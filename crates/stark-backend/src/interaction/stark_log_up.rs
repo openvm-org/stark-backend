@@ -3,6 +3,7 @@ use std::{array, borrow::Borrow, marker::PhantomData};
 use itertools::{izip, Itertools};
 use p3_air::ExtensionBuilder;
 use p3_challenger::{CanObserve, FieldChallenger};
+use p3_commit::PolynomialSpace;
 use p3_field::{AbstractField, ExtensionField, Field};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
@@ -65,7 +66,7 @@ where
     type PartialProof = ();
     type ProvingKey = StarkLogUpProvingKey;
     type Error = StarkLogUpError;
-    const ID: RapPhaseSeqKind = RapPhaseSeqKind::StarkLogUp;
+    const KIND: RapPhaseSeqKind = RapPhaseSeqKind::StarkLogUp;
 
     fn generate_pk_per_air(
         &self,
@@ -136,13 +137,20 @@ where
         ))
     }
 
+    fn extra_opening_points<Domain: PolynomialSpace<Val = F>>(
+        &self,
+        _zeta: Challenge,
+        domains_per_air: &[Domain],
+    ) -> Vec<Vec<Vec<Challenge>>> {
+        vec![vec![vec![]; domains_per_air.len()]]
+    }
     fn partially_verify<Commitment: Clone>(
         &self,
         challenger: &mut Challenger,
         _partial_proof: Option<&Self::PartialProof>,
         exposed_values_per_phase_per_air: &[Vec<Vec<Challenge>>],
         commitment_per_phase: &[Commitment],
-        _permutation_opened_values: &[Vec<Vec<Vec<Challenge>>>],
+        _after_challenge_opened_values: &[Vec<Vec<Vec<Challenge>>>],
     ) -> (RapPhaseVerifierData<Challenge>, Result<(), Self::Error>)
     where
         Challenger: CanObserve<Commitment>,

@@ -75,13 +75,14 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
     /// The prover can support global public values that are shared among all AIRs,
     /// but we currently split public values per-AIR for modularity.
     #[instrument(name = "MultiTraceStarkProver::prove", level = "info", skip_all)]
-    pub fn prove<'a>(
+    pub fn prove(
         &self,
         challenger: &mut SC::Challenger,
-        mpk: &'a MultiStarkProvingKey<SC>,
+        mpk: &MultiStarkProvingKey<SC>,
         proof_input: ProofInput<SC>,
     ) -> Proof<SC> {
         assert!(mpk.validate(&proof_input), "Invalid proof input");
+
         let pcs = self.config.pcs();
         let rap_phase_seq = self.config.rap_phase_seq();
 
@@ -227,7 +228,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
             &perm_trace_per_air,
             &exposed_values_after_challenge,
             &challenges,
-            SC::RapPhaseSeq::ID,
+            SC::RapPhaseSeq::KIND,
         );
 
         // Commit to permutation traces: this means only 1 challenge round right now
@@ -272,6 +273,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
             quotient_data,
             domain_per_air,
             pvs_per_air,
+            rap_phase_seq,
             rap_phase_seq_proof,
         )
     }
@@ -300,6 +302,7 @@ fn prove_raps_with_committed_traces<'a, SC: StarkGenericConfig>(
     quotient_data: ProverQuotientData<SC>,
     domain_per_air: Vec<Domain<SC>>,
     public_values_per_air: Vec<Vec<Val<SC>>>,
+    rap_phase_seq: &SC::RapPhaseSeq,
     rap_phase_seq_proof: Option<RapPhaseSeqPartialProof<SC>>,
 ) -> Proof<SC> {
     // Observe quotient commitment
@@ -357,17 +360,23 @@ fn prove_raps_with_committed_traces<'a, SC: StarkGenericConfig>(
     ));
 
     // ASSUMING: per challenge round, shared commitment for all trace matrices, with matrices in increasing order of air index
-    let after_challenge_data = if let Some(perm_prover_data) = &perm_prover_data {
-        let mut domains = Vec::new();
-        for (air_id, pk) in mpk.per_air.iter().enumerate() {
-            if pk.vk.has_interaction() {
-                domains.push(domain_per_air[air_id]);
+    let (after_challenge_data, extra_after_challenge_points) =
+        if let Some(perm_prover_data) = &perm_prover_data {
+            let mut domains = Vec::new();
+            for (air_id, pk) in mpk.per_air.iter().enumerate() {
+                if pk.vk.has_interaction() {
+                    domains.push(domain_per_air[air_id]);
+                }
             }
-        }
-        vec![(perm_prover_data.data.as_ref(), domains)]
-    } else {
-        vec![]
-    };
+            let extra_after_challenge_points = rap_phase_seq.extra_opening_points(zeta, &domains);
+            (
+                vec![(perm_prover_data.data.as_ref(), domains)],
+                extra_after_challenge_points,
+            )
+        } else {
+            (vec![], vec![])
+        };
+
 
     let quotient_degrees = mpk
         .per_air

@@ -91,7 +91,7 @@ pub type PackedChallenge<SC> =
 #[derive(Debug)]
 pub struct StarkConfig<Pcs, RapPhaseSeq, Challenge, Challenger> {
     pcs: Pcs,
-    rap_phase: RapPhaseSeq,
+    rap_phase_seq: RapPhaseSeq,
     _phantom: PhantomData<(Challenge, Challenger)>,
 }
 
@@ -99,7 +99,7 @@ impl<Pcs, RapPhaseSeq, Challenge, Challenger> StarkConfig<Pcs, RapPhaseSeq, Chal
     pub const fn new(pcs: Pcs, rap_phase: RapPhaseSeq) -> Self {
         Self {
             pcs,
-            rap_phase,
+            rap_phase_seq: rap_phase,
             _phantom: PhantomData,
         }
     }
@@ -128,7 +128,7 @@ where
         &self.pcs
     }
     fn rap_phase_seq(&self) -> &Self::RapPhaseSeq {
-        &self.rap_phase
+        &self.rap_phase_seq
     }
 }
 

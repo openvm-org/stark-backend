@@ -42,6 +42,26 @@ impl<F: Field> Mle<F> {
     pub fn into_evals(self) -> Vec<F> {
         self.evals
     }
+
+
+    /// Evaluates the multilinear polynomial at `point`.
+    pub fn eval(&self, point: &[F]) -> F {
+        pub fn eval_rec<F: Field>(mle_evals: &[F], p: &[F]) -> F {
+            match p {
+                [] => mle_evals[0],
+                &[p_i, ref p @ ..] => {
+                    let (lhs, rhs) = mle_evals.split_at(mle_evals.len() / 2);
+                    let lhs_eval = eval_rec(lhs, p);
+                    let rhs_eval = eval_rec(rhs, p);
+                    // Equivalent to `eq(0, p_i) * lhs_eval + eq(1, p_i) * rhs_eval`.
+                    p_i * (rhs_eval - lhs_eval) + lhs_eval
+                }
+            }
+        }
+
+        let mle_evals = self.clone().into_evals();
+        eval_rec(&mle_evals, point)
+    }
 }
 
 impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
@@ -119,27 +139,6 @@ mod test {
     use p3_field::{AbstractField, Field};
 
     use super::*;
-
-    impl<F: Field> Mle<F> {
-        /// Evaluates the multilinear polynomial at `point`.
-        pub(crate) fn eval(&self, point: &[F]) -> F {
-            pub fn eval_rec<F: Field>(mle_evals: &[F], p: &[F]) -> F {
-                match p {
-                    [] => mle_evals[0],
-                    &[p_i, ref p @ ..] => {
-                        let (lhs, rhs) = mle_evals.split_at(mle_evals.len() / 2);
-                        let lhs_eval = eval_rec(lhs, p);
-                        let rhs_eval = eval_rec(rhs, p);
-                        // Equivalent to `eq(0, p_i) * lhs_eval + eq(1, p_i) * rhs_eval`.
-                        p_i * (rhs_eval - lhs_eval) + lhs_eval
-                    }
-                }
-            }
-
-            let mle_evals = self.clone().into_evals();
-            eval_rec(&mle_evals, point)
-        }
-    }
 
     #[test]
     fn test_mle_evaluation() {

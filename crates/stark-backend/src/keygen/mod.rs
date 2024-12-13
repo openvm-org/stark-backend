@@ -22,7 +22,6 @@ pub(crate) mod view;
 
 struct AirKeygenBuilder<SC: StarkGenericConfig> {
     air: Arc<dyn AnyRap<SC>>,
-    rap_phase_seq_kind: RapPhaseSeqKind,
     prep_keygen_data: PrepKeygenData<SC>,
 }
 
@@ -48,7 +47,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
     pub fn add_air(&mut self, air: Arc<dyn AnyRap<SC>>) -> usize {
         self.partitioned_airs.push(AirKeygenBuilder::new(
             self.config.pcs(),
-            SC::RapPhaseSeq::ID,
+            SC::RapPhaseSeq::KIND,
             air,
         ));
         self.partitioned_airs.len() - 1
@@ -134,7 +133,6 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
         let prep_keygen_data = compute_prep_data_for_air(pcs, air.as_ref());
         AirKeygenBuilder {
             air,
-            rap_phase_seq_kind,
             prep_keygen_data,
         }
     }
@@ -169,7 +167,6 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             params,
             symbolic_constraints,
             quotient_degree,
-            rap_phase_seq_kind: self.rap_phase_seq_kind,
         };
         StarkProvingKey {
             air_name,
@@ -194,7 +191,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             &width,
             &[],
             &[],
-            SC::RapPhaseSeq::ID,
+            SC::RapPhaseSeq::KIND,
             interaction_chunk_size.unwrap_or(1),
         )
     }

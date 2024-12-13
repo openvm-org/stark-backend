@@ -3,6 +3,7 @@ use std::sync::Arc;
 use derivative::Derivative;
 use itertools::{izip, Itertools};
 use p3_commit::Pcs;
+use p3_field::Field;
 use p3_matrix::{
     dense::{RowMajorMatrix, RowMajorMatrixView},
     Matrix,
@@ -168,10 +169,16 @@ pub struct ProverTraceData<SC: StarkGenericConfig> {
 }
 
 /// A view of just the preprocessed AIR, without any after challenge columns.
-pub struct PairTraceView<'a, F> {
-    pub preprocessed: &'a Option<RowMajorMatrixView<'a, F>>,
-    pub partitioned_main: &'a [RowMajorMatrixView<'a, F>],
-    pub public_values: &'a [F],
+pub struct PairTraceView<'a, T> {
+    pub preprocessed: &'a Option<RowMajorMatrixView<'a, T>>,
+    pub partitioned_main: &'a [RowMajorMatrixView<'a, T>],
+    pub public_values: &'a [T],
+}
+
+impl<F: Field> PairTraceView<'_, F> {
+    pub fn height(&self) -> usize {
+        self.partitioned_main[0].height()
+    }
 }
 
 /// The full RAP trace consists of horizontal concatenation of multiple matrices of the same height:
