@@ -21,6 +21,9 @@ jobs:
 
       - name: Build documentation
         run: cargo doc --workspace --no-deps
+        env:
+          # taken from https://github.com/paradigmxyz/reth/blob/main/.github/workflows/book.yml
+          RUSTDOCFLAGS: --cfg docsrs --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
 
       # Deploy to gh-pages branch using peaceiris/actions-gh-pages
       - name: Deploy to GitHub Pages
