@@ -76,15 +76,16 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
     /// The prover can support global public values that are shared among all AIRs,
     /// but we currently split public values per-AIR for modularity.
     #[instrument(name = "MultiTraceStarkProver::prove", level = "info", skip_all)]
-    pub fn prove<'a>(
+    pub fn prove(
         &self,
         challenger: &mut SC::Challenger,
-        mpk: &'a MultiStarkProvingKey<SC>,
+        mpk: &MultiStarkProvingKey<SC>,
         proof_input: ProofInput<SC>,
     ) -> Proof<SC> {
         #[cfg(feature = "bench-metrics")]
         let start = std::time::Instant::now();
         assert!(mpk.validate(&proof_input), "Invalid proof input");
+
         let pcs = self.config.pcs();
         let rap_phase_seq = self.config.rap_phase_seq();
 
@@ -189,7 +190,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
         let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = mpk
             .per_air
             .iter()
-            .map(|pk| (&pk.vk.symbolic_constraints, pk.rap_phase_seq_pk.clone()))
+            .map(|pk| (&pk.vk.symbolic_constraints, &pk.rap_phase_seq_pk))
             .unzip();
 
         let (rap_phase_seq_proof, rap_phase_seq_data) = rap_phase_seq
@@ -204,9 +205,10 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
         let (perm_trace_per_air, exposed_values_after_challenge, challenges) =
             if let Some(phase_data) = rap_phase_seq_data {
                 assert_eq!(mpk.vk_view().num_phases(), 1);
-                assert_eq!(
-                    mpk.vk_view().num_challenges_in_phase(0),
-                    phase_data.challenges.len()
+                // For FriLogUp, these should be equal, but for GkrLogUp, we add extra challenges.
+                assert!(
+                    mpk.vk_view().num_challenges_in_phase(0)
+                        <= phase_data.challenges_per_phase[0].len()
                 );
                 (
                     phase_data.after_challenge_trace_per_air,
@@ -215,7 +217,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
                         .into_iter()
                         .map(|v| v.into_iter().collect_vec())
                         .collect(),
-                    vec![phase_data.challenges],
+                    phase_data.challenges_per_phase,
                 )
             } else {
                 assert_eq!(mpk.vk_view().num_phases(), 0);
@@ -231,7 +233,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
             &perm_trace_per_air,
             &exposed_values_after_challenge,
             &challenges,
-            SC::RapPhaseSeq::ID,
+            SC::RapPhaseSeq::KIND,
         );
 
         // Commit to permutation traces: this means only 1 challenge round right now
@@ -277,6 +279,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
                 quotient_data,
                 domain_per_air,
                 pvs_per_air,
+                rap_phase_seq,
                 rap_phase_seq_proof,
             )
         });
@@ -310,6 +313,7 @@ fn prove_raps_with_committed_traces<'a, SC: StarkGenericConfig>(
     quotient_data: ProverQuotientData<SC>,
     domain_per_air: Vec<Domain<SC>>,
     public_values_per_air: Vec<Vec<Val<SC>>>,
+    rap_phase_seq: &SC::RapPhaseSeq,
     rap_phase_seq_proof: Option<RapPhaseSeqPartialProof<SC>>,
 ) -> Proof<SC> {
     // Observe quotient commitment
@@ -367,16 +371,23 @@ fn prove_raps_with_committed_traces<'a, SC: StarkGenericConfig>(
     ));
 
     // ASSUMING: per challenge round, shared commitment for all trace matrices, with matrices in increasing order of air index
-    let after_challenge_data = if let Some(perm_prover_data) = &perm_prover_data {
-        let mut domains = Vec::new();
-        for (air_id, pk) in mpk.per_air.iter().enumerate() {
-            if pk.vk.has_interaction() {
-                domains.push(domain_per_air[air_id]);
-            }
-        }
-        vec![(perm_prover_data.data.as_ref(), domains)]
+    let (after_challenge_data, extra_after_challenge_points) = if let Some(perm_prover_data) =
+        &perm_prover_data
+    {
+        let domains = mpk
+            .per_air
+            .iter()
+            .enumerate()
+            .filter_map(|(air_id, pk)| pk.vk.has_interaction().then_some(domain_per_air[air_id]))
+            .collect_vec();
+
+        let extra_after_challenge_points = rap_phase_seq.extra_opening_points(zeta, &domains);
+        (
+            vec![(perm_prover_data.data.as_ref(), domains)],
+            extra_after_challenge_points,
+        )
     } else {
-        vec![]
+        (vec![], vec![])
     };
 
     let quotient_degrees = mpk
@@ -389,6 +400,7 @@ fn prove_raps_with_committed_traces<'a, SC: StarkGenericConfig>(
         preprocessed_data,
         main_data,
         after_challenge_data,
+        extra_after_challenge_points,
         &quotient_data.data,
         &quotient_degrees,
     );
@@ -446,7 +458,7 @@ fn commit_perm_traces<SC: StarkGenericConfig>(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(debug_assertions)]
 #[allow(clippy::too_many_arguments)]
 fn debug_constraints_and_interactions<SC: StarkGenericConfig>(
     raps: &[Arc<dyn AnyRap<SC>>],

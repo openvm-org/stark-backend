@@ -1,8 +1,8 @@
 use std::fmt::Debug;
 
 use derivative::Derivative;
-use itertools::Itertools;
-use p3_commit::{Pcs, PolynomialSpace};
+use itertools::{zip_eq, Itertools};
+use p3_commit::{OpenedValuesForMatrix, Pcs, PolynomialSpace};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -24,6 +24,7 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
     /// - for each after_challenge phase, all matrices in the phase share a commitment
     /// - quotient poly chunks are all committed together
     #[instrument(name = "PCS opening proofs", skip_all)]
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
         challenger: &mut SC::Challenger,
@@ -35,6 +36,8 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
         main: Vec<(&PcsProverData<SC>, Vec<Domain<SC>>)>,
         // after_challenge[i] has shared commitment prover data for all matrices in that phase, and domains of those matrices, in order
         after_challenge: Vec<(&PcsProverData<SC>, Vec<Domain<SC>>)>,
+        // extra_after_challenge_points[i] has openings for all matrices in that phase
+        extra_after_challenge_points: Vec<Vec<Vec<SC::Challenge>>>,
         // Quotient poly commitment prover data
         quotient_data: &PcsProverData<SC>,
         // Quotient degree for each RAP committed in quotient_data, in order
@@ -49,7 +52,6 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
         let mut rounds = preprocessed
             .iter()
             .chain(main.iter())
-            .chain(after_challenge.iter())
             .map(|(data, domains)| {
                 let points_per_mat = domains
                     .iter()
@@ -58,6 +60,22 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
                 (*data, points_per_mat)
             })
             .collect_vec();
+
+        // Add after challenge points with any extra points requested by RapPhaseSeq.
+        rounds.extend(
+            zip_eq(&after_challenge, &extra_after_challenge_points)
+                .map(|((data, domains), extra)| {
+                    let points_per_mat = zip_eq(domains, extra)
+                        .map(|(domain, extra)| {
+                            let mut points = vec![zeta, domain.next_point(zeta).unwrap()];
+                            points.extend(extra);
+                            points
+                        })
+                        .collect_vec();
+                    (*data, points_per_mat)
+                })
+                .collect_vec(),
+        );
 
         // open every quotient chunk at zeta
         let num_chunks: usize = quotient_degrees.iter().sum();
@@ -70,11 +88,25 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
         let mut quotient_openings = opening_values.pop().expect("Should have quotient opening");
 
         let num_after_challenge = after_challenge.len();
-        let after_challenge_openings = opening_values
+
+        let (after_challenge_openings, extra_after_challenge_openings): (
+            Vec<Vec<AdjacentOpenedValues<_>>>,
+            Vec<Vec<OpenedValuesForMatrix<_>>>,
+        ) = opening_values
             .split_off(opening_values.len() - num_after_challenge)
             .into_iter()
-            .map(collect_trace_openings)
-            .collect_vec();
+            .map(|ops| {
+                let (adj, rest): (Vec<AdjacentOpenedValues<_>>, Vec<OpenedValuesForMatrix<_>>) =
+                    ops.into_iter()
+                        .map(|mut op| {
+                            let rest = op.split_off(2);
+                            let [local, next] = op.try_into().expect("Should have 2 openings");
+                            (AdjacentOpenedValues { local, next }, rest)
+                        })
+                        .unzip();
+                (adj, rest)
+            })
+            .unzip();
         assert_eq!(
             after_challenge_openings.len(),
             num_after_challenge,
@@ -127,6 +159,7 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
                 preprocessed: preprocessed_openings,
                 main: main_openings,
                 after_challenge: after_challenge_openings,
+                extra_after_challenge: extra_after_challenge_openings,
                 quotient: quotient_openings,
             },
         }
@@ -163,6 +196,10 @@ pub struct OpenedValues<Challenge> {
     /// For each phase after challenge, there is shared commitment.
     /// For each commitment, if any, for each matrix in the commitment, the opened values,
     pub after_challenge: Vec<Vec<AdjacentOpenedValues<Challenge>>>,
+    /// Any extra opening values for the after challenge phases.
+    ///
+    /// For each after challenge phase, for each matrix, for each point, for each column.
+    pub extra_after_challenge: Vec<Vec<Vec<Vec<Challenge>>>>,
     /// For each RAP, for each quotient chunk in quotient poly, the opened values
     pub quotient: Vec<Vec<Vec<Challenge>>>,
 }

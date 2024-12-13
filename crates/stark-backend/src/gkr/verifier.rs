@@ -9,6 +9,7 @@ use crate::{
         gate::Gate,
         types::{GkrArtifact, GkrBatchProof, GkrError},
     },
+    p3_field::ExtensionField,
     poly::{multi::hypercube_eq, uni::random_linear_combination},
     sumcheck,
 };
@@ -18,11 +19,11 @@ use crate::{
 /// On successful verification the function returns a [`GkrArtifact`] which stores the out-of-domain
 /// point and claimed evaluations in the input layer columns for each instance at the OOD point.
 /// These claimed evaluations are not checked in this function - hence partial verification.
-pub fn partially_verify_batch<F: Field>(
+pub fn partially_verify_batch<F: Field, EF: ExtensionField<F>>(
     gate_by_instance: Vec<Gate>,
-    proof: &GkrBatchProof<F>,
+    proof: &GkrBatchProof<EF>,
     challenger: &mut impl FieldChallenger<F>,
-) -> Result<GkrArtifact<F>, GkrError<F>> {
+) -> Result<GkrArtifact<EF>, GkrError<EF>> {
     let GkrBatchProof {
         sumcheck_proofs,
         layer_masks_by_instance,
@@ -64,11 +65,13 @@ pub fn partially_verify_batch<F: Field>(
 
         // Seed the channel with layer claims.
         for claims_to_verify in claims_to_verify_by_instance.iter().flatten() {
-            challenger.observe_slice(claims_to_verify);
+            for claim in claims_to_verify {
+                challenger.observe_ext_element(*claim);
+            }
         }
 
-        let sumcheck_alpha = challenger.sample();
-        let instance_lambda = challenger.sample();
+        let sumcheck_alpha = challenger.sample_ext_element();
+        let instance_lambda = challenger.sample_ext_element();
 
         let mut sumcheck_claims = Vec::new();
         let mut sumcheck_instances = Vec::new();
@@ -125,12 +128,14 @@ pub fn partially_verify_batch<F: Field>(
             let n_unused = n_layers - instance_n_layers(instance);
             let mask = &layer_masks_by_instance[instance][layer - n_unused];
             for column in mask.columns() {
-                challenger.observe_slice(column);
+                for elt in column {
+                    challenger.observe_ext_element(*elt);
+                }
             }
         }
 
         // Set the OOD evaluation point for layer above.
-        let challenge = challenger.sample();
+        let challenge = challenger.sample_ext_element();
         ood_point = sumcheck_ood_point;
         ood_point.push(challenge);
 

@@ -4,12 +4,11 @@ use p3_field::FieldAlgebra;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use tracing::instrument;
 
-use self::single::compute_single_rap_quotient_values;
 use super::trace::SingleRapCommittedTraceView;
 use crate::{
     air_builders::symbolic::{dag::build_symbolic_constraints_dag, SymbolicConstraints},
     config::{Com, Domain, PackedChallenge, PcsProverData, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
+    prover::quotient::single::{compute_single_rap_quotient_values, TraceEvals},
 };
 
 mod evaluator;
@@ -113,15 +112,20 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
             })
             .unzip();
 
+        // Add constraints to symbolic constraints.
+
         // temporary until switching over to use DAG everywhere
         let dag = build_symbolic_constraints_dag(&qvk.symbolic_constraints.constraints, &[]);
+        let trace_evals = TraceEvals {
+            preprocessed: preprocessed_lde_on_quotient_domain,
+            partitioned_main: partitioned_main_lde_on_quotient_domain,
+            after_challenge: after_challenge_lde_on_quotient_domain,
+        };
         let quotient_values = compute_single_rap_quotient_values::<SC>(
             &dag.constraints,
             trace_domain,
             quotient_domain,
-            preprocessed_lde_on_quotient_domain,
-            partitioned_main_lde_on_quotient_domain,
-            after_challenge_lde_on_quotient_domain,
+            trace_evals,
             &self.challenges,
             self.alpha,
             public_values,
@@ -226,8 +230,7 @@ pub struct QuotientChunk<SC: StarkGenericConfig> {
 /// All necessary data from VK to compute ProverQuotientData
 pub struct QuotientVkData<'a, SC: StarkGenericConfig> {
     pub quotient_degree: usize,
-    pub rap_phase_seq_kind: RapPhaseSeqKind,
-    pub interaction_chunk_size: usize,
+    pub interaction_chunk_size: Option<usize>,
     /// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.
     pub symbolic_constraints: &'a SymbolicConstraints<Val<SC>>,

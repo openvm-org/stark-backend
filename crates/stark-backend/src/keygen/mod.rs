@@ -8,7 +8,7 @@ use tracing::instrument;
 use crate::{
     air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
     config::{RapPhaseSeqProvingKey, StarkGenericConfig, Val},
-    interaction::{HasInteractionChunkSize, RapPhaseSeq, RapPhaseSeqKind},
+    interaction::{HasInteractionChunkSize, RapPhaseSeq},
     keygen::types::{
         MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey, StarkVerifyingKey,
         TraceWidth, VerifierSinglePreprocessedData,
@@ -22,7 +22,6 @@ pub(crate) mod view;
 
 struct AirKeygenBuilder<SC: StarkGenericConfig> {
     air: Arc<dyn AnyRap<SC>>,
-    rap_phase_seq_kind: RapPhaseSeqKind,
     prep_keygen_data: PrepKeygenData<SC>,
 }
 
@@ -46,11 +45,8 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
     /// Returns `air_id`
     #[instrument(level = "debug", skip_all)]
     pub fn add_air(&mut self, air: Arc<dyn AnyRap<SC>>) -> usize {
-        self.partitioned_airs.push(AirKeygenBuilder::new(
-            self.config.pcs(),
-            SC::RapPhaseSeq::ID,
-            air,
-        ));
+        self.partitioned_airs
+            .push(AirKeygenBuilder::new(self.config.pcs(), air));
         self.partitioned_airs.len() - 1
     }
 
@@ -130,11 +126,10 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 }
 
 impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
-    fn new(pcs: &SC::Pcs, rap_phase_seq_kind: RapPhaseSeqKind, air: Arc<dyn AnyRap<SC>>) -> Self {
+    fn new(pcs: &SC::Pcs, air: Arc<dyn AnyRap<SC>>) -> Self {
         let prep_keygen_data = compute_prep_data_for_air(pcs, air.as_ref());
         AirKeygenBuilder {
             air,
-            rap_phase_seq_kind,
             prep_keygen_data,
         }
     }
@@ -149,7 +144,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
         let air_name = self.air.name();
 
         let interaction_chunk_size = rap_phase_seq_pk.interaction_chunk_size();
-        let symbolic_builder = self.get_symbolic_builder(Some(interaction_chunk_size));
+        let symbolic_builder = self.get_symbolic_builder(interaction_chunk_size);
         let params = symbolic_builder.params();
         let symbolic_constraints = symbolic_builder.constraints();
         let log_quotient_degree = symbolic_constraints.get_log_quotient_degree();
@@ -169,7 +164,6 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             params,
             symbolic_constraints,
             quotient_degree,
-            rap_phase_seq_kind: self.rap_phase_seq_kind,
         };
         StarkProvingKey {
             air_name,
@@ -194,7 +188,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             &width,
             &[],
             &[],
-            SC::RapPhaseSeq::ID,
+            SC::RapPhaseSeq::KIND,
             interaction_chunk_size.unwrap_or(1),
         )
     }

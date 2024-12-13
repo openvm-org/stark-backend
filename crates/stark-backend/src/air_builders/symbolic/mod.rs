@@ -43,6 +43,7 @@ pub struct SymbolicConstraints<F> {
     /// the prover for after challenge trace generation, and some partial
     /// information may be used by the verifier.
     ///
+    /// FIXME[zach]: False for GKR; there, some constraints depend on height of the trace and therefore cannot be precomputed.
     /// **However**, any contributions to the quotient polynomial from
     /// logup are already included in `constraints` and do not need to
     /// be separately calculated from `interactions`.
@@ -110,7 +111,7 @@ where
         num_challenges_to_sample,
         num_exposed_values_after_challenge,
         rap_phase_seq_kind,
-        interaction_chunk_size,
+        Some(interaction_chunk_size),
     );
     Rap::eval(rap, &mut builder);
     builder
@@ -127,7 +128,7 @@ pub struct SymbolicRapBuilder<F> {
     exposed_values_after_challenge: Vec<Vec<SymbolicVariable<F>>>,
     constraints: Vec<SymbolicExpression<F>>,
     interactions: Vec<SymbolicInteraction<F>>,
-    interaction_chunk_size: usize,
+    interaction_chunk_size: Option<usize>,
     rap_phase_seq_kind: RapPhaseSeqKind,
     trace_width: TraceWidth,
 }
@@ -142,7 +143,7 @@ impl<F: Field> SymbolicRapBuilder<F> {
         num_challenges_to_sample: &[usize],
         num_exposed_values_after_challenge: &[usize],
         rap_phase_seq_kind: RapPhaseSeqKind,
-        interaction_chunk_size: usize,
+        interaction_chunk_size: Option<usize>,
     ) -> Self {
         let preprocessed_width = width.preprocessed.unwrap_or(0);
         let prep_values = [0, 1]
@@ -398,7 +399,15 @@ impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
             assert!(self.challenges.is_empty());
             assert!(self.exposed_values_after_challenge.is_empty());
 
-            let perm_width = num_interactions.div_ceil(self.interaction_chunk_size) + 1;
+            let perm_width = match self.rap_phase_seq_kind {
+                RapPhaseSeqKind::StarkLogUp => {
+                    let interaction_chunk_size = self
+                        .interaction_chunk_size()
+                        .expect("interaction chunk size should be set for StarkLogUp");
+                    num_interactions.div_ceil(interaction_chunk_size) + 1
+                }
+                RapPhaseSeqKind::GkrLogUp => 2,
+            };
             self.after_challenge = Self::new_after_challenge(&[perm_width]);
 
             let phases_shapes = self.rap_phase_seq_kind.shape();
@@ -410,7 +419,7 @@ impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
         }
     }
 
-    fn interaction_chunk_size(&self) -> usize {
+    fn interaction_chunk_size(&self) -> Option<usize> {
         self.interaction_chunk_size
     }
 
