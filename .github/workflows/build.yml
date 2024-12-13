@@ -15,7 +15,7 @@ jobs:
     name: Build
     runs-on:
       - runs-on=${{ github.run_id }}
-      - runner=8cpu-linux-x64
+      - runner=8cpu-linux-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

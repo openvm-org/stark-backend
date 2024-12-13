@@ -1,4 +1,6 @@
-//! Backend for proving and verifying mixed-matrix STARKs with univariate polynomial commitment scheme.
+//! Backend for proving and verifying mixed-matrix STARKs.
+//! The backend is designed to be modular and compatible with different proof systems.
+//! The aim is to support different circuit representations and permutation/lookup arguments.
 
 // Re-export all Plonky3 crates
 pub use p3_air;
@@ -33,7 +35,6 @@ pub mod poly;
 pub mod prover;
 /// Trait for RAP (Randomized AIR with Preprocessing)
 pub mod rap;
-/// Sum-check protocol
 pub mod sumcheck;
 /// Utility functions
 pub mod utils;

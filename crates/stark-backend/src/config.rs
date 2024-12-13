@@ -1,4 +1,4 @@
-//! [StarkGenericConfig] and associated types. Originally taken from Plonky3 under MIT license.
+//! [StarkGenericConfig](config::StarkGenericConfig) and associated types. Originally taken from Plonky3 under MIT license.
 
 use std::marker::PhantomData;
 

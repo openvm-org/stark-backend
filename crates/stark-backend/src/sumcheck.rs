@@ -1,10 +1,10 @@
-//! Copied from starkware-libs/stwo under Apache-2.0 license.
-//!
+// Copied from starkware-libs/stwo under Apache-2.0 license.
+//
 //! Sum-check protocol that proves and verifies claims about `sum_x g(x)` for all x in `{0, 1}^n`.
 //!
 //! [`MultivariatePolyOracle`] provides methods for evaluating sums and making transformations on
 //! `g` in the context of the protocol. It is intended to be used in conjunction with
-//! [`prove_batch()`] to generate proofs.
+//! [`prove_batch`] to generate proofs.
 
 use std::iter::zip;
 

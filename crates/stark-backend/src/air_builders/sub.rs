@@ -1,4 +1,4 @@
-//! Copied from sp1/core under MIT license
+// Copied from sp1/core under MIT license
 
 use std::{
     iter::{Skip, Take},

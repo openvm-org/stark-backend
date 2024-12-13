@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// An AIR with 0 or more public values.
-/// This trait will be merged into Plonky3 in PR: https://github.com/Plonky3/Plonky3/pull/470
+/// This trait will be merged into Plonky3 in PR: <https://github.com/Plonky3/Plonky3/pull/470>
 pub trait BaseAirWithPublicValues<F>: BaseAir<F> {
     fn num_public_values(&self) -> usize {
         0

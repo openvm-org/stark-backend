@@ -9,7 +9,7 @@ pub struct FriParameters {
 
 impl FriParameters {
     /// Conjectured bits of security.
-    /// See ethSTARK paper (https://eprint.iacr.org/2021/582.pdf) section 5.10.1 equation (19)
+    /// See ethSTARK paper (<https://eprint.iacr.org/2021/582.pdf>) section 5.10.1 equation (19)
     ///
     /// `challenge_field_bits` is the number of bits in the challenge field (extension field) of the STARK config.
     pub fn get_conjectured_security_bits(&self, challenge_field_bits: usize) -> usize {
@@ -32,7 +32,7 @@ impl FriParameters {
 }
 
 /// Pre-defined FRI parameters with 100 bits of conjectured security.
-/// Security bits calculated following ethSTARK (https://eprint.iacr.org/2021/582.pdf) 5.10.1 eq (19)
+/// Security bits calculated following ethSTARK (<https://eprint.iacr.org/2021/582.pdf>) 5.10.1 eq (19)
 ///
 /// Assumes that the challenge field used as more than 100 bits.
 pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize) -> FriParameters {

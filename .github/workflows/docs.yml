@@ -1,0 +1,31 @@
+name: Build and Deploy Crate Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  docs:
+    permissions:
+      contents: write
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - runner=8cpu-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build documentation
+        run: cargo doc --workspace --no-deps
+
+      # Deploy to gh-pages branch using peaceiris/actions-gh-pages
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          personal_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./target/doc
+          publish_branch: gh-pages
