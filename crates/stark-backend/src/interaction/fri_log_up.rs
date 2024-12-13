@@ -2,7 +2,8 @@ use std::{array, borrow::Borrow, cmp::max, iter::zip, marker::PhantomData, mem};
 
 use itertools::Itertools;
 use p3_air::ExtensionBuilder;
-use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
+use p3_challenger::{FieldChallenger, GrindingChallenger};
+use p3_commit::PolynomialSpace;
 use p3_field::{ExtensionField, Field, FieldAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
@@ -74,7 +75,7 @@ where
     type PartialProof = FriLogUpPartialProof<F>;
     type PartialProvingKey = FriLogUpProvingKey;
     type Error = FriLogUpError;
-    const ID: RapPhaseSeqKind = RapPhaseSeqKind::FriLogUp;
+    const KIND: RapPhaseSeqKind = RapPhaseSeqKind::FriLogUp;
 
     fn log_up_security_params(&self) -> &LogUpSecurityParameters {
         &self.log_up_params
@@ -136,38 +137,43 @@ where
         Some((
             FriLogUpPartialProof { logup_pow_witness },
             RapPhaseProverData {
-                challenges: challenges.to_vec(),
+                challenges_per_phase: vec![challenges.to_vec()],
                 after_challenge_trace_per_air,
                 exposed_values_per_air,
             },
         ))
     }
 
-    fn partially_verify<Commitment: Clone>(
+    fn extra_opening_points<Domain: PolynomialSpace<Val = F>>(
+        &self,
+        _zeta: Challenge,
+        domains_per_air: &[Domain],
+    ) -> Vec<Vec<Vec<Challenge>>> {
+        if domains_per_air.is_empty() {
+            vec![]
+        } else {
+            vec![vec![vec![]; domains_per_air.len()]]
+        }
+    }
+
+    fn partially_verify(
         &self,
         challenger: &mut Challenger,
         partial_proof: Option<&Self::PartialProof>,
+        constraints_per_air: &[SymbolicConstraints<F>],
         exposed_values_per_phase_per_air: &[Vec<Vec<Challenge>>],
-        commitment_per_phase: &[Commitment],
-        _permutation_opened_values: &[Vec<Vec<Vec<Challenge>>>],
-    ) -> (RapPhaseVerifierData<Challenge>, Result<(), Self::Error>)
-    where
-        Challenger: CanObserve<Commitment>,
-    {
-        if exposed_values_per_phase_per_air
+    ) -> Result<RapPhaseVerifierData<Challenge>, Self::Error> {
+        if constraints_per_air
             .iter()
-            .all(|exposed_values_per_phase_per_air| exposed_values_per_phase_per_air.is_empty())
+            .all(|c| c.interactions.is_empty())
         {
-            return (RapPhaseVerifierData::default(), Ok(()));
+            return Ok(RapPhaseVerifierData::default());
         }
 
         let partial_proof = match partial_proof {
             Some(proof) => proof,
             None => {
-                return (
-                    RapPhaseVerifierData::default(),
-                    Err(FriLogUpError::MissingPartialProof),
-                );
+                return Err(FriLogUpError::MissingPartialProof);
             }
         };
 
@@ -175,10 +181,7 @@ where
             self.log_up_params.log_up_pow_bits,
             partial_proof.logup_pow_witness,
         ) {
-            return (
-                RapPhaseVerifierData::default(),
-                Err(FriLogUpError::InvalidPowWitness),
-            );
+            return Err(FriLogUpError::InvalidPowWitness);
         }
 
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
@@ -191,8 +194,6 @@ where
                 }
             }
         }
-
-        challenger.observe(commitment_per_phase[0].clone());
 
         let cumulative_sums = exposed_values_per_phase_per_air
             .iter()
@@ -218,15 +219,13 @@ where
             .map(|c| c.unwrap_or(Challenge::ZERO))
             .sum();
 
-        let result = if sum == Challenge::ZERO {
-            Ok(())
-        } else {
-            Err(Self::Error::NonZeroCumulativeSum)
+        if sum != Challenge::ZERO {
+            return Err(Self::Error::NonZeroCumulativeSum);
         };
-        let verifier_data = RapPhaseVerifierData {
+
+        Ok(RapPhaseVerifierData {
             challenges_per_phase: vec![challenges.to_vec()],
-        };
-        (verifier_data, result)
+        })
     }
 }
 
@@ -350,7 +349,7 @@ where
             .map(|m| m.as_view())
             .collect_vec();
         let evaluator = |local_index: usize| Evaluator {
-            preprocessed: &preprocessed,
+            preprocessed,
             partitioned_main: &partitioned_main,
             public_values: &trace_view.public_values,
             height,

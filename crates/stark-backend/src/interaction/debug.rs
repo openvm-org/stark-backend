@@ -19,7 +19,7 @@ pub struct LogicalInteractions<F: Field> {
 pub fn generate_logical_interactions<F: Field>(
     air_idx: usize,
     all_interactions: &[SymbolicInteraction<F>],
-    preprocessed: &Option<RowMajorMatrixView<F>>,
+    preprocessed: Option<RowMajorMatrixView<F>>,
     partitioned_main: &[RowMajorMatrixView<F>],
     public_values: &[F],
     logical_interactions: &mut LogicalInteractions<F>,

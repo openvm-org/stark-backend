@@ -10,7 +10,8 @@ use std::iter::zip;
 
 use itertools::Itertools;
 use p3_challenger::FieldChallenger;
-use p3_field::Field;
+use p3_field::{ExtensionField, Field};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::poly::{multi::MultivariatePolyOracle, uni::UnivariatePolynomial};
@@ -43,12 +44,17 @@ pub struct SumcheckArtifacts<F, O> {
 /// - There aren't the same number of multivariate polynomials and claims.
 /// - The degree of any multivariate polynomial exceeds [`MAX_DEGREE`] in any variable.
 /// - The round polynomials are inconsistent with their corresponding claimed sum on `0` and `1`.
-pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
-    mut claims: Vec<F>,
+pub fn prove_batch<F, EF, O>(
+    mut claims: Vec<EF>,
     mut polys: Vec<O>,
-    lambda: F,
+    lambda: EF,
     challenger: &mut impl FieldChallenger<F>,
-) -> (SumcheckProof<F>, SumcheckArtifacts<F, O>) {
+) -> (SumcheckProof<EF>, SumcheckArtifacts<EF, O>)
+where
+    F: Field,
+    EF: ExtensionField<F>,
+    O: MultivariatePolyOracle<EF>,
+{
     let n_variables = polys.iter().map(O::arity).max().unwrap();
     assert_eq!(claims.len(), polys.len());
 
@@ -74,8 +80,8 @@ pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
                     claim.halve().into()
                 };
 
-                let eval_at_0 = round_poly.evaluate(F::ZERO);
-                let eval_at_1 = round_poly.evaluate(F::ONE);
+                let eval_at_0 = round_poly.evaluate(EF::ZERO);
+                let eval_at_1 = round_poly.evaluate(EF::ONE);
 
                 assert_eq!(
                     eval_at_0 + eval_at_1,
@@ -95,7 +101,9 @@ pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
 
         let round_poly = random_linear_combination(&this_round_polys, lambda);
 
-        challenger.observe_slice(&round_poly);
+        for coef in round_poly.as_ref() {
+            challenger.observe_ext_element(*coef);
+        }
 
         let challenge = challenger.sample_ext_element();
 
@@ -150,11 +158,11 @@ fn random_linear_combination<F: Field>(
 /// claimed evaluation are returned for the caller to validate otherwise an [`Err`] is returned.
 ///
 /// Output is of the form `(variable_assignment, claimed_eval)`.
-pub fn partially_verify<F: Field>(
-    mut claim: F,
-    proof: &SumcheckProof<F>,
+pub fn partially_verify<F: Field, EF: ExtensionField<F>>(
+    mut claim: EF,
+    proof: &SumcheckProof<EF>,
     challenger: &mut impl FieldChallenger<F>,
-) -> Result<(Vec<F>, F), SumcheckError<F>> {
+) -> Result<(Vec<EF>, EF), SumcheckError<EF>> {
     let mut assignment = Vec::new();
 
     for (round, round_poly) in proof.round_polys.iter().enumerate() {
@@ -164,13 +172,15 @@ pub fn partially_verify<F: Field>(
 
         // TODO: optimize this by sending one less coefficient, and computing it from the
         // claim, instead of checking the claim. (Can also be done by quotienting).
-        let sum = round_poly.evaluate(F::ZERO) + round_poly.evaluate(F::ONE);
+        let sum = round_poly.evaluate(EF::ZERO) + round_poly.evaluate(EF::ONE);
 
         if claim != sum {
             return Err(SumcheckError::SumInvalid { claim, sum, round });
         }
 
-        challenger.observe_slice(round_poly);
+        for elt in round_poly.iter() {
+            challenger.observe_ext_element(*elt);
+        }
         let challenge = challenger.sample_ext_element();
 
         claim = round_poly.evaluate(challenge);
@@ -180,7 +190,7 @@ pub fn partially_verify<F: Field>(
     Ok((assignment, claim))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SumcheckProof<F> {
     pub round_polys: Vec<UnivariatePolynomial<F>>,
 }
@@ -222,7 +232,7 @@ mod tests {
         let values: Vec<F> = (0..32).map(|_| rng.gen()).collect();
         let claim = values.iter().copied().sum();
 
-        let mle = Mle::new(values);
+        let mle = Mle::from_vec(values);
 
         let lambda = F::ONE;
 
@@ -250,8 +260,8 @@ mod tests {
         let claim0 = values0.iter().copied().sum();
         let claim1 = values1.iter().copied().sum();
 
-        let mle0 = Mle::new(values0.clone());
-        let mle1 = Mle::new(values1.clone());
+        let mle0 = Mle::from_vec(values0.clone());
+        let mle1 = Mle::from_vec(values1.clone());
 
         let lambda: F = rng.gen();
 
@@ -281,8 +291,8 @@ mod tests {
         let claim0 = values0.iter().copied().sum();
         let claim1 = values1.iter().copied().sum();
 
-        let mle0 = Mle::new(values0.clone());
-        let mle1 = Mle::new(values1.clone());
+        let mle0 = Mle::from_vec(values0.clone());
+        let mle1 = Mle::from_vec(values1.clone());
 
         let lambda: F = rng.gen();
 
@@ -315,7 +325,7 @@ mod tests {
         let mut invalid_values = values;
         invalid_values[0] += F::ONE;
         let invalid_claim = claim + F::ONE;
-        let invalid_mle = Mle::new(invalid_values.clone());
+        let invalid_mle = Mle::from_vec(invalid_values.clone());
         let (invalid_proof, _) = prove_batch(
             vec![invalid_claim],
             vec![invalid_mle],

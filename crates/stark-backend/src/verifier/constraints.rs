@@ -3,7 +3,11 @@ use std::marker::PhantomData;
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
 use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra};
-use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
+use p3_matrix::{
+    dense::{RowMajorMatrix, RowMajorMatrixView},
+    stack::VerticalPair,
+};
+use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use super::{
@@ -14,6 +18,10 @@ use crate::{
     air_builders::symbolic::SymbolicExpressionDag,
     config::{Domain, StarkGenericConfig, Val},
     proof::AdjacentOpenedValues,
+    interaction::{
+        gkr_log_up::{cyclic_selectors_at_point, fold_multilinear_lagrange_col_constraints},
+        RapPhaseSeq, RapPhaseSeqKind,
+    },
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -23,6 +31,7 @@ pub fn verify_single_rap_constraints<SC>(
     preprocessed_values: Option<&AdjacentOpenedValues<SC::Challenge>>,
     partitioned_main_values: Vec<&AdjacentOpenedValues<SC::Challenge>>,
     after_challenge_values: Vec<&AdjacentOpenedValues<SC::Challenge>>,
+    extra_after_challenge_values: Vec<Vec<Vec<SC::Challenge>>>,
     quotient_chunks: &[Vec<SC::Challenge>],
     domain: Domain<SC>, // trace domain
     qc_domains: &[Domain<SC>],
@@ -96,6 +105,7 @@ where
         .collect();
 
     let after_challenge_ext_values: Vec<_> = after_challenge_values
+        .clone()
         .into_iter()
         .map(|values| {
             let [local, next] = [&values.local, &values.next]
@@ -103,7 +113,7 @@ where
             (local, next)
         })
         .collect();
-    let after_challenge = after_challenge_ext_values
+    let after_challenge: Vec<_> = after_challenge_ext_values
         .iter()
         .map(|(local, next)| {
             VerticalPair::new(
@@ -129,7 +139,38 @@ where
     };
     folder.eval_constraints(constraints);
 
-    let folded_constraints = folder.accumulator;
+    let mut folded_constraints = folder.accumulator;
+
+    if matches!(SC::RapPhaseSeq::KIND, RapPhaseSeqKind::GkrLogUp)
+        && !after_challenge_values.is_empty()
+    {
+        assert_eq!(after_challenge_values.len(), 1);
+        assert_eq!(extra_after_challenge_values.len(), 1);
+
+        let mut after_challenge_window = vec![];
+        after_challenge_window.extend(unflatten(&after_challenge_values[0].local));
+        after_challenge_window.extend(unflatten(&after_challenge_values[0].next));
+        for extra in &extra_after_challenge_values[0] {
+            after_challenge_window.extend(unflatten(extra));
+        }
+        let after_challenge_window = RowMajorMatrix::new(
+            after_challenge_window,
+            after_challenge_values[0].local.len() / SC::Challenge::D,
+        );
+
+        let log_trace_size = log2_strict_usize(domain.size());
+        let r = &challenges[0][challenges[0].len() - log_trace_size..];
+        let is_cyclic_row: Vec<SC::Challenge> = cyclic_selectors_at_point(domain, zeta);
+        fold_multilinear_lagrange_col_constraints(
+            &mut folded_constraints,
+            alpha,
+            &after_challenge_window,
+            &is_cyclic_row,
+            r,
+            0,
+        );
+    }
+
     // Finally, check that
     //     folded_constraints(zeta) / Z_H(zeta) = quotient(zeta)
     if folded_constraints * sels.inv_zeroifier != quotient {

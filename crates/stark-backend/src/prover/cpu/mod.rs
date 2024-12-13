@@ -175,9 +175,12 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         let rap_views_per_phase;
         let perm_trace_per_air = if let Some(phase_data) = rap_phase_seq_data {
             assert_eq!(mvk_view.num_phases(), 1);
-            assert_eq!(
-                mvk_view.num_challenges_in_phase(0),
-                phase_data.challenges.len()
+            assert_eq!(phase_data.challenges_per_phase.len(), 1);
+            // mvk_view.num_challenges_in_phase are the number of challenge variables used in the AIR constraints.
+            // there may be additional randomness used to generate the trace data that is constrained externally.
+            assert!(
+                mvk_view.num_challenges_in_phase(0) <=
+                phase_data.challenges_per_phase[0].len()
             );
             let perm_views = zip_eq(
                 &phase_data.after_challenge_trace_per_air,
@@ -191,7 +194,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
                 }
                 RapSinglePhaseView {
                     inner: matrix_idx,
-                    challenges: phase_data.challenges.clone(),
+                    challenges: phase_data.challenges_per_phase[0].clone(),
                     exposed_values: exposed_values.unwrap_or_default(),
                 }
             })
@@ -371,7 +374,11 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
 
         let pcs = self.pcs();
         let domain = |log_height| pcs.natural_domain_for_degree(1usize << log_height);
-        let opener = OpeningProver::<SC>::new(pcs, zeta);
+
+        let after_phase_domains = after_phase.iter().next().map(|v| v.log_trace_heights.iter().copied().map(domain).collect_vec());
+        let extra_after_challenge_points = self.config.rap_phase_seq().extra_opening_points(zeta, &after_phase_domains.unwrap_or(vec![]));
+
+        let opener = OpeningProver::<SC>::new(pcs, zeta, extra_after_challenge_points);
         let preprocessed = preprocessed
             .iter()
             .map(|v| {

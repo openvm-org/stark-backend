@@ -5,8 +5,9 @@ use std::{
 };
 
 use p3_field::Field;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnivariatePolynomial<F> {
     coeffs: Vec<F>,
 }
@@ -48,7 +49,7 @@ impl<F: Field> UnivariatePolynomial<F> {
     /// # Panics
     ///
     /// Panics if `points` contains duplicate x-coordinates.
-    pub fn from_interpolation(points: &[(F, F)]) -> Self {
+    pub fn from_points(points: &[(F, F)]) -> Self {
         let mut coeffs = Self::zero();
 
         for (i, &(xi, yi)) in points.iter().enumerate() {
@@ -252,7 +253,7 @@ mod tests {
         let ys = bbvec![1, 2, 3, 4];
         let points = zip(&xs, &ys).map(|(x, y)| (*x, *y)).collect_vec();
 
-        let poly = UnivariatePolynomial::from_interpolation(&points);
+        let poly = UnivariatePolynomial::from_points(&points);
 
         for (x, y) in zip(xs, ys) {
             assert_eq!(poly.evaluate(x), y, "mismatch for x={x}");

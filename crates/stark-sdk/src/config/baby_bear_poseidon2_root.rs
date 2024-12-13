@@ -1,6 +1,6 @@
 use ff::PrimeField;
 use openvm_stark_backend::{
-    config::StarkConfig, interaction::fri_log_up::FriLogUpPhase,
+    config::StarkConfig, interaction::gkr_log_up::GkrLogUpPhase,
     p3_challenger::MultiField32Challenger, p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
 };
@@ -42,7 +42,8 @@ type ChallengeMmcs<P> = ExtensionMmcs<Val, Challenge, ValMmcs<P>>;
 type Dft = Radix2DitParallel<Val>;
 type Challenger<P> = MultiField32Challenger<Val, Bn254Fr, P, WIDTH, 2>;
 type Pcs<P> = TwoAdicFriPcs<Val, Dft, ValMmcs<P>, ChallengeMmcs<P>>;
-type RapPhase<P> = FriLogUpPhase<Val, Challenge, Challenger<P>>;
+// type RapPhase<P> = FriLogUpPhase<Val, Challenge, Challenger<P>>;
+type RapPhase<P> = GkrLogUpPhase<Val, Challenge, Challenger<P>>;
 
 pub type BabyBearPermutationRootConfig<P> =
     StarkConfig<Pcs<P>, RapPhase<P>, Challenge, Challenger<P>>;
@@ -136,7 +137,7 @@ where
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
-    let rap_phase = FriLogUpPhase::new(log_up_params);
+    let rap_phase = RapPhase::<P>::new(log_up_params);
     BabyBearPermutationRootConfig::new(pcs, rap_phase)
 }
 

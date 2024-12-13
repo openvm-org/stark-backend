@@ -1,6 +1,6 @@
 use openvm_stark_backend::{
     config::StarkConfig,
-    interaction::fri_log_up::FriLogUpPhase,
+    interaction::gkr_log_up::GkrLogUpPhase,
     p3_challenger::{HashChallenger, SerializingChallenger32},
     p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
@@ -34,7 +34,8 @@ type Challenger<H> = SerializingChallenger32<Val, HashChallenger<u8, H, 32>>;
 
 type Pcs<H> = TwoAdicFriPcs<Val, Dft, ValMmcs<H>, ChallengeMmcs<H>>;
 
-type RapPhase<H> = FriLogUpPhase<Val, Challenge, Challenger<H>>;
+// type RapPhase<H> = FriLogUpPhase<Val, Challenge, Challenger<H>>;
+type RapPhase<H> = GkrLogUpPhase<Val, Challenge, Challenger<H>>;
 
 pub type BabyBearByteHashConfig<H> = StarkConfig<Pcs<H>, RapPhase<H>, Challenge, Challenger<H>>;
 
@@ -115,7 +116,7 @@ where
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
-    let rap_phase = FriLogUpPhase::new(log_up_params);
+    let rap_phase = RapPhase::<H>::new(log_up_params);
     BabyBearByteHashConfig::new(pcs, rap_phase)
 }
 

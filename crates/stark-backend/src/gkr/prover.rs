@@ -7,7 +7,7 @@ use std::{
 
 use itertools::Itertools;
 use p3_challenger::FieldChallenger;
-use p3_field::Field;
+use p3_field::{ExtensionField, Field};
 use thiserror::Error;
 
 use crate::{
@@ -327,10 +327,10 @@ pub struct NotConstantPolyError;
 ///
 /// The input layers should be committed to the channel before calling this function.
 // GKR algorithm: <https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf> (page 64)
-pub fn prove_batch<F: Field>(
+pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
     challenger: &mut impl FieldChallenger<F>,
-    input_layer_by_instance: Vec<Layer<F>>,
-) -> (GkrBatchProof<F>, GkrArtifact<F>) {
+    input_layer_by_instance: Vec<Layer<EF>>,
+) -> (GkrBatchProof<EF>, GkrArtifact<EF>) {
     let n_instances = input_layer_by_instance.len();
     let n_layers_by_instance = input_layer_by_instance
         .iter()
@@ -366,12 +366,14 @@ pub fn prove_batch<F: Field>(
 
         // Seed the channel with layer claims.
         for claims_to_verify in claims_to_verify_by_instance.iter().flatten() {
-            challenger.observe_slice(claims_to_verify);
+            for claim in claims_to_verify {
+                challenger.observe_ext_element(*claim);
+            }
         }
 
         let eq_evals = HypercubeEqEvals::eval(&ood_point);
-        let sumcheck_alpha = challenger.sample();
-        let instance_lambda = challenger.sample();
+        let sumcheck_alpha: EF = challenger.sample_ext_element();
+        let instance_lambda: EF = challenger.sample_ext_element();
 
         let mut sumcheck_oracles = Vec::new();
         let mut sumcheck_claims = Vec::new();
@@ -385,7 +387,7 @@ pub fn prove_batch<F: Field>(
                 sumcheck_oracles.push(GkrMultivariatePolyOracle {
                     eq_evals: &eq_evals,
                     input_layer: layer,
-                    eq_fixed_var_correction: F::ONE,
+                    eq_fixed_var_correction: EF::ONE,
                     lambda: instance_lambda,
                 });
                 sumcheck_claims.push(random_linear_combination(claims_to_verify, instance_lambda));
@@ -417,12 +419,14 @@ pub fn prove_batch<F: Field>(
         // Seed the channel with the layer masks.
         for (&instance, mask) in zip(&sumcheck_instances, &masks) {
             for column in mask.columns() {
-                challenger.observe_slice(column);
+                for el in column {
+                    challenger.observe_ext_element(*el);
+                }
             }
             layer_masks_by_instance[instance].push(mask.clone());
         }
 
-        let challenge = challenger.sample();
+        let challenge: EF = challenger.sample_ext_element();
         ood_point = sumcheck_ood_point;
         ood_point.push(challenge);
 
@@ -501,7 +505,7 @@ pub fn correct_sum_as_poly_in_first_variable<F: Field>(
     let r_at_2 = f_at_2 * hypercube_eq(&[F::TWO], &[y[n - k]]) * a_const;
 
     // Interpolate.
-    UnivariatePolynomial::from_interpolation(&[
+    UnivariatePolynomial::from_points(&[
         (F::ZERO, r_at_0),
         (F::ONE, r_at_1),
         (F::TWO, r_at_2),

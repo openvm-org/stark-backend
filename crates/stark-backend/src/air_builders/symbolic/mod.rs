@@ -41,6 +41,7 @@ pub struct SymbolicConstraints<F> {
     /// the prover for after challenge trace generation, and some partial
     /// information may be used by the verifier.
     ///
+    /// FIXME[zach]: False for GKR; there, some constraints depend on height of the trace and therefore cannot be precomputed.
     /// **However**, any contributions to the quotient polynomial from
     /// logup are already included in `constraints` and do not need to
     /// be separately calculated from `interactions`.
@@ -399,15 +400,18 @@ impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
             assert!(self.challenges.is_empty());
             assert!(self.exposed_values_after_challenge.is_empty());
 
-            if self.rap_phase_seq_kind == RapPhaseSeqKind::FriLogUp {
-                let interaction_partitions =
-                    find_interaction_chunks(&self.interactions, self.max_constraint_degree)
-                        .interaction_partitions();
-                let num_chunks = interaction_partitions.len();
-                self.interaction_partitions.replace(interaction_partitions);
-                let perm_width = num_chunks + 1;
-                self.after_challenge = Self::new_after_challenge(&[perm_width]);
-            }
+            let perm_width = match self.rap_phase_seq_kind {
+                RapPhaseSeqKind::FriLogUp => {
+                    let interaction_partitions =
+                        find_interaction_chunks(&self.interactions, self.max_constraint_degree)
+                            .interaction_partitions();
+                    let num_chunks = interaction_partitions.len();
+                    self.interaction_partitions.replace(interaction_partitions);
+                    num_chunks + 1
+                }
+                RapPhaseSeqKind::GkrLogUp => 2,
+            };
+            self.after_challenge = Self::new_after_challenge(&[perm_width]);
 
             let phases_shapes = self.rap_phase_seq_kind.shape();
             let phase_shape = phases_shapes.first().unwrap();

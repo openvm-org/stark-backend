@@ -20,8 +20,8 @@ fn test_batch() -> Result<(), GkrError<BabyBear>> {
     let engine = default_engine();
     let mut rng = create_seeded_rng();
 
-    let col0 = Mle::new((0..1 << LOG_N).map(|_| rng.gen()).collect_vec());
-    let col1 = Mle::new((0..1 << LOG_N).map(|_| rng.gen()).collect_vec());
+    let col0 = Mle::from_vec((0..1 << LOG_N).map(|_| rng.gen()).collect_vec());
+    let col1 = Mle::from_vec((0..1 << LOG_N).map(|_| rng.gen()).collect_vec());
 
     let product0 = col0.iter().copied().product();
     let product1 = col1.iter().copied().product();
@@ -62,8 +62,8 @@ fn test_batch_with_different_sizes() -> Result<(), GkrError<BabyBear>> {
     const LOG_N0: usize = 5;
     const LOG_N1: usize = 7;
 
-    let col0 = Mle::new((0..1 << LOG_N0).map(|_| rng.gen()).collect());
-    let col1 = Mle::new((0..1 << LOG_N1).map(|_| rng.gen()).collect());
+    let col0 = Mle::from_vec((0..1 << LOG_N0).map(|_| rng.gen()).collect());
+    let col1 = Mle::from_vec((0..1 << LOG_N1).map(|_| rng.gen()).collect());
 
     let product0 = col0.iter().copied().product();
     let product1 = col1.iter().copied().product();
@@ -106,7 +106,7 @@ fn test_grand_product() -> Result<(), GkrError<BabyBear>> {
 
     let values = (0..N).map(|_| rng.gen()).collect_vec();
     let product = values.iter().copied().product();
-    let col = Mle::<BabyBear>::new(values);
+    let col = Mle::<BabyBear>::from_vec(values);
     let input_layer = Layer::GrandProduct(col.clone());
     let (proof, _) = gkr::prove_batch(&mut engine.new_challenger(), vec![input_layer]);
 
@@ -137,8 +137,8 @@ fn test_logup_with_generic_trace() -> Result<(), GkrError<BabyBear>> {
     let sum: Fraction<F> = zip(&numerator_values, &denominator_values)
         .map(|(&n, &d)| Fraction::new(n, d))
         .sum();
-    let numerators = Mle::<F>::new(numerator_values);
-    let denominators = Mle::<F>::new(denominator_values);
+    let numerators = Mle::<F>::from_vec(numerator_values);
+    let denominators = Mle::<F>::from_vec(denominator_values);
     let top_layer = Layer::LogUpGeneric {
         numerators: numerators.clone(),
         denominators: denominators.clone(),
@@ -178,7 +178,7 @@ fn test_logup_with_singles_trace() -> Result<(), GkrError<BabyBear>> {
         .iter()
         .map(|&d| Fraction::new(F::ONE, d))
         .sum();
-    let denominators = Mle::new(denominator_values);
+    let denominators = Mle::from_vec(denominator_values);
     let top_layer = Layer::LogUpSingles {
         denominators: denominators.clone(),
     };
@@ -214,8 +214,8 @@ fn test_logup_with_multiplicities_trace() -> Result<(), GkrError<BabyBear>> {
     let sum: Fraction<BabyBear> = zip(&numerator_values, &denominator_values)
         .map(|(&n, &d)| Fraction::new(n, d))
         .sum();
-    let numerators = Mle::new(numerator_values);
-    let denominators = Mle::new(denominator_values);
+    let numerators = Mle::from_vec(numerator_values);
+    let denominators = Mle::from_vec(denominator_values);
     let top_layer = Layer::LogUpMultiplicities {
         numerators: numerators.clone(),
         denominators: denominators.clone(),
