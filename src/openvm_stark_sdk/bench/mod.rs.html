@@ -112,7 +112,7 @@
 <a href="#111" id="111">111</a>
 <a href="#112" id="112">112</a>
 <a href="#113" id="113">113</a>
-<a href="#114" id="114">114</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{collections::BTreeMap, ffi::OsStr};
+<a href="#114" id="114">114</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{<a href="https://doc.rust-lang.org/nightly/alloc/collections/btree/map/struct.BTreeMap.html">collections::BTreeMap</a>, <a href="https://doc.rust-lang.org/nightly/std/ffi/os_str/struct.OsStr.html">ffi::OsStr</a>};
 
 <span class="kw">use </span>metrics_tracing_context::{MetricsLayer, TracingContextLayer};
 <span class="kw">use </span>metrics_util::{
@@ -120,42 +120,42 @@
     layers::Layer,
     CompositeKey, MetricKind,
 };
-<span class="kw">use </span>serde_json::json;
+<span class="kw">use </span><a href="https://docs.rs/serde_json/1.0.133/serde_json/macro.json.html">serde_json::json</a>;
 <span class="kw">use </span>tracing::Level;
 <span class="kw">use </span>tracing_forest::ForestLayer;
 <span class="kw">use </span>tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 
 <span class="doccomment">/// Run a function with metric collection enabled. The metrics will be written to a file specified
 /// by an environment variable which name is `output_path_envar`.
-</span><span class="kw">pub fn </span>run_with_metric_collection&lt;R&gt;(
-    output_path_envar: <span class="kw">impl </span>AsRef&lt;OsStr&gt;,
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/bench/fn.run_with_metric_collection.html">run_with_metric_collection</a>&lt;R&gt;(
+    output_path_envar: <span class="kw">impl </span>AsRef&lt;<a href="https://doc.rust-lang.org/nightly/std/ffi/os_str/struct.OsStr.html">OsStr</a>&gt;,
     f: <span class="kw">impl </span>FnOnce() -&gt; R,
 ) -&gt; R {
-    <span class="kw">let </span>file = std::env::var(output_path_envar).map(|path| std::fs::File::create(path).unwrap());
+    <span class="kw">let </span>file = <a href="https://doc.rust-lang.org/nightly/std/env/fn.var.html">std::env::var</a>(<a href="#17">output_path_envar</a>).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.map">map</a>(|path| <a href="https://doc.rust-lang.org/nightly/std/fs/struct.File.html#method.create">std::fs::File::create</a>(<a href="#20">path</a>).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>());
     <span class="comment">// Set up tracing:
     </span><span class="kw">let </span>env_filter = EnvFilter::builder()
-        .with_default_directive(Level::INFO.into())
+        .with_default_directive(Level::INFO.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>())
         .from_env_lossy();
-    <span class="kw">let </span>subscriber = Registry::default()
-        .with(env_filter)
-        .with(ForestLayer::default())
+    <span class="kw">let </span>subscriber = <a href="https://doc.rust-lang.org/nightly/core/default/trait.Default.html#tymethod.default">Registry::default</a>()
+        .with(<a href="#22">env_filter</a>)
+        .with(<a href="https://doc.rust-lang.org/nightly/core/default/trait.Default.html#tymethod.default">ForestLayer::default</a>())
         .with(MetricsLayer::new());
     <span class="comment">// Prepare tracing.
-    </span>tracing::subscriber::set_global_default(subscriber).unwrap();
+    </span>tracing::subscriber::set_global_default(<a href="#25">subscriber</a>).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
 
     <span class="comment">// Prepare metrics.
     </span><span class="kw">let </span>recorder = DebuggingRecorder::new();
-    <span class="kw">let </span>snapshotter = recorder.snapshotter();
-    <span class="kw">let </span>recorder = TracingContextLayer::all().layer(recorder);
+    <span class="kw">let </span>snapshotter = <a href="#33">recorder</a>.snapshotter();
+    <span class="kw">let </span>recorder = TracingContextLayer::all().layer(<a href="#33">recorder</a>);
     <span class="comment">// Install the registry as the global recorder
-    </span>metrics::set_global_recorder(recorder).unwrap();
-    <span class="kw">let </span>res = f();
+    </span>metrics::set_global_recorder(<a href="#35">recorder</a>).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+    <span class="kw">let </span>res = <a href="#18">f</a>();
 
-    <span class="kw">if let </span><span class="prelude-val">Ok</span>(file) = file {
-        serde_json::to_writer_pretty(<span class="kw-2">&amp;</span>file, <span class="kw-2">&amp;</span>serialize_metric_snapshot(snapshotter.snapshot()))
-            .unwrap();
+    <span class="kw">if let </span><span class="prelude-val">Ok</span>(file) = <a href="#20">file</a> {
+        <a href="https://docs.rs/serde_json/1.0.133/serde_json/ser/fn.to_writer_pretty.html">serde_json::to_writer_pretty</a>(<span class="kw-2">&amp;</span><a href="#40">file</a>, <span class="kw-2">&amp;</span><a href="#96-114">serialize_metric_snapshot</a>(<a href="#34">snapshotter</a>.snapshot()))
+            .<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
     }
-    res
+    <a href="#38">res</a>
 }
 
 <span class="doccomment">/// Serialize a gauge/counter metric into a JSON object. The object has the following structure:
@@ -168,23 +168,23 @@
 ///    "value": &lt;float value if gauge | integer value if counter&gt;
 /// }
 ///
-</span><span class="kw">fn </span>serialize_metric(ckey: CompositeKey, value: DebugValue) -&gt; serde_json::Value {
-    <span class="kw">let </span>(_kind, key) = ckey.into_parts();
-    <span class="kw">let </span>(key_name, labels) = key.into_parts();
-    <span class="kw">let </span>value = <span class="kw">match </span>value {
-        DebugValue::Gauge(v) =&gt; v.into_inner().to_string(),
-        DebugValue::Counter(v) =&gt; v.to_string(),
-        DebugValue::Histogram(<span class="kw">_</span>) =&gt; <span class="macro">todo!</span>(<span class="string">"Histograms not supported yet."</span>),
+</span><span class="kw">fn </span>serialize_metric(ckey: CompositeKey, value: DebugValue) -&gt; <a href="https://docs.rs/serde_json/1.0.133/serde_json/value/enum.Value.html">serde_json::Value</a> {
+    <span class="kw">let </span>(_kind, key) = <a href="#57">ckey</a>.into_parts();
+    <span class="kw">let </span>(key_name, labels) = <a href="#58">key</a>.into_parts();
+    <span class="kw">let </span>value = <span class="kw">match </span><a href="#57">value</a> {
+        DebugValue::Gauge(v) =&gt; <a href="#61">v</a>.into_inner().<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>(),
+        DebugValue::Counter(v) =&gt; <a href="#62">v</a>.<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>(),
+        DebugValue::Histogram(<span class="kw">_</span>) =&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.todo.html">todo!</a>(<span class="string">"Histograms not supported yet."</span>),
     };
-    <span class="kw">let </span>labels = labels
-        .into_iter()
-        .map(|label| {
-            <span class="kw">let </span>(k, v) = label.into_parts();
-            (k.as_ref().to_owned(), v.as_ref().to_owned())
+    <span class="kw">let </span>labels = <a href="#59">labels</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|label| {
+            <span class="kw">let </span>(k, v) = <a href="#67">label</a>.into_parts();
+            (<a href="#68">k</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/alloc/borrow/trait.ToOwned.html#tymethod.to_owned">to_owned</a>(), <a href="#68">v</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/alloc/borrow/trait.ToOwned.html#tymethod.to_owned">to_owned</a>())
         })
-        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
 
-    <span class="macro">json!</span>({
+    <a class="macro" href="https://docs.rs/serde_json/1.0.133/serde_json/macro.json.html">json!</a>({
         <span class="string">"metric"</span>: key_name.as_str(),
         <span class="string">"labels"</span>: labels,
         <span class="string">"value"</span>: value,
@@ -207,8 +207,8 @@
 ///   ...
 /// }
 ///
-</span><span class="kw">fn </span>serialize_metric_snapshot(snapshot: Snapshot) -&gt; serde_json::Value {
-    <span class="kw">let </span><span class="kw-2">mut </span>ret = BTreeMap::&lt;<span class="kw">_</span>, Vec&lt;serde_json::Value&gt;&gt;::new();
+</span><span class="kw">fn </span>serialize_metric_snapshot(snapshot: Snapshot) -&gt; <a href="https://docs.rs/serde_json/1.0.133/serde_json/value/enum.Value.html">serde_json::Value</a> {
+    <span class="kw">let </span><span class="kw-2">mut </span>ret = BTreeMap::&lt;<span class="kw">_</span>, Vec&lt;<a href="https://docs.rs/serde_json/1.0.133/serde_json/value/enum.Value.html">serde_json::Value</a>&gt;&gt;::new();
     <span class="kw">for </span>(ckey, <span class="kw">_</span>, <span class="kw">_</span>, value) <span class="kw">in </span>snapshot.into_vec() {
         <span class="kw">match </span>ckey.kind() {
             MetricKind::Gauge =&gt; {
@@ -224,6 +224,6 @@
             MetricKind::Histogram =&gt; <span class="macro">todo!</span>(),
         }
     }
-    <span class="macro">json!</span>(ret)
+    <a class="macro" href="https://docs.rs/serde_json/1.0.133/serde_json/macro.json.html">json!</a>(ret)
 }
 </code></pre></div></section></main></body></html>

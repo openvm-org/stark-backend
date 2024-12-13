@@ -65,71 +65,71 @@
 <a href="#64" id="64">64</a>
 <a href="#65" id="65">65</a>
 <a href="#66" id="66">66</a>
-<a href="#67" id="67">67</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#67" id="67">67</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>openvm_stark_backend::{
-    config::{StarkGenericConfig, Val},
+    config::{<a href="../../../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>, <a href="../../../../openvm_stark_backend/config/type.Val.html">Val</a>},
     p3_field::PrimeField32,
     p3_matrix::Matrix,
-    prover::types::{AirProofInput, AirProofRawInput},
-    rap::AnyRap,
-    Chip, ChipUsageGetter,
+    prover::types::{<a href="../../../../openvm_stark_backend/prover/types/struct.AirProofInput.html">AirProofInput</a>, <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofRawInput.html">AirProofRawInput</a>},
+    <a href="../../../../openvm_stark_backend/rap/trait.AnyRap.html">rap::AnyRap</a>,
+    <a href="../../../../openvm_stark_backend/chip/trait.Chip.html">Chip</a>, <a href="../../../../openvm_stark_backend/chip/trait.ChipUsageGetter.html">ChipUsageGetter</a>,
 };
 
-<span class="kw">use super</span>::{air::FibonacciAir, trace::generate_trace_rows};
-<span class="kw">use </span><span class="kw">crate</span>::dummy_airs::fib_air::columns::NUM_FIBONACCI_COLS;
+<span class="kw">use super</span>::{<a href="air.rs.html#12">air::FibonacciAir</a>, <a href="trace.rs.html#6-16">trace::generate_trace_rows</a>};
+<span class="kw">use </span><a href="columns.rs.html#3"><span class="kw">crate</span>::dummy_airs::fib_air::columns::NUM_FIBONACCI_COLS</a>;
 
 <span class="attr">#[derive(Clone, Debug)]
-</span><span class="kw">pub struct </span>FibonacciChip {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_sdk/dummy_airs/fib_air/chip/struct.FibonacciChip.html">FibonacciChip</a> {
     <span class="doccomment">/// The 0th number in the fibonacci sequence.
-    </span><span class="kw">pub </span>a: u32,
+    </span><span class="kw">pub </span>a: <a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>,
     <span class="doccomment">/// The 1st number in the fibonacci sequence.
-    </span><span class="kw">pub </span>b: u32,
+    </span><span class="kw">pub </span>b: <a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>,
     <span class="doccomment">/// Target n-th number in the fibonacci sequence.
-    </span><span class="kw">pub </span>n: usize,
+    </span><span class="kw">pub </span>n: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
-<span class="kw">impl </span>FibonacciChip {
-    <span class="kw">pub fn </span>new(a: u32, b: u32, n: usize) -&gt; <span class="self">Self </span>{
-        <span class="macro">assert!</span>(n.is_power_of_two());
-        <span class="self">Self </span>{ a, b, n }
+<span class="kw">impl </span><a href="#16-23">FibonacciChip</a> {
+    <span class="kw">pub fn </span>new(a: <a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>, b: <a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>, n: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(n.is_power_of_two());
+        <span class="self">Self </span>{ <a href="#26">a</a>, <a href="#26">b</a>, <a href="#26">n</a> }
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; Chip&lt;SC&gt; <span class="kw">for </span>FibonacciChip
+<span class="kw">impl</span>&lt;SC: <a href="../../../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; Chip&lt;SC&gt; <span class="kw">for </span><a href="#16-23">FibonacciChip</a>
 <span class="kw">where
     </span>Val&lt;SC&gt;: PrimeField32,
 {
     <span class="kw">fn </span>air(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt; {
-        Arc::new(FibonacciAir)
+        <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="air.rs.html#12">FibonacciAir</a>)
     }
 
     <span class="kw">fn </span>generate_air_proof_input(<span class="self">self</span>) -&gt; AirProofInput&lt;SC&gt; {
-        <span class="kw">let </span>common_main = generate_trace_rows::&lt;Val&lt;SC&gt;&gt;(<span class="self">self</span>.a, <span class="self">self</span>.b, <span class="self">self</span>.n);
-        <span class="kw">let </span>a = common_main.get(<span class="number">0</span>, <span class="number">0</span>);
-        <span class="kw">let </span>b = common_main.get(<span class="number">0</span>, <span class="number">1</span>);
-        <span class="kw">let </span>last_val = common_main.get(<span class="self">self</span>.n - <span class="number">1</span>, <span class="number">1</span>);
-        AirProofInput {
-            air: <span class="self">self</span>.air(),
-            cached_mains_pdata: <span class="macro">vec!</span>[],
-            raw: AirProofRawInput {
-                cached_mains: <span class="macro">vec!</span>[],
-                common_main: <span class="prelude-val">Some</span>(generate_trace_rows::&lt;Val&lt;SC&gt;&gt;(<span class="self">self</span>.a, <span class="self">self</span>.b, <span class="self">self</span>.n)),
-                public_values: <span class="macro">vec!</span>[a, b, last_val],
+        <span class="kw">let </span>common_main = generate_trace_rows::&lt;Val&lt;SC&gt;&gt;(<a class="self" href="#40">self</a>.a, <a class="self" href="#40">self</a>.b, <a class="self" href="#40">self</a>.n);
+        <span class="kw">let </span>a = <a href="#41">common_main</a>.get(<span class="number">0</span>, <span class="number">0</span>);
+        <span class="kw">let </span>b = <a href="#41">common_main</a>.get(<span class="number">0</span>, <span class="number">1</span>);
+        <span class="kw">let </span>last_val = <a href="#41">common_main</a>.get(<a class="self" href="#40">self</a>.n - <span class="number">1</span>, <span class="number">1</span>);
+        <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofInput.html">AirProofInput</a> {
+            air: <a class="self" href="#40">self</a>.<a href="../../../../openvm_stark_backend/chip/trait.Chip.html#tymethod.air">air</a>(),
+            cached_mains_pdata: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+            raw: <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofRawInput.html">AirProofRawInput</a> {
+                cached_mains: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+                common_main: <span class="prelude-val">Some</span>(generate_trace_rows::&lt;Val&lt;SC&gt;&gt;(<a class="self" href="#40">self</a>.a, <a class="self" href="#40">self</a>.b, <a class="self" href="#40">self</a>.n)),
+                public_values: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[a, b, last_val],
             },
         }
     }
 }
 
-<span class="kw">impl </span>ChipUsageGetter <span class="kw">for </span>FibonacciChip {
-    <span class="kw">fn </span>air_name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
-        <span class="string">"FibonacciAir"</span>.to_string()
+<span class="kw">impl </span><a href="../../../../openvm_stark_backend/chip/trait.ChipUsageGetter.html">ChipUsageGetter</a> <span class="kw">for </span><a href="#16-23">FibonacciChip</a> {
+    <span class="kw">fn </span>air_name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a> {
+        <span class="string">"FibonacciAir"</span>.<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()
     }
-    <span class="kw">fn </span>current_trace_height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.n
+    <span class="kw">fn </span>current_trace_height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#61">self</a>.n
     }
-    <span class="kw">fn </span>trace_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        NUM_FIBONACCI_COLS
+    <span class="kw">fn </span>trace_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a href="columns.rs.html#3">NUM_FIBONACCI_COLS</a>
     }
 }
 </code></pre></div></section></main></body></html>

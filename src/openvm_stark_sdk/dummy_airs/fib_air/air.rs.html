@@ -53,59 +53,59 @@
 <a href="#52" id="52">52</a>
 <a href="#53" id="53">53</a>
 <a href="#54" id="54">54</a>
-<a href="#55" id="55">55</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::borrow::Borrow;
+<a href="#55" id="55">55</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html">std::borrow::Borrow</a>;
 
 <span class="kw">use </span>openvm_stark_backend::{
     p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir},
     p3_matrix::Matrix,
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    rap::{<a href="../../../../openvm_stark_backend/rap/trait.BaseAirWithPublicValues.html">BaseAirWithPublicValues</a>, <a href="../../../../openvm_stark_backend/rap/trait.PartitionedBaseAir.html">PartitionedBaseAir</a>},
 };
 
-<span class="kw">use </span><span class="kw">super</span>::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
+<span class="kw">use </span><span class="kw">super</span>::columns::{<a href="columns.rs.html#6-9">FibonacciCols</a>, <a href="columns.rs.html#3">NUM_FIBONACCI_COLS</a>};
 
 <span class="attr">#[derive(Clone, Copy)]
-</span><span class="kw">pub struct </span>FibonacciAir;
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_sdk/dummy_airs/fib_air/air/struct.FibonacciAir.html">FibonacciAir</a>;
 
-<span class="kw">impl</span>&lt;F&gt; PartitionedBaseAir&lt;F&gt; <span class="kw">for </span>FibonacciAir {}
-<span class="kw">impl</span>&lt;F&gt; BaseAir&lt;F&gt; <span class="kw">for </span>FibonacciAir {
-    <span class="kw">fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        NUM_FIBONACCI_COLS
+<span class="kw">impl</span>&lt;F&gt; PartitionedBaseAir&lt;F&gt; <span class="kw">for </span><a href="#12">FibonacciAir</a> {}
+<span class="kw">impl</span>&lt;F&gt; BaseAir&lt;F&gt; <span class="kw">for </span><a href="#12">FibonacciAir</a> {
+    <span class="kw">fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a href="columns.rs.html#3">NUM_FIBONACCI_COLS</a>
     }
 }
 
-<span class="kw">impl</span>&lt;F&gt; BaseAirWithPublicValues&lt;F&gt; <span class="kw">for </span>FibonacciAir {
-    <span class="kw">fn </span>num_public_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<span class="kw">impl</span>&lt;F&gt; BaseAirWithPublicValues&lt;F&gt; <span class="kw">for </span><a href="#12">FibonacciAir</a> {
+    <span class="kw">fn </span>num_public_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="number">3
     </span>}
 }
 
-<span class="kw">impl</span>&lt;AB: AirBuilderWithPublicValues&gt; Air&lt;AB&gt; <span class="kw">for </span>FibonacciAir {
+<span class="kw">impl</span>&lt;AB: AirBuilderWithPublicValues&gt; Air&lt;AB&gt; <span class="kw">for </span><a href="#12">FibonacciAir</a> {
     <span class="kw">fn </span>eval(<span class="kw-2">&amp;</span><span class="self">self</span>, builder: <span class="kw-2">&amp;mut </span>AB) {
-        <span class="kw">let </span>main = builder.main();
-        <span class="kw">let </span>pis = builder.public_values();
+        <span class="kw">let </span>main = <a href="#28">builder</a>.main();
+        <span class="kw">let </span>pis = <a href="#28">builder</a>.public_values();
 
-        <span class="kw">let </span>a = pis[<span class="number">0</span>];
-        <span class="kw">let </span>b = pis[<span class="number">1</span>];
-        <span class="kw">let </span>x = pis[<span class="number">2</span>];
+        <span class="kw">let </span>a = <a href="#30">pis</a>[<span class="number">0</span>];
+        <span class="kw">let </span>b = <a href="#30">pis</a>[<span class="number">1</span>];
+        <span class="kw">let </span>x = <a href="#30">pis</a>[<span class="number">2</span>];
 
-        <span class="kw">let </span>(local, next) = (main.row_slice(<span class="number">0</span>), main.row_slice(<span class="number">1</span>));
-        <span class="kw">let </span>local: <span class="kw-2">&amp;</span>FibonacciCols&lt;AB::Var&gt; = (<span class="kw-2">*</span>local).borrow();
-        <span class="kw">let </span>next: <span class="kw-2">&amp;</span>FibonacciCols&lt;AB::Var&gt; = (<span class="kw-2">*</span>next).borrow();
+        <span class="kw">let </span>(local, next) = (<a href="#29">main</a>.row_slice(<span class="number">0</span>), <a href="#29">main</a>.row_slice(<span class="number">1</span>));
+        <span class="kw">let </span>local: <span class="kw-2">&amp;</span>FibonacciCols&lt;AB::Var&gt; = (<span class="kw-2">*</span><a href="#36">local</a>).<a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html#tymethod.borrow">borrow</a>();
+        <span class="kw">let </span>next: <span class="kw-2">&amp;</span>FibonacciCols&lt;AB::Var&gt; = (<span class="kw-2">*</span><a href="#36">next</a>).<a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html#tymethod.borrow">borrow</a>();
 
-        <span class="kw">let </span><span class="kw-2">mut </span>when_first_row = builder.when_first_row();
+        <span class="kw">let </span><span class="kw-2">mut </span>when_first_row = <a href="#28">builder</a>.when_first_row();
 
-        when_first_row.assert_eq(local.left, a);
-        when_first_row.assert_eq(local.right, b);
+        <a href="#40">when_first_row</a>.assert_eq(<a href="#37">local</a>.left, <a href="#32">a</a>);
+        <a href="#40">when_first_row</a>.assert_eq(<a href="#37">local</a>.right, <a href="#33">b</a>);
 
-        <span class="kw">let </span><span class="kw-2">mut </span>when_transition = builder.when_transition();
+        <span class="kw">let </span><span class="kw-2">mut </span>when_transition = <a href="#28">builder</a>.when_transition();
 
         <span class="comment">// a' &lt;- b
-        </span>when_transition.assert_eq(local.right, next.left);
+        </span><a href="#45">when_transition</a>.assert_eq(<a href="#37">local</a>.right, <a href="#38">next</a>.left);
 
         <span class="comment">// b' &lt;- a + b
-        </span>when_transition.assert_eq(local.left + local.right, next.right);
+        </span><a href="#45">when_transition</a>.assert_eq(<a href="#37">local</a>.left + <a href="#37">local</a>.right, <a href="#38">next</a>.right);
 
-        builder.when_last_row().assert_eq(local.right, x);
+        <a href="#28">builder</a>.when_last_row().assert_eq(<a href="#37">local</a>.right, <a href="#34">x</a>);
     }
 }
 </code></pre></div></section></main></body></html>

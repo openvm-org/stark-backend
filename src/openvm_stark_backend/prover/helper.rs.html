@@ -84,20 +84,20 @@
 <a href="#83" id="83">83</a>
 <a href="#84" id="84">84</a>
 <a href="#85" id="85">85</a>
-<a href="#86" id="86">86</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#86" id="86">86</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>itertools::izip;
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrix, Matrix};
 
 <span class="kw">use crate</span>::{
-    config::{StarkGenericConfig, Val},
-    prover::types::{AirProofInput, AirProofRawInput},
-    rap::AnyRap,
+    config::{<a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    prover::types::{<a href="types.rs.html#97-102">AirProofInput</a>, <a href="types.rs.html#106-113">AirProofRawInput</a>},
+    <a href="../rap.rs.html#66-77">rap::AnyRap</a>,
 };
 
 <span class="doccomment">/// Test helper trait for AirProofInput
 /// Don't use this trait in production code
-</span><span class="kw">pub trait </span>AirProofInputTestHelper&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub trait </span><a href="../../../openvm_stark_backend/prover/helper/trait.AirProofInputTestHelper.html">AirProofInputTestHelper</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">fn </span>cached_traces_no_pis(
         air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;,
         cached_traces: Vec&lt;RowMajorMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
@@ -105,41 +105,41 @@
     ) -&gt; <span class="self">Self</span>;
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; AirProofInputTestHelper&lt;SC&gt; <span class="kw">for </span>AirProofInput&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; AirProofInputTestHelper&lt;SC&gt; <span class="kw">for </span>AirProofInput&lt;SC&gt; {
     <span class="kw">fn </span>cached_traces_no_pis(
         air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;,
         cached_traces: Vec&lt;RowMajorMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
         common_trace: RowMajorMatrix&lt;Val&lt;SC&gt;&gt;,
     ) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            air,
-            cached_mains_pdata: <span class="macro">vec!</span>[],
-            raw: AirProofRawInput {
-                cached_mains: cached_traces.into_iter().map(Arc::new).collect(),
-                common_main: <span class="prelude-val">Some</span>(common_trace),
-                public_values: <span class="macro">vec!</span>[],
+            <a href="#24">air</a>,
+            cached_mains_pdata: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+            raw: <a href="types.rs.html#106-113">AirProofRawInput</a> {
+                cached_mains: <a href="#25">cached_traces</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(Arc::new).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
+                common_main: <span class="prelude-val">Some</span>(<a href="#26">common_trace</a>),
+                public_values: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
             },
         }
     }
 }
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; AirProofInput&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; AirProofInput&lt;SC&gt; {
     <span class="kw">pub fn </span>simple(
         air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;,
         trace: RowMajorMatrix&lt;Val&lt;SC&gt;&gt;,
         public_values: Vec&lt;Val&lt;SC&gt;&gt;,
     ) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            air,
-            cached_mains_pdata: <span class="macro">vec!</span>[],
-            raw: AirProofRawInput {
-                cached_mains: <span class="macro">vec!</span>[],
-                common_main: <span class="prelude-val">Some</span>(trace),
-                public_values,
+            <a href="#41">air</a>,
+            cached_mains_pdata: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+            raw: <a href="types.rs.html#106-113">AirProofRawInput</a> {
+                cached_mains: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+                common_main: <span class="prelude-val">Some</span>(<a href="#42">trace</a>),
+                <a href="#43">public_values</a>,
             },
         }
     }
     <span class="kw">pub fn </span>simple_no_pis(air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;, trace: RowMajorMatrix&lt;Val&lt;SC&gt;&gt;) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::simple(air, trace, <span class="macro">vec!</span>[])
+        <a href="#40-54"><span class="self">Self</span>::simple</a>(<a href="#55">air</a>, <a href="#55">trace</a>, <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[])
     }
 
     <span class="kw">pub fn </span>multiple_simple(
@@ -147,26 +147,26 @@
         traces: Vec&lt;RowMajorMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
         public_values: Vec&lt;Vec&lt;Val&lt;SC&gt;&gt;&gt;,
     ) -&gt; Vec&lt;<span class="self">Self</span>&gt; {
-        <span class="macro">izip!</span>(airs, traces, public_values)
-            .map(|(air, trace, pis)| AirProofInput::simple(air, trace, pis))
-            .collect()
+        <span class="macro">izip!</span>(<a href="#60">airs</a>, <a href="#61">traces</a>, <a href="#62">public_values</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(air, trace, pis)| <a href="#40-54">AirProofInput::simple</a>(<a href="#65">air</a>, <a href="#65">trace</a>, <a href="#65">pis</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 
     <span class="kw">pub fn </span>multiple_simple_no_pis(
         airs: Vec&lt;Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;&gt;,
         traces: Vec&lt;RowMajorMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
     ) -&gt; Vec&lt;<span class="self">Self</span>&gt; {
-        <span class="macro">izip!</span>(airs, traces)
-            .map(|(air, trace)| AirProofInput::simple_no_pis(air, trace))
-            .collect()
+        <span class="macro">izip!</span>(<a href="#70">airs</a>, <a href="#71">traces</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(air, trace)| <a href="#55-57">AirProofInput::simple_no_pis</a>(<a href="#74">air</a>, <a href="#74">trace</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
     <span class="doccomment">/// Return the height of the main trace.
-    </span><span class="kw">pub fn </span>main_trace_height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+    </span><span class="kw">pub fn </span>main_trace_height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="kw">if </span><span class="self">self</span>.raw.cached_mains.is_empty() {
             <span class="comment">// An AIR must have a main trace.
-            </span><span class="self">self</span>.raw.common_main.as_ref().unwrap().height()
+            </span><a class="self" href="#78">self</a>.raw.common_main.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>().height()
         } <span class="kw">else </span>{
-            <span class="self">self</span>.raw.cached_mains[<span class="number">0</span>].height()
+            <a class="self" href="#78">self</a>.raw.cached_mains[<span class="number">0</span>].height()
         }
     }
 }

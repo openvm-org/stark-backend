@@ -246,11 +246,11 @@
 <a href="#245" id="245">245</a>
 <a href="#246" id="246">246</a>
 <a href="#247" id="247">247</a>
-<a href="#248" id="248">248</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::any::type_name;
+<a href="#248" id="248">248</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/any/fn.type_name.html">std::any::type_name</a>;
 
 <span class="kw">use </span>ff::PrimeField;
 <span class="kw">use </span>openvm_stark_backend::{
-    config::StarkConfig, interaction::stark_log_up::StarkLogUpPhase,
+    <a href="../../../openvm_stark_backend/config/struct.StarkConfig.html">config::StarkConfig</a>, <a href="../../../openvm_stark_backend/interaction/stark_log_up/struct.StarkLogUpPhase.html">interaction::stark_log_up::StarkLogUpPhase</a>,
     p3_challenger::MultiField32Challenger, p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
 };
@@ -268,159 +268,159 @@
 };
 
 <span class="kw">use super</span>::{
-    instrument::{HashStatistics, InstrumentCounter, Instrumented, StarkHashStatistics},
-    FriParameters,
+    instrument::{<a href="instrument.rs.html#89-93">HashStatistics</a>, <a href="instrument.rs.html#14">InstrumentCounter</a>, <a href="instrument.rs.html#19-23">Instrumented</a>, <a href="instrument.rs.html#96-102">StarkHashStatistics</a>},
+    <a href="fri_params.rs.html#4-8">FriParameters</a>,
 };
 <span class="kw">use crate</span>::{
-    assert_sc_compatible_with_serde,
-    engine::{StarkEngine, StarkEngineWithHashInstrumentation, StarkFriEngine},
+    <a href="../utils.rs.html#50-56">assert_sc_compatible_with_serde</a>,
+    engine::{<a href="../../../openvm_stark_sdk/engine/trait.StarkEngine.html">StarkEngine</a>, <a href="../engine.rs.html#16-19">StarkEngineWithHashInstrumentation</a>, <a href="../engine.rs.html#42-94">StarkFriEngine</a>},
 };
 
-<span class="kw">const </span>WIDTH: usize = <span class="number">3</span>;
+<span class="kw">const </span>WIDTH: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">3</span>;
 <span class="doccomment">/// Poseidon rate in F. &lt;Poseidon RATE&gt;(2) * &lt;# of F in a N&gt;(8) = 16
-</span><span class="kw">const </span>RATE: usize = <span class="number">16</span>;
-<span class="kw">const </span>DIGEST_WIDTH: usize = <span class="number">1</span>;
+</span><span class="kw">const </span>RATE: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">16</span>;
+<span class="kw">const </span>DIGEST_WIDTH: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">1</span>;
 
 <span class="doccomment">/// A configuration for  recursion.
 </span><span class="kw">type </span>Val = BabyBear;
-<span class="kw">type </span>Challenge = BinomialExtensionField&lt;Val, <span class="number">4</span>&gt;;
-<span class="kw">type </span>Perm = Poseidon2Bn254&lt;WIDTH&gt;;
-<span class="kw">type </span>Hash&lt;P&gt; = MultiField32PaddingFreeSponge&lt;Val, Bn254Fr, P, WIDTH, RATE, DIGEST_WIDTH&gt;;
-<span class="kw">type </span>Compress&lt;P&gt; = TruncatedPermutation&lt;P, <span class="number">2</span>, <span class="number">1</span>, WIDTH&gt;;
+<span class="kw">type </span>Challenge = BinomialExtensionField&lt;<a href="#37">Val</a>, <span class="number">4</span>&gt;;
+<span class="kw">type </span>Perm = Poseidon2Bn254&lt;<a href="#31">WIDTH</a>&gt;;
+<span class="kw">type </span>Hash&lt;P&gt; = MultiField32PaddingFreeSponge&lt;<a href="#37">Val</a>, Bn254Fr, P, <a href="#31">WIDTH</a>, <a href="#33">RATE</a>, <a href="#34">DIGEST_WIDTH</a>&gt;;
+<span class="kw">type </span>Compress&lt;P&gt; = TruncatedPermutation&lt;P, <span class="number">2</span>, <span class="number">1</span>, <a href="#31">WIDTH</a>&gt;;
 <span class="kw">type </span>ValMmcs&lt;P&gt; = MerkleTreeMmcs&lt;BabyBear, Bn254Fr, Hash&lt;P&gt;, Compress&lt;P&gt;, <span class="number">1</span>&gt;;
-<span class="kw">type </span>ChallengeMmcs&lt;P&gt; = ExtensionMmcs&lt;Val, Challenge, ValMmcs&lt;P&gt;&gt;;
-<span class="kw">type </span>Dft = Radix2DitParallel&lt;Val&gt;;
-<span class="kw">type </span>Challenger&lt;P&gt; = MultiField32Challenger&lt;Val, Bn254Fr, P, WIDTH, <span class="number">2</span>&gt;;
-<span class="kw">type </span>Pcs&lt;P&gt; = TwoAdicFriPcs&lt;Val, Dft, ValMmcs&lt;P&gt;, ChallengeMmcs&lt;P&gt;&gt;;
-<span class="kw">type </span>RapPhase&lt;P&gt; = StarkLogUpPhase&lt;Val, Challenge, Challenger&lt;P&gt;&gt;;
+<span class="kw">type </span>ChallengeMmcs&lt;P&gt; = ExtensionMmcs&lt;<a href="#37">Val</a>, <a href="#38">Challenge</a>, ValMmcs&lt;P&gt;&gt;;
+<span class="kw">type </span>Dft = Radix2DitParallel&lt;<a href="#37">Val</a>&gt;;
+<span class="kw">type </span>Challenger&lt;P&gt; = MultiField32Challenger&lt;<a href="#37">Val</a>, Bn254Fr, P, <a href="#31">WIDTH</a>, <span class="number">2</span>&gt;;
+<span class="kw">type </span>Pcs&lt;P&gt; = TwoAdicFriPcs&lt;<a href="#37">Val</a>, <a href="#44">Dft</a>, ValMmcs&lt;P&gt;, ChallengeMmcs&lt;P&gt;&gt;;
+<span class="kw">type </span>RapPhase&lt;P&gt; = StarkLogUpPhase&lt;<a href="#37">Val</a>, <a href="#38">Challenge</a>, Challenger&lt;P&gt;&gt;;
 
-<span class="kw">pub type </span>BabyBearPermutationRootConfig&lt;P&gt; =
-    StarkConfig&lt;Pcs&lt;P&gt;, RapPhase&lt;P&gt;, Challenge, Challenger&lt;P&gt;&gt;;
-<span class="kw">pub type </span>BabyBearPoseidon2RootConfig = BabyBearPermutationRootConfig&lt;Perm&gt;;
-<span class="kw">pub type </span>BabyBearPoseidon2RootEngine = BabyBearPermutationRootEngine&lt;Perm&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/type.BabyBearPermutationRootConfig.html">BabyBearPermutationRootConfig</a>&lt;P&gt; =
+    StarkConfig&lt;Pcs&lt;P&gt;, RapPhase&lt;P&gt;, <a href="#38">Challenge</a>, Challenger&lt;P&gt;&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/type.BabyBearPoseidon2RootConfig.html">BabyBearPoseidon2RootConfig</a> = BabyBearPermutationRootConfig&lt;<a href="#39">Perm</a>&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/type.BabyBearPoseidon2RootEngine.html">BabyBearPoseidon2RootEngine</a> = BabyBearPermutationRootEngine&lt;<a href="#39">Perm</a>&gt;;
 
-<span class="macro">assert_sc_compatible_with_serde!</span>(BabyBearPoseidon2RootConfig);
+<a class="macro" href="../utils.rs.html#50-56">assert_sc_compatible_with_serde!</a>(BabyBearPoseidon2RootConfig);
 
-<span class="kw">pub struct </span>BabyBearPermutationRootEngine&lt;P&gt;
+<span class="kw">pub struct </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/struct.BabyBearPermutationRootEngine.html">BabyBearPermutationRootEngine</a>&lt;P&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Bn254Fr; WIDTH]&gt; + Clone,
+    </span>P: CryptographicPermutation&lt;[Bn254Fr; <a href="#31">WIDTH</a>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">pub </span>fri_params: FriParameters,
+    <span class="kw">pub </span>fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>,
     <span class="kw">pub </span>config: BabyBearPermutationRootConfig&lt;P&gt;,
     <span class="kw">pub </span>perm: P,
 }
 
 <span class="kw">impl</span>&lt;P&gt; StarkEngine&lt;BabyBearPermutationRootConfig&lt;P&gt;&gt; <span class="kw">for </span>BabyBearPermutationRootEngine&lt;P&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Bn254Fr; WIDTH]&gt; + Clone,
+    </span>P: CryptographicPermutation&lt;[Bn254Fr; <a href="#31">WIDTH</a>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
     <span class="kw">fn </span>config(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>BabyBearPermutationRootConfig&lt;P&gt; {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.config
+        <span class="kw-2">&amp;</span><a class="self" href="#69">self</a>.config
     }
 
     <span class="kw">fn </span>new_challenger(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Challenger&lt;P&gt; {
-        Challenger::new(<span class="self">self</span>.perm.clone()).unwrap()
+        Challenger::new(<a class="self" href="#73">self</a>.perm.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>()
     }
 }
 
 <span class="kw">impl</span>&lt;P&gt; StarkEngineWithHashInstrumentation&lt;BabyBearPermutationRootConfig&lt;Instrumented&lt;P&gt;&gt;&gt;
     <span class="kw">for </span>BabyBearPermutationRootEngine&lt;Instrumented&lt;P&gt;&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Bn254Fr; WIDTH]&gt; + Clone,
+    </span>P: CryptographicPermutation&lt;[Bn254Fr; <a href="#31">WIDTH</a>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
     <span class="kw">fn </span>clear_instruments(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="self">self</span>.perm.input_lens_by_type.lock().unwrap().clear();
+        <a class="self" href="#83">self</a>.perm.input_lens_by_type.<a href="https://doc.rust-lang.org/nightly/std/sync/mutex/struct.Mutex.html#method.lock">lock</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>().<a href="https://doc.rust-lang.org/nightly/std/collections/hash/map/struct.HashMap.html#method.clear">clear</a>();
     }
     <span class="kw">fn </span>stark_hash_statistics&lt;T&gt;(<span class="kw-2">&amp;</span><span class="self">self</span>, custom: T) -&gt; StarkHashStatistics&lt;T&gt; {
-        <span class="kw">let </span>counter = <span class="self">self</span>.perm.input_lens_by_type.lock().unwrap();
-        <span class="kw">let </span>permutations = counter.iter().fold(<span class="number">0</span>, |total, (name, lens)| {
+        <span class="kw">let </span>counter = <a class="self" href="#86">self</a>.perm.input_lens_by_type.<a href="https://doc.rust-lang.org/nightly/std/sync/mutex/struct.Mutex.html#method.lock">lock</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+        <span class="kw">let </span>permutations = <a href="#87">counter</a>.<a href="https://doc.rust-lang.org/nightly/std/collections/hash/map/struct.HashMap.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.fold">fold</a>(<span class="number">0</span>, |total, (name, lens)| {
             <span class="kw">if </span>name == type_name::&lt;[Val; WIDTH]&gt;() {
-                <span class="kw">let </span>count: usize = lens.iter().sum();
-                <span class="macro">println!</span>(<span class="string">"Permutation: {name}, Count: {count}"</span>);
-                total + count
+                <span class="kw">let </span>count: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <a href="#88">lens</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
+                <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.println.html">println!</a>(<span class="string">"Permutation: {name}, Count: {count}"</span>);
+                <a href="#88">total</a> + <a href="#90">count</a>
             } <span class="kw">else </span>{
-                <span class="macro">panic!</span>(<span class="string">"Permutation type not yet supported: {}"</span>, name);
+                <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"Permutation type not yet supported: {}"</span>, name);
             }
         });
 
-        StarkHashStatistics {
-            name: type_name::&lt;P&gt;().to_string(),
-            stats: HashStatistics { permutations },
-            fri_params: <span class="self">self</span>.fri_params,
-            custom,
+        <a href="instrument.rs.html#96-102">StarkHashStatistics</a> {
+            name: type_name::&lt;P&gt;().<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>(),
+            stats: <a href="instrument.rs.html#89-93">HashStatistics</a> { <a href="#88">permutations</a> },
+            fri_params: <a class="self" href="#86">self</a>.fri_params,
+            <a href="#86">custom</a>,
         }
     }
 }
 
 <span class="doccomment">/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-</span><span class="kw">pub fn </span>default_engine() -&gt; BabyBearPoseidon2RootEngine {
-    default_engine_impl(FriParameters::standard_fast())
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/fn.default_engine.html">default_engine</a>() -&gt; <a href="#52">BabyBearPoseidon2RootEngine</a> {
+    <a href="#113-116">default_engine_impl</a>(<a href="fri_params.rs.html#21-23">FriParameters::standard_fast</a>())
 }
 
 <span class="doccomment">/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-</span><span class="kw">fn </span>default_engine_impl(fri_params: FriParameters) -&gt; BabyBearPoseidon2RootEngine {
-    <span class="kw">let </span>perm = root_perm();
-    engine_from_perm(perm, fri_params)
+</span><span class="kw">fn </span>default_engine_impl(fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>) -&gt; <a href="#52">BabyBearPoseidon2RootEngine</a> {
+    <span class="kw">let </span>perm = <a href="#157-172">root_perm</a>();
+    <a href="#124-134">engine_from_perm</a>(<a href="#114">perm</a>, <a href="#113">fri_params</a>)
 }
 
 <span class="doccomment">/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-</span><span class="kw">pub fn </span>default_config(perm: <span class="kw-2">&amp;</span>Perm) -&gt; BabyBearPoseidon2RootConfig {
-    <span class="kw">let </span>fri_params = FriParameters::standard_fast();
-    config_from_perm(perm, fri_params)
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/fn.default_config.html">default_config</a>(perm: <span class="kw-2">&amp;</span><a href="#39">Perm</a>) -&gt; <a href="#51">BabyBearPoseidon2RootConfig</a> {
+    <span class="kw">let </span>fri_params = <a href="fri_params.rs.html#21-23">FriParameters::standard_fast</a>();
+    <a href="#136-154">config_from_perm</a>(<a href="#119">perm</a>, <a href="#120">fri_params</a>)
 }
 
-<span class="kw">pub fn </span>engine_from_perm&lt;P&gt;(perm: P, fri_params: FriParameters) -&gt; BabyBearPermutationRootEngine&lt;P&gt;
+<span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/fn.engine_from_perm.html">engine_from_perm</a>&lt;P&gt;(perm: P, fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>) -&gt; BabyBearPermutationRootEngine&lt;P&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Bn254Fr; WIDTH]&gt; + Clone,
+    </span>P: CryptographicPermutation&lt;[Bn254Fr; <a href="#31">WIDTH</a>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">let </span>config = config_from_perm(<span class="kw-2">&amp;</span>perm, fri_params);
-    BabyBearPermutationRootEngine {
-        config,
-        perm,
-        fri_params,
+    <span class="kw">let </span>config = <a href="#136-154">config_from_perm</a>(<span class="kw-2">&amp;</span><a href="#124">perm</a>, <a href="#124">fri_params</a>);
+    <a href="#56-63">BabyBearPermutationRootEngine</a> {
+        <a href="#128">config</a>,
+        <a href="#124">perm</a>,
+        <a href="#124">fri_params</a>,
     }
 }
 
-<span class="kw">pub fn </span>config_from_perm&lt;P&gt;(perm: <span class="kw-2">&amp;</span>P, fri_params: FriParameters) -&gt; BabyBearPermutationRootConfig&lt;P&gt;
+<span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/fn.config_from_perm.html">config_from_perm</a>&lt;P&gt;(perm: <span class="kw-2">&amp;</span>P, fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>) -&gt; BabyBearPermutationRootConfig&lt;P&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Bn254Fr; WIDTH]&gt; + Clone,
+    </span>P: CryptographicPermutation&lt;[Bn254Fr; <a href="#31">WIDTH</a>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">let </span>hash = Hash::new(perm.clone()).unwrap();
-    <span class="kw">let </span>compress = Compress::new(perm.clone());
-    <span class="kw">let </span>val_mmcs = ValMmcs::new(hash, compress);
-    <span class="kw">let </span>challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
-    <span class="kw">let </span>dft = Dft::default();
+    <span class="kw">let </span>hash = Hash::new(<a href="#136">perm</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+    <span class="kw">let </span>compress = Compress::new(<a href="#136">perm</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>val_mmcs = ValMmcs::new(<a href="#140">hash</a>, <a href="#141">compress</a>);
+    <span class="kw">let </span>challenge_mmcs = ChallengeMmcs::new(<a href="#142">val_mmcs</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>dft = <a href="https://doc.rust-lang.org/nightly/core/default/trait.Default.html#tymethod.default">Dft::default</a>();
     <span class="kw">let </span>fri_config = FriConfig {
-        log_blowup: fri_params.log_blowup,
-        num_queries: fri_params.num_queries,
-        proof_of_work_bits: fri_params.proof_of_work_bits,
-        mmcs: challenge_mmcs,
+        log_blowup: <a href="#136">fri_params</a>.log_blowup,
+        num_queries: <a href="#136">fri_params</a>.num_queries,
+        proof_of_work_bits: <a href="#136">fri_params</a>.proof_of_work_bits,
+        mmcs: <a href="#143">challenge_mmcs</a>,
     };
-    <span class="kw">let </span>pcs = Pcs::new(dft, val_mmcs, fri_config);
-    <span class="kw">let </span>rap_phase = StarkLogUpPhase::new();
-    BabyBearPermutationRootConfig::new(pcs, rap_phase)
+    <span class="kw">let </span>pcs = Pcs::new(<a href="#144">dft</a>, <a href="#142">val_mmcs</a>, <a href="#145">fri_config</a>);
+    <span class="kw">let </span>rap_phase = <a href="../../../openvm_stark_backend/interaction/stark_log_up/struct.StarkLogUpPhase.html#method.new">StarkLogUpPhase::new</a>();
+    <a href="../../../openvm_stark_backend/config/struct.StarkConfig.html#method.new">BabyBearPermutationRootConfig::new</a>(<a href="#151">pcs</a>, <a href="#152">rap_phase</a>)
 }
 
 <span class="doccomment">/// The permutation for outer recursion.
-</span><span class="kw">pub fn </span>root_perm() -&gt; Perm {
-    <span class="kw">const </span>ROUNDS_F: usize = <span class="number">8</span>;
-    <span class="kw">const </span>ROUNDS_P: usize = <span class="number">56</span>;
-    <span class="kw">let </span><span class="kw-2">mut </span>round_constants = bn254_poseidon2_rc3();
-    <span class="kw">let </span>internal_end = (ROUNDS_F / <span class="number">2</span>) + ROUNDS_P;
-    <span class="kw">let </span>terminal = round_constants.split_off(internal_end);
-    <span class="kw">let </span>internal_round_constants = round_constants.split_off(ROUNDS_F / <span class="number">2</span>);
-    <span class="kw">let </span>internal_round_constants = internal_round_constants
-        .into_iter()
-        .map(|vec| vec[<span class="number">0</span>])
-        .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
-    <span class="kw">let </span>initial = round_constants;
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/fn.root_perm.html">root_perm</a>() -&gt; <a href="#39">Perm</a> {
+    <span class="kw">const </span>ROUNDS_F: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">8</span>;
+    <span class="kw">const </span>ROUNDS_P: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">56</span>;
+    <span class="kw">let </span><span class="kw-2">mut </span>round_constants = <a href="#194-205">bn254_poseidon2_rc3</a>();
+    <span class="kw">let </span>internal_end = (<a href="#158">ROUNDS_F</a> / <span class="number">2</span>) + <a href="#159">ROUNDS_P</a>;
+    <span class="kw">let </span>terminal = <a href="#160">round_constants</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.split_off">split_off</a>(<a href="#161">internal_end</a>);
+    <span class="kw">let </span>internal_round_constants = <a href="#160">round_constants</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.split_off">split_off</a>(<a href="#158">ROUNDS_F</a> / <span class="number">2</span>);
+    <span class="kw">let </span>internal_round_constants = <a href="#163">internal_round_constants</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|vec| <a href="#166">vec</a>[<span class="number">0</span>])
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+    <span class="kw">let </span>initial = <a href="#160">round_constants</a>;
 
-    <span class="kw">let </span>external_round_constants = ExternalLayerConstants::new(initial, terminal);
-    Perm::new(external_round_constants, internal_round_constants)
+    <span class="kw">let </span>external_round_constants = ExternalLayerConstants::new(<a href="#168">initial</a>, <a href="#162">terminal</a>);
+    Perm::new(<a href="#170">external_round_constants</a>, <a href="#164">internal_round_constants</a>)
 }
 
 <span class="kw">fn </span>bn254_from_ark_ff(input: ark_FpBN256) -&gt; Bn254Fr {
-    <span class="kw">let </span>bytes = input.into_bigint().to_bytes_le();
+    <span class="kw">let </span>bytes = <a href="#174">input</a>.into_bigint().to_bytes_le();
 
     <span class="kw">let </span><span class="kw-2">mut </span>res = &lt;FFBn254Fr <span class="kw">as </span>ff::PrimeField&gt;::Repr::default();
 
@@ -428,70 +428,70 @@
         <span class="kw-2">*</span>digit = bytes[i];
     }
 
-    <span class="kw">let </span>value = FFBn254Fr::from_repr(res);
+    <span class="kw">let </span>value = FFBn254Fr::from_repr(<a href="#177">res</a>);
 
     <span class="kw">if </span>value.is_some().into() {
         Bn254Fr {
-            value: value.unwrap(),
+            value: <a href="#183">value</a>.<a href="https://docs.rs/subtle/2.6.0/subtle/struct.CtOption.html#method.unwrap">unwrap</a>(),
         }
     } <span class="kw">else </span>{
-        <span class="macro">panic!</span>(<span class="string">"Invalid field element"</span>)
+        <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"Invalid field element"</span>)
     }
 }
 
 <span class="kw">fn </span>bn254_poseidon2_rc3() -&gt; Vec&lt;[Bn254Fr; <span class="number">3</span>]&gt; {
-    RC3.iter()
-        .map(|vec| {
-            vec.iter()
-                .cloned()
-                .map(bn254_from_ark_ff)
-                .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
-                .try_into()
-                .unwrap()
+    RC3.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|vec| {
+            <a href="#196">vec</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.cloned">cloned</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(<a href="#174-192">bn254_from_ark_ff</a>)
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+                .<a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryInto.html#tymethod.try_into">try_into</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>()
         })
-        .collect()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
 }
 
 <span class="doccomment">/// Logs hash count statistics to stdout and returns as struct.
 /// Count of 1 corresponds to a Poseidon2 permutation with rate RATE that outputs OUT field elements
 </span><span class="attr">#[allow(dead_code)]
-</span><span class="kw">pub fn </span>print_hash_counts(hash_counter: <span class="kw-2">&amp;</span>InstrumentCounter, compress_counter: <span class="kw-2">&amp;</span>InstrumentCounter) {
-    <span class="kw">let </span>hash_counter = hash_counter.lock().unwrap();
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_poseidon2_root/fn.print_hash_counts.html">print_hash_counts</a>(hash_counter: <span class="kw-2">&amp;</span><a href="instrument.rs.html#14">InstrumentCounter</a>, compress_counter: <span class="kw-2">&amp;</span><a href="instrument.rs.html#14">InstrumentCounter</a>) {
+    <span class="kw">let </span>hash_counter = <a href="#210">hash_counter</a>.<a href="https://doc.rust-lang.org/nightly/std/sync/mutex/struct.Mutex.html#method.lock">lock</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
     <span class="kw">let </span><span class="kw-2">mut </span>hash_count = <span class="number">0</span>;
-    hash_counter.iter().for_each(|(name, lens)| {
+    <a href="#211">hash_counter</a>.<a href="https://doc.rust-lang.org/nightly/std/collections/hash/map/struct.HashMap.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.for_each">for_each</a>(|(name, lens)| {
         <span class="kw">if </span>name == type_name::&lt;(Val, [Val; DIGEST_WIDTH])&gt;() {
-            <span class="kw">let </span>count = lens.iter().fold(<span class="number">0</span>, |count, len| count + len.div_ceil(RATE));
-            <span class="macro">println!</span>(<span class="string">"Hash: {name}, Count: {count}"</span>);
-            hash_count += count;
+            <span class="kw">let </span>count = <a href="#213">lens</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.fold">fold</a>(<span class="number">0</span>, |count, len| <a href="#215">count</a> + <a href="#215">len</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.div_ceil">div_ceil</a>(<a href="#33">RATE</a>));
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.println.html">println!</a>(<span class="string">"Hash: {name}, Count: {count}"</span>);
+            <a href="#212">hash_count</a> += <a href="#215">count</a>;
         } <span class="kw">else </span>{
-            <span class="macro">panic!</span>(<span class="string">"Hash type not yet supported: {}"</span>, name);
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"Hash type not yet supported: {}"</span>, name);
         }
     });
-    drop(hash_counter);
-    <span class="kw">let </span>compress_counter = compress_counter.lock().unwrap();
+    <a href="https://doc.rust-lang.org/nightly/core/mem/fn.drop.html">drop</a>(<a href="#211">hash_counter</a>);
+    <span class="kw">let </span>compress_counter = <a href="#210">compress_counter</a>.<a href="https://doc.rust-lang.org/nightly/std/sync/mutex/struct.Mutex.html#method.lock">lock</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
     <span class="kw">let </span><span class="kw-2">mut </span>compress_count = <span class="number">0</span>;
-    compress_counter.iter().for_each(|(name, lens)| {
+    <a href="#223">compress_counter</a>.<a href="https://doc.rust-lang.org/nightly/std/collections/hash/map/struct.HashMap.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.for_each">for_each</a>(|(name, lens)| {
         <span class="kw">if </span>name == type_name::&lt;[Val; DIGEST_WIDTH]&gt;() {
-            <span class="kw">let </span>count = lens.iter().fold(<span class="number">0</span>, |count, len| {
+            <span class="kw">let </span>count = <a href="#225">lens</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.fold">fold</a>(<span class="number">0</span>, |count, len| {
                 <span class="comment">// len should always be N=2 for TruncatedPermutation
-                </span>count + (DIGEST_WIDTH * len).div_ceil(WIDTH)
+                </span><a href="#227">count</a> + (<a href="#34">DIGEST_WIDTH</a> * <a href="#227">len</a>).<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.div_ceil">div_ceil</a>(<a href="#31">WIDTH</a>)
             });
-            <span class="macro">println!</span>(<span class="string">"Compress: {name}, Count: {count}"</span>);
-            compress_count += count;
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.println.html">println!</a>(<span class="string">"Compress: {name}, Count: {count}"</span>);
+            <a href="#224">compress_count</a> += <a href="#227">count</a>;
         } <span class="kw">else </span>{
-            <span class="macro">panic!</span>(<span class="string">"Compress type not yet supported: {}"</span>, name);
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"Compress type not yet supported: {}"</span>, name);
         }
     });
-    <span class="kw">let </span>total_count = hash_count + compress_count;
-    <span class="macro">println!</span>(<span class="string">"Total Count: {total_count}"</span>);
+    <span class="kw">let </span>total_count = <a href="#212">hash_count</a> + <a href="#224">compress_count</a>;
+    <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.println.html">println!</a>(<span class="string">"Total Count: {total_count}"</span>);
 }
 
-<span class="kw">impl </span>StarkFriEngine&lt;BabyBearPoseidon2RootConfig&gt; <span class="kw">for </span>BabyBearPoseidon2RootEngine {
-    <span class="kw">fn </span>new(fri_params: FriParameters) -&gt; <span class="self">Self </span>{
-        default_engine_impl(fri_params)
+<span class="kw">impl </span>StarkFriEngine&lt;<a href="#51">BabyBearPoseidon2RootConfig</a>&gt; <span class="kw">for </span><a href="#52">BabyBearPoseidon2RootEngine</a> {
+    <span class="kw">fn </span>new(fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>) -&gt; <span class="self">Self </span>{
+        <a href="#113-116">default_engine_impl</a>(<a href="#242">fri_params</a>)
     }
-    <span class="kw">fn </span>fri_params(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; FriParameters {
-        <span class="self">self</span>.fri_params
+    <span class="kw">fn </span>fri_params(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="fri_params.rs.html#4-8">FriParameters</a> {
+        <a class="self" href="#245">self</a>.fri_params
     }
 }
 </code></pre></div></section></main></body></html>

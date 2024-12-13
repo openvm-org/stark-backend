@@ -308,26 +308,26 @@
 <span class="kw">use </span>tracing::instrument;
 
 <span class="kw">use crate</span>::{
-    config::{Domain, StarkGenericConfig, Val},
-    interaction::RapPhaseSeq,
-    keygen::{types::MultiStarkVerifyingKey, view::MultiStarkVerifyingKeyView},
-    prover::{opener::AdjacentOpenedValues, types::Proof},
-    verifier::constraints::verify_single_rap_constraints,
+    config::{<a href="../config.rs.html#63-66">Domain</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    <a href="../interaction/mod.rs.html#140-186">interaction::RapPhaseSeq</a>,
+    keygen::{<a href="../keygen/types.rs.html#80-82">types::MultiStarkVerifyingKey</a>, <a href="../keygen/view.rs.html#10-12">view::MultiStarkVerifyingKeyView</a>},
+    prover::{<a href="../prover/opener.rs.html#171-174">opener::AdjacentOpenedValues</a>, <a href="../prover/types.rs.html#44-53">types::Proof</a>},
+    <a href="constraints.rs.html#20">verifier::constraints::verify_single_rap_constraints</a>,
 };
 
-<span class="kw">pub mod </span>constraints;
-<span class="kw">mod </span>error;
+<span class="kw">pub mod </span><a href="constraints.rs.html#1-140">constraints</a>;
+<span class="kw">mod </span><a href="error.rs.html#1-16">error</a>;
 
-<span class="kw">pub use </span>error::<span class="kw-2">*</span>;
+<span class="kw">pub use </span><a href="#17">error</a>::<span class="kw-2">*</span>;
 
 <span class="doccomment">/// Verifies a partitioned proof of multi-matrix AIRs.
-</span><span class="kw">pub struct </span>MultiTraceStarkVerifier&lt;<span class="lifetime">'c</span>, SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/verifier/struct.MultiTraceStarkVerifier.html">MultiTraceStarkVerifier</a>&lt;<span class="lifetime">'c</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     config: <span class="kw-2">&amp;</span><span class="lifetime">'c </span>SC,
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">'c</span>, SC: StarkGenericConfig&gt; MultiTraceStarkVerifier&lt;<span class="lifetime">'c</span>, SC&gt; {
+<span class="kw">impl</span>&lt;<span class="lifetime">'c</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiTraceStarkVerifier&lt;<span class="lifetime">'c</span>, SC&gt; {
     <span class="kw">pub fn </span>new(config: <span class="kw-2">&amp;</span><span class="lifetime">'c </span>SC) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ config }
+        <span class="self">Self </span>{ <a href="#27">config</a> }
     }
     <span class="doccomment">/// Verify collection of InteractiveAIRs and check the permutation
     /// cumulative sum is equal to zero across all AIRs.
@@ -337,7 +337,7 @@
         challenger: <span class="kw-2">&amp;mut </span>SC::Challenger,
         mvk: <span class="kw-2">&amp;</span>MultiStarkVerifyingKey&lt;SC&gt;,
         proof: <span class="kw-2">&amp;</span>Proof&lt;SC&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), VerificationError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), <a href="error.rs.html#4-16">VerificationError</a>&gt; {
         <span class="kw">let </span>mvk = mvk.view(<span class="kw-2">&amp;</span>proof.get_air_ids());
         <span class="self">self</span>.verify_raps(challenger, <span class="kw-2">&amp;</span>mvk, proof)<span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
@@ -355,7 +355,7 @@
         challenger: <span class="kw-2">&amp;mut </span>SC::Challenger,
         mvk: <span class="kw-2">&amp;</span>MultiStarkVerifyingKeyView&lt;SC&gt;,
         proof: <span class="kw-2">&amp;</span>Proof&lt;SC&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), VerificationError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), <a href="error.rs.html#4-16">VerificationError</a>&gt; {
         <span class="kw">let </span>public_values = proof.get_public_values();
         <span class="comment">// Challenger must observe public values
         </span><span class="kw">for </span>pis <span class="kw">in </span><span class="kw-2">&amp;</span>public_values {

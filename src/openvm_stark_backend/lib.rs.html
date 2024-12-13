@@ -66,36 +66,36 @@
 <span class="kw">pub use </span>p3_util;
 
 <span class="doccomment">/// AIR builders for prover and verifier, including support for cross-matrix permutation arguments.
-</span><span class="kw">pub mod </span>air_builders;
+</span><span class="kw">pub mod </span><a href="air_builders/mod.rs.html#1-19">air_builders</a>;
 <span class="doccomment">/// Trait for stateful chip that owns trace generation
-</span><span class="kw">mod </span>chip;
+</span><span class="kw">mod </span><a href="chip.rs.html#1-142">chip</a>;
 <span class="doccomment">/// API trait for circuit prover/verifier.
-</span><span class="kw">pub mod </span>circuit_api;
+</span><span class="kw">pub mod </span><a href="circuit_api.rs.html#1-23">circuit_api</a>;
 <span class="doccomment">/// Types for tracking matrix in system with multiple commitments, each to multiple matrices.
-</span><span class="kw">pub mod </span>commit;
+</span><span class="kw">pub mod </span><a href="commit.rs.html#1-66">commit</a>;
 <span class="doccomment">/// Helper types associated to generic STARK config.
-</span><span class="kw">pub mod </span>config;
+</span><span class="kw">pub mod </span><a href="config.rs.html#1-147">config</a>;
 <span class="doccomment">/// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
-</span><span class="kw">pub mod </span>engine;
+</span><span class="kw">pub mod </span><a href="engine.rs.html#1-168">engine</a>;
 <span class="doccomment">/// GKR batch prover for Grand Product and LogUp lookup arguments.
-</span><span class="kw">pub mod </span>gkr;
+</span><span class="kw">pub mod </span><a href="gkr/mod.rs.html#1-11">gkr</a>;
 <span class="doccomment">/// Log-up permutation argument implementation as RAP.
-</span><span class="kw">pub mod </span>interaction;
+</span><span class="kw">pub mod </span><a href="interaction/mod.rs.html#1-186">interaction</a>;
 <span class="doccomment">/// Proving and verifying key generation
-</span><span class="kw">pub mod </span>keygen;
+</span><span class="kw">pub mod </span><a href="keygen/mod.rs.html#1-242">keygen</a>;
 <span class="doccomment">/// Polynomials
-</span><span class="kw">pub mod </span>poly;
+</span><span class="kw">pub mod </span><a href="poly/mod.rs.html#1-2">poly</a>;
 <span class="doccomment">/// Prover implementation for partitioned multi-matrix AIRs.
-</span><span class="kw">pub mod </span>prover;
+</span><span class="kw">pub mod </span><a href="prover/mod.rs.html#1-503">prover</a>;
 <span class="doccomment">/// Trait for RAP (Randomized AIR with Preprocessing)
-</span><span class="kw">pub mod </span>rap;
-<span class="kw">pub mod </span>sumcheck;
+</span><span class="kw">pub mod </span><a href="rap.rs.html#1-124">rap</a>;
+<span class="kw">pub mod </span><a href="sumcheck.rs.html#3-329">sumcheck</a>;
 <span class="doccomment">/// Utility functions
-</span><span class="kw">pub mod </span>utils;
+</span><span class="kw">pub mod </span><a href="utils.rs.html#1-58">utils</a>;
 <span class="doccomment">/// Verifier implementation
-</span><span class="kw">pub mod </span>verifier;
+</span><span class="kw">pub mod </span><a href="verifier/mod.rs.html#1-302">verifier</a>;
 
-<span class="kw">pub use </span>chip::{Chip, ChipUsageGetter};
+<span class="kw">pub use </span>chip::{<a href="chip.rs.html#12-19">Chip</a>, <a href="chip.rs.html#22-38">ChipUsageGetter</a>};
 
 <span class="comment">// Use jemalloc as global allocator for performance
 </span><span class="attr">#[cfg(all(feature = <span class="string">"jemalloc"</span>, unix, not(test)))]

@@ -161,11 +161,11 @@
 
 <span class="kw">use crate</span>::{
     gkr::{
-        gate::Gate,
-        types::{GkrArtifact, GkrBatchProof, GkrError},
+        <a href="gate.rs.html#14-17">gate::Gate</a>,
+        types::{<a href="types.rs.html#25-32">GkrArtifact</a>, <a href="types.rs.html#15-22">GkrBatchProof</a>, <a href="types.rs.html#66-94">GkrError</a>},
     },
-    poly::{multi::hypercube_eq, uni::random_linear_combination},
-    sumcheck,
+    poly::{<a href="../poly/multi.rs.html#100-105">multi::hypercube_eq</a>, <a href="../poly/uni.rs.html#187-189">uni::random_linear_combination</a>},
+    <a href="../lib.rs.html#38">sumcheck</a>,
 };
 
 <span class="doccomment">/// Partially verifies a batch GKR proof.
@@ -173,38 +173,38 @@
 /// On successful verification the function returns a [`GkrArtifact`] which stores the out-of-domain
 /// point and claimed evaluations in the input layer columns for each instance at the OOD point.
 /// These claimed evaluations are not checked in this function - hence partial verification.
-</span><span class="kw">pub fn </span>partially_verify_batch&lt;F: Field&gt;(
-    gate_by_instance: Vec&lt;Gate&gt;,
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/gkr/fn.partially_verify_batch.html">partially_verify_batch</a>&lt;F: Field&gt;(
+    gate_by_instance: Vec&lt;<a href="gate.rs.html#14-17">Gate</a>&gt;,
     proof: <span class="kw-2">&amp;</span>GkrBatchProof&lt;F&gt;,
     challenger: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>FieldChallenger&lt;F&gt;,
 ) -&gt; <span class="prelude-ty">Result</span>&lt;GkrArtifact&lt;F&gt;, GkrError&lt;F&gt;&gt; {
-    <span class="kw">let </span>GkrBatchProof {
+    <span class="kw">let </span><a href="types.rs.html#15-22">GkrBatchProof</a> {
         sumcheck_proofs,
         layer_masks_by_instance,
         output_claims_by_instance,
-    } = proof;
+    } = <a href="#23">proof</a>;
 
     <span class="kw">if </span>layer_masks_by_instance.len() != output_claims_by_instance.len() {
-        <span class="kw">return </span><span class="prelude-val">Err</span>(GkrError::MalformedProof);
+        <span class="kw">return </span><span class="prelude-val">Err</span>(<a href="types.rs.html#69">GkrError::MalformedProof</a>);
     }
 
-    <span class="kw">let </span>n_instances = layer_masks_by_instance.len();
-    <span class="kw">let </span>instance_n_layers = |instance: usize| layer_masks_by_instance[instance].len();
-    <span class="kw">let </span>n_layers = (<span class="number">0</span>..n_instances).map(instance_n_layers).max().unwrap();
+    <span class="kw">let </span>n_instances = <a href="#28">layer_masks_by_instance</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+    <span class="kw">let </span>instance_n_layers = |instance: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>| <a href="#28">layer_masks_by_instance</a>[<a href="#37">instance</a>].<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+    <span class="kw">let </span>n_layers = (<span class="number">0</span>..<a href="#36">n_instances</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(<a href="#37">instance_n_layers</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>();
 
     <span class="kw">if </span>n_layers != sumcheck_proofs.len() {
-        <span class="kw">return </span><span class="prelude-val">Err</span>(GkrError::MalformedProof);
+        <span class="kw">return </span><span class="prelude-val">Err</span>(<a href="types.rs.html#69">GkrError::MalformedProof</a>);
     }
 
     <span class="kw">if </span>gate_by_instance.len() != n_instances {
-        <span class="kw">return </span><span class="prelude-val">Err</span>(GkrError::NumInstancesMismatch {
-            given: gate_by_instance.len(),
-            proof: n_instances,
+        <span class="kw">return </span><span class="prelude-val">Err</span>(<a href="types.rs.html#80">GkrError::NumInstancesMismatch</a> {
+            given: <a href="#22">gate_by_instance</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>(),
+            proof: <a href="#36">n_instances</a>,
         });
     }
 
-    <span class="kw">let </span><span class="kw-2">mut </span>ood_point = <span class="macro">vec!</span>[];
-    <span class="kw">let </span><span class="kw-2">mut </span>claims_to_verify_by_instance = <span class="macro">vec!</span>[<span class="prelude-val">None</span>; n_instances];
+    <span class="kw">let </span><span class="kw-2">mut </span>ood_point = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[];
+    <span class="kw">let </span><span class="kw-2">mut </span>claims_to_verify_by_instance = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[<span class="prelude-val">None</span>; <a href="#36">n_instances</a>];
 
     <span class="kw">for </span>(layer, sumcheck_proof) <span class="kw">in </span>sumcheck_proofs.iter().enumerate() {
         <span class="kw">let </span>n_remaining_layers = n_layers - layer;
@@ -297,15 +297,15 @@
         }
     }
 
-    <span class="kw">let </span>claims_to_verify_by_instance = claims_to_verify_by_instance
-        .into_iter()
-        .map(Option::unwrap)
-        .collect();
+    <span class="kw">let </span>claims_to_verify_by_instance = <a href="#52">claims_to_verify_by_instance</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(Option::unwrap)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
-    <span class="prelude-val">Ok</span>(GkrArtifact {
-        ood_point,
-        claims_to_verify_by_instance,
-        n_variables_by_instance: (<span class="number">0</span>..n_instances).map(instance_n_layers).collect(),
+    <span class="prelude-val">Ok</span>(<a href="types.rs.html#25-32">GkrArtifact</a> {
+        <a href="#51">ood_point</a>,
+        <a href="#145">claims_to_verify_by_instance</a>,
+        n_variables_by_instance: (<span class="number">0</span>..<a href="#36">n_instances</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(<a href="#37">instance_n_layers</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
     })
 }
 </code></pre></div></section></main></body></html>

@@ -56,44 +56,44 @@
 <a href="#55" id="55">55</a>
 <a href="#56" id="56">56</a></pre></div><pre class="rust"><code><span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>openvm_stark_backend::p3_field::AbstractField;
-<span class="kw">use </span>rand::{rngs::StdRng, Rng, SeedableRng};
+<span class="kw">use </span>rand::{<a href="https://rust-random.github.io/rand/rand/rngs/std/struct.StdRng.html">rngs::StdRng</a>, <a href="https://rust-random.github.io/rand/rand/rng/trait.Rng.html">Rng</a>, <a href="https://rust-random.github.io/rand/rand_core/trait.SeedableRng.html">SeedableRng</a>};
 
 <span class="doccomment">/// Deterministic seeded RNG, for testing use
-</span><span class="kw">pub fn </span>create_seeded_rng() -&gt; StdRng {
+</span><span class="kw">pub fn </span><a href="../../openvm_stark_sdk/utils/fn.create_seeded_rng.html">create_seeded_rng</a>() -&gt; <a href="https://rust-random.github.io/rand/rand/rngs/std/struct.StdRng.html">StdRng</a> {
     <span class="kw">let </span>seed = [<span class="number">42</span>; <span class="number">32</span>];
-    StdRng::from_seed(seed)
+    <a href="https://rust-random.github.io/rand/rand_core/trait.SeedableRng.html#tymethod.from_seed">StdRng::from_seed</a>(<a href="#7">seed</a>)
 }
 
-<span class="kw">pub fn </span>create_seeded_rng_with_seed(seed: u64) -&gt; StdRng {
-    <span class="kw">let </span>seed_be = seed.to_be_bytes();
+<span class="kw">pub fn </span><a href="../../openvm_stark_sdk/utils/fn.create_seeded_rng_with_seed.html">create_seeded_rng_with_seed</a>(seed: <a href="https://doc.rust-lang.org/nightly/std/primitive.u64.html">u64</a>) -&gt; <a href="https://rust-random.github.io/rand/rand/rngs/std/struct.StdRng.html">StdRng</a> {
+    <span class="kw">let </span>seed_be = <a href="#11">seed</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.to_be_bytes">to_be_bytes</a>();
     <span class="kw">let </span><span class="kw-2">mut </span>seed = [<span class="number">0u8</span>; <span class="number">32</span>];
-    seed[<span class="number">24</span>..<span class="number">32</span>].copy_from_slice(<span class="kw-2">&amp;</span>seed_be);
-    StdRng::from_seed(seed)
+    <a href="#13">seed</a>[<span class="number">24</span>..<span class="number">32</span>].<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.copy_from_slice">copy_from_slice</a>(<span class="kw-2">&amp;</span><a href="#12">seed_be</a>);
+    <a href="https://rust-random.github.io/rand/rand_core/trait.SeedableRng.html#tymethod.from_seed">StdRng::from_seed</a>(<a href="#13">seed</a>)
 }
 
 <span class="comment">// Returns row major matrix
-</span><span class="kw">pub fn </span>generate_random_matrix&lt;F: AbstractField&gt;(
-    <span class="kw-2">mut </span>rng: <span class="kw">impl </span>Rng,
-    height: usize,
-    width: usize,
+</span><span class="kw">pub fn </span><a href="../../openvm_stark_sdk/utils/fn.generate_random_matrix.html">generate_random_matrix</a>&lt;F: AbstractField&gt;(
+    <span class="kw-2">mut </span>rng: <span class="kw">impl </span><a href="https://rust-random.github.io/rand/rand/rng/trait.Rng.html">Rng</a>,
+    height: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    width: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 ) -&gt; Vec&lt;Vec&lt;F&gt;&gt; {
-    (<span class="number">0</span>..height)
-        .map(|<span class="kw">_</span>| {
-            (<span class="number">0</span>..width)
-                .map(|<span class="kw">_</span>| F::from_wrapped_u32(rng.gen()))
+    (<span class="number">0</span>..<a href="#21">height</a>)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw">_</span>| {
+            (<span class="number">0</span>..<a href="#22">width</a>)
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw">_</span>| F::from_wrapped_u32(<a href="#20">rng</a>.<a href="https://rust-random.github.io/rand/rand/rng/trait.Rng.html#tymethod.gen">gen</a>()))
                 .collect_vec()
         })
         .collect_vec()
 }
 
-<span class="kw">pub fn </span>to_field_vec&lt;F: AbstractField&gt;(v: Vec&lt;u32&gt;) -&gt; Vec&lt;F&gt; {
-    v.into_iter().map(F::from_canonical_u32).collect()
+<span class="kw">pub fn </span><a href="../../openvm_stark_sdk/utils/fn.to_field_vec.html">to_field_vec</a>&lt;F: AbstractField&gt;(v: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>&gt;) -&gt; Vec&lt;F&gt; {
+    <a href="#33">v</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(F::from_canonical_u32).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
 }
 
 <span class="doccomment">/// A macro to create a `Vec&lt;Arc&lt;dyn AnyRap&lt;_&gt;&gt;&gt;` from a list of AIRs because Rust cannot infer the
 /// type correctly when using `vec!`.
 </span><span class="attr">#[macro_export]
-</span><span class="macro">macro_rules!</span> any_rap_arc_vec {
+</span><span class="macro">macro_rules!</span> <a href="../../openvm_stark_sdk/macro.any_rap_arc_vec.html">any_rap_arc_vec</a> {
     [$(<span class="macro-nonterminal">$e</span>:expr),<span class="kw-2">*</span>] =&gt; {
         {
             <span class="kw">let </span>chips: Vec&lt;std::sync::Arc&lt;<span class="kw">dyn </span>openvm_stark_backend::rap::AnyRap&lt;<span class="kw">_</span>&gt;&gt;&gt; = <span class="macro">vec!</span>[$(std::sync::Arc::new(<span class="macro-nonterminal">$e</span>)),<span class="kw-2">*</span>];
@@ -103,7 +103,7 @@
 }
 
 <span class="attr">#[macro_export]
-</span><span class="macro">macro_rules!</span> assert_sc_compatible_with_serde {
+</span><span class="macro">macro_rules!</span> <a href="../../openvm_stark_sdk/macro.assert_sc_compatible_with_serde.html">assert_sc_compatible_with_serde</a> {
     (<span class="macro-nonterminal">$sc</span>:ty) =&gt; {
         <span class="macro">static_assertions::assert_impl_all!</span>(openvm_stark_backend::keygen::types::MultiStarkProvingKey&lt;<span class="macro-nonterminal">$sc</span>&gt;: serde::Serialize, serde::de::DeserializeOwned);
         <span class="macro">static_assertions::assert_impl_all!</span>(openvm_stark_backend::keygen::types::MultiStarkVerifyingKey&lt;<span class="macro-nonterminal">$sc</span>&gt;: serde::Serialize, serde::de::DeserializeOwned);

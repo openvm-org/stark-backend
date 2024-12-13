@@ -474,31 +474,31 @@
 <span class="kw">use </span>p3_field::Field;
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrix, Matrix};
 <span class="kw">use </span>p3_util::log2_ceil_usize;
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 <span class="kw">use </span>tracing::instrument;
 
 <span class="kw">use </span><span class="self">self</span>::{
-    symbolic_expression::SymbolicExpression,
-    symbolic_variable::{Entry, SymbolicVariable},
+    <a href="symbolic_expression.rs.html#18-43">symbolic_expression::SymbolicExpression</a>,
+    symbolic_variable::{<a href="symbolic_variable.rs.html#14-29">Entry</a>, <a href="symbolic_variable.rs.html#59-63">SymbolicVariable</a>},
 };
-<span class="kw">use </span><span class="kw">super</span>::PartitionedAirBuilder;
+<span class="kw">use </span><a href="../mod.rs.html#14-19"><span class="kw">super</span>::PartitionedAirBuilder</a>;
 <span class="kw">use crate</span>::{
     interaction::{
-        rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, InteractionType,
-        RapPhaseSeqKind, SymbolicInteraction,
+        <a href="../../interaction/rap.rs.html#13-17">rap::InteractionPhaseAirBuilder</a>, <a href="../../interaction/mod.rs.html#28-33">Interaction</a>, <a href="../../interaction/mod.rs.html#44-79">InteractionBuilder</a>, <a href="../../interaction/mod.rs.html#22-25">InteractionType</a>,
+        <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>, <a href="../../interaction/mod.rs.html#35">SymbolicInteraction</a>,
     },
-    keygen::types::{StarkVerifyingParams, TraceWidth},
-    rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
+    keygen::types::{<a href="../../keygen/types.rs.html#38-47">StarkVerifyingParams</a>, <a href="../../keygen/types.rs.html#18-24">TraceWidth</a>},
+    rap::{<a href="../../rap.rs.html#17-21">BaseAirWithPublicValues</a>, <a href="../../rap.rs.html#60-62">PermutationAirBuilderWithExposedValues</a>, <a href="../../rap.rs.html#47-52">Rap</a>},
 };
 
-<span class="kw">pub mod </span>symbolic_expression;
-<span class="kw">pub mod </span>symbolic_variable;
+<span class="kw">pub mod </span><a href="symbolic_expression.rs.html#3-323">symbolic_expression</a>;
+<span class="kw">pub mod </span><a href="symbolic_variable.rs.html#3-194">symbolic_variable</a>;
 
 <span class="doccomment">/// Symbolic constraints for a single AIR with interactions.
 /// The constraints contain the constraints on the logup partial sums.
 </span><span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = <span class="string">"F: Field"</span>)]
-</span><span class="kw">pub struct </span>SymbolicConstraints&lt;F&gt; {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/air_builders/symbolic/struct.SymbolicConstraints.html">SymbolicConstraints</a>&lt;F&gt; {
     <span class="doccomment">/// All constraints of the RAP, including the constraints on the logup partial sums.
     </span><span class="kw">pub </span>constraints: Vec&lt;SymbolicExpression&lt;F&gt;&gt;,
     <span class="doccomment">/// Only for debug purposes. `constraints` also contains the constraints on the logup partial sums.
@@ -506,59 +506,59 @@
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; SymbolicConstraints&lt;F&gt; {
-    <span class="kw">pub fn </span>max_constraint_degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        Iterator::max(<span class="self">self</span>.constraints.iter().map(|c| c.degree_multiple())).unwrap_or(<span class="number">0</span>)
+    <span class="kw">pub fn </span>max_constraint_degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">Iterator::max</a>(<a class="self" href="#42">self</a>.constraints.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|c| <a href="#43">c</a>.<a href="symbolic_expression.rs.html#47-67">degree_multiple</a>())).<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>)
     }
 
-    <span class="kw">pub fn </span>get_log_quotient_degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+    <span class="kw">pub fn </span>get_log_quotient_degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="comment">// We pad to at least degree 2, since a quotient argument doesn't make sense with smaller degrees.
-        </span><span class="kw">let </span>constraint_degree = <span class="self">self</span>.max_constraint_degree().max(<span class="number">2</span>);
+        </span><span class="kw">let </span>constraint_degree = <a class="self" href="#46">self</a>.<a href="#42-44">max_constraint_degree</a>().<a href="https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html#tymethod.max">max</a>(<span class="number">2</span>);
 
         <span class="comment">// The quotient's actual degree is approximately (max_constraint_degree - 1) * (trace height),
         // where subtracting 1 comes from division by the zerofier.
         // But we pad it to a power of two so that we can efficiently decompose the quotient.
-        </span>log2_ceil_usize(constraint_degree - <span class="number">1</span>)
+        </span>log2_ceil_usize(<a href="#48">constraint_degree</a> - <span class="number">1</span>)
     }
 
     <span class="doccomment">/// Returns the maximum field degree and count degree across all interactions
-    </span><span class="kw">pub fn </span>max_interaction_degrees(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; (usize, usize) {
-        <span class="kw">let </span>max_field_degree = <span class="self">self
+    </span><span class="kw">pub fn </span>max_interaction_degrees(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; (<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) {
+        <span class="kw">let </span>max_field_degree = <span class="self"><a href="#57">self</a>
             </span>.interactions
-            .iter()
-            .map(|interaction| {
-                interaction
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|interaction| {
+                <a href="#61">interaction</a>
                     .fields
-                    .iter()
-                    .map(|field| field.degree_multiple())
-                    .max()
-                    .unwrap_or(<span class="number">0</span>)
+                    .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+                    .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|field| <a href="#65">field</a>.<a href="symbolic_expression.rs.html#47-67">degree_multiple</a>())
+                    .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+                    .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>)
             })
-            .max()
-            .unwrap_or(<span class="number">0</span>);
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>);
 
-        <span class="kw">let </span>max_count_degree = <span class="self">self
+        <span class="kw">let </span>max_count_degree = <span class="self"><a href="#57">self</a>
             </span>.interactions
-            .iter()
-            .map(|interaction| interaction.count.degree_multiple())
-            .max()
-            .unwrap_or(<span class="number">0</span>);
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|interaction| <a href="#75">interaction</a>.count.<a href="symbolic_expression.rs.html#47-67">degree_multiple</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>);
 
-        (max_field_degree, max_count_degree)
+        (<a href="#58">max_field_degree</a>, <a href="#72">max_count_degree</a>)
     }
 }
 
 <span class="attr">#[instrument(name = <span class="string">"evaluate constraints symbolically"</span>, skip_all, level = <span class="string">"debug"</span>)]
-</span><span class="kw">pub fn </span>get_symbolic_builder&lt;F, R&gt;(
+</span><span class="kw">pub fn </span><a href="../../../../openvm_stark_backend/air_builders/symbolic/fn.get_symbolic_builder.html">get_symbolic_builder</a>&lt;F, R&gt;(
     rap: <span class="kw-2">&amp;</span>R,
-    width: <span class="kw-2">&amp;</span>TraceWidth,
-    num_challenges_to_sample: <span class="kw-2">&amp;</span>[usize],
-    num_exposed_values_after_challenge: <span class="kw-2">&amp;</span>[usize],
-    rap_phase_seq_kind: RapPhaseSeqKind,
-    interaction_chunk_size: usize,
+    width: <span class="kw-2">&amp;</span><a href="../../keygen/types.rs.html#18-24">TraceWidth</a>,
+    num_challenges_to_sample: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>],
+    num_exposed_values_after_challenge: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>],
+    rap_phase_seq_kind: <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
+    interaction_chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 ) -&gt; SymbolicRapBuilder&lt;F&gt;
 <span class="kw">where
     </span>F: Field,
-    R: Rap&lt;SymbolicRapBuilder&lt;F&gt;&gt; + BaseAirWithPublicValues&lt;F&gt; + <span class="question-mark">?</span>Sized,
+    R: Rap&lt;SymbolicRapBuilder&lt;F&gt;&gt; + BaseAirWithPublicValues&lt;F&gt; + <span class="question-mark">?</span><a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html">Sized</a>,
 {
     <span class="kw">let </span><span class="kw-2">mut </span>builder = SymbolicRapBuilder::new(
         width,
@@ -574,7 +574,7 @@
 
 <span class="doccomment">/// An `AirBuilder` for evaluating constraints symbolically, and recording them for later use.
 </span><span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>SymbolicRapBuilder&lt;F&gt; {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/air_builders/symbolic/struct.SymbolicRapBuilder.html">SymbolicRapBuilder</a>&lt;F&gt; {
     preprocessed: RowMajorMatrix&lt;SymbolicVariable&lt;F&gt;&gt;,
     partitioned_main: Vec&lt;RowMajorMatrix&lt;SymbolicVariable&lt;F&gt;&gt;&gt;,
     after_challenge: Vec&lt;RowMajorMatrix&lt;SymbolicVariable&lt;F&gt;&gt;&gt;,
@@ -583,9 +583,9 @@
     exposed_values_after_challenge: Vec&lt;Vec&lt;SymbolicVariable&lt;F&gt;&gt;&gt;,
     constraints: Vec&lt;SymbolicExpression&lt;F&gt;&gt;,
     interactions: Vec&lt;SymbolicInteraction&lt;F&gt;&gt;,
-    interaction_chunk_size: usize,
-    rap_phase_seq_kind: RapPhaseSeqKind,
-    trace_width: TraceWidth,
+    interaction_chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    rap_phase_seq_kind: <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
+    trace_width: <a href="../../keygen/types.rs.html#18-24">TraceWidth</a>,
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; SymbolicRapBuilder&lt;F&gt; {
@@ -593,132 +593,132 @@
     /// - `num_exposed_values_after_challenge`: in each challenge phase, how many values to expose to verifier
     </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(
         <span class="comment">// FIXME: width.after_challenge is incorrect. It cannot be determined when the function is called.
-        </span>width: <span class="kw-2">&amp;</span>TraceWidth,
-        num_public_values: usize,
-        num_challenges_to_sample: <span class="kw-2">&amp;</span>[usize],
-        num_exposed_values_after_challenge: <span class="kw-2">&amp;</span>[usize],
-        rap_phase_seq_kind: RapPhaseSeqKind,
-        interaction_chunk_size: usize,
+        </span>width: <span class="kw-2">&amp;</span><a href="../../keygen/types.rs.html#18-24">TraceWidth</a>,
+        num_public_values: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+        num_challenges_to_sample: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>],
+        num_exposed_values_after_challenge: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>],
+        rap_phase_seq_kind: <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
+        interaction_chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     ) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>preprocessed_width = width.preprocessed.unwrap_or(<span class="number">0</span>);
+        <span class="kw">let </span>preprocessed_width = <a href="#129">width</a>.preprocessed.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>);
         <span class="kw">let </span>prep_values = [<span class="number">0</span>, <span class="number">1</span>]
-            .into_iter()
-            .flat_map(|offset| {
-                (<span class="number">0</span>..width.preprocessed.unwrap_or(<span class="number">0</span>))
-                    .map(<span class="kw">move </span>|index| SymbolicVariable::new(Entry::Preprocessed { offset }, index))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|offset| {
+                (<span class="number">0</span>..<a href="#129">width</a>.preprocessed.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>))
+                    .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(<span class="kw">move </span>|index| <a href="symbolic_variable.rs.html#66-72">SymbolicVariable::new</a>(<a href="symbolic_variable.rs.html#15-17">Entry::Preprocessed</a> { <a href="#139">offset</a> }, <a href="#141">index</a>))
             })
-            .collect();
-        <span class="kw">let </span>preprocessed = RowMajorMatrix::new(prep_values, preprocessed_width);
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <span class="kw">let </span>preprocessed = RowMajorMatrix::new(<a href="#137">prep_values</a>, <a href="#136">preprocessed_width</a>);
 
-        <span class="kw">let </span><span class="kw-2">mut </span>partitioned_main: Vec&lt;<span class="kw">_</span>&gt; = width
+        <span class="kw">let </span><span class="kw-2">mut </span>partitioned_main: Vec&lt;<span class="kw">_</span>&gt; = <a href="#129">width</a>
             .cached_mains
-            .iter()
-            .enumerate()
-            .map(|(part_index, <span class="kw-2">&amp;</span>width)| gen_main_trace(part_index, width))
-            .collect();
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.enumerate">enumerate</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(part_index, <span class="kw-2">&amp;</span>width)| <a href="#455-467">gen_main_trace</a>(<a href="#150">part_index</a>, <a href="#150">width</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
         <span class="kw">if </span>width.common_main != <span class="number">0 </span>{
-            partitioned_main.push(gen_main_trace(width.cached_mains.len(), width.common_main));
+            <a href="#146">partitioned_main</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.push">push</a>(<a href="#455-467">gen_main_trace</a>(<a href="#129">width</a>.cached_mains.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>(), <a href="#129">width</a>.common_main));
         }
-        <span class="kw">let </span>after_challenge = <span class="self">Self</span>::new_after_challenge(<span class="kw-2">&amp;</span>width.after_challenge);
+        <span class="kw">let </span>after_challenge = <a href="#217-234"><span class="self">Self</span>::new_after_challenge</a>(<span class="kw-2">&amp;</span><a href="#129">width</a>.after_challenge);
 
-        <span class="kw">let </span>public_values = (<span class="number">0</span>..num_public_values)
-            .map(<span class="kw">move </span>|index| SymbolicVariable::new(Entry::Public, index))
-            .collect();
+        <span class="kw">let </span>public_values = (<span class="number">0</span>..<a href="#130">num_public_values</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(<span class="kw">move </span>|index| <a href="symbolic_variable.rs.html#66-72">SymbolicVariable::new</a>(<a href="symbolic_variable.rs.html#26">Entry::Public</a>, <a href="#158">index</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
-        <span class="kw">let </span>challenges = <span class="self">Self</span>::new_challenges(num_challenges_to_sample);
+        <span class="kw">let </span>challenges = <a href="#236-245"><span class="self">Self</span>::new_challenges</a>(<a href="#131">num_challenges_to_sample</a>);
 
         <span class="kw">let </span>exposed_values_after_challenge =
-            <span class="self">Self</span>::new_exposed_values_after_challenge(num_exposed_values_after_challenge);
+            <a href="#247-258"><span class="self">Self</span>::new_exposed_values_after_challenge</a>(<a href="#132">num_exposed_values_after_challenge</a>);
 
         <span class="self">Self </span>{
-            preprocessed,
-            partitioned_main,
-            after_challenge,
-            public_values,
-            challenges,
-            exposed_values_after_challenge,
-            constraints: <span class="macro">vec!</span>[],
-            interactions: <span class="macro">vec!</span>[],
-            interaction_chunk_size,
-            rap_phase_seq_kind,
-            trace_width: width.clone(),
+            <a href="#144">preprocessed</a>,
+            <a href="#146">partitioned_main</a>,
+            <a href="#155">after_challenge</a>,
+            <a href="#157">public_values</a>,
+            <a href="#161">challenges</a>,
+            <a href="#163">exposed_values_after_challenge</a>,
+            constraints: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+            interactions: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+            <a href="#134">interaction_chunk_size</a>,
+            <a href="#133">rap_phase_seq_kind</a>,
+            trace_width: <a href="#129">width</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>(),
         }
     }
 
     <span class="kw">pub fn </span>constraints(<span class="self">self</span>) -&gt; SymbolicConstraints&lt;F&gt; {
-        SymbolicConstraints {
-            constraints: <span class="self">self</span>.constraints,
-            interactions: <span class="self">self</span>.interactions,
+        <a href="#34-39">SymbolicConstraints</a> {
+            constraints: <a class="self" href="#181">self</a>.constraints,
+            interactions: <a class="self" href="#181">self</a>.interactions,
         }
     }
 
-    <span class="kw">pub fn </span>params(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; StarkVerifyingParams {
-        <span class="kw">let </span>width = <span class="self">self</span>.width();
-        <span class="kw">let </span>num_exposed_values_after_challenge = <span class="self">self</span>.num_exposed_values_after_challenge();
-        <span class="kw">let </span>num_challenges_to_sample = <span class="self">self</span>.num_challenges_to_sample();
-        StarkVerifyingParams {
-            width,
-            num_public_values: <span class="self">self</span>.public_values.len(),
-            num_exposed_values_after_challenge,
-            num_challenges_to_sample,
+    <span class="kw">pub fn </span>params(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="../../keygen/types.rs.html#38-47">StarkVerifyingParams</a> {
+        <span class="kw">let </span>width = <a class="self" href="#188">self</a>.<a href="#200-204">width</a>();
+        <span class="kw">let </span>num_exposed_values_after_challenge = <a class="self" href="#188">self</a>.<a href="#206-211">num_exposed_values_after_challenge</a>();
+        <span class="kw">let </span>num_challenges_to_sample = <a class="self" href="#188">self</a>.<a href="#213-215">num_challenges_to_sample</a>();
+        <a href="../../keygen/types.rs.html#38-47">StarkVerifyingParams</a> {
+            <a href="#189">width</a>,
+            num_public_values: <a class="self" href="#188">self</a>.public_values.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>(),
+            <a href="#190">num_exposed_values_after_challenge</a>,
+            <a href="#191">num_challenges_to_sample</a>,
         }
     }
 
-    <span class="kw">pub fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; TraceWidth {
-        <span class="kw">let </span><span class="kw-2">mut </span>ret = <span class="self">self</span>.trace_width.clone();
-        ret.after_challenge = <span class="self">self</span>.after_challenge.iter().map(|m| m.width()).collect();
-        ret
+    <span class="kw">pub fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="../../keygen/types.rs.html#18-24">TraceWidth</a> {
+        <span class="kw">let </span><span class="kw-2">mut </span>ret = <a class="self" href="#200">self</a>.trace_width.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>();
+        <a href="#201">ret</a>.after_challenge = <a class="self" href="#200">self</a>.after_challenge.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|m| <a href="#202">m</a>.width()).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <a href="#201">ret</a>
     }
 
-    <span class="kw">pub fn </span>num_exposed_values_after_challenge(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;usize&gt; {
-        <span class="self">self</span>.exposed_values_after_challenge
-            .iter()
-            .map(|c| c.len())
-            .collect()
+    <span class="kw">pub fn </span>num_exposed_values_after_challenge(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <a class="self" href="#206">self</a>.exposed_values_after_challenge
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|c| <a href="#209">c</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 
-    <span class="kw">pub fn </span>num_challenges_to_sample(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;usize&gt; {
-        <span class="self">self</span>.challenges.iter().map(|c| c.len()).collect()
+    <span class="kw">pub fn </span>num_challenges_to_sample(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <a class="self" href="#213">self</a>.challenges.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|c| <a href="#214">c</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 
     <span class="kw">fn </span>new_after_challenge(
-        width_after_phase: <span class="kw-2">&amp;</span>[usize],
+        width_after_phase: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>],
     ) -&gt; Vec&lt;RowMajorMatrix&lt;SymbolicVariable&lt;F&gt;&gt;&gt; {
-        width_after_phase
-            .iter()
-            .map(|<span class="kw-2">&amp;</span>width| {
+        <a href="#218">width_after_phase</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw-2">&amp;</span>width| {
                 <span class="kw">let </span>mat_values = [<span class="number">0</span>, <span class="number">1</span>]
-                    .into_iter()
-                    .flat_map(|offset| {
-                        (<span class="number">0</span>..width).map(<span class="kw">move </span>|index| {
-                            SymbolicVariable::new(Entry::Permutation { offset }, index)
+                    .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+                    .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|offset| {
+                        (<span class="number">0</span>..<a href="#222">width</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(<span class="kw">move </span>|index| {
+                            <a href="symbolic_variable.rs.html#66-72">SymbolicVariable::new</a>(<a href="symbolic_variable.rs.html#23-25">Entry::Permutation</a> { <a href="#225">offset</a> }, <a href="#226">index</a>)
                         })
                     })
                     .collect_vec();
-                RowMajorMatrix::new(mat_values, width)
+                RowMajorMatrix::new(<a href="#223">mat_values</a>, <a href="#222">width</a>)
             })
             .collect_vec()
     }
 
-    <span class="kw">fn </span>new_challenges(num_challenges_to_sample: <span class="kw-2">&amp;</span>[usize]) -&gt; Vec&lt;Vec&lt;SymbolicVariable&lt;F&gt;&gt;&gt; {
-        num_challenges_to_sample
-            .iter()
-            .map(|<span class="kw-2">&amp;</span>num_challenges| {
-                (<span class="number">0</span>..num_challenges)
-                    .map(|index| SymbolicVariable::new(Entry::Challenge, index))
+    <span class="kw">fn </span>new_challenges(num_challenges_to_sample: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>]) -&gt; Vec&lt;Vec&lt;SymbolicVariable&lt;F&gt;&gt;&gt; {
+        <a href="#236">num_challenges_to_sample</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw-2">&amp;</span>num_challenges| {
+                (<span class="number">0</span>..<a href="#239">num_challenges</a>)
+                    .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|index| <a href="symbolic_variable.rs.html#66-72">SymbolicVariable::new</a>(<a href="symbolic_variable.rs.html#27">Entry::Challenge</a>, <a href="#241">index</a>))
                     .collect_vec()
             })
             .collect_vec()
     }
 
     <span class="kw">fn </span>new_exposed_values_after_challenge(
-        num_exposed_values_after_challenge: <span class="kw-2">&amp;</span>[usize],
+        num_exposed_values_after_challenge: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>],
     ) -&gt; Vec&lt;Vec&lt;SymbolicVariable&lt;F&gt;&gt;&gt; {
-        num_exposed_values_after_challenge
-            .iter()
-            .map(|<span class="kw-2">&amp;</span>num| {
-                (<span class="number">0</span>..num)
-                    .map(|index| SymbolicVariable::new(Entry::Exposed, index))
+        <a href="#248">num_exposed_values_after_challenge</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw-2">&amp;</span>num| {
+                (<span class="number">0</span>..<a href="#252">num</a>)
+                    .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|index| <a href="symbolic_variable.rs.html#66-72">SymbolicVariable::new</a>(<a href="symbolic_variable.rs.html#28">Entry::Exposed</a>, <a href="#254">index</a>))
                     .collect_vec()
             })
             .collect_vec()
@@ -734,36 +734,36 @@
     <span class="doccomment">/// It is difficult to horizontally concatenate matrices when the main trace is partitioned, so we disable this method in that case.
     </span><span class="kw">fn </span>main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::M {
         <span class="kw">if </span><span class="self">self</span>.partitioned_main.len() == <span class="number">1 </span>{
-            <span class="self">self</span>.partitioned_main[<span class="number">0</span>].clone()
+            <a class="self" href="#268">self</a>.partitioned_main[<span class="number">0</span>].<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()
         } <span class="kw">else </span>{
-            <span class="macro">panic!</span>(<span class="string">"Main trace is either empty or partitioned. This function should not be used."</span>)
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"Main trace is either empty or partitioned. This function should not be used."</span>)
         }
     }
 
     <span class="kw">fn </span>is_first_row(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Expr {
-        SymbolicExpression::IsFirstRow
+        <a href="symbolic_expression.rs.html#20">SymbolicExpression::IsFirstRow</a>
     }
 
     <span class="kw">fn </span>is_last_row(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Expr {
-        SymbolicExpression::IsLastRow
+        <a href="symbolic_expression.rs.html#21">SymbolicExpression::IsLastRow</a>
     }
 
-    <span class="kw">fn </span>is_transition_window(<span class="kw-2">&amp;</span><span class="self">self</span>, size: usize) -&gt; <span class="self">Self</span>::Expr {
+    <span class="kw">fn </span>is_transition_window(<span class="kw-2">&amp;</span><span class="self">self</span>, size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self</span>::Expr {
         <span class="kw">if </span>size == <span class="number">2 </span>{
-            SymbolicExpression::IsTransition
+            <a href="symbolic_expression.rs.html#22">SymbolicExpression::IsTransition</a>
         } <span class="kw">else </span>{
-            <span class="macro">panic!</span>(<span class="string">"uni-stark only supports a window size of 2"</span>)
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"uni-stark only supports a window size of 2"</span>)
         }
     }
 
     <span class="kw">fn </span>assert_zero&lt;I: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(<span class="kw-2">&amp;mut </span><span class="self">self</span>, x: I) {
-        <span class="self">self</span>.constraints.push(x.into());
+        <a class="self" href="#292">self</a>.constraints.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.push">push</a>(<a href="#292">x</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>());
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; PairBuilder <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
     <span class="kw">fn </span>preprocessed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::M {
-        <span class="self">self</span>.preprocessed.clone()
+        <a class="self" href="#298">self</a>.preprocessed.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()
     }
 }
 
@@ -776,7 +776,7 @@
     <span class="kw">where
         </span>I: Into&lt;<span class="self">Self</span>::ExprEF&gt;,
     {
-        <span class="self">self</span>.constraints.push(x.into());
+        <a class="self" href="#308">self</a>.constraints.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.push">push</a>(<a href="#308">x</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>());
     }
 }
 
@@ -784,7 +784,7 @@
     <span class="kw">type </span>PublicVar = SymbolicVariable&lt;F&gt;;
 
     <span class="kw">fn </span>public_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::PublicVar] {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.public_values
+        <span class="kw-2">&amp;</span><a class="self" href="#319">self</a>.public_values
     }
 }
 
@@ -793,98 +793,98 @@
     <span class="kw">type </span>RandomVar = SymbolicVariable&lt;F&gt;;
 
     <span class="kw">fn </span>permutation(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::MP {
-        <span class="self">self</span>.after_challenge
-            .first()
-            .expect(<span class="string">"Challenge phase not supported"</span>)
-            .clone()
+        <a class="self" href="#328">self</a>.after_challenge
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
+            .<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()
     }
 
     <span class="kw">fn </span>permutation_randomness(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::RandomVar] {
-        <span class="self">self</span>.challenges
-            .first()
-            .map(|c| c.as_slice())
-            .expect(<span class="string">"Challenge phase not supported"</span>)
+        <a class="self" href="#335">self</a>.challenges
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|c| <a href="#338">c</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.as_slice">as_slice</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; PermutationAirBuilderWithExposedValues <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="../../rap.rs.html#60-62">PermutationAirBuilderWithExposedValues</a> <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
     <span class="kw">fn </span>permutation_exposed_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::VarEF] {
-        <span class="self">self</span>.exposed_values_after_challenge
-            .first()
-            .map(|c| c.as_slice())
-            .expect(<span class="string">"Challenge phase not supported"</span>)
+        <a class="self" href="#344">self</a>.exposed_values_after_challenge
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|c| <a href="#347">c</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.as_slice">as_slice</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; InteractionBuilder <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="../../interaction/mod.rs.html#44-79">InteractionBuilder</a> <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
     <span class="kw">fn </span>push_interaction&lt;E: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        bus_index: usize,
+        bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
         fields: <span class="kw">impl </span>IntoIterator&lt;Item = E&gt;,
         count: <span class="kw">impl </span>Into&lt;<span class="self">Self</span>::Expr&gt;,
-        interaction_type: InteractionType,
+        interaction_type: <a href="../../interaction/mod.rs.html#22-25">InteractionType</a>,
     ) {
-        <span class="kw">let </span>fields = fields.into_iter().map(|f| f.into()).collect();
-        <span class="kw">let </span>count = count.into();
-        <span class="self">self</span>.interactions.push(Interaction {
-            bus_index,
-            fields,
-            count,
-            interaction_type,
+        <span class="kw">let </span>fields = <a href="#356">fields</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|f| <a href="#360">f</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>()).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <span class="kw">let </span>count = <a href="#357">count</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <a class="self" href="#354">self</a>.interactions.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.push">push</a>(<a href="../../interaction/mod.rs.html#28-33">Interaction</a> {
+            <a href="#355">bus_index</a>,
+            <a href="#360">fields</a>,
+            <a href="#361">count</a>,
+            <a href="#358">interaction_type</a>,
         });
     }
 
-    <span class="kw">fn </span>num_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.interactions.len()
+    <span class="kw">fn </span>num_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#370">self</a>.interactions.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()
     }
 
     <span class="kw">fn </span>all_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[Interaction&lt;<span class="self">Self</span>::Expr&gt;] {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.interactions
+        <span class="kw-2">&amp;</span><a class="self" href="#374">self</a>.interactions
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; InteractionPhaseAirBuilder <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="../../interaction/rap.rs.html#13-17">InteractionPhaseAirBuilder</a> <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
     <span class="kw">fn </span>finalize_interactions(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="kw">let </span>num_interactions = <span class="self">self</span>.num_interactions();
+        <span class="kw">let </span>num_interactions = <a class="self" href="#380">self</a>.<a href="../../interaction/mod.rs.html#75">num_interactions</a>();
         <span class="kw">if </span>num_interactions != <span class="number">0 </span>{
-            <span class="macro">assert!</span>(
+            <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(
                 <span class="self">self</span>.after_challenge.is_empty(),
                 <span class="string">"after_challenge width should be auto-populated by the InteractionBuilder"
             </span>);
-            <span class="macro">assert!</span>(<span class="self">self</span>.challenges.is_empty());
-            <span class="macro">assert!</span>(<span class="self">self</span>.exposed_values_after_challenge.is_empty());
+            <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(<span class="self">self</span>.challenges.is_empty());
+            <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(<span class="self">self</span>.exposed_values_after_challenge.is_empty());
 
-            <span class="kw">let </span>perm_width = num_interactions.div_ceil(<span class="self">self</span>.interaction_chunk_size) + <span class="number">1</span>;
-            <span class="self">self</span>.after_challenge = <span class="self">Self</span>::new_after_challenge(<span class="kw-2">&amp;</span>[perm_width]);
+            <span class="kw">let </span>perm_width = <a href="#381">num_interactions</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.div_ceil">div_ceil</a>(<a class="self" href="#380">self</a>.interaction_chunk_size) + <span class="number">1</span>;
+            <a class="self" href="#380">self</a>.after_challenge = <a href="#217-234"><span class="self">Self</span>::new_after_challenge</a>(<span class="kw-2">&amp;</span>[<a href="#390">perm_width</a>]);
 
-            <span class="kw">let </span>phases_shapes = <span class="self">self</span>.rap_phase_seq_kind.shape();
-            <span class="kw">let </span>phase_shape = phases_shapes.first().unwrap();
+            <span class="kw">let </span>phases_shapes = <a class="self" href="#380">self</a>.rap_phase_seq_kind.<a href="../../interaction/mod.rs.html#120-129">shape</a>();
+            <span class="kw">let </span>phase_shape = <a href="#393">phases_shapes</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>();
 
-            <span class="self">self</span>.challenges = <span class="self">Self</span>::new_challenges(<span class="kw-2">&amp;</span>[phase_shape.num_challenges]);
-            <span class="self">self</span>.exposed_values_after_challenge =
-                <span class="self">Self</span>::new_exposed_values_after_challenge(<span class="kw-2">&amp;</span>[phase_shape.num_exposed_values]);
+            <a class="self" href="#380">self</a>.challenges = <a href="#236-245"><span class="self">Self</span>::new_challenges</a>(<span class="kw-2">&amp;</span>[<a href="#394">phase_shape</a>.num_challenges]);
+            <a class="self" href="#380">self</a>.exposed_values_after_challenge =
+                <a href="#247-258"><span class="self">Self</span>::new_exposed_values_after_challenge</a>(<span class="kw-2">&amp;</span>[<a href="#394">phase_shape</a>.num_exposed_values]);
         }
     }
 
-    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.interaction_chunk_size
+    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#402">self</a>.interaction_chunk_size
     }
 
-    <span class="kw">fn </span>rap_phase_seq_kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RapPhaseSeqKind {
-        <span class="self">self</span>.rap_phase_seq_kind
+    <span class="kw">fn </span>rap_phase_seq_kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a> {
+        <a class="self" href="#406">self</a>.rap_phase_seq_kind
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; PartitionedAirBuilder <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="../mod.rs.html#14-19">PartitionedAirBuilder</a> <span class="kw">for </span>SymbolicRapBuilder&lt;F&gt; {
     <span class="kw">fn </span>cached_mains(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::M] {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.partitioned_main[..<span class="self">self</span>.trace_width.cached_mains.len()]
+        <span class="kw-2">&amp;</span><a class="self" href="#412">self</a>.partitioned_main[..<a class="self" href="#412">self</a>.trace_width.cached_mains.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()]
     }
     <span class="kw">fn </span>common_main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::M {
-        <span class="macro">assert_ne!</span>(
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_ne.html">assert_ne!</a>(
             <span class="self">self</span>.trace_width.common_main, <span class="number">0</span>,
             <span class="string">"AIR doesn't have a common main trace"
         </span>);
-        <span class="kw-2">&amp;</span><span class="self">self</span>.partitioned_main[<span class="self">self</span>.trace_width.cached_mains.len()]
+        <span class="kw-2">&amp;</span><a class="self" href="#415">self</a>.partitioned_main[<a class="self" href="#415">self</a>.trace_width.cached_mains.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()]
     }
 }
 
@@ -892,44 +892,44 @@
 </span><span class="kw">struct </span>LocalOnlyChecker;
 
 <span class="attr">#[allow(dead_code)]
-</span><span class="kw">impl </span>LocalOnlyChecker {
-    <span class="kw">fn </span>check_var&lt;F: Field&gt;(var: SymbolicVariable&lt;F&gt;) -&gt; bool {
-        <span class="kw">match </span>var.entry {
-            Entry::Preprocessed { offset } =&gt; offset == <span class="number">0</span>,
-            Entry::Main { offset, .. } =&gt; offset == <span class="number">0</span>,
-            Entry::Permutation { offset } =&gt; offset == <span class="number">0</span>,
-            Entry::Public =&gt; <span class="bool-val">true</span>,
-            Entry::Challenge =&gt; <span class="bool-val">true</span>,
-            Entry::Exposed =&gt; <span class="bool-val">true</span>,
+</span><span class="kw">impl </span><a href="#425">LocalOnlyChecker</a> {
+    <span class="kw">fn </span>check_var&lt;F: Field&gt;(var: SymbolicVariable&lt;F&gt;) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        <span class="kw">match </span><a href="#429">var</a>.entry {
+            <a href="symbolic_variable.rs.html#15-17">Entry::Preprocessed</a> { offset } =&gt; <a href="#431">offset</a> == <span class="number">0</span>,
+            <a href="symbolic_variable.rs.html#19-22">Entry::Main</a> { offset, .. } =&gt; <a href="#432">offset</a> == <span class="number">0</span>,
+            <a href="symbolic_variable.rs.html#23-25">Entry::Permutation</a> { offset } =&gt; <a href="#433">offset</a> == <span class="number">0</span>,
+            <a href="symbolic_variable.rs.html#26">Entry::Public</a> =&gt; <span class="bool-val">true</span>,
+            <a href="symbolic_variable.rs.html#27">Entry::Challenge</a> =&gt; <span class="bool-val">true</span>,
+            <a href="symbolic_variable.rs.html#28">Entry::Exposed</a> =&gt; <span class="bool-val">true</span>,
         }
     }
 
-    <span class="kw">fn </span>check_expr&lt;F: Field&gt;(expr: <span class="kw-2">&amp;</span>SymbolicExpression&lt;F&gt;) -&gt; bool {
-        <span class="kw">match </span>expr {
-            SymbolicExpression::Variable(var) =&gt; <span class="self">Self</span>::check_var(<span class="kw-2">*</span>var),
-            SymbolicExpression::IsFirstRow =&gt; <span class="bool-val">false</span>,
-            SymbolicExpression::IsLastRow =&gt; <span class="bool-val">false</span>,
-            SymbolicExpression::IsTransition =&gt; <span class="bool-val">false</span>,
-            SymbolicExpression::Constant(<span class="kw">_</span>) =&gt; <span class="bool-val">true</span>,
-            SymbolicExpression::Add { x, y, .. } =&gt; <span class="self">Self</span>::check_expr(x) &amp;&amp; <span class="self">Self</span>::check_expr(y),
-            SymbolicExpression::Sub { x, y, .. } =&gt; <span class="self">Self</span>::check_expr(x) &amp;&amp; <span class="self">Self</span>::check_expr(y),
-            SymbolicExpression::Neg { x, .. } =&gt; <span class="self">Self</span>::check_expr(x),
-            SymbolicExpression::Mul { x, y, .. } =&gt; <span class="self">Self</span>::check_expr(x) &amp;&amp; <span class="self">Self</span>::check_expr(y),
+    <span class="kw">fn </span>check_expr&lt;F: Field&gt;(expr: <span class="kw-2">&amp;</span>SymbolicExpression&lt;F&gt;) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        <span class="kw">match </span><a href="#440">expr</a> {
+            <a href="symbolic_expression.rs.html#19">SymbolicExpression::Variable</a>(var) =&gt; <a href="#429-438"><span class="self">Self</span>::check_var</a>(<span class="kw-2">*</span><a href="#442">var</a>),
+            <a href="symbolic_expression.rs.html#20">SymbolicExpression::IsFirstRow</a> =&gt; <span class="bool-val">false</span>,
+            <a href="symbolic_expression.rs.html#21">SymbolicExpression::IsLastRow</a> =&gt; <span class="bool-val">false</span>,
+            <a href="symbolic_expression.rs.html#22">SymbolicExpression::IsTransition</a> =&gt; <span class="bool-val">false</span>,
+            <a href="symbolic_expression.rs.html#23">SymbolicExpression::Constant</a>(<span class="kw">_</span>) =&gt; <span class="bool-val">true</span>,
+            <a href="symbolic_expression.rs.html#24-28">SymbolicExpression::Add</a> { x, y, .. } =&gt; <a href="#440-452"><span class="self">Self</span>::check_expr</a>(<a href="#447">x</a>) &amp;&amp; <a href="#440-452"><span class="self">Self</span>::check_expr</a>(<a href="#447">y</a>),
+            <a href="symbolic_expression.rs.html#29-33">SymbolicExpression::Sub</a> { x, y, .. } =&gt; <a href="#440-452"><span class="self">Self</span>::check_expr</a>(<a href="#448">x</a>) &amp;&amp; <a href="#440-452"><span class="self">Self</span>::check_expr</a>(<a href="#448">y</a>),
+            <a href="symbolic_expression.rs.html#34-37">SymbolicExpression::Neg</a> { x, .. } =&gt; <a href="#440-452"><span class="self">Self</span>::check_expr</a>(<a href="#449">x</a>),
+            <a href="symbolic_expression.rs.html#38-42">SymbolicExpression::Mul</a> { x, y, .. } =&gt; <a href="#440-452"><span class="self">Self</span>::check_expr</a>(<a href="#450">x</a>) &amp;&amp; <a href="#440-452"><span class="self">Self</span>::check_expr</a>(<a href="#450">y</a>),
         }
     }
 }
 
 <span class="kw">fn </span>gen_main_trace&lt;F: Field&gt;(
-    part_index: usize,
-    width: usize,
+    part_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    width: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 ) -&gt; RowMajorMatrix&lt;SymbolicVariable&lt;F&gt;&gt; {
     <span class="kw">let </span>mat_values = [<span class="number">0</span>, <span class="number">1</span>]
-        .into_iter()
-        .flat_map(|offset| {
-            (<span class="number">0</span>..width)
-                .map(<span class="kw">move </span>|index| SymbolicVariable::new(Entry::Main { part_index, offset }, index))
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|offset| {
+            (<span class="number">0</span>..<a href="#457">width</a>)
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(<span class="kw">move </span>|index| <a href="symbolic_variable.rs.html#66-72">SymbolicVariable::new</a>(<a href="symbolic_variable.rs.html#19-22">Entry::Main</a> { <a href="#456">part_index</a>, <a href="#461">offset</a> }, <a href="#463">index</a>))
         })
         .collect_vec();
-    RowMajorMatrix::new(mat_values, width)
+    RowMajorMatrix::new(<a href="#459">mat_values</a>, <a href="#457">width</a>)
 }
 </code></pre></div></section></main></body></html>

@@ -324,21 +324,21 @@
 <a href="#323" id="323">323</a></pre></div><pre class="rust"><code><span class="comment">// Copied from uni-stark/src/symbolic_expression.rs to use Arc instead of Rc.
 
 </span><span class="kw">use </span>core::{
-    fmt::Debug,
-    iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    <a href="https://doc.rust-lang.org/nightly/core/fmt/macros/derive.Debug.html">fmt::Debug</a>,
+    iter::{<a href="https://doc.rust-lang.org/nightly/core/iter/traits/accum/trait.Product.html">Product</a>, <a href="https://doc.rust-lang.org/nightly/core/iter/traits/accum/trait.Sum.html">Sum</a>},
+    ops::{<a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Add.html">Add</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.AddAssign.html">AddAssign</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Mul.html">Mul</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.MulAssign.html">MulAssign</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Neg.html">Neg</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Sub.html">Sub</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.SubAssign.html">SubAssign</a>},
 };
-<span class="kw">use </span>std::sync::Arc;
+<span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>p3_field::{AbstractField, Field};
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 
-<span class="kw">use </span><span class="kw">super</span>::symbolic_variable::SymbolicVariable;
+<span class="kw">use </span><a href="symbolic_variable.rs.html#59-63"><span class="kw">super</span>::symbolic_variable::SymbolicVariable</a>;
 
 <span class="doccomment">/// An expression over `SymbolicVariable`s.
 </span><span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = <span class="string">"F: Field"</span>)]
-</span><span class="kw">pub enum </span>SymbolicExpression&lt;F&gt; {
+</span><span class="kw">pub enum </span><a href="../../../../openvm_stark_backend/air_builders/symbolic/symbolic_expression/enum.SymbolicExpression.html">SymbolicExpression</a>&lt;F&gt; {
     Variable(SymbolicVariable&lt;F&gt;),
     IsFirstRow,
     IsLastRow,
@@ -347,161 +347,161 @@
     Add {
         x: Arc&lt;<span class="self">Self</span>&gt;,
         y: Arc&lt;<span class="self">Self</span>&gt;,
-        degree_multiple: usize,
+        degree_multiple: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     },
     Sub {
         x: Arc&lt;<span class="self">Self</span>&gt;,
         y: Arc&lt;<span class="self">Self</span>&gt;,
-        degree_multiple: usize,
+        degree_multiple: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     },
     Neg {
         x: Arc&lt;<span class="self">Self</span>&gt;,
-        degree_multiple: usize,
+        degree_multiple: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     },
     Mul {
         x: Arc&lt;<span class="self">Self</span>&gt;,
         y: Arc&lt;<span class="self">Self</span>&gt;,
-        degree_multiple: usize,
+        degree_multiple: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     },
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; SymbolicExpression&lt;F&gt; {
     <span class="doccomment">/// Returns the multiple of `n` (the trace length) in this expression's degree.
-    </span><span class="kw">pub const fn </span>degree_multiple(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="kw">match </span><span class="self">self </span>{
-            SymbolicExpression::Variable(v) =&gt; v.degree_multiple(),
-            SymbolicExpression::IsFirstRow =&gt; <span class="number">1</span>,
-            SymbolicExpression::IsLastRow =&gt; <span class="number">1</span>,
-            SymbolicExpression::IsTransition =&gt; <span class="number">0</span>,
-            SymbolicExpression::Constant(<span class="kw">_</span>) =&gt; <span class="number">0</span>,
-            SymbolicExpression::Add {
+    </span><span class="kw">pub const fn </span>degree_multiple(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <span class="kw">match </span><span class="self"><a href="#47">self</a> </span>{
+            <a href="#19">SymbolicExpression::Variable</a>(v) =&gt; <a href="#49">v</a>.<a href="symbolic_variable.rs.html#74-79">degree_multiple</a>(),
+            <a href="#20">SymbolicExpression::IsFirstRow</a> =&gt; <span class="number">1</span>,
+            <a href="#21">SymbolicExpression::IsLastRow</a> =&gt; <span class="number">1</span>,
+            <a href="#22">SymbolicExpression::IsTransition</a> =&gt; <span class="number">0</span>,
+            <a href="#23">SymbolicExpression::Constant</a>(<span class="kw">_</span>) =&gt; <span class="number">0</span>,
+            <a href="#24-28">SymbolicExpression::Add</a> {
                 degree_multiple, ..
-            } =&gt; <span class="kw-2">*</span>degree_multiple,
-            SymbolicExpression::Sub {
+            } =&gt; <span class="kw-2">*</span><a href="#55">degree_multiple</a>,
+            <a href="#29-33">SymbolicExpression::Sub</a> {
                 degree_multiple, ..
-            } =&gt; <span class="kw-2">*</span>degree_multiple,
-            SymbolicExpression::Neg {
+            } =&gt; <span class="kw-2">*</span><a href="#58">degree_multiple</a>,
+            <a href="#34-37">SymbolicExpression::Neg</a> {
                 degree_multiple, ..
-            } =&gt; <span class="kw-2">*</span>degree_multiple,
-            SymbolicExpression::Mul {
+            } =&gt; <span class="kw-2">*</span><a href="#61">degree_multiple</a>,
+            <a href="#38-42">SymbolicExpression::Mul</a> {
                 degree_multiple, ..
-            } =&gt; <span class="kw-2">*</span>degree_multiple,
+            } =&gt; <span class="kw-2">*</span><a href="#64">degree_multiple</a>,
         }
     }
 
-    <span class="kw">pub fn </span>rotate(<span class="kw-2">&amp;</span><span class="self">self</span>, offset: usize) -&gt; <span class="self">Self </span>{
-        <span class="kw">match </span><span class="self">self </span>{
-            SymbolicExpression::Variable(v) =&gt; v.rotate(offset).into(),
-            SymbolicExpression::IsFirstRow =&gt; <span class="macro">unreachable!</span>(<span class="string">"IsFirstRow should not be rotated"</span>),
-            SymbolicExpression::IsLastRow =&gt; <span class="macro">unreachable!</span>(<span class="string">"IsLastRow should not be rotated"</span>),
-            SymbolicExpression::IsTransition =&gt; <span class="macro">unreachable!</span>(<span class="string">"IsTransition should not be rotated"</span>),
-            SymbolicExpression::Constant(c) =&gt; <span class="self">Self</span>::Constant(<span class="kw-2">*</span>c),
-            SymbolicExpression::Add {
+    <span class="kw">pub fn </span>rotate(<span class="kw-2">&amp;</span><span class="self">self</span>, offset: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
+        <span class="kw">match </span><span class="self"><a href="#69">self</a> </span>{
+            <a href="#19">SymbolicExpression::Variable</a>(v) =&gt; <a href="#71">v</a>.<a href="symbolic_variable.rs.html#81-87">rotate</a>(<a href="#69">offset</a>).<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="#20">SymbolicExpression::IsFirstRow</a> =&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.unreachable.html">unreachable!</a>(<span class="string">"IsFirstRow should not be rotated"</span>),
+            <a href="#21">SymbolicExpression::IsLastRow</a> =&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.unreachable.html">unreachable!</a>(<span class="string">"IsLastRow should not be rotated"</span>),
+            <a href="#22">SymbolicExpression::IsTransition</a> =&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.unreachable.html">unreachable!</a>(<span class="string">"IsTransition should not be rotated"</span>),
+            <a href="#23">SymbolicExpression::Constant</a>(c) =&gt; <a href="#23"><span class="self">Self</span>::Constant</a>(<span class="kw-2">*</span><a href="#75">c</a>),
+            <a href="#24-28">SymbolicExpression::Add</a> {
                 x,
                 y,
                 degree_multiple,
             } =&gt; <span class="self">Self</span>::Add {
-                x: Arc::new(x.rotate(offset)),
-                y: Arc::new(y.rotate(offset)),
-                degree_multiple: <span class="kw-2">*</span>degree_multiple,
+                x: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#77">x</a>.<a href="#69-108">rotate</a>(<a href="#69">offset</a>)),
+                y: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#78">y</a>.<a href="#69-108">rotate</a>(<a href="#69">offset</a>)),
+                degree_multiple: <span class="kw-2">*</span><a href="#79">degree_multiple</a>,
             },
-            SymbolicExpression::Sub {
+            <a href="#29-33">SymbolicExpression::Sub</a> {
                 x,
                 y,
                 degree_multiple,
             } =&gt; <span class="self">Self</span>::Sub {
-                x: Arc::new(x.rotate(offset)),
-                y: Arc::new(y.rotate(offset)),
-                degree_multiple: <span class="kw-2">*</span>degree_multiple,
+                x: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#86">x</a>.<a href="#69-108">rotate</a>(<a href="#69">offset</a>)),
+                y: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#87">y</a>.<a href="#69-108">rotate</a>(<a href="#69">offset</a>)),
+                degree_multiple: <span class="kw-2">*</span><a href="#88">degree_multiple</a>,
             },
-            SymbolicExpression::Neg { x, degree_multiple } =&gt; <span class="self">Self</span>::Neg {
-                x: Arc::new(x.rotate(offset)),
-                degree_multiple: <span class="kw-2">*</span>degree_multiple,
+            <a href="#34-37">SymbolicExpression::Neg</a> { x, degree_multiple } =&gt; <span class="self">Self</span>::Neg {
+                x: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#94">x</a>.<a href="#69-108">rotate</a>(<a href="#69">offset</a>)),
+                degree_multiple: <span class="kw-2">*</span><a href="#94">degree_multiple</a>,
             },
-            SymbolicExpression::Mul {
+            <a href="#38-42">SymbolicExpression::Mul</a> {
                 x,
                 y,
                 degree_multiple,
             } =&gt; <span class="self">Self</span>::Mul {
-                x: Arc::new(x.rotate(offset)),
-                y: Arc::new(y.rotate(offset)),
-                degree_multiple: <span class="kw-2">*</span>degree_multiple,
+                x: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#99">x</a>.<a href="#69-108">rotate</a>(<a href="#69">offset</a>)),
+                y: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#100">y</a>.<a href="#69-108">rotate</a>(<a href="#69">offset</a>)),
+                degree_multiple: <span class="kw-2">*</span><a href="#101">degree_multiple</a>,
             },
         }
     }
 
     <span class="kw">pub fn </span>next(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
-        <span class="self">self</span>.rotate(<span class="number">1</span>)
+        <a class="self" href="#110">self</a>.<a href="#69-108">rotate</a>(<span class="number">1</span>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Default <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/default/trait.Default.html">Default</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::ZERO)
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::ZERO)
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; From&lt;F&gt; <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>from(value: F) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(value)
+        <a href="#23"><span class="self">Self</span>::Constant</a>(<a href="#122">value</a>)
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; AbstractField <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">type </span>F = F;
 
-    <span class="kw">const </span>ZERO: <span class="self">Self </span>= <span class="self">Self</span>::Constant(F::ZERO);
-    <span class="kw">const </span>ONE: <span class="self">Self </span>= <span class="self">Self</span>::Constant(F::ONE);
-    <span class="kw">const </span>TWO: <span class="self">Self </span>= <span class="self">Self</span>::Constant(F::TWO);
-    <span class="kw">const </span>NEG_ONE: <span class="self">Self </span>= <span class="self">Self</span>::Constant(F::NEG_ONE);
+    <span class="kw">const </span>ZERO: <span class="self">Self </span>= <a href="#23"><span class="self">Self</span>::Constant</a>(F::ZERO);
+    <span class="kw">const </span>ONE: <span class="self">Self </span>= <a href="#23"><span class="self">Self</span>::Constant</a>(F::ONE);
+    <span class="kw">const </span>TWO: <span class="self">Self </span>= <a href="#23"><span class="self">Self</span>::Constant</a>(F::TWO);
+    <span class="kw">const </span>NEG_ONE: <span class="self">Self </span>= <a href="#23"><span class="self">Self</span>::Constant</a>(F::NEG_ONE);
 
     <span class="attr">#[inline]
     </span><span class="kw">fn </span>from_f(f: <span class="self">Self</span>::F) -&gt; <span class="self">Self </span>{
-        f.into()
+        <a href="#136">f</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>()
     }
 
-    <span class="kw">fn </span>from_bool(b: bool) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::from_bool(b))
+    <span class="kw">fn </span>from_bool(b: <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>) -&gt; <span class="self">Self </span>{
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::from_bool(<a href="#140">b</a>))
     }
 
-    <span class="kw">fn </span>from_canonical_u8(n: u8) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::from_canonical_u8(n))
+    <span class="kw">fn </span>from_canonical_u8(n: <a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>) -&gt; <span class="self">Self </span>{
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::from_canonical_u8(<a href="#144">n</a>))
     }
 
-    <span class="kw">fn </span>from_canonical_u16(n: u16) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::from_canonical_u16(n))
+    <span class="kw">fn </span>from_canonical_u16(n: <a href="https://doc.rust-lang.org/nightly/std/primitive.u16.html">u16</a>) -&gt; <span class="self">Self </span>{
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::from_canonical_u16(<a href="#148">n</a>))
     }
 
-    <span class="kw">fn </span>from_canonical_u32(n: u32) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::from_canonical_u32(n))
+    <span class="kw">fn </span>from_canonical_u32(n: <a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>) -&gt; <span class="self">Self </span>{
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::from_canonical_u32(<a href="#152">n</a>))
     }
 
-    <span class="kw">fn </span>from_canonical_u64(n: u64) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::from_canonical_u64(n))
+    <span class="kw">fn </span>from_canonical_u64(n: <a href="https://doc.rust-lang.org/nightly/std/primitive.u64.html">u64</a>) -&gt; <span class="self">Self </span>{
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::from_canonical_u64(<a href="#156">n</a>))
     }
 
-    <span class="kw">fn </span>from_canonical_usize(n: usize) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::from_canonical_usize(n))
+    <span class="kw">fn </span>from_canonical_usize(n: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::from_canonical_usize(<a href="#160">n</a>))
     }
 
-    <span class="kw">fn </span>from_wrapped_u32(n: u32) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::from_wrapped_u32(n))
+    <span class="kw">fn </span>from_wrapped_u32(n: <a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>) -&gt; <span class="self">Self </span>{
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::from_wrapped_u32(<a href="#164">n</a>))
     }
 
-    <span class="kw">fn </span>from_wrapped_u64(n: u64) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::Constant(F::from_wrapped_u64(n))
+    <span class="kw">fn </span>from_wrapped_u64(n: <a href="https://doc.rust-lang.org/nightly/std/primitive.u64.html">u64</a>) -&gt; <span class="self">Self </span>{
+        <a href="#23"><span class="self">Self</span>::Constant</a>(F::from_wrapped_u64(<a href="#168">n</a>))
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Add <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Add.html">Add</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>add(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>degree_multiple = <span class="self">self</span>.degree_multiple().max(rhs.degree_multiple());
+        <span class="kw">let </span>degree_multiple = <a class="self" href="#176">self</a>.<a href="#47-67">degree_multiple</a>().<a href="https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html#tymethod.max">max</a>(<a href="#176">rhs</a>.<a href="#47-67">degree_multiple</a>());
         <span class="self">Self</span>::Add {
-            x: Arc::new(<span class="self">self</span>),
-            y: Arc::new(rhs),
-            degree_multiple,
+            x: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a class="self" href="#176">self</a>),
+            y: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#176">rhs</a>),
+            <a href="#177">degree_multiple</a>,
         }
     }
 }
@@ -510,43 +510,43 @@
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>add(<span class="self">self</span>, rhs: F) -&gt; <span class="self">Self </span>{
-        <span class="self">self </span>+ <span class="self">Self</span>::from(rhs)
+        <span class="self"><a href="#189">self</a> </span>+ <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#189">rhs</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; AddAssign <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.AddAssign.html">AddAssign</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>add_assign(<span class="kw-2">&amp;mut </span><span class="self">self</span>, rhs: <span class="self">Self</span>) {
-        <span class="kw-2">*</span><span class="self">self </span>= <span class="self">self</span>.clone() + rhs;
+        <span class="kw-2">*</span><span class="self"><a href="#195">self</a> </span>= <a class="self" href="#195">self</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>() + <a href="#195">rhs</a>;
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; AddAssign&lt;F&gt; <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>add_assign(<span class="kw-2">&amp;mut </span><span class="self">self</span>, rhs: F) {
-        <span class="kw-2">*</span><span class="self">self </span>+= <span class="self">Self</span>::from(rhs);
+        <span class="kw-2">*</span><span class="self"><a href="#201">self</a> </span>+= <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#201">rhs</a>);
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Sum <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/iter/traits/accum/trait.Sum.html">Sum</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>sum&lt;I: Iterator&lt;Item = <span class="self">Self</span>&gt;&gt;(iter: I) -&gt; <span class="self">Self </span>{
-        iter.reduce(|x, y| x + y).unwrap_or(<span class="self">Self</span>::ZERO)
+        <a href="#207">iter</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.reduce">reduce</a>(|x, y| <a href="#208">x</a> + <a href="#208">y</a>).<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="self">Self</span>::ZERO)
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; Sum&lt;F&gt; <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>sum&lt;I: Iterator&lt;Item = F&gt;&gt;(iter: I) -&gt; <span class="self">Self </span>{
-        iter.map(|x| <span class="self">Self</span>::from(x)).sum()
+        <a href="#213">iter</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|x| <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#214">x</a>)).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>()
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Sub <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Sub.html">Sub</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>sub(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>degree_multiple = <span class="self">self</span>.degree_multiple().max(rhs.degree_multiple());
+        <span class="kw">let </span>degree_multiple = <a class="self" href="#221">self</a>.<a href="#47-67">degree_multiple</a>().<a href="https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html#tymethod.max">max</a>(<a href="#221">rhs</a>.<a href="#47-67">degree_multiple</a>());
         <span class="self">Self</span>::Sub {
-            x: Arc::new(<span class="self">self</span>),
-            y: Arc::new(rhs),
-            degree_multiple,
+            x: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a class="self" href="#221">self</a>),
+            y: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#221">rhs</a>),
+            <a href="#222">degree_multiple</a>,
         }
     }
 }
@@ -555,44 +555,44 @@
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>sub(<span class="self">self</span>, rhs: F) -&gt; <span class="self">Self </span>{
-        <span class="self">self </span>- <span class="self">Self</span>::from(rhs)
+        <span class="self"><a href="#234">self</a> </span>- <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#234">rhs</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; SubAssign <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.SubAssign.html">SubAssign</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>sub_assign(<span class="kw-2">&amp;mut </span><span class="self">self</span>, rhs: <span class="self">Self</span>) {
-        <span class="kw-2">*</span><span class="self">self </span>= <span class="self">self</span>.clone() - rhs;
+        <span class="kw-2">*</span><span class="self"><a href="#240">self</a> </span>= <a class="self" href="#240">self</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>() - <a href="#240">rhs</a>;
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; SubAssign&lt;F&gt; <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>sub_assign(<span class="kw-2">&amp;mut </span><span class="self">self</span>, rhs: F) {
-        <span class="kw-2">*</span><span class="self">self </span>-= <span class="self">Self</span>::from(rhs);
+        <span class="kw-2">*</span><span class="self"><a href="#246">self</a> </span>-= <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#246">rhs</a>);
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Neg <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Neg.html">Neg</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>neg(<span class="self">self</span>) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>degree_multiple = <span class="self">self</span>.degree_multiple();
+        <span class="kw">let </span>degree_multiple = <a class="self" href="#254">self</a>.<a href="#47-67">degree_multiple</a>();
         <span class="self">Self</span>::Neg {
-            x: Arc::new(<span class="self">self</span>),
-            degree_multiple,
+            x: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a class="self" href="#254">self</a>),
+            <a href="#255">degree_multiple</a>,
         }
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Mul <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Mul.html">Mul</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>mul(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; <span class="self">Self </span>{
         <span class="attr">#[allow(clippy::suspicious_arithmetic_impl)]
-        </span><span class="kw">let </span>degree_multiple = <span class="self">self</span>.degree_multiple() + rhs.degree_multiple();
+        </span><span class="kw">let </span>degree_multiple = <a class="self" href="#266">self</a>.<a href="#47-67">degree_multiple</a>() + <a href="#266">rhs</a>.<a href="#47-67">degree_multiple</a>();
         <span class="self">Self</span>::Mul {
-            x: Arc::new(<span class="self">self</span>),
-            y: Arc::new(rhs),
-            degree_multiple,
+            x: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a class="self" href="#266">self</a>),
+            y: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#266">rhs</a>),
+            <a href="#268">degree_multiple</a>,
         }
     }
 }
@@ -601,46 +601,46 @@
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>mul(<span class="self">self</span>, rhs: F) -&gt; <span class="self">Self </span>{
-        <span class="self">self </span>* <span class="self">Self</span>::from(rhs)
+        <span class="self"><a href="#280">self</a> </span>* <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#280">rhs</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; MulAssign <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.MulAssign.html">MulAssign</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>mul_assign(<span class="kw-2">&amp;mut </span><span class="self">self</span>, rhs: <span class="self">Self</span>) {
-        <span class="kw-2">*</span><span class="self">self </span>= <span class="self">self</span>.clone() * rhs;
+        <span class="kw-2">*</span><span class="self"><a href="#286">self</a> </span>= <a class="self" href="#286">self</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>() * <a href="#286">rhs</a>;
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; MulAssign&lt;F&gt; <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>mul_assign(<span class="kw-2">&amp;mut </span><span class="self">self</span>, rhs: F) {
-        <span class="kw-2">*</span><span class="self">self </span><span class="kw-2">*</span>= <span class="self">Self</span>::from(rhs);
+        <span class="kw-2">*</span><span class="self"><a href="#292">self</a> </span><span class="kw-2">*</span>= <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#292">rhs</a>);
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Product <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/iter/traits/accum/trait.Product.html">Product</a> <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>product&lt;I: Iterator&lt;Item = <span class="self">Self</span>&gt;&gt;(iter: I) -&gt; <span class="self">Self </span>{
-        iter.reduce(|x, y| x * y).unwrap_or(<span class="self">Self</span>::ONE)
+        <a href="#298">iter</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.reduce">reduce</a>(|x, y| <a href="#299">x</a> * <a href="#299">y</a>).<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="self">Self</span>::ONE)
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; Product&lt;F&gt; <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>product&lt;I: Iterator&lt;Item = F&gt;&gt;(iter: I) -&gt; <span class="self">Self </span>{
-        iter.map(|x| <span class="self">Self</span>::from(x)).product()
+        <a href="#304">iter</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|x| <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#305">x</a>)).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.product">product</a>()
     }
 }
 
-<span class="kw">pub trait </span>SymbolicEvaluator&lt;F: Field, E: AbstractField + From&lt;F&gt;&gt; {
+<span class="kw">pub trait </span><a href="../../../../openvm_stark_backend/air_builders/symbolic/symbolic_expression/trait.SymbolicEvaluator.html">SymbolicEvaluator</a>&lt;F: Field, E: AbstractField + From&lt;F&gt;&gt; {
     <span class="kw">fn </span>eval_var(<span class="kw-2">&amp;</span><span class="self">self</span>, symbolic_var: SymbolicVariable&lt;F&gt;) -&gt; E;
 
     <span class="kw">fn </span>eval_expr(<span class="kw-2">&amp;</span><span class="self">self</span>, symbolic_expr: <span class="kw-2">&amp;</span>SymbolicExpression&lt;F&gt;) -&gt; E {
-        <span class="kw">match </span>symbolic_expr {
-            SymbolicExpression::Variable(var) =&gt; <span class="self">self</span>.eval_var(<span class="kw-2">*</span>var),
-            SymbolicExpression::Constant(c) =&gt; (<span class="kw-2">*</span>c).into(),
-            SymbolicExpression::Add { x, y, .. } =&gt; <span class="self">self</span>.eval_expr(x) + <span class="self">self</span>.eval_expr(y),
-            SymbolicExpression::Sub { x, y, .. } =&gt; <span class="self">self</span>.eval_expr(x) - <span class="self">self</span>.eval_expr(y),
-            SymbolicExpression::Neg { x, .. } =&gt; -<span class="self">self</span>.eval_expr(x),
-            SymbolicExpression::Mul { x, y, .. } =&gt; <span class="self">self</span>.eval_expr(x) * <span class="self">self</span>.eval_expr(y),
-            <span class="kw">_ </span>=&gt; <span class="macro">unreachable!</span>(<span class="string">"Expression cannot be evaluated"</span>),
+        <span class="kw">match </span><a href="#312">symbolic_expr</a> {
+            <a href="#19">SymbolicExpression::Variable</a>(var) =&gt; <a class="self" href="#312">self</a>.<a href="#310">eval_var</a>(<span class="kw-2">*</span><a href="#314">var</a>),
+            <a href="#23">SymbolicExpression::Constant</a>(c) =&gt; (<span class="kw-2">*</span><a href="#315">c</a>).<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="#24-28">SymbolicExpression::Add</a> { x, y, .. } =&gt; <a class="self" href="#312">self</a>.<a href="#312-322">eval_expr</a>(<a href="#316">x</a>) + <a class="self" href="#312">self</a>.<a href="#312-322">eval_expr</a>(<a href="#316">y</a>),
+            <a href="#29-33">SymbolicExpression::Sub</a> { x, y, .. } =&gt; <a class="self" href="#312">self</a>.<a href="#312-322">eval_expr</a>(<a href="#317">x</a>) - <a class="self" href="#312">self</a>.<a href="#312-322">eval_expr</a>(<a href="#317">y</a>),
+            <a href="#34-37">SymbolicExpression::Neg</a> { x, .. } =&gt; -<a class="self" href="#312">self</a>.<a href="#312-322">eval_expr</a>(<a href="#318">x</a>),
+            <a href="#38-42">SymbolicExpression::Mul</a> { x, y, .. } =&gt; <a class="self" href="#312">self</a>.<a href="#312-322">eval_expr</a>(<a href="#319">x</a>) * <a class="self" href="#312">self</a>.<a href="#312-322">eval_expr</a>(<a href="#319">y</a>),
+            <span class="kw">_ </span>=&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.unreachable.html">unreachable!</a>(<span class="string">"Expression cannot be evaluated"</span>),
         }
     }
 }

@@ -138,7 +138,7 @@
 <a href="#137" id="137">137</a>
 <a href="#138" id="138">138</a>
 <a href="#139" id="139">139</a>
-<a href="#140" id="140">140</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::marker::PhantomData;
+<a href="#140" id="140">140</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">std::marker::PhantomData</a>;
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_commit::PolynomialSpace;
@@ -146,19 +146,19 @@
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 <span class="kw">use </span>tracing::instrument;
 
-<span class="kw">use </span><span class="kw">super</span>::error::VerificationError;
+<span class="kw">use </span><a href="error.rs.html#4-16"><span class="kw">super</span>::error::VerificationError</a>;
 <span class="kw">use crate</span>::{
     air_builders::{
-        symbolic::symbolic_expression::SymbolicExpression,
-        verifier::{GenericVerifierConstraintFolder, VerifierConstraintFolder},
+        <a href="../air_builders/symbolic/symbolic_expression.rs.html#18-43">symbolic::symbolic_expression::SymbolicExpression</a>,
+        verifier::{<a href="../air_builders/verifier.rs.html#31-44">GenericVerifierConstraintFolder</a>, <a href="../air_builders/verifier.rs.html#19-26">VerifierConstraintFolder</a>},
     },
-    config::{Domain, StarkGenericConfig, Val},
-    prover::opener::AdjacentOpenedValues,
+    config::{<a href="../config.rs.html#63-66">Domain</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    <a href="../prover/opener.rs.html#171-174">prover::opener::AdjacentOpenedValues</a>,
 };
 
 <span class="attr">#[allow(clippy::too_many_arguments)]
 #[instrument(skip_all, level = <span class="string">"trace"</span>)]
-</span><span class="kw">pub fn </span>verify_single_rap_constraints&lt;SC&gt;(
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/verifier/constraints/fn.verify_single_rap_constraints.html">verify_single_rap_constraints</a>&lt;SC&gt;(
     constraints: <span class="kw-2">&amp;</span>[SymbolicExpression&lt;Val&lt;SC&gt;&gt;],
     preprocessed_values: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>AdjacentOpenedValues&lt;SC::Challenge&gt;&gt;,
     partitioned_main_values: Vec&lt;<span class="kw-2">&amp;</span>AdjacentOpenedValues&lt;SC::Challenge&gt;&gt;,
@@ -171,9 +171,9 @@
     challenges: <span class="kw-2">&amp;</span>[Vec&lt;SC::Challenge&gt;],
     public_values: <span class="kw-2">&amp;</span>[Val&lt;SC&gt;],
     exposed_values_after_challenge: <span class="kw-2">&amp;</span>[Vec&lt;SC::Challenge&gt;],
-) -&gt; <span class="prelude-ty">Result</span>&lt;(), VerificationError&gt;
+) -&gt; <span class="prelude-ty">Result</span>&lt;(), <a href="error.rs.html#4-16">VerificationError</a>&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">let </span>zps = qc_domains
         .iter()

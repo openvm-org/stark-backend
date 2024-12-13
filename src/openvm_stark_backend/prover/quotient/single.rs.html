@@ -193,7 +193,7 @@
 <a href="#192" id="192">192</a>
 <a href="#193" id="193">193</a>
 <a href="#194" id="194">194</a>
-<a href="#195" id="195">195</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::cmp::min;
+<a href="#195" id="195">195</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/cmp/fn.min.html">std::cmp::min</a>;
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_commit::PolynomialSpace;
@@ -204,10 +204,10 @@
 <span class="kw">use </span>tracing::instrument;
 
 <span class="kw">use crate</span>::{
-    air_builders::{prover::ProverConstraintFolder, symbolic::SymbolicConstraints},
-    config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
-    rap::{PartitionedBaseAir, Rap},
+    air_builders::{<a href="../../air_builders/prover.rs.html#25-43">prover::ProverConstraintFolder</a>, <a href="../../air_builders/symbolic/mod.rs.html#34-39">symbolic::SymbolicConstraints</a>},
+    config::{<a href="../../config.rs.html#63-66">Domain</a>, <a href="../../config.rs.html#88-89">PackedChallenge</a>, <a href="../../config.rs.html#86">PackedVal</a>, <a href="../../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../../config.rs.html#38-41">Val</a>},
+    <a href="../../interaction/mod.rs.html#112-117">interaction::RapPhaseSeqKind</a>,
+    rap::{<a href="../../rap.rs.html#24-33">PartitionedBaseAir</a>, <a href="../../rap.rs.html#47-52">Rap</a>},
 };
 
 <span class="comment">// Starting reference: p3_uni_stark::prover::quotient_values
@@ -221,7 +221,7 @@
     level = <span class="string">"trace"</span>,
     skip_all
 )]
-</span><span class="kw">pub fn </span>compute_single_rap_quotient_values&lt;<span class="lifetime">'a</span>, SC, R, Mat&gt;(
+</span><span class="kw">pub fn </span><a href="../../../../openvm_stark_backend/prover/quotient/single/fn.compute_single_rap_quotient_values.html">compute_single_rap_quotient_values</a>&lt;<span class="lifetime">'a</span>, SC, R, Mat&gt;(
     rap: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>R,
     symbolic_constraints: <span class="kw-2">&amp;</span>SymbolicConstraints&lt;Val&lt;SC&gt;&gt;,
     trace_domain: Domain&lt;SC&gt;,
@@ -235,14 +235,14 @@
     public_values: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[Val&lt;SC&gt;],
     <span class="comment">// Values exposed to verifier after challenge round i
     </span>exposed_values_after_challenge: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[<span class="kw-2">&amp;</span><span class="lifetime">'a </span>[PackedChallenge&lt;SC&gt;]],
-    rap_phase_seq_kind: RapPhaseSeqKind,
-    interaction_chunk_size: usize,
+    rap_phase_seq_kind: <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
+    interaction_chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 ) -&gt; Vec&lt;SC::Challenge&gt;
 <span class="kw">where
     </span><span class="comment">// TODO: avoid ?Sized to prevent dynamic dispatching because `eval` is called many many times
-    </span>R: <span class="kw">for</span>&lt;<span class="lifetime">'b</span>&gt; Rap&lt;ProverConstraintFolder&lt;<span class="lifetime">'b</span>, SC&gt;&gt; + PartitionedBaseAir&lt;Val&lt;SC&gt;&gt; + Sync + <span class="question-mark">?</span>Sized,
-    SC: StarkGenericConfig,
-    Mat: Matrix&lt;Val&lt;SC&gt;&gt; + Sync,
+    </span>R: <span class="kw">for</span>&lt;<span class="lifetime">'b</span>&gt; Rap&lt;ProverConstraintFolder&lt;<span class="lifetime">'b</span>, SC&gt;&gt; + PartitionedBaseAir&lt;Val&lt;SC&gt;&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a> + <span class="question-mark">?</span><a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html">Sized</a>,
+    SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
+    Mat: Matrix&lt;Val&lt;SC&gt;&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
 {
     <span class="kw">let </span>quotient_size = quotient_domain.size();
     <span class="kw">let </span>preprocessed_width = preprocessed_trace_on_quotient_domain.width();

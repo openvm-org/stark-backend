@@ -92,98 +92,98 @@
 <a href="#91" id="91">91</a>
 <a href="#92" id="92">92</a>
 <a href="#93" id="93">93</a>
-<a href="#94" id="94">94</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#94" id="94">94</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
-<span class="kw">pub use </span>openvm_stark_backend::engine::StarkEngine;
+<span class="kw">pub use </span><a href="../../openvm_stark_sdk/engine/trait.StarkEngine.html">openvm_stark_backend::engine::StarkEngine</a>;
 <span class="kw">use </span>openvm_stark_backend::{
-    config::{StarkGenericConfig, Val},
-    engine::VerificationData,
+    config::{<a href="../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>, <a href="../../openvm_stark_backend/config/type.Val.html">Val</a>},
+    <a href="../../openvm_stark_backend/engine/struct.VerificationData.html">engine::VerificationData</a>,
     p3_matrix::dense::DenseMatrix,
-    prover::types::AirProofInput,
-    rap::AnyRap,
-    verifier::VerificationError,
+    <a href="../../openvm_stark_backend/prover/types/struct.AirProofInput.html">prover::types::AirProofInput</a>,
+    <a href="../../openvm_stark_backend/rap/trait.AnyRap.html">rap::AnyRap</a>,
+    <a href="../../openvm_stark_backend/verifier/error/enum.VerificationError.html">verifier::VerificationError</a>,
 };
 <span class="kw">use </span>tracing::Level;
 
-<span class="kw">use </span><span class="kw">crate</span>::config::{instrument::StarkHashStatistics, setup_tracing_with_log_level, FriParameters};
+<span class="kw">use </span><span class="kw">crate</span>::config::{<a href="config/instrument.rs.html#96-102">instrument::StarkHashStatistics</a>, <a href="config/mod.rs.html#23-32">setup_tracing_with_log_level</a>, <a href="config/fri_params.rs.html#4-8">FriParameters</a>};
 
-<span class="kw">pub trait </span>StarkEngineWithHashInstrumentation&lt;SC: StarkGenericConfig&gt;: StarkEngine&lt;SC&gt; {
+<span class="kw">pub trait </span><a href="../../openvm_stark_sdk/engine/trait.StarkEngineWithHashInstrumentation.html">StarkEngineWithHashInstrumentation</a>&lt;SC: <a href="../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt;: StarkEngine&lt;SC&gt; {
     <span class="kw">fn </span>clear_instruments(<span class="kw-2">&amp;mut </span><span class="self">self</span>);
     <span class="kw">fn </span>stark_hash_statistics&lt;T&gt;(<span class="kw-2">&amp;</span><span class="self">self</span>, custom: T) -&gt; StarkHashStatistics&lt;T&gt;;
 }
 
 <span class="doccomment">/// All necessary data to verify a Stark proof.
-</span><span class="kw">pub struct </span>VerificationDataWithFriParams&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../openvm_stark_sdk/engine/struct.VerificationDataWithFriParams.html">VerificationDataWithFriParams</a>&lt;SC: <a href="../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>data: VerificationData&lt;SC&gt;,
-    <span class="kw">pub </span>fri_params: FriParameters,
+    <span class="kw">pub </span>fri_params: <a href="config/fri_params.rs.html#4-8">FriParameters</a>,
 }
 
 <span class="doccomment">/// `stark-backend::prover::types::ProofInput` without specifying AIR IDs.
-</span><span class="kw">pub struct </span>ProofInputForTest&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../openvm_stark_sdk/engine/struct.ProofInputForTest.html">ProofInputForTest</a>&lt;SC: <a href="../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>per_air: Vec&lt;AirProofInput&lt;SC&gt;&gt;,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; ProofInputForTest&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; ProofInputForTest&lt;SC&gt; {
     <span class="kw">pub fn </span>run_test(
         <span class="self">self</span>,
         engine: <span class="kw-2">&amp;</span><span class="kw">impl </span>StarkFriEngine&lt;SC&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, VerificationError&gt; {
-        engine.run_test(<span class="self">self</span>.per_air)
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, <a href="../../openvm_stark_backend/verifier/error/enum.VerificationError.html">VerificationError</a>&gt; {
+        <a href="#35">engine</a>.<a href="#45-58">run_test</a>(<a class="self" href="#34">self</a>.per_air)
     }
 }
 
 <span class="doccomment">/// Stark engine using Fri.
-</span><span class="kw">pub trait </span>StarkFriEngine&lt;SC: StarkGenericConfig&gt;: StarkEngine&lt;SC&gt; + Sized {
-    <span class="kw">fn </span>new(fri_parameters: FriParameters) -&gt; <span class="self">Self</span>;
-    <span class="kw">fn </span>fri_params(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; FriParameters;
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_sdk/engine/trait.StarkFriEngine.html">StarkFriEngine</a>&lt;SC: <a href="../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt;: StarkEngine&lt;SC&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html">Sized</a> {
+    <span class="kw">fn </span>new(fri_parameters: <a href="config/fri_params.rs.html#4-8">FriParameters</a>) -&gt; <span class="self">Self</span>;
+    <span class="kw">fn </span>fri_params(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="config/fri_params.rs.html#4-8">FriParameters</a>;
     <span class="kw">fn </span>run_test(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         air_proof_inputs: Vec&lt;AirProofInput&lt;SC&gt;&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, VerificationError&gt;
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, <a href="../../openvm_stark_backend/verifier/error/enum.VerificationError.html">VerificationError</a>&gt;
     <span class="kw">where
-        </span>AirProofInput&lt;SC&gt;: Send + Sync,
+        </span>AirProofInput&lt;SC&gt;: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
     {
-        setup_tracing_with_log_level(Level::WARN);
-        <span class="kw">let </span>data = &lt;<span class="self">Self </span><span class="kw">as </span>StarkEngine&lt;<span class="kw">_</span>&gt;&gt;::run_test_impl(<span class="self">self</span>, air_proof_inputs)<span class="question-mark">?</span>;
-        <span class="prelude-val">Ok</span>(VerificationDataWithFriParams {
-            data,
-            fri_params: <span class="self">self</span>.fri_params(),
+        <a href="config/mod.rs.html#23-32">setup_tracing_with_log_level</a>(Level::WARN);
+        <span class="kw">let </span>data = &lt;<span class="self">Self </span><span class="kw">as </span>StarkEngine&lt;<span class="kw">_</span>&gt;&gt;::run_test_impl(<a class="self" href="#46">self</a>, <a href="#47">air_proof_inputs</a>)<span class="question-mark">?</span>;
+        <span class="prelude-val">Ok</span>(<a href="#22-25">VerificationDataWithFriParams</a> {
+            <a href="#53">data</a>,
+            fri_params: <a class="self" href="#46">self</a>.<a href="#44">fri_params</a>(),
         })
     }
     <span class="kw">fn </span>run_test_fast(
         air_proof_inputs: Vec&lt;AirProofInput&lt;SC&gt;&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, VerificationError&gt;
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, <a href="../../openvm_stark_backend/verifier/error/enum.VerificationError.html">VerificationError</a>&gt;
     <span class="kw">where
-        </span>AirProofInput&lt;SC&gt;: Send + Sync,
+        </span>AirProofInput&lt;SC&gt;: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
     {
-        <span class="kw">let </span>engine = <span class="self">Self</span>::new(FriParameters::standard_fast());
-        engine.run_test(air_proof_inputs)
+        <span class="kw">let </span>engine = <a href="#43"><span class="self">Self</span>::new</a>(<a href="config/fri_params.rs.html#21-23">FriParameters::standard_fast</a>());
+        <a href="#65">engine</a>.<a href="#45-58">run_test</a>(<a href="#60">air_proof_inputs</a>)
     }
     <span class="kw">fn </span>run_simple_test_impl(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         chips: Vec&lt;Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;&gt;,
         traces: Vec&lt;DenseMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
         public_values: Vec&lt;Vec&lt;Val&lt;SC&gt;&gt;&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, VerificationError&gt;
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, <a href="../../openvm_stark_backend/verifier/error/enum.VerificationError.html">VerificationError</a>&gt;
     <span class="kw">where
-        </span>AirProofInput&lt;SC&gt;: Send + Sync,
+        </span>AirProofInput&lt;SC&gt;: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
     {
-        <span class="self">self</span>.run_test(AirProofInput::multiple_simple(chips, traces, public_values))
+        <a class="self" href="#69">self</a>.<a href="#45-58">run_test</a>(<a href="../../openvm_stark_backend/prover/types/struct.AirProofInput.html#method.multiple_simple">AirProofInput::multiple_simple</a>(<a href="#70">chips</a>, <a href="#71">traces</a>, <a href="#72">public_values</a>))
     }
     <span class="kw">fn </span>run_simple_test_fast(
         chips: Vec&lt;Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;&gt;,
         traces: Vec&lt;DenseMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
         public_values: Vec&lt;Vec&lt;Val&lt;SC&gt;&gt;&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, VerificationError&gt; {
-        <span class="kw">let </span>engine = <span class="self">Self</span>::new(FriParameters::standard_fast());
-        StarkFriEngine::&lt;<span class="kw">_</span>&gt;::run_simple_test_impl(<span class="kw-2">&amp;</span>engine, chips, traces, public_values)
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, <a href="../../openvm_stark_backend/verifier/error/enum.VerificationError.html">VerificationError</a>&gt; {
+        <span class="kw">let </span>engine = <a href="#43"><span class="self">Self</span>::new</a>(<a href="config/fri_params.rs.html#21-23">FriParameters::standard_fast</a>());
+        StarkFriEngine::&lt;<span class="kw">_</span>&gt;::run_simple_test_impl(<span class="kw-2">&amp;</span><a href="#84">engine</a>, <a href="#80">chips</a>, <a href="#81">traces</a>, <a href="#82">public_values</a>)
     }
     <span class="kw">fn </span>run_simple_test_no_pis_fast(
         chips: Vec&lt;Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;&gt;,
         traces: Vec&lt;DenseMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, VerificationError&gt; {
-        <span class="kw">let </span>pis = <span class="macro">vec!</span>[<span class="macro">vec!</span>[]; chips.len()];
-        &lt;<span class="self">Self </span><span class="kw">as </span>StarkFriEngine&lt;SC&gt;&gt;::run_simple_test_fast(chips, traces, pis)
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationDataWithFriParams&lt;SC&gt;, <a href="../../openvm_stark_backend/verifier/error/enum.VerificationError.html">VerificationError</a>&gt; {
+        <span class="kw">let </span>pis = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[<a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[]; <a href="#88">chips</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()];
+        &lt;<span class="self">Self </span><span class="kw">as </span>StarkFriEngine&lt;SC&gt;&gt;::run_simple_test_fast(<a href="#88">chips</a>, <a href="#89">traces</a>, <a href="#91">pis</a>)
     }
 }
 </code></pre></div></section></main></body></html>

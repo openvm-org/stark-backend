@@ -35,32 +35,32 @@
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrixView, Matrix};
 
 <span class="kw">use </span><span class="kw">crate</span>::air_builders::symbolic::{
-    symbolic_expression::SymbolicEvaluator,
-    symbolic_variable::{Entry, SymbolicVariable},
+    <a href="../air_builders/symbolic/symbolic_expression.rs.html#309-323">symbolic_expression::SymbolicEvaluator</a>,
+    symbolic_variable::{<a href="../air_builders/symbolic/symbolic_variable.rs.html#14-29">Entry</a>, <a href="../air_builders/symbolic/symbolic_variable.rs.html#59-63">SymbolicVariable</a>},
 };
 
 <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>Evaluator&lt;<span class="lifetime">'a</span>, F: Field&gt; {
     <span class="kw">pub </span>preprocessed: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="prelude-ty">Option</span>&lt;RowMajorMatrixView&lt;<span class="lifetime">'a</span>, F&gt;&gt;,
     <span class="kw">pub </span>partitioned_main: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[RowMajorMatrixView&lt;<span class="lifetime">'a</span>, F&gt;],
     <span class="kw">pub </span>public_values: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[F],
-    <span class="kw">pub </span>height: usize,
-    <span class="kw">pub </span>local_index: usize,
+    <span class="kw">pub </span>height: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>local_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; SymbolicEvaluator&lt;F, F&gt; <span class="kw">for </span>Evaluator&lt;<span class="lifetime">'_</span>, F&gt; {
     <span class="kw">fn </span>eval_var(<span class="kw-2">&amp;</span><span class="self">self</span>, symbolic_var: SymbolicVariable&lt;F&gt;) -&gt; F {
-        <span class="kw">let </span>n = <span class="self">self</span>.local_index;
-        <span class="kw">let </span>height = <span class="self">self</span>.height;
-        <span class="kw">let </span>index = symbolic_var.index;
-        <span class="kw">match </span>symbolic_var.entry {
-            Entry::Preprocessed { offset } =&gt; {
-                <span class="self">self</span>.preprocessed.unwrap().get((n + offset) % height, index)
+        <span class="kw">let </span>n = <a class="self" href="#18">self</a>.local_index;
+        <span class="kw">let </span>height = <a class="self" href="#18">self</a>.height;
+        <span class="kw">let </span>index = <a href="#18">symbolic_var</a>.index;
+        <span class="kw">match </span><a href="#18">symbolic_var</a>.entry {
+            <a href="../air_builders/symbolic/symbolic_variable.rs.html#15-17">Entry::Preprocessed</a> { offset } =&gt; {
+                <a class="self" href="#18">self</a>.preprocessed.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>().get((<a href="#19">n</a> + <a href="#23">offset</a>) % <a href="#20">height</a>, <a href="#21">index</a>)
             }
-            Entry::Main { part_index, offset } =&gt; {
-                <span class="self">self</span>.partitioned_main[part_index].get((n + offset) % height, index)
+            <a href="../air_builders/symbolic/symbolic_variable.rs.html#19-22">Entry::Main</a> { part_index, offset } =&gt; {
+                <a class="self" href="#18">self</a>.partitioned_main[<a href="#26">part_index</a>].get((<a href="#19">n</a> + <a href="#26">offset</a>) % <a href="#20">height</a>, <a href="#21">index</a>)
             }
-            Entry::Public =&gt; <span class="self">self</span>.public_values[index],
-            <span class="kw">_ </span>=&gt; <span class="macro">unreachable!</span>(<span class="string">"There should be no after challenge variables"</span>),
+            <a href="../air_builders/symbolic/symbolic_variable.rs.html#26">Entry::Public</a> =&gt; <a class="self" href="#18">self</a>.public_values[<a href="#21">index</a>],
+            <span class="kw">_ </span>=&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.unreachable.html">unreachable!</a>(<span class="string">"There should be no after challenge variables"</span>),
         }
     }
 }

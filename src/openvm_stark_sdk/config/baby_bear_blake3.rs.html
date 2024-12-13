@@ -36,32 +36,32 @@
 
 <span class="kw">use super</span>::{
     baby_bear_bytehash::{
-        <span class="self">self</span>, config_from_byte_hash, BabyBearByteHashConfig, BabyBearByteHashEngine,
+        <a class="self" href="mod.rs.html#8">self</a>, <a href="baby_bear_bytehash.rs.html#82-103">config_from_byte_hash</a>, <a href="baby_bear_bytehash.rs.html#34">BabyBearByteHashConfig</a>, <a href="baby_bear_bytehash.rs.html#36-43">BabyBearByteHashEngine</a>,
     },
-    FriParameters,
+    <a href="fri_params.rs.html#4-8">FriParameters</a>,
 };
 <span class="kw">use crate</span>::{
-    assert_sc_compatible_with_serde,
-    config::baby_bear_bytehash::BabyBearByteHashEngineWithDefaultHash,
+    <a href="../utils.rs.html#50-56">assert_sc_compatible_with_serde</a>,
+    <a href="baby_bear_bytehash.rs.html#105-110">config::baby_bear_bytehash::BabyBearByteHashEngineWithDefaultHash</a>,
 };
 
-<span class="kw">pub type </span>BabyBearBlake3Config = BabyBearByteHashConfig&lt;Blake3&gt;;
-<span class="kw">pub type </span>BabyBearBlake3Engine = BabyBearByteHashEngine&lt;Blake3&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/baby_bear_blake3/type.BabyBearBlake3Config.html">BabyBearBlake3Config</a> = BabyBearByteHashConfig&lt;Blake3&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/baby_bear_blake3/type.BabyBearBlake3Engine.html">BabyBearBlake3Engine</a> = BabyBearByteHashEngine&lt;Blake3&gt;;
 
-<span class="macro">assert_sc_compatible_with_serde!</span>(BabyBearBlake3Config);
+<a class="macro" href="../utils.rs.html#50-56">assert_sc_compatible_with_serde!</a>(BabyBearBlake3Config);
 
 <span class="doccomment">/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-</span><span class="kw">pub fn </span>default_engine() -&gt; BabyBearBlake3Engine {
-    baby_bear_bytehash::default_engine(Blake3)
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_blake3/fn.default_engine.html">default_engine</a>() -&gt; <a href="#15">BabyBearBlake3Engine</a> {
+    <a href="baby_bear_bytehash.rs.html#59-65">baby_bear_bytehash::default_engine</a>(Blake3)
 }
 
 <span class="doccomment">/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-</span><span class="kw">pub fn </span>default_config() -&gt; BabyBearBlake3Config {
-    <span class="kw">let </span>fri_params = FriParameters::standard_fast();
-    config_from_byte_hash(Blake3, fri_params)
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_blake3/fn.default_config.html">default_config</a>() -&gt; <a href="#14">BabyBearBlake3Config</a> {
+    <span class="kw">let </span>fri_params = <a href="fri_params.rs.html#21-23">FriParameters::standard_fast</a>();
+    <a href="baby_bear_bytehash.rs.html#82-103">config_from_byte_hash</a>(Blake3, <a href="#26">fri_params</a>)
 }
 
-<span class="kw">impl </span>BabyBearByteHashEngineWithDefaultHash&lt;Blake3&gt; <span class="kw">for </span>BabyBearBlake3Engine {
+<span class="kw">impl </span>BabyBearByteHashEngineWithDefaultHash&lt;Blake3&gt; <span class="kw">for </span><a href="#15">BabyBearBlake3Engine</a> {
     <span class="kw">fn </span>default_hash() -&gt; Blake3 {
         Blake3
     }

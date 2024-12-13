@@ -166,33 +166,33 @@
 <a href="#165" id="165">165</a>
 <a href="#166" id="166">166</a>
 <a href="#167" id="167">167</a>
-<a href="#168" id="168">168</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#168" id="168">168</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>itertools::izip;
 <span class="kw">use </span>p3_matrix::dense::DenseMatrix;
 
 <span class="kw">use crate</span>::{
-    config::{StarkGenericConfig, Val},
+    config::{<a href="config.rs.html#12-36">StarkGenericConfig</a>, <a href="config.rs.html#38-41">Val</a>},
     keygen::{
-        types::{MultiStarkProvingKey, MultiStarkVerifyingKey},
-        MultiStarkKeygenBuilder,
+        types::{<a href="keygen/types.rs.html#111-115">MultiStarkProvingKey</a>, <a href="keygen/types.rs.html#80-82">MultiStarkVerifyingKey</a>},
+        <a href="keygen/mod.rs.html#31-35">MultiStarkKeygenBuilder</a>,
     },
     prover::{
-        types::{AirProofInput, Proof, ProofInput, TraceCommitter},
-        MultiTraceStarkProver,
+        types::{<a href="prover/types.rs.html#97-102">AirProofInput</a>, <a href="prover/types.rs.html#44-53">Proof</a>, <a href="prover/types.rs.html#69-72">ProofInput</a>, <a href="prover/trace.rs.html#114-116">TraceCommitter</a>},
+        <a href="prover/mod.rs.html#53-55">MultiTraceStarkProver</a>,
     },
-    rap::AnyRap,
-    verifier::{MultiTraceStarkVerifier, VerificationError},
+    <a href="rap.rs.html#66-77">rap::AnyRap</a>,
+    verifier::{<a href="verifier/mod.rs.html#22-24">MultiTraceStarkVerifier</a>, <a href="verifier/error.rs.html#4-16">VerificationError</a>},
 };
 
 <span class="doccomment">/// Data for verifying a Stark proof.
-</span><span class="kw">pub struct </span>VerificationData&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../openvm_stark_backend/engine/struct.VerificationData.html">VerificationData</a>&lt;SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>vk: MultiStarkVerifyingKey&lt;SC&gt;,
     <span class="kw">pub </span>proof: Proof&lt;SC&gt;,
 }
 
 <span class="doccomment">/// Testing engine
-</span><span class="kw">pub trait </span>StarkEngine&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/engine/trait.StarkEngine.html">StarkEngine</a>&lt;SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Stark config
     </span><span class="kw">fn </span>config(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>SC;
     <span class="doccomment">/// Creates a new challenger with a deterministic state.
@@ -201,15 +201,15 @@
     </span><span class="kw">fn </span>new_challenger(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; SC::Challenger;
 
     <span class="kw">fn </span>keygen_builder(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; MultiStarkKeygenBuilder&lt;SC&gt; {
-        MultiStarkKeygenBuilder::new(<span class="self">self</span>.config())
+        <a href="keygen/mod.rs.html#38-43">MultiStarkKeygenBuilder::new</a>(<a class="self" href="#35">self</a>.<a href="#29">config</a>())
     }
 
     <span class="kw">fn </span>prover(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; MultiTraceStarkProver&lt;SC&gt; {
-        MultiTraceStarkProver::new(<span class="self">self</span>.config())
+        <a href="prover/mod.rs.html#58-60">MultiTraceStarkProver::new</a>(<a class="self" href="#39">self</a>.<a href="#29">config</a>())
     }
 
     <span class="kw">fn </span>verifier(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; MultiTraceStarkVerifier&lt;SC&gt; {
-        MultiTraceStarkVerifier::new(<span class="self">self</span>.config())
+        <a href="verifier/mod.rs.html#27-29">MultiTraceStarkVerifier::new</a>(<a class="self" href="#43">self</a>.<a href="#29">config</a>())
     }
 
     <span class="comment">// TODO[jpw]: the following does not belong in this crate! dev tooling only
@@ -222,8 +222,8 @@
         chips: Vec&lt;Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;&gt;,
         traces: Vec&lt;DenseMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
         public_values: Vec&lt;Vec&lt;Val&lt;SC&gt;&gt;&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationData&lt;SC&gt;, VerificationError&gt; {
-        <span class="self">self</span>.run_test_impl(AirProofInput::multiple_simple(chips, traces, public_values))
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationData&lt;SC&gt;, <a href="verifier/error.rs.html#4-16">VerificationError</a>&gt; {
+        <a class="self" href="#53">self</a>.<a href="#63-77">run_test_impl</a>(<a href="prover/helper.rs.html#59-67">AirProofInput::multiple_simple</a>(<a href="#54">chips</a>, <a href="#55">traces</a>, <a href="#56">public_values</a>))
     }
 
     <span class="doccomment">/// Runs a single end-to-end test for a given set of chips and traces partitions.
@@ -231,17 +231,17 @@
     </span><span class="kw">fn </span>run_test_impl(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         air_proof_inputs: Vec&lt;AirProofInput&lt;SC&gt;&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationData&lt;SC&gt;, VerificationError&gt; {
-        <span class="kw">let </span><span class="kw-2">mut </span>keygen_builder = <span class="self">self</span>.keygen_builder();
-        <span class="kw">let </span>air_ids = <span class="self">self</span>.set_up_keygen_builder(<span class="kw-2">&amp;mut </span>keygen_builder, <span class="kw-2">&amp;</span>air_proof_inputs);
-        <span class="kw">let </span>proof_input = ProofInput {
-            per_air: <span class="macro">izip!</span>(air_ids, air_proof_inputs).collect(),
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;VerificationData&lt;SC&gt;, <a href="verifier/error.rs.html#4-16">VerificationError</a>&gt; {
+        <span class="kw">let </span><span class="kw-2">mut </span>keygen_builder = <a class="self" href="#64">self</a>.<a href="#35-37">keygen_builder</a>();
+        <span class="kw">let </span>air_ids = <a class="self" href="#64">self</a>.<a href="#80-105">set_up_keygen_builder</a>(<span class="kw-2">&amp;mut </span><a href="#67">keygen_builder</a>, <span class="kw-2">&amp;</span><a href="#65">air_proof_inputs</a>);
+        <span class="kw">let </span>proof_input = <a href="prover/types.rs.html#69-72">ProofInput</a> {
+            per_air: <span class="macro">izip!</span>(<a href="#68">air_ids</a>, <a href="#65">air_proof_inputs</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
         };
-        <span class="kw">let </span>pk = keygen_builder.generate_pk();
-        <span class="kw">let </span>vk = pk.get_vk();
-        <span class="kw">let </span>proof = <span class="self">self</span>.prove(<span class="kw-2">&amp;</span>pk, proof_input);
-        <span class="self">self</span>.verify(<span class="kw-2">&amp;</span>vk, <span class="kw-2">&amp;</span>proof)<span class="question-mark">?</span>;
-        <span class="prelude-val">Ok</span>(VerificationData { vk, proof })
+        <span class="kw">let </span>pk = <a href="#67">keygen_builder</a>.<a href="keygen/mod.rs.html#59-129">generate_pk</a>();
+        <span class="kw">let </span>vk = <a href="#72">pk</a>.<a href="keygen/types.rs.html#132-136">get_vk</a>();
+        <span class="kw">let </span>proof = <a class="self" href="#64">self</a>.<a href="#116-157">prove</a>(<span class="kw-2">&amp;</span><a href="#72">pk</a>, <a href="#69">proof_input</a>);
+        <a class="self" href="#64">self</a>.<a href="#159-167">verify</a>(<span class="kw-2">&amp;</span><a href="#73">vk</a>, <span class="kw-2">&amp;</span><a href="#74">proof</a>)<span class="question-mark">?</span>;
+        <span class="prelude-val">Ok</span>(<a href="#21-24">VerificationData</a> { <a href="#73">vk</a>, <a href="#74">proof</a> })
     }
 
     <span class="doccomment">/// Add AIRs and get AIR IDs
@@ -249,89 +249,89 @@
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         keygen_builder: <span class="kw-2">&amp;mut </span>MultiStarkKeygenBuilder&lt;<span class="lifetime">'_</span>, SC&gt;,
         air_proof_inputs: <span class="kw-2">&amp;</span>[AirProofInput&lt;SC&gt;],
-    ) -&gt; Vec&lt;usize&gt; {
-        air_proof_inputs
-            .iter()
-            .map(|air_proof_input| {
-                <span class="kw">let </span>air = air_proof_input.air.clone();
-                <span class="macro">assert_eq!</span>(
+    ) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <a href="#83">air_proof_inputs</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|air_proof_input| {
+                <span class="kw">let </span>air = <a href="#87">air_proof_input</a>.air.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>();
+                <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
                     air_proof_input.raw.cached_mains.len(),
                     air.cached_main_widths().len()
                 );
-                <span class="kw">let </span>common_main_width = air.common_main_width();
+                <span class="kw">let </span>common_main_width = <a href="#88">air</a>.<a href="rap.rs.html#30-32">common_main_width</a>();
                 <span class="kw">if </span>common_main_width == <span class="number">0 </span>{
-                    <span class="macro">assert!</span>(air_proof_input.raw.common_main.is_none());
+                    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(air_proof_input.raw.common_main.is_none());
                 } <span class="kw">else </span>{
-                    <span class="macro">assert_eq!</span>(
+                    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
                         air_proof_input.raw.common_main.as_ref().unwrap().width,
                         air.common_main_width()
                     );
                 }
-                keygen_builder.add_air(air)
+                <a href="#82">keygen_builder</a>.<a href="keygen/mod.rs.html#47">add_air</a>(<a href="#88">air</a>)
             })
-            .collect()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 
     <span class="kw">fn </span>prove_then_verify(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         pk: <span class="kw-2">&amp;</span>MultiStarkProvingKey&lt;SC&gt;,
         proof_input: ProofInput&lt;SC&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), VerificationError&gt; {
-        <span class="kw">let </span>proof = <span class="self">self</span>.prove(pk, proof_input);
-        <span class="self">self</span>.verify(<span class="kw-2">&amp;</span>pk.get_vk(), <span class="kw-2">&amp;</span>proof)
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), <a href="verifier/error.rs.html#4-16">VerificationError</a>&gt; {
+        <span class="kw">let </span>proof = <a class="self" href="#108">self</a>.<a href="#116-157">prove</a>(<a href="#109">pk</a>, <a href="#110">proof_input</a>);
+        <a class="self" href="#108">self</a>.<a href="#159-167">verify</a>(<span class="kw-2">&amp;</span><a href="#109">pk</a>.<a href="keygen/types.rs.html#132-136">get_vk</a>(), <span class="kw-2">&amp;</span><a href="#112">proof</a>)
     }
 
     <span class="kw">fn </span>prove(<span class="kw-2">&amp;</span><span class="self">self</span>, pk: <span class="kw-2">&amp;</span>MultiStarkProvingKey&lt;SC&gt;, proof_input: ProofInput&lt;SC&gt;) -&gt; Proof&lt;SC&gt; {
-        <span class="kw">let </span>prover = <span class="self">self</span>.prover();
-        <span class="kw">let </span>committer = TraceCommitter::new(prover.pcs());
+        <span class="kw">let </span>prover = <a class="self" href="#116">self</a>.<a href="#39-41">prover</a>();
+        <span class="kw">let </span>committer = <a href="prover/trace.rs.html#125-127">TraceCommitter::new</a>(<a href="#117">prover</a>.<a href="prover/mod.rs.html#62-64">pcs</a>());
 
-        <span class="kw">let </span>air_proof_inputs = proof_input
+        <span class="kw">let </span>air_proof_inputs = <a href="#116">proof_input</a>
             .per_air
-            .into_iter()
-            .map(|(air_id, <span class="kw-2">mut </span>air_proof_input)| {
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(air_id, <span class="kw-2">mut </span>air_proof_input)| {
                 <span class="comment">// Commit cached traces if they are not provided
                 </span><span class="kw">if </span>air_proof_input.cached_mains_pdata.is_empty()
                     &amp;&amp; !air_proof_input.raw.cached_mains.is_empty()
                 {
-                    air_proof_input.cached_mains_pdata = air_proof_input
+                    <a href="#123">air_proof_input</a>.cached_mains_pdata = <a href="#123">air_proof_input</a>
                         .raw
                         .cached_mains
-                        .iter()
-                        .map(|trace| committer.commit(<span class="macro">vec!</span>[trace.as_ref().clone()]))
-                        .collect();
+                        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+                        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|trace| <a href="#118">committer</a>.<a href="prover/trace.rs.html#132-149">commit</a>(<a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[trace.as_ref().clone()]))
+                        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
                 } <span class="kw">else </span>{
-                    <span class="macro">assert_eq!</span>(
+                    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
                         air_proof_input.cached_mains_pdata.len(),
                         air_proof_input.raw.cached_mains.len()
                     );
                 }
-                (air_id, air_proof_input)
+                (<a href="#123">air_id</a>, <a href="#123">air_proof_input</a>)
             })
-            .collect();
-        <span class="kw">let </span>proof_input = ProofInput {
-            per_air: air_proof_inputs,
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <span class="kw">let </span>proof_input = <a href="prover/types.rs.html#69-72">ProofInput</a> {
+            per_air: <a href="#120">air_proof_inputs</a>,
         };
 
-        <span class="kw">let </span><span class="kw-2">mut </span>challenger = <span class="self">self</span>.new_challenger();
+        <span class="kw">let </span><span class="kw-2">mut </span>challenger = <a class="self" href="#116">self</a>.<a href="#33">new_challenger</a>();
 
         <span class="attr">#[cfg(feature = <span class="string">"bench-metrics"</span>)]
         </span><span class="kw">let </span>prove_start = std::time::Instant::now();
-        <span class="kw">let </span>_proof = prover.prove(<span class="kw-2">&amp;mut </span>challenger, pk, proof_input);
+        <span class="kw">let </span>_proof = <a href="#117">prover</a>.<a href="prover/mod.rs.html#77">prove</a>(<span class="kw-2">&amp;mut </span><a href="#147">challenger</a>, <a href="#116">pk</a>, <a href="#143">proof_input</a>);
         <span class="attr">#[cfg(feature = <span class="string">"bench-metrics"</span>)]
         </span><span class="macro">metrics::gauge!</span>(<span class="string">"stark_prove_excluding_trace_time_ms"</span>)
             .set(prove_start.elapsed().as_millis() <span class="kw">as </span>f64);
 
-        _proof
+        <a href="#151">_proof</a>
     }
 
     <span class="kw">fn </span>verify(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         vk: <span class="kw-2">&amp;</span>MultiStarkVerifyingKey&lt;SC&gt;,
         proof: <span class="kw-2">&amp;</span>Proof&lt;SC&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), VerificationError&gt; {
-        <span class="kw">let </span><span class="kw-2">mut </span>challenger = <span class="self">self</span>.new_challenger();
-        <span class="kw">let </span>verifier = <span class="self">self</span>.verifier();
-        verifier.verify(<span class="kw-2">&amp;mut </span>challenger, vk, proof)
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), <a href="verifier/error.rs.html#4-16">VerificationError</a>&gt; {
+        <span class="kw">let </span><span class="kw-2">mut </span>challenger = <a class="self" href="#160">self</a>.<a href="#33">new_challenger</a>();
+        <span class="kw">let </span>verifier = <a class="self" href="#160">self</a>.<a href="#43-45">verifier</a>();
+        <a href="#165">verifier</a>.<a href="verifier/mod.rs.html#32">verify</a>(<span class="kw-2">&amp;mut </span><a href="#164">challenger</a>, <a href="#161">vk</a>, <a href="#162">proof</a>)
     }
 }
 </code></pre></div></section></main></body></html>

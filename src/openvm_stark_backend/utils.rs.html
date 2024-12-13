@@ -59,13 +59,13 @@
 <a href="#58" id="58">58</a></pre></div><pre class="rust"><code><span class="kw">use </span>p3_field::Field;
 <span class="kw">use </span>tracing::instrument;
 
-<span class="kw">use </span><span class="kw">crate</span>::prover::USE_DEBUG_BUILDER;
+<span class="kw">use </span><a href="prover/mod.rs.html#47-49"><span class="kw">crate</span>::prover::USE_DEBUG_BUILDER</a>;
 
 <span class="comment">// Copied from valida-util
 </span><span class="doccomment">/// Calculates and returns the multiplicative inverses of each field element, with zero
 /// values remaining unchanged.
 </span><span class="attr">#[instrument(name = <span class="string">"batch_multiplicative_inverse"</span>, level = <span class="string">"info"</span>, skip_all)]
-</span><span class="kw">pub fn </span>batch_multiplicative_inverse_allowing_zero&lt;F: Field&gt;(values: Vec&lt;F&gt;) -&gt; Vec&lt;F&gt; {
+</span><span class="kw">pub fn </span><a href="../../openvm_stark_backend/utils/fn.batch_multiplicative_inverse_allowing_zero.html">batch_multiplicative_inverse_allowing_zero</a>&lt;F: Field&gt;(values: Vec&lt;F&gt;) -&gt; Vec&lt;F&gt; {
     <span class="comment">// Check if values are zero, and construct a new vector with only nonzero values
     </span><span class="kw">let </span><span class="kw-2">mut </span>nonzero_values = Vec::with_capacity(values.len());
     <span class="kw">let </span><span class="kw-2">mut </span>indices = Vec::with_capacity(values.len());
@@ -91,15 +91,15 @@
 
 <span class="doccomment">/// Disables the debug builder so there are not debug assert panics.
 /// Commonly used in negative tests to prevent panics.
-</span><span class="kw">pub fn </span>disable_debug_builder() {
-    USE_DEBUG_BUILDER.with(|debug| {
-        <span class="kw-2">*</span>debug.lock().unwrap() = <span class="bool-val">false</span>;
+</span><span class="kw">pub fn </span><a href="../../openvm_stark_backend/utils/fn.disable_debug_builder.html">disable_debug_builder</a>() {
+    <a href="prover/mod.rs.html#47-49">USE_DEBUG_BUILDER</a>.<a href="https://doc.rust-lang.org/nightly/std/thread/local/struct.LocalKey.html#method.with">with</a>(|debug| {
+        <span class="kw-2">*</span><a href="#37">debug</a>.<a href="https://doc.rust-lang.org/nightly/std/sync/mutex/struct.Mutex.html#method.lock">lock</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>() = <span class="bool-val">false</span>;
     });
 }
 
 <span class="attr">#[macro_export]
 #[cfg(feature = <span class="string">"parallel"</span>)]
-</span><span class="macro">macro_rules!</span> parizip {
+</span><span class="macro">macro_rules!</span> <a href="../../openvm_stark_backend/macro.parizip.html">parizip</a> {
     ( <span class="macro-nonterminal">$first</span>:expr $( , <span class="macro-nonterminal">$rest</span>:expr )* $(,)* ) =&gt; {
         {
             <span class="kw">use </span>rayon::iter::<span class="kw-2">*</span>;

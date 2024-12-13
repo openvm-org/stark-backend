@@ -169,11 +169,11 @@
 <a href="#168" id="168">168</a>
 <a href="#169" id="169">169</a>
 <a href="#170" id="170">170</a>
-<a href="#171" id="171">171</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::any::type_name;
+<a href="#171" id="171">171</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/any/fn.type_name.html">std::any::type_name</a>;
 
 <span class="kw">use </span>openvm_stark_backend::{
-    config::StarkConfig,
-    interaction::stark_log_up::StarkLogUpPhase,
+    <a href="../../../openvm_stark_backend/config/struct.StarkConfig.html">config::StarkConfig</a>,
+    <a href="../../../openvm_stark_backend/interaction/stark_log_up/struct.StarkLogUpPhase.html">interaction::stark_log_up::StarkLogUpPhase</a>,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
     p3_field::{extension::BinomialExtensionField, Field},
@@ -184,160 +184,160 @@
 <span class="kw">use </span>p3_merkle_tree::MerkleTreeMmcs;
 <span class="kw">use </span>p3_poseidon::Poseidon;
 <span class="kw">use </span>p3_symmetric::{CryptographicPermutation, PaddingFreeSponge, TruncatedPermutation};
-<span class="kw">use </span>rand::{rngs::StdRng, SeedableRng};
+<span class="kw">use </span>rand::{<a href="https://rust-random.github.io/rand/rand/rngs/std/struct.StdRng.html">rngs::StdRng</a>, <a href="https://rust-random.github.io/rand/rand_core/trait.SeedableRng.html">SeedableRng</a>};
 
 <span class="kw">use super</span>::{
-    instrument::{HashStatistics, Instrumented, StarkHashStatistics},
-    FriParameters,
+    instrument::{<a href="instrument.rs.html#89-93">HashStatistics</a>, <a href="instrument.rs.html#19-23">Instrumented</a>, <a href="instrument.rs.html#96-102">StarkHashStatistics</a>},
+    <a href="fri_params.rs.html#4-8">FriParameters</a>,
 };
 <span class="kw">use crate</span>::{
-    assert_sc_compatible_with_serde,
-    engine::{StarkEngine, StarkEngineWithHashInstrumentation},
+    <a href="../utils.rs.html#50-56">assert_sc_compatible_with_serde</a>,
+    engine::{<a href="../../../openvm_stark_sdk/engine/trait.StarkEngine.html">StarkEngine</a>, <a href="../engine.rs.html#16-19">StarkEngineWithHashInstrumentation</a>},
 };
 
-<span class="kw">const </span>RATE: usize = <span class="number">4</span>;
+<span class="kw">const </span>RATE: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">4</span>;
 <span class="comment">// permutation width
-</span><span class="kw">const </span>WIDTH: usize = <span class="number">8</span>; <span class="comment">// rate + capacity
-</span><span class="kw">const </span>DIGEST_WIDTH: usize = <span class="number">4</span>;
+</span><span class="kw">const </span>WIDTH: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">8</span>; <span class="comment">// rate + capacity
+</span><span class="kw">const </span>DIGEST_WIDTH: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">4</span>;
 
 <span class="kw">type </span>Val = Goldilocks;
-<span class="kw">type </span>PackedVal = &lt;Val <span class="kw">as </span>Field&gt;::Packing;
-<span class="kw">type </span>Challenge = BinomialExtensionField&lt;Val, <span class="number">2</span>&gt;;
-<span class="kw">type </span>Perm = Poseidon&lt;Val, MdsMatrixGoldilocks, WIDTH, <span class="number">7</span>&gt;;
-<span class="kw">type </span>InstrPerm = Instrumented&lt;Perm&gt;;
+<span class="kw">type </span>PackedVal = &lt;<a href="#32">Val</a> <span class="kw">as </span>Field&gt;::Packing;
+<span class="kw">type </span>Challenge = BinomialExtensionField&lt;<a href="#32">Val</a>, <span class="number">2</span>&gt;;
+<span class="kw">type </span>Perm = Poseidon&lt;<a href="#32">Val</a>, MdsMatrixGoldilocks, <a href="#29">WIDTH</a>, <span class="number">7</span>&gt;;
+<span class="kw">type </span>InstrPerm = Instrumented&lt;<a href="#35">Perm</a>&gt;;
 
 <span class="comment">// Generic over P: CryptographicPermutation&lt;[F; WIDTH]&gt;
-</span><span class="kw">type </span>Hash&lt;P&gt; = PaddingFreeSponge&lt;P, WIDTH, RATE, DIGEST_WIDTH&gt;;
-<span class="kw">type </span>Compress&lt;P&gt; = TruncatedPermutation&lt;P, <span class="number">2</span>, DIGEST_WIDTH, WIDTH&gt;;
+</span><span class="kw">type </span>Hash&lt;P&gt; = PaddingFreeSponge&lt;P, <a href="#29">WIDTH</a>, <a href="#27">RATE</a>, <a href="#30">DIGEST_WIDTH</a>&gt;;
+<span class="kw">type </span>Compress&lt;P&gt; = TruncatedPermutation&lt;P, <span class="number">2</span>, <a href="#30">DIGEST_WIDTH</a>, <a href="#29">WIDTH</a>&gt;;
 <span class="kw">type </span>ValMmcs&lt;P&gt; =
-    MerkleTreeMmcs&lt;PackedVal, &lt;Val <span class="kw">as </span>Field&gt;::Packing, Hash&lt;P&gt;, Compress&lt;P&gt;, DIGEST_WIDTH&gt;;
-<span class="kw">type </span>ChallengeMmcs&lt;P&gt; = ExtensionMmcs&lt;Val, Challenge, ValMmcs&lt;P&gt;&gt;;
-<span class="kw">pub type </span>Challenger&lt;P&gt; = DuplexChallenger&lt;Val, P, WIDTH, RATE&gt;;
-<span class="kw">type </span>Dft = Radix2DitParallel&lt;Val&gt;;
-<span class="kw">type </span>Pcs&lt;P&gt; = TwoAdicFriPcs&lt;Val, Dft, ValMmcs&lt;P&gt;, ChallengeMmcs&lt;P&gt;&gt;;
-<span class="kw">type </span>RapPhase&lt;P&gt; = StarkLogUpPhase&lt;Val, Challenge, Challenger&lt;P&gt;&gt;;
+    MerkleTreeMmcs&lt;<a href="#33">PackedVal</a>, &lt;<a href="#32">Val</a> <span class="kw">as </span>Field&gt;::Packing, Hash&lt;P&gt;, Compress&lt;P&gt;, <a href="#30">DIGEST_WIDTH</a>&gt;;
+<span class="kw">type </span>ChallengeMmcs&lt;P&gt; = ExtensionMmcs&lt;<a href="#32">Val</a>, <a href="#34">Challenge</a>, ValMmcs&lt;P&gt;&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/type.Challenger.html">Challenger</a>&lt;P&gt; = DuplexChallenger&lt;<a href="#32">Val</a>, P, <a href="#29">WIDTH</a>, <a href="#27">RATE</a>&gt;;
+<span class="kw">type </span>Dft = Radix2DitParallel&lt;<a href="#32">Val</a>&gt;;
+<span class="kw">type </span>Pcs&lt;P&gt; = TwoAdicFriPcs&lt;<a href="#32">Val</a>, <a href="#45">Dft</a>, ValMmcs&lt;P&gt;, ChallengeMmcs&lt;P&gt;&gt;;
+<span class="kw">type </span>RapPhase&lt;P&gt; = StarkLogUpPhase&lt;<a href="#32">Val</a>, <a href="#34">Challenge</a>, Challenger&lt;P&gt;&gt;;
 
-<span class="kw">pub type </span>GoldilocksPermutationConfig&lt;P&gt; =
-    StarkConfig&lt;Pcs&lt;P&gt;, RapPhase&lt;P&gt;, Challenge, Challenger&lt;P&gt;&gt;;
-<span class="kw">pub type </span>GoldilocksPoseidonConfig = GoldilocksPermutationConfig&lt;Perm&gt;;
-<span class="kw">pub type </span>GoldilocksPoseidonEngine = GoldilocksPermutationEngine&lt;Perm&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/type.GoldilocksPermutationConfig.html">GoldilocksPermutationConfig</a>&lt;P&gt; =
+    StarkConfig&lt;Pcs&lt;P&gt;, RapPhase&lt;P&gt;, <a href="#34">Challenge</a>, Challenger&lt;P&gt;&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/type.GoldilocksPoseidonConfig.html">GoldilocksPoseidonConfig</a> = GoldilocksPermutationConfig&lt;<a href="#35">Perm</a>&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/type.GoldilocksPoseidonEngine.html">GoldilocksPoseidonEngine</a> = GoldilocksPermutationEngine&lt;<a href="#35">Perm</a>&gt;;
 
-<span class="macro">assert_sc_compatible_with_serde!</span>(GoldilocksPoseidonConfig);
+<a class="macro" href="../utils.rs.html#50-56">assert_sc_compatible_with_serde!</a>(GoldilocksPoseidonConfig);
 
-<span class="kw">pub struct </span>GoldilocksPermutationEngine&lt;P&gt;
+<span class="kw">pub struct </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/struct.GoldilocksPermutationEngine.html">GoldilocksPermutationEngine</a>&lt;P&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Val; WIDTH]&gt;
-        + CryptographicPermutation&lt;[PackedVal; WIDTH]&gt;
-        + Clone,
+    </span>P: CryptographicPermutation&lt;[<a href="#32">Val</a>; <a href="#29">WIDTH</a>]&gt;
+        + CryptographicPermutation&lt;[<a href="#33">PackedVal</a>; <a href="#29">WIDTH</a>]&gt;
+        + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    fri_params: FriParameters,
+    fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>,
     <span class="kw">pub </span>config: GoldilocksPermutationConfig&lt;P&gt;,
     <span class="kw">pub </span>perm: P,
 }
 
 <span class="kw">impl</span>&lt;P&gt; StarkEngine&lt;GoldilocksPermutationConfig&lt;P&gt;&gt; <span class="kw">for </span>GoldilocksPermutationEngine&lt;P&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Val; WIDTH]&gt;
-        + CryptographicPermutation&lt;[PackedVal; WIDTH]&gt;
-        + Clone,
+    </span>P: CryptographicPermutation&lt;[<a href="#32">Val</a>; <a href="#29">WIDTH</a>]&gt;
+        + CryptographicPermutation&lt;[<a href="#33">PackedVal</a>; <a href="#29">WIDTH</a>]&gt;
+        + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
     <span class="kw">fn </span>config(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>GoldilocksPermutationConfig&lt;P&gt; {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.config
+        <span class="kw-2">&amp;</span><a class="self" href="#73">self</a>.config
     }
 
     <span class="kw">fn </span>new_challenger(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Challenger&lt;P&gt; {
-        Challenger::new(<span class="self">self</span>.perm.clone())
+        Challenger::new(<a class="self" href="#77">self</a>.perm.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>())
     }
 }
 
 <span class="kw">impl</span>&lt;P&gt; StarkEngineWithHashInstrumentation&lt;GoldilocksPermutationConfig&lt;Instrumented&lt;P&gt;&gt;&gt;
     <span class="kw">for </span>GoldilocksPermutationEngine&lt;Instrumented&lt;P&gt;&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Val; WIDTH]&gt;
-        + CryptographicPermutation&lt;[PackedVal; WIDTH]&gt;
-        + Clone,
+    </span>P: CryptographicPermutation&lt;[<a href="#32">Val</a>; <a href="#29">WIDTH</a>]&gt;
+        + CryptographicPermutation&lt;[<a href="#33">PackedVal</a>; <a href="#29">WIDTH</a>]&gt;
+        + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
     <span class="kw">fn </span>clear_instruments(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="self">self</span>.perm.input_lens_by_type.lock().unwrap().clear();
+        <a class="self" href="#89">self</a>.perm.input_lens_by_type.<a href="https://doc.rust-lang.org/nightly/std/sync/mutex/struct.Mutex.html#method.lock">lock</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>().<a href="https://doc.rust-lang.org/nightly/std/collections/hash/map/struct.HashMap.html#method.clear">clear</a>();
     }
     <span class="kw">fn </span>stark_hash_statistics&lt;T&gt;(<span class="kw-2">&amp;</span><span class="self">self</span>, custom: T) -&gt; StarkHashStatistics&lt;T&gt; {
-        <span class="kw">let </span>counter = <span class="self">self</span>.perm.input_lens_by_type.lock().unwrap();
-        <span class="kw">let </span>permutations = counter.iter().fold(<span class="number">0</span>, |total, (name, lens)| {
+        <span class="kw">let </span>counter = <a class="self" href="#92">self</a>.perm.input_lens_by_type.<a href="https://doc.rust-lang.org/nightly/std/sync/mutex/struct.Mutex.html#method.lock">lock</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+        <span class="kw">let </span>permutations = <a href="#93">counter</a>.<a href="https://doc.rust-lang.org/nightly/std/collections/hash/map/struct.HashMap.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.fold">fold</a>(<span class="number">0</span>, |total, (name, lens)| {
             <span class="kw">if </span>name == type_name::&lt;[Val; WIDTH]&gt;() {
-                <span class="kw">let </span>count: usize = lens.iter().sum();
-                <span class="macro">println!</span>(<span class="string">"Permutation: {name}, Count: {count}"</span>);
-                total + count
+                <span class="kw">let </span>count: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <a href="#94">lens</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
+                <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.println.html">println!</a>(<span class="string">"Permutation: {name}, Count: {count}"</span>);
+                <a href="#94">total</a> + <a href="#96">count</a>
             } <span class="kw">else </span>{
-                <span class="macro">panic!</span>(<span class="string">"Permutation type not yet supported: {}"</span>, name);
+                <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"Permutation type not yet supported: {}"</span>, name);
             }
         });
 
-        StarkHashStatistics {
-            name: type_name::&lt;P&gt;().to_string(),
-            stats: HashStatistics { permutations },
-            fri_params: <span class="self">self</span>.fri_params,
-            custom,
+        <a href="instrument.rs.html#96-102">StarkHashStatistics</a> {
+            name: type_name::&lt;P&gt;().<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>(),
+            stats: <a href="instrument.rs.html#89-93">HashStatistics</a> { <a href="#94">permutations</a> },
+            fri_params: <a class="self" href="#92">self</a>.fri_params,
+            <a href="#92">custom</a>,
         }
     }
 }
 
 <span class="doccomment">/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-</span><span class="kw">pub fn </span>default_engine() -&gt; GoldilocksPoseidonEngine {
-    <span class="kw">let </span>perm = random_perm();
-    <span class="kw">let </span>fri_params = FriParameters::standard_fast();
-    engine_from_perm(perm, fri_params)
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/fn.default_engine.html">default_engine</a>() -&gt; <a href="#52">GoldilocksPoseidonEngine</a> {
+    <span class="kw">let </span>perm = <a href="#162-166">random_perm</a>();
+    <span class="kw">let </span>fri_params = <a href="fri_params.rs.html#21-23">FriParameters::standard_fast</a>();
+    <a href="#126-138">engine_from_perm</a>(<a href="#115">perm</a>, <a href="#116">fri_params</a>)
 }
 
 <span class="doccomment">/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-</span><span class="kw">pub fn </span>default_config(perm: <span class="kw-2">&amp;</span>Perm) -&gt; GoldilocksPoseidonConfig {
-    <span class="kw">let </span>fri_params = FriParameters::standard_fast();
-    config_from_perm(perm, fri_params)
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/fn.default_config.html">default_config</a>(perm: <span class="kw-2">&amp;</span><a href="#35">Perm</a>) -&gt; <a href="#51">GoldilocksPoseidonConfig</a> {
+    <span class="kw">let </span>fri_params = <a href="fri_params.rs.html#21-23">FriParameters::standard_fast</a>();
+    <a href="#140-160">config_from_perm</a>(<a href="#121">perm</a>, <a href="#122">fri_params</a>)
 }
 
-<span class="kw">pub fn </span>engine_from_perm&lt;P&gt;(perm: P, fri_params: FriParameters) -&gt; GoldilocksPermutationEngine&lt;P&gt;
+<span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/fn.engine_from_perm.html">engine_from_perm</a>&lt;P&gt;(perm: P, fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>) -&gt; GoldilocksPermutationEngine&lt;P&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Val; WIDTH]&gt;
-        + CryptographicPermutation&lt;[PackedVal; WIDTH]&gt;
-        + Clone,
+    </span>P: CryptographicPermutation&lt;[<a href="#32">Val</a>; <a href="#29">WIDTH</a>]&gt;
+        + CryptographicPermutation&lt;[<a href="#33">PackedVal</a>; <a href="#29">WIDTH</a>]&gt;
+        + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">let </span>config = config_from_perm(<span class="kw-2">&amp;</span>perm, fri_params);
-    GoldilocksPermutationEngine {
-        config,
-        perm,
-        fri_params,
+    <span class="kw">let </span>config = <a href="#140-160">config_from_perm</a>(<span class="kw-2">&amp;</span><a href="#126">perm</a>, <a href="#126">fri_params</a>);
+    <a href="#56-65">GoldilocksPermutationEngine</a> {
+        <a href="#132">config</a>,
+        <a href="#126">perm</a>,
+        <a href="#126">fri_params</a>,
     }
 }
 
-<span class="kw">pub fn </span>config_from_perm&lt;P&gt;(perm: <span class="kw-2">&amp;</span>P, fri_params: FriParameters) -&gt; GoldilocksPermutationConfig&lt;P&gt;
+<span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/fn.config_from_perm.html">config_from_perm</a>&lt;P&gt;(perm: <span class="kw-2">&amp;</span>P, fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>) -&gt; GoldilocksPermutationConfig&lt;P&gt;
 <span class="kw">where
-    </span>P: CryptographicPermutation&lt;[Val; WIDTH]&gt;
-        + CryptographicPermutation&lt;[PackedVal; WIDTH]&gt;
-        + Clone,
+    </span>P: CryptographicPermutation&lt;[<a href="#32">Val</a>; <a href="#29">WIDTH</a>]&gt;
+        + CryptographicPermutation&lt;[<a href="#33">PackedVal</a>; <a href="#29">WIDTH</a>]&gt;
+        + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">let </span>hash = Hash::new(perm.clone());
-    <span class="kw">let </span>compress = Compress::new(perm.clone());
-    <span class="kw">let </span>val_mmcs = ValMmcs::new(hash, compress);
-    <span class="kw">let </span>challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
-    <span class="kw">let </span>dft = Dft::default();
+    <span class="kw">let </span>hash = Hash::new(<a href="#140">perm</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>compress = Compress::new(<a href="#140">perm</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>val_mmcs = ValMmcs::new(<a href="#146">hash</a>, <a href="#147">compress</a>);
+    <span class="kw">let </span>challenge_mmcs = ChallengeMmcs::new(<a href="#148">val_mmcs</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>dft = <a href="https://doc.rust-lang.org/nightly/core/default/trait.Default.html#tymethod.default">Dft::default</a>();
     <span class="kw">let </span>fri_config = FriConfig {
-        log_blowup: fri_params.log_blowup,
-        num_queries: fri_params.num_queries,
-        proof_of_work_bits: fri_params.proof_of_work_bits,
-        mmcs: challenge_mmcs,
+        log_blowup: <a href="#140">fri_params</a>.log_blowup,
+        num_queries: <a href="#140">fri_params</a>.num_queries,
+        proof_of_work_bits: <a href="#140">fri_params</a>.proof_of_work_bits,
+        mmcs: <a href="#149">challenge_mmcs</a>,
     };
-    <span class="kw">let </span>pcs = Pcs::new(dft, val_mmcs, fri_config);
-    <span class="kw">let </span>rap_phase = RapPhase::new();
-    GoldilocksPermutationConfig::new(pcs, rap_phase)
+    <span class="kw">let </span>pcs = Pcs::new(<a href="#150">dft</a>, <a href="#148">val_mmcs</a>, <a href="#151">fri_config</a>);
+    <span class="kw">let </span>rap_phase = <a href="../../../openvm_stark_backend/interaction/stark_log_up/struct.StarkLogUpPhase.html#method.new">RapPhase::new</a>();
+    <a href="../../../openvm_stark_backend/config/struct.StarkConfig.html#method.new">GoldilocksPermutationConfig::new</a>(<a href="#157">pcs</a>, <a href="#158">rap_phase</a>)
 }
 
-<span class="kw">pub fn </span>random_perm() -&gt; Perm {
+<span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/fn.random_perm.html">random_perm</a>() -&gt; <a href="#35">Perm</a> {
     <span class="kw">let </span>seed = [<span class="number">42</span>; <span class="number">32</span>];
-    <span class="kw">let </span><span class="kw-2">mut </span>rng = StdRng::from_seed(seed);
-    Perm::new_from_rng(<span class="number">4</span>, <span class="number">22</span>, MdsMatrixGoldilocks, <span class="kw-2">&amp;mut </span>rng)
+    <span class="kw">let </span><span class="kw-2">mut </span>rng = <a href="https://rust-random.github.io/rand/rand_core/trait.SeedableRng.html#tymethod.from_seed">StdRng::from_seed</a>(<a href="#163">seed</a>);
+    Perm::new_from_rng(<span class="number">4</span>, <span class="number">22</span>, MdsMatrixGoldilocks, <span class="kw-2">&amp;mut </span><a href="#164">rng</a>)
 }
 
-<span class="kw">pub fn </span>random_instrumented_perm() -&gt; InstrPerm {
-    <span class="kw">let </span>perm = random_perm();
-    Instrumented::new(perm)
+<span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/goldilocks_poseidon/fn.random_instrumented_perm.html">random_instrumented_perm</a>() -&gt; <a href="#36">InstrPerm</a> {
+    <span class="kw">let </span>perm = <a href="#162-166">random_perm</a>();
+    <a href="instrument.rs.html#26-32">Instrumented::new</a>(<a href="#169">perm</a>)
 }
 </code></pre></div></section></main></body></html>

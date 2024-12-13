@@ -235,23 +235,23 @@
 <span class="kw">use </span>p3_field::AbstractField;
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 
-<span class="kw">use super</span>::{PartitionedAirBuilder, ViewPair};
+<span class="kw">use super</span>::{<a href="../mod.rs.html#14-19">PartitionedAirBuilder</a>, <a href="../mod.rs.html#10">ViewPair</a>};
 <span class="kw">use crate</span>::{
-    config::{StarkGenericConfig, Val},
+    config::{<a href="../../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../../config.rs.html#38-41">Val</a>},
     interaction::{
-        rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, InteractionType,
-        RapPhaseSeqKind,
+        <a href="../../interaction/rap.rs.html#13-17">rap::InteractionPhaseAirBuilder</a>, <a href="../../interaction/mod.rs.html#28-33">Interaction</a>, <a href="../../interaction/mod.rs.html#44-79">InteractionBuilder</a>, <a href="../../interaction/mod.rs.html#22-25">InteractionType</a>,
+        <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
     },
-    rap::PermutationAirBuilderWithExposedValues,
+    <a href="../../rap.rs.html#60-62">rap::PermutationAirBuilderWithExposedValues</a>,
 };
 
-<span class="kw">pub mod </span>check_constraints;
+<span class="kw">pub mod </span><a href="check_constraints.rs.html#1-166">check_constraints</a>;
 
 <span class="doccomment">/// An `AirBuilder` which asserts that each constraint is zero, allowing any failed constraints to
 /// be detected early.
-</span><span class="kw">pub struct </span>DebugConstraintBuilder&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
-    <span class="kw">pub </span>air_name: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str,
-    <span class="kw">pub </span>row_index: usize,
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/air_builders/debug/struct.DebugConstraintBuilder.html">DebugConstraintBuilder</a>&lt;<span class="lifetime">'a</span>, SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
+    <span class="kw">pub </span>air_name: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><a href="https://doc.rust-lang.org/nightly/std/primitive.str.html">str</a>,
+    <span class="kw">pub </span>row_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="kw">pub </span>preprocessed: ViewPair&lt;<span class="lifetime">'a</span>, Val&lt;SC&gt;&gt;,
     <span class="kw">pub </span>partitioned_main: Vec&lt;ViewPair&lt;<span class="lifetime">'a</span>, Val&lt;SC&gt;&gt;&gt;,
     <span class="kw">pub </span>after_challenge: Vec&lt;ViewPair&lt;<span class="lifetime">'a</span>, SC::Challenge&gt;&gt;,
@@ -261,13 +261,13 @@
     <span class="kw">pub </span>is_transition: Val&lt;SC&gt;,
     <span class="kw">pub </span>public_values: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[Val&lt;SC&gt;],
     <span class="kw">pub </span>exposed_values_after_challenge: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[Vec&lt;SC::Challenge&gt;],
-    <span class="kw">pub </span>rap_phase_seq_kind: RapPhaseSeqKind,
-    <span class="kw">pub </span>has_common_main: bool,
+    <span class="kw">pub </span>rap_phase_seq_kind: <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
+    <span class="kw">pub </span>has_common_main: <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>,
 }
 
 <span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC&gt; AirBuilder <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'a</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">type </span>F = Val&lt;SC&gt;;
     <span class="kw">type </span>Expr = Val&lt;SC&gt;;
@@ -277,30 +277,30 @@
     <span class="doccomment">/// It is difficult to horizontally concatenate matrices when the main trace is partitioned, so we disable this method in that case.
     </span><span class="kw">fn </span>main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::M {
         <span class="kw">if </span><span class="self">self</span>.partitioned_main.len() == <span class="number">1 </span>{
-            <span class="self">self</span>.partitioned_main[<span class="number">0</span>]
+            <a class="self" href="#47">self</a>.partitioned_main[<span class="number">0</span>]
         } <span class="kw">else </span>{
-            <span class="macro">panic!</span>(<span class="string">"Main trace is either empty or partitioned. This function should not be used."</span>)
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"Main trace is either empty or partitioned. This function should not be used."</span>)
         }
     }
 
     <span class="kw">fn </span>is_first_row(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Expr {
-        <span class="self">self</span>.is_first_row
+        <a class="self" href="#55">self</a>.is_first_row
     }
 
     <span class="kw">fn </span>is_last_row(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Expr {
-        <span class="self">self</span>.is_last_row
+        <a class="self" href="#59">self</a>.is_last_row
     }
 
-    <span class="kw">fn </span>is_transition_window(<span class="kw-2">&amp;</span><span class="self">self</span>, size: usize) -&gt; <span class="self">Self</span>::Expr {
+    <span class="kw">fn </span>is_transition_window(<span class="kw-2">&amp;</span><span class="self">self</span>, size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self</span>::Expr {
         <span class="kw">if </span>size == <span class="number">2 </span>{
-            <span class="self">self</span>.is_transition
+            <a class="self" href="#63">self</a>.is_transition
         } <span class="kw">else </span>{
-            <span class="macro">panic!</span>(<span class="string">"only supports a window size of 2"</span>)
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"only supports a window size of 2"</span>)
         }
     }
 
     <span class="kw">fn </span>assert_zero&lt;I: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(<span class="kw-2">&amp;mut </span><span class="self">self</span>, x: I) {
-        <span class="macro">assert_eq!</span>(
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
             x.into(),
             Val::&lt;SC&gt;::ZERO,
             <span class="string">"constraints had nonzero value on air {},row {}"</span>,
@@ -310,9 +310,9 @@
     }
 
     <span class="kw">fn </span>assert_eq&lt;I1: Into&lt;<span class="self">Self</span>::Expr&gt;, I2: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(<span class="kw-2">&amp;mut </span><span class="self">self</span>, x: I1, y: I2) {
-        <span class="kw">let </span>x = x.into();
-        <span class="kw">let </span>y = y.into();
-        <span class="macro">assert_eq!</span>(
+        <span class="kw">let </span>x = <a href="#81">x</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <span class="kw">let </span>y = <a href="#81">y</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
             x, y,
             <span class="string">"values didn't match on air {}, row {}: {} != {}"</span>,
             <span class="self">self</span>.air_name, <span class="self">self</span>.row_index, x, y
@@ -322,16 +322,16 @@
 
 <span class="kw">impl</span>&lt;SC&gt; PairBuilder <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>preprocessed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::M {
-        <span class="self">self</span>.preprocessed
+        <a class="self" href="#96">self</a>.preprocessed
     }
 }
 
 <span class="kw">impl</span>&lt;SC&gt; ExtensionBuilder <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">type </span>EF = SC::Challenge;
     <span class="kw">type </span>ExprEF = SC::Challenge;
@@ -341,7 +341,7 @@
     <span class="kw">where
         </span>I: Into&lt;<span class="self">Self</span>::ExprEF&gt;,
     {
-        <span class="macro">assert_eq!</span>(
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
             x.into(),
             SC::Challenge::ZERO,
             <span class="string">"constraints had nonzero value on row {}"</span>,
@@ -354,9 +354,9 @@
         </span>I1: Into&lt;<span class="self">Self</span>::ExprEF&gt;,
         I2: Into&lt;<span class="self">Self</span>::ExprEF&gt;,
     {
-        <span class="kw">let </span>x = x.into();
-        <span class="kw">let </span>y = y.into();
-        <span class="macro">assert_eq!</span>(
+        <span class="kw">let </span>x = <a href="#121">x</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <span class="kw">let </span>y = <a href="#121">y</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
             x, y,
             <span class="string">"values didn't match on air {}, row {}: {} != {}"</span>,
             <span class="self">self</span>.air_name, <span class="self">self</span>.row_index, x, y
@@ -366,81 +366,81 @@
 
 <span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC&gt; PermutationAirBuilder <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'a</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">type </span>MP = ViewPair&lt;<span class="lifetime">'a</span>, SC::Challenge&gt;;
 
     <span class="kw">type </span>RandomVar = SC::Challenge;
 
     <span class="kw">fn </span>permutation(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::MP {
-        <span class="kw-2">*</span><span class="self">self
+        <span class="kw-2">*</span><span class="self"><a href="#144">self</a>
             </span>.after_challenge
-            .first()
-            .expect(<span class="string">"Challenge phase not supported"</span>)
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
     }
 
     <span class="kw">fn </span>permutation_randomness(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::EF] {
-        <span class="self">self</span>.challenges
-            .first()
-            .expect(<span class="string">"Challenge phase not supported"</span>)
+        <a class="self" href="#151">self</a>.challenges
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
     }
 }
 
 <span class="kw">impl</span>&lt;SC&gt; AirBuilderWithPublicValues <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">type </span>PublicVar = Val&lt;SC&gt;;
 
     <span class="kw">fn </span>public_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::F] {
-        <span class="self">self</span>.public_values
+        <a class="self" href="#164">self</a>.public_values
     }
 }
 
-<span class="kw">impl</span>&lt;SC&gt; PermutationAirBuilderWithExposedValues <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
+<span class="kw">impl</span>&lt;SC&gt; <a href="../../rap.rs.html#60-62">PermutationAirBuilderWithExposedValues</a> <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>permutation_exposed_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::EF] {
-        <span class="self">self</span>.exposed_values_after_challenge
-            .first()
-            .expect(<span class="string">"Challenge phase not supported"</span>)
+        <a class="self" href="#173">self</a>.exposed_values_after_challenge
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
     }
 }
 
-<span class="kw">impl</span>&lt;SC&gt; PartitionedAirBuilder <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
+<span class="kw">impl</span>&lt;SC&gt; <a href="../mod.rs.html#14-19">PartitionedAirBuilder</a> <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>cached_mains(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::M] {
-        <span class="kw">let </span><span class="kw-2">mut </span>num_cached_mains = <span class="self">self</span>.partitioned_main.len();
+        <span class="kw">let </span><span class="kw-2">mut </span>num_cached_mains = <a class="self" href="#184">self</a>.partitioned_main.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
         <span class="kw">if </span><span class="self">self</span>.has_common_main {
-            num_cached_mains -= <span class="number">1</span>;
+            <a href="#185">num_cached_mains</a> -= <span class="number">1</span>;
         }
-        <span class="kw-2">&amp;</span><span class="self">self</span>.partitioned_main[..num_cached_mains]
+        <span class="kw-2">&amp;</span><a class="self" href="#184">self</a>.partitioned_main[..<a href="#185">num_cached_mains</a>]
     }
     <span class="kw">fn </span>common_main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::M {
-        <span class="macro">assert!</span>(<span class="self">self</span>.has_common_main, <span class="string">"AIR doesn't have a common main trace"</span>);
-        <span class="self">self</span>.partitioned_main.last().unwrap()
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(<span class="self">self</span>.has_common_main, <span class="string">"AIR doesn't have a common main trace"</span>);
+        <a class="self" href="#191">self</a>.partitioned_main.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>()
     }
 }
 
 <span class="comment">// No-op implementation
-</span><span class="kw">impl</span>&lt;SC&gt; InteractionBuilder <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
+</span><span class="kw">impl</span>&lt;SC&gt; <a href="../../interaction/mod.rs.html#44-79">InteractionBuilder</a> <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>push_interaction&lt;E: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        _bus_index: usize,
+        _bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
         _fields: <span class="kw">impl </span>IntoIterator&lt;Item = E&gt;,
         _count: <span class="kw">impl </span>Into&lt;<span class="self">Self</span>::Expr&gt;,
-        _interaction_type: InteractionType,
+        _interaction_type: <a href="../../interaction/mod.rs.html#22-25">InteractionType</a>,
     ) {
         <span class="comment">// no-op, interactions are debugged elsewhere
     </span>}
 
-    <span class="kw">fn </span>num_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+    <span class="kw">fn </span>num_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="number">0
     </span>}
 
@@ -449,15 +449,15 @@
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; InteractionPhaseAirBuilder <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; <a href="../../interaction/rap.rs.html#13-17">InteractionPhaseAirBuilder</a> <span class="kw">for </span>DebugConstraintBuilder&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="kw">fn </span>finalize_interactions(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {}
 
-    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="number">0
     </span>}
 
-    <span class="kw">fn </span>rap_phase_seq_kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RapPhaseSeqKind {
-        <span class="self">self</span>.rap_phase_seq_kind
+    <span class="kw">fn </span>rap_phase_seq_kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a> {
+        <a class="self" href="#228">self</a>.rap_phase_seq_kind
     }
 }
 </code></pre></div></section></main></body></html>

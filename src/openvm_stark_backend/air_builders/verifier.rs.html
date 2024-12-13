@@ -126,8 +126,8 @@
 <a href="#125" id="125">125</a>
 <a href="#126" id="126">126</a>
 <a href="#127" id="127">127</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
-    marker::PhantomData,
-    ops::{AddAssign, MulAssign},
+    <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">marker::PhantomData</a>,
+    ops::{<a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.AddAssign.html">AddAssign</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.MulAssign.html">MulAssign</a>},
 };
 
 <span class="kw">use </span>p3_field::{AbstractField, ExtensionField, Field};
@@ -136,14 +136,14 @@
 
 <span class="kw">use super</span>::{
     symbolic::{
-        symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
-        symbolic_variable::{Entry, SymbolicVariable},
+        symbolic_expression::{<a href="symbolic/symbolic_expression.rs.html#309-323">SymbolicEvaluator</a>, <a href="symbolic/symbolic_expression.rs.html#18-43">SymbolicExpression</a>},
+        symbolic_variable::{<a href="symbolic/symbolic_variable.rs.html#14-29">Entry</a>, <a href="symbolic/symbolic_variable.rs.html#59-63">SymbolicVariable</a>},
     },
-    ViewPair,
+    <a href="mod.rs.html#10">ViewPair</a>,
 };
-<span class="kw">use </span><span class="kw">crate</span>::config::{StarkGenericConfig, Val};
+<span class="kw">use </span><span class="kw">crate</span>::config::{<a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>};
 
-<span class="kw">pub type </span>VerifierConstraintFolder&lt;<span class="lifetime">'a</span>, SC&gt; = GenericVerifierConstraintFolder&lt;
+<span class="kw">pub type </span><a href="../../../openvm_stark_backend/air_builders/verifier/type.VerifierConstraintFolder.html">VerifierConstraintFolder</a>&lt;<span class="lifetime">'a</span>, SC&gt; = GenericVerifierConstraintFolder&lt;
     <span class="lifetime">'a</span>,
     Val&lt;SC&gt;,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
@@ -155,7 +155,7 @@
 </span><span class="doccomment">/// A folder for verifier constraints with generic types.
 ///
 /// `Var` is still a challenge type because this is a verifier.
-</span><span class="kw">pub struct </span>GenericVerifierConstraintFolder&lt;<span class="lifetime">'a</span>, F, EF, PubVar, Var, Expr&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/air_builders/verifier/struct.GenericVerifierConstraintFolder.html">GenericVerifierConstraintFolder</a>&lt;<span class="lifetime">'a</span>, F, EF, PubVar, Var, Expr&gt; {
     <span class="kw">pub </span>preprocessed: ViewPair&lt;<span class="lifetime">'a</span>, Var&gt;,
     <span class="kw">pub </span>partitioned_main: Vec&lt;ViewPair&lt;<span class="lifetime">'a</span>, Var&gt;&gt;,
     <span class="kw">pub </span>after_challenge: Vec&lt;ViewPair&lt;<span class="lifetime">'a</span>, Var&gt;&gt;,
@@ -174,9 +174,9 @@
 <span class="kw">where
     </span>F: Field,
     EF: ExtensionField&lt;F&gt;,
-    Expr: AbstractField + From&lt;F&gt; + MulAssign&lt;Var&gt; + AddAssign&lt;Var&gt; + Send + Sync,
-    Var: Into&lt;Expr&gt; + Copy + Send + Sync,
-    PubVar: Into&lt;Expr&gt; + Copy + Send + Sync,
+    Expr: AbstractField + From&lt;F&gt; + MulAssign&lt;Var&gt; + AddAssign&lt;Var&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    Var: Into&lt;Expr&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    PubVar: Into&lt;Expr&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
 {
     <span class="kw">pub fn </span>eval_constraints(<span class="kw-2">&amp;mut </span><span class="self">self</span>, constraints: <span class="kw-2">&amp;</span>[SymbolicExpression&lt;F&gt;]) {
         <span class="kw">for </span>constraint <span class="kw">in </span>constraints {
@@ -186,9 +186,9 @@
     }
 
     <span class="kw">pub fn </span>assert_zero(<span class="kw-2">&amp;mut </span><span class="self">self</span>, x: <span class="kw">impl </span>Into&lt;Expr&gt;) {
-        <span class="kw">let </span>x = x.into();
-        <span class="self">self</span>.accumulator <span class="kw-2">*</span>= <span class="self">self</span>.alpha;
-        <span class="self">self</span>.accumulator += x;
+        <span class="kw">let </span>x = <a href="#61">x</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <a class="self" href="#61">self</a>.accumulator <span class="kw-2">*</span>= <a class="self" href="#61">self</a>.alpha;
+        <a class="self" href="#61">self</a>.accumulator += <a href="#62">x</a>;
     }
 }
 
@@ -197,58 +197,58 @@
 <span class="kw">where
     </span>F: Field,
     EF: ExtensionField&lt;F&gt;,
-    Expr: AbstractField + From&lt;F&gt; + Send + Sync,
-    Var: Into&lt;Expr&gt; + Copy + Send + Sync,
-    PubVar: Into&lt;Expr&gt; + Copy + Send + Sync,
+    Expr: AbstractField + From&lt;F&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    Var: Into&lt;Expr&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    PubVar: Into&lt;Expr&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
 {
     <span class="kw">fn </span>eval_var(<span class="kw-2">&amp;</span><span class="self">self</span>, symbolic_var: SymbolicVariable&lt;F&gt;) -&gt; Expr {
-        <span class="kw">let </span>index = symbolic_var.index;
-        <span class="kw">match </span>symbolic_var.entry {
-            Entry::Preprocessed { offset } =&gt; <span class="self">self</span>.preprocessed.get(offset, index).into(),
-            Entry::Main { part_index, offset } =&gt; {
-                <span class="self">self</span>.partitioned_main[part_index].get(offset, index).into()
+        <span class="kw">let </span>index = <a href="#77">symbolic_var</a>.index;
+        <span class="kw">match </span><a href="#77">symbolic_var</a>.entry {
+            <a href="symbolic/symbolic_variable.rs.html#15-17">Entry::Preprocessed</a> { offset } =&gt; <a class="self" href="#77">self</a>.preprocessed.get(<a href="#80">offset</a>, <a href="#78">index</a>).<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="symbolic/symbolic_variable.rs.html#19-22">Entry::Main</a> { part_index, offset } =&gt; {
+                <a class="self" href="#77">self</a>.partitioned_main[<a href="#81">part_index</a>].get(<a href="#81">offset</a>, <a href="#78">index</a>).<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>()
             }
-            Entry::Public =&gt; <span class="self">self</span>.public_values[index].into(),
-            Entry::Permutation { offset } =&gt; <span class="self">self
+            <a href="symbolic/symbolic_variable.rs.html#26">Entry::Public</a> =&gt; <a class="self" href="#77">self</a>.public_values[<a href="#78">index</a>].<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="symbolic/symbolic_variable.rs.html#23-25">Entry::Permutation</a> { offset } =&gt; <span class="self"><a href="#77">self</a>
                 </span>.after_challenge
-                .first()
-                .expect(<span class="string">"Challenge phase not supported"</span>)
-                .get(offset, index)
-                .into(),
-            Entry::Challenge =&gt; <span class="self">self
+                .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
+                .get(<a href="#85">offset</a>, <a href="#78">index</a>)
+                .<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="symbolic/symbolic_variable.rs.html#27">Entry::Challenge</a> =&gt; <span class="self"><a href="#77">self</a>
                 </span>.challenges
-                .first()
-                .expect(<span class="string">"Challenge phase not supported"</span>)[index]
-                .into(),
-            Entry::Exposed =&gt; <span class="self">self
+                .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)[<a href="#78">index</a>]
+                .<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="symbolic/symbolic_variable.rs.html#28">Entry::Exposed</a> =&gt; <span class="self"><a href="#77">self</a>
                 </span>.exposed_values_after_challenge
-                .first()
-                .expect(<span class="string">"Challenge phase not supported"</span>)[index]
-                .into(),
+                .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)[<a href="#78">index</a>]
+                .<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
         }
     }
 
     <span class="kw">fn </span>eval_expr(<span class="kw-2">&amp;</span><span class="self">self</span>, symbolic_expr: <span class="kw-2">&amp;</span>SymbolicExpression&lt;F&gt;) -&gt; Expr {
         <span class="comment">// TODO[jpw] don't use recursion to avoid stack overflow
-        </span><span class="kw">match </span>symbolic_expr {
-            SymbolicExpression::Variable(var) =&gt; <span class="self">self</span>.eval_var(<span class="kw-2">*</span>var),
-            SymbolicExpression::Constant(c) =&gt; (<span class="kw-2">*</span>c).into(),
-            SymbolicExpression::Add { x, y, .. } =&gt; {
-                <span class="kw">let </span>(x, y) = join(|| <span class="self">self</span>.eval_expr(x), || <span class="self">self</span>.eval_expr(y));
-                x + y
+        </span><span class="kw">match </span><a href="#104">symbolic_expr</a> {
+            <a href="symbolic/symbolic_expression.rs.html#19">SymbolicExpression::Variable</a>(var) =&gt; <a class="self" href="#104">self</a>.<a href="symbolic/symbolic_expression.rs.html#310">eval_var</a>(<span class="kw-2">*</span><a href="#107">var</a>),
+            <a href="symbolic/symbolic_expression.rs.html#23">SymbolicExpression::Constant</a>(c) =&gt; (<span class="kw-2">*</span><a href="#108">c</a>).<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="symbolic/symbolic_expression.rs.html#24-28">SymbolicExpression::Add</a> { x, y, .. } =&gt; {
+                <span class="kw">let </span>(x, y) = join(|| <a class="self" href="#104">self</a>.<a href="symbolic/symbolic_expression.rs.html#312-322">eval_expr</a>(<a href="#109">x</a>), || <a class="self" href="#104">self</a>.<a href="symbolic/symbolic_expression.rs.html#312-322">eval_expr</a>(<a href="#109">y</a>));
+                <a href="#110">x</a> + <a href="#110">y</a>
             }
-            SymbolicExpression::Sub { x, y, .. } =&gt; {
-                <span class="kw">let </span>(x, y) = join(|| <span class="self">self</span>.eval_expr(x), || <span class="self">self</span>.eval_expr(y));
-                x - y
+            <a href="symbolic/symbolic_expression.rs.html#29-33">SymbolicExpression::Sub</a> { x, y, .. } =&gt; {
+                <span class="kw">let </span>(x, y) = join(|| <a class="self" href="#104">self</a>.<a href="symbolic/symbolic_expression.rs.html#312-322">eval_expr</a>(<a href="#113">x</a>), || <a class="self" href="#104">self</a>.<a href="symbolic/symbolic_expression.rs.html#312-322">eval_expr</a>(<a href="#113">y</a>));
+                <a href="#114">x</a> - <a href="#114">y</a>
             }
-            SymbolicExpression::Neg { x, .. } =&gt; -<span class="self">self</span>.eval_expr(x),
-            SymbolicExpression::Mul { x, y, .. } =&gt; {
-                <span class="kw">let </span>(x, y) = join(|| <span class="self">self</span>.eval_expr(x), || <span class="self">self</span>.eval_expr(y));
-                x * y
+            <a href="symbolic/symbolic_expression.rs.html#34-37">SymbolicExpression::Neg</a> { x, .. } =&gt; -<a class="self" href="#104">self</a>.<a href="symbolic/symbolic_expression.rs.html#312-322">eval_expr</a>(<a href="#117">x</a>),
+            <a href="symbolic/symbolic_expression.rs.html#38-42">SymbolicExpression::Mul</a> { x, y, .. } =&gt; {
+                <span class="kw">let </span>(x, y) = join(|| <a class="self" href="#104">self</a>.<a href="symbolic/symbolic_expression.rs.html#312-322">eval_expr</a>(<a href="#118">x</a>), || <a class="self" href="#104">self</a>.<a href="symbolic/symbolic_expression.rs.html#312-322">eval_expr</a>(<a href="#118">y</a>));
+                <a href="#119">x</a> * <a href="#119">y</a>
             }
-            SymbolicExpression::IsFirstRow =&gt; <span class="self">self</span>.is_first_row.into(),
-            SymbolicExpression::IsLastRow =&gt; <span class="self">self</span>.is_last_row.into(),
-            SymbolicExpression::IsTransition =&gt; <span class="self">self</span>.is_transition.into(),
+            <a href="symbolic/symbolic_expression.rs.html#20">SymbolicExpression::IsFirstRow</a> =&gt; <a class="self" href="#104">self</a>.is_first_row.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="symbolic/symbolic_expression.rs.html#21">SymbolicExpression::IsLastRow</a> =&gt; <a class="self" href="#104">self</a>.is_last_row.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <a href="symbolic/symbolic_expression.rs.html#22">SymbolicExpression::IsTransition</a> =&gt; <a class="self" href="#104">self</a>.is_transition.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
         }
     }
 }

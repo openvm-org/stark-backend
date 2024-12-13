@@ -543,69 +543,60 @@
 <a href="#542" id="542">542</a>
 <a href="#543" id="543">543</a>
 <a href="#544" id="544">544</a>
-<a href="#545" id="545">545</a>
-<a href="#546" id="546">546</a>
-<a href="#547" id="547">547</a>
-<a href="#548" id="548">548</a>
-<a href="#549" id="549">549</a>
-<a href="#550" id="550">550</a>
-<a href="#551" id="551">551</a>
-<a href="#552" id="552">552</a>
-<a href="#553" id="553">553</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{array, borrow::Borrow, marker::PhantomData};
+<a href="#545" id="545">545</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{<a href="https://doc.rust-lang.org/nightly/core/array/index.html">array</a>, <a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html">borrow::Borrow</a>, <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">marker::PhantomData</a>};
 
 <span class="kw">use </span>itertools::{izip, Itertools};
 <span class="kw">use </span>p3_air::ExtensionBuilder;
 <span class="kw">use </span>p3_challenger::{CanObserve, FieldChallenger};
-<span class="kw">use </span>p3_commit::PolynomialSpace;
 <span class="kw">use </span>p3_field::{AbstractField, ExtensionField, Field};
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrix, Matrix};
 <span class="kw">use </span>p3_maybe_rayon::prelude::<span class="kw-2">*</span>;
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 <span class="kw">use </span>thiserror::Error;
 
 <span class="kw">use crate</span>::{
     air_builders::symbolic::{
-        symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
-        SymbolicConstraints,
+        symbolic_expression::{<a href="../air_builders/symbolic/symbolic_expression.rs.html#309-323">SymbolicEvaluator</a>, <a href="../air_builders/symbolic/symbolic_expression.rs.html#18-43">SymbolicExpression</a>},
+        <a href="../air_builders/symbolic/mod.rs.html#34-39">SymbolicConstraints</a>,
     },
     interaction::{
-        trace::Evaluator,
-        utils::{generate_betas, generate_rlc_elements},
-        HasInteractionChunkSize, Interaction, InteractionBuilder, InteractionType,
-        RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
+        <a href="trace.rs.html#9-15">trace::Evaluator</a>,
+        utils::{<a href="utils.rs.html#26-37">generate_betas</a>, <a href="utils.rs.html#7-22">generate_rlc_elements</a>},
+        <a href="mod.rs.html#132-134">HasInteractionChunkSize</a>, <a href="mod.rs.html#28-33">Interaction</a>, <a href="mod.rs.html#44-79">InteractionBuilder</a>, <a href="mod.rs.html#22-25">InteractionType</a>,
+        <a href="mod.rs.html#81-90">RapPhaseProverData</a>, <a href="mod.rs.html#140-186">RapPhaseSeq</a>, <a href="mod.rs.html#112-117">RapPhaseSeqKind</a>, <a href="mod.rs.html#92-95">RapPhaseVerifierData</a>,
     },
-    parizip,
-    prover::PairTraceView,
-    rap::PermutationAirBuilderWithExposedValues,
+    <a href="../utils.rs.html#44-51">parizip</a>,
+    <a href="../prover/trace.rs.html#171-175">prover::PairTraceView</a>,
+    <a href="../rap.rs.html#60-62">rap::PermutationAirBuilderWithExposedValues</a>,
 };
 
 <span class="attr">#[derive(Default)]
-</span><span class="kw">pub struct </span>StarkLogUpPhase&lt;F, Challenge, Challenger&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/interaction/stark_log_up/struct.StarkLogUpPhase.html">StarkLogUpPhase</a>&lt;F, Challenge, Challenger&gt; {
     _marker: PhantomData&lt;(F, Challenge, Challenger)&gt;,
 }
 
 <span class="kw">impl</span>&lt;F, Challenge, Challenger&gt; StarkLogUpPhase&lt;F, Challenge, Challenger&gt; {
     <span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            _marker: PhantomData,
+            _marker: <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">PhantomData</a>,
         }
     }
 }
 
 <span class="attr">#[derive(Error, Debug)]
-</span><span class="kw">pub enum </span>StarkLogUpError {
+</span><span class="kw">pub enum </span><a href="#42-45">StarkLogUpError</a> {
     <span class="attr">#[error(<span class="string">"non-zero cumulative sum"</span>)]
     </span>NonZeroCumulativeSum,
 }
 
 <span class="attr">#[derive(Clone, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>StarkLogUpProvingKey {
-    chunk_size: usize,
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/interaction/stark_log_up/struct.StarkLogUpProvingKey.html">StarkLogUpProvingKey</a> {
+    chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
-<span class="kw">impl </span>HasInteractionChunkSize <span class="kw">for </span>StarkLogUpProvingKey {
-    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.chunk_size
+<span class="kw">impl </span><a href="mod.rs.html#132-134">HasInteractionChunkSize</a> <span class="kw">for </span><a href="#48-50">StarkLogUpProvingKey</a> {
+    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#53">self</a>.chunk_size
     }
 }
 
@@ -617,26 +608,26 @@
     Challenger: FieldChallenger&lt;F&gt;,
 {
     <span class="kw">type </span>PartialProof = ();
-    <span class="kw">type </span>ProvingKey = StarkLogUpProvingKey;
-    <span class="kw">type </span>Error = StarkLogUpError;
-    <span class="kw">const </span>KIND: RapPhaseSeqKind = RapPhaseSeqKind::StarkLogUp;
+    <span class="kw">type </span>ProvingKey = <a href="#48-50">StarkLogUpProvingKey</a>;
+    <span class="kw">type </span>Error = <a href="#42-45">StarkLogUpError</a>;
+    <span class="kw">const </span>ID: <a href="mod.rs.html#112-117">RapPhaseSeqKind</a> = <a href="mod.rs.html#116">RapPhaseSeqKind::StarkLogUp</a>;
 
     <span class="kw">fn </span>generate_pk_per_air(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         symbolic_constraints_per_air: Vec&lt;SymbolicConstraints&lt;F&gt;&gt;,
     ) -&gt; Vec&lt;<span class="self">Self</span>::ProvingKey&gt; {
-        <span class="kw">let </span>global_max_constraint_degree = symbolic_constraints_per_air
-            .iter()
-            .map(|constraints| constraints.max_constraint_degree())
-            .max()
-            .unwrap_or(<span class="number">0</span>);
+        <span class="kw">let </span>global_max_constraint_degree = <a href="#72">symbolic_constraints_per_air</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|constraints| <a href="#76">constraints</a>.<a href="../air_builders/symbolic/mod.rs.html#42-44">max_constraint_degree</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>);
 
-        symbolic_constraints_per_air
-            .iter()
-            .map(|constraints| {
+        <a href="#72">symbolic_constraints_per_air</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|constraints| {
                 <span class="kw">let </span>chunk_size =
-                    find_interaction_chunk_size(constraints, global_max_constraint_degree);
-                StarkLogUpProvingKey { chunk_size }
+                    <a href="#529-545">find_interaction_chunk_size</a>(<a href="#82">constraints</a>, <a href="#74">global_max_constraint_degree</a>);
+                <a href="#48-50">StarkLogUpProvingKey</a> { <a href="#83">chunk_size</a> }
             })
             .collect_vec()
     }
@@ -648,62 +639,55 @@
         constraints_per_air: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>SymbolicConstraints&lt;F&gt;],
         trace_view_per_air: <span class="kw-2">&amp;</span>[PairTraceView&lt;<span class="lifetime">'_</span>, F&gt;],
     ) -&gt; <span class="prelude-ty">Option</span>&lt;(<span class="self">Self</span>::PartialProof, RapPhaseProverData&lt;Challenge&gt;)&gt; {
-        <span class="kw">let </span>has_any_interactions = constraints_per_air
-            .iter()
-            .any(|constraints| !constraints.interactions.is_empty());
+        <span class="kw">let </span>has_any_interactions = <a href="#94">constraints_per_air</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.any">any</a>(|constraints| !<a href="#99">constraints</a>.interactions.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.is_empty">is_empty</a>());
 
         <span class="kw">if </span>!has_any_interactions {
             <span class="kw">return </span><span class="prelude-val">None</span>;
         }
 
-        <span class="kw">let </span>challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
-            array::from_fn(|<span class="kw">_</span>| challenger.sample_ext_element::&lt;Challenge&gt;());
+        <span class="kw">let </span>challenges: [Challenge; <a href="#211">STARK_LU_NUM_CHALLENGES</a>] =
+            <a href="https://doc.rust-lang.org/nightly/core/array/fn.from_fn.html">array::from_fn</a>(|<span class="kw">_</span>| <a href="#92">challenger</a>.sample_ext_element::&lt;Challenge&gt;());
 
         <span class="kw">let </span>after_challenge_trace_per_air = <span class="macro">tracing::info_span!</span>(<span class="string">"generate permutation traces"</span>)
             .in_scope(|| {
-                <span class="self">Self</span>::generate_after_challenge_traces_per_air(
-                    <span class="kw-2">&amp;</span>challenges,
-                    constraints_per_air,
-                    rap_pk_per_air,
-                    trace_view_per_air,
+                <a href="#221-237"><span class="self">Self</span>::generate_after_challenge_traces_per_air</a>(
+                    <span class="kw-2">&amp;</span><a href="#105">challenges</a>,
+                    <a href="#94">constraints_per_air</a>,
+                    <a href="#93">rap_pk_per_air</a>,
+                    <a href="#95">trace_view_per_air</a>,
                 )
             });
-        <span class="kw">let </span>cumulative_sum_per_air = <span class="self">Self</span>::extract_cumulative_sums(<span class="kw-2">&amp;</span>after_challenge_trace_per_air);
+        <span class="kw">let </span>cumulative_sum_per_air = <a href="#239-253"><span class="self">Self</span>::extract_cumulative_sums</a>(<span class="kw-2">&amp;</span><a href="#108">after_challenge_trace_per_air</a>);
 
         <span class="comment">// Challenger needs to observe what is exposed (cumulative_sums)
         </span><span class="kw">for </span>cumulative_sum <span class="kw">in </span>cumulative_sum_per_air.iter().flatten() {
             challenger.observe_slice(cumulative_sum.as_base_slice());
         }
 
-        <span class="kw">let </span>exposed_values_per_air = cumulative_sum_per_air
-            .iter()
-            .map(|csum| csum.map(|csum| <span class="macro">vec!</span>[csum]))
+        <span class="kw">let </span>exposed_values_per_air = <a href="#117">cumulative_sum_per_air</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|csum| <a href="#126">csum</a>.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|csum| <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[csum]))
             .collect_vec();
 
         <span class="prelude-val">Some</span>((
             (),
-            RapPhaseProverData {
-                challenges: challenges.to_vec(),
-                after_challenge_trace_per_air,
-                exposed_values_per_air,
+            <a href="mod.rs.html#81-90">RapPhaseProverData</a> {
+                challenges: <a href="#105">challenges</a>.<a href="https://doc.rust-lang.org/nightly/alloc/foreigntype.slice.html#method.to_vec">to_vec</a>(),
+                <a href="#108">after_challenge_trace_per_air</a>,
+                <a href="#124">exposed_values_per_air</a>,
             },
         ))
     }
 
-    <span class="kw">fn </span>extra_opening_points&lt;Domain: PolynomialSpace&lt;Val = F&gt;&gt;(
-        <span class="kw-2">&amp;</span><span class="self">self</span>,
-        _zeta: Challenge,
-        domains_per_air: <span class="kw-2">&amp;</span>[Domain],
-    ) -&gt; Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt; {
-        <span class="macro">vec!</span>[<span class="macro">vec!</span>[<span class="macro">vec!</span>[]; domains_per_air.len()]]
-    }
-    <span class="kw">fn </span>partially_verify&lt;Commitment: Clone&gt;(
+    <span class="kw">fn </span>partially_verify&lt;Commitment: <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>&gt;(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         challenger: <span class="kw-2">&amp;mut </span>Challenger,
         _partial_proof: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="self">Self</span>::PartialProof&gt;,
         exposed_values_per_phase_per_air: <span class="kw-2">&amp;</span>[Vec&lt;Vec&lt;Challenge&gt;&gt;],
         commitment_per_phase: <span class="kw-2">&amp;</span>[Commitment],
-        _after_challenge_opened_values: <span class="kw-2">&amp;</span>[Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt;],
+        _permutation_opened_values: <span class="kw-2">&amp;</span>[Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt;],
     ) -&gt; (RapPhaseVerifierData&lt;Challenge&gt;, <span class="prelude-ty">Result</span>&lt;(), <span class="self">Self</span>::Error&gt;)
     <span class="kw">where
         </span>Challenger: CanObserve&lt;Commitment&gt;,
@@ -713,15 +697,15 @@
             .all(|exposed_values_per_phase_per_air| exposed_values_per_phase_per_air.is_empty())
         {
             <span class="kw">return </span>(
-                RapPhaseVerifierData {
-                    challenges_per_phase: <span class="macro">vec!</span>[],
+                <a href="mod.rs.html#92-95">RapPhaseVerifierData</a> {
+                    challenges_per_phase: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
                 },
                 <span class="prelude-val">Ok</span>(()),
             );
         }
 
-        <span class="kw">let </span>challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
-            array::from_fn(|<span class="kw">_</span>| challenger.sample_ext_element::&lt;Challenge&gt;());
+        <span class="kw">let </span>challenges: [Challenge; <a href="#211">STARK_LU_NUM_CHALLENGES</a>] =
+            <a href="https://doc.rust-lang.org/nightly/core/array/fn.from_fn.html">array::from_fn</a>(|<span class="kw">_</span>| <a href="#141">challenger</a>.sample_ext_element::&lt;Challenge&gt;());
 
         <span class="kw">for </span>exposed_values_per_phase <span class="kw">in </span>exposed_values_per_phase_per_air.iter() {
             <span class="kw">if let </span><span class="prelude-val">Some</span>(exposed_values) = exposed_values_per_phase.first() {
@@ -731,46 +715,46 @@
             }
         }
 
-        challenger.observe(commitment_per_phase[<span class="number">0</span>].clone());
+        <a href="#141">challenger</a>.observe(<a href="#144">commitment_per_phase</a>[<span class="number">0</span>].<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
 
-        <span class="kw">let </span>cumulative_sums = exposed_values_per_phase_per_air
-            .iter()
-            .map(|exposed_values_per_phase| {
-                <span class="macro">assert!</span>(
+        <span class="kw">let </span>cumulative_sums = <a href="#143">exposed_values_per_phase_per_air</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|exposed_values_per_phase| {
+                <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(
                     exposed_values_per_phase.len() &lt;= <span class="number">1</span>,
                     <span class="string">"Verifier does not support more than 1 challenge phase"
                 </span>);
-                exposed_values_per_phase.first().map(|exposed_values| {
-                    <span class="macro">assert_eq!</span>(
+                <a href="#177">exposed_values_per_phase</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|exposed_values| {
+                    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
                         exposed_values.len(),
                         <span class="number">1</span>,
                         <span class="string">"Only exposed value should be cumulative sum"
                     </span>);
-                    exposed_values[<span class="number">0</span>]
+                    <a href="#182">exposed_values</a>[<span class="number">0</span>]
                 })
             })
             .collect_vec();
 
         <span class="comment">// Check cumulative sum
-        </span><span class="kw">let </span>sum: Challenge = cumulative_sums
-            .into_iter()
-            .map(|c| c.unwrap_or(Challenge::ZERO))
-            .sum();
+        </span><span class="kw">let </span>sum: Challenge = <a href="#175">cumulative_sums</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|c| <a href="#196">c</a>.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(Challenge::ZERO))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
 
         <span class="kw">let </span>result = <span class="kw">if </span>sum == Challenge::ZERO {
             <span class="prelude-val">Ok</span>(())
         } <span class="kw">else </span>{
             <span class="prelude-val">Err</span>(<span class="self">Self</span>::Error::NonZeroCumulativeSum)
         };
-        <span class="kw">let </span>verifier_data = RapPhaseVerifierData {
-            challenges_per_phase: <span class="macro">vec!</span>[challenges.to_vec()],
+        <span class="kw">let </span>verifier_data = <a href="mod.rs.html#92-95">RapPhaseVerifierData</a> {
+            challenges_per_phase: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[challenges.to_vec()],
         };
-        (verifier_data, result)
+        (<a href="#204">verifier_data</a>, <a href="#199">result</a>)
     }
 }
 
-<span class="kw">pub const </span>STARK_LU_NUM_CHALLENGES: usize = <span class="number">2</span>;
-<span class="kw">pub const </span>STARK_LU_NUM_EXPOSED_VALUES: usize = <span class="number">1</span>;
+<span class="kw">pub const </span><a href="../../../openvm_stark_backend/interaction/stark_log_up/constant.STARK_LU_NUM_CHALLENGES.html">STARK_LU_NUM_CHALLENGES</a>: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">2</span>;
+<span class="kw">pub const </span><a href="../../../openvm_stark_backend/interaction/stark_log_up/constant.STARK_LU_NUM_EXPOSED_VALUES.html">STARK_LU_NUM_EXPOSED_VALUES</a>: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">1</span>;
 
 <span class="kw">impl</span>&lt;F, Challenge, Challenger&gt; StarkLogUpPhase&lt;F, Challenge, Challenger&gt;
 <span class="kw">where
@@ -780,18 +764,18 @@
 {
     <span class="doccomment">/// Returns a list of optional tuples of (permutation trace,cumulative sum) for each AIR.
     </span><span class="kw">fn </span>generate_after_challenge_traces_per_air(
-        challenges: <span class="kw-2">&amp;</span>[Challenge; STARK_LU_NUM_CHALLENGES],
+        challenges: <span class="kw-2">&amp;</span>[Challenge; <a href="#211">STARK_LU_NUM_CHALLENGES</a>],
         constraints_per_air: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>SymbolicConstraints&lt;F&gt;],
-        params_per_air: <span class="kw-2">&amp;</span>[StarkLogUpProvingKey],
+        params_per_air: <span class="kw-2">&amp;</span>[<a href="#48-50">StarkLogUpProvingKey</a>],
         trace_view_per_air: <span class="kw-2">&amp;</span>[PairTraceView&lt;<span class="lifetime">'_</span>, F&gt;],
     ) -&gt; Vec&lt;<span class="prelude-ty">Option</span>&lt;RowMajorMatrix&lt;Challenge&gt;&gt;&gt; {
-        <span class="macro">parizip!</span>(constraints_per_air, trace_view_per_air, params_per_air)
+        <a class="macro" href="../utils.rs.html#44-51">parizip!</a>(constraints_per_air, trace_view_per_air, params_per_air)
             .map(|(constraints, trace_view, params)| {
-                <span class="self">Self</span>::generate_after_challenge_trace(
-                    <span class="kw-2">&amp;</span>constraints.interactions,
-                    trace_view,
-                    challenges,
-                    params.chunk_size,
+                <a href="#266-410"><span class="self">Self</span>::generate_after_challenge_trace</a>(
+                    <span class="kw-2">&amp;</span><a href="#228">constraints</a>.interactions,
+                    <a href="#228">trace_view</a>,
+                    <a href="#222">challenges</a>,
+                    <a href="#228">params</a>.chunk_size,
                 )
             })
             .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
@@ -800,17 +784,17 @@
     <span class="kw">fn </span>extract_cumulative_sums(
         perm_traces: <span class="kw-2">&amp;</span>[<span class="prelude-ty">Option</span>&lt;RowMajorMatrix&lt;Challenge&gt;&gt;],
     ) -&gt; Vec&lt;<span class="prelude-ty">Option</span>&lt;Challenge&gt;&gt; {
-        perm_traces
-            .iter()
-            .map(|perm_trace| {
-                perm_trace.as_ref().map(|perm_trace| {
-                    <span class="kw-2">*</span>perm_trace
-                        .row_slice(perm_trace.height() - <span class="number">1</span>)
-                        .last()
-                        .unwrap()
+        <a href="#240">perm_traces</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|perm_trace| {
+                <a href="#244">perm_trace</a>.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|perm_trace| {
+                    <span class="kw-2">*</span><a href="#245">perm_trace</a>
+                        .row_slice(<a href="#245">perm_trace</a>.height() - <span class="number">1</span>)
+                        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.last">last</a>()
+                        .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>()
                 })
             })
-            .collect()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 
     <span class="comment">// Copied from valida/machine/src/chip.rs, modified to allow partitioned main trace
@@ -827,8 +811,8 @@
     </span><span class="kw">pub fn </span>generate_after_challenge_trace(
         all_interactions: <span class="kw-2">&amp;</span>[Interaction&lt;SymbolicExpression&lt;F&gt;&gt;],
         trace_view: <span class="kw-2">&amp;</span>PairTraceView&lt;<span class="lifetime">'_</span>, F&gt;,
-        permutation_randomness: <span class="kw-2">&amp;</span>[Challenge; STARK_LU_NUM_CHALLENGES],
-        interaction_chunk_size: usize,
+        permutation_randomness: <span class="kw-2">&amp;</span>[Challenge; <a href="#211">STARK_LU_NUM_CHALLENGES</a>],
+        interaction_chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     ) -&gt; <span class="prelude-ty">Option</span>&lt;RowMajorMatrix&lt;Challenge&gt;&gt;
     <span class="kw">where
         </span>F: Field,
@@ -837,10 +821,10 @@
         <span class="kw">if </span>all_interactions.is_empty() {
             <span class="kw">return </span><span class="prelude-val">None</span>;
         }
-        <span class="kw">let </span><span class="kw-2">&amp;</span>[alpha, beta] = permutation_randomness;
+        <span class="kw">let </span><span class="kw-2">&amp;</span>[alpha, beta] = <a href="#269">permutation_randomness</a>;
 
-        <span class="kw">let </span>alphas = generate_rlc_elements(alpha, all_interactions);
-        <span class="kw">let </span>betas = generate_betas(beta, all_interactions);
+        <span class="kw">let </span>alphas = <a href="utils.rs.html#7-22">generate_rlc_elements</a>(<a href="#279">alpha</a>, <a href="#267">all_interactions</a>);
+        <span class="kw">let </span>betas = <a href="utils.rs.html#26-37">generate_betas</a>(<a href="#279">beta</a>, <a href="#267">all_interactions</a>);
 
         <span class="comment">// Compute the reciprocal columns
         //
@@ -858,14 +842,14 @@
         //
         // Row: | perm_1 | perm_2 | perm_3 | ... | perm_s | phi |, where s
         // is the number of bundles
-        </span><span class="kw">let </span>num_interactions = all_interactions.len();
-        <span class="kw">let </span>height = trace_view.partitioned_main[<span class="number">0</span>].height();
+        </span><span class="kw">let </span>num_interactions = <a href="#267">all_interactions</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.len">len</a>();
+        <span class="kw">let </span>height = <a href="#268">trace_view</a>.partitioned_main[<span class="number">0</span>].height();
         <span class="comment">// To optimize memory and parallelism, we split the trace rows into chunks
         // based on the number of cpu threads available, and then do all
         // computations necessary for that chunk within a single thread.
-        </span><span class="kw">let </span>perm_width = num_interactions.div_ceil(interaction_chunk_size) + <span class="number">1</span>;
-        <span class="kw">let </span><span class="kw-2">mut </span>perm_values = Challenge::zero_vec(height * perm_width);
-        <span class="macro">debug_assert!</span>(
+        </span><span class="kw">let </span>perm_width = <a href="#300">num_interactions</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.div_ceil">div_ceil</a>(<a href="#270">interaction_chunk_size</a>) + <span class="number">1</span>;
+        <span class="kw">let </span><span class="kw-2">mut </span>perm_values = Challenge::zero_vec(<a href="#301">height</a> * <a href="#305">perm_width</a>);
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.debug_assert.html">debug_assert!</a>(
             trace_view
                 .partitioned_main
                 .iter()
@@ -878,17 +862,17 @@
         <span class="attr">#[cfg(not(feature = <span class="string">"parallel"</span>))]
         </span><span class="kw">let </span>num_threads = <span class="number">1</span>;
 
-        <span class="kw">let </span>height_chunk_size = height.div_ceil(num_threads);
-        perm_values
-            .par_chunks_mut(height_chunk_size * perm_width)
+        <span class="kw">let </span>height_chunk_size = <a href="#301">height</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.div_ceil">div_ceil</a>(<a href="#316">num_threads</a>);
+        <a href="#306">perm_values</a>
+            .par_chunks_mut(<a href="#320">height_chunk_size</a> * <a href="#305">perm_width</a>)
             .enumerate()
             .for_each(|(chunk_idx, perm_values)| {
                 <span class="comment">// perm_values is now local_height x perm_width row-major matrix
-                </span><span class="kw">let </span>num_rows = perm_values.len() / perm_width;
+                </span><span class="kw">let </span>num_rows = <a href="#324">perm_values</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.len">len</a>() / <a href="#305">perm_width</a>;
                 <span class="comment">// the interaction chunking requires more memory because we must
                 // allocate separate memory for the denominators and reciprocals
-                </span><span class="kw">let </span><span class="kw-2">mut </span>denoms = Challenge::zero_vec(num_rows * num_interactions);
-                <span class="kw">let </span>row_offset = chunk_idx * height_chunk_size;
+                </span><span class="kw">let </span><span class="kw-2">mut </span>denoms = Challenge::zero_vec(<a href="#326">num_rows</a> * <a href="#300">num_interactions</a>);
+                <span class="kw">let </span>row_offset = <a href="#324">chunk_idx</a> * <a href="#320">height_chunk_size</a>;
                 <span class="comment">// compute the denominators to be inverted:
                 </span><span class="kw">for </span>(n, denom_row) <span class="kw">in </span>denoms.chunks_exact_mut(num_interactions).enumerate() {
                     <span class="kw">let </span>evaluator = Evaluator {
@@ -914,24 +898,24 @@
                 <span class="comment">// Zero should be vanishingly unlikely if alpha, beta are properly pseudo-randomized
                 // The logup reciprocals should never be zero, so trace generation should panic if
                 // trying to divide by zero.
-                </span><span class="kw">let </span>reciprocals = p3_field::batch_multiplicative_inverse(<span class="kw-2">&amp;</span>denoms);
-                drop(denoms);
+                </span><span class="kw">let </span>reciprocals = p3_field::batch_multiplicative_inverse(<span class="kw-2">&amp;</span><a href="#329">denoms</a>);
+                <a href="https://doc.rust-lang.org/nightly/core/mem/fn.drop.html">drop</a>(<a href="#329">denoms</a>);
                 <span class="comment">// This block should already be in a single thread, but rayon is able
                 // to do more magic sometimes
-                </span>perm_values
-                    .par_chunks_exact_mut(perm_width)
-                    .zip(reciprocals.par_chunks_exact(num_interactions))
+                </span><a href="#324">perm_values</a>
+                    .par_chunks_exact_mut(<a href="#305">perm_width</a>)
+                    .zip(<a href="#356">reciprocals</a>.par_chunks_exact(<a href="#300">num_interactions</a>))
                     .enumerate()
                     .for_each(|(n, (perm_row, reciprocal_chunk))| {
-                        <span class="macro">debug_assert_eq!</span>(perm_row.len(), perm_width);
-                        <span class="macro">debug_assert_eq!</span>(reciprocal_chunk.len(), num_interactions);
+                        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.debug_assert_eq.html">debug_assert_eq!</a>(perm_row.len(), perm_width);
+                        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.debug_assert_eq.html">debug_assert_eq!</a>(reciprocal_chunk.len(), num_interactions);
 
-                        <span class="kw">let </span>evaluator = Evaluator {
-                            preprocessed: trace_view.preprocessed,
-                            partitioned_main: trace_view.partitioned_main,
-                            public_values: trace_view.public_values,
-                            height,
-                            local_index: row_offset + n,
+                        <span class="kw">let </span>evaluator = <a href="trace.rs.html#9-15">Evaluator</a> {
+                            preprocessed: <a href="#268">trace_view</a>.preprocessed,
+                            partitioned_main: <a href="#268">trace_view</a>.partitioned_main,
+                            public_values: <a href="#268">trace_view</a>.public_values,
+                            <a href="#301">height</a>,
+                            local_index: <a href="#330">row_offset</a> + <a href="#364">n</a>,
                         };
 
                         <span class="kw">let </span><span class="kw-2">mut </span>row_sum = Challenge::ZERO;
@@ -953,7 +937,7 @@
                             row_sum += <span class="kw-2">*</span>perm_val;
                         }
 
-                        perm_row[perm_width - <span class="number">1</span>] = row_sum;
+                        <a href="#364">perm_row</a>[<a href="#305">perm_width</a> - <span class="number">1</span>] = <a href="#376">row_sum</a>;
                     });
             });
 
@@ -967,7 +951,7 @@
             }
         });
 
-        <span class="prelude-val">Some</span>(RowMajorMatrix::new(perm_values, perm_width))
+        <span class="prelude-val">Some</span>(RowMajorMatrix::new(<a href="#306">perm_values</a>, <a href="#305">perm_width</a>))
     }
 }
 
@@ -976,41 +960,41 @@
 /// and one column for the partial sum of log derivative. These columns are trace columns
 /// "after challenge" phase 0, and they are valued in the extension field.
 /// For more details, see the comment in the trace.rs file
-</span><span class="kw">pub fn </span>eval_stark_log_up_phase&lt;AB&gt;(builder: <span class="kw-2">&amp;mut </span>AB, interaction_chunk_size: usize)
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/interaction/stark_log_up/fn.eval_stark_log_up_phase.html">eval_stark_log_up_phase</a>&lt;AB&gt;(builder: <span class="kw-2">&amp;mut </span>AB, interaction_chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>)
 <span class="kw">where
-    </span>AB: InteractionBuilder + PermutationAirBuilderWithExposedValues,
+    </span>AB: <a href="mod.rs.html#44-79">InteractionBuilder</a> + <a href="../rap.rs.html#60-62">PermutationAirBuilderWithExposedValues</a>,
 {
-    <span class="kw">let </span>exposed_values = builder.permutation_exposed_values();
+    <span class="kw">let </span>exposed_values = <a href="#418">builder</a>.<a href="../rap.rs.html#61">permutation_exposed_values</a>();
     <span class="comment">// There are interactions, add constraints for the virtual columns
-    </span><span class="macro">assert_eq!</span>(
+    </span><a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(
         exposed_values.len(),
         <span class="number">1</span>,
         <span class="string">"Should have one exposed value for cumulative_sum"
     </span>);
-    <span class="kw">let </span>cumulative_sum = exposed_values[<span class="number">0</span>];
+    <span class="kw">let </span>cumulative_sum = <a href="#422">exposed_values</a>[<span class="number">0</span>];
 
-    <span class="kw">let </span>rand_elems = builder.permutation_randomness();
+    <span class="kw">let </span>rand_elems = <a href="#418">builder</a>.permutation_randomness();
 
-    <span class="kw">let </span>perm = builder.permutation();
-    <span class="kw">let </span>(perm_local, perm_next) = (perm.row_slice(<span class="number">0</span>), perm.row_slice(<span class="number">1</span>));
-    <span class="kw">let </span>perm_local: <span class="kw-2">&amp;</span>[AB::VarEF] = (<span class="kw-2">*</span>perm_local).borrow();
-    <span class="kw">let </span>perm_next: <span class="kw-2">&amp;</span>[AB::VarEF] = (<span class="kw-2">*</span>perm_next).borrow();
+    <span class="kw">let </span>perm = <a href="#418">builder</a>.permutation();
+    <span class="kw">let </span>(perm_local, perm_next) = (<a href="#433">perm</a>.row_slice(<span class="number">0</span>), <a href="#433">perm</a>.row_slice(<span class="number">1</span>));
+    <span class="kw">let </span>perm_local: <span class="kw-2">&amp;</span>[AB::VarEF] = (<span class="kw-2">*</span><a href="#434">perm_local</a>).<a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html#tymethod.borrow">borrow</a>();
+    <span class="kw">let </span>perm_next: <span class="kw-2">&amp;</span>[AB::VarEF] = (<span class="kw-2">*</span><a href="#434">perm_next</a>).<a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html#tymethod.borrow">borrow</a>();
 
-    <span class="kw">let </span>all_interactions = builder.all_interactions().to_vec();
+    <span class="kw">let </span>all_interactions = <a href="#418">builder</a>.<a href="mod.rs.html#78">all_interactions</a>().<a href="https://doc.rust-lang.org/nightly/alloc/foreigntype.slice.html#method.to_vec">to_vec</a>();
     <span class="attr">#[cfg(debug_assertions)]
     </span>{
-        <span class="kw">let </span>num_interactions = all_interactions.len();
-        <span class="kw">let </span>perm_width = num_interactions.div_ceil(interaction_chunk_size) + <span class="number">1</span>;
-        <span class="macro">assert_eq!</span>(perm_width, perm_local.len());
-        <span class="macro">assert_eq!</span>(perm_width, perm_next.len());
+        <span class="kw">let </span>num_interactions = <a href="#438">all_interactions</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+        <span class="kw">let </span>perm_width = <a href="#441">num_interactions</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.div_ceil">div_ceil</a>(<a href="#418">interaction_chunk_size</a>) + <span class="number">1</span>;
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(perm_width, perm_local.len());
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(perm_width, perm_next.len());
     }
-    <span class="kw">let </span>phi_local = <span class="kw-2">*</span>perm_local.last().unwrap();
-    <span class="kw">let </span>phi_next = <span class="kw-2">*</span>perm_next.last().unwrap();
+    <span class="kw">let </span>phi_local = <span class="kw-2">*</span><a href="#435">perm_local</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>();
+    <span class="kw">let </span>phi_next = <span class="kw-2">*</span><a href="#436">perm_next</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>();
 
-    <span class="kw">let </span>alphas = generate_rlc_elements(rand_elems[<span class="number">0</span>].into(), <span class="kw-2">&amp;</span>all_interactions);
-    <span class="kw">let </span>betas = generate_betas(rand_elems[<span class="number">1</span>].into(), <span class="kw-2">&amp;</span>all_interactions);
+    <span class="kw">let </span>alphas = <a href="utils.rs.html#7-22">generate_rlc_elements</a>(<a href="#431">rand_elems</a>[<span class="number">0</span>].<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(), <span class="kw-2">&amp;</span><a href="#438">all_interactions</a>);
+    <span class="kw">let </span>betas = <a href="utils.rs.html#26-37">generate_betas</a>(<a href="#431">rand_elems</a>[<span class="number">1</span>].<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(), <span class="kw-2">&amp;</span><a href="#438">all_interactions</a>);
 
-    <span class="kw">let </span>phi_lhs = phi_next.into() - phi_local.into();
+    <span class="kw">let </span>phi_lhs = <a href="#447">phi_next</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>() - <a href="#446">phi_local</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
     <span class="kw">let </span><span class="kw-2">mut </span>phi_rhs = AB::ExprEF::ZERO;
     <span class="kw">let </span><span class="kw-2">mut </span>phi_0 = AB::ExprEF::ZERO;
 
@@ -1064,13 +1048,13 @@
     }
 
     <span class="comment">// Running sum constraints
-    </span>builder.when_transition().assert_eq_ext(phi_lhs, phi_rhs);
-    builder
+    </span><a href="#418">builder</a>.when_transition().assert_eq_ext(<a href="#452">phi_lhs</a>, <a href="#453">phi_rhs</a>);
+    <a href="#418">builder</a>
         .when_first_row()
-        .assert_eq_ext(<span class="kw-2">*</span>perm_local.last().unwrap(), phi_0);
-    builder
+        .assert_eq_ext(<span class="kw-2">*</span><a href="#435">perm_local</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>(), <a href="#454">phi_0</a>);
+    <a href="#418">builder</a>
         .when_last_row()
-        .assert_eq_ext(<span class="kw-2">*</span>perm_local.last().unwrap(), cumulative_sum);
+        .assert_eq_ext(<span class="kw-2">*</span><a href="#435">perm_local</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>(), <a href="#429">cumulative_sum</a>);
 }
 
 <span class="doccomment">/// Computes the interaction chunk size for the AIR.
@@ -1089,19 +1073,19 @@
 /// exceed `max_constraint_degree` (if possible), while maximizing `interaction_chunk_size`.
 </span><span class="kw">fn </span>find_interaction_chunk_size&lt;F: Field&gt;(
     constraints: <span class="kw-2">&amp;</span>SymbolicConstraints&lt;F&gt;,
-    global_max_constraint_degree: usize,
-) -&gt; usize {
-    <span class="kw">let </span>(max_field_degree, max_count_degree) = constraints.max_interaction_degrees();
+    global_max_constraint_degree: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+    <span class="kw">let </span>(max_field_degree, max_count_degree) = <a href="#530">constraints</a>.<a href="../air_builders/symbolic/mod.rs.html#57-80">max_interaction_degrees</a>();
 
     <span class="kw">if </span>max_field_degree == <span class="number">0 </span>{
         <span class="number">1
     </span>} <span class="kw">else </span>{
-        <span class="kw">let </span><span class="kw-2">mut </span>interaction_chunk_size = (global_max_constraint_degree - <span class="number">1</span>) / max_field_degree;
-        interaction_chunk_size = interaction_chunk_size.min(
-            (global_max_constraint_degree - max_count_degree + max_field_degree) / max_field_degree,
+        <span class="kw">let </span><span class="kw-2">mut </span>interaction_chunk_size = (<a href="#531">global_max_constraint_degree</a> - <span class="number">1</span>) / <a href="#533">max_field_degree</a>;
+        <a href="#538">interaction_chunk_size</a> = <a href="#538">interaction_chunk_size</a>.<a href="https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html#tymethod.min">min</a>(
+            (<a href="#531">global_max_constraint_degree</a> - <a href="#533">max_count_degree</a> + <a href="#533">max_field_degree</a>) / <a href="#533">max_field_degree</a>,
         );
-        interaction_chunk_size = interaction_chunk_size.max(<span class="number">1</span>);
-        interaction_chunk_size
+        <a href="#538">interaction_chunk_size</a> = <a href="#538">interaction_chunk_size</a>.<a href="https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html#tymethod.max">max</a>(<span class="number">1</span>);
+        <a href="#538">interaction_chunk_size</a>
     }
 }
 </code></pre></div></section></main></body></html>

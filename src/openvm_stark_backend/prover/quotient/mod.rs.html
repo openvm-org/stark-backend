@@ -241,50 +241,51 @@
 <a href="#240" id="240">240</a>
 <a href="#241" id="241">241</a>
 <a href="#242" id="242">242</a>
-<a href="#243" id="243">243</a></pre></div><pre class="rust"><code><span class="kw">use </span>itertools::{izip, Itertools};
+<a href="#243" id="243">243</a>
+<a href="#244" id="244">244</a></pre></div><pre class="rust"><code><span class="kw">use </span>itertools::{izip, Itertools};
 <span class="kw">use </span>p3_commit::{Pcs, PolynomialSpace};
 <span class="kw">use </span>p3_field::AbstractField;
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrix, Matrix};
 <span class="kw">use </span>tracing::instrument;
 
-<span class="kw">use </span><span class="self">self</span>::single::compute_single_rap_quotient_values;
-<span class="kw">use </span><span class="kw">super</span>::trace::SingleRapCommittedTraceView;
+<span class="kw">use </span><a href="single.rs.html#24-28"><span class="self">self</span>::single::compute_single_rap_quotient_values</a>;
+<span class="kw">use </span><a href="../trace.rs.html#190-203"><span class="kw">super</span>::trace::SingleRapCommittedTraceView</a>;
 <span class="kw">use crate</span>::{
-    air_builders::{prover::ProverConstraintFolder, symbolic::SymbolicConstraints},
-    config::{Com, Domain, PackedChallenge, PcsProverData, StarkGenericConfig, Val},
-    rap::{AnyRap, PartitionedBaseAir, Rap},
+    air_builders::{<a href="../../air_builders/prover.rs.html#25-43">prover::ProverConstraintFolder</a>, <a href="../../air_builders/symbolic/mod.rs.html#34-39">symbolic::SymbolicConstraints</a>},
+    config::{<a href="../../config.rs.html#43-46">Com</a>, <a href="../../config.rs.html#63-66">Domain</a>, <a href="../../config.rs.html#88-89">PackedChallenge</a>, <a href="../../config.rs.html#48-51">PcsProverData</a>, <a href="../../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../../config.rs.html#38-41">Val</a>},
+    <a href="../../interaction/mod.rs.html#112-117">interaction::RapPhaseSeqKind</a>,
+    rap::{<a href="../../rap.rs.html#66-77">AnyRap</a>, <a href="../../rap.rs.html#24-33">PartitionedBaseAir</a>, <a href="../../rap.rs.html#47-52">Rap</a>},
 };
-<span class="kw">use </span><span class="kw">crate</span>::interaction::RapPhaseSeq;
 
-<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span>helper;
-<span class="kw">pub mod </span>single;
+<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span><a href="helper.rs.html#1-30">helper</a>;
+<span class="kw">pub mod </span><a href="single.rs.html#1-195">single</a>;
 
-<span class="kw">pub struct </span>QuotientCommitter&lt;<span class="lifetime">'pcs</span>, SC: StarkGenericConfig&gt; {
+<span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/prover/quotient/struct.QuotientCommitter.html">QuotientCommitter</a>&lt;<span class="lifetime">'pcs</span>, SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     pcs: <span class="kw-2">&amp;</span><span class="lifetime">'pcs </span>SC::Pcs,
     <span class="doccomment">/// For each challenge round, the challenges drawn
     </span>challenges: Vec&lt;Vec&lt;PackedChallenge&lt;SC&gt;&gt;&gt;,
     alpha: SC::Challenge,
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">'pcs</span>, SC: StarkGenericConfig&gt; QuotientCommitter&lt;<span class="lifetime">'pcs</span>, SC&gt; {
+<span class="kw">impl</span>&lt;<span class="lifetime">'pcs</span>, SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; QuotientCommitter&lt;<span class="lifetime">'pcs</span>, SC&gt; {
     <span class="kw">pub fn </span>new(
         pcs: <span class="kw-2">&amp;</span><span class="lifetime">'pcs </span>SC::Pcs,
         challenges: <span class="kw-2">&amp;</span>[Vec&lt;SC::Challenge&gt;],
         alpha: SC::Challenge,
     ) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>packed_challenges = challenges
-            .iter()
-            .map(|challenges| {
-                challenges
-                    .iter()
-                    .map(|c| PackedChallenge::&lt;SC&gt;::from_f(<span class="kw-2">*</span>c))
+        <span class="kw">let </span>packed_challenges = <a href="#29">challenges</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|challenges| {
+                <a href="#34">challenges</a>
+                    .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+                    .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|c| PackedChallenge::&lt;SC&gt;::from_f(<span class="kw-2">*</span><a href="#37">c</a>))
                     .collect_vec()
             })
             .collect_vec();
         <span class="self">Self </span>{
-            pcs,
-            challenges: packed_challenges,
-            alpha,
+            <a href="#28">pcs</a>,
+            challenges: <a href="#32">packed_challenges</a>,
+            <a href="#30">alpha</a>,
         }
     }
 
@@ -321,72 +322,72 @@
     <span class="kw">where
         </span>R: <span class="kw">for</span>&lt;<span class="lifetime">'b</span>&gt; Rap&lt;ProverConstraintFolder&lt;<span class="lifetime">'b</span>, SC&gt;&gt;
             + PartitionedBaseAir&lt;Val&lt;SC&gt;&gt;
-            + Sync
-            + <span class="question-mark">?</span>Sized,
+            + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>
+            + <span class="question-mark">?</span><a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html">Sized</a>,
     {
-        <span class="kw">let </span>quotient_degree = qvk.quotient_degree;
-        <span class="kw">let </span>trace_domain = trace.domain;
+        <span class="kw">let </span>quotient_degree = <a href="#74">qvk</a>.quotient_degree;
+        <span class="kw">let </span>trace_domain = <a href="#75">trace</a>.domain;
         <span class="kw">let </span>quotient_domain =
-            trace_domain.create_disjoint_domain(trace_domain.size() * quotient_degree);
+            <a href="#85">trace_domain</a>.create_disjoint_domain(<a href="#85">trace_domain</a>.size() * <a href="#84">quotient_degree</a>);
         <span class="comment">// Empty matrix if no preprocessed trace
-        </span><span class="kw">let </span>preprocessed_lde_on_quotient_domain = <span class="kw">if let </span><span class="prelude-val">Some</span>(view) = trace.preprocessed.as_ref() {
-            <span class="self">self</span>.pcs
-                .get_evaluations_on_domain(view.data, view.matrix_index, quotient_domain)
+        </span><span class="kw">let </span>preprocessed_lde_on_quotient_domain = <span class="kw">if let </span><span class="prelude-val">Some</span>(view) = <a href="#75">trace</a>.preprocessed.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>() {
+            <a class="self" href="#72">self</a>.pcs
+                .get_evaluations_on_domain(<a href="#89">view</a>.data, <a href="#89">view</a>.matrix_index, <a href="#86">quotient_domain</a>)
                 .to_row_major_matrix()
         } <span class="kw">else </span>{
-            RowMajorMatrix::new(<span class="macro">vec!</span>[], <span class="number">0</span>)
+            RowMajorMatrix::new(<a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[], <span class="number">0</span>)
         };
-        <span class="kw">let </span>partitioned_main_lde_on_quotient_domain: Vec&lt;<span class="kw">_</span>&gt; = trace
+        <span class="kw">let </span>partitioned_main_lde_on_quotient_domain: Vec&lt;<span class="kw">_</span>&gt; = <a href="#75">trace</a>
             .partitioned_main
-            .iter()
-            .map(|view| {
-                <span class="self">self</span>.pcs
-                    .get_evaluations_on_domain(view.data, view.matrix_index, quotient_domain)
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|view| {
+                <a class="self" href="#72">self</a>.pcs
+                    .get_evaluations_on_domain(<a href="#99">view</a>.data, <a href="#99">view</a>.matrix_index, <a href="#86">quotient_domain</a>)
                     .to_row_major_matrix()
             })
-            .collect();
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
         <span class="kw">let </span>(after_challenge_lde_on_quotient_domain, exposed_values_after_challenge): (
             Vec&lt;<span class="kw">_</span>&gt;,
             Vec&lt;<span class="kw">_</span>&gt;,
-        ) = trace
+        ) = <a href="#75">trace</a>
             .after_challenge
-            .iter()
-            .map(|(view, exposed_values)| {
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(view, exposed_values)| {
                 (
-                    <span class="self">self</span>.pcs
-                        .get_evaluations_on_domain(view.data, view.matrix_index, quotient_domain)
+                    <a class="self" href="#72">self</a>.pcs
+                        .get_evaluations_on_domain(<a href="#112">view</a>.data, <a href="#112">view</a>.matrix_index, <a href="#86">quotient_domain</a>)
                         .to_row_major_matrix(),
-                    exposed_values
-                        .iter()
-                        .map(|x| PackedChallenge::&lt;SC&gt;::from_f(<span class="kw-2">*</span>x))
+                    <a href="#112">exposed_values</a>
+                        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+                        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|x| PackedChallenge::&lt;SC&gt;::from_f(<span class="kw-2">*</span><a href="#119">x</a>))
                         .collect_vec(),
                 )
             })
-            .unzip();
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.unzip">unzip</a>();
 
-        <span class="kw">let </span>quotient_values = compute_single_rap_quotient_values(
-            rap,
-            qvk.symbolic_constraints,
-            trace_domain,
-            quotient_domain,
-            preprocessed_lde_on_quotient_domain,
-            partitioned_main_lde_on_quotient_domain,
-            after_challenge_lde_on_quotient_domain,
-            <span class="kw-2">&amp;</span><span class="self">self</span>.challenges,
-            <span class="self">self</span>.alpha,
-            public_values,
-            <span class="kw-2">&amp;</span>exposed_values_after_challenge
-                .iter()
-                .map(|v| v.as_slice())
+        <span class="kw">let </span>quotient_values = <a href="single.rs.html#24-28">compute_single_rap_quotient_values</a>(
+            <a href="#73">rap</a>,
+            <a href="#74">qvk</a>.symbolic_constraints,
+            <a href="#85">trace_domain</a>,
+            <a href="#86">quotient_domain</a>,
+            <a href="#89">preprocessed_lde_on_quotient_domain</a>,
+            <a href="#96">partitioned_main_lde_on_quotient_domain</a>,
+            <a href="#106">after_challenge_lde_on_quotient_domain</a>,
+            <span class="kw-2">&amp;</span><a class="self" href="#72">self</a>.challenges,
+            <a class="self" href="#72">self</a>.alpha,
+            <a href="#76">public_values</a>,
+            <span class="kw-2">&amp;</span><a href="#106">exposed_values_after_challenge</a>
+                .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|v| <a href="#138">v</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.as_slice">as_slice</a>())
                 .collect_vec(),
-            SC::RapPhaseSeq::KIND,
-            qvk.interaction_chunk_size,
+            <a href="#74">qvk</a>.rap_phase_seq_kind,
+            <a href="#74">qvk</a>.interaction_chunk_size,
         );
-        SingleQuotientData {
-            quotient_degree,
-            quotient_domain,
-            quotient_values,
+        <a href="#193-201">SingleQuotientData</a> {
+            <a href="#84">quotient_degree</a>,
+            <a href="#86">quotient_domain</a>,
+            <a href="#125">quotient_values</a>,
         }
     }
 
@@ -411,9 +412,9 @@
 /// Quotient polynomials for multiple RAP matrices are committed together into a single commitment.
 /// The quotient polynomials can be committed together even if the corresponding trace matrices
 /// are committed separately.
-</span><span class="kw">pub struct </span>ProverQuotientData&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/prover/quotient/struct.ProverQuotientData.html">ProverQuotientData</a>&lt;SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// For each AIR, the number of quotient chunks that were committed.
-    </span><span class="kw">pub </span>quotient_degrees: Vec&lt;usize&gt;,
+    </span><span class="kw">pub </span>quotient_degrees: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
     <span class="doccomment">/// Quotient commitment
     </span><span class="kw">pub </span>commit: Com&lt;SC&gt;,
     <span class="doccomment">/// Prover data for the quotient commitment
@@ -421,44 +422,44 @@
 }
 
 <span class="doccomment">/// The quotient polynomials from multiple RAP matrices.
-</span><span class="kw">pub struct </span>QuotientData&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/prover/quotient/struct.QuotientData.html">QuotientData</a>&lt;SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     inner: Vec&lt;SingleQuotientData&lt;SC&gt;&gt;,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; QuotientData&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; QuotientData&lt;SC&gt; {
     <span class="doccomment">/// Splits the quotient polynomials from multiple AIRs into chunks of size equal to the trace domain size.
     </span><span class="kw">pub fn </span>split(<span class="self">self</span>) -&gt; <span class="kw">impl </span>IntoIterator&lt;Item = QuotientChunk&lt;SC&gt;&gt; {
-        <span class="self">self</span>.inner.into_iter().flat_map(|data| data.split())
+        <a class="self" href="#187">self</a>.inner.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|data| <a href="#188">data</a>.<a href="#208-219">split</a>())
     }
 }
 
 <span class="doccomment">/// The quotient polynomial from a single matrix RAP, evaluated on the quotient domain.
-</span><span class="kw">pub struct </span>SingleQuotientData&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/prover/quotient/struct.SingleQuotientData.html">SingleQuotientData</a>&lt;SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// The factor by which the trace degree was multiplied to get the
     /// quotient domain size.
-    </span>quotient_degree: usize,
+    </span>quotient_degree: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// Quotient domain
     </span>quotient_domain: Domain&lt;SC&gt;,
     <span class="doccomment">/// Evaluations of the quotient polynomial on the quotient domain
     </span>quotient_values: Vec&lt;SC::Challenge&gt;,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; SingleQuotientData&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; SingleQuotientData&lt;SC&gt; {
     <span class="doccomment">/// The vector of evaluations of the quotient polynomial on the quotient domain,
     /// first flattened from vector of extension field elements to matrix of base field elements,
     /// and then split into chunks of size equal to the trace domain size (quotient domain size
     /// divided by `quotient_degree`).
     </span><span class="kw">pub fn </span>split(<span class="self">self</span>) -&gt; <span class="kw">impl </span>IntoIterator&lt;Item = QuotientChunk&lt;SC&gt;&gt; {
-        <span class="kw">let </span>quotient_degree = <span class="self">self</span>.quotient_degree;
-        <span class="kw">let </span>quotient_domain = <span class="self">self</span>.quotient_domain;
+        <span class="kw">let </span>quotient_degree = <a class="self" href="#208">self</a>.quotient_degree;
+        <span class="kw">let </span>quotient_domain = <a class="self" href="#208">self</a>.quotient_domain;
         <span class="comment">// Flatten from extension field elements to base field elements
-        </span><span class="kw">let </span>quotient_flat = RowMajorMatrix::new_col(<span class="self">self</span>.quotient_values).flatten_to_base();
-        <span class="kw">let </span>quotient_chunks = quotient_domain.split_evals(quotient_degree, quotient_flat);
-        <span class="kw">let </span>qc_domains = quotient_domain.split_domains(quotient_degree);
-        qc_domains
-            .into_iter()
-            .zip_eq(quotient_chunks)
-            .map(|(domain, chunk)| QuotientChunk { domain, chunk })
+        </span><span class="kw">let </span>quotient_flat = RowMajorMatrix::new_col(<a class="self" href="#208">self</a>.quotient_values).flatten_to_base();
+        <span class="kw">let </span>quotient_chunks = <a href="#210">quotient_domain</a>.split_evals(<a href="#209">quotient_degree</a>, <a href="#212">quotient_flat</a>);
+        <span class="kw">let </span>qc_domains = <a href="#210">quotient_domain</a>.split_domains(<a href="#209">quotient_degree</a>);
+        <a href="#214">qc_domains</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+            .zip_eq(<a href="#213">quotient_chunks</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(domain, chunk)| <a href="#228-234">QuotientChunk</a> { <a href="#218">domain</a>, <a href="#218">chunk</a> })
     }
 }
 
@@ -468,7 +469,7 @@
 ///
 /// This represents a single chunk, where the vector of extension field elements is
 /// further flattened to a matrix of base field elements.
-</span><span class="kw">pub struct </span>QuotientChunk&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/prover/quotient/struct.QuotientChunk.html">QuotientChunk</a>&lt;SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Chunk of quotient domain, which is a coset of the trace domain
     </span><span class="kw">pub </span>domain: Domain&lt;SC&gt;,
     <span class="doccomment">/// Matrix with number of rows equal to trace domain size,
@@ -477,9 +478,10 @@
 }
 
 <span class="doccomment">/// All necessary data from VK to compute ProverQuotientData
-</span><span class="kw">pub struct </span>QuotientVkData&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
-    <span class="kw">pub </span>quotient_degree: usize,
-    <span class="kw">pub </span>interaction_chunk_size: usize,
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/prover/quotient/struct.QuotientVkData.html">QuotientVkData</a>&lt;<span class="lifetime">'a</span>, SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
+    <span class="kw">pub </span>quotient_degree: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>rap_phase_seq_kind: <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
+    <span class="kw">pub </span>interaction_chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.
     </span><span class="kw">pub </span>symbolic_constraints: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>SymbolicConstraints&lt;Val&lt;SC&gt;&gt;,

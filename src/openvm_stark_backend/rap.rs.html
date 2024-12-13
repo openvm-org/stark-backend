@@ -125,34 +125,34 @@
 <a href="#124" id="124">124</a></pre></div><pre class="rust"><code><span class="doccomment">//! # RAP (Randomized Air with Preprocessing)
 //! See &lt;https://hackmd.io/@aztec-network/plonk-arithmetiization-air&gt; for formal definition.
 
-</span><span class="kw">use </span>std::any::{type_name, Any};
+</span><span class="kw">use </span>std::any::{<a href="https://doc.rust-lang.org/nightly/core/any/fn.type_name.html">type_name</a>, <a href="https://doc.rust-lang.org/nightly/core/any/trait.Any.html">Any</a>};
 
 <span class="kw">use </span>p3_air::{BaseAir, PermutationAirBuilder};
 
 <span class="kw">use crate</span>::{
     air_builders::{
-        debug::DebugConstraintBuilder, prover::ProverConstraintFolder, symbolic::SymbolicRapBuilder,
+        <a href="air_builders/debug/mod.rs.html#21-35">debug::DebugConstraintBuilder</a>, <a href="air_builders/prover.rs.html#25-43">prover::ProverConstraintFolder</a>, <a href="air_builders/symbolic/mod.rs.html#110-122">symbolic::SymbolicRapBuilder</a>,
     },
-    config::{StarkGenericConfig, Val},
+    config::{<a href="config.rs.html#12-36">StarkGenericConfig</a>, <a href="config.rs.html#38-41">Val</a>},
 };
 
 <span class="doccomment">/// An AIR with 0 or more public values.
 /// This trait will be merged into Plonky3 in PR: &lt;https://github.com/Plonky3/Plonky3/pull/470&gt;
-</span><span class="kw">pub trait </span>BaseAirWithPublicValues&lt;F&gt;: BaseAir&lt;F&gt; {
-    <span class="kw">fn </span>num_public_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/rap/trait.BaseAirWithPublicValues.html">BaseAirWithPublicValues</a>&lt;F&gt;: BaseAir&lt;F&gt; {
+    <span class="kw">fn </span>num_public_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="number">0
     </span>}
 }
 
 <span class="doccomment">/// An AIR with 1 or more main trace partitions.
-</span><span class="kw">pub trait </span>PartitionedBaseAir&lt;F&gt;: BaseAir&lt;F&gt; {
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/rap/trait.PartitionedBaseAir.html">PartitionedBaseAir</a>&lt;F&gt;: BaseAir&lt;F&gt; {
     <span class="doccomment">/// By default, an AIR has no cached main trace.
-    </span><span class="kw">fn </span>cached_main_widths(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;usize&gt; {
-        <span class="macro">vec!</span>[]
+    </span><span class="kw">fn </span>cached_main_widths(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[]
     }
     <span class="doccomment">/// By default, an AIR has only one private main trace.
-    </span><span class="kw">fn </span>common_main_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.width()
+    </span><span class="kw">fn </span>common_main_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#30">self</a>.width()
     }
 }
 
@@ -168,7 +168,7 @@
 ///
 /// Does not inherit [Air](p3_air::Air) trait to allow overrides for technical reasons
 /// around dynamic dispatch.
-</span><span class="kw">pub trait </span>Rap&lt;AB&gt;: Sync
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/rap/trait.Rap.html">Rap</a>&lt;AB&gt;: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>
 <span class="kw">where
     </span>AB: PermutationAirBuilder,
 {
@@ -181,69 +181,69 @@
 ///
 /// Exposed values are used internally by the prover and verifier
 /// in cross-table permutation arguments.
-</span><span class="kw">pub trait </span>PermutationAirBuilderWithExposedValues: PermutationAirBuilder {
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/rap/trait.PermutationAirBuilderWithExposedValues.html">PermutationAirBuilderWithExposedValues</a>: PermutationAirBuilder {
     <span class="kw">fn </span>permutation_exposed_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::VarEF];
 }
 
 <span class="doccomment">/// RAP trait for all-purpose dynamic dispatch use.
 /// This trait is auto-implemented if you implement `Air` and `BaseAirWithPublicValues` and `PartitionedBaseAir` traits.
-</span><span class="kw">pub trait </span>AnyRap&lt;SC: StarkGenericConfig&gt;:
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/rap/trait.AnyRap.html">AnyRap</a>&lt;SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt;:
 Rap&lt;SymbolicRapBuilder&lt;Val&lt;SC&gt;&gt;&gt; <span class="comment">// for keygen to extract fixed data about the RAP
     </span>+ <span class="kw">for</span>&lt;<span class="lifetime">'a</span>&gt; Rap&lt;ProverConstraintFolder&lt;<span class="lifetime">'a</span>, SC&gt;&gt; <span class="comment">// for prover quotient polynomial calculation
     </span>+ <span class="kw">for</span>&lt;<span class="lifetime">'a</span>&gt; Rap&lt;DebugConstraintBuilder&lt;<span class="lifetime">'a</span>, SC&gt;&gt; <span class="comment">// for debugging
     </span>+ BaseAirWithPublicValues&lt;Val&lt;SC&gt;&gt;
     + PartitionedBaseAir&lt;Val&lt;SC&gt;&gt;
-    + Send + Sync
+    + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>
 {
-    <span class="kw">fn </span>as_any(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="kw">dyn </span>Any;
+    <span class="kw">fn </span>as_any(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="kw">dyn </span><a href="https://doc.rust-lang.org/nightly/core/any/trait.Any.html">Any</a>;
     <span class="doccomment">/// Name for display purposes
-    </span><span class="kw">fn </span>name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String;
+    </span><span class="kw">fn </span>name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a>;
 }
 
 <span class="kw">impl</span>&lt;SC, T&gt; AnyRap&lt;SC&gt; <span class="kw">for </span>T
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>,
     T: Rap&lt;SymbolicRapBuilder&lt;Val&lt;SC&gt;&gt;&gt;
         + <span class="kw">for</span>&lt;<span class="lifetime">'a</span>&gt; Rap&lt;ProverConstraintFolder&lt;<span class="lifetime">'a</span>, SC&gt;&gt;
         + <span class="kw">for</span>&lt;<span class="lifetime">'a</span>&gt; Rap&lt;DebugConstraintBuilder&lt;<span class="lifetime">'a</span>, SC&gt;&gt;
         + BaseAirWithPublicValues&lt;Val&lt;SC&gt;&gt;
         + PartitionedBaseAir&lt;Val&lt;SC&gt;&gt;
-        + Send
-        + Sync
+        + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a>
+        + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>
         + <span class="lifetime">'static</span>,
 {
-    <span class="kw">fn </span>as_any(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="kw">dyn </span>Any {
-        <span class="self">self
+    <span class="kw">fn </span>as_any(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="kw">dyn </span><a href="https://doc.rust-lang.org/nightly/core/any/trait.Any.html">Any</a> {
+        <span class="self"><a href="#91">self</a>
     </span>}
 
-    <span class="kw">fn </span>name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
-        get_air_name(<span class="self">self</span>)
+    <span class="kw">fn </span>name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a> {
+        <a href="#101-124">get_air_name</a>(<a class="self" href="#95">self</a>)
     }
 }
 
 <span class="doccomment">/// Automatically derives the AIR name from the type name for pretty display purposes.
-</span><span class="kw">pub fn </span>get_air_name&lt;T&gt;(_rap: <span class="kw-2">&amp;</span>T) -&gt; String {
-    <span class="kw">let </span>full_name = type_name::&lt;T&gt;().to_string();
+</span><span class="kw">pub fn </span><a href="../../openvm_stark_backend/rap/fn.get_air_name.html">get_air_name</a>&lt;T&gt;(_rap: <span class="kw-2">&amp;</span>T) -&gt; <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a> {
+    <span class="kw">let </span>full_name = type_name::&lt;T&gt;().<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>();
     <span class="comment">// Split the input by the first '&lt;' to separate the main type from its generics
-    </span><span class="kw">if let </span><span class="prelude-val">Some</span>((main_part, generics_part)) = full_name.split_once(<span class="string">'&lt;'</span>) {
+    </span><span class="kw">if let </span><span class="prelude-val">Some</span>((main_part, generics_part)) = <a href="#102">full_name</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.str.html#method.split_once">split_once</a>(<span class="string">'&lt;'</span>) {
         <span class="comment">// Extract the last segment of the main type
-        </span><span class="kw">let </span>main_type = main_part.split(<span class="string">"::"</span>).last().unwrap_or(<span class="string">""</span>);
+        </span><span class="kw">let </span>main_type = <a href="#104">main_part</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.str.html#method.split">split</a>(<span class="string">"::"</span>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="string">""</span>);
 
         <span class="comment">// Remove the trailing '&gt;' from the generics part and split by ", " to handle multiple generics
-        </span><span class="kw">let </span>generics: Vec&lt;String&gt; = generics_part
-            .trim_end_matches(<span class="string">'&gt;'</span>)
-            .split(<span class="string">", "</span>)
-            .map(|generic| {
+        </span><span class="kw">let </span>generics: Vec&lt;<a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a>&gt; = <a href="#104">generics_part</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.str.html#method.trim_end_matches">trim_end_matches</a>(<span class="string">'&gt;'</span>)
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.str.html#method.split">split</a>(<span class="string">", "</span>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|generic| {
                 <span class="comment">// For each generic type, extract the last segment after "::"
-                </span>generic.split(<span class="string">"::"</span>).last().unwrap_or(<span class="string">""</span>).to_string()
+                </span><a href="#112">generic</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.str.html#method.split">split</a>(<span class="string">"::"</span>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="string">""</span>).<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()
             })
-            .collect();
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
         <span class="comment">// Join the simplified generics back together with ", " and format the result
-        </span><span class="macro">format!</span>(<span class="string">"{}&lt;{}&gt;"</span>, main_type, generics.join(<span class="string">", "</span>))
+        </span><a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.format.html">format!</a>(<span class="string">"{}&lt;{}&gt;"</span>, main_type, generics.join(<span class="string">", "</span>))
     } <span class="kw">else </span>{
         <span class="comment">// If there's no generic part, just return the last segment after "::"
-        </span>full_name.split(<span class="string">"::"</span>).last().unwrap_or(<span class="string">""</span>).to_string()
+        </span><a href="#102">full_name</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.str.html#method.split">split</a>(<span class="string">"::"</span>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="string">""</span>).<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()
     }
 }
 </code></pre></div></section></main></body></html>

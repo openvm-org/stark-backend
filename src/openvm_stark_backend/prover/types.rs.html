@@ -178,20 +178,20 @@
 <a href="#177" id="177">177</a>
 <a href="#178" id="178">178</a>
 <a href="#179" id="179">179</a>
-<a href="#180" id="180">180</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#180" id="180">180</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>derivative::Derivative;
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_field::Field;
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrix, Matrix};
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 
-<span class="kw">pub use </span><span class="kw">super</span>::trace::{ProverTraceData, TraceCommitter};
+<span class="kw">pub use </span><span class="kw">super</span>::trace::{<a href="trace.rs.html#160-168">ProverTraceData</a>, <a href="trace.rs.html#114-116">TraceCommitter</a>};
 <span class="kw">use crate</span>::{
-    config::{Com, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
-    keygen::types::{MultiStarkProvingKey, MultiStarkVerifyingKey},
-    prover::opener::OpeningProof,
-    rap::AnyRap,
+    config::{<a href="../config.rs.html#43-46">Com</a>, <a href="../config.rs.html#68-72">RapPhaseSeqPartialProof</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    keygen::types::{<a href="../keygen/types.rs.html#111-115">MultiStarkProvingKey</a>, <a href="../keygen/types.rs.html#80-82">MultiStarkVerifyingKey</a>},
+    <a href="opener.rs.html#151-154">prover::opener::OpeningProof</a>,
+    <a href="../rap.rs.html#66-77">rap::AnyRap</a>,
 };
 
 <span class="doccomment">/// All commitments to a multi-matrix STARK that are not preprocessed.
@@ -201,7 +201,7 @@
     deserialize = <span class="string">"Com&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
 #[derivative(Clone(bound = <span class="string">"Com&lt;SC&gt;: Clone"</span>))]
-</span><span class="kw">pub struct </span>Commitments&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.Commitments.html">Commitments</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Multiple commitments for the main trace.
     /// For each RAP, each part of a partitioned matrix trace matrix
     /// must belong to one of these commitments.
@@ -221,7 +221,7 @@
 </span><span class="attr">#[derive(Serialize, Deserialize, Derivative)]
 #[serde(bound = <span class="string">""</span>)]
 #[derivative(Clone(bound = <span class="string">"Com&lt;SC&gt;: Clone"</span>))]
-</span><span class="kw">pub struct </span>Proof&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.Proof.html">Proof</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// The PCS commitments
     </span><span class="kw">pub </span>commitments: Commitments&lt;SC&gt;,
     <span class="doccomment">/// Opening proofs separated by partition, but this may change
@@ -235,10 +235,10 @@
 <span class="attr">#[derive(Serialize, Deserialize, Derivative)]
 #[serde(bound = <span class="string">""</span>)]
 #[derivative(Clone(bound = <span class="string">"SC::Challenge: Clone"</span>))]
-</span><span class="kw">pub struct </span>AirProofData&lt;SC: StarkGenericConfig&gt; {
-    <span class="kw">pub </span>air_id: usize,
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.AirProofData.html">AirProofData</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
+    <span class="kw">pub </span>air_id: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// height of trace matrix.
-    </span><span class="kw">pub </span>degree: usize,
+    </span><span class="kw">pub </span>degree: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// For each challenge phase with trace, the values to expose to the verifier in that phase
     </span><span class="kw">pub </span>exposed_values_after_challenge: Vec&lt;Vec&lt;SC::Challenge&gt;&gt;,
     <span class="comment">// The public values to expose to the verifier
@@ -246,17 +246,17 @@
 }
 
 <span class="doccomment">/// Proof input
-</span><span class="kw">pub struct </span>ProofInput&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.ProofInput.html">ProofInput</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// (AIR id, AIR input)
-    </span><span class="kw">pub </span>per_air: Vec&lt;(usize, AirProofInput&lt;SC&gt;)&gt;,
+    </span><span class="kw">pub </span>per_air: Vec&lt;(<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, AirProofInput&lt;SC&gt;)&gt;,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; ProofInput&lt;SC&gt; {
-    <span class="kw">pub fn </span>new(per_air: Vec&lt;(usize, AirProofInput&lt;SC&gt;)&gt;) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ per_air }
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; ProofInput&lt;SC&gt; {
+    <span class="kw">pub fn </span>new(per_air: Vec&lt;(<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, AirProofInput&lt;SC&gt;)&gt;) -&gt; <span class="self">Self </span>{
+        <span class="self">Self </span>{ <a href="#75">per_air</a> }
     }
     <span class="kw">pub fn </span>into_air_proof_input_vec(<span class="self">self</span>) -&gt; Vec&lt;AirProofInput&lt;SC&gt;&gt; {
-        <span class="self">self</span>.per_air.into_iter().map(|(<span class="kw">_</span>, x)| x).collect()
+        <a class="self" href="#78">self</a>.per_air.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(<span class="kw">_</span>, x)| <a href="#79">x</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 }
 
@@ -266,7 +266,7 @@
     deserialize = <span class="string">"ProverTraceData&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
 #[derivative(Clone(bound = <span class="string">"Com&lt;SC&gt;: Clone"</span>))]
-</span><span class="kw">pub struct </span>CommittedTraceData&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.CommittedTraceData.html">CommittedTraceData</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>raw_data: Arc&lt;RowMajorMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
     <span class="kw">pub </span>prover_data: ProverTraceData&lt;SC&gt;,
 }
@@ -274,7 +274,7 @@
 <span class="doccomment">/// Necessary input for proving a single AIR.
 </span><span class="attr">#[derive(Derivative)]
 #[derivative(Clone(bound = <span class="string">"Com&lt;SC&gt;: Clone"</span>))]
-</span><span class="kw">pub struct </span>AirProofInput&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.AirProofInput.html">AirProofInput</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;,
     <span class="doccomment">/// Prover data for cached main traces
     </span><span class="kw">pub </span>cached_mains_pdata: Vec&lt;ProverTraceData&lt;SC&gt;&gt;,
@@ -283,7 +283,7 @@
 
 <span class="doccomment">/// Raw input for proving a single AIR.
 </span><span class="attr">#[derive(Clone, Debug)]
-</span><span class="kw">pub struct </span>AirProofRawInput&lt;F: Field&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.AirProofRawInput.html">AirProofRawInput</a>&lt;F: Field&gt; {
     <span class="doccomment">/// Cached main trace matrices
     </span><span class="kw">pub </span>cached_mains: Vec&lt;Arc&lt;RowMajorMatrix&lt;F&gt;&gt;&gt;,
     <span class="doccomment">/// Common main trace matrix
@@ -292,26 +292,26 @@
     </span><span class="kw">pub </span>public_values: Vec&lt;F&gt;,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; Proof&lt;SC&gt; {
-    <span class="kw">pub fn </span>get_air_ids(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;usize&gt; {
-        <span class="self">self</span>.per_air.iter().map(|p| p.air_id).collect()
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; Proof&lt;SC&gt; {
+    <span class="kw">pub fn </span>get_air_ids(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <a class="self" href="#116">self</a>.per_air.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|p| <a href="#117">p</a>.air_id).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
     <span class="kw">pub fn </span>get_public_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;Vec&lt;Val&lt;SC&gt;&gt;&gt; {
-        <span class="self">self</span>.per_air
-            .iter()
-            .map(|p| p.public_values.clone())
-            .collect()
+        <a class="self" href="#119">self</a>.per_air
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|p| <a href="#122">p</a>.public_values.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; ProofInput&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; ProofInput&lt;SC&gt; {
     <span class="kw">pub fn </span>sort(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="self">self</span>.per_air.sort_by_key(|p| p.<span class="number">0</span>);
+        <a class="self" href="#128">self</a>.per_air.<a href="https://doc.rust-lang.org/nightly/alloc/foreigntype.slice.html#method.sort_by_key">sort_by_key</a>(|p| <a href="#129">p</a>.<span class="number">0</span>);
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; MultiStarkVerifyingKey&lt;SC&gt; {
-    <span class="kw">pub fn </span>validate(<span class="kw-2">&amp;</span><span class="self">self</span>, proof_input: <span class="kw-2">&amp;</span>ProofInput&lt;SC&gt;) -&gt; bool {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkVerifyingKey&lt;SC&gt; {
+    <span class="kw">pub fn </span>validate(<span class="kw-2">&amp;</span><span class="self">self</span>, proof_input: <span class="kw-2">&amp;</span>ProofInput&lt;SC&gt;) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
         <span class="kw">if </span>!proof_input
             .per_air
             .iter()
@@ -331,14 +331,14 @@
     </span>}
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; MultiStarkProvingKey&lt;SC&gt; {
-    <span class="kw">pub fn </span>validate(<span class="kw-2">&amp;</span><span class="self">self</span>, proof_input: <span class="kw-2">&amp;</span>ProofInput&lt;SC&gt;) -&gt; bool {
-        <span class="self">self</span>.get_vk().validate(proof_input)
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkProvingKey&lt;SC&gt; {
+    <span class="kw">pub fn </span>validate(<span class="kw-2">&amp;</span><span class="self">self</span>, proof_input: <span class="kw-2">&amp;</span>ProofInput&lt;SC&gt;) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        <a class="self" href="#155">self</a>.<a href="../keygen/types.rs.html#132-136">get_vk</a>().<a href="#134-151">validate</a>(<a href="#155">proof_input</a>)
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; AirProofRawInput&lt;F&gt; {
-    <span class="kw">pub fn </span>height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+    <span class="kw">pub fn </span>height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="kw">let </span><span class="kw-2">mut </span>height = <span class="prelude-val">None</span>;
         <span class="kw">for </span>m <span class="kw">in </span><span class="self">self</span>.cached_mains.iter() {
             <span class="kw">if let </span><span class="prelude-val">Some</span>(h) = height {
@@ -347,14 +347,14 @@
                 height = <span class="prelude-val">Some</span>(m.height());
             }
         }
-        <span class="kw">let </span>common_h = <span class="self">self</span>.common_main.as_ref().map(|trace| trace.height());
-        <span class="kw">if let </span><span class="prelude-val">Some</span>(h) = height {
-            <span class="kw">if let </span><span class="prelude-val">Some</span>(common_h) = common_h {
-                <span class="macro">assert_eq!</span>(h, common_h);
+        <span class="kw">let </span>common_h = <a class="self" href="#161">self</a>.common_main.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|trace| <a href="#170">trace</a>.height());
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(h) = <a href="#162">height</a> {
+            <span class="kw">if let </span><span class="prelude-val">Some</span>(common_h) = <a href="#170">common_h</a> {
+                <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(h, common_h);
             }
-            h
+            <a href="#171">h</a>
         } <span class="kw">else </span>{
-            common_h.unwrap_or(<span class="number">0</span>)
+            <a href="#170">common_h</a>.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>)
         }
     }
 }

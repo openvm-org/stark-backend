@@ -171,112 +171,112 @@
 <span class="kw">use </span>p3_maybe_rayon::prelude::<span class="kw-2">*</span>;
 
 <span class="kw">use crate</span>::{
-    air_builders::debug::DebugConstraintBuilder,
-    config::{StarkGenericConfig, Val},
+    <a href="mod.rs.html#21-35">air_builders::debug::DebugConstraintBuilder</a>,
+    config::{<a href="../../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../../config.rs.html#38-41">Val</a>},
     interaction::{
-        debug::{generate_logical_interactions, LogicalInteractions},
-        InteractionType, RapPhaseSeqKind, SymbolicInteraction,
+        debug::{<a href="../../interaction/debug.rs.html#19-60">generate_logical_interactions</a>, <a href="../../interaction/debug.rs.html#13-17">LogicalInteractions</a>},
+        <a href="../../interaction/mod.rs.html#22-25">InteractionType</a>, <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>, <a href="../../interaction/mod.rs.html#35">SymbolicInteraction</a>,
     },
-    rap::{PartitionedBaseAir, Rap},
+    rap::{<a href="../../rap.rs.html#24-33">PartitionedBaseAir</a>, <a href="../../rap.rs.html#47-52">Rap</a>},
 };
 
 <span class="doccomment">/// Check that all constraints vanish on the subgroup.
 </span><span class="attr">#[allow(clippy::too_many_arguments)]
-</span><span class="kw">pub fn </span>check_constraints&lt;R, SC&gt;(
+</span><span class="kw">pub fn </span><a href="../../../../openvm_stark_backend/air_builders/debug/check_constraints/fn.check_constraints.html">check_constraints</a>&lt;R, SC&gt;(
     rap: <span class="kw-2">&amp;</span>R,
-    rap_name: <span class="kw-2">&amp;</span>str,
+    rap_name: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/nightly/std/primitive.str.html">str</a>,
     preprocessed: <span class="kw-2">&amp;</span><span class="prelude-ty">Option</span>&lt;RowMajorMatrixView&lt;Val&lt;SC&gt;&gt;&gt;,
     partitioned_main: <span class="kw-2">&amp;</span>[RowMajorMatrixView&lt;Val&lt;SC&gt;&gt;],
     after_challenge: <span class="kw-2">&amp;</span>[RowMajorMatrixView&lt;SC::Challenge&gt;],
     challenges: <span class="kw-2">&amp;</span>[Vec&lt;SC::Challenge&gt;],
     public_values: <span class="kw-2">&amp;</span>[Val&lt;SC&gt;],
     exposed_values_after_challenge: <span class="kw-2">&amp;</span>[Vec&lt;SC::Challenge&gt;],
-    rap_phase_seq_kind: RapPhaseSeqKind,
+    rap_phase_seq_kind: <a href="../../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
 ) <span class="kw">where
     </span>R: <span class="kw">for</span>&lt;<span class="lifetime">'a</span>&gt; Rap&lt;DebugConstraintBuilder&lt;<span class="lifetime">'a</span>, SC&gt;&gt;
         + BaseAir&lt;Val&lt;SC&gt;&gt;
         + PartitionedBaseAir&lt;Val&lt;SC&gt;&gt;
-        + <span class="question-mark">?</span>Sized,
-    SC: StarkGenericConfig,
+        + <span class="question-mark">?</span><a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html">Sized</a>,
+    SC: <a href="../../config.rs.html#12-36">StarkGenericConfig</a>,
 {
-    <span class="kw">let </span>height = partitioned_main[<span class="number">0</span>].height();
-    <span class="macro">assert!</span>(partitioned_main.iter().all(|mat| mat.height() == height));
-    <span class="macro">assert!</span>(after_challenge.iter().all(|mat| mat.height() == height));
+    <span class="kw">let </span>height = <a href="#23">partitioned_main</a>[<span class="number">0</span>].height();
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(partitioned_main.iter().all(|mat| mat.height() == height));
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(after_challenge.iter().all(|mat| mat.height() == height));
 
     <span class="comment">// Check that constraints are satisfied.
-    </span>(<span class="number">0</span>..height).into_par_iter().for_each(|i| {
-        <span class="kw">let </span>i_next = (i + <span class="number">1</span>) % height;
+    </span>(<span class="number">0</span>..<a href="#36">height</a>).into_par_iter().for_each(|i| {
+        <span class="kw">let </span>i_next = (<a href="#41">i</a> + <span class="number">1</span>) % <a href="#36">height</a>;
 
-        <span class="kw">let </span>(preprocessed_local, preprocessed_next) = preprocessed
-            .as_ref()
-            .map(|preprocessed| {
+        <span class="kw">let </span>(preprocessed_local, preprocessed_next) = <a href="#22">preprocessed</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|preprocessed| {
                 (
-                    preprocessed.row_slice(i).to_vec(),
-                    preprocessed.row_slice(i_next).to_vec(),
+                    <a href="#46">preprocessed</a>.row_slice(<a href="#41">i</a>).<a href="https://doc.rust-lang.org/nightly/alloc/foreigntype.slice.html#method.to_vec">to_vec</a>(),
+                    <a href="#46">preprocessed</a>.row_slice(<a href="#42">i_next</a>).<a href="https://doc.rust-lang.org/nightly/alloc/foreigntype.slice.html#method.to_vec">to_vec</a>(),
                 )
             })
-            .unwrap_or((<span class="macro">vec!</span>[], <span class="macro">vec!</span>[]));
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>((<a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[], <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[]));
 
-        <span class="kw">let </span>partitioned_main_row_pair = partitioned_main
-            .iter()
-            .map(|part| (part.row_slice(i), part.row_slice(i_next)))
-            .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
-        <span class="kw">let </span>partitioned_main = partitioned_main_row_pair
-            .iter()
-            .map(|(local, next)| {
+        <span class="kw">let </span>partitioned_main_row_pair = <a href="#23">partitioned_main</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|part| (<a href="#56">part</a>.row_slice(<a href="#41">i</a>), <a href="#56">part</a>.row_slice(<a href="#42">i_next</a>)))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+        <span class="kw">let </span>partitioned_main = <a href="#54">partitioned_main_row_pair</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(local, next)| {
                 VerticalPair::new(
-                    RowMajorMatrixView::new_row(local),
-                    RowMajorMatrixView::new_row(next),
+                    RowMajorMatrixView::new_row(<a href="#60">local</a>),
+                    RowMajorMatrixView::new_row(<a href="#60">next</a>),
                 )
             })
-            .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
 
-        <span class="kw">let </span>after_challenge_row_pair = after_challenge
-            .iter()
-            .map(|mat| (mat.row_slice(i), mat.row_slice(i_next)))
-            .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
-        <span class="kw">let </span>after_challenge = after_challenge_row_pair
-            .iter()
-            .map(|(local, next)| {
+        <span class="kw">let </span>after_challenge_row_pair = <a href="#24">after_challenge</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|mat| (<a href="#70">mat</a>.row_slice(<a href="#41">i</a>), <a href="#70">mat</a>.row_slice(<a href="#42">i_next</a>)))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+        <span class="kw">let </span>after_challenge = <a href="#68">after_challenge_row_pair</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(local, next)| {
                 VerticalPair::new(
-                    RowMajorMatrixView::new_row(local),
-                    RowMajorMatrixView::new_row(next),
+                    RowMajorMatrixView::new_row(<a href="#74">local</a>),
+                    RowMajorMatrixView::new_row(<a href="#74">next</a>),
                 )
             })
-            .collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;();
 
-        <span class="kw">let </span><span class="kw-2">mut </span>builder = DebugConstraintBuilder {
-            air_name: rap_name,
-            row_index: i,
+        <span class="kw">let </span><span class="kw-2">mut </span>builder = <a href="mod.rs.html#21-35">DebugConstraintBuilder</a> {
+            air_name: <a href="#21">rap_name</a>,
+            row_index: <a href="#41">i</a>,
             preprocessed: VerticalPair::new(
-                RowMajorMatrixView::new_row(preprocessed_local.as_slice()),
-                RowMajorMatrixView::new_row(preprocessed_next.as_slice()),
+                RowMajorMatrixView::new_row(<a href="#44">preprocessed_local</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.as_slice">as_slice</a>()),
+                RowMajorMatrixView::new_row(<a href="#44">preprocessed_next</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.as_slice">as_slice</a>()),
             ),
-            partitioned_main,
-            after_challenge,
-            challenges,
-            public_values,
-            exposed_values_after_challenge,
+            <a href="#58">partitioned_main</a>,
+            <a href="#72">after_challenge</a>,
+            <a href="#25">challenges</a>,
+            <a href="#26">public_values</a>,
+            <a href="#27">exposed_values_after_challenge</a>,
             is_first_row: Val::&lt;SC&gt;::ZERO,
             is_last_row: Val::&lt;SC&gt;::ZERO,
             is_transition: Val::&lt;SC&gt;::ONE,
-            rap_phase_seq_kind,
-            has_common_main: rap.common_main_width() &gt; <span class="number">0</span>,
+            <a href="#28">rap_phase_seq_kind</a>,
+            has_common_main: <a href="#20">rap</a>.<a href="../../rap.rs.html#30-32">common_main_width</a>() &gt; <span class="number">0</span>,
         };
         <span class="kw">if </span>i == <span class="number">0 </span>{
-            builder.is_first_row = Val::&lt;SC&gt;::ONE;
+            <a href="#82">builder</a>.is_first_row = Val::&lt;SC&gt;::ONE;
         }
         <span class="kw">if </span>i == height - <span class="number">1 </span>{
-            builder.is_last_row = Val::&lt;SC&gt;::ONE;
-            builder.is_transition = Val::&lt;SC&gt;::ZERO;
+            <a href="#82">builder</a>.is_last_row = Val::&lt;SC&gt;::ONE;
+            <a href="#82">builder</a>.is_transition = Val::&lt;SC&gt;::ZERO;
         }
 
-        rap.eval(<span class="kw-2">&amp;mut </span>builder);
+        <a href="#20">rap</a>.<a href="../../rap.rs.html#51">eval</a>(<span class="kw-2">&amp;mut </span><a href="#82">builder</a>);
     });
 }
 
-<span class="kw">pub fn </span>check_logup&lt;F: Field&gt;(
-    air_names: <span class="kw-2">&amp;</span>[String],
+<span class="kw">pub fn </span><a href="../../../../openvm_stark_backend/air_builders/debug/check_constraints/fn.check_logup.html">check_logup</a>&lt;F: Field&gt;(
+    air_names: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a>],
     interactions: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>[SymbolicInteraction&lt;F&gt;]],
     preprocessed: <span class="kw-2">&amp;</span>[<span class="prelude-ty">Option</span>&lt;RowMajorMatrixView&lt;F&gt;&gt;],
     partitioned_main: <span class="kw-2">&amp;</span>[Vec&lt;RowMajorMatrixView&lt;F&gt;&gt;],
@@ -327,7 +327,7 @@
         }
     }
     <span class="kw">if </span>logup_failed {
-        <span class="macro">panic!</span>(<span class="string">"LogUp multiset equality check failed."</span>);
+        <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"LogUp multiset equality check failed."</span>);
     }
 }
 </code></pre></div></section></main></body></html>

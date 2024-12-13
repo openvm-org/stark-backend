@@ -172,29 +172,24 @@
 <a href="#171" id="171">171</a>
 <a href="#172" id="172">172</a>
 <a href="#173" id="173">173</a>
-<a href="#174" id="174">174</a>
-<a href="#175" id="175">175</a>
-<a href="#176" id="176">176</a>
-<a href="#177" id="177">177</a>
-<a href="#178" id="178">178</a>
-<a href="#179" id="179">179</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::fmt::Debug;
+<a href="#174" id="174">174</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/fmt/macros/derive.Debug.html">std::fmt::Debug</a>;
 
 <span class="kw">use </span>derivative::Derivative;
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_commit::{Pcs, PolynomialSpace};
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 <span class="kw">use </span>tracing::instrument;
 
-<span class="kw">use </span><span class="kw">crate</span>::config::{Domain, PcsProof, PcsProverData, StarkGenericConfig};
+<span class="kw">use </span><span class="kw">crate</span>::config::{<a href="../config.rs.html#63-66">Domain</a>, <a href="../config.rs.html#53-56">PcsProof</a>, <a href="../config.rs.html#48-51">PcsProverData</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>};
 
-<span class="kw">pub struct </span>OpeningProver&lt;<span class="lifetime">'pcs</span>, SC: StarkGenericConfig&gt; {
+<span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/opener/struct.OpeningProver.html">OpeningProver</a>&lt;<span class="lifetime">'pcs</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     pcs: <span class="kw-2">&amp;</span><span class="lifetime">'pcs </span>SC::Pcs,
     zeta: SC::Challenge,
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">'pcs</span>, SC: StarkGenericConfig&gt; OpeningProver&lt;<span class="lifetime">'pcs</span>, SC&gt; {
+<span class="kw">impl</span>&lt;<span class="lifetime">'pcs</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; OpeningProver&lt;<span class="lifetime">'pcs</span>, SC&gt; {
     <span class="kw">pub fn </span>new(pcs: <span class="kw-2">&amp;</span><span class="lifetime">'pcs </span>SC::Pcs, zeta: SC::Challenge) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ pcs, zeta }
+        <span class="self">Self </span>{ <a href="#17">pcs</a>, <a href="#17">zeta</a> }
     }
 
     <span class="doccomment">/// Opening proof for multiple RAP matrices, where
@@ -217,7 +212,7 @@
         <span class="comment">// Quotient poly commitment prover data
         </span>quotient_data: <span class="kw-2">&amp;</span>PcsProverData&lt;SC&gt;,
         <span class="comment">// Quotient degree for each RAP committed in quotient_data, in order
-        </span>quotient_degrees: <span class="kw-2">&amp;</span>[usize],
+        </span>quotient_degrees: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>],
     ) -&gt; OpeningProof&lt;SC&gt; {
         <span class="kw">let </span>preprocessed: Vec&lt;<span class="kw">_</span>&gt; = preprocessed
             .into_iter()
@@ -306,35 +301,34 @@
                 preprocessed: preprocessed_openings,
                 main: main_openings,
                 after_challenge: after_challenge_openings,
-                extra_after_challenge: <span class="macro">todo!</span>(),
                 quotient: quotient_openings,
             },
         }
     }
 }
 
-<span class="kw">fn </span>collect_trace_openings&lt;Challenge: Debug&gt;(
+<span class="kw">fn </span>collect_trace_openings&lt;Challenge: <a href="https://doc.rust-lang.org/nightly/core/fmt/trait.Debug.html">Debug</a>&gt;(
     ops: Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt;,
 ) -&gt; Vec&lt;AdjacentOpenedValues&lt;Challenge&gt;&gt; {
-    ops.into_iter()
-        .map(|op| {
-            <span class="kw">let </span>[local, next] = op.try_into().expect(<span class="string">"Should have 2 openings"</span>);
-            AdjacentOpenedValues { local, next }
+    <a href="#137">ops</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|op| {
+            <span class="kw">let </span>[local, next] = <a href="#140">op</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryInto.html#tymethod.try_into">try_into</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.expect">expect</a>(<span class="string">"Should have 2 openings"</span>);
+            <a href="#171-174">AdjacentOpenedValues</a> { <a href="#141">local</a>, <a href="#141">next</a> }
         })
-        .collect()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
 }
 
 <span class="doccomment">/// PCS opening proof with opened values for multi-matrix AIR.
 </span><span class="attr">#[derive(Serialize, Deserialize, Derivative)]
 #[serde(bound = <span class="string">""</span>)]
 #[derivative(Clone(bound = <span class="string">"SC::Challenge: Clone"</span>))]
-</span><span class="kw">pub struct </span>OpeningProof&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/opener/struct.OpeningProof.html">OpeningProof</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>proof: PcsProof&lt;SC&gt;,
     <span class="kw">pub </span>values: OpenedValues&lt;SC::Challenge&gt;,
 }
 
 <span class="attr">#[derive(Clone, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>OpenedValues&lt;Challenge&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/opener/struct.OpenedValues.html">OpenedValues</a>&lt;Challenge&gt; {
     <span class="doccomment">/// For each preprocessed trace commitment, the opened values
     </span><span class="kw">pub </span>preprocessed: Vec&lt;AdjacentOpenedValues&lt;Challenge&gt;&gt;,
     <span class="doccomment">/// For each main trace commitment, for each matrix in commitment, the
@@ -343,16 +337,12 @@
     <span class="doccomment">/// For each phase after challenge, there is shared commitment.
     /// For each commitment, if any, for each matrix in the commitment, the opened values,
     </span><span class="kw">pub </span>after_challenge: Vec&lt;Vec&lt;AdjacentOpenedValues&lt;Challenge&gt;&gt;&gt;,
-    <span class="doccomment">/// Any extra opening values for the after challenge phases.
-    ///
-    /// For each after challenge phase, for each matrix, for each point, for each column.
-    </span><span class="kw">pub </span>extra_after_challenge: Vec&lt;Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt;&gt;,
     <span class="doccomment">/// For each RAP, for each quotient chunk in quotient poly, the opened values
     </span><span class="kw">pub </span>quotient: Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt;,
 }
 
 <span class="attr">#[derive(Clone, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>AdjacentOpenedValues&lt;Challenge&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/opener/struct.AdjacentOpenedValues.html">AdjacentOpenedValues</a>&lt;Challenge&gt; {
     <span class="kw">pub </span>local: Vec&lt;Challenge&gt;,
     <span class="kw">pub </span>next: Vec&lt;Challenge&gt;,
 }

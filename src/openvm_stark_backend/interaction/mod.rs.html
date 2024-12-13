@@ -184,48 +184,41 @@
 <a href="#183" id="183">183</a>
 <a href="#184" id="184">184</a>
 <a href="#185" id="185">185</a>
-<a href="#186" id="186">186</a>
-<a href="#187" id="187">187</a>
-<a href="#188" id="188">188</a>
-<a href="#189" id="189">189</a>
-<a href="#190" id="190">190</a>
-<a href="#191" id="191">191</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::fmt::Debug;
+<a href="#186" id="186">186</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/fmt/macros/derive.Debug.html">std::fmt::Debug</a>;
 
 <span class="kw">use </span>p3_air::AirBuilder;
 <span class="kw">use </span>p3_challenger::CanObserve;
-<span class="kw">use </span>p3_commit::PolynomialSpace;
 <span class="kw">use </span>p3_matrix::dense::RowMajorMatrix;
-<span class="kw">use </span>serde::{de::DeserializeOwned, Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde/1.0.216/serde/de/trait.DeserializeOwned.html">de::DeserializeOwned</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 
 <span class="kw">use crate</span>::{
-    air_builders::symbolic::{symbolic_expression::SymbolicExpression, SymbolicConstraints},
-    interaction::stark_log_up::{STARK_LU_NUM_CHALLENGES, STARK_LU_NUM_EXPOSED_VALUES},
-    prover::PairTraceView,
+    air_builders::symbolic::{<a href="../air_builders/symbolic/symbolic_expression.rs.html#18-43">symbolic_expression::SymbolicExpression</a>, <a href="../air_builders/symbolic/mod.rs.html#34-39">SymbolicConstraints</a>},
+    interaction::stark_log_up::{<a href="stark_log_up.rs.html#211">STARK_LU_NUM_CHALLENGES</a>, <a href="stark_log_up.rs.html#212">STARK_LU_NUM_EXPOSED_VALUES</a>},
+    <a href="../prover/trace.rs.html#171-175">prover::PairTraceView</a>,
 };
 
 <span class="doccomment">/// Interaction debugging tools
-</span><span class="kw">pub mod </span>debug;
-<span class="kw">pub mod </span>rap;
-<span class="kw">pub mod </span>stark_log_up;
-<span class="kw">pub mod </span>trace;
-<span class="kw">mod </span>utils;
-<span class="kw">mod </span>gkr_log_up;
+</span><span class="kw">pub mod </span><a href="debug.rs.html#1-60">debug</a>;
+<span class="kw">pub mod </span><a href="rap.rs.html#1-37">rap</a>;
+<span class="kw">pub mod </span><a href="stark_log_up.rs.html#1-545">stark_log_up</a>;
+<span class="kw">pub mod </span><a href="trace.rs.html#1-33">trace</a>;
+<span class="kw">mod </span><a href="utils.rs.html#1-59">utils</a>;
 
 <span class="attr">#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
-</span><span class="kw">pub enum </span>InteractionType {
+</span><span class="kw">pub enum </span><a href="../../../openvm_stark_backend/interaction/enum.InteractionType.html">InteractionType</a> {
     Send,
     Receive,
 }
 
 <span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>Interaction&lt;Expr&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/interaction/struct.Interaction.html">Interaction</a>&lt;Expr&gt; {
     <span class="kw">pub </span>fields: Vec&lt;Expr&gt;,
     <span class="kw">pub </span>count: Expr,
-    <span class="kw">pub </span>bus_index: usize,
-    <span class="kw">pub </span>interaction_type: InteractionType,
+    <span class="kw">pub </span>bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>interaction_type: <a href="#22-25">InteractionType</a>,
 }
 
-<span class="kw">pub type </span>SymbolicInteraction&lt;F&gt; = Interaction&lt;SymbolicExpression&lt;F&gt;&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_backend/interaction/type.SymbolicInteraction.html">SymbolicInteraction</a>&lt;F&gt; = Interaction&lt;SymbolicExpression&lt;F&gt;&gt;;
 
 <span class="doccomment">/// An [AirBuilder] with additional functionality to build special logUp arguments for
 /// communication between AIRs across buses. These arguments use randomness to
@@ -234,44 +227,44 @@
 /// An interactive AIR is a AIR that can specify buses for sending and receiving data
 /// to other AIRs. The original AIR is augmented by virtual columns determined by
 /// the interactions to define a [RAP](crate::rap::Rap).
-</span><span class="kw">pub trait </span>InteractionBuilder: AirBuilder {
+</span><span class="kw">pub trait </span><a href="../../../openvm_stark_backend/interaction/trait.InteractionBuilder.html">InteractionBuilder</a>: AirBuilder {
     <span class="doccomment">/// Stores a new send interaction in the builder.
     </span><span class="kw">fn </span>push_send&lt;E: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        bus_index: usize,
+        bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
         fields: <span class="kw">impl </span>IntoIterator&lt;Item = E&gt;,
         count: <span class="kw">impl </span>Into&lt;<span class="self">Self</span>::Expr&gt;,
     ) {
-        <span class="self">self</span>.push_interaction(bus_index, fields, count, InteractionType::Send);
+        <a class="self" href="#47">self</a>.<a href="#66-72">push_interaction</a>(<a href="#48">bus_index</a>, <a href="#49">fields</a>, <a href="#50">count</a>, <a href="#23">InteractionType::Send</a>);
     }
 
     <span class="doccomment">/// Stores a new receive interaction in the builder.
     </span><span class="kw">fn </span>push_receive&lt;E: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        bus_index: usize,
+        bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
         fields: <span class="kw">impl </span>IntoIterator&lt;Item = E&gt;,
         count: <span class="kw">impl </span>Into&lt;<span class="self">Self</span>::Expr&gt;,
     ) {
-        <span class="self">self</span>.push_interaction(bus_index, fields, count, InteractionType::Receive);
+        <a class="self" href="#57">self</a>.<a href="#66-72">push_interaction</a>(<a href="#58">bus_index</a>, <a href="#59">fields</a>, <a href="#60">count</a>, <a href="#24">InteractionType::Receive</a>);
     }
 
     <span class="doccomment">/// Stores a new interaction in the builder.
     </span><span class="kw">fn </span>push_interaction&lt;E: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        bus_index: usize,
+        bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
         fields: <span class="kw">impl </span>IntoIterator&lt;Item = E&gt;,
         count: <span class="kw">impl </span>Into&lt;<span class="self">Self</span>::Expr&gt;,
-        interaction_type: InteractionType,
+        interaction_type: <a href="#22-25">InteractionType</a>,
     );
 
     <span class="doccomment">/// Returns the current number of interactions.
-    </span><span class="kw">fn </span>num_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize;
+    </span><span class="kw">fn </span>num_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>;
 
     <span class="doccomment">/// Returns all interactions stored.
     </span><span class="kw">fn </span>all_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[Interaction&lt;<span class="self">Self</span>::Expr&gt;];
 }
 
-<span class="kw">pub struct </span>RapPhaseProverData&lt;Challenge&gt; {
+<span class="kw">pub struct </span><a href="../../../openvm_stark_backend/interaction/struct.RapPhaseProverData.html">RapPhaseProverData</a>&lt;Challenge&gt; {
     <span class="doccomment">/// Challenges from the challenger in this phase that determine RAP constraints and exposed values.
     </span><span class="kw">pub </span>challenges: Vec&lt;Challenge&gt;,
 
@@ -282,52 +275,60 @@
     </span><span class="kw">pub </span>exposed_values_per_air: Vec&lt;<span class="prelude-ty">Option</span>&lt;Vec&lt;Challenge&gt;&gt;&gt;,
 }
 
-<span class="kw">pub struct </span>RapPhaseVerifierData&lt;Challenge&gt; {
+<span class="kw">pub struct </span><a href="../../../openvm_stark_backend/interaction/struct.RapPhaseVerifierData.html">RapPhaseVerifierData</a>&lt;Challenge&gt; {
     <span class="doccomment">/// Challenges from the challenger in this phase that determine RAP constraints and exposed values.
     </span><span class="kw">pub </span>challenges_per_phase: Vec&lt;Vec&lt;Challenge&gt;&gt;,
 }
 
 <span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>RapPhaseShape {
-    <span class="kw">pub </span>num_challenges: usize,
-    <span class="kw">pub </span>num_exposed_values: usize,
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/interaction/struct.RapPhaseShape.html">RapPhaseShape</a> {
+    <span class="kw">pub </span>num_challenges: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+
+    <span class="kw">pub </span>num_exposed_values: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+
+    <span class="doccomment">/// Any additional rotations to open at in the permutation PCS round.
+    ///
+    /// Specifies that each `i` in `extra_opening_rots` should be opened at
+    /// `zeta * g^i` (in addition to `zeta` and `zeta * g`).
+    </span><span class="kw">pub </span>extra_opening_rots: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
 }
 
 <span class="doccomment">/// Supported challenge phases in a RAP.
 </span><span class="attr">#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-</span><span class="kw">pub enum </span>RapPhaseSeqKind {
+</span><span class="kw">pub enum </span><a href="../../../openvm_stark_backend/interaction/enum.RapPhaseSeqKind.html">RapPhaseSeqKind</a> {
     GkrLogUp,
     <span class="doccomment">/// Up to one phase with prover/verifier given by [[stark_log_up::StarkLogUpPhase]] and
     /// constraints given by [[stark_log_up::eval_stark_log_up_phase]].
     </span>StarkLogUp,
 }
 
-<span class="kw">impl </span>RapPhaseSeqKind {
-    <span class="kw">pub fn </span>shape(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;RapPhaseShape&gt; {
-        <span class="kw">match </span><span class="self">self </span>{
-            RapPhaseSeqKind::StarkLogUp =&gt; <span class="macro">vec!</span>[RapPhaseShape {
+<span class="kw">impl </span><a href="#112-117">RapPhaseSeqKind</a> {
+    <span class="kw">pub fn </span>shape(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="#98-108">RapPhaseShape</a>&gt; {
+        <span class="kw">match </span><span class="self"><a href="#120">self</a> </span>{
+            <a href="#116">RapPhaseSeqKind::StarkLogUp</a> =&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[RapPhaseShape {
                 num_challenges: STARK_LU_NUM_CHALLENGES,
                 num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
+                extra_opening_rots: <span class="macro">vec!</span>[],
             }],
-            RapPhaseSeqKind::GkrLogUp =&gt; <span class="macro">todo!</span>(),
+            <a href="#113">RapPhaseSeqKind::GkrLogUp</a> =&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.todo.html">todo!</a>(),
         }
     }
 }
 
-<span class="kw">pub trait </span>HasInteractionChunkSize {
-    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize;
+<span class="kw">pub trait </span><a href="../../../openvm_stark_backend/interaction/trait.HasInteractionChunkSize.html">HasInteractionChunkSize</a> {
+    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>;
 }
 
-<span class="doccomment">/// Defines a particular protocol for the "after challenge" phases in a RAP.
+<span class="doccomment">/// Defines a particular protocol for the "after challenge" phase in a RAP.
 ///
 /// A [RapPhaseSeq] is defined by the proving and verifying methods implemented in this trait,
-/// as well as via some "eval" method that is determined by `RapPhaseSeqKind`.
-</span><span class="kw">pub trait </span>RapPhaseSeq&lt;F, Challenge, Challenger&gt; {
-    <span class="kw">type </span>PartialProof: Clone + Serialize + DeserializeOwned;
-    <span class="kw">type </span>ProvingKey: Clone + Serialize + DeserializeOwned + HasInteractionChunkSize;
-    <span class="kw">type </span>Error: Debug;
+/// as well as via some "eval" method that is determined by `RapPhaseId`.
+</span><span class="kw">pub trait </span><a href="../../../openvm_stark_backend/interaction/trait.RapPhaseSeq.html">RapPhaseSeq</a>&lt;F, Challenge, Challenger&gt; {
+    <span class="kw">type </span>PartialProof: <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a> + <a href="https://docs.rs/serde/1.0.216/serde/ser/trait.Serialize.html">Serialize</a> + <a href="https://docs.rs/serde/1.0.216/serde/de/trait.DeserializeOwned.html">DeserializeOwned</a>;
+    <span class="kw">type </span>ProvingKey: <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a> + <a href="https://docs.rs/serde/1.0.216/serde/ser/trait.Serialize.html">Serialize</a> + <a href="https://docs.rs/serde/1.0.216/serde/de/trait.DeserializeOwned.html">DeserializeOwned</a> + <a href="#132-134">HasInteractionChunkSize</a>;
+    <span class="kw">type </span>Error: <a href="https://doc.rust-lang.org/nightly/core/fmt/trait.Debug.html">Debug</a>;
 
-    <span class="kw">const </span>KIND: RapPhaseSeqKind;
+    <span class="kw">const </span>ID: <a href="#112-117">RapPhaseSeqKind</a>;
 
     <span class="doccomment">/// The protocol parameters for the challenge phases may depend on the AIR constraints.
     </span><span class="kw">fn </span>generate_pk_per_air(
@@ -351,24 +352,13 @@
         trace_view_per_air: <span class="kw-2">&amp;</span>[PairTraceView&lt;<span class="lifetime">'_</span>, F&gt;],
     ) -&gt; <span class="prelude-ty">Option</span>&lt;(<span class="self">Self</span>::PartialProof, RapPhaseProverData&lt;Challenge&gt;)&gt;;
 
-    <span class="doccomment">/// Returns the additional openings for the challenge phases.
-    ///
-    /// Returns a sequence of extension field elements per phase per air.
-    </span><span class="kw">fn </span>extra_opening_points&lt;Domain&gt;(
-        <span class="kw-2">&amp;</span><span class="self">self</span>,
-        zeta: Challenge,
-        domains_per_air: <span class="kw-2">&amp;</span>[Domain],
-    ) -&gt; Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt;
-    <span class="kw">where
-        </span>Domain: PolynomialSpace&lt;Val = F&gt;;
-
     <span class="doccomment">/// Partially verifies the challenge phases.
     ///
     /// Assumes the shape of `exposed_values_per_air_per_phase` is verified externally.
     ///
     /// An implementation of this function must sample challenges for the challenge phases and then
     /// observe the exposed values and commitment.
-    </span><span class="kw">fn </span>partially_verify&lt;Commitment: Clone&gt;(
+    </span><span class="kw">fn </span>partially_verify&lt;Commitment: <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>&gt;(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         challenger: <span class="kw-2">&amp;mut </span>Challenger,
         partial_proof: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="self">Self</span>::PartialProof&gt;,

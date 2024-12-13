@@ -20,17 +20,17 @@
 <a href="#19" id="19">19</a></pre></div><pre class="rust"><code><span class="kw">use </span>p3_air::AirBuilder;
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 
-<span class="kw">pub mod </span>debug;
-<span class="kw">pub mod </span>prover;
-<span class="kw">pub mod </span>sub;
-<span class="kw">pub mod </span>symbolic;
-<span class="kw">pub mod </span>verifier;
+<span class="kw">pub mod </span><a href="debug/mod.rs.html#1-231">debug</a>;
+<span class="kw">pub mod </span><a href="prover.rs.html#2-232">prover</a>;
+<span class="kw">pub mod </span><a href="sub.rs.html#3-106">sub</a>;
+<span class="kw">pub mod </span><a href="symbolic/mod.rs.html#3-467">symbolic</a>;
+<span class="kw">pub mod </span><a href="verifier.rs.html#1-127">verifier</a>;
 
-<span class="kw">pub type </span>ViewPair&lt;<span class="lifetime">'a</span>, T&gt; = VerticalPair&lt;RowMajorMatrixView&lt;<span class="lifetime">'a</span>, T&gt;, RowMajorMatrixView&lt;<span class="lifetime">'a</span>, T&gt;&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_backend/air_builders/type.ViewPair.html">ViewPair</a>&lt;<span class="lifetime">'a</span>, T&gt; = VerticalPair&lt;RowMajorMatrixView&lt;<span class="lifetime">'a</span>, T&gt;, RowMajorMatrixView&lt;<span class="lifetime">'a</span>, T&gt;&gt;;
 
 <span class="doccomment">/// AIR builder that supports main trace matrix which is partitioned
 /// into sub-matrices which belong to different commitments.
-</span><span class="kw">pub trait </span>PartitionedAirBuilder: AirBuilder {
+</span><span class="kw">pub trait </span><a href="../../../openvm_stark_backend/air_builders/trait.PartitionedAirBuilder.html">PartitionedAirBuilder</a>: AirBuilder {
     <span class="doccomment">/// Cached main trace matrix.
     </span><span class="kw">fn </span>cached_mains(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::M];
     <span class="doccomment">/// Common main trace matrix. Panic if there is no common main trace.

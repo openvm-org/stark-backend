@@ -237,7 +237,10 @@
 <a href="#236" id="236">236</a>
 <a href="#237" id="237">237</a>
 <a href="#238" id="238">238</a>
-<a href="#239" id="239">239</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#239" id="239">239</a>
+<a href="#240" id="240">240</a>
+<a href="#241" id="241">241</a>
+<a href="#242" id="242">242</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_field::AbstractExtensionField;
@@ -245,48 +248,49 @@
 <span class="kw">use </span>tracing::instrument;
 
 <span class="kw">use crate</span>::{
-    air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
-    config::{RapPhaseSeqProvingKey, StarkGenericConfig, Val},
-    interaction::{HasInteractionChunkSize, RapPhaseSeq, RapPhaseSeqKind},
+    air_builders::symbolic::{<a href="../air_builders/symbolic/mod.rs.html#83">get_symbolic_builder</a>, <a href="../air_builders/symbolic/mod.rs.html#110-122">SymbolicRapBuilder</a>},
+    config::{<a href="../config.rs.html#74-78">RapPhaseSeqProvingKey</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    interaction::{<a href="../interaction/mod.rs.html#132-134">HasInteractionChunkSize</a>, <a href="../interaction/mod.rs.html#140-186">RapPhaseSeq</a>, <a href="../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>},
     keygen::types::{
-        MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey, StarkVerifyingKey,
-        TraceWidth, VerifierSinglePreprocessedData,
+        <a href="types.rs.html#111-115">MultiStarkProvingKey</a>, <a href="types.rs.html#152-157">ProverOnlySinglePreprocessedData</a>, <a href="types.rs.html#91-99">StarkProvingKey</a>, <a href="types.rs.html#56-68">StarkVerifyingKey</a>,
+        <a href="types.rs.html#18-24">TraceWidth</a>, <a href="types.rs.html#168-171">VerifierSinglePreprocessedData</a>,
     },
-    prover::types::TraceCommitter,
-    rap::AnyRap,
+    <a href="../prover/trace.rs.html#114-116">prover::types::TraceCommitter</a>,
+    <a href="../rap.rs.html#66-77">rap::AnyRap</a>,
 };
 
-<span class="kw">pub mod </span>types;
-<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span>view;
+<span class="kw">pub mod </span><a href="types.rs.html#4-171">types</a>;
+<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">mod </span><a href="view.rs.html#1-92">view</a>;
 
-<span class="kw">struct </span>AirKeygenBuilder&lt;SC: StarkGenericConfig&gt; {
+<span class="kw">struct </span>AirKeygenBuilder&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;,
+    rap_phase_seq_kind: <a href="../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
     prep_keygen_data: PrepKeygenData&lt;SC&gt;,
 }
 
 <span class="doccomment">/// Stateful builder to create multi-stark proving and verifying keys
 /// for system of multiple RAPs with multiple multi-matrix commitments
-</span><span class="kw">pub struct </span>MultiStarkKeygenBuilder&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/struct.MultiStarkKeygenBuilder.html">MultiStarkKeygenBuilder</a>&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>config: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>SC,
     <span class="doccomment">/// Information for partitioned AIRs.
     </span>partitioned_airs: Vec&lt;AirKeygenBuilder&lt;SC&gt;&gt;,
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; MultiStarkKeygenBuilder&lt;<span class="lifetime">'a</span>, SC&gt; {
+<span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkKeygenBuilder&lt;<span class="lifetime">'a</span>, SC&gt; {
     <span class="kw">pub fn </span>new(config: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>SC) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            config,
-            partitioned_airs: <span class="macro">vec!</span>[],
+            <a href="#38">config</a>,
+            partitioned_airs: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
         }
     }
 
     <span class="doccomment">/// Default way to add a single Interactive AIR.
     /// Returns `air_id`
     </span><span class="attr">#[instrument(level = <span class="string">"debug"</span>, skip_all)]
-    </span><span class="kw">pub fn </span>add_air(<span class="kw-2">&amp;mut </span><span class="self">self</span>, air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;) -&gt; usize {
+    </span><span class="kw">pub fn </span>add_air(<span class="kw-2">&amp;mut </span><span class="self">self</span>, air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="self">self</span>.partitioned_airs.push(AirKeygenBuilder::new(
             <span class="self">self</span>.config.pcs(),
-            SC::RapPhaseSeq::KIND,
+            SC::RapPhaseSeq::ID,
             air,
         ));
         <span class="self">self</span>.partitioned_airs.len() - <span class="number">1
@@ -295,41 +299,41 @@
     <span class="doccomment">/// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
     </span><span class="kw">pub fn </span>generate_pk(<span class="self">self</span>) -&gt; MultiStarkProvingKey&lt;SC&gt; {
-        <span class="kw">let </span>global_max_constraint_degree = <span class="self">self
+        <span class="kw">let </span>global_max_constraint_degree = <span class="self"><a href="#59">self</a>
             </span>.partitioned_airs
-            .iter()
-            .map(|keygen_builder| {
-                <span class="kw">let </span>max_constraint_degree = keygen_builder.max_constraint_degree();
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|keygen_builder| {
+                <span class="kw">let </span>max_constraint_degree = <a href="#63">keygen_builder</a>.<a href="#142-146">max_constraint_degree</a>();
                 <span class="macro">tracing::debug!</span>(
                     <span class="string">"{} has constraint degree {}"</span>,
                     keygen_builder.air.name(),
                     max_constraint_degree
                 );
-                max_constraint_degree
+                <a href="#64">max_constraint_degree</a>
             })
-            .max()
-            .unwrap();
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>();
         <span class="macro">tracing::info!</span>(
             <span class="string">"Max constraint (excluding logup constraints) degree across all AIRs: {}"</span>,
             global_max_constraint_degree
         );
 
-        <span class="kw">let </span>symbolic_constraints_per_air = <span class="self">self
+        <span class="kw">let </span>symbolic_constraints_per_air = <span class="self"><a href="#59">self</a>
             </span>.partitioned_airs
-            .iter()
-            .map(|keygen_builder| keygen_builder.get_symbolic_builder(<span class="prelude-val">None</span>).constraints())
-            .collect();
-        <span class="kw">let </span>rap_phase_seq_pk_per_air = <span class="self">self
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|keygen_builder| <a href="#82">keygen_builder</a>.<a href="#182-200">get_symbolic_builder</a>(<span class="prelude-val">None</span>).<a href="../air_builders/symbolic/mod.rs.html#181-186">constraints</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <span class="kw">let </span>rap_phase_seq_pk_per_air = <span class="self"><a href="#59">self</a>
             </span>.config
-            .rap_phase_seq()
-            .generate_pk_per_air(symbolic_constraints_per_air);
+            .<a href="../config.rs.html#35">rap_phase_seq</a>()
+            .<a href="../interaction/mod.rs.html#148-151">generate_pk_per_air</a>(<a href="#79">symbolic_constraints_per_air</a>);
 
-        <span class="kw">let </span>pk_per_air: Vec&lt;<span class="kw">_</span>&gt; = <span class="self">self
+        <span class="kw">let </span>pk_per_air: Vec&lt;<span class="kw">_</span>&gt; = <span class="self"><a href="#59">self</a>
             </span>.partitioned_airs
-            .into_iter()
-            .zip_eq(rap_phase_seq_pk_per_air)
-            .map(|(keygen_builder, params)| keygen_builder.generate_pk(params))
-            .collect();
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+            .zip_eq(<a href="#84">rap_phase_seq_pk_per_air</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(keygen_builder, params)| <a href="#93">keygen_builder</a>.<a href="#148-180">generate_pk</a>(<a href="#93">params</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
         <span class="kw">for </span>pk <span class="kw">in </span>pk_per_air.iter() {
             <span class="kw">let </span>width = <span class="kw-2">&amp;</span>pk.vk.params.width;
@@ -360,117 +364,119 @@
             }
         }
 
-        MultiStarkProvingKey {
-            per_air: pk_per_air,
-            max_constraint_degree: global_max_constraint_degree,
+        <a href="types.rs.html#111-115">MultiStarkProvingKey</a> {
+            per_air: <a href="#89">pk_per_air</a>,
+            max_constraint_degree: <a href="#60">global_max_constraint_degree</a>,
         }
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; AirKeygenBuilder&lt;SC&gt; {
-    <span class="kw">fn </span>new(pcs: <span class="kw-2">&amp;</span>SC::Pcs, rap_phase_seq_kind: RapPhaseSeqKind, air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>prep_keygen_data = compute_prep_data_for_air(pcs, air.as_ref());
-        AirKeygenBuilder {
-            air,
-            prep_keygen_data,
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; AirKeygenBuilder&lt;SC&gt; {
+    <span class="kw">fn </span>new(pcs: <span class="kw-2">&amp;</span>SC::Pcs, rap_phase_seq_kind: <a href="../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>, air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>prep_keygen_data = <a href="#214-242">compute_prep_data_for_air</a>(<a href="#133">pcs</a>, <a href="#133">air</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>());
+        <a href="#23-27">AirKeygenBuilder</a> {
+            <a href="#133">air</a>,
+            <a href="#133">rap_phase_seq_kind</a>,
+            <a href="#134">prep_keygen_data</a>,
         }
     }
 
-    <span class="kw">fn </span>max_constraint_degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.get_symbolic_builder(<span class="prelude-val">None</span>)
-            .constraints()
-            .max_constraint_degree()
+    <span class="kw">fn </span>max_constraint_degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#142">self</a>.<a href="#182-200">get_symbolic_builder</a>(<span class="prelude-val">None</span>)
+            .<a href="../air_builders/symbolic/mod.rs.html#181-186">constraints</a>()
+            .<a href="../air_builders/symbolic/mod.rs.html#42-44">max_constraint_degree</a>()
     }
 
     <span class="kw">fn </span>generate_pk(<span class="self">self</span>, rap_phase_seq_pk: RapPhaseSeqProvingKey&lt;SC&gt;) -&gt; StarkProvingKey&lt;SC&gt; {
-        <span class="kw">let </span>air_name = <span class="self">self</span>.air.name();
+        <span class="kw">let </span>air_name = <a class="self" href="#148">self</a>.air.<a href="../rap.rs.html#76">name</a>();
 
-        <span class="kw">let </span>interaction_chunk_size = rap_phase_seq_pk.interaction_chunk_size();
-        <span class="kw">let </span>symbolic_builder = <span class="self">self</span>.get_symbolic_builder(<span class="prelude-val">Some</span>(interaction_chunk_size));
-        <span class="kw">let </span>params = symbolic_builder.params();
-        <span class="kw">let </span>symbolic_constraints = symbolic_builder.constraints();
-        <span class="kw">let </span>log_quotient_degree = symbolic_constraints.get_log_quotient_degree();
-        <span class="kw">let </span>quotient_degree = <span class="number">1 </span>&lt;&lt; log_quotient_degree;
+        <span class="kw">let </span>interaction_chunk_size = <a href="#148">rap_phase_seq_pk</a>.<a href="../interaction/mod.rs.html#133">interaction_chunk_size</a>();
+        <span class="kw">let </span>symbolic_builder = <a class="self" href="#148">self</a>.<a href="#182-200">get_symbolic_builder</a>(<span class="prelude-val">Some</span>(<a href="#151">interaction_chunk_size</a>));
+        <span class="kw">let </span>params = <a href="#152">symbolic_builder</a>.<a href="../air_builders/symbolic/mod.rs.html#188-198">params</a>();
+        <span class="kw">let </span>symbolic_constraints = <a href="#152">symbolic_builder</a>.<a href="../air_builders/symbolic/mod.rs.html#181-186">constraints</a>();
+        <span class="kw">let </span>log_quotient_degree = <a href="#154">symbolic_constraints</a>.<a href="../air_builders/symbolic/mod.rs.html#46-54">get_log_quotient_degree</a>();
+        <span class="kw">let </span>quotient_degree = <span class="number">1 </span>&lt;&lt; <a href="#155">log_quotient_degree</a>;
 
         <span class="kw">let </span><span class="self">Self </span>{
             prep_keygen_data:
-                PrepKeygenData {
+                <a href="#203-206">PrepKeygenData</a> {
                     verifier_data: prep_verifier_data,
                     prover_data: prep_prover_data,
                 },
             ..
-        } = <span class="self">self</span>;
+        } = <a class="self" href="#148">self</a>;
 
-        <span class="kw">let </span>vk = StarkVerifyingKey {
-            preprocessed_data: prep_verifier_data,
-            params,
-            symbolic_constraints,
-            quotient_degree,
+        <span class="kw">let </span>vk = <a href="types.rs.html#56-68">StarkVerifyingKey</a> {
+            preprocessed_data: <a href="#161">prep_verifier_data</a>,
+            <a href="#153">params</a>,
+            <a href="#154">symbolic_constraints</a>,
+            <a href="#156">quotient_degree</a>,
+            rap_phase_seq_kind: <a class="self" href="#148">self</a>.rap_phase_seq_kind,
         };
-        StarkProvingKey {
-            air_name,
-            vk,
-            preprocessed_data: prep_prover_data,
-            rap_phase_seq_pk,
+        <a href="types.rs.html#91-99">StarkProvingKey</a> {
+            <a href="#149">air_name</a>,
+            <a href="#167">vk</a>,
+            preprocessed_data: <a href="#162">prep_prover_data</a>,
+            <a href="#148">rap_phase_seq_pk</a>,
         }
     }
 
     <span class="kw">fn </span>get_symbolic_builder(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
-        interaction_chunk_size: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+        interaction_chunk_size: <span class="prelude-ty">Option</span>&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
     ) -&gt; SymbolicRapBuilder&lt;Val&lt;SC&gt;&gt; {
-        <span class="kw">let </span>width = TraceWidth {
-            preprocessed: <span class="self">self</span>.prep_keygen_data.width(),
-            cached_mains: <span class="self">self</span>.air.cached_main_widths(),
-            common_main: <span class="self">self</span>.air.common_main_width(),
-            after_challenge: <span class="macro">vec!</span>[],
+        <span class="kw">let </span>width = <a href="types.rs.html#18-24">TraceWidth</a> {
+            preprocessed: <a class="self" href="#183">self</a>.prep_keygen_data.<a href="#209-211">width</a>(),
+            cached_mains: <a class="self" href="#183">self</a>.air.<a href="../rap.rs.html#26-28">cached_main_widths</a>(),
+            common_main: <a class="self" href="#183">self</a>.air.<a href="../rap.rs.html#30-32">common_main_width</a>(),
+            after_challenge: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
         };
-        get_symbolic_builder(
-            <span class="self">self</span>.air.as_ref(),
-            <span class="kw-2">&amp;</span>width,
+        <a href="../air_builders/symbolic/mod.rs.html#83">get_symbolic_builder</a>(
+            <a class="self" href="#183">self</a>.air.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>(),
+            <span class="kw-2">&amp;</span><a href="#186">width</a>,
             <span class="kw-2">&amp;</span>[],
             <span class="kw-2">&amp;</span>[],
-            SC::RapPhaseSeq::KIND,
-            interaction_chunk_size.unwrap_or(<span class="number">1</span>),
+            SC::RapPhaseSeq::ID,
+            <a href="#184">interaction_chunk_size</a>.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">1</span>),
         )
     }
 }
 
-<span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>PrepKeygenData&lt;SC: StarkGenericConfig&gt; {
+<span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>PrepKeygenData&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>verifier_data: <span class="prelude-ty">Option</span>&lt;VerifierSinglePreprocessedData&lt;SC&gt;&gt;,
     <span class="kw">pub </span>prover_data: <span class="prelude-ty">Option</span>&lt;ProverOnlySinglePreprocessedData&lt;SC&gt;&gt;,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; PrepKeygenData&lt;SC&gt; {
-    <span class="kw">pub fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
-        <span class="self">self</span>.prover_data.as_ref().map(|d| d.trace.width())
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; PrepKeygenData&lt;SC&gt; {
+    <span class="kw">pub fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <a class="self" href="#209">self</a>.prover_data.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|d| <a href="#210">d</a>.trace.width())
     }
 }
 
-<span class="kw">fn </span>compute_prep_data_for_air&lt;SC: StarkGenericConfig&gt;(
+<span class="kw">fn </span>compute_prep_data_for_air&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt;(
     pcs: <span class="kw-2">&amp;</span>SC::Pcs,
     air: <span class="kw-2">&amp;</span><span class="kw">dyn </span>AnyRap&lt;SC&gt;,
 ) -&gt; PrepKeygenData&lt;SC&gt; {
-    <span class="kw">let </span>preprocessed_trace = air.preprocessed_trace();
-    <span class="kw">let </span>vpdata_opt = preprocessed_trace.map(|trace| {
-        <span class="kw">let </span>trace_committer = TraceCommitter::&lt;SC&gt;::new(pcs);
-        <span class="kw">let </span>data = trace_committer.commit(<span class="macro">vec!</span>[trace.clone()]);
-        <span class="kw">let </span>vdata = VerifierSinglePreprocessedData {
-            commit: data.commit,
+    <span class="kw">let </span>preprocessed_trace = <a href="#216">air</a>.preprocessed_trace();
+    <span class="kw">let </span>vpdata_opt = <a href="#218">preprocessed_trace</a>.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|trace| {
+        <span class="kw">let </span>trace_committer = TraceCommitter::&lt;SC&gt;::new(<a href="#215">pcs</a>);
+        <span class="kw">let </span>data = <a href="#220">trace_committer</a>.<a href="../prover/trace.rs.html#132-149">commit</a>(<a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[trace.clone()]);
+        <span class="kw">let </span>vdata = <a href="types.rs.html#168-171">VerifierSinglePreprocessedData</a> {
+            commit: <a href="#221">data</a>.commit,
         };
-        <span class="kw">let </span>pdata = ProverOnlySinglePreprocessedData {
-            trace,
-            data: data.data,
+        <span class="kw">let </span>pdata = <a href="types.rs.html#152-157">ProverOnlySinglePreprocessedData</a> {
+            <a href="#219">trace</a>,
+            data: <a href="#221">data</a>.data,
         };
-        (vdata, pdata)
+        (<a href="#222">vdata</a>, <a href="#225">pdata</a>)
     });
-    <span class="kw">if let </span><span class="prelude-val">Some</span>((vdata, pdata)) = vpdata_opt {
-        PrepKeygenData {
-            prover_data: <span class="prelude-val">Some</span>(pdata),
-            verifier_data: <span class="prelude-val">Some</span>(vdata),
+    <span class="kw">if let </span><span class="prelude-val">Some</span>((vdata, pdata)) = <a href="#219">vpdata_opt</a> {
+        <a href="#203-206">PrepKeygenData</a> {
+            prover_data: <span class="prelude-val">Some</span>(<a href="#231">pdata</a>),
+            verifier_data: <span class="prelude-val">Some</span>(<a href="#231">vdata</a>),
         }
     } <span class="kw">else </span>{
-        PrepKeygenData {
+        <a href="#203-206">PrepKeygenData</a> {
             prover_data: <span class="prelude-val">None</span>,
             verifier_data: <span class="prelude-val">None</span>,
         }

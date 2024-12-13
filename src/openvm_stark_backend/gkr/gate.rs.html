@@ -54,7 +54,7 @@
 <a href="#53" id="53">53</a>
 <a href="#54" id="54">54</a></pre></div><pre class="rust"><code><span class="kw">use </span>p3_field::Field;
 
-<span class="kw">use crate</span>::{gkr::types::GkrMask, poly::uni::Fraction};
+<span class="kw">use crate</span>::{<a href="types.rs.html#36-38">gkr::types::GkrMask</a>, <a href="../poly/uni.rs.html#193-196">poly::uni::Fraction</a>};
 
 <span class="doccomment">/// Defines how a circuit operates locally on two input rows to produce a single output row.
 /// This local 2-to-1 constraint is what gives the whole circuit its "binary tree" structure.
@@ -65,39 +65,39 @@
 ///
 /// [Thaler13]: https://eprint.iacr.org/2013/351.pdf
 </span><span class="attr">#[derive(Debug, Clone, Copy)]
-</span><span class="kw">pub enum </span>Gate {
+</span><span class="kw">pub enum </span><a href="../../../openvm_stark_backend/gkr/enum.Gate.html">Gate</a> {
     LogUp,
     GrandProduct,
 }
 
-<span class="kw">impl </span>Gate {
+<span class="kw">impl </span><a href="#14-17">Gate</a> {
     <span class="doccomment">/// Returns the output after applying the gate to the mask.
     </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>eval&lt;F: Field&gt;(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         mask: <span class="kw-2">&amp;</span>GkrMask&lt;F&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;F&gt;, InvalidNumMaskColumnsError&gt; {
-        <span class="prelude-val">Ok</span>(<span class="kw">match </span><span class="self">self </span>{
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;F&gt;, <a href="#54">InvalidNumMaskColumnsError</a>&gt; {
+        <span class="prelude-val">Ok</span>(<span class="kw">match </span><span class="self"><a href="#22">self</a> </span>{
             <span class="self">Self</span>::LogUp =&gt; {
                 <span class="kw">if </span>mask.columns().len() != <span class="number">2 </span>{
-                    <span class="kw">return </span><span class="prelude-val">Err</span>(InvalidNumMaskColumnsError);
+                    <span class="kw">return </span><span class="prelude-val">Err</span>(<a href="#54">InvalidNumMaskColumnsError</a>);
                 }
 
-                <span class="kw">let </span>[numerator_a, numerator_b] = mask.columns()[<span class="number">0</span>];
-                <span class="kw">let </span>[denominator_a, denominator_b] = mask.columns()[<span class="number">1</span>];
+                <span class="kw">let </span>[numerator_a, numerator_b] = <a href="#23">mask</a>.<a href="types.rs.html#45-47">columns</a>()[<span class="number">0</span>];
+                <span class="kw">let </span>[denominator_a, denominator_b] = <a href="#23">mask</a>.<a href="types.rs.html#45-47">columns</a>()[<span class="number">1</span>];
 
-                <span class="kw">let </span>a = Fraction::new(numerator_a, denominator_a);
-                <span class="kw">let </span>b = Fraction::new(numerator_b, denominator_b);
-                <span class="kw">let </span>res = a + b;
+                <span class="kw">let </span>a = <a href="../poly/uni.rs.html#199-204">Fraction::new</a>(<a href="#31">numerator_a</a>, <a href="#32">denominator_a</a>);
+                <span class="kw">let </span>b = <a href="../poly/uni.rs.html#199-204">Fraction::new</a>(<a href="#31">numerator_b</a>, <a href="#32">denominator_b</a>);
+                <span class="kw">let </span>res = <a href="#34">a</a> + <a href="#35">b</a>;
 
-                <span class="macro">vec!</span>[res.numerator, res.denominator]
+                <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[res.numerator, res.denominator]
             }
             <span class="self">Self</span>::GrandProduct =&gt; {
                 <span class="kw">if </span>mask.columns().len() != <span class="number">1 </span>{
-                    <span class="kw">return </span><span class="prelude-val">Err</span>(InvalidNumMaskColumnsError);
+                    <span class="kw">return </span><span class="prelude-val">Err</span>(<a href="#54">InvalidNumMaskColumnsError</a>);
                 }
 
-                <span class="kw">let </span>[a, b] = mask.columns()[<span class="number">0</span>];
-                <span class="macro">vec!</span>[a * b]
+                <span class="kw">let </span>[a, b] = <a href="#23">mask</a>.<a href="types.rs.html#45-47">columns</a>()[<span class="number">0</span>];
+                <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[a * b]
             }
         })
     }
@@ -105,5 +105,5 @@
 
 <span class="doccomment">/// Error indicating the mask has an invalid number of columns for a gate's operation.
 </span><span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>InvalidNumMaskColumnsError;
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/gkr/struct.InvalidNumMaskColumnsError.html">InvalidNumMaskColumnsError</a>;
 </code></pre></div></section></main></body></html>

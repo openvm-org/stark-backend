@@ -289,47 +289,47 @@
 //! Chip will either send or receive the fields with multiplicity count.
 //! The main Air has no constraints, the only constraints are specified by the Chip trait
 
-</span><span class="kw">use </span>std::{iter, sync::Arc};
+</span><span class="kw">use </span>std::{<a href="https://doc.rust-lang.org/nightly/core/iter/index.html">iter</a>, <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">sync::Arc</a>};
 
 <span class="kw">use </span>itertools::izip;
 <span class="kw">use </span>openvm_stark_backend::{
-    air_builders::PartitionedAirBuilder,
-    config::{StarkGenericConfig, Val},
-    interaction::{InteractionBuilder, InteractionType},
+    <a href="../../../../openvm_stark_backend/air_builders/trait.PartitionedAirBuilder.html">air_builders::PartitionedAirBuilder</a>,
+    config::{<a href="../../../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>, <a href="../../../../openvm_stark_backend/config/type.Val.html">Val</a>},
+    interaction::{<a href="../../../../openvm_stark_backend/interaction/trait.InteractionBuilder.html">InteractionBuilder</a>, <a href="../../../../openvm_stark_backend/interaction/enum.InteractionType.html">InteractionType</a>},
     p3_air::{Air, BaseAir},
     p3_field::{AbstractField, Field},
     p3_matrix::{dense::RowMajorMatrix, Matrix},
-    prover::types::{AirProofInput, AirProofRawInput, CommittedTraceData, TraceCommitter},
-    rap::{AnyRap, BaseAirWithPublicValues, PartitionedBaseAir},
-    Chip, ChipUsageGetter,
+    prover::types::{<a href="../../../../openvm_stark_backend/prover/types/struct.AirProofInput.html">AirProofInput</a>, <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofRawInput.html">AirProofRawInput</a>, <a href="../../../../openvm_stark_backend/prover/types/struct.CommittedTraceData.html">CommittedTraceData</a>, <a href="../../../../openvm_stark_backend/prover/trace/struct.TraceCommitter.html">TraceCommitter</a>},
+    rap::{<a href="../../../../openvm_stark_backend/rap/trait.AnyRap.html">AnyRap</a>, <a href="../../../../openvm_stark_backend/rap/trait.BaseAirWithPublicValues.html">BaseAirWithPublicValues</a>, <a href="../../../../openvm_stark_backend/rap/trait.PartitionedBaseAir.html">PartitionedBaseAir</a>},
+    <a href="../../../../openvm_stark_backend/chip/trait.Chip.html">Chip</a>, <a href="../../../../openvm_stark_backend/chip/trait.ChipUsageGetter.html">ChipUsageGetter</a>,
 };
 
-<span class="kw">pub struct </span>DummyInteractionCols;
-<span class="kw">impl </span>DummyInteractionCols {
-    <span class="kw">pub fn </span>count_col() -&gt; usize {
+<span class="kw">pub struct </span><a href="../../../../openvm_stark_sdk/dummy_airs/interaction/dummy_interaction_air/struct.DummyInteractionCols.html">DummyInteractionCols</a>;
+<span class="kw">impl </span><a href="#22">DummyInteractionCols</a> {
+    <span class="kw">pub fn </span>count_col() -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="number">0
     </span>}
-    <span class="kw">pub fn </span>field_col(field_idx: usize) -&gt; usize {
-        field_idx + <span class="number">1
+    <span class="kw">pub fn </span>field_col(field_idx: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a href="#27">field_idx</a> + <span class="number">1
     </span>}
 }
 
 <span class="attr">#[derive(Clone, Copy)]
-</span><span class="kw">pub struct </span>DummyInteractionAir {
-    field_width: usize,
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_sdk/dummy_airs/interaction/dummy_interaction_air/struct.DummyInteractionAir.html">DummyInteractionAir</a> {
+    field_width: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// Send if true. Receive if false.
-    </span><span class="kw">pub </span>is_send: bool,
-    bus_index: usize,
+    </span><span class="kw">pub </span>is_send: <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>,
+    bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// If true, then | count | and | fields[..] | are in separate main trace partitions.
-    </span><span class="kw">pub </span>partition: bool,
+    </span><span class="kw">pub </span>partition: <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>,
 }
 
-<span class="kw">impl </span>DummyInteractionAir {
-    <span class="kw">pub fn </span>new(field_width: usize, is_send: bool, bus_index: usize) -&gt; <span class="self">Self </span>{
+<span class="kw">impl </span><a href="#33-40">DummyInteractionAir</a> {
+    <span class="kw">pub fn </span>new(field_width: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, is_send: <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>, bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            field_width,
-            is_send,
-            bus_index,
+            <a href="#43">field_width</a>,
+            <a href="#43">is_send</a>,
+            <a href="#43">bus_index</a>,
             partition: <span class="bool-val">false</span>,
         }
     }
@@ -337,35 +337,35 @@
     <span class="kw">pub fn </span>partition(<span class="self">self</span>) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
             partition: <span class="bool-val">true</span>,
-            ..<span class="self">self
+            ..<span class="self"><a href="#52">self</a>
         </span>}
     }
 
-    <span class="kw">pub fn </span>field_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.field_width
+    <span class="kw">pub fn </span>field_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#59">self</a>.field_width
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; BaseAirWithPublicValues&lt;F&gt; <span class="kw">for </span>DummyInteractionAir {}
-<span class="kw">impl</span>&lt;F: Field&gt; PartitionedBaseAir&lt;F&gt; <span class="kw">for </span>DummyInteractionAir {
-    <span class="kw">fn </span>cached_main_widths(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;usize&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; BaseAirWithPublicValues&lt;F&gt; <span class="kw">for </span><a href="#33-40">DummyInteractionAir</a> {}
+<span class="kw">impl</span>&lt;F: Field&gt; PartitionedBaseAir&lt;F&gt; <span class="kw">for </span><a href="#33-40">DummyInteractionAir</a> {
+    <span class="kw">fn </span>cached_main_widths(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
         <span class="kw">if </span><span class="self">self</span>.partition {
-            <span class="macro">vec!</span>[<span class="self">self</span>.field_width]
+            <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[<span class="self">self</span>.field_width]
         } <span class="kw">else </span>{
-            <span class="macro">vec!</span>[]
+            <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[]
         }
     }
-    <span class="kw">fn </span>common_main_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+    <span class="kw">fn </span>common_main_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
         <span class="kw">if </span><span class="self">self</span>.partition {
             <span class="number">1
         </span>} <span class="kw">else </span>{
-            <span class="number">1 </span>+ <span class="self">self</span>.field_width
+            <span class="number">1 </span>+ <a class="self" href="#73">self</a>.field_width
         }
     }
 }
-<span class="kw">impl</span>&lt;F: Field&gt; BaseAir&lt;F&gt; <span class="kw">for </span>DummyInteractionAir {
-    <span class="kw">fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="number">1 </span>+ <span class="self">self</span>.field_width
+<span class="kw">impl</span>&lt;F: Field&gt; BaseAir&lt;F&gt; <span class="kw">for </span><a href="#33-40">DummyInteractionAir</a> {
+    <span class="kw">fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <span class="number">1 </span>+ <a class="self" href="#82">self</a>.field_width
     }
 
     <span class="kw">fn </span>preprocessed_trace(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;RowMajorMatrix&lt;F&gt;&gt; {
@@ -373,199 +373,199 @@
     </span>}
 }
 
-<span class="kw">impl</span>&lt;AB: InteractionBuilder + PartitionedAirBuilder&gt; Air&lt;AB&gt; <span class="kw">for </span>DummyInteractionAir {
+<span class="kw">impl</span>&lt;AB: <a href="../../../../openvm_stark_backend/interaction/trait.InteractionBuilder.html">InteractionBuilder</a> + <a href="../../../../openvm_stark_backend/air_builders/trait.PartitionedAirBuilder.html">PartitionedAirBuilder</a>&gt; Air&lt;AB&gt; <span class="kw">for </span><a href="#33-40">DummyInteractionAir</a> {
     <span class="kw">fn </span>eval(<span class="kw-2">&amp;</span><span class="self">self</span>, builder: <span class="kw-2">&amp;mut </span>AB) {
         <span class="kw">let </span>(fields, count) = <span class="kw">if </span><span class="self">self</span>.partition {
-            <span class="kw">let </span>local_0 = builder.common_main().row_slice(<span class="number">0</span>);
-            <span class="kw">let </span>local_1 = builder.cached_mains()[<span class="number">0</span>].row_slice(<span class="number">0</span>);
-            <span class="kw">let </span>count = local_0[<span class="number">0</span>];
-            <span class="kw">let </span>fields = local_1.to_vec();
-            (fields, count)
+            <span class="kw">let </span>local_0 = <a href="#92">builder</a>.<a href="../../../../openvm_stark_backend/air_builders/trait.PartitionedAirBuilder.html#tymethod.common_main">common_main</a>().row_slice(<span class="number">0</span>);
+            <span class="kw">let </span>local_1 = <a href="#92">builder</a>.<a href="../../../../openvm_stark_backend/air_builders/trait.PartitionedAirBuilder.html#tymethod.cached_mains">cached_mains</a>()[<span class="number">0</span>].row_slice(<span class="number">0</span>);
+            <span class="kw">let </span>count = <a href="#94">local_0</a>[<span class="number">0</span>];
+            <span class="kw">let </span>fields = <a href="#95">local_1</a>.<a href="https://doc.rust-lang.org/nightly/alloc/foreigntype.slice.html#method.to_vec">to_vec</a>();
+            (<a href="#97">fields</a>, <a href="#96">count</a>)
         } <span class="kw">else </span>{
-            <span class="kw">let </span>main = builder.main();
-            <span class="kw">let </span>local = main.row_slice(<span class="number">0</span>);
-            <span class="kw">let </span>count = local[DummyInteractionCols::count_col()];
-            <span class="kw">let </span>fields: Vec&lt;<span class="kw">_</span>&gt; = (<span class="number">0</span>..<span class="self">self</span>.field_width)
-                .map(|i| local[DummyInteractionCols::field_col(i)])
-                .collect();
-            (fields, count)
+            <span class="kw">let </span>main = <a href="#92">builder</a>.main();
+            <span class="kw">let </span>local = <a href="#100">main</a>.row_slice(<span class="number">0</span>);
+            <span class="kw">let </span>count = <a href="#101">local</a>[<a href="#24-26">DummyInteractionCols::count_col</a>()];
+            <span class="kw">let </span>fields: Vec&lt;<span class="kw">_</span>&gt; = (<span class="number">0</span>..<a class="self" href="#92">self</a>.field_width)
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|i| <a href="#101">local</a>[<a href="#27-29">DummyInteractionCols::field_col</a>(<a href="#104">i</a>)])
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+            (<a href="#103">fields</a>, <a href="#102">count</a>)
         };
         <span class="kw">let </span>interaction_type = <span class="kw">if </span><span class="self">self</span>.is_send {
-            InteractionType::Send
+            <a href="../../../../openvm_stark_backend/interaction/enum.InteractionType.html#variant.Send">InteractionType::Send</a>
         } <span class="kw">else </span>{
-            InteractionType::Receive
+            <a href="../../../../openvm_stark_backend/interaction/enum.InteractionType.html#variant.Receive">InteractionType::Receive</a>
         };
-        builder.push_interaction(<span class="self">self</span>.bus_index, fields, count, interaction_type)
+        <a href="#92">builder</a>.<a href="../../../../openvm_stark_backend/interaction/trait.InteractionBuilder.html#tymethod.push_interaction">push_interaction</a>(<a class="self" href="#92">self</a>.bus_index, <a href="#93">fields</a>, <a href="#93">count</a>, <a href="#108">interaction_type</a>)
     }
 }
 
 <span class="doccomment">/// Note: in principle, committing cached trace is out of scope of a chip. But this chip is for
 /// usually testing, so we support it for convenience.
-</span><span class="kw">pub struct </span>DummyInteractionChip&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_sdk/dummy_airs/interaction/dummy_interaction_air/struct.DummyInteractionChip.html">DummyInteractionChip</a>&lt;<span class="lifetime">'a</span>, SC: <a href="../../../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; {
     trace_committer: <span class="prelude-ty">Option</span>&lt;TraceCommitter&lt;<span class="lifetime">'a</span>, SC&gt;&gt;,
     <span class="comment">// common_main: Option&lt;RowMajorMatrix&lt;Val&lt;SC&gt;&gt;&gt;,
-    </span>data: <span class="prelude-ty">Option</span>&lt;DummyInteractionData&gt;,
-    <span class="kw">pub </span>air: DummyInteractionAir,
+    </span>data: <span class="prelude-ty">Option</span>&lt;<a href="#137-140">DummyInteractionData</a>&gt;,
+    <span class="kw">pub </span>air: <a href="#33-40">DummyInteractionAir</a>,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; Clone <span class="kw">for </span>DummyInteractionChip&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../../../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a> <span class="kw">for </span>DummyInteractionChip&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="kw">fn </span>clone(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            trace_committer: <span class="self">self</span>.trace_committer.clone(),
-            data: <span class="self">self</span>.data.clone(),
-            air: <span class="self">self</span>.air,
+            trace_committer: <a class="self" href="#127">self</a>.trace_committer.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>(),
+            data: <a class="self" href="#127">self</a>.data.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>(),
+            air: <a class="self" href="#127">self</a>.air,
         }
     }
 }
 
 <span class="attr">#[derive(Debug, Clone)]
-</span><span class="kw">pub struct </span>DummyInteractionData {
-    <span class="kw">pub </span>count: Vec&lt;u32&gt;,
-    <span class="kw">pub </span>fields: Vec&lt;Vec&lt;u32&gt;&gt;,
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_sdk/dummy_airs/interaction/dummy_interaction_air/struct.DummyInteractionData.html">DummyInteractionData</a> {
+    <span class="kw">pub </span>count: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>&gt;,
+    <span class="kw">pub </span>fields: Vec&lt;Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>&gt;&gt;,
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; DummyInteractionChip&lt;<span class="lifetime">'a</span>, SC&gt;
+<span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC: <a href="../../../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; DummyInteractionChip&lt;<span class="lifetime">'a</span>, SC&gt;
 <span class="kw">where
     </span>Val&lt;SC&gt;: AbstractField,
 {
-    <span class="kw">pub fn </span>new_without_partition(field_width: usize, is_send: bool, bus_index: usize) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>air = DummyInteractionAir::new(field_width, is_send, bus_index);
+    <span class="kw">pub fn </span>new_without_partition(field_width: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, is_send: <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>, bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
+        <span class="kw">let </span>air = <a href="#43-50">DummyInteractionAir::new</a>(<a href="#146">field_width</a>, <a href="#146">is_send</a>, <a href="#146">bus_index</a>);
         <span class="self">Self </span>{
             trace_committer: <span class="prelude-val">None</span>,
             data: <span class="prelude-val">None</span>,
-            air,
+            <a href="#147">air</a>,
         }
     }
     <span class="kw">pub fn </span>new_with_partition(
         pcs: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>SC::Pcs,
-        field_width: usize,
-        is_send: bool,
-        bus_index: usize,
+        field_width: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+        is_send: <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>,
+        bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     ) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>air = DummyInteractionAir::new(field_width, is_send, bus_index).partition();
+        <span class="kw">let </span>air = <a href="#43-50">DummyInteractionAir::new</a>(<a href="#156">field_width</a>, <a href="#157">is_send</a>, <a href="#158">bus_index</a>).<a href="#52-57">partition</a>();
         <span class="self">Self </span>{
-            trace_committer: <span class="prelude-val">Some</span>(TraceCommitter::new(pcs)),
+            trace_committer: <span class="prelude-val">Some</span>(<a href="../../../../openvm_stark_backend/prover/trace/struct.TraceCommitter.html#method.new">TraceCommitter::new</a>(<a href="#155">pcs</a>)),
             data: <span class="prelude-val">None</span>,
-            air,
+            <a href="#160">air</a>,
         }
     }
-    <span class="kw">pub fn </span>load_data(<span class="kw-2">&amp;mut </span><span class="self">self</span>, data: DummyInteractionData) {
-        <span class="kw">let </span>DummyInteractionData { count, fields } = <span class="kw-2">&amp;</span>data;
-        <span class="kw">let </span>h = count.len();
-        <span class="macro">assert_eq!</span>(fields.len(), h);
-        <span class="kw">let </span>w = fields[<span class="number">0</span>].len();
-        <span class="macro">assert_eq!</span>(<span class="self">self</span>.air.field_width, w);
-        <span class="macro">assert!</span>(fields.iter().all(|r| r.len() == w));
-        <span class="self">self</span>.data = <span class="prelude-val">Some</span>(data);
+    <span class="kw">pub fn </span>load_data(<span class="kw-2">&amp;mut </span><span class="self">self</span>, data: <a href="#137-140">DummyInteractionData</a>) {
+        <span class="kw">let </span><a href="#137-140">DummyInteractionData</a> { count, fields } = <span class="kw-2">&amp;</span><a href="#167">data</a>;
+        <span class="kw">let </span>h = <a href="#168">count</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(fields.len(), h);
+        <span class="kw">let </span>w = <a href="#168">fields</a>[<span class="number">0</span>].<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(<span class="self">self</span>.air.field_width, w);
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(fields.iter().all(|r| r.len() == w));
+        <a class="self" href="#167">self</a>.data = <span class="prelude-val">Some</span>(<a href="#167">data</a>);
     }
     <span class="kw">fn </span>generate_traces_with_partition(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
-        data: DummyInteractionData,
+        data: <a href="#137-140">DummyInteractionData</a>,
     ) -&gt; (RowMajorMatrix&lt;Val&lt;SC&gt;&gt;, CommittedTraceData&lt;SC&gt;) {
-        <span class="kw">let </span>DummyInteractionData {
+        <span class="kw">let </span><a href="#137-140">DummyInteractionData</a> {
             <span class="kw-2">mut </span>count,
             <span class="kw-2">mut </span>fields,
-        } = data;
-        <span class="kw">let </span>h = count.len();
-        <span class="macro">assert_eq!</span>(fields.len(), h);
-        <span class="kw">let </span>w = fields[<span class="number">0</span>].len();
-        <span class="macro">assert_eq!</span>(<span class="self">self</span>.air.field_width, w);
-        <span class="macro">assert!</span>(fields.iter().all(|r| r.len() == w));
-        <span class="kw">let </span>h = h.next_power_of_two();
-        count.resize(h, <span class="number">0</span>);
-        fields.resize(h, <span class="macro">vec!</span>[<span class="number">0</span>; w]);
-        <span class="kw">let </span>common_main_val: Vec&lt;<span class="kw">_</span>&gt; = count
-            .into_iter()
-            .map(Val::&lt;SC&gt;::from_canonical_u32)
-            .collect();
-        <span class="kw">let </span>cached_trace_val: Vec&lt;<span class="kw">_</span>&gt; = fields
-            .into_iter()
-            .flatten()
-            .map(Val::&lt;SC&gt;::from_canonical_u32)
-            .collect();
-        <span class="kw">let </span>cached_trace = RowMajorMatrix::new(cached_trace_val, w);
-        <span class="kw">let </span>prover_data = <span class="self">self
+        } = <a href="#178">data</a>;
+        <span class="kw">let </span>h = <a href="#181">count</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(fields.len(), h);
+        <span class="kw">let </span>w = <a href="#182">fields</a>[<span class="number">0</span>].<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(<span class="self">self</span>.air.field_width, w);
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(fields.iter().all(|r| r.len() == w));
+        <span class="kw">let </span>h = <a href="#184">h</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.next_power_of_two">next_power_of_two</a>();
+        <a href="#181">count</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.resize">resize</a>(<a href="#189">h</a>, <span class="number">0</span>);
+        <a href="#182">fields</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.resize">resize</a>(<a href="#189">h</a>, <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[<span class="number">0</span>; <a href="#186">w</a>]);
+        <span class="kw">let </span>common_main_val: Vec&lt;<span class="kw">_</span>&gt; = <a href="#181">count</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(Val::&lt;SC&gt;::from_canonical_u32)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <span class="kw">let </span>cached_trace_val: Vec&lt;<span class="kw">_</span>&gt; = <a href="#182">fields</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flatten">flatten</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(Val::&lt;SC&gt;::from_canonical_u32)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <span class="kw">let </span>cached_trace = RowMajorMatrix::new(<a href="#196">cached_trace_val</a>, <a href="#186">w</a>);
+        <span class="kw">let </span>prover_data = <span class="self"><a href="#177">self</a>
             </span>.trace_committer
-            .as_ref()
-            .unwrap()
-            .commit(<span class="macro">vec!</span>[cached_trace.clone()]);
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>()
+            .<a href="../../../../openvm_stark_backend/prover/trace/struct.TraceCommitter.html#method.commit">commit</a>(<a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[cached_trace.clone()]);
         (
-            RowMajorMatrix::new(common_main_val, <span class="number">1</span>),
-            CommittedTraceData {
-                raw_data: Arc::new(cached_trace),
-                prover_data,
+            RowMajorMatrix::new(<a href="#192">common_main_val</a>, <span class="number">1</span>),
+            <a href="../../../../openvm_stark_backend/prover/types/struct.CommittedTraceData.html">CommittedTraceData</a> {
+                raw_data: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#201">cached_trace</a>),
+                <a href="#202">prover_data</a>,
             },
         )
     }
 
     <span class="kw">fn </span>generate_traces_without_partition(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
-        data: DummyInteractionData,
+        data: <a href="#137-140">DummyInteractionData</a>,
     ) -&gt; RowMajorMatrix&lt;Val&lt;SC&gt;&gt; {
-        <span class="kw">let </span>DummyInteractionData { count, fields } = data;
-        <span class="kw">let </span>h = count.len();
-        <span class="macro">assert_eq!</span>(fields.len(), h);
-        <span class="kw">let </span>w = fields[<span class="number">0</span>].len();
-        <span class="macro">assert_eq!</span>(<span class="self">self</span>.air.field_width, w);
-        <span class="macro">assert!</span>(fields.iter().all(|r| r.len() == w));
-        <span class="kw">let </span>common_main_val: Vec&lt;<span class="kw">_</span>&gt; = <span class="macro">izip!</span>(count, fields)
-            .flat_map(|(count, fields)| iter::once(count).chain(fields))
-            .chain(iter::repeat(<span class="number">0</span>))
-            .take((w + <span class="number">1</span>) * h.next_power_of_two())
-            .map(Val::&lt;SC&gt;::from_canonical_u32)
-            .collect();
-        RowMajorMatrix::new(common_main_val, w + <span class="number">1</span>)
+        <span class="kw">let </span><a href="#137-140">DummyInteractionData</a> { count, fields } = <a href="#218">data</a>;
+        <span class="kw">let </span>h = <a href="#220">count</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(fields.len(), h);
+        <span class="kw">let </span>w = <a href="#220">fields</a>[<span class="number">0</span>].<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(<span class="self">self</span>.air.field_width, w);
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(fields.iter().all(|r| r.len() == w));
+        <span class="kw">let </span>common_main_val: Vec&lt;<span class="kw">_</span>&gt; = <span class="macro">izip!</span>(<a href="#220">count</a>, <a href="#220">fields</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|(count, fields)| <a href="https://doc.rust-lang.org/nightly/core/iter/sources/once/fn.once.html">iter::once</a>(<a href="#227">count</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.chain">chain</a>(<a href="#227">fields</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.chain">chain</a>(<a href="https://doc.rust-lang.org/nightly/core/iter/sources/repeat/fn.repeat.html">iter::repeat</a>(<span class="number">0</span>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.take">take</a>((<a href="#223">w</a> + <span class="number">1</span>) * <a href="#221">h</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.next_power_of_two">next_power_of_two</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(Val::&lt;SC&gt;::from_canonical_u32)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        RowMajorMatrix::new(<a href="#226">common_main_val</a>, <a href="#223">w</a> + <span class="number">1</span>)
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; Chip&lt;SC&gt; <span class="kw">for </span>DummyInteractionChip&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../../../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; Chip&lt;SC&gt; <span class="kw">for </span>DummyInteractionChip&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="kw">fn </span>air(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt; {
-        Arc::new(<span class="self">self</span>.air)
+        <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a class="self" href="#237">self</a>.air)
     }
 
     <span class="kw">fn </span>generate_air_proof_input(<span class="self">self</span>) -&gt; AirProofInput&lt;SC&gt; {
-        <span class="macro">assert!</span>(<span class="self">self</span>.data.is_some());
-        <span class="kw">let </span>data = <span class="self">self</span>.data.clone().unwrap();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(<span class="self">self</span>.data.is_some());
+        <span class="kw">let </span>data = <a class="self" href="#241">self</a>.data.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>();
         <span class="kw">if </span><span class="self">self</span>.trace_committer.is_some() {
-            <span class="kw">let </span>(common_main, cached_main) = <span class="self">self</span>.generate_traces_with_partition(data);
-            AirProofInput {
-                air: <span class="self">self</span>.air(),
-                cached_mains_pdata: <span class="macro">vec!</span>[cached_main.prover_data],
-                raw: AirProofRawInput {
-                    cached_mains: <span class="macro">vec!</span>[cached_main.raw_data],
-                    common_main: <span class="prelude-val">Some</span>(common_main),
-                    public_values: <span class="macro">vec!</span>[],
+            <span class="kw">let </span>(common_main, cached_main) = <a class="self" href="#241">self</a>.<a href="#176-214">generate_traces_with_partition</a>(<a href="#243">data</a>);
+            <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofInput.html">AirProofInput</a> {
+                air: <a class="self" href="#241">self</a>.<a href="../../../../openvm_stark_backend/chip/trait.Chip.html#tymethod.air">air</a>(),
+                cached_mains_pdata: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[cached_main.prover_data],
+                raw: <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofRawInput.html">AirProofRawInput</a> {
+                    cached_mains: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[cached_main.raw_data],
+                    common_main: <span class="prelude-val">Some</span>(<a href="#245">common_main</a>),
+                    public_values: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
                 },
             }
         } <span class="kw">else </span>{
-            <span class="kw">let </span>common_main = <span class="self">self</span>.generate_traces_without_partition(data);
-            AirProofInput {
-                air: <span class="self">self</span>.air(),
-                cached_mains_pdata: <span class="macro">vec!</span>[],
-                raw: AirProofRawInput {
-                    cached_mains: <span class="macro">vec!</span>[],
-                    common_main: <span class="prelude-val">Some</span>(common_main),
-                    public_values: <span class="macro">vec!</span>[],
+            <span class="kw">let </span>common_main = <a class="self" href="#241">self</a>.<a href="#216-233">generate_traces_without_partition</a>(<a href="#243">data</a>);
+            <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofInput.html">AirProofInput</a> {
+                air: <a class="self" href="#241">self</a>.<a href="../../../../openvm_stark_backend/chip/trait.Chip.html#tymethod.air">air</a>(),
+                cached_mains_pdata: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+                raw: <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofRawInput.html">AirProofRawInput</a> {
+                    cached_mains: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+                    common_main: <span class="prelude-val">Some</span>(<a href="#256">common_main</a>),
+                    public_values: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
                 },
             }
         }
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; ChipUsageGetter <span class="kw">for </span>DummyInteractionChip&lt;<span class="lifetime">'_</span>, SC&gt; {
-    <span class="kw">fn </span>air_name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; String {
-        <span class="string">"DummyInteractionAir"</span>.to_string()
+<span class="kw">impl</span>&lt;SC: <a href="../../../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>&gt; <a href="../../../../openvm_stark_backend/chip/trait.ChipUsageGetter.html">ChipUsageGetter</a> <span class="kw">for </span>DummyInteractionChip&lt;<span class="lifetime">'_</span>, SC&gt; {
+    <span class="kw">fn </span>air_name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a> {
+        <span class="string">"DummyInteractionAir"</span>.<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>()
     }
-    <span class="kw">fn </span>current_trace_height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="kw">if let </span><span class="prelude-val">Some</span>(data) = <span class="kw-2">&amp;</span><span class="self">self</span>.data {
-            data.count.len()
+    <span class="kw">fn </span>current_trace_height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(data) = <span class="kw-2">&amp;</span><a class="self" href="#274">self</a>.data {
+            <a href="#275">data</a>.count.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()
         } <span class="kw">else </span>{
             <span class="number">0
         </span>}
     }
 
-    <span class="kw">fn </span>trace_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.air.field_width + <span class="number">1
+    <span class="kw">fn </span>trace_width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#282">self</a>.air.field_width + <span class="number">1
     </span>}
 }
 </code></pre></div></section></main></body></html>

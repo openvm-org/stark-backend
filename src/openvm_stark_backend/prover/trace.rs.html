@@ -201,36 +201,28 @@
 <a href="#200" id="200">200</a>
 <a href="#201" id="201">201</a>
 <a href="#202" id="202">202</a>
-<a href="#203" id="203">203</a>
-<a href="#204" id="204">204</a>
-<a href="#205" id="205">205</a>
-<a href="#206" id="206">206</a>
-<a href="#207" id="207">207</a>
-<a href="#208" id="208">208</a>
-<a href="#209" id="209">209</a>
-<a href="#210" id="210">210</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#203" id="203">203</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>derivative::Derivative;
 <span class="kw">use </span>itertools::{izip, Itertools};
 <span class="kw">use </span>p3_commit::Pcs;
-<span class="kw">use </span>p3_field::Field;
 <span class="kw">use </span>p3_matrix::{
     dense::{RowMajorMatrix, RowMajorMatrixView},
     Matrix,
 };
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 <span class="kw">use </span>tracing::info_span;
 
 <span class="kw">use crate</span>::{
-    commit::CommittedSingleMatrixView,
-    config::{Com, Domain, PcsProverData, StarkGenericConfig, Val},
-    keygen::view::MultiStarkProvingKeyView,
-    prover::quotient::{helper::QuotientVkDataHelper, ProverQuotientData, QuotientCommitter},
-    rap::AnyRap,
+    <a href="../commit.rs.html#44-51">commit::CommittedSingleMatrixView</a>,
+    config::{<a href="../config.rs.html#43-46">Com</a>, <a href="../config.rs.html#63-66">Domain</a>, <a href="../config.rs.html#48-51">PcsProverData</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    <a href="../keygen/view.rs.html#14-17">keygen::view::MultiStarkProvingKeyView</a>,
+    prover::quotient::{<a href="quotient/helper.rs.html#8-10">helper::QuotientVkDataHelper</a>, <a href="quotient/mod.rs.html#171-178">ProverQuotientData</a>, <a href="quotient/mod.rs.html#19-24">QuotientCommitter</a>},
+    <a href="../rap.rs.html#66-77">rap::AnyRap</a>,
 };
 
 <span class="attr">#[allow(clippy::too_many_arguments)]
-</span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>commit_quotient_traces&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt;(
+</span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>commit_quotient_traces&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt;(
     pcs: <span class="kw-2">&amp;</span>SC::Pcs,
     mpk: <span class="kw-2">&amp;</span>MultiStarkProvingKeyView&lt;SC&gt;,
     alpha: SC::Challenge,
@@ -243,27 +235,27 @@
     perm_prover_data: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="prelude-ty">Option</span>&lt;ProverTraceData&lt;SC&gt;&gt;,
     exposed_values_after_challenge: Vec&lt;Vec&lt;Vec&lt;SC::Challenge&gt;&gt;&gt;,
 ) -&gt; ProverQuotientData&lt;SC&gt; {
-    <span class="kw">let </span>trace_views = create_trace_view_per_air(
-        domain_per_air,
-        cached_mains_pdata_per_air,
-        mpk,
-        exposed_values_after_challenge,
-        common_main_prover_data,
-        perm_prover_data,
+    <span class="kw">let </span>trace_views = <a href="#55-111">create_trace_view_per_air</a>(
+        <a href="#29">domain_per_air</a>,
+        <a href="#30">cached_mains_pdata_per_air</a>,
+        <a href="#24">mpk</a>,
+        <a href="#33">exposed_values_after_challenge</a>,
+        <a href="#31">common_main_prover_data</a>,
+        <a href="#32">perm_prover_data</a>,
     );
-    <span class="kw">let </span>quotient_committer = QuotientCommitter::new(pcs, challenges, alpha);
-    <span class="kw">let </span>qvks = mpk
+    <span class="kw">let </span>quotient_committer = <a href="quotient/mod.rs.html#27-46">QuotientCommitter::new</a>(<a href="#23">pcs</a>, <a href="#26">challenges</a>, <a href="#25">alpha</a>);
+    <span class="kw">let </span>qvks = <a href="#24">mpk</a>
         .per_air
-        .iter()
-        .map(|pk| pk.get_quotient_vk_data())
+        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|pk| <a href="#47">pk</a>.<a href="quotient/helper.rs.html#9">get_quotient_vk_data</a>())
         .collect_vec();
     <span class="kw">let </span>quotient_values =
-        quotient_committer.quotient_values(raps, <span class="kw-2">&amp;</span>qvks, <span class="kw-2">&amp;</span>trace_views, public_values_per_air);
+        <a href="#43">quotient_committer</a>.<a href="quotient/mod.rs.html#56">quotient_values</a>(<a href="#27">raps</a>, <span class="kw-2">&amp;</span><a href="#44">qvks</a>, <span class="kw-2">&amp;</span><a href="#35">trace_views</a>, <a href="#28">public_values_per_air</a>);
     <span class="comment">// Commit to quotient polynomias. One shared commit for all quotient polynomials
-    </span>quotient_committer.commit(quotient_values)
+    </span><a href="#43">quotient_committer</a>.<a href="quotient/mod.rs.html#150">commit</a>(<a href="#49">quotient_values</a>)
 }
 
-<span class="kw">fn </span>create_trace_view_per_air&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt;(
+<span class="kw">fn </span>create_trace_view_per_air&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt;(
     domain_per_air: Vec&lt;Domain&lt;SC&gt;&gt;,
     cached_mains_pdata_per_air: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[Vec&lt;ProverTraceData&lt;SC&gt;&gt;],
     mpk: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>MultiStarkProvingKeyView&lt;SC&gt;,
@@ -274,67 +266,67 @@
     <span class="kw">let </span><span class="kw-2">mut </span>common_main_idx = <span class="number">0</span>;
     <span class="kw">let </span><span class="kw-2">mut </span>after_challenge_idx = <span class="number">0</span>;
     <span class="macro">izip!</span>(
-        domain_per_air,
-        cached_mains_pdata_per_air,
-        <span class="kw-2">&amp;</span>mpk.per_air,
-        exposed_values_after_challenge,
-    ).map(|(domain, cached_mains_pdata, pk, exposed_values)| {
+        <a href="#56">domain_per_air</a>,
+        <a href="#57">cached_mains_pdata_per_air</a>,
+        <span class="kw-2">&amp;</span><a href="#58">mpk</a>.per_air,
+        <a href="#59">exposed_values_after_challenge</a>,
+    ).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(domain, cached_mains_pdata, pk, exposed_values)| {
         <span class="comment">// The AIR will be treated as the full RAP with virtual columns after this
-        </span><span class="kw">let </span>preprocessed = pk.preprocessed_data.as_ref().map(|p| {
+        </span><span class="kw">let </span>preprocessed = <a href="#70">pk</a>.preprocessed_data.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|p| {
             <span class="comment">// TODO: currently assuming each chip has it's own preprocessed commitment
-            </span>CommittedSingleMatrixView::&lt;SC&gt;::new(p.data.as_ref(), <span class="number">0</span>)
+            </span>CommittedSingleMatrixView::&lt;SC&gt;::new(<a href="#72">p</a>.data.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>(), <span class="number">0</span>)
         });
-        <span class="kw">let </span><span class="kw-2">mut </span>partitioned_main: Vec&lt;<span class="kw">_</span>&gt; = cached_mains_pdata
-            .iter()
-            .map(|pdata| CommittedSingleMatrixView::new(pdata.data.as_ref(), <span class="number">0</span>))
-            .collect();
+        <span class="kw">let </span><span class="kw-2">mut </span>partitioned_main: Vec&lt;<span class="kw">_</span>&gt; = <a href="#70">cached_mains_pdata</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|pdata| <a href="../commit.rs.html#54-56">CommittedSingleMatrixView::new</a>(<a href="#78">pdata</a>.data.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>(), <span class="number">0</span>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
         <span class="kw">if </span>pk.vk.has_common_main() {
-            partitioned_main.push(CommittedSingleMatrixView::new(
-                common_main_prover_data.data.as_ref(),
-                common_main_idx,
+            <a href="#76">partitioned_main</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.push">push</a>(<a href="../commit.rs.html#54-56">CommittedSingleMatrixView::new</a>(
+                <a href="#60">common_main_prover_data</a>.data.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>(),
+                <a href="#63">common_main_idx</a>,
             ));
-            common_main_idx += <span class="number">1</span>;
+            <a href="#63">common_main_idx</a> += <span class="number">1</span>;
         }
 
-        <span class="kw">let </span>after_challenge = exposed_values
-            .into_iter()
-            .map(|exposed_values| {
-                <span class="kw">let </span>matrix = CommittedSingleMatrixView::new(
-                    perm_prover_data
-                        .as_ref()
-                        .expect(<span class="string">"AIR exposes after_challenge values but has no permutation trace commitment"</span>)
+        <span class="kw">let </span>after_challenge = <a href="#70">exposed_values</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|exposed_values| {
+                <span class="kw">let </span>matrix = <a href="../commit.rs.html#54-56">CommittedSingleMatrixView::new</a>(
+                    <a href="#61">perm_prover_data</a>
+                        .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>()
+                        .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"AIR exposes after_challenge values but has no permutation trace commitment"</span>)
                         .data
-                        .as_ref(),
-                    after_challenge_idx,
+                        .<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>(),
+                    <a href="#64">after_challenge_idx</a>,
                 );
-                after_challenge_idx += <span class="number">1</span>;
-                (matrix, exposed_values)
+                <a href="#64">after_challenge_idx</a> += <span class="number">1</span>;
+                (<a href="#91">matrix</a>, <a href="#90">exposed_values</a>)
             })
-            .collect();
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
-        SingleRapCommittedTraceView {
-            domain,
-            preprocessed,
-            partitioned_main,
-            after_challenge,
+        <a href="#190-203">SingleRapCommittedTraceView</a> {
+            <a href="#70">domain</a>,
+            <a href="#72">preprocessed</a>,
+            <a href="#76">partitioned_main</a>,
+            <a href="#88">after_challenge</a>,
         }
-    }).collect()
+    }).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
 }
 
 <span class="doccomment">/// Prover that commits to a batch of trace matrices, possibly of different heights.
-</span><span class="kw">pub struct </span>TraceCommitter&lt;<span class="lifetime">'pcs</span>, SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.TraceCommitter.html">TraceCommitter</a>&lt;<span class="lifetime">'pcs</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     pcs: <span class="kw-2">&amp;</span><span class="lifetime">'pcs </span>SC::Pcs,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; Clone <span class="kw">for </span>TraceCommitter&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a> <span class="kw">for </span>TraceCommitter&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="kw">fn </span>clone(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ pcs: <span class="self">self</span>.pcs }
+        <span class="self">Self </span>{ pcs: <a class="self" href="#119">self</a>.pcs }
     }
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">'pcs</span>, SC: StarkGenericConfig&gt; TraceCommitter&lt;<span class="lifetime">'pcs</span>, SC&gt; {
+<span class="kw">impl</span>&lt;<span class="lifetime">'pcs</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; TraceCommitter&lt;<span class="lifetime">'pcs</span>, SC&gt; {
     <span class="kw">pub fn </span>new(pcs: <span class="kw-2">&amp;</span><span class="lifetime">'pcs </span>SC::Pcs) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ pcs }
+        <span class="self">Self </span>{ <a href="#125">pcs</a> }
     }
 
     <span class="doccomment">/// Uses the PCS to commit to a sequence of trace matrices.
@@ -342,19 +334,19 @@
     /// The matrices may be of different heights.
     </span><span class="kw">pub fn </span>commit(<span class="kw-2">&amp;</span><span class="self">self</span>, traces: Vec&lt;RowMajorMatrix&lt;Val&lt;SC&gt;&gt;&gt;) -&gt; ProverTraceData&lt;SC&gt; {
         <span class="macro">info_span!</span>(<span class="string">"commit to trace data"</span>).in_scope(|| {
-            <span class="kw">let </span>traces_with_domains: Vec&lt;<span class="kw">_</span>&gt; = traces
-                .into_iter()
-                .map(|matrix| {
-                    <span class="kw">let </span>height = matrix.height();
+            <span class="kw">let </span>traces_with_domains: Vec&lt;<span class="kw">_</span>&gt; = <a href="#132">traces</a>
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|matrix| {
+                    <span class="kw">let </span>height = <a href="#136">matrix</a>.height();
                     <span class="comment">// Recomputing the domain is lightweight
-                    </span><span class="kw">let </span>domain = <span class="self">self</span>.pcs.natural_domain_for_degree(height);
-                    (domain, matrix)
+                    </span><span class="kw">let </span>domain = <a class="self" href="#132">self</a>.pcs.natural_domain_for_degree(<a href="#137">height</a>);
+                    (<a href="#139">domain</a>, <a href="#136">matrix</a>)
                 })
-                .collect();
-            <span class="kw">let </span>(commit, data) = <span class="self">self</span>.pcs.commit(traces_with_domains);
-            ProverTraceData {
-                commit,
-                data: Arc::new(data),
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+            <span class="kw">let </span>(commit, data) = <a class="self" href="#132">self</a>.pcs.commit(<a href="#134">traces_with_domains</a>);
+            <a href="#160-168">ProverTraceData</a> {
+                <a href="#143">commit</a>,
+                data: <a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html#method.new">Arc::new</a>(<a href="#143">data</a>),
             }
         })
     }
@@ -368,7 +360,7 @@
     serialize = <span class="string">"Com&lt;SC&gt;: Serialize, PcsProverData&lt;SC&gt;: Serialize"</span>,
     deserialize = <span class="string">"Com&lt;SC&gt;: Deserialize&lt;'de&gt;, PcsProverData&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
-</span><span class="kw">pub struct </span>ProverTraceData&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/types/struct.ProverTraceData.html">ProverTraceData</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Commitment to the trace matrices.
     </span><span class="kw">pub </span>commit: Com&lt;SC&gt;,
     <span class="doccomment">/// Prover data, such as a Merkle tree, for the trace commitment.
@@ -379,16 +371,10 @@
 }
 
 <span class="doccomment">/// A view of just the preprocessed AIR, without any after challenge columns.
-</span><span class="kw">pub struct </span>PairTraceView&lt;<span class="lifetime">'a</span>, T&gt; {
-    <span class="kw">pub </span>preprocessed: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="prelude-ty">Option</span>&lt;RowMajorMatrixView&lt;<span class="lifetime">'a</span>, T&gt;&gt;,
-    <span class="kw">pub </span>partitioned_main: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[RowMajorMatrixView&lt;<span class="lifetime">'a</span>, T&gt;],
-    <span class="kw">pub </span>public_values: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[T],
-}
-
-<span class="kw">impl</span>&lt;F: Field&gt; PairTraceView&lt;<span class="lifetime">'_</span>, F&gt; {
-    <span class="kw">pub fn </span>height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.partitioned_main[<span class="number">0</span>].height()
-    }
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/struct.PairTraceView.html">PairTraceView</a>&lt;<span class="lifetime">'a</span>, F&gt; {
+    <span class="kw">pub </span>preprocessed: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="prelude-ty">Option</span>&lt;RowMajorMatrixView&lt;<span class="lifetime">'a</span>, F&gt;&gt;,
+    <span class="kw">pub </span>partitioned_main: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[RowMajorMatrixView&lt;<span class="lifetime">'a</span>, F&gt;],
+    <span class="kw">pub </span>public_values: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[F],
 }
 
 <span class="doccomment">/// The full RAP trace consists of horizontal concatenation of multiple matrices of the same height:
@@ -404,7 +390,7 @@
 /// matrices need to be partitioned.
 </span><span class="attr">#[derive(Derivative)]
 #[derivative(Clone(bound = <span class="string">""</span>))]
-</span><span class="kw">pub struct </span>SingleRapCommittedTraceView&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span>SingleRapCommittedTraceView&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Domain of the trace matrices
     </span><span class="kw">pub </span>domain: Domain&lt;SC&gt;,
     <span class="comment">// Maybe public values should be included in this struct

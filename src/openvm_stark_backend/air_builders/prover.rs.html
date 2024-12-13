@@ -239,22 +239,22 @@
 
 <span class="kw">use super</span>::{
     symbolic::{
-        symbolic_expression::SymbolicEvaluator,
-        symbolic_variable::{Entry, SymbolicVariable},
+        <a href="symbolic/symbolic_expression.rs.html#309-323">symbolic_expression::SymbolicEvaluator</a>,
+        symbolic_variable::{<a href="symbolic/symbolic_variable.rs.html#14-29">Entry</a>, <a href="symbolic/symbolic_variable.rs.html#59-63">SymbolicVariable</a>},
     },
-    PartitionedAirBuilder, ViewPair,
+    <a href="mod.rs.html#14-19">PartitionedAirBuilder</a>, <a href="mod.rs.html#10">ViewPair</a>,
 };
 <span class="kw">use crate</span>::{
-    config::{PackedChallenge, PackedVal, StarkGenericConfig, Val},
+    config::{<a href="../config.rs.html#88-89">PackedChallenge</a>, <a href="../config.rs.html#86">PackedVal</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
     interaction::{
-        rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, InteractionType,
-        RapPhaseSeqKind,
+        <a href="../interaction/rap.rs.html#13-17">rap::InteractionPhaseAirBuilder</a>, <a href="../interaction/mod.rs.html#28-33">Interaction</a>, <a href="../interaction/mod.rs.html#44-79">InteractionBuilder</a>, <a href="../interaction/mod.rs.html#22-25">InteractionType</a>,
+        <a href="../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
     },
-    rap::PermutationAirBuilderWithExposedValues,
+    <a href="../rap.rs.html#60-62">rap::PermutationAirBuilderWithExposedValues</a>,
 };
 
 <span class="doccomment">/// A folder for prover constraints.
-</span><span class="kw">pub struct </span>ProverConstraintFolder&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/air_builders/prover/struct.ProverConstraintFolder.html">ProverConstraintFolder</a>&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>preprocessed: ViewPair&lt;<span class="lifetime">'a</span>, PackedVal&lt;SC&gt;&gt;,
     <span class="kw">pub </span>partitioned_main: Vec&lt;ViewPair&lt;<span class="lifetime">'a</span>, PackedVal&lt;SC&gt;&gt;&gt;,
     <span class="kw">pub </span>after_challenge: Vec&lt;ViewPair&lt;<span class="lifetime">'a</span>, PackedChallenge&lt;SC&gt;&gt;&gt;,
@@ -264,19 +264,19 @@
     <span class="kw">pub </span>is_transition: PackedVal&lt;SC&gt;,
     <span class="kw">pub </span>alpha_powers: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[SC::Challenge],
     <span class="kw">pub </span>accumulator: PackedChallenge&lt;SC&gt;,
-    <span class="kw">pub </span>constraint_index: usize,
+    <span class="kw">pub </span>constraint_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="kw">pub </span>public_values: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[Val&lt;SC&gt;],
     <span class="kw">pub </span>exposed_values_after_challenge: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[<span class="kw-2">&amp;</span><span class="lifetime">'a </span>[PackedChallenge&lt;SC&gt;]],
     <span class="kw">pub </span>interactions: Vec&lt;Interaction&lt;PackedVal&lt;SC&gt;&gt;&gt;,
     <span class="doccomment">/// Number of interactions to bundle in permutation trace, if applicable.
-    </span><span class="kw">pub </span>interaction_chunk_size: usize,
-    <span class="kw">pub </span>rap_phase_seq_kind: RapPhaseSeqKind,
-    <span class="kw">pub </span>has_common_main: bool,
+    </span><span class="kw">pub </span>interaction_chunk_size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>rap_phase_seq_kind: <a href="../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
+    <span class="kw">pub </span>has_common_main: <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>,
 }
 
 <span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC&gt; AirBuilder <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'a</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">type </span>F = Val&lt;SC&gt;;
     <span class="kw">type </span>Expr = PackedVal&lt;SC&gt;;
@@ -286,48 +286,48 @@
     <span class="doccomment">/// It is difficult to horizontally concatenate matrices when the main trace is partitioned, so we disable this method in that case.
     </span><span class="kw">fn </span>main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::M {
         <span class="kw">if </span><span class="self">self</span>.partitioned_main.len() == <span class="number">1 </span>{
-            <span class="self">self</span>.partitioned_main[<span class="number">0</span>]
+            <a class="self" href="#55">self</a>.partitioned_main[<span class="number">0</span>]
         } <span class="kw">else </span>{
-            <span class="macro">panic!</span>(<span class="string">"Main trace is either empty or partitioned. This function should not be used."</span>)
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"Main trace is either empty or partitioned. This function should not be used."</span>)
         }
     }
 
     <span class="kw">fn </span>is_first_row(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Expr {
-        <span class="self">self</span>.is_first_row
+        <a class="self" href="#63">self</a>.is_first_row
     }
 
     <span class="kw">fn </span>is_last_row(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Expr {
-        <span class="self">self</span>.is_last_row
+        <a class="self" href="#67">self</a>.is_last_row
     }
 
-    <span class="kw">fn </span>is_transition_window(<span class="kw-2">&amp;</span><span class="self">self</span>, size: usize) -&gt; <span class="self">Self</span>::Expr {
+    <span class="kw">fn </span>is_transition_window(<span class="kw-2">&amp;</span><span class="self">self</span>, size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self</span>::Expr {
         <span class="kw">if </span>size == <span class="number">2 </span>{
-            <span class="self">self</span>.is_transition
+            <a class="self" href="#71">self</a>.is_transition
         } <span class="kw">else </span>{
-            <span class="macro">panic!</span>(<span class="string">"only supports a window size of 2"</span>)
+            <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"only supports a window size of 2"</span>)
         }
     }
 
     <span class="kw">fn </span>assert_zero&lt;I: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(<span class="kw-2">&amp;mut </span><span class="self">self</span>, x: I) {
-        <span class="kw">let </span>x: PackedVal&lt;SC&gt; = x.into();
-        <span class="kw">let </span>alpha_power = <span class="self">self</span>.alpha_powers[<span class="self">self</span>.constraint_index];
-        <span class="self">self</span>.accumulator += PackedChallenge::&lt;SC&gt;::from_f(alpha_power) * x;
-        <span class="self">self</span>.constraint_index += <span class="number">1</span>;
+        <span class="kw">let </span>x: PackedVal&lt;SC&gt; = <a href="#79">x</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <span class="kw">let </span>alpha_power = <a class="self" href="#79">self</a>.alpha_powers[<a class="self" href="#79">self</a>.constraint_index];
+        <a class="self" href="#79">self</a>.accumulator += PackedChallenge::&lt;SC&gt;::from_f(<a href="#81">alpha_power</a>) * <a href="#80">x</a>;
+        <a class="self" href="#79">self</a>.constraint_index += <span class="number">1</span>;
     }
 }
 
 <span class="kw">impl</span>&lt;SC&gt; PairBuilder <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>preprocessed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::M {
-        <span class="self">self</span>.preprocessed
+        <a class="self" href="#91">self</a>.preprocessed
     }
 }
 
 <span class="kw">impl</span>&lt;SC&gt; ExtensionBuilder <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">type </span>EF = SC::Challenge;
     <span class="kw">type </span>ExprEF = PackedChallenge&lt;SC&gt;;
@@ -337,129 +337,129 @@
     <span class="kw">where
         </span>I: Into&lt;<span class="self">Self</span>::ExprEF&gt;,
     {
-        <span class="kw">let </span>x: PackedChallenge&lt;SC&gt; = x.into();
-        <span class="kw">let </span>alpha_power = <span class="self">self</span>.alpha_powers[<span class="self">self</span>.constraint_index];
-        <span class="self">self</span>.accumulator += PackedChallenge::&lt;SC&gt;::from_f(alpha_power) * x;
-        <span class="self">self</span>.constraint_index += <span class="number">1</span>;
+        <span class="kw">let </span>x: PackedChallenge&lt;SC&gt; = <a href="#104">x</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <span class="kw">let </span>alpha_power = <a class="self" href="#104">self</a>.alpha_powers[<a class="self" href="#104">self</a>.constraint_index];
+        <a class="self" href="#104">self</a>.accumulator += PackedChallenge::&lt;SC&gt;::from_f(<a href="#109">alpha_power</a>) * <a href="#108">x</a>;
+        <a class="self" href="#104">self</a>.constraint_index += <span class="number">1</span>;
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; AirBuilderWithPublicValues <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; AirBuilderWithPublicValues <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="kw">type </span>PublicVar = <span class="self">Self</span>::F;
 
     <span class="kw">fn </span>public_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::F] {
-        <span class="self">self</span>.public_values
+        <a class="self" href="#118">self</a>.public_values
     }
 }
 
 <span class="comment">// PermutationAirBuilder is just a special kind of RAP builder
 </span><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC&gt; PermutationAirBuilder <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'a</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">type </span>MP = ViewPair&lt;<span class="lifetime">'a</span>, PackedChallenge&lt;SC&gt;&gt;;
 
     <span class="kw">type </span>RandomVar = PackedChallenge&lt;SC&gt;;
 
     <span class="kw">fn </span>permutation(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::MP {
-        <span class="kw-2">*</span><span class="self">self
+        <span class="kw-2">*</span><span class="self"><a href="#132">self</a>
             </span>.after_challenge
-            .first()
-            .expect(<span class="string">"Challenge phase not supported"</span>)
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
     }
 
     <span class="kw">fn </span>permutation_randomness(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::RandomVar] {
-        <span class="self">self</span>.challenges
-            .first()
-            .map(|c| c.as_slice())
-            .expect(<span class="string">"Challenge phase not supported"</span>)
+        <a class="self" href="#139">self</a>.challenges
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|c| <a href="#142">c</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.as_slice">as_slice</a>())
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
     }
 }
 
-<span class="kw">impl</span>&lt;SC&gt; PermutationAirBuilderWithExposedValues <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
+<span class="kw">impl</span>&lt;SC&gt; <a href="../rap.rs.html#60-62">PermutationAirBuilderWithExposedValues</a> <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>permutation_exposed_values(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::VarEF] {
-        <span class="self">self</span>.exposed_values_after_challenge
-            .first()
-            .expect(<span class="string">"Challenge phase not supported"</span>)
+        <a class="self" href="#151">self</a>.exposed_values_after_challenge
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.first">first</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"Challenge phase not supported"</span>)
     }
 }
 
-<span class="kw">impl</span>&lt;SC&gt; PartitionedAirBuilder <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
+<span class="kw">impl</span>&lt;SC&gt; <a href="mod.rs.html#14-19">PartitionedAirBuilder</a> <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>cached_mains(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="self">Self</span>::M] {
-        <span class="kw">let </span><span class="kw-2">mut </span>num_cached_mains = <span class="self">self</span>.partitioned_main.len();
+        <span class="kw">let </span><span class="kw-2">mut </span>num_cached_mains = <a class="self" href="#162">self</a>.partitioned_main.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
         <span class="kw">if </span><span class="self">self</span>.has_common_main {
-            num_cached_mains -= <span class="number">1</span>;
+            <a href="#163">num_cached_mains</a> -= <span class="number">1</span>;
         }
-        <span class="kw-2">&amp;</span><span class="self">self</span>.partitioned_main[..num_cached_mains]
+        <span class="kw-2">&amp;</span><a class="self" href="#162">self</a>.partitioned_main[..<a href="#163">num_cached_mains</a>]
     }
     <span class="kw">fn </span>common_main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::M {
-        <span class="macro">assert!</span>(<span class="self">self</span>.has_common_main, <span class="string">"AIR doesn't have a common main trace"</span>);
-        <span class="self">self</span>.partitioned_main.last().unwrap()
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(<span class="self">self</span>.has_common_main, <span class="string">"AIR doesn't have a common main trace"</span>);
+        <a class="self" href="#169">self</a>.partitioned_main.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.last">last</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>()
     }
 }
 
-<span class="kw">impl</span>&lt;SC&gt; InteractionBuilder <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
+<span class="kw">impl</span>&lt;SC&gt; <a href="../interaction/mod.rs.html#44-79">InteractionBuilder</a> <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>push_interaction&lt;E: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        bus_index: usize,
+        bus_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
         fields: <span class="kw">impl </span>IntoIterator&lt;Item = E&gt;,
         count: <span class="kw">impl </span>Into&lt;<span class="self">Self</span>::Expr&gt;,
-        interaction_type: InteractionType,
+        interaction_type: <a href="../interaction/mod.rs.html#22-25">InteractionType</a>,
     ) {
-        <span class="kw">let </span>fields = fields.into_iter().map(|f| f.into()).collect();
-        <span class="kw">let </span>count = count.into();
-        <span class="self">self</span>.interactions.push(Interaction {
-            bus_index,
-            fields,
-            count,
-            interaction_type,
+        <span class="kw">let </span>fields = <a href="#182">fields</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|f| <a href="#186">f</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>()).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <span class="kw">let </span>count = <a href="#183">count</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>();
+        <a class="self" href="#180">self</a>.interactions.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.push">push</a>(<a href="../interaction/mod.rs.html#28-33">Interaction</a> {
+            <a href="#181">bus_index</a>,
+            <a href="#186">fields</a>,
+            <a href="#187">count</a>,
+            <a href="#184">interaction_type</a>,
         });
     }
 
-    <span class="kw">fn </span>num_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.interactions.len()
+    <span class="kw">fn </span>num_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#196">self</a>.interactions.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()
     }
 
     <span class="kw">fn </span>all_interactions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[Interaction&lt;<span class="self">Self</span>::Expr&gt;] {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.interactions
+        <span class="kw-2">&amp;</span><a class="self" href="#200">self</a>.interactions
     }
 }
 
 <span class="kw">impl</span>&lt;SC&gt; SymbolicEvaluator&lt;Val&lt;SC&gt;, PackedVal&lt;SC&gt;&gt; <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt;
 <span class="kw">where
-    </span>SC: StarkGenericConfig,
+    </span>SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>,
 {
     <span class="kw">fn </span>eval_var(<span class="kw-2">&amp;</span><span class="self">self</span>, symbolic_var: SymbolicVariable&lt;Val&lt;SC&gt;&gt;) -&gt; PackedVal&lt;SC&gt; {
-        <span class="kw">let </span>index = symbolic_var.index;
-        <span class="kw">match </span>symbolic_var.entry {
-            Entry::Preprocessed { offset } =&gt; <span class="self">self</span>.preprocessed.get(offset, index),
-            Entry::Main { part_index, offset } =&gt; {
-                <span class="self">self</span>.partitioned_main[part_index].get(offset, index)
+        <span class="kw">let </span>index = <a href="#209">symbolic_var</a>.index;
+        <span class="kw">match </span><a href="#209">symbolic_var</a>.entry {
+            <a href="symbolic/symbolic_variable.rs.html#15-17">Entry::Preprocessed</a> { offset } =&gt; <a class="self" href="#209">self</a>.preprocessed.get(<a href="#212">offset</a>, <a href="#210">index</a>),
+            <a href="symbolic/symbolic_variable.rs.html#19-22">Entry::Main</a> { part_index, offset } =&gt; {
+                <a class="self" href="#209">self</a>.partitioned_main[<a href="#213">part_index</a>].get(<a href="#213">offset</a>, <a href="#210">index</a>)
             }
-            Entry::Public =&gt; <span class="self">self</span>.public_values[index].into(),
-            <span class="kw">_ </span>=&gt; <span class="macro">panic!</span>(<span class="string">"After challenge evaluation not allowed"</span>),
+            <a href="symbolic/symbolic_variable.rs.html#26">Entry::Public</a> =&gt; <a class="self" href="#209">self</a>.public_values[<a href="#210">index</a>].<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
+            <span class="kw">_ </span>=&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"After challenge evaluation not allowed"</span>),
         }
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; InteractionPhaseAirBuilder <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; <a href="../interaction/rap.rs.html#13-17">InteractionPhaseAirBuilder</a> <span class="kw">for </span>ProverConstraintFolder&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="kw">fn </span>finalize_interactions(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {}
 
-    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.interaction_chunk_size
+    <span class="kw">fn </span>interaction_chunk_size(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#225">self</a>.interaction_chunk_size
     }
 
-    <span class="kw">fn </span>rap_phase_seq_kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; RapPhaseSeqKind {
-        <span class="self">self</span>.rap_phase_seq_kind
+    <span class="kw">fn </span>rap_phase_seq_kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a> {
+        <a class="self" href="#229">self</a>.rap_phase_seq_kind
     }
 }
 </code></pre></div></section></main></body></html>

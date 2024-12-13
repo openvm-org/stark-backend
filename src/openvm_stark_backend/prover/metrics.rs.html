@@ -152,49 +152,49 @@
 <a href="#151" id="151">151</a>
 <a href="#152" id="152">152</a>
 <a href="#153" id="153">153</a>
-<a href="#154" id="154">154</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::fmt::Display;
+<a href="#154" id="154">154</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/fmt/trait.Display.html">std::fmt::Display</a>;
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_field::AbstractExtensionField;
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 
 <span class="kw">use crate</span>::{
-    config::{StarkGenericConfig, Val},
-    keygen::types::{StarkProvingKey, TraceWidth},
+    config::{<a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    keygen::types::{<a href="../keygen/types.rs.html#91-99">StarkProvingKey</a>, <a href="../keygen/types.rs.html#18-24">TraceWidth</a>},
 };
 
 <span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>TraceMetrics {
-    <span class="kw">pub </span>per_air: Vec&lt;SingleTraceMetrics&gt;,
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/metrics/struct.TraceMetrics.html">TraceMetrics</a> {
+    <span class="kw">pub </span>per_air: Vec&lt;<a href="#20-29">SingleTraceMetrics</a>&gt;,
     <span class="doccomment">/// Total base field cells from all traces, excludes preprocessed.
-    </span><span class="kw">pub </span>total_cells: usize,
+    </span><span class="kw">pub </span>total_cells: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
 <span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>SingleTraceMetrics {
-    <span class="kw">pub </span>air_name: String,
-    <span class="kw">pub </span>height: usize,
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/metrics/struct.SingleTraceMetrics.html">SingleTraceMetrics</a> {
+    <span class="kw">pub </span>air_name: <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a>,
+    <span class="kw">pub </span>height: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// The after challenge width is adjusted to be in terms of **base field** elements.
-    </span><span class="kw">pub </span>width: TraceWidth,
-    <span class="kw">pub </span>cells: TraceCells,
+    </span><span class="kw">pub </span>width: <a href="../keygen/types.rs.html#18-24">TraceWidth</a>,
+    <span class="kw">pub </span>cells: <a href="#33-38">TraceCells</a>,
     <span class="doccomment">/// Omitting preprocessed trace, the total base field cells from main and after challenge
     /// traces.
-    </span><span class="kw">pub </span>total_cells: usize,
+    </span><span class="kw">pub </span>total_cells: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
 <span class="doccomment">/// Trace cells, counted in terms of number of **base field** elements.
 </span><span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>TraceCells {
-    <span class="kw">pub </span>preprocessed: <span class="prelude-ty">Option</span>&lt;usize&gt;,
-    <span class="kw">pub </span>cached_mains: Vec&lt;usize&gt;,
-    <span class="kw">pub </span>common_main: usize,
-    <span class="kw">pub </span>after_challenge: Vec&lt;usize&gt;,
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/metrics/struct.TraceCells.html">TraceCells</a> {
+    <span class="kw">pub </span>preprocessed: <span class="prelude-ty">Option</span>&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
+    <span class="kw">pub </span>cached_mains: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
+    <span class="kw">pub </span>common_main: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>after_challenge: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
 }
 
-<span class="kw">impl </span>Display <span class="kw">for </span>TraceMetrics {
-    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
-        <span class="macro">writeln!</span>(
-            f,
+<span class="kw">impl </span><a href="https://doc.rust-lang.org/nightly/core/fmt/trait.Display.html">Display</a> <span class="kw">for </span><a href="#13-17">TraceMetrics</a> {
+    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; <a href="https://doc.rust-lang.org/nightly/core/fmt/type.Result.html">std::fmt::Result</a> {
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.writeln.html">writeln!</a>(
+            <a href="#41">f</a>,
             <span class="string">"Total Cells: {} (excluding preprocessed)"</span>,
             format_number_with_underscores(<span class="self">self</span>.total_cells)
         )<span class="question-mark">?</span>;
@@ -205,10 +205,10 @@
     }
 }
 
-<span class="kw">impl </span>Display <span class="kw">for </span>SingleTraceMetrics {
-    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
-        <span class="macro">write!</span>(
-            f,
+<span class="kw">impl </span><a href="https://doc.rust-lang.org/nightly/core/fmt/trait.Display.html">Display</a> <span class="kw">for </span><a href="#20-29">SingleTraceMetrics</a> {
+    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; <a href="https://doc.rust-lang.org/nightly/core/fmt/type.Result.html">std::fmt::Result</a> {
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.write.html">write!</a>(
+            <a href="#55">f</a>,
             <span class="string">"{:&lt;20} | Rows = {:&lt;10} | Cells = {:&lt;11} | Prep Cols = {:&lt;5} | Main Cols = {:&lt;5} | Perm Cols = {:&lt;5}"</span>,
             <span class="self">self</span>.air_name, format_number_with_underscores(<span class="self">self</span>.height), format_number_with_underscores(<span class="self">self</span>.total_cells), <span class="self">self</span>.width.preprocessed.unwrap_or(<span class="number">0</span>),
             <span class="macro">format!</span>(<span class="string">"{:?}"</span>, <span class="self">self</span>.width.main_widths()),
@@ -219,51 +219,51 @@
 }
 
 <span class="doccomment">/// heights are the trace heights for each air
-</span><span class="kw">pub fn </span>trace_metrics&lt;SC: StarkGenericConfig&gt;(
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/prover/metrics/fn.trace_metrics.html">trace_metrics</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt;(
     pk: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>StarkProvingKey&lt;SC&gt;],
-    heights: <span class="kw-2">&amp;</span>[usize],
-) -&gt; TraceMetrics {
-    <span class="kw">let </span>per_air: Vec&lt;<span class="kw">_</span>&gt; = pk
-        .iter()
-        .zip_eq(heights)
-        .map(|(pk, <span class="kw-2">&amp;</span>height)| {
-            <span class="kw">let </span>air_name = pk.air_name.clone();
-            <span class="kw">let </span><span class="kw-2">mut </span>width = pk.vk.params.width.clone();
+    heights: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>],
+) -&gt; <a href="#13-17">TraceMetrics</a> {
+    <span class="kw">let </span>per_air: Vec&lt;<span class="kw">_</span>&gt; = <a href="#69">pk</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+        .zip_eq(<a href="#70">heights</a>)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(pk, <span class="kw-2">&amp;</span>height)| {
+            <span class="kw">let </span>air_name = <a href="#75">pk</a>.air_name.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>();
+            <span class="kw">let </span><span class="kw-2">mut </span>width = <a href="#75">pk</a>.vk.params.width.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>();
             <span class="kw">let </span>ext_degree = &lt;SC::Challenge <span class="kw">as </span>AbstractExtensionField&lt;Val&lt;SC&gt;&gt;&gt;::D;
             <span class="kw">for </span>w <span class="kw">in </span><span class="kw-2">&amp;mut </span>width.after_challenge {
                 <span class="kw-2">*</span>w <span class="kw-2">*</span>= ext_degree;
             }
-            <span class="kw">let </span>cells = TraceCells {
-                preprocessed: width.preprocessed.map(|w| w * height),
-                cached_mains: width.cached_mains.iter().map(|w| w * height).collect(),
-                common_main: width.common_main * height,
-                after_challenge: width.after_challenge.iter().map(|w| w * height).collect(),
+            <span class="kw">let </span>cells = <a href="#33-38">TraceCells</a> {
+                preprocessed: <a href="#77">width</a>.preprocessed.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|w| <a href="#83">w</a> * <a href="#75">height</a>),
+                cached_mains: <a href="#77">width</a>.cached_mains.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|w| <a href="#84">w</a> * <a href="#75">height</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
+                common_main: <a href="#77">width</a>.common_main * <a href="#75">height</a>,
+                after_challenge: <a href="#77">width</a>.after_challenge.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|w| <a href="#86">w</a> * <a href="#75">height</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
             };
-            <span class="kw">let </span>total_cells = cells
+            <span class="kw">let </span>total_cells = <a href="#82">cells</a>
                 .cached_mains
-                .iter()
-                .chain([<span class="kw-2">&amp;</span>cells.common_main])
-                .chain(cells.after_challenge.iter())
-                .sum::&lt;usize&gt;();
-            SingleTraceMetrics {
-                air_name,
-                height,
-                width,
-                cells,
-                total_cells,
+                .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.chain">chain</a>([<span class="kw-2">&amp;</span><a href="#82">cells</a>.common_main])
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.chain">chain</a>(<a href="#82">cells</a>.after_challenge.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>())
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>::&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;();
+            <a href="#20-29">SingleTraceMetrics</a> {
+                <a href="#76">air_name</a>,
+                <a href="#75">height</a>,
+                <a href="#77">width</a>,
+                <a href="#82">cells</a>,
+                <a href="#88">total_cells</a>,
             }
         })
-        .collect();
-    <span class="kw">let </span>total_cells = per_air.iter().map(|m| m.total_cells).sum();
-    TraceMetrics {
-        per_air,
-        total_cells,
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+    <span class="kw">let </span>total_cells = <a href="#72">per_air</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|m| <a href="#103">m</a>.total_cells).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
+    <a href="#13-17">TraceMetrics</a> {
+        <a href="#72">per_air</a>,
+        <a href="#103">total_cells</a>,
     }
 }
 
-<span class="kw">pub fn </span>format_number_with_underscores(n: usize) -&gt; String {
-    <span class="kw">let </span>num_str = n.to_string();
-    <span class="kw">let </span><span class="kw-2">mut </span>result = String::new();
+<span class="kw">pub fn </span><a href="../../../openvm_stark_backend/prover/metrics/fn.format_number_with_underscores.html">format_number_with_underscores</a>(n: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a> {
+    <span class="kw">let </span>num_str = <a href="#110">n</a>.<a href="https://doc.rust-lang.org/nightly/alloc/string/trait.ToString.html#tymethod.to_string">to_string</a>();
+    <span class="kw">let </span><span class="kw-2">mut </span>result = <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html#method.new">String::new</a>();
 
     <span class="comment">// Start adding characters from the end of num_str
     </span><span class="kw">for </span>(i, c) <span class="kw">in </span>num_str.chars().rev().enumerate() {
@@ -274,7 +274,7 @@
     }
 
     <span class="comment">// Reverse the result to get the correct order
-    </span>result.chars().rev().collect()
+    </span><a href="#112">result</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.str.html#method.chars">chars</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.rev">rev</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
 }
 
 <span class="attr">#[cfg(feature = <span class="string">"bench-metrics"</span>)]

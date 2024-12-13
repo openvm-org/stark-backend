@@ -73,36 +73,36 @@
 <a href="#72" id="72">72</a>
 <a href="#73" id="73">73</a>
 <a href="#74" id="74">74</a>
-<a href="#75" id="75">75</a></pre></div><pre class="rust"><code><span class="kw">use </span>serde::{Deserialize, Serialize};
+<a href="#75" id="75">75</a></pre></div><pre class="rust"><code><span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 
 <span class="attr">#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-</span><span class="kw">pub struct </span>FriParameters {
-    <span class="kw">pub </span>log_blowup: usize,
-    <span class="kw">pub </span>num_queries: usize,
-    <span class="kw">pub </span>proof_of_work_bits: usize,
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_sdk/config/fri_params/struct.FriParameters.html">FriParameters</a> {
+    <span class="kw">pub </span>log_blowup: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>num_queries: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>proof_of_work_bits: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
-<span class="kw">impl </span>FriParameters {
+<span class="kw">impl </span><a href="#4-8">FriParameters</a> {
     <span class="doccomment">/// Conjectured bits of security.
     /// See ethSTARK paper (&lt;https://eprint.iacr.org/2021/582.pdf&gt;) section 5.10.1 equation (19)
     ///
     /// `challenge_field_bits` is the number of bits in the challenge field (extension field) of the STARK config.
-    </span><span class="kw">pub fn </span>get_conjectured_security_bits(<span class="kw-2">&amp;</span><span class="self">self</span>, challenge_field_bits: usize) -&gt; usize {
-        <span class="kw">let </span>fri_query_security_bits = <span class="self">self</span>.num_queries * <span class="self">self</span>.log_blowup + <span class="self">self</span>.proof_of_work_bits;
+    </span><span class="kw">pub fn </span>get_conjectured_security_bits(<span class="kw-2">&amp;</span><span class="self">self</span>, challenge_field_bits: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <span class="kw">let </span>fri_query_security_bits = <a class="self" href="#15">self</a>.num_queries * <a class="self" href="#15">self</a>.log_blowup + <a class="self" href="#15">self</a>.proof_of_work_bits;
         <span class="comment">// The paper says min(fri_field_bits, fri_query_security_bits) - 1 but plonky2 (https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/starky/src/config.rs#L86C1-L87C1) omits the -1
-        </span>challenge_field_bits.min(fri_query_security_bits)
+        </span><a href="#15">challenge_field_bits</a>.<a href="https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html#tymethod.min">min</a>(<a href="#16">fri_query_security_bits</a>)
     }
 
-    <span class="kw">pub fn </span>standard_fast() -&gt; FriParameters {
-        standard_fri_params_with_100_bits_conjectured_security(<span class="number">1</span>)
+    <span class="kw">pub fn </span>standard_fast() -&gt; <a href="#4-8">FriParameters</a> {
+        <a href="#38-75">standard_fri_params_with_100_bits_conjectured_security</a>(<span class="number">1</span>)
     }
 
-    <span class="kw">pub fn </span>standard_with_100_bits_conjectured_security(log_blowup: usize) -&gt; FriParameters {
-        standard_fri_params_with_100_bits_conjectured_security(log_blowup)
+    <span class="kw">pub fn </span>standard_with_100_bits_conjectured_security(log_blowup: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <a href="#4-8">FriParameters</a> {
+        <a href="#38-75">standard_fri_params_with_100_bits_conjectured_security</a>(<a href="#25">log_blowup</a>)
     }
 
-    <span class="kw">pub fn </span>max_constraint_degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        (<span class="number">1 </span>&lt;&lt; <span class="self">self</span>.log_blowup) + <span class="number">1
+    <span class="kw">pub fn </span>max_constraint_degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        (<span class="number">1 </span>&lt;&lt; <a class="self" href="#29">self</a>.log_blowup) + <span class="number">1
     </span>}
 }
 
@@ -110,42 +110,42 @@
 /// Security bits calculated following ethSTARK (&lt;https://eprint.iacr.org/2021/582.pdf&gt;) 5.10.1 eq (19)
 ///
 /// Assumes that the challenge field used as more than 100 bits.
-</span><span class="kw">pub fn </span>standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize) -&gt; FriParameters {
-    <span class="kw">if let </span><span class="prelude-val">Ok</span>(<span class="string">"1"</span>) = std::env::var(<span class="string">"OPENVM_FAST_TEST"</span>).as_deref() {
-        <span class="kw">return </span>FriParameters {
-            log_blowup,
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/fri_params/fn.standard_fri_params_with_100_bits_conjectured_security.html">standard_fri_params_with_100_bits_conjectured_security</a>(log_blowup: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <a href="#4-8">FriParameters</a> {
+    <span class="kw">if let </span><span class="prelude-val">Ok</span>(<span class="string">"1"</span>) = <a href="https://doc.rust-lang.org/nightly/std/env/fn.var.html">std::env::var</a>(<span class="string">"OPENVM_FAST_TEST"</span>).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.as_deref">as_deref</a>() {
+        <span class="kw">return </span><a href="#4-8">FriParameters</a> {
+            <a href="#38">log_blowup</a>,
             num_queries: <span class="number">2</span>,
             proof_of_work_bits: <span class="number">0</span>,
         };
     }
-    <span class="kw">let </span>fri_params = <span class="kw">match </span>log_blowup {
+    <span class="kw">let </span>fri_params = <span class="kw">match </span><a href="#38">log_blowup</a> {
         <span class="comment">// plonky2 standard fast config uses num_queries=84: https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/starky/src/config.rs#L49
         // plonky3's default is num_queries=100, so we will use that. See https://github.com/Plonky3/Plonky3/issues/380 for related security discussion.
-        </span><span class="number">1 </span>=&gt; FriParameters {
-            log_blowup,
+        </span><span class="number">1 </span>=&gt; <a href="#4-8">FriParameters</a> {
+            <a href="#38">log_blowup</a>,
             num_queries: <span class="number">100</span>,
             proof_of_work_bits: <span class="number">16</span>,
         },
-        <span class="number">2 </span>=&gt; FriParameters {
-            log_blowup,
+        <span class="number">2 </span>=&gt; <a href="#4-8">FriParameters</a> {
+            <a href="#38">log_blowup</a>,
             num_queries: <span class="number">42</span>,
             proof_of_work_bits: <span class="number">16</span>,
         },
         <span class="comment">// plonky2 standard recursion config: https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/plonky2/src/plonk/circuit_data.rs#L101
-        </span><span class="number">3 </span>=&gt; FriParameters {
-            log_blowup,
+        </span><span class="number">3 </span>=&gt; <a href="#4-8">FriParameters</a> {
+            <a href="#38">log_blowup</a>,
             num_queries: <span class="number">28</span>,
             proof_of_work_bits: <span class="number">16</span>,
         },
-        <span class="number">4 </span>=&gt; FriParameters {
-            log_blowup,
+        <span class="number">4 </span>=&gt; <a href="#4-8">FriParameters</a> {
+            <a href="#38">log_blowup</a>,
             num_queries: <span class="number">21</span>,
             proof_of_work_bits: <span class="number">16</span>,
         },
-        <span class="kw">_ </span>=&gt; <span class="macro">todo!</span>(<span class="string">"No standard FRI params defined for log blowup {log_blowup}"</span>,),
+        <span class="kw">_ </span>=&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.todo.html">todo!</a>(<span class="string">"No standard FRI params defined for log blowup {log_blowup}"</span>,),
     };
-    <span class="macro">assert!</span>(fri_params.get_conjectured_security_bits(<span class="number">100</span>) &gt;= <span class="number">100</span>);
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(fri_params.get_conjectured_security_bits(<span class="number">100</span>) &gt;= <span class="number">100</span>);
     <span class="macro">tracing::info!</span>(<span class="string">"FRI parameters | log_blowup: {log_blowup:&lt;2} | num_queries: {:&lt;2} | proof_of_work_bits: {:&lt;2}"</span>, fri_params.num_queries, fri_params.proof_of_work_bits);
-    fri_params
+    <a href="#46">fri_params</a>
 }
 </code></pre></div></section></main></body></html>

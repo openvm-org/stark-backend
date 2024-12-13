@@ -265,26 +265,21 @@
 <a href="#264" id="264">264</a>
 <a href="#265" id="265">265</a>
 <a href="#266" id="266">266</a>
-<a href="#267" id="267">267</a>
-<a href="#268" id="268">268</a>
-<a href="#269" id="269">269</a>
-<a href="#270" id="270">270</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::ops::Index;
+<a href="#267" id="267">267</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/ops/index/trait.Index.html">std::ops::Index</a>;
 
 <span class="kw">use </span>p3_field::Field;
-<span class="kw">use </span>serde::{Deserialize, Serialize};
 <span class="kw">use </span>thiserror::Error;
 
 <span class="kw">use crate</span>::{
     poly::{
-        multi::{fold_mle_evals, Mle, MultivariatePolyOracle},
-        uni::Fraction,
+        multi::{<a href="../poly/multi.rs.html#108-114">fold_mle_evals</a>, <a href="../poly/multi.rs.html#27-29">Mle</a>, <a href="../poly/multi.rs.html#12-21">MultivariatePolyOracle</a>},
+        <a href="../poly/uni.rs.html#193-196">uni::Fraction</a>,
     },
-    sumcheck::{SumcheckError, SumcheckProof},
+    sumcheck::{<a href="../sumcheck.rs.html#194-199">SumcheckError</a>, <a href="../sumcheck.rs.html#185-187">SumcheckProof</a>},
 };
 
 <span class="doccomment">/// Batch GKR proof.
-</span><span class="attr">#[derive(Clone, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>GkrBatchProof&lt;F&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/gkr/struct.GkrBatchProof.html">GkrBatchProof</a>&lt;F&gt; {
     <span class="doccomment">/// Sum-check proof for each layer.
     </span><span class="kw">pub </span>sumcheck_proofs: Vec&lt;SumcheckProof&lt;F&gt;&gt;,
     <span class="doccomment">/// Mask for each layer for each instance.
@@ -294,67 +289,66 @@
 }
 
 <span class="doccomment">/// Values of interest obtained from the execution of the GKR protocol.
-</span><span class="attr">#[derive(Clone, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>GkrArtifact&lt;F&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/gkr/struct.GkrArtifact.html">GkrArtifact</a>&lt;F&gt; {
     <span class="doccomment">/// Out-of-domain (OOD) point for evaluating columns in the input layer.
     </span><span class="kw">pub </span>ood_point: Vec&lt;F&gt;,
     <span class="doccomment">/// The claimed evaluation at `ood_point` for each column in the input layer of each instance.
     </span><span class="kw">pub </span>claims_to_verify_by_instance: Vec&lt;Vec&lt;F&gt;&gt;,
     <span class="doccomment">/// The number of variables that interpolate the input layer of each instance.
-    </span><span class="kw">pub </span>n_variables_by_instance: Vec&lt;usize&gt;,
+    </span><span class="kw">pub </span>n_variables_by_instance: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
 }
 
 <span class="doccomment">/// Stores two evaluations of each column in a GKR layer.
-</span><span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>GkrMask&lt;F&gt; {
+</span><span class="attr">#[derive(Debug, Clone)]
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/gkr/struct.GkrMask.html">GkrMask</a>&lt;F&gt; {
     columns: Vec&lt;[F; <span class="number">2</span>]&gt;,
 }
 
 <span class="kw">impl</span>&lt;F&gt; GkrMask&lt;F&gt; {
     <span class="kw">pub fn </span>new(columns: Vec&lt;[F; <span class="number">2</span>]&gt;) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ columns }
+        <span class="self">Self </span>{ <a href="#41">columns</a> }
     }
 
     <span class="kw">pub fn </span>columns(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[[F; <span class="number">2</span>]] {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.columns
+        <span class="kw-2">&amp;</span><a class="self" href="#45">self</a>.columns
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; GkrMask&lt;F&gt; {
     <span class="kw">pub fn </span>to_rows(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; [Vec&lt;F&gt;; <span class="number">2</span>] {
-        <span class="self">self</span>.columns.iter().map(|[a, b]| (a, b)).unzip().into()
+        <a class="self" href="#51">self</a>.columns.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|[a, b]| (<a href="#52">a</a>, <a href="#52">b</a>)).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.unzip">unzip</a>().<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>()
     }
 
     <span class="doccomment">/// Returns all `p_i(x)` where `p_i` interpolates column `i` of the mask on `{0, 1}`.
     </span><span class="kw">pub fn </span>reduce_at_point(<span class="kw-2">&amp;</span><span class="self">self</span>, x: F) -&gt; Vec&lt;F&gt; {
-        <span class="self">self</span>.columns
-            .iter()
-            .map(|<span class="kw-2">&amp;</span>[v0, v1]| fold_mle_evals(x, v0, v1))
-            .collect()
+        <a class="self" href="#56">self</a>.columns
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw-2">&amp;</span>[v0, v1]| <a href="../poly/multi.rs.html#108-114">fold_mle_evals</a>(<a href="#56">x</a>, <a href="#59">v0</a>, <a href="#59">v1</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 }
 
 <span class="doccomment">/// Error encountered during GKR protocol verification.
 </span><span class="attr">#[derive(Error, Debug)]
-</span><span class="kw">pub enum </span>GkrError&lt;F&gt; {
+</span><span class="kw">pub enum </span><a href="../../../openvm_stark_backend/gkr/enum.GkrError.html">GkrError</a>&lt;F&gt; {
     <span class="doccomment">/// The proof is malformed.
     </span><span class="attr">#[error(<span class="string">"proof data is invalid"</span>)]
     </span>MalformedProof,
     <span class="doccomment">/// Mask has an invalid number of columns.
     </span><span class="attr">#[error(<span class="string">"mask in layer {instance_layer} of instance {instance} is invalid"</span>)]
     </span>InvalidMask {
-        instance: usize,
+        instance: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
         <span class="doccomment">/// Layer of the instance (but not necessarily the batch).
-        </span>instance_layer: LayerIndex,
+        </span>instance_layer: <a href="#97">LayerIndex</a>,
     },
     <span class="doccomment">/// There is a mismatch between the number of instances in the proof and the number of
     /// instances passed for verification.
     </span><span class="attr">#[error(<span class="string">"provided an invalid number of instances (given {given}, proof expects {proof})"</span>)]
-    </span>NumInstancesMismatch { given: usize, proof: usize },
+    </span>NumInstancesMismatch { given: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, proof: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> },
     <span class="doccomment">/// There was an error with one of the sumcheck proofs.
     </span><span class="attr">#[error(<span class="string">"sum-check invalid in layer {layer}: {source}"</span>)]
     </span>InvalidSumcheck {
-        layer: LayerIndex,
+        layer: <a href="#97">LayerIndex</a>,
         source: SumcheckError&lt;F&gt;,
     },
     <span class="doccomment">/// The circuit polynomial the verifier evaluated doesn't match claim from sumcheck.
@@ -362,12 +356,12 @@
     </span>CircuitCheckFailure {
         claim: F,
         output: F,
-        layer: LayerIndex,
+        layer: <a href="#97">LayerIndex</a>,
     },
 }
 
 <span class="doccomment">/// GKR layer index where 0 corresponds to the output layer.
-</span><span class="kw">pub type </span>LayerIndex = usize;
+</span><span class="kw">pub type </span><a href="../../../openvm_stark_backend/gkr/type.LayerIndex.html">LayerIndex</a> = <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>;
 
 <span class="doccomment">/// Represents a layer in a binary tree structured GKR circuit.
 ///
@@ -376,7 +370,7 @@
 ///
 /// [LogUp]: https://eprint.iacr.org/2023/1284.pdf
 </span><span class="attr">#[derive(Debug, Clone)]
-</span><span class="kw">pub enum </span>Layer&lt;F&gt; {
+</span><span class="kw">pub enum </span><a href="../../../openvm_stark_backend/gkr/enum.Layer.html">Layer</a>&lt;F&gt; {
     GrandProduct(Mle&lt;F&gt;),
     LogUpGeneric {
         numerators: Mle&lt;F&gt;,
@@ -394,8 +388,8 @@
 
 <span class="kw">impl</span>&lt;F: Field&gt; Layer&lt;F&gt; {
     <span class="doccomment">/// Returns the number of variables used to interpolate the layer's gate values.
-    </span><span class="kw">pub fn </span>n_variables(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="kw">match </span><span class="self">self </span>{
+    </span><span class="kw">pub fn </span>n_variables(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <span class="kw">match </span><span class="self"><a href="#124">self</a> </span>{
             <span class="self">Self</span>::GrandProduct(mle)
             | <span class="self">Self</span>::LogUpSingles { denominators: mle }
             | <span class="self">Self</span>::LogUpMultiplicities {
@@ -403,12 +397,12 @@
             }
             | <span class="self">Self</span>::LogUpGeneric {
                 denominators: mle, ..
-            } =&gt; mle.arity(),
+            } =&gt; <a href="#126">mle</a>.<a href="../poly/multi.rs.html#14">arity</a>(),
         }
     }
 
-    <span class="kw">fn </span>is_output_layer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-        <span class="self">self</span>.n_variables() == <span class="number">0
+    <span class="kw">fn </span>is_output_layer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        <a class="self" href="#137">self</a>.<a href="#124-135">n_variables</a>() == <span class="number">0
     </span>}
 
     <span class="doccomment">/// Produces the next layer from the current layer.
@@ -420,35 +414,35 @@
             <span class="kw">return </span><span class="prelude-val">None</span>;
         }
 
-        <span class="kw">let </span>next_layer = <span class="kw">match </span><span class="self">self </span>{
-            Layer::GrandProduct(layer) =&gt; <span class="self">Self</span>::next_grand_product_layer(layer),
-            Layer::LogUpGeneric {
+        <span class="kw">let </span>next_layer = <span class="kw">match </span><span class="self"><a href="#145">self</a> </span>{
+            <a href="#107">Layer::GrandProduct</a>(layer) =&gt; <a href="#167-173"><span class="self">Self</span>::next_grand_product_layer</a>(<a href="#151">layer</a>),
+            <a href="#108-111">Layer::LogUpGeneric</a> {
                 numerators,
                 denominators,
             }
-            | Layer::LogUpMultiplicities {
+            | <a href="#112-115">Layer::LogUpMultiplicities</a> {
                 numerators,
                 denominators,
-            } =&gt; <span class="self">Self</span>::next_logup_layer(MleExpr::Mle(numerators), denominators),
-            Layer::LogUpSingles { denominators } =&gt; {
-                <span class="self">Self</span>::next_logup_layer(MleExpr::Constant(F::ONE), denominators)
+            } =&gt; <a href="#175-192"><span class="self">Self</span>::next_logup_layer</a>(<a href="#255">MleExpr::Mle</a>(<a href="#153">numerators</a>), <a href="#154">denominators</a>),
+            <a href="#117-119">Layer::LogUpSingles</a> { denominators } =&gt; {
+                <a href="#175-192"><span class="self">Self</span>::next_logup_layer</a>(<a href="#254">MleExpr::Constant</a>(F::ONE), <a href="#160">denominators</a>)
             }
         };
-        <span class="prelude-val">Some</span>(next_layer)
+        <span class="prelude-val">Some</span>(<a href="#150">next_layer</a>)
     }
 
     <span class="kw">fn </span>next_grand_product_layer(layer: <span class="kw-2">&amp;</span>Mle&lt;F&gt;) -&gt; Layer&lt;F&gt; {
-        <span class="kw">let </span>res = layer
-            .chunks_exact(<span class="number">2</span>) <span class="comment">// Process in chunks of 2 elements
-            </span>.map(|chunk| chunk[<span class="number">0</span>] * chunk[<span class="number">1</span>]) <span class="comment">// Multiply each pair
-            </span>.collect();
-        Layer::GrandProduct(Mle::new(res))
+        <span class="kw">let </span>res = <a href="#167">layer</a>
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.chunks_exact">chunks_exact</a>(<span class="number">2</span>) <span class="comment">// Process in chunks of 2 elements
+            </span>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|chunk| <a href="#170">chunk</a>[<span class="number">0</span>] * <a href="#170">chunk</a>[<span class="number">1</span>]) <span class="comment">// Multiply each pair
+            </span>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <a href="#107">Layer::GrandProduct</a>(<a href="../poly/multi.rs.html#37-40">Mle::new</a>(<a href="#168">res</a>))
     }
 
     <span class="kw">fn </span>next_logup_layer(numerators: MleExpr&lt;<span class="lifetime">'_</span>, F&gt;, denominators: <span class="kw-2">&amp;</span>Mle&lt;F&gt;) -&gt; Layer&lt;F&gt; {
-        <span class="kw">let </span>half_n = <span class="number">1 </span>&lt;&lt; (denominators.arity() - <span class="number">1</span>);
-        <span class="kw">let </span><span class="kw-2">mut </span>next_numerators = Vec::with_capacity(half_n);
-        <span class="kw">let </span><span class="kw-2">mut </span>next_denominators = Vec::with_capacity(half_n);
+        <span class="kw">let </span>half_n = <span class="number">1 </span>&lt;&lt; (<a href="#175">denominators</a>.<a href="../poly/multi.rs.html#14">arity</a>() - <span class="number">1</span>);
+        <span class="kw">let </span><span class="kw-2">mut </span>next_numerators = <a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.with_capacity">Vec::with_capacity</a>(<a href="#176">half_n</a>);
+        <span class="kw">let </span><span class="kw-2">mut </span>next_denominators = <a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.with_capacity">Vec::with_capacity</a>(<a href="#176">half_n</a>);
 
         <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..half_n {
             <span class="kw">let </span>a = Fraction::new(numerators[i * <span class="number">2</span>], denominators[i * <span class="number">2</span>]);
@@ -458,38 +452,38 @@
             next_denominators.push(res.denominator);
         }
 
-        Layer::LogUpGeneric {
-            numerators: Mle::new(next_numerators),
-            denominators: Mle::new(next_denominators),
+        <a href="#108-111">Layer::LogUpGeneric</a> {
+            numerators: <a href="../poly/multi.rs.html#37-40">Mle::new</a>(<a href="#177">next_numerators</a>),
+            denominators: <a href="../poly/multi.rs.html#37-40">Mle::new</a>(<a href="#178">next_denominators</a>),
         }
     }
 
     <span class="doccomment">/// Returns each column output if the layer is an output layer, otherwise returns an `Err`.
-    </span><span class="kw">pub fn </span>try_into_output_layer_values(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;F&gt;, NotOutputLayerError&gt; {
+    </span><span class="kw">pub fn </span>try_into_output_layer_values(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;F&gt;, <a href="#251">NotOutputLayerError</a>&gt; {
         <span class="kw">if </span>!<span class="self">self</span>.is_output_layer() {
-            <span class="kw">return </span><span class="prelude-val">Err</span>(NotOutputLayerError);
+            <span class="kw">return </span><span class="prelude-val">Err</span>(<a href="#251">NotOutputLayerError</a>);
         }
 
-        <span class="prelude-val">Ok</span>(<span class="kw">match </span><span class="self">self </span>{
-            Layer::LogUpSingles { denominators } =&gt; {
+        <span class="prelude-val">Ok</span>(<span class="kw">match </span><span class="self"><a href="#195">self</a> </span>{
+            <a href="#117-119">Layer::LogUpSingles</a> { denominators } =&gt; {
                 <span class="kw">let </span>numerator = F::ONE;
-                <span class="kw">let </span>denominator = denominators[<span class="number">0</span>];
-                <span class="macro">vec!</span>[numerator, denominator]
+                <span class="kw">let </span>denominator = <a href="#201">denominators</a>[<span class="number">0</span>];
+                <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[numerator, denominator]
             }
-            Layer::LogUpGeneric {
+            <a href="#108-111">Layer::LogUpGeneric</a> {
                 numerators,
                 denominators,
             }
-            | Layer::LogUpMultiplicities {
+            | <a href="#112-115">Layer::LogUpMultiplicities</a> {
                 numerators,
                 denominators,
             } =&gt; {
-                <span class="kw">let </span>numerator = numerators[<span class="number">0</span>];
-                <span class="kw">let </span>denominator = denominators[<span class="number">0</span>];
-                <span class="macro">vec!</span>[numerator, denominator]
+                <span class="kw">let </span>numerator = <a href="#207">numerators</a>[<span class="number">0</span>];
+                <span class="kw">let </span>denominator = <a href="#208">denominators</a>[<span class="number">0</span>];
+                <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[numerator, denominator]
             }
-            Layer::GrandProduct(col) =&gt; {
-                <span class="macro">vec!</span>[col[<span class="number">0</span>]]
+            <a href="#107">Layer::GrandProduct</a>(col) =&gt; {
+                <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[col[<span class="number">0</span>]]
             }
         })
     }
@@ -497,11 +491,11 @@
     <span class="doccomment">/// Returns a transformed layer with the first variable of each column fixed to `assignment`.
     </span><span class="kw">pub fn </span>fix_first_variable(<span class="self">self</span>, x0: F) -&gt; <span class="self">Self </span>{
         <span class="kw">if </span><span class="self">self</span>.n_variables() == <span class="number">0 </span>{
-            <span class="kw">return </span><span class="self">self</span>;
+            <span class="kw">return </span><a class="self" href="#225">self</a>;
         }
 
-        <span class="kw">match </span><span class="self">self </span>{
-            <span class="self">Self</span>::GrandProduct(mle) =&gt; <span class="self">Self</span>::GrandProduct(mle.partial_evaluation(x0)),
+        <span class="kw">match </span><span class="self"><a href="#225">self</a> </span>{
+            <span class="self">Self</span>::GrandProduct(mle) =&gt; <a href="#107"><span class="self">Self</span>::GrandProduct</a>(<a href="#231">mle</a>.<a href="../poly/multi.rs.html#20">partial_evaluation</a>(<a href="#225">x0</a>)),
             <span class="self">Self</span>::LogUpGeneric {
                 numerators,
                 denominators,
@@ -510,31 +504,31 @@
                 numerators,
                 denominators,
             } =&gt; <span class="self">Self</span>::LogUpGeneric {
-                numerators: numerators.partial_evaluation(x0),
-                denominators: denominators.partial_evaluation(x0),
+                numerators: <a href="#233">numerators</a>.<a href="../poly/multi.rs.html#20">partial_evaluation</a>(<a href="#225">x0</a>),
+                denominators: <a href="#234">denominators</a>.<a href="../poly/multi.rs.html#20">partial_evaluation</a>(<a href="#225">x0</a>),
             },
             <span class="self">Self</span>::LogUpSingles { denominators } =&gt; <span class="self">Self</span>::LogUpSingles {
-                denominators: denominators.partial_evaluation(x0),
+                denominators: <a href="#243">denominators</a>.<a href="../poly/multi.rs.html#20">partial_evaluation</a>(<a href="#225">x0</a>),
             },
         }
     }
 }
 
 <span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>NotOutputLayerError;
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/gkr/struct.NotOutputLayerError.html">NotOutputLayerError</a>;
 
 <span class="kw">enum </span>MleExpr&lt;<span class="lifetime">'a</span>, F: Field&gt; {
     Constant(F),
     Mle(<span class="kw-2">&amp;</span><span class="lifetime">'a </span>Mle&lt;F&gt;),
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Index&lt;usize&gt; <span class="kw">for </span>MleExpr&lt;<span class="lifetime">'_</span>, F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; Index&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; <span class="kw">for </span>MleExpr&lt;<span class="lifetime">'_</span>, F&gt; {
     <span class="kw">type </span>Output = F;
 
-    <span class="kw">fn </span>index(<span class="kw-2">&amp;</span><span class="self">self</span>, index: usize) -&gt; <span class="kw-2">&amp;</span>F {
-        <span class="kw">match </span><span class="self">self </span>{
-            <span class="self">Self</span>::Constant(v) =&gt; v,
-            <span class="self">Self</span>::Mle(mle) =&gt; <span class="kw-2">&amp;</span>mle[index],
+    <span class="kw">fn </span>index(<span class="kw-2">&amp;</span><span class="self">self</span>, index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="kw-2">&amp;</span>F {
+        <span class="kw">match </span><span class="self"><a href="#261">self</a> </span>{
+            <span class="self">Self</span>::Constant(v) =&gt; <a href="#263">v</a>,
+            <span class="self">Self</span>::Mle(mle) =&gt; <span class="kw-2">&amp;</span><a href="#264">mle</a>[<a href="#261">index</a>],
         }
     }
 }

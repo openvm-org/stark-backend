@@ -17,12 +17,12 @@
 <a href="#16" id="16">16</a></pre></div><pre class="rust"><code><span class="kw">use </span>thiserror::Error;
 
 <span class="attr">#[derive(Debug, Error, PartialEq, Eq)]
-</span><span class="kw">pub enum </span>VerificationError {
+</span><span class="kw">pub enum </span><a href="#4-16">VerificationError</a> {
     <span class="attr">#[error(<span class="string">"invalid proof shape"</span>)]
     </span>InvalidProofShape,
     <span class="doccomment">/// An error occurred while verifying the claimed openings.
     </span><span class="attr">#[error(<span class="string">"invalid opening argument: {0}"</span>)]
-    </span>InvalidOpeningArgument(String),
+    </span>InvalidOpeningArgument(<a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a>),
     <span class="doccomment">/// Out-of-domain evaluation mismatch, i.e. `constraints(zeta)` did not match
     /// `quotient(zeta) Z_H(zeta)`.
     </span><span class="attr">#[error(<span class="string">"out-of-domain evaluation mismatch"</span>)]

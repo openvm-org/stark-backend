@@ -147,21 +147,21 @@
 <a href="#146" id="146">146</a>
 <a href="#147" id="147">147</a></pre></div><pre class="rust"><code><span class="doccomment">//! [StarkGenericConfig](config::StarkGenericConfig) and associated types. Originally taken from Plonky3 under MIT license.
 
-</span><span class="kw">use </span>std::marker::PhantomData;
+</span><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">std::marker::PhantomData</a>;
 
 <span class="kw">use </span>p3_challenger::{CanObserve, CanSample, FieldChallenger};
 <span class="kw">use </span>p3_commit::{Pcs, PolynomialSpace};
 <span class="kw">use </span>p3_field::{ExtensionField, Field};
 
-<span class="kw">use </span><span class="kw">crate</span>::interaction::RapPhaseSeq;
+<span class="kw">use </span><a href="interaction/mod.rs.html#140-186"><span class="kw">crate</span>::interaction::RapPhaseSeq</a>;
 
 <span class="doccomment">/// Based on [p3_uni_stark::StarkGenericConfig].
-</span><span class="kw">pub trait </span>StarkGenericConfig
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/config/trait.StarkGenericConfig.html">StarkGenericConfig</a>
 <span class="kw">where
-    </span>Domain&lt;<span class="self">Self</span>&gt;: Send + Sync,
-    Com&lt;<span class="self">Self</span>&gt;: Send + Sync,
-    PcsProof&lt;<span class="self">Self</span>&gt;: Send + Sync,
-    PcsProverData&lt;<span class="self">Self</span>&gt;: Send + Sync,
+    </span>Domain&lt;<span class="self">Self</span>&gt;: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    Com&lt;<span class="self">Self</span>&gt;: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    PcsProof&lt;<span class="self">Self</span>&gt;: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    PcsProverData&lt;<span class="self">Self</span>&gt;: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
 {
     <span class="doccomment">/// The PCS used to commit to trace polynomials.
     </span><span class="kw">type </span>Pcs: Pcs&lt;<span class="self">Self</span>::Challenge, <span class="self">Self</span>::Challenger&gt;;
@@ -170,7 +170,7 @@
     </span><span class="kw">type </span>RapPhaseSeq: RapPhaseSeq&lt;Val&lt;<span class="self">Self</span>&gt;, <span class="self">Self</span>::Challenge, <span class="self">Self</span>::Challenger&gt;;
 
     <span class="doccomment">/// The field from which most random challenges are drawn.
-    </span><span class="kw">type </span>Challenge: ExtensionField&lt;Val&lt;<span class="self">Self</span>&gt;&gt; + Send + Sync;
+    </span><span class="kw">type </span>Challenge: ExtensionField&lt;Val&lt;<span class="self">Self</span>&gt;&gt; + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>;
 
     <span class="doccomment">/// The challenger (Fiat-Shamir) implementation used.
     </span><span class="kw">type </span>Challenger: FieldChallenger&lt;Val&lt;<span class="self">Self</span>&gt;&gt;
@@ -182,85 +182,85 @@
     <span class="kw">fn </span>rap_phase_seq(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::RapPhaseSeq;
 }
 
-<span class="kw">pub type </span>Val&lt;SC&gt; = &lt;&lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.Val.html">Val</a>&lt;SC&gt; = &lt;&lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::Domain <span class="kw">as </span>PolynomialSpace&gt;::Val;
 
-<span class="kw">pub type </span>Com&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.Com.html">Com</a>&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::Commitment;
 
-<span class="kw">pub type </span>PcsProverData&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.PcsProverData.html">PcsProverData</a>&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::ProverData;
 
-<span class="kw">pub type </span>PcsProof&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.PcsProof.html">PcsProof</a>&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::Proof;
 
-<span class="kw">pub type </span>PcsError&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.PcsError.html">PcsError</a>&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::Error;
 
-<span class="kw">pub type </span>Domain&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.Domain.html">Domain</a>&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Pcs <span class="kw">as </span>Pcs&lt;
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::Domain;
 
-<span class="kw">pub type </span>RapPhaseSeqPartialProof&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::RapPhaseSeq <span class="kw">as </span>RapPhaseSeq&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.RapPhaseSeqPartialProof.html">RapPhaseSeqPartialProof</a>&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::RapPhaseSeq <span class="kw">as </span>RapPhaseSeq&lt;
     Val&lt;SC&gt;,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::PartialProof;
 
-<span class="kw">pub type </span>RapPhaseSeqProvingKey&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::RapPhaseSeq <span class="kw">as </span>RapPhaseSeq&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.RapPhaseSeqProvingKey.html">RapPhaseSeqProvingKey</a>&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::RapPhaseSeq <span class="kw">as </span>RapPhaseSeq&lt;
     Val&lt;SC&gt;,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::ProvingKey;
 
-<span class="kw">pub type </span>RapPhaseSeqError&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::RapPhaseSeq <span class="kw">as </span>RapPhaseSeq&lt;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.RapPhaseSeqError.html">RapPhaseSeqError</a>&lt;SC&gt; = &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::RapPhaseSeq <span class="kw">as </span>RapPhaseSeq&lt;
     Val&lt;SC&gt;,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge,
     &lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenger,
 &gt;&gt;::Error;
 
-<span class="kw">pub type </span>PackedVal&lt;SC&gt; = &lt;Val&lt;SC&gt; <span class="kw">as </span>Field&gt;::Packing;
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.PackedVal.html">PackedVal</a>&lt;SC&gt; = &lt;Val&lt;SC&gt; <span class="kw">as </span>Field&gt;::Packing;
 
-<span class="kw">pub type </span>PackedChallenge&lt;SC&gt; =
+<span class="kw">pub type </span><a href="../../openvm_stark_backend/config/type.PackedChallenge.html">PackedChallenge</a>&lt;SC&gt; =
     &lt;&lt;SC <span class="kw">as </span>StarkGenericConfig&gt;::Challenge <span class="kw">as </span>ExtensionField&lt;Val&lt;SC&gt;&gt;&gt;::ExtensionPacking;
 
 <span class="attr">#[derive(Debug)]
-</span><span class="kw">pub struct </span>StarkConfig&lt;Pcs, RapPhaseSeq, Challenge, Challenger&gt; {
+</span><span class="kw">pub struct </span><a href="../../openvm_stark_backend/config/struct.StarkConfig.html">StarkConfig</a>&lt;Pcs, RapPhaseSeq, Challenge, Challenger&gt; {
     pcs: Pcs,
-    rap_phase_seq: RapPhaseSeq,
+    rap_phase: RapPhaseSeq,
     _phantom: PhantomData&lt;(Challenge, Challenger)&gt;,
 }
 
 <span class="kw">impl</span>&lt;Pcs, RapPhaseSeq, Challenge, Challenger&gt; StarkConfig&lt;Pcs, RapPhaseSeq, Challenge, Challenger&gt; {
     <span class="kw">pub const fn </span>new(pcs: Pcs, rap_phase: RapPhaseSeq) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            pcs,
-            rap_phase_seq: rap_phase,
-            _phantom: PhantomData,
+            <a href="#99">pcs</a>,
+            <a href="#99">rap_phase</a>,
+            _phantom: <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">PhantomData</a>,
         }
     }
 }
 
-<span class="kw">impl</span>&lt;Pcs, Rps, Challenge, Challenger&gt; StarkGenericConfig
+<span class="kw">impl</span>&lt;Pcs, Rps, Challenge, Challenger&gt; <a href="#12-36">StarkGenericConfig</a>
     <span class="kw">for </span>StarkConfig&lt;Pcs, Rps, Challenge, Challenger&gt;
 <span class="kw">where
     </span>Challenge: ExtensionField&lt;&lt;Pcs::Domain <span class="kw">as </span>PolynomialSpace&gt;::Val&gt;,
     Pcs: p3_commit::Pcs&lt;Challenge, Challenger&gt;,
-    Pcs::Domain: Send + Sync,
-    Pcs::Commitment: Send + Sync,
-    Pcs::ProverData: Send + Sync,
-    Pcs::Proof: Send + Sync,
+    Pcs::Domain: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    Pcs::Commitment: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    Pcs::ProverData: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
+    Pcs::Proof: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
     Rps: RapPhaseSeq&lt;&lt;Pcs::Domain <span class="kw">as </span>PolynomialSpace&gt;::Val, Challenge, Challenger&gt;,
     Challenger: FieldChallenger&lt;&lt;Pcs::Domain <span class="kw">as </span>PolynomialSpace&gt;::Val&gt;
         + CanObserve&lt;&lt;Pcs <span class="kw">as </span>p3_commit::Pcs&lt;Challenge, Challenger&gt;&gt;::Commitment&gt;
@@ -272,16 +272,16 @@
     <span class="kw">type </span>Challenger = Challenger;
 
     <span class="kw">fn </span>pcs(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::Pcs {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.pcs
+        <span class="kw-2">&amp;</span><a class="self" href="#127">self</a>.pcs
     }
     <span class="kw">fn </span>rap_phase_seq(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::RapPhaseSeq {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.rap_phase_seq
+        <span class="kw-2">&amp;</span><a class="self" href="#130">self</a>.rap_phase
     }
 }
 
-<span class="kw">pub struct </span>UniStarkConfig&lt;SC&gt;(<span class="kw">pub </span>SC);
+<span class="kw">pub struct </span><a href="../../openvm_stark_backend/config/struct.UniStarkConfig.html">UniStarkConfig</a>&lt;SC&gt;(<span class="kw">pub </span>SC);
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; p3_uni_stark::StarkGenericConfig <span class="kw">for </span>UniStarkConfig&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="#12-36">StarkGenericConfig</a>&gt; p3_uni_stark::StarkGenericConfig <span class="kw">for </span>UniStarkConfig&lt;SC&gt; {
     <span class="kw">type </span>Pcs = SC::Pcs;
 
     <span class="kw">type </span>Challenge = SC::Challenge;
@@ -289,7 +289,7 @@
     <span class="kw">type </span>Challenger = SC::Challenger;
 
     <span class="kw">fn </span>pcs(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::Pcs {
-        <span class="self">self</span>.<span class="number">0</span>.pcs()
+        <a class="self" href="#144">self</a>.<span class="number">0</span>.<a href="#33">pcs</a>()
     }
 }
 </code></pre></div></section></main></body></html>

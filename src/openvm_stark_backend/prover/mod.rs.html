@@ -501,18 +501,9 @@
 <a href="#500" id="500">500</a>
 <a href="#501" id="501">501</a>
 <a href="#502" id="502">502</a>
-<a href="#503" id="503">503</a>
-<a href="#504" id="504">504</a>
-<a href="#505" id="505">505</a>
-<a href="#506" id="506">506</a>
-<a href="#507" id="507">507</a>
-<a href="#508" id="508">508</a>
-<a href="#509" id="509">509</a>
-<a href="#510" id="510">510</a>
-<a href="#511" id="511">511</a>
-<a href="#512" id="512">512</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
-    iter,
-    sync::{Arc, Mutex},
+<a href="#503" id="503">503</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::{
+    <a href="https://doc.rust-lang.org/nightly/core/iter/index.html">iter</a>,
+    sync::{<a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">Arc</a>, <a href="https://doc.rust-lang.org/nightly/std/sync/mutex/struct.Mutex.html">Mutex</a>},
 };
 
 <span class="kw">use </span>itertools::{izip, multiunzip, Itertools};
@@ -527,56 +518,56 @@
 <span class="kw">use </span>tracing::instrument;
 
 <span class="kw">use crate</span>::{
-    air_builders::debug::check_constraints::{check_constraints, check_logup},
-    config::{Domain, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
-    keygen::{types::MultiStarkProvingKey, view::MultiStarkProvingKeyView},
+    air_builders::debug::check_constraints::{<a href="../air_builders/debug/check_constraints.rs.html#19-110">check_constraints</a>, <a href="../air_builders/debug/check_constraints.rs.html#112-166">check_logup</a>},
+    config::{<a href="../config.rs.html#63-66">Domain</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    <a href="../interaction/mod.rs.html#112-117">interaction::RapPhaseSeqKind</a>,
+    keygen::{<a href="../keygen/types.rs.html#111-115">types::MultiStarkProvingKey</a>, <a href="../keygen/view.rs.html#14-17">view::MultiStarkProvingKeyView</a>},
     prover::{
-        metrics::trace_metrics,
-        opener::OpeningProver,
-        quotient::ProverQuotientData,
-        trace::{commit_quotient_traces, ProverTraceData, TraceCommitter},
-        types::{AirProofData, Commitments, Proof, ProofInput},
+        <a href="metrics.rs.html#68-108">metrics::trace_metrics</a>,
+        <a href="opener.rs.html#11-14">opener::OpeningProver</a>,
+        <a href="quotient/mod.rs.html#171-178">quotient::ProverQuotientData</a>,
+        trace::{<a href="trace.rs.html#22-53">commit_quotient_traces</a>, <a href="trace.rs.html#160-168">ProverTraceData</a>, <a href="trace.rs.html#114-116">TraceCommitter</a>},
+        types::{<a href="types.rs.html#58-66">AirProofData</a>, <a href="types.rs.html#24-35">Commitments</a>, <a href="types.rs.html#44-53">Proof</a>, <a href="types.rs.html#69-72">ProofInput</a>},
     },
-    rap::AnyRap,
+    <a href="../rap.rs.html#66-77">rap::AnyRap</a>,
 };
 
-<span class="kw">pub mod </span>helper;
+<span class="kw">pub mod </span><a href="helper.rs.html#1-86">helper</a>;
 <span class="doccomment">/// Metrics about trace and other statistics related to prover performance
-</span><span class="kw">pub mod </span>metrics;
+</span><span class="kw">pub mod </span><a href="metrics.rs.html#1-154">metrics</a>;
 <span class="doccomment">/// Polynomial opening proofs
-</span><span class="kw">pub mod </span>opener;
+</span><span class="kw">pub mod </span><a href="opener.rs.html#1-174">opener</a>;
 <span class="doccomment">/// Computation of DEEP quotient polynomial and commitment
-</span><span class="kw">pub mod </span>quotient;
+</span><span class="kw">pub mod </span><a href="quotient/mod.rs.html#1-244">quotient</a>;
 <span class="doccomment">/// Trace commitment computation
-</span><span class="kw">mod </span>trace;
-<span class="kw">pub mod </span>types;
+</span><span class="kw">mod </span><a href="trace.rs.html#1-203">trace</a>;
+<span class="kw">pub mod </span><a href="types.rs.html#1-180">types</a>;
 
-<span class="kw">pub use </span>trace::PairTraceView;
+<span class="kw">pub use </span><a href="trace.rs.html#171-175">trace::PairTraceView</a>;
 
-<span class="kw">use crate</span>::{config::RapPhaseSeqPartialProof, interaction::RapPhaseSeq};
+<span class="kw">use crate</span>::{<a href="../config.rs.html#68-72">config::RapPhaseSeqPartialProof</a>, <a href="../interaction/mod.rs.html#140-186">interaction::RapPhaseSeq</a>};
 
-<span class="macro">thread_local!</span> {
-   <span class="kw">pub static </span>USE_DEBUG_BUILDER: Arc&lt;Mutex&lt;bool&gt;&gt; = Arc::new(Mutex::new(<span class="bool-val">true</span>));
+<a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.thread_local.html">thread_local!</a> {
+   <span class="kw">pub static </span><a href="../../../openvm_stark_backend/prover/constant.USE_DEBUG_BUILDER.html">USE_DEBUG_BUILDER</a>: Arc&lt;Mutex&lt;bool&gt;&gt; = Arc::new(Mutex::new(<span class="bool-val">true</span>));
 }
 
 <span class="doccomment">/// Proves multiple chips with interactions together.
 /// This prover implementation is specialized for Interactive AIRs.
-</span><span class="kw">pub struct </span>MultiTraceStarkProver&lt;<span class="lifetime">'c</span>, SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/prover/struct.MultiTraceStarkProver.html">MultiTraceStarkProver</a>&lt;<span class="lifetime">'c</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>config: <span class="kw-2">&amp;</span><span class="lifetime">'c </span>SC,
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">'c</span>, SC: StarkGenericConfig&gt; MultiTraceStarkProver&lt;<span class="lifetime">'c</span>, SC&gt; {
+<span class="kw">impl</span>&lt;<span class="lifetime">'c</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiTraceStarkProver&lt;<span class="lifetime">'c</span>, SC&gt; {
     <span class="kw">pub fn </span>new(config: <span class="kw-2">&amp;</span><span class="lifetime">'c </span>SC) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ config }
+        <span class="self">Self </span>{ <a href="#58">config</a> }
     }
 
     <span class="kw">pub fn </span>pcs(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>SC::Pcs {
-        <span class="self">self</span>.config.pcs()
+        <a class="self" href="#62">self</a>.config.<a href="../config.rs.html#33">pcs</a>()
     }
 
     <span class="kw">pub fn </span>committer(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; TraceCommitter&lt;SC&gt; {
-        TraceCommitter::new(<span class="self">self</span>.pcs())
+        <a href="trace.rs.html#125-127">TraceCommitter::new</a>(<a class="self" href="#66">self</a>.<a href="#62-64">pcs</a>())
     }
 
     <span class="doccomment">/// Specialized prove for InteractiveAirs.
@@ -587,14 +578,13 @@
     /// The prover can support global public values that are shared among all AIRs,
     /// but we currently split public values per-AIR for modularity.
     </span><span class="attr">#[instrument(name = <span class="string">"MultiTraceStarkProver::prove"</span>, level = <span class="string">"info"</span>, skip_all)]
-    </span><span class="kw">pub fn </span>prove(
+    </span><span class="kw">pub fn </span>prove&lt;<span class="lifetime">'a</span>&gt;(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
         challenger: <span class="kw-2">&amp;mut </span>SC::Challenger,
-        mpk: <span class="kw-2">&amp;</span>MultiStarkProvingKey&lt;SC&gt;,
+        mpk: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>MultiStarkProvingKey&lt;SC&gt;,
         proof_input: ProofInput&lt;SC&gt;,
     ) -&gt; Proof&lt;SC&gt; {
         <span class="macro">assert!</span>(mpk.validate(<span class="kw-2">&amp;</span>proof_input), <span class="string">"Invalid proof input"</span>);
-
         <span class="kw">let </span>pcs = <span class="self">self</span>.config.pcs();
         <span class="kw">let </span>rap_phase_seq = <span class="self">self</span>.config.rap_phase_seq();
 
@@ -740,7 +730,7 @@
             <span class="kw-2">&amp;</span>perm_trace_per_air,
             <span class="kw-2">&amp;</span>exposed_values_after_challenge,
             <span class="kw-2">&amp;</span>challenges,
-            SC::RapPhaseSeq::KIND,
+            SC::RapPhaseSeq::ID,
         );
 
         <span class="comment">// Commit to permutation traces: this means only 1 challenge round right now
@@ -785,7 +775,6 @@
             quotient_data,
             domain_per_air,
             pvs_per_air,
-            rap_phase_seq,
             rap_phase_seq_proof,
         )
     }
@@ -804,7 +793,7 @@
 /// all trace matrices, with matrices in increasing order of air index
 </span><span class="attr">#[allow(clippy::too_many_arguments)]
 #[instrument(level = <span class="string">"info"</span>, skip_all)]
-</span><span class="kw">fn </span>prove_raps_with_committed_traces&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt;(
+</span><span class="kw">fn </span>prove_raps_with_committed_traces&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt;(
     pcs: <span class="kw-2">&amp;</span>SC::Pcs,
     challenger: <span class="kw-2">&amp;mut </span>SC::Challenger,
     mpk: MultiStarkProvingKeyView&lt;SC&gt;,
@@ -814,7 +803,6 @@
     quotient_data: ProverQuotientData&lt;SC&gt;,
     domain_per_air: Vec&lt;Domain&lt;SC&gt;&gt;,
     public_values_per_air: Vec&lt;Vec&lt;Val&lt;SC&gt;&gt;&gt;,
-    rap_phase_seq: <span class="kw-2">&amp;</span>SC::RapPhaseSeq,
     rap_phase_seq_proof: <span class="prelude-ty">Option</span>&lt;RapPhaseSeqPartialProof&lt;SC&gt;&gt;,
 ) -&gt; Proof&lt;SC&gt; {
     <span class="comment">// Observe quotient commitment
@@ -872,23 +860,17 @@
     ));
 
     <span class="comment">// ASSUMING: per challenge round, shared commitment for all trace matrices, with matrices in increasing order of air index
-    </span><span class="kw">let </span>(after_challenge_data, extra_after_challenge_points) =
-        <span class="kw">if let </span><span class="prelude-val">Some</span>(perm_prover_data) = <span class="kw-2">&amp;</span>perm_prover_data {
-            <span class="kw">let </span><span class="kw-2">mut </span>domains = Vec::new();
-            <span class="kw">for </span>(air_id, pk) <span class="kw">in </span>mpk.per_air.iter().enumerate() {
-                <span class="kw">if </span>pk.vk.has_interaction() {
-                    domains.push(domain_per_air[air_id]);
-                }
+    </span><span class="kw">let </span>after_challenge_data = <span class="kw">if let </span><span class="prelude-val">Some</span>(perm_prover_data) = <span class="kw-2">&amp;</span>perm_prover_data {
+        <span class="kw">let </span><span class="kw-2">mut </span>domains = Vec::new();
+        <span class="kw">for </span>(air_id, pk) <span class="kw">in </span>mpk.per_air.iter().enumerate() {
+            <span class="kw">if </span>pk.vk.has_interaction() {
+                domains.push(domain_per_air[air_id]);
             }
-            <span class="kw">let </span>extra_after_challenge_points = rap_phase_seq.extra_opening_points(zeta, <span class="kw-2">&amp;</span>domains);
-            (
-                <span class="macro">vec!</span>[(perm_prover_data.data.as_ref(), domains)],
-                extra_after_challenge_points,
-            )
-        } <span class="kw">else </span>{
-            (<span class="macro">vec!</span>[], <span class="macro">vec!</span>[])
-        };
-
+        }
+        <span class="macro">vec!</span>[(perm_prover_data.data.as_ref(), domains)]
+    } <span class="kw">else </span>{
+        <span class="macro">vec!</span>[]
+    };
 
     <span class="kw">let </span>quotient_degrees = mpk
         .per_air
@@ -935,22 +917,22 @@
     }
 }
 
-<span class="kw">fn </span>commit_perm_traces&lt;SC: StarkGenericConfig&gt;(
+<span class="kw">fn </span>commit_perm_traces&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt;(
     pcs: <span class="kw-2">&amp;</span>SC::Pcs,
     perm_traces: Vec&lt;<span class="prelude-ty">Option</span>&lt;RowMajorMatrix&lt;SC::Challenge&gt;&gt;&gt;,
     domain_per_air: <span class="kw-2">&amp;</span>[Domain&lt;SC&gt;],
 ) -&gt; <span class="prelude-ty">Option</span>&lt;ProverTraceData&lt;SC&gt;&gt; {
-    <span class="kw">let </span>flattened_traces_with_domains: Vec&lt;<span class="kw">_</span>&gt; = perm_traces
-        .into_iter()
-        .zip_eq(domain_per_air)
-        .flat_map(|(perm_trace, domain)| perm_trace.map(|trace| (<span class="kw-2">*</span>domain, trace.flatten_to_base())))
-        .collect();
+    <span class="kw">let </span>flattened_traces_with_domains: Vec&lt;<span class="kw">_</span>&gt; = <a href="#419">perm_traces</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .zip_eq(<a href="#420">domain_per_air</a>)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|(perm_trace, domain)| <a href="#425">perm_trace</a>.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|trace| (<span class="kw-2">*</span><a href="#425">domain</a>, <a href="#425">trace</a>.flatten_to_base())))
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
     <span class="comment">// Only commit if there are permutation traces
     </span><span class="kw">if </span>!flattened_traces_with_domains.is_empty() {
-        <span class="kw">let </span>(commit, data) = pcs.commit(flattened_traces_with_domains);
-        <span class="prelude-val">Some</span>(ProverTraceData {
-            commit,
-            data: data.into(),
+        <span class="kw">let </span>(commit, data) = <a href="#418">pcs</a>.commit(<a href="#422">flattened_traces_with_domains</a>);
+        <span class="prelude-val">Some</span>(<a href="trace.rs.html#160-168">ProverTraceData</a> {
+            <a href="#429">commit</a>,
+            data: <a href="#429">data</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>(),
         })
     } <span class="kw">else </span>{
         <span class="prelude-val">None
@@ -959,7 +941,7 @@
 
 <span class="attr">#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-</span><span class="kw">fn </span>debug_constraints_and_interactions&lt;SC: StarkGenericConfig&gt;(
+</span><span class="kw">fn </span>debug_constraints_and_interactions&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt;(
     raps: <span class="kw-2">&amp;</span>[Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;],
     mpk: <span class="kw-2">&amp;</span>MultiStarkProvingKeyView&lt;SC&gt;,
     main_views_per_air: <span class="kw-2">&amp;</span>[Vec&lt;RowMajorMatrixView&lt;<span class="lifetime">'_</span>, Val&lt;SC&gt;&gt;&gt;],
@@ -967,57 +949,57 @@
     perm_trace_per_air: <span class="kw-2">&amp;</span>[<span class="prelude-ty">Option</span>&lt;RowMajorMatrix&lt;SC::Challenge&gt;&gt;],
     exposed_values_after_challenge: <span class="kw-2">&amp;</span>[Vec&lt;Vec&lt;SC::Challenge&gt;&gt;],
     challenges: <span class="kw-2">&amp;</span>[Vec&lt;SC::Challenge&gt;],
-    rap_phase_seq_kind: RapPhaseSeqKind,
+    rap_phase_seq_kind: <a href="../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
 ) {
-    USE_DEBUG_BUILDER.with(|debug| {
+    <a href="#47-49">USE_DEBUG_BUILDER</a>.<a href="https://doc.rust-lang.org/nightly/std/thread/local/struct.LocalKey.html#method.with">with</a>(|debug| {
         <span class="kw">if </span><span class="kw-2">*</span>debug.lock().unwrap() {
             <span class="kw">let </span>preprocessed = <span class="macro">izip!</span>(
-                raps,
-                <span class="kw-2">&amp;</span>mpk.per_air,
-                main_views_per_air,
-                public_values_per_air,
-                perm_trace_per_air,
-                exposed_values_after_challenge
+                <a href="#442">raps</a>,
+                <span class="kw-2">&amp;</span><a href="#443">mpk</a>.per_air,
+                <a href="#444">main_views_per_air</a>,
+                <a href="#445">public_values_per_air</a>,
+                <a href="#446">perm_trace_per_air</a>,
+                <a href="#447">exposed_values_after_challenge</a>
             )
-            .map(
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(
                 |(rap, pk, main, public_values, perm_trace, exposed_values_after_challenge)| {
-                    <span class="kw">let </span>preprocessed_trace = pk
+                    <span class="kw">let </span>preprocessed_trace = <a href="#462">pk</a>
                         .preprocessed_data
-                        .as_ref()
-                        .map(|data| data.trace.as_view());
+                        .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>()
+                        .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|data| <a href="#466">data</a>.trace.as_view());
                     <span class="macro">tracing::debug!</span>(<span class="string">"Checking constraints for {}"</span>, rap.name());
-                    check_constraints(
-                        rap.as_ref(),
-                        <span class="kw-2">&amp;</span>rap.name(),
-                        <span class="kw-2">&amp;</span>preprocessed_trace,
-                        main,
-                        <span class="kw-2">&amp;</span>perm_trace.iter().map(|m| m.as_view()).collect_vec(),
-                        challenges,
-                        public_values,
-                        exposed_values_after_challenge,
-                        rap_phase_seq_kind,
+                    <a href="../air_builders/debug/check_constraints.rs.html#19-110">check_constraints</a>(
+                        <a href="#462">rap</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>(),
+                        <span class="kw-2">&amp;</span><a href="#462">rap</a>.<a href="../rap.rs.html#76">name</a>(),
+                        <span class="kw-2">&amp;</span><a href="#463">preprocessed_trace</a>,
+                        <a href="#462">main</a>,
+                        <span class="kw-2">&amp;</span><a href="#462">perm_trace</a>.<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|m| <a href="#473">m</a>.as_view()).collect_vec(),
+                        <a href="#448">challenges</a>,
+                        <a href="#462">public_values</a>,
+                        <a href="#462">exposed_values_after_challenge</a>,
+                        <a href="#449">rap_phase_seq_kind</a>,
                     );
-                    preprocessed_trace
+                    <a href="#463">preprocessed_trace</a>
                 },
             )
             .collect_vec();
 
-            <span class="kw">let </span>(air_names, interactions): (Vec&lt;<span class="kw">_</span>&gt;, Vec&lt;<span class="kw">_</span>&gt;) = mpk
+            <span class="kw">let </span>(air_names, interactions): (Vec&lt;<span class="kw">_</span>&gt;, Vec&lt;<span class="kw">_</span>&gt;) = <a href="#443">mpk</a>
                 .per_air
-                .iter()
-                .map(|pk| {
+                .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|pk| {
                     (
-                        pk.air_name.clone(),
-                        <span class="kw-2">&amp;</span>pk.vk.symbolic_constraints.interactions[..],
+                        <a href="#487">pk</a>.air_name.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>(),
+                        <span class="kw-2">&amp;</span><a href="#487">pk</a>.vk.symbolic_constraints.interactions[..],
                     )
                 })
-                .unzip();
-            check_logup(
-                <span class="kw-2">&amp;</span>air_names,
-                <span class="kw-2">&amp;</span>interactions,
-                <span class="kw-2">&amp;</span>preprocessed,
-                main_views_per_air,
-                public_values_per_air,
+                .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.unzip">unzip</a>();
+            <a href="../air_builders/debug/check_constraints.rs.html#112-166">check_logup</a>(
+                <span class="kw-2">&amp;</span><a href="#484">air_names</a>,
+                <span class="kw-2">&amp;</span><a href="#484">interactions</a>,
+                <span class="kw-2">&amp;</span><a href="#453">preprocessed</a>,
+                <a href="#444">main_views_per_air</a>,
+                <a href="#445">public_values_per_air</a>,
             );
         }
     });

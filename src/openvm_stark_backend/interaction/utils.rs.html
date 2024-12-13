@@ -60,24 +60,24 @@
 <a href="#59" id="59">59</a></pre></div><pre class="rust"><code><span class="kw">use </span>p3_air::VirtualPairCol;
 <span class="kw">use </span>p3_field::{AbstractField, ExtensionField, Field, Powers};
 
-<span class="kw">use </span><span class="kw">super</span>::Interaction;
+<span class="kw">use </span><a href="mod.rs.html#28-33"><span class="kw">super</span>::Interaction</a>;
 
 <span class="doccomment">/// Returns [random_element, random_element^2, ..., random_element^{max_bus_index + 1}].
 </span><span class="kw">pub fn </span>generate_rlc_elements&lt;AF: AbstractField, E&gt;(
     random_element: AF,
     all_interactions: <span class="kw-2">&amp;</span>[Interaction&lt;E&gt;],
 ) -&gt; Vec&lt;AF&gt; {
-    <span class="kw">let </span>max_bus_index = all_interactions
-        .iter()
-        .map(|interaction| interaction.bus_index)
-        .max()
-        .unwrap_or(<span class="number">0</span>);
+    <span class="kw">let </span>max_bus_index = <a href="#9">all_interactions</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|interaction| <a href="#13">interaction</a>.bus_index)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>);
 
-    random_element
+    <a href="#8">random_element</a>
         .powers()
-        .skip(<span class="number">1</span>)
-        .take(max_bus_index + <span class="number">1</span>)
-        .collect()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.skip">skip</a>(<span class="number">1</span>)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.take">take</a>(<a href="#11">max_bus_index</a> + <span class="number">1</span>)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
 }
 
 <span class="doccomment">/// Returns [beta^0, beta^1, ..., beta^{max_num_fields - 1}]
@@ -86,13 +86,13 @@
     beta: AF,
     all_interactions: <span class="kw-2">&amp;</span>[Interaction&lt;E&gt;],
 ) -&gt; Vec&lt;AF&gt; {
-    <span class="kw">let </span>max_fields_len = all_interactions
-        .iter()
-        .map(|interaction| interaction.fields.len())
-        .max()
-        .unwrap_or(<span class="number">0</span>);
+    <span class="kw">let </span>max_fields_len = <a href="#28">all_interactions</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|interaction| <a href="#32">interaction</a>.fields.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>())
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>);
 
-    beta.powers().take(max_fields_len).collect()
+    <a href="#27">beta</a>.powers().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.take">take</a>(<a href="#30">max_fields_len</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
 }
 
 <span class="comment">// TODO: Use Var and Expr type bounds in place of concrete fields so that
@@ -113,7 +113,7 @@
     <span class="kw">for </span>(columns, beta) <span class="kw">in </span>fields.iter().zip(betas) {
         rlc += beta * columns.apply::&lt;F, F&gt;(preprocessed_row, main_row)
     }
-    rlc += alpha;
-    rlc
+    <a href="#53">rlc</a> += <a href="#46">alpha</a>;
+    <a href="#53">rlc</a>
 }
 </code></pre></div></section></main></body></html>

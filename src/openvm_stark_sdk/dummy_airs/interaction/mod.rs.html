@@ -62,68 +62,68 @@
 <a href="#61" id="61">61</a>
 <a href="#62" id="62">62</a>
 <a href="#63" id="63">63</a>
-<a href="#64" id="64">64</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#64" id="64">64</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>itertools::{izip, Itertools};
 <span class="kw">use </span>openvm_stark_backend::{
-    keygen::MultiStarkKeygenBuilder,
+    <a href="../../../../openvm_stark_backend/keygen/struct.MultiStarkKeygenBuilder.html">keygen::MultiStarkKeygenBuilder</a>,
     p3_matrix::dense::RowMajorMatrix,
     prover::{
-        types::{AirProofInput, AirProofRawInput, ProofInput},
-        MultiTraceStarkProver,
+        types::{<a href="../../../../openvm_stark_backend/prover/types/struct.AirProofInput.html">AirProofInput</a>, <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofRawInput.html">AirProofRawInput</a>, <a href="../../../../openvm_stark_backend/prover/types/struct.ProofInput.html">ProofInput</a>},
+        <a href="../../../../openvm_stark_backend/prover/struct.MultiTraceStarkProver.html">MultiTraceStarkProver</a>,
     },
-    rap::AnyRap,
-    verifier::{MultiTraceStarkVerifier, VerificationError},
+    <a href="../../../../openvm_stark_backend/rap/trait.AnyRap.html">rap::AnyRap</a>,
+    verifier::{<a href="../../../../openvm_stark_backend/verifier/struct.MultiTraceStarkVerifier.html">MultiTraceStarkVerifier</a>, <a href="../../../../openvm_stark_backend/verifier/error/enum.VerificationError.html">VerificationError</a>},
 };
 <span class="kw">use </span>p3_baby_bear::BabyBear;
 
-<span class="kw">use </span><span class="kw">crate</span>::config::{<span class="self">self</span>, baby_bear_poseidon2::BabyBearPoseidon2Config};
+<span class="kw">use </span><span class="kw">crate</span>::config::{<a class="self" href="../../lib.rs.html#9">self</a>, <a href="../../config/baby_bear_poseidon2.rs.html#54">baby_bear_poseidon2::BabyBearPoseidon2Config</a>};
 
-<span class="kw">pub mod </span>dummy_interaction_air;
+<span class="kw">pub mod </span><a href="dummy_interaction_air.rs.html#1-285">dummy_interaction_air</a>;
 
 <span class="kw">type </span>Val = BabyBear;
 
-<span class="kw">pub fn </span>verify_interactions(
-    traces: Vec&lt;RowMajorMatrix&lt;Val&gt;&gt;,
-    airs: Vec&lt;Arc&lt;<span class="kw">dyn </span>AnyRap&lt;BabyBearPoseidon2Config&gt;&gt;&gt;,
-    pis: Vec&lt;Vec&lt;Val&gt;&gt;,
-) -&gt; <span class="prelude-ty">Result</span>&lt;(), VerificationError&gt; {
-    <span class="kw">let </span>perm = config::baby_bear_poseidon2::random_perm();
-    <span class="kw">let </span>config = config::baby_bear_poseidon2::default_config(<span class="kw-2">&amp;</span>perm);
+<span class="kw">pub fn </span><a href="../../../../openvm_stark_sdk/dummy_airs/interaction/fn.verify_interactions.html">verify_interactions</a>(
+    traces: Vec&lt;RowMajorMatrix&lt;<a href="#20">Val</a>&gt;&gt;,
+    airs: Vec&lt;Arc&lt;<span class="kw">dyn </span>AnyRap&lt;<a href="../../config/baby_bear_poseidon2.rs.html#54">BabyBearPoseidon2Config</a>&gt;&gt;&gt;,
+    pis: Vec&lt;Vec&lt;<a href="#20">Val</a>&gt;&gt;,
+) -&gt; <span class="prelude-ty">Result</span>&lt;(), <a href="../../../../openvm_stark_backend/verifier/error/enum.VerificationError.html">VerificationError</a>&gt; {
+    <span class="kw">let </span>perm = <a href="../../config/baby_bear_poseidon2.rs.html#176-180">config::baby_bear_poseidon2::random_perm</a>();
+    <span class="kw">let </span>config = <a href="../../config/baby_bear_poseidon2.rs.html#128-131">config::baby_bear_poseidon2::default_config</a>(<span class="kw-2">&amp;</span><a href="#27">perm</a>);
 
-    <span class="kw">let </span><span class="kw-2">mut </span>keygen_builder = MultiStarkKeygenBuilder::new(<span class="kw-2">&amp;</span>config);
-    <span class="kw">let </span>air_ids = airs
-        .iter()
-        .map(|air| keygen_builder.add_air(air.clone()))
+    <span class="kw">let </span><span class="kw-2">mut </span>keygen_builder = <a href="../../../../openvm_stark_backend/keygen/struct.MultiStarkKeygenBuilder.html#method.new">MultiStarkKeygenBuilder::new</a>(<span class="kw-2">&amp;</span><a href="#28">config</a>);
+    <span class="kw">let </span>air_ids = <a href="#24">airs</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|air| <a href="#30">keygen_builder</a>.<a href="../../../../openvm_stark_backend/keygen/struct.MultiStarkKeygenBuilder.html#method.add_air">add_air</a>(<a href="#33">air</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()))
         .collect_vec();
-    <span class="kw">let </span>pk = keygen_builder.generate_pk();
-    <span class="kw">let </span>vk = pk.get_vk();
+    <span class="kw">let </span>pk = <a href="#30">keygen_builder</a>.<a href="../../../../openvm_stark_backend/keygen/struct.MultiStarkKeygenBuilder.html#method.generate_pk">generate_pk</a>();
+    <span class="kw">let </span>vk = <a href="#35">pk</a>.<a href="../../../../openvm_stark_backend/keygen/types/struct.MultiStarkProvingKey.html#method.get_vk">get_vk</a>();
 
-    <span class="kw">let </span>per_air: Vec&lt;<span class="kw">_</span>&gt; = <span class="macro">izip!</span>(air_ids, airs, traces, pis)
-        .map(|(air_id, air, trace, pvs)| {
+    <span class="kw">let </span>per_air: Vec&lt;<span class="kw">_</span>&gt; = <span class="macro">izip!</span>(<a href="#31">air_ids</a>, <a href="#24">airs</a>, <a href="#23">traces</a>, <a href="#25">pis</a>)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(air_id, air, trace, pvs)| {
             (
-                air_id,
-                AirProofInput {
-                    air,
-                    cached_mains_pdata: <span class="macro">vec!</span>[],
-                    raw: AirProofRawInput {
-                        cached_mains: <span class="macro">vec!</span>[],
-                        common_main: <span class="prelude-val">Some</span>(trace),
-                        public_values: pvs,
+                <a href="#39">air_id</a>,
+                <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofInput.html">AirProofInput</a> {
+                    <a href="#39">air</a>,
+                    cached_mains_pdata: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+                    raw: <a href="../../../../openvm_stark_backend/prover/types/struct.AirProofRawInput.html">AirProofRawInput</a> {
+                        cached_mains: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[],
+                        common_main: <span class="prelude-val">Some</span>(<a href="#39">trace</a>),
+                        public_values: <a href="#39">pvs</a>,
                     },
                 },
             )
         })
-        .collect();
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
-    <span class="kw">let </span>prover = MultiTraceStarkProver::new(<span class="kw-2">&amp;</span>config);
-    <span class="kw">let </span><span class="kw-2">mut </span>challenger = config::baby_bear_poseidon2::Challenger::new(perm.clone());
-    <span class="kw">let </span>proof = prover.prove(<span class="kw-2">&amp;mut </span>challenger, <span class="kw-2">&amp;</span>pk, ProofInput { per_air });
+    <span class="kw">let </span>prover = <a href="../../../../openvm_stark_backend/prover/struct.MultiTraceStarkProver.html#method.new">MultiTraceStarkProver::new</a>(<span class="kw-2">&amp;</span><a href="#28">config</a>);
+    <span class="kw">let </span><span class="kw-2">mut </span>challenger = config::baby_bear_poseidon2::Challenger::new(<a href="#27">perm</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>proof = <a href="#55">prover</a>.<a href="../../../../openvm_stark_backend/prover/struct.MultiTraceStarkProver.html#method.prove">prove</a>(<span class="kw-2">&amp;mut </span><a href="#56">challenger</a>, <span class="kw-2">&amp;</span><a href="#35">pk</a>, <a href="../../../../openvm_stark_backend/prover/types/struct.ProofInput.html">ProofInput</a> { <a href="#38">per_air</a> });
 
     <span class="comment">// Verify the proof:
     // Start from clean challenger
-    </span><span class="kw">let </span><span class="kw-2">mut </span>challenger = config::baby_bear_poseidon2::Challenger::new(perm.clone());
-    <span class="kw">let </span>verifier = MultiTraceStarkVerifier::new(prover.config);
-    verifier.verify(<span class="kw-2">&amp;mut </span>challenger, <span class="kw-2">&amp;</span>vk, <span class="kw-2">&amp;</span>proof)
+    </span><span class="kw">let </span><span class="kw-2">mut </span>challenger = config::baby_bear_poseidon2::Challenger::new(<a href="#27">perm</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>verifier = <a href="../../../../openvm_stark_backend/verifier/struct.MultiTraceStarkVerifier.html#method.new">MultiTraceStarkVerifier::new</a>(<a href="#55">prover</a>.config);
+    <a href="#62">verifier</a>.<a href="../../../../openvm_stark_backend/verifier/struct.MultiTraceStarkVerifier.html#method.verify">verify</a>(<span class="kw-2">&amp;mut </span><a href="#61">challenger</a>, <span class="kw-2">&amp;</span><a href="#36">vk</a>, <span class="kw-2">&amp;</span><a href="#57">proof</a>)
 }
 </code></pre></div></section></main></body></html>

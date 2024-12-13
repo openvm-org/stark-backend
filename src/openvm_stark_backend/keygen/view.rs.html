@@ -93,92 +93,92 @@
 <a href="#92" id="92">92</a></pre></div><pre class="rust"><code><span class="kw">use </span>itertools::Itertools;
 
 <span class="kw">use crate</span>::{
-    config::{Com, StarkGenericConfig},
+    config::{<a href="../config.rs.html#43-46">Com</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>},
     keygen::types::{
-        MultiStarkProvingKey, MultiStarkVerifyingKey, StarkProvingKey, StarkVerifyingKey,
+        <a href="types.rs.html#111-115">MultiStarkProvingKey</a>, <a href="types.rs.html#80-82">MultiStarkVerifyingKey</a>, <a href="types.rs.html#91-99">StarkProvingKey</a>, <a href="types.rs.html#56-68">StarkVerifyingKey</a>,
     },
 };
 
-<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>MultiStarkVerifyingKeyView&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
+<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>MultiStarkVerifyingKeyView&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>per_air: Vec&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span>StarkVerifyingKey&lt;SC&gt;&gt;,
 }
 
-<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>MultiStarkProvingKeyView&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
-    <span class="kw">pub </span>air_ids: Vec&lt;usize&gt;,
+<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>MultiStarkProvingKeyView&lt;<span class="lifetime">'a</span>, SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
+    <span class="kw">pub </span>air_ids: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
     <span class="kw">pub </span>per_air: Vec&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span>StarkProvingKey&lt;SC&gt;&gt;,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; MultiStarkVerifyingKey&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkVerifyingKey&lt;SC&gt; {
     <span class="doccomment">/// Returns a view with all airs.
     </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>full_view(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; MultiStarkVerifyingKeyView&lt;SC&gt; {
-        <span class="self">self</span>.view(<span class="kw-2">&amp;</span>(<span class="number">0</span>..<span class="self">self</span>.per_air.len()).collect_vec())
+        <a class="self" href="#21">self</a>.<a href="#24-28">view</a>(<span class="kw-2">&amp;</span>(<span class="number">0</span>..<a class="self" href="#21">self</a>.per_air.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()).collect_vec())
     }
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>view(<span class="kw-2">&amp;</span><span class="self">self</span>, air_ids: <span class="kw-2">&amp;</span>[usize]) -&gt; MultiStarkVerifyingKeyView&lt;SC&gt; {
-        MultiStarkVerifyingKeyView {
-            per_air: air_ids.iter().map(|<span class="kw-2">&amp;</span>id| <span class="kw-2">&amp;</span><span class="self">self</span>.per_air[id]).collect(),
+    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>view(<span class="kw-2">&amp;</span><span class="self">self</span>, air_ids: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>]) -&gt; MultiStarkVerifyingKeyView&lt;SC&gt; {
+        <a href="#10-12">MultiStarkVerifyingKeyView</a> {
+            per_air: <a href="#24">air_ids</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw-2">&amp;</span>id| <span class="kw-2">&amp;</span><a class="self" href="#24">self</a>.per_air[<a href="#26">id</a>]).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
         }
     }
 }
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; MultiStarkProvingKey&lt;SC&gt; {
-    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>view(<span class="kw-2">&amp;</span><span class="self">self</span>, air_ids: Vec&lt;usize&gt;) -&gt; MultiStarkProvingKeyView&lt;SC&gt; {
-        <span class="kw">let </span>per_air = air_ids.iter().map(|<span class="kw-2">&amp;</span>id| <span class="kw-2">&amp;</span><span class="self">self</span>.per_air[id]).collect();
-        MultiStarkProvingKeyView { air_ids, per_air }
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkProvingKey&lt;SC&gt; {
+    <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>view(<span class="kw-2">&amp;</span><span class="self">self</span>, air_ids: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;) -&gt; MultiStarkProvingKeyView&lt;SC&gt; {
+        <span class="kw">let </span>per_air = <a href="#31">air_ids</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw-2">&amp;</span>id| <span class="kw-2">&amp;</span><a class="self" href="#31">self</a>.per_air[<a href="#32">id</a>]).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+        <a href="#14-17">MultiStarkProvingKeyView</a> { <a href="#31">air_ids</a>, <a href="#32">per_air</a> }
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; MultiStarkVerifyingKeyView&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkVerifyingKeyView&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="doccomment">/// Returns the preprocessed commit of each AIR. If the AIR does not have a preprocessed trace, returns None.
     </span><span class="kw">pub fn </span>preprocessed_commits(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<span class="prelude-ty">Option</span>&lt;Com&lt;SC&gt;&gt;&gt; {
-        <span class="self">self</span>.per_air
-            .iter()
-            .map(|vk| {
-                vk.preprocessed_data
-                    .as_ref()
-                    .map(|data| data.commit.clone())
+        <a class="self" href="#39">self</a>.per_air
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|vk| {
+                <a href="#42">vk</a>.preprocessed_data
+                    .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.as_ref">as_ref</a>()
+                    .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.map">map</a>(|data| <a href="#45">data</a>.commit.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>())
             })
-            .collect()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 
     <span class="doccomment">/// Returns all non-empty preprocessed commits.
     </span><span class="kw">pub fn </span>flattened_preprocessed_commits(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;Com&lt;SC&gt;&gt; {
-        <span class="self">self</span>.preprocessed_commits().into_iter().flatten().collect()
+        <a class="self" href="#51">self</a>.<a href="#39-48">preprocessed_commits</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flatten">flatten</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 
-    <span class="kw">pub fn </span>num_phases(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.per_air
-            .iter()
-            .map(|vk| {
+    <span class="kw">pub fn </span>num_phases(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#55">self</a>.per_air
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|vk| {
                 <span class="comment">// Consistency check
-                </span><span class="kw">let </span>num = vk.params.width.after_challenge.len();
-                <span class="macro">assert_eq!</span>(num, vk.params.num_challenges_to_sample.len());
-                <span class="macro">assert_eq!</span>(num, vk.params.num_exposed_values_after_challenge.len());
-                num
+                </span><span class="kw">let </span>num = <a href="#58">vk</a>.params.width.after_challenge.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+                <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(num, vk.params.num_challenges_to_sample.len());
+                <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(num, vk.params.num_exposed_values_after_challenge.len());
+                <a href="#60">num</a>
             })
-            .max()
-            .unwrap_or(<span class="number">0</span>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>)
     }
 
-    <span class="kw">pub fn </span>num_challenges_per_phase(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;usize&gt; {
-        <span class="kw">let </span>num_phases = <span class="self">self</span>.num_phases();
-        (<span class="number">0</span>..num_phases)
-            .map(|phase_idx| <span class="self">self</span>.num_challenges_in_phase(phase_idx))
-            .collect()
+    <span class="kw">pub fn </span>num_challenges_per_phase(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <span class="kw">let </span>num_phases = <a class="self" href="#69">self</a>.<a href="#55-67">num_phases</a>();
+        (<span class="number">0</span>..<a href="#70">num_phases</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|phase_idx| <a class="self" href="#69">self</a>.<a href="#76-83">num_challenges_in_phase</a>(<a href="#72">phase_idx</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>()
     }
 
-    <span class="kw">pub fn </span>num_challenges_in_phase(<span class="kw-2">&amp;</span><span class="self">self</span>, phase_idx: usize) -&gt; usize {
-        <span class="self">self</span>.per_air
-            .iter()
-            .flat_map(|vk| vk.params.num_challenges_to_sample.get(phase_idx))
-            .copied()
-            .max()
-            .unwrap_or_else(|| <span class="macro">panic!</span>(<span class="string">"No challenges used in challenge phase {phase_idx}"</span>))
+    <span class="kw">pub fn </span>num_challenges_in_phase(<span class="kw-2">&amp;</span><span class="self">self</span>, phase_idx: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#76">self</a>.per_air
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|vk| <a href="#79">vk</a>.params.num_challenges_to_sample.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.get">get</a>(<a href="#76">phase_idx</a>))
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.copied">copied</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or_else">unwrap_or_else</a>(|| <a class="macro" href="https://doc.rust-lang.org/nightly/std/macro.panic.html">panic!</a>(<span class="string">"No challenges used in challenge phase {phase_idx}"</span>))
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; MultiStarkProvingKeyView&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkProvingKeyView&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="kw">pub fn </span>vk_view(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; MultiStarkVerifyingKeyView&lt;SC&gt; {
-        MultiStarkVerifyingKeyView {
-            per_air: <span class="self">self</span>.per_air.iter().map(|pk| <span class="kw-2">&amp;</span>pk.vk).collect(),
+        <a href="#10-12">MultiStarkVerifyingKeyView</a> {
+            per_air: <a class="self" href="#87">self</a>.per_air.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|pk| <span class="kw-2">&amp;</span><a href="#89">pk</a>.vk).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
         }
     }
 }

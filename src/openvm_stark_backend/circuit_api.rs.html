@@ -21,27 +21,27 @@
 <a href="#20" id="20">20</a>
 <a href="#21" id="21">21</a>
 <a href="#22" id="22">22</a>
-<a href="#23" id="23">23</a></pre></div><pre class="rust"><code><span class="kw">use </span>async_trait::async_trait;
+<a href="#23" id="23">23</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://docs.rs/async-trait/0.1.83/async_trait/attr.async_trait.html">async_trait::async_trait</a>;
 
 <span class="kw">use crate</span>::{
-    config::StarkGenericConfig,
-    prover::types::{Proof, ProofInput},
-    verifier::VerificationError,
+    <a href="config.rs.html#12-36">config::StarkGenericConfig</a>,
+    prover::types::{<a href="prover/types.rs.html#44-53">Proof</a>, <a href="prover/types.rs.html#69-72">ProofInput</a>},
+    <a href="verifier/error.rs.html#4-16">verifier::VerificationError</a>,
 };
 
 <span class="doccomment">/// Async prover for a specific circuit using a specific Stark config.
 </span><span class="attr">#[async_trait]
-</span><span class="kw">pub trait </span>AsyncCircuitProver&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/circuit_api/trait.AsyncCircuitProver.html">AsyncCircuitProver</a>&lt;SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">async fn </span>prove(<span class="kw-2">&amp;</span><span class="self">self</span>, proof_input: ProofInput&lt;SC&gt;) -&gt; Proof&lt;SC&gt;;
 }
 
 <span class="doccomment">/// Prover for a specific circuit using a specific Stark config.
-</span><span class="kw">pub trait </span>CircuitProver&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/circuit_api/trait.CircuitProver.html">CircuitProver</a>&lt;SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">fn </span>prove(<span class="kw-2">&amp;</span><span class="self">self</span>, proof_input: ProofInput&lt;SC&gt;) -&gt; Proof&lt;SC&gt;;
 }
 
 <span class="doccomment">/// Verifier for a specific circuit using a specific Stark config.
-</span><span class="kw">pub trait </span>CircuitVerifier&lt;SC: StarkGenericConfig&gt; {
-    <span class="kw">fn </span>verify(<span class="kw-2">&amp;</span><span class="self">self</span>, proof: <span class="kw-2">&amp;</span>Proof&lt;SC&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;(), VerificationError&gt;;
+</span><span class="kw">pub trait </span><a href="../../openvm_stark_backend/circuit_api/trait.CircuitVerifier.html">CircuitVerifier</a>&lt;SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt; {
+    <span class="kw">fn </span>verify(<span class="kw-2">&amp;</span><span class="self">self</span>, proof: <span class="kw-2">&amp;</span>Proof&lt;SC&gt;) -&gt; <span class="prelude-ty">Result</span>&lt;(), <a href="verifier/error.rs.html#4-16">VerificationError</a>&gt;;
 }
 </code></pre></div></section></main></body></html>

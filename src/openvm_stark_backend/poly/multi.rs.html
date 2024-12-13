@@ -263,20 +263,21 @@
 <a href="#262" id="262">262</a>
 <a href="#263" id="263">263</a>
 <a href="#264" id="264">264</a>
-<a href="#265" id="265">265</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
+<a href="#265" id="265">265</a>
+<a href="#266" id="266">266</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
 </span><span class="kw">use </span>std::{
-    iter::zip,
-    ops::{Deref, DerefMut},
+    <a href="https://doc.rust-lang.org/nightly/core/iter/adapters/zip/fn.zip.html">iter::zip</a>,
+    ops::{<a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.Deref.html">Deref</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.DerefMut.html">DerefMut</a>},
 };
 
 <span class="kw">use </span>p3_field::{ExtensionField, Field};
 
-<span class="kw">use </span><span class="kw">super</span>::uni::UnivariatePolynomial;
+<span class="kw">use </span><a href="uni.rs.html#10-12"><span class="kw">super</span>::uni::UnivariatePolynomial</a>;
 
 <span class="doccomment">/// Represents a multivariate polynomial `g(x_1, ..., x_n)`.
-</span><span class="kw">pub trait </span>MultivariatePolyOracle&lt;F&gt; {
+</span><span class="kw">pub trait </span><a href="../../../openvm_stark_backend/poly/multi/trait.MultivariatePolyOracle.html">MultivariatePolyOracle</a>&lt;F&gt; {
     <span class="doccomment">/// For an n-variate polynomial, returns n.
-    </span><span class="kw">fn </span>arity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize;
+    </span><span class="kw">fn </span>arity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>;
 
     <span class="doccomment">/// Returns the sum of `g(x_1, x_2, ..., x_n)` over all `(x_2, ..., x_n)` in `{0, 1}^(n-1)` as a polynomial in `x_1`.
     </span><span class="kw">fn </span>marginalize_first(<span class="kw-2">&amp;</span><span class="self">self</span>, claim: F) -&gt; UnivariatePolynomial&lt;F&gt;;
@@ -289,7 +290,7 @@
 ///
 /// The evaluations are stored in lexicographic order.
 </span><span class="attr">#[derive(Debug, Clone)]
-</span><span class="kw">pub struct </span>Mle&lt;F&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/poly/multi/struct.Mle.html">Mle</a>&lt;F&gt; {
     evals: Vec&lt;F&gt;,
 }
 
@@ -300,75 +301,55 @@
     ///
     /// Panics if the number of evaluations is not a power of two.
     </span><span class="kw">pub fn </span>new(evals: Vec&lt;F&gt;) -&gt; <span class="self">Self </span>{
-        <span class="macro">assert!</span>(evals.len().is_power_of_two());
-        <span class="self">Self </span>{ evals }
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(evals.len().is_power_of_two());
+        <span class="self">Self </span>{ <a href="#37">evals</a> }
     }
 
     <span class="kw">pub fn </span>into_evals(<span class="self">self</span>) -&gt; Vec&lt;F&gt; {
-        <span class="self">self</span>.evals
-    }
-
-
-    <span class="doccomment">/// Evaluates the multilinear polynomial at `point`.
-    </span><span class="kw">pub fn </span>eval(<span class="kw-2">&amp;</span><span class="self">self</span>, point: <span class="kw-2">&amp;</span>[F]) -&gt; F {
-        <span class="kw">pub fn </span>eval_rec&lt;F: Field&gt;(mle_evals: <span class="kw-2">&amp;</span>[F], p: <span class="kw-2">&amp;</span>[F]) -&gt; F {
-            <span class="kw">match </span>p {
-                [] =&gt; mle_evals[<span class="number">0</span>],
-                <span class="kw-2">&amp;</span>[p_i, <span class="kw-2">ref </span>p @ ..] =&gt; {
-                    <span class="kw">let </span>(lhs, rhs) = mle_evals.split_at(mle_evals.len() / <span class="number">2</span>);
-                    <span class="kw">let </span>lhs_eval = eval_rec(lhs, p);
-                    <span class="kw">let </span>rhs_eval = eval_rec(rhs, p);
-                    <span class="comment">// Equivalent to `eq(0, p_i) * lhs_eval + eq(1, p_i) * rhs_eval`.
-                    </span>p_i * (rhs_eval - lhs_eval) + lhs_eval
-                }
-            }
-        }
-
-        <span class="kw">let </span>mle_evals = <span class="self">self</span>.clone().into_evals();
-        eval_rec(<span class="kw-2">&amp;</span>mle_evals, point)
+        <a class="self" href="#42">self</a>.evals
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; MultivariatePolyOracle&lt;F&gt; <span class="kw">for </span>Mle&lt;F&gt; {
-    <span class="kw">fn </span>arity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.evals.len().ilog2() <span class="kw">as </span>usize
+    <span class="kw">fn </span>arity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#48">self</a>.evals.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>().<a href="https://doc.rust-lang.org/nightly/core/foreigntype.num.html#method.ilog2">ilog2</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>
     }
 
     <span class="kw">fn </span>marginalize_first(<span class="kw-2">&amp;</span><span class="self">self</span>, claim: F) -&gt; UnivariatePolynomial&lt;F&gt; {
         <span class="kw">let </span>x0 = F::ZERO;
         <span class="kw">let </span>x1 = F::ONE;
 
-        <span class="kw">let </span>y0 = <span class="self">self</span>[<span class="number">0</span>..<span class="self">self</span>.len() / <span class="number">2</span>]
-            .iter()
-            .fold(F::ZERO, |acc, x| acc + <span class="kw-2">*</span>x);
-        <span class="kw">let </span>y1 = claim - y0;
+        <span class="kw">let </span>y0 = <a class="self" href="#52">self</a>[<span class="number">0</span>..<a class="self" href="#52">self</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.len">len</a>() / <span class="number">2</span>]
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.fold">fold</a>(F::ZERO, |acc, x| <a href="#58">acc</a> + <span class="kw-2">*</span><a href="#58">x</a>);
+        <span class="kw">let </span>y1 = <a href="#52">claim</a> - <a href="#56">y0</a>;
 
-        UnivariatePolynomial::from_interpolation(<span class="kw-2">&amp;</span>[(x0, y0), (x1, y1)])
+        <a href="uni.rs.html#51-71">UnivariatePolynomial::from_interpolation</a>(<span class="kw-2">&amp;</span>[(<a href="#53">x0</a>, <a href="#56">y0</a>), (<a href="#54">x1</a>, <a href="#59">y1</a>)])
     }
 
     <span class="kw">fn </span>partial_evaluation(<span class="self">self</span>, alpha: F) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>midpoint = <span class="self">self</span>.len() / <span class="number">2</span>;
-        <span class="kw">let </span>(lhs_evals, rhs_evals) = <span class="self">self</span>.split_at(midpoint);
+        <span class="kw">let </span>midpoint = <a class="self" href="#64">self</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.len">len</a>() / <span class="number">2</span>;
+        <span class="kw">let </span>(lhs_evals, rhs_evals) = <a class="self" href="#64">self</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.split_at">split_at</a>(<a href="#65">midpoint</a>);
 
-        <span class="kw">let </span>res = zip(lhs_evals, rhs_evals)
-            .map(|(<span class="kw-2">&amp;</span>lhs_eval, <span class="kw-2">&amp;</span>rhs_eval)| alpha * (rhs_eval - lhs_eval) + lhs_eval)
-            .collect();
+        <span class="kw">let </span>res = <a href="https://doc.rust-lang.org/nightly/core/iter/adapters/zip/fn.zip.html">zip</a>(<a href="#66">lhs_evals</a>, <a href="#66">rhs_evals</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(<span class="kw-2">&amp;</span>lhs_eval, <span class="kw-2">&amp;</span>rhs_eval)| <a href="#64">alpha</a> * (<a href="#69">rhs_eval</a> - <a href="#69">lhs_eval</a>) + <a href="#69">lhs_eval</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
-        Mle::new(res)
+        <a href="#37-40">Mle::new</a>(<a href="#68">res</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F&gt; Deref <span class="kw">for </span>Mle&lt;F&gt; {
+<span class="kw">impl</span>&lt;F&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.Deref.html">Deref</a> <span class="kw">for </span>Mle&lt;F&gt; {
     <span class="kw">type </span>Target = [F];
 
     <span class="kw">fn </span>deref(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::Target {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.evals
+        <span class="kw-2">&amp;</span><a class="self" href="#79">self</a>.evals
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; DerefMut <span class="kw">for </span>Mle&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.DerefMut.html">DerefMut</a> <span class="kw">for </span>Mle&lt;F&gt; {
     <span class="kw">fn </span>deref_mut(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;mut </span><span class="self">Self</span>::Target {
-        <span class="kw-2">&amp;mut </span><span class="self">self</span>.evals
+        <span class="kw-2">&amp;mut </span><a class="self" href="#85">self</a>.evals
     }
 }
 
@@ -382,20 +363,20 @@
 ///
 /// # Panics
 /// - Panics if `x` and `y` have different lengths.
-</span><span class="kw">pub fn </span>hypercube_eq&lt;F: Field&gt;(x: <span class="kw-2">&amp;</span>[F], y: <span class="kw-2">&amp;</span>[F]) -&gt; F {
-    <span class="macro">assert_eq!</span>(x.len(), y.len());
-    zip(x, y)
-        .map(|(<span class="kw-2">&amp;</span>xi, <span class="kw-2">&amp;</span>yi)| xi * yi + (xi - F::ONE) * (yi - F::ONE))
-        .product()
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/poly/multi/fn.hypercube_eq.html">hypercube_eq</a>&lt;F: Field&gt;(x: <span class="kw-2">&amp;</span>[F], y: <span class="kw-2">&amp;</span>[F]) -&gt; F {
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(x.len(), y.len());
+    <a href="https://doc.rust-lang.org/nightly/core/iter/adapters/zip/fn.zip.html">zip</a>(<a href="#100">x</a>, <a href="#100">y</a>)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|(<span class="kw-2">&amp;</span>xi, <span class="kw-2">&amp;</span>yi)| <a href="#103">xi</a> * <a href="#103">yi</a> + (<a href="#103">xi</a> - F::ONE) * (<a href="#103">yi</a> - F::ONE))
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.product">product</a>()
 }
 
 <span class="doccomment">/// Computes `hypercube_eq(0, assignment) * eval0 + hypercube_eq(1, assignment) * eval1`.
-</span><span class="kw">pub fn </span>fold_mle_evals&lt;F, EF&gt;(assignment: EF, eval0: F, eval1: F) -&gt; EF
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/poly/multi/fn.fold_mle_evals.html">fold_mle_evals</a>&lt;F, EF&gt;(assignment: EF, eval0: F, eval1: F) -&gt; EF
 <span class="kw">where
     </span>F: Field,
     EF: ExtensionField&lt;F&gt;,
 {
-    assignment * (eval1 - eval0) + eval0
+    <a href="#108">assignment</a> * (<a href="#108">eval1</a> - <a href="#108">eval0</a>) + <a href="#108">eval0</a>
 }
 
 <span class="attr">#[cfg(test)]
@@ -404,6 +385,27 @@
     <span class="kw">use </span>p3_field::{AbstractField, Field};
 
     <span class="kw">use super</span>::<span class="kw-2">*</span>;
+
+    <span class="kw">impl</span>&lt;F: Field&gt; Mle&lt;F&gt; {
+        <span class="doccomment">/// Evaluates the multilinear polynomial at `point`.
+        </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>eval(<span class="kw-2">&amp;</span><span class="self">self</span>, point: <span class="kw-2">&amp;</span>[F]) -&gt; F {
+            <span class="kw">pub fn </span>eval_rec&lt;F: Field&gt;(mle_evals: <span class="kw-2">&amp;</span>[F], p: <span class="kw-2">&amp;</span>[F]) -&gt; F {
+                <span class="kw">match </span>p {
+                    [] =&gt; mle_evals[<span class="number">0</span>],
+                    <span class="kw-2">&amp;</span>[p_i, <span class="kw-2">ref </span>p @ ..] =&gt; {
+                        <span class="kw">let </span>(lhs, rhs) = mle_evals.split_at(mle_evals.len() / <span class="number">2</span>);
+                        <span class="kw">let </span>lhs_eval = eval_rec(lhs, p);
+                        <span class="kw">let </span>rhs_eval = eval_rec(rhs, p);
+                        <span class="comment">// Equivalent to `eq(0, p_i) * lhs_eval + eq(1, p_i) * rhs_eval`.
+                        </span>p_i * (rhs_eval - lhs_eval) + lhs_eval
+                    }
+                }
+            }
+
+            <span class="kw">let </span>mle_evals = <span class="self">self</span>.clone().into_evals();
+            eval_rec(<span class="kw-2">&amp;</span>mle_evals, point)
+        }
+    }
 
     <span class="attr">#[test]
     </span><span class="kw">fn </span>test_mle_evaluation() {

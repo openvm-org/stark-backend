@@ -543,30 +543,26 @@
 <a href="#542" id="542">542</a>
 <a href="#543" id="543">543</a>
 <a href="#544" id="544">544</a>
-<a href="#545" id="545">545</a>
-<a href="#546" id="546">546</a>
-<a href="#547" id="547">547</a>
-<a href="#548" id="548">548</a>
-<a href="#549" id="549">549</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
+<a href="#545" id="545">545</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
 //! GKR batch prover for Grand Product and LogUp lookup arguments.
 </span><span class="kw">use </span>std::{
-    iter::{successors, zip},
-    ops::Deref,
+    iter::{<a href="https://doc.rust-lang.org/nightly/core/iter/sources/successors/fn.successors.html">successors</a>, <a href="https://doc.rust-lang.org/nightly/core/iter/adapters/zip/fn.zip.html">zip</a>},
+    <a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.Deref.html">ops::Deref</a>,
 };
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_challenger::FieldChallenger;
-<span class="kw">use </span>p3_field::{ExtensionField, Field};
+<span class="kw">use </span>p3_field::Field;
 <span class="kw">use </span>thiserror::Error;
 
 <span class="kw">use crate</span>::{
-    gkr::types::{GkrArtifact, GkrBatchProof, GkrMask, Layer},
+    gkr::types::{<a href="types.rs.html#25-32">GkrArtifact</a>, <a href="types.rs.html#15-22">GkrBatchProof</a>, <a href="types.rs.html#36-38">GkrMask</a>, <a href="types.rs.html#106-120">Layer</a>},
     poly::{
-        multi::{hypercube_eq, Mle, MultivariatePolyOracle},
-        uni::{random_linear_combination, UnivariatePolynomial},
+        multi::{<a href="../poly/multi.rs.html#100-105">hypercube_eq</a>, <a href="../poly/multi.rs.html#27-29">Mle</a>, <a href="../poly/multi.rs.html#12-21">MultivariatePolyOracle</a>},
+        uni::{<a href="../poly/uni.rs.html#187-189">random_linear_combination</a>, <a href="../poly/uni.rs.html#10-12">UnivariatePolynomial</a>},
     },
-    sumcheck,
-    sumcheck::SumcheckArtifacts,
+    <a href="../lib.rs.html#38">sumcheck</a>,
+    <a href="../sumcheck.rs.html#18-22">sumcheck::SumcheckArtifacts</a>,
 };
 
 <span class="doccomment">/// For a given `y`, stores evaluations of [hypercube_eq](x, y) on all 2^{n-1} boolean hypercube
@@ -582,23 +578,23 @@
 
 <span class="kw">impl</span>&lt;F: Field&gt; HypercubeEqEvals&lt;F&gt; {
     <span class="kw">pub fn </span>eval(y: <span class="kw-2">&amp;</span>[F]) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>y = y.to_vec();
+        <span class="kw">let </span>y = <a href="#35">y</a>.<a href="https://doc.rust-lang.org/nightly/alloc/foreigntype.slice.html#method.to_vec">to_vec</a>();
 
         <span class="kw">if </span>y.is_empty() {
-            <span class="kw">let </span>evals = <span class="macro">vec!</span>[F::ONE];
-            <span class="kw">return </span><span class="self">Self </span>{ evals, y };
+            <span class="kw">let </span>evals = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[F::ONE];
+            <span class="kw">return </span><span class="self">Self </span>{ <a href="#39">evals</a>, <a href="#36">y</a> };
         }
 
         <span class="comment">// Compute evaluations for when x_0 = 0.
-        </span><span class="kw">let </span>evals = <span class="self">Self</span>::gen(<span class="kw-2">&amp;</span>y[<span class="number">1</span>..], F::ONE - y[<span class="number">0</span>]);
-        <span class="macro">assert_eq!</span>(evals.len(), <span class="number">1 </span>&lt;&lt; (y.len() - <span class="number">1</span>));
-        <span class="self">Self </span>{ evals, y }
+        </span><span class="kw">let </span>evals = <a href="#50-65"><span class="self">Self</span>::gen</a>(<span class="kw-2">&amp;</span><a href="#36">y</a>[<span class="number">1</span>..], F::ONE - <a href="#36">y</a>[<span class="number">0</span>]);
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(evals.len(), <span class="number">1 </span>&lt;&lt; (y.len() - <span class="number">1</span>));
+        <span class="self">Self </span>{ <a href="#44">evals</a>, <a href="#36">y</a> }
     }
 
     <span class="doccomment">/// Returns evaluations of the function `x -&gt; eq(x, y) * v` for each `x` in `{0, 1}^n`.
     </span><span class="kw">fn </span>gen(y: <span class="kw-2">&amp;</span>[F], v: F) -&gt; Vec&lt;F&gt; {
-        <span class="kw">let </span><span class="kw-2">mut </span>evals = Vec::with_capacity(<span class="number">1 </span>&lt;&lt; y.len());
-        evals.push(v);
+        <span class="kw">let </span><span class="kw-2">mut </span>evals = <a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.with_capacity">Vec::with_capacity</a>(<span class="number">1 </span>&lt;&lt; <a href="#50">y</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.len">len</a>());
+        <a href="#51">evals</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.push">push</a>(<a href="#50">v</a>);
 
         <span class="kw">for </span><span class="kw-2">&amp;</span>y_i <span class="kw">in </span>y.iter().rev() {
             <span class="kw">for </span>j <span class="kw">in </span><span class="number">0</span>..evals.len() {
@@ -610,15 +606,15 @@
             }
         }
 
-        evals
+        <a href="#51">evals</a>
     }
 }
 
-<span class="kw">impl</span>&lt;F&gt; Deref <span class="kw">for </span>HypercubeEqEvals&lt;F&gt; {
+<span class="kw">impl</span>&lt;F&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.Deref.html">Deref</a> <span class="kw">for </span>HypercubeEqEvals&lt;F&gt; {
     <span class="kw">type </span>Target = [F];
 
     <span class="kw">fn </span>deref(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::Target {
-        <span class="self">self</span>.evals.deref()
+        <a class="self" href="#71">self</a>.evals.<a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.Deref.html#tymethod.deref">deref</a>()
     }
 }
 
@@ -640,7 +636,7 @@
 ///
 /// P(x) = eq(x, y) * (numer(x) + lambda * denom(x))
 /// ```
-</span><span class="kw">struct </span>GkrMultivariatePolyOracle&lt;<span class="lifetime">'a</span>, F: Clone&gt; {
+</span><span class="kw">struct </span>GkrMultivariatePolyOracle&lt;<span class="lifetime">'a</span>, F: <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>&gt; {
     <span class="kw">pub </span>eq_evals: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>HypercubeEqEvals&lt;F&gt;,
     <span class="kw">pub </span>input_layer: Layer&lt;F&gt;,
     <span class="kw">pub </span>eq_fixed_var_correction: F,
@@ -649,51 +645,51 @@
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; MultivariatePolyOracle&lt;F&gt; <span class="kw">for </span>GkrMultivariatePolyOracle&lt;<span class="lifetime">'_</span>, F&gt; {
-    <span class="kw">fn </span>arity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.input_layer.n_variables() - <span class="number">1
+    <span class="kw">fn </span>arity(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#103">self</a>.input_layer.<a href="types.rs.html#124-135">n_variables</a>() - <span class="number">1
     </span>}
 
     <span class="kw">fn </span>marginalize_first(<span class="kw-2">&amp;</span><span class="self">self</span>, claim: F) -&gt; UnivariatePolynomial&lt;F&gt; {
-        <span class="kw">let </span>n_variables = <span class="self">self</span>.arity();
-        <span class="macro">assert_ne!</span>(n_variables, <span class="number">0</span>);
-        <span class="kw">let </span>n_terms = <span class="number">1 </span>&lt;&lt; (n_variables - <span class="number">1</span>);
+        <span class="kw">let </span>n_variables = <a class="self" href="#107">self</a>.<a href="../poly/multi.rs.html#14">arity</a>();
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_ne.html">assert_ne!</a>(n_variables, <span class="number">0</span>);
+        <span class="kw">let </span>n_terms = <span class="number">1 </span>&lt;&lt; (<a href="#108">n_variables</a> - <span class="number">1</span>);
         <span class="comment">// Vector used to generate evaluations of `eq(x, y)` for `x` in the boolean hypercube.
-        </span><span class="kw">let </span>y = <span class="kw-2">&amp;</span><span class="self">self</span>.eq_evals.y;
-        <span class="kw">let </span>lambda = <span class="self">self</span>.lambda;
+        </span><span class="kw">let </span>y = <span class="kw-2">&amp;</span><a class="self" href="#107">self</a>.eq_evals.y;
+        <span class="kw">let </span>lambda = <a class="self" href="#107">self</a>.lambda;
 
-        <span class="kw">let </span>(<span class="kw-2">mut </span>eval_at_0, <span class="kw-2">mut </span>eval_at_2) = <span class="kw">match </span><span class="kw-2">&amp;</span><span class="self">self</span>.input_layer {
-            Layer::GrandProduct(col) =&gt; eval_grand_product_sum(<span class="self">self</span>.eq_evals, col, n_terms),
-            Layer::LogUpGeneric {
+        <span class="kw">let </span>(<span class="kw-2">mut </span>eval_at_0, <span class="kw-2">mut </span>eval_at_2) = <span class="kw">match </span><span class="kw-2">&amp;</span><a class="self" href="#107">self</a>.input_layer {
+            <a href="types.rs.html#107">Layer::GrandProduct</a>(col) =&gt; <a href="#155-186">eval_grand_product_sum</a>(<a class="self" href="#107">self</a>.eq_evals, <a href="#116">col</a>, <a href="#110">n_terms</a>),
+            <a href="types.rs.html#108-111">Layer::LogUpGeneric</a> {
                 numerators,
                 denominators,
             }
-            | Layer::LogUpMultiplicities {
+            | <a href="types.rs.html#112-115">Layer::LogUpMultiplicities</a> {
                 numerators,
                 denominators,
-            } =&gt; eval_logup_sum(<span class="self">self</span>.eq_evals, numerators, denominators, n_terms, lambda),
-            Layer::LogUpSingles { denominators } =&gt; {
-                eval_logup_singles_sum(<span class="self">self</span>.eq_evals, denominators, n_terms, lambda)
+            } =&gt; <a href="#193-235">eval_logup_sum</a>(<a class="self" href="#107">self</a>.eq_evals, <a href="#118">numerators</a>, <a href="#119">denominators</a>, <a href="#110">n_terms</a>, <a href="#113">lambda</a>),
+            <a href="types.rs.html#117-119">Layer::LogUpSingles</a> { denominators } =&gt; {
+                <a href="#241-276">eval_logup_singles_sum</a>(<a class="self" href="#107">self</a>.eq_evals, <a href="#125">denominators</a>, <a href="#110">n_terms</a>, <a href="#113">lambda</a>)
             }
         };
 
-        eval_at_0 <span class="kw-2">*</span>= <span class="self">self</span>.eq_fixed_var_correction;
-        eval_at_2 <span class="kw-2">*</span>= <span class="self">self</span>.eq_fixed_var_correction;
-        correct_sum_as_poly_in_first_variable(eval_at_0, eval_at_2, claim, y, n_variables)
+        <a href="#115">eval_at_0</a> <span class="kw-2">*</span>= <a class="self" href="#107">self</a>.eq_fixed_var_correction;
+        <a href="#115">eval_at_2</a> <span class="kw-2">*</span>= <a class="self" href="#107">self</a>.eq_fixed_var_correction;
+        <a href="#475-510">correct_sum_as_poly_in_first_variable</a>(<a href="#115">eval_at_0</a>, <a href="#115">eval_at_2</a>, <a href="#107">claim</a>, <a href="#112">y</a>, <a href="#108">n_variables</a>)
     }
 
     <span class="kw">fn </span>partial_evaluation(<span class="self">self</span>, alpha: F) -&gt; <span class="self">Self </span>{
         <span class="kw">if </span><span class="self">self</span>.is_constant() {
-            <span class="kw">return </span><span class="self">self</span>;
+            <span class="kw">return </span><a class="self" href="#135">self</a>;
         }
 
-        <span class="kw">let </span>z0 = <span class="self">self</span>.eq_evals.y[<span class="self">self</span>.eq_evals.y.len() - <span class="self">self</span>.arity()];
-        <span class="kw">let </span>eq_fixed_var_correction = <span class="self">self</span>.eq_fixed_var_correction * hypercube_eq(<span class="kw-2">&amp;</span>[alpha], <span class="kw-2">&amp;</span>[z0]);
+        <span class="kw">let </span>z0 = <a class="self" href="#135">self</a>.eq_evals.y[<a class="self" href="#135">self</a>.eq_evals.y.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>() - <a class="self" href="#135">self</a>.<a href="../poly/multi.rs.html#14">arity</a>()];
+        <span class="kw">let </span>eq_fixed_var_correction = <a class="self" href="#135">self</a>.eq_fixed_var_correction * <a href="../poly/multi.rs.html#100-105">hypercube_eq</a>(<span class="kw-2">&amp;</span>[<a href="#135">alpha</a>], <span class="kw-2">&amp;</span>[<a href="#140">z0</a>]);
 
         <span class="self">Self </span>{
-            eq_evals: <span class="self">self</span>.eq_evals,
-            eq_fixed_var_correction,
-            input_layer: <span class="self">self</span>.input_layer.fix_first_variable(alpha),
-            lambda: <span class="self">self</span>.lambda,
+            eq_evals: <a class="self" href="#135">self</a>.eq_evals,
+            <a href="#141">eq_fixed_var_correction</a>,
+            input_layer: <a class="self" href="#135">self</a>.input_layer.<a href="types.rs.html#225-247">fix_first_variable</a>(<a href="#135">alpha</a>),
+            lambda: <a class="self" href="#135">self</a>.lambda,
         }
     }
 }
@@ -704,7 +700,7 @@
 </span><span class="kw">fn </span>eval_grand_product_sum&lt;F: Field&gt;(
     eq_evals: <span class="kw-2">&amp;</span>HypercubeEqEvals&lt;F&gt;,
     input_layer: <span class="kw-2">&amp;</span>Mle&lt;F&gt;,
-    n_terms: usize,
+    n_terms: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 ) -&gt; (F, F) {
     <span class="kw">let </span><span class="kw-2">mut </span>eval_at_0 = F::ZERO;
     <span class="kw">let </span><span class="kw-2">mut </span>eval_at_2 = F::ZERO;
@@ -731,7 +727,7 @@
         eval_at_2 += eq_eval_at_0i * prod_at_r2i;
     }
 
-    (eval_at_0, eval_at_2)
+    (<a href="#160">eval_at_0</a>, <a href="#161">eval_at_2</a>)
 }
 
 <span class="doccomment">/// Evaluates `sum_x eq(({0}^|r|, 0, x), y) * (inp_numer(r, t, x, 0) * inp_denom(r, t, x, 1) +
@@ -743,7 +739,7 @@
     eq_evals: <span class="kw-2">&amp;</span>HypercubeEqEvals&lt;F&gt;,
     input_numerators: <span class="kw-2">&amp;</span>Mle&lt;F&gt;,
     input_denominators: <span class="kw-2">&amp;</span>Mle&lt;F&gt;,
-    n_terms: usize,
+    n_terms: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     lambda: F,
 ) -&gt; (F, F) {
     <span class="kw">let </span><span class="kw-2">mut </span>eval_at_0 = F::ZERO;
@@ -780,7 +776,7 @@
         eval_at_2 += eq_eval_at_0i * (numer_at_r2i + lambda * denom_at_r2i);
     }
 
-    (eval_at_0, eval_at_2)
+    (<a href="#200">eval_at_0</a>, <a href="#201">eval_at_2</a>)
 }
 
 <span class="doccomment">/// Evaluates `sum_x eq(({0}^|r|, 0, x), y) * (inp_denom(r, t, x, 1) + inp_denom(r, t, x, 0) +
@@ -790,7 +786,7 @@
 </span><span class="kw">fn </span>eval_logup_singles_sum&lt;F: Field&gt;(
     eq_evals: <span class="kw-2">&amp;</span>HypercubeEqEvals&lt;F&gt;,
     input_denominators: <span class="kw-2">&amp;</span>Mle&lt;F&gt;,
-    n_terms: usize,
+    n_terms: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     lambda: F,
 ) -&gt; (F, F) {
     <span class="kw">let </span><span class="kw-2">mut </span>eval_at_0 = F::ZERO;
@@ -821,12 +817,12 @@
         eval_at_2 += eq_eval_at_0i * (numer_at_r2i + lambda * denom_at_r2i);
     }
 
-    (eval_at_0, eval_at_2)
+    (<a href="#247">eval_at_0</a>, <a href="#248">eval_at_2</a>)
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; GkrMultivariatePolyOracle&lt;<span class="lifetime">'_</span>, F&gt; {
-    <span class="kw">fn </span>is_constant(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-        <span class="self">self</span>.arity() == <span class="number">0
+    <span class="kw">fn </span>is_constant(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        <a class="self" href="#279">self</a>.<a href="../poly/multi.rs.html#14">arity</a>() == <span class="number">0
     </span>}
 
     <span class="doccomment">/// Returns all input layer columns restricted to a line.
@@ -839,66 +835,66 @@
     /// Otherwise, an [`Err`] is returned.
     ///
     /// For more context see &lt;https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf&gt; page 64.
-    </span><span class="kw">fn </span>try_into_mask(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;GkrMask&lt;F&gt;, NotConstantPolyError&gt; {
+    </span><span class="kw">fn </span>try_into_mask(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;GkrMask&lt;F&gt;, <a href="#324">NotConstantPolyError</a>&gt; {
         <span class="kw">if </span>!<span class="self">self</span>.is_constant() {
-            <span class="kw">return </span><span class="prelude-val">Err</span>(NotConstantPolyError);
+            <span class="kw">return </span><span class="prelude-val">Err</span>(<a href="#324">NotConstantPolyError</a>);
         }
 
-        <span class="kw">let </span>columns = <span class="kw">match </span><span class="self">self</span>.input_layer {
-            Layer::GrandProduct(mle) =&gt; <span class="macro">vec!</span>[mle.as_ref().try_into().unwrap()],
-            Layer::LogUpGeneric {
+        <span class="kw">let </span>columns = <span class="kw">match </span><a class="self" href="#293">self</a>.input_layer {
+            <a href="types.rs.html#107">Layer::GrandProduct</a>(mle) =&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[mle.as_ref().try_into().unwrap()],
+            <a href="types.rs.html#108-111">Layer::LogUpGeneric</a> {
                 numerators,
                 denominators,
             } =&gt; {
-                <span class="kw">let </span>numerators = numerators.as_ref().try_into().unwrap();
-                <span class="kw">let </span>denominators = denominators.as_ref().try_into().unwrap();
-                <span class="macro">vec!</span>[numerators, denominators]
+                <span class="kw">let </span>numerators = <a href="#301">numerators</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryInto.html#tymethod.try_into">try_into</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+                <span class="kw">let </span>denominators = <a href="#302">denominators</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryInto.html#tymethod.try_into">try_into</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+                <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[numerators, denominators]
             }
             <span class="comment">// Should never get called.
-            </span>Layer::LogUpMultiplicities { .. } =&gt; <span class="macro">unimplemented!</span>(),
-            Layer::LogUpSingles { denominators } =&gt; {
+            </span><a href="types.rs.html#112-115">Layer::LogUpMultiplicities</a> { .. } =&gt; <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.unimplemented.html">unimplemented!</a>(),
+            <a href="types.rs.html#117-119">Layer::LogUpSingles</a> { denominators } =&gt; {
                 <span class="kw">let </span>numerators = [F::ONE; <span class="number">2</span>];
-                <span class="kw">let </span>denominators = denominators.as_ref().try_into().unwrap();
-                <span class="macro">vec!</span>[numerators, denominators]
+                <span class="kw">let </span>denominators = <a href="#310">denominators</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.AsRef.html#tymethod.as_ref">as_ref</a>().<a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryInto.html#tymethod.try_into">try_into</a>().<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+                <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[numerators, denominators]
             }
         };
 
-        <span class="prelude-val">Ok</span>(GkrMask::new(columns))
+        <span class="prelude-val">Ok</span>(<a href="types.rs.html#41-43">GkrMask::new</a>(<a href="#298">columns</a>))
     }
 }
 
 <span class="doccomment">/// Error returned when a polynomial is expected to be constant but it is not.
 </span><span class="attr">#[derive(Debug, Error)]
 #[error(<span class="string">"polynomial is not constant"</span>)]
-</span><span class="kw">pub struct </span>NotConstantPolyError;
+</span><span class="kw">pub struct </span><a href="#324">NotConstantPolyError</a>;
 
 <span class="doccomment">/// Batch proves lookup circuits with GKR.
 ///
 /// The input layers should be committed to the channel before calling this function.
 </span><span class="comment">// GKR algorithm: &lt;https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf&gt; (page 64)
-</span><span class="kw">pub fn </span>prove_batch&lt;F: Field, EF: ExtensionField&lt;F&gt;&gt;(
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/gkr/fn.prove_batch.html">prove_batch</a>&lt;F: Field&gt;(
     challenger: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>FieldChallenger&lt;F&gt;,
-    input_layer_by_instance: Vec&lt;Layer&lt;EF&gt;&gt;,
-) -&gt; (GkrBatchProof&lt;EF&gt;, GkrArtifact&lt;EF&gt;) {
-    <span class="kw">let </span>n_instances = input_layer_by_instance.len();
-    <span class="kw">let </span>n_layers_by_instance = input_layer_by_instance
-        .iter()
-        .map(|l| l.n_variables())
+    input_layer_by_instance: Vec&lt;Layer&lt;F&gt;&gt;,
+) -&gt; (GkrBatchProof&lt;F&gt;, GkrArtifact&lt;F&gt;) {
+    <span class="kw">let </span>n_instances = <a href="#332">input_layer_by_instance</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>();
+    <span class="kw">let </span>n_layers_by_instance = <a href="#332">input_layer_by_instance</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|l| <a href="#337">l</a>.<a href="types.rs.html#124-135">n_variables</a>())
         .collect_vec();
-    <span class="kw">let </span>n_layers = <span class="kw-2">*</span>n_layers_by_instance.iter().max().unwrap();
+    <span class="kw">let </span>n_layers = <span class="kw-2">*</span><a href="#335">n_layers_by_instance</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>();
 
     <span class="comment">// Evaluate all instance circuits and collect the layer values.
-    </span><span class="kw">let </span><span class="kw-2">mut </span>layers_by_instance = input_layer_by_instance
-        .into_iter()
-        .map(|input_layer| gen_layers(input_layer).into_iter().rev())
+    </span><span class="kw">let </span><span class="kw-2">mut </span>layers_by_instance = <a href="#332">input_layer_by_instance</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|input_layer| <a href="#461-466">gen_layers</a>(<a href="#344">input_layer</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.rev">rev</a>())
         .collect_vec();
 
-    <span class="kw">let </span><span class="kw-2">mut </span>output_claims_by_instance = <span class="macro">vec!</span>[<span class="prelude-val">None</span>; n_instances];
-    <span class="kw">let </span><span class="kw-2">mut </span>layer_masks_by_instance = (<span class="number">0</span>..n_instances).map(|<span class="kw">_</span>| Vec::new()).collect_vec();
-    <span class="kw">let </span><span class="kw-2">mut </span>sumcheck_proofs = Vec::new();
+    <span class="kw">let </span><span class="kw-2">mut </span>output_claims_by_instance = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[<span class="prelude-val">None</span>; <a href="#334">n_instances</a>];
+    <span class="kw">let </span><span class="kw-2">mut </span>layer_masks_by_instance = (<span class="number">0</span>..<a href="#334">n_instances</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|<span class="kw">_</span>| <a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.new">Vec::new</a>()).collect_vec();
+    <span class="kw">let </span><span class="kw-2">mut </span>sumcheck_proofs = <a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.new">Vec::new</a>();
 
-    <span class="kw">let </span><span class="kw-2">mut </span>ood_point = Vec::new();
-    <span class="kw">let </span><span class="kw-2">mut </span>claims_to_verify_by_instance = <span class="macro">vec!</span>[<span class="prelude-val">None</span>; n_instances];
+    <span class="kw">let </span><span class="kw-2">mut </span>ood_point = <a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.new">Vec::new</a>();
+    <span class="kw">let </span><span class="kw-2">mut </span>claims_to_verify_by_instance = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[<span class="prelude-val">None</span>; <a href="#334">n_instances</a>];
 
     <span class="kw">for </span>layer <span class="kw">in </span><span class="number">0</span>..n_layers {
         <span class="kw">let </span>n_remaining_layers = n_layers - layer;
@@ -915,14 +911,12 @@
 
         <span class="comment">// Seed the channel with layer claims.
         </span><span class="kw">for </span>claims_to_verify <span class="kw">in </span>claims_to_verify_by_instance.iter().flatten() {
-            <span class="kw">for </span>claim <span class="kw">in </span>claims_to_verify {
-                challenger.observe_ext_element(<span class="kw-2">*</span>claim);
-            }
+            challenger.observe_slice(claims_to_verify);
         }
 
         <span class="kw">let </span>eq_evals = HypercubeEqEvals::eval(<span class="kw-2">&amp;</span>ood_point);
-        <span class="kw">let </span>sumcheck_alpha: EF = challenger.sample_ext_element();
-        <span class="kw">let </span>instance_lambda: EF = challenger.sample_ext_element();
+        <span class="kw">let </span>sumcheck_alpha = challenger.sample();
+        <span class="kw">let </span>instance_lambda = challenger.sample();
 
         <span class="kw">let </span><span class="kw-2">mut </span>sumcheck_oracles = Vec::new();
         <span class="kw">let </span><span class="kw-2">mut </span>sumcheck_claims = Vec::new();
@@ -936,7 +930,7 @@
                 sumcheck_oracles.push(GkrMultivariatePolyOracle {
                     eq_evals: <span class="kw-2">&amp;</span>eq_evals,
                     input_layer: layer,
-                    eq_fixed_var_correction: EF::ONE,
+                    eq_fixed_var_correction: F::ONE,
                     lambda: instance_lambda,
                 });
                 sumcheck_claims.push(random_linear_combination(claims_to_verify, instance_lambda));
@@ -968,14 +962,12 @@
         <span class="comment">// Seed the channel with the layer masks.
         </span><span class="kw">for </span>(<span class="kw-2">&amp;</span>instance, mask) <span class="kw">in </span>zip(<span class="kw-2">&amp;</span>sumcheck_instances, <span class="kw-2">&amp;</span>masks) {
             <span class="kw">for </span>column <span class="kw">in </span>mask.columns() {
-                <span class="kw">for </span>el <span class="kw">in </span>column {
-                    challenger.observe_ext_element(<span class="kw-2">*</span>el);
-                }
+                challenger.observe_slice(column);
             }
             layer_masks_by_instance[instance].push(mask.clone());
         }
 
-        <span class="kw">let </span>challenge: EF = challenger.sample_ext_element();
+        <span class="kw">let </span>challenge = challenger.sample();
         ood_point = sumcheck_ood_point;
         ood_point.push(challenge);
 
@@ -985,37 +977,37 @@
         }
     }
 
-    <span class="kw">let </span>output_claims_by_instance = output_claims_by_instance
-        .into_iter()
-        .map(Option::unwrap)
-        .collect();
+    <span class="kw">let </span>output_claims_by_instance = <a href="#347">output_claims_by_instance</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(Option::unwrap)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
-    <span class="kw">let </span>claims_to_verify_by_instance = claims_to_verify_by_instance
-        .into_iter()
-        .map(Option::unwrap)
-        .collect();
+    <span class="kw">let </span>claims_to_verify_by_instance = <a href="#352">claims_to_verify_by_instance</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(Option::unwrap)
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
 
-    <span class="kw">let </span>proof = GkrBatchProof {
-        sumcheck_proofs,
-        layer_masks_by_instance,
-        output_claims_by_instance,
+    <span class="kw">let </span>proof = <a href="types.rs.html#15-22">GkrBatchProof</a> {
+        <a href="#349">sumcheck_proofs</a>,
+        <a href="#348">layer_masks_by_instance</a>,
+        <a href="#435">output_claims_by_instance</a>,
     };
 
-    <span class="kw">let </span>artifact = GkrArtifact {
-        ood_point,
-        claims_to_verify_by_instance,
-        n_variables_by_instance: n_layers_by_instance,
+    <span class="kw">let </span>artifact = <a href="types.rs.html#25-32">GkrArtifact</a> {
+        <a href="#351">ood_point</a>,
+        <a href="#440">claims_to_verify_by_instance</a>,
+        n_variables_by_instance: <a href="#335">n_layers_by_instance</a>,
     };
 
-    (proof, artifact)
+    (<a href="#445">proof</a>, <a href="#451">artifact</a>)
 }
 
 <span class="doccomment">/// Executes the GKR circuit on the input layer and returns all the circuit's layers.
 </span><span class="kw">fn </span>gen_layers&lt;F: Field&gt;(input_layer: Layer&lt;F&gt;) -&gt; Vec&lt;Layer&lt;F&gt;&gt; {
-    <span class="kw">let </span>n_variables = input_layer.n_variables();
-    <span class="kw">let </span>layers = successors(<span class="prelude-val">Some</span>(input_layer), |layer| layer.next_layer()).collect_vec();
-    <span class="macro">assert_eq!</span>(layers.len(), n_variables + <span class="number">1</span>);
-    layers
+    <span class="kw">let </span>n_variables = <a href="#461">input_layer</a>.<a href="types.rs.html#124-135">n_variables</a>();
+    <span class="kw">let </span>layers = <a href="https://doc.rust-lang.org/nightly/core/iter/sources/successors/fn.successors.html">successors</a>(<span class="prelude-val">Some</span>(<a href="#461">input_layer</a>), |layer| <a href="#463">layer</a>.<a href="types.rs.html#145-165">next_layer</a>()).collect_vec();
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(layers.len(), n_variables + <span class="number">1</span>);
+    <a href="#463">layers</a>
 }
 
 <span class="doccomment">/// Computes `r(t) = sum_x eq((t, x), y[-k:]) * p(t, x)` from evaluations of
@@ -1025,20 +1017,20 @@
 ///
 /// For more context see `Layer::into_multivariate_poly()` docs.
 /// See also &lt;https://ia.cr/2024/108&gt; (section 3.2).
-</span><span class="kw">pub fn </span>correct_sum_as_poly_in_first_variable&lt;F: Field&gt;(
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/gkr/fn.correct_sum_as_poly_in_first_variable.html">correct_sum_as_poly_in_first_variable</a>&lt;F: Field&gt;(
     f_at_0: F,
     f_at_2: F,
     claim: F,
     y: <span class="kw-2">&amp;</span>[F],
-    k: usize,
+    k: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 ) -&gt; UnivariatePolynomial&lt;F&gt; {
-    <span class="macro">assert_ne!</span>(k, <span class="number">0</span>);
-    <span class="kw">let </span>n = y.len();
-    <span class="macro">assert!</span>(k &lt;= n);
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_ne.html">assert_ne!</a>(k, <span class="number">0</span>);
+    <span class="kw">let </span>n = <a href="#479">y</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.len">len</a>();
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(k &lt;= n);
 
     <span class="comment">// We evaluated `f(0)` and `f(2)` - the inputs.
     // We want to compute `r(t) = f(t) * eq(t, y[n - k]) / eq(0, y[:n - k + 1])`.
-    </span><span class="kw">let </span>a_const = hypercube_eq(<span class="kw-2">&amp;</span><span class="macro">vec!</span>[F::ZERO; n - k + <span class="number">1</span>], <span class="kw-2">&amp;</span>y[..n - k + <span class="number">1</span>]).inverse();
+    </span><span class="kw">let </span>a_const = <a href="../poly/multi.rs.html#100-105">hypercube_eq</a>(<span class="kw-2">&amp;</span><a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[F::ZERO; <a href="#483">n</a> - <a href="#480">k</a> + <span class="number">1</span>], <span class="kw-2">&amp;</span><a href="#479">y</a>[..<a href="#483">n</a> - <a href="#480">k</a> + <span class="number">1</span>]).inverse();
 
     <span class="comment">// Find the additional root of `r(t)`, by finding the root of `eq(t, y[n - k])`:
     //    0 = eq(t, y[n - k])
@@ -1046,19 +1038,19 @@
     //      = 1 - y[n - k] - t(1 - 2 * y[n - k])
     // =&gt; t = (1 - y[n - k]) / (1 - 2 * y[n - k])
     //      = b
-    </span><span class="kw">let </span>b_const = (F::ONE - y[n - k]) / (F::ONE - y[n - k].double());
+    </span><span class="kw">let </span>b_const = (F::ONE - <a href="#479">y</a>[<a href="#483">n</a> - <a href="#480">k</a>]) / (F::ONE - <a href="#479">y</a>[<a href="#483">n</a> - <a href="#480">k</a>].double());
 
     <span class="comment">// We get that `r(t) = f(t) * eq(t, y[n - k]) * a`.
-    </span><span class="kw">let </span>r_at_0 = f_at_0 * hypercube_eq(<span class="kw-2">&amp;</span>[F::ZERO], <span class="kw-2">&amp;</span>[y[n - k]]) * a_const;
-    <span class="kw">let </span>r_at_1 = claim - r_at_0;
-    <span class="kw">let </span>r_at_2 = f_at_2 * hypercube_eq(<span class="kw-2">&amp;</span>[F::TWO], <span class="kw-2">&amp;</span>[y[n - k]]) * a_const;
+    </span><span class="kw">let </span>r_at_0 = <a href="#476">f_at_0</a> * <a href="../poly/multi.rs.html#100-105">hypercube_eq</a>(<span class="kw-2">&amp;</span>[F::ZERO], <span class="kw-2">&amp;</span>[<a href="#479">y</a>[<a href="#483">n</a> - <a href="#480">k</a>]]) * <a href="#488">a_const</a>;
+    <span class="kw">let </span>r_at_1 = <a href="#478">claim</a> - <a href="#499">r_at_0</a>;
+    <span class="kw">let </span>r_at_2 = <a href="#477">f_at_2</a> * <a href="../poly/multi.rs.html#100-105">hypercube_eq</a>(<span class="kw-2">&amp;</span>[F::TWO], <span class="kw-2">&amp;</span>[<a href="#479">y</a>[<a href="#483">n</a> - <a href="#480">k</a>]]) * <a href="#488">a_const</a>;
 
     <span class="comment">// Interpolate.
-    </span>UnivariatePolynomial::from_interpolation(<span class="kw-2">&amp;</span>[
-        (F::ZERO, r_at_0),
-        (F::ONE, r_at_1),
-        (F::TWO, r_at_2),
-        (b_const, F::ZERO),
+    </span><a href="../poly/uni.rs.html#51-71">UnivariatePolynomial::from_interpolation</a>(<span class="kw-2">&amp;</span>[
+        (F::ZERO, <a href="#499">r_at_0</a>),
+        (F::ONE, <a href="#500">r_at_1</a>),
+        (F::TWO, <a href="#501">r_at_2</a>),
+        (<a href="#496">b_const</a>, F::ZERO),
     ])
 }
 

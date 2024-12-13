@@ -327,13 +327,7 @@
 <a href="#326" id="326">326</a>
 <a href="#327" id="327">327</a>
 <a href="#328" id="328">328</a>
-<a href="#329" id="329">329</a>
-<a href="#330" id="330">330</a>
-<a href="#331" id="331">331</a>
-<a href="#332" id="332">332</a>
-<a href="#333" id="333">333</a>
-<a href="#334" id="334">334</a>
-<a href="#335" id="335">335</a></pre></div><pre class="rust"><code><span class="comment">// Copied from starkware-libs/stwo under Apache-2.0 license.
+<a href="#329" id="329">329</a></pre></div><pre class="rust"><code><span class="comment">// Copied from starkware-libs/stwo under Apache-2.0 license.
 //
 </span><span class="doccomment">//! Sum-check protocol that proves and verifies claims about `sum_x g(x)` for all x in `{0, 1}^n`.
 //!
@@ -341,17 +335,16 @@
 //! `g` in the context of the protocol. It is intended to be used in conjunction with
 //! [`prove_batch`] to generate proofs.
 
-</span><span class="kw">use </span>std::iter::zip;
+</span><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/iter/adapters/zip/fn.zip.html">std::iter::zip</a>;
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_challenger::FieldChallenger;
-<span class="kw">use </span>p3_field::{ExtensionField, Field};
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>p3_field::Field;
 <span class="kw">use </span>thiserror::Error;
 
-<span class="kw">use </span><span class="kw">crate</span>::poly::{multi::MultivariatePolyOracle, uni::UnivariatePolynomial};
+<span class="kw">use </span><span class="kw">crate</span>::poly::{<a href="poly/multi.rs.html#12-21">multi::MultivariatePolyOracle</a>, <a href="poly/uni.rs.html#10-12">uni::UnivariatePolynomial</a>};
 
-<span class="kw">pub struct </span>SumcheckArtifacts&lt;F, O&gt; {
+<span class="kw">pub struct </span><a href="../../openvm_stark_backend/sumcheck/struct.SumcheckArtifacts.html">SumcheckArtifacts</a>&lt;F, O&gt; {
     <span class="kw">pub </span>evaluation_point: Vec&lt;F&gt;,
     <span class="kw">pub </span>constant_poly_oracles: Vec&lt;O&gt;,
     <span class="kw">pub </span>claimed_evals: Vec&lt;F&gt;,
@@ -380,20 +373,17 @@
 /// - The degree of any multivariate polynomial exceeds [`MAX_DEGREE`] in any variable.
 /// - The round polynomials are inconsistent with their corresponding claimed sum on `0` and `1`.
 </span><span class="comment">// TODO: Consider returning constant oracles as separate type.
-</span><span class="kw">pub fn </span>prove_batch&lt;F, EF, O&gt;(
-    <span class="kw-2">mut </span>claims: Vec&lt;EF&gt;,
+</span><span class="kw">pub fn </span><a href="../../openvm_stark_backend/sumcheck/fn.prove_batch.html">prove_batch</a>&lt;F: Field, O: MultivariatePolyOracle&lt;F&gt;&gt;(
+    <span class="kw-2">mut </span>claims: Vec&lt;F&gt;,
     <span class="kw-2">mut </span>polys: Vec&lt;O&gt;,
-    lambda: EF,
+    lambda: F,
     challenger: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>FieldChallenger&lt;F&gt;,
-) -&gt; (SumcheckProof&lt;EF&gt;, SumcheckArtifacts&lt;EF, O&gt;)
-<span class="kw">where </span>F: Field,
-        EF: ExtensionField&lt;F&gt;,
-        O: MultivariatePolyOracle&lt;EF&gt; {
-    <span class="kw">let </span>n_variables = polys.iter().map(O::arity).max().unwrap();
-    <span class="macro">assert_eq!</span>(claims.len(), polys.len());
+) -&gt; (SumcheckProof&lt;F&gt;, SumcheckArtifacts&lt;F, O&gt;) {
+    <span class="kw">let </span>n_variables = <a href="#49">polys</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(O::arity).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.max">max</a>().<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap">unwrap</a>();
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert_eq.html">assert_eq!</a>(claims.len(), polys.len());
 
-    <span class="kw">let </span><span class="kw-2">mut </span>round_polys = <span class="macro">vec!</span>[];
-    <span class="kw">let </span><span class="kw-2">mut </span>evaluation_point = <span class="macro">vec!</span>[];
+    <span class="kw">let </span><span class="kw-2">mut </span>round_polys = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[];
+    <span class="kw">let </span><span class="kw-2">mut </span>evaluation_point = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[];
 
     <span class="comment">// Update the claims for the sum over `h`'s hypercube.
     </span><span class="kw">for </span>(claim, multivariate_poly) <span class="kw">in </span>zip(<span class="kw-2">&amp;mut </span>claims, <span class="kw-2">&amp;</span>polys) {
@@ -414,8 +404,8 @@
                     claim.halve().into()
                 };
 
-                <span class="kw">let </span>eval_at_0 = round_poly.evaluate(EF::ZERO);
-                <span class="kw">let </span>eval_at_1 = round_poly.evaluate(EF::ONE);
+                <span class="kw">let </span>eval_at_0 = round_poly.evaluate(F::ZERO);
+                <span class="kw">let </span>eval_at_1 = round_poly.evaluate(F::ONE);
 
                 <span class="macro">assert_eq!</span>(
                     eval_at_0 + eval_at_1,
@@ -435,9 +425,7 @@
 
         <span class="kw">let </span>round_poly = random_linear_combination(<span class="kw-2">&amp;</span>this_round_polys, lambda);
 
-        <span class="kw">for </span>coef <span class="kw">in </span>round_poly.as_ref() {
-            challenger.observe_ext_element(<span class="kw-2">*</span>coef);
-        }
+        challenger.observe_slice(<span class="kw-2">&amp;</span>round_poly);
 
         <span class="kw">let </span>challenge = challenger.sample_ext_element();
 
@@ -461,14 +449,14 @@
         evaluation_point.push(challenge);
     }
 
-    <span class="kw">let </span>proof = SumcheckProof { round_polys };
-    <span class="kw">let </span>artifacts = SumcheckArtifacts {
-        evaluation_point,
-        constant_poly_oracles: polys,
-        claimed_evals: claims,
+    <span class="kw">let </span>proof = <a href="#185-187">SumcheckProof</a> { <a href="#56">round_polys</a> };
+    <span class="kw">let </span>artifacts = <a href="#18-22">SumcheckArtifacts</a> {
+        <a href="#57">evaluation_point</a>,
+        constant_poly_oracles: <a href="#49">polys</a>,
+        claimed_evals: <a href="#48">claims</a>,
     };
 
-    (proof, artifacts)
+    (<a href="#123">proof</a>, <a href="#124">artifacts</a>)
 }
 
 <span class="doccomment">/// Returns `p_0 + alpha * p_1 + ... + alpha^(n-1) * p_{n-1}`.
@@ -477,10 +465,10 @@
     polys: <span class="kw-2">&amp;</span>[UnivariatePolynomial&lt;F&gt;],
     alpha: F,
 ) -&gt; UnivariatePolynomial&lt;F&gt; {
-    polys
-        .iter()
-        .rfold(UnivariatePolynomial::&lt;F&gt;::zero(), |acc, poly| {
-            acc * alpha + poly.clone()
+    <a href="#136">polys</a>
+        .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+        .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/double_ended/trait.DoubleEndedIterator.html#tymethod.rfold">rfold</a>(UnivariatePolynomial::&lt;F&gt;::zero(), |acc, poly| {
+            <a href="#141">acc</a> * <a href="#137">alpha</a> + <a href="#141">poly</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()
         })
 }
 
@@ -492,12 +480,12 @@
 /// claimed evaluation are returned for the caller to validate otherwise an [`Err`] is returned.
 ///
 /// Output is of the form `(variable_assignment, claimed_eval)`.
-</span><span class="kw">pub fn </span>partially_verify&lt;F: Field&gt;(
+</span><span class="kw">pub fn </span><a href="../../openvm_stark_backend/sumcheck/fn.partially_verify.html">partially_verify</a>&lt;F: Field&gt;(
     <span class="kw-2">mut </span>claim: F,
     proof: <span class="kw-2">&amp;</span>SumcheckProof&lt;F&gt;,
     challenger: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>FieldChallenger&lt;F&gt;,
 ) -&gt; <span class="prelude-ty">Result</span>&lt;(Vec&lt;F&gt;, F), SumcheckError&lt;F&gt;&gt; {
-    <span class="kw">let </span><span class="kw-2">mut </span>assignment = Vec::new();
+    <span class="kw">let </span><span class="kw-2">mut </span>assignment = <a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.new">Vec::new</a>();
 
     <span class="kw">for </span>(round, round_poly) <span class="kw">in </span>proof.round_polys.iter().enumerate() {
         <span class="kw">if </span>round_poly.degree() &gt; MAX_DEGREE {
@@ -519,28 +507,28 @@
         assignment.push(challenge);
     }
 
-    <span class="prelude-val">Ok</span>((assignment, claim))
+    <span class="prelude-val">Ok</span>((<a href="#159">assignment</a>, <a href="#155">claim</a>))
 }
 
-<span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>SumcheckProof&lt;F&gt; {
+<span class="attr">#[derive(Debug, Clone)]
+</span><span class="kw">pub struct </span><a href="../../openvm_stark_backend/sumcheck/struct.SumcheckProof.html">SumcheckProof</a>&lt;F&gt; {
     <span class="kw">pub </span>round_polys: Vec&lt;UnivariatePolynomial&lt;F&gt;&gt;,
 }
 
 <span class="doccomment">/// Max degree of polynomials the verifier accepts in each round of the protocol.
-</span><span class="kw">pub const </span>MAX_DEGREE: usize = <span class="number">3</span>;
+</span><span class="kw">pub const </span><a href="../../openvm_stark_backend/sumcheck/constant.MAX_DEGREE.html">MAX_DEGREE</a>: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">3</span>;
 
 <span class="doccomment">/// Sum-check protocol verification error.
 </span><span class="attr">#[derive(Error, Debug)]
-</span><span class="kw">pub enum </span>SumcheckError&lt;F&gt; {
+</span><span class="kw">pub enum </span><a href="../../openvm_stark_backend/sumcheck/enum.SumcheckError.html">SumcheckError</a>&lt;F&gt; {
     <span class="attr">#[error(<span class="string">"degree of the polynomial in round {round} is too high"</span>)]
-    </span>DegreeInvalid { round: RoundIndex },
+    </span>DegreeInvalid { round: <a href="#202">RoundIndex</a> },
     <span class="attr">#[error(<span class="string">"sum does not match the claim in round {round} (sum {sum}, claim {claim})"</span>)]
-    </span>SumInvalid { claim: F, sum: F, round: RoundIndex },
+    </span>SumInvalid { claim: F, sum: F, round: <a href="#202">RoundIndex</a> },
 }
 
 <span class="doccomment">/// Sum-check round index where 0 corresponds to the first round.
-</span><span class="kw">pub type </span>RoundIndex = usize;
+</span><span class="kw">pub type </span><a href="../../openvm_stark_backend/sumcheck/type.RoundIndex.html">RoundIndex</a> = <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>;
 
 <span class="attr">#[cfg(test)]
 </span><span class="kw">mod </span>tests {

@@ -58,26 +58,26 @@
 <a href="#57" id="57">57</a>
 <a href="#58" id="58">58</a>
 <a href="#59" id="59">59</a>
-<a href="#60" id="60">60</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::collections::{BTreeMap, HashMap};
+<a href="#60" id="60">60</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::collections::{<a href="https://doc.rust-lang.org/nightly/alloc/collections/btree/map/struct.BTreeMap.html">BTreeMap</a>, <a href="https://doc.rust-lang.org/nightly/std/collections/hash/map/struct.HashMap.html">HashMap</a>};
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_field::Field;
 <span class="kw">use </span>p3_matrix::{dense::RowMajorMatrixView, Matrix};
 
-<span class="kw">use super</span>::{trace::Evaluator, InteractionType, SymbolicInteraction};
-<span class="kw">use </span><span class="kw">crate</span>::air_builders::symbolic::symbolic_expression::SymbolicEvaluator;
+<span class="kw">use super</span>::{<a href="trace.rs.html#9-15">trace::Evaluator</a>, <a href="mod.rs.html#22-25">InteractionType</a>, <a href="mod.rs.html#35">SymbolicInteraction</a>};
+<span class="kw">use </span><a href="../air_builders/symbolic/symbolic_expression.rs.html#309-323"><span class="kw">crate</span>::air_builders::symbolic::symbolic_expression::SymbolicEvaluator</a>;
 
 <span class="doccomment">/// The actual interactions that are sent/received during a single run
 /// of trace generation. For debugging purposes only.
 </span><span class="attr">#[derive(Default, Clone, Debug)]
-</span><span class="kw">pub struct </span>LogicalInteractions&lt;F: Field&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/interaction/debug/struct.LogicalInteractions.html">LogicalInteractions</a>&lt;F: Field&gt; {
     <span class="doccomment">/// Bus index =&gt; (fields =&gt; (air_idx, interaction_type, count))
     </span><span class="attr">#[allow(clippy::type_complexity)]
-    </span><span class="kw">pub </span>at_bus: BTreeMap&lt;usize, HashMap&lt;Vec&lt;F&gt;, Vec&lt;(usize, InteractionType, F)&gt;&gt;&gt;,
+    </span><span class="kw">pub </span>at_bus: BTreeMap&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, HashMap&lt;Vec&lt;F&gt;, Vec&lt;(<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, <a href="mod.rs.html#22-25">InteractionType</a>, F)&gt;&gt;&gt;,
 }
 
-<span class="kw">pub fn </span>generate_logical_interactions&lt;F: Field&gt;(
-    air_idx: usize,
+<span class="kw">pub fn </span><a href="../../../openvm_stark_backend/interaction/debug/fn.generate_logical_interactions.html">generate_logical_interactions</a>&lt;F: Field&gt;(
+    air_idx: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     all_interactions: <span class="kw-2">&amp;</span>[SymbolicInteraction&lt;F&gt;],
     preprocessed: <span class="kw-2">&amp;</span><span class="prelude-ty">Option</span>&lt;RowMajorMatrixView&lt;F&gt;&gt;,
     partitioned_main: <span class="kw-2">&amp;</span>[RowMajorMatrixView&lt;F&gt;],
@@ -88,7 +88,7 @@
         <span class="kw">return</span>;
     }
 
-    <span class="kw">let </span>height = partitioned_main[<span class="number">0</span>].height();
+    <span class="kw">let </span>height = <a href="#23">partitioned_main</a>[<span class="number">0</span>].height();
 
     <span class="kw">for </span>n <span class="kw">in </span><span class="number">0</span>..height {
         <span class="kw">let </span>evaluator = Evaluator {

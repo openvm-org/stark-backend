@@ -167,51 +167,54 @@
 <a href="#166" id="166">166</a>
 <a href="#167" id="167">167</a>
 <a href="#168" id="168">168</a>
-<a href="#169" id="169">169</a></pre></div><pre class="rust"><code><span class="comment">// Keygen V2 API for STARK backend
+<a href="#169" id="169">169</a>
+<a href="#170" id="170">170</a>
+<a href="#171" id="171">171</a></pre></div><pre class="rust"><code><span class="comment">// Keygen V2 API for STARK backend
 // Changes:
 // - All AIRs can be optional
-</span><span class="kw">use </span>std::sync::Arc;
+</span><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
 
 <span class="kw">use </span>derivative::Derivative;
 <span class="kw">use </span>p3_matrix::dense::RowMajorMatrix;
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 
 <span class="kw">use crate</span>::{
-    air_builders::symbolic::SymbolicConstraints,
-    config::{Com, PcsProverData, RapPhaseSeqProvingKey, StarkGenericConfig, Val},
+    <a href="../air_builders/symbolic/mod.rs.html#34-39">air_builders::symbolic::SymbolicConstraints</a>,
+    config::{<a href="../config.rs.html#43-46">Com</a>, <a href="../config.rs.html#48-51">PcsProverData</a>, <a href="../config.rs.html#74-78">RapPhaseSeqProvingKey</a>, <a href="../config.rs.html#12-36">StarkGenericConfig</a>, <a href="../config.rs.html#38-41">Val</a>},
+    <a href="../interaction/mod.rs.html#112-117">interaction::RapPhaseSeqKind</a>,
 };
 
 <span class="doccomment">/// Widths of different parts of trace matrix
 </span><span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>TraceWidth {
-    <span class="kw">pub </span>preprocessed: <span class="prelude-ty">Option</span>&lt;usize&gt;,
-    <span class="kw">pub </span>cached_mains: Vec&lt;usize&gt;,
-    <span class="kw">pub </span>common_main: usize,
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/types/struct.TraceWidth.html">TraceWidth</a> {
+    <span class="kw">pub </span>preprocessed: <span class="prelude-ty">Option</span>&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
+    <span class="kw">pub </span>cached_mains: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
+    <span class="kw">pub </span>common_main: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// Width counted by extension field elements, _not_ base field elements
-    </span><span class="kw">pub </span>after_challenge: Vec&lt;usize&gt;,
+    </span><span class="kw">pub </span>after_challenge: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
 }
 
-<span class="kw">impl </span>TraceWidth {
+<span class="kw">impl </span><a href="#18-24">TraceWidth</a> {
     <span class="doccomment">/// Returns the widths of all main traces, including the common main trace if it exists.
-    </span><span class="kw">pub fn </span>main_widths(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;usize&gt; {
-        <span class="kw">let </span><span class="kw-2">mut </span>ret = <span class="self">self</span>.cached_mains.clone();
+    </span><span class="kw">pub fn </span>main_widths(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <span class="kw">let </span><span class="kw-2">mut </span>ret = <a class="self" href="#28">self</a>.cached_mains.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>();
         <span class="kw">if </span><span class="self">self</span>.common_main != <span class="number">0 </span>{
-            ret.push(<span class="self">self</span>.common_main);
+            <a href="#29">ret</a>.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.push">push</a>(<a class="self" href="#28">self</a>.common_main);
         }
-        ret
+        <a href="#29">ret</a>
     }
 }
 
 <span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>StarkVerifyingParams {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/types/struct.StarkVerifyingParams.html">StarkVerifyingParams</a> {
     <span class="doccomment">/// Trace sub-matrix widths
-    </span><span class="kw">pub </span>width: TraceWidth,
+    </span><span class="kw">pub </span>width: <a href="#18-24">TraceWidth</a>,
     <span class="doccomment">/// Number of public values for this STARK only
-    </span><span class="kw">pub </span>num_public_values: usize,
+    </span><span class="kw">pub </span>num_public_values: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="doccomment">/// Number of values to expose to verifier in each trace challenge phase
-    </span><span class="kw">pub </span>num_exposed_values_after_challenge: Vec&lt;usize&gt;,
+    </span><span class="kw">pub </span>num_exposed_values_after_challenge: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
     <span class="doccomment">/// For only this RAP, how many challenges are needed in each trace challenge phase
-    </span><span class="kw">pub </span>num_challenges_to_sample: Vec&lt;usize&gt;,
+    </span><span class="kw">pub </span>num_challenges_to_sample: Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
 }
 
 <span class="doccomment">/// Verifying key for a single STARK (corresponding to single AIR matrix)
@@ -221,17 +224,18 @@
     serialize = <span class="string">"Com&lt;SC&gt;: Serialize"</span>,
     deserialize = <span class="string">"Com&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
-</span><span class="kw">pub struct </span>StarkVerifyingKey&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/types/struct.StarkVerifyingKey.html">StarkVerifyingKey</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Preprocessed trace data, if any
     </span><span class="kw">pub </span>preprocessed_data: <span class="prelude-ty">Option</span>&lt;VerifierSinglePreprocessedData&lt;SC&gt;&gt;,
     <span class="doccomment">/// Parameters of the STARK
-    </span><span class="kw">pub </span>params: StarkVerifyingParams,
+    </span><span class="kw">pub </span>params: <a href="#38-47">StarkVerifyingParams</a>,
     <span class="doccomment">/// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.
     </span><span class="kw">pub </span>symbolic_constraints: SymbolicConstraints&lt;Val&lt;SC&gt;&gt;,
     <span class="doccomment">/// The factor to multiple the trace degree by to get the degree of the quotient polynomial. Determined from the max constraint degree of the AIR constraints.
     /// This is equivalently the number of chunks the quotient polynomial is split into.
-    </span><span class="kw">pub </span>quotient_degree: usize,
+    </span><span class="kw">pub </span>quotient_degree: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>rap_phase_seq_kind: <a href="../interaction/mod.rs.html#112-117">RapPhaseSeqKind</a>,
 }
 
 <span class="doccomment">/// Common verifying key for multiple AIRs.
@@ -244,7 +248,7 @@
     serialize = <span class="string">"Com&lt;SC&gt;: Serialize"</span>,
     deserialize = <span class="string">"Com&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
-</span><span class="kw">pub struct </span>MultiStarkVerifyingKey&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/types/struct.MultiStarkVerifyingKey.html">MultiStarkVerifyingKey</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>per_air: Vec&lt;StarkVerifyingKey&lt;SC&gt;&gt;,
 }
 
@@ -255,9 +259,9 @@
     serialize = <span class="string">"PcsProverData&lt;SC&gt;: Serialize"</span>,
     deserialize = <span class="string">"PcsProverData&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
-</span><span class="kw">pub struct </span>StarkProvingKey&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/types/struct.StarkProvingKey.html">StarkProvingKey</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Type name of the AIR, for display purposes only
-    </span><span class="kw">pub </span>air_name: String,
+    </span><span class="kw">pub </span>air_name: <a href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html">String</a>,
     <span class="doccomment">/// Verifying key
     </span><span class="kw">pub </span>vk: StarkVerifyingKey&lt;SC&gt;,
     <span class="doccomment">/// Prover only data for preprocessed trace
@@ -275,36 +279,36 @@
     serialize = <span class="string">"PcsProverData&lt;SC&gt;: Serialize"</span>,
     deserialize = <span class="string">"PcsProverData&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
-</span><span class="kw">pub struct </span>MultiStarkProvingKey&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/types/struct.MultiStarkProvingKey.html">MultiStarkProvingKey</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="kw">pub </span>per_air: Vec&lt;StarkProvingKey&lt;SC&gt;&gt;,
     <span class="doccomment">/// Maximum degree of constraints (excluding logup constraints) across all AIRs
-    </span><span class="kw">pub </span>max_constraint_degree: usize,
+    </span><span class="kw">pub </span>max_constraint_degree: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; StarkVerifyingKey&lt;SC&gt; {
-    <span class="kw">pub fn </span>num_cached_mains(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.params.width.cached_mains.len()
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; StarkVerifyingKey&lt;SC&gt; {
+    <span class="kw">pub fn </span>num_cached_mains(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#118">self</a>.params.width.cached_mains.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>()
     }
 
-    <span class="kw">pub fn </span>has_common_main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-        <span class="self">self</span>.params.width.common_main != <span class="number">0
+    <span class="kw">pub fn </span>has_common_main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        <a class="self" href="#122">self</a>.params.width.common_main != <span class="number">0
     </span>}
 
-    <span class="kw">pub fn </span>has_interaction(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-        !<span class="self">self</span>.symbolic_constraints.interactions.is_empty()
+    <span class="kw">pub fn </span>has_interaction(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        !<a class="self" href="#126">self</a>.symbolic_constraints.interactions.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.is_empty">is_empty</a>()
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; MultiStarkProvingKey&lt;SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkProvingKey&lt;SC&gt; {
     <span class="kw">pub fn </span>get_vk(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; MultiStarkVerifyingKey&lt;SC&gt; {
-        MultiStarkVerifyingKey {
-            per_air: <span class="self">self</span>.per_air.iter().map(|pk| pk.vk.clone()).collect(),
+        <a href="#80-82">MultiStarkVerifyingKey</a> {
+            per_air: <a class="self" href="#132">self</a>.per_air.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|pk| <a href="#134">pk</a>.vk.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
         }
     }
 }
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; MultiStarkVerifyingKey&lt;SC&gt; {
-    <span class="kw">pub fn </span>num_challenges_per_phase(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;usize&gt; {
-        <span class="self">self</span>.full_view().num_challenges_per_phase()
+<span class="kw">impl</span>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; MultiStarkVerifyingKey&lt;SC&gt; {
+    <span class="kw">pub fn </span>num_challenges_per_phase(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt; {
+        <a class="self" href="#139">self</a>.<a href="view.rs.html#21-23">full_view</a>().<a href="view.rs.html#69-74">num_challenges_per_phase</a>()
     }
 }
 
@@ -316,7 +320,7 @@
     serialize = <span class="string">"PcsProverData&lt;SC&gt;: Serialize"</span>,
     deserialize = <span class="string">"PcsProverData&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
-</span><span class="kw">pub struct </span>ProverOnlySinglePreprocessedData&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/types/struct.ProverOnlySinglePreprocessedData.html">ProverOnlySinglePreprocessedData</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Preprocessed trace matrix.
     </span><span class="kw">pub </span>trace: RowMajorMatrix&lt;Val&lt;SC&gt;&gt;,
     <span class="doccomment">/// Prover data, such as a Merkle tree, for the trace commitment.
@@ -332,7 +336,7 @@
     serialize = <span class="string">"Com&lt;SC&gt;: Serialize"</span>,
     deserialize = <span class="string">"Com&lt;SC&gt;: Deserialize&lt;'de&gt;"
 </span>))]
-</span><span class="kw">pub struct </span>VerifierSinglePreprocessedData&lt;SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/keygen/types/struct.VerifierSinglePreprocessedData.html">VerifierSinglePreprocessedData</a>&lt;SC: <a href="../config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Commitment to the preprocessed trace.
     </span><span class="kw">pub </span>commit: Com&lt;SC&gt;,
 }

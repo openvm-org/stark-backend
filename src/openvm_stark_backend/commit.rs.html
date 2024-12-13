@@ -64,9 +64,9 @@
 <a href="#63" id="63">63</a>
 <a href="#64" id="64">64</a>
 <a href="#65" id="65">65</a>
-<a href="#66" id="66">66</a></pre></div><pre class="rust"><code><span class="kw">use </span>serde::{Deserialize, Serialize};
+<a href="#66" id="66">66</a></pre></div><pre class="rust"><code><span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 
-<span class="kw">use </span><span class="kw">crate</span>::config::{PcsProverData, StarkGenericConfig};
+<span class="kw">use </span><span class="kw">crate</span>::config::{<a href="config.rs.html#48-51">PcsProverData</a>, <a href="config.rs.html#12-36">StarkGenericConfig</a>};
 
 <span class="doccomment">/// In a multi-matrix system, we record a pointer from each matrix to the commitment its stored in
 /// as well as the index of the matrix within that commitment.
@@ -74,14 +74,14 @@
 ///
 /// The pointers are in reference to an implicit global list of commitments
 </span><span class="attr">#[derive(Clone, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>MatrixCommitmentPointers {
+</span><span class="kw">pub struct </span><a href="../../openvm_stark_backend/commit/struct.MatrixCommitmentPointers.html">MatrixCommitmentPointers</a> {
     <span class="doccomment">/// For each matrix, the pointer
-    </span><span class="kw">pub </span>matrix_ptrs: Vec&lt;SingleMatrixCommitPtr&gt;,
+    </span><span class="kw">pub </span>matrix_ptrs: Vec&lt;<a href="#28-31">SingleMatrixCommitPtr</a>&gt;,
 }
 
-<span class="kw">impl </span>MatrixCommitmentPointers {
-    <span class="kw">pub fn </span>new(matrix_ptrs: Vec&lt;SingleMatrixCommitPtr&gt;) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ matrix_ptrs }
+<span class="kw">impl </span><a href="#11-14">MatrixCommitmentPointers</a> {
+    <span class="kw">pub fn </span>new(matrix_ptrs: Vec&lt;<a href="#28-31">SingleMatrixCommitPtr</a>&gt;) -&gt; <span class="self">Self </span>{
+        <span class="self">Self </span>{ <a href="#17">matrix_ptrs</a> }
     }
 }
 
@@ -91,42 +91,42 @@
 ///
 /// The pointer is in reference to an implicit global list of commitments
 </span><span class="attr">#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>SingleMatrixCommitPtr {
-    <span class="kw">pub </span>commit_index: usize,
-    <span class="kw">pub </span>matrix_index: usize,
+</span><span class="kw">pub struct </span><a href="../../openvm_stark_backend/commit/struct.SingleMatrixCommitPtr.html">SingleMatrixCommitPtr</a> {
+    <span class="kw">pub </span>commit_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    <span class="kw">pub </span>matrix_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
-<span class="kw">impl </span>SingleMatrixCommitPtr {
-    <span class="kw">pub fn </span>new(commit_index: usize, matrix_index: usize) -&gt; <span class="self">Self </span>{
+<span class="kw">impl </span><a href="#28-31">SingleMatrixCommitPtr</a> {
+    <span class="kw">pub fn </span>new(commit_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>, matrix_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            commit_index,
-            matrix_index,
+            <a href="#34">commit_index</a>,
+            <a href="#34">matrix_index</a>,
         }
     }
 }
 
 <span class="doccomment">/// The PCS commits to multiple matrices at once, so this struct stores
 /// references to get PCS data relevant to a single matrix (e.g., LDE matrix, openings).
-</span><span class="kw">pub struct </span>CommittedSingleMatrixView&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; {
+</span><span class="kw">pub struct </span><a href="../../openvm_stark_backend/commit/struct.CommittedSingleMatrixView.html">CommittedSingleMatrixView</a>&lt;<span class="lifetime">'a</span>, SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt; {
     <span class="doccomment">/// Prover data, includes LDE matrix of trace and Merkle tree.
     /// The prover data can commit to multiple trace matrices, so
     /// `matrix_index` is needed to identify this trace.
     </span><span class="kw">pub </span>data: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>PcsProverData&lt;SC&gt;,
     <span class="doccomment">/// The index of the trace matrix in the prover data.
-    </span><span class="kw">pub </span>matrix_index: usize,
+    </span><span class="kw">pub </span>matrix_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC: StarkGenericConfig&gt; CommittedSingleMatrixView&lt;<span class="lifetime">'a</span>, SC&gt; {
-    <span class="kw">pub fn </span>new(data: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>PcsProverData&lt;SC&gt;, matrix_index: usize) -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ data, matrix_index }
+<span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt; CommittedSingleMatrixView&lt;<span class="lifetime">'a</span>, SC&gt; {
+    <span class="kw">pub fn </span>new(data: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>PcsProverData&lt;SC&gt;, matrix_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
+        <span class="self">Self </span>{ <a href="#54">data</a>, <a href="#54">matrix_index</a> }
     }
 }
 
-<span class="kw">impl</span>&lt;SC: StarkGenericConfig&gt; Clone <span class="kw">for </span>CommittedSingleMatrixView&lt;<span class="lifetime">'_</span>, SC&gt; {
+<span class="kw">impl</span>&lt;SC: <a href="config.rs.html#12-36">StarkGenericConfig</a>&gt; <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a> <span class="kw">for </span>CommittedSingleMatrixView&lt;<span class="lifetime">'_</span>, SC&gt; {
     <span class="kw">fn </span>clone(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            data: <span class="self">self</span>.data,
-            matrix_index: <span class="self">self</span>.matrix_index,
+            data: <a class="self" href="#60">self</a>.data,
+            matrix_index: <a class="self" href="#60">self</a>.matrix_index,
         }
     }
 }

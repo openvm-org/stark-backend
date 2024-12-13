@@ -25,31 +25,31 @@
 <a href="#24" id="24">24</a>
 <a href="#25" id="25">25</a>
 <a href="#26" id="26">26</a>
-<a href="#27" id="27">27</a></pre></div><pre class="rust"><code><span class="kw">use </span>core::borrow::Borrow;
+<a href="#27" id="27">27</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html">core::borrow::Borrow</a>;
 
-<span class="kw">pub const </span>NUM_FIBONACCI_COLS: usize = <span class="number">2</span>;
+<span class="kw">pub const </span><a href="../../../../openvm_stark_sdk/dummy_airs/fib_air/columns/constant.NUM_FIBONACCI_COLS.html">NUM_FIBONACCI_COLS</a>: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> = <span class="number">2</span>;
 
 <span class="attr">#[repr(C)]
-</span><span class="kw">pub struct </span>FibonacciCols&lt;F&gt; {
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_sdk/dummy_airs/fib_air/columns/struct.FibonacciCols.html">FibonacciCols</a>&lt;F&gt; {
     <span class="kw">pub </span>left: F,
     <span class="kw">pub </span>right: F,
 }
 
 <span class="kw">impl</span>&lt;F&gt; FibonacciCols&lt;F&gt; {
     <span class="kw">pub const fn </span>new(left: F, right: F) -&gt; FibonacciCols&lt;F&gt; {
-        FibonacciCols { left, right }
+        <a href="#6-9">FibonacciCols</a> { <a href="#12">left</a>, <a href="#12">right</a> }
     }
 }
 
 <span class="comment">// Manual implementation of AlignedBorrow to avoid circular git import
 </span><span class="kw">impl</span>&lt;F&gt; Borrow&lt;FibonacciCols&lt;F&gt;&gt; <span class="kw">for </span>[F] {
     <span class="kw">fn </span>borrow(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>FibonacciCols&lt;F&gt; {
-        <span class="macro">debug_assert_eq!</span>(<span class="self">self</span>.len(), NUM_FIBONACCI_COLS);
-        <span class="kw">let </span>(prefix, shorts, suffix) = <span class="kw">unsafe </span>{ <span class="self">self</span>.align_to::&lt;FibonacciCols&lt;F&gt;&gt;() };
-        <span class="macro">debug_assert!</span>(prefix.is_empty(), <span class="string">"Alignment should match"</span>);
-        <span class="macro">debug_assert!</span>(suffix.is_empty(), <span class="string">"Alignment should match"</span>);
-        <span class="macro">debug_assert_eq!</span>(shorts.len(), <span class="number">1</span>);
-        <span class="kw-2">&amp;</span>shorts[<span class="number">0</span>]
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.debug_assert_eq.html">debug_assert_eq!</a>(<span class="self">self</span>.len(), NUM_FIBONACCI_COLS);
+        <span class="kw">let </span>(prefix, shorts, suffix) = <span class="kw">unsafe </span>{ <a class="self" href="#19">self</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.align_to">align_to</a>::&lt;FibonacciCols&lt;F&gt;&gt;() };
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.debug_assert.html">debug_assert!</a>(prefix.is_empty(), <span class="string">"Alignment should match"</span>);
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.debug_assert.html">debug_assert!</a>(suffix.is_empty(), <span class="string">"Alignment should match"</span>);
+        <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.debug_assert_eq.html">debug_assert_eq!</a>(shorts.len(), <span class="number">1</span>);
+        <span class="kw-2">&amp;</span><a href="#21">shorts</a>[<span class="number">0</span>]
     }
 }
 </code></pre></div></section></main></body></html>

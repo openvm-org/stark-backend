@@ -107,76 +107,76 @@
 <a href="#106" id="106">106</a></pre></div><pre class="rust"><code><span class="comment">// Copied from sp1/core under MIT license
 
 </span><span class="kw">use </span>std::{
-    iter::{Skip, Take},
-    ops::{Deref, Range},
+    iter::{<a href="https://doc.rust-lang.org/nightly/core/iter/adapters/skip/struct.Skip.html">Skip</a>, <a href="https://doc.rust-lang.org/nightly/core/iter/adapters/take/struct.Take.html">Take</a>},
+    ops::{<a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.Deref.html">Deref</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/range/struct.Range.html">Range</a>},
 };
 
 <span class="kw">use </span>p3_air::{AirBuilder, BaseAir};
 <span class="kw">use </span>p3_matrix::Matrix;
 
 <span class="doccomment">/// A submatrix of a matrix.  The matrix will contain a subset of the columns of `self.inner`.
-</span><span class="kw">pub struct </span>SubMatrixRowSlices&lt;M: Matrix&lt;T&gt;, T: Send + Sync&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/air_builders/sub/struct.SubMatrixRowSlices.html">SubMatrixRowSlices</a>&lt;M: Matrix&lt;T&gt;, T: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>&gt; {
     inner: M,
-    column_range: Range&lt;usize&gt;,
+    column_range: Range&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
     _phantom: std::marker::PhantomData&lt;T&gt;,
 }
 
-<span class="kw">impl</span>&lt;M: Matrix&lt;T&gt;, T: Send + Sync&gt; SubMatrixRowSlices&lt;M, T&gt; {
-    <span class="kw">pub const fn </span>new(inner: M, column_range: Range&lt;usize&gt;) -&gt; <span class="self">Self </span>{
+<span class="kw">impl</span>&lt;M: Matrix&lt;T&gt;, T: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>&gt; SubMatrixRowSlices&lt;M, T&gt; {
+    <span class="kw">pub const fn </span>new(inner: M, column_range: Range&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            inner,
-            column_range,
-            _phantom: std::marker::PhantomData,
+            <a href="#19">inner</a>,
+            <a href="#19">column_range</a>,
+            _phantom: <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">std::marker::PhantomData</a>,
         }
     }
 }
 
 <span class="doccomment">/// Implement `Matrix` for `SubMatrixRowSlices`.
-</span><span class="kw">impl</span>&lt;M: Matrix&lt;T&gt;, T: Send + Sync&gt; Matrix&lt;T&gt; <span class="kw">for </span>SubMatrixRowSlices&lt;M, T&gt; {
+</span><span class="kw">impl</span>&lt;M: Matrix&lt;T&gt;, T: <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>&gt; Matrix&lt;T&gt; <span class="kw">for </span>SubMatrixRowSlices&lt;M, T&gt; {
     <span class="kw">type </span>Row&lt;<span class="lifetime">'a</span>&gt;
         = Skip&lt;Take&lt;M::Row&lt;<span class="lifetime">'a</span>&gt;&gt;&gt;
     <span class="kw">where
         </span><span class="self">Self</span>: <span class="lifetime">'a</span>;
 
     <span class="attr">#[inline]
-    </span><span class="kw">fn </span>row(<span class="kw-2">&amp;</span><span class="self">self</span>, r: usize) -&gt; <span class="self">Self</span>::Row&lt;<span class="lifetime">'_</span>&gt; {
-        <span class="self">self</span>.inner
-            .row(r)
-            .take(<span class="self">self</span>.column_range.end)
-            .skip(<span class="self">self</span>.column_range.start)
+    </span><span class="kw">fn </span>row(<span class="kw-2">&amp;</span><span class="self">self</span>, r: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self</span>::Row&lt;<span class="lifetime">'_</span>&gt; {
+        <a class="self" href="#36">self</a>.inner
+            .row(<a href="#36">r</a>)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.take">take</a>(<a class="self" href="#36">self</a>.column_range.end)
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.skip">skip</a>(<a class="self" href="#36">self</a>.column_range.start)
     }
 
     <span class="attr">#[inline]
-    </span><span class="kw">fn </span>row_slice(<span class="kw-2">&amp;</span><span class="self">self</span>, r: usize) -&gt; <span class="kw">impl </span>Deref&lt;Target = [T]&gt; {
-        <span class="self">self</span>.row(r).collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
+    </span><span class="kw">fn </span>row_slice(<span class="kw-2">&amp;</span><span class="self">self</span>, r: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="kw">impl </span>Deref&lt;Target = [T]&gt; {
+        <a class="self" href="#44">self</a>.row(<a href="#44">r</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;()
     }
 
     <span class="attr">#[inline]
-    </span><span class="kw">fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.column_range.len()
+    </span><span class="kw">fn </span>width(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#49">self</a>.column_range.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/exact_size/trait.ExactSizeIterator.html#tymethod.len">len</a>()
     }
 
     <span class="attr">#[inline]
-    </span><span class="kw">fn </span>height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.inner.height()
+    </span><span class="kw">fn </span>height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#54">self</a>.inner.height()
     }
 }
 
 <span class="doccomment">/// A builder used to eval a sub-air.  This will handle enforcing constraints for a subset of a
 /// trace matrix.  E.g. if a particular air needs to be enforced for a subset of the columns of
 /// the trace, then the SubAirBuilder can be used.
-</span><span class="kw">pub struct </span>SubAirBuilder&lt;<span class="lifetime">'a</span>, AB: AirBuilder, SubAir: BaseAir&lt;T&gt;, T&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/air_builders/sub/struct.SubAirBuilder.html">SubAirBuilder</a>&lt;<span class="lifetime">'a</span>, AB: AirBuilder, SubAir: BaseAir&lt;T&gt;, T&gt; {
     inner: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>AB,
-    column_range: Range&lt;usize&gt;,
+    column_range: Range&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;,
     _phantom: std::marker::PhantomData&lt;(SubAir, T)&gt;,
 }
 
 <span class="kw">impl</span>&lt;<span class="lifetime">'a</span>, AB: AirBuilder, SubAir: BaseAir&lt;T&gt;, T&gt; SubAirBuilder&lt;<span class="lifetime">'a</span>, AB, SubAir, T&gt; {
-    <span class="kw">pub fn </span>new(inner: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>AB, column_range: Range&lt;usize&gt;) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub fn </span>new(inner: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>AB, column_range: Range&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>&gt;) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            inner,
-            column_range,
-            _phantom: std::marker::PhantomData,
+            <a href="#69">inner</a>,
+            <a href="#69">column_range</a>,
+            _phantom: <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">std::marker::PhantomData</a>,
         }
     }
 }
@@ -189,25 +189,25 @@
     <span class="kw">type </span>M = SubMatrixRowSlices&lt;AB::M, <span class="self">Self</span>::Var&gt;;
 
     <span class="kw">fn </span>main(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::M {
-        <span class="kw">let </span>matrix = <span class="self">self</span>.inner.main();
+        <span class="kw">let </span>matrix = <a class="self" href="#85">self</a>.inner.main();
 
-        SubMatrixRowSlices::new(matrix, <span class="self">self</span>.column_range.clone())
+        <a href="#19-25">SubMatrixRowSlices::new</a>(<a href="#86">matrix</a>, <a class="self" href="#85">self</a>.column_range.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>())
     }
 
     <span class="kw">fn </span>is_first_row(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Expr {
-        <span class="self">self</span>.inner.is_first_row()
+        <a class="self" href="#91">self</a>.inner.is_first_row()
     }
 
     <span class="kw">fn </span>is_last_row(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Expr {
-        <span class="self">self</span>.inner.is_last_row()
+        <a class="self" href="#95">self</a>.inner.is_last_row()
     }
 
-    <span class="kw">fn </span>is_transition_window(<span class="kw-2">&amp;</span><span class="self">self</span>, size: usize) -&gt; <span class="self">Self</span>::Expr {
-        <span class="self">self</span>.inner.is_transition_window(size)
+    <span class="kw">fn </span>is_transition_window(<span class="kw-2">&amp;</span><span class="self">self</span>, size: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self</span>::Expr {
+        <a class="self" href="#99">self</a>.inner.is_transition_window(<a href="#99">size</a>)
     }
 
     <span class="kw">fn </span>assert_zero&lt;I: Into&lt;<span class="self">Self</span>::Expr&gt;&gt;(<span class="kw-2">&amp;mut </span><span class="self">self</span>, x: I) {
-        <span class="self">self</span>.inner.assert_zero(x.into());
+        <a class="self" href="#103">self</a>.inner.assert_zero(<a href="#103">x</a>.<a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into">into</a>());
     }
 }
 </code></pre></div></section></main></body></html>

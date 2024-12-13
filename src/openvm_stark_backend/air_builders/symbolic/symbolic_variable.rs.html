@@ -195,107 +195,107 @@
 <a href="#194" id="194">194</a></pre></div><pre class="rust"><code><span class="comment">// Copied from uni-stark/src/symbolic_variable.rs.
 
 </span><span class="kw">use </span>core::{
-    marker::PhantomData,
-    ops::{Add, Mul, Sub},
+    <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">marker::PhantomData</a>,
+    ops::{<a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Add.html">Add</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Mul.html">Mul</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Sub.html">Sub</a>},
 };
 
 <span class="kw">use </span>p3_field::Field;
-<span class="kw">use </span>serde::{Deserialize, Serialize};
+<span class="kw">use </span>serde::{<a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Deserialize.html">Deserialize</a>, <a href="https://docs.rs/serde_derive/1.0.216/serde_derive/derive.Serialize.html">Serialize</a>};
 
-<span class="kw">use </span><span class="kw">super</span>::symbolic_expression::SymbolicExpression;
+<span class="kw">use </span><a href="symbolic_expression.rs.html#18-43"><span class="kw">super</span>::symbolic_expression::SymbolicExpression</a>;
 
 <span class="attr">#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-</span><span class="kw">pub enum </span>Entry {
+</span><span class="kw">pub enum </span><a href="../../../../openvm_stark_backend/air_builders/symbolic/symbolic_variable/enum.Entry.html">Entry</a> {
     Preprocessed {
-        offset: usize,
+        offset: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     },
     <span class="doccomment">/// Main may be partitioned
     </span>Main {
-        part_index: usize,
-        offset: usize,
+        part_index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+        offset: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     },
     Permutation {
-        offset: usize,
+        offset: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     },
     Public,
     Challenge,
     Exposed,
 }
 
-<span class="kw">impl </span>Entry {
+<span class="kw">impl </span><a href="#14-29">Entry</a> {
     <span class="doccomment">/// Advance the internal offset of the entry by the given `offset`.
-    </span><span class="kw">pub fn </span>rotate(<span class="self">self</span>, offset: usize) -&gt; <span class="self">Self </span>{
-        <span class="kw">match </span><span class="self">self </span>{
-            Entry::Preprocessed { offset: old_offset } =&gt; Entry::Preprocessed {
-                offset: old_offset + offset,
+    </span><span class="kw">pub fn </span>rotate(<span class="self">self</span>, offset: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
+        <span class="kw">match </span><span class="self"><a href="#33">self</a> </span>{
+            <a href="#15-17">Entry::Preprocessed</a> { offset: old_offset } =&gt; <a href="#15-17">Entry::Preprocessed</a> {
+                offset: <a href="#35">old_offset</a> + <a href="#33">offset</a>,
             },
-            Entry::Main {
+            <a href="#19-22">Entry::Main</a> {
                 part_index,
                 offset: old_offset,
-            } =&gt; Entry::Main {
-                part_index,
-                offset: old_offset + offset,
+            } =&gt; <a href="#19-22">Entry::Main</a> {
+                <a href="#39">part_index</a>,
+                offset: <a href="#40">old_offset</a> + <a href="#33">offset</a>,
             },
-            Entry::Permutation { offset: old_offset } =&gt; Entry::Permutation {
-                offset: old_offset + offset,
+            <a href="#23-25">Entry::Permutation</a> { offset: old_offset } =&gt; <a href="#23-25">Entry::Permutation</a> {
+                offset: <a href="#45">old_offset</a> + <a href="#33">offset</a>,
             },
-            Entry::Public | Entry::Challenge | Entry::Exposed =&gt; <span class="self">self</span>,
+            <a href="#26">Entry::Public</a> | <a href="#27">Entry::Challenge</a> | <a href="#28">Entry::Exposed</a> =&gt; <a class="self" href="#33">self</a>,
         }
     }
 
     <span class="kw">pub fn </span>next(<span class="self">self</span>) -&gt; <span class="self">Self </span>{
-        <span class="self">self</span>.rotate(<span class="number">1</span>)
+        <a class="self" href="#52">self</a>.<a href="#33-50">rotate</a>(<span class="number">1</span>)
     }
 }
 
 <span class="doccomment">/// A variable within the evaluation window, i.e. a column in either the local or next row.
 </span><span class="attr">#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>SymbolicVariable&lt;F&gt; {
-    <span class="kw">pub </span>entry: Entry,
-    <span class="kw">pub </span>index: usize,
+</span><span class="kw">pub struct </span><a href="../../../../openvm_stark_backend/air_builders/symbolic/symbolic_variable/struct.SymbolicVariable.html">SymbolicVariable</a>&lt;F&gt; {
+    <span class="kw">pub </span>entry: <a href="#14-29">Entry</a>,
+    <span class="kw">pub </span>index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
     <span class="kw">pub</span>(<span class="kw">crate</span>) _phantom: PhantomData&lt;F&gt;,
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; SymbolicVariable&lt;F&gt; {
-    <span class="kw">pub const fn </span>new(entry: Entry, index: usize) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub const fn </span>new(entry: <a href="#14-29">Entry</a>, index: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            entry,
-            index,
-            _phantom: PhantomData,
+            <a href="#66">entry</a>,
+            <a href="#66">index</a>,
+            _phantom: <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">PhantomData</a>,
         }
     }
 
-    <span class="kw">pub const fn </span>degree_multiple(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="kw">match </span><span class="self">self</span>.entry {
-            Entry::Preprocessed { .. } | Entry::Main { .. } | Entry::Permutation { .. } =&gt; <span class="number">1</span>,
-            Entry::Public | Entry::Challenge | Entry::Exposed =&gt; <span class="number">0</span>,
+    <span class="kw">pub const fn </span>degree_multiple(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <span class="kw">match </span><a class="self" href="#74">self</a>.entry {
+            <a href="#15-17">Entry::Preprocessed</a> { .. } | <a href="#19-22">Entry::Main</a> { .. } | <a href="#23-25">Entry::Permutation</a> { .. } =&gt; <span class="number">1</span>,
+            <a href="#26">Entry::Public</a> | <a href="#27">Entry::Challenge</a> | <a href="#28">Entry::Exposed</a> =&gt; <span class="number">0</span>,
         }
     }
 
-    <span class="kw">pub fn </span>rotate(<span class="self">self</span>, offset: usize) -&gt; <span class="self">Self </span>{
+    <span class="kw">pub fn </span>rotate(<span class="self">self</span>, offset: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            entry: <span class="self">self</span>.entry.rotate(offset),
-            index: <span class="self">self</span>.index,
-            _phantom: PhantomData,
+            entry: <a class="self" href="#81">self</a>.entry.<a href="#33-50">rotate</a>(<a href="#81">offset</a>),
+            index: <a class="self" href="#81">self</a>.index,
+            _phantom: <a href="https://doc.rust-lang.org/nightly/core/marker/struct.PhantomData.html">PhantomData</a>,
         }
     }
 
     <span class="kw">pub fn </span>next(<span class="self">self</span>) -&gt; <span class="self">Self </span>{
-        <span class="self">self</span>.rotate(<span class="number">1</span>)
+        <a class="self" href="#89">self</a>.<a href="#81-87">rotate</a>(<span class="number">1</span>)
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; From&lt;SymbolicVariable&lt;F&gt;&gt; <span class="kw">for </span>SymbolicExpression&lt;F&gt; {
     <span class="kw">fn </span>from(value: SymbolicVariable&lt;F&gt;) -&gt; <span class="self">Self </span>{
-        SymbolicExpression::Variable(value)
+        <a href="symbolic_expression.rs.html#19">SymbolicExpression::Variable</a>(<a href="#95">value</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Add <span class="kw">for </span>SymbolicVariable&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Add.html">Add</a> <span class="kw">for </span>SymbolicVariable&lt;F&gt; {
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>add(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) + SymbolicExpression::from(rhs)
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#103">self</a>) + <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a href="#103">rhs</a>)
     }
 }
 
@@ -303,7 +303,7 @@
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>add(<span class="self">self</span>, rhs: F) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) + SymbolicExpression::from(rhs)
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#111">self</a>) + <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a href="#111">rhs</a>)
     }
 }
 
@@ -311,7 +311,7 @@
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>add(<span class="self">self</span>, rhs: SymbolicExpression&lt;F&gt;) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) + rhs
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#119">self</a>) + <a href="#119">rhs</a>
     }
 }
 
@@ -319,15 +319,15 @@
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>add(<span class="self">self</span>, rhs: SymbolicVariable&lt;F&gt;) -&gt; <span class="self">Self</span>::Output {
-        <span class="self">self </span>+ <span class="self">Self</span>::from(rhs)
+        <span class="self"><a href="#127">self</a> </span>+ <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#127">rhs</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Sub <span class="kw">for </span>SymbolicVariable&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Sub.html">Sub</a> <span class="kw">for </span>SymbolicVariable&lt;F&gt; {
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>sub(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) - SymbolicExpression::from(rhs)
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#135">self</a>) - <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a href="#135">rhs</a>)
     }
 }
 
@@ -335,7 +335,7 @@
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>sub(<span class="self">self</span>, rhs: F) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) - SymbolicExpression::from(rhs)
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#143">self</a>) - <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a href="#143">rhs</a>)
     }
 }
 
@@ -343,7 +343,7 @@
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>sub(<span class="self">self</span>, rhs: SymbolicExpression&lt;F&gt;) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) - rhs
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#151">self</a>) - <a href="#151">rhs</a>
     }
 }
 
@@ -351,15 +351,15 @@
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>sub(<span class="self">self</span>, rhs: SymbolicVariable&lt;F&gt;) -&gt; <span class="self">Self</span>::Output {
-        <span class="self">self </span>- <span class="self">Self</span>::from(rhs)
+        <span class="self"><a href="#159">self</a> </span>- <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#159">rhs</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Mul <span class="kw">for </span>SymbolicVariable&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Mul.html">Mul</a> <span class="kw">for </span>SymbolicVariable&lt;F&gt; {
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>mul(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) * SymbolicExpression::from(rhs)
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#167">self</a>) * <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a href="#167">rhs</a>)
     }
 }
 
@@ -367,7 +367,7 @@
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>mul(<span class="self">self</span>, rhs: F) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) * SymbolicExpression::from(rhs)
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#175">self</a>) * <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a href="#175">rhs</a>)
     }
 }
 
@@ -375,7 +375,7 @@
     <span class="kw">type </span>Output = SymbolicExpression&lt;F&gt;;
 
     <span class="kw">fn </span>mul(<span class="self">self</span>, rhs: SymbolicExpression&lt;F&gt;) -&gt; <span class="self">Self</span>::Output {
-        SymbolicExpression::from(<span class="self">self</span>) * rhs
+        <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from">SymbolicExpression::from</a>(<a class="self" href="#183">self</a>) * <a href="#183">rhs</a>
     }
 }
 
@@ -383,7 +383,7 @@
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>mul(<span class="self">self</span>, rhs: SymbolicVariable&lt;F&gt;) -&gt; <span class="self">Self</span>::Output {
-        <span class="self">self </span>* <span class="self">Self</span>::from(rhs)
+        <span class="self"><a href="#191">self</a> </span>* <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from"><span class="self">Self</span>::from</a>(<a href="#191">rhs</a>)
     }
 }
 </code></pre></div></section></main></body></html>

@@ -16,18 +16,18 @@
 <a href="#15" id="15">15</a>
 <a href="#16" id="16">16</a></pre></div><pre class="rust"><code><span class="kw">use </span>openvm_stark_backend::{p3_field::PrimeField32, p3_matrix::dense::RowMajorMatrix};
 
-<span class="kw">use </span><span class="kw">super</span>::columns::NUM_FIBONACCI_COLS;
+<span class="kw">use </span><a href="columns.rs.html#3"><span class="kw">super</span>::columns::NUM_FIBONACCI_COLS</a>;
 
 <span class="doccomment">/// n is number of rows in the trace
-</span><span class="kw">pub fn </span>generate_trace_rows&lt;F: PrimeField32&gt;(a: u32, b: u32, n: usize) -&gt; RowMajorMatrix&lt;F&gt; {
-    <span class="macro">assert!</span>(n.is_power_of_two());
+</span><span class="kw">pub fn </span><a href="../../../../openvm_stark_sdk/dummy_airs/fib_air/trace/fn.generate_trace_rows.html">generate_trace_rows</a>&lt;F: PrimeField32&gt;(a: <a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>, b: <a href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>, n: <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>) -&gt; RowMajorMatrix&lt;F&gt; {
+    <a class="macro" href="https://doc.rust-lang.org/nightly/core/macro.assert.html">assert!</a>(n.is_power_of_two());
 
-    <span class="kw">let </span><span class="kw-2">mut </span>rows = <span class="macro">vec!</span>[<span class="macro">vec!</span>[F::from_canonical_u32(a), F::from_canonical_u32(b)]];
+    <span class="kw">let </span><span class="kw-2">mut </span>rows = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[<span class="macro">vec!</span>[F::from_canonical_u32(a), F::from_canonical_u32(b)]];
 
     <span class="kw">for </span>i <span class="kw">in </span><span class="number">1</span>..n {
         rows.push(<span class="macro">vec!</span>[rows[i - <span class="number">1</span>][<span class="number">1</span>], rows[i - <span class="number">1</span>][<span class="number">0</span>] + rows[i - <span class="number">1</span>][<span class="number">1</span>]]);
     }
 
-    RowMajorMatrix::new(rows.concat(), NUM_FIBONACCI_COLS)
+    RowMajorMatrix::new(<a href="#9">rows</a>.<a href="https://doc.rust-lang.org/nightly/alloc/foreigntype.slice.html#method.concat">concat</a>(), <a href="columns.rs.html#3">NUM_FIBONACCI_COLS</a>)
 }
 </code></pre></div></section></main></body></html>

@@ -328,51 +328,49 @@
 <a href="#327" id="327">327</a>
 <a href="#328" id="328">328</a>
 <a href="#329" id="329">329</a>
-<a href="#330" id="330">330</a>
-<a href="#331" id="331">331</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
+<a href="#330" id="330">330</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
 </span><span class="kw">use </span>std::{
-    iter::Sum,
-    ops::{Add, Deref, Mul, Neg, Sub},
+    <a href="https://doc.rust-lang.org/nightly/core/iter/traits/accum/trait.Sum.html">iter::Sum</a>,
+    ops::{<a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Add.html">Add</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.Deref.html">Deref</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Mul.html">Mul</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Neg.html">Neg</a>, <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Sub.html">Sub</a>},
 };
 
 <span class="kw">use </span>p3_field::Field;
-<span class="kw">use </span>serde::{Deserialize, Serialize};
 
-<span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
-</span><span class="kw">pub struct </span>UnivariatePolynomial&lt;F&gt; {
+<span class="attr">#[derive(Debug, Clone)]
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/poly/uni/struct.UnivariatePolynomial.html">UnivariatePolynomial</a>&lt;F&gt; {
     coeffs: Vec&lt;F&gt;,
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; UnivariatePolynomial&lt;F&gt; {
     <span class="doccomment">/// Creates a new univariate polynomial from a vector of coefficients.
     </span><span class="kw">pub fn </span>from_coeffs(coeffs: Vec&lt;F&gt;) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span><span class="kw-2">mut </span>polynomial = <span class="self">Self </span>{ coeffs };
-        polynomial.trim_leading_zeroes();
-        polynomial
+        <span class="kw">let </span><span class="kw-2">mut </span>polynomial = <span class="self">Self </span>{ <a href="#16">coeffs</a> };
+        <a href="#17">polynomial</a>.<a href="#79-85">trim_leading_zeroes</a>();
+        <a href="#17">polynomial</a>
     }
 
     <span class="kw">pub fn </span>zero() -&gt; <span class="self">Self </span>{
-        <span class="self">Self </span>{ coeffs: <span class="macro">vec!</span>[] }
+        <span class="self">Self </span>{ coeffs: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[] }
     }
 
     <span class="kw">fn </span>one() -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            coeffs: <span class="macro">vec!</span>[F::ONE],
+            coeffs: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[F::ONE],
         }
     }
 
-    <span class="kw">fn </span>is_zero(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-        <span class="self">self</span>.coeffs.iter().all(F::is_zero)
+    <span class="kw">fn </span>is_zero(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        <a class="self" href="#32">self</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.all">all</a>(F::is_zero)
     }
 
     <span class="kw">pub fn </span>evaluate(<span class="kw-2">&amp;</span><span class="self">self</span>, x: F) -&gt; F {
-        <span class="self">self</span>.coeffs
-            .iter()
-            .rfold(F::ZERO, |acc, coeff| acc * x + <span class="kw-2">*</span>coeff)
+        <a class="self" href="#36">self</a>.coeffs
+            .<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>()
+            .<a href="https://doc.rust-lang.org/nightly/core/iter/traits/double_ended/trait.DoubleEndedIterator.html#tymethod.rfold">rfold</a>(F::ZERO, |acc, coeff| <a href="#39">acc</a> * <a href="#36">x</a> + <span class="kw-2">*</span><a href="#39">coeff</a>)
     }
 
-    <span class="kw">pub fn </span>degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.coeffs.iter().rposition(|<span class="kw-2">&amp;</span>v| !v.is_zero()).unwrap_or(<span class="number">0</span>)
+    <span class="kw">pub fn </span>degree(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a> {
+        <a class="self" href="#42">self</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.rposition">rposition</a>(|<span class="kw-2">&amp;</span>v| !<a href="#43">v</a>.is_zero()).<a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>)
     }
 
     <span class="doccomment">/// Interpolates `points` via Lagrange interpolation.
@@ -381,7 +379,7 @@
     ///
     /// Panics if `points` contains duplicate x-coordinates.
     </span><span class="kw">pub fn </span>from_interpolation(points: <span class="kw-2">&amp;</span>[(F, F)]) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span><span class="kw-2">mut </span>coeffs = <span class="self">Self</span>::zero();
+        <span class="kw">let </span><span class="kw-2">mut </span>coeffs = <a href="#22-24"><span class="self">Self</span>::zero</a>();
 
         <span class="kw">for </span>(i, <span class="kw-2">&amp;</span>(xi, yi)) <span class="kw">in </span>points.iter().enumerate() {
             <span class="kw">let </span><span class="kw-2">mut </span>num = UnivariatePolynomial::one();
@@ -398,38 +396,38 @@
             coeffs = coeffs + selector * yi;
         }
 
-        coeffs.trim_leading_zeroes();
-        coeffs
+        <a href="#52">coeffs</a>.<a href="#79-85">trim_leading_zeroes</a>();
+        <a href="#52">coeffs</a>
     }
 
     <span class="kw">fn </span>identity() -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            coeffs: <span class="macro">vec!</span>[F::ZERO, F::ONE],
+            coeffs: <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[F::ZERO, F::ONE],
         }
     }
 
     <span class="kw">fn </span>trim_leading_zeroes(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-        <span class="kw">if let </span><span class="prelude-val">Some</span>(non_zero_idx) = <span class="self">self</span>.coeffs.iter().rposition(|<span class="kw-2">&amp;</span>coeff| !coeff.is_zero()) {
-            <span class="self">self</span>.coeffs.truncate(non_zero_idx + <span class="number">1</span>);
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(non_zero_idx) = <a class="self" href="#79">self</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.rposition">rposition</a>(|<span class="kw-2">&amp;</span>coeff| !<a href="#80">coeff</a>.is_zero()) {
+            <a class="self" href="#79">self</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.truncate">truncate</a>(<a href="#80">non_zero_idx</a> + <span class="number">1</span>);
         } <span class="kw">else </span>{
-            <span class="self">self</span>.coeffs.clear();
+            <a class="self" href="#79">self</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.clear">clear</a>();
         }
     }
 
     <span class="kw">pub fn </span>into_coeffs(<span class="self">self</span>) -&gt; Vec&lt;F&gt; {
-        <span class="self">self</span>.coeffs
+        <a class="self" href="#87">self</a>.coeffs
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Default <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/default/trait.Default.html">Default</a> <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
     <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::zero()
+        <a href="#22-24"><span class="self">Self</span>::zero</a>()
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; From&lt;F&gt; <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
     <span class="kw">fn </span>from(value: F) -&gt; <span class="self">Self </span>{
-        <span class="self">Self</span>::from_coeffs(<span class="macro">vec!</span>[value])
+        <a href="#16-20"><span class="self">Self</span>::from_coeffs</a>(<a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[value])
     }
 }
 
@@ -440,22 +438,22 @@
         <span class="kw">for </span>coeff <span class="kw">in </span><span class="kw-2">&amp;mut </span><span class="self">self</span>.coeffs {
             <span class="kw-2">*</span>coeff <span class="kw-2">*</span>= rhs;
         }
-        <span class="self">self
+        <span class="self"><a href="#107">self</a>
     </span>}
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Mul <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Mul.html">Mul</a> <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>mul(<span class="kw-2">mut </span><span class="self">self</span>, <span class="kw-2">mut </span>rhs: <span class="self">Self</span>) -&gt; <span class="self">Self </span>{
         <span class="kw">if </span><span class="self">self</span>.is_zero() || rhs.is_zero() {
-            <span class="kw">return </span><span class="self">Self</span>::zero();
+            <span class="kw">return </span><a href="#22-24"><span class="self">Self</span>::zero</a>();
         }
 
-        <span class="self">self</span>.trim_leading_zeroes();
-        rhs.trim_leading_zeroes();
+        <a class="self" href="#118">self</a>.<a href="#79-85">trim_leading_zeroes</a>();
+        <a href="#118">rhs</a>.<a href="#79-85">trim_leading_zeroes</a>();
 
-        <span class="kw">let </span><span class="kw-2">mut </span>res = <span class="macro">vec!</span>[F::ZERO; <span class="self">self</span>.coeffs.len() + rhs.coeffs.len() - <span class="number">1</span>];
+        <span class="kw">let </span><span class="kw-2">mut </span>res = <a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[F::ZERO; <a class="self" href="#118">self</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>() + <a href="#118">rhs</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>() - <span class="number">1</span>];
 
         <span class="kw">for </span>(i, coeff_a) <span class="kw">in </span><span class="self">self</span>.coeffs.into_iter().enumerate() {
             <span class="kw">for </span>(j, coeff_b) <span class="kw">in </span>rhs.coeffs.iter().enumerate() {
@@ -463,16 +461,16 @@
             }
         }
 
-        <span class="self">Self</span>::from_coeffs(res)
+        <a href="#16-20"><span class="self">Self</span>::from_coeffs</a>(<a href="#126">res</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Add <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Add.html">Add</a> <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>add(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; <span class="self">Self </span>{
-        <span class="kw">let </span>n = <span class="self">self</span>.coeffs.len().max(rhs.coeffs.len());
-        <span class="kw">let </span><span class="kw-2">mut </span>coeffs = Vec::with_capacity(n);
+        <span class="kw">let </span>n = <a class="self" href="#141">self</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>().<a href="https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html#tymethod.max">max</a>(<a href="#141">rhs</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.len">len</a>());
+        <span class="kw">let </span><span class="kw-2">mut </span>coeffs = <a href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html#method.with_capacity">Vec::with_capacity</a>(<a href="#142">n</a>);
 
         <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..n {
             <span class="kw">let </span>a = <span class="self">self</span>.coeffs.get(i).copied().unwrap_or(F::ZERO);
@@ -480,49 +478,49 @@
             coeffs.push(a + b);
         }
 
-        <span class="self">Self </span>{ coeffs }
+        <span class="self">Self </span>{ <a href="#143">coeffs</a> }
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Sub <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Sub.html">Sub</a> <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>sub(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; <span class="self">Self </span>{
-        <span class="self">self </span>+ (-rhs)
+        <span class="self"><a href="#158">self</a> </span>+ (-<a href="#158">rhs</a>)
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Neg <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Neg.html">Neg</a> <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
     <span class="kw">type </span>Output = <span class="self">Self</span>;
 
     <span class="kw">fn </span>neg(<span class="self">self</span>) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            coeffs: <span class="self">self</span>.coeffs.into_iter().map(|v| -v).collect(),
+            coeffs: <a class="self" href="#166">self</a>.coeffs.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/collect/trait.IntoIterator.html#tymethod.into_iter">into_iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|v| -<a href="#168">v</a>).<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
         }
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Deref <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/deref/trait.Deref.html">Deref</a> <span class="kw">for </span>UnivariatePolynomial&lt;F&gt; {
     <span class="kw">type </span>Target = [F];
 
     <span class="kw">fn </span>deref(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::Target {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.coeffs
+        <span class="kw-2">&amp;</span><a class="self" href="#176">self</a>.coeffs
     }
 }
 
 <span class="doccomment">/// Evaluates a polynomial represented by coefficients in a slice at a given point `x`.
-</span><span class="kw">pub fn </span>evaluate_on_slice&lt;F: Field&gt;(coeffs: <span class="kw-2">&amp;</span>[F], x: F) -&gt; F {
-    coeffs.iter().rfold(F::ZERO, |acc, <span class="kw-2">&amp;</span>coeff| acc * x + coeff)
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/poly/uni/fn.evaluate_on_slice.html">evaluate_on_slice</a>&lt;F: Field&gt;(coeffs: <span class="kw-2">&amp;</span>[F], x: F) -&gt; F {
+    <a href="#182">coeffs</a>.<a href="https://doc.rust-lang.org/nightly/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/nightly/core/iter/traits/double_ended/trait.DoubleEndedIterator.html#tymethod.rfold">rfold</a>(F::ZERO, |acc, <span class="kw-2">&amp;</span>coeff| <a href="#183">acc</a> * <a href="#182">x</a> + <a href="#183">coeff</a>)
 }
 
 <span class="doccomment">/// Returns `v_0 + alpha * v_1 + ... + alpha^(n-1) * v_{n-1}`.
-</span><span class="kw">pub fn </span>random_linear_combination&lt;F: Field&gt;(v: <span class="kw-2">&amp;</span>[F], alpha: F) -&gt; F {
-    evaluate_on_slice(v, alpha)
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_backend/poly/uni/fn.random_linear_combination.html">random_linear_combination</a>&lt;F: Field&gt;(v: <span class="kw-2">&amp;</span>[F], alpha: F) -&gt; F {
+    <a href="#182-184">evaluate_on_slice</a>(<a href="#187">v</a>, <a href="#187">alpha</a>)
 }
 
 <span class="doccomment">/// Projective fraction.
 </span><span class="attr">#[derive(Debug, Clone, Copy)]
-</span><span class="kw">pub struct </span>Fraction&lt;T&gt; {
+</span><span class="kw">pub struct </span><a href="../../../openvm_stark_backend/poly/uni/struct.Fraction.html">Fraction</a>&lt;T&gt; {
     <span class="kw">pub </span>numerator: T,
     <span class="kw">pub </span>denominator: T,
 }
@@ -530,35 +528,35 @@
 <span class="kw">impl</span>&lt;T&gt; Fraction&lt;T&gt; {
     <span class="kw">pub const fn </span>new(numerator: T, denominator: T) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
-            numerator,
-            denominator,
+            <a href="#199">numerator</a>,
+            <a href="#199">denominator</a>,
         }
     }
 }
 
-<span class="kw">impl</span>&lt;T: Clone + Add&lt;Output = T&gt; + Mul&lt;Output = T&gt;&gt; Add <span class="kw">for </span>Fraction&lt;T&gt; {
+<span class="kw">impl</span>&lt;T: <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a> + Add&lt;Output = T&gt; + Mul&lt;Output = T&gt;&gt; <a href="https://doc.rust-lang.org/nightly/core/ops/arith/trait.Add.html">Add</a> <span class="kw">for </span>Fraction&lt;T&gt; {
     <span class="kw">type </span>Output = Fraction&lt;T&gt;;
 
     <span class="kw">fn </span>add(<span class="self">self</span>, rhs: <span class="self">Self</span>) -&gt; Fraction&lt;T&gt; {
-        Fraction {
-            numerator: rhs.denominator.clone() * <span class="self">self</span>.numerator.clone()
-                + <span class="self">self</span>.denominator.clone() * rhs.numerator.clone(),
-            denominator: <span class="self">self</span>.denominator * rhs.denominator,
+        <a href="#193-196">Fraction</a> {
+            numerator: <a href="#210">rhs</a>.denominator.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>() * <a class="self" href="#210">self</a>.numerator.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>()
+                + <a class="self" href="#210">self</a>.denominator.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>() * <a href="#210">rhs</a>.numerator.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>(),
+            denominator: <a class="self" href="#210">self</a>.denominator * <a href="#210">rhs</a>.denominator,
         }
     }
 }
 
 <span class="kw">impl</span>&lt;F: Field&gt; Fraction&lt;F&gt; {
-    <span class="kw">const </span>ZERO: <span class="self">Self </span>= <span class="self">Self</span>::new(F::ZERO, F::ONE);
+    <span class="kw">const </span>ZERO: <span class="self">Self </span>= <a href="#199-204"><span class="self">Self</span>::new</a>(F::ZERO, F::ONE);
 
-    <span class="kw">pub fn </span>is_zero(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-        <span class="self">self</span>.numerator.is_zero() &amp;&amp; !<span class="self">self</span>.denominator.is_zero()
+    <span class="kw">pub fn </span>is_zero(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a> {
+        <a class="self" href="#222">self</a>.numerator.is_zero() &amp;&amp; !<a class="self" href="#222">self</a>.denominator.is_zero()
     }
 }
 
-<span class="kw">impl</span>&lt;F: Field&gt; Sum <span class="kw">for </span>Fraction&lt;F&gt; {
+<span class="kw">impl</span>&lt;F: Field&gt; <a href="https://doc.rust-lang.org/nightly/core/iter/traits/accum/trait.Sum.html">Sum</a> <span class="kw">for </span>Fraction&lt;F&gt; {
     <span class="kw">fn </span>sum&lt;I: Iterator&lt;Item = <span class="self">Self</span>&gt;&gt;(iter: I) -&gt; <span class="self">Self </span>{
-        iter.fold(<span class="self">Self</span>::ZERO, |a, b| a + b)
+        <a href="#228">iter</a>.<a href="https://doc.rust-lang.org/nightly/core/iter/traits/iterator/trait.Iterator.html#tymethod.fold">fold</a>(<span class="self">Self</span>::ZERO, |a, b| <a href="#229">a</a> + <a href="#229">b</a>)
     }
 }
 

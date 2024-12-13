@@ -122,8 +122,8 @@
 <a href="#121" id="121">121</a>
 <a href="#122" id="122">122</a>
 <a href="#123" id="123">123</a></pre></div><pre class="rust"><code><span class="kw">use </span>openvm_stark_backend::{
-    config::StarkConfig,
-    interaction::stark_log_up::StarkLogUpPhase,
+    <a href="../../../openvm_stark_backend/config/struct.StarkConfig.html">config::StarkConfig</a>,
+    <a href="../../../openvm_stark_backend/interaction/stark_log_up/struct.StarkLogUpPhase.html">interaction::stark_log_up::StarkLogUpPhase</a>,
     p3_challenger::{HashChallenger, SerializingChallenger32},
     p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
@@ -134,114 +134,114 @@
 <span class="kw">use </span>p3_merkle_tree::MerkleTreeMmcs;
 <span class="kw">use </span>p3_symmetric::{CompressionFunctionFromHasher, CryptographicHasher, SerializingHasher32};
 
-<span class="kw">use </span><span class="kw">super</span>::FriParameters;
-<span class="kw">use </span><span class="kw">crate</span>::engine::{StarkEngine, StarkFriEngine};
+<span class="kw">use </span><a href="fri_params.rs.html#4-8"><span class="kw">super</span>::FriParameters</a>;
+<span class="kw">use </span><span class="kw">crate</span>::engine::{<a href="../../../openvm_stark_sdk/engine/trait.StarkEngine.html">StarkEngine</a>, <a href="../engine.rs.html#42-94">StarkFriEngine</a>};
 
 <span class="kw">type </span>Val = BabyBear;
-<span class="kw">type </span>Challenge = BinomialExtensionField&lt;Val, <span class="number">4</span>&gt;;
+<span class="kw">type </span>Challenge = BinomialExtensionField&lt;<a href="#17">Val</a>, <span class="number">4</span>&gt;;
 
 <span class="comment">// Generic over H: CryptographicHasher&lt;u8, [u8; 32]&gt;
 </span><span class="kw">type </span>FieldHash&lt;H&gt; = SerializingHasher32&lt;H&gt;;
 <span class="kw">type </span>Compress&lt;H&gt; = CompressionFunctionFromHasher&lt;H, <span class="number">2</span>, <span class="number">32</span>&gt;;
 <span class="comment">// type InstrCompress&lt;H&gt; = Instrumented&lt;Compress&lt;H&gt;&gt;;
 
-</span><span class="kw">type </span>ValMmcs&lt;H&gt; = MerkleTreeMmcs&lt;Val, u8, FieldHash&lt;H&gt;, Compress&lt;H&gt;, <span class="number">32</span>&gt;;
-<span class="kw">type </span>ChallengeMmcs&lt;H&gt; = ExtensionMmcs&lt;Val, Challenge, ValMmcs&lt;H&gt;&gt;;
-<span class="kw">type </span>Dft = Radix2DitParallel&lt;Val&gt;;
-<span class="kw">type </span>Challenger&lt;H&gt; = SerializingChallenger32&lt;Val, HashChallenger&lt;u8, H, <span class="number">32</span>&gt;&gt;;
+</span><span class="kw">type </span>ValMmcs&lt;H&gt; = MerkleTreeMmcs&lt;<a href="#17">Val</a>, <a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, FieldHash&lt;H&gt;, Compress&lt;H&gt;, <span class="number">32</span>&gt;;
+<span class="kw">type </span>ChallengeMmcs&lt;H&gt; = ExtensionMmcs&lt;<a href="#17">Val</a>, <a href="#18">Challenge</a>, ValMmcs&lt;H&gt;&gt;;
+<span class="kw">type </span>Dft = Radix2DitParallel&lt;<a href="#17">Val</a>&gt;;
+<span class="kw">type </span>Challenger&lt;H&gt; = SerializingChallenger32&lt;<a href="#17">Val</a>, HashChallenger&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, H, <span class="number">32</span>&gt;&gt;;
 
-<span class="kw">type </span>Pcs&lt;H&gt; = TwoAdicFriPcs&lt;Val, Dft, ValMmcs&lt;H&gt;, ChallengeMmcs&lt;H&gt;&gt;;
+<span class="kw">type </span>Pcs&lt;H&gt; = TwoAdicFriPcs&lt;<a href="#17">Val</a>, <a href="#27">Dft</a>, ValMmcs&lt;H&gt;, ChallengeMmcs&lt;H&gt;&gt;;
 
-<span class="kw">type </span>RapPhase&lt;H&gt; = StarkLogUpPhase&lt;Val, Challenge, Challenger&lt;H&gt;&gt;;
+<span class="kw">type </span>RapPhase&lt;H&gt; = StarkLogUpPhase&lt;<a href="#17">Val</a>, <a href="#18">Challenge</a>, Challenger&lt;H&gt;&gt;;
 
-<span class="kw">pub type </span>BabyBearByteHashConfig&lt;H&gt; = StarkConfig&lt;Pcs&lt;H&gt;, RapPhase&lt;H&gt;, Challenge, Challenger&lt;H&gt;&gt;;
+<span class="kw">pub type </span><a href="../../../openvm_stark_sdk/config/baby_bear_bytehash/type.BabyBearByteHashConfig.html">BabyBearByteHashConfig</a>&lt;H&gt; = StarkConfig&lt;Pcs&lt;H&gt;, RapPhase&lt;H&gt;, <a href="#18">Challenge</a>, Challenger&lt;H&gt;&gt;;
 
-<span class="kw">pub struct </span>BabyBearByteHashEngine&lt;H&gt;
+<span class="kw">pub struct </span><a href="../../../openvm_stark_sdk/config/baby_bear_bytehash/struct.BabyBearByteHashEngine.html">BabyBearByteHashEngine</a>&lt;H&gt;
 <span class="kw">where
-    </span>H: CryptographicHasher&lt;u8, [u8; <span class="number">32</span>]&gt; + Clone,
+    </span>H: CryptographicHasher&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, [<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>; <span class="number">32</span>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">pub </span>fri_params: FriParameters,
+    <span class="kw">pub </span>fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>,
     <span class="kw">pub </span>config: BabyBearByteHashConfig&lt;H&gt;,
     <span class="kw">pub </span>byte_hash: H,
 }
 
 <span class="kw">impl</span>&lt;H&gt; StarkEngine&lt;BabyBearByteHashConfig&lt;H&gt;&gt; <span class="kw">for </span>BabyBearByteHashEngine&lt;H&gt;
 <span class="kw">where
-    </span>H: CryptographicHasher&lt;u8, [u8; <span class="number">32</span>]&gt; + Clone + Send + Sync,
+    </span>H: CryptographicHasher&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, [<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>; <span class="number">32</span>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>,
 {
     <span class="kw">fn </span>config(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>BabyBearByteHashConfig&lt;H&gt; {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.config
+        <span class="kw-2">&amp;</span><a class="self" href="#49">self</a>.config
     }
 
     <span class="kw">fn </span>new_challenger(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Challenger&lt;H&gt; {
-        Challenger::from_hasher(<span class="macro">vec!</span>[], <span class="self">self</span>.byte_hash.clone())
+        Challenger::from_hasher(<a class="macro" href="https://doc.rust-lang.org/nightly/alloc/macro.vec.html">vec!</a>[], <a class="self" href="#53">self</a>.byte_hash.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>())
     }
 }
 
 <span class="doccomment">/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-</span><span class="kw">pub fn </span>default_engine&lt;H&gt;(byte_hash: H) -&gt; BabyBearByteHashEngine&lt;H&gt;
+</span><span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_bytehash/fn.default_engine.html">default_engine</a>&lt;H&gt;(byte_hash: H) -&gt; BabyBearByteHashEngine&lt;H&gt;
 <span class="kw">where
-    </span>H: CryptographicHasher&lt;u8, [u8; <span class="number">32</span>]&gt; + Clone,
+    </span>H: CryptographicHasher&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, [<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>; <span class="number">32</span>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">let </span>fri_params = FriParameters::standard_fast();
-    engine_from_byte_hash(byte_hash, fri_params)
+    <span class="kw">let </span>fri_params = <a href="fri_params.rs.html#21-23">FriParameters::standard_fast</a>();
+    <a href="#67-80">engine_from_byte_hash</a>(<a href="#59">byte_hash</a>, <a href="#63">fri_params</a>)
 }
 
-<span class="kw">pub fn </span>engine_from_byte_hash&lt;H&gt;(
+<span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_bytehash/fn.engine_from_byte_hash.html">engine_from_byte_hash</a>&lt;H&gt;(
     byte_hash: H,
-    fri_params: FriParameters,
+    fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>,
 ) -&gt; BabyBearByteHashEngine&lt;H&gt;
 <span class="kw">where
-    </span>H: CryptographicHasher&lt;u8, [u8; <span class="number">32</span>]&gt; + Clone,
+    </span>H: CryptographicHasher&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, [<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>; <span class="number">32</span>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">let </span>config = config_from_byte_hash(byte_hash.clone(), fri_params);
-    BabyBearByteHashEngine {
-        config,
-        byte_hash,
-        fri_params,
+    <span class="kw">let </span>config = <a href="#82-103">config_from_byte_hash</a>(<a href="#68">byte_hash</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>(), <a href="#69">fri_params</a>);
+    <a href="#36-43">BabyBearByteHashEngine</a> {
+        <a href="#74">config</a>,
+        <a href="#68">byte_hash</a>,
+        <a href="#69">fri_params</a>,
     }
 }
 
-<span class="kw">pub fn </span>config_from_byte_hash&lt;H&gt;(
+<span class="kw">pub fn </span><a href="../../../openvm_stark_sdk/config/baby_bear_bytehash/fn.config_from_byte_hash.html">config_from_byte_hash</a>&lt;H&gt;(
     byte_hash: H,
-    fri_params: FriParameters,
+    fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>,
 ) -&gt; BabyBearByteHashConfig&lt;H&gt;
 <span class="kw">where
-    </span>H: CryptographicHasher&lt;u8, [u8; <span class="number">32</span>]&gt; + Clone,
+    </span>H: CryptographicHasher&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, [<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>; <span class="number">32</span>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
-    <span class="kw">let </span>field_hash = FieldHash::new(byte_hash.clone());
-    <span class="kw">let </span>compress = Compress::new(byte_hash);
-    <span class="kw">let </span>val_mmcs = ValMmcs::new(field_hash, compress);
-    <span class="kw">let </span>challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
-    <span class="kw">let </span>dft = Dft::default();
+    <span class="kw">let </span>field_hash = FieldHash::new(<a href="#83">byte_hash</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>compress = Compress::new(<a href="#83">byte_hash</a>);
+    <span class="kw">let </span>val_mmcs = ValMmcs::new(<a href="#89">field_hash</a>, <a href="#90">compress</a>);
+    <span class="kw">let </span>challenge_mmcs = ChallengeMmcs::new(<a href="#91">val_mmcs</a>.<a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html#tymethod.clone">clone</a>());
+    <span class="kw">let </span>dft = <a href="https://doc.rust-lang.org/nightly/core/default/trait.Default.html#tymethod.default">Dft::default</a>();
     <span class="kw">let </span>fri_config = FriConfig {
-        log_blowup: fri_params.log_blowup,
-        num_queries: fri_params.num_queries,
-        proof_of_work_bits: fri_params.proof_of_work_bits,
-        mmcs: challenge_mmcs,
+        log_blowup: <a href="#84">fri_params</a>.log_blowup,
+        num_queries: <a href="#84">fri_params</a>.num_queries,
+        proof_of_work_bits: <a href="#84">fri_params</a>.proof_of_work_bits,
+        mmcs: <a href="#92">challenge_mmcs</a>,
     };
-    <span class="kw">let </span>pcs = Pcs::new(dft, val_mmcs, fri_config);
-    <span class="kw">let </span>rap_phase = StarkLogUpPhase::new();
-    BabyBearByteHashConfig::new(pcs, rap_phase)
+    <span class="kw">let </span>pcs = Pcs::new(<a href="#93">dft</a>, <a href="#91">val_mmcs</a>, <a href="#94">fri_config</a>);
+    <span class="kw">let </span>rap_phase = <a href="../../../openvm_stark_backend/interaction/stark_log_up/struct.StarkLogUpPhase.html#method.new">StarkLogUpPhase::new</a>();
+    <a href="../../../openvm_stark_backend/config/struct.StarkConfig.html#method.new">BabyBearByteHashConfig::new</a>(<a href="#100">pcs</a>, <a href="#101">rap_phase</a>)
 }
 
-<span class="kw">pub trait </span>BabyBearByteHashEngineWithDefaultHash&lt;H&gt;
+<span class="kw">pub trait </span><a href="../../../openvm_stark_sdk/config/baby_bear_bytehash/trait.BabyBearByteHashEngineWithDefaultHash.html">BabyBearByteHashEngineWithDefaultHash</a>&lt;H&gt;
 <span class="kw">where
-    </span>H: CryptographicHasher&lt;u8, [u8; <span class="number">32</span>]&gt; + Clone,
+    </span>H: CryptographicHasher&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, [<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>; <span class="number">32</span>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a>,
 {
     <span class="kw">fn </span>default_hash() -&gt; H;
 }
 
-<span class="kw">impl</span>&lt;H: CryptographicHasher&lt;u8, [u8; <span class="number">32</span>]&gt; + Clone + Send + Sync&gt;
+<span class="kw">impl</span>&lt;H: CryptographicHasher&lt;<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>, [<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>; <span class="number">32</span>]&gt; + <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html">Send</a> + <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a>&gt;
     StarkFriEngine&lt;BabyBearByteHashConfig&lt;H&gt;&gt; <span class="kw">for </span>BabyBearByteHashEngine&lt;H&gt;
 <span class="kw">where
     </span>BabyBearByteHashEngine&lt;H&gt;: BabyBearByteHashEngineWithDefaultHash&lt;H&gt;,
 {
-    <span class="kw">fn </span>new(fri_params: FriParameters) -&gt; <span class="self">Self </span>{
-        engine_from_byte_hash(<span class="self">Self</span>::default_hash(), fri_params)
+    <span class="kw">fn </span>new(fri_params: <a href="fri_params.rs.html#4-8">FriParameters</a>) -&gt; <span class="self">Self </span>{
+        <a href="#67-80">engine_from_byte_hash</a>(<a href="#109"><span class="self">Self</span>::default_hash</a>(), <a href="#117">fri_params</a>)
     }
-    <span class="kw">fn </span>fri_params(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; FriParameters {
-        <span class="self">self</span>.fri_params
+    <span class="kw">fn </span>fri_params(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="fri_params.rs.html#4-8">FriParameters</a> {
+        <a class="self" href="#120">self</a>.fri_params
     }
 }
 </code></pre></div></section></main></body></html>
