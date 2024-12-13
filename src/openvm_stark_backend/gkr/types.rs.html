@@ -265,9 +265,13 @@
 <a href="#264" id="264">264</a>
 <a href="#265" id="265">265</a>
 <a href="#266" id="266">266</a>
-<a href="#267" id="267">267</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::ops::Index;
+<a href="#267" id="267">267</a>
+<a href="#268" id="268">268</a>
+<a href="#269" id="269">269</a>
+<a href="#270" id="270">270</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::ops::Index;
 
 <span class="kw">use </span>p3_field::Field;
+<span class="kw">use </span>serde::{Deserialize, Serialize};
 <span class="kw">use </span>thiserror::Error;
 
 <span class="kw">use crate</span>::{
@@ -279,6 +283,7 @@
 };
 
 <span class="doccomment">/// Batch GKR proof.
+</span><span class="attr">#[derive(Clone, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>GkrBatchProof&lt;F&gt; {
     <span class="doccomment">/// Sum-check proof for each layer.
     </span><span class="kw">pub </span>sumcheck_proofs: Vec&lt;SumcheckProof&lt;F&gt;&gt;,
@@ -289,6 +294,7 @@
 }
 
 <span class="doccomment">/// Values of interest obtained from the execution of the GKR protocol.
+</span><span class="attr">#[derive(Clone, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>GkrArtifact&lt;F&gt; {
     <span class="doccomment">/// Out-of-domain (OOD) point for evaluating columns in the input layer.
     </span><span class="kw">pub </span>ood_point: Vec&lt;F&gt;,
@@ -299,7 +305,7 @@
 }
 
 <span class="doccomment">/// Stores two evaluations of each column in a GKR layer.
-</span><span class="attr">#[derive(Debug, Clone)]
+</span><span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>GkrMask&lt;F&gt; {
     columns: Vec&lt;[F; <span class="number">2</span>]&gt;,
 }

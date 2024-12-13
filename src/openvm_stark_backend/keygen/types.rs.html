@@ -167,9 +167,7 @@
 <a href="#166" id="166">166</a>
 <a href="#167" id="167">167</a>
 <a href="#168" id="168">168</a>
-<a href="#169" id="169">169</a>
-<a href="#170" id="170">170</a>
-<a href="#171" id="171">171</a></pre></div><pre class="rust"><code><span class="comment">// Keygen V2 API for STARK backend
+<a href="#169" id="169">169</a></pre></div><pre class="rust"><code><span class="comment">// Keygen V2 API for STARK backend
 // Changes:
 // - All AIRs can be optional
 </span><span class="kw">use </span>std::sync::Arc;
@@ -181,7 +179,6 @@
 <span class="kw">use crate</span>::{
     air_builders::symbolic::SymbolicConstraints,
     config::{Com, PcsProverData, RapPhaseSeqProvingKey, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
 };
 
 <span class="doccomment">/// Widths of different parts of trace matrix
@@ -235,7 +232,6 @@
     <span class="doccomment">/// The factor to multiple the trace degree by to get the degree of the quotient polynomial. Determined from the max constraint degree of the AIR constraints.
     /// This is equivalently the number of chunks the quotient polynomial is split into.
     </span><span class="kw">pub </span>quotient_degree: usize,
-    <span class="kw">pub </span>rap_phase_seq_kind: RapPhaseSeqKind,
 }
 
 <span class="doccomment">/// Common verifying key for multiple AIRs.

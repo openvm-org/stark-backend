@@ -328,15 +328,17 @@
 <a href="#327" id="327">327</a>
 <a href="#328" id="328">328</a>
 <a href="#329" id="329">329</a>
-<a href="#330" id="330">330</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
+<a href="#330" id="330">330</a>
+<a href="#331" id="331">331</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
 </span><span class="kw">use </span>std::{
     iter::Sum,
     ops::{Add, Deref, Mul, Neg, Sub},
 };
 
 <span class="kw">use </span>p3_field::Field;
+<span class="kw">use </span>serde::{Deserialize, Serialize};
 
-<span class="attr">#[derive(Debug, Clone)]
+<span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>UnivariatePolynomial&lt;F&gt; {
     coeffs: Vec&lt;F&gt;,
 }

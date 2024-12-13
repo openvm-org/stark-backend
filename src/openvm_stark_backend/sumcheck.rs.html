@@ -327,7 +327,13 @@
 <a href="#326" id="326">326</a>
 <a href="#327" id="327">327</a>
 <a href="#328" id="328">328</a>
-<a href="#329" id="329">329</a></pre></div><pre class="rust"><code><span class="comment">// Copied from starkware-libs/stwo under Apache-2.0 license.
+<a href="#329" id="329">329</a>
+<a href="#330" id="330">330</a>
+<a href="#331" id="331">331</a>
+<a href="#332" id="332">332</a>
+<a href="#333" id="333">333</a>
+<a href="#334" id="334">334</a>
+<a href="#335" id="335">335</a></pre></div><pre class="rust"><code><span class="comment">// Copied from starkware-libs/stwo under Apache-2.0 license.
 //
 </span><span class="doccomment">//! Sum-check protocol that proves and verifies claims about `sum_x g(x)` for all x in `{0, 1}^n`.
 //!
@@ -339,7 +345,8 @@
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_challenger::FieldChallenger;
-<span class="kw">use </span>p3_field::Field;
+<span class="kw">use </span>p3_field::{ExtensionField, Field};
+<span class="kw">use </span>serde::{Deserialize, Serialize};
 <span class="kw">use </span>thiserror::Error;
 
 <span class="kw">use </span><span class="kw">crate</span>::poly::{multi::MultivariatePolyOracle, uni::UnivariatePolynomial};
@@ -373,12 +380,15 @@
 /// - The degree of any multivariate polynomial exceeds [`MAX_DEGREE`] in any variable.
 /// - The round polynomials are inconsistent with their corresponding claimed sum on `0` and `1`.
 </span><span class="comment">// TODO: Consider returning constant oracles as separate type.
-</span><span class="kw">pub fn </span>prove_batch&lt;F: Field, O: MultivariatePolyOracle&lt;F&gt;&gt;(
-    <span class="kw-2">mut </span>claims: Vec&lt;F&gt;,
+</span><span class="kw">pub fn </span>prove_batch&lt;F, EF, O&gt;(
+    <span class="kw-2">mut </span>claims: Vec&lt;EF&gt;,
     <span class="kw-2">mut </span>polys: Vec&lt;O&gt;,
-    lambda: F,
+    lambda: EF,
     challenger: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>FieldChallenger&lt;F&gt;,
-) -&gt; (SumcheckProof&lt;F&gt;, SumcheckArtifacts&lt;F, O&gt;) {
+) -&gt; (SumcheckProof&lt;EF&gt;, SumcheckArtifacts&lt;EF, O&gt;)
+<span class="kw">where </span>F: Field,
+        EF: ExtensionField&lt;F&gt;,
+        O: MultivariatePolyOracle&lt;EF&gt; {
     <span class="kw">let </span>n_variables = polys.iter().map(O::arity).max().unwrap();
     <span class="macro">assert_eq!</span>(claims.len(), polys.len());
 
@@ -404,8 +414,8 @@
                     claim.halve().into()
                 };
 
-                <span class="kw">let </span>eval_at_0 = round_poly.evaluate(F::ZERO);
-                <span class="kw">let </span>eval_at_1 = round_poly.evaluate(F::ONE);
+                <span class="kw">let </span>eval_at_0 = round_poly.evaluate(EF::ZERO);
+                <span class="kw">let </span>eval_at_1 = round_poly.evaluate(EF::ONE);
 
                 <span class="macro">assert_eq!</span>(
                     eval_at_0 + eval_at_1,
@@ -425,7 +435,9 @@
 
         <span class="kw">let </span>round_poly = random_linear_combination(<span class="kw-2">&amp;</span>this_round_polys, lambda);
 
-        challenger.observe_slice(<span class="kw-2">&amp;</span>round_poly);
+        <span class="kw">for </span>coef <span class="kw">in </span>round_poly.as_ref() {
+            challenger.observe_ext_element(<span class="kw-2">*</span>coef);
+        }
 
         <span class="kw">let </span>challenge = challenger.sample_ext_element();
 
@@ -510,7 +522,7 @@
     <span class="prelude-val">Ok</span>((assignment, claim))
 }
 
-<span class="attr">#[derive(Debug, Clone)]
+<span class="attr">#[derive(Debug, Clone, Serialize, Deserialize)]
 </span><span class="kw">pub struct </span>SumcheckProof&lt;F&gt; {
     <span class="kw">pub </span>round_polys: Vec&lt;UnivariatePolynomial&lt;F&gt;&gt;,
 }

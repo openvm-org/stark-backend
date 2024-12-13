@@ -238,7 +238,7 @@
 <span class="attr">#[derive(Debug)]
 </span><span class="kw">pub struct </span>StarkConfig&lt;Pcs, RapPhaseSeq, Challenge, Challenger&gt; {
     pcs: Pcs,
-    rap_phase: RapPhaseSeq,
+    rap_phase_seq: RapPhaseSeq,
     _phantom: PhantomData&lt;(Challenge, Challenger)&gt;,
 }
 
@@ -246,7 +246,7 @@
     <span class="kw">pub const fn </span>new(pcs: Pcs, rap_phase: RapPhaseSeq) -&gt; <span class="self">Self </span>{
         <span class="self">Self </span>{
             pcs,
-            rap_phase,
+            rap_phase_seq: rap_phase,
             _phantom: PhantomData,
         }
     }
@@ -275,7 +275,7 @@
         <span class="kw-2">&amp;</span><span class="self">self</span>.pcs
     }
     <span class="kw">fn </span>rap_phase_seq(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="self">Self</span>::RapPhaseSeq {
-        <span class="kw-2">&amp;</span><span class="self">self</span>.rap_phase
+        <span class="kw-2">&amp;</span><span class="self">self</span>.rap_phase_seq
     }
 }
 

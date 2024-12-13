@@ -263,8 +263,7 @@
 <a href="#262" id="262">262</a>
 <a href="#263" id="263">263</a>
 <a href="#264" id="264">264</a>
-<a href="#265" id="265">265</a>
-<a href="#266" id="266">266</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
+<a href="#265" id="265">265</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
 </span><span class="kw">use </span>std::{
     iter::zip,
     ops::{Deref, DerefMut},
@@ -307,6 +306,26 @@
 
     <span class="kw">pub fn </span>into_evals(<span class="self">self</span>) -&gt; Vec&lt;F&gt; {
         <span class="self">self</span>.evals
+    }
+
+
+    <span class="doccomment">/// Evaluates the multilinear polynomial at `point`.
+    </span><span class="kw">pub fn </span>eval(<span class="kw-2">&amp;</span><span class="self">self</span>, point: <span class="kw-2">&amp;</span>[F]) -&gt; F {
+        <span class="kw">pub fn </span>eval_rec&lt;F: Field&gt;(mle_evals: <span class="kw-2">&amp;</span>[F], p: <span class="kw-2">&amp;</span>[F]) -&gt; F {
+            <span class="kw">match </span>p {
+                [] =&gt; mle_evals[<span class="number">0</span>],
+                <span class="kw-2">&amp;</span>[p_i, <span class="kw-2">ref </span>p @ ..] =&gt; {
+                    <span class="kw">let </span>(lhs, rhs) = mle_evals.split_at(mle_evals.len() / <span class="number">2</span>);
+                    <span class="kw">let </span>lhs_eval = eval_rec(lhs, p);
+                    <span class="kw">let </span>rhs_eval = eval_rec(rhs, p);
+                    <span class="comment">// Equivalent to `eq(0, p_i) * lhs_eval + eq(1, p_i) * rhs_eval`.
+                    </span>p_i * (rhs_eval - lhs_eval) + lhs_eval
+                }
+            }
+        }
+
+        <span class="kw">let </span>mle_evals = <span class="self">self</span>.clone().into_evals();
+        eval_rec(<span class="kw-2">&amp;</span>mle_evals, point)
     }
 }
 
@@ -385,27 +404,6 @@
     <span class="kw">use </span>p3_field::{AbstractField, Field};
 
     <span class="kw">use super</span>::<span class="kw-2">*</span>;
-
-    <span class="kw">impl</span>&lt;F: Field&gt; Mle&lt;F&gt; {
-        <span class="doccomment">/// Evaluates the multilinear polynomial at `point`.
-        </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>eval(<span class="kw-2">&amp;</span><span class="self">self</span>, point: <span class="kw-2">&amp;</span>[F]) -&gt; F {
-            <span class="kw">pub fn </span>eval_rec&lt;F: Field&gt;(mle_evals: <span class="kw-2">&amp;</span>[F], p: <span class="kw-2">&amp;</span>[F]) -&gt; F {
-                <span class="kw">match </span>p {
-                    [] =&gt; mle_evals[<span class="number">0</span>],
-                    <span class="kw-2">&amp;</span>[p_i, <span class="kw-2">ref </span>p @ ..] =&gt; {
-                        <span class="kw">let </span>(lhs, rhs) = mle_evals.split_at(mle_evals.len() / <span class="number">2</span>);
-                        <span class="kw">let </span>lhs_eval = eval_rec(lhs, p);
-                        <span class="kw">let </span>rhs_eval = eval_rec(rhs, p);
-                        <span class="comment">// Equivalent to `eq(0, p_i) * lhs_eval + eq(1, p_i) * rhs_eval`.
-                        </span>p_i * (rhs_eval - lhs_eval) + lhs_eval
-                    }
-                }
-            }
-
-            <span class="kw">let </span>mle_evals = <span class="self">self</span>.clone().into_evals();
-            eval_rec(<span class="kw-2">&amp;</span>mle_evals, point)
-        }
-    }
 
     <span class="attr">#[test]
     </span><span class="kw">fn </span>test_mle_evaluation() {

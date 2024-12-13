@@ -27,8 +27,7 @@
 <a href="#26" id="26">26</a>
 <a href="#27" id="27">27</a>
 <a href="#28" id="28">28</a>
-<a href="#29" id="29">29</a>
-<a href="#30" id="30">30</a></pre></div><pre class="rust"><code><span class="kw">use crate</span>::{
+<a href="#29" id="29">29</a></pre></div><pre class="rust"><code><span class="kw">use crate</span>::{
     config::StarkGenericConfig,
     interaction::HasInteractionChunkSize,
     keygen::types::{MultiStarkProvingKey, StarkProvingKey},
@@ -43,7 +42,6 @@
     <span class="kw">fn </span>get_quotient_vk_data(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; QuotientVkData&lt;SC&gt; {
         QuotientVkData {
             quotient_degree: <span class="self">self</span>.vk.quotient_degree,
-            rap_phase_seq_kind: <span class="self">self</span>.vk.rap_phase_seq_kind,
             interaction_chunk_size: <span class="self">self</span>.rap_phase_seq_pk.interaction_chunk_size(),
             symbolic_constraints: <span class="kw-2">&amp;</span><span class="self">self</span>.vk.symbolic_constraints,
         }

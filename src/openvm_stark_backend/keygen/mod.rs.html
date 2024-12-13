@@ -237,10 +237,7 @@
 <a href="#236" id="236">236</a>
 <a href="#237" id="237">237</a>
 <a href="#238" id="238">238</a>
-<a href="#239" id="239">239</a>
-<a href="#240" id="240">240</a>
-<a href="#241" id="241">241</a>
-<a href="#242" id="242">242</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#239" id="239">239</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_field::AbstractExtensionField;
@@ -264,7 +261,6 @@
 
 <span class="kw">struct </span>AirKeygenBuilder&lt;SC: StarkGenericConfig&gt; {
     air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;,
-    rap_phase_seq_kind: RapPhaseSeqKind,
     prep_keygen_data: PrepKeygenData&lt;SC&gt;,
 }
 
@@ -290,7 +286,7 @@
     </span><span class="kw">pub fn </span>add_air(<span class="kw-2">&amp;mut </span><span class="self">self</span>, air: Arc&lt;<span class="kw">dyn </span>AnyRap&lt;SC&gt;&gt;) -&gt; usize {
         <span class="self">self</span>.partitioned_airs.push(AirKeygenBuilder::new(
             <span class="self">self</span>.config.pcs(),
-            SC::RapPhaseSeq::ID,
+            SC::RapPhaseSeq::KIND,
             air,
         ));
         <span class="self">self</span>.partitioned_airs.len() - <span class="number">1
@@ -376,7 +372,6 @@
         <span class="kw">let </span>prep_keygen_data = compute_prep_data_for_air(pcs, air.as_ref());
         AirKeygenBuilder {
             air,
-            rap_phase_seq_kind,
             prep_keygen_data,
         }
     }
@@ -411,7 +406,6 @@
             params,
             symbolic_constraints,
             quotient_degree,
-            rap_phase_seq_kind: <span class="self">self</span>.rap_phase_seq_kind,
         };
         StarkProvingKey {
             air_name,
@@ -436,7 +430,7 @@
             <span class="kw-2">&amp;</span>width,
             <span class="kw-2">&amp;</span>[],
             <span class="kw-2">&amp;</span>[],
-            SC::RapPhaseSeq::ID,
+            SC::RapPhaseSeq::KIND,
             interaction_chunk_size.unwrap_or(<span class="number">1</span>),
         )
     }

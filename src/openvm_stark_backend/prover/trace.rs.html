@@ -201,11 +201,19 @@
 <a href="#200" id="200">200</a>
 <a href="#201" id="201">201</a>
 <a href="#202" id="202">202</a>
-<a href="#203" id="203">203</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
+<a href="#203" id="203">203</a>
+<a href="#204" id="204">204</a>
+<a href="#205" id="205">205</a>
+<a href="#206" id="206">206</a>
+<a href="#207" id="207">207</a>
+<a href="#208" id="208">208</a>
+<a href="#209" id="209">209</a>
+<a href="#210" id="210">210</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::sync::Arc;
 
 <span class="kw">use </span>derivative::Derivative;
 <span class="kw">use </span>itertools::{izip, Itertools};
 <span class="kw">use </span>p3_commit::Pcs;
+<span class="kw">use </span>p3_field::Field;
 <span class="kw">use </span>p3_matrix::{
     dense::{RowMajorMatrix, RowMajorMatrixView},
     Matrix,
@@ -371,10 +379,16 @@
 }
 
 <span class="doccomment">/// A view of just the preprocessed AIR, without any after challenge columns.
-</span><span class="kw">pub struct </span>PairTraceView&lt;<span class="lifetime">'a</span>, F&gt; {
-    <span class="kw">pub </span>preprocessed: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="prelude-ty">Option</span>&lt;RowMajorMatrixView&lt;<span class="lifetime">'a</span>, F&gt;&gt;,
-    <span class="kw">pub </span>partitioned_main: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[RowMajorMatrixView&lt;<span class="lifetime">'a</span>, F&gt;],
-    <span class="kw">pub </span>public_values: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[F],
+</span><span class="kw">pub struct </span>PairTraceView&lt;<span class="lifetime">'a</span>, T&gt; {
+    <span class="kw">pub </span>preprocessed: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="prelude-ty">Option</span>&lt;RowMajorMatrixView&lt;<span class="lifetime">'a</span>, T&gt;&gt;,
+    <span class="kw">pub </span>partitioned_main: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[RowMajorMatrixView&lt;<span class="lifetime">'a</span>, T&gt;],
+    <span class="kw">pub </span>public_values: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[T],
+}
+
+<span class="kw">impl</span>&lt;F: Field&gt; PairTraceView&lt;<span class="lifetime">'_</span>, F&gt; {
+    <span class="kw">pub fn </span>height(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+        <span class="self">self</span>.partitioned_main[<span class="number">0</span>].height()
+    }
 }
 
 <span class="doccomment">/// The full RAP trace consists of horizontal concatenation of multiple matrices of the same height:

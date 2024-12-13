@@ -172,7 +172,12 @@
 <a href="#171" id="171">171</a>
 <a href="#172" id="172">172</a>
 <a href="#173" id="173">173</a>
-<a href="#174" id="174">174</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::fmt::Debug;
+<a href="#174" id="174">174</a>
+<a href="#175" id="175">175</a>
+<a href="#176" id="176">176</a>
+<a href="#177" id="177">177</a>
+<a href="#178" id="178">178</a>
+<a href="#179" id="179">179</a></pre></div><pre class="rust"><code><span class="kw">use </span>std::fmt::Debug;
 
 <span class="kw">use </span>derivative::Derivative;
 <span class="kw">use </span>itertools::Itertools;
@@ -301,6 +306,7 @@
                 preprocessed: preprocessed_openings,
                 main: main_openings,
                 after_challenge: after_challenge_openings,
+                extra_after_challenge: <span class="macro">todo!</span>(),
                 quotient: quotient_openings,
             },
         }
@@ -337,6 +343,10 @@
     <span class="doccomment">/// For each phase after challenge, there is shared commitment.
     /// For each commitment, if any, for each matrix in the commitment, the opened values,
     </span><span class="kw">pub </span>after_challenge: Vec&lt;Vec&lt;AdjacentOpenedValues&lt;Challenge&gt;&gt;&gt;,
+    <span class="doccomment">/// Any extra opening values for the after challenge phases.
+    ///
+    /// For each after challenge phase, for each matrix, for each point, for each column.
+    </span><span class="kw">pub </span>extra_after_challenge: Vec&lt;Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt;&gt;,
     <span class="doccomment">/// For each RAP, for each quotient chunk in quotient poly, the opened values
     </span><span class="kw">pub </span>quotient: Vec&lt;Vec&lt;Vec&lt;Challenge&gt;&gt;&gt;,
 }

@@ -543,7 +543,11 @@
 <a href="#542" id="542">542</a>
 <a href="#543" id="543">543</a>
 <a href="#544" id="544">544</a>
-<a href="#545" id="545">545</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
+<a href="#545" id="545">545</a>
+<a href="#546" id="546">546</a>
+<a href="#547" id="547">547</a>
+<a href="#548" id="548">548</a>
+<a href="#549" id="549">549</a></pre></div><pre class="rust"><code><span class="doccomment">//! Copied from starkware-libs/stwo under Apache-2.0 license.
 //! GKR batch prover for Grand Product and LogUp lookup arguments.
 </span><span class="kw">use </span>std::{
     iter::{successors, zip},
@@ -552,7 +556,7 @@
 
 <span class="kw">use </span>itertools::Itertools;
 <span class="kw">use </span>p3_challenger::FieldChallenger;
-<span class="kw">use </span>p3_field::Field;
+<span class="kw">use </span>p3_field::{ExtensionField, Field};
 <span class="kw">use </span>thiserror::Error;
 
 <span class="kw">use crate</span>::{
@@ -872,10 +876,10 @@
 ///
 /// The input layers should be committed to the channel before calling this function.
 </span><span class="comment">// GKR algorithm: &lt;https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf&gt; (page 64)
-</span><span class="kw">pub fn </span>prove_batch&lt;F: Field&gt;(
+</span><span class="kw">pub fn </span>prove_batch&lt;F: Field, EF: ExtensionField&lt;F&gt;&gt;(
     challenger: <span class="kw-2">&amp;mut </span><span class="kw">impl </span>FieldChallenger&lt;F&gt;,
-    input_layer_by_instance: Vec&lt;Layer&lt;F&gt;&gt;,
-) -&gt; (GkrBatchProof&lt;F&gt;, GkrArtifact&lt;F&gt;) {
+    input_layer_by_instance: Vec&lt;Layer&lt;EF&gt;&gt;,
+) -&gt; (GkrBatchProof&lt;EF&gt;, GkrArtifact&lt;EF&gt;) {
     <span class="kw">let </span>n_instances = input_layer_by_instance.len();
     <span class="kw">let </span>n_layers_by_instance = input_layer_by_instance
         .iter()
@@ -911,12 +915,14 @@
 
         <span class="comment">// Seed the channel with layer claims.
         </span><span class="kw">for </span>claims_to_verify <span class="kw">in </span>claims_to_verify_by_instance.iter().flatten() {
-            challenger.observe_slice(claims_to_verify);
+            <span class="kw">for </span>claim <span class="kw">in </span>claims_to_verify {
+                challenger.observe_ext_element(<span class="kw-2">*</span>claim);
+            }
         }
 
         <span class="kw">let </span>eq_evals = HypercubeEqEvals::eval(<span class="kw-2">&amp;</span>ood_point);
-        <span class="kw">let </span>sumcheck_alpha = challenger.sample();
-        <span class="kw">let </span>instance_lambda = challenger.sample();
+        <span class="kw">let </span>sumcheck_alpha: EF = challenger.sample_ext_element();
+        <span class="kw">let </span>instance_lambda: EF = challenger.sample_ext_element();
 
         <span class="kw">let </span><span class="kw-2">mut </span>sumcheck_oracles = Vec::new();
         <span class="kw">let </span><span class="kw-2">mut </span>sumcheck_claims = Vec::new();
@@ -930,7 +936,7 @@
                 sumcheck_oracles.push(GkrMultivariatePolyOracle {
                     eq_evals: <span class="kw-2">&amp;</span>eq_evals,
                     input_layer: layer,
-                    eq_fixed_var_correction: F::ONE,
+                    eq_fixed_var_correction: EF::ONE,
                     lambda: instance_lambda,
                 });
                 sumcheck_claims.push(random_linear_combination(claims_to_verify, instance_lambda));
@@ -962,12 +968,14 @@
         <span class="comment">// Seed the channel with the layer masks.
         </span><span class="kw">for </span>(<span class="kw-2">&amp;</span>instance, mask) <span class="kw">in </span>zip(<span class="kw-2">&amp;</span>sumcheck_instances, <span class="kw-2">&amp;</span>masks) {
             <span class="kw">for </span>column <span class="kw">in </span>mask.columns() {
-                challenger.observe_slice(column);
+                <span class="kw">for </span>el <span class="kw">in </span>column {
+                    challenger.observe_ext_element(<span class="kw-2">*</span>el);
+                }
             }
             layer_masks_by_instance[instance].push(mask.clone());
         }
 
-        <span class="kw">let </span>challenge = challenger.sample();
+        <span class="kw">let </span>challenge: EF = challenger.sample_ext_element();
         ood_point = sumcheck_ood_point;
         ood_point.push(challenge);
 
