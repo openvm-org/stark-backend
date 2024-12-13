@@ -3,7 +3,6 @@ name: Build and Deploy Crate Docs
 on:
   push:
     branches: [main]
-  pull_request:
 
 jobs:
   docs:
@@ -24,6 +23,8 @@ jobs:
         env:
           # taken from https://github.com/paradigmxyz/reth/blob/main/.github/workflows/book.yml
           RUSTDOCFLAGS: --cfg docsrs --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
+
+      # TODO: make a special tag for doc commit when pushing v*.*.* tags
 
       # Deploy to gh-pages branch using peaceiris/actions-gh-pages
       - name: Deploy to GitHub Pages
