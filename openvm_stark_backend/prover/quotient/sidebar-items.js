@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["single"],"struct":["ProverQuotientData","QuotientChunk","QuotientCommitter","QuotientData","QuotientVkData","SingleQuotientData"]};

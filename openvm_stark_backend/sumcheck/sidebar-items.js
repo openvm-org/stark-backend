@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_DEGREE"],"enum":["SumcheckError"],"fn":["partially_verify","prove_batch"],"struct":["SumcheckArtifacts","SumcheckProof"],"type":["RoundIndex"]};

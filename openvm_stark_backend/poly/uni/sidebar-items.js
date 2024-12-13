@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["evaluate_on_slice","random_linear_combination"],"struct":["Fraction","UnivariatePolynomial"]};

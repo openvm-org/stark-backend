@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["openvm_stark_backend",[]],["openvm_stark_sdk",[["impl&lt;SC: <a class=\"trait\" href=\"openvm_stark_backend/config/trait.StarkGenericConfig.html\" title=\"trait openvm_stark_backend::config::StarkGenericConfig\">StarkGenericConfig</a>&gt; <a class=\"trait\" href=\"openvm_stark_backend/chip/trait.Chip.html\" title=\"trait openvm_stark_backend::chip::Chip\">Chip</a>&lt;SC&gt; for <a class=\"struct\" href=\"openvm_stark_sdk/dummy_airs/fib_air/chip/struct.FibonacciChip.html\" title=\"struct openvm_stark_sdk::dummy_airs::fib_air::chip::FibonacciChip\">FibonacciChip</a><div class=\"where\">where\n    <a class=\"type\" href=\"openvm_stark_backend/config/type.Val.html\" title=\"type openvm_stark_backend::config::Val\">Val</a>&lt;SC&gt;: PrimeField32,</div>"],["impl&lt;SC: <a class=\"trait\" href=\"openvm_stark_backend/config/trait.StarkGenericConfig.html\" title=\"trait openvm_stark_backend::config::StarkGenericConfig\">StarkGenericConfig</a>&gt; <a class=\"trait\" href=\"openvm_stark_backend/chip/trait.Chip.html\" title=\"trait openvm_stark_backend::chip::Chip\">Chip</a>&lt;SC&gt; for <a class=\"struct\" href=\"openvm_stark_sdk/dummy_airs/interaction/dummy_interaction_air/struct.DummyInteractionChip.html\" title=\"struct openvm_stark_sdk::dummy_airs::interaction::dummy_interaction_air::DummyInteractionChip\">DummyInteractionChip</a>&lt;'_, SC&gt;"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[27,1340]}

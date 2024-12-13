@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NUM_FIBONACCI_COLS"],"struct":["FibonacciCols"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["standard_fri_params_with_100_bits_conjectured_security"],"struct":["FriParameters"]};

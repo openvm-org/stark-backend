@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["parizip"],"mod":["air_builders","circuit_api","commit","config","engine","gkr","interaction","keygen","poly","prover","rap","sumcheck","utils","verifier"],"trait":["Chip","ChipUsageGetter"]};

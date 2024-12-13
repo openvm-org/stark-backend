@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["compute_single_rap_quotient_values"]};

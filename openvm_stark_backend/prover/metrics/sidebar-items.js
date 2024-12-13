@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["format_number_with_underscores","trace_metrics"],"struct":["SingleTraceMetrics","TraceCells","TraceMetrics"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["config_from_perm","default_config","default_engine","engine_from_perm","print_hash_counts","root_perm"],"struct":["BabyBearPermutationRootEngine"],"type":["BabyBearPermutationRootConfig","BabyBearPoseidon2RootConfig","BabyBearPoseidon2RootEngine"]};

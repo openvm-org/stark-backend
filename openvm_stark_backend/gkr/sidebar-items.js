@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Gate","GkrError","Layer"],"fn":["correct_sum_as_poly_in_first_variable","partially_verify_batch","prove_batch"],"struct":["GkrArtifact","GkrBatchProof","GkrMask","InvalidNumMaskColumnsError","NotConstantPolyError","NotOutputLayerError"],"type":["LayerIndex"]};

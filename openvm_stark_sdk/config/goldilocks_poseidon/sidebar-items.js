@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["config_from_perm","default_config","default_engine","engine_from_perm","random_instrumented_perm","random_perm"],"struct":["GoldilocksPermutationEngine"],"type":["Challenger","GoldilocksPermutationConfig","GoldilocksPoseidonConfig","GoldilocksPoseidonEngine"]};
