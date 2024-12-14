@@ -1,10 +1,12 @@
-name: Build and Deploy Crate Docs
+name: Build and Deploy Crate Docs to Vercel 
 
 on:
   push:
     branches: [main]
     tags:
       - v*.*.*
+  pull_request:
+    branches: ["chore/rust-docs/deploy"]
 
 jobs:
   docs:
@@ -28,10 +30,16 @@ jobs:
 
       # TODO: make a special tag for doc commit when pushing v*.*.* tags
 
-      # Deploy to gh-pages branch using peaceiris/actions-gh-pages
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          personal_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./target/doc
-          publish_branch: gh-pages
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+
+      - name: Deploy to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }} # Token stored in GitHub Secrets
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+        run: |
+          cd target/doc
+          mkdir .vercel
+          echo "{\"projectId\":\"$VERCEL_PROJECT_ID\",\"orgId\":\"$VERCEL_ORG_ID\"}" > .vercel/project.json
+          vercel --prod --token $VERCEL_TOKEN        
