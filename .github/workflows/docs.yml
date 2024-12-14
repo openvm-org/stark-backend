@@ -6,7 +6,7 @@ on:
     tags:
       - v*.*.*
   pull_request:
-    branches: ["chore/rust-docs/deploy"]
+    branches: ["main"]
 
 jobs:
   docs:
