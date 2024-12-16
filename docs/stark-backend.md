@@ -72,7 +72,7 @@ it is not difficult to add one.
 
 Instead, only a special type of RAP is supported: an AIR with Interactions.
 An AIR with preprocessed and main trace can be extended to a RAP
-with one challenge phase via the [Interactions API](./src/interaction/README.md).
+with one challenge phase via the [Interactions API](./interactions.md).
 
 The backend currently has special support for Interactive AIRs, and completely owns
 the generation of the trace in the challenge phase for these RAPs -- for reference,
@@ -84,10 +84,3 @@ To fully support the Interaction API, the verifier also does a final cumulative
 sum check. This is done in `MultiTraceStarkVerifier::verify`.
 This can be framed as an additional operation to perform on the per-RAP
 exposed values after the challenge phase.
-
-## TODO
-
-Codify special verifier instructions for operations that should be performed on
-public values and exposed values, in a serializable way.
-These instructions should be extended to equality constraints between public values
-and trace commitments.
