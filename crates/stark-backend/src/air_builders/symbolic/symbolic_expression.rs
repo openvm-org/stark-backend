@@ -5,7 +5,7 @@ use core::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use std::sync::Arc;
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use p3_field::{AbstractField, Field};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::symbolic_variable::SymbolicVariable;
 
 /// An expression over `SymbolicVariable`s.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "F: Field")]
 pub enum SymbolicExpression<F> {
     Variable(SymbolicVariable<F>),
@@ -306,18 +306,41 @@ impl<F: Field> Product<F> for SymbolicExpression<F> {
     }
 }
 
-pub trait SymbolicEvaluator<F: Field, E: AbstractField + From<F>> {
+pub trait SymbolicEvaluator<F: Field, E: AbstractField + From<F>>
+where
+    SymbolicVariable<F>: Hash + PartialEq + Eq,
+{
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> E;
 
-    fn eval_expr(&self, symbolic_expr: &SymbolicExpression<F>) -> E {
-        match symbolic_expr {
+    #[allow(clippy::needless_option_as_deref)]
+    fn eval_expr(
+        &self,
+        symbolic_expr: &SymbolicExpression<F>,
+        mut cache: Option<&mut HashMap<SymbolicExpression<F>, E>>,
+    ) -> E {
+        if let Some(ref mut cache) = cache {
+            if let Some(e) = cache.get(symbolic_expr) {
+                return e.clone();
+            }
+        }
+        let e = match symbolic_expr {
             SymbolicExpression::Variable(var) => self.eval_var(*var),
             SymbolicExpression::Constant(c) => (*c).into(),
-            SymbolicExpression::Add { x, y, .. } => self.eval_expr(x) + self.eval_expr(y),
-            SymbolicExpression::Sub { x, y, .. } => self.eval_expr(x) - self.eval_expr(y),
-            SymbolicExpression::Neg { x, .. } => -self.eval_expr(x),
-            SymbolicExpression::Mul { x, y, .. } => self.eval_expr(x) * self.eval_expr(y),
+            SymbolicExpression::Add { x, y, .. } => {
+                self.eval_expr(x, cache.as_deref_mut()) + self.eval_expr(y, cache.as_deref_mut())
+            }
+            SymbolicExpression::Sub { x, y, .. } => {
+                self.eval_expr(x, cache.as_deref_mut()) - self.eval_expr(y, cache.as_deref_mut())
+            }
+            SymbolicExpression::Neg { x, .. } => -self.eval_expr(x, cache.as_deref_mut()),
+            SymbolicExpression::Mul { x, y, .. } => {
+                self.eval_expr(x, cache.as_deref_mut()) * self.eval_expr(y, cache.as_deref_mut())
+            }
             _ => unreachable!("Expression cannot be evaluated"),
+        };
+        if let Some(ref mut cache) = cache {
+            cache.insert(symbolic_expr.clone(), e.clone());
         }
+        e
     }
 }

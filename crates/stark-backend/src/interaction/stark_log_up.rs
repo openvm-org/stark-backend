@@ -342,10 +342,12 @@ where
                         debug_assert!(interaction.fields.len() <= betas.len());
                         let mut fields = interaction.fields.iter();
                         *denom = alpha
-                            + evaluator
-                                .eval_expr(fields.next().expect("fields should not be empty"));
+                            + evaluator.eval_expr(
+                                fields.next().expect("fields should not be empty"),
+                                None,
+                            );
                         for (expr, &beta) in fields.zip(betas.iter().skip(1)) {
-                            *denom += beta * evaluator.eval_expr(expr);
+                            *denom += beta * evaluator.eval_expr(expr, None);
                         }
                     }
                 }
@@ -372,7 +374,6 @@ where
                             height,
                             local_index: row_offset + n,
                         };
-
                         let mut row_sum = Challenge::ZERO;
                         for (perm_val, reciprocal_chunk, interaction_chunk) in izip!(
                             perm_row.iter_mut(),
@@ -383,7 +384,7 @@ where
                                 izip!(reciprocal_chunk, interaction_chunk)
                             {
                                 let mut interaction_val =
-                                    *reciprocal * evaluator.eval_expr(&interaction.count);
+                                    *reciprocal * evaluator.eval_expr(&interaction.count, None);
                                 if interaction.interaction_type == InteractionType::Receive {
                                     interaction_val = -interaction_val;
                                 }

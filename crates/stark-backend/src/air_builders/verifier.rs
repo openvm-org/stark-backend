@@ -1,11 +1,11 @@
 use std::{
+    collections::HashMap,
     marker::PhantomData,
     ops::{AddAssign, MulAssign},
 };
 
 use p3_field::{AbstractField, ExtensionField, Field};
 use p3_matrix::Matrix;
-use p3_maybe_rayon::prelude::join;
 
 use super::{
     symbolic::{
@@ -52,8 +52,9 @@ where
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
     pub fn eval_constraints(&mut self, constraints: &[SymbolicExpression<F>]) {
+        let mut cache = HashMap::new();
         for constraint in constraints {
-            let x = self.eval_expr(constraint);
+            let x = self.eval_expr(constraint, Some(&mut cache));
             self.assert_zero(x);
         }
     }
@@ -100,28 +101,37 @@ where
                 .into(),
         }
     }
-
-    fn eval_expr(&self, symbolic_expr: &SymbolicExpression<F>) -> Expr {
-        // TODO[jpw] don't use recursion to avoid stack overflow
-        match symbolic_expr {
+    #[allow(clippy::needless_option_as_deref)]
+    fn eval_expr(
+        &self,
+        symbolic_expr: &SymbolicExpression<F>,
+        mut cache: Option<&mut HashMap<SymbolicExpression<F>, Expr>>,
+    ) -> Expr {
+        if let Some(ref mut cache) = cache {
+            if let Some(e) = cache.get(symbolic_expr) {
+                return e.clone();
+            }
+        }
+        let e = match symbolic_expr {
             SymbolicExpression::Variable(var) => self.eval_var(*var),
             SymbolicExpression::Constant(c) => (*c).into(),
             SymbolicExpression::Add { x, y, .. } => {
-                let (x, y) = join(|| self.eval_expr(x), || self.eval_expr(y));
-                x + y
+                self.eval_expr(x, cache.as_deref_mut()) + self.eval_expr(y, cache.as_deref_mut())
             }
             SymbolicExpression::Sub { x, y, .. } => {
-                let (x, y) = join(|| self.eval_expr(x), || self.eval_expr(y));
-                x - y
+                self.eval_expr(x, cache.as_deref_mut()) - self.eval_expr(y, cache.as_deref_mut())
             }
-            SymbolicExpression::Neg { x, .. } => -self.eval_expr(x),
+            SymbolicExpression::Neg { x, .. } => -self.eval_expr(x, cache.as_deref_mut()),
             SymbolicExpression::Mul { x, y, .. } => {
-                let (x, y) = join(|| self.eval_expr(x), || self.eval_expr(y));
-                x * y
+                self.eval_expr(x, cache.as_deref_mut()) * self.eval_expr(y, cache.as_deref_mut())
             }
             SymbolicExpression::IsFirstRow => self.is_first_row.into(),
             SymbolicExpression::IsLastRow => self.is_last_row.into(),
             SymbolicExpression::IsTransition => self.is_transition.into(),
+        };
+        if let Some(ref mut cache) = cache {
+            cache.insert(symbolic_expr.clone(), e.clone());
         }
+        e
     }
 }
