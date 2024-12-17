@@ -1,11 +1,11 @@
 use std::{
-    collections::HashMap,
     marker::PhantomData,
     ops::{AddAssign, MulAssign},
 };
 
 use p3_field::{AbstractField, ExtensionField, Field};
 use p3_matrix::Matrix;
+use rustc_hash::FxHashMap;
 
 use super::{
     symbolic::{
@@ -52,7 +52,7 @@ where
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
     pub fn eval_constraints(&mut self, constraints: &[SymbolicExpression<F>]) {
-        let mut cache = HashMap::new();
+        let mut cache = FxHashMap::default();
         for constraint in constraints {
             let x = self.eval_expr(constraint, Some(&mut cache));
             self.assert_zero(x);
@@ -105,7 +105,7 @@ where
     fn eval_expr(
         &self,
         symbolic_expr: &SymbolicExpression<F>,
-        mut cache: Option<&mut HashMap<SymbolicExpression<F>, Expr>>,
+        mut cache: Option<&mut FxHashMap<SymbolicExpression<F>, Expr>>,
     ) -> Expr {
         if let Some(ref mut cache) = cache {
             if let Some(e) = cache.get(symbolic_expr) {

@@ -5,9 +5,10 @@ use core::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{hash::Hash, sync::Arc};
 
 use p3_field::{AbstractField, Field};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::symbolic_variable::SymbolicVariable;
@@ -316,7 +317,7 @@ where
     fn eval_expr(
         &self,
         symbolic_expr: &SymbolicExpression<F>,
-        mut cache: Option<&mut HashMap<SymbolicExpression<F>, E>>,
+        mut cache: Option<&mut FxHashMap<SymbolicExpression<F>, E>>,
     ) -> E {
         if let Some(ref mut cache) = cache {
             if let Some(e) = cache.get(symbolic_expr) {
