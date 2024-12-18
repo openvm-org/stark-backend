@@ -9,9 +9,9 @@ use super::trace::SingleRapCommittedTraceView;
 use crate::{
     air_builders::{prover::ProverConstraintFolder, symbolic::SymbolicConstraints},
     config::{Com, Domain, PackedChallenge, PcsProverData, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
     rap::{AnyRap, PartitionedBaseAir, Rap},
 };
+use crate::interaction::RapPhaseSeq;
 
 pub(crate) mod helper;
 pub mod single;
@@ -137,7 +137,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
                 .iter()
                 .map(|v| v.as_slice())
                 .collect_vec(),
-            qvk.rap_phase_seq_kind,
+            SC::RapPhaseSeq::KIND,
             qvk.interaction_chunk_size,
         );
         SingleQuotientData {
@@ -236,7 +236,6 @@ pub struct QuotientChunk<SC: StarkGenericConfig> {
 /// All necessary data from VK to compute ProverQuotientData
 pub struct QuotientVkData<'a, SC: StarkGenericConfig> {
     pub quotient_degree: usize,
-    pub rap_phase_seq_kind: RapPhaseSeqKind,
     pub interaction_chunk_size: usize,
     /// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.

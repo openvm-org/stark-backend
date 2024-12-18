@@ -2,6 +2,7 @@ use std::fmt::Debug;
 
 use p3_air::AirBuilder;
 use p3_challenger::CanObserve;
+use p3_commit::PolynomialSpace;
 use p3_matrix::dense::RowMajorMatrix;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -17,6 +18,7 @@ pub mod rap;
 pub mod stark_log_up;
 pub mod trace;
 mod utils;
+mod gkr_log_up;
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum InteractionType {
@@ -97,14 +99,7 @@ pub struct RapPhaseVerifierData<Challenge> {
 #[derive(Debug)]
 pub struct RapPhaseShape {
     pub num_challenges: usize,
-
     pub num_exposed_values: usize,
-
-    /// Any additional rotations to open at in the permutation PCS round.
-    ///
-    /// Specifies that each `i` in `extra_opening_rots` should be opened at
-    /// `zeta * g^i` (in addition to `zeta` and `zeta * g`).
-    pub extra_opening_rots: Vec<usize>,
 }
 
 /// Supported challenge phases in a RAP.
@@ -122,7 +117,6 @@ impl RapPhaseSeqKind {
             RapPhaseSeqKind::StarkLogUp => vec![RapPhaseShape {
                 num_challenges: STARK_LU_NUM_CHALLENGES,
                 num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
-                extra_opening_rots: vec![],
             }],
             RapPhaseSeqKind::GkrLogUp => todo!(),
         }
@@ -133,16 +127,16 @@ pub trait HasInteractionChunkSize {
     fn interaction_chunk_size(&self) -> usize;
 }
 
-/// Defines a particular protocol for the "after challenge" phase in a RAP.
+/// Defines a particular protocol for the "after challenge" phases in a RAP.
 ///
 /// A [RapPhaseSeq] is defined by the proving and verifying methods implemented in this trait,
-/// as well as via some "eval" method that is determined by `RapPhaseId`.
+/// as well as via some "eval" method that is determined by `RapPhaseSeqKind`.
 pub trait RapPhaseSeq<F, Challenge, Challenger> {
     type PartialProof: Clone + Serialize + DeserializeOwned;
     type ProvingKey: Clone + Serialize + DeserializeOwned + HasInteractionChunkSize;
     type Error: Debug;
 
-    const ID: RapPhaseSeqKind;
+    const KIND: RapPhaseSeqKind;
 
     /// The protocol parameters for the challenge phases may depend on the AIR constraints.
     fn generate_pk_per_air(
@@ -165,6 +159,17 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
         constraints_per_air: &[&SymbolicConstraints<F>],
         trace_view_per_air: &[PairTraceView<'_, F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)>;
+
+    /// Returns the additional openings for the challenge phases.
+    ///
+    /// Returns a sequence of extension field elements per phase per air.
+    fn extra_opening_points<Domain>(
+        &self,
+        zeta: Challenge,
+        domains_per_air: &[Domain],
+    ) -> Vec<Vec<Vec<Challenge>>>
+    where
+        Domain: PolynomialSpace<Val = F>;
 
     /// Partially verifies the challenge phases.
     ///
