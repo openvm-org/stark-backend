@@ -317,10 +317,11 @@ where
     fn eval_expr(
         &self,
         symbolic_expr: &SymbolicExpression<F>,
-        mut cache: Option<&mut FxHashMap<SymbolicExpression<F>, E>>,
+        mut cache: Option<&mut FxHashMap<*const SymbolicExpression<F>, E>>,
     ) -> E {
         if let Some(ref mut cache) = cache {
-            if let Some(e) = cache.get(symbolic_expr) {
+            let ptr: *const SymbolicExpression<F> = &*symbolic_expr; 
+            if let Some(e) = cache.get(&ptr) {
                 return e.clone();
             }
         }
@@ -340,7 +341,7 @@ where
             _ => unreachable!("Expression cannot be evaluated"),
         };
         if let Some(ref mut cache) = cache {
-            cache.insert(symbolic_expr.clone(), e.clone());
+            cache.insert(&*symbolic_expr, e.clone());
         }
         e
     }
