@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use super::symbolic_variable::SymbolicVariable;
 
 /// An expression over `SymbolicVariable`s.
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
+// Note: avoid deriving Hash because it will hash the entire sub-tree
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "F: Field")]
 pub enum SymbolicExpression<F> {
     Variable(SymbolicVariable<F>),

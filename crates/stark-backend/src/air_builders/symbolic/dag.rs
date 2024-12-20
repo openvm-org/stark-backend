@@ -54,7 +54,7 @@ pub(super) fn build_symbolic_expr_dag<F: Field>(
     let mut id_to_expr = Vec::new();
     let top_expr_ids = exprs
         .iter()
-        .map(|expr| topology_sort_symbolic_expr(expr, &mut expr_to_id, &mut id_to_expr))
+        .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_id, &mut id_to_expr))
         .collect();
     SymbolicExpressionDag {
         expr_by_id: id_to_expr,
@@ -62,12 +62,14 @@ pub(super) fn build_symbolic_expr_dag<F: Field>(
     }
 }
 
-fn topology_sort_symbolic_expr<'a, F: Field>(
-    expr: &'a SymbolicExpression<F>,
-    expr_to_id: &mut FxHashMap<&'a SymbolicExpression<F>, usize>,
+/// `expr_to_id` is a cache so that the `Arc<_>` references within symbolic expressions get
+/// mapped to the same node ID if their underlying references are the same.
+fn topological_sort_symbolic_expr<F: Field>(
+    expr: &SymbolicExpression<F>,
+    expr_to_id: &mut FxHashMap<*const SymbolicExpression<F>, usize>,
     id_to_expr: &mut Vec<SymbolicExpressionNode<F>>,
 ) -> usize {
-    if let Some(&id) = expr_to_id.get(&expr) {
+    if let Some(&id) = expr_to_id.get(&(expr as *const _)) {
         return id;
     }
     let exp_ser = match expr {
@@ -81,8 +83,8 @@ fn topology_sort_symbolic_expr<'a, F: Field>(
             y,
             degree_multiple,
         } => {
-            let x_id = topology_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
-            let y_id = topology_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
+            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
+            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
             SymbolicExpressionNode::Add {
                 x: x_id,
                 y: y_id,
@@ -94,8 +96,8 @@ fn topology_sort_symbolic_expr<'a, F: Field>(
             y,
             degree_multiple,
         } => {
-            let x_id = topology_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
-            let y_id = topology_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
+            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
+            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
             SymbolicExpressionNode::Sub {
                 x: x_id,
                 y: y_id,
@@ -103,7 +105,7 @@ fn topology_sort_symbolic_expr<'a, F: Field>(
             }
         }
         SymbolicExpression::Neg { x, degree_multiple } => {
-            let x_id = topology_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
+            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
             SymbolicExpressionNode::Neg {
                 x: x_id,
                 degree_multiple: *degree_multiple,
@@ -114,8 +116,11 @@ fn topology_sort_symbolic_expr<'a, F: Field>(
             y,
             degree_multiple,
         } => {
-            let x_id = topology_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
-            let y_id = topology_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
+            // An important case to remember: square will have Arc::as_ptr(&x) == Arc::as_ptr(&y)
+            // The `expr_to_id` will ensure only one topological sort is done to prevent exponential
+            // behavior.
+            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
+            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
             SymbolicExpressionNode::Mul {
                 x: x_id,
                 y: y_id,
