@@ -105,10 +105,11 @@ where
     fn eval_expr(
         &self,
         symbolic_expr: &SymbolicExpression<F>,
-        mut cache: Option<&mut FxHashMap<SymbolicExpression<F>, Expr>>,
+        mut cache: Option<&mut FxHashMap<*const SymbolicExpression<F>, Expr>>,
     ) -> Expr {
         if let Some(ref mut cache) = cache {
-            if let Some(e) = cache.get(symbolic_expr) {
+            let ptr: *const SymbolicExpression<F> = &*symbolic_expr;
+            if let Some(e) = cache.get(&ptr) {
                 return e.clone();
             }
         }
@@ -130,7 +131,7 @@ where
             SymbolicExpression::IsTransition => self.is_transition.into(),
         };
         if let Some(ref mut cache) = cache {
-            cache.insert(symbolic_expr.clone(), e.clone());
+            cache.insert(&*symbolic_expr, e.clone());
         }
         e
     }
