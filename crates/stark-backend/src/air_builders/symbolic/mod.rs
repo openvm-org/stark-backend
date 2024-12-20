@@ -7,7 +7,7 @@ use p3_air::{
 use p3_field::Field;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_ceil_usize;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::instrument;
 
 use self::{
@@ -16,6 +16,7 @@ use self::{
 };
 use super::PartitionedAirBuilder;
 use crate::{
+    air_builders::symbolic::dag::{build_symbolic_expr_dag, SymbolicExpressionDag},
     interaction::{
         rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, InteractionType,
         RapPhaseSeqKind, SymbolicInteraction,
@@ -24,6 +25,7 @@ use crate::{
     rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
 };
 
+mod dag;
 pub mod symbolic_expression;
 pub mod symbolic_variable;
 
@@ -33,6 +35,10 @@ pub mod symbolic_variable;
 #[serde(bound = "F: Field")]
 pub struct SymbolicConstraints<F> {
     /// All constraints of the RAP, including the constraints on the logup partial sums.
+    #[serde(
+        serialize_with = "serialize_symbolic_exprs",
+        deserialize_with = "deserialize_symbolic_exprs"
+    )]
     pub constraints: Vec<SymbolicExpression<F>>,
     /// Only for debug purposes. `constraints` also contains the constraints on the logup partial sums.
     pub interactions: Vec<Interaction<SymbolicExpression<F>>>,
@@ -464,4 +470,26 @@ fn gen_main_trace<F: Field>(
         })
         .collect_vec();
     RowMajorMatrix::new(mat_values, width)
+}
+
+fn serialize_symbolic_exprs<F: Field, S>(
+    data: &[SymbolicExpression<F>],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    // Convert the number to a hex string before serializing
+    let dag = build_symbolic_expr_dag(data);
+    dag.serialize(serializer)
+}
+
+fn deserialize_symbolic_exprs<'de, F: Field, D>(
+    deserializer: D,
+) -> Result<Vec<SymbolicExpression<F>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let dag = SymbolicExpressionDag::deserialize(deserializer)?;
+    Ok(dag.to_symbolic_expressions())
 }
