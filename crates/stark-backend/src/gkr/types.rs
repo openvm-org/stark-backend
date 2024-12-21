@@ -1,6 +1,7 @@
 use std::ops::Index;
 
 use p3_field::Field;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -12,6 +13,7 @@ use crate::{
 };
 
 /// Batch GKR proof.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GkrBatchProof<F> {
     /// Sum-check proof for each layer.
     pub sumcheck_proofs: Vec<SumcheckProof<F>>,
@@ -22,6 +24,7 @@ pub struct GkrBatchProof<F> {
 }
 
 /// Values of interest obtained from the execution of the GKR protocol.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GkrArtifact<F> {
     /// Out-of-domain (OOD) point for evaluating columns in the input layer.
     pub ood_point: Vec<F>,
@@ -32,7 +35,7 @@ pub struct GkrArtifact<F> {
 }
 
 /// Stores two evaluations of each column in a GKR layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GkrMask<F> {
     columns: Vec<[F; 2]>,
 }

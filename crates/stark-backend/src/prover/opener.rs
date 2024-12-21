@@ -127,6 +127,7 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
                 preprocessed: preprocessed_openings,
                 main: main_openings,
                 after_challenge: after_challenge_openings,
+                extra_after_challenge: todo!(),
                 quotient: quotient_openings,
             },
         }
@@ -163,6 +164,10 @@ pub struct OpenedValues<Challenge> {
     /// For each phase after challenge, there is shared commitment.
     /// For each commitment, if any, for each matrix in the commitment, the opened values,
     pub after_challenge: Vec<Vec<AdjacentOpenedValues<Challenge>>>,
+    /// Any extra opening values for the after challenge phases.
+    ///
+    /// For each after challenge phase, for each matrix, for each point, for each column.
+    pub extra_after_challenge: Vec<Vec<Vec<Vec<Challenge>>>>,
     /// For each RAP, for each quotient chunk in quotient poly, the opened values
     pub quotient: Vec<Vec<Vec<Challenge>>>,
 }
