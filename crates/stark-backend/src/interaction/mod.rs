@@ -18,13 +18,13 @@ pub mod stark_log_up;
 pub mod trace;
 mod utils;
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InteractionType {
     Send,
     Receive,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Interaction<Expr> {
     pub fields: Vec<Expr>,
     pub count: Expr,

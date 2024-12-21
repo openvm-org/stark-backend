@@ -8,7 +8,7 @@ use p3_matrix::Matrix;
 
 use super::{
     symbolic::{
-        dag::{build_symbolic_expr_dag, SymbolicExpressionNode},
+        dag::{build_symbolic_constraints_dag, SymbolicExpressionNode},
         symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
         symbolic_variable::{Entry, SymbolicVariable},
     },
@@ -52,7 +52,7 @@ where
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
     pub fn eval_constraints(&mut self, constraints: &[SymbolicExpression<F>]) {
-        let dag = build_symbolic_expr_dag(constraints);
+        let dag = build_symbolic_constraints_dag(constraints, &[]).constraints;
         // node_idx -> evaluation
         // We do a simple serial evaluation in topological order.
         // This can be parallelized if necessary.

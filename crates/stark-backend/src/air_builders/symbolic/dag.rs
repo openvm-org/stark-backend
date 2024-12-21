@@ -4,8 +4,12 @@ use p3_field::Field;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::air_builders::symbolic::{
-    symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
+use super::SymbolicConstraints;
+use crate::{
+    air_builders::symbolic::{
+        symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
+    },
+    interaction::{Interaction, SymbolicInteraction},
 };
 
 /// A node in symbolic expression DAG.
@@ -50,18 +54,62 @@ pub struct SymbolicExpressionDag<F> {
     pub(crate) constraint_idx: Vec<usize>,
 }
 
-pub(crate) fn build_symbolic_expr_dag<F: Field>(
-    exprs: &[SymbolicExpression<F>],
-) -> SymbolicExpressionDag<F> {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "F: Field")]
+pub struct SymbolicConstraintsDag<F> {
+    /// DAG with all symbolic expressions as nodes.
+    /// A subset of the nodes represents all constraints that will be
+    /// included in the quotient polynomial via DEEP-ALI.
+    pub constraints: SymbolicExpressionDag<F>,
+    /// List of all interactions, where expressions in the interactions
+    /// are referenced by node idx as `usize`.
+    ///
+    /// This is used by the prover for after challenge trace generation,
+    /// and some partial information may be used by the verifier.
+    ///
+    /// **However**, any contributions to the quotient polynomial from
+    /// logup are already included in `constraints` and do not need to
+    /// be separately calculated from `interactions`.
+    pub interactions: Vec<Interaction<usize>>,
+}
+
+pub(crate) fn build_symbolic_constraints_dag<F: Field>(
+    constraints: &[SymbolicExpression<F>],
+    interactions: &[SymbolicInteraction<F>],
+) -> SymbolicConstraintsDag<F> {
     let mut expr_to_idx = FxHashMap::default();
     let mut nodes = Vec::new();
-    let constraint_idx = exprs
+    let constraint_idx = constraints
         .iter()
         .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
         .collect();
-    SymbolicExpressionDag {
+    let interactions: Vec<Interaction<usize>> = interactions
+        .iter()
+        .map(|interaction| {
+            let fields: Vec<usize> = interaction
+                .fields
+                .iter()
+                .map(|field_expr| {
+                    topological_sort_symbolic_expr(field_expr, &mut expr_to_idx, &mut nodes)
+                })
+                .collect();
+            let count =
+                topological_sort_symbolic_expr(&interaction.count, &mut expr_to_idx, &mut nodes);
+            Interaction {
+                fields,
+                count,
+                bus_index: interaction.bus_index,
+                interaction_type: interaction.interaction_type,
+            }
+        })
+        .collect();
+    let constraints = SymbolicExpressionDag {
         nodes,
         constraint_idx,
+    };
+    SymbolicConstraintsDag {
+        constraints,
+        interactions,
     }
 }
 
@@ -139,8 +187,9 @@ fn topological_sort_symbolic_expr<'a, F: Field>(
 }
 
 impl<F: Field> SymbolicExpressionDag<F> {
-    /// Returns symbolic expressions for each constraint
-    pub fn to_symbolic_expressions(&self) -> Vec<SymbolicExpression<F>> {
+    /// Convert each node to a [`SymbolicExpression<F>`] reference and return
+    /// the full list.
+    fn to_symbolic_expressions(&self) -> Vec<Arc<SymbolicExpression<F>>> {
         let mut exprs: Vec<Arc<SymbolicExpression<_>>> = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
             let expr = match *node {
@@ -186,10 +235,48 @@ impl<F: Field> SymbolicExpressionDag<F> {
             };
             exprs.push(Arc::new(expr));
         }
-        self.constraint_idx
-            .iter()
-            .map(|&idx| exprs[idx].as_ref().clone())
-            .collect()
+        exprs
+    }
+}
+
+// TEMPORARY conversions until we switch main interfaces to use SymbolicConstraintsDag
+impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
+    fn from(dag: SymbolicConstraintsDag<F>) -> Self {
+        let exprs = dag.constraints.to_symbolic_expressions();
+        let constraints = dag
+            .constraints
+            .constraint_idx
+            .into_iter()
+            .map(|idx| exprs[idx].as_ref().clone())
+            .collect::<Vec<_>>();
+        let interactions = dag
+            .interactions
+            .into_iter()
+            .map(|interaction| {
+                let fields = interaction
+                    .fields
+                    .into_iter()
+                    .map(|idx| exprs[idx].as_ref().clone())
+                    .collect();
+                let count = exprs[interaction.count].as_ref().clone();
+                Interaction {
+                    fields,
+                    count,
+                    bus_index: interaction.bus_index,
+                    interaction_type: interaction.interaction_type,
+                }
+            })
+            .collect::<Vec<_>>();
+        SymbolicConstraints {
+            constraints,
+            interactions,
+        }
+    }
+}
+
+impl<F: Field> From<SymbolicConstraints<F>> for SymbolicConstraintsDag<F> {
+    fn from(sc: SymbolicConstraints<F>) -> Self {
+        build_symbolic_constraints_dag(&sc.constraints, &sc.interactions)
     }
 }
 
@@ -198,17 +285,20 @@ mod tests {
     use p3_baby_bear::BabyBear;
     use p3_field::AbstractField;
 
-    use crate::air_builders::symbolic::{
-        dag::{build_symbolic_expr_dag, SymbolicExpressionDag, SymbolicExpressionNode},
-        symbolic_expression::SymbolicExpression,
-        symbolic_variable::{Entry, SymbolicVariable},
-        SymbolicConstraints,
+    use crate::{
+        air_builders::symbolic::{
+            dag::{build_symbolic_constraints_dag, SymbolicExpressionDag, SymbolicExpressionNode},
+            symbolic_expression::SymbolicExpression,
+            symbolic_variable::{Entry, SymbolicVariable},
+            SymbolicConstraints,
+        },
+        interaction::{Interaction, InteractionType},
     };
 
     type F = BabyBear;
 
     #[test]
-    fn test_symbolic_expressions_dag() {
+    fn test_symbolic_constraints_dag() {
         let expr = SymbolicExpression::Constant(F::ONE)
             * SymbolicVariable::new(
                 Entry::Main {
@@ -217,16 +307,22 @@ mod tests {
                 },
                 3,
             );
-        let exprs = vec![
+        let constraints = vec![
             SymbolicExpression::IsFirstRow * SymbolicExpression::IsLastRow
                 + SymbolicExpression::Constant(F::ONE)
                 + SymbolicExpression::IsFirstRow * SymbolicExpression::IsLastRow
                 + expr.clone(),
             expr.clone() * expr.clone(),
         ];
-        let expr_list = build_symbolic_expr_dag(&exprs);
+        let interactions = vec![Interaction {
+            bus_index: 0,
+            fields: vec![expr.clone(), SymbolicExpression::Constant(F::TWO)],
+            count: SymbolicExpression::Constant(F::ONE),
+            interaction_type: InteractionType::Send,
+        }];
+        let dag = build_symbolic_constraints_dag(&constraints, &interactions);
         assert_eq!(
-            expr_list,
+            dag.constraints,
             SymbolicExpressionDag::<F> {
                 nodes: vec![
                     SymbolicExpressionNode::IsFirstRow,
@@ -274,17 +370,28 @@ mod tests {
                         left_idx: 8,
                         right_idx: 8,
                         degree_multiple: 2
-                    }
+                    },
+                    SymbolicExpressionNode::Constant(F::TWO),
                 ],
                 constraint_idx: vec![9, 10],
             }
         );
+        assert_eq!(
+            dag.interactions,
+            vec![Interaction {
+                bus_index: 0,
+                fields: vec![8, 11],
+                count: 3,
+                interaction_type: InteractionType::Send,
+            }]
+        );
+
         let sc = SymbolicConstraints {
-            constraints: exprs,
-            interactions: vec![],
+            constraints,
+            interactions,
         };
         let ser_str = serde_json::to_string(&sc).unwrap();
         let new_sc: SymbolicConstraints<_> = serde_json::from_str(&ser_str).unwrap();
-        assert_eq!(sc.constraints, new_sc.constraints);
+        assert_eq!(sc, new_sc);
     }
 }
