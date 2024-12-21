@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::symbolic_expression::SymbolicExpression;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(C)]
 pub enum Entry {
     Preprocessed {
         offset: usize,

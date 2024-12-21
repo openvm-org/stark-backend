@@ -42,9 +42,9 @@ pub fn generate_logical_interactions<F: Field>(
             let fields = interaction
                 .fields
                 .iter()
-                .map(|expr| evaluator.eval_expr(expr, None))
+                .map(|expr| evaluator.eval_expr(expr))
                 .collect_vec();
-            let count = evaluator.eval_expr(&interaction.count, None);
+            let count = evaluator.eval_expr(&interaction.count);
             if count.is_zero() {
                 continue;
             }
