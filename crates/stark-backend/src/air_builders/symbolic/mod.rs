@@ -25,7 +25,7 @@ use crate::{
     rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
 };
 
-mod dag;
+pub mod dag;
 pub mod symbolic_expression;
 pub mod symbolic_variable;
 
@@ -35,10 +35,6 @@ pub mod symbolic_variable;
 #[serde(bound = "F: Field")]
 pub struct SymbolicConstraints<F> {
     /// All constraints of the RAP, including the constraints on the logup partial sums.
-    #[serde(
-        serialize_with = "serialize_symbolic_exprs",
-        deserialize_with = "deserialize_symbolic_exprs"
-    )]
     pub constraints: Vec<SymbolicExpression<F>>,
     /// Only for debug purposes. `constraints` also contains the constraints on the logup partial sums.
     pub interactions: Vec<Interaction<SymbolicExpression<F>>>,
@@ -472,6 +468,7 @@ fn gen_main_trace<F: Field>(
     RowMajorMatrix::new(mat_values, width)
 }
 
+#[allow(dead_code)]
 fn serialize_symbolic_exprs<F: Field, S>(
     data: &[SymbolicExpression<F>],
     serializer: S,
@@ -484,6 +481,7 @@ where
     dag.serialize(serializer)
 }
 
+#[allow(dead_code)]
 fn deserialize_symbolic_exprs<'de, F: Field, D>(
     deserializer: D,
 ) -> Result<Vec<SymbolicExpression<F>>, D::Error>

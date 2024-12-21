@@ -5,10 +5,13 @@ use core::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use std::{hash::Hash, sync::Arc};
+use std::{
+    hash::{Hash, Hasher},
+    ptr,
+    sync::Arc,
+};
 
 use p3_field::{AbstractField, Field};
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::symbolic_variable::SymbolicVariable;
@@ -42,6 +45,36 @@ pub enum SymbolicExpression<F> {
         y: Arc<Self>,
         degree_multiple: usize,
     },
+}
+
+impl<F: Field> Hash for SymbolicExpression<F> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // First hash the discriminant of the enum
+        std::mem::discriminant(self).hash(state);
+        // Degree multiple is not necessary
+        match self {
+            Self::Variable(v) => v.hash(state),
+            Self::IsFirstRow => {}   // discriminant is enough
+            Self::IsLastRow => {}    // discriminant is enough
+            Self::IsTransition => {} // discriminant is enough
+            Self::Constant(f) => f.hash(state),
+            Self::Add { x, y, .. } => {
+                ptr::hash(&**x, state);
+                ptr::hash(&**y, state);
+            }
+            Self::Sub { x, y, .. } => {
+                ptr::hash(&**x, state);
+                ptr::hash(&**y, state);
+            }
+            Self::Neg { x, .. } => {
+                ptr::hash(&**x, state);
+            }
+            Self::Mul { x, y, .. } => {
+                ptr::hash(&**x, state);
+                ptr::hash(&**y, state);
+            }
+        }
+    }
 }
 
 impl<F: Field> SymbolicExpression<F> {
@@ -308,41 +341,18 @@ impl<F: Field> Product<F> for SymbolicExpression<F> {
     }
 }
 
-pub trait SymbolicEvaluator<F: Field, E: AbstractField + From<F>>
-where
-    SymbolicVariable<F>: Hash + PartialEq + Eq,
-{
+pub trait SymbolicEvaluator<F: Field, E: AbstractField + From<F>> {
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> E;
 
-    #[allow(clippy::needless_option_as_deref)]
-    fn eval_expr(
-        &self,
-        symbolic_expr: &SymbolicExpression<F>,
-        mut cache: Option<&mut FxHashMap<SymbolicExpression<F>, E>>,
-    ) -> E {
-        if let Some(ref mut cache) = cache {
-            if let Some(e) = cache.get(symbolic_expr) {
-                return e.clone();
-            }
-        }
-        let e = match symbolic_expr {
+    fn eval_expr(&self, symbolic_expr: &SymbolicExpression<F>) -> E {
+        match symbolic_expr {
             SymbolicExpression::Variable(var) => self.eval_var(*var),
             SymbolicExpression::Constant(c) => (*c).into(),
-            SymbolicExpression::Add { x, y, .. } => {
-                self.eval_expr(x, cache.as_deref_mut()) + self.eval_expr(y, cache.as_deref_mut())
-            }
-            SymbolicExpression::Sub { x, y, .. } => {
-                self.eval_expr(x, cache.as_deref_mut()) - self.eval_expr(y, cache.as_deref_mut())
-            }
-            SymbolicExpression::Neg { x, .. } => -self.eval_expr(x, cache.as_deref_mut()),
-            SymbolicExpression::Mul { x, y, .. } => {
-                self.eval_expr(x, cache.as_deref_mut()) * self.eval_expr(y, cache.as_deref_mut())
-            }
+            SymbolicExpression::Add { x, y, .. } => self.eval_expr(x) + self.eval_expr(y),
+            SymbolicExpression::Sub { x, y, .. } => self.eval_expr(x) - self.eval_expr(y),
+            SymbolicExpression::Neg { x, .. } => -self.eval_expr(x),
+            SymbolicExpression::Mul { x, y, .. } => self.eval_expr(x) * self.eval_expr(y),
             _ => unreachable!("Expression cannot be evaluated"),
-        };
-        if let Some(ref mut cache) = cache {
-            cache.insert(symbolic_expr.clone(), e.clone());
         }
-        e
     }
 }

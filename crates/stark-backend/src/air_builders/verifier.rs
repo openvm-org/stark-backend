@@ -5,10 +5,10 @@ use std::{
 
 use p3_field::{AbstractField, ExtensionField, Field};
 use p3_matrix::Matrix;
-use rustc_hash::FxHashMap;
 
 use super::{
     symbolic::{
+        dag::{build_symbolic_expr_dag, SymbolicExpressionNode},
         symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
         symbolic_variable::{Entry, SymbolicVariable},
     },
@@ -52,10 +52,27 @@ where
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
     pub fn eval_constraints(&mut self, constraints: &[SymbolicExpression<F>]) {
-        let mut cache = FxHashMap::default();
-        for constraint in constraints {
-            let x = self.eval_expr(constraint, Some(&mut cache));
-            self.assert_zero(x);
+        let dag = build_symbolic_expr_dag(constraints);
+        // node_idx -> evaluation
+        // We do a simple serial evaluation in topological order.
+        // This can be parallelized if necessary.
+        let mut exprs: Vec<Expr> = Vec::with_capacity(dag.nodes.len());
+        for node in &dag.nodes {
+            let expr = match *node {
+                SymbolicExpressionNode::Variable(var) => self.eval_var(var),
+                SymbolicExpressionNode::Constant(f) => Expr::from(f),
+                SymbolicExpressionNode::Add { x, y, .. } => exprs[x].clone() + exprs[y].clone(),
+                SymbolicExpressionNode::Sub { x, y, .. } => exprs[x].clone() - exprs[y].clone(),
+                SymbolicExpressionNode::Neg { x, .. } => -exprs[x].clone(),
+                SymbolicExpressionNode::Mul { x, y, .. } => exprs[x].clone() * exprs[y].clone(),
+                SymbolicExpressionNode::IsFirstRow => self.is_first_row.into(),
+                SymbolicExpressionNode::IsLastRow => self.is_last_row.into(),
+                SymbolicExpressionNode::IsTransition => self.is_transition.into(),
+            };
+            exprs.push(expr);
+        }
+        for idx in dag.constraint_idx {
+            self.assert_zero(exprs[idx].clone());
         }
     }
 
@@ -101,37 +118,6 @@ where
                 .into(),
         }
     }
-    #[allow(clippy::needless_option_as_deref)]
-    fn eval_expr(
-        &self,
-        symbolic_expr: &SymbolicExpression<F>,
-        mut cache: Option<&mut FxHashMap<SymbolicExpression<F>, Expr>>,
-    ) -> Expr {
-        if let Some(ref mut cache) = cache {
-            if let Some(e) = cache.get(symbolic_expr) {
-                return e.clone();
-            }
-        }
-        let e = match symbolic_expr {
-            SymbolicExpression::Variable(var) => self.eval_var(*var),
-            SymbolicExpression::Constant(c) => (*c).into(),
-            SymbolicExpression::Add { x, y, .. } => {
-                self.eval_expr(x, cache.as_deref_mut()) + self.eval_expr(y, cache.as_deref_mut())
-            }
-            SymbolicExpression::Sub { x, y, .. } => {
-                self.eval_expr(x, cache.as_deref_mut()) - self.eval_expr(y, cache.as_deref_mut())
-            }
-            SymbolicExpression::Neg { x, .. } => -self.eval_expr(x, cache.as_deref_mut()),
-            SymbolicExpression::Mul { x, y, .. } => {
-                self.eval_expr(x, cache.as_deref_mut()) * self.eval_expr(y, cache.as_deref_mut())
-            }
-            SymbolicExpression::IsFirstRow => self.is_first_row.into(),
-            SymbolicExpression::IsLastRow => self.is_last_row.into(),
-            SymbolicExpression::IsTransition => self.is_transition.into(),
-        };
-        if let Some(ref mut cache) = cache {
-            cache.insert(symbolic_expr.clone(), e.clone());
-        }
-        e
-    }
+    // NOTE: do not use the eval_expr function as it can have exponential complexity!
+    // Instead use the `SymbolicExpressionDag`
 }

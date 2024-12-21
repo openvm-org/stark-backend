@@ -1,17 +1,21 @@
 use std::sync::Arc;
 
-use p3_field::Field;
+use p3_field::{AbstractField, Field};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
+use super::symbolic_expression::SymbolicEvaluator;
 use crate::air_builders::symbolic::{
     symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
 };
 
-/// A node in symbolic expression DAG. Basically replace `Arc`s in `SymbolicExpression` with node IDs.
+/// A node in symbolic expression DAG.
+/// Basically replace `Arc`s in `SymbolicExpression` with node IDs.
+/// Intended to be serializable and deserializable.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(bound = "F: Field")]
-enum SymbolicExpressionNode<F> {
+#[repr(C)]
+pub enum SymbolicExpressionNode<F> {
     Variable(SymbolicVariable<F>),
     IsFirstRow,
     IsLastRow,
@@ -42,37 +46,37 @@ enum SymbolicExpressionNode<F> {
 #[serde(bound = "F: Field")]
 pub struct SymbolicExpressionDag<F> {
     /// Nodes in **topological** order.
-    expr_by_id: Vec<SymbolicExpressionNode<F>>,
-    /// Node ids of expressions to assert.
-    top_expr_ids: Vec<usize>,
+    pub(crate) nodes: Vec<SymbolicExpressionNode<F>>,
+    /// Node indices of expressions to assert equal zero.
+    pub(crate) constraint_idx: Vec<usize>,
 }
 
-pub(super) fn build_symbolic_expr_dag<F: Field>(
+pub(crate) fn build_symbolic_expr_dag<F: Field>(
     exprs: &[SymbolicExpression<F>],
 ) -> SymbolicExpressionDag<F> {
-    let mut expr_to_id = FxHashMap::default();
-    let mut id_to_expr = Vec::new();
-    let top_expr_ids = exprs
+    let mut expr_to_idx = FxHashMap::default();
+    let mut nodes = Vec::new();
+    let constraint_idx = exprs
         .iter()
-        .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_id, &mut id_to_expr))
+        .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
         .collect();
     SymbolicExpressionDag {
-        expr_by_id: id_to_expr,
-        top_expr_ids,
+        nodes,
+        constraint_idx,
     }
 }
 
-/// `expr_to_id` is a cache so that the `Arc<_>` references within symbolic expressions get
+/// `expr_to_idx` is a cache so that the `Arc<_>` references within symbolic expressions get
 /// mapped to the same node ID if their underlying references are the same.
-fn topological_sort_symbolic_expr<F: Field>(
-    expr: &SymbolicExpression<F>,
-    expr_to_id: &mut FxHashMap<*const SymbolicExpression<F>, usize>,
-    id_to_expr: &mut Vec<SymbolicExpressionNode<F>>,
+fn topological_sort_symbolic_expr<'a, F: Field>(
+    expr: &'a SymbolicExpression<F>,
+    expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, usize>,
+    nodes: &mut Vec<SymbolicExpressionNode<F>>,
 ) -> usize {
-    if let Some(&id) = expr_to_id.get(&(expr as *const _)) {
-        return id;
+    if let Some(&idx) = expr_to_idx.get(expr) {
+        return idx;
     }
-    let exp_ser = match expr {
+    let node = match expr {
         SymbolicExpression::Variable(var) => SymbolicExpressionNode::Variable(*var),
         SymbolicExpression::IsFirstRow => SymbolicExpressionNode::IsFirstRow,
         SymbolicExpression::IsLastRow => SymbolicExpressionNode::IsLastRow,
@@ -83,8 +87,8 @@ fn topological_sort_symbolic_expr<F: Field>(
             y,
             degree_multiple,
         } => {
-            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
-            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
+            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
+            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Add {
                 x: x_id,
                 y: y_id,
@@ -96,8 +100,8 @@ fn topological_sort_symbolic_expr<F: Field>(
             y,
             degree_multiple,
         } => {
-            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
-            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
+            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
+            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Sub {
                 x: x_id,
                 y: y_id,
@@ -105,7 +109,7 @@ fn topological_sort_symbolic_expr<F: Field>(
             }
         }
         SymbolicExpression::Neg { x, degree_multiple } => {
-            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
+            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Neg {
                 x: x_id,
                 degree_multiple: *degree_multiple,
@@ -119,8 +123,8 @@ fn topological_sort_symbolic_expr<F: Field>(
             // An important case to remember: square will have Arc::as_ptr(&x) == Arc::as_ptr(&y)
             // The `expr_to_id` will ensure only one topological sort is done to prevent exponential
             // behavior.
-            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_id, id_to_expr);
-            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_id, id_to_expr);
+            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
+            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Mul {
                 x: x_id,
                 y: y_id,
@@ -129,17 +133,18 @@ fn topological_sort_symbolic_expr<F: Field>(
         }
     };
 
-    let id = id_to_expr.len();
-    id_to_expr.push(exp_ser);
-    expr_to_id.insert(expr, id);
-    id
+    let idx = nodes.len();
+    nodes.push(node);
+    expr_to_idx.insert(expr, idx);
+    idx
 }
 
 impl<F: Field> SymbolicExpressionDag<F> {
+    /// Returns symbolic expressions for each constraint
     pub fn to_symbolic_expressions(&self) -> Vec<SymbolicExpression<F>> {
-        let mut exprs: Vec<Arc<SymbolicExpression<_>>> = Vec::with_capacity(self.expr_by_id.len());
-        for expr_ser in &self.expr_by_id {
-            let expr = match expr_ser {
+        let mut exprs: Vec<Arc<SymbolicExpression<_>>> = Vec::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            let expr = match node {
                 SymbolicExpressionNode::Variable(var) => SymbolicExpression::Variable(*var),
                 SymbolicExpressionNode::IsFirstRow => SymbolicExpression::IsFirstRow,
                 SymbolicExpressionNode::IsLastRow => SymbolicExpression::IsLastRow,
@@ -179,9 +184,37 @@ impl<F: Field> SymbolicExpressionDag<F> {
             };
             exprs.push(Arc::new(expr));
         }
-        self.top_expr_ids
+        self.constraint_idx
             .iter()
-            .map(|&id| exprs[id].as_ref().clone())
+            .map(|&idx| exprs[idx].as_ref().clone())
+            .collect()
+    }
+
+    /// Evaluate each constraint expression.
+    pub fn evaluate_constraints<E, SE>(&self, evaluator: &SE) -> Vec<E>
+    where
+        E: AbstractField + From<F>,
+        SE: SymbolicEvaluator<F, E>,
+    {
+        // node_idx -> evaluation
+        // We do a simple serial evaluation in topological order.
+        // This can be parallelized if necessary.
+        let mut exprs: Vec<E> = Vec::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            let expr = match *node {
+                SymbolicExpressionNode::Variable(var) => evaluator.eval_var(var),
+                SymbolicExpressionNode::Constant(f) => E::from(f),
+                SymbolicExpressionNode::Add { x, y, .. } => exprs[x].clone() + exprs[y].clone(),
+                SymbolicExpressionNode::Sub { x, y, .. } => exprs[x].clone() - exprs[y].clone(),
+                SymbolicExpressionNode::Neg { x, .. } => -exprs[x].clone(),
+                SymbolicExpressionNode::Mul { x, y, .. } => exprs[x].clone() * exprs[y].clone(),
+                _ => unreachable!("unevaluatable expression: {node:?}"),
+            };
+            exprs.push(expr);
+        }
+        self.constraint_idx
+            .iter()
+            .map(|&idx| exprs[idx].clone())
             .collect()
     }
 }
@@ -202,25 +235,26 @@ mod tests {
 
     #[test]
     fn test_symbolic_expressions_dag() {
+        let expr = SymbolicExpression::Constant(F::ONE)
+            * SymbolicVariable::new(
+                Entry::Main {
+                    part_index: 1,
+                    offset: 2,
+                },
+                3,
+            );
         let exprs = vec![
             SymbolicExpression::IsFirstRow * SymbolicExpression::IsLastRow
                 + SymbolicExpression::Constant(F::ONE)
                 + SymbolicExpression::IsFirstRow * SymbolicExpression::IsLastRow
-                + SymbolicExpression::Constant(F::ONE)
-                    * SymbolicVariable::new(
-                        Entry::Main {
-                            part_index: 1,
-                            offset: 2,
-                        },
-                        3,
-                    ),
-            SymbolicExpression::IsFirstRow * SymbolicExpression::IsLastRow,
+                + expr.clone(),
+            expr.clone() * expr.clone(),
         ];
         let expr_list = build_symbolic_expr_dag(&exprs);
         assert_eq!(
             expr_list,
             SymbolicExpressionDag::<F> {
-                expr_by_id: vec![
+                nodes: vec![
                     SymbolicExpressionNode::IsFirstRow,
                     SymbolicExpressionNode::IsLastRow,
                     SymbolicExpressionNode::Mul {
@@ -234,9 +268,15 @@ mod tests {
                         y: 3,
                         degree_multiple: 2
                     },
+                    // Currently topological sort does not detect all subgraph isomorphisms. For example each IsFirstRow and IsLastRow is a new reference so ptr::hash is distinct.
+                    SymbolicExpressionNode::Mul {
+                        x: 0,
+                        y: 1,
+                        degree_multiple: 2
+                    },
                     SymbolicExpressionNode::Add {
                         x: 4,
-                        y: 2,
+                        y: 5,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Variable(SymbolicVariable::new(
@@ -248,16 +288,21 @@ mod tests {
                     )),
                     SymbolicExpressionNode::Mul {
                         x: 3,
-                        y: 6,
+                        y: 7,
                         degree_multiple: 1
                     },
                     SymbolicExpressionNode::Add {
-                        x: 5,
-                        y: 7,
+                        x: 6,
+                        y: 8,
+                        degree_multiple: 2
+                    },
+                    SymbolicExpressionNode::Mul {
+                        x: 8,
+                        y: 8,
                         degree_multiple: 2
                     }
                 ],
-                top_expr_ids: vec![8, 2],
+                constraint_idx: vec![9, 10],
             }
         );
         let sc = SymbolicConstraints {
