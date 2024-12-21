@@ -36,7 +36,13 @@ pub mod symbolic_variable;
 pub struct SymbolicConstraints<F> {
     /// All constraints of the RAP, including the constraints on the logup partial sums.
     pub constraints: Vec<SymbolicExpression<F>>,
-    /// Only for debug purposes. `constraints` also contains the constraints on the logup partial sums.
+    /// Symbolic representation of chip interactions. This is used by
+    /// the prover for after challenge trace generation, and some partial
+    /// information may be used by the verifier.
+    ///
+    /// **However**, any contributions to the quotient polynomial from
+    /// logup are already included in `constraints` and do not need to
+    /// be separately calculated from `interactions`.
     pub interactions: Vec<Interaction<SymbolicExpression<F>>>,
 }
 
