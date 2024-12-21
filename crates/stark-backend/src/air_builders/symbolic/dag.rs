@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use p3_field::{AbstractField, Field};
+use p3_field::Field;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::symbolic_expression::SymbolicEvaluator;
 use crate::air_builders::symbolic::{
     symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
 };
@@ -22,22 +21,22 @@ pub enum SymbolicExpressionNode<F> {
     IsTransition,
     Constant(F),
     Add {
-        x: usize,
-        y: usize,
+        left_idx: usize,
+        right_idx: usize,
         degree_multiple: usize,
     },
     Sub {
-        x: usize,
-        y: usize,
+        left_idx: usize,
+        right_idx: usize,
         degree_multiple: usize,
     },
     Neg {
-        x: usize,
+        idx: usize,
         degree_multiple: usize,
     },
     Mul {
-        x: usize,
-        y: usize,
+        left_idx: usize,
+        right_idx: usize,
         degree_multiple: usize,
     },
 }
@@ -87,11 +86,11 @@ fn topological_sort_symbolic_expr<'a, F: Field>(
             y,
             degree_multiple,
         } => {
-            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
-            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
+            let left_idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
+            let right_idx = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Add {
-                x: x_id,
-                y: y_id,
+                left_idx,
+                right_idx,
                 degree_multiple: *degree_multiple,
             }
         }
@@ -100,18 +99,18 @@ fn topological_sort_symbolic_expr<'a, F: Field>(
             y,
             degree_multiple,
         } => {
-            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
-            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
+            let left_idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
+            let right_idx = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Sub {
-                x: x_id,
-                y: y_id,
+                left_idx,
+                right_idx,
                 degree_multiple: *degree_multiple,
             }
         }
         SymbolicExpression::Neg { x, degree_multiple } => {
-            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
+            let idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Neg {
-                x: x_id,
+                idx,
                 degree_multiple: *degree_multiple,
             }
         }
@@ -123,11 +122,11 @@ fn topological_sort_symbolic_expr<'a, F: Field>(
             // An important case to remember: square will have Arc::as_ptr(&x) == Arc::as_ptr(&y)
             // The `expr_to_id` will ensure only one topological sort is done to prevent exponential
             // behavior.
-            let x_id = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
-            let y_id = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
+            let left_idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
+            let right_idx = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Mul {
-                x: x_id,
-                y: y_id,
+                left_idx,
+                right_idx,
                 degree_multiple: *degree_multiple,
             }
         }
@@ -144,42 +143,45 @@ impl<F: Field> SymbolicExpressionDag<F> {
     pub fn to_symbolic_expressions(&self) -> Vec<SymbolicExpression<F>> {
         let mut exprs: Vec<Arc<SymbolicExpression<_>>> = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
-            let expr = match node {
-                SymbolicExpressionNode::Variable(var) => SymbolicExpression::Variable(*var),
+            let expr = match *node {
+                SymbolicExpressionNode::Variable(var) => SymbolicExpression::Variable(var),
                 SymbolicExpressionNode::IsFirstRow => SymbolicExpression::IsFirstRow,
                 SymbolicExpressionNode::IsLastRow => SymbolicExpression::IsLastRow,
                 SymbolicExpressionNode::IsTransition => SymbolicExpression::IsTransition,
-                SymbolicExpressionNode::Constant(f) => SymbolicExpression::Constant(*f),
+                SymbolicExpressionNode::Constant(f) => SymbolicExpression::Constant(f),
                 SymbolicExpressionNode::Add {
-                    x,
-                    y,
+                    left_idx,
+                    right_idx,
                     degree_multiple,
                 } => SymbolicExpression::Add {
-                    x: exprs[*x].clone(),
-                    y: exprs[*y].clone(),
-                    degree_multiple: *degree_multiple,
+                    x: exprs[left_idx].clone(),
+                    y: exprs[right_idx].clone(),
+                    degree_multiple,
                 },
                 SymbolicExpressionNode::Sub {
-                    x,
-                    y,
+                    left_idx,
+                    right_idx,
                     degree_multiple,
                 } => SymbolicExpression::Sub {
-                    x: exprs[*x].clone(),
-                    y: exprs[*y].clone(),
-                    degree_multiple: *degree_multiple,
+                    x: exprs[left_idx].clone(),
+                    y: exprs[right_idx].clone(),
+                    degree_multiple,
                 },
-                SymbolicExpressionNode::Neg { x, degree_multiple } => SymbolicExpression::Neg {
-                    x: exprs[*x].clone(),
-                    degree_multiple: *degree_multiple,
+                SymbolicExpressionNode::Neg {
+                    idx,
+                    degree_multiple,
+                } => SymbolicExpression::Neg {
+                    x: exprs[idx].clone(),
+                    degree_multiple,
                 },
                 SymbolicExpressionNode::Mul {
-                    x,
-                    y,
+                    left_idx,
+                    right_idx,
                     degree_multiple,
                 } => SymbolicExpression::Mul {
-                    x: exprs[*x].clone(),
-                    y: exprs[*y].clone(),
-                    degree_multiple: *degree_multiple,
+                    x: exprs[left_idx].clone(),
+                    y: exprs[right_idx].clone(),
+                    degree_multiple,
                 },
             };
             exprs.push(Arc::new(expr));
@@ -187,34 +189,6 @@ impl<F: Field> SymbolicExpressionDag<F> {
         self.constraint_idx
             .iter()
             .map(|&idx| exprs[idx].as_ref().clone())
-            .collect()
-    }
-
-    /// Evaluate each constraint expression.
-    pub fn evaluate_constraints<E, SE>(&self, evaluator: &SE) -> Vec<E>
-    where
-        E: AbstractField + From<F>,
-        SE: SymbolicEvaluator<F, E>,
-    {
-        // node_idx -> evaluation
-        // We do a simple serial evaluation in topological order.
-        // This can be parallelized if necessary.
-        let mut exprs: Vec<E> = Vec::with_capacity(self.nodes.len());
-        for node in &self.nodes {
-            let expr = match *node {
-                SymbolicExpressionNode::Variable(var) => evaluator.eval_var(var),
-                SymbolicExpressionNode::Constant(f) => E::from(f),
-                SymbolicExpressionNode::Add { x, y, .. } => exprs[x].clone() + exprs[y].clone(),
-                SymbolicExpressionNode::Sub { x, y, .. } => exprs[x].clone() - exprs[y].clone(),
-                SymbolicExpressionNode::Neg { x, .. } => -exprs[x].clone(),
-                SymbolicExpressionNode::Mul { x, y, .. } => exprs[x].clone() * exprs[y].clone(),
-                _ => unreachable!("unevaluatable expression: {node:?}"),
-            };
-            exprs.push(expr);
-        }
-        self.constraint_idx
-            .iter()
-            .map(|&idx| exprs[idx].clone())
             .collect()
     }
 }
@@ -258,25 +232,25 @@ mod tests {
                     SymbolicExpressionNode::IsFirstRow,
                     SymbolicExpressionNode::IsLastRow,
                     SymbolicExpressionNode::Mul {
-                        x: 0,
-                        y: 1,
+                        left_idx: 0,
+                        right_idx: 1,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Constant(F::ONE),
                     SymbolicExpressionNode::Add {
-                        x: 2,
-                        y: 3,
+                        left_idx: 2,
+                        right_idx: 3,
                         degree_multiple: 2
                     },
                     // Currently topological sort does not detect all subgraph isomorphisms. For example each IsFirstRow and IsLastRow is a new reference so ptr::hash is distinct.
                     SymbolicExpressionNode::Mul {
-                        x: 0,
-                        y: 1,
+                        left_idx: 0,
+                        right_idx: 1,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Add {
-                        x: 4,
-                        y: 5,
+                        left_idx: 4,
+                        right_idx: 5,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Variable(SymbolicVariable::new(
@@ -287,18 +261,18 @@ mod tests {
                         3
                     )),
                     SymbolicExpressionNode::Mul {
-                        x: 3,
-                        y: 7,
+                        left_idx: 3,
+                        right_idx: 7,
                         degree_multiple: 1
                     },
                     SymbolicExpressionNode::Add {
-                        x: 6,
-                        y: 8,
+                        left_idx: 6,
+                        right_idx: 8,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Mul {
-                        x: 8,
-                        y: 8,
+                        left_idx: 8,
+                        right_idx: 8,
                         degree_multiple: 2
                     }
                 ],

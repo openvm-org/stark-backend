@@ -61,10 +61,22 @@ where
             let expr = match *node {
                 SymbolicExpressionNode::Variable(var) => self.eval_var(var),
                 SymbolicExpressionNode::Constant(f) => Expr::from(f),
-                SymbolicExpressionNode::Add { x, y, .. } => exprs[x].clone() + exprs[y].clone(),
-                SymbolicExpressionNode::Sub { x, y, .. } => exprs[x].clone() - exprs[y].clone(),
-                SymbolicExpressionNode::Neg { x, .. } => -exprs[x].clone(),
-                SymbolicExpressionNode::Mul { x, y, .. } => exprs[x].clone() * exprs[y].clone(),
+                SymbolicExpressionNode::Add {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs[left_idx].clone() + exprs[right_idx].clone(),
+                SymbolicExpressionNode::Sub {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs[left_idx].clone() - exprs[right_idx].clone(),
+                SymbolicExpressionNode::Neg { idx, .. } => -exprs[idx].clone(),
+                SymbolicExpressionNode::Mul {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs[left_idx].clone() * exprs[right_idx].clone(),
                 SymbolicExpressionNode::IsFirstRow => self.is_first_row.into(),
                 SymbolicExpressionNode::IsLastRow => self.is_last_row.into(),
                 SymbolicExpressionNode::IsTransition => self.is_transition.into(),
