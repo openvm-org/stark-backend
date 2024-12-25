@@ -3,7 +3,7 @@ use std::{marker::PhantomData, ops::Add};
 use openvm_stark_backend::{
     config::{StarkGenericConfig, Val},
     keygen::types::StarkVerifyingKey,
-    p3_field::AbstractExtensionField,
+    p3_field::FieldExtensionAlgebra,
 };
 
 use crate::config::FriParameters;
@@ -201,7 +201,7 @@ impl FriVerifierCostEstimate {
                 vk.params.width.common_main + vk.params.width.cached_mains.iter().sum::<usize>()
             })
             .sum();
-        let ext_degree = <SC::Challenge as AbstractExtensionField<Val<SC>>>::D;
+        let ext_degree = <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D;
         let num_perm_columns: usize = vks
             .iter()
             .map(|vk| vk.params.width.after_challenge.iter().sum::<usize>())

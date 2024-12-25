@@ -1,6 +1,6 @@
 use itertools::{izip, Itertools};
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::AbstractField;
+use p3_field::FieldAlgebra;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use tracing::instrument;
 

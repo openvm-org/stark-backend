@@ -1,10 +1,10 @@
 use p3_air::VirtualPairCol;
-use p3_field::{AbstractField, ExtensionField, Field, Powers};
+use p3_field::{FieldAlgebra, ExtensionField, Field, Powers};
 
 use super::Interaction;
 
 /// Returns [random_element, random_element^2, ..., random_element^{max_bus_index + 1}].
-pub fn generate_rlc_elements<AF: AbstractField, E>(
+pub fn generate_rlc_elements<AF: FieldAlgebra, E>(
     random_element: AF,
     all_interactions: &[Interaction<E>],
 ) -> Vec<AF> {
@@ -23,7 +23,7 @@ pub fn generate_rlc_elements<AF: AbstractField, E>(
 
 /// Returns [beta^0, beta^1, ..., beta^{max_num_fields - 1}]
 /// where max_num_fields is the maximum length of `fields` in any interaction.
-pub fn generate_betas<AF: AbstractField, E>(
+pub fn generate_betas<AF: FieldAlgebra, E>(
     beta: AF,
     all_interactions: &[Interaction<E>],
 ) -> Vec<AF> {

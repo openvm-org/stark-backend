@@ -116,7 +116,7 @@ where
 #[cfg(test)]
 mod test {
     use p3_baby_bear::BabyBear;
-    use p3_field::{AbstractField, Field};
+    use p3_field::{FieldAlgebra, Field};
 
     use super::*;
 

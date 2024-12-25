@@ -5,7 +5,7 @@
 
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
-    p3_field::AbstractField,
+    p3_field::FieldAlgebra,
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
 use p3_air::{Air, BaseAir};

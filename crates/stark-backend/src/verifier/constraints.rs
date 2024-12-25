@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
-use p3_field::{AbstractExtensionField, AbstractField, Field};
+use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use tracing::instrument;
 

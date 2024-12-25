@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-use p3_field::{AbstractField, Field};
+use p3_field::{FieldAlgebra, Field};
 use serde::{Deserialize, Serialize};
 
 use super::symbolic_variable::SymbolicVariable;
@@ -159,7 +159,7 @@ impl<F: Field> From<F> for SymbolicExpression<F> {
     }
 }
 
-impl<F: Field> AbstractField for SymbolicExpression<F> {
+impl<F: Field> FieldAlgebra for SymbolicExpression<F> {
     type F = F;
 
     const ZERO: Self = Self::Constant(F::ZERO);
@@ -341,7 +341,7 @@ impl<F: Field> Product<F> for SymbolicExpression<F> {
     }
 }
 
-pub trait SymbolicEvaluator<F: Field, E: AbstractField + From<F>> {
+pub trait SymbolicEvaluator<F: Field, E: FieldAlgebra + From<F>> {
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> E;
 
     fn eval_expr(&self, symbolic_expr: &SymbolicExpression<F>) -> E {

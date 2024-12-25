@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     config::{StarkGenericConfig, Val},
     interaction::{InteractionBuilder, InteractionType},
     p3_air::{Air, BaseAir},
-    p3_field::{AbstractField, Field},
+    p3_field::{FieldAlgebra, Field},
     p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::types::{AirProofInput, AirProofRawInput, CommittedTraceData, TraceCommitter},
     rap::{AnyRap, BaseAirWithPublicValues, PartitionedBaseAir},
@@ -141,7 +141,7 @@ pub struct DummyInteractionData {
 
 impl<'a, SC: StarkGenericConfig> DummyInteractionChip<'a, SC>
 where
-    Val<SC>: AbstractField,
+    Val<SC>: FieldAlgebra,
 {
     pub fn new_without_partition(field_width: usize, is_send: bool, bus_index: usize) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index);

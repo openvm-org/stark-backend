@@ -3,7 +3,7 @@ use std::{
     ops::{AddAssign, MulAssign},
 };
 
-use p3_field::{AbstractField, ExtensionField, Field};
+use p3_field::{FieldAlgebra, ExtensionField, Field};
 use p3_matrix::Matrix;
 
 use super::{
@@ -47,7 +47,7 @@ impl<F, EF, PubVar, Var, Expr> GenericVerifierConstraintFolder<'_, F, EF, PubVar
 where
     F: Field,
     EF: ExtensionField<F>,
-    Expr: AbstractField + From<F> + MulAssign<Var> + AddAssign<Var> + Send + Sync,
+    Expr: FieldAlgebra + From<F> + MulAssign<Var> + AddAssign<Var> + Send + Sync,
     Var: Into<Expr> + Copy + Send + Sync,
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
@@ -100,7 +100,7 @@ impl<F, EF, PubVar, Var, Expr> SymbolicEvaluator<F, Expr>
 where
     F: Field,
     EF: ExtensionField<F>,
-    Expr: AbstractField + From<F> + Send + Sync,
+    Expr: FieldAlgebra + From<F> + Send + Sync,
     Var: Into<Expr> + Copy + Send + Sync,
     PubVar: Into<Expr> + Copy + Send + Sync,
 {

@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use openvm_stark_backend::p3_field::AbstractField;
+use openvm_stark_backend::p3_field::FieldAlgebra;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 /// Deterministic seeded RNG, for testing use
@@ -16,7 +16,7 @@ pub fn create_seeded_rng_with_seed(seed: u64) -> StdRng {
 }
 
 // Returns row major matrix
-pub fn generate_random_matrix<F: AbstractField>(
+pub fn generate_random_matrix<F: FieldAlgebra>(
     mut rng: impl Rng,
     height: usize,
     width: usize,
@@ -30,7 +30,7 @@ pub fn generate_random_matrix<F: AbstractField>(
         .collect_vec()
 }
 
-pub fn to_field_vec<F: AbstractField>(v: Vec<u32>) -> Vec<F> {
+pub fn to_field_vec<F: FieldAlgebra>(v: Vec<u32>) -> Vec<F> {
     v.into_iter().map(F::from_canonical_u32).collect()
 }
 

@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use itertools::Itertools;
-use p3_field::AbstractExtensionField;
+use p3_field::FieldExtensionAlgebra;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -75,7 +75,7 @@ pub fn trace_metrics<SC: StarkGenericConfig>(
         .map(|(pk, &height)| {
             let air_name = pk.air_name.clone();
             let mut width = pk.vk.params.width.clone();
-            let ext_degree = <SC::Challenge as AbstractExtensionField<Val<SC>>>::D;
+            let ext_degree = <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D;
             for w in &mut width.after_challenge {
                 *w *= ext_degree;
             }
