@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-use p3_field::{FieldAlgebra, Field};
+use p3_field::{Field, FieldAlgebra};
 use serde::{Deserialize, Serialize};
 
 use super::symbolic_variable::SymbolicVariable;

@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     config::{StarkGenericConfig, Val},
     interaction::{InteractionBuilder, InteractionType},
     p3_air::{Air, BaseAir},
-    p3_field::{FieldAlgebra, Field},
+    p3_field::{Field, FieldAlgebra},
     p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::types::{AirProofInput, AirProofRawInput, CommittedTraceData, TraceCommitter},
     rap::{AnyRap, BaseAirWithPublicValues, PartitionedBaseAir},

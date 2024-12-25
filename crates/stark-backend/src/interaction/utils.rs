@@ -1,5 +1,5 @@
 use p3_air::VirtualPairCol;
-use p3_field::{FieldAlgebra, ExtensionField, Field, Powers};
+use p3_field::{ExtensionField, Field, FieldAlgebra, Powers};
 
 use super::Interaction;
 
