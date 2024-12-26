@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use openvm_stark_backend::{
-    p3_field::AbstractField,
+    p3_field::FieldAlgebra,
     prover::{
         types::{AirProofInput, AirProofRawInput, ProofInput},
         USE_DEBUG_BUILDER,

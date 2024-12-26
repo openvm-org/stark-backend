@@ -6,7 +6,7 @@ use std::{
 use itertools::{izip, multiunzip, Itertools};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::AbstractField;
+use p3_field::FieldAlgebra;
 use p3_matrix::{
     dense::{RowMajorMatrix, RowMajorMatrixView},
     Matrix,

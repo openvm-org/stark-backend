@@ -2,7 +2,7 @@ use std::cmp::min;
 
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
-use p3_field::{AbstractExtensionField, AbstractField, PackedValue};
+use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PackedValue};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair, Matrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -185,7 +185,7 @@ where
             // "Transpose" D packed base coefficients into WIDTH scalar extension coefficients.
             let width = min(PackedVal::<SC>::WIDTH, quotient_size);
             (0..width).map(move |idx_in_packing| {
-                let quotient_value = (0..<SC::Challenge as AbstractExtensionField<Val<SC>>>::D)
+                let quotient_value = (0..<SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D)
                     .map(|coeff_idx| quotient.as_base_slice()[coeff_idx].as_slice()[idx_in_packing])
                     .collect::<Vec<_>>();
                 SC::Challenge::from_base_slice(&quotient_value)

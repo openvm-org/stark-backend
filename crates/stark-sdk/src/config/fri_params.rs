@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FriParameters {
     pub log_blowup: usize,
+    pub log_final_poly_len: usize,
     pub num_queries: usize,
     pub proof_of_work_bits: usize,
 }
@@ -39,6 +40,7 @@ pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize)
     if let Ok("1") = std::env::var("OPENVM_FAST_TEST").as_deref() {
         return FriParameters {
             log_blowup,
+            log_final_poly_len: 0,
             num_queries: 2,
             proof_of_work_bits: 0,
         };
@@ -48,22 +50,26 @@ pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize)
         // plonky3's default is num_queries=100, so we will use that. See https://github.com/Plonky3/Plonky3/issues/380 for related security discussion.
         1 => FriParameters {
             log_blowup,
+            log_final_poly_len: 0,
             num_queries: 100,
             proof_of_work_bits: 16,
         },
         2 => FriParameters {
             log_blowup,
+            log_final_poly_len: 0,
             num_queries: 42,
             proof_of_work_bits: 16,
         },
         // plonky2 standard recursion config: https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/plonky2/src/plonk/circuit_data.rs#L101
         3 => FriParameters {
             log_blowup,
+            log_final_poly_len: 0,
             num_queries: 28,
             proof_of_work_bits: 16,
         },
         4 => FriParameters {
             log_blowup,
+            log_final_poly_len: 0,
             num_queries: 21,
             proof_of_work_bits: 16,
         },

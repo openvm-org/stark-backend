@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     interaction::stark_log_up::StarkLogUpPhase,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
-    p3_field::{extension::BinomialExtensionField, AbstractField, Field},
+    p3_field::{extension::BinomialExtensionField, Field, FieldAlgebra},
 };
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_dft::Radix2DitParallel;
@@ -157,6 +157,7 @@ where
     let dft = Dft::default();
     let fri_config = FriConfig {
         log_blowup: fri_params.log_blowup,
+        log_final_poly_len: fri_params.log_final_poly_len,
         num_queries: fri_params.num_queries,
         proof_of_work_bits: fri_params.proof_of_work_bits,
         mmcs: challenge_mmcs,

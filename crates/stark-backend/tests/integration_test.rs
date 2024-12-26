@@ -2,7 +2,7 @@
 #![allow(incomplete_features)]
 
 use openvm_stark_backend::{
-    config::StarkGenericConfig, p3_field::AbstractField, utils::disable_debug_builder, Chip,
+    config::StarkGenericConfig, p3_field::FieldAlgebra, utils::disable_debug_builder, Chip,
 };
 /// Test utils
 use openvm_stark_sdk::{

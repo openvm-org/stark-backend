@@ -207,7 +207,7 @@ mod tests {
         config::baby_bear_blake3::default_engine, engine::StarkEngine, utils::create_seeded_rng,
     };
     use p3_baby_bear::BabyBear;
-    use p3_field::AbstractField;
+    use p3_field::FieldAlgebra;
     use rand::Rng;
 
     use super::*;

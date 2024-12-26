@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use openvm_stark_backend::{
-    p3_field::AbstractField, prover::USE_DEBUG_BUILDER, verifier::VerificationError,
+    p3_field::FieldAlgebra, prover::USE_DEBUG_BUILDER, verifier::VerificationError,
 };
 use openvm_stark_sdk::{
     any_rap_arc_vec,

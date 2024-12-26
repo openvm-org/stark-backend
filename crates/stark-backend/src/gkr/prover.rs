@@ -512,7 +512,7 @@ pub fn correct_sum_as_poly_in_first_variable<F: Field>(
 #[cfg(test)]
 mod tests {
     use p3_baby_bear::BabyBear;
-    use p3_field::AbstractField;
+    use p3_field::FieldAlgebra;
     use rand::Rng;
 
     use crate::{gkr::prover::HypercubeEqEvals, poly::multi::hypercube_eq};

@@ -3,7 +3,7 @@ use std::{array, borrow::Borrow, marker::PhantomData};
 use itertools::{izip, Itertools};
 use p3_air::ExtensionBuilder;
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_field::{AbstractField, ExtensionField, Field};
+use p3_field::{ExtensionField, Field, FieldAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};

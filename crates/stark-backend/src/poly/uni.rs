@@ -236,7 +236,7 @@ mod tests {
 
     use itertools::Itertools;
     use p3_baby_bear::BabyBear;
-    use p3_field::AbstractField;
+    use p3_field::FieldAlgebra;
 
     use super::*;
 

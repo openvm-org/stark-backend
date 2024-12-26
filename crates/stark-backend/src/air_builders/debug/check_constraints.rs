@@ -1,6 +1,6 @@
 use itertools::izip;
 use p3_air::BaseAir;
-use p3_field::{AbstractField, Field};
+use p3_field::{Field, FieldAlgebra};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair, Matrix};
 use p3_maybe_rayon::prelude::*;
 

@@ -283,7 +283,7 @@ impl<F: Field> From<SymbolicConstraints<F>> for SymbolicConstraintsDag<F> {
 #[cfg(test)]
 mod tests {
     use p3_baby_bear::BabyBear;
-    use p3_field::AbstractField;
+    use p3_field::FieldAlgebra;
 
     use crate::{
         air_builders::symbolic::{

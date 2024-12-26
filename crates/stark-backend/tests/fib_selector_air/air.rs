@@ -2,7 +2,7 @@ use std::borrow::Borrow;
 
 use openvm_stark_backend::{
     interaction::InteractionBuilder,
-    p3_field::{AbstractField, Field},
+    p3_field::{Field, FieldAlgebra},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
 use openvm_stark_sdk::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS};

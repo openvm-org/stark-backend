@@ -2,7 +2,7 @@
 use p3_air::{
     AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder, PermutationAirBuilder,
 };
-use p3_field::AbstractField;
+use p3_field::FieldAlgebra;
 use p3_matrix::Matrix;
 
 use super::{

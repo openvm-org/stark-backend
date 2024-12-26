@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use itertools::Itertools;
-use p3_field::AbstractExtensionField;
+use p3_field::FieldExtensionAlgebra;
 use p3_matrix::Matrix;
 use tracing::instrument;
 
@@ -100,7 +100,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
                 pk.vk.quotient_degree,
                 width.preprocessed.unwrap_or(0),
                 format!("{:?}",width.main_widths()),
-                format!("{:?}",width.after_challenge.iter().map(|&x| x * <SC::Challenge as AbstractExtensionField<Val<SC>>>::D).collect_vec()),
+                format!("{:?}",width.after_challenge.iter().map(|&x| x * <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D).collect_vec()),
                 pk.vk.symbolic_constraints.constraints.len(),
                 pk.vk.symbolic_constraints.interactions.len(),
                 pk.vk
