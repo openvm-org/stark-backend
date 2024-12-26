@@ -5,8 +5,9 @@ use std::{
 };
 
 use p3_field::Field;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnivariatePolynomial<F> {
     coeffs: Vec<F>,
 }

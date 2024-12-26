@@ -10,7 +10,8 @@ use std::iter::zip;
 
 use itertools::Itertools;
 use p3_challenger::FieldChallenger;
-use p3_field::Field;
+use p3_field::{ExtensionField, Field};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::poly::{multi::MultivariatePolyOracle, uni::UnivariatePolynomial};
@@ -44,12 +45,15 @@ pub struct SumcheckArtifacts<F, O> {
 /// - The degree of any multivariate polynomial exceeds [`MAX_DEGREE`] in any variable.
 /// - The round polynomials are inconsistent with their corresponding claimed sum on `0` and `1`.
 // TODO: Consider returning constant oracles as separate type.
-pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
-    mut claims: Vec<F>,
+pub fn prove_batch<F, EF, O>(
+    mut claims: Vec<EF>,
     mut polys: Vec<O>,
-    lambda: F,
+    lambda: EF,
     challenger: &mut impl FieldChallenger<F>,
-) -> (SumcheckProof<F>, SumcheckArtifacts<F, O>) {
+) -> (SumcheckProof<EF>, SumcheckArtifacts<EF, O>)
+where F: Field,
+        EF: ExtensionField<F>,
+        O: MultivariatePolyOracle<EF> {
     let n_variables = polys.iter().map(O::arity).max().unwrap();
     assert_eq!(claims.len(), polys.len());
 
@@ -75,8 +79,8 @@ pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
                     claim.halve().into()
                 };
 
-                let eval_at_0 = round_poly.evaluate(F::ZERO);
-                let eval_at_1 = round_poly.evaluate(F::ONE);
+                let eval_at_0 = round_poly.evaluate(EF::ZERO);
+                let eval_at_1 = round_poly.evaluate(EF::ONE);
 
                 assert_eq!(
                     eval_at_0 + eval_at_1,
@@ -96,7 +100,9 @@ pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
 
         let round_poly = random_linear_combination(&this_round_polys, lambda);
 
-        challenger.observe_slice(&round_poly);
+        for coef in round_poly.as_ref() {
+            challenger.observe_ext_element(*coef);
+        }
 
         let challenge = challenger.sample_ext_element();
 
@@ -181,7 +187,7 @@ pub fn partially_verify<F: Field>(
     Ok((assignment, claim))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SumcheckProof<F> {
     pub round_polys: Vec<UnivariatePolynomial<F>>,
 }
