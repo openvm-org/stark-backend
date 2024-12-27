@@ -27,6 +27,7 @@ use crate::{
         types::{AirProofData, Commitments, Proof, ProofInput},
     },
     rap::AnyRap,
+    utils::metrics_span,
 };
 
 pub mod helper;
@@ -81,6 +82,8 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
         mpk: &'a MultiStarkProvingKey<SC>,
         proof_input: ProofInput<SC>,
     ) -> Proof<SC> {
+        #[cfg(feature = "bench-metrics")]
+        let start = std::time::Instant::now();
         assert!(mpk.validate(&proof_input), "Invalid proof input");
         let pcs = self.config.pcs();
         let rap_phase_seq = self.config.rap_phase_seq();
@@ -117,16 +120,17 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
         challenger.observe_slice(&preprocessed_commits);
 
         // Commit all common main traces in a commitment. Traces inside are ordered by AIR id.
-        let (common_main_trace_views, common_main_prover_data) = {
-            let committer = TraceCommitter::<SC>::new(pcs);
-            let (trace_views, traces): (Vec<_>, Vec<_>) = common_main_per_air
-                .iter()
-                .filter_map(|cm: &Option<RowMajorMatrix<_>>| cm.as_ref())
-                .map(|m| (m.as_view(), m.clone()))
-                .unzip();
+        let (common_main_trace_views, common_main_prover_data) =
+            metrics_span("main_trace_commit_time_ms", || {
+                let committer = TraceCommitter::<SC>::new(pcs);
+                let (trace_views, traces): (Vec<_>, Vec<_>) = common_main_per_air
+                    .iter()
+                    .filter_map(|cm: &Option<RowMajorMatrix<_>>| cm.as_ref())
+                    .map(|m| (m.as_view(), m.clone()))
+                    .unzip();
 
-            (trace_views, committer.commit(traces))
-        };
+                (trace_views, committer.commit(traces))
+            });
 
         // Commitments order:
         // - for each air:
@@ -232,8 +236,9 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
 
         // Commit to permutation traces: this means only 1 challenge round right now
         // One shared commit for all permutation traces
-        let perm_prover_data = tracing::info_span!("commit to permutation traces")
-            .in_scope(|| commit_perm_traces::<SC>(pcs, perm_trace_per_air, &domain_per_air));
+        let perm_prover_data = metrics_span("perm_trace_commit_time_ms", || {
+            commit_perm_traces::<SC>(pcs, perm_trace_per_air, &domain_per_air)
+        });
 
         // Challenger observes commitment if exists
         if let Some(data) = &perm_prover_data {
@@ -262,18 +267,24 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
             .flatten()
             .chain(iter::once(common_main_prover_data))
             .collect();
-        prove_raps_with_committed_traces(
-            pcs,
-            challenger,
-            mpk,
-            &main_prover_data,
-            perm_prover_data,
-            exposed_values_after_challenge,
-            quotient_data,
-            domain_per_air,
-            pvs_per_air,
-            rap_phase_seq_proof,
-        )
+        let proof = metrics_span("pcs_opening_time_ms", || {
+            prove_raps_with_committed_traces(
+                pcs,
+                challenger,
+                mpk,
+                &main_prover_data,
+                perm_prover_data,
+                exposed_values_after_challenge,
+                quotient_data,
+                domain_per_air,
+                pvs_per_air,
+                rap_phase_seq_proof,
+            )
+        });
+        #[cfg(feature = "bench-metrics")]
+        ::metrics::gauge!("stark_prove_excluding_trace_time_ms")
+            .set(start.elapsed().as_millis() as f64);
+        proof
     }
 }
 
