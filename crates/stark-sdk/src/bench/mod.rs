@@ -93,7 +93,7 @@ fn serialize_metric(ckey: CompositeKey, value: DebugValue) -> serde_json::Value 
 ///   ...
 /// }
 ///
-fn serialize_metric_snapshot(snapshot: Snapshot) -> serde_json::Value {
+pub fn serialize_metric_snapshot(snapshot: Snapshot) -> serde_json::Value {
     let mut ret = BTreeMap::<_, Vec<serde_json::Value>>::new();
     for (ckey, _, _, value) in snapshot.into_vec() {
         match ckey.kind() {
