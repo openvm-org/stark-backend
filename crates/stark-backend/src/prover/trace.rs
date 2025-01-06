@@ -16,6 +16,7 @@ use crate::{
     keygen::view::MultiStarkProvingKeyView,
     prover::quotient::{helper::QuotientVkDataHelper, ProverQuotientData, QuotientCommitter},
     rap::AnyRap,
+    utils::metrics_span,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -46,10 +47,13 @@ pub(super) fn commit_quotient_traces<'a, SC: StarkGenericConfig>(
         .iter()
         .map(|pk| pk.get_quotient_vk_data())
         .collect_vec();
-    let quotient_values =
-        quotient_committer.quotient_values(raps, &qvks, &trace_views, public_values_per_air);
-    // Commit to quotient polynomias. One shared commit for all quotient polynomials
-    quotient_committer.commit(quotient_values)
+    let quotient_values = metrics_span("quotient_poly_compute_time_ms", || {
+        quotient_committer.quotient_values(raps, &qvks, &trace_views, public_values_per_air)
+    });
+    // Commit to quotient polynomials. One shared commit for all quotient polynomials
+    metrics_span("quotient_poly_commit_time_ms", || {
+        quotient_committer.commit(quotient_values)
+    })
 }
 
 fn create_trace_view_per_air<'a, SC: StarkGenericConfig>(

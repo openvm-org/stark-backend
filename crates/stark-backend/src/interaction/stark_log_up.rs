@@ -23,6 +23,7 @@ use crate::{
     parizip,
     prover::PairTraceView,
     rap::PermutationAirBuilderWithExposedValues,
+    utils::metrics_span,
 };
 
 #[derive(Default)]
@@ -105,15 +106,14 @@ where
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
             array::from_fn(|_| challenger.sample_ext_element::<Challenge>());
 
-        let after_challenge_trace_per_air = tracing::info_span!("generate permutation traces")
-            .in_scope(|| {
-                Self::generate_after_challenge_traces_per_air(
-                    &challenges,
-                    constraints_per_air,
-                    rap_pk_per_air,
-                    trace_view_per_air,
-                )
-            });
+        let after_challenge_trace_per_air = metrics_span("generate_perm_trace_time_ms", || {
+            Self::generate_after_challenge_traces_per_air(
+                &challenges,
+                constraints_per_air,
+                rap_pk_per_air,
+                trace_view_per_air,
+            )
+        });
         let cumulative_sum_per_air = Self::extract_cumulative_sums(&after_challenge_trace_per_air);
 
         // Challenger needs to observe what is exposed (cumulative_sums)

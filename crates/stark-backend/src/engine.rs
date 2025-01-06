@@ -145,15 +145,7 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
         };
 
         let mut challenger = self.new_challenger();
-
-        #[cfg(feature = "bench-metrics")]
-        let prove_start = std::time::Instant::now();
-        let _proof = prover.prove(&mut challenger, pk, proof_input);
-        #[cfg(feature = "bench-metrics")]
-        metrics::gauge!("stark_prove_excluding_trace_time_ms")
-            .set(prove_start.elapsed().as_millis() as f64);
-
-        _proof
+        prover.prove(&mut challenger, pk, proof_input)
     }
 
     fn verify(
