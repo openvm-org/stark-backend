@@ -52,14 +52,14 @@ where
 
     let ext_degree = SC::Challenge::D;
 
-    let alpha_powers = alpha
+    let mut alpha_powers = alpha
         .powers()
         .take(constraints.constraint_idx.len())
-        .collect_vec()
-        .into_iter()
-        .rev()
         .map(PackedChallenge::<SC>::from_f)
         .collect_vec();
+    // We want alpha powers to have highest power first, because of how accumulator "folding" works
+    // So this will be alpha^{num_constraints - 1}, ..., alpha^0
+    alpha_powers.reverse();
 
     // assert!(quotient_size >= PackedVal::<SC>::WIDTH);
     // We take PackedVal::<SC>::WIDTH worth of values at a time from a quotient_size slice, so we need to

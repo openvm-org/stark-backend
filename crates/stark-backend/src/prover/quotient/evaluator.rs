@@ -156,9 +156,7 @@ impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
         let mut accumulator = PackedChallenge::<SC>::ZERO;
         for (&alpha_pow, &node_idx) in alpha_powers.iter().zip(&constraints.constraint_idx) {
             match evaluated_nodes[node_idx] {
-                PackedExpr::Val(x) => {
-                    accumulator += alpha_pow * x;
-                }
+                PackedExpr::Val(x) => accumulator += alpha_pow * x,
                 PackedExpr::Challenge(x) => accumulator += alpha_pow * x,
             }
         }
