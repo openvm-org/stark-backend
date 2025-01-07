@@ -53,7 +53,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     /// - `quotient_degrees` is the factor to **multiply** the trace degree by to get the degree
     ///   of the quotient polynomial. This should be determined from the constraint degree
     ///   of the RAP.
-    #[instrument(name = "compute quotient values", level = "debug", skip_all)]
+    #[instrument(name = "compute quotient values", level = "info", skip_all)]
     pub fn quotient_values<'a>(
         &self,
         qvks: &[QuotientVkData<'a, SC>],
@@ -115,7 +115,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
 
         // temporary until switching over to use DAG everywhere
         let dag = build_symbolic_constraints_dag(&qvk.symbolic_constraints.constraints, &[]);
-        let quotient_values = compute_single_rap_quotient_values::<SC, _>(
+        let quotient_values = compute_single_rap_quotient_values::<SC>(
             &dag.constraints,
             trace_domain,
             quotient_domain,

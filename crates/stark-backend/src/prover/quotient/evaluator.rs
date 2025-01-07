@@ -2,19 +2,17 @@ use std::ops::{Add, Mul, Neg, Sub};
 
 use derivative::Derivative;
 use p3_field::FieldAlgebra;
-use p3_matrix::Matrix;
 
 use crate::{
-    air_builders::{
-        symbolic::{
-            dag::SymbolicExpressionDag,
-            symbolic_expression::SymbolicEvaluator,
-            symbolic_variable::{Entry, SymbolicVariable},
-        },
-        ViewPair,
+    air_builders::symbolic::{
+        dag::SymbolicExpressionDag,
+        symbolic_expression::SymbolicEvaluator,
+        symbolic_variable::{Entry, SymbolicVariable},
     },
     config::{PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };
+
+type ViewPair<'a, T> = [Vec<T>; 2];
 
 /// A struct for quotient polynomial evaluation. This evaluates `WIDTH` rows of the quotient polynomial
 /// simultaneously using SIMD (if target arch allows it) via `PackedVal` and `PackedChallenge` types.
@@ -113,9 +111,9 @@ where
     fn eval_var(&self, symbolic_var: SymbolicVariable<Val<SC>>) -> PackedExpr<SC> {
         let index = symbolic_var.index;
         match symbolic_var.entry {
-            Entry::Preprocessed { offset } => PackedExpr::Val(self.preprocessed.get(offset, index)),
+            Entry::Preprocessed { offset } => PackedExpr::Val(self.preprocessed[offset][index]),
             Entry::Main { part_index, offset } => {
-                PackedExpr::Val(self.partitioned_main[part_index].get(offset, index))
+                PackedExpr::Val(self.partitioned_main[part_index][offset][index])
             }
             Entry::Public => PackedExpr::Val(self.public_values[index].into()),
             Entry::Permutation { offset } => {
@@ -123,7 +121,7 @@ where
                     .after_challenge
                     .first()
                     .expect("Challenge phase not supported");
-                PackedExpr::Challenge(perm.get(offset, index))
+                PackedExpr::Challenge(perm[offset][index])
             }
             Entry::Challenge => {
                 let permutation_randomness = self

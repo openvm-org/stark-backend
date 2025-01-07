@@ -3,7 +3,7 @@ use std::cmp::min;
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PackedValue};
-use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair, Matrix};
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
@@ -25,13 +25,13 @@ use crate::{
     level = "trace",
     skip_all
 )]
-pub fn compute_single_rap_quotient_values<'a, SC, Mat>(
+pub fn compute_single_rap_quotient_values<'a, SC>(
     constraints: &SymbolicExpressionDag<Val<SC>>,
     trace_domain: Domain<SC>,
     quotient_domain: Domain<SC>,
-    preprocessed_trace_on_quotient_domain: Mat,
-    partitioned_main_lde_on_quotient_domain: Vec<Mat>,
-    after_challenge_lde_on_quotient_domain: Vec<Mat>,
+    preprocessed_trace_on_quotient_domain: RowMajorMatrix<Val<SC>>,
+    partitioned_main_lde_on_quotient_domain: Vec<RowMajorMatrix<Val<SC>>>,
+    after_challenge_lde_on_quotient_domain: Vec<RowMajorMatrix<Val<SC>>>,
     // For each challenge round, the challenges drawn
     challenges: &[Vec<PackedChallenge<SC>>],
     alpha: SC::Challenge,
@@ -41,7 +41,6 @@ pub fn compute_single_rap_quotient_values<'a, SC, Mat>(
 ) -> Vec<SC::Challenge>
 where
     SC: StarkGenericConfig,
-    Mat: Matrix<Val<SC>> + Sync,
 {
     let quotient_size = quotient_domain.size();
     let preprocessed_width = preprocessed_trace_on_quotient_domain.width();
@@ -78,16 +77,19 @@ where
             let wrap = |i| i % quotient_size;
             let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;
 
+            // let span = info_span!("form packed vals").entered();
             let is_first_row = *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
             let is_last_row = *PackedVal::<SC>::from_slice(&sels.is_last_row[i_range.clone()]);
             let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
             let inv_zeroifier = *PackedVal::<SC>::from_slice(&sels.inv_zeroifier[i_range.clone()]);
 
+            // Vertically pack rows of each matrix:
+
             let [preprocessed_local, preprocessed_next] = [0, 1].map(|step_idx| {
                 (0..preprocessed_width)
                     .map(|col| {
                         PackedVal::<SC>::from_fn(|offset| {
-                            Matrix::get(
+                            *mat_get_unchecked(
                                 &preprocessed_trace_on_quotient_domain,
                                 wrap(i_start + offset + step_idx * next_step),
                                 col,
@@ -105,7 +107,11 @@ where
                         (0..width)
                             .map(|col| {
                                 PackedVal::<SC>::from_fn(|offset| {
-                                    lde.get(wrap(i_start + offset + step_idx * next_step), col)
+                                    *mat_get_unchecked(
+                                        lde,
+                                        wrap(i_start + offset + step_idx * next_step),
+                                        col,
+                                    )
                                 })
                             })
                             .collect_vec()
@@ -124,7 +130,8 @@ where
                             .map(|col| {
                                 PackedChallenge::<SC>::from_base_fn(|i| {
                                     PackedVal::<SC>::from_fn(|offset| {
-                                        lde.get(
+                                        *mat_get_unchecked(
+                                            lde,
                                             wrap(i_start + offset + step_idx * next_step),
                                             col + i,
                                         )
@@ -135,30 +142,13 @@ where
                     })
                 })
                 .collect_vec();
+            // span.exit();
 
+            // let span = info_span!("accumulate").entered();
             let evaluator: ProverConstraintEvaluator<SC> = ProverConstraintEvaluator {
-                preprocessed: VerticalPair::new(
-                    RowMajorMatrixView::new_row(&preprocessed_local),
-                    RowMajorMatrixView::new_row(&preprocessed_next),
-                ),
-                partitioned_main: partitioned_main_pairs
-                    .iter()
-                    .map(|[local, next]| {
-                        VerticalPair::new(
-                            RowMajorMatrixView::new_row(local),
-                            RowMajorMatrixView::new_row(next),
-                        )
-                    })
-                    .collect(),
-                after_challenge: after_challenge_pairs
-                    .iter()
-                    .map(|[local, next]| {
-                        VerticalPair::new(
-                            RowMajorMatrixView::new_row(local),
-                            RowMajorMatrixView::new_row(next),
-                        )
-                    })
-                    .collect(),
+                preprocessed: [preprocessed_local, preprocessed_next],
+                partitioned_main: partitioned_main_pairs,
+                after_challenge: after_challenge_pairs,
                 challenges,
                 is_first_row,
                 is_last_row,
@@ -169,6 +159,7 @@ where
             let accumulator = evaluator.accumulate(constraints, &alpha_powers);
             // quotient(x) = constraints(x) / Z_H(x)
             let quotient: PackedChallenge<SC> = accumulator * inv_zeroifier;
+            // span.exit();
 
             // "Transpose" D packed base coefficients into WIDTH scalar extension coefficients.
             let width = min(PackedVal::<SC>::WIDTH, quotient_size);
@@ -180,4 +171,8 @@ where
             })
         })
         .collect()
+}
+
+fn mat_get_unchecked<T>(mat: &RowMajorMatrix<T>, r: usize, c: usize) -> &T {
+    unsafe { mat.values.get_unchecked(r * mat.width + c) }
 }
