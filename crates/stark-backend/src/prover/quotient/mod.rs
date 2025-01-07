@@ -115,7 +115,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
 
         // temporary until switching over to use DAG everywhere
         let dag = build_symbolic_constraints_dag(&qvk.symbolic_constraints.constraints, &[]);
-        let quotient_values = compute_single_rap_quotient_values(
+        let quotient_values = compute_single_rap_quotient_values::<SC, _>(
             &dag.constraints,
             trace_domain,
             quotient_domain,
@@ -129,8 +129,6 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
                 .iter()
                 .map(|v| v.as_slice())
                 .collect_vec(),
-            qvk.rap_phase_seq_kind,
-            qvk.interaction_chunk_size,
         );
         SingleQuotientData {
             quotient_degree,

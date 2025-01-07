@@ -1,8 +1,13 @@
+use std::ops::{Add, Mul, Neg, Sub};
+
+use derivative::Derivative;
+use p3_field::FieldAlgebra;
 use p3_matrix::Matrix;
 
 use crate::{
     air_builders::{
         symbolic::{
+            dag::SymbolicExpressionDag,
             symbolic_expression::SymbolicEvaluator,
             symbolic_variable::{Entry, SymbolicVariable},
         },
@@ -27,17 +32,84 @@ pub struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
 
 /// In order to avoid extension field arithmetic as much as possible, we evaluate into
 /// the smallest packed expression possible.
+#[derive(Derivative, Copy)]
+#[derivative(Clone(bound = ""))]
 enum PackedExpr<SC: StarkGenericConfig> {
     Val(PackedVal<SC>),
     Challenge(PackedChallenge<SC>),
 }
 
-// TODO: impl binops
+impl<SC: StarkGenericConfig> Add for PackedExpr<SC> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        match (self, other) {
+            (PackedExpr::Val(x), PackedExpr::Val(y)) => PackedExpr::Val(x + y),
+            (PackedExpr::Val(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(y + x),
+            (PackedExpr::Challenge(x), PackedExpr::Val(y)) => PackedExpr::Challenge(x + y),
+            (PackedExpr::Challenge(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(x + y),
+        }
+    }
+}
+
+impl<SC: StarkGenericConfig> Sub for PackedExpr<SC> {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        match (self, other) {
+            (PackedExpr::Val(x), PackedExpr::Val(y)) => PackedExpr::Val(x - y),
+            (PackedExpr::Val(x), PackedExpr::Challenge(y)) => {
+                let x: PackedChallenge<SC> = x.into();
+                // We could alternative do (-y) + x
+                PackedExpr::Challenge(x - y)
+            }
+            (PackedExpr::Challenge(x), PackedExpr::Val(y)) => PackedExpr::Challenge(x - y),
+            (PackedExpr::Challenge(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(x - y),
+        }
+    }
+}
+
+impl<SC: StarkGenericConfig> Mul for PackedExpr<SC> {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self {
+        match (self, other) {
+            (PackedExpr::Val(x), PackedExpr::Val(y)) => PackedExpr::Val(x * y),
+            (PackedExpr::Val(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(y * x),
+            (PackedExpr::Challenge(x), PackedExpr::Val(y)) => PackedExpr::Challenge(x * y),
+            (PackedExpr::Challenge(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(x * y),
+        }
+    }
+}
+
+impl<SC: StarkGenericConfig> Neg for PackedExpr<SC> {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        match self {
+            PackedExpr::Val(x) => PackedExpr::Val(-x),
+            PackedExpr::Challenge(x) => PackedExpr::Challenge(-x),
+        }
+    }
+}
 
 impl<SC> SymbolicEvaluator<Val<SC>, PackedExpr<SC>> for ProverConstraintEvaluator<'_, SC>
 where
     SC: StarkGenericConfig,
 {
+    fn eval_const(&self, c: Val<SC>) -> PackedExpr<SC> {
+        PackedExpr::Val(c.into())
+    }
+    fn eval_is_first_row(&self) -> PackedExpr<SC> {
+        PackedExpr::Val(self.is_first_row)
+    }
+    fn eval_is_last_row(&self) -> PackedExpr<SC> {
+        PackedExpr::Val(self.is_last_row)
+    }
+    fn eval_is_transition(&self) -> PackedExpr<SC> {
+        PackedExpr::Val(self.is_transition)
+    }
+
     fn eval_var(&self, symbolic_var: SymbolicVariable<Val<SC>>) -> PackedExpr<SC> {
         let index = symbolic_var.index;
         match symbolic_var.entry {
@@ -72,19 +144,24 @@ where
     }
 }
 
-// fn assert_zero<I: Into<Self::Expr>>(&mut self, x: I) {
-//     let x: PackedVal<SC> = x.into();
-//     let alpha_power = self.alpha_powers[self.constraint_index];
-//     self.accumulator += PackedChallenge::<SC>::from_f(alpha_power) * x;
-//     self.constraint_index += 1;
-// }
-
-// fn assert_zero_ext<I>(&mut self, x: I)
-// where
-//     I: Into<Self::ExprEF>,
-// {
-//     let x: PackedChallenge<SC> = x.into();
-//     let alpha_power = self.alpha_powers[self.constraint_index];
-//     self.accumulator += PackedChallenge::<SC>::from_f(alpha_power) * x;
-//     self.constraint_index += 1;
-// }
+impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
+    /// `alpha_powers` are in **reversed** order, with highest power coming first.
+    // Note: this could be split into multiple functions if additional constraints need to be folded in
+    pub fn accumulate(
+        &self,
+        constraints: &SymbolicExpressionDag<Val<SC>>,
+        alpha_powers: &[PackedChallenge<SC>],
+    ) -> PackedChallenge<SC> {
+        let evaluated_nodes = self.eval_nodes(&constraints.nodes);
+        let mut accumulator = PackedChallenge::<SC>::ZERO;
+        for (&alpha_pow, &node_idx) in alpha_powers.iter().zip(&constraints.constraint_idx) {
+            match evaluated_nodes[node_idx] {
+                PackedExpr::Val(x) => {
+                    accumulator += alpha_pow * x;
+                }
+                PackedExpr::Challenge(x) => accumulator += alpha_pow * x,
+            }
+        }
+        accumulator
+    }
+}

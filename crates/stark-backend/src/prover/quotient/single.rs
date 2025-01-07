@@ -8,18 +8,10 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
-use super::folder::ProverConstraintEvaluator;
+use super::evaluator::ProverConstraintEvaluator;
 use crate::{
-    air_builders::{
-        prover::ProverConstraintFolder,
-        symbolic::{
-            dag::{SymbolicConstraintsDag, SymbolicExpressionDag},
-            SymbolicConstraints,
-        },
-    },
+    air_builders::symbolic::dag::SymbolicExpressionDag,
     config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
-    rap::{PartitionedBaseAir, Rap},
 };
 
 // Starting reference: p3_uni_stark::prover::quotient_values
@@ -46,8 +38,6 @@ pub fn compute_single_rap_quotient_values<'a, SC, Mat>(
     public_values: &'a [Val<SC>],
     // Values exposed to verifier after challenge round i
     exposed_values_after_challenge: &'a [&'a [PackedChallenge<SC>]],
-    rap_phase_seq_kind: RapPhaseSeqKind,
-    interaction_chunk_size: usize,
 ) -> Vec<SC::Challenge>
 where
     SC: StarkGenericConfig,
@@ -62,11 +52,14 @@ where
 
     let ext_degree = SC::Challenge::D;
 
-    let mut alpha_powers = alpha
+    let alpha_powers = alpha
         .powers()
         .take(constraints.constraint_idx.len())
+        .collect_vec()
+        .into_iter()
+        .rev()
+        .map(PackedChallenge::<SC>::from_f)
         .collect_vec();
-    alpha_powers.reverse();
 
     // assert!(quotient_size >= PackedVal::<SC>::WIDTH);
     // We take PackedVal::<SC>::WIDTH worth of values at a time from a quotient_size slice, so we need to
@@ -143,8 +136,7 @@ where
                 })
                 .collect_vec();
 
-            let accumulator = PackedChallenge::<SC>::ZERO;
-            let mut folder = ProverConstraintEvaluator {
+            let evaluator: ProverConstraintEvaluator<SC> = ProverConstraintEvaluator {
                 preprocessed: VerticalPair::new(
                     RowMajorMatrixView::new_row(&preprocessed_local),
                     RowMajorMatrixView::new_row(&preprocessed_next),
@@ -174,10 +166,9 @@ where
                 public_values,
                 exposed_values_after_challenge,
             };
-            rap.eval(&mut folder);
-
+            let accumulator = evaluator.accumulate(constraints, &alpha_powers);
             // quotient(x) = constraints(x) / Z_H(x)
-            let quotient = folder.accumulator * inv_zeroifier;
+            let quotient: PackedChallenge<SC> = accumulator * inv_zeroifier;
 
             // "Transpose" D packed base coefficients into WIDTH scalar extension coefficients.
             let width = min(PackedVal::<SC>::WIDTH, quotient_size);

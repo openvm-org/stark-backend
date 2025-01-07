@@ -8,7 +8,7 @@ use p3_matrix::Matrix;
 
 use super::{
     symbolic::{
-        dag::{build_symbolic_constraints_dag, SymbolicExpressionNode},
+        dag::build_symbolic_constraints_dag,
         symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
         symbolic_variable::{Entry, SymbolicVariable},
     },
@@ -56,33 +56,7 @@ where
         // node_idx -> evaluation
         // We do a simple serial evaluation in topological order.
         // This can be parallelized if necessary.
-        let mut exprs: Vec<Expr> = Vec::with_capacity(dag.nodes.len());
-        for node in &dag.nodes {
-            let expr = match *node {
-                SymbolicExpressionNode::Variable(var) => self.eval_var(var),
-                SymbolicExpressionNode::Constant(f) => Expr::from(f),
-                SymbolicExpressionNode::Add {
-                    left_idx,
-                    right_idx,
-                    ..
-                } => exprs[left_idx].clone() + exprs[right_idx].clone(),
-                SymbolicExpressionNode::Sub {
-                    left_idx,
-                    right_idx,
-                    ..
-                } => exprs[left_idx].clone() - exprs[right_idx].clone(),
-                SymbolicExpressionNode::Neg { idx, .. } => -exprs[idx].clone(),
-                SymbolicExpressionNode::Mul {
-                    left_idx,
-                    right_idx,
-                    ..
-                } => exprs[left_idx].clone() * exprs[right_idx].clone(),
-                SymbolicExpressionNode::IsFirstRow => self.is_first_row.into(),
-                SymbolicExpressionNode::IsLastRow => self.is_last_row.into(),
-                SymbolicExpressionNode::IsTransition => self.is_transition.into(),
-            };
-            exprs.push(expr);
-        }
+        let exprs = self.eval_nodes(&dag.nodes);
         for idx in dag.constraint_idx {
             self.assert_zero(exprs[idx].clone());
         }
@@ -104,6 +78,18 @@ where
     Var: Into<Expr> + Copy + Send + Sync,
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
+    fn eval_const(&self, c: F) -> Expr {
+        c.into()
+    }
+    fn eval_is_first_row(&self) -> Expr {
+        self.is_first_row.into()
+    }
+    fn eval_is_last_row(&self) -> Expr {
+        self.is_last_row.into()
+    }
+    fn eval_is_transition(&self) -> Expr {
+        self.is_transition.into()
+    }
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> Expr {
         let index = symbolic_var.index;
         match symbolic_var.entry {
@@ -131,5 +117,5 @@ where
         }
     }
     // NOTE: do not use the eval_expr function as it can have exponential complexity!
-    // Instead use the `SymbolicExpressionDag`
+    // Instead use `eval_nodes`
 }

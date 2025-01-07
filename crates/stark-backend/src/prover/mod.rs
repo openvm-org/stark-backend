@@ -253,7 +253,6 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
             &mpk,
             alpha,
             &challenges,
-            airs,
             &pvs_per_air,
             domain_per_air.clone(),
             &cached_mains_pdata_per_air,

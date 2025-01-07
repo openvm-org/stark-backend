@@ -15,6 +15,9 @@ pub(super) struct Evaluator<'a, F: Field> {
 }
 
 impl<F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, F> {
+    fn eval_const(&self, c: F) -> F {
+        c
+    }
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> F {
         let n = self.local_index;
         let height = self.height;
@@ -29,5 +32,14 @@ impl<F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, F> {
             Entry::Public => self.public_values[index],
             _ => unreachable!("There should be no after challenge variables"),
         }
+    }
+    fn eval_is_first_row(&self) -> F {
+        unreachable!()
+    }
+    fn eval_is_last_row(&self) -> F {
+        unreachable!()
+    }
+    fn eval_is_transition(&self) -> F {
+        unreachable!()
     }
 }

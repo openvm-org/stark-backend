@@ -15,7 +15,6 @@ use crate::{
     config::{Com, Domain, PcsProverData, StarkGenericConfig, Val},
     keygen::view::MultiStarkProvingKeyView,
     prover::quotient::{helper::QuotientVkDataHelper, ProverQuotientData, QuotientCommitter},
-    rap::AnyRap,
     utils::metrics_span,
 };
 
@@ -25,7 +24,6 @@ pub(super) fn commit_quotient_traces<'a, SC: StarkGenericConfig>(
     mpk: &MultiStarkProvingKeyView<SC>,
     alpha: SC::Challenge,
     challenges: &[Vec<SC::Challenge>],
-    raps: Vec<impl AsRef<dyn AnyRap<SC>>>,
     public_values_per_air: &[Vec<Val<SC>>],
     domain_per_air: Vec<Domain<SC>>,
     cached_mains_pdata_per_air: &'a [Vec<ProverTraceData<SC>>],

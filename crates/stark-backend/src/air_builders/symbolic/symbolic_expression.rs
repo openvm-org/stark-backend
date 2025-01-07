@@ -14,7 +14,7 @@ use std::{
 use p3_field::{Field, FieldAlgebra};
 use serde::{Deserialize, Serialize};
 
-use super::symbolic_variable::SymbolicVariable;
+use super::{dag::SymbolicExpressionNode, symbolic_variable::SymbolicVariable};
 
 /// An expression over `SymbolicVariable`s.
 // Note: avoid deriving Hash because it will hash the entire sub-tree
@@ -341,21 +341,64 @@ impl<F: Field> Product<F> for SymbolicExpression<F> {
     }
 }
 
-pub trait SymbolicEvaluator<F: Field, E: From<F>>
+pub trait SymbolicEvaluator<F, E>
 where
+    F: Field,
     E: Add<E, Output = E> + Sub<E, Output = E> + Mul<E, Output = E> + Neg<Output = E>,
 {
+    fn eval_const(&self, c: F) -> E;
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> E;
+    fn eval_is_first_row(&self) -> E;
+    fn eval_is_last_row(&self) -> E;
+    fn eval_is_transition(&self) -> E;
 
     fn eval_expr(&self, symbolic_expr: &SymbolicExpression<F>) -> E {
         match symbolic_expr {
             SymbolicExpression::Variable(var) => self.eval_var(*var),
-            SymbolicExpression::Constant(c) => (*c).into(),
+            SymbolicExpression::Constant(c) => self.eval_const(*c),
             SymbolicExpression::Add { x, y, .. } => self.eval_expr(x) + self.eval_expr(y),
             SymbolicExpression::Sub { x, y, .. } => self.eval_expr(x) - self.eval_expr(y),
             SymbolicExpression::Neg { x, .. } => -self.eval_expr(x),
             SymbolicExpression::Mul { x, y, .. } => self.eval_expr(x) * self.eval_expr(y),
-            _ => unreachable!("Expression cannot be evaluated"),
+            SymbolicExpression::IsFirstRow => self.eval_is_first_row(),
+            SymbolicExpression::IsLastRow => self.eval_is_last_row(),
+            SymbolicExpression::IsTransition => self.eval_is_transition(),
         }
+    }
+
+    /// Assumes that `nodes` are in topological order (if B references A, then B comes after A).
+    /// Simple serial evaluation in order.
+    fn eval_nodes(&self, nodes: &[SymbolicExpressionNode<F>]) -> Vec<E>
+    where
+        E: Clone,
+    {
+        let mut exprs: Vec<E> = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let expr = match *node {
+                SymbolicExpressionNode::Variable(var) => self.eval_var(var),
+                SymbolicExpressionNode::Constant(c) => self.eval_const(c),
+                SymbolicExpressionNode::Add {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs[left_idx].clone() + exprs[right_idx].clone(),
+                SymbolicExpressionNode::Sub {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs[left_idx].clone() - exprs[right_idx].clone(),
+                SymbolicExpressionNode::Neg { idx, .. } => -exprs[idx].clone(),
+                SymbolicExpressionNode::Mul {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs[left_idx].clone() * exprs[right_idx].clone(),
+                SymbolicExpressionNode::IsFirstRow => self.eval_is_first_row(),
+                SymbolicExpressionNode::IsLastRow => self.eval_is_last_row(),
+                SymbolicExpressionNode::IsTransition => self.eval_is_transition(),
+            };
+            exprs.push(expr);
+        }
+        exprs
     }
 }
