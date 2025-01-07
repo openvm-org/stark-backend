@@ -8,8 +8,15 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
+use super::folder::ProverConstraintEvaluator;
 use crate::{
-    air_builders::{prover::ProverConstraintFolder, symbolic::SymbolicConstraints},
+    air_builders::{
+        prover::ProverConstraintFolder,
+        symbolic::{
+            dag::{SymbolicConstraintsDag, SymbolicExpressionDag},
+            SymbolicConstraints,
+        },
+    },
     config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
     interaction::RapPhaseSeqKind,
     rap::{PartitionedBaseAir, Rap},
@@ -26,9 +33,8 @@ use crate::{
     level = "trace",
     skip_all
 )]
-pub fn compute_single_rap_quotient_values<'a, SC, R, Mat>(
-    rap: &'a R,
-    symbolic_constraints: &SymbolicConstraints<Val<SC>>,
+pub fn compute_single_rap_quotient_values<'a, SC, Mat>(
+    constraints: &SymbolicExpressionDag<Val<SC>>,
     trace_domain: Domain<SC>,
     quotient_domain: Domain<SC>,
     preprocessed_trace_on_quotient_domain: Mat,
@@ -44,8 +50,6 @@ pub fn compute_single_rap_quotient_values<'a, SC, R, Mat>(
     interaction_chunk_size: usize,
 ) -> Vec<SC::Challenge>
 where
-    // TODO: avoid ?Sized to prevent dynamic dispatching because `eval` is called many many times
-    R: for<'b> Rap<ProverConstraintFolder<'b, SC>> + PartitionedBaseAir<Val<SC>> + Sync + ?Sized,
     SC: StarkGenericConfig,
     Mat: Matrix<Val<SC>> + Sync,
 {
@@ -60,7 +64,7 @@ where
 
     let mut alpha_powers = alpha
         .powers()
-        .take(symbolic_constraints.constraints.len())
+        .take(constraints.constraint_idx.len())
         .collect_vec();
     alpha_powers.reverse();
 
@@ -140,7 +144,7 @@ where
                 .collect_vec();
 
             let accumulator = PackedChallenge::<SC>::ZERO;
-            let mut folder = ProverConstraintFolder {
+            let mut folder = ProverConstraintEvaluator {
                 preprocessed: VerticalPair::new(
                     RowMajorMatrixView::new_row(&preprocessed_local),
                     RowMajorMatrixView::new_row(&preprocessed_next),
@@ -167,15 +171,8 @@ where
                 is_first_row,
                 is_last_row,
                 is_transition,
-                alpha_powers: &alpha_powers,
-                accumulator,
                 public_values,
                 exposed_values_after_challenge,
-                interactions: vec![],
-                interaction_chunk_size,
-                rap_phase_seq_kind,
-                has_common_main: rap.common_main_width() > 0,
-                constraint_index: 0,
             };
             rap.eval(&mut folder);
 

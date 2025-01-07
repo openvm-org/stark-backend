@@ -2,7 +2,6 @@ use p3_air::AirBuilder;
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 
 pub mod debug;
-pub mod prover;
 pub mod sub;
 pub mod symbolic;
 pub mod verifier;

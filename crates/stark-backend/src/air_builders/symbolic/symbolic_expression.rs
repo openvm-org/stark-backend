@@ -341,7 +341,10 @@ impl<F: Field> Product<F> for SymbolicExpression<F> {
     }
 }
 
-pub trait SymbolicEvaluator<F: Field, E: FieldAlgebra + From<F>> {
+pub trait SymbolicEvaluator<F: Field, E: From<F>>
+where
+    E: Add<E, Output = E> + Sub<E, Output = E> + Mul<E, Output = E> + Neg<Output = E>,
+{
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> E;
 
     fn eval_expr(&self, symbolic_expr: &SymbolicExpression<F>) -> E {

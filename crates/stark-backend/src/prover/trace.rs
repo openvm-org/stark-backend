@@ -48,7 +48,7 @@ pub(super) fn commit_quotient_traces<'a, SC: StarkGenericConfig>(
         .map(|pk| pk.get_quotient_vk_data())
         .collect_vec();
     let quotient_values = metrics_span("quotient_poly_compute_time_ms", || {
-        quotient_committer.quotient_values(raps, &qvks, &trace_views, public_values_per_air)
+        quotient_committer.quotient_values(&qvks, &trace_views, public_values_per_air)
     });
     // Commit to quotient polynomials. One shared commit for all quotient polynomials
     metrics_span("quotient_poly_commit_time_ms", || {

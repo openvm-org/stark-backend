@@ -6,9 +6,7 @@ use std::any::{type_name, Any};
 use p3_air::{BaseAir, PermutationAirBuilder};
 
 use crate::{
-    air_builders::{
-        debug::DebugConstraintBuilder, prover::ProverConstraintFolder, symbolic::SymbolicRapBuilder,
-    },
+    air_builders::{debug::DebugConstraintBuilder, symbolic::SymbolicRapBuilder},
     config::{StarkGenericConfig, Val},
 };
 
@@ -65,7 +63,6 @@ pub trait PermutationAirBuilderWithExposedValues: PermutationAirBuilder {
 /// This trait is auto-implemented if you implement `Air` and `BaseAirWithPublicValues` and `PartitionedBaseAir` traits.
 pub trait AnyRap<SC: StarkGenericConfig>:
 Rap<SymbolicRapBuilder<Val<SC>>> // for keygen to extract fixed data about the RAP
-    + for<'a> Rap<ProverConstraintFolder<'a, SC>> // for prover quotient polynomial calculation
     + for<'a> Rap<DebugConstraintBuilder<'a, SC>> // for debugging
     + BaseAirWithPublicValues<Val<SC>>
     + PartitionedBaseAir<Val<SC>>
@@ -80,7 +77,6 @@ impl<SC, T> AnyRap<SC> for T
 where
     SC: StarkGenericConfig,
     T: Rap<SymbolicRapBuilder<Val<SC>>>
-        + for<'a> Rap<ProverConstraintFolder<'a, SC>>
         + for<'a> Rap<DebugConstraintBuilder<'a, SC>>
         + BaseAirWithPublicValues<Val<SC>>
         + PartitionedBaseAir<Val<SC>>

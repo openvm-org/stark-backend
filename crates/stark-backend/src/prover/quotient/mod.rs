@@ -7,14 +7,14 @@ use tracing::instrument;
 use self::single::compute_single_rap_quotient_values;
 use super::trace::SingleRapCommittedTraceView;
 use crate::{
-    air_builders::{prover::ProverConstraintFolder, symbolic::SymbolicConstraints},
+    air_builders::symbolic::{dag::build_symbolic_constraints_dag, SymbolicConstraints},
     config::{Com, Domain, PackedChallenge, PcsProverData, StarkGenericConfig, Val},
     interaction::RapPhaseSeqKind,
-    rap::{AnyRap, PartitionedBaseAir, Rap},
 };
 
+pub(crate) mod evaluator;
 pub(crate) mod helper;
-pub mod single;
+pub(crate) mod single;
 
 pub struct QuotientCommitter<'pcs, SC: StarkGenericConfig> {
     pcs: &'pcs SC::Pcs,
@@ -53,34 +53,25 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     /// - `quotient_degrees` is the factor to **multiply** the trace degree by to get the degree
     ///   of the quotient polynomial. This should be determined from the constraint degree
     ///   of the RAP.
-    #[instrument(name = "compute quotient values", skip_all)]
+    #[instrument(name = "compute quotient values", level = "debug", skip_all)]
     pub fn quotient_values<'a>(
         &self,
-        raps: Vec<impl AsRef<dyn AnyRap<SC>>>,
         qvks: &[QuotientVkData<'a, SC>],
         traces: &[SingleRapCommittedTraceView<'a, SC>],
         public_values: &'a [Vec<Val<SC>>],
     ) -> QuotientData<SC> {
-        let raps = raps.iter().map(|rap| rap.as_ref()).collect_vec();
-        let inner = izip!(raps, qvks, traces, public_values)
-            .map(|(rap, qvk, trace, pis)| self.single_rap_quotient_values(rap, qvk, trace, pis))
+        let inner = izip!(qvks, traces, public_values)
+            .map(|(qvk, trace, pis)| self.single_rap_quotient_values(qvk, trace, pis))
             .collect();
         QuotientData { inner }
     }
 
-    pub(crate) fn single_rap_quotient_values<'a, R>(
+    pub(crate) fn single_rap_quotient_values<'a>(
         &self,
-        rap: &'a R,
         qvk: &QuotientVkData<'a, SC>,
         trace: &SingleRapCommittedTraceView<'a, SC>,
         public_values: &'a [Val<SC>],
-    ) -> SingleQuotientData<SC>
-    where
-        R: for<'b> Rap<ProverConstraintFolder<'b, SC>>
-            + PartitionedBaseAir<Val<SC>>
-            + Sync
-            + ?Sized,
-    {
+    ) -> SingleQuotientData<SC> {
         let quotient_degree = qvk.quotient_degree;
         let trace_domain = trace.domain;
         let quotient_domain =
@@ -122,9 +113,10 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
             })
             .unzip();
 
+        // temporary until switching over to use DAG everywhere
+        let dag = build_symbolic_constraints_dag(&qvk.symbolic_constraints.constraints, &[]);
         let quotient_values = compute_single_rap_quotient_values(
-            rap,
-            qvk.symbolic_constraints,
+            &dag.constraints,
             trace_domain,
             quotient_domain,
             preprocessed_lde_on_quotient_domain,
