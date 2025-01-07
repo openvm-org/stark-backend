@@ -77,7 +77,6 @@ where
             let wrap = |i| i % quotient_size;
             let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;
 
-            // let span = info_span!("form packed vals").entered();
             let is_first_row = *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
             let is_last_row = *PackedVal::<SC>::from_slice(&sels.is_last_row[i_range.clone()]);
             let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
@@ -142,9 +141,7 @@ where
                     })
                 })
                 .collect_vec();
-            // span.exit();
 
-            // let span = info_span!("accumulate").entered();
             let evaluator: ProverConstraintEvaluator<SC> = ProverConstraintEvaluator {
                 preprocessed: [preprocessed_local, preprocessed_next],
                 partitioned_main: partitioned_main_pairs,
@@ -159,7 +156,6 @@ where
             let accumulator = evaluator.accumulate(constraints, &alpha_powers);
             // quotient(x) = constraints(x) / Z_H(x)
             let quotient: PackedChallenge<SC> = accumulator * inv_zeroifier;
-            // span.exit();
 
             // "Transpose" D packed base coefficients into WIDTH scalar extension coefficients.
             let width = min(PackedVal::<SC>::WIDTH, quotient_size);
