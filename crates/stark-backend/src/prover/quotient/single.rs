@@ -77,6 +77,12 @@ where
             let wrap = |i| i % quotient_size;
             let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;
 
+            let [row_idx_local, row_idx_next] = [0, next_step].map(|shift| {
+                (0..PackedVal::<SC>::WIDTH)
+                    .map(|offset| wrap(i_start + offset + shift))
+                    .collect::<Vec<_>>()
+            });
+
             let is_first_row = *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
             let is_last_row = *PackedVal::<SC>::from_slice(&sels.is_last_row[i_range.clone()]);
             let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
@@ -84,33 +90,30 @@ where
 
             // Vertically pack rows of each matrix:
 
-            let [preprocessed_local, preprocessed_next] = [0, 1].map(|step_idx| {
-                (0..preprocessed_width)
-                    .map(|col| {
-                        PackedVal::<SC>::from_fn(|offset| {
-                            *mat_get_unchecked(
-                                &preprocessed_trace_on_quotient_domain,
-                                wrap(i_start + offset + step_idx * next_step),
-                                col,
-                            )
+            let [preprocessed_local, preprocessed_next] =
+                [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
+                    (0..preprocessed_width)
+                        .map(|col| {
+                            PackedVal::<SC>::from_fn(|offset| {
+                                *mat_get_unchecked(
+                                    &preprocessed_trace_on_quotient_domain,
+                                    wrapped_idx[offset],
+                                    col,
+                                )
+                            })
                         })
-                    })
-                    .collect_vec()
-            });
+                        .collect_vec()
+                });
 
             let partitioned_main_pairs = partitioned_main_lde_on_quotient_domain
                 .iter()
                 .map(|lde| {
                     let width = lde.width();
-                    [0, 1].map(|step_idx| {
+                    [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
                         (0..width)
                             .map(|col| {
                                 PackedVal::<SC>::from_fn(|offset| {
-                                    *mat_get_unchecked(
-                                        lde,
-                                        wrap(i_start + offset + step_idx * next_step),
-                                        col,
-                                    )
+                                    *mat_get_unchecked(lde, wrapped_idx[offset], col)
                                 })
                             })
                             .collect_vec()
@@ -123,17 +126,13 @@ where
                 .map(|lde| {
                     // Width in base field with extension field elements flattened
                     let base_width = lde.width();
-                    [0, 1].map(|step_idx| {
+                    [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
                         (0..base_width)
                             .step_by(ext_degree)
                             .map(|col| {
                                 PackedChallenge::<SC>::from_base_fn(|i| {
                                     PackedVal::<SC>::from_fn(|offset| {
-                                        *mat_get_unchecked(
-                                            lde,
-                                            wrap(i_start + offset + step_idx * next_step),
-                                            col + i,
-                                        )
+                                        *mat_get_unchecked(lde, wrapped_idx[offset], col + i)
                                     })
                                 })
                             })
