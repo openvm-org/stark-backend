@@ -12,14 +12,33 @@ use crate::{
     config::{PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };
 
-type ViewPair<'a, T> = [Vec<T>; 2];
+pub(crate) struct ViewPair<T> {
+    local: Vec<T>,
+    next: Option<Vec<T>>,
+}
+
+impl<T> ViewPair<T> {
+    pub fn new(local: Vec<T>, next: Option<Vec<T>>) -> Self {
+        Self { local, next }
+    }
+
+    pub fn get(&self, row_offset: usize, column_idx: usize) -> &T {
+        match row_offset {
+            0 => &self.local[column_idx],
+            // SAFETY: this is only used in cases where a previous scan already determines whether the
+            // Option should be Some
+            1 => unsafe { &self.next.as_ref().unwrap_unchecked()[column_idx] },
+            _ => panic!("row offset {row_offset} not supported"),
+        }
+    }
+}
 
 /// A struct for quotient polynomial evaluation. This evaluates `WIDTH` rows of the quotient polynomial
 /// simultaneously using SIMD (if target arch allows it) via `PackedVal` and `PackedChallenge` types.
-pub struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
-    pub preprocessed: ViewPair<'a, PackedVal<SC>>,
-    pub partitioned_main: Vec<ViewPair<'a, PackedVal<SC>>>,
-    pub after_challenge: Vec<ViewPair<'a, PackedChallenge<SC>>>,
+pub(crate) struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
+    pub preprocessed: ViewPair<PackedVal<SC>>,
+    pub partitioned_main: Vec<ViewPair<PackedVal<SC>>>,
+    pub after_challenge: Vec<ViewPair<PackedChallenge<SC>>>,
     pub challenges: &'a [Vec<PackedChallenge<SC>>],
     pub is_first_row: PackedVal<SC>,
     pub is_last_row: PackedVal<SC>,
@@ -111,9 +130,11 @@ where
     fn eval_var(&self, symbolic_var: SymbolicVariable<Val<SC>>) -> PackedExpr<SC> {
         let index = symbolic_var.index;
         match symbolic_var.entry {
-            Entry::Preprocessed { offset } => PackedExpr::Val(self.preprocessed[offset][index]),
+            Entry::Preprocessed { offset } => {
+                PackedExpr::Val(*self.preprocessed.get(offset, index))
+            }
             Entry::Main { part_index, offset } => {
-                PackedExpr::Val(self.partitioned_main[part_index][offset][index])
+                PackedExpr::Val(*self.partitioned_main[part_index].get(offset, index))
             }
             Entry::Public => PackedExpr::Val(self.public_values[index].into()),
             Entry::Permutation { offset } => {
@@ -121,7 +142,7 @@ where
                     .after_challenge
                     .first()
                     .expect("Challenge phase not supported");
-                PackedExpr::Challenge(perm[offset][index])
+                PackedExpr::Challenge(*perm.get(offset, index))
             }
             Entry::Challenge => {
                 let permutation_randomness = self

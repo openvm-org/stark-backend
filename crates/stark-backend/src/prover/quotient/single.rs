@@ -8,7 +8,7 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
-use super::evaluator::ProverConstraintEvaluator;
+use super::evaluator::{ProverConstraintEvaluator, ViewPair};
 use crate::{
     air_builders::symbolic::dag::SymbolicExpressionDag,
     config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
@@ -70,6 +70,9 @@ where
         sels.inv_zeroifier.push(Val::<SC>::default());
     }
 
+    // Scan constraints to see if we need `next` row.
+    let needs_next = constraints.max_rotation() > 0;
+
     (0..quotient_size)
         .into_par_iter()
         .step_by(PackedVal::<SC>::WIDTH)
@@ -82,42 +85,51 @@ where
                     .map(|offset| wrap(i_start + offset + shift))
                     .collect::<Vec<_>>()
             });
+            let row_idx_local = Some(row_idx_local);
+            let row_idx_next = needs_next.then_some(row_idx_next);
 
             let is_first_row = *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
             let is_last_row = *PackedVal::<SC>::from_slice(&sels.is_last_row[i_range.clone()]);
             let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
             let inv_zeroifier = *PackedVal::<SC>::from_slice(&sels.inv_zeroifier[i_range.clone()]);
 
-            // Vertically pack rows of each matrix:
+            // Vertically pack rows of each matrix,
+            // skipping `next` if above scan showed no constraints need it:
 
             let [preprocessed_local, preprocessed_next] =
                 [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
-                    (0..preprocessed_width)
-                        .map(|col| {
-                            PackedVal::<SC>::from_fn(|offset| {
-                                *mat_get_unchecked(
-                                    &preprocessed_trace_on_quotient_domain,
-                                    wrapped_idx[offset],
-                                    col,
-                                )
+                    wrapped_idx.as_ref().map(|wrapped_idx| {
+                        (0..preprocessed_width)
+                            .map(|col| {
+                                PackedVal::<SC>::from_fn(|offset| {
+                                    *mat_get_unchecked(
+                                        &preprocessed_trace_on_quotient_domain,
+                                        wrapped_idx[offset],
+                                        col,
+                                    )
+                                })
                             })
-                        })
-                        .collect_vec()
+                            .collect_vec()
+                    })
                 });
+            let preprocessed_pair = ViewPair::new(preprocessed_local.unwrap(), preprocessed_next);
 
             let partitioned_main_pairs = partitioned_main_lde_on_quotient_domain
                 .iter()
                 .map(|lde| {
                     let width = lde.width();
-                    [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
-                        (0..width)
-                            .map(|col| {
-                                PackedVal::<SC>::from_fn(|offset| {
-                                    *mat_get_unchecked(lde, wrapped_idx[offset], col)
+                    let [local, next] = [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
+                        wrapped_idx.as_ref().map(|wrapped_idx| {
+                            (0..width)
+                                .map(|col| {
+                                    PackedVal::<SC>::from_fn(|offset| {
+                                        *mat_get_unchecked(lde, wrapped_idx[offset], col)
+                                    })
                                 })
-                            })
-                            .collect_vec()
-                    })
+                                .collect_vec()
+                        })
+                    });
+                    ViewPair::new(local.unwrap(), next)
                 })
                 .collect_vec();
 
@@ -126,23 +138,26 @@ where
                 .map(|lde| {
                     // Width in base field with extension field elements flattened
                     let base_width = lde.width();
-                    [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
-                        (0..base_width)
-                            .step_by(ext_degree)
-                            .map(|col| {
-                                PackedChallenge::<SC>::from_base_fn(|i| {
-                                    PackedVal::<SC>::from_fn(|offset| {
-                                        *mat_get_unchecked(lde, wrapped_idx[offset], col + i)
+                    let [local, next] = [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
+                        wrapped_idx.as_ref().map(|wrapped_idx| {
+                            (0..base_width)
+                                .step_by(ext_degree)
+                                .map(|col| {
+                                    PackedChallenge::<SC>::from_base_fn(|i| {
+                                        PackedVal::<SC>::from_fn(|offset| {
+                                            *mat_get_unchecked(lde, wrapped_idx[offset], col + i)
+                                        })
                                     })
                                 })
-                            })
-                            .collect_vec()
-                    })
+                                .collect_vec()
+                        })
+                    });
+                    ViewPair::new(local.unwrap(), next)
                 })
                 .collect_vec();
 
             let evaluator: ProverConstraintEvaluator<SC> = ProverConstraintEvaluator {
-                preprocessed: [preprocessed_local, preprocessed_next],
+                preprocessed: preprocessed_pair,
                 partitioned_main: partitioned_main_pairs,
                 after_challenge: after_challenge_pairs,
                 challenges,

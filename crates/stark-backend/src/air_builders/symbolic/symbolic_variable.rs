@@ -30,6 +30,17 @@ pub enum Entry {
 }
 
 impl Entry {
+    pub fn offset(&self) -> Option<usize> {
+        match self {
+            Entry::Preprocessed { offset } => Some(*offset),
+            Entry::Main { offset, .. } => Some(*offset),
+            Entry::Permutation { offset } => Some(*offset),
+            Entry::Public => None,
+            Entry::Challenge => None,
+            Entry::Exposed => None,
+        }
+    }
+
     /// Advance the internal offset of the entry by the given `offset`.
     pub fn rotate(self, offset: usize) -> Self {
         match self {

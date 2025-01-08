@@ -54,6 +54,18 @@ pub struct SymbolicExpressionDag<F> {
     pub(crate) constraint_idx: Vec<usize>,
 }
 
+impl<F> SymbolicExpressionDag<F> {
+    pub fn max_rotation(&self) -> usize {
+        let mut rotation = 0;
+        for node in &self.nodes {
+            if let SymbolicExpressionNode::Variable(var) = node {
+                rotation = rotation.max(var.entry.offset().unwrap_or(0));
+            }
+        }
+        rotation
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "F: Field")]
 pub struct SymbolicConstraintsDag<F> {
