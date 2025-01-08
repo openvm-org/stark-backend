@@ -10,7 +10,10 @@ use tracing::instrument;
 
 use super::evaluator::{ProverConstraintEvaluator, ViewPair};
 use crate::{
-    air_builders::symbolic::dag::SymbolicExpressionDag,
+    air_builders::symbolic::{
+        dag::{SymbolicExpressionDag, SymbolicExpressionNode},
+        symbolic_variable::Entry,
+    },
     config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };
 
@@ -70,8 +73,34 @@ where
         sels.inv_zeroifier.push(Val::<SC>::default());
     }
 
-    // Scan constraints to see if we need `next` row.
-    let needs_next = constraints.max_rotation() > 0;
+    // Scan constraints to see if we need `next` row and also check index bounds
+    // so we don't need to check them per row.
+    let mut rotation = 0;
+    for node in &constraints.nodes {
+        if let SymbolicExpressionNode::Variable(var) = node {
+            match var.entry {
+                Entry::Preprocessed { offset } => {
+                    rotation = rotation.max(offset);
+                    assert!(var.index < preprocessed_width);
+                }
+                Entry::Main { part_index, offset } => {
+                    rotation = rotation.max(offset);
+                    assert!(var.index < partitioned_main_lde_on_quotient_domain[part_index].width);
+                }
+                Entry::Permutation { offset } => {
+                    rotation = rotation.max(offset);
+                    let ext_width = after_challenge_lde_on_quotient_domain
+                        .first()
+                        .expect("Challenge phase not supported")
+                        .width
+                        / ext_degree;
+                    assert!(var.index < ext_width);
+                }
+                _ => {}
+            }
+        }
+    }
+    let needs_next = rotation > 0;
 
     (0..quotient_size)
         .into_par_iter()

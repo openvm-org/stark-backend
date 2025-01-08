@@ -24,10 +24,16 @@ impl<T> ViewPair<T> {
 
     pub fn get(&self, row_offset: usize, column_idx: usize) -> &T {
         match row_offset {
-            0 => &self.local[column_idx],
+            // SAFETY: all column indices have been checked to be in range already
+            0 => unsafe { self.local.get_unchecked(column_idx) },
             // SAFETY: this is only used in cases where a previous scan already determines whether the
             // Option should be Some
-            1 => unsafe { &self.next.as_ref().unwrap_unchecked()[column_idx] },
+            1 => unsafe {
+                self.next
+                    .as_ref()
+                    .unwrap_unchecked()
+                    .get_unchecked(column_idx)
+            },
             _ => panic!("row offset {row_offset} not supported"),
         }
     }
@@ -138,10 +144,8 @@ where
             }
             Entry::Public => PackedExpr::Val(self.public_values[index].into()),
             Entry::Permutation { offset } => {
-                let perm = self
-                    .after_challenge
-                    .first()
-                    .expect("Challenge phase not supported");
+                // SAFETY: all constraints have already been checked to be in range
+                let perm = unsafe { self.after_challenge.get_unchecked(0) };
                 PackedExpr::Challenge(*perm.get(offset, index))
             }
             Entry::Challenge => {
