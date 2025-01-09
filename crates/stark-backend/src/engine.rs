@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use itertools::izip;
+use itertools::{izip, Itertools};
 use p3_matrix::dense::DenseMatrix;
 
 use crate::{
+    air_builders::debug::debug_constraints_and_interactions,
     config::{StarkGenericConfig, Val},
     keygen::{
-        types::{MultiStarkProvingKey, MultiStarkVerifyingKey},
+        types::{MultiStarkProvingKey, MultiStarkVerifyingKey, StarkProvingKey},
         MultiStarkKeygenBuilder,
     },
     prover::{
@@ -44,6 +45,39 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
         MultiTraceStarkVerifier::new(self.config())
     }
 
+    // mpk can be removed if we use BaseAir trait to regenerate preprocessed traces
+    fn debug(
+        &self,
+        airs: &[Arc<dyn AnyRap<SC>>],
+        pk: &[StarkProvingKey<SC>],
+        proof_input: &ProofInput<SC>,
+    ) {
+        let air_inputs: Vec<_> = proof_input
+            .per_air
+            .iter()
+            .map(|(_, air_input)| air_input)
+            .collect_vec();
+        let trace_views = air_inputs
+            .iter()
+            .map(|input| {
+                let mut views = input
+                    .raw
+                    .cached_mains
+                    .iter()
+                    .map(|trace| trace.as_view())
+                    .collect_vec();
+                if let Some(trace) = input.raw.common_main.as_ref() {
+                    views.push(trace.as_view());
+                }
+                views
+            })
+            .collect_vec();
+        let pvs = air_inputs
+            .iter()
+            .map(|input| input.raw.public_values.clone())
+            .collect_vec();
+        debug_constraints_and_interactions(airs, pk, &trace_views, &pvs);
+    }
     // TODO[jpw]: the following does not belong in this crate! dev tooling only
 
     /// Runs a single end-to-end test for a given set of AIRs and traces.
@@ -51,11 +85,11 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     /// This function should only be used on AIRs where the main trace is **not** partitioned.
     fn run_simple_test_impl(
         &self,
-        chips: Vec<Arc<dyn AnyRap<SC>>>,
+        airs: Vec<Arc<dyn AnyRap<SC>>>,
         traces: Vec<DenseMatrix<Val<SC>>>,
         public_values: Vec<Vec<Val<SC>>>,
     ) -> Result<VerificationData<SC>, VerificationError> {
-        self.run_test_impl(AirProofInput::multiple_simple(chips, traces, public_values))
+        self.run_test_impl(AirProofInput::multiple_simple(airs, traces, public_values))
     }
 
     /// Runs a single end-to-end test for a given set of chips and traces partitions.
@@ -70,6 +104,12 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
             per_air: izip!(air_ids, air_proof_inputs).collect(),
         };
         let pk = keygen_builder.generate_pk();
+        let airs = proof_input
+            .per_air
+            .iter()
+            .map(|(_, air_input)| air_input.air.clone())
+            .collect_vec();
+        self.debug(&airs, &pk.per_air, &proof_input);
         let vk = pk.get_vk();
         let proof = self.prove(&pk, proof_input);
         self.verify(&vk, &proof)?;
