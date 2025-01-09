@@ -12,7 +12,7 @@ use crate::{
     interaction::RapPhaseSeqKind,
 };
 
-pub(crate) mod evaluator;
+mod evaluator;
 pub(crate) mod helper;
 pub(crate) mod single;
 

@@ -12,7 +12,7 @@ use crate::{
     config::{PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };
 
-pub(crate) struct ViewPair<T> {
+pub(super) struct ViewPair<T> {
     local: Vec<T>,
     next: Option<Vec<T>>,
 }
@@ -22,18 +22,15 @@ impl<T> ViewPair<T> {
         Self { local, next }
     }
 
-    pub fn get(&self, row_offset: usize, column_idx: usize) -> &T {
+    /// SAFETY: no matrix bounds checks are done.
+    pub unsafe fn get(&self, row_offset: usize, column_idx: usize) -> &T {
         match row_offset {
-            // SAFETY: all column indices have been checked to be in range already
-            0 => unsafe { self.local.get_unchecked(column_idx) },
-            // SAFETY: this is only used in cases where a previous scan already determines whether the
-            // Option should be Some
-            1 => unsafe {
-                self.next
-                    .as_ref()
-                    .unwrap_unchecked()
-                    .get_unchecked(column_idx)
-            },
+            0 => self.local.get_unchecked(column_idx),
+            1 => self
+                .next
+                .as_ref()
+                .unwrap_unchecked()
+                .get_unchecked(column_idx),
             _ => panic!("row offset {row_offset} not supported"),
         }
     }
@@ -41,7 +38,7 @@ impl<T> ViewPair<T> {
 
 /// A struct for quotient polynomial evaluation. This evaluates `WIDTH` rows of the quotient polynomial
 /// simultaneously using SIMD (if target arch allows it) via `PackedVal` and `PackedChallenge` types.
-pub(crate) struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
+pub(super) struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
     pub preprocessed: ViewPair<PackedVal<SC>>,
     pub partitioned_main: Vec<ViewPair<PackedVal<SC>>>,
     pub after_challenge: Vec<ViewPair<PackedChallenge<SC>>>,
@@ -133,21 +130,23 @@ where
         PackedExpr::Val(self.is_transition)
     }
 
+    /// SAFETY: we only use this trait implementation when we have already done
+    /// a previous scan to ensure all matrix bounds are satisfied,
+    /// so no bounds checks are done here.
     fn eval_var(&self, symbolic_var: SymbolicVariable<Val<SC>>) -> PackedExpr<SC> {
         let index = symbolic_var.index;
         match symbolic_var.entry {
-            Entry::Preprocessed { offset } => {
+            Entry::Preprocessed { offset } => unsafe {
                 PackedExpr::Val(*self.preprocessed.get(offset, index))
-            }
-            Entry::Main { part_index, offset } => {
+            },
+            Entry::Main { part_index, offset } => unsafe {
                 PackedExpr::Val(*self.partitioned_main[part_index].get(offset, index))
-            }
+            },
             Entry::Public => PackedExpr::Val(self.public_values[index].into()),
-            Entry::Permutation { offset } => {
-                // SAFETY: all constraints have already been checked to be in range
-                let perm = unsafe { self.after_challenge.get_unchecked(0) };
+            Entry::Permutation { offset } => unsafe {
+                let perm = self.after_challenge.get_unchecked(0);
                 PackedExpr::Challenge(*perm.get(offset, index))
-            }
+            },
             Entry::Challenge => {
                 let permutation_randomness = self
                     .challenges
