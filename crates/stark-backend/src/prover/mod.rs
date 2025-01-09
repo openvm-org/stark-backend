@@ -17,7 +17,6 @@ use tracing::instrument;
 use crate::{
     air_builders::debug::check_constraints::{check_constraints, check_logup},
     config::{Domain, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
     keygen::{types::MultiStarkProvingKey, view::MultiStarkProvingKeyView},
     prover::{
         metrics::trace_metrics,
@@ -223,16 +222,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
             };
 
         #[cfg(debug_assertions)]
-        debug_constraints_and_interactions(
-            &airs,
-            &mpk,
-            &main_views_per_air,
-            &pvs_per_air,
-            &perm_trace_per_air,
-            &exposed_values_after_challenge,
-            &challenges,
-            SC::RapPhaseSeq::ID,
-        );
+        debug_constraints_and_interactions(&airs, &mpk, &main_views_per_air, &pvs_per_air);
 
         // Commit to permutation traces: this means only 1 challenge round right now
         // One shared commit for all permutation traces
@@ -446,6 +436,9 @@ fn commit_perm_traces<SC: StarkGenericConfig>(
     }
 }
 
+/// The debugging will check the main AIR constraints and then separately check LogUp constraints by
+/// checking the actual multiset equalities. Currently it will not debug check any after challenge phase
+/// constraints for implementation simplicity.
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn debug_constraints_and_interactions<SC: StarkGenericConfig>(
@@ -453,10 +446,6 @@ fn debug_constraints_and_interactions<SC: StarkGenericConfig>(
     mpk: &MultiStarkProvingKeyView<SC>,
     main_views_per_air: &[Vec<RowMajorMatrixView<'_, Val<SC>>>],
     public_values_per_air: &[Vec<Val<SC>>],
-    perm_trace_per_air: &[Option<RowMajorMatrix<SC::Challenge>>],
-    exposed_values_after_challenge: &[Vec<Vec<SC::Challenge>>],
-    challenges: &[Vec<SC::Challenge>],
-    rap_phase_seq_kind: RapPhaseSeqKind,
 ) {
     USE_DEBUG_BUILDER.with(|debug| {
         if *debug.lock().unwrap() {
@@ -465,30 +454,22 @@ fn debug_constraints_and_interactions<SC: StarkGenericConfig>(
                 &mpk.per_air,
                 main_views_per_air,
                 public_values_per_air,
-                perm_trace_per_air,
-                exposed_values_after_challenge
             )
-            .map(
-                |(rap, pk, main, public_values, perm_trace, exposed_values_after_challenge)| {
-                    let preprocessed_trace = pk
-                        .preprocessed_data
-                        .as_ref()
-                        .map(|data| data.trace.as_view());
-                    tracing::debug!("Checking constraints for {}", rap.name());
-                    check_constraints(
-                        rap.as_ref(),
-                        &rap.name(),
-                        &preprocessed_trace,
-                        main,
-                        &perm_trace.iter().map(|m| m.as_view()).collect_vec(),
-                        challenges,
-                        public_values,
-                        exposed_values_after_challenge,
-                        rap_phase_seq_kind,
-                    );
-                    preprocessed_trace
-                },
-            )
+            .map(|(rap, pk, main, public_values)| {
+                let preprocessed_trace = pk
+                    .preprocessed_data
+                    .as_ref()
+                    .map(|data| data.trace.as_view());
+                tracing::debug!("Checking constraints for {}", rap.name());
+                check_constraints(
+                    rap.as_ref(),
+                    &rap.name(),
+                    &preprocessed_trace,
+                    main,
+                    public_values,
+                );
+                preprocessed_trace
+            })
             .collect_vec();
 
             let (air_names, interactions): (Vec<_>, Vec<_>) = mpk
