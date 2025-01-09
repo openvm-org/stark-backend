@@ -1,5 +1,5 @@
 use openvm_stark_backend::{
-    config::StarkGenericConfig, engine::StarkEngine, prover::USE_DEBUG_BUILDER,
+    config::StarkGenericConfig, engine::StarkEngine, utils::disable_debug_builder,
     verifier::VerificationError, Chip,
 };
 use openvm_stark_sdk::{
@@ -114,9 +114,7 @@ fn test_interaction_cached_trace_neg() {
         (0, vec![456, 5]),
     ];
 
-    USE_DEBUG_BUILDER.with(|debug| {
-        *debug.lock().unwrap() = false;
-    });
+    disable_debug_builder();
     assert_eq!(
         prove_and_verify_indexless_lookups(sender, receiver).err(),
         Some(VerificationError::ChallengePhaseError)

@@ -3,10 +3,8 @@ use std::sync::Arc;
 use itertools::Itertools;
 use openvm_stark_backend::{
     p3_field::FieldAlgebra,
-    prover::{
-        types::{AirProofInput, AirProofRawInput, ProofInput},
-        USE_DEBUG_BUILDER,
-    },
+    prover::types::{AirProofInput, AirProofRawInput, ProofInput},
+    utils::disable_debug_builder,
     verifier::VerificationError,
 };
 use openvm_stark_sdk::{config::baby_bear_poseidon2::default_engine, engine::StarkEngine};
@@ -86,9 +84,7 @@ fn test_partitioned_sum_air_happy_neg() {
         .map(|row| row.iter().fold(Val::ZERO, |sum, x| sum + *x))
         .collect();
     x[0] = Val::ZERO;
-    USE_DEBUG_BUILDER.with(|debug| {
-        *debug.lock().unwrap() = false;
-    });
+    disable_debug_builder();
     assert_eq!(
         prove_and_verify_sum_air(x, ys),
         Err(VerificationError::OodEvaluationMismatch)

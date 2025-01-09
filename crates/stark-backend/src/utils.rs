@@ -4,7 +4,7 @@ use cfg_if::cfg_if;
 use p3_field::Field;
 use tracing::instrument;
 
-use crate::prover::USE_DEBUG_BUILDER;
+use crate::air_builders::debug::USE_DEBUG_BUILDER;
 
 // Copied from valida-util
 /// Calculates and returns the multiplicative inverses of each field element, with zero

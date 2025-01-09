@@ -1,23 +1,15 @@
-use std::{
-    iter,
-    sync::{Arc, Mutex},
-};
+use std::iter;
 
 use itertools::{izip, multiunzip, Itertools};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::FieldAlgebra;
-use p3_matrix::{
-    dense::{RowMajorMatrix, RowMajorMatrixView},
-    Matrix,
-};
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    air_builders::debug::check_constraints::{check_constraints, check_logup},
     config::{Domain, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
     keygen::{types::MultiStarkProvingKey, view::MultiStarkProvingKeyView},
     prover::{
         metrics::trace_metrics,
@@ -26,7 +18,6 @@ use crate::{
         trace::{commit_quotient_traces, ProverTraceData, TraceCommitter},
         types::{AirProofData, Commitments, Proof, ProofInput},
     },
-    rap::AnyRap,
     utils::metrics_span,
 };
 
@@ -44,10 +35,6 @@ pub mod types;
 pub use trace::PairTraceView;
 
 use crate::{config::RapPhaseSeqPartialProof, interaction::RapPhaseSeq};
-
-thread_local! {
-   pub static USE_DEBUG_BUILDER: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
-}
 
 /// Proves multiple chips with interactions together.
 /// This prover implementation is specialized for Interactive AIRs.
@@ -89,22 +76,19 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
         let rap_phase_seq = self.config.rap_phase_seq();
 
         let (air_ids, air_inputs): (Vec<_>, Vec<_>) = proof_input.per_air.into_iter().unzip();
-        let (
-            airs,
-            cached_mains_pdata_per_air,
-            cached_mains_per_air,
-            common_main_per_air,
-            pvs_per_air,
-        ): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
-            multiunzip(air_inputs.into_iter().map(|input| {
-                (
-                    input.air,
-                    input.cached_mains_pdata,
-                    input.raw.cached_mains,
-                    input.raw.common_main,
-                    input.raw.public_values,
-                )
-            }));
+        let (cached_mains_pdata_per_air, cached_mains_per_air, common_main_per_air, pvs_per_air): (
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+        ) = multiunzip(air_inputs.into_iter().map(|input| {
+            (
+                input.cached_mains_pdata,
+                input.raw.cached_mains,
+                input.raw.common_main,
+                input.raw.public_values,
+            )
+        }));
         assert_eq!(cached_mains_pdata_per_air.len(), cached_mains_per_air.len());
 
         let num_air = air_ids.len();
@@ -221,18 +205,6 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
                 assert_eq!(mpk.vk_view().num_phases(), 0);
                 (vec![None; num_air], vec![vec![]; num_air], vec![])
             };
-
-        #[cfg(debug_assertions)]
-        debug_constraints_and_interactions(
-            &airs,
-            &mpk,
-            &main_views_per_air,
-            &pvs_per_air,
-            &perm_trace_per_air,
-            &exposed_values_after_challenge,
-            &challenges,
-            SC::RapPhaseSeq::ID,
-        );
 
         // Commit to permutation traces: this means only 1 challenge round right now
         // One shared commit for all permutation traces
@@ -444,70 +416,4 @@ fn commit_perm_traces<SC: StarkGenericConfig>(
     } else {
         None
     }
-}
-
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-fn debug_constraints_and_interactions<SC: StarkGenericConfig>(
-    raps: &[Arc<dyn AnyRap<SC>>],
-    mpk: &MultiStarkProvingKeyView<SC>,
-    main_views_per_air: &[Vec<RowMajorMatrixView<'_, Val<SC>>>],
-    public_values_per_air: &[Vec<Val<SC>>],
-    perm_trace_per_air: &[Option<RowMajorMatrix<SC::Challenge>>],
-    exposed_values_after_challenge: &[Vec<Vec<SC::Challenge>>],
-    challenges: &[Vec<SC::Challenge>],
-    rap_phase_seq_kind: RapPhaseSeqKind,
-) {
-    USE_DEBUG_BUILDER.with(|debug| {
-        if *debug.lock().unwrap() {
-            let preprocessed = izip!(
-                raps,
-                &mpk.per_air,
-                main_views_per_air,
-                public_values_per_air,
-                perm_trace_per_air,
-                exposed_values_after_challenge
-            )
-            .map(
-                |(rap, pk, main, public_values, perm_trace, exposed_values_after_challenge)| {
-                    let preprocessed_trace = pk
-                        .preprocessed_data
-                        .as_ref()
-                        .map(|data| data.trace.as_view());
-                    tracing::debug!("Checking constraints for {}", rap.name());
-                    check_constraints(
-                        rap.as_ref(),
-                        &rap.name(),
-                        &preprocessed_trace,
-                        main,
-                        &perm_trace.iter().map(|m| m.as_view()).collect_vec(),
-                        challenges,
-                        public_values,
-                        exposed_values_after_challenge,
-                        rap_phase_seq_kind,
-                    );
-                    preprocessed_trace
-                },
-            )
-            .collect_vec();
-
-            let (air_names, interactions): (Vec<_>, Vec<_>) = mpk
-                .per_air
-                .iter()
-                .map(|pk| {
-                    (
-                        pk.air_name.clone(),
-                        &pk.vk.symbolic_constraints.interactions[..],
-                    )
-                })
-                .unzip();
-            check_logup(
-                &air_names,
-                &interactions,
-                &preprocessed,
-                main_views_per_air,
-                public_values_per_air,
-            );
-        }
-    });
 }
