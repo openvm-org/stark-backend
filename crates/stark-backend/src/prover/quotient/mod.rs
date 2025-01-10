@@ -7,7 +7,10 @@ use tracing::instrument;
 use self::single::compute_single_rap_quotient_values;
 use super::trace::SingleRapCommittedTraceView;
 use crate::{
-    air_builders::symbolic::{dag::build_symbolic_constraints_dag, SymbolicConstraints},
+    air_builders::symbolic::{
+        dag::{build_symbolic_constraints_dag, SymbolicExpressionDag},
+        SymbolicConstraints,
+    },
     config::{Com, Domain, PackedChallenge, PcsProverData, StarkGenericConfig, Val},
     interaction::RapPhaseSeqKind,
 };
@@ -154,19 +157,6 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     }
 }
 
-/// Prover data for multi-matrix quotient polynomial commitment.
-/// Quotient polynomials for multiple RAP matrices are committed together into a single commitment.
-/// The quotient polynomials can be committed together even if the corresponding trace matrices
-/// are committed separately.
-pub struct ProverQuotientData<SC: StarkGenericConfig> {
-    /// For each AIR, the number of quotient chunks that were committed.
-    pub quotient_degrees: Vec<usize>,
-    /// Quotient commitment
-    pub commit: Com<SC>,
-    /// Prover data for the quotient commitment
-    pub data: PcsProverData<SC>,
-}
-
 /// The quotient polynomials from multiple RAP matrices.
 pub struct QuotientData<SC: StarkGenericConfig> {
     inner: Vec<SingleQuotientData<SC>>,
@@ -221,14 +211,4 @@ pub struct QuotientChunk<SC: StarkGenericConfig> {
     /// Matrix with number of rows equal to trace domain size,
     /// and number of columns equal to extension field degree.
     pub chunk: RowMajorMatrix<Val<SC>>,
-}
-
-/// All necessary data from VK to compute ProverQuotientData
-pub struct QuotientVkData<'a, SC: StarkGenericConfig> {
-    pub quotient_degree: usize,
-    pub rap_phase_seq_kind: RapPhaseSeqKind,
-    pub interaction_chunk_size: usize,
-    /// Symbolic constraints of the AIR in all challenge phases. This is
-    /// a serialization of the constraints in the AIR.
-    pub symbolic_constraints: &'a SymbolicConstraints<Val<SC>>,
 }

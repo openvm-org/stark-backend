@@ -6,7 +6,10 @@ use p3_commit::{Pcs, PolynomialSpace};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::config::{Domain, PcsProof, PcsProverData, StarkGenericConfig};
+use crate::{
+    config::{Domain, PcsProof, PcsProverData, StarkGenericConfig},
+    proof::AdjacentOpenedValues,
+};
 
 pub struct OpeningProver<'pcs, SC: StarkGenericConfig> {
     pcs: &'pcs SC::Pcs,
@@ -142,33 +145,4 @@ fn collect_trace_openings<Challenge: Debug>(
             AdjacentOpenedValues { local, next }
         })
         .collect()
-}
-
-/// PCS opening proof with opened values for multi-matrix AIR.
-#[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound = "")]
-#[derivative(Clone(bound = "SC::Challenge: Clone"))]
-pub struct OpeningProof<SC: StarkGenericConfig> {
-    pub proof: PcsProof<SC>,
-    pub values: OpenedValues<SC::Challenge>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct OpenedValues<Challenge> {
-    /// For each preprocessed trace commitment, the opened values
-    pub preprocessed: Vec<AdjacentOpenedValues<Challenge>>,
-    /// For each main trace commitment, for each matrix in commitment, the
-    /// opened values
-    pub main: Vec<Vec<AdjacentOpenedValues<Challenge>>>,
-    /// For each phase after challenge, there is shared commitment.
-    /// For each commitment, if any, for each matrix in the commitment, the opened values,
-    pub after_challenge: Vec<Vec<AdjacentOpenedValues<Challenge>>>,
-    /// For each RAP, for each quotient chunk in quotient poly, the opened values
-    pub quotient: Vec<Vec<Vec<Challenge>>>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AdjacentOpenedValues<Challenge> {
-    pub local: Vec<Challenge>,
-    pub next: Vec<Challenge>,
 }

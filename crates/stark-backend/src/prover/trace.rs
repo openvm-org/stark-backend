@@ -10,6 +10,7 @@ use p3_matrix::{
 use serde::{Deserialize, Serialize};
 use tracing::info_span;
 
+use super::hal::ProverBackend;
 use crate::{
     commit::CommittedSingleMatrixView,
     config::{Com, Domain, PcsProverData, StarkGenericConfig, Val},
@@ -189,17 +190,30 @@ pub struct PairTraceView<'a, F> {
 /// matrices need to be partitioned.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-pub struct SingleRapCommittedTraceView<'a, SC: StarkGenericConfig> {
-    /// Domain of the trace matrices
-    pub domain: Domain<SC>,
+pub struct SingleRapCommittedTraceView<'a, PB: ProverBackend> {
+    /// Log_2 of the domain size (i.e., height of matrices)
+    pub log_domain_size: u8,
     // Maybe public values should be included in this struct
     /// Preprocessed trace data, if any
-    pub preprocessed: Option<CommittedSingleMatrixView<'a, SC>>,
+    pub preprocessed: Option<CommittedSingleMatrixView<'a, PB>>,
     /// Main trace data, horizontally partitioned into multiple matrices
-    pub partitioned_main: Vec<CommittedSingleMatrixView<'a, SC>>,
+    pub partitioned_main: Vec<CommittedSingleMatrixView<'a, PB>>,
     /// `after_challenge[i] = (matrix, exposed_values)`
     /// where `matrix` is the trace matrix which uses challenges drawn
     /// after observing commitments to `preprocessed`, `partitioned_main`, and `after_challenge[..i]`,
     /// and `exposed_values` are certain values in this phase that are exposed to the verifier.
-    pub after_challenge: Vec<(CommittedSingleMatrixView<'a, SC>, Vec<SC::Challenge>)>,
+    pub after_challenge: Vec<(CommittedSingleMatrixView<'a, PB>, PB::ChallengeBuffer<'a>)>,
+}
+
+/// The PCS commits to multiple matrices at once, so this struct stores
+/// references to get PCS data relevant to a single matrix (e.g., LDE matrix, openings).
+#[derive(Derivative, derive_new::new)]
+#[derivative(Clone(bound = ""))]
+pub struct CommittedSingleMatrixView<'a, PB: ProverBackend> {
+    /// Prover data, includes LDE matrix of trace and Merkle tree.
+    /// The prover data can commit to multiple trace matrices, so
+    /// `matrix_index` is needed to identify this trace.
+    pub data: PB::PcsDataRef<'a>,
+    /// The index of the trace matrix in the prover data.
+    pub matrix_index: usize,
 }

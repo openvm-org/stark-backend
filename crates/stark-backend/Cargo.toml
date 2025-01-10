@@ -23,9 +23,10 @@ serde = { workspace = true, default-features = false, features = [
     "alloc",
     "rc",
 ] }
-derivative = { workspace = true }
+derivative.workspace = true
+derive-new.workspace = true
 metrics = { workspace = true, optional = true }
-cfg-if = { workspace = true }
+cfg-if.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 rustc-hash.workspace = true

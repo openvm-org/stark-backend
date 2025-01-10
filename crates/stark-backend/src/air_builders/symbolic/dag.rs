@@ -47,6 +47,7 @@ pub enum SymbolicExpressionNode<F> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(bound = "F: Field")]
+#[repr(C)]
 pub struct SymbolicExpressionDag<F> {
     /// Nodes in **topological** order.
     pub(crate) nodes: Vec<SymbolicExpressionNode<F>>,
@@ -68,6 +69,7 @@ impl<F> SymbolicExpressionDag<F> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "F: Field")]
+#[repr(C)]
 pub struct SymbolicConstraintsDag<F> {
     /// DAG with all symbolic expressions as nodes.
     /// A subset of the nodes represents all constraints that will be

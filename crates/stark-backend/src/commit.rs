@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::config::{PcsProverData, StarkGenericConfig};
-
 /// In a multi-matrix system, we record a pointer from each matrix to the commitment its stored in
 /// as well as the index of the matrix within that commitment.
 /// The intended use case is to track the list of pointers for all main trace matrix parts in a single STARK.
@@ -35,32 +33,6 @@ impl SingleMatrixCommitPtr {
         Self {
             commit_index,
             matrix_index,
-        }
-    }
-}
-
-/// The PCS commits to multiple matrices at once, so this struct stores
-/// references to get PCS data relevant to a single matrix (e.g., LDE matrix, openings).
-pub struct CommittedSingleMatrixView<'a, SC: StarkGenericConfig> {
-    /// Prover data, includes LDE matrix of trace and Merkle tree.
-    /// The prover data can commit to multiple trace matrices, so
-    /// `matrix_index` is needed to identify this trace.
-    pub data: &'a PcsProverData<SC>,
-    /// The index of the trace matrix in the prover data.
-    pub matrix_index: usize,
-}
-
-impl<'a, SC: StarkGenericConfig> CommittedSingleMatrixView<'a, SC> {
-    pub fn new(data: &'a PcsProverData<SC>, matrix_index: usize) -> Self {
-        Self { data, matrix_index }
-    }
-}
-
-impl<SC: StarkGenericConfig> Clone for CommittedSingleMatrixView<'_, SC> {
-    fn clone(&self) -> Self {
-        Self {
-            data: self.data,
-            matrix_index: self.matrix_index,
         }
     }
 }

@@ -283,3 +283,14 @@ impl<SC: StarkGenericConfig> ChipUsageGetter for DummyInteractionChip<'_, SC> {
         self.air.field_width + 1
     }
 }
+
+#[derive(Serialize, Deserialize, Derivative)]
+#[serde(bound(
+    serialize = "ProverTraceData<SC>: Serialize",
+    deserialize = "ProverTraceData<SC>: Deserialize<'de>"
+))]
+#[derivative(Clone(bound = "Com<SC>: Clone"))]
+pub struct CommittedTraceData<SC: StarkGenericConfig> {
+    pub raw_data: Arc<RowMajorMatrix<Val<SC>>>,
+    pub prover_data: ProverTraceData<SC>,
+}

@@ -6,32 +6,104 @@ use p3_field::Field;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use serde::{Deserialize, Serialize};
 
+use super::hal::ProverBackend;
 pub use super::trace::{ProverTraceData, TraceCommitter};
 use crate::{
-    config::{Com, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
+    config::{Com, StarkGenericConfig, Val},
     keygen::types::{MultiStarkProvingKey, MultiStarkVerifyingKey},
-    prover::opener::OpeningProof,
+    proof::{AirProofData, Commitments},
     rap::AnyRap,
 };
 
-/// All commitments to a multi-matrix STARK that are not preprocessed.
-#[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound(
-    serialize = "Com<SC>: Serialize",
-    deserialize = "Com<SC>: Deserialize<'de>"
-))]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct Commitments<SC: StarkGenericConfig> {
-    /// Multiple commitments for the main trace.
-    /// For each RAP, each part of a partitioned matrix trace matrix
-    /// must belong to one of these commitments.
-    pub main_trace: Vec<Com<SC>>,
-    /// One shared commitment for all trace matrices across all RAPs
-    /// in a single challenge phase `i` after observing the commits to
-    /// `preprocessed`, `main_trace`, and `after_challenge[..i]`
-    pub after_challenge: Vec<Com<SC>>,
-    /// Shared commitment for all quotient polynomial evaluations
-    pub quotient: Com<SC>,
+#[derive(Clone, derive_new::new)]
+pub struct ProvingContext<'a, PB: ProverBackend> {
+    /// (AIR id, AIR input)
+    pub per_air: Vec<(usize, AirProvingContext<'a, PB>)>,
+}
+
+impl<'a, PB: ProverBackend> ProvingContext<'a, PB> {
+    pub fn into_air_proof_input_vec(self) -> Vec<AirProvingContext<'a, PB>> {
+        self.per_air.into_iter().map(|(_, x)| x).collect()
+    }
+}
+
+/// Necessary context for proving a single AIR.
+#[derive(Clone)]
+pub struct AirProvingContext<'a, PB: ProverBackend> {
+    /// Prover data for cached main traces
+    pub cached_mains_com_data: Vec<CommittedDataRef<'a, PB>>,
+    pub raw: RawAirProvingContext<'a, PB>,
+}
+
+/// Reference to the prover data corresponding to a single shared commitment,
+/// as well as the owned commitment.
+#[derive(Clone)]
+pub struct CommittedDataRef<'com, PB: ProverBackend> {
+    /// Commitment to the trace matrices.
+    pub commit: PB::Commitment,
+    /// Preimage of commitment. Memory layout may vary.
+    pub data: PB::PcsDataRef<'com>,
+}
+
+/// Raw context for proving a single AIR.
+/// Consists of the trace and public values (witness and instance data).
+#[derive(Clone, Debug)]
+pub struct RawAirProvingContext<'a, PB: ProverBackend> {
+    /// Cached main trace matrices
+    pub cached_mains: Vec<PB::MatrixBuffer<'a>>,
+    /// Common main trace matrix
+    pub common_main: Option<PB::MatrixBuffer<'a>>,
+    /// Public values
+    pub public_values: PB::ValBuffer<'a>,
+}
+
+impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
+    pub fn validate<PB: ProverBackend>(&self, ctx: &ProvingContext<PB>) -> bool {
+        if !ctx
+            .per_air
+            .iter()
+            .all(|(air_id, _)| *air_id < self.per_air.len())
+        {
+            return false;
+        }
+        if !ctx.per_air.iter().tuple_windows().all(|(a, b)| a.0 < b.0) {
+            return false;
+        }
+        true
+    }
+}
+
+impl<SC: StarkGenericConfig> MultiStarkProvingKey<SC> {
+    pub fn validate<PB: ProverBackend>(&self, ctx: &ProvingContext<PB>) -> bool {
+        self.get_vk().validate(ctx)
+    }
+}
+
+/// The full RAP trace consists of horizontal concatenation of multiple matrices of the same height:
+/// - preprocessed trace matrix
+/// - the main trace matrix is horizontally partitioned into multiple matrices,
+///   where each matrix can belong to a separate matrix commitment.
+/// - after each round of challenges, a trace matrix for trace allowed to use those challenges
+///
+/// Each of these matrices is allowed to be in a separate commitment.
+///
+/// Only the main trace matrix is allowed to be partitioned, so that different parts may belong to
+/// different commitments. We do not see any use cases where the `preprocessed` or `after_challenge`
+/// matrices need to be partitioned.
+#[derive(Clone)]
+pub struct SingleRapView<T, ChallengeBuffer> {
+    /// Log_2 of the domain size (i.e., height of matrices)
+    pub log_domain_size: u8,
+    // Maybe public values should be included in this struct
+    /// Preprocessed trace data, if any
+    pub preprocessed: Option<T>,
+    /// Main trace data, horizontally partitioned into multiple matrices
+    pub partitioned_main: Vec<T>,
+    /// `after_challenge[i] = (matrix, exposed_values)`
+    /// where `matrix` is the trace matrix which uses challenges drawn
+    /// after observing commitments to `preprocessed`, `partitioned_main`, and `after_challenge[..i]`,
+    /// and `exposed_values` are certain values in this phase that are exposed to the verifier.
+    pub after_challenge: Vec<(T, ChallengeBuffer)>,
 }
 
 /// The full proof for multiple RAPs where trace matrices are committed into
@@ -40,57 +112,21 @@ pub struct Commitments<SC: StarkGenericConfig> {
 /// Includes the quotient commitments and FRI opening proofs for the constraints as well.
 #[derive(Serialize, Deserialize, Derivative)]
 #[serde(bound = "")]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct Proof<SC: StarkGenericConfig> {
+#[derivative(Clone(bound = ""))]
+pub struct HalProof<PB: ProverBackend> {
     /// The PCS commitments
-    pub commitments: Commitments<SC>,
+    pub commitments: Commitments<PB::Commitment>,
     /// Opening proofs separated by partition, but this may change
-    pub opening: OpeningProof<SC>,
+    pub opening: PB::OpeningProof,
     /// Proof data for each AIR
-    pub per_air: Vec<AirProofData<SC>>,
+    pub per_air: Vec<AirProofData<PB::Val, PB::Challenge>>,
     /// Partial proof for rap phase if it exists
-    pub rap_phase_seq_proof: Option<RapPhaseSeqPartialProof<SC>>,
+    pub rap_phase_seq_proof: (), // todo
 }
 
-#[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound = "")]
-#[derivative(Clone(bound = "SC::Challenge: Clone"))]
-pub struct AirProofData<SC: StarkGenericConfig> {
-    pub air_id: usize,
-    /// height of trace matrix.
-    pub degree: usize,
-    /// For each challenge phase with trace, the values to expose to the verifier in that phase
-    pub exposed_values_after_challenge: Vec<Vec<SC::Challenge>>,
-    // The public values to expose to the verifier
-    pub public_values: Vec<Val<SC>>,
-}
+// ============= Below are common types independent of hardware ============
 
-/// Proof input
-pub struct ProofInput<SC: StarkGenericConfig> {
-    /// (AIR id, AIR input)
-    pub per_air: Vec<(usize, AirProofInput<SC>)>,
-}
-
-impl<SC: StarkGenericConfig> ProofInput<SC> {
-    pub fn new(per_air: Vec<(usize, AirProofInput<SC>)>) -> Self {
-        Self { per_air }
-    }
-    pub fn into_air_proof_input_vec(self) -> Vec<AirProofInput<SC>> {
-        self.per_air.into_iter().map(|(_, x)| x).collect()
-    }
-}
-
-#[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound(
-    serialize = "ProverTraceData<SC>: Serialize",
-    deserialize = "ProverTraceData<SC>: Deserialize<'de>"
-))]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct CommittedTraceData<SC: StarkGenericConfig> {
-    pub raw_data: Arc<RowMajorMatrix<Val<SC>>>,
-    pub prover_data: ProverTraceData<SC>,
-}
-
+// Legacy type
 /// Necessary input for proving a single AIR.
 #[derive(Derivative)]
 #[derivative(Clone(bound = "Com<SC>: Clone"))]
@@ -110,51 +146,6 @@ pub struct AirProofRawInput<F: Field> {
     pub common_main: Option<RowMajorMatrix<F>>,
     /// Public values
     pub public_values: Vec<F>,
-}
-
-impl<SC: StarkGenericConfig> Proof<SC> {
-    pub fn get_air_ids(&self) -> Vec<usize> {
-        self.per_air.iter().map(|p| p.air_id).collect()
-    }
-    pub fn get_public_values(&self) -> Vec<Vec<Val<SC>>> {
-        self.per_air
-            .iter()
-            .map(|p| p.public_values.clone())
-            .collect()
-    }
-}
-
-impl<SC: StarkGenericConfig> ProofInput<SC> {
-    pub fn sort(&mut self) {
-        self.per_air.sort_by_key(|p| p.0);
-    }
-}
-
-impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
-    pub fn validate(&self, proof_input: &ProofInput<SC>) -> bool {
-        if !proof_input
-            .per_air
-            .iter()
-            .all(|input| input.0 < self.per_air.len())
-        {
-            return false;
-        }
-        if !proof_input
-            .per_air
-            .iter()
-            .tuple_windows()
-            .all(|(a, b)| a.0 < b.0)
-        {
-            return false;
-        }
-        true
-    }
-}
-
-impl<SC: StarkGenericConfig> MultiStarkProvingKey<SC> {
-    pub fn validate(&self, proof_input: &ProofInput<SC>) -> bool {
-        self.get_vk().validate(proof_input)
-    }
 }
 
 impl<F: Field> AirProofRawInput<F> {
