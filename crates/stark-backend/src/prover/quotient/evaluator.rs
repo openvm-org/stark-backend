@@ -142,26 +142,24 @@ where
             Entry::Main { part_index, offset } => unsafe {
                 PackedExpr::Val(*self.partitioned_main[part_index].get(offset, index))
             },
-            Entry::Public => PackedExpr::Val(self.public_values[index].into()),
+            Entry::Public => unsafe {
+                PackedExpr::Val((*self.public_values.get_unchecked(index)).into())
+            },
             Entry::Permutation { offset } => unsafe {
                 let perm = self.after_challenge.get_unchecked(0);
                 PackedExpr::Challenge(*perm.get(offset, index))
             },
-            Entry::Challenge => {
-                let permutation_randomness = self
-                    .challenges
-                    .first()
-                    .map(|c| c.as_slice())
-                    .expect("Challenge phase not supported");
-                PackedExpr::Challenge(permutation_randomness[index])
-            }
-            Entry::Exposed => {
-                let permutation_exposed_values = self
-                    .exposed_values_after_challenge
-                    .first()
-                    .expect("Challenge phase not supported");
-                PackedExpr::Challenge(permutation_exposed_values[index])
-            }
+            Entry::Challenge => unsafe {
+                PackedExpr::Challenge(*self.challenges.get_unchecked(0).get_unchecked(index))
+            },
+            Entry::Exposed => unsafe {
+                PackedExpr::Challenge(
+                    *self
+                        .exposed_values_after_challenge
+                        .get_unchecked(0)
+                        .get_unchecked(index),
+                )
+            },
         }
     }
 }

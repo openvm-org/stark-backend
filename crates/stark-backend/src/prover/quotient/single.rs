@@ -87,6 +87,9 @@ where
                     rotation = rotation.max(offset);
                     assert!(var.index < partitioned_main_lde_on_quotient_domain[part_index].width);
                 }
+                Entry::Public => {
+                    assert!(var.index < public_values.len());
+                }
                 Entry::Permutation { offset } => {
                     rotation = rotation.max(offset);
                     let ext_width = after_challenge_lde_on_quotient_domain
@@ -96,7 +99,24 @@ where
                         / ext_degree;
                     assert!(var.index < ext_width);
                 }
-                _ => {}
+                Entry::Challenge => {
+                    assert!(
+                        var.index
+                            < challenges
+                                .first()
+                                .expect("Challenge phase not supported")
+                                .len()
+                    );
+                }
+                Entry::Exposed => {
+                    assert!(
+                        var.index
+                            < exposed_values_after_challenge
+                                .first()
+                                .expect("Challenge phase not supported")
+                                .len()
+                    );
+                }
             }
         }
     }
