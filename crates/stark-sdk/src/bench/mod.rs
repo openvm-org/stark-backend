@@ -27,15 +27,13 @@ pub fn run_with_metric_collection<R>(
         .with(ForestLayer::default())
         .with(MetricsLayer::new());
     // Prepare tracing.
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    let _ = tracing::subscriber::set_default(subscriber);
 
     // Prepare metrics.
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let recorder = TracingContextLayer::all().layer(recorder);
-    // Install the registry as the global recorder
-    metrics::set_global_recorder(recorder).unwrap();
-    let res = f();
+    let res = metrics::with_local_recorder(&recorder, || f());
 
     if let Ok(file) = file {
         serde_json::to_writer_pretty(&file, &serialize_metric_snapshot(snapshotter.snapshot()))
