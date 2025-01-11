@@ -33,7 +33,7 @@ pub fn run_with_metric_collection<R>(
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let recorder = TracingContextLayer::all().layer(recorder);
-    let res = metrics::with_local_recorder(&recorder, || f());
+    let res = metrics::with_local_recorder(&recorder, f);
 
     if let Ok(file) = file {
         serde_json::to_writer_pretty(&file, &serialize_metric_snapshot(snapshotter.snapshot()))
