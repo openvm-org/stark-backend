@@ -6,7 +6,7 @@
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::types::{CommittedDataRef, SingleRapView};
-use crate::air_builders::symbolic::dag::SymbolicExpressionDag;
+use crate::air_builders::symbolic::SymbolicExpressionDag;
 
 /// Associated types needed by the prover, in the form of buffers, specific to a specific hardware backend.
 pub trait ProverBackend {
@@ -22,34 +22,31 @@ pub trait ProverBackend {
     type Commitment: Clone + Send + Sync + Serialize + DeserializeOwned;
 
     // ==== Device Types ====
-    /// Buffer of base field elements on device.
-    type ValBuffer<'a>: SizedArray + Copy + Send + Sync + 'a;
+    /// Buffer of base field elements on device together with length metadata.
+    type ValBuffer<'a>: Copy + Send + Sync + 'a;
     /// Buffer of challenge field (an extension field of base field) elements on device.
-    type ChallengeBuffer<'a>: SizedArray + Copy + Send + Sync + 'a;
+    type ChallengeBuffer<'a>: Copy + Send + Sync + 'a;
     /// Single matrix buffer on device.
-    type MatrixBuffer<'a>: SizedMatrix + Copy + Send + Sync + 'a;
+    type MatrixView<'a>: MatrixView + Copy + Send + Sync + 'a;
     /// Reference for the preimage of a PCS commitment on device.
     /// For example, buffer of the LDE matrix and pointer to its merkle tree.
     type PcsDataRef<'a>: Copy + Send + Sync + 'a;
+    type RapPhaseSeqProvingKeyRef<'a>: Copy + Send + Sync + 'a;
 }
 
-pub trait SizedArray {
-    /// Length in number of elements, where element type depends on the implementation.
-    fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-pub trait SizedMatrix {
+pub trait MatrixView {
     fn height(&self) -> usize;
     fn width(&self) -> usize;
 }
 
+pub trait ProverDevice<PB: ProverBackend>:
+    TraceCommitter<PB> + QuotientCommitter<PB> + OpeningProver<PB>
+{
+}
+
 /// Provides functionality for committing to a batch of trace matrices, possibly of different heights.
 pub trait TraceCommitter<PB: ProverBackend> {
-    fn commit<'tr, 'com>(&self, traces: &[PB::MatrixBuffer<'tr>]) -> CommittedDataRef<'com, PB>;
+    fn commit<'tr, 'com>(&self, traces: &[PB::MatrixView<'tr>]) -> CommittedDataRef<'com, PB>;
 }
 
 /// Only needed in proof systems that use quotient polynomials.
@@ -78,7 +75,7 @@ pub trait QuotientCommitter<PB: ProverBackend> {
         &self,
         quotient_degrees: &[u8],
         constraints: &[&'a SymbolicExpressionDag<PB::Val>],
-        ldes: &[SingleRapView<PB::MatrixBuffer<'a>, PB::ChallengeBuffer<'a>>],
+        ldes: &[SingleRapView<PB::MatrixView<'a>, PB::ChallengeBuffer<'a>>],
         public_values: &'a [PB::ValBuffer<'a>],
     ) -> CommittedDataRef<'a, PB>;
 }

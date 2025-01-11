@@ -1,4 +1,4 @@
-use std::iter;
+use std::{iter, marker::PhantomData};
 
 use itertools::{izip, multiunzip, Itertools};
 use p3_challenger::{CanObserve, FieldChallenger};
@@ -8,38 +8,51 @@ use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
+use super::{
+    hal::{ProverBackend, ProverDevice},
+    types::{HalProof, ProvingContext},
+    Prover,
+};
 use crate::{
-    config::{Domain, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
+    config::{Com, Domain, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
     interaction::RapPhaseSeq,
     keygen::{types::MultiStarkProvingKey, view::MultiStarkProvingKeyView},
-    prover::{
-        metrics::trace_metrics,
-        opener::OpeningProver,
-        quotient::ProverQuotientData,
-        trace::{commit_quotient_traces, ProverTraceData, TraceCommitter},
-        types::{AirProofData, Commitments, Proof, ProofInput},
-    },
+    prover::metrics::trace_metrics,
     utils::metrics_span,
 };
 
-/// Proves multiple chips with interactions together.
-/// This prover implementation is specialized for Interactive AIRs.
-pub struct MultiTraceStarkProver<'c, SC: StarkGenericConfig> {
-    pub config: &'c SC,
+/// Host-to-device coordinator for full prover implementation.
+///
+/// The generics are:
+/// - `SC`: Stark configuration for proving key (from host)
+/// - `PB`: Prover backend types
+/// - `PD`: Prover device methods
+// TODO[jpw]: the SC generic is awkward and should be revisited
+pub struct Coordinator<SC: StarkGenericConfig, PB, PD> {
+    device: PD,
+    challenger: SC::Challenger,
+    phantom: PhantomData<(SC, PB)>,
 }
 
-impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
-    pub fn new(config: &'c SC) -> Self {
-        Self { config }
+impl<SC: StarkGenericConfig, PB, PD> Coordinator<SC, PB, PD> {
+    pub fn new(device: PD, challenger: SC::Challenger) -> Self {
+        Self {
+            device,
+            challenger,
+            phantom: PhantomData,
+        }
     }
+}
 
-    pub fn pcs(&self) -> &SC::Pcs {
-        self.config.pcs()
-    }
-
-    pub fn committer(&self) -> TraceCommitter<SC> {
-        TraceCommitter::new(self.pcs())
-    }
+impl<SC, PB, PD> Prover for Coordinator<SC, PB, PD>
+where
+    SC: StarkGenericConfig + 'static,
+    PB: ProverBackend<Val = Val<SC>, Challenge = SC::Challenge, Commitment = Com<SC>>,
+    PD: ProverDevice<PB>,
+{
+    type Proof = HalProof<PB>;
+    type ProvingKeyRef<'a> = &'a MultiStarkProvingKey<SC>;
+    type ProvingContext<'a> = ProvingContext<'a, PB>;
 
     /// Specialized prove for InteractiveAirs.
     /// Handles trace generation of the permutation traces.
@@ -49,33 +62,29 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkProver<'c, SC> {
     /// The prover can support global public values that are shared among all AIRs,
     /// but we currently split public values per-AIR for modularity.
     #[instrument(name = "MultiTraceStarkProver::prove", level = "info", skip_all)]
-    pub fn prove<'a>(
-        &self,
-        challenger: &mut SC::Challenger,
+    fn prove<'a>(
+        &mut self,
         mpk: &'a MultiStarkProvingKey<SC>,
-        proof_input: ProofInput<SC>,
-    ) -> Proof<SC> {
+        ctx: ProvingContext<'a, PB>,
+    ) -> HalProof<PB> {
         #[cfg(feature = "bench-metrics")]
         let start = std::time::Instant::now();
-        assert!(mpk.validate(&proof_input), "Invalid proof input");
-        let pcs = self.config.pcs();
-        let rap_phase_seq = self.config.rap_phase_seq();
+        assert!(mpk.validate(&ctx), "Invalid proof input");
 
-        let (air_ids, air_inputs): (Vec<_>, Vec<_>) = proof_input.per_air.into_iter().unzip();
-        let (cached_mains_pdata_per_air, cached_mains_per_air, common_main_per_air, pvs_per_air): (
+        let (air_ids, air_ctxs): (Vec<_>, Vec<_>) = ctx.into_iter().unzip();
+        let (cached_mains_com_data_per_air, cached_mains_per_air, common_main_per_air, pvs_per_air): (
             Vec<_>,
             Vec<_>,
             Vec<_>,
             Vec<_>,
-        ) = multiunzip(air_inputs.into_iter().map(|input| {
+        ) = multiunzip(air_ctxs.into_iter().map(|ctx| {
             (
-                input.cached_mains_pdata,
-                input.raw.cached_mains,
-                input.raw.common_main,
-                input.raw.public_values,
+                ctx.cached_mains_com_data,
+                ctx.raw.cached_mains,
+                ctx.raw.common_main,
+                ctx.raw.public_values,
             )
         }));
-        assert_eq!(cached_mains_pdata_per_air.len(), cached_mains_per_air.len());
 
         let num_air = air_ids.len();
         // Ignore unused AIRs.

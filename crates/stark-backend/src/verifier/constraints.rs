@@ -13,7 +13,7 @@ use crate::{
         verifier::{GenericVerifierConstraintFolder, VerifierConstraintFolder},
     },
     config::{Domain, StarkGenericConfig, Val},
-    prover::opener::AdjacentOpenedValues,
+    proof::AdjacentOpenedValues,
 };
 
 #[allow(clippy::too_many_arguments)]

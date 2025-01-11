@@ -7,13 +7,34 @@ use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use serde::{Deserialize, Serialize};
 
 use super::hal::ProverBackend;
-pub use super::trace::{ProverTraceData, TraceCommitter};
 use crate::{
     config::{Com, StarkGenericConfig, Val},
-    keygen::types::{MultiStarkProvingKey, MultiStarkVerifyingKey},
+    keygen::types::{MultiStarkProvingKey, MultiStarkVerifyingKey, StarkVerifyingKey},
     proof::{AirProofData, Commitments},
     rap::AnyRap,
 };
+
+pub struct MultiStarkProvingKeyView<'a, PB: ProverBackend> {
+    pub per_air: Vec<StarkProvingKeyView<'a, PB>>,
+}
+
+pub struct StarkProvingKeyView<'a, PB: ProverBackend> {
+    /// Type name of the AIR, for display purposes only
+    pub air_name: &'a str,
+    pub vk: &'a StarkVerifyingKey<PB::Val, PB::Commitment>,
+    /// Prover only data for preprocessed trace
+    pub preprocessed_data: Option<ProverOnlySinglePreprocessedView<'a, PB>>,
+    pub rap_phase_seq_pk: PB::RapPhaseSeqProvingKeyView<'a>,
+}
+
+pub struct RapPhaseSeqProvingKeyView<'a, PB: ProverBackend> {
+    pub rap_phase_seq_pk: &'a (),
+}
+
+pub struct ProverOnlySinglePreprocessedView<'a, PB: ProverBackend> {
+    pub trace: PB::MatrixView<'a>,
+    pub data: PB::PcsDataRef<'a>,
+}
 
 #[derive(Clone, derive_new::new)]
 pub struct ProvingContext<'a, PB: ProverBackend> {
@@ -24,6 +45,15 @@ pub struct ProvingContext<'a, PB: ProverBackend> {
 impl<'a, PB: ProverBackend> ProvingContext<'a, PB> {
     pub fn into_air_proof_input_vec(self) -> Vec<AirProvingContext<'a, PB>> {
         self.per_air.into_iter().map(|(_, x)| x).collect()
+    }
+}
+
+impl<'a, PB: ProverBackend> IntoIterator for ProvingContext<'a, PB> {
+    type Item = (usize, AirProvingContext<'a, PB>);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.per_air.into_iter()
     }
 }
 
@@ -50,9 +80,9 @@ pub struct CommittedDataRef<'com, PB: ProverBackend> {
 #[derive(Clone, Debug)]
 pub struct RawAirProvingContext<'a, PB: ProverBackend> {
     /// Cached main trace matrices
-    pub cached_mains: Vec<PB::MatrixBuffer<'a>>,
+    pub cached_mains: Vec<PB::MatrixView<'a>>,
     /// Common main trace matrix
-    pub common_main: Option<PB::MatrixBuffer<'a>>,
+    pub common_main: Option<PB::MatrixView<'a>>,
     /// Public values
     pub public_values: PB::ValBuffer<'a>,
 }
@@ -125,6 +155,7 @@ pub struct HalProof<PB: ProverBackend> {
 }
 
 // ============= Below are common types independent of hardware ============
+// These are legacy types. They should be removed but affect many testing codepaths.
 
 // Legacy type
 /// Necessary input for proving a single AIR.
@@ -133,7 +164,7 @@ pub struct HalProof<PB: ProverBackend> {
 pub struct AirProofInput<SC: StarkGenericConfig> {
     pub air: Arc<dyn AnyRap<SC>>,
     /// Prover data for cached main traces
-    pub cached_mains_pdata: Vec<ProverTraceData<SC>>,
+    pub cached_mains_pdata: Vec<super::cpu::trace::ProverTraceData<SC>>,
     pub raw: AirProofRawInput<Val<SC>>,
 }
 

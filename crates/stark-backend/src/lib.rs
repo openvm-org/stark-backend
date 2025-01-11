@@ -33,7 +33,6 @@ pub mod keygen;
 pub mod poly;
 /// Definition of the STARK proof struct.
 pub mod proof;
-/// Prover implementation for partitioned multi-matrix AIRs.
 pub mod prover;
 /// Trait for RAP (Randomized AIR with Preprocessing)
 pub mod rap;

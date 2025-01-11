@@ -69,14 +69,14 @@ impl<F> SymbolicExpressionDag<F> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "F: Field")]
-#[repr(C)]
+#[repr(C)] // TODO[jpw]: device transfer requires usize-dependent serialization
 pub struct SymbolicConstraintsDag<F> {
     /// DAG with all symbolic expressions as nodes.
     /// A subset of the nodes represents all constraints that will be
     /// included in the quotient polynomial via DEEP-ALI.
     pub constraints: SymbolicExpressionDag<F>,
     /// List of all interactions, where expressions in the interactions
-    /// are referenced by node idx as `usize`.
+    /// are referenced by node idx as `u32`.
     ///
     /// This is used by the prover for after challenge trace generation,
     /// and some partial information may be used by the verifier.
@@ -131,7 +131,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
 /// mapped to the same node ID if their underlying references are the same.
 fn topological_sort_symbolic_expr<'a, F: Field>(
     expr: &'a SymbolicExpression<F>,
-    expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, usize>,
+    expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, u32>,
     nodes: &mut Vec<SymbolicExpressionNode<F>>,
 ) -> usize {
     if let Some(&idx) = expr_to_idx.get(expr) {

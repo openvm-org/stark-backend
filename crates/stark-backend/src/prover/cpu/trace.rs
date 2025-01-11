@@ -177,34 +177,6 @@ pub struct PairTraceView<'a, F> {
     pub public_values: &'a [F],
 }
 
-/// The full RAP trace consists of horizontal concatenation of multiple matrices of the same height:
-/// - preprocessed trace matrix
-/// - the main trace matrix is horizontally partitioned into multiple matrices,
-///   where each matrix can belong to a separate matrix commitment.
-/// - after each round of challenges, a trace matrix for trace allowed to use those challenges
-///
-/// Each of these matrices is allowed to be in a separate commitment.
-///
-/// Only the main trace matrix is allowed to be partitioned, so that different parts may belong to
-/// different commitments. We do not see any use cases where the `preprocessed` or `after_challenge`
-/// matrices need to be partitioned.
-#[derive(Derivative)]
-#[derivative(Clone(bound = ""))]
-pub struct SingleRapCommittedTraceView<'a, PB: ProverBackend> {
-    /// Log_2 of the domain size (i.e., height of matrices)
-    pub log_domain_size: u8,
-    // Maybe public values should be included in this struct
-    /// Preprocessed trace data, if any
-    pub preprocessed: Option<CommittedSingleMatrixView<'a, PB>>,
-    /// Main trace data, horizontally partitioned into multiple matrices
-    pub partitioned_main: Vec<CommittedSingleMatrixView<'a, PB>>,
-    /// `after_challenge[i] = (matrix, exposed_values)`
-    /// where `matrix` is the trace matrix which uses challenges drawn
-    /// after observing commitments to `preprocessed`, `partitioned_main`, and `after_challenge[..i]`,
-    /// and `exposed_values` are certain values in this phase that are exposed to the verifier.
-    pub after_challenge: Vec<(CommittedSingleMatrixView<'a, PB>, PB::ChallengeBuffer<'a>)>,
-}
-
 /// The PCS commits to multiple matrices at once, so this struct stores
 /// references to get PCS data relevant to a single matrix (e.g., LDE matrix, openings).
 #[derive(Derivative, derive_new::new)]

@@ -9,8 +9,7 @@ use crate::{
     config::{Domain, StarkGenericConfig, Val},
     interaction::RapPhaseSeq,
     keygen::{types::MultiStarkVerifyingKey, view::MultiStarkVerifyingKeyView},
-    proof::Proof,
-    prover::opener::AdjacentOpenedValues,
+    proof::{AdjacentOpenedValues, Proof},
     verifier::constraints::verify_single_rap_constraints,
 };
 

@@ -8,7 +8,6 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicExpression, SymbolicConstraints},
     interaction::stark_log_up::{STARK_LU_NUM_CHALLENGES, STARK_LU_NUM_EXPOSED_VALUES},
-    prover::PairTraceView,
 };
 
 /// Interaction debugging tools
@@ -109,6 +108,7 @@ pub struct RapPhaseShape {
 
 /// Supported challenge phases in a RAP.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum RapPhaseSeqKind {
     GkrLogUp,
     /// Up to one phase with prover/verifier given by [[stark_log_up::StarkLogUpPhase]] and
