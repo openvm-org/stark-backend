@@ -1,4 +1,4 @@
-// Keygen V2 API for STARK backend
+// Keygen API for STARK backend
 // Changes:
 // - All AIRs can be optional
 use std::sync::Arc;

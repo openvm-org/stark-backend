@@ -5,9 +5,9 @@ use p3_field::FieldAlgebra;
 
 use crate::{
     air_builders::symbolic::{
-        dag::SymbolicExpressionDag,
         symbolic_expression::SymbolicEvaluator,
         symbolic_variable::{Entry, SymbolicVariable},
+        SymbolicExpressionDag,
     },
     config::{PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };

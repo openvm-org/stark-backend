@@ -9,7 +9,7 @@
 /// Host prover implementation that uses custom device kernels
 pub mod coordinator;
 /// CPU implementation of proving backend
-pub mod cpu;
+// pub mod cpu;
 pub mod hal;
 /// Types used by the prover
 pub mod types;
@@ -21,14 +21,11 @@ pub mod metrics;
 
 /// Trait for STARK/SNARK proving at the highest abstraction level.
 pub trait Prover {
-    type ProvingKeyRef<'a>;
-    type ProvingContext<'a>;
+    type ProvingKeyView<'a>;
+    type ProvingContext;
     type Proof;
 
     /// The prover should own the challenger, whose state mutates during proving.
-    fn prove<'a>(
-        &mut self,
-        pk: Self::ProvingKeyRef<'a>,
-        ctx: Self::ProvingContext<'a>,
-    ) -> Self::Proof;
+    fn prove<'a>(&mut self, pk: Self::ProvingKeyView<'a>, ctx: Self::ProvingContext)
+        -> Self::Proof;
 }

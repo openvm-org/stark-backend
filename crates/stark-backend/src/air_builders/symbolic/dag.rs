@@ -16,7 +16,7 @@ use crate::{
 /// Basically replace `Arc`s in `SymbolicExpression` with node IDs.
 /// Intended to be serializable and deserializable.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(bound = "F: Field")]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
 #[repr(C)]
 pub enum SymbolicExpressionNode<F> {
     Variable(SymbolicVariable<F>),
@@ -46,7 +46,7 @@ pub enum SymbolicExpressionNode<F> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(bound = "F: Field")]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
 #[repr(C)]
 pub struct SymbolicExpressionDag<F> {
     /// Nodes in **topological** order.
@@ -68,7 +68,7 @@ impl<F> SymbolicExpressionDag<F> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "F: Field")]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
 #[repr(C)] // TODO[jpw]: device transfer requires usize-dependent serialization
 pub struct SymbolicConstraintsDag<F> {
     /// DAG with all symbolic expressions as nodes.

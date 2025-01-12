@@ -5,11 +5,9 @@ use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use tracing::instrument;
 
 use self::single::compute_single_rap_quotient_values;
-use super::trace::SingleRapCommittedTraceView;
 use crate::{
     air_builders::symbolic::{
-        dag::{build_symbolic_constraints_dag, SymbolicExpressionDag},
-        SymbolicConstraints,
+        build_symbolic_constraints_dag, SymbolicConstraints, SymbolicExpressionDag,
     },
     config::{Com, Domain, PackedChallenge, PcsProverData, StarkGenericConfig, Val},
     interaction::RapPhaseSeqKind,

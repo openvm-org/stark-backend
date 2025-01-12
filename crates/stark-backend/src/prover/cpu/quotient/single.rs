@@ -11,14 +11,13 @@ use tracing::instrument;
 use super::evaluator::{ProverConstraintEvaluator, ViewPair};
 use crate::{
     air_builders::symbolic::{
-        dag::{SymbolicExpressionDag, SymbolicExpressionNode},
-        symbolic_variable::Entry,
+        symbolic_variable::Entry, SymbolicExpressionDag, SymbolicExpressionNode,
     },
     config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };
 
 // Starting reference: p3_uni_stark::prover::quotient_values
-// TODO: make this into a trait that is auto-implemented so we can dynamic dispatch the trait
+// (many changes have been made since then)
 /// Computes evaluation of DEEP quotient polynomial on the quotient domain for a single RAP (single trace matrix).
 ///
 /// Designed to be general enough to support RAP with multiple rounds of challenges.
@@ -46,6 +45,13 @@ where
     SC: StarkGenericConfig,
 {
     let quotient_size = quotient_domain.size();
+    assert!(preprocessed_trace_on_quotient_domain.height() >= quotient_size);
+    assert!(partitioned_main_lde_on_quotient_domain
+        .iter()
+        .all(|m| m.height() >= quotient_size));
+    assert!(after_challenge_lde_on_quotient_domain
+        .iter()
+        .all(|m| m.height() >= quotient_size));
     let preprocessed_width = preprocessed_trace_on_quotient_domain.width();
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
 

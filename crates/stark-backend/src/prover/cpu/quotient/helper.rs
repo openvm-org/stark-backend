@@ -1,7 +1,6 @@
 use crate::{
     config::StarkGenericConfig,
     keygen::types::{MultiStarkProvingKey, StarkProvingKey},
-    prover::quotient::QuotientVkData,
 };
 
 pub(crate) trait QuotientVkDataHelper<SC: StarkGenericConfig> {

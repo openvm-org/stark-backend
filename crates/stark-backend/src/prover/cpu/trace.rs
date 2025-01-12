@@ -32,14 +32,14 @@ pub(super) fn commit_quotient_traces<'a, SC: StarkGenericConfig>(
     perm_prover_data: &'a Option<ProverTraceData<SC>>,
     exposed_values_after_challenge: Vec<Vec<Vec<SC::Challenge>>>,
 ) -> ProverQuotientData<SC> {
-    let trace_views = create_trace_view_per_air(
-        domain_per_air,
-        cached_mains_pdata_per_air,
-        mpk,
-        exposed_values_after_challenge,
-        common_main_prover_data,
-        perm_prover_data,
-    );
+    // let trace_views = create_trace_view_per_air(
+    //     domain_per_air,
+    //     cached_mains_pdata_per_air,
+    //     mpk,
+    //     exposed_values_after_challenge,
+    //     common_main_prover_data,
+    //     perm_prover_data,
+    // );
     let quotient_committer = QuotientCommitter::new(pcs, challenges, alpha);
     let qvks = mpk
         .per_air
@@ -53,64 +53,6 @@ pub(super) fn commit_quotient_traces<'a, SC: StarkGenericConfig>(
     metrics_span("quotient_poly_commit_time_ms", || {
         quotient_committer.commit(quotient_values)
     })
-}
-
-fn create_trace_view_per_air<'a, SC: StarkGenericConfig>(
-    domain_per_air: Vec<Domain<SC>>,
-    cached_mains_pdata_per_air: &'a [Vec<ProverTraceData<SC>>],
-    mpk: &'a MultiStarkProvingKeyView<SC>,
-    exposed_values_after_challenge: Vec<Vec<Vec<SC::Challenge>>>,
-    common_main_prover_data: &'a ProverTraceData<SC>,
-    perm_prover_data: &'a Option<ProverTraceData<SC>>,
-) -> Vec<SingleRapCommittedTraceView<'a, SC>> {
-    let mut common_main_idx = 0;
-    let mut after_challenge_idx = 0;
-    izip!(
-        domain_per_air,
-        cached_mains_pdata_per_air,
-        &mpk.per_air,
-        exposed_values_after_challenge,
-    ).map(|(domain, cached_mains_pdata, pk, exposed_values)| {
-        // The AIR will be treated as the full RAP with virtual columns after this
-        let preprocessed = pk.preprocessed_data.as_ref().map(|p| {
-            // TODO: currently assuming each chip has it's own preprocessed commitment
-            CommittedSingleMatrixView::<SC>::new(p.data.as_ref(), 0)
-        });
-        let mut partitioned_main: Vec<_> = cached_mains_pdata
-            .iter()
-            .map(|pdata| CommittedSingleMatrixView::new(pdata.data.as_ref(), 0))
-            .collect();
-        if pk.vk.has_common_main() {
-            partitioned_main.push(CommittedSingleMatrixView::new(
-                common_main_prover_data.data.as_ref(),
-                common_main_idx,
-            ));
-            common_main_idx += 1;
-        }
-
-        let after_challenge = exposed_values
-            .into_iter()
-            .map(|exposed_values| {
-                let matrix = CommittedSingleMatrixView::new(
-                    perm_prover_data
-                        .as_ref()
-                        .expect("AIR exposes after_challenge values but has no permutation trace commitment")
-                        .data
-                        .as_ref(),
-                    after_challenge_idx,
-                );
-                after_challenge_idx += 1;
-                (matrix, exposed_values)
-            })
-            .collect();
-
-        SingleRapCommittedTraceView {
-            domain,
-            preprocessed,
-            partitioned_main,
-            after_challenge,
-        }
-    }).collect()
 }
 
 /// Prover that commits to a batch of trace matrices, possibly of different heights.
@@ -170,22 +112,15 @@ pub struct ProverTraceData<SC: StarkGenericConfig> {
     pub data: Arc<PcsProverData<SC>>,
 }
 
-/// A view of just the preprocessed AIR, without any after challenge columns.
-pub struct PairTraceView<'a, F> {
-    pub preprocessed: &'a Option<RowMajorMatrixView<'a, F>>,
-    pub partitioned_main: &'a [RowMajorMatrixView<'a, F>],
-    pub public_values: &'a [F],
-}
-
 /// The PCS commits to multiple matrices at once, so this struct stores
 /// references to get PCS data relevant to a single matrix (e.g., LDE matrix, openings).
 #[derive(Derivative, derive_new::new)]
 #[derivative(Clone(bound = ""))]
-pub struct CommittedSingleMatrixView<'a, PB: ProverBackend> {
+pub struct CommittedSingleMatrixView<PB: ProverBackend> {
     /// Prover data, includes LDE matrix of trace and Merkle tree.
     /// The prover data can commit to multiple trace matrices, so
     /// `matrix_index` is needed to identify this trace.
-    pub data: PB::PcsDataRef<'a>,
+    pub data: PB::PcsDataRef,
     /// The index of the trace matrix in the prover data.
     pub matrix_index: usize,
 }

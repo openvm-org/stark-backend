@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use p3_air::AirBuilder;
 use p3_challenger::CanObserve;
@@ -8,6 +8,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicExpression, SymbolicConstraints},
     interaction::stark_log_up::{STARK_LU_NUM_CHALLENGES, STARK_LU_NUM_EXPOSED_VALUES},
+    prover::types::PairView,
 };
 
 /// Interaction debugging tools
@@ -163,7 +164,7 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
         challenger: &mut Challenger,
         params_per_air: &[Self::ProvingKey],
         constraints_per_air: &[&SymbolicConstraints<F>],
-        trace_view_per_air: &[PairTraceView<'_, F>],
+        trace_view_per_air: &[PairView<Arc<RowMajorMatrix<F>>, Vec<F>>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)>;
 
     /// Partially verifies the challenge phases.
