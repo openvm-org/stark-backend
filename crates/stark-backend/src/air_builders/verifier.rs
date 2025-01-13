@@ -8,7 +8,7 @@ use p3_matrix::Matrix;
 
 use super::{
     symbolic::{
-        dag::build_symbolic_constraints_dag,
+        build_symbolic_constraints_dag,
         symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
         symbolic_variable::{Entry, SymbolicVariable},
     },

@@ -6,7 +6,7 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    config::{Domain, StarkGenericConfig, Val},
+    config::{Com, Domain, StarkGenericConfig, Val},
     interaction::RapPhaseSeq,
     keygen::{types::MultiStarkVerifyingKey, view::MultiStarkVerifyingKeyView},
     proof::{AdjacentOpenedValues, Proof},
@@ -51,7 +51,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
     pub fn verify_raps(
         &self,
         challenger: &mut SC::Challenger,
-        mvk: &MultiStarkVerifyingKeyView<SC>,
+        mvk: &MultiStarkVerifyingKeyView<Val<SC>, Com<SC>>,
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError> {
         let public_values = proof.get_public_values();

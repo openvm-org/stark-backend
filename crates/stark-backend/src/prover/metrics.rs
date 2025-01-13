@@ -1,14 +1,10 @@
 use std::fmt::Display;
 
 use itertools::Itertools;
-use p3_field::FieldExtensionAlgebra;
 use serde::{Deserialize, Serialize};
 
 use super::{hal::ProverBackend, types::StarkProvingKeyView};
-use crate::{
-    config::{StarkGenericConfig, Val},
-    keygen::types::{StarkProvingKey, TraceWidth},
-};
+use crate::keygen::types::TraceWidth;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceMetrics {

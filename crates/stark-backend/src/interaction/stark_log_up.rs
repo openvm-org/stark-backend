@@ -21,7 +21,7 @@ use crate::{
         RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
     },
     parizip,
-    prover::PairTraceView,
+    prover::types::PairView,
     rap::PermutationAirBuilderWithExposedValues,
     utils::metrics_span,
 };

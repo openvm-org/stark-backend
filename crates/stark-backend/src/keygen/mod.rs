@@ -13,7 +13,7 @@ use crate::{
         MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey, StarkVerifyingKey,
         TraceWidth, VerifierSinglePreprocessedData,
     },
-    prover::types::TraceCommitter,
+    prover::cpu::trace::TraceCommitter,
     rap::AnyRap,
 };
 

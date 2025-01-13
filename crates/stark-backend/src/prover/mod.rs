@@ -9,7 +9,7 @@
 /// Host prover implementation that uses custom device kernels
 pub mod coordinator;
 /// CPU implementation of proving backend
-// pub mod cpu;
+pub mod cpu;
 pub mod hal;
 /// Types used by the prover
 pub mod types;
