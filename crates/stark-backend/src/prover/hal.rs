@@ -85,18 +85,17 @@ pub trait RapPartialProver<PB: ProverBackend> {
 /// Only needed in proof systems that use quotient polynomials.
 pub trait QuotientCommitter<PB: ProverBackend> {
     /// Given PCS prover data for a commitment and an index of a matrix in
-    /// the commitment, return a view of the matrix which must be evaluated
+    /// the commitment, return a view of the matrix evaluated
     /// on the quotient domain. In practice this will be the LDE matrix
     /// evaluated on the LDE domain which contains the quotient domain as a
     /// subgroup.
     fn get_extended_matrix(
         &self,
-        data: &PB::PcsDataView,
+        view: &PB::PcsDataView,
         matrix_idx: usize,
+        quotient_degree: u8,
     ) -> Option<PB::MatrixView>;
-    /// Given PCS prover data for a commitment, return views of all matrices in the commitment,
-    /// in order.
-    fn get_all_extended_matrices(&self, data: &PB::PcsDataView) -> Vec<PB::MatrixView>;
+
     /// Evaluate the quotient polynomial on the quotient domain and then commit to it.
     /// The `extended_views` are extensions of the respective trace matrices
     /// to evaluations on the quotient domain (or an even larger domain).

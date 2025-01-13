@@ -9,9 +9,9 @@ use p3_matrix::Matrix;
 use crate::{
     air_builders::{
         symbolic::{
-            build_symbolic_constraints_dag,
-            symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
+            symbolic_expression::SymbolicEvaluator,
             symbolic_variable::{Entry, SymbolicVariable},
+            SymbolicExpressionDag,
         },
         ViewPair,
     },
@@ -53,13 +53,13 @@ where
     Var: Into<Expr> + Copy + Send + Sync,
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
-    pub fn eval_constraints(&mut self, constraints: &[SymbolicExpression<F>]) {
-        let dag = build_symbolic_constraints_dag(constraints, &[]).constraints;
+    pub fn eval_constraints(&mut self, constraints: &SymbolicExpressionDag<F>) {
+        let dag = constraints;
         // node_idx -> evaluation
         // We do a simple serial evaluation in topological order.
         // This can be parallelized if necessary.
         let exprs = self.eval_nodes(&dag.nodes);
-        for idx in dag.constraint_idx {
+        for &idx in &dag.constraint_idx {
             self.assert_zero(exprs[idx].clone());
         }
     }

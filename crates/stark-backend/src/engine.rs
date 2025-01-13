@@ -11,7 +11,8 @@ use crate::{
         MultiStarkKeygenBuilder,
     },
     prover::{
-        types::{AirProofInput, Proof, ProofInput, TraceCommitter},
+        cpu::CpuDevice,
+        types::{AirProofInput, TraceCommitter},
         MultiTraceStarkProver,
     },
     rap::AnyRap,
@@ -38,7 +39,7 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     }
 
     fn prover(&self) -> MultiTraceStarkProver<SC> {
-        MultiTraceStarkProver::new(self.config())
+        MultiTraceStarkProver::new(CpuDevice::new(self.config()), self.new_challenger())
     }
 
     fn verifier(&self) -> MultiTraceStarkVerifier<SC> {

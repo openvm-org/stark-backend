@@ -6,6 +6,8 @@
 //! Currently includes full prover implementations for:
 //! - CPU
 
+use cpu::{Cpu, CpuDevice};
+
 /// Host prover implementation that uses custom device kernels
 pub mod coordinator;
 /// CPU implementation of proving backend
@@ -29,3 +31,5 @@ pub trait Prover {
     fn prove<'a>(&mut self, pk: Self::ProvingKeyView<'a>, ctx: Self::ProvingContext)
         -> Self::Proof;
 }
+
+pub type MultiTraceStarkProver<'a, SC> = coordinator::Coordinator<SC, Cpu<SC>, CpuDevice<'a, SC>>;

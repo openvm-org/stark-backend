@@ -11,7 +11,7 @@ use super::{
     folder::{GenericVerifierConstraintFolder, VerifierConstraintFolder},
 };
 use crate::{
-    air_builders::symbolic::symbolic_expression::SymbolicExpression,
+    air_builders::symbolic::SymbolicExpressionDag,
     config::{Domain, StarkGenericConfig, Val},
     proof::AdjacentOpenedValues,
 };
@@ -19,7 +19,7 @@ use crate::{
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip_all, level = "trace")]
 pub fn verify_single_rap_constraints<SC>(
-    constraints: &[SymbolicExpression<Val<SC>>],
+    constraints: &SymbolicExpressionDag<Val<SC>>,
     preprocessed_values: Option<&AdjacentOpenedValues<SC::Challenge>>,
     partitioned_main_values: Vec<&AdjacentOpenedValues<SC::Challenge>>,
     after_challenge_values: Vec<&AdjacentOpenedValues<SC::Challenge>>,

@@ -4,17 +4,18 @@ use derivative::Derivative;
 use itertools::{zip_eq, Itertools};
 use opener::OpeningProver;
 use p3_challenger::FieldChallenger;
-use p3_commit::Pcs;
+use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::FieldExtensionAlgebra;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
+use quotient::QuotientCommitter;
 
 use super::{
     hal::{self, MatrixView, ProverBackend},
-    types::{PairView, ProverViewAfterRapPhases, StarkProvingKeyView},
+    types::{PairView, ProverViewAfterRapPhases, RapView, StarkProvingKeyView},
 };
 use crate::{
-    air_builders::symbolic::SymbolicConstraints,
+    air_builders::symbolic::{SymbolicConstraints, SymbolicExpressionDag},
     config::{
         Com, PcsProof, PcsProverData, RapPhaseSeqPartialProof, RapPhaseSeqProvingKey,
         StarkGenericConfig, Val,
@@ -44,8 +45,8 @@ pub struct Cpu<SC> {
 }
 
 #[derive(Clone, derive_new::new)]
-pub struct CpuDevice<SC> {
-    config: SC,
+pub struct CpuDevice<'a, SC> {
+    config: &'a SC,
 }
 
 impl<SC: StarkGenericConfig> ProverBackend for Cpu<SC> {
@@ -81,19 +82,19 @@ impl<T: Send + Sync + Clone> MatrixView for Arc<RowMajorMatrix<T>> {
     }
 }
 
-impl<SC> CpuDevice<SC> {
+impl<SC> CpuDevice<'_, SC> {
     pub fn config(&self) -> &SC {
-        &self.config
+        self.config
     }
 }
 
-impl<SC: StarkGenericConfig> CpuDevice<SC> {
+impl<SC: StarkGenericConfig> CpuDevice<'_, SC> {
     pub fn pcs(&self) -> &SC::Pcs {
         self.config.pcs()
     }
 }
 
-impl<SC: StarkGenericConfig> hal::TraceCommitter<Cpu<SC>> for CpuDevice<SC> {
+impl<SC: StarkGenericConfig> hal::TraceCommitter<Cpu<SC>> for CpuDevice<'_, SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsDataView<SC>) {
         let pcs = self.pcs();
         let (log_trace_heights, traces_with_domains): (Vec<_>, Vec<_>) = traces
@@ -117,7 +118,7 @@ impl<SC: StarkGenericConfig> hal::TraceCommitter<Cpu<SC>> for CpuDevice<SC> {
     }
 }
 
-impl<SC: StarkGenericConfig> hal::RapPartialProver<Cpu<SC>> for CpuDevice<SC> {
+impl<SC: StarkGenericConfig> hal::RapPartialProver<Cpu<SC>> for CpuDevice<'_, SC> {
     // `None` when there is no sumcheck
     type RapPartialProof = Option<RapPhaseSeqPartialProof<SC>>;
     type RapPartialProvingKeyView<'a>
@@ -218,7 +219,53 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<Cpu<SC>> for CpuDevice<SC> {
     }
 }
 
-impl<SC: StarkGenericConfig> hal::OpeningProver<Cpu<SC>> for CpuDevice<SC> {
+type RapLdeView<SC> =
+    RapView<Arc<RowMajorMatrix<Val<SC>>>, Val<SC>, <SC as StarkGenericConfig>::Challenge>;
+
+impl<SC: StarkGenericConfig> hal::QuotientCommitter<Cpu<SC>> for CpuDevice<'_, SC> {
+    fn get_extended_matrix(
+        &self,
+        view: &PcsDataView<SC>,
+        matrix_idx: usize,
+        quotient_degree: u8,
+    ) -> Option<Arc<RowMajorMatrix<Val<SC>>>> {
+        let pcs = self.pcs();
+        let log_trace_height = *view.log_trace_heights.get(matrix_idx)?;
+        let trace_domain = pcs.natural_domain_for_degree(1usize << log_trace_height);
+        let quotient_domain =
+            trace_domain.create_disjoint_domain(trace_domain.size() * quotient_degree as usize);
+        // NOTE[jpw]: (perf) this clones under the hood!
+        let lde_matrix = self
+            .pcs()
+            .get_evaluations_on_domain(&view.data, matrix_idx, quotient_domain)
+            .to_row_major_matrix();
+        Some(Arc::new(lde_matrix))
+    }
+
+    fn eval_and_commit_quotient(
+        &self,
+        challenger: &mut SC::Challenger,
+        constraints: &[&SymbolicExpressionDag<Val<SC>>],
+        extended_views: Vec<RapLdeView<SC>>,
+        quotient_degrees: &[u8],
+    ) -> (Com<SC>, PcsDataView<SC>) {
+        // Generate `alpha` challenge
+        let alpha: SC::Challenge = challenger.sample_ext_element();
+        tracing::debug!("alpha: {alpha:?}");
+
+        let qc = QuotientCommitter::new(self.pcs(), alpha);
+        let quotient_values = metrics_span("quotient_poly_compute_time_ms", || {
+            qc.quotient_values(constraints, extended_views, quotient_degrees)
+        });
+
+        // Commit to quotient polynomials. One shared commit for all quotient polynomials
+        metrics_span("quotient_poly_commit_time_ms", || {
+            qc.commit(quotient_values)
+        })
+    }
+}
+
+impl<SC: StarkGenericConfig> hal::OpeningProver<Cpu<SC>> for CpuDevice<'_, SC> {
     fn open(
         &self,
         challenger: &mut SC::Challenger,
@@ -241,27 +288,27 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<Cpu<SC>> for CpuDevice<SC> {
         tracing::debug!("zeta: {zeta:?}");
 
         let pcs = self.pcs();
-        let domain = |log_height| pcs.natural_domain_for_degree(1 << log_height);
-        let opener = OpeningProver::new(pcs, zeta);
+        let domain = |log_height| pcs.natural_domain_for_degree(1usize << log_height);
+        let opener = OpeningProver::<SC>::new(pcs, zeta);
         let preprocessed = preprocessed
             .iter()
             .map(|v| {
                 assert_eq!(v.log_trace_heights.len(), 1);
-                (&v.data, domain(v.log_trace_heights[0]))
+                (v.data.deref(), domain(v.log_trace_heights[0]))
             })
             .collect();
         let main = main
             .iter()
             .map(|v| {
                 let domains = v.log_trace_heights.iter().copied().map(domain).collect();
-                (&v.data, domains)
+                (v.data.deref(), domains)
             })
             .collect();
-        let after_phase = after_phase
+        let after_phase: Vec<_> = after_phase
             .iter()
             .map(|v| {
                 let domains = v.log_trace_heights.iter().copied().map(domain).collect();
-                (&v.data, domains)
+                (v.data.deref(), domains)
             })
             .collect();
         opener.open(

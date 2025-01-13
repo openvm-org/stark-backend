@@ -1,4 +1,4 @@
-use std::cmp::min;
+use std::{cmp::min, sync::Arc};
 
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
@@ -31,15 +31,15 @@ pub fn compute_single_rap_quotient_values<'a, SC>(
     constraints: &SymbolicExpressionDag<Val<SC>>,
     trace_domain: Domain<SC>,
     quotient_domain: Domain<SC>,
-    preprocessed_trace_on_quotient_domain: RowMajorMatrix<Val<SC>>,
-    partitioned_main_lde_on_quotient_domain: Vec<RowMajorMatrix<Val<SC>>>,
-    after_challenge_lde_on_quotient_domain: Vec<RowMajorMatrix<Val<SC>>>,
+    preprocessed_trace_on_quotient_domain: Arc<RowMajorMatrix<Val<SC>>>,
+    partitioned_main_lde_on_quotient_domain: Vec<Arc<RowMajorMatrix<Val<SC>>>>,
+    after_challenge_lde_on_quotient_domain: Vec<Arc<RowMajorMatrix<Val<SC>>>>,
     // For each challenge round, the challenges drawn
-    challenges: &[Vec<PackedChallenge<SC>>],
+    challenges: &'a [Vec<PackedChallenge<SC>>],
     alpha: SC::Challenge,
     public_values: &'a [Val<SC>],
     // Values exposed to verifier after challenge round i
-    exposed_values_after_challenge: &'a [&'a [PackedChallenge<SC>]],
+    exposed_values_after_challenge: &'a [Vec<PackedChallenge<SC>>],
 ) -> Vec<SC::Challenge>
 where
     SC: StarkGenericConfig,

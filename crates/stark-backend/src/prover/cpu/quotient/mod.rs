@@ -1,49 +1,30 @@
-use itertools::{izip, Itertools};
+use std::sync::Arc;
+
+use itertools::{izip, multiunzip, Itertools};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::FieldAlgebra;
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_matrix::dense::RowMajorMatrix;
+use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use self::single::compute_single_rap_quotient_values;
+use super::{PcsDataView, RapLdeView};
 use crate::{
-    air_builders::symbolic::{
-        build_symbolic_constraints_dag, SymbolicConstraints, SymbolicExpressionDag,
-    },
-    config::{Com, Domain, PackedChallenge, PcsProverData, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
+    air_builders::symbolic::SymbolicExpressionDag,
+    config::{Com, Domain, PackedChallenge, StarkGenericConfig, Val},
 };
 
 mod evaluator;
-pub(crate) mod helper;
 pub(crate) mod single;
 
 pub struct QuotientCommitter<'pcs, SC: StarkGenericConfig> {
     pcs: &'pcs SC::Pcs,
-    /// For each challenge round, the challenges drawn
-    challenges: Vec<Vec<PackedChallenge<SC>>>,
     alpha: SC::Challenge,
 }
 
 impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
-    pub fn new(
-        pcs: &'pcs SC::Pcs,
-        challenges: &[Vec<SC::Challenge>],
-        alpha: SC::Challenge,
-    ) -> Self {
-        let packed_challenges = challenges
-            .iter()
-            .map(|challenges| {
-                challenges
-                    .iter()
-                    .map(|c| PackedChallenge::<SC>::from_f(*c))
-                    .collect_vec()
-            })
-            .collect_vec();
-        Self {
-            pcs,
-            challenges: packed_challenges,
-            alpha,
-        }
+    pub fn new(pcs: &'pcs SC::Pcs, alpha: SC::Challenge) -> Self {
+        Self { pcs, alpha }
     }
 
     /// Constructs quotient domains and computes the evaluation of the quotient polynomials
@@ -57,106 +38,102 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     #[instrument(name = "compute quotient values", level = "info", skip_all)]
     pub fn quotient_values<'a>(
         &self,
-        qvks: &[QuotientVkData<'a, SC>],
-        traces: &[SingleRapCommittedTraceView<'a, SC>],
-        public_values: &'a [Vec<Val<SC>>],
+        constraints: &[&SymbolicExpressionDag<Val<SC>>],
+        lde_views: Vec<RapLdeView<SC>>,
+        quotient_degrees: &[u8],
     ) -> QuotientData<SC> {
-        let inner = izip!(qvks, traces, public_values)
-            .map(|(qvk, trace, pis)| self.single_rap_quotient_values(qvk, trace, pis))
+        assert_eq!(constraints.len(), lde_views.len());
+        assert_eq!(constraints.len(), quotient_degrees.len());
+        let inner = izip!(constraints, lde_views, quotient_degrees)
+            .map(|(constraints, rap_ldes, &quotient_degree)| {
+                self.single_rap_quotient_values(constraints, rap_ldes, quotient_degree)
+            })
             .collect();
         QuotientData { inner }
     }
 
     pub(crate) fn single_rap_quotient_values<'a>(
         &self,
-        qvk: &QuotientVkData<'a, SC>,
-        trace: &SingleRapCommittedTraceView<'a, SC>,
-        public_values: &'a [Val<SC>],
+        constraints: &SymbolicExpressionDag<Val<SC>>,
+        ldes: RapLdeView<SC>,
+        quotient_degree: u8,
     ) -> SingleQuotientData<SC> {
-        let quotient_degree = qvk.quotient_degree;
-        let trace_domain = trace.domain;
+        let log_trace_height = ldes.pair.log_trace_height;
+        let trace_domain = self
+            .pcs
+            .natural_domain_for_degree(1usize << log_trace_height);
         let quotient_domain =
-            trace_domain.create_disjoint_domain(trace_domain.size() * quotient_degree);
+            trace_domain.create_disjoint_domain(trace_domain.size() * quotient_degree as usize);
         // Empty matrix if no preprocessed trace
-        let preprocessed_lde_on_quotient_domain = if let Some(view) = trace.preprocessed.as_ref() {
-            self.pcs
-                .get_evaluations_on_domain(view.data, view.matrix_index, quotient_domain)
-                .to_row_major_matrix()
-        } else {
-            RowMajorMatrix::new(vec![], 0)
-        };
-        let partitioned_main_lde_on_quotient_domain: Vec<_> = trace
-            .partitioned_main
-            .iter()
-            .map(|view| {
-                self.pcs
-                    .get_evaluations_on_domain(view.data, view.matrix_index, quotient_domain)
-                    .to_row_major_matrix()
-            })
-            .collect();
+        let preprocessed_lde_on_quotient_domain = ldes
+            .pair
+            .preprocessed
+            .unwrap_or(Arc::new(RowMajorMatrix::new(vec![], 0)));
+        let partitioned_main_lde_on_quotient_domain: Vec<_> = ldes.pair.partitioned_main;
 
-        let (after_challenge_lde_on_quotient_domain, exposed_values_after_challenge): (
+        let (after_challenge_lde_on_quotient_domain, challenges, exposed_values_after_challenge): (
             Vec<_>,
             Vec<_>,
-        ) = trace
-            .after_challenge
-            .iter()
-            .map(|(view, exposed_values)| {
-                (
-                    self.pcs
-                        .get_evaluations_on_domain(view.data, view.matrix_index, quotient_domain)
-                        .to_row_major_matrix(),
-                    exposed_values
-                        .iter()
-                        .map(|x| PackedChallenge::<SC>::from_f(*x))
-                        .collect_vec(),
-                )
-            })
-            .unzip();
+            Vec<_>,
+        ) = multiunzip(ldes.per_phase.into_iter().map(|view| {
+            (
+                view.inner
+                    .expect("gap in challenge phase not supported yet"),
+                view.challenges
+                    .into_iter()
+                    .map(PackedChallenge::<SC>::from_f)
+                    .collect_vec(),
+                view.exposed_values
+                    .into_iter()
+                    .map(PackedChallenge::<SC>::from_f)
+                    .collect_vec(),
+            )
+        }));
 
-        // temporary until switching over to use DAG everywhere
-        let dag = build_symbolic_constraints_dag(&qvk.symbolic_constraints.constraints, &[]);
         let quotient_values = compute_single_rap_quotient_values::<SC>(
-            &dag.constraints,
+            constraints,
             trace_domain,
             quotient_domain,
             preprocessed_lde_on_quotient_domain,
             partitioned_main_lde_on_quotient_domain,
             after_challenge_lde_on_quotient_domain,
-            &self.challenges,
+            &challenges,
             self.alpha,
-            public_values,
-            &exposed_values_after_challenge
-                .iter()
-                .map(|v| v.as_slice())
-                .collect_vec(),
+            &ldes.pair.public_values,
+            &exposed_values_after_challenge,
         );
         SingleQuotientData {
-            quotient_degree,
+            quotient_degree: quotient_degree as usize,
             quotient_domain,
             quotient_values,
         }
     }
 
     #[instrument(name = "commit to quotient poly chunks", skip_all)]
-    pub fn commit(&self, data: QuotientData<SC>) -> ProverQuotientData<SC> {
-        let quotient_degrees = data.inner.iter().map(|d| d.quotient_degree).collect();
-        let quotient_domains_and_chunks = data
+    pub fn commit(&self, data: QuotientData<SC>) -> (Com<SC>, PcsDataView<SC>) {
+        let (log_trace_heights, quotient_domains_and_chunks): (Vec<_>, Vec<_>) = data
             .split()
             .into_iter()
-            .map(|q| (q.domain, q.chunk))
-            .collect();
+            .map(|q| {
+                (
+                    log2_strict_usize(q.domain.size()) as u8,
+                    (q.domain, q.chunk),
+                )
+            })
+            .unzip();
         let (commit, data) = self.pcs.commit(quotient_domains_and_chunks);
-        ProverQuotientData {
-            quotient_degrees,
+        (
             commit,
-            data,
-        }
+            PcsDataView {
+                data: Arc::new(data),
+                log_trace_heights,
+            },
+        )
     }
 }
 
 /// The quotient polynomials from multiple RAP matrices.
-pub struct QuotientData<SC: StarkGenericConfig> {
+pub(super) struct QuotientData<SC: StarkGenericConfig> {
     inner: Vec<SingleQuotientData<SC>>,
 }
 
@@ -168,9 +145,7 @@ impl<SC: StarkGenericConfig> QuotientData<SC> {
 }
 
 /// The quotient polynomial from a single matrix RAP, evaluated on the quotient domain.
-pub struct SingleQuotientData<SC: StarkGenericConfig> {
-    /// The factor by which the trace degree was multiplied to get the
-    /// quotient domain size.
+pub(super) struct SingleQuotientData<SC: StarkGenericConfig> {
     quotient_degree: usize,
     /// Quotient domain
     quotient_domain: Domain<SC>,
@@ -209,40 +184,4 @@ pub struct QuotientChunk<SC: StarkGenericConfig> {
     /// Matrix with number of rows equal to trace domain size,
     /// and number of columns equal to extension field degree.
     pub chunk: RowMajorMatrix<Val<SC>>,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn commit_quotient_traces<'a, SC: StarkGenericConfig>(
-    pcs: &SC::Pcs,
-    mpk: &MultiStarkProvingKeyView<SC>,
-    alpha: SC::Challenge,
-    challenges: &[Vec<SC::Challenge>],
-    public_values_per_air: &[Vec<Val<SC>>],
-    domain_per_air: Vec<Domain<SC>>,
-    cached_mains_pdata_per_air: &'a [Vec<ProverTraceData<SC>>],
-    common_main_prover_data: &'a ProverTraceData<SC>,
-    perm_prover_data: &'a Option<ProverTraceData<SC>>,
-    exposed_values_after_challenge: Vec<Vec<Vec<SC::Challenge>>>,
-) -> ProverQuotientData<SC> {
-    // let trace_views = create_trace_view_per_air(
-    //     domain_per_air,
-    //     cached_mains_pdata_per_air,
-    //     mpk,
-    //     exposed_values_after_challenge,
-    //     common_main_prover_data,
-    //     perm_prover_data,
-    // );
-    let quotient_committer = QuotientCommitter::new(pcs, challenges, alpha);
-    let qvks = mpk
-        .per_air
-        .iter()
-        .map(|pk| pk.get_quotient_vk_data())
-        .collect_vec();
-    let quotient_values = metrics_span("quotient_poly_compute_time_ms", || {
-        quotient_committer.quotient_values(&qvks, &trace_views, public_values_per_air)
-    });
-    // Commit to quotient polynomials. One shared commit for all quotient polynomials
-    metrics_span("quotient_poly_commit_time_ms", || {
-        quotient_committer.commit(quotient_values)
-    })
 }

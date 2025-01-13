@@ -329,24 +329,25 @@ fn create_trace_view_per_air<PB: ProverBackend, R>(
     )
     .enumerate()
     .map(|(i, (pk, &log_trace_height, cached_views, pvs))| {
+        let quotient_degree = pk.vk.quotient_degree;
         // The AIR will be treated as the full RAP with virtual columns after this
         let preprocessed = pk.preprocessed_data.as_ref().map(|cv| {
             device
-                .get_extended_matrix(&cv.data, cv.matrix_idx as usize)
+                .get_extended_matrix(&cv.data, cv.matrix_idx as usize, quotient_degree)
                 .unwrap()
         });
         let mut partitioned_main: Vec<_> = cached_views
             .iter()
             .map(|cv| {
                 device
-                    .get_extended_matrix(&cv.data, cv.matrix_idx as usize)
+                    .get_extended_matrix(&cv.data, cv.matrix_idx as usize, quotient_degree)
                     .unwrap()
             })
             .collect();
         if pk.vk.has_common_main() {
             partitioned_main.push(
                 device
-                    .get_extended_matrix(&common_main_pcs_data, common_main_idx)
+                    .get_extended_matrix(&common_main_pcs_data, common_main_idx, quotient_degree)
                     .unwrap_or_else(|| {
                         panic!("common main commitment could not get matrix_idx={common_main_idx}")
                     }),
@@ -366,7 +367,8 @@ fn create_trace_view_per_air<PB: ProverBackend, R>(
             .map(|((_, pcs_data), rap_views)| -> Option<RapSinglePhaseView<PB::MatrixView, PB::Challenge>> {
                 let rap_view = rap_views.get(i)?;
                 let matrix_idx = rap_view.inner?;
-                let extended_matrix = device.get_extended_matrix(pcs_data, matrix_idx).unwrap_or_else(|| {
+                let extended_matrix = device.get_extended_matrix(pcs_data, matrix_idx, quotient_degree);
+                let extended_matrix = extended_matrix.unwrap_or_else(|| {
                     panic!("could not get matrix_idx={matrix_idx} for rap {i}")
                 });
                 Some(RapSinglePhaseView {
