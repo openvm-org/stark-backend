@@ -6,15 +6,17 @@ use std::{
 use p3_field::{ExtensionField, Field, FieldAlgebra};
 use p3_matrix::Matrix;
 
-use super::{
-    symbolic::{
-        build_symbolic_constraints_dag,
-        symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
-        symbolic_variable::{Entry, SymbolicVariable},
+use crate::{
+    air_builders::{
+        symbolic::{
+            build_symbolic_constraints_dag,
+            symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
+            symbolic_variable::{Entry, SymbolicVariable},
+        },
+        ViewPair,
     },
-    ViewPair,
+    config::{StarkGenericConfig, Val},
 };
-use crate::config::{StarkGenericConfig, Val};
 
 pub type VerifierConstraintFolder<'a, SC> = GenericVerifierConstraintFolder<
     'a,

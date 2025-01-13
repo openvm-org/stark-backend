@@ -6,12 +6,12 @@ use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use tracing::instrument;
 
-use super::error::VerificationError;
+use super::{
+    error::VerificationError,
+    folder::{GenericVerifierConstraintFolder, VerifierConstraintFolder},
+};
 use crate::{
-    air_builders::{
-        symbolic::symbolic_expression::SymbolicExpression,
-        verifier::{GenericVerifierConstraintFolder, VerifierConstraintFolder},
-    },
+    air_builders::symbolic::symbolic_expression::SymbolicExpression,
     config::{Domain, StarkGenericConfig, Val},
     proof::AdjacentOpenedValues,
 };

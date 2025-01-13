@@ -15,8 +15,11 @@ use crate::{
 
 pub mod constraints;
 mod error;
+/// Constraint folder
+pub mod folder;
 
 pub use error::*;
+pub use folder::GenericVerifierConstraintFolder;
 
 /// Verifies a partitioned proof of multi-matrix AIRs.
 pub struct MultiTraceStarkVerifier<'c, SC: StarkGenericConfig> {
