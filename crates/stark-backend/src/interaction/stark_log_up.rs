@@ -9,6 +9,7 @@ use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::PairTraceView;
 use crate::{
     air_builders::symbolic::{
         symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
@@ -21,7 +22,6 @@ use crate::{
         RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
     },
     parizip,
-    prover::types::PairView,
     rap::PermutationAirBuilderWithExposedValues,
     utils::metrics_span,
 };
@@ -91,9 +91,9 @@ where
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        rap_pk_per_air: &[Self::ProvingKey],
+        rap_pk_per_air: &[&Self::ProvingKey],
         constraints_per_air: &[&SymbolicConstraints<F>],
-        trace_view_per_air: &[PairTraceView<'_, F>],
+        trace_view_per_air: &[PairTraceView<F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)> {
         let has_any_interactions = constraints_per_air
             .iter()
@@ -221,8 +221,8 @@ where
     fn generate_after_challenge_traces_per_air(
         challenges: &[Challenge; STARK_LU_NUM_CHALLENGES],
         constraints_per_air: &[&SymbolicConstraints<F>],
-        params_per_air: &[StarkLogUpProvingKey],
-        trace_view_per_air: &[PairTraceView<'_, F>],
+        params_per_air: &[&StarkLogUpProvingKey],
+        trace_view_per_air: &[PairTraceView<F>],
     ) -> Vec<Option<RowMajorMatrix<Challenge>>> {
         parizip!(constraints_per_air, trace_view_per_air, params_per_air)
             .map(|(constraints, trace_view, params)| {
@@ -265,7 +265,7 @@ where
     /// - If `partitioned_main` is empty.
     pub fn generate_after_challenge_trace(
         all_interactions: &[Interaction<SymbolicExpression<F>>],
-        trace_view: &PairTraceView<'_, F>,
+        trace_view: &PairTraceView<F>,
         permutation_randomness: &[Challenge; STARK_LU_NUM_CHALLENGES],
         interaction_chunk_size: usize,
     ) -> Option<RowMajorMatrix<Challenge>>
@@ -317,6 +317,19 @@ where
         #[cfg(not(feature = "parallel"))]
         let num_threads = 1;
 
+        let preprocessed = trace_view.preprocessed.as_ref().map(|m| m.as_view());
+        let partitioned_main = trace_view
+            .partitioned_main
+            .iter()
+            .map(|m| m.as_view())
+            .collect_vec();
+        let evaluator = |local_index: usize| Evaluator {
+            preprocessed: &preprocessed,
+            partitioned_main: &partitioned_main,
+            public_values: &trace_view.public_values,
+            height,
+            local_index,
+        };
         let height_chunk_size = height.div_ceil(num_threads);
         perm_values
             .par_chunks_mut(height_chunk_size * perm_width)
@@ -330,13 +343,7 @@ where
                 let row_offset = chunk_idx * height_chunk_size;
                 // compute the denominators to be inverted:
                 for (n, denom_row) in denoms.chunks_exact_mut(num_interactions).enumerate() {
-                    let evaluator = Evaluator {
-                        preprocessed: trace_view.preprocessed,
-                        partitioned_main: trace_view.partitioned_main,
-                        public_values: trace_view.public_values,
-                        height,
-                        local_index: row_offset + n,
-                    };
+                    let evaluator = evaluator(row_offset + n);
                     for (denom, interaction) in denom_row.iter_mut().zip(all_interactions.iter()) {
                         let alpha = alphas[interaction.bus_index];
                         debug_assert!(interaction.fields.len() <= betas.len());
@@ -365,13 +372,7 @@ where
                         debug_assert_eq!(perm_row.len(), perm_width);
                         debug_assert_eq!(reciprocal_chunk.len(), num_interactions);
 
-                        let evaluator = Evaluator {
-                            preprocessed: trace_view.preprocessed,
-                            partitioned_main: trace_view.partitioned_main,
-                            public_values: trace_view.public_values,
-                            height,
-                            local_index: row_offset + n,
-                        };
+                        let evaluator = evaluator(row_offset + n);
                         let mut row_sum = Challenge::ZERO;
                         for (perm_val, reciprocal_chunk, interaction_chunk) in izip!(
                             perm_row.iter_mut(),

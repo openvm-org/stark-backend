@@ -58,10 +58,11 @@ where
         Commitment = Com<SC>,
         Challenger = SC::Challenger,
     >,
-    PD: ProverDevice<PB>,
+    PD: ProverDevice<PB> + 'static,
 {
     type Proof = HalProof<PB, PD::RapPartialProof>;
-    type ProvingKeyView<'a> = MultiStarkProvingKeyView<'a, PB, PD::RapPartialProvingKeyView>;
+    type ProvingKeyView<'a> = MultiStarkProvingKeyView<'a, PB, PD::RapPartialProvingKeyView<'a>>;
+
     type ProvingContext = ProvingContext<PB>;
 
     /// Specialized prove for InteractiveAirs.

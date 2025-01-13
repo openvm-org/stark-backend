@@ -138,8 +138,9 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
                 let degree = air_proof.degree;
                 let quotient_degree = vk.quotient_degree;
                 let domain = pcs.natural_domain_for_degree(degree);
-                let quotient_domain = domain.create_disjoint_domain(degree * quotient_degree);
-                let qc_domains = quotient_domain.split_domains(quotient_degree);
+                let quotient_domain =
+                    domain.create_disjoint_domain(degree * quotient_degree as usize);
+                let qc_domains = quotient_domain.split_domains(quotient_degree as usize);
                 (domain, qc_domains)
             })
             .unzip();

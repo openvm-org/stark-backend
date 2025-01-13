@@ -210,3 +210,39 @@ pub struct QuotientChunk<SC: StarkGenericConfig> {
     /// and number of columns equal to extension field degree.
     pub chunk: RowMajorMatrix<Val<SC>>,
 }
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn commit_quotient_traces<'a, SC: StarkGenericConfig>(
+    pcs: &SC::Pcs,
+    mpk: &MultiStarkProvingKeyView<SC>,
+    alpha: SC::Challenge,
+    challenges: &[Vec<SC::Challenge>],
+    public_values_per_air: &[Vec<Val<SC>>],
+    domain_per_air: Vec<Domain<SC>>,
+    cached_mains_pdata_per_air: &'a [Vec<ProverTraceData<SC>>],
+    common_main_prover_data: &'a ProverTraceData<SC>,
+    perm_prover_data: &'a Option<ProverTraceData<SC>>,
+    exposed_values_after_challenge: Vec<Vec<Vec<SC::Challenge>>>,
+) -> ProverQuotientData<SC> {
+    // let trace_views = create_trace_view_per_air(
+    //     domain_per_air,
+    //     cached_mains_pdata_per_air,
+    //     mpk,
+    //     exposed_values_after_challenge,
+    //     common_main_prover_data,
+    //     perm_prover_data,
+    // );
+    let quotient_committer = QuotientCommitter::new(pcs, challenges, alpha);
+    let qvks = mpk
+        .per_air
+        .iter()
+        .map(|pk| pk.get_quotient_vk_data())
+        .collect_vec();
+    let quotient_values = metrics_span("quotient_poly_compute_time_ms", || {
+        quotient_committer.quotient_values(&qvks, &trace_views, public_values_per_air)
+    });
+    // Commit to quotient polynomials. One shared commit for all quotient polynomials
+    metrics_span("quotient_poly_commit_time_ms", || {
+        quotient_committer.commit(quotient_values)
+    })
+}

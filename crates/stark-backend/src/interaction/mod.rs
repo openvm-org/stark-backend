@@ -162,9 +162,9 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        params_per_air: &[Self::ProvingKey],
+        params_per_air: &[&Self::ProvingKey],
         constraints_per_air: &[&SymbolicConstraints<F>],
-        trace_view_per_air: &[PairView<Arc<RowMajorMatrix<F>>, Vec<F>>],
+        trace_view_per_air: &[PairTraceView<F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)>;
 
     /// Partially verifies the challenge phases.
@@ -185,3 +185,5 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
     where
         Challenger: CanObserve<Commitment>;
 }
+
+type PairTraceView<F> = PairView<Arc<RowMajorMatrix<F>>, F>;

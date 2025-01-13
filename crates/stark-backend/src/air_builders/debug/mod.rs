@@ -7,7 +7,7 @@ use p3_air::{
 use p3_field::FieldAlgebra;
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 
-use super::{PartitionedAirBuilder, ViewPair};
+use super::{symbolic::SymbolicConstraints, PartitionedAirBuilder, ViewPair};
 use crate::{
     config::{StarkGenericConfig, Val},
     interaction::{
@@ -60,10 +60,8 @@ pub fn debug_constraints_and_interactions<SC: StarkGenericConfig>(
             let (air_names, interactions): (Vec<_>, Vec<_>) = pk
                 .iter()
                 .map(|pk| {
-                    (
-                        pk.air_name.clone(),
-                        &pk.vk.symbolic_constraints.interactions[..],
-                    )
+                    let sym_constraints = SymbolicConstraints::from(&pk.vk.symbolic_constraints);
+                    (pk.air_name.clone(), sym_constraints.interactions)
                 })
                 .unzip();
             check_logup(

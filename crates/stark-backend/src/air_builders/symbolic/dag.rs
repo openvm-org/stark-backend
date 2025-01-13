@@ -97,6 +97,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
         .iter()
         .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
         .collect();
+    let _num_nodes = nodes.len();
     let interactions: Vec<Interaction<usize>> = interactions
         .iter()
         .map(|interaction| {
@@ -117,6 +118,11 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
             }
         })
         .collect();
+    debug_assert_eq!(
+        _num_nodes,
+        nodes.len(),
+        "Interactions should have all been evaluated in constraints"
+    );
     let constraints = SymbolicExpressionDag {
         nodes,
         constraint_idx,
@@ -131,7 +137,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
 /// mapped to the same node ID if their underlying references are the same.
 fn topological_sort_symbolic_expr<'a, F: Field>(
     expr: &'a SymbolicExpression<F>,
-    expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, u32>,
+    expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, usize>,
     nodes: &mut Vec<SymbolicExpressionNode<F>>,
 ) -> usize {
     if let Some(&idx) = expr_to_idx.get(expr) {
@@ -254,23 +260,23 @@ impl<F: Field> SymbolicExpressionDag<F> {
 }
 
 // TEMPORARY conversions until we switch main interfaces to use SymbolicConstraintsDag
-impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
-    fn from(dag: SymbolicConstraintsDag<F>) -> Self {
+impl<'a, F: Field> From<&'a SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
+    fn from(dag: &'a SymbolicConstraintsDag<F>) -> Self {
         let exprs = dag.constraints.to_symbolic_expressions();
         let constraints = dag
             .constraints
             .constraint_idx
-            .into_iter()
-            .map(|idx| exprs[idx].as_ref().clone())
+            .iter()
+            .map(|&idx| exprs[idx].as_ref().clone())
             .collect::<Vec<_>>();
         let interactions = dag
             .interactions
-            .into_iter()
+            .iter()
             .map(|interaction| {
                 let fields = interaction
                     .fields
-                    .into_iter()
-                    .map(|idx| exprs[idx].as_ref().clone())
+                    .iter()
+                    .map(|&idx| exprs[idx].as_ref().clone())
                     .collect();
                 let count = exprs[interaction.count].as_ref().clone();
                 Interaction {
@@ -285,6 +291,12 @@ impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
             constraints,
             interactions,
         }
+    }
+}
+
+impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
+    fn from(dag: SymbolicConstraintsDag<F>) -> Self {
+        (&dag).into()
     }
 }
 

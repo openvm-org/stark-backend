@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::hal::ProverBackend;
 use crate::{
-    config::{Com, StarkGenericConfig, Val},
+    config::{Com, PcsProverData, StarkGenericConfig, Val},
     keygen::types::StarkVerifyingKey,
     proof::{AirProofData, Commitments},
     rap::AnyRap,
@@ -148,13 +148,14 @@ impl<T, Challenge> Default for RapSinglePhaseView<T, Challenge> {
     }
 }
 
+#[derive(derive_new::new)]
 pub struct ProverViewAfterRapPhases<PB: ProverBackend> {
     /// For each challenge phase **after** the main phase,
     /// the commitment and preimage (there should never be a reason to have more than one).
     /// This may be empty if challenge phases do not require additional trace commitments.
     pub committed_pcs_data_per_phase: Vec<(PB::Commitment, PB::PcsDataView)>,
     /// For each challenge phase, for each RAP,
-    /// the matrix_idx in the commitment, challenge, and exposed values for the RAP.
+    /// the challenge, and exposed values for the RAP.
     /// The indexing is `rap_views_per_phase[phase_idx][rap_idx]`.
     pub rap_views_per_phase: Vec<Vec<RapSinglePhaseView<usize, PB::Challenge>>>,
 }
@@ -190,7 +191,7 @@ pub struct HalProof<PB: ProverBackend, RapPartialProof> {
 pub struct AirProofInput<SC: StarkGenericConfig> {
     pub air: Arc<dyn AnyRap<SC>>,
     /// Prover data for cached main traces
-    pub cached_mains_pdata: Vec<super::cpu::trace::ProverTraceData<SC>>,
+    pub cached_mains_pdata: Vec<(Com<SC>, Arc<PcsProverData<SC>>)>,
     pub raw: AirProofRawInput<Val<SC>>,
 }
 

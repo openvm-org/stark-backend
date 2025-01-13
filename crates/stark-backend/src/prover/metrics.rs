@@ -76,23 +76,15 @@ pub fn trace_metrics<PB: ProverBackend, R>(
         .map(|(pk, height)| {
             let air_name = pk.air_name.clone();
             let mut width = pk.vk.params.width.clone();
-            let ext_degree = PB::CHALLENGE_EXT_DEGREE as u32;
+            let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
             for w in &mut width.after_challenge {
                 *w *= ext_degree;
             }
             let cells = TraceCells {
-                preprocessed: width.preprocessed.map(|w| w as usize * height),
-                cached_mains: width
-                    .cached_mains
-                    .iter()
-                    .map(|w| *w as usize * height)
-                    .collect(),
-                common_main: width.common_main as usize * height,
-                after_challenge: width
-                    .after_challenge
-                    .iter()
-                    .map(|w| *w as usize * height)
-                    .collect(),
+                preprocessed: width.preprocessed.map(|w| w * height),
+                cached_mains: width.cached_mains.iter().map(|w| w * height).collect(),
+                common_main: width.common_main * height,
+                after_challenge: width.after_challenge.iter().map(|w| w * height).collect(),
             };
             let total_cells = cells
                 .cached_mains

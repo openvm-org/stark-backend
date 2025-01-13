@@ -1,14 +1,12 @@
 use std::fmt::Debug;
 
-use derivative::Derivative;
 use itertools::Itertools;
 use p3_commit::{Pcs, PolynomialSpace};
-use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
     config::{Domain, PcsProof, PcsProverData, StarkGenericConfig},
-    proof::AdjacentOpenedValues,
+    proof::{AdjacentOpenedValues, OpenedValues, OpeningProof},
 };
 
 pub struct OpeningProver<'pcs, SC: StarkGenericConfig> {
@@ -41,8 +39,8 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
         // Quotient poly commitment prover data
         quotient_data: &PcsProverData<SC>,
         // Quotient degree for each RAP committed in quotient_data, in order
-        quotient_degrees: &[usize],
-    ) -> OpeningProof<SC> {
+        quotient_degrees: &[u8],
+    ) -> OpeningProof<PcsProof<SC>, SC::Challenge> {
         let preprocessed: Vec<_> = preprocessed
             .into_iter()
             .map(|(data, domain)| (data, vec![domain]))
@@ -63,7 +61,7 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
             .collect_vec();
 
         // open every quotient chunk at zeta
-        let num_chunks: usize = quotient_degrees.iter().sum();
+        let num_chunks = quotient_degrees.iter().sum::<u8>() as usize;
         let quotient_opening_points = vec![vec![zeta]; num_chunks];
         rounds.push((quotient_data, quotient_opening_points));
 
@@ -115,7 +113,7 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
             .iter()
             .map(|&chunk_size| {
                 quotient_openings
-                    .drain(..chunk_size)
+                    .drain(..chunk_size as usize)
                     .map(|mut op| {
                         op.pop()
                             .expect("quotient chunk should be opened at 1 point")

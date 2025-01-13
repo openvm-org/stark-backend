@@ -16,16 +16,16 @@ use crate::{
 /// Widths of different parts of trace matrix
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceWidth {
-    pub preprocessed: Option<u32>,
-    pub cached_mains: Vec<u32>,
-    pub common_main: u32,
+    pub preprocessed: Option<usize>,
+    pub cached_mains: Vec<usize>,
+    pub common_main: usize,
     /// Width counted by extension field elements, _not_ base field elements
-    pub after_challenge: Vec<u32>,
+    pub after_challenge: Vec<usize>,
 }
 
 impl TraceWidth {
     /// Returns the widths of all main traces, including the common main trace if it exists.
-    pub fn main_widths(&self) -> Vec<u32> {
+    pub fn main_widths(&self) -> Vec<usize> {
         let mut ret = self.cached_mains.clone();
         if self.common_main != 0 {
             ret.push(self.common_main);
@@ -40,11 +40,11 @@ pub struct StarkVerifyingParams {
     /// Trace sub-matrix widths
     pub width: TraceWidth,
     /// Number of public values for this STARK only
-    pub num_public_values: u32,
+    pub num_public_values: usize,
     /// Number of values to expose to verifier in each trace challenge phase
-    pub num_exposed_values_after_challenge: Vec<u32>,
+    pub num_exposed_values_after_challenge: Vec<usize>,
     /// For only this RAP, how many challenges are needed in each trace challenge phase
-    pub num_challenges_to_sample: Vec<u32>,
+    pub num_challenges_to_sample: Vec<usize>,
 }
 
 /// Verifier data for preprocessed trace for a single AIR.
@@ -157,7 +157,7 @@ impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
 ))]
 pub struct ProverOnlySinglePreprocessedData<SC: StarkGenericConfig> {
     /// Preprocessed trace matrix.
-    pub trace: RowMajorMatrix<Val<SC>>,
+    pub trace: Arc<RowMajorMatrix<Val<SC>>>,
     /// Prover data, such as a Merkle tree, for the trace commitment.
     pub data: Arc<PcsProverData<SC>>,
 }

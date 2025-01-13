@@ -150,20 +150,24 @@ impl<F: Field> SymbolicRapBuilder<F> {
         let prep_values = [0, 1]
             .into_iter()
             .flat_map(|offset| {
-                (0..width.preprocessed.unwrap_or(0))
-                    .map(move |index| SymbolicVariable::new(Entry::Preprocessed { offset }, index))
+                (0..width.preprocessed.unwrap_or(0)).map(move |index| {
+                    SymbolicVariable::new(Entry::Preprocessed { offset }, index as usize)
+                })
             })
             .collect();
-        let preprocessed = RowMajorMatrix::new(prep_values, preprocessed_width);
+        let preprocessed = RowMajorMatrix::new(prep_values, preprocessed_width as usize);
 
         let mut partitioned_main: Vec<_> = width
             .cached_mains
             .iter()
             .enumerate()
-            .map(|(part_index, &width)| gen_main_trace(part_index, width))
+            .map(|(part_index, &width)| gen_main_trace(part_index, width as usize))
             .collect();
         if width.common_main != 0 {
-            partitioned_main.push(gen_main_trace(width.cached_mains.len(), width.common_main));
+            partitioned_main.push(gen_main_trace(
+                width.cached_mains.len(),
+                width.common_main as usize,
+            ));
         }
         let after_challenge = Self::new_after_challenge(&width.after_challenge);
 
@@ -241,7 +245,7 @@ impl<F: Field> SymbolicRapBuilder<F> {
                         })
                     })
                     .collect_vec();
-                RowMajorMatrix::new(mat_values, width)
+                RowMajorMatrix::new(mat_values, width as usize)
             })
             .collect_vec()
     }

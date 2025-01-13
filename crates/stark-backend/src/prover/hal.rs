@@ -67,20 +67,17 @@ pub trait RapPartialProver<PB: ProverBackend> {
     /// Partial proof for multiple RAPs
     type RapPartialProof: Clone + Send + Sync;
     /// Part of proving key for a single RAP specific for the RAP challenge phases
-    type RapPartialProvingKeyView: Clone + Send + Sync;
-
-    // ==== Device Types ====
-    /// View of prover data for multiple RAPs generated during partial proving of RAP challenge rounds,
-    /// on device.
-    type RapPhaseProverDataRef: Clone + Send + Sync;
+    type RapPartialProvingKeyView<'a>: Clone + Send + Sync
+    where
+        Self: 'a;
 
     /// The `trace_views` are the views of the respective trace matrices, evaluated on the trace domain.
     /// Currently this function does not provide a view of any already committed data associated
     /// with the trace views, although that data is available.
-    fn partially_prove(
+    fn partially_prove<'a>(
         &self,
         challenger: &mut PB::Challenger,
-        pk_views: &[StarkProvingKeyView<PB, Self::RapPartialProvingKeyView>],
+        pk_views: &[StarkProvingKeyView<'a, PB, Self::RapPartialProvingKeyView<'a>>],
         trace_views: Vec<PairView<PB::MatrixView, PB::Val>>,
     ) -> (Self::RapPartialProof, ProverViewAfterRapPhases<PB>);
 }
