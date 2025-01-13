@@ -10,9 +10,10 @@ use crate::{
         types::{MultiStarkProvingKey, MultiStarkVerifyingKey, StarkProvingKey},
         MultiStarkKeygenBuilder,
     },
+    proof::Proof,
     prover::{
-        cpu::CpuDevice,
-        types::{AirProofInput, TraceCommitter},
+        cpu::{CpuBackend, CpuDevice},
+        types::AirProofInput,
         MultiTraceStarkProver,
     },
     rap::AnyRap,
@@ -39,7 +40,11 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     }
 
     fn prover(&self) -> MultiTraceStarkProver<SC> {
-        MultiTraceStarkProver::new(CpuDevice::new(self.config()), self.new_challenger())
+        MultiTraceStarkProver::new(
+            CpuBackend::<SC>::default(),
+            CpuDevice::new(self.config()),
+            self.new_challenger(),
+        )
     }
 
     fn verifier(&self) -> MultiTraceStarkVerifier<SC> {

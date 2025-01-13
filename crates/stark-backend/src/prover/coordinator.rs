@@ -34,14 +34,16 @@ use crate::{
 /// - `PD`: Prover device methods
 // TODO[jpw]: the SC generic is awkward and should be revisited; only being used for challenger
 pub struct Coordinator<SC: StarkGenericConfig, PB, PD> {
+    backend: PB,
     device: PD,
     challenger: SC::Challenger,
     phantom: PhantomData<(SC, PB)>,
 }
 
 impl<SC: StarkGenericConfig, PB, PD> Coordinator<SC, PB, PD> {
-    pub fn new(device: PD, challenger: SC::Challenger) -> Self {
+    pub fn new(backend: PB, device: PD, challenger: SC::Challenger) -> Self {
         Self {
+            backend,
             device,
             challenger,
             phantom: PhantomData,

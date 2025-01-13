@@ -39,8 +39,9 @@ pub struct MultiTraceStarkProver<'c, SC: StarkGenericConfig> {
 }
 
 /// CPU backend using Plonky3 traits.
-#[derive(Default, Clone, Copy)]
-pub struct Cpu<SC> {
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""), Copy(bound = ""), Default(bound = ""))]
+pub struct CpuBackend<SC> {
     phantom: PhantomData<SC>,
 }
 
@@ -49,7 +50,7 @@ pub struct CpuDevice<'a, SC> {
     config: &'a SC,
 }
 
-impl<SC: StarkGenericConfig> ProverBackend for Cpu<SC> {
+impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
     const CHALLENGE_EXT_DEGREE: u8 = <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D as u8;
 
     type Val = Val<SC>;
@@ -94,7 +95,7 @@ impl<SC: StarkGenericConfig> CpuDevice<'_, SC> {
     }
 }
 
-impl<SC: StarkGenericConfig> hal::TraceCommitter<Cpu<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsDataView<SC>) {
         let pcs = self.pcs();
         let (log_trace_heights, traces_with_domains): (Vec<_>, Vec<_>) = traces
@@ -118,7 +119,7 @@ impl<SC: StarkGenericConfig> hal::TraceCommitter<Cpu<SC>> for CpuDevice<'_, SC> 
     }
 }
 
-impl<SC: StarkGenericConfig> hal::RapPartialProver<Cpu<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice<'_, SC> {
     // `None` when there is no sumcheck
     type RapPartialProof = Option<RapPhaseSeqPartialProof<SC>>;
     type RapPartialProvingKeyView<'a>
@@ -129,9 +130,12 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<Cpu<SC>> for CpuDevice<'_, SC
     fn partially_prove<'a>(
         &self,
         challenger: &mut SC::Challenger,
-        pk_views: &[StarkProvingKeyView<'a, Cpu<SC>, &'a RapPhaseSeqProvingKey<SC>>],
+        pk_views: &[StarkProvingKeyView<'a, CpuBackend<SC>, &'a RapPhaseSeqProvingKey<SC>>],
         trace_views: Vec<PairView<Arc<RowMajorMatrix<Val<SC>>>, Val<SC>>>,
-    ) -> (Self::RapPartialProof, ProverViewAfterRapPhases<Cpu<SC>>) {
+    ) -> (
+        Self::RapPartialProof,
+        ProverViewAfterRapPhases<CpuBackend<SC>>,
+    ) {
         assert_eq!(pk_views.len(), trace_views.len());
         let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = pk_views
             .iter()
@@ -222,7 +226,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<Cpu<SC>> for CpuDevice<'_, SC
 type RapLdeView<SC> =
     RapView<Arc<RowMajorMatrix<Val<SC>>>, Val<SC>, <SC as StarkGenericConfig>::Challenge>;
 
-impl<SC: StarkGenericConfig> hal::QuotientCommitter<Cpu<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn get_extended_matrix(
         &self,
         view: &PcsDataView<SC>,
@@ -265,7 +269,7 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<Cpu<SC>> for CpuDevice<'_, S
     }
 }
 
-impl<SC: StarkGenericConfig> hal::OpeningProver<Cpu<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn open(
         &self,
         challenger: &mut SC::Challenger,
