@@ -69,14 +69,14 @@ impl<F> SymbolicExpressionDag<F> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
-#[repr(C)] // TODO[jpw]: device transfer requires usize-dependent serialization
+#[repr(C)] // TODO[jpw]: device transfer requires usize-independent serialization
 pub struct SymbolicConstraintsDag<F> {
     /// DAG with all symbolic expressions as nodes.
     /// A subset of the nodes represents all constraints that will be
     /// included in the quotient polynomial via DEEP-ALI.
     pub constraints: SymbolicExpressionDag<F>,
     /// List of all interactions, where expressions in the interactions
-    /// are referenced by node idx as `u32`.
+    /// are referenced by node idx as `usize`.
     ///
     /// This is used by the prover for after challenge trace generation,
     /// and some partial information may be used by the verifier.
