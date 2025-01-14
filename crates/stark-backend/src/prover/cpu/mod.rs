@@ -98,7 +98,7 @@ impl<SC: StarkGenericConfig> CpuDevice<'_, SC> {
     }
 }
 
-impl<'a, SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'a, SC> {}
+impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'_, SC> {}
 
 impl<SC: StarkGenericConfig> hal::TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsDataView<SC>) {
@@ -159,7 +159,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             .partially_prove(
                 challenger,
                 &rap_pk_per_air,
-                &constraints_per_air.iter().map(|c| c).collect_vec(),
+                &constraints_per_air.iter().collect_vec(),
                 &trace_views,
             )
             .map_or((None, None), |(p, d)| (Some(p), Some(d)));

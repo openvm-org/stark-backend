@@ -74,7 +74,7 @@ pub fn trace_metrics<PB: ProverBackend, R>(
         .iter()
         .zip_eq(heights)
         .map(|(pk, height)| {
-            let air_name = pk.air_name.clone();
+            let air_name = pk.air_name;
             let mut width = pk.vk.params.width.clone();
             let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
             for w in &mut width.after_challenge {

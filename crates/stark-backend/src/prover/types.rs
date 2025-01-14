@@ -55,13 +55,13 @@ pub struct ProvingContext<PB: ProverBackend> {
     pub per_air: Vec<(usize, AirProvingContext<PB>)>,
 }
 
-impl<'a, PB: ProverBackend> ProvingContext<PB> {
+impl<PB: ProverBackend> ProvingContext<PB> {
     pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<PB>> {
         self.per_air.into_iter().map(|(_, x)| x).collect()
     }
 }
 
-impl<'a, PB: ProverBackend> IntoIterator for ProvingContext<PB> {
+impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
     type Item = (usize, AirProvingContext<PB>);
     type IntoIter = std::vec::IntoIter<Self::Item>;
 

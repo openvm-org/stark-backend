@@ -53,17 +53,20 @@ impl<SC: StarkGenericConfig, PB, PD> Coordinator<SC, PB, PD> {
 
 impl<SC, PB, PD> Prover for Coordinator<SC, PB, PD>
 where
-    SC: StarkGenericConfig + 'static,
+    SC: StarkGenericConfig,
     PB: ProverBackend<
         Val = Val<SC>,
         Challenge = SC::Challenge,
         Commitment = Com<SC>,
         Challenger = SC::Challenger,
     >,
-    PD: ProverDevice<PB> + 'static,
+    PD: ProverDevice<PB>,
 {
     type Proof = HalProof<PB, PD::RapPartialProof>;
-    type ProvingKeyView<'a> = MultiStarkProvingKeyView<'a, PB, PD::RapPartialProvingKeyView<'a>>;
+    type ProvingKeyView<'a>
+        = MultiStarkProvingKeyView<'a, PB, PD::RapPartialProvingKeyView<'a>>
+    where
+        Self: 'a;
 
     type ProvingContext = ProvingContext<PB>;
 
@@ -74,7 +77,7 @@ where
     /// The [MultiStarkProvingKeyView] should already be filtered to only include the relevant AIR's proving keys.
     #[instrument(name = "Coordinator::prove", level = "info", skip_all)]
     fn prove<'a>(
-        &mut self,
+        &'a mut self,
         mpk: Self::ProvingKeyView<'a>,
         ctx: Self::ProvingContext,
     ) -> Self::Proof {
@@ -84,6 +87,7 @@ where
 
         let (air_ids, air_ctxs): (Vec<_>, Vec<_>) = ctx.into_iter().unzip();
         let num_air = air_ids.len();
+        #[allow(clippy::type_complexity)]
         let (cached_commits_per_air, cached_views_per_air, common_main_per_air, pvs_per_air): (
             Vec<Vec<PB::Commitment>>,
             Vec<Vec<CommittedTraceView<PB>>>,
@@ -134,7 +138,7 @@ where
                 main_trace_views.push(common_main_trace_views[common_main_idx].clone());
                 common_main_idx += 1;
             }
-            let trace_height = main_trace_views.get(0).expect("no main trace").height();
+            let trace_height = main_trace_views.first().expect("no main trace").height();
             let log_trace_height: u8 = log2_strict_usize(trace_height).try_into().unwrap();
             let pair_trace_view = PairView {
                 log_trace_height,
@@ -288,7 +292,7 @@ where
 }
 
 impl<'a, PB: ProverBackend, R> MultiStarkProvingKeyView<'a, PB, R> {
-    pub fn validate(&self, ctx: &ProvingContext<PB>) -> bool {
+    pub(crate) fn validate(&self, ctx: &ProvingContext<PB>) -> bool {
         if ctx.per_air.len() != self.air_ids.len() {
             return false;
         }
@@ -306,7 +310,7 @@ impl<'a, PB: ProverBackend, R> MultiStarkProvingKeyView<'a, PB, R> {
         true
     }
 
-    pub fn vk_view(&self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
+    pub(crate) fn vk_view(&self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
         MultiStarkVerifyingKeyView::new(self.per_air.iter().map(|pk| pk.vk).collect())
     }
 }
@@ -349,7 +353,7 @@ fn create_trace_view_per_air<PB: ProverBackend, R>(
         if pk.vk.has_common_main() {
             partitioned_main.push(
                 device
-                    .get_extended_matrix(&common_main_pcs_data, common_main_idx, quotient_degree)
+                    .get_extended_matrix(common_main_pcs_data, common_main_idx, quotient_degree)
                     .unwrap_or_else(|| {
                         panic!("common main commitment could not get matrix_idx={common_main_idx}")
                     }),

@@ -1,4 +1,4 @@
-use std::{iter::zip, sync::Arc};
+use std::iter::zip;
 
 use itertools::{izip, Itertools};
 use p3_matrix::{dense::DenseMatrix, Matrix};
@@ -30,9 +30,9 @@ pub struct VerificationData<SC: StarkGenericConfig> {
 
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving. Currently this trait is CPU specific.
-pub trait StarkEngine<SC: StarkGenericConfig + 'static> {
+pub trait StarkEngine<SC: StarkGenericConfig> {
     /// Stark config
-    fn config<'a>(&self) -> &'a SC;
+    fn config(&self) -> &SC;
 
     /// Creates a new challenger with a deterministic state.
     /// Creating new challenger for prover and verifier separately will result in
@@ -43,7 +43,10 @@ pub trait StarkEngine<SC: StarkGenericConfig + 'static> {
         MultiStarkKeygenBuilder::new(self.config())
     }
 
-    fn prover<'a>(&self) -> MultiTraceStarkProver<'a, SC> {
+    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, SC>
+    where
+        Self: 'a,
+    {
         MultiTraceStarkProver::new(
             CpuBackend::<SC>::default(),
             CpuDevice::new(self.config()),
@@ -135,8 +138,8 @@ pub trait StarkEngine<SC: StarkGenericConfig + 'static> {
 
     fn prove(&self, mpk: &MultiStarkProvingKey<SC>, proof_input: ProofInput<SC>) -> Proof<SC> {
         let mut prover = self.prover();
+        let backend = prover.backend;
         let air_ids = proof_input.per_air.iter().map(|(id, _)| *id).collect();
-        let mpk_view = prover.backend.transport_pk_to_device(mpk, air_ids);
         let ctx_per_air = proof_input
             .per_air
             .into_iter()
@@ -149,7 +152,7 @@ pub trait StarkEngine<SC: StarkGenericConfig + 'static> {
                         .cached_mains
                         .iter()
                         .map(|trace| {
-                            let trace = prover.backend.transport_matrix_to_device(trace);
+                            let trace = backend.transport_matrix_to_device(trace);
                             let (com, data) = prover.device.commit(&[trace.clone()]);
                             (
                                 com,
@@ -188,7 +191,7 @@ pub trait StarkEngine<SC: StarkGenericConfig + 'static> {
         let ctx = ProvingContext {
             per_air: ctx_per_air,
         };
-
+        let mpk_view = backend.transport_pk_to_device(mpk, air_ids);
         let proof = Prover::prove(&mut prover, mpk_view, ctx);
         proof.into()
     }

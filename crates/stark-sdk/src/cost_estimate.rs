@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, ops::Add};
 
 use openvm_stark_backend::{
-    config::{StarkGenericConfig, Val},
+    config::{Com, StarkGenericConfig, Val},
     keygen::types::StarkVerifyingKey,
     p3_field::FieldExtensionAlgebra,
 };
@@ -191,7 +191,7 @@ impl FriVerifierCostEstimate {
     }
 
     pub fn from_vk<SC: StarkGenericConfig>(
-        vks: &[&StarkVerifyingKey<SC>],
+        vks: &[&StarkVerifyingKey<Val<SC>, Com<SC>>],
         fri_params: FriParameters,
         log_max_height: usize,
     ) -> Self {
@@ -207,7 +207,7 @@ impl FriVerifierCostEstimate {
             .map(|vk| vk.params.width.after_challenge.iter().sum::<usize>())
             .sum::<usize>()
             * ext_degree;
-        let quotient_degree = vks.iter().map(|vk| vk.quotient_degree).max().unwrap_or(0);
+        let quotient_degree = vks.iter().map(|vk| vk.quotient_degree).max().unwrap_or(0) as usize;
         Self::new(
             VerifierCostParameters {
                 num_main_columns,

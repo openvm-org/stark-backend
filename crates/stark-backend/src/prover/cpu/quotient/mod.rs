@@ -52,7 +52,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
         QuotientData { inner }
     }
 
-    pub(crate) fn single_rap_quotient_values<'a>(
+    pub(super) fn single_rap_quotient_values(
         &self,
         constraints: &SymbolicExpressionDag<Val<SC>>,
         ldes: RapLdeView<SC>,

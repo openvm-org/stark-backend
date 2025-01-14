@@ -167,7 +167,7 @@ where
 {
     /// Transport the proving key to the device, filtering for only the provided `air_ids`.
     fn transport_pk_to_device<'a>(
-        &self,
+        &'a self,
         mpk: &'a MultiStarkProvingKey<SC>,
         air_ids: Vec<usize>,
     ) -> MultiStarkProvingKeyView<'a, PB, &'a RapPhaseSeqProvingKey<SC>>

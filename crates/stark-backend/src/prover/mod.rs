@@ -23,13 +23,18 @@ pub mod metrics;
 
 /// Trait for STARK/SNARK proving at the highest abstraction level.
 pub trait Prover {
-    type ProvingKeyView<'a>;
+    type ProvingKeyView<'a>
+    where
+        Self: 'a;
     type ProvingContext;
     type Proof;
 
     /// The prover should own the challenger, whose state mutates during proving.
-    fn prove<'a>(&mut self, pk: Self::ProvingKeyView<'a>, ctx: Self::ProvingContext)
-        -> Self::Proof;
+    fn prove<'a>(
+        &'a mut self,
+        pk: Self::ProvingKeyView<'a>,
+        ctx: Self::ProvingContext,
+    ) -> Self::Proof;
 }
 
 pub type MultiTraceStarkProver<'a, SC> =

@@ -14,7 +14,7 @@ use openvm_stark_backend::{
     p3_air::{Air, BaseAir},
     p3_field::{Field, FieldAlgebra},
     p3_matrix::{dense::RowMajorMatrix, Matrix},
-    prover::types::{AirProofInput, AirProofRawInput, CommittedTraceData, TraceCommitter},
+    prover::types::{AirProofInput, AirProofRawInput, TraceCommitter},
     rap::{AnyRap, BaseAirWithPublicValues, PartitionedBaseAir},
     Chip, ChipUsageGetter,
 };
