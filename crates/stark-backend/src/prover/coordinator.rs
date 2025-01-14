@@ -250,15 +250,26 @@ where
         // transpose per_phase, per_air -> per_air, per_phase
         let exposed_values_per_air = (0..num_air)
             .map(|i| {
-                prover_view
+                let mut values = prover_view
                     .rap_views_per_phase
                     .iter()
-                    .map(|phase| {
-                        phase
+                    .map(|per_air| {
+                        per_air
                             .get(i)
-                            .map(|v| v.exposed_values.clone())
-                            .unwrap_or_default()
+                            .and_then(|v| v.inner.map(|_| v.exposed_values.clone()))
                     })
+                    .collect_vec();
+                // Prune Nones
+                while let Some(last) = values.last() {
+                    if last.is_none() {
+                        values.pop();
+                    } else {
+                        break;
+                    }
+                }
+                values
+                    .into_iter()
+                    .map(|v| v.unwrap_or_default())
                     .collect_vec()
             })
             .collect_vec();
@@ -366,7 +377,7 @@ fn create_trace_view_per_air<PB: ProverBackend, R>(
             partitioned_main,
             public_values: pvs.to_vec(),
         };
-        let per_phase = view_after
+        let mut per_phase = view_after
             .committed_pcs_data_per_phase
             .iter()
             .zip_eq(&view_after.rap_views_per_phase)
@@ -382,8 +393,16 @@ fn create_trace_view_per_air<PB: ProverBackend, R>(
                     challenges: rap_view.challenges.clone(),
                     exposed_values: rap_view.exposed_values.clone(),
                 })
-            }).map(Option::unwrap_or_default)
+            })
             .collect_vec();
+        while let Some(last) = per_phase.last() {
+            if last.is_none() {
+                per_phase.pop();
+            } else {
+                break;
+            }
+        }
+        let per_phase = per_phase.into_iter().map(|v| v.unwrap_or_default()).collect();
 
         RapView { pair, per_phase }
     })

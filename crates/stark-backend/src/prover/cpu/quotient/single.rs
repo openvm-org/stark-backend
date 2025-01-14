@@ -45,7 +45,6 @@ where
     SC: StarkGenericConfig,
 {
     let quotient_size = quotient_domain.size();
-    assert!(preprocessed_trace_on_quotient_domain.height() >= quotient_size);
     assert!(partitioned_main_lde_on_quotient_domain
         .iter()
         .all(|m| m.height() >= quotient_size));
@@ -88,6 +87,7 @@ where
                 Entry::Preprocessed { offset } => {
                     rotation = rotation.max(offset);
                     assert!(var.index < preprocessed_width);
+                    assert!(preprocessed_trace_on_quotient_domain.height() >= quotient_size);
                 }
                 Entry::Main { part_index, offset } => {
                     rotation = rotation.max(offset);

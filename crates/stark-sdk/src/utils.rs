@@ -51,6 +51,6 @@ macro_rules! assert_sc_compatible_with_serde {
     ($sc:ty) => {
         static_assertions::assert_impl_all!(openvm_stark_backend::keygen::types::MultiStarkProvingKey<$sc>: serde::Serialize, serde::de::DeserializeOwned);
         static_assertions::assert_impl_all!(openvm_stark_backend::keygen::types::MultiStarkVerifyingKey<$sc>: serde::Serialize, serde::de::DeserializeOwned);
-        static_assertions::assert_impl_all!(openvm_stark_backend::prover::types::Proof<$sc>: serde::Serialize, serde::de::DeserializeOwned);
+        static_assertions::assert_impl_all!(openvm_stark_backend::proof::Proof<$sc>: serde::Serialize, serde::de::DeserializeOwned);
     };
 }

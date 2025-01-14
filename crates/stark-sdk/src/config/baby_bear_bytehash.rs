@@ -44,7 +44,7 @@ where
 
 impl<H> StarkEngine<BabyBearByteHashConfig<H>> for BabyBearByteHashEngine<H>
 where
-    H: CryptographicHasher<u8, [u8; 32]> + Clone + Send + Sync + 'static,
+    H: CryptographicHasher<u8, [u8; 32]> + Clone + Send + Sync,
 {
     fn config(&self) -> &BabyBearByteHashConfig<H> {
         &self.config

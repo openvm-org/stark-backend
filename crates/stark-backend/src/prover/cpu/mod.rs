@@ -48,7 +48,8 @@ pub struct CpuBackend<SC> {
     phantom: PhantomData<SC>,
 }
 
-#[derive(Clone, derive_new::new)]
+#[derive(Derivative, derive_new::new)]
+#[derivative(Clone(bound = ""), Copy(bound = ""))]
 pub struct CpuDevice<'a, SC> {
     config: &'a SC,
 }

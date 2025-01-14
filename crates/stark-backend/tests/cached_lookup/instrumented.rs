@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 
 use openvm_stark_backend::{
-    config::StarkGenericConfig, keygen::types::MultiStarkVerifyingKey, prover::types::Proof,
+    config::StarkGenericConfig, keygen::types::MultiStarkVerifyingKey, proof::Proof,
     verifier::VerificationError,
 };
 use openvm_stark_sdk::{

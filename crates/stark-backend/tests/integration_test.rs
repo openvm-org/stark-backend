@@ -1,9 +1,4 @@
-#![feature(trait_upcasting)]
-#![allow(incomplete_features)]
-
-use openvm_stark_backend::{
-    config::StarkGenericConfig, p3_field::FieldAlgebra, utils::disable_debug_builder, Chip,
-};
+use openvm_stark_backend::{p3_field::FieldAlgebra, utils::disable_debug_builder, Chip};
 /// Test utils
 use openvm_stark_sdk::{
     any_rap_arc_vec, config,
@@ -139,7 +134,7 @@ fn test_optional_air() {
     let engine = BabyBearPoseidon2Engine::new(FriParameters::standard_fast());
     let fib_chip = FibonacciChip::new(0, 1, 8);
     let send_chip1 = DummyInteractionChip::new_without_partition(1, true, 0);
-    let send_chip2 = DummyInteractionChip::new_with_partition(engine.config().pcs(), 1, true, 0);
+    let send_chip2 = DummyInteractionChip::new_with_partition(engine.config(), 1, true, 0);
     let recv_chip1 = DummyInteractionChip::new_without_partition(1, false, 0);
     let mut keygen_builder = engine.keygen_builder();
     let fib_chip_id = keygen_builder.add_air(fib_chip.air());
@@ -147,7 +142,6 @@ fn test_optional_air() {
     let send_chip2_id = keygen_builder.add_air(send_chip2.air());
     let recv_chip1_id = keygen_builder.add_air(recv_chip1.air());
     let pk = keygen_builder.generate_pk();
-    let prover = engine.prover();
     let verifier = engine.verifier();
 
     // Case 1: All AIRs are present.
@@ -156,7 +150,6 @@ fn test_optional_air() {
         let mut send_chip1 = send_chip1.clone();
         let mut send_chip2 = send_chip2.clone();
         let mut recv_chip1 = recv_chip1.clone();
-        let mut challenger = engine.new_challenger();
         send_chip1.load_data(DummyInteractionData {
             count: vec![1, 2, 4],
             fields: vec![vec![1], vec![2], vec![3]],
@@ -169,8 +162,7 @@ fn test_optional_air() {
             count: vec![2, 4, 12],
             fields: vec![vec![1], vec![2], vec![3]],
         });
-        let proof = prover.prove(
-            &mut challenger,
+        let proof = engine.prove(
             &pk,
             ProofInput {
                 per_air: vec![
@@ -190,7 +182,6 @@ fn test_optional_air() {
     {
         let mut send_chip1 = send_chip1.clone();
         let mut recv_chip1 = recv_chip1.clone();
-        let mut challenger = engine.new_challenger();
         send_chip1.load_data(DummyInteractionData {
             count: vec![1, 2, 4],
             fields: vec![vec![1], vec![2], vec![3]],
@@ -199,8 +190,7 @@ fn test_optional_air() {
             count: vec![1, 2, 4],
             fields: vec![vec![1], vec![2], vec![3]],
         });
-        let proof = prover.prove(
-            &mut challenger,
+        let proof = engine.prove(
             &pk,
             ProofInput {
                 per_air: vec![
@@ -218,13 +208,11 @@ fn test_optional_air() {
     {
         disable_debug_builder();
         let mut recv_chip1 = recv_chip1.clone();
-        let mut challenger = engine.new_challenger();
         recv_chip1.load_data(DummyInteractionData {
             count: vec![1, 2, 4],
             fields: vec![vec![1], vec![2], vec![3]],
         });
-        let proof = prover.prove(
-            &mut challenger,
+        let proof = engine.prove(
             &pk,
             ProofInput {
                 per_air: vec![recv_chip1.generate_air_proof_input_with_id(recv_chip1_id)],

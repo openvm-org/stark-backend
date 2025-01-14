@@ -97,7 +97,6 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
         .iter()
         .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
         .collect();
-    let _num_nodes = nodes.len();
     let interactions: Vec<Interaction<usize>> = interactions
         .iter()
         .map(|interaction| {
@@ -118,11 +117,9 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
             }
         })
         .collect();
-    debug_assert_eq!(
-        _num_nodes,
-        nodes.len(),
-        "Interactions should have all been evaluated in constraints"
-    );
+    // Note[jpw]: there could be few nodes created after `constraint_idx` is built
+    // from `interactions` even though constraints already contain all interactions.
+    // This should be marginal and is not optimized for now.
     let constraints = SymbolicExpressionDag {
         nodes,
         constraint_idx,

@@ -6,15 +6,20 @@
 
 use std::{iter, sync::Arc};
 
+use derivative::Derivative;
 use itertools::izip;
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
-    config::{StarkGenericConfig, Val},
+    config::{Com, StarkGenericConfig, Val},
     interaction::{InteractionBuilder, InteractionType},
     p3_air::{Air, BaseAir},
     p3_field::{Field, FieldAlgebra},
     p3_matrix::{dense::RowMajorMatrix, Matrix},
-    prover::types::{AirProofInput, AirProofRawInput, TraceCommitter},
+    prover::{
+        cpu::{CpuBackend, CpuDevice},
+        hal::TraceCommitter,
+        types::{AirProofInput, AirProofRawInput, CommittedTraceView},
+    },
     rap::{AnyRap, BaseAirWithPublicValues, PartitionedBaseAir},
     Chip, ChipUsageGetter,
 };
@@ -116,21 +121,13 @@ impl<AB: InteractionBuilder + PartitionedAirBuilder> Air<AB> for DummyInteractio
 
 /// Note: in principle, committing cached trace is out of scope of a chip. But this chip is for
 /// usually testing, so we support it for convenience.
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
 pub struct DummyInteractionChip<'a, SC: StarkGenericConfig> {
-    trace_committer: Option<TraceCommitter<'a, SC>>,
+    device: Option<CpuDevice<'a, SC>>,
     // common_main: Option<RowMajorMatrix<Val<SC>>>,
     data: Option<DummyInteractionData>,
     pub air: DummyInteractionAir,
-}
-
-impl<SC: StarkGenericConfig> Clone for DummyInteractionChip<'_, SC> {
-    fn clone(&self) -> Self {
-        Self {
-            trace_committer: self.trace_committer.clone(),
-            data: self.data.clone(),
-            air: self.air,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -146,20 +143,20 @@ where
     pub fn new_without_partition(field_width: usize, is_send: bool, bus_index: usize) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index);
         Self {
-            trace_committer: None,
+            device: None,
             data: None,
             air,
         }
     }
     pub fn new_with_partition(
-        pcs: &'a SC::Pcs,
+        config: &'a SC,
         field_width: usize,
         is_send: bool,
         bus_index: usize,
     ) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index).partition();
         Self {
-            trace_committer: Some(TraceCommitter::new(pcs)),
+            device: Some(CpuDevice::new(config)),
             data: None,
             air,
         }
@@ -173,10 +170,15 @@ where
         assert!(fields.iter().all(|r| r.len() == w));
         self.data = Some(data);
     }
+
+    #[allow(clippy::type_complexity)]
     fn generate_traces_with_partition(
         &self,
         data: DummyInteractionData,
-    ) -> (RowMajorMatrix<Val<SC>>, CommittedTraceData<SC>) {
+    ) -> (
+        RowMajorMatrix<Val<SC>>,
+        (Com<SC>, CommittedTraceView<CpuBackend<SC>>),
+    ) {
         let DummyInteractionData {
             mut count,
             mut fields,
@@ -198,18 +200,22 @@ where
             .flatten()
             .map(Val::<SC>::from_canonical_u32)
             .collect();
-        let cached_trace = RowMajorMatrix::new(cached_trace_val, w);
-        let prover_data = self
-            .trace_committer
+        let cached_trace = Arc::new(RowMajorMatrix::new(cached_trace_val, w));
+        let (commit, data) = self
+            .device
             .as_ref()
             .unwrap()
-            .commit(vec![cached_trace.clone()]);
+            .commit(&[cached_trace.clone()]);
         (
             RowMajorMatrix::new(common_main_val, 1),
-            CommittedTraceData {
-                raw_data: Arc::new(cached_trace),
-                prover_data,
-            },
+            (
+                commit,
+                CommittedTraceView {
+                    trace: cached_trace,
+                    data,
+                    matrix_idx: 0,
+                },
+            ),
         )
     }
 
@@ -241,25 +247,24 @@ impl<SC: StarkGenericConfig> Chip<SC> for DummyInteractionChip<'_, SC> {
     fn generate_air_proof_input(self) -> AirProofInput<SC> {
         assert!(self.data.is_some());
         let data = self.data.clone().unwrap();
-        if self.trace_committer.is_some() {
-            let (common_main, cached_main) = self.generate_traces_with_partition(data);
+        if self.device.is_some() {
+            let (common_main, (cached_commit, cached_main)) =
+                self.generate_traces_with_partition(data);
             AirProofInput {
-                air: self.air(),
-                cached_mains_pdata: vec![cached_main.prover_data],
+                cached_mains_pdata: vec![(cached_commit, cached_main.data.data)],
                 raw: AirProofRawInput {
-                    cached_mains: vec![cached_main.raw_data],
-                    common_main: Some(common_main),
+                    cached_mains: vec![cached_main.trace],
+                    common_main: Some(Arc::new(common_main)),
                     public_values: vec![],
                 },
             }
         } else {
             let common_main = self.generate_traces_without_partition(data);
             AirProofInput {
-                air: self.air(),
                 cached_mains_pdata: vec![],
                 raw: AirProofRawInput {
                     cached_mains: vec![],
-                    common_main: Some(common_main),
+                    common_main: Some(Arc::new(common_main)),
                     public_values: vec![],
                 },
             }
@@ -282,15 +287,4 @@ impl<SC: StarkGenericConfig> ChipUsageGetter for DummyInteractionChip<'_, SC> {
     fn trace_width(&self) -> usize {
         self.air.field_width + 1
     }
-}
-
-#[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound(
-    serialize = "ProverTraceData<SC>: Serialize",
-    deserialize = "ProverTraceData<SC>: Deserialize<'de>"
-))]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct CommittedTraceData<SC: StarkGenericConfig> {
-    pub raw_data: Arc<RowMajorMatrix<Val<SC>>>,
-    pub prover_data: ProverTraceData<SC>,
 }
