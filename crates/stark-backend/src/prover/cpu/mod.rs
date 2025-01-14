@@ -11,8 +11,11 @@ use p3_util::log2_strict_usize;
 use quotient::QuotientCommitter;
 
 use super::{
-    hal::{self, MatrixView, ProverBackend},
-    types::{PairView, ProverViewAfterRapPhases, RapView, StarkProvingKeyView},
+    hal::{self, DeviceDataAdapter, MatrixView, ProverBackend, ProverDevice},
+    types::{
+        CommittedTraceView, MultiStarkProvingKeyView, PairView, ProverViewAfterRapPhases, RapView,
+        StarkProvingKeyView,
+    },
 };
 use crate::{
     air_builders::symbolic::{SymbolicConstraints, SymbolicExpressionDag},
@@ -21,7 +24,7 @@ use crate::{
         StarkGenericConfig, Val,
     },
     interaction::RapPhaseSeq,
-    keygen::view::MultiStarkVerifyingKeyView,
+    keygen::{types::MultiStarkProvingKey, view::MultiStarkVerifyingKeyView},
     proof::OpeningProof,
     prover::{hal::TraceCommitter, types::RapSinglePhaseView},
     utils::metrics_span,
@@ -94,6 +97,8 @@ impl<SC: StarkGenericConfig> CpuDevice<'_, SC> {
         self.config.pcs()
     }
 }
+
+impl<'a, SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'a, SC> {}
 
 impl<SC: StarkGenericConfig> hal::TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsDataView<SC>) {
@@ -323,5 +328,58 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
             &quotient_data.data,
             quotient_degrees,
         )
+    }
+}
+
+impl<SC> DeviceDataAdapter<SC, CpuBackend<SC>> for CpuBackend<SC>
+where
+    SC: StarkGenericConfig,
+{
+    fn transport_pk_to_device<'a>(
+        &self,
+        mpk: &'a MultiStarkProvingKey<SC>,
+        air_ids: Vec<usize>,
+    ) -> MultiStarkProvingKeyView<'a, CpuBackend<SC>, &'a RapPhaseSeqProvingKey<SC>>
+    where
+        SC: 'a,
+    {
+        assert!(
+            air_ids.len() <= mpk.per_air.len(),
+            "filtering more AIRs than available"
+        );
+        let per_air = air_ids
+            .iter()
+            .map(|&air_idx| {
+                let pk = &mpk.per_air[air_idx];
+                let preprocessed_data = pk.preprocessed_data.clone().map(|pd| {
+                    let pcs_data_view = PcsDataView {
+                        data: pd.data,
+                        log_trace_heights: vec![log2_strict_usize(pd.trace.height()) as u8],
+                    };
+                    CommittedTraceView {
+                        trace: pd.trace,
+                        data: pcs_data_view,
+                        matrix_idx: 0,
+                    }
+                });
+                StarkProvingKeyView {
+                    air_name: &pk.air_name,
+                    vk: &pk.vk,
+                    preprocessed_data,
+                    rap_partial_pk: &pk.rap_phase_seq_pk,
+                }
+            })
+            .collect();
+        MultiStarkProvingKeyView::new(air_ids, per_air)
+    }
+    fn transport_matrix_to_device(
+        &self,
+        matrix: &Arc<RowMajorMatrix<Val<SC>>>,
+    ) -> Arc<RowMajorMatrix<Val<SC>>> {
+        matrix.clone()
+    }
+
+    fn transport_pcs_data_to_device(&self, data: &PcsDataView<SC>) -> PcsDataView<SC> {
+        data.clone()
     }
 }

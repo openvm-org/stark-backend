@@ -34,8 +34,8 @@ use crate::{
 /// - `PD`: Prover device methods
 // TODO[jpw]: the SC generic is awkward and should be revisited; only being used for challenger
 pub struct Coordinator<SC: StarkGenericConfig, PB, PD> {
-    backend: PB,
-    device: PD,
+    pub backend: PB,
+    pub device: PD,
     challenger: SC::Challenger,
     phantom: PhantomData<(SC, PB)>,
 }

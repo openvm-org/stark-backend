@@ -39,6 +39,7 @@ pub mod utils;
 pub mod verifier;
 
 pub use chip::{Chip, ChipUsageGetter};
+pub use rap::AirRef;
 
 // Use jemalloc as global allocator for performance
 #[cfg(all(feature = "jemalloc", unix, not(test)))]

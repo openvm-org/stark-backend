@@ -3,11 +3,20 @@
 //! Not all hardware implementations need to implement this.
 //! A pure external device implementation can just implement the [Prover](super::Prover) trait directly.
 
+use std::sync::Arc;
+
 use p3_challenger::CanObserve;
+use p3_matrix::dense::RowMajorMatrix;
 use serde::{de::DeserializeOwned, Serialize};
 
-use super::types::{PairView, ProverViewAfterRapPhases, RapView, StarkProvingKeyView};
-use crate::air_builders::symbolic::SymbolicExpressionDag;
+use super::types::{
+    MultiStarkProvingKeyView, PairView, ProverViewAfterRapPhases, RapView, StarkProvingKeyView,
+};
+use crate::{
+    air_builders::symbolic::SymbolicExpressionDag,
+    config::{Com, RapPhaseSeqProvingKey, StarkGenericConfig, Val},
+    keygen::types::MultiStarkProvingKey,
+};
 
 /// Associated types needed by the prover, in the form of buffers and views,
 /// specific to a specific hardware backend.
@@ -148,4 +157,24 @@ pub trait OpeningProver<PB: ProverBackend> {
         // Quotient degree for each RAP committed in quotient_data, in order
         quotient_degrees: &[u8],
     ) -> PB::OpeningProof;
+}
+
+/// Trait to manage data transport of prover types from host to device.
+pub trait DeviceDataAdapter<SC, PB>
+where
+    SC: StarkGenericConfig,
+    PB: ProverBackend<Val = Val<SC>, Challenge = SC::Challenge, Commitment = Com<SC>>,
+{
+    /// Transport the proving key to the device, filtering for only the provided `air_ids`.
+    fn transport_pk_to_device<'a>(
+        &self,
+        mpk: &'a MultiStarkProvingKey<SC>,
+        air_ids: Vec<usize>,
+    ) -> MultiStarkProvingKeyView<'a, PB, &'a RapPhaseSeqProvingKey<SC>>
+    where
+        SC: 'a;
+
+    fn transport_matrix_to_device(&self, matrix: &Arc<RowMajorMatrix<Val<SC>>>) -> PB::MatrixView;
+
+    fn transport_pcs_data_to_device(&self, data: &super::cpu::PcsDataView<SC>) -> PB::PcsDataView;
 }

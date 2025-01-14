@@ -7,10 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use super::hal::ProverBackend;
 use crate::{
-    config::{Com, PcsProverData, StarkGenericConfig, Val},
+    config::{Com, PcsProof, PcsProverData, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
     keygen::types::StarkVerifyingKey,
-    proof::{AirProofData, Commitments},
-    rap::AnyRap,
+    proof::{AirProofData, Commitments, OpeningProof, Proof},
 };
 
 /// A view of the proving key after it has been transferred to device.
@@ -181,16 +180,43 @@ pub struct HalProof<PB: ProverBackend, RapPartialProof> {
     pub rap_partial_proof: RapPartialProof,
 }
 
-// ============= Below are common types independent of hardware ============
-// These are legacy types. They should be removed but affect many testing codepaths.
+impl<PB, SC: StarkGenericConfig, RapPartialProof> From<HalProof<PB, RapPartialProof>> for Proof<SC>
+where
+    PB: ProverBackend<Val = Val<SC>, Challenge = SC::Challenge, Commitment = Com<SC>>,
+    PB::OpeningProof: Into<OpeningProof<PcsProof<SC>, SC::Challenge>>,
+    RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
+{
+    fn from(proof: HalProof<PB, RapPartialProof>) -> Self {
+        Proof {
+            commitments: proof.commitments,
+            opening: proof.opening.into(),
+            per_air: proof.per_air,
+            rap_phase_seq_proof: proof.rap_partial_proof.into(),
+        }
+    }
+}
 
-// Legacy type
+// ============= Below are common types independent of hardware ============
+
+#[derive(Derivative, derive_new::new)]
+#[derivative(Clone(bound = "Com<SC>: Clone"))]
+pub struct ProofInput<SC: StarkGenericConfig> {
+    /// (AIR id, AIR input)
+    pub per_air: Vec<(usize, AirProofInput<SC>)>,
+}
+
 /// Necessary input for proving a single AIR.
+///
+/// The [Chip](crate::chip::Chip) trait is currently specific to the
+/// CPU backend and in particular to `RowMajorMatrix`. We may extend
+/// to more general [ProverBackend](super::hal::ProverBackend)s, but
+/// currently we use this struct as a common interface.
 #[derive(Derivative)]
 #[derivative(Clone(bound = "Com<SC>: Clone"))]
 pub struct AirProofInput<SC: StarkGenericConfig> {
-    pub air: Arc<dyn AnyRap<SC>>,
-    /// Prover data for cached main traces
+    /// Prover data for cached main traces.
+    /// They must either be all provided or they will be regenerated
+    /// from the raw traces.
     pub cached_mains_pdata: Vec<(Com<SC>, Arc<PcsProverData<SC>>)>,
     pub raw: AirProofRawInput<Val<SC>>,
 }
@@ -201,7 +227,7 @@ pub struct AirProofRawInput<F: Field> {
     /// Cached main trace matrices
     pub cached_mains: Vec<Arc<RowMajorMatrix<F>>>,
     /// Common main trace matrix
-    pub common_main: Option<RowMajorMatrix<F>>,
+    pub common_main: Option<Arc<RowMajorMatrix<F>>>,
     /// Public values
     pub public_values: Vec<F>,
 }
