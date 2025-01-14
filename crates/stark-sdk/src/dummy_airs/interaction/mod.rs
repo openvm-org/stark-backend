@@ -6,7 +6,7 @@ use openvm_stark_backend::{
     p3_matrix::dense::RowMajorMatrix,
     prover::{
         cpu::{CpuBackend, CpuDevice},
-        hal::DeviceDataAdapter,
+        hal::DeviceDataTransporterpter,
         types::{AirProvingContext, ProvingContext},
         MultiTraceStarkProver, Prover,
     },

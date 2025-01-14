@@ -160,7 +160,7 @@ pub trait OpeningProver<PB: ProverBackend> {
 }
 
 /// Trait to manage data transport of prover types from host to device.
-pub trait DeviceDataAdapter<SC, PB>
+pub trait DeviceDataTransporterpter<SC, PB>
 where
     SC: StarkGenericConfig,
     PB: ProverBackend<Val = Val<SC>, Challenge = SC::Challenge, Commitment = Com<SC>>,
