@@ -1,7 +1,10 @@
 //! # RAP (Randomized Air with Preprocessing)
 //! See <https://hackmd.io/@aztec-network/plonk-arithmetiization-air> for formal definition.
 
-use std::any::{type_name, Any};
+use std::{
+    any::{type_name, Any},
+    sync::Arc,
+};
 
 use p3_air::{BaseAir, PermutationAirBuilder};
 
@@ -58,6 +61,10 @@ where
 pub trait PermutationAirBuilderWithExposedValues: PermutationAirBuilder {
     fn permutation_exposed_values(&self) -> &[Self::VarEF];
 }
+
+/// Shared reference to any Interactive Air.
+/// This type is the main interface for keygen.
+pub type AirRef<SC> = Arc<dyn AnyRap<SC>>;
 
 /// RAP trait for all-purpose dynamic dispatch use.
 /// This trait is auto-implemented if you implement `Air` and `BaseAirWithPublicValues` and `PartitionedBaseAir` traits.

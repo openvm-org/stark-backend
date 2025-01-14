@@ -1,13 +1,10 @@
 use std::fmt::Display;
 
 use itertools::Itertools;
-use p3_field::FieldExtensionAlgebra;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    config::{StarkGenericConfig, Val},
-    keygen::types::{StarkProvingKey, TraceWidth},
-};
+use super::{hal::ProverBackend, types::StarkProvingKeyView};
+use crate::keygen::types::TraceWidth;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceMetrics {
@@ -65,17 +62,21 @@ impl Display for SingleTraceMetrics {
 }
 
 /// heights are the trace heights for each air
-pub fn trace_metrics<SC: StarkGenericConfig>(
-    pk: &[&StarkProvingKey<SC>],
-    heights: &[usize],
+pub fn trace_metrics<PB: ProverBackend, R>(
+    pk: &[StarkProvingKeyView<PB, R>],
+    log_trace_heights: &[u8],
 ) -> TraceMetrics {
+    let heights = log_trace_heights
+        .iter()
+        .map(|&h| 1usize << h)
+        .collect::<Vec<_>>();
     let per_air: Vec<_> = pk
         .iter()
         .zip_eq(heights)
-        .map(|(pk, &height)| {
-            let air_name = pk.air_name.clone();
+        .map(|(pk, height)| {
+            let air_name = pk.air_name;
             let mut width = pk.vk.params.width.clone();
-            let ext_degree = <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D;
+            let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
             for w in &mut width.after_challenge {
                 *w *= ext_degree;
             }
@@ -92,7 +93,7 @@ pub fn trace_metrics<SC: StarkGenericConfig>(
                 .chain(cells.after_challenge.iter())
                 .sum::<usize>();
             SingleTraceMetrics {
-                air_name,
+                air_name: air_name.to_string(),
                 height,
                 width,
                 cells,

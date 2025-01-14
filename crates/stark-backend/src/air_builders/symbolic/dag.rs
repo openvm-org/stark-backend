@@ -16,7 +16,7 @@ use crate::{
 /// Basically replace `Arc`s in `SymbolicExpression` with node IDs.
 /// Intended to be serializable and deserializable.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(bound = "F: Field")]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
 #[repr(C)]
 pub enum SymbolicExpressionNode<F> {
     Variable(SymbolicVariable<F>),
@@ -46,7 +46,8 @@ pub enum SymbolicExpressionNode<F> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(bound = "F: Field")]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
+#[repr(C)]
 pub struct SymbolicExpressionDag<F> {
     /// Nodes in **topological** order.
     pub(crate) nodes: Vec<SymbolicExpressionNode<F>>,
@@ -67,7 +68,8 @@ impl<F> SymbolicExpressionDag<F> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(bound = "F: Field")]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
+#[repr(C)] // TODO[jpw]: device transfer requires usize-independent serialization
 pub struct SymbolicConstraintsDag<F> {
     /// DAG with all symbolic expressions as nodes.
     /// A subset of the nodes represents all constraints that will be
@@ -115,6 +117,9 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
             }
         })
         .collect();
+    // Note[jpw]: there could be few nodes created after `constraint_idx` is built
+    // from `interactions` even though constraints already contain all interactions.
+    // This should be marginal and is not optimized for now.
     let constraints = SymbolicExpressionDag {
         nodes,
         constraint_idx,
@@ -252,23 +257,23 @@ impl<F: Field> SymbolicExpressionDag<F> {
 }
 
 // TEMPORARY conversions until we switch main interfaces to use SymbolicConstraintsDag
-impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
-    fn from(dag: SymbolicConstraintsDag<F>) -> Self {
+impl<'a, F: Field> From<&'a SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
+    fn from(dag: &'a SymbolicConstraintsDag<F>) -> Self {
         let exprs = dag.constraints.to_symbolic_expressions();
         let constraints = dag
             .constraints
             .constraint_idx
-            .into_iter()
-            .map(|idx| exprs[idx].as_ref().clone())
+            .iter()
+            .map(|&idx| exprs[idx].as_ref().clone())
             .collect::<Vec<_>>();
         let interactions = dag
             .interactions
-            .into_iter()
+            .iter()
             .map(|interaction| {
                 let fields = interaction
                     .fields
-                    .into_iter()
-                    .map(|idx| exprs[idx].as_ref().clone())
+                    .iter()
+                    .map(|&idx| exprs[idx].as_ref().clone())
                     .collect();
                 let count = exprs[interaction.count].as_ref().clone();
                 Interaction {
@@ -283,6 +288,12 @@ impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
             constraints,
             interactions,
         }
+    }
+}
+
+impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
+    fn from(dag: SymbolicConstraintsDag<F>) -> Self {
+        (&dag).into()
     }
 }
 

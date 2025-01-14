@@ -6,15 +6,17 @@ use std::{
 use p3_field::{ExtensionField, Field, FieldAlgebra};
 use p3_matrix::Matrix;
 
-use super::{
-    symbolic::{
-        dag::build_symbolic_constraints_dag,
-        symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
-        symbolic_variable::{Entry, SymbolicVariable},
+use crate::{
+    air_builders::{
+        symbolic::{
+            symbolic_expression::SymbolicEvaluator,
+            symbolic_variable::{Entry, SymbolicVariable},
+            SymbolicExpressionDag,
+        },
+        ViewPair,
     },
-    ViewPair,
+    config::{StarkGenericConfig, Val},
 };
-use crate::config::{StarkGenericConfig, Val};
 
 pub type VerifierConstraintFolder<'a, SC> = GenericVerifierConstraintFolder<
     'a,
@@ -51,13 +53,13 @@ where
     Var: Into<Expr> + Copy + Send + Sync,
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
-    pub fn eval_constraints(&mut self, constraints: &[SymbolicExpression<F>]) {
-        let dag = build_symbolic_constraints_dag(constraints, &[]).constraints;
+    pub fn eval_constraints(&mut self, constraints: &SymbolicExpressionDag<F>) {
+        let dag = constraints;
         // node_idx -> evaluation
         // We do a simple serial evaluation in topological order.
         // This can be parallelized if necessary.
         let exprs = self.eval_nodes(&dag.nodes);
-        for idx in dag.constraint_idx {
+        for &idx in &dag.constraint_idx {
             self.assert_zero(exprs[idx].clone());
         }
     }

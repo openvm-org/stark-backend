@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::iter::zip;
 
 use itertools::{izip, Itertools};
-use p3_matrix::dense::DenseMatrix;
+use p3_matrix::{dense::DenseMatrix, Matrix};
+use p3_util::log2_strict_usize;
 
 use crate::{
     air_builders::debug::debug_constraints_and_interactions,
@@ -10,12 +11,15 @@ use crate::{
         types::{MultiStarkProvingKey, MultiStarkVerifyingKey, StarkProvingKey},
         MultiStarkKeygenBuilder,
     },
+    proof::Proof,
     prover::{
-        types::{AirProofInput, Proof, ProofInput, TraceCommitter},
-        MultiTraceStarkProver,
+        cpu::{CpuBackend, CpuDevice, PcsDataView},
+        hal::{DeviceDataTransporterpter, TraceCommitter},
+        types::{AirProofInput, AirProvingContext, CommittedTraceView, ProofInput, ProvingContext},
+        MultiTraceStarkProver, Prover,
     },
-    rap::AnyRap,
     verifier::{MultiTraceStarkVerifier, VerificationError},
+    AirRef,
 };
 
 /// Data for verifying a Stark proof.
@@ -24,10 +28,12 @@ pub struct VerificationData<SC: StarkGenericConfig> {
     pub proof: Proof<SC>,
 }
 
-/// Testing engine
+/// A helper trait to collect the different steps in multi-trace STARK
+/// keygen and proving. Currently this trait is CPU specific.
 pub trait StarkEngine<SC: StarkGenericConfig> {
     /// Stark config
     fn config(&self) -> &SC;
+
     /// Creates a new challenger with a deterministic state.
     /// Creating new challenger for prover and verifier separately will result in
     /// them having the same starting state.
@@ -37,8 +43,15 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
         MultiStarkKeygenBuilder::new(self.config())
     }
 
-    fn prover(&self) -> MultiTraceStarkProver<SC> {
-        MultiTraceStarkProver::new(self.config())
+    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, SC>
+    where
+        Self: 'a,
+    {
+        MultiTraceStarkProver::new(
+            CpuBackend::<SC>::default(),
+            CpuDevice::new(self.config()),
+            self.new_challenger(),
+        )
     }
 
     fn verifier(&self) -> MultiTraceStarkVerifier<SC> {
@@ -48,16 +61,11 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     // mpk can be removed if we use BaseAir trait to regenerate preprocessed traces
     fn debug(
         &self,
-        airs: &[Arc<dyn AnyRap<SC>>],
+        airs: &[AirRef<SC>],
         pk: &[StarkProvingKey<SC>],
-        proof_input: &ProofInput<SC>,
+        proof_inputs: &[AirProofInput<SC>],
     ) {
-        let air_inputs: Vec<_> = proof_input
-            .per_air
-            .iter()
-            .map(|(_, air_input)| air_input)
-            .collect_vec();
-        let trace_views = air_inputs
+        let (trace_views, pvs): (Vec<_>, Vec<_>) = proof_inputs
             .iter()
             .map(|input| {
                 let mut views = input
@@ -69,13 +77,9 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
                 if let Some(trace) = input.raw.common_main.as_ref() {
                     views.push(trace.as_view());
                 }
-                views
+                (views, input.raw.public_values.clone())
             })
-            .collect_vec();
-        let pvs = air_inputs
-            .iter()
-            .map(|input| input.raw.public_values.clone())
-            .collect_vec();
+            .unzip();
         debug_constraints_and_interactions(airs, pk, &trace_views, &pvs);
     }
     // TODO[jpw]: the following does not belong in this crate! dev tooling only
@@ -85,32 +89,28 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     /// This function should only be used on AIRs where the main trace is **not** partitioned.
     fn run_simple_test_impl(
         &self,
-        airs: Vec<Arc<dyn AnyRap<SC>>>,
+        airs: Vec<AirRef<SC>>,
         traces: Vec<DenseMatrix<Val<SC>>>,
         public_values: Vec<Vec<Val<SC>>>,
     ) -> Result<VerificationData<SC>, VerificationError> {
-        self.run_test_impl(AirProofInput::multiple_simple(airs, traces, public_values))
+        self.run_test_impl(airs, AirProofInput::multiple_simple(traces, public_values))
     }
 
     /// Runs a single end-to-end test for a given set of chips and traces partitions.
     /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
     fn run_test_impl(
         &self,
+        airs: Vec<AirRef<SC>>,
         air_proof_inputs: Vec<AirProofInput<SC>>,
     ) -> Result<VerificationData<SC>, VerificationError> {
         let mut keygen_builder = self.keygen_builder();
-        let air_ids = self.set_up_keygen_builder(&mut keygen_builder, &air_proof_inputs);
+        let air_ids = self.set_up_keygen_builder(&mut keygen_builder, &airs);
+        let pk = keygen_builder.generate_pk();
+        self.debug(&airs, &pk.per_air, &air_proof_inputs);
+        let vk = pk.get_vk();
         let proof_input = ProofInput {
             per_air: izip!(air_ids, air_proof_inputs).collect(),
         };
-        let pk = keygen_builder.generate_pk();
-        let airs = proof_input
-            .per_air
-            .iter()
-            .map(|(_, air_input)| air_input.air.clone())
-            .collect_vec();
-        self.debug(&airs, &pk.per_air, &proof_input);
-        let vk = pk.get_vk();
         let proof = self.prove(&pk, proof_input);
         self.verify(&vk, &proof)?;
         Ok(VerificationData { vk, proof })
@@ -120,72 +120,80 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     fn set_up_keygen_builder(
         &self,
         keygen_builder: &mut MultiStarkKeygenBuilder<'_, SC>,
-        air_proof_inputs: &[AirProofInput<SC>],
+        airs: &[AirRef<SC>],
     ) -> Vec<usize> {
-        air_proof_inputs
-            .iter()
-            .map(|air_proof_input| {
-                let air = air_proof_input.air.clone();
-                assert_eq!(
-                    air_proof_input.raw.cached_mains.len(),
-                    air.cached_main_widths().len()
-                );
-                let common_main_width = air.common_main_width();
-                if common_main_width == 0 {
-                    assert!(air_proof_input.raw.common_main.is_none());
-                } else {
-                    assert_eq!(
-                        air_proof_input.raw.common_main.as_ref().unwrap().width,
-                        air.common_main_width()
-                    );
-                }
-                keygen_builder.add_air(air)
-            })
+        airs.iter()
+            .map(|air| keygen_builder.add_air(air.clone()))
             .collect()
     }
 
     fn prove_then_verify(
         &self,
-        pk: &MultiStarkProvingKey<SC>,
+        mpk: &MultiStarkProvingKey<SC>,
         proof_input: ProofInput<SC>,
     ) -> Result<(), VerificationError> {
-        let proof = self.prove(pk, proof_input);
-        self.verify(&pk.get_vk(), &proof)
+        let proof = self.prove(mpk, proof_input);
+        self.verify(&mpk.get_vk(), &proof)
     }
 
-    fn prove(&self, pk: &MultiStarkProvingKey<SC>, proof_input: ProofInput<SC>) -> Proof<SC> {
-        let prover = self.prover();
-        let committer = TraceCommitter::new(prover.pcs());
-
-        let air_proof_inputs = proof_input
+    fn prove(&self, mpk: &MultiStarkProvingKey<SC>, proof_input: ProofInput<SC>) -> Proof<SC> {
+        let mut prover = self.prover();
+        let backend = prover.backend;
+        let air_ids = proof_input.per_air.iter().map(|(id, _)| *id).collect();
+        let ctx_per_air = proof_input
             .per_air
             .into_iter()
-            .map(|(air_id, mut air_proof_input)| {
+            .map(|(air_id, input)| {
                 // Commit cached traces if they are not provided
-                if air_proof_input.cached_mains_pdata.is_empty()
-                    && !air_proof_input.raw.cached_mains.is_empty()
+                let cached_mains = if input.cached_mains_pdata.len() != input.raw.cached_mains.len()
                 {
-                    air_proof_input.cached_mains_pdata = air_proof_input
+                    input
                         .raw
                         .cached_mains
                         .iter()
-                        .map(|trace| committer.commit(vec![trace.as_ref().clone()]))
-                        .collect();
+                        .map(|trace| {
+                            let trace = backend.transport_matrix_to_device(trace);
+                            let (com, data) = prover.device.commit(&[trace.clone()]);
+                            (
+                                com,
+                                CommittedTraceView {
+                                    trace,
+                                    data,
+                                    matrix_idx: 0,
+                                },
+                            )
+                        })
+                        .collect()
                 } else {
-                    assert_eq!(
-                        air_proof_input.cached_mains_pdata.len(),
-                        air_proof_input.raw.cached_mains.len()
-                    );
-                }
-                (air_id, air_proof_input)
+                    zip(input.cached_mains_pdata, input.raw.cached_mains)
+                        .map(|((com, data), trace)| {
+                            let data_view = PcsDataView {
+                                data,
+                                log_trace_heights: vec![log2_strict_usize(trace.height()) as u8],
+                            };
+                            let view = CommittedTraceView {
+                                trace,
+                                data: data_view,
+                                matrix_idx: 0,
+                            };
+                            (com, view)
+                        })
+                        .collect()
+                };
+                let air_ctx = AirProvingContext {
+                    cached_mains,
+                    common_main: input.raw.common_main,
+                    public_values: input.raw.public_values,
+                };
+                (air_id, air_ctx)
             })
             .collect();
-        let proof_input = ProofInput {
-            per_air: air_proof_inputs,
+        let ctx = ProvingContext {
+            per_air: ctx_per_air,
         };
-
-        let mut challenger = self.new_challenger();
-        prover.prove(&mut challenger, pk, proof_input)
+        let mpk_view = backend.transport_pk_to_device(mpk, air_ids);
+        let proof = Prover::prove(&mut prover, mpk_view, ctx);
+        proof.into()
     }
 
     fn verify(

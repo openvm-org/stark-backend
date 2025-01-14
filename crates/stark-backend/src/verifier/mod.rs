@@ -6,17 +6,20 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    config::{Domain, StarkGenericConfig, Val},
+    config::{Com, Domain, StarkGenericConfig, Val},
     interaction::RapPhaseSeq,
     keygen::{types::MultiStarkVerifyingKey, view::MultiStarkVerifyingKeyView},
-    prover::{opener::AdjacentOpenedValues, types::Proof},
+    proof::{AdjacentOpenedValues, Proof},
     verifier::constraints::verify_single_rap_constraints,
 };
 
 pub mod constraints;
 mod error;
+/// Constraint folder
+pub mod folder;
 
 pub use error::*;
+pub use folder::GenericVerifierConstraintFolder;
 
 /// Verifies a partitioned proof of multi-matrix AIRs.
 pub struct MultiTraceStarkVerifier<'c, SC: StarkGenericConfig> {
@@ -51,7 +54,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
     pub fn verify_raps(
         &self,
         challenger: &mut SC::Challenger,
-        mvk: &MultiStarkVerifyingKeyView<SC>,
+        mvk: &MultiStarkVerifyingKeyView<Val<SC>, Com<SC>>,
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError> {
         let public_values = proof.get_public_values();
@@ -135,8 +138,9 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
                 let degree = air_proof.degree;
                 let quotient_degree = vk.quotient_degree;
                 let domain = pcs.natural_domain_for_degree(degree);
-                let quotient_domain = domain.create_disjoint_domain(degree * quotient_degree);
-                let qc_domains = quotient_domain.split_domains(quotient_degree);
+                let quotient_domain =
+                    domain.create_disjoint_domain(degree * quotient_degree as usize);
+                let qc_domains = quotient_domain.split_domains(quotient_degree as usize);
                 (domain, qc_domains)
             })
             .unzip();

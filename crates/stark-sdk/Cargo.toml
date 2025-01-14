@@ -23,7 +23,7 @@ zkhash = { workspace = true }
 ff = { workspace = true }
 itertools.workspace = true
 tracing.workspace = true
-
+derivative.workspace = true
 serde = { workspace = true, features = ["alloc"] }
 rand.workspace = true
 metrics.workspace = true

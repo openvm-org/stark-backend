@@ -24,9 +24,11 @@ use crate::{
     rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
 };
 
-pub mod dag;
+mod dag;
 pub mod symbolic_expression;
 pub mod symbolic_variable;
+
+pub use dag::*;
 
 /// Symbolic constraints for a single AIR with interactions.
 /// The constraints contain the constraints on the logup partial sums.

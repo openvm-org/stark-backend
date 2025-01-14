@@ -5,9 +5,9 @@ use p3_field::FieldAlgebra;
 
 use crate::{
     air_builders::symbolic::{
-        dag::SymbolicExpressionDag,
         symbolic_expression::SymbolicEvaluator,
         symbolic_variable::{Entry, SymbolicVariable},
+        SymbolicExpressionDag,
     },
     config::{PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };
@@ -47,7 +47,7 @@ pub(super) struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
     pub is_last_row: PackedVal<SC>,
     pub is_transition: PackedVal<SC>,
     pub public_values: &'a [Val<SC>],
-    pub exposed_values_after_challenge: &'a [&'a [PackedChallenge<SC>]],
+    pub exposed_values_after_challenge: &'a [Vec<PackedChallenge<SC>>],
 }
 
 /// In order to avoid extension field arithmetic as much as possible, we evaluate into

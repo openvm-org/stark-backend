@@ -15,10 +15,6 @@ pub use p3_util;
 pub mod air_builders;
 /// Trait for stateful chip that owns trace generation
 mod chip;
-/// API trait for circuit prover/verifier.
-pub mod circuit_api;
-/// Types for tracking matrix in system with multiple commitments, each to multiple matrices.
-pub mod commit;
 /// Helper types associated to generic STARK config.
 pub mod config;
 /// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
@@ -31,7 +27,8 @@ pub mod interaction;
 pub mod keygen;
 /// Polynomials
 pub mod poly;
-/// Prover implementation for partitioned multi-matrix AIRs.
+/// Definition of the STARK proof struct.
+pub mod proof;
 pub mod prover;
 /// Trait for RAP (Randomized AIR with Preprocessing)
 pub mod rap;
@@ -42,6 +39,7 @@ pub mod utils;
 pub mod verifier;
 
 pub use chip::{Chip, ChipUsageGetter};
+pub use rap::AirRef;
 
 // Use jemalloc as global allocator for performance
 #[cfg(all(feature = "jemalloc", unix, not(test)))]

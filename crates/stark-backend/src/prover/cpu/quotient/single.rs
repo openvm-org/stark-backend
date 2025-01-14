@@ -1,4 +1,4 @@
-use std::cmp::min;
+use std::{cmp::min, sync::Arc};
 
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
@@ -11,14 +11,13 @@ use tracing::instrument;
 use super::evaluator::{ProverConstraintEvaluator, ViewPair};
 use crate::{
     air_builders::symbolic::{
-        dag::{SymbolicExpressionDag, SymbolicExpressionNode},
-        symbolic_variable::Entry,
+        symbolic_variable::Entry, SymbolicExpressionDag, SymbolicExpressionNode,
     },
     config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };
 
 // Starting reference: p3_uni_stark::prover::quotient_values
-// TODO: make this into a trait that is auto-implemented so we can dynamic dispatch the trait
+// (many changes have been made since then)
 /// Computes evaluation of DEEP quotient polynomial on the quotient domain for a single RAP (single trace matrix).
 ///
 /// Designed to be general enough to support RAP with multiple rounds of challenges.
@@ -32,20 +31,26 @@ pub fn compute_single_rap_quotient_values<'a, SC>(
     constraints: &SymbolicExpressionDag<Val<SC>>,
     trace_domain: Domain<SC>,
     quotient_domain: Domain<SC>,
-    preprocessed_trace_on_quotient_domain: RowMajorMatrix<Val<SC>>,
-    partitioned_main_lde_on_quotient_domain: Vec<RowMajorMatrix<Val<SC>>>,
-    after_challenge_lde_on_quotient_domain: Vec<RowMajorMatrix<Val<SC>>>,
+    preprocessed_trace_on_quotient_domain: Arc<RowMajorMatrix<Val<SC>>>,
+    partitioned_main_lde_on_quotient_domain: Vec<Arc<RowMajorMatrix<Val<SC>>>>,
+    after_challenge_lde_on_quotient_domain: Vec<Arc<RowMajorMatrix<Val<SC>>>>,
     // For each challenge round, the challenges drawn
-    challenges: &[Vec<PackedChallenge<SC>>],
+    challenges: &'a [Vec<PackedChallenge<SC>>],
     alpha: SC::Challenge,
     public_values: &'a [Val<SC>],
     // Values exposed to verifier after challenge round i
-    exposed_values_after_challenge: &'a [&'a [PackedChallenge<SC>]],
+    exposed_values_after_challenge: &'a [Vec<PackedChallenge<SC>>],
 ) -> Vec<SC::Challenge>
 where
     SC: StarkGenericConfig,
 {
     let quotient_size = quotient_domain.size();
+    assert!(partitioned_main_lde_on_quotient_domain
+        .iter()
+        .all(|m| m.height() >= quotient_size));
+    assert!(after_challenge_lde_on_quotient_domain
+        .iter()
+        .all(|m| m.height() >= quotient_size));
     let preprocessed_width = preprocessed_trace_on_quotient_domain.width();
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
 
@@ -82,6 +87,7 @@ where
                 Entry::Preprocessed { offset } => {
                     rotation = rotation.max(offset);
                     assert!(var.index < preprocessed_width);
+                    assert!(preprocessed_trace_on_quotient_domain.height() >= quotient_size);
                 }
                 Entry::Main { part_index, offset } => {
                     rotation = rotation.max(offset);

@@ -1,8 +1,8 @@
 use openvm_stark_backend::{
-    config::StarkGenericConfig, engine::StarkEngine, utils::disable_debug_builder,
-    verifier::VerificationError, Chip,
+    engine::StarkEngine, utils::disable_debug_builder, verifier::VerificationError, Chip,
 };
 use openvm_stark_sdk::{
+    collect_airs_and_inputs,
     config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, FriParameters},
     dummy_airs::interaction::dummy_interaction_air::{DummyInteractionChip, DummyInteractionData},
     engine::StarkFriEngine,
@@ -19,12 +19,8 @@ pub fn prove_and_verify_indexless_lookups(
     let engine = BabyBearPoseidon2Engine::new(FriParameters::standard_fast());
 
     let mut sender_chip = DummyInteractionChip::new_without_partition(sender[0].1.len(), true, 0);
-    let mut receiver_chip = DummyInteractionChip::new_with_partition(
-        engine.config().pcs(),
-        receiver[0].1.len(),
-        false,
-        0,
-    );
+    let mut receiver_chip =
+        DummyInteractionChip::new_with_partition(engine.config(), receiver[0].1.len(), false, 0);
     {
         let (count, fields): (Vec<_>, Vec<_>) = sender.into_iter().unzip();
         sender_chip.load_data(DummyInteractionData { count, fields });
@@ -33,12 +29,8 @@ pub fn prove_and_verify_indexless_lookups(
         let (count, fields): (Vec<_>, Vec<_>) = receiver.into_iter().unzip();
         receiver_chip.load_data(DummyInteractionData { count, fields });
     }
-    engine
-        .run_test(vec![
-            receiver_chip.generate_air_proof_input(),
-            sender_chip.generate_air_proof_input(),
-        ])
-        .map(|_| ())
+    let (airs, proof_inputs) = collect_airs_and_inputs!(receiver_chip, sender_chip);
+    engine.run_test(airs, proof_inputs).map(|_| ())
 }
 
 /// tests for cached_lookup

@@ -5,11 +5,8 @@ use std::{
 };
 
 use openvm_stark_backend::{
-    config::StarkGenericConfig,
-    keygen::types::MultiStarkVerifyingKey,
-    prover::types::{Proof, ProofInput},
-    utils::disable_debug_builder,
-    Chip,
+    config::StarkGenericConfig, keygen::types::MultiStarkVerifyingKey, proof::Proof,
+    prover::types::ProofInput, utils::disable_debug_builder, Chip,
 };
 use openvm_stark_sdk::{
     config::{
@@ -38,7 +35,7 @@ pub fn prove<SC: StarkGenericConfig, E: StarkEngine<SC>>(
     ProverBenchmarks,
 ) {
     let mut chip =
-        DummyInteractionChip::new_with_partition(engine.config().pcs(), trace[0].1.len(), false, 0);
+        DummyInteractionChip::new_with_partition(engine.config(), trace[0].1.len(), false, 0);
     let (count, fields): (Vec<_>, Vec<_>) = trace.into_iter().unzip();
     let data = DummyInteractionData { count, fields };
     chip.load_data(data);
@@ -49,7 +46,6 @@ pub fn prove<SC: StarkGenericConfig, E: StarkEngine<SC>>(
     let vk = pk.get_vk();
 
     let mut benchmarks = ProverBenchmarks::default();
-    let prover = engine.prover();
     let air = Arc::new(chip.air);
     // Must add trace matrices in the same order as above
     let mut start;
@@ -69,8 +65,7 @@ pub fn prove<SC: StarkGenericConfig, E: StarkEngine<SC>>(
 
     // Disable debug prover since we don't balance the buses
     disable_debug_builder();
-    let mut challenger = engine.new_challenger();
-    let proof = prover.prove(&mut challenger, &pk, proof_input);
+    let proof = engine.prove(&pk, proof_input);
     benchmarks.prove_time_without_trace_gen = start.elapsed().as_micros();
 
     (vk, air, proof, benchmarks)

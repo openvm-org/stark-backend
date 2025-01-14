@@ -6,20 +6,20 @@ use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use tracing::instrument;
 
-use super::error::VerificationError;
+use super::{
+    error::VerificationError,
+    folder::{GenericVerifierConstraintFolder, VerifierConstraintFolder},
+};
 use crate::{
-    air_builders::{
-        symbolic::symbolic_expression::SymbolicExpression,
-        verifier::{GenericVerifierConstraintFolder, VerifierConstraintFolder},
-    },
+    air_builders::symbolic::SymbolicExpressionDag,
     config::{Domain, StarkGenericConfig, Val},
-    prover::opener::AdjacentOpenedValues,
+    proof::AdjacentOpenedValues,
 };
 
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip_all, level = "trace")]
 pub fn verify_single_rap_constraints<SC>(
-    constraints: &[SymbolicExpression<Val<SC>>],
+    constraints: &SymbolicExpressionDag<Val<SC>>,
     preprocessed_values: Option<&AdjacentOpenedValues<SC::Challenge>>,
     partitioned_main_values: Vec<&AdjacentOpenedValues<SC::Challenge>>,
     after_challenge_values: Vec<&AdjacentOpenedValues<SC::Challenge>>,

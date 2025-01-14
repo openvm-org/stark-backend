@@ -1,4 +1,4 @@
-// Keygen V2 API for STARK backend
+// Keygen API for STARK backend
 // Changes:
 // - All AIRs can be optional
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use p3_matrix::dense::RowMajorMatrix;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    air_builders::symbolic::SymbolicConstraints,
+    air_builders::symbolic::SymbolicConstraintsDag,
     config::{Com, PcsProverData, RapPhaseSeqProvingKey, StarkGenericConfig, Val},
     interaction::RapPhaseSeqKind,
 };
@@ -35,6 +35,7 @@ impl TraceWidth {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[repr(C)]
 pub struct StarkVerifyingParams {
     /// Trace sub-matrix widths
     pub width: TraceWidth,
@@ -46,24 +47,29 @@ pub struct StarkVerifyingParams {
     pub num_challenges_to_sample: Vec<usize>,
 }
 
+/// Verifier data for preprocessed trace for a single AIR.
+///
+/// Currently assumes each AIR has it's own preprocessed commitment
+#[derive(Clone, Serialize, Deserialize)]
+pub struct VerifierSinglePreprocessedData<Com> {
+    /// Commitment to the preprocessed trace.
+    pub commit: Com,
+}
+
 /// Verifying key for a single STARK (corresponding to single AIR matrix)
-#[derive(Derivative, Serialize, Deserialize)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-#[serde(bound(
-    serialize = "Com<SC>: Serialize",
-    deserialize = "Com<SC>: Deserialize<'de>"
-))]
-pub struct StarkVerifyingKey<SC: StarkGenericConfig> {
+#[derive(Clone, Serialize, Deserialize)]
+#[repr(C)]
+pub struct StarkVerifyingKey<Val, Com> {
     /// Preprocessed trace data, if any
-    pub preprocessed_data: Option<VerifierSinglePreprocessedData<SC>>,
+    pub preprocessed_data: Option<VerifierSinglePreprocessedData<Com>>,
     /// Parameters of the STARK
     pub params: StarkVerifyingParams,
     /// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.
-    pub symbolic_constraints: SymbolicConstraints<Val<SC>>,
+    pub symbolic_constraints: SymbolicConstraintsDag<Val>,
     /// The factor to multiple the trace degree by to get the degree of the quotient polynomial. Determined from the max constraint degree of the AIR constraints.
     /// This is equivalently the number of chunks the quotient polynomial is split into.
-    pub quotient_degree: usize,
+    pub quotient_degree: u8,
     pub rap_phase_seq_kind: RapPhaseSeqKind,
 }
 
@@ -78,7 +84,7 @@ pub struct StarkVerifyingKey<SC: StarkGenericConfig> {
     deserialize = "Com<SC>: Deserialize<'de>"
 ))]
 pub struct MultiStarkVerifyingKey<SC: StarkGenericConfig> {
-    pub per_air: Vec<StarkVerifyingKey<SC>>,
+    pub per_air: Vec<StarkVerifyingKey<Val<SC>, Com<SC>>>,
 }
 
 /// Proving key for a single STARK (corresponding to single AIR matrix)
@@ -92,7 +98,7 @@ pub struct StarkProvingKey<SC: StarkGenericConfig> {
     /// Type name of the AIR, for display purposes only
     pub air_name: String,
     /// Verifying key
-    pub vk: StarkVerifyingKey<SC>,
+    pub vk: StarkVerifyingKey<Val<SC>, Com<SC>>,
     /// Prover only data for preprocessed trace
     pub preprocessed_data: Option<ProverOnlySinglePreprocessedData<SC>>,
     pub rap_phase_seq_pk: RapPhaseSeqProvingKey<SC>,
@@ -114,7 +120,7 @@ pub struct MultiStarkProvingKey<SC: StarkGenericConfig> {
     pub max_constraint_degree: usize,
 }
 
-impl<SC: StarkGenericConfig> StarkVerifyingKey<SC> {
+impl<Val, Com> StarkVerifyingKey<Val, Com> {
     pub fn num_cached_mains(&self) -> usize {
         self.params.width.cached_mains.len()
     }
@@ -151,21 +157,7 @@ impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
 ))]
 pub struct ProverOnlySinglePreprocessedData<SC: StarkGenericConfig> {
     /// Preprocessed trace matrix.
-    pub trace: RowMajorMatrix<Val<SC>>,
+    pub trace: Arc<RowMajorMatrix<Val<SC>>>,
     /// Prover data, such as a Merkle tree, for the trace commitment.
     pub data: Arc<PcsProverData<SC>>,
-}
-
-/// Verifier data for preprocessed trace for a single AIR.
-///
-/// Currently assumes each AIR has it's own preprocessed commitment
-#[derive(Derivative, Serialize, Deserialize)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-#[serde(bound(
-    serialize = "Com<SC>: Serialize",
-    deserialize = "Com<SC>: Deserialize<'de>"
-))]
-pub struct VerifierSinglePreprocessedData<SC: StarkGenericConfig> {
-    /// Commitment to the preprocessed trace.
-    pub commit: Com<SC>,
 }

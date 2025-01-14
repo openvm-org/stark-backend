@@ -92,7 +92,7 @@ pub fn check_constraints<R, SC>(
 
 pub fn check_logup<F: Field>(
     air_names: &[String],
-    interactions: &[&[SymbolicInteraction<F>]],
+    interactions: &[Vec<SymbolicInteraction<F>>],
     preprocessed: &[Option<RowMajorMatrixView<F>>],
     partitioned_main: &[Vec<RowMajorMatrixView<F>>],
     public_values: &[Vec<F>],

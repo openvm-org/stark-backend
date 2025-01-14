@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
 use itertools::Itertools;
+use p3_commit::Pcs;
 use p3_field::FieldExtensionAlgebra;
 use p3_matrix::Matrix;
 use tracing::instrument;
 
 use crate::{
     air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
-    config::{RapPhaseSeqProvingKey, StarkGenericConfig, Val},
+    config::{Com, RapPhaseSeqProvingKey, StarkGenericConfig, Val},
     interaction::{HasInteractionChunkSize, RapPhaseSeq, RapPhaseSeqKind},
     keygen::types::{
         MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey, StarkVerifyingKey,
         TraceWidth, VerifierSinglePreprocessedData,
     },
-    prover::types::TraceCommitter,
     rap::AnyRap,
 };
 
@@ -101,7 +101,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
                 width.preprocessed.unwrap_or(0),
                 format!("{:?}",width.main_widths()),
                 format!("{:?}",width.after_challenge.iter().map(|&x| x * <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D).collect_vec()),
-                pk.vk.symbolic_constraints.constraints.len(),
+                pk.vk.symbolic_constraints.constraints.constraint_idx.len(),
                 pk.vk.symbolic_constraints.interactions.len(),
                 pk.vk
                     .symbolic_constraints
@@ -164,10 +164,10 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             ..
         } = self;
 
-        let vk = StarkVerifyingKey {
+        let vk: StarkVerifyingKey<Val<SC>, Com<SC>> = StarkVerifyingKey {
             preprocessed_data: prep_verifier_data,
             params,
-            symbolic_constraints,
+            symbolic_constraints: symbolic_constraints.into(),
             quotient_degree,
             rap_phase_seq_kind: self.rap_phase_seq_kind,
         };
@@ -201,7 +201,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
 }
 
 pub(super) struct PrepKeygenData<SC: StarkGenericConfig> {
-    pub verifier_data: Option<VerifierSinglePreprocessedData<SC>>,
+    pub verifier_data: Option<VerifierSinglePreprocessedData<Com<SC>>>,
     pub prover_data: Option<ProverOnlySinglePreprocessedData<SC>>,
 }
 
@@ -217,14 +217,12 @@ fn compute_prep_data_for_air<SC: StarkGenericConfig>(
 ) -> PrepKeygenData<SC> {
     let preprocessed_trace = air.preprocessed_trace();
     let vpdata_opt = preprocessed_trace.map(|trace| {
-        let trace_committer = TraceCommitter::<SC>::new(pcs);
-        let data = trace_committer.commit(vec![trace.clone()]);
-        let vdata = VerifierSinglePreprocessedData {
-            commit: data.commit,
-        };
+        let domain = pcs.natural_domain_for_degree(trace.height());
+        let (commit, data) = pcs.commit(vec![(domain, trace.clone())]);
+        let vdata = VerifierSinglePreprocessedData { commit };
         let pdata = ProverOnlySinglePreprocessedData {
-            trace,
-            data: data.data,
+            trace: Arc::new(trace),
+            data: Arc::new(data),
         };
         (vdata, pdata)
     });

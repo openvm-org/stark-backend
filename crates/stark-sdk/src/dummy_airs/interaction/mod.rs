@@ -5,11 +5,13 @@ use openvm_stark_backend::{
     keygen::MultiStarkKeygenBuilder,
     p3_matrix::dense::RowMajorMatrix,
     prover::{
-        types::{AirProofInput, AirProofRawInput, ProofInput},
-        MultiTraceStarkProver,
+        cpu::{CpuBackend, CpuDevice},
+        hal::DeviceDataTransporterpter,
+        types::{AirProvingContext, ProvingContext},
+        MultiTraceStarkProver, Prover,
     },
-    rap::AnyRap,
     verifier::{MultiTraceStarkVerifier, VerificationError},
+    AirRef,
 };
 use p3_baby_bear::BabyBear;
 
@@ -21,7 +23,7 @@ type Val = BabyBear;
 
 pub fn verify_interactions(
     traces: Vec<RowMajorMatrix<Val>>,
-    airs: Vec<Arc<dyn AnyRap<BabyBearPoseidon2Config>>>,
+    airs: Vec<AirRef<BabyBearPoseidon2Config>>,
     pis: Vec<Vec<Val>>,
 ) -> Result<(), VerificationError> {
     let perm = config::baby_bear_poseidon2::random_perm();
@@ -29,36 +31,34 @@ pub fn verify_interactions(
 
     let mut keygen_builder = MultiStarkKeygenBuilder::new(&config);
     let air_ids = airs
-        .iter()
-        .map(|air| keygen_builder.add_air(air.clone()))
+        .into_iter()
+        .map(|air| keygen_builder.add_air(air))
         .collect_vec();
     let pk = keygen_builder.generate_pk();
     let vk = pk.get_vk();
 
-    let per_air: Vec<_> = izip!(air_ids, airs, traces, pis)
-        .map(|(air_id, air, trace, pvs)| {
+    let backend = CpuBackend::default();
+    let pk = backend.transport_pk_to_device(&pk, air_ids.clone());
+    let per_air: Vec<_> = izip!(air_ids, traces, pis)
+        .map(|(air_id, trace, pvs)| {
             (
                 air_id,
-                AirProofInput {
-                    air,
-                    cached_mains_pdata: vec![],
-                    raw: AirProofRawInput {
-                        cached_mains: vec![],
-                        common_main: Some(trace),
-                        public_values: pvs,
-                    },
+                AirProvingContext {
+                    cached_mains: vec![],
+                    common_main: Some(Arc::new(trace)),
+                    public_values: pvs,
                 },
             )
         })
         .collect();
 
-    let prover = MultiTraceStarkProver::new(&config);
-    let mut challenger = config::baby_bear_poseidon2::Challenger::new(perm.clone());
-    let proof = prover.prove(&mut challenger, &pk, ProofInput { per_air });
+    let challenger = config::baby_bear_poseidon2::Challenger::new(perm.clone());
+    let mut prover = MultiTraceStarkProver::new(backend, CpuDevice::new(&config), challenger);
+    let proof = prover.prove(pk, ProvingContext::new(per_air));
 
     // Verify the proof:
     // Start from clean challenger
     let mut challenger = config::baby_bear_poseidon2::Challenger::new(perm.clone());
-    let verifier = MultiTraceStarkVerifier::new(prover.config);
-    verifier.verify(&mut challenger, &vk, &proof)
+    let verifier = MultiTraceStarkVerifier::new(prover.device.config());
+    verifier.verify(&mut challenger, &vk, &proof.into())
 }
