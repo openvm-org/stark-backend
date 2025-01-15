@@ -14,7 +14,7 @@ use crate::{
     proof::Proof,
     prover::{
         cpu::{CpuBackend, CpuDevice, PcsDataView},
-        hal::{DeviceDataTransporterpter, TraceCommitter},
+        hal::{DeviceDataTransporter, TraceCommitter},
         types::{AirProofInput, AirProvingContext, CommittedTraceView, ProofInput, ProvingContext},
         MultiTraceStarkProver, Prover,
     },

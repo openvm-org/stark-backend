@@ -11,7 +11,7 @@ use p3_util::log2_strict_usize;
 use quotient::QuotientCommitter;
 
 use super::{
-    hal::{self, DeviceDataTransporterpter, MatrixView, ProverBackend, ProverDevice},
+    hal::{self, DeviceDataTransporter, MatrixView, ProverBackend, ProverDevice},
     types::{
         CommittedTraceView, MultiStarkProvingKeyView, PairView, ProverViewAfterRapPhases, RapView,
         StarkProvingKeyView,
@@ -332,7 +332,7 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
     }
 }
 
-impl<SC> DeviceDataTransporterpter<SC, CpuBackend<SC>> for CpuBackend<SC>
+impl<SC> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuBackend<SC>
 where
     SC: StarkGenericConfig,
 {
