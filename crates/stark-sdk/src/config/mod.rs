@@ -22,9 +22,8 @@ pub fn setup_tracing() {
 
 pub fn setup_tracing_with_log_level(level: Level) {
     // Set up tracing:
-    let env_filter = EnvFilter::builder()
-        .with_default_directive(level.into())
-        .from_env_lossy();
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("{},p3_=warn", level)));
     let _ = Registry::default()
         .with(env_filter)
         .with(ForestLayer::default())

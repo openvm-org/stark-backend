@@ -7,7 +7,6 @@ use metrics_util::{
     CompositeKey, MetricKind,
 };
 use serde_json::json;
-use tracing::Level;
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 
@@ -19,9 +18,9 @@ pub fn run_with_metric_collection<R>(
 ) -> R {
     let file = std::env::var(output_path_envar).map(|path| std::fs::File::create(path).unwrap());
     // Set up tracing:
-    let env_filter = EnvFilter::builder()
-        .with_default_directive(Level::INFO.into())
-        .from_env_lossy();
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,p3_=warn"));
+    // Plonky3 logging is more verbose, so we set default to debug.
     let subscriber = Registry::default()
         .with(env_filter)
         .with(ForestLayer::default())
