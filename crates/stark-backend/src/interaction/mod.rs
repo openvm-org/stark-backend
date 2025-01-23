@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use p3_air::AirBuilder;
-use p3_challenger::CanObserve;
+use p3_commit::PolynomialSpace;
 use p3_matrix::dense::RowMajorMatrix;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -13,6 +13,7 @@ use crate::{
 
 /// Interaction debugging tools
 pub mod debug;
+pub mod gkr_log_up;
 pub mod rap;
 pub mod stark_log_up;
 pub mod trace;
@@ -79,8 +80,8 @@ pub trait InteractionBuilder: AirBuilder {
 }
 
 pub struct RapPhaseProverData<Challenge> {
-    /// Challenges from the challenger in this phase that determine RAP constraints and exposed values.
-    pub challenges: Vec<Challenge>,
+    /// Challenges from the challenger that determine RAP constraints and exposed values.
+    pub challenges_per_phase: Vec<Vec<Challenge>>,
 
     /// After challenge trace per air computed as a function of `challenges`.
     pub after_challenge_trace_per_air: Vec<Option<RowMajorMatrix<Challenge>>>,
@@ -96,15 +97,9 @@ pub struct RapPhaseVerifierData<Challenge> {
 
 #[derive(Debug)]
 pub struct RapPhaseShape {
+    // The number of challenges serialized in the vkey (i.e., used in the RAP constraints).
     pub num_challenges: usize,
-
     pub num_exposed_values: usize,
-
-    /// Any additional rotations to open at in the permutation PCS round.
-    ///
-    /// Specifies that each `i` in `extra_opening_rots` should be opened at
-    /// `zeta * g^i` (in addition to `zeta` and `zeta * g`).
-    pub extra_opening_rots: Vec<usize>,
 }
 
 /// Supported challenge phases in a RAP.
@@ -122,27 +117,29 @@ impl RapPhaseSeqKind {
             RapPhaseSeqKind::StarkLogUp => vec![RapPhaseShape {
                 num_challenges: STARK_LU_NUM_CHALLENGES,
                 num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
-                extra_opening_rots: vec![],
             }],
-            RapPhaseSeqKind::GkrLogUp => todo!(),
+            RapPhaseSeqKind::GkrLogUp => vec![RapPhaseShape {
+                num_challenges: 2,
+                num_exposed_values: 1,
+            }],
         }
     }
 }
 
 pub trait HasInteractionChunkSize {
-    fn interaction_chunk_size(&self) -> usize;
+    fn interaction_chunk_size(&self) -> Option<usize>;
 }
 
-/// Defines a particular protocol for the "after challenge" phase in a RAP.
+/// Defines a particular protocol for the "after challenge" phases in a RAP.
 ///
 /// A [RapPhaseSeq] is defined by the proving and verifying methods implemented in this trait,
-/// as well as via some "eval" method that is determined by `RapPhaseId`.
+/// as well as via some "eval" method that is determined by `RapPhaseSeqKind`.
 pub trait RapPhaseSeq<F, Challenge, Challenger> {
     type PartialProof: Clone + Serialize + DeserializeOwned;
     type ProvingKey: Clone + Serialize + DeserializeOwned + HasInteractionChunkSize;
     type Error: Debug;
 
-    const ID: RapPhaseSeqKind;
+    const KIND: RapPhaseSeqKind;
 
     /// The protocol parameters for the challenge phases may depend on the AIR constraints.
     fn generate_pk_per_air(
@@ -161,10 +158,21 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        params_per_air: &[Self::ProvingKey],
+        params_per_air: &[&Self::ProvingKey],
         constraints_per_air: &[&SymbolicConstraints<F>],
         trace_view_per_air: &[PairTraceView<'_, F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)>;
+
+    /// Returns the additional openings for the challenge phases.
+    ///
+    /// Returns a sequence of extension field elements per phase per air.
+    fn extra_opening_points<Domain>(
+        &self,
+        zeta: Challenge,
+        domains_per_air: &[Domain],
+    ) -> Vec<Vec<Vec<Challenge>>>
+    where
+        Domain: PolynomialSpace<Val = F>;
 
     /// Partially verifies the challenge phases.
     ///
@@ -172,15 +180,11 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
     ///
     /// An implementation of this function must sample challenges for the challenge phases and then
     /// observe the exposed values and commitment.
-    fn partially_verify<Commitment: Clone>(
+    fn partially_verify(
         &self,
         challenger: &mut Challenger,
         partial_proof: Option<&Self::PartialProof>,
+        constraints_per_air: &[&SymbolicConstraints<F>],
         exposed_values_per_air_per_phase: &[Vec<Vec<Challenge>>],
-        commitments_per_phase: &[Commitment],
-        // per commitment, per matrix, per rotation, per column
-        after_challenge_opened_values: &[Vec<Vec<Vec<Challenge>>>],
-    ) -> (RapPhaseVerifierData<Challenge>, Result<(), Self::Error>)
-    where
-        Challenger: CanObserve<Commitment>;
+    ) -> Result<RapPhaseVerifierData<Challenge>, Self::Error>;
 }

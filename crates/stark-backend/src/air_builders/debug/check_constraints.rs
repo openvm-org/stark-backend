@@ -1,15 +1,21 @@
-use itertools::izip;
+use itertools::{izip, Itertools};
 use p3_air::BaseAir;
 use p3_field::{Field, FieldAlgebra};
-use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair, Matrix};
+use p3_matrix::{
+    dense::{RowMajorMatrix, RowMajorMatrixView},
+    stack::VerticalPair,
+    Matrix,
+};
 use p3_maybe_rayon::prelude::*;
+use p3_util::log2_strict_usize;
 
 use crate::{
     air_builders::debug::DebugConstraintBuilder,
     config::{StarkGenericConfig, Val},
     interaction::{
         debug::{generate_logical_interactions, LogicalInteractions},
-        InteractionType, RapPhaseSeqKind, SymbolicInteraction,
+        gkr_log_up::fold_multilinear_lagrange_col_constraints,
+        InteractionType, RapPhaseSeq, RapPhaseSeqKind, SymbolicInteraction,
     },
     rap::{PartitionedBaseAir, Rap},
 };
@@ -69,7 +75,7 @@ pub fn check_constraints<R, SC>(
             .iter()
             .map(|mat| (mat.row_slice(i), mat.row_slice(i_next)))
             .collect::<Vec<_>>();
-        let after_challenge = after_challenge_row_pair
+        let after_challenge_pairs = after_challenge_row_pair
             .iter()
             .map(|(local, next)| {
                 VerticalPair::new(
@@ -87,7 +93,7 @@ pub fn check_constraints<R, SC>(
                 RowMajorMatrixView::new_row(preprocessed_next.as_slice()),
             ),
             partitioned_main,
-            after_challenge,
+            after_challenge: after_challenge_pairs,
             challenges,
             public_values,
             exposed_values_after_challenge,
@@ -106,7 +112,51 @@ pub fn check_constraints<R, SC>(
         }
 
         rap.eval(&mut builder);
+
+        if matches!(SC::RapPhaseSeq::KIND, RapPhaseSeqKind::GkrLogUp) {
+            check_gkr_log_up_adapter_constraints_for_row::<SC>(after_challenge, challenges, i);
+        }
     });
+}
+
+fn check_gkr_log_up_adapter_constraints_for_row<SC: StarkGenericConfig>(
+    after_challenge: &[RowMajorMatrixView<SC::Challenge>],
+    challenges: &[Vec<SC::Challenge>],
+    i: usize,
+) {
+    if after_challenge.is_empty() {
+        return;
+    }
+    assert_eq!(after_challenge.len(), 1);
+    assert_eq!(challenges.len(), 1);
+
+    let after_challenge = &after_challenge[0];
+    let challenges = &challenges[0];
+    let height = after_challenge.height();
+
+    let log_height = log2_strict_usize(height);
+    let indices = std::iter::once(i).chain((0..log_height).map(|j| (i + (1 << j)) % height));
+    let after_challenge_window = RowMajorMatrix::new(
+        indices.flat_map(|i| after_challenge.row(i)).collect_vec(),
+        after_challenge.width(),
+    );
+
+    let r = &challenges[challenges.len() - log_height..];
+    let mut accumulator = SC::Challenge::ZERO;
+    let alpha = SC::Challenge::TWO;
+
+    let is_cyclic_row = (0..=log_height)
+        .map(|k| SC::Challenge::from_bool(i & ((1 << (log_height - k)) - 1) == 0))
+        .collect_vec();
+    fold_multilinear_lagrange_col_constraints(
+        &mut accumulator,
+        alpha,
+        &after_challenge_window,
+        &is_cyclic_row,
+        r,
+        0,
+    );
+    assert_eq!(accumulator, SC::Challenge::ZERO);
 }
 
 pub fn check_logup<F: Field>(

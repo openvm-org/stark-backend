@@ -221,8 +221,8 @@ where
 impl<SC: StarkGenericConfig> InteractionPhaseAirBuilder for DebugConstraintBuilder<'_, SC> {
     fn finalize_interactions(&mut self) {}
 
-    fn interaction_chunk_size(&self) -> usize {
-        0
+    fn interaction_chunk_size(&self) -> Option<usize> {
+        None
     }
 
     fn rap_phase_seq_kind(&self) -> RapPhaseSeqKind {

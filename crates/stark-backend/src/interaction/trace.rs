@@ -1,9 +1,12 @@
 use p3_field::Field;
 use p3_matrix::{dense::RowMajorMatrixView, Matrix};
 
-use crate::air_builders::symbolic::{
-    symbolic_expression::SymbolicEvaluator,
-    symbolic_variable::{Entry, SymbolicVariable},
+use crate::{
+    air_builders::symbolic::{
+        symbolic_expression::SymbolicEvaluator,
+        symbolic_variable::{Entry, SymbolicVariable},
+    },
+    prover::PairTraceView,
 };
 
 pub(super) struct Evaluator<'a, F: Field> {
@@ -12,6 +15,18 @@ pub(super) struct Evaluator<'a, F: Field> {
     pub public_values: &'a [F],
     pub height: usize,
     pub local_index: usize,
+}
+
+impl<'a, F: Field> Evaluator<'a, F> {
+    pub fn for_local_index(trace_view: &'a PairTraceView<'a, F>, local_index: usize) -> Self {
+        Self {
+            preprocessed: trace_view.preprocessed,
+            partitioned_main: trace_view.partitioned_main,
+            public_values: trace_view.public_values,
+            height: trace_view.height(),
+            local_index,
+        }
+    }
 }
 
 impl<F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, F> {

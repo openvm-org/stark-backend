@@ -1,3 +1,5 @@
+use std::iter::zip;
+
 use itertools::{izip, Itertools};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
@@ -82,37 +84,27 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             .iter()
             .map(|proof| proof.exposed_values_after_challenge.clone())
             .collect_vec();
-        let permutation_opened_values = proof
-            .opening
-            .values
-            .after_challenge
-            .iter()
-            .map(|after_challenge_per_matrix| {
-                after_challenge_per_matrix
-                    .iter()
-                    .map(|after_challenge| {
-                        vec![after_challenge.local.clone(), after_challenge.next.clone()]
-                    })
-                    .collect_vec()
-            })
-            .collect_vec();
 
         assert!(
             proof.commitments.after_challenge.len() <= 1,
             "at most one challenge phase currently supported"
         );
 
-        let (after_challenge_data, rap_phase_seq_result) = rap_phase.partially_verify(
-            challenger,
-            proof.rap_phase_seq_proof.as_ref(),
-            &exposed_values_per_air_per_phase,
-            &proof.commitments.after_challenge,
-            &permutation_opened_values,
-        );
-        // We don't want to bail on error yet; `OodEvaluationMismatch` should take precedence over
-        // `ChallengePhaseError`, but we won't know if the former happens until later.
-        let rap_phase_seq_result =
-            rap_phase_seq_result.map_err(|_| VerificationError::ChallengePhaseError);
+        let rap_phase_verifier_data = rap_phase
+            .partially_verify(
+                challenger,
+                proof.rap_phase_seq_proof.as_ref(),
+                &mvk.per_air
+                    .iter()
+                    .map(|vk| &vk.symbolic_constraints)
+                    .collect_vec(),
+                &exposed_values_per_air_per_phase,
+            )
+            .map_err(|_| VerificationError::ChallengePhaseError)?;
+
+        for commitment in proof.commitments.after_challenge.iter() {
+            challenger.observe(commitment.clone());
+        }
 
         // Draw `alpha` challenge
         let alpha: SC::Challenge = challenger.sample_ext_element();
@@ -212,11 +204,24 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             assert_eq!(opened_values.after_challenge.len(), 0);
         } else {
             let after_challenge_commit = proof.commitments.after_challenge[0].clone();
-            let domains_and_openings = after_challenge_domain_per_air
-                .into_iter()
-                .zip_eq(&opened_values.after_challenge[0])
-                .map(|(domain, values)| trace_domain_and_openings(domain, zeta, values))
-                .collect_vec();
+            let extra_after_challenge_points =
+                rap_phase.extra_opening_points(zeta, &after_challenge_domain_per_air);
+            let domains_and_openings = izip!(
+                after_challenge_domain_per_air,
+                &opened_values.after_challenge[0],
+                &extra_after_challenge_points[0],
+                &opened_values.extra_after_challenge[0]
+            )
+            .map(|(domain, values, extra_points, extra_values)| {
+                let mut points_and_openings = vec![
+                    (zeta, values.local.clone()),
+                    (domain.next_point(zeta).unwrap(), values.next.clone()),
+                ];
+                points_and_openings
+                    .extend(zip(extra_points.clone(), extra_values.clone()).collect_vec());
+                (domain, points_and_openings)
+            })
+            .collect_vec();
             rounds.push((after_challenge_commit, domains_and_openings));
         }
 
@@ -269,34 +274,37 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
                 common_main_matrix_idx += 1;
             }
             // loop through challenge phases of this single RAP
-            let after_challenge_values = if vk.has_interaction() {
+            let (after_challenge_values, extra_after_challenge_values) = if vk.has_interaction() {
                 (0..num_phases)
                     .map(|phase_idx| {
                         let matrix_idx = after_challenge_idx[phase_idx];
                         after_challenge_idx[phase_idx] += 1;
-                        &opened_values.after_challenge[phase_idx][matrix_idx]
+                        (
+                            &opened_values.after_challenge[phase_idx][matrix_idx],
+                            opened_values.extra_after_challenge[phase_idx][matrix_idx].clone(),
+                        )
                     })
-                    .collect_vec()
+                    .unzip()
             } else {
-                vec![]
+                (vec![], vec![])
             };
             verify_single_rap_constraints::<SC>(
                 &vk.symbolic_constraints.constraints,
                 preprocessed_values,
                 partitioned_main_values,
                 after_challenge_values,
+                extra_after_challenge_values,
                 quotient_chunks,
                 domain,
                 &qc_domains,
                 zeta,
                 alpha,
-                &after_challenge_data.challenges_per_phase,
+                &rap_phase_verifier_data.challenges_per_phase,
                 &air_proof.public_values,
                 &air_proof.exposed_values_after_challenge,
             )?;
         }
 
-        // If we made it this far, use the `rap_phase_result` as the final result.
-        rap_phase_seq_result
+        Ok(())
     }
 }

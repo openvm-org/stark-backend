@@ -2,7 +2,8 @@ use std::{array, borrow::Borrow, marker::PhantomData};
 
 use itertools::{izip, Itertools};
 use p3_air::ExtensionBuilder;
-use p3_challenger::{CanObserve, FieldChallenger};
+use p3_challenger::FieldChallenger;
+use p3_commit::PolynomialSpace;
 use p3_field::{ExtensionField, Field, FieldAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
@@ -51,8 +52,8 @@ pub struct StarkLogUpProvingKey {
 }
 
 impl HasInteractionChunkSize for StarkLogUpProvingKey {
-    fn interaction_chunk_size(&self) -> usize {
-        self.chunk_size
+    fn interaction_chunk_size(&self) -> Option<usize> {
+        Some(self.chunk_size)
     }
 }
 
@@ -66,7 +67,8 @@ where
     type PartialProof = ();
     type ProvingKey = StarkLogUpProvingKey;
     type Error = StarkLogUpError;
-    const ID: RapPhaseSeqKind = RapPhaseSeqKind::StarkLogUp;
+    // Interaction chunk size.
+    const KIND: RapPhaseSeqKind = RapPhaseSeqKind::StarkLogUp;
 
     fn generate_pk_per_air(
         &self,
@@ -91,7 +93,7 @@ where
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        rap_pk_per_air: &[Self::ProvingKey],
+        rap_pk_per_air: &[&Self::ProvingKey],
         constraints_per_air: &[&SymbolicConstraints<F>],
         trace_view_per_air: &[PairTraceView<'_, F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)> {
@@ -129,34 +131,36 @@ where
         Some((
             (),
             RapPhaseProverData {
-                challenges: challenges.to_vec(),
+                challenges_per_phase: vec![challenges.to_vec()],
                 after_challenge_trace_per_air,
                 exposed_values_per_air,
             },
         ))
     }
 
-    fn partially_verify<Commitment: Clone>(
+    fn extra_opening_points<Domain: PolynomialSpace<Val = F>>(
+        &self,
+        _zeta: Challenge,
+        domains_per_air: &[Domain],
+    ) -> Vec<Vec<Vec<Challenge>>> {
+        vec![vec![vec![]; domains_per_air.len()]]
+    }
+
+    fn partially_verify(
         &self,
         challenger: &mut Challenger,
         _partial_proof: Option<&Self::PartialProof>,
+        constraints_per_air: &[&SymbolicConstraints<F>],
         exposed_values_per_phase_per_air: &[Vec<Vec<Challenge>>],
-        commitment_per_phase: &[Commitment],
-        _permutation_opened_values: &[Vec<Vec<Vec<Challenge>>>],
-    ) -> (RapPhaseVerifierData<Challenge>, Result<(), Self::Error>)
-    where
-        Challenger: CanObserve<Commitment>,
-    {
-        if exposed_values_per_phase_per_air
+    ) -> Result<RapPhaseVerifierData<Challenge>, Self::Error> {
+        if constraints_per_air
             .iter()
-            .all(|exposed_values_per_phase_per_air| exposed_values_per_phase_per_air.is_empty())
+            .all(|c| c.interactions.is_empty())
         {
-            return (
-                RapPhaseVerifierData {
-                    challenges_per_phase: vec![],
-                },
-                Ok(()),
-            );
+            // TODO[zach]: Should we check the other parameters?
+            return Ok(RapPhaseVerifierData {
+                challenges_per_phase: vec![],
+            });
         }
 
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
@@ -169,8 +173,6 @@ where
                 }
             }
         }
-
-        challenger.observe(commitment_per_phase[0].clone());
 
         let cumulative_sums = exposed_values_per_phase_per_air
             .iter()
@@ -196,15 +198,13 @@ where
             .map(|c| c.unwrap_or(Challenge::ZERO))
             .sum();
 
-        let result = if sum == Challenge::ZERO {
-            Ok(())
-        } else {
-            Err(Self::Error::NonZeroCumulativeSum)
+        if sum != Challenge::ZERO {
+            return Err(Self::Error::NonZeroCumulativeSum);
         };
-        let verifier_data = RapPhaseVerifierData {
+
+        Ok(RapPhaseVerifierData {
             challenges_per_phase: vec![challenges.to_vec()],
-        };
-        (verifier_data, result)
+        })
     }
 }
 
@@ -221,7 +221,7 @@ where
     fn generate_after_challenge_traces_per_air(
         challenges: &[Challenge; STARK_LU_NUM_CHALLENGES],
         constraints_per_air: &[&SymbolicConstraints<F>],
-        params_per_air: &[StarkLogUpProvingKey],
+        params_per_air: &[&StarkLogUpProvingKey],
         trace_view_per_air: &[PairTraceView<'_, F>],
     ) -> Vec<Option<RowMajorMatrix<Challenge>>> {
         parizip!(constraints_per_air, trace_view_per_air, params_per_air)
@@ -495,7 +495,7 @@ where
         //
         // By construction, the degree of row_lhs is bounded by 1 + max_field_degree * interaction_chunk_size,
         // and the degree of row_rhs is bounded by max_count_degree + max_field_degree * (interaction_chunk_size-1)
-        builder.assert_eq_ext(row_lhs, row_rhs);
+        builder.assert_eq_ext(row_lhs.clone() * row_lhs.clone(), row_rhs * row_lhs);
 
         phi_0 += perm_local[chunk_idx].into();
         phi_rhs += perm_next[chunk_idx].into();
