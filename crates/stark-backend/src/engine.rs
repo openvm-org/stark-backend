@@ -13,9 +13,11 @@ use crate::{
     },
     proof::Proof,
     prover::{
-        cpu::{CpuBackend, CpuDevice, PcsDataView},
+        cpu::{CpuBackend, CpuDevice, PcsData},
         hal::{DeviceDataTransporter, TraceCommitter},
-        types::{AirProofInput, AirProvingContext, CommittedTraceView, ProofInput, ProvingContext},
+        types::{
+            AirProofInput, AirProvingContext, ProofInput, ProvingContext, SingleCommitPreimage,
+        },
         MultiTraceStarkProver, Prover,
     },
     verifier::{MultiTraceStarkVerifier, VerificationError},
@@ -140,13 +142,12 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
         let mut prover = self.prover();
         let backend = prover.backend;
         let air_ids = proof_input.per_air.iter().map(|(id, _)| *id).collect();
-        let ctx_per_air = proof_input
+        // Commit cached traces if they are not provided
+        let cached_mains_per_air = proof_input
             .per_air
-            .into_iter()
-            .map(|(air_id, input)| {
-                // Commit cached traces if they are not provided
-                let cached_mains = if input.cached_mains_pdata.len() != input.raw.cached_mains.len()
-                {
+            .iter()
+            .map(|(_, input)| {
+                if input.cached_mains_pdata.len() != input.raw.cached_mains.len() {
                     input
                         .raw
                         .cached_mains
@@ -156,30 +157,47 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
                             let (com, data) = prover.device.commit(&[trace.clone()]);
                             (
                                 com,
-                                CommittedTraceView {
+                                SingleCommitPreimage {
                                     trace,
                                     data,
                                     matrix_idx: 0,
                                 },
                             )
                         })
-                        .collect()
+                        .collect_vec()
                 } else {
-                    zip(input.cached_mains_pdata, input.raw.cached_mains)
+                    zip(&input.cached_mains_pdata, &input.raw.cached_mains)
                         .map(|((com, data), trace)| {
-                            let data_view = PcsDataView {
-                                data,
+                            let data_view = PcsData {
+                                data: data.clone(),
                                 log_trace_heights: vec![log2_strict_usize(trace.height()) as u8],
                             };
-                            let view = CommittedTraceView {
-                                trace,
+                            let preimage = SingleCommitPreimage {
+                                trace: trace.clone(),
                                 data: data_view,
                                 matrix_idx: 0,
                             };
-                            (com, view)
+                            (com.clone(), preimage)
                         })
-                        .collect()
-                };
+                        .collect_vec()
+                }
+            })
+            .collect_vec();
+        let ctx_per_air = zip(proof_input.per_air, &cached_mains_per_air)
+            .map(|((air_id, input), cached_mains)| {
+                let cached_mains = cached_mains
+                    .iter()
+                    .map(|(com, preimage)| {
+                        (
+                            com.clone(),
+                            SingleCommitPreimage {
+                                trace: &preimage.trace,
+                                data: &preimage.data,
+                                matrix_idx: preimage.matrix_idx,
+                            },
+                        )
+                    })
+                    .collect_vec();
                 let air_ctx = AirProvingContext {
                     cached_mains,
                     common_main: input.raw.common_main,
@@ -192,7 +210,7 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
             per_air: ctx_per_air,
         };
         let mpk_view = backend.transport_pk_to_device(mpk, air_ids);
-        let proof = Prover::prove(&mut prover, mpk_view, ctx);
+        let proof = Prover::prove(&mut prover, &mpk_view, ctx);
         proof.into()
     }
 

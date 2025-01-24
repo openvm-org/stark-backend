@@ -26,14 +26,16 @@ pub trait Prover {
     type ProvingKeyView<'a>
     where
         Self: 'a;
-    type ProvingContext;
+    type ProvingContext<'a>
+    where
+        Self: 'a;
     type Proof;
 
     /// The prover should own the challenger, whose state mutates during proving.
     fn prove<'a>(
         &'a mut self,
         pk: Self::ProvingKeyView<'a>,
-        ctx: Self::ProvingContext,
+        ctx: Self::ProvingContext<'a>,
     ) -> Self::Proof;
 }
 

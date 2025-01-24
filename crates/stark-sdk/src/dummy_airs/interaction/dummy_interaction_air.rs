@@ -10,15 +10,15 @@ use derivative::Derivative;
 use itertools::izip;
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
-    config::{Com, StarkGenericConfig, Val},
+    config::{StarkGenericConfig, Val},
     interaction::{InteractionBuilder, InteractionType},
     p3_air::{Air, BaseAir},
     p3_field::{Field, FieldAlgebra},
     p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::{
-        cpu::{CpuBackend, CpuDevice},
+        cpu::CpuDevice,
         hal::TraceCommitter,
-        types::{AirProofInput, AirProofRawInput, CommittedTraceView},
+        types::{AirProofInput, AirProofRawInput, CommittedTraceData},
     },
     rap::{AnyRap, BaseAirWithPublicValues, PartitionedBaseAir},
     Chip, ChipUsageGetter,
@@ -175,10 +175,7 @@ where
     fn generate_traces_with_partition(
         &self,
         data: DummyInteractionData,
-    ) -> (
-        RowMajorMatrix<Val<SC>>,
-        (Com<SC>, CommittedTraceView<CpuBackend<SC>>),
-    ) {
+    ) -> (RowMajorMatrix<Val<SC>>, CommittedTraceData<SC>) {
         let DummyInteractionData {
             mut count,
             mut fields,
@@ -208,14 +205,11 @@ where
             .commit(&[cached_trace.clone()]);
         (
             RowMajorMatrix::new(common_main_val, 1),
-            (
-                commit,
-                CommittedTraceView {
-                    trace: cached_trace,
-                    data,
-                    matrix_idx: 0,
-                },
-            ),
+            CommittedTraceData {
+                trace: cached_trace,
+                commitment: commit,
+                pcs_data: data.data,
+            },
         )
     }
 
@@ -248,12 +242,11 @@ impl<SC: StarkGenericConfig> Chip<SC> for DummyInteractionChip<'_, SC> {
         assert!(self.data.is_some());
         let data = self.data.clone().unwrap();
         if self.device.is_some() {
-            let (common_main, (cached_commit, cached_main)) =
-                self.generate_traces_with_partition(data);
+            let (common_main, cached) = self.generate_traces_with_partition(data);
             AirProofInput {
-                cached_mains_pdata: vec![(cached_commit, cached_main.data.data)],
+                cached_mains_pdata: vec![(cached.commitment, cached.pcs_data)],
                 raw: AirProofRawInput {
-                    cached_mains: vec![cached_main.trace],
+                    cached_mains: vec![cached.trace],
                     common_main: Some(Arc::new(common_main)),
                     public_values: vec![],
                 },
