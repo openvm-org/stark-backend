@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::fmt::Debug;
 
 use p3_air::AirBuilder;
 use p3_challenger::CanObserve;
@@ -186,4 +186,4 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
         Challenger: CanObserve<Commitment>;
 }
 
-type PairTraceView<F> = PairView<Arc<RowMajorMatrix<F>>, F>;
+type PairTraceView<'a, F> = PairView<&'a RowMajorMatrix<F>, F>;

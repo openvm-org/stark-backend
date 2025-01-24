@@ -8,7 +8,7 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use self::single::compute_single_rap_quotient_values;
-use super::{PcsDataView, RapLdeView};
+use super::{PcsData, RapMatrixView};
 use crate::{
     air_builders::symbolic::SymbolicExpressionDag,
     config::{Com, Domain, PackedChallenge, StarkGenericConfig, Val},
@@ -39,7 +39,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     pub fn quotient_values<'a>(
         &self,
         constraints: &[&SymbolicExpressionDag<Val<SC>>],
-        lde_views: Vec<RapLdeView<SC>>,
+        lde_views: Vec<RapMatrixView<SC>>,
         quotient_degrees: &[u8],
     ) -> QuotientData<SC> {
         assert_eq!(constraints.len(), lde_views.len());
@@ -55,7 +55,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     pub(super) fn single_rap_quotient_values(
         &self,
         constraints: &SymbolicExpressionDag<Val<SC>>,
-        ldes: RapLdeView<SC>,
+        ldes: RapMatrixView<SC>,
         quotient_degree: u8,
     ) -> SingleQuotientData<SC> {
         let log_trace_height = ldes.pair.log_trace_height;
@@ -110,7 +110,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     }
 
     #[instrument(name = "commit to quotient poly chunks", skip_all)]
-    pub fn commit(&self, data: QuotientData<SC>) -> (Com<SC>, PcsDataView<SC>) {
+    pub fn commit(&self, data: QuotientData<SC>) -> (Com<SC>, PcsData<SC>) {
         let (log_trace_heights, quotient_domains_and_chunks): (Vec<_>, Vec<_>) = data
             .split()
             .into_iter()
@@ -124,7 +124,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
         let (commit, data) = self.pcs.commit(quotient_domains_and_chunks);
         (
             commit,
-            PcsDataView {
+            PcsData {
                 data: Arc::new(data),
                 log_trace_heights,
             },

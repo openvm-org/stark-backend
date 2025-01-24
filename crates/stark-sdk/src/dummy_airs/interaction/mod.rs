@@ -54,7 +54,7 @@ pub fn verify_interactions(
 
     let challenger = config::baby_bear_poseidon2::Challenger::new(perm.clone());
     let mut prover = MultiTraceStarkProver::new(backend, CpuDevice::new(&config), challenger);
-    let proof = prover.prove(pk, ProvingContext::new(per_air));
+    let proof = prover.prove(&pk, ProvingContext::new(per_air));
 
     // Verify the proof:
     // Start from clean challenger

@@ -10,11 +10,11 @@ use p3_matrix::dense::RowMajorMatrix;
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::types::{
-    MultiStarkProvingKeyView, PairView, ProverViewAfterRapPhases, RapView, StarkProvingKeyView,
+    DeviceMultiStarkProvingKey, DeviceStarkProvingKey, PairView, ProverDataAfterRapPhases, RapView,
 };
 use crate::{
     air_builders::symbolic::SymbolicExpressionDag,
-    config::{Com, RapPhaseSeqProvingKey, StarkGenericConfig, Val},
+    config::{Com, StarkGenericConfig, Val},
     keygen::types::MultiStarkProvingKey,
 };
 
@@ -32,6 +32,8 @@ pub trait ProverBackend {
     type Challenge: Copy + Send + Sync + Serialize + DeserializeOwned;
     /// PCS opening proof on host (see [OpeningProver]). This should not be a reference.
     type OpeningProof: Clone + Send + Sync + Serialize + DeserializeOwned;
+    /// Partial proof for multiple RAPs
+    type RapPartialProof: Clone + Send + Sync + Serialize + DeserializeOwned;
     /// Single commitment on host.
     // Commitments are small in size and need to be transferred back to host to be included in proof.
     type Commitment: Clone + Send + Sync + Serialize + DeserializeOwned;
@@ -40,16 +42,19 @@ pub trait ProverBackend {
     type Challenger: CanObserve<Self::Val> + CanObserve<Self::Commitment>;
 
     // ==== Device Types ====
-    /// Single matrix buffer on device together with dimension metadata.
-    type MatrixView: MatrixView + Clone + Send + Sync;
-    /// Reference for the preimage of a PCS commitment on device, together with any metadata
+    /// Single matrix buffer on device together with dimension metadata. Owning this means nothing else has a shared
+    /// reference to the buffer.
+    type Matrix: MatrixDimensions + Send + Sync;
+    /// Owned buffer for the preimage of a PCS commitment on device, together with any metadata
     /// necessary for computing opening proofs.
     ///
     /// For example, multiple buffers for LDE matrices, their trace domain sizes, and pointer to mixed merkle tree.
-    type PcsDataView: Clone + Send + Sync;
+    type PcsData: Send + Sync;
+    /// Part of proving key for a single RAP specific for the RAP challenge phases
+    type RapPartialProvingKey: Send + Sync;
 }
 
-pub trait MatrixView {
+pub trait MatrixDimensions {
     fn height(&self) -> usize;
     fn width(&self) -> usize;
 }
@@ -61,7 +66,7 @@ pub trait ProverDevice<PB: ProverBackend>:
 
 /// Provides functionality for committing to a batch of trace matrices, possibly of different heights.
 pub trait TraceCommitter<PB: ProverBackend> {
-    fn commit(&self, traces: &[PB::MatrixView]) -> (PB::Commitment, PB::PcsDataView);
+    fn commit(&self, traces: &[PB::Matrix]) -> (PB::Commitment, PB::PcsData);
 }
 
 /// This trait is responsible for all partial proving of after challenge rounds (a.k.a layers) in a
@@ -72,23 +77,15 @@ pub trait TraceCommitter<PB: ProverBackend> {
 /// - commit to additional trace data
 /// - generate other partial proof data
 pub trait RapPartialProver<PB: ProverBackend> {
-    // ==== Host Types ====
-    /// Partial proof for multiple RAPs
-    type RapPartialProof: Clone + Send + Sync;
-    /// Part of proving key for a single RAP specific for the RAP challenge phases
-    type RapPartialProvingKeyView<'a>: Clone + Send + Sync
-    where
-        Self: 'a;
-
     /// The `trace_views` are the views of the respective trace matrices, evaluated on the trace domain.
     /// Currently this function does not provide a view of any already committed data associated
     /// with the trace views, although that data is available.
     fn partially_prove<'a>(
         &self,
         challenger: &mut PB::Challenger,
-        pk_views: &[StarkProvingKeyView<'a, PB, Self::RapPartialProvingKeyView<'a>>],
-        trace_views: Vec<PairView<PB::MatrixView, PB::Val>>,
-    ) -> (Self::RapPartialProof, ProverViewAfterRapPhases<PB>);
+        pk_views: &[DeviceStarkProvingKey<'a, PB>],
+        trace_views: Vec<PairView<&'a PB::Matrix, PB::Val>>,
+    ) -> (PB::RapPartialProof, ProverDataAfterRapPhases<PB>);
 }
 
 /// Only needed in proof systems that use quotient polynomials.
@@ -100,10 +97,10 @@ pub trait QuotientCommitter<PB: ProverBackend> {
     /// subgroup.
     fn get_extended_matrix(
         &self,
-        view: &PB::PcsDataView,
+        pcs_data: &PB::PcsData,
         matrix_idx: usize,
         quotient_degree: u8,
-    ) -> Option<PB::MatrixView>;
+    ) -> Option<PB::Matrix>;
 
     /// Evaluate the quotient polynomial on the quotient domain and then commit to it.
     /// The `extended_views` are extensions of the respective trace matrices
@@ -128,9 +125,9 @@ pub trait QuotientCommitter<PB: ProverBackend> {
         &self,
         challenger: &mut PB::Challenger,
         constraints: &[&SymbolicExpressionDag<PB::Val>],
-        extended_views: Vec<RapView<PB::MatrixView, PB::Val, PB::Challenge>>,
+        extended_views: Vec<RapView<PB::Matrix, PB::Val, PB::Challenge>>,
         quotient_degrees: &[u8],
-    ) -> (PB::Commitment, PB::PcsDataView);
+    ) -> (PB::Commitment, PB::PcsData);
 }
 
 /// Polynomial commitment scheme (PCS) opening proof generator.
@@ -140,20 +137,22 @@ pub trait OpeningProver<PB: ProverBackend> {
     /// - main trace matrices can have multiple commitments
     /// - for each after_challenge phase, all matrices in the phase share a commitment
     /// - quotient poly chunks are all committed together
+    // Note[jpw]: pass `preprocessed, main` by reference because there is cached data
+    // that is not owned. We assume `after_phase, quotient_data` will never be used after this.
     fn open(
         &self,
         challenger: &mut PB::Challenger,
         // For each preprocessed trace commitment, the prover data and
         // the log height of the matrix, in order
-        preprocessed: Vec<PB::PcsDataView>,
+        preprocessed: Vec<&PB::PcsData>,
         // For each main trace commitment, the prover data and
         // the log height of each matrix, in order
         // Note: this is all one challenge phase.
-        main: Vec<PB::PcsDataView>,
+        main: Vec<&PB::PcsData>,
         // `after_phase[i]` has shared commitment prover data for all matrices in phase `i + 1`.
-        after_phase: Vec<PB::PcsDataView>,
+        after_phase: Vec<PB::PcsData>,
         // Quotient poly commitment prover data
-        quotient_data: PB::PcsDataView,
+        quotient_data: PB::PcsData,
         // Quotient degree for each RAP committed in quotient_data, in order
         quotient_degrees: &[u8],
     ) -> PB::OpeningProof;
@@ -167,14 +166,14 @@ where
 {
     /// Transport the proving key to the device, filtering for only the provided `air_ids`.
     fn transport_pk_to_device<'a>(
-        &'a self,
+        &self,
         mpk: &'a MultiStarkProvingKey<SC>,
         air_ids: Vec<usize>,
-    ) -> MultiStarkProvingKeyView<'a, PB, &'a RapPhaseSeqProvingKey<SC>>
+    ) -> DeviceMultiStarkProvingKey<'a, PB>
     where
         SC: 'a;
 
-    fn transport_matrix_to_device(&self, matrix: &Arc<RowMajorMatrix<Val<SC>>>) -> PB::MatrixView;
+    fn transport_matrix_to_device(&self, matrix: &Arc<RowMajorMatrix<Val<SC>>>) -> PB::Matrix;
 
-    fn transport_pcs_data_to_device(&self, data: &super::cpu::PcsDataView<SC>) -> PB::PcsDataView;
+    fn transport_pcs_data_to_device(&self, data: &super::cpu::PcsData<SC>) -> PB::PcsData;
 }

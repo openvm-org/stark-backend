@@ -13,28 +13,26 @@ use crate::{
 };
 
 /// A view of the proving key after it has been transferred to device.
-#[derive(Clone)]
-pub struct MultiStarkProvingKeyView<'a, PB: ProverBackend, R> {
+pub struct DeviceMultiStarkProvingKey<'a, PB: ProverBackend> {
     pub(super) air_ids: Vec<usize>,
-    pub per_air: Vec<StarkProvingKeyView<'a, PB, R>>,
+    pub per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
 }
 
-impl<'a, PB: ProverBackend, R> MultiStarkProvingKeyView<'a, PB, R> {
-    pub fn new(air_ids: Vec<usize>, per_air: Vec<StarkProvingKeyView<'a, PB, R>>) -> Self {
+impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
+    pub fn new(air_ids: Vec<usize>, per_air: Vec<DeviceStarkProvingKey<'a, PB>>) -> Self {
         assert_eq!(air_ids.len(), per_air.len());
         Self { air_ids, per_air }
     }
 }
 
-#[derive(Clone)]
-pub struct StarkProvingKeyView<'a, PB: ProverBackend, R> {
+pub struct DeviceStarkProvingKey<'a, PB: ProverBackend> {
     /// Type name of the AIR, for display purposes only
     pub air_name: &'a str,
     pub vk: &'a StarkVerifyingKey<PB::Val, PB::Commitment>,
     /// Prover only data for preprocessed trace
-    pub preprocessed_data: Option<CommittedTraceView<PB>>,
+    pub preprocessed_data: Option<SingleCommitPreimage<PB::Matrix, PB::PcsData>>,
     /// Additional configuration or preprocessed data for the RAP phases
-    pub rap_partial_pk: R,
+    pub rap_partial_pk: PB::RapPartialProvingKey,
 }
 
 /// A view of an already committed trace, together with a reference to the
@@ -43,26 +41,26 @@ pub struct StarkProvingKeyView<'a, PB: ProverBackend, R> {
 /// The PCS may commit to multiple matrices at once, so `matrix_idx` provides
 /// the index of this matrix within the commitment.
 #[derive(Clone)]
-pub struct CommittedTraceView<PB: ProverBackend> {
-    pub trace: PB::MatrixView,
-    pub data: PB::PcsDataView,
+pub struct SingleCommitPreimage<Matrix, PcsData> {
+    pub trace: Matrix,
+    pub data: PcsData,
     pub matrix_idx: u32,
 }
 
-#[derive(Clone, derive_new::new)]
-pub struct ProvingContext<PB: ProverBackend> {
+#[derive(derive_new::new)]
+pub struct ProvingContext<'a, PB: ProverBackend> {
     /// (AIR id, AIR input)
-    pub per_air: Vec<(usize, AirProvingContext<PB>)>,
+    pub per_air: Vec<(usize, AirProvingContext<'a, PB>)>,
 }
 
-impl<PB: ProverBackend> ProvingContext<PB> {
-    pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<PB>> {
+impl<'a, PB: ProverBackend> ProvingContext<'a, PB> {
+    pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<'a, PB>> {
         self.per_air.into_iter().map(|(_, x)| x).collect()
     }
 }
 
-impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
-    type Item = (usize, AirProvingContext<PB>);
+impl<'a, PB: ProverBackend> IntoIterator for ProvingContext<'a, PB> {
+    type Item = (usize, AirProvingContext<'a, PB>);
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -77,12 +75,15 @@ impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
 /// Public values: for each AIR, a separate list of public values.
 /// The prover can support global public values that are shared among all AIRs,
 /// but we currently split public values per-AIR for modularity.
-#[derive(Clone)]
-pub struct AirProvingContext<PB: ProverBackend> {
+pub struct AirProvingContext<'a, PB: ProverBackend> {
     /// Cached main trace matrices with commitments. One matrix per commitment.
-    pub cached_mains: Vec<(PB::Commitment, CommittedTraceView<PB>)>,
+    #[allow(clippy::type_complexity)]
+    pub cached_mains: Vec<(
+        PB::Commitment,
+        SingleCommitPreimage<&'a PB::Matrix, &'a PB::PcsData>,
+    )>,
     /// Common main trace matrix
-    pub common_main: Option<PB::MatrixView>,
+    pub common_main: Option<PB::Matrix>,
     /// Public values
     // [jpw] This is on host for now because it seems more convenient for the challenger to be on host.
     pub public_values: Vec<PB::Val>,
@@ -148,11 +149,11 @@ impl<T, Challenge> Default for RapSinglePhaseView<T, Challenge> {
 }
 
 #[derive(derive_new::new)]
-pub struct ProverViewAfterRapPhases<PB: ProverBackend> {
+pub struct ProverDataAfterRapPhases<PB: ProverBackend> {
     /// For each challenge phase **after** the main phase,
     /// the commitment and preimage (there should never be a reason to have more than one).
     /// This may be empty if challenge phases do not require additional trace commitments.
-    pub committed_pcs_data_per_phase: Vec<(PB::Commitment, PB::PcsDataView)>,
+    pub committed_pcs_data_per_phase: Vec<(PB::Commitment, PB::PcsData)>,
     /// For each challenge phase, for each RAP,
     /// the challenge, and exposed values for the RAP.
     /// The indexing is `rap_views_per_phase[phase_idx][rap_idx]`.
@@ -164,12 +165,9 @@ pub struct ProverViewAfterRapPhases<PB: ProverBackend> {
 ///
 /// Includes the quotient commitments and FRI opening proofs for the constraints as well.
 #[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound(
-    serialize = "RapPartialProof: Serialize",
-    deserialize = "RapPartialProof: Deserialize<'de>"
-))]
-#[derivative(Clone(bound = "RapPartialProof: Clone"))]
-pub struct HalProof<PB: ProverBackend, RapPartialProof> {
+#[serde(bound = "")]
+#[derivative(Clone(bound = ""))]
+pub struct HalProof<PB: ProverBackend> {
     /// The PCS commitments
     pub commitments: Commitments<PB::Commitment>,
     /// Opening proofs separated by partition, but this may change
@@ -177,16 +175,16 @@ pub struct HalProof<PB: ProverBackend, RapPartialProof> {
     /// Proof data for each AIR
     pub per_air: Vec<AirProofData<PB::Val, PB::Challenge>>,
     /// Partial proof for rap phase if it exists
-    pub rap_partial_proof: RapPartialProof,
+    pub rap_partial_proof: PB::RapPartialProof,
 }
 
-impl<PB, SC: StarkGenericConfig, RapPartialProof> From<HalProof<PB, RapPartialProof>> for Proof<SC>
+impl<PB, SC: StarkGenericConfig> From<HalProof<PB>> for Proof<SC>
 where
     PB: ProverBackend<Val = Val<SC>, Challenge = SC::Challenge, Commitment = Com<SC>>,
     PB::OpeningProof: Into<OpeningProof<PcsProof<SC>, SC::Challenge>>,
-    RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
+    PB::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
 {
-    fn from(proof: HalProof<PB, RapPartialProof>) -> Self {
+    fn from(proof: HalProof<PB>) -> Self {
         Proof {
             commitments: proof.commitments,
             opening: proof.opening.into(),
@@ -203,6 +201,18 @@ where
 pub struct ProofInput<SC: StarkGenericConfig> {
     /// (AIR id, AIR input)
     pub per_air: Vec<(usize, AirProofInput<SC>)>,
+}
+
+#[derive(Serialize, Deserialize, Derivative)]
+#[serde(bound(
+    serialize = "PcsProverData<SC>: Serialize",
+    deserialize = "PcsProverData<SC>: Deserialize<'de>"
+))]
+#[derivative(Clone(bound = "Com<SC>: Clone"))]
+pub struct CommittedTraceData<SC: StarkGenericConfig> {
+    pub trace: Arc<RowMajorMatrix<Val<SC>>>,
+    pub commitment: Com<SC>,
+    pub pcs_data: Arc<PcsProverData<SC>>,
 }
 
 /// Necessary input for proving a single AIR.

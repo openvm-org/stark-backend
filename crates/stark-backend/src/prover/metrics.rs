@@ -3,7 +3,7 @@ use std::fmt::Display;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use super::{hal::ProverBackend, types::StarkProvingKeyView};
+use super::{hal::ProverBackend, types::DeviceStarkProvingKey};
 use crate::keygen::types::TraceWidth;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,8 +62,8 @@ impl Display for SingleTraceMetrics {
 }
 
 /// heights are the trace heights for each air
-pub fn trace_metrics<PB: ProverBackend, R>(
-    pk: &[StarkProvingKeyView<PB, R>],
+pub fn trace_metrics<PB: ProverBackend>(
+    pk: &[DeviceStarkProvingKey<PB>],
     log_trace_heights: &[u8],
 ) -> TraceMetrics {
     let heights = log_trace_heights
