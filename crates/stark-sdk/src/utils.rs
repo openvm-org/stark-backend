@@ -20,6 +20,7 @@ impl<SC: StarkGenericConfig> ProofInputForTest<SC> {
         self,
         engine: &impl StarkFriEngine<SC>,
     ) -> Result<VerificationDataWithFriParams<SC>, VerificationError> {
+        assert_eq!(self.airs.len(), self.per_air.len());
         engine.run_test(self.airs, self.per_air)
     }
     /// Sort AIRs by their trace height in descending order. This should not be used outside
