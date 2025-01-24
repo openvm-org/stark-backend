@@ -51,7 +51,7 @@ fn prove_and_verify_sum_air(x: Vec<Val>, ys: Vec<Vec<Val>>) -> Result<(), Verifi
         cached_mains_pdata: vec![(y_com, y_data.data)],
         raw: AirProofRawInput {
             cached_mains: vec![y_trace],
-            common_main: Some(Arc::new(x_trace)),
+            common_main: Some(x_trace),
             public_values: vec![],
         },
     };

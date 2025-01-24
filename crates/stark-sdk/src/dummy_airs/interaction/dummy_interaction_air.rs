@@ -247,7 +247,7 @@ impl<SC: StarkGenericConfig> Chip<SC> for DummyInteractionChip<'_, SC> {
                 cached_mains_pdata: vec![(cached.commitment, cached.pcs_data)],
                 raw: AirProofRawInput {
                     cached_mains: vec![cached.trace],
-                    common_main: Some(Arc::new(common_main)),
+                    common_main: Some(common_main),
                     public_values: vec![],
                 },
             }
@@ -257,7 +257,7 @@ impl<SC: StarkGenericConfig> Chip<SC> for DummyInteractionChip<'_, SC> {
                 cached_mains_pdata: vec![],
                 raw: AirProofRawInput {
                     cached_mains: vec![],
-                    common_main: Some(Arc::new(common_main)),
+                    common_main: Some(common_main),
                     public_values: vec![],
                 },
             }

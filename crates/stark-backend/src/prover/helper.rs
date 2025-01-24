@@ -27,7 +27,7 @@ impl<SC: StarkGenericConfig> AirProofInputTestHelper<SC> for AirProofInput<SC> {
             cached_mains_pdata: vec![],
             raw: AirProofRawInput {
                 cached_mains: cached_traces.into_iter().map(Arc::new).collect(),
-                common_main: Some(Arc::new(common_trace)),
+                common_main: Some(common_trace),
                 public_values: vec![],
             },
         }
@@ -39,7 +39,7 @@ impl<SC: StarkGenericConfig> AirProofInput<SC> {
             cached_mains_pdata: vec![],
             raw: AirProofRawInput {
                 cached_mains: vec![],
-                common_main: Some(Arc::new(trace)),
+                common_main: Some(trace),
                 public_values,
             },
         }

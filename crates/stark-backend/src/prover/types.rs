@@ -237,7 +237,7 @@ pub struct AirProofRawInput<F: Field> {
     /// Cached main trace matrices
     pub cached_mains: Vec<Arc<RowMajorMatrix<F>>>,
     /// Common main trace matrix
-    pub common_main: Option<Arc<RowMajorMatrix<F>>>,
+    pub common_main: Option<RowMajorMatrix<F>>,
     /// Public values
     pub public_values: Vec<F>,
 }

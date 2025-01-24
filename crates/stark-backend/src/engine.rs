@@ -1,4 +1,4 @@
-use std::iter::zip;
+use std::{iter::zip, sync::Arc};
 
 use itertools::{izip, Itertools};
 use p3_matrix::{dense::DenseMatrix, Matrix};
@@ -200,7 +200,7 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
                     .collect_vec();
                 let air_ctx = AirProvingContext {
                     cached_mains,
-                    common_main: input.raw.common_main,
+                    common_main: input.raw.common_main.map(Arc::new),
                     public_values: input.raw.public_values,
                 };
                 (air_id, air_ctx)
