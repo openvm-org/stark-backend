@@ -11,6 +11,7 @@ The following metrics comprise the main breakdown of the components of `prove`. 
 - `main_trace_commit_time_ms`: The time to commit the main trace matrices, depending on the PCS.
 - `generate_perm_trace_time_ms`: When FRI is used for the log up argument, this is the time to generate the permutation trace.
 - `perm_trace_commit_time_ms`: When FRI is used for the log up argument, this is the time to commit the permutation trace.
+- `quotient_extended_view_time_ms`: The time to get the trace polynomial evaluations on the quotient domain from the LDE matrices.
 - `quotient_poly_compute_time_ms`: The time to compute the quotient polynomials from the trace matrices according to AIR constraints.
 - `quotient_poly_commit_time_ms`: The time to commit the quotient polynomials.
 - `pcs_opening_time_ms`: The time to compute all polynomial commitment scheme (PCS) opening proofs necessary for the proof. Currently the PCS is FRI over a base field with high `2`-adicity.

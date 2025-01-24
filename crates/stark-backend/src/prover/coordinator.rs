@@ -217,16 +217,18 @@ where
         // ==================== Quotient polynomial computation and commitment, if any ====================
         // Note[jpw]: Currently we always call this step, we could add a flag to skip it for protocols that
         // do not require quotient poly.
-        let extended_rap_views = create_trace_view_per_air(
-            &self.device,
-            mpk,
-            &log_trace_height_per_air,
-            &cached_views_per_air,
-            &common_main_pcs_data,
-            &pvs_per_air,
-            &pcs_data_after,
-            prover_data_after.rap_views_per_phase,
-        );
+        let extended_rap_views = metrics_span("quotient_extended_view_time_ms", || {
+            create_trace_view_per_air(
+                &self.device,
+                mpk,
+                &log_trace_height_per_air,
+                &cached_views_per_air,
+                &common_main_pcs_data,
+                &pvs_per_air,
+                &pcs_data_after,
+                prover_data_after.rap_views_per_phase,
+            )
+        });
         let (constraints, quotient_degrees): (Vec<_>, Vec<_>) = mpk
             .vk_view()
             .per_air
