@@ -1,6 +1,50 @@
+use std::{cmp::Reverse, iter::zip};
+
 use itertools::Itertools;
-use openvm_stark_backend::p3_field::FieldAlgebra;
+use openvm_stark_backend::{
+    config::StarkGenericConfig, p3_field::FieldAlgebra, p3_matrix::Matrix,
+    prover::types::AirProofInput, verifier::VerificationError, AirRef,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+
+use crate::engine::{StarkFriEngine, VerificationDataWithFriParams};
+
+/// `stark-backend::prover::types::ProofInput` without specifying AIR IDs.
+pub struct ProofInputForTest<SC: StarkGenericConfig> {
+    pub airs: Vec<AirRef<SC>>,
+    pub per_air: Vec<AirProofInput<SC>>,
+}
+
+impl<SC: StarkGenericConfig> ProofInputForTest<SC> {
+    pub fn run_test(
+        self,
+        engine: &impl StarkFriEngine<SC>,
+    ) -> Result<VerificationDataWithFriParams<SC>, VerificationError> {
+        engine.run_test(self.airs, self.per_air)
+    }
+    /// Sort AIRs by their trace height in descending order. This should not be used outside
+    /// static-verifier because a dynamic verifier should support any AIR order.
+    /// This is related to an implementation detail of FieldMerkleTreeMMCS which is used in most configs.
+    /// Reference: <https://github.com/Plonky3/Plonky3/blob/27b3127dab047e07145c38143379edec2960b3e1/merkle-tree/src/merkle_tree.rs#L53>
+    pub fn sort_chips(&mut self) {
+        let airs = std::mem::take(&mut self.airs);
+        let air_proof_inputs = std::mem::take(&mut self.per_air);
+        let (airs, air_proof_inputs): (Vec<_>, Vec<_>) = zip(airs, air_proof_inputs)
+            .sorted_by_key(|(_, air_proof_input)| {
+                Reverse(
+                    air_proof_input
+                        .raw
+                        .common_main
+                        .as_ref()
+                        .map(|trace| trace.height())
+                        .unwrap_or(0),
+                )
+            })
+            .unzip();
+        self.airs = airs;
+        self.per_air = air_proof_inputs;
+    }
+}
 
 /// Deterministic seeded RNG, for testing use
 pub fn create_seeded_rng() -> StdRng {

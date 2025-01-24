@@ -116,7 +116,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
                 metrics::counter!("quotient_deg", &labels).absolute(pk.vk.quotient_degree as u64);
                 // column info will be logged by prover later
                 metrics::counter!("constraints", &labels)
-                    .absolute(pk.vk.symbolic_constraints.constraints.len() as u64);
+                    .absolute(pk.vk.symbolic_constraints.constraints.constraint_idx.len() as u64);
                 metrics::counter!("interactions", &labels)
                     .absolute(pk.vk.symbolic_constraints.interactions.len() as u64);
             }

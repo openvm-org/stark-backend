@@ -22,21 +22,6 @@ pub struct VerificationDataWithFriParams<SC: StarkGenericConfig> {
     pub fri_params: FriParameters,
 }
 
-/// `stark-backend::prover::types::ProofInput` without specifying AIR IDs.
-pub struct ProofInputForTest<SC: StarkGenericConfig> {
-    pub airs: Vec<AirRef<SC>>,
-    pub per_air: Vec<AirProofInput<SC>>,
-}
-
-impl<SC: StarkGenericConfig> ProofInputForTest<SC> {
-    pub fn run_test(
-        self,
-        engine: &impl StarkFriEngine<SC>,
-    ) -> Result<VerificationDataWithFriParams<SC>, VerificationError> {
-        engine.run_test(self.airs, self.per_air)
-    }
-}
-
 /// Stark engine using Fri.
 pub trait StarkFriEngine<SC: StarkGenericConfig>: StarkEngine<SC> + Sized {
     fn new(fri_parameters: FriParameters) -> Self;
