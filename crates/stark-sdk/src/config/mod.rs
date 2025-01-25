@@ -16,8 +16,6 @@ pub mod instrument;
 
 pub use fri_params::FriParameters;
 
-pub const DEFAULT_MAX_CONSTRAINT_DEGREE: usize = 3;
-
 pub fn setup_tracing() {
     setup_tracing_with_log_level(Level::INFO);
 }

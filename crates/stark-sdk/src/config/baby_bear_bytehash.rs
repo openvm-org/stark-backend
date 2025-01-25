@@ -11,7 +11,7 @@ use p3_fri::{FriConfig, TwoAdicFriPcs};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, CryptographicHasher, SerializingHasher32};
 
-use super::{FriParameters, DEFAULT_MAX_CONSTRAINT_DEGREE};
+use super::FriParameters;
 use crate::engine::{StarkEngine, StarkFriEngine};
 
 type Val = BabyBear;
@@ -81,7 +81,7 @@ where
         config,
         byte_hash,
         fri_params,
-        max_constraint_degree: DEFAULT_MAX_CONSTRAINT_DEGREE,
+        max_constraint_degree: fri_params.max_constraint_degree(),
     }
 }
 

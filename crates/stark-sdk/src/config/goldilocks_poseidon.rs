@@ -17,7 +17,7 @@ use rand::{rngs::StdRng, SeedableRng};
 
 use super::{
     instrument::{HashStatistics, Instrumented, StarkHashStatistics},
-    FriParameters, DEFAULT_MAX_CONSTRAINT_DEGREE,
+    FriParameters,
 };
 use crate::{
     assert_sc_compatible_with_serde,
@@ -139,7 +139,7 @@ where
         config,
         perm,
         fri_params,
-        max_constraint_degree: DEFAULT_MAX_CONSTRAINT_DEGREE,
+        max_constraint_degree: fri_params.max_constraint_degree(),
     }
 }
 
