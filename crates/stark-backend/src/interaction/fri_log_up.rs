@@ -48,6 +48,9 @@ pub struct FriLogUpProvingKey {
 }
 
 impl FriLogUpProvingKey {
+    pub fn interaction_partitions(self) -> Vec<Vec<usize>> {
+        self.interaction_partitions
+    }
     pub fn num_chunks(&self) -> usize {
         self.interaction_partitions.len()
     }

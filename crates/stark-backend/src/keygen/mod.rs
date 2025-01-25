@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{iter::zip, sync::Arc};
 
 use itertools::Itertools;
 use p3_commit::Pcs;
@@ -8,7 +8,7 @@ use tracing::instrument;
 
 use crate::{
     air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
-    config::{Com, StarkGenericConfig, Val},
+    config::{Com, RapPartialProvingKey, StarkGenericConfig, Val},
     interaction::{RapPhaseSeq, RapPhaseSeqKind},
     keygen::types::{
         MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey, StarkVerifyingKey,
@@ -62,7 +62,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
     /// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
-    pub fn generate_pk(mut self) -> MultiStarkProvingKey<SC> {
+    pub fn generate_pk(self) -> MultiStarkProvingKey<SC> {
         let air_max_constraint_degree = self
             .partitioned_airs
             .iter()
@@ -83,14 +83,24 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         );
         if self.max_constraint_degree != 0 {
             assert!(air_max_constraint_degree <= self.max_constraint_degree);
-        } else {
-            self.max_constraint_degree = air_max_constraint_degree;
         }
-
-        let pk_per_air: Vec<_> = self
+        // First pass: get symbolic constraints and interactions but RAP phase constraints are not final
+        let symbolic_constraints_per_air = self
             .partitioned_airs
-            .into_iter()
-            .map(|keygen_builder| keygen_builder.generate_pk(self.max_constraint_degree))
+            .iter()
+            .map(|keygen_builder| keygen_builder.get_symbolic_builder(None).constraints())
+            .collect_vec();
+        // Note: due to the need to go through a trait, there is some duplicate computation
+        // (e.g., FRI logup will calculate the interaction chunking both here and in the second pass below)
+        let rap_partial_pk_per_air = self
+            .config
+            .rap_phase_seq()
+            .generate_pk_per_air(&symbolic_constraints_per_air, self.max_constraint_degree);
+        let pk_per_air: Vec<_> = zip(self.partitioned_airs, rap_partial_pk_per_air)
+            .map(|(keygen_builder, rap_partial_pk)| {
+                // Second pass: get final constraints, where RAP phase constraints may have changed
+                keygen_builder.generate_pk(rap_partial_pk, self.max_constraint_degree)
+            })
             .collect();
 
         for pk in pk_per_air.iter() {
@@ -145,7 +155,11 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             .max_constraint_degree()
     }
 
-    fn generate_pk(self, max_constraint_degree: usize) -> StarkProvingKey<SC> {
+    fn generate_pk(
+        self,
+        rap_partial_pk: RapPartialProvingKey<SC>,
+        max_constraint_degree: usize,
+    ) -> StarkProvingKey<SC> {
         let air_name = self.air.name();
 
         let symbolic_builder = self.get_symbolic_builder(Some(max_constraint_degree));
@@ -174,6 +188,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             air_name,
             vk,
             preprocessed_data: prep_prover_data,
+            rap_partial_pk,
         }
     }
 

@@ -132,6 +132,9 @@ pub struct SymbolicRapBuilder<F> {
     max_constraint_degree: usize,
     rap_phase_seq_kind: RapPhaseSeqKind,
     trace_width: TraceWidth,
+
+    /// Caching for FRI logup to avoid recomputation during keygen
+    interaction_partitions: Option<Vec<Vec<usize>>>,
 }
 
 impl<F: Field> SymbolicRapBuilder<F> {
@@ -187,6 +190,7 @@ impl<F: Field> SymbolicRapBuilder<F> {
             max_constraint_degree,
             rap_phase_seq_kind,
             trace_width: width.clone(),
+            interaction_partitions: None,
         }
     }
 
@@ -400,9 +404,11 @@ impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
             assert!(self.exposed_values_after_challenge.is_empty());
 
             if self.rap_phase_seq_kind == RapPhaseSeqKind::FriLogUp {
-                let num_chunks =
+                let interaction_partitions =
                     find_interaction_chunks(&self.interactions, self.max_constraint_degree)
-                        .num_chunks();
+                        .interaction_partitions();
+                let num_chunks = interaction_partitions.len();
+                self.interaction_partitions.replace(interaction_partitions);
                 let perm_width = num_chunks + 1;
                 self.after_challenge = Self::new_after_challenge(&[perm_width]);
             }
