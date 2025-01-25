@@ -3,15 +3,16 @@ use std::sync::Arc;
 use itertools::{izip, multiunzip, Itertools};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::FieldAlgebra;
-use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use self::single::compute_single_rap_quotient_values;
-use super::{PcsData, RapMatrixView};
+use super::PcsData;
 use crate::{
     air_builders::symbolic::SymbolicExpressionDag,
     config::{Com, Domain, PackedChallenge, StarkGenericConfig, Val},
+    prover::types::RapView,
 };
 
 mod evaluator;
@@ -31,22 +32,21 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     /// on the quotient domains of each RAP.
     ///
     /// ## Assumptions
-    /// - `raps`, `traces`, `quotient_degrees` are all the same length and in the same order.
-    /// - `quotient_degrees` is the factor to **multiply** the trace degree by to get the degree
-    ///   of the quotient polynomial. This should be determined from the constraint degree
-    ///   of the RAP.
+    /// - `constraints`, `extended_views`, `quotient_degrees` have equal lengths and the length equals number of RAPs.
+    /// - `quotient_degrees` is the factor to **multiply** the trace degree by to get the degree of the quotient polynomial. This should be determined from the constraint degree of the RAP.
+    /// - `extended_views` is a view of the trace polynomials evaluated on the quotient domain, with rows bit reversed to account for the fact that the quotient domain is different for each RAP.
     #[instrument(name = "compute quotient values", level = "info", skip_all)]
-    pub fn quotient_values<'a>(
+    pub fn quotient_values(
         &self,
         constraints: &[&SymbolicExpressionDag<Val<SC>>],
-        lde_views: Vec<RapMatrixView<SC>>,
+        extended_views: Vec<RapView<impl Matrix<Val<SC>>, Val<SC>, SC::Challenge>>,
         quotient_degrees: &[u8],
     ) -> QuotientData<SC> {
-        assert_eq!(constraints.len(), lde_views.len());
+        assert_eq!(constraints.len(), extended_views.len());
         assert_eq!(constraints.len(), quotient_degrees.len());
-        let inner = izip!(constraints, lde_views, quotient_degrees)
-            .map(|(constraints, rap_ldes, &quotient_degree)| {
-                self.single_rap_quotient_values(constraints, rap_ldes, quotient_degree)
+        let inner = izip!(constraints, extended_views, quotient_degrees)
+            .map(|(constraints, extended_view, &quotient_degree)| {
+                self.single_rap_quotient_values(constraints, extended_view, quotient_degree)
             })
             .collect();
         QuotientData { inner }
@@ -55,27 +55,21 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     pub(super) fn single_rap_quotient_values(
         &self,
         constraints: &SymbolicExpressionDag<Val<SC>>,
-        ldes: RapMatrixView<SC>,
+        view: RapView<impl Matrix<Val<SC>>, Val<SC>, SC::Challenge>,
         quotient_degree: u8,
     ) -> SingleQuotientData<SC> {
-        let log_trace_height = ldes.pair.log_trace_height;
+        let log_trace_height = view.pair.log_trace_height;
         let trace_domain = self
             .pcs
             .natural_domain_for_degree(1usize << log_trace_height);
         let quotient_domain =
             trace_domain.create_disjoint_domain(trace_domain.size() * quotient_degree as usize);
-        // Empty matrix if no preprocessed trace
-        let preprocessed_lde_on_quotient_domain = ldes
-            .pair
-            .preprocessed
-            .unwrap_or(Arc::new(RowMajorMatrix::new(vec![], 0)));
-        let partitioned_main_lde_on_quotient_domain: Vec<_> = ldes.pair.partitioned_main;
 
         let (after_challenge_lde_on_quotient_domain, challenges, exposed_values_after_challenge): (
             Vec<_>,
             Vec<_>,
             Vec<_>,
-        ) = multiunzip(ldes.per_phase.into_iter().map(|view| {
+        ) = multiunzip(view.per_phase.into_iter().map(|view| {
             (
                 view.inner
                     .expect("gap in challenge phase not supported yet"),
@@ -90,16 +84,16 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
             )
         }));
 
-        let quotient_values = compute_single_rap_quotient_values::<SC>(
+        let quotient_values = compute_single_rap_quotient_values::<SC, _>(
             constraints,
             trace_domain,
             quotient_domain,
-            preprocessed_lde_on_quotient_domain,
-            partitioned_main_lde_on_quotient_domain,
+            view.pair.preprocessed,
+            view.pair.partitioned_main,
             after_challenge_lde_on_quotient_domain,
             &challenges,
             self.alpha,
-            &ldes.pair.public_values,
+            &view.pair.public_values,
             &exposed_values_after_challenge,
         );
         SingleQuotientData {
@@ -184,94 +178,4 @@ pub struct QuotientChunk<SC: StarkGenericConfig> {
     /// Matrix with number of rows equal to trace domain size,
     /// and number of columns equal to extension field degree.
     pub chunk: RowMajorMatrix<Val<SC>>,
-}
-
-/// Takes in views of pcs data and returns extended views of all matrices evaluated on quotient domains
-/// for quotient poly calculation.
-#[allow(clippy::too_many_arguments)]
-fn create_trace_view_per_air<PB: ProverBackend>(
-    device: &impl QuotientCommitter<PB>,
-    mpk: &DeviceMultiStarkProvingKey<PB>,
-    log_trace_height_per_air: &[u8],
-    cached_views_per_air: &[Vec<SingleCommitPreimage<&PB::Matrix, &PB::PcsData>>],
-    common_main_pcs_data: &PB::PcsData,
-    pvs_per_air: &[Vec<PB::Val>],
-    pcs_data_per_phase: &[PB::PcsData],
-    rap_views_per_phase: Vec<Vec<RapSinglePhaseView<usize, PB::Challenge>>>,
-) -> Vec<RapView<PB::Matrix, PB::Val, PB::Challenge>> {
-    let mut common_main_idx = 0;
-    izip!(
-        &mpk.per_air,
-        log_trace_height_per_air,
-        cached_views_per_air,
-        pvs_per_air
-    )
-    .enumerate()
-    .map(|(i, (pk, &log_trace_height, cached_views, pvs))| {
-        let quotient_degree = pk.vk.quotient_degree;
-        // The AIR will be treated as the full RAP with virtual columns after this
-        let preprocessed = pk.preprocessed_data.as_ref().map(|cv| {
-            device
-                .get_extended_matrix(&cv.data, cv.matrix_idx as usize, quotient_degree)
-                .unwrap()
-        });
-        let mut partitioned_main: Vec<_> = cached_views
-            .iter()
-            .map(|cv| {
-                device
-                    .get_extended_matrix(cv.data, cv.matrix_idx as usize, quotient_degree)
-                    .unwrap()
-            })
-            .collect();
-        if pk.vk.has_common_main() {
-            partitioned_main.push(
-                device
-                    .get_extended_matrix(common_main_pcs_data, common_main_idx, quotient_degree)
-                    .unwrap_or_else(|| {
-                        panic!("common main commitment could not get matrix_idx={common_main_idx}")
-                    }),
-            );
-            common_main_idx += 1;
-        }
-        let pair = PairView {
-            log_trace_height,
-            preprocessed,
-            partitioned_main,
-            public_values: pvs.to_vec(),
-        };
-        let mut per_phase = pcs_data_per_phase
-            .iter()
-            .zip_eq(&rap_views_per_phase)
-            .map(
-                |(pcs_data, rap_views)| -> Option<RapSinglePhaseView<PB::Matrix, PB::Challenge>> {
-                    let rap_view = rap_views.get(i)?;
-                    let matrix_idx = rap_view.inner?;
-                    let extended_matrix =
-                        device.get_extended_matrix(pcs_data, matrix_idx, quotient_degree);
-                    let extended_matrix = extended_matrix.unwrap_or_else(|| {
-                        panic!("could not get matrix_idx={matrix_idx} for rap {i}")
-                    });
-                    Some(RapSinglePhaseView {
-                        inner: Some(extended_matrix),
-                        challenges: rap_view.challenges.clone(),
-                        exposed_values: rap_view.exposed_values.clone(),
-                    })
-                },
-            )
-            .collect_vec();
-        while let Some(last) = per_phase.last() {
-            if last.is_none() {
-                per_phase.pop();
-            } else {
-                break;
-            }
-        }
-        let per_phase = per_phase
-            .into_iter()
-            .map(|v| v.unwrap_or_default())
-            .collect();
-
-        RapView { pair, per_phase }
-    })
-    .collect()
 }

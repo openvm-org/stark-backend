@@ -7,7 +7,7 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use super::{
-    hal::{ProverBackend, ProverDevice, QuotientCommitter},
+    hal::{ProverBackend, ProverDevice},
     types::{DeviceMultiStarkProvingKey, HalProof, ProvingContext, SingleCommitPreimage},
     Prover,
 };
@@ -173,6 +173,10 @@ where
             &mpk.per_air,
             pair_trace_view_per_air,
         );
+        // Challenger observes additional commitments if any exist:
+        for (commit, _) in &prover_data_after.committed_pcs_data_per_phase {
+            self.challenger.observe(commit.clone());
+        }
 
         // Collect exposed_values_per_air for the proof:
         // - transpose per_phase, per_air -> per_air, per_phase
@@ -202,21 +206,13 @@ where
             })
             .collect_vec();
 
-        let (commitments_after, pcs_data_after): (Vec<_>, Vec<_>) = prover_data_after
-            .committed_pcs_data_per_phase
-            .into_iter()
-            .unzip();
-        // Challenger observes additional commitments if any exist:
-        for commit in &commitments_after {
-            self.challenger.observe(commit.clone());
-        }
-
         // ==================== Quotient polynomial computation and commitment, if any ====================
         // Note[jpw]: Currently we always call this step, we could add a flag to skip it for protocols that
         // do not require quotient poly.
         let (quotient_commit, quotient_data) = self.device.eval_and_commit_quotient(
             &mut self.challenger,
             &mpk.per_air,
+            &pvs_per_air,
             &cached_views_per_air,
             &common_main_pcs_data,
             &prover_data_after,
@@ -224,6 +220,10 @@ where
         // Observe quotient commitment
         self.challenger.observe(quotient_commit.clone());
 
+        let (commitments_after, pcs_data_after): (Vec<_>, Vec<_>) = prover_data_after
+            .committed_pcs_data_per_phase
+            .into_iter()
+            .unzip();
         // ==================== Polynomial Opening Proofs ====================
         let opening = metrics_span("pcs_opening_time_ms", || {
             let quotient_degrees = mpk

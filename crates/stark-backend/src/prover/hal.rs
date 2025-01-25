@@ -95,8 +95,12 @@ pub trait QuotientCommitter<PB: ProverBackend> {
     /// Then compute the quotient polynomial evaluated on the quotient domain
     /// and commit to it.
     ///
-    /// The lengths of `pk_views`, `cached_views_per_air` must be equal,
-    /// and both equal to the number of AIRs.
+    /// The lengths of
+    /// - `pk_views`: proving key per AIR
+    /// - `public_values`: public values per AIR
+    /// - `cached_views_per_air`: committed trace views per AIR (if any)
+    ///
+    /// must be equal, and all equal to the number of AIRs.
     ///
     /// Quotient polynomials for multiple RAP matrices are committed together into a single commitment.
     /// The quotient polynomials can be committed together even if the corresponding trace matrices
@@ -105,6 +109,7 @@ pub trait QuotientCommitter<PB: ProverBackend> {
         &self,
         challenger: &mut PB::Challenger,
         pk_views: &[DeviceStarkProvingKey<PB>],
+        public_values: &[Vec<PB::Val>],
         cached_views_per_air: &[Vec<SingleCommitPreimage<&PB::Matrix, &PB::PcsData>>],
         common_main_pcs_data: &PB::PcsData,
         prover_data_after: &ProverDataAfterRapPhases<PB>,

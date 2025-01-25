@@ -1,9 +1,9 @@
-use std::{cmp::min, sync::Arc};
+use std::cmp::min;
 
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PackedValue};
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_matrix::Matrix;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
@@ -27,13 +27,13 @@ use crate::{
     level = "trace",
     skip_all
 )]
-pub fn compute_single_rap_quotient_values<'a, SC>(
+pub fn compute_single_rap_quotient_values<'a, SC, M>(
     constraints: &SymbolicExpressionDag<Val<SC>>,
     trace_domain: Domain<SC>,
     quotient_domain: Domain<SC>,
-    preprocessed_trace_on_quotient_domain: Arc<RowMajorMatrix<Val<SC>>>,
-    partitioned_main_lde_on_quotient_domain: Vec<Arc<RowMajorMatrix<Val<SC>>>>,
-    after_challenge_lde_on_quotient_domain: Vec<Arc<RowMajorMatrix<Val<SC>>>>,
+    preprocessed_trace_on_quotient_domain: Option<M>,
+    partitioned_main_lde_on_quotient_domain: Vec<M>,
+    after_challenge_lde_on_quotient_domain: Vec<M>,
     // For each challenge round, the challenges drawn
     challenges: &'a [Vec<PackedChallenge<SC>>],
     alpha: SC::Challenge,
@@ -43,6 +43,7 @@ pub fn compute_single_rap_quotient_values<'a, SC>(
 ) -> Vec<SC::Challenge>
 where
     SC: StarkGenericConfig,
+    M: Matrix<Val<SC>>,
 {
     let quotient_size = quotient_domain.size();
     assert!(partitioned_main_lde_on_quotient_domain
@@ -51,7 +52,10 @@ where
     assert!(after_challenge_lde_on_quotient_domain
         .iter()
         .all(|m| m.height() >= quotient_size));
-    let preprocessed_width = preprocessed_trace_on_quotient_domain.width();
+    let preprocessed_width = preprocessed_trace_on_quotient_domain
+        .as_ref()
+        .map(|m| m.width())
+        .unwrap_or(0);
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
 
     let qdb = log2_strict_usize(quotient_size) - log2_strict_usize(trace_domain.size());
@@ -87,11 +91,19 @@ where
                 Entry::Preprocessed { offset } => {
                     rotation = rotation.max(offset);
                     assert!(var.index < preprocessed_width);
-                    assert!(preprocessed_trace_on_quotient_domain.height() >= quotient_size);
+                    assert!(
+                        preprocessed_trace_on_quotient_domain
+                            .as_ref()
+                            .unwrap()
+                            .height()
+                            >= quotient_size
+                    );
                 }
                 Entry::Main { part_index, offset } => {
                     rotation = rotation.max(offset);
-                    assert!(var.index < partitioned_main_lde_on_quotient_domain[part_index].width);
+                    assert!(
+                        var.index < partitioned_main_lde_on_quotient_domain[part_index].width()
+                    );
                 }
                 Entry::Public => {
                     assert!(var.index < public_values.len());
@@ -101,7 +113,7 @@ where
                     let ext_width = after_challenge_lde_on_quotient_domain
                         .first()
                         .expect("Challenge phase not supported")
-                        .width
+                        .width()
                         / ext_degree;
                     assert!(var.index < ext_width);
                 }
@@ -157,11 +169,10 @@ where
                         (0..preprocessed_width)
                             .map(|col| {
                                 PackedVal::<SC>::from_fn(|offset| {
-                                    *mat_get_unchecked(
-                                        &preprocessed_trace_on_quotient_domain,
-                                        wrapped_idx[offset],
-                                        col,
-                                    )
+                                    preprocessed_trace_on_quotient_domain
+                                        .as_ref()
+                                        .unwrap()
+                                        .get(wrapped_idx[offset], col)
                                 })
                             })
                             .collect_vec()
@@ -178,7 +189,7 @@ where
                             (0..width)
                                 .map(|col| {
                                     PackedVal::<SC>::from_fn(|offset| {
-                                        *mat_get_unchecked(lde, wrapped_idx[offset], col)
+                                        lde.get(wrapped_idx[offset], col)
                                     })
                                 })
                                 .collect_vec()
@@ -200,7 +211,7 @@ where
                                 .map(|col| {
                                     PackedChallenge::<SC>::from_base_fn(|i| {
                                         PackedVal::<SC>::from_fn(|offset| {
-                                            *mat_get_unchecked(lde, wrapped_idx[offset], col + i)
+                                            lde.get(wrapped_idx[offset], col + i)
                                         })
                                     })
                                 })
@@ -236,8 +247,4 @@ where
             })
         })
         .collect()
-}
-
-fn mat_get_unchecked<T>(mat: &RowMajorMatrix<T>, r: usize, c: usize) -> &T {
-    unsafe { mat.values.get_unchecked(r * mat.width + c) }
 }
