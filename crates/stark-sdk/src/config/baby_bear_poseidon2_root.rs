@@ -2,7 +2,7 @@ use std::any::type_name;
 
 use ff::PrimeField;
 use openvm_stark_backend::{
-    config::StarkConfig, interaction::stark_log_up::StarkLogUpPhase,
+    config::StarkConfig, interaction::fri_log_up::StarkLogUpPhase,
     p3_challenger::MultiField32Challenger, p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
 };

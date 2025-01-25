@@ -415,7 +415,7 @@ where
 /// and one column for the partial sum of log derivative. These columns are trace columns
 /// "after challenge" phase 0, and they are valued in the extension field.
 /// For more details, see the comment in the trace.rs file
-pub fn eval_stark_log_up_phase<AB>(builder: &mut AB, interaction_chunk_size: usize)
+pub fn eval_fri_log_up_phase<AB>(builder: &mut AB, interaction_chunk_size: usize)
 where
     AB: InteractionBuilder + PermutationAirBuilderWithExposedValues,
 {
@@ -522,7 +522,7 @@ where
 ///         max_count_degree + max_field_degree * (interaction_chunk_size - 1)
 ///     )
 ///
-/// More details about this can be found in the function [eval_stark_log_up_phase].
+/// More details about this can be found in the function [eval_fri_log_up_phase].
 ///
 /// The goal is to pick `interaction_chunk_size` so that `logup_degree` does not
 /// exceed `max_constraint_degree` (if possible), while maximizing `interaction_chunk_size`.

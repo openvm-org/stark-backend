@@ -1,6 +1,6 @@
 use openvm_stark_backend::{
     config::StarkConfig,
-    interaction::stark_log_up::StarkLogUpPhase,
+    interaction::fri_log_up::StarkLogUpPhase,
     p3_challenger::{HashChallenger, SerializingChallenger32},
     p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,

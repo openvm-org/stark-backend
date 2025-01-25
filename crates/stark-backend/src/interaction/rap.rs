@@ -5,7 +5,7 @@ use p3_air::Air;
 
 use super::{InteractionBuilder, RapPhaseSeqKind};
 use crate::{
-    interaction::stark_log_up::eval_stark_log_up_phase,
+    interaction::fri_log_up::eval_fri_log_up_phase,
     rap::{PermutationAirBuilderWithExposedValues, Rap},
 };
 
@@ -28,7 +28,7 @@ where
         if builder.num_interactions() != 0 {
             match builder.rap_phase_seq_kind() {
                 RapPhaseSeqKind::StarkLogUp => {
-                    eval_stark_log_up_phase(builder, builder.interaction_chunk_size());
+                    eval_fri_log_up_phase(builder, builder.interaction_chunk_size());
                 }
                 RapPhaseSeqKind::GkrLogUp => todo!(),
             }
