@@ -3,7 +3,6 @@ use std::any::type_name;
 use openvm_stark_backend::{
     config::StarkConfig,
     interaction::fri_log_up::FriLogUpPhase,
-    keygen::MultiStarkKeygenBuilder,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
     p3_field::{extension::BinomialExtensionField, Field, FieldAlgebra},
@@ -22,7 +21,7 @@ use zkhash::{
 
 use super::{
     instrument::{HashStatistics, InstrumentCounter, Instrumented, StarkHashStatistics},
-    FriParameters,
+    FriParameters, DEFAULT_MAX_CONSTRAINT_DEGREE,
 };
 use crate::{
     assert_sc_compatible_with_serde,
@@ -66,6 +65,7 @@ where
     pub fri_params: FriParameters,
     pub config: BabyBearPermutationConfig<P>,
     pub perm: P,
+    pub max_constraint_degree: usize,
 }
 
 impl<P> StarkEngine<BabyBearPermutationConfig<P>> for BabyBearPermutationEngine<P>
@@ -78,10 +78,8 @@ where
         &self.config
     }
 
-    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<BabyBearPermutationConfig<P>> {
-        let mut builder = MultiStarkKeygenBuilder::new(self.config());
-        builder.set_max_constraint_degree(self.fri_params.max_constraint_degree());
-        builder
+    fn max_constraint_degree(&self) -> Option<usize> {
+        Some(self.max_constraint_degree)
     }
 
     fn new_challenger(&self) -> Challenger<P> {
@@ -148,6 +146,7 @@ where
         config,
         perm,
         fri_params,
+        max_constraint_degree: DEFAULT_MAX_CONSTRAINT_DEGREE,
     }
 }
 

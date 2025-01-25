@@ -1,7 +1,6 @@
 use openvm_stark_backend::{
     config::StarkConfig,
     interaction::fri_log_up::FriLogUpPhase,
-    keygen::MultiStarkKeygenBuilder,
     p3_challenger::{HashChallenger, SerializingChallenger32},
     p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
@@ -12,7 +11,7 @@ use p3_fri::{FriConfig, TwoAdicFriPcs};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, CryptographicHasher, SerializingHasher32};
 
-use super::FriParameters;
+use super::{FriParameters, DEFAULT_MAX_CONSTRAINT_DEGREE};
 use crate::engine::{StarkEngine, StarkFriEngine};
 
 type Val = BabyBear;
@@ -41,6 +40,7 @@ where
     pub fri_params: FriParameters,
     pub config: BabyBearByteHashConfig<H>,
     pub byte_hash: H,
+    pub max_constraint_degree: usize,
 }
 
 impl<H> StarkEngine<BabyBearByteHashConfig<H>> for BabyBearByteHashEngine<H>
@@ -51,10 +51,8 @@ where
         &self.config
     }
 
-    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<BabyBearByteHashConfig<H>> {
-        let mut builder = MultiStarkKeygenBuilder::new(self.config());
-        builder.set_max_constraint_degree(self.fri_params.max_constraint_degree());
-        builder
+    fn max_constraint_degree(&self) -> Option<usize> {
+        Some(self.max_constraint_degree)
     }
 
     fn new_challenger(&self) -> Challenger<H> {
@@ -83,6 +81,7 @@ where
         config,
         byte_hash,
         fri_params,
+        max_constraint_degree: DEFAULT_MAX_CONSTRAINT_DEGREE,
     }
 }
 

@@ -36,12 +36,22 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     /// Stark config
     fn config(&self) -> &SC;
 
+    fn max_constraint_degree(&self) -> Option<usize> {
+        None
+    }
+
     /// Creates a new challenger with a deterministic state.
     /// Creating new challenger for prover and verifier separately will result in
     /// them having the same starting state.
     fn new_challenger(&self) -> SC::Challenger;
 
-    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<SC>;
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<SC> {
+        let mut builder = MultiStarkKeygenBuilder::new(self.config());
+        if let Some(max_constraint_degree) = self.max_constraint_degree() {
+            builder.set_max_constraint_degree(max_constraint_degree);
+        }
+        builder
+    }
 
     fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, SC>
     where

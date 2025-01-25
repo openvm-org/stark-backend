@@ -3,7 +3,6 @@ use std::any::type_name;
 use openvm_stark_backend::{
     config::StarkConfig,
     interaction::fri_log_up::FriLogUpPhase,
-    keygen::MultiStarkKeygenBuilder,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
     p3_field::{extension::BinomialExtensionField, Field},
@@ -18,7 +17,7 @@ use rand::{rngs::StdRng, SeedableRng};
 
 use super::{
     instrument::{HashStatistics, Instrumented, StarkHashStatistics},
-    FriParameters,
+    FriParameters, DEFAULT_MAX_CONSTRAINT_DEGREE,
 };
 use crate::{
     assert_sc_compatible_with_serde,
@@ -63,6 +62,7 @@ where
     fri_params: FriParameters,
     pub config: GoldilocksPermutationConfig<P>,
     pub perm: P,
+    pub max_constraint_degree: usize,
 }
 
 impl<P> StarkEngine<GoldilocksPermutationConfig<P>> for GoldilocksPermutationEngine<P>
@@ -75,10 +75,8 @@ where
         &self.config
     }
 
-    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<GoldilocksPermutationConfig<P>> {
-        let mut builder = MultiStarkKeygenBuilder::new(self.config());
-        builder.set_max_constraint_degree(self.fri_params.max_constraint_degree());
-        builder
+    fn max_constraint_degree(&self) -> Option<usize> {
+        Some(self.max_constraint_degree)
     }
 
     fn new_challenger(&self) -> Challenger<P> {
@@ -141,6 +139,7 @@ where
         config,
         perm,
         fri_params,
+        max_constraint_degree: DEFAULT_MAX_CONSTRAINT_DEGREE,
     }
 }
 
