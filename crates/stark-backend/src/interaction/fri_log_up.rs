@@ -486,11 +486,11 @@ pub fn eval_fri_log_up_phase<AB>(
 
         // Some analysis on the degrees of row_lhs and row_rhs:
         //
-        // Let max_field_degree be the maximum degree of all fields across all interactions
-        // for the AIR. Define max_count_degree similarly for the counts of the interactions.
+        // Let max_field_degree_i be the maximum degree of all fields in interaction i
+        // for the AIR. Let count_degree_i to the degree of `count` in interaction i.
         //
-        // By construction, the degree of row_lhs is bounded by 1 + sum_i(max_field_degree),
-        // and the degree of row_rhs is bounded by max_i(max_count_degree_i + sum_{j!=i}(max_field_degree_j))
+        // By construction, the degree of row_lhs is bounded by 1 + sum_i(max_field_degree_i),
+        // and the degree of row_rhs is bounded by max_i(count_degree_i + sum_{j!=i}(max_field_degree_j))
         builder.assert_eq_ext(row_lhs, row_rhs);
 
         phi_0 += perm_local[chunk_idx].into();
