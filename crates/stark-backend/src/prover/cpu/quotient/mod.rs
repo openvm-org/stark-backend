@@ -185,3 +185,93 @@ pub struct QuotientChunk<SC: StarkGenericConfig> {
     /// and number of columns equal to extension field degree.
     pub chunk: RowMajorMatrix<Val<SC>>,
 }
+
+/// Takes in views of pcs data and returns extended views of all matrices evaluated on quotient domains
+/// for quotient poly calculation.
+#[allow(clippy::too_many_arguments)]
+fn create_trace_view_per_air<PB: ProverBackend>(
+    device: &impl QuotientCommitter<PB>,
+    mpk: &DeviceMultiStarkProvingKey<PB>,
+    log_trace_height_per_air: &[u8],
+    cached_views_per_air: &[Vec<SingleCommitPreimage<&PB::Matrix, &PB::PcsData>>],
+    common_main_pcs_data: &PB::PcsData,
+    pvs_per_air: &[Vec<PB::Val>],
+    pcs_data_per_phase: &[PB::PcsData],
+    rap_views_per_phase: Vec<Vec<RapSinglePhaseView<usize, PB::Challenge>>>,
+) -> Vec<RapView<PB::Matrix, PB::Val, PB::Challenge>> {
+    let mut common_main_idx = 0;
+    izip!(
+        &mpk.per_air,
+        log_trace_height_per_air,
+        cached_views_per_air,
+        pvs_per_air
+    )
+    .enumerate()
+    .map(|(i, (pk, &log_trace_height, cached_views, pvs))| {
+        let quotient_degree = pk.vk.quotient_degree;
+        // The AIR will be treated as the full RAP with virtual columns after this
+        let preprocessed = pk.preprocessed_data.as_ref().map(|cv| {
+            device
+                .get_extended_matrix(&cv.data, cv.matrix_idx as usize, quotient_degree)
+                .unwrap()
+        });
+        let mut partitioned_main: Vec<_> = cached_views
+            .iter()
+            .map(|cv| {
+                device
+                    .get_extended_matrix(cv.data, cv.matrix_idx as usize, quotient_degree)
+                    .unwrap()
+            })
+            .collect();
+        if pk.vk.has_common_main() {
+            partitioned_main.push(
+                device
+                    .get_extended_matrix(common_main_pcs_data, common_main_idx, quotient_degree)
+                    .unwrap_or_else(|| {
+                        panic!("common main commitment could not get matrix_idx={common_main_idx}")
+                    }),
+            );
+            common_main_idx += 1;
+        }
+        let pair = PairView {
+            log_trace_height,
+            preprocessed,
+            partitioned_main,
+            public_values: pvs.to_vec(),
+        };
+        let mut per_phase = pcs_data_per_phase
+            .iter()
+            .zip_eq(&rap_views_per_phase)
+            .map(
+                |(pcs_data, rap_views)| -> Option<RapSinglePhaseView<PB::Matrix, PB::Challenge>> {
+                    let rap_view = rap_views.get(i)?;
+                    let matrix_idx = rap_view.inner?;
+                    let extended_matrix =
+                        device.get_extended_matrix(pcs_data, matrix_idx, quotient_degree);
+                    let extended_matrix = extended_matrix.unwrap_or_else(|| {
+                        panic!("could not get matrix_idx={matrix_idx} for rap {i}")
+                    });
+                    Some(RapSinglePhaseView {
+                        inner: Some(extended_matrix),
+                        challenges: rap_view.challenges.clone(),
+                        exposed_values: rap_view.exposed_values.clone(),
+                    })
+                },
+            )
+            .collect_vec();
+        while let Some(last) = per_phase.last() {
+            if last.is_none() {
+                per_phase.pop();
+            } else {
+                break;
+            }
+        }
+        let per_phase = per_phase
+            .into_iter()
+            .map(|v| v.unwrap_or_default())
+            .collect();
+
+        RapView { pair, per_phase }
+    })
+    .collect()
+}

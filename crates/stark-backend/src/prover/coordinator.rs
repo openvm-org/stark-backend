@@ -8,10 +8,7 @@ use tracing::instrument;
 
 use super::{
     hal::{ProverBackend, ProverDevice, QuotientCommitter},
-    types::{
-        DeviceMultiStarkProvingKey, HalProof, ProvingContext, RapSinglePhaseView, RapView,
-        SingleCommitPreimage,
-    },
+    types::{DeviceMultiStarkProvingKey, HalProof, ProvingContext, SingleCommitPreimage},
     Prover,
 };
 use crate::{
@@ -217,35 +214,23 @@ where
         // ==================== Quotient polynomial computation and commitment, if any ====================
         // Note[jpw]: Currently we always call this step, we could add a flag to skip it for protocols that
         // do not require quotient poly.
-        let extended_rap_views = metrics_span("quotient_extended_view_time_ms", || {
-            create_trace_view_per_air(
-                &self.device,
-                mpk,
-                &log_trace_height_per_air,
-                &cached_views_per_air,
-                &common_main_pcs_data,
-                &pvs_per_air,
-                &pcs_data_after,
-                prover_data_after.rap_views_per_phase,
-            )
-        });
-        let (constraints, quotient_degrees): (Vec<_>, Vec<_>) = mpk
-            .vk_view()
-            .per_air
-            .iter()
-            .map(|vk| (&vk.symbolic_constraints.constraints, vk.quotient_degree))
-            .unzip();
         let (quotient_commit, quotient_data) = self.device.eval_and_commit_quotient(
             &mut self.challenger,
-            &constraints,
-            extended_rap_views,
-            &quotient_degrees,
+            &mpk.per_air,
+            &cached_views_per_air,
+            &common_main_pcs_data,
+            &prover_data_after,
         );
         // Observe quotient commitment
         self.challenger.observe(quotient_commit.clone());
 
         // ==================== Polynomial Opening Proofs ====================
         let opening = metrics_span("pcs_opening_time_ms", || {
+            let quotient_degrees = mpk
+                .per_air
+                .iter()
+                .map(|pk| pk.vk.quotient_degree)
+                .collect_vec();
             let preprocessed = mpk
                 .per_air
                 .iter()
@@ -325,94 +310,4 @@ impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
     pub(crate) fn vk_view(&self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
         MultiStarkVerifyingKeyView::new(self.per_air.iter().map(|pk| pk.vk).collect())
     }
-}
-
-/// Takes in views of pcs data and returns extended views of all matrices evaluated on quotient domains
-/// for quotient poly calculation.
-#[allow(clippy::too_many_arguments)]
-fn create_trace_view_per_air<PB: ProverBackend>(
-    device: &impl QuotientCommitter<PB>,
-    mpk: &DeviceMultiStarkProvingKey<PB>,
-    log_trace_height_per_air: &[u8],
-    cached_views_per_air: &[Vec<SingleCommitPreimage<&PB::Matrix, &PB::PcsData>>],
-    common_main_pcs_data: &PB::PcsData,
-    pvs_per_air: &[Vec<PB::Val>],
-    pcs_data_per_phase: &[PB::PcsData],
-    rap_views_per_phase: Vec<Vec<RapSinglePhaseView<usize, PB::Challenge>>>,
-) -> Vec<RapView<PB::Matrix, PB::Val, PB::Challenge>> {
-    let mut common_main_idx = 0;
-    izip!(
-        &mpk.per_air,
-        log_trace_height_per_air,
-        cached_views_per_air,
-        pvs_per_air
-    )
-    .enumerate()
-    .map(|(i, (pk, &log_trace_height, cached_views, pvs))| {
-        let quotient_degree = pk.vk.quotient_degree;
-        // The AIR will be treated as the full RAP with virtual columns after this
-        let preprocessed = pk.preprocessed_data.as_ref().map(|cv| {
-            device
-                .get_extended_matrix(&cv.data, cv.matrix_idx as usize, quotient_degree)
-                .unwrap()
-        });
-        let mut partitioned_main: Vec<_> = cached_views
-            .iter()
-            .map(|cv| {
-                device
-                    .get_extended_matrix(cv.data, cv.matrix_idx as usize, quotient_degree)
-                    .unwrap()
-            })
-            .collect();
-        if pk.vk.has_common_main() {
-            partitioned_main.push(
-                device
-                    .get_extended_matrix(common_main_pcs_data, common_main_idx, quotient_degree)
-                    .unwrap_or_else(|| {
-                        panic!("common main commitment could not get matrix_idx={common_main_idx}")
-                    }),
-            );
-            common_main_idx += 1;
-        }
-        let pair = PairView {
-            log_trace_height,
-            preprocessed,
-            partitioned_main,
-            public_values: pvs.to_vec(),
-        };
-        let mut per_phase = pcs_data_per_phase
-            .iter()
-            .zip_eq(&rap_views_per_phase)
-            .map(
-                |(pcs_data, rap_views)| -> Option<RapSinglePhaseView<PB::Matrix, PB::Challenge>> {
-                    let rap_view = rap_views.get(i)?;
-                    let matrix_idx = rap_view.inner?;
-                    let extended_matrix =
-                        device.get_extended_matrix(pcs_data, matrix_idx, quotient_degree);
-                    let extended_matrix = extended_matrix.unwrap_or_else(|| {
-                        panic!("could not get matrix_idx={matrix_idx} for rap {i}")
-                    });
-                    Some(RapSinglePhaseView {
-                        inner: Some(extended_matrix),
-                        challenges: rap_view.challenges.clone(),
-                        exposed_values: rap_view.exposed_values.clone(),
-                    })
-                },
-            )
-            .collect_vec();
-        while let Some(last) = per_phase.last() {
-            if last.is_none() {
-                per_phase.pop();
-            } else {
-                break;
-            }
-        }
-        let per_phase = per_phase
-            .into_iter()
-            .map(|v| v.unwrap_or_default())
-            .collect();
-
-        RapView { pair, per_phase }
-    })
-    .collect()
 }

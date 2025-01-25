@@ -10,11 +10,10 @@ use p3_matrix::dense::RowMajorMatrix;
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::types::{
-    DeviceMultiStarkProvingKey, DeviceStarkProvingKey, PairView, ProverDataAfterRapPhases, RapView,
+    DeviceMultiStarkProvingKey, DeviceStarkProvingKey, PairView, ProverDataAfterRapPhases,
     SingleCommitPreimage,
 };
 use crate::{
-    air_builders::symbolic::SymbolicExpressionDag,
     config::{Com, StarkGenericConfig, Val},
     keygen::types::MultiStarkProvingKey,
 };
