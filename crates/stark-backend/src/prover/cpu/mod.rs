@@ -5,7 +5,7 @@ use itertools::{zip_eq, Itertools};
 use opener::OpeningProver;
 use p3_challenger::FieldChallenger;
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::FieldExtensionAlgebra;
+use p3_field::{FieldExtensionAlgebra, PackedValue};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use quotient::QuotientCommitter;
@@ -235,9 +235,9 @@ type RapMatrixView<SC> =
     RapView<Arc<RowMajorMatrix<Val<SC>>>, Val<SC>, <SC as StarkGenericConfig>::Challenge>;
 
 impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
-    fn get_extended_matrix(
+    fn get_extended_matrix<'a>(
         &self,
-        view: &PcsData<SC>,
+        view: &'a PcsData<SC>,
         matrix_idx: usize,
         quotient_degree: u8,
     ) -> Option<Arc<RowMajorMatrix<Val<SC>>>> {
