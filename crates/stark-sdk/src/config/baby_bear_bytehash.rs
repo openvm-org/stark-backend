@@ -1,6 +1,7 @@
 use openvm_stark_backend::{
     config::StarkConfig,
     interaction::fri_log_up::FriLogUpPhase,
+    keygen::MultiStarkKeygenBuilder,
     p3_challenger::{HashChallenger, SerializingChallenger32},
     p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
@@ -48,6 +49,12 @@ where
 {
     fn config(&self) -> &BabyBearByteHashConfig<H> {
         &self.config
+    }
+
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<BabyBearByteHashConfig<H>> {
+        let mut builder = MultiStarkKeygenBuilder::new(self.config());
+        builder.set_max_constraint_degree(self.fri_params.max_constraint_degree());
+        builder
     }
 
     fn new_challenger(&self) -> Challenger<H> {

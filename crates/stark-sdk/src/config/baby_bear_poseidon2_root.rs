@@ -2,7 +2,7 @@ use std::any::type_name;
 
 use ff::PrimeField;
 use openvm_stark_backend::{
-    config::StarkConfig, interaction::fri_log_up::FriLogUpPhase,
+    config::StarkConfig, interaction::fri_log_up::FriLogUpPhase, keygen::MultiStarkKeygenBuilder,
     p3_challenger::MultiField32Challenger, p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
 };
@@ -68,6 +68,12 @@ where
 {
     fn config(&self) -> &BabyBearPermutationRootConfig<P> {
         &self.config
+    }
+
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<BabyBearPermutationRootConfig<P>> {
+        let mut builder = MultiStarkKeygenBuilder::new(self.config());
+        builder.set_max_constraint_degree(self.fri_params.max_constraint_degree());
+        builder
     }
 
     fn new_challenger(&self) -> Challenger<P> {

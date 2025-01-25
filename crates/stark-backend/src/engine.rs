@@ -41,9 +41,7 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     /// them having the same starting state.
     fn new_challenger(&self) -> SC::Challenger;
 
-    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<SC> {
-        MultiStarkKeygenBuilder::new(self.config())
-    }
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<SC>;
 
     fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, SC>
     where
