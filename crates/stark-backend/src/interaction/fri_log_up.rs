@@ -6,25 +6,23 @@ use std::{
     marker::PhantomData,
 };
 
-use itertools::{izip, Itertools};
+use itertools::Itertools;
 use p3_air::ExtensionBuilder;
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_field::{ExtensionField, Field, FieldAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{PairTraceView, SymbolicInteraction};
 use crate::{
-    air_builders::symbolic::{
-        symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
-        SymbolicConstraints,
-    },
+    air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
     interaction::{
         trace::Evaluator,
         utils::{generate_betas, generate_rlc_elements},
-        Interaction, InteractionBuilder, InteractionType, RapPhaseProverData, RapPhaseSeq,
-        RapPhaseSeqKind, RapPhaseVerifierData,
+        InteractionBuilder, InteractionType, RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind,
+        RapPhaseVerifierData,
     },
     parizip,
     rap::PermutationAirBuilderWithExposedValues,
@@ -50,6 +48,11 @@ pub enum FriLogUpError {
     NonZeroCumulativeSum,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FriLogUpProvingKey {
+    interaction_partitions: Vec<Vec<usize>>,
+}
+
 impl<F: Field, Challenge, Challenger> RapPhaseSeq<F, Challenge, Challenger>
     for FriLogUpPhase<F, Challenge, Challenger>
 where
@@ -65,6 +68,7 @@ where
         &self,
         challenger: &mut Challenger,
         constraints_per_air: &[&SymbolicConstraints<F>],
+        params_per_air: &[&FriLogUpProvingKey],
         trace_view_per_air: &[PairTraceView<F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)> {
         let has_any_interactions = constraints_per_air
@@ -82,6 +86,7 @@ where
             Self::generate_after_challenge_traces_per_air(
                 &challenges,
                 constraints_per_air,
+                params_per_air,
                 trace_view_per_air,
             )
         });
@@ -192,16 +197,16 @@ where
     fn generate_after_challenge_traces_per_air(
         challenges: &[Challenge; STARK_LU_NUM_CHALLENGES],
         constraints_per_air: &[&SymbolicConstraints<F>],
+        params_per_air: &[&FriLogUpProvingKey],
         trace_view_per_air: &[PairTraceView<F>],
-        max_constraint_degree: usize,
     ) -> Vec<Option<RowMajorMatrix<Challenge>>> {
-        parizip!(constraints_per_air, trace_view_per_air)
-            .map(|(constraints, trace_view)| {
+        parizip!(constraints_per_air, trace_view_per_air, params_per_air)
+            .map(|(constraints, trace_view, params)| {
                 Self::generate_after_challenge_trace(
                     &constraints.interactions,
                     trace_view,
                     challenges,
-                    max_constraint_degree,
+                    &params.interaction_partitions,
                 )
             })
             .collect::<Vec<_>>()
@@ -238,7 +243,7 @@ where
         all_interactions: &[SymbolicInteraction<F>],
         trace_view: &PairTraceView<F>,
         permutation_randomness: &[Challenge; STARK_LU_NUM_CHALLENGES],
-        max_constraint_degree: usize,
+        interaction_partitions: &[Vec<usize>],
     ) -> Option<RowMajorMatrix<Challenge>>
     where
         F: Field,

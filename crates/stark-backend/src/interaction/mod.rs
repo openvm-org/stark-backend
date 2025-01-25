@@ -136,9 +136,18 @@ impl RapPhaseSeqKind {
 /// as well as via some "eval" method that is determined by `RapPhaseId`.
 pub trait RapPhaseSeq<F, Challenge, Challenger> {
     type PartialProof: Clone + Serialize + DeserializeOwned;
+    /// Preprocessed data necessary for the RAP partial proving
+    type PartialProvingKey: Clone + Serialize + DeserializeOwned;
     type Error: Debug;
 
     const ID: RapPhaseSeqKind;
+
+    /// The protocol parameters for the challenge phases may depend on the AIR constraints.
+    fn generate_pk_per_air(
+        &self,
+        symbolic_constraints_per_air: Vec<SymbolicConstraints<F>>,
+        max_constraint_degree: usize,
+    ) -> Vec<Self::PartialProvingKey>;
 
     /// Partially prove the challenge phases,
     ///
@@ -152,6 +161,7 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
         &self,
         challenger: &mut Challenger,
         constraints_per_air: &[&SymbolicConstraints<F>],
+        params_per_air: &[&Self::PartialProvingKey],
         trace_view_per_air: &[PairTraceView<F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)>;
 

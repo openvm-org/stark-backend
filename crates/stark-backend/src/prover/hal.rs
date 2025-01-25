@@ -50,6 +50,8 @@ pub trait ProverBackend {
     ///
     /// For example, multiple buffers for LDE matrices, their trace domain sizes, and pointer to mixed merkle tree.
     type PcsData: Send + Sync;
+    /// Part of proving key for a single RAP specific for the RAP challenge phases
+    type RapPartialProvingKey: Send + Sync;
 }
 
 pub trait MatrixDimensions {

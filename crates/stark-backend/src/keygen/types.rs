@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     air_builders::symbolic::SymbolicConstraintsDag,
-    config::{Com, PcsProverData, StarkGenericConfig, Val},
+    config::{Com, PcsProverData, RapPartialProvingKey, StarkGenericConfig, Val},
     interaction::RapPhaseSeqKind,
 };
 
@@ -101,6 +101,8 @@ pub struct StarkProvingKey<SC: StarkGenericConfig> {
     pub vk: StarkVerifyingKey<Val<SC>, Com<SC>>,
     /// Prover only data for preprocessed trace
     pub preprocessed_data: Option<ProverOnlySinglePreprocessedData<SC>>,
+    /// Partial proving key for RAP partial proving in challenge phases
+    pub rap_partial_pk: RapPartialProvingKey<SC>,
 }
 
 /// Common proving key for multiple AIRs.
@@ -115,7 +117,7 @@ pub struct StarkProvingKey<SC: StarkGenericConfig> {
 ))]
 pub struct MultiStarkProvingKey<SC: StarkGenericConfig> {
     pub per_air: Vec<StarkProvingKey<SC>>,
-    /// Maximum degree of constraints (excluding logup constraints) across all AIRs
+    /// Maximum degree of constraints across all AIRs
     pub max_constraint_degree: usize,
 }
 

@@ -31,6 +31,8 @@ pub struct DeviceStarkProvingKey<'a, PB: ProverBackend> {
     pub vk: &'a StarkVerifyingKey<PB::Val, PB::Commitment>,
     /// Prover only data for preprocessed trace
     pub preprocessed_data: Option<SingleCommitPreimage<PB::Matrix, PB::PcsData>>,
+    /// Additional configuration or preprocessed data for the RAP phases
+    pub rap_partial_pk: PB::RapPartialProvingKey,
 }
 
 /// A view of an already committed trace, together with a reference to the

@@ -16,6 +16,7 @@ where
     PcsProof<Self>: Send + Sync,
     PcsProverData<Self>: Send + Sync,
     RapPhaseSeqPartialProof<Self>: Send + Sync,
+    RapPartialProvingKey<Self>: Send + Sync,
 {
     /// The PCS used to commit to trace polynomials.
     type Pcs: Pcs<Self::Challenge, Self::Challenger>;
@@ -72,6 +73,12 @@ pub type RapPhaseSeqPartialProof<SC> = <<SC as StarkGenericConfig>::RapPhaseSeq 
     <SC as StarkGenericConfig>::Challenger,
 >>::PartialProof;
 
+pub type RapPartialProvingKey<SC> = <<SC as StarkGenericConfig>::RapPhaseSeq as RapPhaseSeq<
+    Val<SC>,
+    <SC as StarkGenericConfig>::Challenge,
+    <SC as StarkGenericConfig>::Challenger,
+>>::PartialProvingKey;
+
 pub type RapPhaseSeqError<SC> = <<SC as StarkGenericConfig>::RapPhaseSeq as RapPhaseSeq<
     Val<SC>,
     <SC as StarkGenericConfig>::Challenge,
@@ -111,6 +118,7 @@ where
     Pcs::Proof: Send + Sync,
     Rps: RapPhaseSeq<<Pcs::Domain as PolynomialSpace>::Val, Challenge, Challenger>,
     Rps::PartialProof: Send + Sync,
+    Rps::PartialProvingKey: Send + Sync,
     Challenger: FieldChallenger<<Pcs::Domain as PolynomialSpace>::Val>
         + CanObserve<<Pcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment>
         + CanSample<Challenge>,

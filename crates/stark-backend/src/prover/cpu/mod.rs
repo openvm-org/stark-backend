@@ -19,7 +19,10 @@ use super::{
 };
 use crate::{
     air_builders::symbolic::SymbolicConstraints,
-    config::{Com, PcsProof, PcsProverData, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
+    config::{
+        Com, PcsProof, PcsProverData, RapPartialProvingKey, RapPhaseSeqPartialProof,
+        StarkGenericConfig, Val,
+    },
     interaction::RapPhaseSeq,
     keygen::{types::MultiStarkProvingKey, view::MultiStarkVerifyingKeyView},
     proof::OpeningProof,
@@ -62,6 +65,7 @@ impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
     type Challenger = SC::Challenger;
     type Matrix = Arc<RowMajorMatrix<Val<SC>>>;
     type PcsData = PcsData<SC>;
+    type RapPartialProvingKey = RapPartialProvingKey<SC>;
 }
 
 #[derive(Derivative)]
@@ -132,10 +136,16 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         ProverDataAfterRapPhases<CpuBackend<SC>>,
     ) {
         assert_eq!(pk_views.len(), trace_views.len());
-        let constraints_per_air: Vec<_> = pk_views
+        let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = pk_views
             .iter()
-            .map(|pk| SymbolicConstraints::from(&pk.vk.symbolic_constraints))
-            .collect();
+            .map(|pk| {
+                (
+                    // TODO[jpw]: remove this after RapPhaseSeq trait is modified
+                    SymbolicConstraints::from(&pk.vk.symbolic_constraints),
+                    &pk.rap_partial_pk,
+                )
+            })
+            .unzip();
 
         let trace_views = trace_views
             .iter()
@@ -152,6 +162,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             .partially_prove(
                 challenger,
                 &constraints_per_air.iter().collect_vec(),
+                &rap_pk_per_air,
                 &trace_views,
             )
             .map_or((None, None), |(p, d)| (Some(p), Some(d)));
@@ -427,6 +438,7 @@ where
                     air_name: &pk.air_name,
                     vk: &pk.vk,
                     preprocessed_data,
+                    rap_partial_pk: pk.rap_partial_pk.clone(),
                 }
             })
             .collect();
