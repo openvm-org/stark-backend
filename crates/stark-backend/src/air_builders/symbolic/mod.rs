@@ -401,7 +401,8 @@ impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
 
             if self.rap_phase_seq_kind == RapPhaseSeqKind::FriLogUp {
                 let num_chunks =
-                    find_interaction_chunks(&self.interactions, self.max_constraint_degree).len();
+                    find_interaction_chunks(&self.interactions, self.max_constraint_degree)
+                        .num_chunks();
                 let perm_width = num_chunks + 1;
                 self.after_challenge = Self::new_after_challenge(&[perm_width]);
             }

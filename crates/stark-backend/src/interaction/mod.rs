@@ -145,7 +145,7 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
     /// The protocol parameters for the challenge phases may depend on the AIR constraints.
     fn generate_pk_per_air(
         &self,
-        symbolic_constraints_per_air: Vec<SymbolicConstraints<F>>,
+        symbolic_constraints_per_air: &[SymbolicConstraints<F>],
         max_constraint_degree: usize,
     ) -> Vec<Self::PartialProvingKey>;
 
