@@ -36,6 +36,8 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     /// Stark config
     fn config(&self) -> &SC;
 
+    /// During keygen, the circuit may be optimized but it will **try** to keep the
+    /// constraint degree at most this value.
     fn max_constraint_degree(&self) -> Option<usize> {
         None
     }

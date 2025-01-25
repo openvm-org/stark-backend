@@ -44,6 +44,10 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         }
     }
 
+    /// The builder will **try** to keep the max constraint degree across all AIRs below this value.
+    /// If it is given AIRs that exceed this value, it will still include them.
+    ///
+    /// Currently this is only used for interaction chunking in FRI logup.
     pub fn set_max_constraint_degree(&mut self, max_constraint_degree: usize) {
         self.max_constraint_degree = max_constraint_degree;
     }
@@ -62,7 +66,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
     /// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
-    pub fn generate_pk(self) -> MultiStarkProvingKey<SC> {
+    pub fn generate_pk(mut self) -> MultiStarkProvingKey<SC> {
         let air_max_constraint_degree = self
             .partitioned_airs
             .iter()
@@ -81,8 +85,15 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             "Max constraint (excluding logup constraints) degree across all AIRs: {}",
             air_max_constraint_degree
         );
-        if self.max_constraint_degree != 0 {
-            assert!(air_max_constraint_degree <= self.max_constraint_degree);
+        if self.max_constraint_degree != 0 && air_max_constraint_degree > self.max_constraint_degree
+        {
+            // This means the quotient polynomial is already going to be higher degree, so we
+            // might as well use it.
+            tracing::info!(
+                "Setting max_constraint_degree from {} to {air_max_constraint_degree}",
+                self.max_constraint_degree
+            );
+            self.max_constraint_degree = air_max_constraint_degree;
         }
         // First pass: get symbolic constraints and interactions but RAP phase constraints are not final
         let symbolic_constraints_per_air = self
