@@ -427,7 +427,6 @@ where
                     air_name: &pk.air_name,
                     vk: &pk.vk,
                     preprocessed_data,
-                    rap_partial_pk: pk.rap_phase_seq_pk.clone(),
                 }
             })
             .collect();

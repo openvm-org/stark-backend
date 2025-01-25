@@ -17,8 +17,8 @@ use self::{
 use super::PartitionedAirBuilder;
 use crate::{
     interaction::{
-        rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, InteractionType,
-        RapPhaseSeqKind, SymbolicInteraction,
+        fri_log_up::find_interaction_chunks, rap::InteractionPhaseAirBuilder, Interaction,
+        InteractionBuilder, InteractionType, RapPhaseSeqKind, SymbolicInteraction,
     },
     keygen::types::{StarkVerifyingParams, TraceWidth},
     rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
@@ -399,8 +399,12 @@ impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
             assert!(self.challenges.is_empty());
             assert!(self.exposed_values_after_challenge.is_empty());
 
-            let perm_width = num_interactions.div_ceil(self.max_constraint_degree) + 1;
-            self.after_challenge = Self::new_after_challenge(&[perm_width]);
+            if self.rap_phase_seq_kind == RapPhaseSeqKind::FriLogUp {
+                let num_chunks =
+                    find_interaction_chunks(&self.interactions, self.max_constraint_degree).len();
+                let perm_width = num_chunks + 1;
+                self.after_challenge = Self::new_after_challenge(&[perm_width]);
+            }
 
             let phases_shapes = self.rap_phase_seq_kind.shape();
             let phase_shape = phases_shapes.first().unwrap();

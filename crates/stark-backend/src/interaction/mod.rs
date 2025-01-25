@@ -108,7 +108,7 @@ pub struct RapPhaseShape {
 }
 
 /// Supported challenge phases in a RAP.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RapPhaseSeqKind {
     GkrLogUp,

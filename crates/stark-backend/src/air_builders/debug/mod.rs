@@ -12,7 +12,7 @@ use crate::{
     config::{StarkGenericConfig, Val},
     interaction::{
         rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, InteractionType,
-        RapPhaseSeqKind,
+        RapPhaseSeqKind, SymbolicInteraction,
     },
     keygen::types::StarkProvingKey,
     rap::{AnyRap, PermutationAirBuilderWithExposedValues},
@@ -277,14 +277,19 @@ where
     }
 }
 
+// No-op
 impl<SC: StarkGenericConfig> InteractionPhaseAirBuilder for DebugConstraintBuilder<'_, SC> {
     fn finalize_interactions(&mut self) {}
 
-    fn interaction_chunk_size(&self) -> usize {
+    fn max_constraint_degree(&self) -> usize {
         0
     }
 
     fn rap_phase_seq_kind(&self) -> RapPhaseSeqKind {
         self.rap_phase_seq_kind
+    }
+
+    fn symbolic_interactions(&self) -> Vec<SymbolicInteraction<Val<SC>>> {
+        vec![]
     }
 }

@@ -1,4 +1,10 @@
-use std::{array, borrow::Borrow, marker::PhantomData};
+use std::{
+    array,
+    borrow::Borrow,
+    cmp::max,
+    iter::{self, zip},
+    marker::PhantomData,
+};
 
 use itertools::{izip, Itertools};
 use p3_air::ExtensionBuilder;
@@ -229,7 +235,7 @@ where
     /// ## Panics
     /// - If `partitioned_main` is empty.
     pub fn generate_after_challenge_trace(
-        all_interactions: &[Interaction<SymbolicExpression<F>>],
+        all_interactions: &[SymbolicInteraction<F>],
         trace_view: &PairTraceView<F>,
         permutation_randomness: &[Challenge; STARK_LU_NUM_CHALLENGES],
         max_constraint_degree: usize,
@@ -264,10 +270,16 @@ where
         // is the number of bundles
         let num_interactions = all_interactions.len();
         let height = trace_view.partitioned_main[0].height();
-        // To optimize memory and parallelism, we split the trace rows into chunks
-        // based on the number of cpu threads available, and then do all
-        // computations necessary for that chunk within a single thread.
-        let perm_width = num_interactions.div_ceil(interaction_chunk_size) + 1;
+
+        // Note: we could precompute this and include in the proving key, but this should be
+        // a fast scan and only done once per AIR and not per row, so it is more ergonomic to compute
+        // on the fly. If we introduce a more advanced chunking algorithm, then we will need to
+        // cache the chunking information in the proving key.
+        let chunk_end = find_interaction_chunks(all_interactions, max_constraint_degree);
+        let chunk_split_at = iter::once(chunk_end[0])
+            .chain(chunk_end.windows(2).map(|w| w[1] - w[0]))
+            .collect_vec();
+        let perm_width = chunk_end.len() + 1;
         let mut perm_values = Challenge::zero_vec(height * perm_width);
         debug_assert!(
             trace_view
@@ -277,6 +289,9 @@ where
             "All main trace parts must have same height"
         );
 
+        // To optimize memory and parallelism, we split the trace rows into chunks
+        // based on the number of cpu threads available, and then do all
+        // computations necessary for that chunk within a single thread.
         #[cfg(feature = "parallel")]
         let num_threads = rayon::current_num_threads();
         #[cfg(not(feature = "parallel"))]
@@ -295,17 +310,17 @@ where
             height,
             local_index,
         };
-        let height_chunk_size = height.div_ceil(num_threads);
+        let height_per_thread = height.div_ceil(num_threads);
         perm_values
-            .par_chunks_mut(height_chunk_size * perm_width)
+            .par_chunks_mut(height_per_thread * perm_width)
             .enumerate()
-            .for_each(|(chunk_idx, perm_values)| {
+            .for_each(|(thread_idx, perm_values)| {
                 // perm_values is now local_height x perm_width row-major matrix
                 let num_rows = perm_values.len() / perm_width;
                 // the interaction chunking requires more memory because we must
                 // allocate separate memory for the denominators and reciprocals
                 let mut denoms = Challenge::zero_vec(num_rows * num_interactions);
-                let row_offset = chunk_idx * height_chunk_size;
+                let row_offset = thread_idx * height_per_thread;
                 // compute the denominators to be inverted:
                 for (n, denom_row) in denoms.chunks_exact_mut(num_interactions).enumerate() {
                     let evaluator = evaluator(row_offset + n);
@@ -327,25 +342,30 @@ where
                 // trying to divide by zero.
                 let reciprocals = p3_field::batch_multiplicative_inverse(&denoms);
                 drop(denoms);
+                // For loop over rows in same thread:
                 // This block should already be in a single thread, but rayon is able
                 // to do more magic sometimes
                 perm_values
                     .par_chunks_exact_mut(perm_width)
                     .zip(reciprocals.par_chunks_exact(num_interactions))
                     .enumerate()
-                    .for_each(|(n, (perm_row, reciprocal_chunk))| {
+                    .for_each(|(n, (perm_row, reciprocals))| {
                         debug_assert_eq!(perm_row.len(), perm_width);
-                        debug_assert_eq!(reciprocal_chunk.len(), num_interactions);
+                        debug_assert_eq!(reciprocals.len(), num_interactions);
+                        let mut remaining_reciprocals = reciprocals;
+                        let mut remaining_interactions = all_interactions;
 
                         let evaluator = evaluator(row_offset + n);
                         let mut row_sum = Challenge::ZERO;
-                        for (perm_val, reciprocal_chunk, interaction_chunk) in izip!(
-                            perm_row.iter_mut(),
-                            reciprocal_chunk.chunks(interaction_chunk_size),
-                            all_interactions.chunks(interaction_chunk_size)
-                        ) {
+                        for (&mid, perm_val) in zip(chunk_split_at.iter(), perm_row.iter_mut()) {
+                            let reciprocal_chunk;
+                            let interaction_chunk;
+                            (reciprocal_chunk, remaining_reciprocals) =
+                                remaining_reciprocals.split_at(mid);
+                            (interaction_chunk, remaining_interactions) =
+                                remaining_interactions.split_at(mid);
                             for (reciprocal, interaction) in
-                                izip!(reciprocal_chunk, interaction_chunk)
+                                zip(reciprocal_chunk, interaction_chunk)
                             {
                                 let mut interaction_val =
                                     *reciprocal * evaluator.eval_expr(&interaction.count);
@@ -376,6 +396,7 @@ where
 }
 
 // Initial version taken from valida/machine/src/chip.rs under MIT license.
+//
 /// The permutation row consists of 1 column for each bundle of interactions
 /// and one column for the partial sum of log derivative. These columns are trace columns
 /// "after challenge" phase 0, and they are valued in the extension field.
@@ -404,13 +425,9 @@ pub fn eval_fri_log_up_phase<AB>(
     let perm_next: &[AB::VarEF] = (*perm_next).borrow();
 
     let all_interactions = builder.all_interactions().to_vec();
-    #[cfg(debug_assertions)]
-    {
-        let num_interactions = all_interactions.len();
-        let perm_width = num_interactions.div_ceil(interaction_chunk_size) + 1;
-        assert_eq!(perm_width, perm_local.len());
-        assert_eq!(perm_width, perm_next.len());
-    }
+    let chunk_end = find_interaction_chunks(symbolic_interactions, max_constraint_degree);
+    debug_assert_eq!(chunk_end.len() + 1, perm_local.len());
+
     let phi_local = *perm_local.last().unwrap();
     let phi_next = *perm_next.last().unwrap();
 
@@ -421,10 +438,13 @@ pub fn eval_fri_log_up_phase<AB>(
     let mut phi_rhs = AB::ExprEF::ZERO;
     let mut phi_0 = AB::ExprEF::ZERO;
 
-    for (chunk_idx, interaction_chunk) in
-        all_interactions.chunks(interaction_chunk_size).enumerate()
-    {
-        let interaction_chunk = interaction_chunk.to_vec();
+    for (chunk_idx, &end) in chunk_end.iter().enumerate() {
+        let start = if chunk_idx == 0 {
+            0
+        } else {
+            chunk_end[chunk_idx - 1]
+        };
+        let interaction_chunk = &all_interactions[start..end];
 
         let denoms_per_chunk = interaction_chunk
             .iter()
@@ -444,7 +464,7 @@ pub fn eval_fri_log_up_phase<AB>(
         }
 
         let mut row_rhs = AB::ExprEF::ZERO;
-        for (i, interaction) in interaction_chunk.into_iter().enumerate() {
+        for (i, interaction) in interaction_chunk.iter().cloned().enumerate() {
             let mut term: AB::ExprEF = interaction.count.into();
             if interaction.interaction_type == InteractionType::Receive {
                 term = -term;
@@ -462,8 +482,8 @@ pub fn eval_fri_log_up_phase<AB>(
         // Let max_field_degree be the maximum degree of all fields across all interactions
         // for the AIR. Define max_count_degree similarly for the counts of the interactions.
         //
-        // By construction, the degree of row_lhs is bounded by 1 + max_field_degree * interaction_chunk_size,
-        // and the degree of row_rhs is bounded by max_count_degree + max_field_degree * (interaction_chunk_size-1)
+        // By construction, the degree of row_lhs is bounded by 1 + sum_i(max_field_degree),
+        // and the degree of row_rhs is bounded by max_i(max_count_degree_i + sum_{j!=i}(max_field_degree_j))
         builder.assert_eq_ext(row_lhs, row_rhs);
 
         phi_0 += perm_local[chunk_idx].into();
@@ -480,34 +500,71 @@ pub fn eval_fri_log_up_phase<AB>(
         .assert_eq_ext(*perm_local.last().unwrap(), cumulative_sum);
 }
 
-/// Computes the interaction chunk size for the AIR.
-///
-/// `global_max_constraint_degree` is the maximum constraint degree across all AIRs.
-/// The degree of the dominating logup constraint is bounded by
+/// We can chunk interactions, where the degree of the dominating logup constraint is bounded by
 ///
 ///     logup_degree = max(
-///         1 + max_field_degree * interaction_chunk_size,
-///         max_count_degree + max_field_degree * (interaction_chunk_size - 1)
+///         1 + sum_i(max_field_degree_i),
+///         max_i(count_degree_i + sum_{j!=i}(max_field_degree_j))
 ///     )
+/// where i,j refer to interactions in the chunk.
 ///
 /// More details about this can be found in the function [eval_fri_log_up_phase].
 ///
-/// The goal is to pick `interaction_chunk_size` so that `logup_degree` does not
-/// exceed `max_constraint_degree` (if possible), while maximizing `interaction_chunk_size`.
-fn find_interaction_chunk_size<F: Field>(
-    constraints: &SymbolicConstraints<F>,
-    global_max_constraint_degree: usize,
-) -> usize {
-    let (max_field_degree, max_count_degree) = constraints.max_interaction_degrees();
-
-    if max_field_degree == 0 {
-        1
-    } else {
-        let mut interaction_chunk_size = (global_max_constraint_degree - 1) / max_field_degree;
-        interaction_chunk_size = interaction_chunk_size.min(
-            (global_max_constraint_degree - max_count_degree + max_field_degree) / max_field_degree,
-        );
-        interaction_chunk_size = interaction_chunk_size.max(1);
-        interaction_chunk_size
+/// We greedily pack interactions into chunks while making sure the constraint
+/// degree does not exceed `max_constraint_degree` (if possible).
+/// `max_constraint_degree` is the maximum constraint degree across all AIRs.
+/// Greedy packing means that we do not reorder the interactions.
+///
+/// Returns `chunk_end: Vec<usize>` where `num_chunks = chunk_end.len()` and the interactions
+/// are chunked into `0..chunk_end[0], chunk_end[0]..chunk_end[1], ...`.
+/// If `max_constraint_degree == 0`, then `num_chunks = interactions.len()` and no chunking is done.
+///
+/// ## Panics
+/// If `max_constraint_degree > 0` and there are interactions that cannot fit in a singleton chunk.
+pub(crate) fn find_interaction_chunks<F: Field>(
+    interactions: &[SymbolicInteraction<F>],
+    max_constraint_degree: usize,
+) -> Vec<usize> {
+    if interactions.is_empty() {
+        return vec![];
     }
+    let mut running_sum_field_degree = 0;
+    let mut numerator_max_degree = 0;
+    let mut chunk_idx = vec![];
+    for (i, interaction) in interactions.iter().enumerate() {
+        let field_degree = interaction
+            .fields
+            .iter()
+            .map(|f| f.degree_multiple())
+            .max()
+            .unwrap_or(0);
+        let count_degree = interaction.count.degree_multiple();
+        // Can we add this interaction to the current chunk?
+        let new_num_max_degree = max(
+            numerator_max_degree + field_degree,
+            count_degree + running_sum_field_degree,
+        );
+        let new_denom_degree = running_sum_field_degree + field_degree;
+        if max(new_num_max_degree, new_denom_degree + 1) <= max_constraint_degree {
+            // include in current chunk
+            numerator_max_degree = new_num_max_degree;
+            running_sum_field_degree += field_degree;
+        } else {
+            // seal current chunk + start new chunk
+            if i > 0 {
+                // if i == 0, that means the interaction exceeds the max_constraint_degree
+                chunk_idx.push(i);
+            }
+            numerator_max_degree = count_degree;
+            running_sum_field_degree = field_degree;
+            if max_constraint_degree > 0
+                && max(count_degree, field_degree + 1) > max_constraint_degree
+            {
+                panic!("Interaction with field_degree={field_degree}, count_degree={count_degree} exceeds max_constraint_degree={max_constraint_degree}");
+            }
+        }
+    }
+    // the last interaction is in a chunk that has not been sealed
+    chunk_idx.push(interactions.len());
+    chunk_idx
 }

@@ -35,7 +35,7 @@ where
                     eval_fri_log_up_phase(
                         builder,
                         &symbolic_interactions,
-                        builder.global_max_constraint_degree(),
+                        builder.max_constraint_degree(),
                     );
                 }
                 RapPhaseSeqKind::GkrLogUp => todo!(),

@@ -89,7 +89,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
         let pk_per_air: Vec<_> = self
             .partitioned_airs
-            .iter()
+            .into_iter()
             .map(|keygen_builder| keygen_builder.generate_pk(self.max_constraint_degree))
             .collect();
 
