@@ -75,7 +75,7 @@ pub fn check_constraints<R, SC>(
             is_first_row: Val::<SC>::ZERO,
             is_last_row: Val::<SC>::ZERO,
             is_transition: Val::<SC>::ONE,
-            rap_phase_seq_kind: RapPhaseSeqKind::StarkLogUp, // unused
+            rap_phase_seq_kind: RapPhaseSeqKind::FriLogUp, // unused
             has_common_main: rap.common_main_width() > 0,
         };
         if i == 0 {

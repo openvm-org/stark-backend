@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     air_builders::symbolic::SymbolicConstraintsDag,
-    config::{Com, PcsProverData, RapPhaseSeqProvingKey, StarkGenericConfig, Val},
+    config::{Com, PcsProverData, StarkGenericConfig, Val},
     interaction::RapPhaseSeqKind,
 };
 
@@ -101,7 +101,6 @@ pub struct StarkProvingKey<SC: StarkGenericConfig> {
     pub vk: StarkVerifyingKey<Val<SC>, Com<SC>>,
     /// Prover only data for preprocessed trace
     pub preprocessed_data: Option<ProverOnlySinglePreprocessedData<SC>>,
-    pub rap_phase_seq_pk: RapPhaseSeqProvingKey<SC>,
 }
 
 /// Common proving key for multiple AIRs.

@@ -8,8 +8,8 @@ use tracing::instrument;
 
 use crate::{
     air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
-    config::{Com, RapPhaseSeqProvingKey, StarkGenericConfig, Val},
-    interaction::{HasInteractionChunkSize, RapPhaseSeq, RapPhaseSeqKind},
+    config::{Com, StarkGenericConfig, Val},
+    interaction::{RapPhaseSeq, RapPhaseSeqKind},
     keygen::types::{
         MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey, StarkVerifyingKey,
         TraceWidth, VerifierSinglePreprocessedData,
@@ -32,6 +32,7 @@ pub struct MultiStarkKeygenBuilder<'a, SC: StarkGenericConfig> {
     pub config: &'a SC,
     /// Information for partitioned AIRs.
     partitioned_airs: Vec<AirKeygenBuilder<SC>>,
+    max_constraint_degree: usize,
 }
 
 impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
@@ -39,7 +40,12 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         Self {
             config,
             partitioned_airs: vec![],
+            max_constraint_degree: 0,
         }
+    }
+
+    pub fn set_max_constraint_degree(&mut self, max_constraint_degree: usize) {
+        self.max_constraint_degree = max_constraint_degree;
     }
 
     /// Default way to add a single Interactive AIR.
@@ -56,8 +62,8 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
     /// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
-    pub fn generate_pk(self) -> MultiStarkProvingKey<SC> {
-        let global_max_constraint_degree = self
+    pub fn generate_pk(mut self) -> MultiStarkProvingKey<SC> {
+        let air_max_constraint_degree = self
             .partitioned_airs
             .iter()
             .map(|keygen_builder| {
@@ -73,24 +79,18 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             .unwrap();
         tracing::info!(
             "Max constraint (excluding logup constraints) degree across all AIRs: {}",
-            global_max_constraint_degree
+            air_max_constraint_degree
         );
-
-        let symbolic_constraints_per_air = self
-            .partitioned_airs
-            .iter()
-            .map(|keygen_builder| keygen_builder.get_symbolic_builder(None).constraints())
-            .collect();
-        let rap_phase_seq_pk_per_air = self
-            .config
-            .rap_phase_seq()
-            .generate_pk_per_air(symbolic_constraints_per_air);
+        if self.max_constraint_degree != 0 {
+            assert!(air_max_constraint_degree <= self.max_constraint_degree);
+        } else {
+            self.max_constraint_degree = air_max_constraint_degree;
+        }
 
         let pk_per_air: Vec<_> = self
             .partitioned_airs
-            .into_iter()
-            .zip_eq(rap_phase_seq_pk_per_air)
-            .map(|(keygen_builder, params)| keygen_builder.generate_pk(params))
+            .iter()
+            .map(|keygen_builder| keygen_builder.generate_pk(self.max_constraint_degree))
             .collect();
 
         for pk in pk_per_air.iter() {
@@ -124,7 +124,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
         MultiStarkProvingKey {
             per_air: pk_per_air,
-            max_constraint_degree: global_max_constraint_degree,
+            max_constraint_degree: self.max_constraint_degree,
         }
     }
 }
@@ -145,11 +145,10 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             .max_constraint_degree()
     }
 
-    fn generate_pk(self, rap_phase_seq_pk: RapPhaseSeqProvingKey<SC>) -> StarkProvingKey<SC> {
+    fn generate_pk(self, max_constraint_degree: usize) -> StarkProvingKey<SC> {
         let air_name = self.air.name();
 
-        let interaction_chunk_size = rap_phase_seq_pk.interaction_chunk_size();
-        let symbolic_builder = self.get_symbolic_builder(Some(interaction_chunk_size));
+        let symbolic_builder = self.get_symbolic_builder(Some(max_constraint_degree));
         let params = symbolic_builder.params();
         let symbolic_constraints = symbolic_builder.constraints();
         let log_quotient_degree = symbolic_constraints.get_log_quotient_degree();
@@ -175,13 +174,12 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             air_name,
             vk,
             preprocessed_data: prep_prover_data,
-            rap_phase_seq_pk,
         }
     }
 
     fn get_symbolic_builder(
         &self,
-        interaction_chunk_size: Option<usize>,
+        max_constraint_degree: Option<usize>,
     ) -> SymbolicRapBuilder<Val<SC>> {
         let width = TraceWidth {
             preprocessed: self.prep_keygen_data.width(),
@@ -195,7 +193,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             &[],
             &[],
             SC::RapPhaseSeq::ID,
-            interaction_chunk_size.unwrap_or(1),
+            max_constraint_degree.unwrap_or(0),
         )
     }
 }

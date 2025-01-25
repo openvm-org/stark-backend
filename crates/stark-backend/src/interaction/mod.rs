@@ -112,15 +112,15 @@ pub struct RapPhaseShape {
 #[repr(u8)]
 pub enum RapPhaseSeqKind {
     GkrLogUp,
-    /// Up to one phase with prover/verifier given by [[fri_log_up::StarkLogUpPhase]] and
+    /// Up to one phase with prover/verifier given by [[fri_log_up::FriLogUpPhase]] and
     /// constraints given by [[fri_log_up::eval_fri_log_up_phase]].
-    StarkLogUp,
+    FriLogUp,
 }
 
 impl RapPhaseSeqKind {
     pub fn shape(&self) -> Vec<RapPhaseShape> {
         match self {
-            RapPhaseSeqKind::StarkLogUp => vec![RapPhaseShape {
+            RapPhaseSeqKind::FriLogUp => vec![RapPhaseShape {
                 num_challenges: STARK_LU_NUM_CHALLENGES,
                 num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
                 extra_opening_rots: vec![],
@@ -130,26 +130,15 @@ impl RapPhaseSeqKind {
     }
 }
 
-pub trait HasInteractionChunkSize {
-    fn interaction_chunk_size(&self) -> usize;
-}
-
 /// Defines a particular protocol for the "after challenge" phase in a RAP.
 ///
 /// A [RapPhaseSeq] is defined by the proving and verifying methods implemented in this trait,
 /// as well as via some "eval" method that is determined by `RapPhaseId`.
 pub trait RapPhaseSeq<F, Challenge, Challenger> {
     type PartialProof: Clone + Serialize + DeserializeOwned;
-    type ProvingKey: Clone + Serialize + DeserializeOwned + HasInteractionChunkSize;
     type Error: Debug;
 
     const ID: RapPhaseSeqKind;
-
-    /// The protocol parameters for the challenge phases may depend on the AIR constraints.
-    fn generate_pk_per_air(
-        &self,
-        symbolic_constraints_per_air: Vec<SymbolicConstraints<F>>,
-    ) -> Vec<Self::ProvingKey>;
 
     /// Partially prove the challenge phases,
     ///
@@ -162,7 +151,6 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        params_per_air: &[&Self::ProvingKey],
         constraints_per_air: &[&SymbolicConstraints<F>],
         trace_view_per_air: &[PairTraceView<F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)>;

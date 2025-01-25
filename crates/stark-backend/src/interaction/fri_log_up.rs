@@ -6,10 +6,9 @@ use p3_challenger::{CanObserve, FieldChallenger};
 use p3_field::{ExtensionField, Field, FieldAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::PairTraceView;
+use super::{PairTraceView, SymbolicInteraction};
 use crate::{
     air_builders::symbolic::{
         symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
@@ -18,8 +17,8 @@ use crate::{
     interaction::{
         trace::Evaluator,
         utils::{generate_betas, generate_rlc_elements},
-        HasInteractionChunkSize, Interaction, InteractionBuilder, InteractionType,
-        RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
+        Interaction, InteractionBuilder, InteractionType, RapPhaseProverData, RapPhaseSeq,
+        RapPhaseSeqKind, RapPhaseVerifierData,
     },
     parizip,
     rap::PermutationAirBuilderWithExposedValues,
@@ -27,11 +26,11 @@ use crate::{
 };
 
 #[derive(Default)]
-pub struct StarkLogUpPhase<F, Challenge, Challenger> {
+pub struct FriLogUpPhase<F, Challenge, Challenger> {
     _marker: PhantomData<(F, Challenge, Challenger)>,
 }
 
-impl<F, Challenge, Challenger> StarkLogUpPhase<F, Challenge, Challenger> {
+impl<F, Challenge, Challenger> FriLogUpPhase<F, Challenge, Challenger> {
     pub fn new() -> Self {
         Self {
             _marker: PhantomData,
@@ -40,58 +39,25 @@ impl<F, Challenge, Challenger> StarkLogUpPhase<F, Challenge, Challenger> {
 }
 
 #[derive(Error, Debug)]
-pub enum StarkLogUpError {
+pub enum FriLogUpError {
     #[error("non-zero cumulative sum")]
     NonZeroCumulativeSum,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct StarkLogUpProvingKey {
-    chunk_size: usize,
-}
-
-impl HasInteractionChunkSize for StarkLogUpProvingKey {
-    fn interaction_chunk_size(&self) -> usize {
-        self.chunk_size
-    }
-}
-
 impl<F: Field, Challenge, Challenger> RapPhaseSeq<F, Challenge, Challenger>
-    for StarkLogUpPhase<F, Challenge, Challenger>
+    for FriLogUpPhase<F, Challenge, Challenger>
 where
     F: Field,
     Challenge: ExtensionField<F>,
     Challenger: FieldChallenger<F>,
 {
     type PartialProof = ();
-    type ProvingKey = StarkLogUpProvingKey;
-    type Error = StarkLogUpError;
-    const ID: RapPhaseSeqKind = RapPhaseSeqKind::StarkLogUp;
-
-    fn generate_pk_per_air(
-        &self,
-        symbolic_constraints_per_air: Vec<SymbolicConstraints<F>>,
-    ) -> Vec<Self::ProvingKey> {
-        let global_max_constraint_degree = symbolic_constraints_per_air
-            .iter()
-            .map(|constraints| constraints.max_constraint_degree())
-            .max()
-            .unwrap_or(0);
-
-        symbolic_constraints_per_air
-            .iter()
-            .map(|constraints| {
-                let chunk_size =
-                    find_interaction_chunk_size(constraints, global_max_constraint_degree);
-                StarkLogUpProvingKey { chunk_size }
-            })
-            .collect_vec()
-    }
+    type Error = FriLogUpError;
+    const ID: RapPhaseSeqKind = RapPhaseSeqKind::FriLogUp;
 
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        rap_pk_per_air: &[&Self::ProvingKey],
         constraints_per_air: &[&SymbolicConstraints<F>],
         trace_view_per_air: &[PairTraceView<F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)> {
@@ -110,7 +76,6 @@ where
             Self::generate_after_challenge_traces_per_air(
                 &challenges,
                 constraints_per_air,
-                rap_pk_per_air,
                 trace_view_per_air,
             )
         });
@@ -211,7 +176,7 @@ where
 pub const STARK_LU_NUM_CHALLENGES: usize = 2;
 pub const STARK_LU_NUM_EXPOSED_VALUES: usize = 1;
 
-impl<F, Challenge, Challenger> StarkLogUpPhase<F, Challenge, Challenger>
+impl<F, Challenge, Challenger> FriLogUpPhase<F, Challenge, Challenger>
 where
     F: Field,
     Challenge: ExtensionField<F>,
@@ -221,16 +186,16 @@ where
     fn generate_after_challenge_traces_per_air(
         challenges: &[Challenge; STARK_LU_NUM_CHALLENGES],
         constraints_per_air: &[&SymbolicConstraints<F>],
-        params_per_air: &[&StarkLogUpProvingKey],
         trace_view_per_air: &[PairTraceView<F>],
+        max_constraint_degree: usize,
     ) -> Vec<Option<RowMajorMatrix<Challenge>>> {
-        parizip!(constraints_per_air, trace_view_per_air, params_per_air)
-            .map(|(constraints, trace_view, params)| {
+        parizip!(constraints_per_air, trace_view_per_air)
+            .map(|(constraints, trace_view)| {
                 Self::generate_after_challenge_trace(
                     &constraints.interactions,
                     trace_view,
                     challenges,
-                    params.chunk_size,
+                    max_constraint_degree,
                 )
             })
             .collect::<Vec<_>>()
@@ -267,7 +232,7 @@ where
         all_interactions: &[Interaction<SymbolicExpression<F>>],
         trace_view: &PairTraceView<F>,
         permutation_randomness: &[Challenge; STARK_LU_NUM_CHALLENGES],
-        interaction_chunk_size: usize,
+        max_constraint_degree: usize,
     ) -> Option<RowMajorMatrix<Challenge>>
     where
         F: Field,
@@ -415,8 +380,11 @@ where
 /// and one column for the partial sum of log derivative. These columns are trace columns
 /// "after challenge" phase 0, and they are valued in the extension field.
 /// For more details, see the comment in the trace.rs file
-pub fn eval_fri_log_up_phase<AB>(builder: &mut AB, interaction_chunk_size: usize)
-where
+pub fn eval_fri_log_up_phase<AB>(
+    builder: &mut AB,
+    symbolic_interactions: &[SymbolicInteraction<AB::F>],
+    max_constraint_degree: usize,
+) where
     AB: InteractionBuilder + PermutationAirBuilderWithExposedValues,
 {
     let exposed_values = builder.permutation_exposed_values();

@@ -1,18 +1,21 @@
 //! An AIR with specified interactions can be augmented into a RAP.
 //! This module auto-converts any [Air] implemented on an [InteractionBuilder] into a [Rap].
 
-use p3_air::Air;
+use p3_air::{Air, AirBuilder};
 
-use super::{InteractionBuilder, RapPhaseSeqKind};
+use super::{InteractionBuilder, RapPhaseSeqKind, SymbolicInteraction};
 use crate::{
     interaction::fri_log_up::eval_fri_log_up_phase,
     rap::{PermutationAirBuilderWithExposedValues, Rap},
 };
 
 /// Used internally to select RAP phase evaluation function.
-pub(crate) trait InteractionPhaseAirBuilder {
+pub(crate) trait InteractionPhaseAirBuilder: InteractionBuilder {
     fn finalize_interactions(&mut self);
-    fn interaction_chunk_size(&self) -> usize;
+    /// The symbolic interactions **must** correspond to the `InteractionBuilder::all_interactions` function.
+    fn symbolic_interactions(&self) -> Vec<SymbolicInteraction<<Self as AirBuilder>::F>>;
+    /// The maximum constraint degree allowed in a RAP.
+    fn max_constraint_degree(&self) -> usize;
     fn rap_phase_seq_kind(&self) -> RapPhaseSeqKind;
 }
 
@@ -27,8 +30,13 @@ where
         builder.finalize_interactions();
         if builder.num_interactions() != 0 {
             match builder.rap_phase_seq_kind() {
-                RapPhaseSeqKind::StarkLogUp => {
-                    eval_fri_log_up_phase(builder, builder.interaction_chunk_size());
+                RapPhaseSeqKind::FriLogUp => {
+                    let symbolic_interactions = builder.symbolic_interactions();
+                    eval_fri_log_up_phase(
+                        builder,
+                        &symbolic_interactions,
+                        builder.global_max_constraint_degree(),
+                    );
                 }
                 RapPhaseSeqKind::GkrLogUp => todo!(),
             }

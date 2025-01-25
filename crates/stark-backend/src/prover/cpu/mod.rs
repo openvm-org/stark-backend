@@ -19,10 +19,7 @@ use super::{
 };
 use crate::{
     air_builders::symbolic::SymbolicConstraints,
-    config::{
-        Com, PcsProof, PcsProverData, RapPhaseSeqPartialProof, RapPhaseSeqProvingKey,
-        StarkGenericConfig, Val,
-    },
+    config::{Com, PcsProof, PcsProverData, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
     interaction::RapPhaseSeq,
     keygen::{types::MultiStarkProvingKey, view::MultiStarkVerifyingKeyView},
     proof::OpeningProof,
@@ -65,7 +62,6 @@ impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
     type Challenger = SC::Challenger;
     type Matrix = Arc<RowMajorMatrix<Val<SC>>>;
     type PcsData = PcsData<SC>;
-    type RapPartialProvingKey = RapPhaseSeqProvingKey<SC>;
 }
 
 #[derive(Derivative)]
@@ -136,16 +132,10 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         ProverDataAfterRapPhases<CpuBackend<SC>>,
     ) {
         assert_eq!(pk_views.len(), trace_views.len());
-        let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = pk_views
+        let constraints_per_air: Vec<_> = pk_views
             .iter()
-            .map(|pk| {
-                (
-                    // TODO[jpw]: remove this after RapPhaseSeq trait is modified
-                    SymbolicConstraints::from(&pk.vk.symbolic_constraints),
-                    &pk.rap_partial_pk,
-                )
-            })
-            .unzip();
+            .map(|pk| SymbolicConstraints::from(&pk.vk.symbolic_constraints))
+            .collect();
 
         let trace_views = trace_views
             .iter()
@@ -161,7 +151,6 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             .rap_phase_seq()
             .partially_prove(
                 challenger,
-                &rap_pk_per_air,
                 &constraints_per_air.iter().collect_vec(),
                 &trace_views,
             )
