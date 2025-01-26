@@ -51,6 +51,9 @@ pub trait StarkFriEngine<SC: StarkGenericConfig>: StarkEngine<SC> + Sized {
         let engine = Self::new(FriParameters::standard_fast());
         engine.run_test(airs, air_proof_inputs)
     }
+    /// Runs a single end-to-end test for a given set of AIRs and traces.
+    /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
+    /// This function should only be used on AIRs where the main trace is **not** partitioned.
     fn run_simple_test_impl(
         &self,
         chips: Vec<AirRef<SC>>,

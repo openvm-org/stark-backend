@@ -1,12 +1,12 @@
 use std::{iter::zip, sync::Arc};
 
 use itertools::{izip, Itertools};
-use p3_matrix::{dense::DenseMatrix, Matrix};
+use p3_matrix::Matrix;
 use p3_util::log2_strict_usize;
 
 use crate::{
     air_builders::debug::debug_constraints_and_interactions,
-    config::{StarkGenericConfig, Val},
+    config::StarkGenericConfig,
     keygen::{
         types::{MultiStarkProvingKey, MultiStarkVerifyingKey, StarkProvingKey},
         MultiStarkKeygenBuilder,
@@ -68,64 +68,6 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
 
     fn verifier(&self) -> MultiTraceStarkVerifier<SC> {
         MultiTraceStarkVerifier::new(self.config())
-    }
-
-    // mpk can be removed if we use BaseAir trait to regenerate preprocessed traces
-    fn debug(
-        &self,
-        airs: &[AirRef<SC>],
-        pk: &[StarkProvingKey<SC>],
-        proof_inputs: &[AirProofInput<SC>],
-    ) {
-        let (trace_views, pvs): (Vec<_>, Vec<_>) = proof_inputs
-            .iter()
-            .map(|input| {
-                let mut views = input
-                    .raw
-                    .cached_mains
-                    .iter()
-                    .map(|trace| trace.as_view())
-                    .collect_vec();
-                if let Some(trace) = input.raw.common_main.as_ref() {
-                    views.push(trace.as_view());
-                }
-                (views, input.raw.public_values.clone())
-            })
-            .unzip();
-        debug_constraints_and_interactions(airs, pk, &trace_views, &pvs);
-    }
-    // TODO[jpw]: the following does not belong in this crate! dev tooling only
-
-    /// Runs a single end-to-end test for a given set of AIRs and traces.
-    /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
-    /// This function should only be used on AIRs where the main trace is **not** partitioned.
-    fn run_simple_test_impl(
-        &self,
-        airs: Vec<AirRef<SC>>,
-        traces: Vec<DenseMatrix<Val<SC>>>,
-        public_values: Vec<Vec<Val<SC>>>,
-    ) -> Result<VerificationData<SC>, VerificationError> {
-        self.run_test_impl(airs, AirProofInput::multiple_simple(traces, public_values))
-    }
-
-    /// Runs a single end-to-end test for a given set of chips and traces partitions.
-    /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
-    fn run_test_impl(
-        &self,
-        airs: Vec<AirRef<SC>>,
-        air_proof_inputs: Vec<AirProofInput<SC>>,
-    ) -> Result<VerificationData<SC>, VerificationError> {
-        let mut keygen_builder = self.keygen_builder();
-        let air_ids = self.set_up_keygen_builder(&mut keygen_builder, &airs);
-        let pk = keygen_builder.generate_pk();
-        self.debug(&airs, &pk.per_air, &air_proof_inputs);
-        let vk = pk.get_vk();
-        let proof_input = ProofInput {
-            per_air: izip!(air_ids, air_proof_inputs).collect(),
-        };
-        let proof = self.prove(&pk, proof_input);
-        self.verify(&vk, &proof)?;
-        Ok(VerificationData { vk, proof })
     }
 
     /// Add AIRs and get AIR IDs
@@ -232,5 +174,50 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
         let mut challenger = self.new_challenger();
         let verifier = self.verifier();
         verifier.verify(&mut challenger, vk, proof)
+    }
+
+    // mpk can be removed if we use BaseAir trait to regenerate preprocessed traces
+    fn debug(
+        &self,
+        airs: &[AirRef<SC>],
+        pk: &[StarkProvingKey<SC>],
+        proof_inputs: &[AirProofInput<SC>],
+    ) {
+        let (trace_views, pvs): (Vec<_>, Vec<_>) = proof_inputs
+            .iter()
+            .map(|input| {
+                let mut views = input
+                    .raw
+                    .cached_mains
+                    .iter()
+                    .map(|trace| trace.as_view())
+                    .collect_vec();
+                if let Some(trace) = input.raw.common_main.as_ref() {
+                    views.push(trace.as_view());
+                }
+                (views, input.raw.public_values.clone())
+            })
+            .unzip();
+        debug_constraints_and_interactions(airs, pk, &trace_views, &pvs);
+    }
+
+    /// Runs a single end-to-end test for a given set of chips and traces partitions.
+    /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
+    fn run_test_impl(
+        &self,
+        airs: Vec<AirRef<SC>>,
+        air_proof_inputs: Vec<AirProofInput<SC>>,
+    ) -> Result<VerificationData<SC>, VerificationError> {
+        let mut keygen_builder = self.keygen_builder();
+        let air_ids = self.set_up_keygen_builder(&mut keygen_builder, &airs);
+        let pk = keygen_builder.generate_pk();
+        self.debug(&airs, &pk.per_air, &air_proof_inputs);
+        let vk = pk.get_vk();
+        let proof_input = ProofInput {
+            per_air: izip!(air_ids, air_proof_inputs).collect(),
+        };
+        let proof = self.prove(&pk, proof_input);
+        self.verify(&vk, &proof)?;
+        Ok(VerificationData { vk, proof })
     }
 }
