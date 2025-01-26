@@ -551,7 +551,17 @@ pub(crate) fn find_interaction_chunks<F: Field>(
             .unwrap_or(0)
     };
     let mut interaction_idxs = (0..interactions.len()).collect_vec();
-    interaction_idxs.sort_by(|&i, &j| max_field_degree(i).cmp(&max_field_degree(j)));
+    interaction_idxs.sort_by(|&i, &j| {
+        let field_cmp = max_field_degree(i).cmp(&max_field_degree(j));
+        if field_cmp == std::cmp::Ordering::Equal {
+            interactions[i]
+                .count
+                .degree_multiple()
+                .cmp(&interactions[j].count.degree_multiple())
+        } else {
+            field_cmp
+        }
+    });
     // Now we greedily pack
     let mut running_sum_field_degree = 0;
     let mut numerator_max_degree = 0;
