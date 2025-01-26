@@ -140,7 +140,6 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             .iter()
             .map(|pk| {
                 (
-                    // TODO[jpw]: remove this after RapPhaseSeq trait is modified
                     SymbolicConstraints::from(&pk.vk.symbolic_constraints),
                     &pk.rap_partial_pk,
                 )

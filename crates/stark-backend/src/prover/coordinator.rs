@@ -25,7 +25,6 @@ use crate::{
 /// - `SC`: Stark configuration for proving key (from host)
 /// - `PB`: Prover backend types
 /// - `PD`: Prover device methods
-// TODO[jpw]: the SC generic is awkward and should be revisited; only being used for challenger
 pub struct Coordinator<SC: StarkGenericConfig, PB, PD> {
     pub backend: PB,
     pub device: PD,

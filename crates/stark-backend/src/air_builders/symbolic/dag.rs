@@ -69,7 +69,7 @@ impl<F> SymbolicExpressionDag<F> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
-#[repr(C)] // TODO[jpw]: device transfer requires usize-independent serialization
+#[repr(C)]
 pub struct SymbolicConstraintsDag<F> {
     /// DAG with all symbolic expressions as nodes.
     /// A subset of the nodes represents all constraints that will be

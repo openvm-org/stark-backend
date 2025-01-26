@@ -36,8 +36,6 @@ pub fn generate_betas<AF: FieldAlgebra, E>(
     beta.powers().take(max_fields_len).collect()
 }
 
-// TODO: Use Var and Expr type bounds in place of concrete fields so that
-// this function can be used in `eval_permutation_constraints`.
 #[allow(dead_code)]
 pub fn reduce_row<F, EF>(
     preprocessed_row: &[F],

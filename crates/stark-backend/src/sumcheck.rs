@@ -43,7 +43,6 @@ pub struct SumcheckArtifacts<F, O> {
 /// - There aren't the same number of multivariate polynomials and claims.
 /// - The degree of any multivariate polynomial exceeds [`MAX_DEGREE`] in any variable.
 /// - The round polynomials are inconsistent with their corresponding claimed sum on `0` and `1`.
-// TODO: Consider returning constant oracles as separate type.
 pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
     mut claims: Vec<F>,
     mut polys: Vec<O>,

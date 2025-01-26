@@ -63,7 +63,6 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             challenger.observe_slice(pis);
         }
 
-        // TODO: valid shape check from verifying key
         for preprocessed_commit in mvk.flattened_preprocessed_commits() {
             challenger.observe(preprocessed_commit);
         }
