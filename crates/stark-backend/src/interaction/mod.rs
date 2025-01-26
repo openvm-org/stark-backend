@@ -111,7 +111,7 @@ pub struct RapPhaseShape {
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RapPhaseSeqKind {
-    GkrLogUp,
+    // GkrLogUp,
     /// Up to one phase with prover/verifier given by [[fri_log_up::FriLogUpPhase]] and
     /// constraints given by [[fri_log_up::eval_fri_log_up_phase]].
     FriLogUp,
@@ -125,7 +125,6 @@ impl RapPhaseSeqKind {
                 num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
                 extra_opening_rots: vec![],
             }],
-            RapPhaseSeqKind::GkrLogUp => todo!(),
         }
     }
 }

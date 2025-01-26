@@ -38,7 +38,6 @@ where
                         builder.max_constraint_degree(),
                     );
                 }
-                RapPhaseSeqKind::GkrLogUp => todo!(),
             }
         }
     }
