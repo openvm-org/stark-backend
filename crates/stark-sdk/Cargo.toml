@@ -36,6 +36,9 @@ tracing-forest = { version = "0.1.6", features = ["ansi", "smallvec"] }
 metrics-tracing-context = "0.16.0"
 metrics-util = "0.17.0"
 
+[dev-dependencies]
+p3-keccak-air = { workspace = true }
+
 [features]
 default = ["parallel"]
 parallel = ["openvm-stark-backend/parallel"]
@@ -44,3 +47,6 @@ nightly-features = [
     "p3-keccak/nightly-features",
     "p3-poseidon2/nightly-features",
 ]
+mimalloc = ["openvm-stark-backend/mimalloc"]
+jemalloc = ["openvm-stark-backend/jemalloc"]
+jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
