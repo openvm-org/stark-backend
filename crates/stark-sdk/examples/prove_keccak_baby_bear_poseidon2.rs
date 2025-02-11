@@ -7,9 +7,10 @@ use openvm_stark_backend::{
     p3_field::Field,
     prover::types::{AirProofInput, ProofInput},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    utils::metrics_span,
 };
 use openvm_stark_sdk::{
-    config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, FriParameters},
+    config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, setup_tracing, FriParameters},
     engine::StarkFriEngine,
     openvm_stark_backend::engine::StarkEngine,
     utils::create_seeded_rng,
@@ -17,9 +18,8 @@ use openvm_stark_sdk::{
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::Rng;
-use tracing::info_span;
 
-const NUM_PERMUTATIONS: usize = 1 << 18;
+const NUM_PERMUTATIONS: usize = 1 << 15;
 const LOG_BLOWUP: usize = 2;
 
 // Newtype to implement extended traits
@@ -40,6 +40,7 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 }
 
 fn main() {
+    setup_tracing();
     let mut rng = create_seeded_rng();
     let air = TestAir(KeccakAir {});
 
@@ -51,8 +52,9 @@ fn main() {
     let pk = keygen_builder.generate_pk();
 
     let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
-    let trace = info_span!("generate_trace")
-        .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs));
+    let trace = metrics_span("generate_trace", || {
+        p3_keccak_air::generate_trace_rows::<BabyBear>(inputs)
+    });
 
     let proof = engine.prove(
         &pk,

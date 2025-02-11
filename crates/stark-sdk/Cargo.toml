@@ -50,3 +50,4 @@ nightly-features = [
 mimalloc = ["openvm-stark-backend/mimalloc"]
 jemalloc = ["openvm-stark-backend/jemalloc"]
 jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
+bench-metrics = ["openvm-stark-backend/bench-metrics"]
