@@ -15,7 +15,11 @@ use crate::{
     config::{Com, StarkGenericConfig, Val},
     keygen::view::MultiStarkVerifyingKeyView,
     proof::{AirProofData, Commitments},
-    prover::{hal::MatrixDimensions, metrics::trace_metrics, types::PairView},
+    prover::{
+        hal::MatrixDimensions,
+        metrics::trace_metrics,
+        types::{PairView, SingleCommitPreimage},
+    },
     utils::metrics_span,
 };
 
@@ -82,10 +86,10 @@ where
 
         let num_air = ctx.per_air.len();
         let (cached_commits_per_air, cached_views_per_air, common_main_per_air, pvs_per_air): (
-            Vec<_>,
-            Vec<_>,
-            Vec<_>,
-            Vec<_>,
+            Vec<Vec<PB::Commitment>>,
+            Vec<Vec<SingleCommitPreimage<&'a PB::Matrix, &'a PB::PcsData>>>,
+            Vec<Option<PB::Matrix>>,
+            Vec<Vec<PB::Val>>,
         ) = ctx
             .into_iter()
             .map(|(_, ctx)| {
