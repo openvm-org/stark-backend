@@ -85,6 +85,7 @@ where
         assert!(mpk.validate(&ctx), "Invalid proof input");
 
         let num_air = ctx.per_air.len();
+        #[allow(clippy::type_complexity)]
         let (cached_commits_per_air, cached_views_per_air, common_main_per_air, pvs_per_air): (
             Vec<Vec<PB::Commitment>>,
             Vec<Vec<SingleCommitPreimage<&'a PB::Matrix, &'a PB::PcsData>>>,
