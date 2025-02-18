@@ -158,7 +158,7 @@ where
             let is_first_row = *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
             let is_last_row = *PackedVal::<SC>::from_slice(&sels.is_last_row[i_range.clone()]);
             let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
-            let inv_zeroifier = *PackedVal::<SC>::from_slice(&sels.inv_zeroifier[i_range.clone()]);
+            let inv_zeroifier = *PackedVal::<SC>::from_slice(&sels.inv_zeroifier[i_range]);
 
             // Vertically pack rows of each matrix,
             // skipping `next` if above scan showed no constraints need it:

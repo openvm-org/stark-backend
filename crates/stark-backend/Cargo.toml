@@ -5,6 +5,9 @@ authors.workspace = true
 edition.workspace = true
 description = "Multi-matrix STARK backend with logup built on top of Plonky3."
 
+[lints]
+workspace = true
+
 [dependencies]
 p3-air = { workspace = true }
 p3-challenger = { workspace = true }

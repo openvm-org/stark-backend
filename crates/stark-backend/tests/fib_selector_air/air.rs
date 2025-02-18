@@ -17,7 +17,7 @@ pub struct FibonacciSelectorAir {
 }
 
 impl FibonacciSelectorAir {
-    pub fn new(sels: Vec<bool>, enable_interactions: bool) -> Self {
+    pub const fn new(sels: Vec<bool>, enable_interactions: bool) -> Self {
         Self {
             sels,
             enable_interactions,

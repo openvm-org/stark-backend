@@ -36,7 +36,7 @@ pub struct MultiStarkKeygenBuilder<'a, SC: StarkGenericConfig> {
 }
 
 impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
-    pub fn new(config: &'a SC) -> Self {
+    pub const fn new(config: &'a SC) -> Self {
         Self {
             config,
             partitioned_airs: vec![],
@@ -114,7 +114,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             })
             .collect();
 
-        for pk in pk_per_air.iter() {
+        for pk in &pk_per_air {
             let width = &pk.vk.params.width;
             tracing::info!("{:<20} | Quotient Deg = {:<2} | Prep Cols = {:<2} | Main Cols = {:<8} | Perm Cols = {:<4} | {:4} Constraints | {:3} Interactions On Buses {:?}",
                 pk.air_name,
@@ -153,7 +153,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
     fn new(pcs: &SC::Pcs, rap_phase_seq_kind: RapPhaseSeqKind, air: Arc<dyn AnyRap<SC>>) -> Self {
         let prep_keygen_data = compute_prep_data_for_air(pcs, air.as_ref());
-        AirKeygenBuilder {
+        Self {
             air,
             rap_phase_seq_kind,
             prep_keygen_data,

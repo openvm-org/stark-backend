@@ -64,7 +64,7 @@ impl<Val, Com: Clone> MultiStarkVerifyingKeyView<'_, Val, Com> {
     pub fn num_challenges_in_phase(&self, phase_idx: usize) -> usize {
         self.per_air
             .iter()
-            .flat_map(|vk| vk.params.num_challenges_to_sample.get(phase_idx))
+            .filter_map(|vk| vk.params.num_challenges_to_sample.get(phase_idx))
             .copied()
             .max()
             .unwrap_or_else(|| panic!("No challenges used in challenge phase {phase_idx}"))

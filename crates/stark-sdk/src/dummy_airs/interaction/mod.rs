@@ -58,7 +58,7 @@ pub fn verify_interactions(
 
     // Verify the proof:
     // Start from clean challenger
-    let mut challenger = config::baby_bear_poseidon2::Challenger::new(perm.clone());
+    let mut challenger = config::baby_bear_poseidon2::Challenger::new(perm);
     let verifier = MultiTraceStarkVerifier::new(prover.device.config());
     verifier.verify(&mut challenger, &vk, &proof.into())
 }

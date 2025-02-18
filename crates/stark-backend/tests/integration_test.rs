@@ -239,7 +239,7 @@ fn get_fib_number(n: usize) -> u32 {
 fn get_conditional_fib_number(sels: &[bool]) -> u32 {
     let mut a = 0;
     let mut b = 1;
-    for &s in sels[0..sels.len() - 1].iter() {
+    for &s in &sels[0..sels.len() - 1] {
         if s {
             let c = a + b;
             a = b;

@@ -113,8 +113,8 @@ pub fn check_logup<F: Field>(
 
     let mut logup_failed = false;
     // For each bus, check each `fields` key by summing up multiplicities.
-    for (bus_idx, bus_interactions) in logical_interactions.at_bus.into_iter() {
-        for (fields, connections) in bus_interactions.into_iter() {
+    for (bus_idx, bus_interactions) in logical_interactions.at_bus {
+        for (fields, connections) in bus_interactions {
             let mut sum = F::ZERO;
             for (_, itype, count) in &connections {
                 match *itype {
@@ -141,7 +141,5 @@ pub fn check_logup<F: Field>(
             }
         }
     }
-    if logup_failed {
-        panic!("LogUp multiset equality check failed.");
-    }
+    assert!(!logup_failed, "LogUp multiset equality check failed.")
 }

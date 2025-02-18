@@ -40,7 +40,7 @@ impl<T> Instrumented<T> {
             .unwrap()
             .entry(type_name::<A>().to_string())
             .and_modify(|lens| lens.push(len))
-            .or_insert(vec![len]);
+            .or_insert_with(|| vec![len]);
     }
 }
 

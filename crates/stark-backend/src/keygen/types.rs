@@ -126,7 +126,7 @@ impl<Val, Com> StarkVerifyingKey<Val, Com> {
         self.params.width.cached_mains.len()
     }
 
-    pub fn has_common_main(&self) -> bool {
+    pub const fn has_common_main(&self) -> bool {
         self.params.width.common_main != 0
     }
 

@@ -18,7 +18,7 @@ pub(super) struct ViewPair<T> {
 }
 
 impl<T> ViewPair<T> {
-    pub fn new(local: Vec<T>, next: Option<Vec<T>>) -> Self {
+    pub const fn new(local: Vec<T>, next: Option<Vec<T>>) -> Self {
         Self { local, next }
     }
 
@@ -64,10 +64,10 @@ impl<SC: StarkGenericConfig> Add for PackedExpr<SC> {
 
     fn add(self, other: Self) -> Self {
         match (self, other) {
-            (PackedExpr::Val(x), PackedExpr::Val(y)) => PackedExpr::Val(x + y),
-            (PackedExpr::Val(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(y + x),
-            (PackedExpr::Challenge(x), PackedExpr::Val(y)) => PackedExpr::Challenge(x + y),
-            (PackedExpr::Challenge(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(x + y),
+            (Self::Val(x), Self::Val(y)) => Self::Val(x + y),
+            (Self::Val(x), Self::Challenge(y)) => Self::Challenge(y + x),
+            (Self::Challenge(x), Self::Val(y)) => Self::Challenge(x + y),
+            (Self::Challenge(x), Self::Challenge(y)) => Self::Challenge(x + y),
         }
     }
 }
@@ -77,14 +77,14 @@ impl<SC: StarkGenericConfig> Sub for PackedExpr<SC> {
 
     fn sub(self, other: Self) -> Self {
         match (self, other) {
-            (PackedExpr::Val(x), PackedExpr::Val(y)) => PackedExpr::Val(x - y),
-            (PackedExpr::Val(x), PackedExpr::Challenge(y)) => {
+            (Self::Val(x), Self::Val(y)) => Self::Val(x - y),
+            (Self::Val(x), Self::Challenge(y)) => {
                 let x: PackedChallenge<SC> = x.into();
                 // We could alternative do (-y) + x
-                PackedExpr::Challenge(x - y)
+                Self::Challenge(x - y)
             }
-            (PackedExpr::Challenge(x), PackedExpr::Val(y)) => PackedExpr::Challenge(x - y),
-            (PackedExpr::Challenge(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(x - y),
+            (Self::Challenge(x), Self::Val(y)) => Self::Challenge(x - y),
+            (Self::Challenge(x), Self::Challenge(y)) => Self::Challenge(x - y),
         }
     }
 }
@@ -94,10 +94,10 @@ impl<SC: StarkGenericConfig> Mul for PackedExpr<SC> {
 
     fn mul(self, other: Self) -> Self {
         match (self, other) {
-            (PackedExpr::Val(x), PackedExpr::Val(y)) => PackedExpr::Val(x * y),
-            (PackedExpr::Val(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(y * x),
-            (PackedExpr::Challenge(x), PackedExpr::Val(y)) => PackedExpr::Challenge(x * y),
-            (PackedExpr::Challenge(x), PackedExpr::Challenge(y)) => PackedExpr::Challenge(x * y),
+            (Self::Val(x), Self::Val(y)) => Self::Val(x * y),
+            (Self::Val(x), Self::Challenge(y)) => Self::Challenge(y * x),
+            (Self::Challenge(x), Self::Val(y)) => Self::Challenge(x * y),
+            (Self::Challenge(x), Self::Challenge(y)) => Self::Challenge(x * y),
         }
     }
 }
@@ -107,8 +107,8 @@ impl<SC: StarkGenericConfig> Neg for PackedExpr<SC> {
 
     fn neg(self) -> Self {
         match self {
-            PackedExpr::Val(x) => PackedExpr::Val(-x),
-            PackedExpr::Challenge(x) => PackedExpr::Challenge(-x),
+            Self::Val(x) => Self::Val(-x),
+            Self::Challenge(x) => Self::Challenge(-x),
         }
     }
 }

@@ -88,7 +88,7 @@ impl<T: Send + Sync + Clone> MatrixDimensions for Arc<RowMajorMatrix<T>> {
 }
 
 impl<SC> CpuDevice<'_, SC> {
-    pub fn config(&self) -> &SC {
+    pub const fn config(&self) -> &SC {
         self.config
     }
 }
@@ -208,16 +208,16 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             metrics_span("perm_trace_commit_time_ms", || {
                 let flattened_traces: Vec<_> = perm_trace_per_air
                     .into_iter()
-                    .flat_map(|perm_trace| {
+                    .filter_map(|perm_trace| {
                         perm_trace.map(|trace| Arc::new(trace.flatten_to_base()))
                     })
                     .collect();
                 // Only commit if there are permutation traces
-                if !flattened_traces.is_empty() {
+                if flattened_traces.is_empty() {
+                    None
+                } else {
                     let (commit, data) = self.commit(&flattened_traces);
                     Some((commit, data))
-                } else {
-                    None
                 }
             })
             .into_iter()
@@ -290,7 +290,7 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
                     log_trace_height,
                     preprocessed,
                     partitioned_main,
-                    public_values: pvs.to_vec(),
+                    public_values: pvs.clone(),
                 };
                 let mut per_phase = zip(
                     &prover_data_after.committed_pcs_data_per_phase,
@@ -402,7 +402,7 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
     }
 }
 
-impl<SC> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuBackend<SC>
+impl<SC> DeviceDataTransporter<SC, Self> for CpuBackend<SC>
 where
     SC: StarkGenericConfig,
 {
@@ -410,7 +410,7 @@ where
         &self,
         mpk: &'a MultiStarkProvingKey<SC>,
         air_ids: Vec<usize>,
-    ) -> DeviceMultiStarkProvingKey<'a, CpuBackend<SC>>
+    ) -> DeviceMultiStarkProvingKey<'a, Self>
     where
         SC: 'a,
     {

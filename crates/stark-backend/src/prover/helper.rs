@@ -34,7 +34,7 @@ impl<SC: StarkGenericConfig> AirProofInputTestHelper<SC> for AirProofInput<SC> {
     }
 }
 impl<SC: StarkGenericConfig> AirProofInput<SC> {
-    pub fn simple(trace: RowMajorMatrix<Val<SC>>, public_values: Vec<Val<SC>>) -> Self {
+    pub const fn simple(trace: RowMajorMatrix<Val<SC>>, public_values: Vec<Val<SC>>) -> Self {
         Self {
             cached_mains_pdata: vec![],
             raw: AirProofRawInput {
@@ -44,7 +44,7 @@ impl<SC: StarkGenericConfig> AirProofInput<SC> {
             },
         }
     }
-    pub fn simple_no_pis(trace: RowMajorMatrix<Val<SC>>) -> Self {
+    pub const fn simple_no_pis(trace: RowMajorMatrix<Val<SC>>) -> Self {
         Self::simple(trace, vec![])
     }
 
@@ -53,14 +53,14 @@ impl<SC: StarkGenericConfig> AirProofInput<SC> {
         public_values: Vec<Vec<Val<SC>>>,
     ) -> Vec<Self> {
         izip!(traces, public_values)
-            .map(|(trace, pis)| AirProofInput::simple(trace, pis))
+            .map(|(trace, pis)| Self::simple(trace, pis))
             .collect()
     }
 
     pub fn multiple_simple_no_pis(traces: Vec<RowMajorMatrix<Val<SC>>>) -> Vec<Self> {
         traces
             .into_iter()
-            .map(AirProofInput::simple_no_pis)
+            .map(Self::simple_no_pis)
             .collect()
     }
     /// Return the height of the main trace.

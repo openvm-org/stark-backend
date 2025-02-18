@@ -99,7 +99,22 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
             .per_air
             .iter()
             .map(|(_, input)| {
-                if input.cached_mains_pdata.len() != input.raw.cached_mains.len() {
+                if input.cached_mains_pdata.len() == input.raw.cached_mains.len() {
+                    zip(&input.cached_mains_pdata, &input.raw.cached_mains)
+                        .map(|((com, data), trace)| {
+                            let data_view = PcsData {
+                                data: data.clone(),
+                                log_trace_heights: vec![log2_strict_usize(trace.height()) as u8],
+                            };
+                            let preimage = SingleCommitPreimage {
+                                trace: trace.clone(),
+                                data: data_view,
+                                matrix_idx: 0,
+                            };
+                            (com.clone(), preimage)
+                        })
+                        .collect_vec()
+                } else {
                     input
                         .raw
                         .cached_mains
@@ -115,21 +130,6 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
                                     matrix_idx: 0,
                                 },
                             )
-                        })
-                        .collect_vec()
-                } else {
-                    zip(&input.cached_mains_pdata, &input.raw.cached_mains)
-                        .map(|((com, data), trace)| {
-                            let data_view = PcsData {
-                                data: data.clone(),
-                                log_trace_heights: vec![log2_strict_usize(trace.height()) as u8],
-                            };
-                            let preimage = SingleCommitPreimage {
-                                trace: trace.clone(),
-                                data: data_view,
-                                matrix_idx: 0,
-                            };
-                            (com.clone(), preimage)
                         })
                         .collect_vec()
                 }

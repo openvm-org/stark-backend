@@ -107,10 +107,10 @@ pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
         polys = polys
             .into_iter()
             .map(|multivariate_poly| {
-                if n_remaining_rounds != multivariate_poly.arity() {
-                    multivariate_poly
-                } else {
+                if n_remaining_rounds == multivariate_poly.arity() {
                     multivariate_poly.partial_evaluation(challenge)
+                } else {
+                    multivariate_poly
                 }
             })
             .collect();
@@ -250,8 +250,8 @@ mod tests {
         let claim0 = values0.iter().copied().sum();
         let claim1 = values1.iter().copied().sum();
 
-        let mle0 = Mle::new(values0.clone());
-        let mle1 = Mle::new(values1.clone());
+        let mle0 = Mle::new(values0);
+        let mle1 = Mle::new(values1);
 
         let lambda: F = rng.gen();
 
@@ -281,8 +281,8 @@ mod tests {
         let claim0 = values0.iter().copied().sum();
         let claim1 = values1.iter().copied().sum();
 
-        let mle0 = Mle::new(values0.clone());
-        let mle1 = Mle::new(values1.clone());
+        let mle0 = Mle::new(values0);
+        let mle1 = Mle::new(values1);
 
         let lambda: F = rng.gen();
 

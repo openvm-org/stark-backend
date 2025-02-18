@@ -24,7 +24,7 @@ pub struct QuotientCommitter<'pcs, SC: StarkGenericConfig> {
 }
 
 impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
-    pub fn new(pcs: &'pcs SC::Pcs, alpha: SC::Challenge) -> Self {
+    pub const fn new(pcs: &'pcs SC::Pcs, alpha: SC::Challenge) -> Self {
         Self { pcs, alpha }
     }
 

@@ -57,7 +57,7 @@ impl<SC: StarkGenericConfig, C: Chip<SC>> Chip<SC> for Rc<C> {
         self.as_ref().air()
     }
     fn generate_air_proof_input(self) -> AirProofInput<SC> {
-        if let Some(c) = Rc::into_inner(self) {
+        if let Some(c) = Self::into_inner(self) {
             c.generate_air_proof_input()
         } else {
             panic!("Cannot generate AirProofInput while other chips still hold a reference");
@@ -100,7 +100,7 @@ impl<SC: StarkGenericConfig, C: Chip<SC>> Chip<SC> for Arc<C> {
         self.as_ref().air()
     }
     fn generate_air_proof_input(self) -> AirProofInput<SC> {
-        if let Some(c) = Arc::into_inner(self) {
+        if let Some(c) = Self::into_inner(self) {
             c.generate_air_proof_input()
         } else {
             panic!("Cannot generate AirProofInput while other chips still hold a reference");

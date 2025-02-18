@@ -284,7 +284,7 @@ impl<'a, F: Field> From<&'a SymbolicConstraintsDag<F>> for SymbolicConstraints<F
                 }
             })
             .collect::<Vec<_>>();
-        SymbolicConstraints {
+        Self {
             constraints,
             interactions,
         }
@@ -339,7 +339,7 @@ mod tests {
         ];
         let interactions = vec![Interaction {
             bus_index: 0,
-            fields: vec![expr.clone(), SymbolicExpression::Constant(F::TWO)],
+            fields: vec![expr, SymbolicExpression::Constant(F::TWO)],
             count: SymbolicExpression::Constant(F::ONE),
             interaction_type: InteractionType::Send,
         }];

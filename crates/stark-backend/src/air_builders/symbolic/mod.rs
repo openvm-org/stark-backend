@@ -453,28 +453,26 @@ struct LocalOnlyChecker;
 
 #[allow(dead_code)]
 impl LocalOnlyChecker {
-    fn check_var<F: Field>(var: SymbolicVariable<F>) -> bool {
+    const fn check_var<F: Field>(var: SymbolicVariable<F>) -> bool {
         match var.entry {
-            Entry::Preprocessed { offset } => offset == 0,
-            Entry::Main { offset, .. } => offset == 0,
-            Entry::Permutation { offset } => offset == 0,
-            Entry::Public => true,
-            Entry::Challenge => true,
-            Entry::Exposed => true,
+            Entry::Preprocessed { offset }
+            | Entry::Main { offset, .. }
+            | Entry::Permutation { offset } => offset == 0,
+            Entry::Public | Entry::Challenge | Entry::Exposed => true,
         }
     }
 
     fn check_expr<F: Field>(expr: &SymbolicExpression<F>) -> bool {
         match expr {
             SymbolicExpression::Variable(var) => Self::check_var(*var),
-            SymbolicExpression::IsFirstRow => false,
-            SymbolicExpression::IsLastRow => false,
-            SymbolicExpression::IsTransition => false,
+            SymbolicExpression::IsFirstRow
+            | SymbolicExpression::IsLastRow
+            | SymbolicExpression::IsTransition => false,
             SymbolicExpression::Constant(_) => true,
-            SymbolicExpression::Add { x, y, .. } => Self::check_expr(x) && Self::check_expr(y),
-            SymbolicExpression::Sub { x, y, .. } => Self::check_expr(x) && Self::check_expr(y),
+            SymbolicExpression::Add { x, y, .. }
+            | SymbolicExpression::Sub { x, y, .. }
+            | SymbolicExpression::Mul { x, y, .. } => Self::check_expr(x) && Self::check_expr(y),
             SymbolicExpression::Neg { x, .. } => Self::check_expr(x),
-            SymbolicExpression::Mul { x, y, .. } => Self::check_expr(x) && Self::check_expr(y),
         }
     }
 }

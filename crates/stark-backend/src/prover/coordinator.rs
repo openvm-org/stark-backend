@@ -33,7 +33,7 @@ pub struct Coordinator<SC: StarkGenericConfig, PB, PD> {
 }
 
 impl<SC: StarkGenericConfig, PB, PD> Coordinator<SC, PB, PD> {
-    pub fn new(backend: PB, device: PD, challenger: SC::Challenger) -> Self {
+    pub const fn new(backend: PB, device: PD, challenger: SC::Challenger) -> Self {
         Self {
             backend,
             device,
@@ -137,7 +137,7 @@ where
                 log_trace_height,
                 preprocessed: pk.preprocessed_data.as_ref().map(|d| &d.trace),
                 partitioned_main: main_trace_views,
-                public_values: pvs.to_vec(),
+                public_values: pvs.clone(),
             };
             log_trace_height_per_air.push(log_trace_height);
             pair_trace_view_per_air.push(pair_trace_view);
@@ -233,7 +233,7 @@ where
             let preprocessed = mpk
                 .per_air
                 .iter()
-                .flat_map(|pk| pk.preprocessed_data.as_ref().map(|d| &d.data))
+                .filter_map(|pk| pk.preprocessed_data.as_ref().map(|d| &d.data))
                 .collect_vec();
             let main = cached_views_per_air
                 .into_iter()

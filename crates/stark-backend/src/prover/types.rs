@@ -185,7 +185,7 @@ where
     PB::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
 {
     fn from(proof: HalProof<PB>) -> Self {
-        Proof {
+        Self {
             commitments: proof.commitments,
             opening: proof.opening.into(),
             per_air: proof.per_air,
@@ -245,7 +245,7 @@ pub struct AirProofRawInput<F: Field> {
 impl<F: Field> AirProofRawInput<F> {
     pub fn height(&self) -> usize {
         let mut height = None;
-        for m in self.cached_mains.iter() {
+        for m in &self.cached_mains {
             if let Some(h) = height {
                 assert_eq!(h, m.height());
             } else {

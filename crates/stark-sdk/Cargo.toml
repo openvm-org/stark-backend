@@ -5,6 +5,9 @@ authors.workspace = true
 edition.workspace = true
 description = "SDK for production and testing usage of STARKs."
 
+[lints]
+workspace = true
+
 [dependencies]
 openvm-stark-backend = { workspace = true }
 

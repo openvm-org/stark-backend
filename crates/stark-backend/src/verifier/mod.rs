@@ -27,7 +27,7 @@ pub struct MultiTraceStarkVerifier<'c, SC: StarkGenericConfig> {
 }
 
 impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
-    pub fn new(config: &'c SC) -> Self {
+    pub const fn new(config: &'c SC) -> Self {
         Self { config }
     }
     /// Verify collection of InteractiveAIRs and check the permutation
@@ -164,7 +164,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             .preprocessed_commits()
             .into_iter()
             .zip_eq(&domains)
-            .flat_map(|(commit, domain)| commit.map(|commit| (commit, *domain)))
+            .filter_map(|(commit, domain)| commit.map(|commit| (commit, *domain)))
             .zip_eq(&opened_values.preprocessed)
             .map(|((commit, domain), values)| {
                 let domain_and_openings = trace_domain_and_openings(domain, zeta, values);
@@ -199,7 +199,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
                 .zip_eq(values_per_mat)
                 .map(|(domain, values)| trace_domain_and_openings(domain, zeta, values))
                 .collect_vec();
-            rounds.push((commit.clone(), domains_and_openings));
+            rounds.push((commit, domains_and_openings));
         }
 
         // 3. Then after_challenge trace openings, at most 1 phase for now.

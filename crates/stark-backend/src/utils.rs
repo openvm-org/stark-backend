@@ -14,7 +14,7 @@ pub fn batch_multiplicative_inverse_allowing_zero<F: Field>(values: Vec<F>) -> V
     // Check if values are zero, and construct a new vector with only nonzero values
     let mut nonzero_values = Vec::with_capacity(values.len());
     let mut indices = Vec::with_capacity(values.len());
-    for (i, value) in values.iter().cloned().enumerate() {
+    for (i, value) in values.iter().copied().enumerate() {
         if value.is_zero() {
             continue;
         }
@@ -26,7 +26,7 @@ pub fn batch_multiplicative_inverse_allowing_zero<F: Field>(values: Vec<F>) -> V
     let inverse_nonzero_values = p3_field::batch_multiplicative_inverse(&nonzero_values);
 
     // Reconstruct the original vector
-    let mut result = values.clone();
+    let mut result = values;
     for (i, index) in indices.into_iter().enumerate() {
         result[index] = inverse_nonzero_values[i];
     }

@@ -120,7 +120,7 @@ pub enum RapPhaseSeqKind {
 impl RapPhaseSeqKind {
     pub fn shape(&self) -> Vec<RapPhaseShape> {
         match self {
-            RapPhaseSeqKind::FriLogUp => vec![RapPhaseShape {
+            Self::FriLogUp => vec![RapPhaseShape {
                 num_challenges: STARK_LU_NUM_CHALLENGES,
                 num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
                 extra_opening_rots: vec![],

@@ -19,15 +19,15 @@ impl FriParameters {
         challenge_field_bits.min(fri_query_security_bits)
     }
 
-    pub fn standard_fast() -> FriParameters {
+    pub fn standard_fast() -> Self {
         standard_fri_params_with_100_bits_conjectured_security(1)
     }
 
-    pub fn standard_with_100_bits_conjectured_security(log_blowup: usize) -> FriParameters {
+    pub fn standard_with_100_bits_conjectured_security(log_blowup: usize) -> Self {
         standard_fri_params_with_100_bits_conjectured_security(log_blowup)
     }
 
-    pub fn max_constraint_degree(&self) -> usize {
+    pub const fn max_constraint_degree(&self) -> usize {
         (1 << self.log_blowup) + 1
     }
 }
@@ -37,7 +37,7 @@ impl FriParameters {
 ///
 /// Assumes that the challenge field used as more than 100 bits.
 pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize) -> FriParameters {
-    if let Ok("1") = std::env::var("OPENVM_FAST_TEST").as_deref() {
+    if std::env::var("OPENVM_FAST_TEST").as_deref() == Ok("1") {
         return FriParameters {
             log_blowup,
             log_final_poly_len: 0,

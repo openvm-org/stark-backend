@@ -19,7 +19,7 @@ impl<F: Field> UnivariatePolynomial<F> {
         polynomial
     }
 
-    pub fn zero() -> Self {
+    pub const fn zero() -> Self {
         Self { coeffs: vec![] }
     }
 
@@ -52,7 +52,7 @@ impl<F: Field> UnivariatePolynomial<F> {
         let mut coeffs = Self::zero();
 
         for (i, &(xi, yi)) in points.iter().enumerate() {
-            let mut num = UnivariatePolynomial::one();
+            let mut num = Self::one();
             let mut denom = F::ONE;
 
             for (j, &(xj, _)) in points.iter().enumerate() {
@@ -205,10 +205,10 @@ impl<T> Fraction<T> {
 }
 
 impl<T: Clone + Add<Output = T> + Mul<Output = T>> Add for Fraction<T> {
-    type Output = Fraction<T>;
+    type Output = Self;
 
-    fn add(self, rhs: Self) -> Fraction<T> {
-        Fraction {
+    fn add(self, rhs: Self) -> Self {
+        Self {
             numerator: rhs.denominator.clone() * self.numerator.clone()
                 + self.denominator.clone() * rhs.numerator.clone(),
             denominator: self.denominator * rhs.denominator,

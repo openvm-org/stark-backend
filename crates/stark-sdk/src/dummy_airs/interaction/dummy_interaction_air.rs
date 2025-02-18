@@ -26,10 +26,10 @@ use openvm_stark_backend::{
 
 pub struct DummyInteractionCols;
 impl DummyInteractionCols {
-    pub fn count_col() -> usize {
+    pub const fn count_col() -> usize {
         0
     }
-    pub fn field_col(field_idx: usize) -> usize {
+    pub const fn field_col(field_idx: usize) -> usize {
         field_idx + 1
     }
 }
@@ -45,7 +45,7 @@ pub struct DummyInteractionAir {
 }
 
 impl DummyInteractionAir {
-    pub fn new(field_width: usize, is_send: bool, bus_index: usize) -> Self {
+    pub const fn new(field_width: usize, is_send: bool, bus_index: usize) -> Self {
         Self {
             field_width,
             is_send,
@@ -54,14 +54,14 @@ impl DummyInteractionAir {
         }
     }
 
-    pub fn partition(self) -> Self {
+    pub const fn partition(self) -> Self {
         Self {
             partition: true,
             ..self
         }
     }
 
-    pub fn field_width(&self) -> usize {
+    pub const fn field_width(&self) -> usize {
         self.field_width
     }
 }
@@ -140,7 +140,7 @@ impl<'a, SC: StarkGenericConfig> DummyInteractionChip<'a, SC>
 where
     Val<SC>: FieldAlgebra,
 {
-    pub fn new_without_partition(field_width: usize, is_send: bool, bus_index: usize) -> Self {
+    pub const fn new_without_partition(field_width: usize, is_send: bool, bus_index: usize) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index);
         Self {
             device: None,

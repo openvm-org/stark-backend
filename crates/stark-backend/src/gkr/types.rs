@@ -38,7 +38,7 @@ pub struct GkrMask<F> {
 }
 
 impl<F> GkrMask<F> {
-    pub fn new(columns: Vec<[F; 2]>) -> Self {
+    pub const fn new(columns: Vec<[F; 2]>) -> Self {
         Self { columns }
     }
 
@@ -148,31 +148,31 @@ impl<F: Field> Layer<F> {
         }
 
         let next_layer = match self {
-            Layer::GrandProduct(layer) => Self::next_grand_product_layer(layer),
-            Layer::LogUpGeneric {
+            Self::GrandProduct(layer) => Self::next_grand_product_layer(layer),
+            Self::LogUpGeneric {
                 numerators,
                 denominators,
             }
-            | Layer::LogUpMultiplicities {
+            | Self::LogUpMultiplicities {
                 numerators,
                 denominators,
             } => Self::next_logup_layer(MleExpr::Mle(numerators), denominators),
-            Layer::LogUpSingles { denominators } => {
+            Self::LogUpSingles { denominators } => {
                 Self::next_logup_layer(MleExpr::Constant(F::ONE), denominators)
             }
         };
         Some(next_layer)
     }
 
-    fn next_grand_product_layer(layer: &Mle<F>) -> Layer<F> {
+    fn next_grand_product_layer(layer: &Mle<F>) -> Self {
         let res = layer
             .chunks_exact(2) // Process in chunks of 2 elements
             .map(|chunk| chunk[0] * chunk[1]) // Multiply each pair
             .collect();
-        Layer::GrandProduct(Mle::new(res))
+        Self::GrandProduct(Mle::new(res))
     }
 
-    fn next_logup_layer(numerators: MleExpr<'_, F>, denominators: &Mle<F>) -> Layer<F> {
+    fn next_logup_layer(numerators: MleExpr<'_, F>, denominators: &Mle<F>) -> Self {
         let half_n = 1 << (denominators.arity() - 1);
         let mut next_numerators = Vec::with_capacity(half_n);
         let mut next_denominators = Vec::with_capacity(half_n);
@@ -185,7 +185,7 @@ impl<F: Field> Layer<F> {
             next_denominators.push(res.denominator);
         }
 
-        Layer::LogUpGeneric {
+        Self::LogUpGeneric {
             numerators: Mle::new(next_numerators),
             denominators: Mle::new(next_denominators),
         }
@@ -198,16 +198,16 @@ impl<F: Field> Layer<F> {
         }
 
         Ok(match self {
-            Layer::LogUpSingles { denominators } => {
+            Self::LogUpSingles { denominators } => {
                 let numerator = F::ONE;
                 let denominator = denominators[0];
                 vec![numerator, denominator]
             }
-            Layer::LogUpGeneric {
+            Self::LogUpGeneric {
                 numerators,
                 denominators,
             }
-            | Layer::LogUpMultiplicities {
+            | Self::LogUpMultiplicities {
                 numerators,
                 denominators,
             } => {
@@ -215,7 +215,7 @@ impl<F: Field> Layer<F> {
                 let denominator = denominators[0];
                 vec![numerator, denominator]
             }
-            Layer::GrandProduct(col) => {
+            Self::GrandProduct(col) => {
                 vec![col[0]]
             }
         })

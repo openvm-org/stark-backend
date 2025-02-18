@@ -98,11 +98,12 @@ where
     let after_challenge_ext_values: Vec<_> = after_challenge_values
         .into_iter()
         .map(|values| {
-            let [local, next] = [&values.local, &values.next]
-                .map(|flattened_ext_values| unflatten(flattened_ext_values));
+            let local = unflatten(&values.local);
+            let next = unflatten(&values.next);
             (local, next)
         })
         .collect();
+
     let after_challenge = after_challenge_ext_values
         .iter()
         .map(|(local, next)| {

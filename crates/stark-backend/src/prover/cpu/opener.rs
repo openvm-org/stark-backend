@@ -15,7 +15,7 @@ pub struct OpeningProver<'pcs, SC: StarkGenericConfig> {
 }
 
 impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
-    pub fn new(pcs: &'pcs SC::Pcs, zeta: SC::Challenge) -> Self {
+    pub const fn new(pcs: &'pcs SC::Pcs, zeta: SC::Challenge) -> Self {
         Self { pcs, zeta }
     }
 

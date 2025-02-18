@@ -69,7 +69,7 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
             .map(|(&lhs_eval, &rhs_eval)| alpha * (rhs_eval - lhs_eval) + lhs_eval)
             .collect();
 
-        Mle::new(res)
+        Self::new(res)
     }
 }
 

@@ -119,7 +119,7 @@ where
 impl<H: CryptographicHasher<u8, [u8; 32]> + Clone + Send + Sync>
     StarkFriEngine<BabyBearByteHashConfig<H>> for BabyBearByteHashEngine<H>
 where
-    BabyBearByteHashEngine<H>: BabyBearByteHashEngineWithDefaultHash<H>,
+    Self: BabyBearByteHashEngineWithDefaultHash<H>,
 {
     fn new(fri_params: FriParameters) -> Self {
         engine_from_byte_hash(Self::default_hash(), fri_params)

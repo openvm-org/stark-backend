@@ -30,38 +30,36 @@ pub enum Entry {
 }
 
 impl Entry {
-    pub fn offset(&self) -> Option<usize> {
+    pub const fn offset(&self) -> Option<usize> {
         match self {
-            Entry::Preprocessed { offset } => Some(*offset),
-            Entry::Main { offset, .. } => Some(*offset),
-            Entry::Permutation { offset } => Some(*offset),
-            Entry::Public => None,
-            Entry::Challenge => None,
-            Entry::Exposed => None,
+            Self::Preprocessed { offset }
+            | Self::Main { offset, .. }
+            | Self::Permutation { offset } => Some(*offset),
+            Self::Public | Self::Challenge | Self::Exposed => None,
         }
     }
 
     /// Advance the internal offset of the entry by the given `offset`.
-    pub fn rotate(self, offset: usize) -> Self {
+    pub const fn rotate(self, offset: usize) -> Self {
         match self {
-            Entry::Preprocessed { offset: old_offset } => Entry::Preprocessed {
+            Self::Preprocessed { offset: old_offset } => Self::Preprocessed {
                 offset: old_offset + offset,
             },
-            Entry::Main {
+            Self::Main {
                 part_index,
                 offset: old_offset,
-            } => Entry::Main {
+            } => Self::Main {
                 part_index,
                 offset: old_offset + offset,
             },
-            Entry::Permutation { offset: old_offset } => Entry::Permutation {
+            Self::Permutation { offset: old_offset } => Self::Permutation {
                 offset: old_offset + offset,
             },
-            Entry::Public | Entry::Challenge | Entry::Exposed => self,
+            Self::Public | Self::Challenge | Self::Exposed => self,
         }
     }
 
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         self.rotate(1)
     }
 }
@@ -90,7 +88,7 @@ impl<F: Field> SymbolicVariable<F> {
         }
     }
 
-    pub fn rotate(self, offset: usize) -> Self {
+    pub const fn rotate(self, offset: usize) -> Self {
         Self {
             entry: self.entry.rotate(offset),
             index: self.index,
@@ -98,14 +96,14 @@ impl<F: Field> SymbolicVariable<F> {
         }
     }
 
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         self.rotate(1)
     }
 }
 
 impl<F: Field> From<SymbolicVariable<F>> for SymbolicExpression<F> {
     fn from(value: SymbolicVariable<F>) -> Self {
-        SymbolicExpression::Variable(value)
+        Self::Variable(value)
     }
 }
 

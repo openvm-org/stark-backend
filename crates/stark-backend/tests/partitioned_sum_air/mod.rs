@@ -39,7 +39,7 @@ fn prove_and_verify_sum_air(x: Vec<Val>, ys: Vec<Vec<Val>>) -> Result<(), Verifi
     let air = Arc::new(SumAir(y_width));
 
     let mut keygen_builder = engine.keygen_builder();
-    let air_id = keygen_builder.add_air(air.clone());
+    let air_id = keygen_builder.add_air(air);
     let pk = keygen_builder.generate_pk();
     let vk = pk.get_vk();
 

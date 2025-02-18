@@ -54,24 +54,14 @@ impl<F: Field> Hash for SymbolicExpression<F> {
         // Degree multiple is not necessary
         match self {
             Self::Variable(v) => v.hash(state),
-            Self::IsFirstRow => {}   // discriminant is enough
-            Self::IsLastRow => {}    // discriminant is enough
-            Self::IsTransition => {} // discriminant is enough
+            Self::IsFirstRow | Self::IsLastRow | Self::IsTransition => {} // discriminant is enough
             Self::Constant(f) => f.hash(state),
-            Self::Add { x, y, .. } => {
-                ptr::hash(&**x, state);
-                ptr::hash(&**y, state);
-            }
-            Self::Sub { x, y, .. } => {
+            Self::Add { x, y, .. } | Self::Sub { x, y, .. } | Self::Mul { x, y, .. } => {
                 ptr::hash(&**x, state);
                 ptr::hash(&**y, state);
             }
             Self::Neg { x, .. } => {
                 ptr::hash(&**x, state);
-            }
-            Self::Mul { x, y, .. } => {
-                ptr::hash(&**x, state);
-                ptr::hash(&**y, state);
             }
         }
     }
@@ -81,21 +71,19 @@ impl<F: Field> SymbolicExpression<F> {
     /// Returns the multiple of `n` (the trace length) in this expression's degree.
     pub const fn degree_multiple(&self) -> usize {
         match self {
-            SymbolicExpression::Variable(v) => v.degree_multiple(),
-            SymbolicExpression::IsFirstRow => 1,
-            SymbolicExpression::IsLastRow => 1,
-            SymbolicExpression::IsTransition => 0,
-            SymbolicExpression::Constant(_) => 0,
-            SymbolicExpression::Add {
+            Self::Variable(v) => v.degree_multiple(),
+            Self::IsFirstRow | Self::IsLastRow => 1,
+            Self::IsTransition | Self::Constant(_) => 0,
+            Self::Add {
                 degree_multiple, ..
-            } => *degree_multiple,
-            SymbolicExpression::Sub {
+            }
+            | Self::Sub {
                 degree_multiple, ..
-            } => *degree_multiple,
-            SymbolicExpression::Neg {
+            }
+            | Self::Neg {
                 degree_multiple, ..
-            } => *degree_multiple,
-            SymbolicExpression::Mul {
+            }
+            | Self::Mul {
                 degree_multiple, ..
             } => *degree_multiple,
         }
@@ -103,12 +91,12 @@ impl<F: Field> SymbolicExpression<F> {
 
     pub fn rotate(&self, offset: usize) -> Self {
         match self {
-            SymbolicExpression::Variable(v) => v.rotate(offset).into(),
-            SymbolicExpression::IsFirstRow => unreachable!("IsFirstRow should not be rotated"),
-            SymbolicExpression::IsLastRow => unreachable!("IsLastRow should not be rotated"),
-            SymbolicExpression::IsTransition => unreachable!("IsTransition should not be rotated"),
-            SymbolicExpression::Constant(c) => Self::Constant(*c),
-            SymbolicExpression::Add {
+            Self::Variable(v) => v.rotate(offset).into(),
+            Self::IsFirstRow => unreachable!("IsFirstRow should not be rotated"),
+            Self::IsLastRow => unreachable!("IsLastRow should not be rotated"),
+            Self::IsTransition => unreachable!("IsTransition should not be rotated"),
+            Self::Constant(c) => Self::Constant(*c),
+            Self::Add {
                 x,
                 y,
                 degree_multiple,
@@ -117,7 +105,7 @@ impl<F: Field> SymbolicExpression<F> {
                 y: Arc::new(y.rotate(offset)),
                 degree_multiple: *degree_multiple,
             },
-            SymbolicExpression::Sub {
+            Self::Sub {
                 x,
                 y,
                 degree_multiple,
@@ -126,11 +114,11 @@ impl<F: Field> SymbolicExpression<F> {
                 y: Arc::new(y.rotate(offset)),
                 degree_multiple: *degree_multiple,
             },
-            SymbolicExpression::Neg { x, degree_multiple } => Self::Neg {
+            Self::Neg { x, degree_multiple } => Self::Neg {
                 x: Arc::new(x.rotate(offset)),
                 degree_multiple: *degree_multiple,
             },
-            SymbolicExpression::Mul {
+            Self::Mul {
                 x,
                 y,
                 degree_multiple,

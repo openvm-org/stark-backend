@@ -9,8 +9,8 @@ pub struct FibonacciCols<F> {
 }
 
 impl<F> FibonacciCols<F> {
-    pub const fn new(left: F, right: F) -> FibonacciCols<F> {
-        FibonacciCols { left, right }
+    pub const fn new(left: F, right: F) -> Self {
+        Self { left, right }
     }
 }
 

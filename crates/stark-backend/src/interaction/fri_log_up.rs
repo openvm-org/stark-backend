@@ -29,7 +29,7 @@ pub struct FriLogUpPhase<F, Challenge, Challenger> {
 }
 
 impl<F, Challenge, Challenger> FriLogUpPhase<F, Challenge, Challenger> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             _marker: PhantomData,
         }
@@ -56,7 +56,7 @@ impl FriLogUpProvingKey {
     }
 }
 
-impl<F: Field, Challenge, Challenger> RapPhaseSeq<F, Challenge, Challenger>
+impl<F, Challenge, Challenger> RapPhaseSeq<F, Challenge, Challenger>
     for FriLogUpPhase<F, Challenge, Challenger>
 where
     F: Field,
@@ -155,7 +155,7 @@ where
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
             array::from_fn(|_| challenger.sample_ext_element::<Challenge>());
 
-        for exposed_values_per_phase in exposed_values_per_phase_per_air.iter() {
+        for exposed_values_per_phase in exposed_values_per_phase_per_air {
             if let Some(exposed_values) = exposed_values_per_phase.first() {
                 for exposed_value in exposed_values {
                     challenger.observe_slice(exposed_value.as_base_slice());
@@ -465,7 +465,7 @@ pub fn eval_fri_log_up_phase<AB>(
             .collect_vec();
 
         let mut row_lhs: AB::ExprEF = perm_local[chunk_idx].into();
-        for denom in denoms_per_chunk.iter() {
+        for denom in &denoms_per_chunk {
             row_lhs *= denom.clone();
         }
 

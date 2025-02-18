@@ -202,7 +202,7 @@ fn bn254_poseidon2_rc3() -> Vec<[Bn254Fr; 3]> {
     RC3.iter()
         .map(|vec| {
             vec.iter()
-                .cloned()
+                .copied()
                 .map(bn254_from_ark_ff)
                 .collect::<Vec<_>>()
                 .try_into()

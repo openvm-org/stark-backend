@@ -39,7 +39,7 @@ pub struct MmcsVerifyBatchCostEstimate {
 impl MmcsVerifyBatchCostEstimate {
     /// `width` is number of base field columns.
     /// `max_log_height_lde` is the height of the MMCS (which includes blowup)
-    pub fn from_dim(width: usize, max_log_height_lde: usize) -> Self {
+    pub const fn from_dim(width: usize, max_log_height_lde: usize) -> Self {
         Self {
             num_f_to_hash: width,
             num_compress: max_log_height_lde,
@@ -70,7 +70,7 @@ impl FriOpenInputCostEstimate {
     /// `width` is number of base field columns.
     /// `max_log_height` is the trace height, before blowup.
     /// `num_points` is number of points to open.
-    pub fn new(
+    pub const fn new(
         width: usize,
         max_log_height: usize,
         num_points: usize,
@@ -108,7 +108,7 @@ pub struct FriQueryCostEstimate {
 
 impl FriQueryCostEstimate {
     /// `max_log_height` is the trace height, before blowup.
-    pub fn new(max_log_height: usize, fri_params: FriParameters) -> Self {
+    pub const fn new(max_log_height: usize, fri_params: FriParameters) -> Self {
         let mut mmcs = MmcsVerifyBatchCostEstimate {
             num_f_to_hash: 2 * max_log_height,
             num_compress: max_log_height * (max_log_height + fri_params.log_blowup - 1) / 2,
