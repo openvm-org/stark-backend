@@ -186,7 +186,7 @@ where
         // - transpose per_phase, per_air -> per_air, per_phase
         let exposed_values_per_air: Vec<Vec<_>> = (0..num_air)
             .map(|i| {
-                prover_data_after
+                let mut values: Vec<_> = prover_data_after
                     .rap_views_per_phase
                     .iter()
                     .filter_map(|per_air| {
@@ -195,9 +195,13 @@ where
                             .inner
                             .map(|_| per_air[i].exposed_values.clone())
                     })
-                    .rev()
-                    .skip_while(|v| v.is_empty())
-                    .collect()
+                    .collect();
+
+                while values.last().map_or(false, |v| v.is_empty()) {
+                    values.pop();
+                }
+
+                values
             })
             .collect();
 
