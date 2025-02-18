@@ -140,7 +140,11 @@ impl<'a, SC: StarkGenericConfig> DummyInteractionChip<'a, SC>
 where
     Val<SC>: FieldAlgebra,
 {
-    pub const fn new_without_partition(field_width: usize, is_send: bool, bus_index: usize) -> Self {
+    pub const fn new_without_partition(
+        field_width: usize,
+        is_send: bool,
+        bus_index: usize,
+    ) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index);
         Self {
             device: None,

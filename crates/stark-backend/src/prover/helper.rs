@@ -58,10 +58,7 @@ impl<SC: StarkGenericConfig> AirProofInput<SC> {
     }
 
     pub fn multiple_simple_no_pis(traces: Vec<RowMajorMatrix<Val<SC>>>) -> Vec<Self> {
-        traces
-            .into_iter()
-            .map(Self::simple_no_pis)
-            .collect()
+        traces.into_iter().map(Self::simple_no_pis).collect()
     }
     /// Return the height of the main trace.
     pub fn main_trace_height(&self) -> usize {
