@@ -184,26 +184,31 @@ where
 
         // Collect exposed_values_per_air for the proof:
         // - transpose per_phase, per_air -> per_air, per_phase
-        let exposed_values_per_air: Vec<Vec<_>> = (0..num_air)
+        let exposed_values_per_air = (0..num_air)
             .map(|i| {
-                let mut values: Vec<_> = prover_data_after
+                let mut values = prover_data_after
                     .rap_views_per_phase
                     .iter()
-                    .filter_map(|per_air| {
+                    .map(|per_air| {
                         per_air
-                            .get(i)?
-                            .inner
-                            .map(|_| per_air[i].exposed_values.clone())
+                            .get(i)
+                            .and_then(|v| v.inner.map(|_| v.exposed_values.clone()))
                     })
-                    .collect();
-
-                while values.last().map_or(false, |v| v.is_empty()) {
-                    values.pop();
+                    .collect_vec();
+                // Prune Nones
+                while let Some(last) = values.last() {
+                    if last.is_none() {
+                        values.pop();
+                    } else {
+                        break;
+                    }
                 }
-
                 values
+                    .into_iter()
+                    .map(|v| v.unwrap_or_default())
+                    .collect_vec()
             })
-            .collect();
+            .collect_vec();
 
         // ==================== Quotient polynomial computation and commitment, if any ====================
         // Note[jpw]: Currently we always call this step, we could add a flag to skip it for protocols that
