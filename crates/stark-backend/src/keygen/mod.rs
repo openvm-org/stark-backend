@@ -67,40 +67,41 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
     /// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
     pub fn generate_pk(mut self) -> MultiStarkProvingKey<SC> {
-        let air_max_constraint_degree = self
-            .partitioned_airs
-            .iter()
-            .map(|keygen_builder| {
-                let max_constraint_degree = keygen_builder.max_constraint_degree();
-                tracing::debug!(
-                    "{} has constraint degree {}",
-                    keygen_builder.air.name(),
-                    max_constraint_degree
-                );
+        let mut air_max_constraint_degree = 0;
+        let mut symbolic_constraints_per_air = Vec::with_capacity(self.partitioned_airs.len());
+
+        // Extract constraint degrees and symbolic constraints in a single pass
+        //
+        // First pass: get symbolic constraints and interactions but RAP phase constraints are not final
+        for keygen_builder in &self.partitioned_airs {
+            let max_constraint_degree = keygen_builder.max_constraint_degree();
+            tracing::debug!(
+                "{} has constraint degree {}",
+                keygen_builder.air.name(),
                 max_constraint_degree
-            })
-            .max()
-            .unwrap();
+            );
+
+            air_max_constraint_degree = air_max_constraint_degree.max(max_constraint_degree);
+            symbolic_constraints_per_air
+                .push(keygen_builder.get_symbolic_builder(None).constraints());
+        }
+
         tracing::info!(
             "Max constraint (excluding logup constraints) degree across all AIRs: {}",
             air_max_constraint_degree
         );
+
+        // Adjust max constraint degree if necessary
         if self.max_constraint_degree != 0 && air_max_constraint_degree > self.max_constraint_degree
         {
-            // This means the quotient polynomial is already going to be higher degree, so we
-            // might as well use it.
             tracing::info!(
-                "Setting max_constraint_degree from {} to {air_max_constraint_degree}",
-                self.max_constraint_degree
+                "Updating max_constraint_degree from {} to {}",
+                self.max_constraint_degree,
+                air_max_constraint_degree
             );
             self.max_constraint_degree = air_max_constraint_degree;
         }
-        // First pass: get symbolic constraints and interactions but RAP phase constraints are not final
-        let symbolic_constraints_per_air = self
-            .partitioned_airs
-            .iter()
-            .map(|keygen_builder| keygen_builder.get_symbolic_builder(None).constraints())
-            .collect_vec();
+
         // Note: due to the need to go through a trait, there is some duplicate computation
         // (e.g., FRI logup will calculate the interaction chunking both here and in the second pass below)
         let rap_partial_pk_per_air = self
