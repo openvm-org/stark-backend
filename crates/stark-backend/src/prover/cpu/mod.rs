@@ -101,13 +101,13 @@ impl<SC: StarkGenericConfig> CpuDevice<'_, SC> {
 
 impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'_, SC> {}
 
-impl<SC: StarkGenericConfig> hal::TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsData<SC>) {
         let pcs = self.pcs();
         let (log_trace_heights, traces_with_domains): (Vec<_>, Vec<_>) = traces
             .iter()
             .map(|matrix| {
-                let height = matrix.as_ref().height();
+                let height = matrix.height();
                 let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
                 // Recomputing the domain is lightweight
                 let domain = pcs.natural_domain_for_degree(height);

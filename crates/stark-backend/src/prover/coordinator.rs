@@ -295,21 +295,13 @@ where
 
 impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
     pub(crate) fn validate(&self, ctx: &ProvingContext<PB>) -> bool {
-        if ctx.per_air.len() != self.air_ids.len() {
-            return false;
-        }
-        if !ctx
-            .per_air
-            .iter()
-            .zip(&self.air_ids)
-            .all(|((id1, _), id2)| id1 == id2)
-        {
-            return false;
-        }
-        if !ctx.per_air.iter().tuple_windows().all(|(a, b)| a.0 < b.0) {
-            return false;
-        }
-        true
+        ctx.per_air.len() == self.air_ids.len()
+            && ctx
+                .per_air
+                .iter()
+                .zip(&self.air_ids)
+                .all(|((id1, _), id2)| id1 == id2)
+            && ctx.per_air.iter().tuple_windows().all(|(a, b)| a.0 < b.0)
     }
 
     pub(crate) fn vk_view(&self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
