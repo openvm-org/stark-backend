@@ -231,22 +231,22 @@ where
             .unzip();
         // ==================== Polynomial Opening Proofs ====================
         let opening = metrics_span("pcs_opening_time_ms", || {
-            let quotient_degrees = mpk
-                .per_air
-                .iter()
-                .map(|pk| pk.vk.quotient_degree)
-                .collect_vec();
-            let preprocessed = mpk
-                .per_air
-                .iter()
-                .flat_map(|pk| pk.preprocessed_data.as_ref().map(|d| &d.data))
-                .collect_vec();
+            let mut quotient_degrees = Vec::with_capacity(mpk.per_air.len());
+            let mut preprocessed = Vec::new();
+
+            for pk in &mpk.per_air {
+                quotient_degrees.push(pk.vk.quotient_degree);
+                if let Some(data) = pk.preprocessed_data.as_ref().map(|d| &d.data) {
+                    preprocessed.push(data);
+                }
+            }
+
             let main = cached_views_per_air
                 .into_iter()
                 .flatten()
                 .map(|cv| cv.data)
                 .chain(iter::once(&common_main_pcs_data))
-                .collect_vec();
+                .collect();
             self.device.open(
                 &mut self.challenger,
                 preprocessed,
