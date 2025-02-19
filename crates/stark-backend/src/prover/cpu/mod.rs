@@ -213,12 +213,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
                     })
                     .collect();
                 // Only commit if there are permutation traces
-                if flattened_traces.is_empty() {
-                    None
-                } else {
-                    let (commit, data) = self.commit(&flattened_traces);
-                    Some((commit, data))
-                }
+                (!flattened_traces.is_empty()).then(|| self.commit(&flattened_traces))
             })
             .into_iter()
             .collect();
