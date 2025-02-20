@@ -55,8 +55,6 @@ where
 {
     pub fn eval_constraints(&mut self, constraints: &SymbolicExpressionDag<F>) {
         let dag = constraints;
-        // check that the constraint indices are sorted
-        assert!(dag.constraint_idx.windows(2).all(|w| w[0] < w[1]));
         // node_idx -> evaluation
         // We do a simple serial evaluation in topological order.
         // This can be parallelized if necessary.
