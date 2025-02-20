@@ -93,10 +93,11 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
 ) -> SymbolicConstraintsDag<F> {
     let mut expr_to_idx = FxHashMap::default();
     let mut nodes = Vec::new();
-    let constraint_idx = constraints
+    let mut constraint_idx: Vec<usize> = constraints
         .iter()
         .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
         .collect();
+    constraint_idx.sort();
     let interactions: Vec<Interaction<usize>> = interactions
         .iter()
         .map(|interaction| {
