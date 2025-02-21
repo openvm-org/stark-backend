@@ -53,7 +53,7 @@ fn main() {
 
     let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
     let trace = metrics_span("generate_trace", || {
-        p3_keccak_air::generate_trace_rows::<BabyBear>(inputs)
+        p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0)
     });
 
     let proof = engine.prove(
