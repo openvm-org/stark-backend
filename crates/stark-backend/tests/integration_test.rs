@@ -13,6 +13,7 @@ use openvm_stark_sdk::{
 use p3_baby_bear::BabyBear;
 
 mod cached_lookup;
+mod fast_ext_field;
 mod fib_selector_air;
 mod fib_triples_air;
 pub mod interaction;

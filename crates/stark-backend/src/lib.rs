@@ -19,6 +19,8 @@ mod chip;
 pub mod config;
 /// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
 pub mod engine;
+/// Faster Extension Field for BabyBearExt4
+pub mod fast_ext_field;
 /// GKR batch prover for Grand Product and LogUp lookup arguments.
 pub mod gkr;
 /// Log-up permutation argument implementation as RAP.
