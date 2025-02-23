@@ -28,7 +28,7 @@ pub fn arith_tests() {
 #[test]
 pub fn mul_time_test() {
     let mut rng = create_seeded_rng();
-    const NUM_OPS: usize = 1000000;
+    const NUM_OPS: usize = 100_000_000;
     let now = Instant::now();
     for _ in 0..NUM_OPS {
         let a = BabyBearExt4::rand(&mut rng);
