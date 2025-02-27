@@ -13,10 +13,8 @@ use super::{PairTraceView, SymbolicInteraction};
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
     interaction::{
-        trace::Evaluator,
-        utils::{generate_betas, generate_rlc_elements},
-        InteractionBuilder, InteractionType, RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind,
-        RapPhaseVerifierData,
+        trace::Evaluator, utils::generate_betas, InteractionBuilder, InteractionType,
+        RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
     },
     parizip,
     rap::PermutationAirBuilderWithExposedValues,
@@ -271,7 +269,6 @@ where
         }
         let &[alpha, beta] = permutation_randomness;
 
-        let alphas = generate_rlc_elements(alpha, all_interactions);
         let betas = generate_betas(beta, all_interactions);
 
         // Compute the reciprocal columns
@@ -343,8 +340,8 @@ where
                 for (n, denom_row) in denoms.chunks_exact_mut(num_interactions).enumerate() {
                     let evaluator = evaluator(row_offset + n);
                     for (denom, interaction) in denom_row.iter_mut().zip(all_interactions.iter()) {
-                        let alpha = alphas[interaction.bus_index];
                         debug_assert!(interaction.fields.len() <= betas.len());
+                        let b = F::from_canonical_usize(interaction.bus_index + 1);
                         let mut fields = interaction.fields.iter();
                         *denom = alpha
                             + evaluator
@@ -352,6 +349,7 @@ where
                         for (expr, &beta) in fields.zip(betas.iter().skip(1)) {
                             *denom += beta * evaluator.eval_expr(expr);
                         }
+                        *denom += betas[interaction.fields.len()] * b;
                     }
                 }
 
@@ -443,7 +441,7 @@ pub fn eval_fri_log_up_phase<AB>(
     let phi_local = *perm_local.last().unwrap();
     let phi_next = *perm_next.last().unwrap();
 
-    let alphas = generate_rlc_elements(rand_elems[0].into(), &all_interactions);
+    let alpha = rand_elems[0];
     let betas = generate_betas(rand_elems[1].into(), &all_interactions);
 
     let phi_lhs = phi_next.into() - phi_local.into();
@@ -457,10 +455,11 @@ pub fn eval_fri_log_up_phase<AB>(
                 let interaction = &all_interactions[interaction_idx];
                 assert!(!interaction.fields.is_empty(), "fields should not be empty");
                 let mut field_hash = AB::ExprEF::ZERO;
-                for (field, beta) in interaction.fields.iter().zip(betas.iter()) {
+                let b = AB::Expr::from_canonical_usize(interaction.bus_index + 1);
+                for (field, beta) in interaction.fields.iter().chain([&b]).zip(&betas) {
                     field_hash += beta.clone() * field.clone();
                 }
-                field_hash + alphas[interaction.bus_index].clone()
+                field_hash + alpha.into()
             })
             .collect_vec();
 
