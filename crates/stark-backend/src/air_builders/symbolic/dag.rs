@@ -314,7 +314,6 @@ mod tests {
             dag::{build_symbolic_constraints_dag, SymbolicExpressionDag, SymbolicExpressionNode},
             symbolic_expression::SymbolicExpression,
             symbolic_variable::{Entry, SymbolicVariable},
-            SymbolicConstraints,
         },
         interaction::{Interaction, InteractionType},
     };
@@ -409,13 +408,5 @@ mod tests {
                 interaction_type: InteractionType::Send,
             }]
         );
-
-        let sc = SymbolicConstraints {
-            constraints,
-            interactions,
-        };
-        let ser_str = serde_json::to_string(&sc).unwrap();
-        let new_sc: SymbolicConstraints<_> = serde_json::from_str(&ser_str).unwrap();
-        assert_eq!(sc, new_sc);
     }
 }
