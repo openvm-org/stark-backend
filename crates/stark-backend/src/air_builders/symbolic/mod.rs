@@ -17,7 +17,7 @@ use super::PartitionedAirBuilder;
 use crate::{
     interaction::{
         fri_log_up::find_interaction_chunks, rap::InteractionPhaseAirBuilder, Interaction,
-        InteractionBuilder, InteractionType, RapPhaseSeqKind, SymbolicInteraction,
+        InteractionBuilder, RapPhaseSeqKind, SymbolicInteraction,
     },
     keygen::types::{StarkVerifyingParams, TraceWidth},
     rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
@@ -28,6 +28,8 @@ pub mod symbolic_expression;
 pub mod symbolic_variable;
 
 pub use dag::*;
+
+use crate::interaction::BusIndex;
 
 /// Symbolic constraints for a single AIR with interactions.
 /// The constraints contain the constraints on the logup partial sums.
@@ -67,7 +69,7 @@ impl<F: Field> SymbolicConstraints<F> {
             .iter()
             .map(|interaction| {
                 interaction
-                    .fields
+                    .message
                     .iter()
                     .map(|field| field.degree_multiple())
                     .max()
@@ -362,18 +364,18 @@ impl<F: Field> PermutationAirBuilderWithExposedValues for SymbolicRapBuilder<F> 
 impl<F: Field> InteractionBuilder for SymbolicRapBuilder<F> {
     fn push_interaction<E: Into<Self::Expr>>(
         &mut self,
-        bus_index: usize,
+        bus_index: BusIndex,
         fields: impl IntoIterator<Item = E>,
         count: impl Into<Self::Expr>,
-        interaction_type: InteractionType,
+        count_weight: u32,
     ) {
         let fields = fields.into_iter().map(|f| f.into()).collect();
         let count = count.into();
         self.interactions.push(Interaction {
             bus_index,
-            fields,
+            message: fields,
             count,
-            interaction_type,
+            count_weight,
         });
     }
 

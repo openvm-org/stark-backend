@@ -1,10 +1,19 @@
+use std::sync::Arc;
+
 use itertools::Itertools;
-use openvm_stark_backend::{p3_field::FieldAlgebra, verifier::VerificationError};
+use openvm_stark_backend::{
+    config::StarkGenericConfig,
+    interaction::RapPhaseSeq,
+    keygen::{types::LinearConstraint, MultiStarkKeygenBuilder},
+    p3_field::FieldAlgebra,
+    verifier::VerificationError,
+};
 use openvm_stark_sdk::{
-    any_rap_arc_vec,
+    any_rap_arc_vec, config,
     dummy_airs::interaction::{dummy_interaction_air::DummyInteractionAir, verify_interactions},
 };
 use p3_baby_bear::BabyBear;
+use p3_field::PrimeField32;
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
@@ -14,6 +23,58 @@ use crate::{
 };
 
 type Val = BabyBear;
+
+#[test]
+fn test_interaction_trace_height_constraints() {
+    let log_trace_degree = 3;
+    let n = 1usize << log_trace_degree;
+    let sels: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+    let fib_air = FibonacciSelectorAir::new(sels.clone(), true);
+    let mut sender_air = DummyInteractionAir::new(1, true, 0);
+    sender_air.count_weight = 3;
+    let mut sender_air_2 = DummyInteractionAir::new(1, true, 0);
+    sender_air_2.count_weight = 1;
+    let mut sender_air_3 = DummyInteractionAir::new(1, true, 1);
+    sender_air_3.count_weight = 7;
+
+    let perm = config::baby_bear_poseidon2::random_perm();
+    let config = config::baby_bear_poseidon2::default_config(&perm);
+
+    let mut keygen_builder = MultiStarkKeygenBuilder::new(&config);
+    keygen_builder.add_air(Arc::new(fib_air));
+    keygen_builder.add_air(Arc::new(sender_air));
+    keygen_builder.add_air(Arc::new(sender_air_2));
+    keygen_builder.add_air(Arc::new(sender_air_3));
+    let pk = keygen_builder.generate_pk();
+    let vk = pk.get_vk();
+
+    assert_eq!(vk.trace_height_constraints.len(), 3);
+
+    assert_eq!(
+        &vk.trace_height_constraints[0],
+        &LinearConstraint {
+            coefficients: vec![0, 3, 1, 0], // fib_air does not contribute any count_weight
+            threshold: BabyBear::ORDER_U32,
+        }
+    );
+    assert_eq!(
+        &vk.trace_height_constraints[1],
+        &LinearConstraint {
+            coefficients: vec![0, 0, 0, 7],
+            threshold: BabyBear::ORDER_U32,
+        }
+    );
+    assert_eq!(
+        &vk.trace_height_constraints[2],
+        &LinearConstraint {
+            coefficients: vec![1, 1, 1, 1], // one interaction per AIR
+            threshold: config
+                .rap_phase_seq()
+                .log_up_security_params()
+                .max_interactions(),
+        }
+    );
+}
 
 #[test]
 fn test_interaction_fib_selector_happy_path() {

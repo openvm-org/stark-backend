@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::hal::ProverBackend;
 use crate::{
     config::{Com, PcsProof, PcsProverData, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
-    keygen::types::StarkVerifyingKey,
+    keygen::types::{LinearConstraint, StarkVerifyingKey},
     proof::{AirProofData, Commitments, OpeningProof, Proof},
 };
 
@@ -16,12 +16,21 @@ use crate::{
 pub struct DeviceMultiStarkProvingKey<'a, PB: ProverBackend> {
     pub(super) air_ids: Vec<usize>,
     pub per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
+    pub trace_height_constraints: Vec<LinearConstraint>,
 }
 
 impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
-    pub fn new(air_ids: Vec<usize>, per_air: Vec<DeviceStarkProvingKey<'a, PB>>) -> Self {
+    pub fn new(
+        air_ids: Vec<usize>,
+        per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
+        trace_height_constraints: Vec<LinearConstraint>,
+    ) -> Self {
         assert_eq!(air_ids.len(), per_air.len());
-        Self { air_ids, per_air }
+        Self {
+            air_ids,
+            per_air,
+            trace_height_constraints,
+        }
     }
 }
 

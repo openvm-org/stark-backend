@@ -2,12 +2,15 @@ use itertools::Itertools;
 
 use crate::{
     config::{Com, StarkGenericConfig, Val},
-    keygen::types::{MultiStarkVerifyingKey, StarkVerifyingKey},
+    keygen::types::{LinearConstraint, MultiStarkVerifyingKey, StarkVerifyingKey},
 };
 
 #[derive(Clone, derive_new::new)]
 pub(crate) struct MultiStarkVerifyingKeyView<'a, Val, Com> {
     pub per_air: Vec<&'a StarkVerifyingKey<Val, Com>>,
+    /// Trace height constraints are *not* filtered by AIR. When computing the dot product, this
+    /// will be indexed into by air_id.
+    pub trace_height_constraints: &'a [LinearConstraint],
 }
 
 impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
@@ -18,6 +21,7 @@ impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
     pub(crate) fn view(&self, air_ids: &[usize]) -> MultiStarkVerifyingKeyView<Val<SC>, Com<SC>> {
         MultiStarkVerifyingKeyView {
             per_air: air_ids.iter().map(|&id| &self.per_air[id]).collect(),
+            trace_height_constraints: &self.trace_height_constraints,
         }
     }
 }

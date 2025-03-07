@@ -2,8 +2,10 @@ use std::any::type_name;
 
 use ff::PrimeField;
 use openvm_stark_backend::{
-    config::StarkConfig, interaction::fri_log_up::FriLogUpPhase,
-    p3_challenger::MultiField32Challenger, p3_commit::ExtensionMmcs,
+    config::StarkConfig,
+    interaction::{fri_log_up::FriLogUpPhase, LogUpSecurityParameters},
+    p3_challenger::MultiField32Challenger,
+    p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
 };
 use p3_baby_bear::BabyBear;
@@ -25,6 +27,7 @@ use super::{
 };
 use crate::{
     assert_sc_compatible_with_serde,
+    config::fri_params::SecurityParameters,
     engine::{StarkEngine, StarkEngineWithHashInstrumentation, StarkFriEngine},
 };
 
@@ -111,35 +114,42 @@ where
 
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
 pub fn default_engine() -> BabyBearPoseidon2RootEngine {
-    default_engine_impl(FriParameters::standard_fast())
+    default_engine_impl(SecurityParameters::standard_fast())
 }
 
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-fn default_engine_impl(fri_params: FriParameters) -> BabyBearPoseidon2RootEngine {
+fn default_engine_impl(security_params: SecurityParameters) -> BabyBearPoseidon2RootEngine {
     let perm = root_perm();
-    engine_from_perm(perm, fri_params)
+    engine_from_perm(perm, security_params)
 }
 
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
 pub fn default_config(perm: &Perm) -> BabyBearPoseidon2RootConfig {
-    let fri_params = FriParameters::standard_fast();
-    config_from_perm(perm, fri_params)
+    config_from_perm(perm, SecurityParameters::standard_fast())
 }
 
-pub fn engine_from_perm<P>(perm: P, fri_params: FriParameters) -> BabyBearPermutationRootEngine<P>
+pub fn engine_from_perm<P>(
+    perm: P,
+    security_params: SecurityParameters,
+) -> BabyBearPermutationRootEngine<P>
 where
     P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
 {
-    let config = config_from_perm(&perm, fri_params);
+    let fri_params = security_params.fri_params;
+    let max_constraint_degree = fri_params.max_constraint_degree();
+    let config = config_from_perm(&perm, security_params);
     BabyBearPermutationRootEngine {
         config,
         perm,
         fri_params,
-        max_constraint_degree: fri_params.max_constraint_degree(),
+        max_constraint_degree,
     }
 }
 
-pub fn config_from_perm<P>(perm: &P, fri_params: FriParameters) -> BabyBearPermutationRootConfig<P>
+pub fn config_from_perm<P>(
+    perm: &P,
+    security_params: SecurityParameters,
+) -> BabyBearPermutationRootConfig<P>
 where
     P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
 {
@@ -148,6 +158,10 @@ where
     let val_mmcs = ValMmcs::new(hash, compress);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft::default();
+    let SecurityParameters {
+        fri_params,
+        log_up_params,
+    } = security_params;
     let fri_config = FriConfig {
         log_blowup: fri_params.log_blowup,
         log_final_poly_len: fri_params.log_final_poly_len,
@@ -156,7 +170,7 @@ where
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
-    let rap_phase = FriLogUpPhase::new();
+    let rap_phase = FriLogUpPhase::new(log_up_params);
     BabyBearPermutationRootConfig::new(pcs, rap_phase)
 }
 
@@ -247,7 +261,11 @@ pub fn print_hash_counts(hash_counter: &InstrumentCounter, compress_counter: &In
 
 impl StarkFriEngine<BabyBearPoseidon2RootConfig> for BabyBearPoseidon2RootEngine {
     fn new(fri_params: FriParameters) -> Self {
-        default_engine_impl(fri_params)
+        let security_params = SecurityParameters {
+            fri_params,
+            log_up_params: LogUpSecurityParameters::default(),
+        };
+        default_engine_impl(security_params)
     }
     fn fri_params(&self) -> FriParameters {
         self.fri_params

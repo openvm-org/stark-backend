@@ -24,7 +24,7 @@ use crate::{
         StarkGenericConfig, Val,
     },
     interaction::RapPhaseSeq,
-    keygen::{types::MultiStarkProvingKey, view::MultiStarkVerifyingKeyView},
+    keygen::types::MultiStarkProvingKey,
     proof::OpeningProof,
     prover::{hal::TraceCommitter, types::RapSinglePhaseView},
     utils::metrics_span,
@@ -129,14 +129,17 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
     fn partially_prove<'a>(
         &self,
         challenger: &mut SC::Challenger,
-        pk_views: &[DeviceStarkProvingKey<'a, CpuBackend<SC>>],
+        mpk: &DeviceMultiStarkProvingKey<'a, CpuBackend<SC>>,
         trace_views: Vec<PairView<&'a Arc<RowMajorMatrix<Val<SC>>>, Val<SC>>>,
     ) -> (
         Option<RapPhaseSeqPartialProof<SC>>,
         ProverDataAfterRapPhases<CpuBackend<SC>>,
     ) {
-        assert_eq!(pk_views.len(), trace_views.len());
-        let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = pk_views
+        let num_airs = mpk.per_air.len();
+        assert_eq!(num_airs, trace_views.len());
+
+        let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = mpk
+            .per_air
             .iter()
             .map(|pk| {
                 (
@@ -166,9 +169,8 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             )
             .map_or((None, None), |(p, d)| (Some(p), Some(d)));
 
-        let mvk_view = MultiStarkVerifyingKeyView::new(pk_views.iter().map(|pk| pk.vk).collect());
+        let mvk_view = mpk.vk_view();
 
-        let num_airs = pk_views.len();
         let mut perm_matrix_idx = 0usize;
         let rap_views_per_phase;
         let perm_trace_per_air = if let Some(phase_data) = rap_phase_seq_data {
@@ -441,7 +443,7 @@ where
                 }
             })
             .collect();
-        DeviceMultiStarkProvingKey::new(air_ids, per_air)
+        DeviceMultiStarkProvingKey::new(air_ids, per_air, mpk.trace_height_constraints.clone())
     }
     fn transport_matrix_to_device(
         &self,

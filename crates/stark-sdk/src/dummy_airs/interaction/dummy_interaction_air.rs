@@ -11,7 +11,7 @@ use itertools::izip;
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
     config::{StarkGenericConfig, Val},
-    interaction::{InteractionBuilder, InteractionType},
+    interaction::{BusIndex, InteractionBuilder},
     p3_air::{Air, BaseAir},
     p3_field::{Field, FieldAlgebra},
     p3_matrix::{dense::RowMajorMatrix, Matrix},
@@ -39,17 +39,19 @@ pub struct DummyInteractionAir {
     field_width: usize,
     /// Send if true. Receive if false.
     pub is_send: bool,
-    bus_index: usize,
+    bus_index: BusIndex,
+    pub count_weight: u32,
     /// If true, then | count | and | fields[..] | are in separate main trace partitions.
     pub partition: bool,
 }
 
 impl DummyInteractionAir {
-    pub fn new(field_width: usize, is_send: bool, bus_index: usize) -> Self {
+    pub fn new(field_width: usize, is_send: bool, bus_index: BusIndex) -> Self {
         Self {
             field_width,
             is_send,
             bus_index,
+            count_weight: 0,
             partition: false,
         }
     }
@@ -110,12 +112,16 @@ impl<AB: InteractionBuilder + PartitionedAirBuilder> Air<AB> for DummyInteractio
                 .collect();
             (fields, count)
         };
-        let interaction_type = if self.is_send {
-            InteractionType::Send
+        if self.is_send {
+            builder.push_interaction(self.bus_index, fields, count, self.count_weight);
         } else {
-            InteractionType::Receive
-        };
-        builder.push_interaction(self.bus_index, fields, count, interaction_type)
+            builder.push_interaction(
+                self.bus_index,
+                fields,
+                AB::Expr::NEG_ONE * count,
+                self.count_weight,
+            );
+        }
     }
 }
 
@@ -140,7 +146,7 @@ impl<'a, SC: StarkGenericConfig> DummyInteractionChip<'a, SC>
 where
     Val<SC>: FieldAlgebra,
 {
-    pub fn new_without_partition(field_width: usize, is_send: bool, bus_index: usize) -> Self {
+    pub fn new_without_partition(field_width: usize, is_send: bool, bus_index: BusIndex) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index);
         Self {
             device: None,
@@ -152,7 +158,7 @@ where
         config: &'a SC,
         field_width: usize,
         is_send: bool,
-        bus_index: usize,
+        bus_index: BusIndex,
     ) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index).partition();
         Self {

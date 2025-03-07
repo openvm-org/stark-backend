@@ -83,7 +83,7 @@ pub trait RapPartialProver<PB: ProverBackend> {
     fn partially_prove<'a>(
         &self,
         challenger: &mut PB::Challenger,
-        pk_views: &[DeviceStarkProvingKey<'a, PB>],
+        mpk: &DeviceMultiStarkProvingKey<'a, PB>,
         trace_views: Vec<PairView<&'a PB::Matrix, PB::Val>>,
     ) -> (PB::RapPartialProof, ProverDataAfterRapPhases<PB>);
 }

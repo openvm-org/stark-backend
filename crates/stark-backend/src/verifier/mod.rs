@@ -57,6 +57,17 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         mvk: &MultiStarkVerifyingKeyView<Val<SC>, Com<SC>>,
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError> {
+        for constraint in mvk.trace_height_constraints {
+            let sum = proof
+                .per_air
+                .iter()
+                .map(|ap| constraint.coefficients[ap.air_id] as u64 * ap.degree as u64)
+                .sum::<u64>();
+            if sum >= constraint.threshold as u64 {
+                return Err(VerificationError::InvalidProofShape);
+            }
+        }
+
         let public_values = proof.get_public_values();
         // Challenger must observe public values
         for pis in &public_values {

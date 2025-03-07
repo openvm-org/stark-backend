@@ -173,11 +173,9 @@ where
         );
 
         // ==================== Partially prove all RAP phases that require challenges ====================
-        let (rap_partial_proof, prover_data_after) = self.device.partially_prove(
-            &mut self.challenger,
-            &mpk.per_air,
-            pair_trace_view_per_air,
-        );
+        let (rap_partial_proof, prover_data_after) =
+            self.device
+                .partially_prove(&mut self.challenger, mpk, pair_trace_view_per_air);
         // Challenger observes additional commitments if any exist:
         for (commit, _) in &prover_data_after.committed_pcs_data_per_phase {
             self.challenger.observe(commit.clone());
@@ -304,7 +302,10 @@ impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
             && ctx.per_air.iter().tuple_windows().all(|(a, b)| a.0 < b.0)
     }
 
-    pub(crate) fn vk_view(&self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
-        MultiStarkVerifyingKeyView::new(self.per_air.iter().map(|pk| pk.vk).collect())
+    pub(crate) fn vk_view(&'a self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
+        MultiStarkVerifyingKeyView::new(
+            self.per_air.iter().map(|pk| pk.vk).collect(),
+            &self.trace_height_constraints,
+        )
     }
 }

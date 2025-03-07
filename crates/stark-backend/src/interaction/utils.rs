@@ -10,7 +10,7 @@ pub fn generate_betas<AF: FieldAlgebra, E>(
 ) -> Vec<AF> {
     let max_fields_len = all_interactions
         .iter()
-        .map(|interaction| interaction.fields.len())
+        .map(|interaction| interaction.message.len())
         .max()
         .unwrap_or(0);
 

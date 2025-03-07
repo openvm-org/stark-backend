@@ -1,3 +1,4 @@
+use openvm_stark_backend::interaction::LogUpSecurityParameters;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,4 +88,25 @@ pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize)
     assert!(fri_params.get_conjectured_security_bits(100) >= 100);
     tracing::info!("FRI parameters | log_blowup: {log_blowup:<2} | num_queries: {:<2} | proof_of_work_bits: {:<2}", fri_params.num_queries, fri_params.proof_of_work_bits);
     fri_params
+}
+
+#[derive(Clone, Debug)]
+pub struct SecurityParameters {
+    pub fri_params: FriParameters,
+    pub log_up_params: LogUpSecurityParameters,
+}
+
+impl SecurityParameters {
+    pub fn standard_fast() -> Self {
+        Self {
+            fri_params: FriParameters::standard_fast(),
+            log_up_params: LogUpSecurityParameters::default(),
+        }
+    }
+    pub fn standard_100_bits_with_fri_log_blowup(log_blowup: usize) -> Self {
+        Self {
+            fri_params: FriParameters::standard_with_100_bits_conjectured_security(log_blowup),
+            log_up_params: LogUpSecurityParameters::default(),
+        }
+    }
 }

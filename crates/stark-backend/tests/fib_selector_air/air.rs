@@ -1,7 +1,7 @@
 use std::borrow::Borrow;
 
 use openvm_stark_backend::{
-    interaction::InteractionBuilder,
+    interaction::{InteractionBuilder, LookupBus},
     p3_field::{Field, FieldAlgebra},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
@@ -13,14 +13,14 @@ use super::columns::FibonacciSelectorCols;
 
 pub struct FibonacciSelectorAir {
     sels: Vec<bool>,
-    enable_interactions: bool,
+    bus: Option<LookupBus>,
 }
 
 impl FibonacciSelectorAir {
     pub fn new(sels: Vec<bool>, enable_interactions: bool) -> Self {
         Self {
             sels,
-            enable_interactions,
+            bus: enable_interactions.then_some(LookupBus::new(0)),
         }
     }
 
@@ -93,8 +93,12 @@ impl<AB: AirBuilderWithPublicValues + PairBuilder + InteractionBuilder> Air<AB>
 
         builder.when_last_row().assert_eq(local.right, x);
 
-        if self.enable_interactions {
-            builder.push_receive(0, vec![local.left + local.right], preprocessed_local.sel);
+        if let Some(bus) = self.bus {
+            bus.add_key_with_lookups(
+                builder,
+                vec![local.left + local.right],
+                preprocessed_local.sel,
+            );
         }
     }
 }

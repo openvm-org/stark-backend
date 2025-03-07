@@ -1,13 +1,13 @@
 use std::fs::{self, File};
 
 use openvm_stark_backend::{
-    config::StarkGenericConfig, keygen::types::MultiStarkVerifyingKey, proof::Proof,
-    verifier::VerificationError,
+    config::StarkGenericConfig, interaction::LogUpSecurityParameters,
+    keygen::types::MultiStarkVerifyingKey, proof::Proof, verifier::VerificationError,
 };
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{self, engine_from_perm},
-        fri_params::standard_fri_params_with_100_bits_conjectured_security,
+        fri_params::{standard_fri_params_with_100_bits_conjectured_security, SecurityParameters},
     },
     dummy_airs::interaction::dummy_interaction_air::DummyInteractionAir,
     engine::StarkEngineWithHashInstrumentation,
@@ -61,12 +61,12 @@ pub struct VerifierStatistics {
 }
 
 fn instrumented_prove_and_verify(
-    fri_params: FriParameters,
+    security_params: SecurityParameters,
     trace: Vec<(u32, Vec<u32>)>,
     partition: bool,
 ) -> StarkHashStatistics<BenchParams> {
     let instr_perm = baby_bear_poseidon2::random_instrumented_perm();
-    let mut engine = engine_from_perm(instr_perm, fri_params);
+    let mut engine = engine_from_perm(instr_perm, security_params);
     engine.perm.is_on = false;
 
     let (vk, air, proof, _) = prove(&engine, trace, partition);
@@ -75,17 +75,17 @@ fn instrumented_prove_and_verify(
 }
 
 fn instrumented_verifier_comparison(
-    fri_params: FriParameters,
+    security_params: SecurityParameters,
     field_width: usize,
     log_degree: usize,
 ) -> VerifierStatistics {
     let rng = StdRng::seed_from_u64(0);
     let trace = generate_random_trace(rng, field_width, 1 << log_degree);
     println!("Without cached trace:");
-    let without_ct = instrumented_prove_and_verify(fri_params, trace.clone(), false);
+    let without_ct = instrumented_prove_and_verify(security_params.clone(), trace.clone(), false);
 
     println!("With cached trace:");
-    let with_ct = instrumented_prove_and_verify(fri_params, trace, true);
+    let with_ct = instrumented_prove_and_verify(security_params, trace, true);
 
     VerifierStatistics {
         name: without_ct.name,
@@ -129,8 +129,13 @@ fn instrument_cached_trace_verifier() -> eyre::Result<()> {
 
     let mut all_stats = vec![];
     for fri_param in fri_params {
+        let security_param = SecurityParameters {
+            fri_params: fri_param,
+            log_up_params: LogUpSecurityParameters::default(),
+        };
         for (field_width, log_degree) in &data_sizes {
-            let stats = instrumented_verifier_comparison(fri_param, *field_width, *log_degree);
+            let stats =
+                instrumented_verifier_comparison(security_param.clone(), *field_width, *log_degree);
             wtr.serialize(&stats)?;
             wtr.flush()?;
             all_stats.push(stats);

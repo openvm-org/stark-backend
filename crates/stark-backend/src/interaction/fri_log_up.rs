@@ -2,19 +2,19 @@ use std::{array, borrow::Borrow, cmp::max, iter::zip, marker::PhantomData, mem};
 
 use itertools::Itertools;
 use p3_air::ExtensionBuilder;
-use p3_challenger::{CanObserve, FieldChallenger};
+use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_field::{ExtensionField, Field, FieldAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{PairTraceView, SymbolicInteraction};
+use super::{LogUpSecurityParameters, PairTraceView, SymbolicInteraction};
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
     interaction::{
-        trace::Evaluator, utils::generate_betas, InteractionBuilder, InteractionType,
-        RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
+        trace::Evaluator, utils::generate_betas, InteractionBuilder, RapPhaseProverData,
+        RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
     },
     parizip,
     rap::PermutationAirBuilderWithExposedValues,
@@ -23,12 +23,14 @@ use crate::{
 
 #[derive(Default)]
 pub struct FriLogUpPhase<F, Challenge, Challenger> {
+    log_up_params: LogUpSecurityParameters,
     _marker: PhantomData<(F, Challenge, Challenger)>,
 }
 
 impl<F, Challenge, Challenger> FriLogUpPhase<F, Challenge, Challenger> {
-    pub fn new() -> Self {
+    pub fn new(log_up_params: LogUpSecurityParameters) -> Self {
         Self {
+            log_up_params,
             _marker: PhantomData,
         }
     }
@@ -38,6 +40,15 @@ impl<F, Challenge, Challenger> FriLogUpPhase<F, Challenge, Challenger> {
 pub enum FriLogUpError {
     #[error("non-zero cumulative sum")]
     NonZeroCumulativeSum,
+    #[error("missing proof")]
+    MissingPartialProof,
+    #[error("invalid proof of work witness")]
+    InvalidPowWitness,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FriLogUpPartialProof<Witness> {
+    pub logup_pow_witness: Witness,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -59,12 +70,16 @@ impl<F: Field, Challenge, Challenger> RapPhaseSeq<F, Challenge, Challenger>
 where
     F: Field,
     Challenge: ExtensionField<F>,
-    Challenger: FieldChallenger<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
 {
-    type PartialProof = ();
+    type PartialProof = FriLogUpPartialProof<F>;
     type PartialProvingKey = FriLogUpProvingKey;
     type Error = FriLogUpError;
     const ID: RapPhaseSeqKind = RapPhaseSeqKind::FriLogUp;
+
+    fn log_up_security_params(&self) -> &LogUpSecurityParameters {
+        &self.log_up_params
+    }
 
     fn generate_pk_per_air(
         &self,
@@ -94,6 +109,8 @@ where
             return None;
         }
 
+        // Proof of work phase to boost logup security.
+        let logup_pow_witness = challenger.grind(self.log_up_params.log_up_pow_bits);
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
             array::from_fn(|_| challenger.sample_ext_element::<Challenge>());
 
@@ -118,7 +135,7 @@ where
             .collect_vec();
 
         Some((
-            (),
+            FriLogUpPartialProof { logup_pow_witness },
             RapPhaseProverData {
                 challenges: challenges.to_vec(),
                 after_challenge_trace_per_air,
@@ -130,7 +147,7 @@ where
     fn partially_verify<Commitment: Clone>(
         &self,
         challenger: &mut Challenger,
-        _partial_proof: Option<&Self::PartialProof>,
+        partial_proof: Option<&Self::PartialProof>,
         exposed_values_per_phase_per_air: &[Vec<Vec<Challenge>>],
         commitment_per_phase: &[Commitment],
         _permutation_opened_values: &[Vec<Vec<Vec<Challenge>>>],
@@ -142,11 +159,26 @@ where
             .iter()
             .all(|exposed_values_per_phase_per_air| exposed_values_per_phase_per_air.is_empty())
         {
+            return (RapPhaseVerifierData::default(), Ok(()));
+        }
+
+        let partial_proof = match partial_proof {
+            Some(proof) => proof,
+            None => {
+                return (
+                    RapPhaseVerifierData::default(),
+                    Err(FriLogUpError::MissingPartialProof),
+                );
+            }
+        };
+
+        if !challenger.check_witness(
+            self.log_up_params.log_up_pow_bits,
+            partial_proof.logup_pow_witness,
+        ) {
             return (
-                RapPhaseVerifierData {
-                    challenges_per_phase: vec![],
-                },
-                Ok(()),
+                RapPhaseVerifierData::default(),
+                Err(FriLogUpError::InvalidPowWitness),
             );
         }
 
@@ -340,16 +372,16 @@ where
                 for (n, denom_row) in denoms.chunks_exact_mut(num_interactions).enumerate() {
                     let evaluator = evaluator(row_offset + n);
                     for (denom, interaction) in denom_row.iter_mut().zip(all_interactions.iter()) {
-                        debug_assert!(interaction.fields.len() <= betas.len());
-                        let b = F::from_canonical_usize(interaction.bus_index + 1);
-                        let mut fields = interaction.fields.iter();
+                        debug_assert!(interaction.message.len() <= betas.len());
+                        let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
+                        let mut fields = interaction.message.iter();
                         *denom = alpha
                             + evaluator
                                 .eval_expr(fields.next().expect("fields should not be empty"));
                         for (expr, &beta) in fields.zip(betas.iter().skip(1)) {
                             *denom += beta * evaluator.eval_expr(expr);
                         }
-                        *denom += betas[interaction.fields.len()] * b;
+                        *denom += betas[interaction.message.len()] * b;
                     }
                 }
 
@@ -374,11 +406,8 @@ where
                         for (part, perm_val) in zip(interaction_partitions, perm_row.iter_mut()) {
                             for &interaction_idx in part {
                                 let interaction = &all_interactions[interaction_idx];
-                                let mut interaction_val = reciprocals[interaction_idx]
+                                let interaction_val = reciprocals[interaction_idx]
                                     * evaluator.eval_expr(&interaction.count);
-                                if interaction.interaction_type == InteractionType::Receive {
-                                    interaction_val = -interaction_val;
-                                }
                                 *perm_val += interaction_val;
                             }
                             row_sum += *perm_val;
@@ -453,10 +482,13 @@ pub fn eval_fri_log_up_phase<AB>(
             .iter()
             .map(|&interaction_idx| {
                 let interaction = &all_interactions[interaction_idx];
-                assert!(!interaction.fields.is_empty(), "fields should not be empty");
+                assert!(
+                    !interaction.message.is_empty(),
+                    "fields should not be empty"
+                );
                 let mut field_hash = AB::ExprEF::ZERO;
-                let b = AB::Expr::from_canonical_usize(interaction.bus_index + 1);
-                for (field, beta) in interaction.fields.iter().chain([&b]).zip(&betas) {
+                let b = AB::Expr::from_canonical_u32(interaction.bus_index as u32 + 1);
+                for (field, beta) in interaction.message.iter().chain([&b]).zip(&betas) {
                     field_hash += beta.clone() * field.clone();
                 }
                 field_hash + alpha.into()
@@ -472,9 +504,6 @@ pub fn eval_fri_log_up_phase<AB>(
         for (i, &interaction_idx) in part.iter().enumerate() {
             let interaction = &all_interactions[interaction_idx];
             let mut term: AB::ExprEF = interaction.count.clone().into();
-            if interaction.interaction_type == InteractionType::Receive {
-                term = -term;
-            }
             for (j, denom) in denoms_per_chunk.iter().enumerate() {
                 if i != j {
                     term *= denom.clone();
@@ -508,10 +537,10 @@ pub fn eval_fri_log_up_phase<AB>(
 
 /// We can chunk interactions, where the degree of the dominating logup constraint is bounded by
 ///
-///     logup_degree = max(
-///         1 + sum_i(max_field_degree_i),
-///         max_i(count_degree_i + sum_{j!=i}(max_field_degree_j))
-///     )
+/// logup_degree = max(
+///     1 + sum_i(max_field_degree_i),
+///     max_i(count_degree_i + sum_{j!=i}(max_field_degree_j))
+/// )
 /// where i,j refer to interactions in the chunk.
 ///
 /// More details about this can be found in the function [eval_fri_log_up_phase].
@@ -543,7 +572,7 @@ pub(crate) fn find_interaction_chunks<F: Field>(
     // First, we sort interaction indices by ascending max field degree
     let max_field_degree = |i: usize| {
         interactions[i]
-            .fields
+            .message
             .iter()
             .map(|f| f.degree_multiple())
             .max()
