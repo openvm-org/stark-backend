@@ -57,6 +57,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         mvk: &MultiStarkVerifyingKeyView<Val<SC>, Com<SC>>,
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError> {
+        // Enforce trace height linear inequalities
         for constraint in mvk.trace_height_constraints {
             let sum = proof
                 .per_air
@@ -65,6 +66,14 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
                 .sum::<u64>();
             if sum >= constraint.threshold as u64 {
                 return Err(VerificationError::InvalidProofShape);
+            }
+        }
+        // Check that all `air_id`s are different
+        {
+            let mut air_ids: Vec<_> = proof.per_air.iter().map(|apd| apd.air_id).collect();
+            air_ids.sort();
+            for ids in air_ids.windows(2) {
+                assert!(ids[0] < ids[1], "all `air_id`s must be different");
             }
         }
 
