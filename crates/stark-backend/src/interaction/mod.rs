@@ -103,7 +103,7 @@ impl LookupBus {
         // We embed the query multiplicity as {0, 1} in the integers and the lookup table key
         // multiplicity to be {0, -1, ..., -p + 1}. Setting `count_weight = 1` will ensure that the
         // total number of lookups is at most p, which is sufficient to establish lookup multiset is
-        // a subset of the key multiset. TODO: See Lemma ?? in ??.
+        // a subset of the key multiset. See Corollary 3.6 in [docs/Soundess_of_Interactions_via_LogUp.pdf].
         builder.push_interaction(self.index, query, enabled, 1);
     }
 

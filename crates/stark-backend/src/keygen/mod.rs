@@ -183,6 +183,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
         let log_up_security_params = self.config.rap_phase_seq().log_up_security_params();
 
+        assert!((log_up_security_params.log_max_interactions as usize) < Val::<SC>::bits());
         // Add a constraint for the total number of interactions.
         trace_height_constraints.push(LinearConstraint {
             coefficients: symbolic_constraints_per_air
