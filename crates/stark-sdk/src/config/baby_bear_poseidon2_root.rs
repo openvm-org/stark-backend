@@ -1,5 +1,3 @@
-use std::any::type_name;
-
 use ff::PrimeField;
 use openvm_stark_backend::{
     config::StarkConfig,
@@ -21,14 +19,11 @@ use zkhash::{
     poseidon2::poseidon2_instance_bn256::RC3,
 };
 
-use super::{
-    instrument::{HashStatistics, InstrumentCounter, Instrumented, StarkHashStatistics},
-    FriParameters,
-};
+use super::FriParameters;
 use crate::{
     assert_sc_compatible_with_serde,
     config::fri_params::SecurityParameters,
-    engine::{StarkEngine, StarkEngineWithHashInstrumentation, StarkFriEngine},
+    engine::{StarkEngine, StarkFriEngine},
 };
 
 const WIDTH: usize = 3;
@@ -80,35 +75,6 @@ where
 
     fn new_challenger(&self) -> Challenger<P> {
         Challenger::new(self.perm.clone()).unwrap()
-    }
-}
-
-impl<P> StarkEngineWithHashInstrumentation<BabyBearPermutationRootConfig<Instrumented<P>>>
-    for BabyBearPermutationRootEngine<Instrumented<P>>
-where
-    P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
-{
-    fn clear_instruments(&mut self) {
-        self.perm.input_lens_by_type.lock().unwrap().clear();
-    }
-    fn stark_hash_statistics<T>(&self, custom: T) -> StarkHashStatistics<T> {
-        let counter = self.perm.input_lens_by_type.lock().unwrap();
-        let permutations = counter.iter().fold(0, |total, (name, lens)| {
-            if name == type_name::<[Val; WIDTH]>() {
-                let count: usize = lens.iter().sum();
-                println!("Permutation: {name}, Count: {count}");
-                total + count
-            } else {
-                panic!("Permutation type not yet supported: {}", name);
-            }
-        });
-
-        StarkHashStatistics {
-            name: type_name::<P>().to_string(),
-            stats: HashStatistics { permutations },
-            fri_params: self.fri_params,
-            custom,
-        }
     }
 }
 
@@ -223,40 +189,6 @@ fn bn254_poseidon2_rc3() -> Vec<[Bn254Fr; 3]> {
                 .unwrap()
         })
         .collect()
-}
-
-/// Logs hash count statistics to stdout and returns as struct.
-/// Count of 1 corresponds to a Poseidon2 permutation with rate RATE that outputs OUT field elements
-#[allow(dead_code)]
-pub fn print_hash_counts(hash_counter: &InstrumentCounter, compress_counter: &InstrumentCounter) {
-    let hash_counter = hash_counter.lock().unwrap();
-    let mut hash_count = 0;
-    hash_counter.iter().for_each(|(name, lens)| {
-        if name == type_name::<(Val, [Val; DIGEST_WIDTH])>() {
-            let count = lens.iter().fold(0, |count, len| count + len.div_ceil(RATE));
-            println!("Hash: {name}, Count: {count}");
-            hash_count += count;
-        } else {
-            panic!("Hash type not yet supported: {}", name);
-        }
-    });
-    drop(hash_counter);
-    let compress_counter = compress_counter.lock().unwrap();
-    let mut compress_count = 0;
-    compress_counter.iter().for_each(|(name, lens)| {
-        if name == type_name::<[Val; DIGEST_WIDTH]>() {
-            let count = lens.iter().fold(0, |count, len| {
-                // len should always be N=2 for TruncatedPermutation
-                count + (DIGEST_WIDTH * len).div_ceil(WIDTH)
-            });
-            println!("Compress: {name}, Count: {count}");
-            compress_count += count;
-        } else {
-            panic!("Compress type not yet supported: {}", name);
-        }
-    });
-    let total_count = hash_count + compress_count;
-    println!("Total Count: {total_count}");
 }
 
 impl StarkFriEngine<BabyBearPoseidon2RootConfig> for BabyBearPoseidon2RootEngine {
