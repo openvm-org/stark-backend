@@ -1,9 +1,10 @@
 use std::fmt::Display;
 
-use itertools::Itertools;
+use itertools::zip_eq;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
-use super::{hal::ProverBackend, types::DeviceStarkProvingKey};
+use super::{hal::ProverBackend, types::DeviceMultiStarkProvingKey};
 use crate::keygen::types::TraceWidth;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,16 +64,29 @@ impl Display for SingleTraceMetrics {
 
 /// heights are the trace heights for each air
 pub fn trace_metrics<PB: ProverBackend>(
-    pk: &[DeviceStarkProvingKey<PB>],
+    mpk: &DeviceMultiStarkProvingKey<PB>,
     log_trace_heights: &[u8],
 ) -> TraceMetrics {
     let heights = log_trace_heights
         .iter()
         .map(|&h| 1usize << h)
         .collect::<Vec<_>>();
-    let per_air: Vec<_> = pk
-        .iter()
-        .zip_eq(heights)
+    for (i, trace_height_constraint) in mpk.trace_height_constraints.iter().enumerate() {
+        let weighted_sum = heights
+            .iter()
+            .enumerate()
+            .map(|(j, h)| {
+                let air_id = mpk.air_ids[j];
+                (trace_height_constraint.coefficients[air_id] as usize) * h
+            })
+            .sum::<usize>();
+        info!(
+            weighted_sum,
+            threshold = trace_height_constraint.threshold,
+            "trace_height_constraint_{i}",
+        );
+    }
+    let per_air: Vec<_> = zip_eq(&mpk.per_air, heights)
         .map(|(pk, height)| {
             let air_name = pk.air_name;
             let mut width = pk.vk.params.width.clone();
@@ -102,10 +116,33 @@ pub fn trace_metrics<PB: ProverBackend>(
         })
         .collect();
     let total_cells = per_air.iter().map(|m| m.total_cells).sum();
-    TraceMetrics {
+    info!(
+        "preprocessed_trace_cells = {}",
+        per_air
+            .iter()
+            .map(|m| m.cells.preprocessed.unwrap_or(0))
+            .sum::<usize>()
+    );
+    info!(
+        "main_trace_cells = {}",
+        per_air
+            .iter()
+            .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
+            .sum::<usize>()
+    );
+    info!(
+        "perm_trace_cells = {}",
+        per_air
+            .iter()
+            .map(|m| m.cells.after_challenge.iter().sum::<usize>())
+            .sum::<usize>()
+    );
+    let metrics = TraceMetrics {
         per_air,
         total_cells,
-    }
+    };
+    info!("{}", metrics);
+    metrics
 }
 
 pub fn format_number_with_underscores(n: usize) -> String {

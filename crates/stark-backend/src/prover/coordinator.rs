@@ -4,20 +4,21 @@ use itertools::{izip, Itertools};
 use p3_challenger::CanObserve;
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 use super::{
     hal::{ProverBackend, ProverDevice},
     types::{DeviceMultiStarkProvingKey, HalProof, ProvingContext},
     Prover,
 };
+#[cfg(feature = "bench-metrics")]
+use crate::prover::metrics::trace_metrics;
 use crate::{
     config::{Com, StarkGenericConfig, Val},
     keygen::view::MultiStarkVerifyingKeyView,
     proof::{AirProofData, Commitments},
     prover::{
         hal::MatrixDimensions,
-        metrics::trace_metrics,
         types::{PairView, SingleCommitPreimage},
     },
     utils::metrics_span,
@@ -85,6 +86,7 @@ where
         assert!(mpk.validate(&ctx), "Invalid proof input");
 
         let num_air = ctx.per_air.len();
+        info!(num_air);
         #[allow(clippy::type_complexity)]
         let (cached_commits_per_air, cached_views_per_air, common_main_per_air, pvs_per_air): (
             Vec<Vec<PB::Commitment>>,
@@ -148,9 +150,8 @@ where
             log_trace_height_per_air.push(log_trace_height);
             pair_trace_view_per_air.push(pair_trace_view);
         }
-        tracing::info!("{}", trace_metrics(&mpk.per_air, &log_trace_height_per_air));
         #[cfg(feature = "bench-metrics")]
-        trace_metrics(&mpk.per_air, &log_trace_height_per_air).emit();
+        trace_metrics(mpk, &log_trace_height_per_air).emit();
 
         // ============ Challenger observations before additional RAP phases =============
         // Observe public values:

@@ -16,6 +16,8 @@ use crate::{
 pub struct DeviceMultiStarkProvingKey<'a, PB: ProverBackend> {
     pub(super) air_ids: Vec<usize>,
     pub per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
+    /// Each [LinearConstraint] is indexed by AIR ID.
+    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in `per_air`.
     pub trace_height_constraints: Vec<LinearConstraint>,
 }
 
