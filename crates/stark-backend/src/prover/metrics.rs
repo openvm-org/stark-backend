@@ -12,6 +12,8 @@ pub struct TraceMetrics {
     pub per_air: Vec<SingleTraceMetrics>,
     /// Total base field cells from all traces, excludes preprocessed.
     pub total_cells: usize,
+    /// For each trace height constraint, the (weighted sum, threshold)
+    pub trace_height_inequalities: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,9 +41,47 @@ impl Display for TraceMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "Total Cells: {} (excluding preprocessed)",
+            "total_trace_cells = {} (excluding preprocessed)",
             format_number_with_underscores(self.total_cells)
         )?;
+        writeln!(
+            f,
+            "preprocessed_trace_cells = {}",
+            format_number_with_underscores(
+                self.per_air
+                    .iter()
+                    .map(|m| m.cells.preprocessed.unwrap_or(0))
+                    .sum::<usize>()
+            )
+        )?;
+        writeln!(
+            f,
+            "main_trace_cells = {}",
+            format_number_with_underscores(
+                self.per_air
+                    .iter()
+                    .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
+                    .sum::<usize>()
+            )
+        )?;
+        writeln!(
+            f,
+            "perm_trace_cells = {}",
+            format_number_with_underscores(
+                self.per_air
+                    .iter()
+                    .map(|m| m.cells.after_challenge.iter().sum::<usize>())
+                    .sum::<usize>()
+            )
+        )?;
+        for (i, (weighted_sum, threshold)) in self.trace_height_inequalities.iter().enumerate() {
+            writeln!(
+                f,
+                "trace_height_constraint_{i} | weighted_sum = {:<10} | threshold = {:<10}",
+                format_number_with_underscores(*weighted_sum),
+                format_number_with_underscores(*threshold)
+            )?;
+        }
         for trace_metrics in &self.per_air {
             writeln!(f, "{}", trace_metrics)?;
         }
@@ -71,21 +111,21 @@ pub fn trace_metrics<PB: ProverBackend>(
         .iter()
         .map(|&h| 1usize << h)
         .collect::<Vec<_>>();
-    for (i, trace_height_constraint) in mpk.trace_height_constraints.iter().enumerate() {
-        let weighted_sum = heights
-            .iter()
-            .enumerate()
-            .map(|(j, h)| {
-                let air_id = mpk.air_ids[j];
-                (trace_height_constraint.coefficients[air_id] as usize) * h
-            })
-            .sum::<usize>();
-        info!(
-            weighted_sum,
-            threshold = trace_height_constraint.threshold,
-            "trace_height_constraint_{i}",
-        );
-    }
+    let trace_height_inequalities = mpk
+        .trace_height_constraints
+        .iter()
+        .map(|trace_height_constraint| {
+            let weighted_sum = heights
+                .iter()
+                .enumerate()
+                .map(|(j, h)| {
+                    let air_id = mpk.air_ids[j];
+                    (trace_height_constraint.coefficients[air_id] as usize) * h
+                })
+                .sum::<usize>();
+            (weighted_sum, trace_height_constraint.threshold as usize)
+        })
+        .collect::<Vec<_>>();
     let per_air: Vec<_> = zip_eq(&mpk.per_air, heights)
         .map(|(pk, height)| {
             let air_name = pk.air_name;
@@ -116,30 +156,10 @@ pub fn trace_metrics<PB: ProverBackend>(
         })
         .collect();
     let total_cells = per_air.iter().map(|m| m.total_cells).sum();
-    info!(
-        "preprocessed_trace_cells = {}",
-        per_air
-            .iter()
-            .map(|m| m.cells.preprocessed.unwrap_or(0))
-            .sum::<usize>()
-    );
-    info!(
-        "main_trace_cells = {}",
-        per_air
-            .iter()
-            .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
-            .sum::<usize>()
-    );
-    info!(
-        "perm_trace_cells = {}",
-        per_air
-            .iter()
-            .map(|m| m.cells.after_challenge.iter().sum::<usize>())
-            .sum::<usize>()
-    );
     let metrics = TraceMetrics {
         per_air,
         total_cells,
+        trace_height_inequalities,
     };
     info!("{}", metrics);
     metrics
@@ -169,6 +189,12 @@ mod emit {
 
     impl TraceMetrics {
         pub fn emit(&self) {
+            for (i, (weighted_sum, threshold)) in self.trace_height_inequalities.iter().enumerate()
+            {
+                let labels = [("trace_height_constraint", i.to_string())];
+                counter!("weighted_sum", &labels).absolute(*weighted_sum as u64);
+                counter!("threshold", &labels).absolute(*threshold as u64);
+            }
             for trace_metrics in &self.per_air {
                 trace_metrics.emit();
             }
