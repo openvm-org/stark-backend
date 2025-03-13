@@ -56,7 +56,7 @@ and define $\hat{\sigma}^{(i)}_k$ analogously. The multiset defined by the trace
 
 $$
 M_b(\sigma) = \sum_{i=1}^{t} \sum_{k=1}^{k_i} \sum_{x \in \langle \omega_i \rangle}
-\hat{m}^{(i)}_k(x) \mathbf{1}(b = b^{(i)}_k)
+\hat{m}^{(i)}_k(x) \mathbf{1}(b = b^{(i)}_k \wedge \sigma = \sigma^{(i)}_k)
 $$
 
 We say that a bus $b$ is **balanced** if the $\mathbb{F}$-multiset $M_b$ satisfies $M_b(\tau) = 0$ for all messages
@@ -307,7 +307,7 @@ soundness condition.
 ### Total Interactions Trace Height Constraints
 
 We also add another constraint related to the bits of soundness for the LogUp procedure. For this, we set the trace
-height coefficients to be the number of interactions on the corresponding AIR and the threshold to be $2{^30}$. This
+height coefficients to be the number of interactions on the corresponding AIR and the threshold to be $2^{30}$. This
 allows us to claim a certain number of bits of security. See [here](Soundness_of_Interactions_via_LogUp.pdf) for more
 details.
 
