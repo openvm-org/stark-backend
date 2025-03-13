@@ -1,9 +1,7 @@
 use ff::PrimeField;
 use openvm_stark_backend::{
-    config::StarkConfig,
-    interaction::{fri_log_up::FriLogUpPhase, LogUpSecurityParameters},
-    p3_challenger::MultiField32Challenger,
-    p3_commit::ExtensionMmcs,
+    config::StarkConfig, interaction::fri_log_up::FriLogUpPhase,
+    p3_challenger::MultiField32Challenger, p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
 };
 use p3_baby_bear::BabyBear;
@@ -22,7 +20,9 @@ use zkhash::{
 use super::FriParameters;
 use crate::{
     assert_sc_compatible_with_serde,
-    config::fri_params::SecurityParameters,
+    config::{
+        fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
+    },
     engine::{StarkEngine, StarkFriEngine},
 };
 
@@ -195,7 +195,7 @@ impl StarkFriEngine<BabyBearPoseidon2RootConfig> for BabyBearPoseidon2RootEngine
     fn new(fri_params: FriParameters) -> Self {
         let security_params = SecurityParameters {
             fri_params,
-            log_up_params: LogUpSecurityParameters::default(),
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
         };
         default_engine_impl(security_params)
     }

@@ -71,7 +71,7 @@ fn test_interaction_trace_height_constraints() {
             threshold: config
                 .rap_phase_seq()
                 .log_up_security_params()
-                .max_interactions(),
+                .max_interaction_count
         }
     );
 }

@@ -1,6 +1,8 @@
 use openvm_stark_backend::interaction::LogUpSecurityParameters;
 use serde::{Deserialize, Serialize};
 
+use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FriParameters {
     pub log_blowup: usize,
@@ -100,13 +102,13 @@ impl SecurityParameters {
     pub fn standard_fast() -> Self {
         Self {
             fri_params: FriParameters::standard_fast(),
-            log_up_params: LogUpSecurityParameters::default(),
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
         }
     }
     pub fn standard_100_bits_with_fri_log_blowup(log_blowup: usize) -> Self {
         Self {
             fri_params: FriParameters::standard_with_100_bits_conjectured_security(log_blowup),
-            log_up_params: LogUpSecurityParameters::default(),
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
         }
     }
 }

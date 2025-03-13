@@ -21,7 +21,6 @@ use crate::{
     utils::metrics_span,
 };
 
-#[derive(Default)]
 pub struct FriLogUpPhase<F, Challenge, Challenger> {
     log_up_params: LogUpSecurityParameters,
     _marker: PhantomData<(F, Challenge, Challenger)>,

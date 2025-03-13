@@ -4,6 +4,7 @@ use p3_air::AirBuilder;
 use p3_challenger::CanObserve;
 use p3_field::Field;
 use p3_matrix::dense::RowMajorMatrix;
+use p3_util::log2_ceil_usize;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
@@ -329,9 +330,9 @@ type PairTraceView<'a, F> = PairView<&'a RowMajorMatrix<F>, F>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]
 pub struct LogUpSecurityParameters {
-    /// A bound on the base-2 logarithm of the length of the total number of interactions.
+    /// A bound on the total number of interactions.
     /// Determines a constraint at keygen that is checked by the verifier.
-    pub log_max_interactions: u32,
+    pub max_interaction_count: u32,
     /// A bound on the base-2 logarithm of the length of the longest interaction. Checked in keygen.
     pub log_max_message_length: u32,
     /// The number of proof-of-work bits for the LogUp proof-of-work phase.
@@ -343,26 +344,14 @@ impl LogUpSecurityParameters {
     pub fn conjectured_bits_of_security<F: Field>(&self) -> u32 {
         // See Section 4 of [docs/Soundness_of_Interactions_via_LogUp.pdf].
         let log_order = u32::try_from(F::order().bits() - 1).unwrap();
-        log_order - self.log_max_interactions - self.log_max_message_length
+        log_order
+            - log2_ceil_usize(self.max_interaction_count as usize) as u32
+            - self.log_max_message_length
             + u32::try_from(self.log_up_pow_bits).unwrap()
-    }
-    pub fn max_interactions(&self) -> u32 {
-        2u32.checked_pow(self.log_max_interactions)
-            .expect("max_interactions overflowed u32")
     }
     pub fn max_message_length(&self) -> usize {
         2usize
             .checked_pow(self.log_max_message_length)
             .expect("max_message_length overflowed usize")
-    }
-}
-
-impl Default for LogUpSecurityParameters {
-    fn default() -> Self {
-        Self {
-            log_max_interactions: 30,
-            log_max_message_length: 7,
-            log_up_pow_bits: 16,
-        }
     }
 }

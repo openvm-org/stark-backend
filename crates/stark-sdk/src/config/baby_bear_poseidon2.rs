@@ -2,7 +2,7 @@ use std::any::type_name;
 
 use openvm_stark_backend::{
     config::StarkConfig,
-    interaction::{fri_log_up::FriLogUpPhase, LogUpSecurityParameters},
+    interaction::fri_log_up::FriLogUpPhase,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
     p3_field::{extension::BinomialExtensionField, Field, FieldAlgebra},
@@ -25,7 +25,9 @@ use super::{
 };
 use crate::{
     assert_sc_compatible_with_serde,
-    config::fri_params::SecurityParameters,
+    config::{
+        fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
+    },
     engine::{StarkEngine, StarkEngineWithHashInstrumentation, StarkFriEngine},
 };
 
@@ -129,7 +131,7 @@ fn default_engine_impl(fri_params: FriParameters) -> BabyBearPoseidon2Engine {
     let perm = default_perm();
     let security_params = SecurityParameters {
         fri_params,
-        log_up_params: LogUpSecurityParameters::default(),
+        log_up_params: log_up_security_params_baby_bear_100_bits(),
     };
     engine_from_perm(perm, security_params)
 }

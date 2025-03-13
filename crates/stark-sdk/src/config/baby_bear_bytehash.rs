@@ -1,6 +1,6 @@
 use openvm_stark_backend::{
     config::StarkConfig,
-    interaction::{fri_log_up::FriLogUpPhase, LogUpSecurityParameters},
+    interaction::fri_log_up::FriLogUpPhase,
     p3_challenger::{HashChallenger, SerializingChallenger32},
     p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
@@ -13,7 +13,9 @@ use p3_symmetric::{CompressionFunctionFromHasher, CryptographicHasher, Serializi
 
 use super::FriParameters;
 use crate::{
-    config::fri_params::SecurityParameters,
+    config::{
+        fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
+    },
     engine::{StarkEngine, StarkFriEngine},
 };
 
@@ -132,7 +134,7 @@ where
     fn new(fri_params: FriParameters) -> Self {
         let security_params = SecurityParameters {
             fri_params,
-            log_up_params: LogUpSecurityParameters::default(),
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
         };
         engine_from_byte_hash(Self::default_hash(), security_params)
     }

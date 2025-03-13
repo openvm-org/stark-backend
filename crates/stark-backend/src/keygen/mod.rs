@@ -152,15 +152,18 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         for (i, constraints_per_air) in symbolic_constraints_per_air.iter().enumerate() {
             for interaction in &constraints_per_air.interactions {
                 // Also make sure that this of interaction is valid given the security params.
+                // +1 because of the bus
                 let max_msg_len = self
                     .config
                     .rap_phase_seq()
                     .log_up_security_params()
                     .max_message_length();
+                // plus one because of the bus
+                let total_message_length = interaction.message.len() + 1;
                 assert!(
-                    interaction.message.len() <= max_msg_len,
-                    "interaction has message length {}, which is more than max {max_msg_len}",
-                    interaction.message.len(),
+                    total_message_length <= max_msg_len,
+                    "interaction message with bus has length {}, which is more than max {max_msg_len}",
+                    total_message_length,
                 );
 
                 let b = interaction.bus_index;
@@ -183,14 +186,13 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
         let log_up_security_params = self.config.rap_phase_seq().log_up_security_params();
 
-        assert!((log_up_security_params.log_max_interactions as usize) < Val::<SC>::bits());
         // Add a constraint for the total number of interactions.
         trace_height_constraints.push(LinearConstraint {
             coefficients: symbolic_constraints_per_air
                 .iter()
                 .map(|c| c.interactions.len() as u32)
                 .collect(),
-            threshold: log_up_security_params.max_interactions(),
+            threshold: log_up_security_params.max_interaction_count,
         });
 
         MultiStarkProvingKey {

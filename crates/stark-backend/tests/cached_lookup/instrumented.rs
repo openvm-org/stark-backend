@@ -1,13 +1,14 @@
 use std::fs::{self, File};
 
 use openvm_stark_backend::{
-    config::StarkGenericConfig, interaction::LogUpSecurityParameters,
-    keygen::types::MultiStarkVerifyingKey, proof::Proof, verifier::VerificationError,
+    config::StarkGenericConfig, keygen::types::MultiStarkVerifyingKey, proof::Proof,
+    verifier::VerificationError,
 };
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{self, engine_from_perm},
         fri_params::{standard_fri_params_with_100_bits_conjectured_security, SecurityParameters},
+        log_up_params::log_up_security_params_baby_bear_100_bits,
     },
     dummy_airs::interaction::dummy_interaction_air::DummyInteractionAir,
     engine::StarkEngineWithHashInstrumentation,
@@ -131,7 +132,7 @@ fn instrument_cached_trace_verifier() -> eyre::Result<()> {
     for fri_param in fri_params {
         let security_param = SecurityParameters {
             fri_params: fri_param,
-            log_up_params: LogUpSecurityParameters::default(),
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
         };
         for (field_width, log_degree) in &data_sizes {
             let stats =

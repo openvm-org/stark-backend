@@ -5,14 +5,14 @@ use std::{
 };
 
 use openvm_stark_backend::{
-    config::StarkGenericConfig, interaction::LogUpSecurityParameters,
-    keygen::types::MultiStarkVerifyingKey, proof::Proof, prover::types::ProofInput,
-    utils::disable_debug_builder, Chip,
+    config::StarkGenericConfig, keygen::types::MultiStarkVerifyingKey, proof::Proof,
+    prover::types::ProofInput, utils::disable_debug_builder, Chip,
 };
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{engine_from_perm, random_perm},
         fri_params::{standard_fri_params_with_100_bits_conjectured_security, SecurityParameters},
+        log_up_params::log_up_security_params_baby_bear_100_bits,
         FriParameters,
     },
     dummy_airs::interaction::dummy_interaction_air::{
@@ -189,7 +189,7 @@ fn bench_cached_trace_prover() -> eyre::Result<()> {
     for fri_param in fri_params {
         let security_param = SecurityParameters {
             fri_params: fri_param,
-            log_up_params: LogUpSecurityParameters::default(),
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
         };
         for (field_width, log_degree) in &data_sizes {
             let stats = compare_provers(security_param.clone(), *field_width, *log_degree);
