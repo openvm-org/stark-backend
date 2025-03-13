@@ -307,7 +307,7 @@ soundness condition.
 ### Total Interactions Trace Height Constraints
 
 We also add another constraint related to the bits of soundness for the LogUp procedure. For this, we set the trace
-height coefficients to be the number of interactions on the corresponding AIR and the threshold to be $2^{30}$. This
+height coefficients to be the number of interactions on the corresponding AIR and the threshold to be $p$. This
 allows us to claim a certain number of bits of security. See [here](Soundness_of_Interactions_via_LogUp.pdf) for more
 details.
 
