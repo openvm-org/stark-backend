@@ -29,7 +29,7 @@ metrics = { workspace = true, optional = true }
 cfg-if.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true
-bincode.workspace = true
+bitcode = { workspace = true, features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }
