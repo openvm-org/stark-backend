@@ -205,6 +205,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         // final verifying key. This just needs to commit to the verifying key and does not need to be
         // verified by the verifier, so we just use bincode to serialize it.
         let mut vk_bytes = bitcode::serialize(&pre_vk).unwrap();
+        tracing::info!("pre-vkey: {} bytes", vk_bytes.len());
         vk_bytes.resize(vk_bytes.len().next_power_of_two(), 0u8);
         // Purely to get type compatibility and convenience, we hash using pcs.commit
         let vk_col = RowMajorMatrix::new_col(
