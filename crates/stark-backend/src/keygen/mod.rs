@@ -204,19 +204,18 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         // To protect against weak Fiat-Shamir, we hash the "pre"-verifying key and include it in the
         // final verifying key. This just needs to commit to the verifying key and does not need to be
         // verified by the verifier, so we just use bincode to serialize it.
-        let mut vk_bytes = bitcode::serialize(&pre_vk).unwrap();
+        let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
         tracing::info!("pre-vkey: {} bytes", vk_bytes.len());
-        vk_bytes.resize(vk_bytes.len().next_power_of_two(), 0u8);
-        // Purely to get type compatibility and convenience, we hash using pcs.commit
-        let vk_col = RowMajorMatrix::new_col(
+        // Purely to get type compatibility and convenience, we hash using pcs.commit as a single row
+        let vk_as_row = RowMajorMatrix::new_row(
             vk_bytes
                 .into_iter()
                 .map(Val::<SC>::from_canonical_u8)
                 .collect(),
         );
         let pcs = self.config.pcs();
-        let vk_col_domain = pcs.natural_domain_for_degree(vk_col.height());
-        let (vk_pre_hash, _) = pcs.commit(vec![(vk_col_domain, vk_col)]);
+        let deg_1_domain = pcs.natural_domain_for_degree(1);
+        let (vk_pre_hash, _) = pcs.commit(vec![(deg_1_domain, vk_as_row)]);
 
         MultiStarkProvingKey {
             per_air: pk_per_air,
