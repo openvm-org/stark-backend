@@ -28,8 +28,8 @@ derive-new.workspace = true
 metrics = { workspace = true, optional = true }
 cfg-if.workspace = true
 thiserror.workspace = true
-async-trait.workspace = true
 rustc-hash.workspace = true
+bitcode = { workspace = true, features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

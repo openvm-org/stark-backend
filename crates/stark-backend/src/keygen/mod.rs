@@ -2,9 +2,10 @@ use std::{collections::HashMap, iter::zip, sync::Arc};
 
 use itertools::Itertools;
 use p3_commit::Pcs;
-use p3_field::{Field, FieldExtensionAlgebra};
-use p3_matrix::Matrix;
+use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra};
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use tracing::instrument;
+use types::MultiStarkVerifyingKey0;
 
 use crate::{
     air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
@@ -195,11 +196,33 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             threshold: log_up_security_params.max_interaction_count,
         });
 
+        let pre_vk: MultiStarkVerifyingKey0<SC> = MultiStarkVerifyingKey0 {
+            per_air: pk_per_air.iter().map(|pk| pk.vk.clone()).collect(),
+            trace_height_constraints: trace_height_constraints.clone(),
+            log_up_pow_bits: log_up_security_params.log_up_pow_bits,
+        };
+        // To protect against weak Fiat-Shamir, we hash the "pre"-verifying key and include it in the
+        // final verifying key. This just needs to commit to the verifying key and does not need to be
+        // verified by the verifier, so we just use bincode to serialize it.
+        let mut vk_bytes = bitcode::serialize(&pre_vk).unwrap();
+        vk_bytes.resize(vk_bytes.len().next_power_of_two(), 0u8);
+        // Purely to get type compatibility and convenience, we hash using pcs.commit
+        let vk_col = RowMajorMatrix::new_col(
+            vk_bytes
+                .into_iter()
+                .map(Val::<SC>::from_canonical_u8)
+                .collect(),
+        );
+        let pcs = self.config.pcs();
+        let vk_col_domain = pcs.natural_domain_for_degree(vk_col.height());
+        let (vk_pre_hash, _) = pcs.commit(vec![(vk_col_domain, vk_col)]);
+
         MultiStarkProvingKey {
             per_air: pk_per_air,
             trace_height_constraints,
             max_constraint_degree: self.max_constraint_degree,
             log_up_pow_bits: log_up_security_params.log_up_pow_bits,
+            vk_pre_hash,
         }
     }
 }

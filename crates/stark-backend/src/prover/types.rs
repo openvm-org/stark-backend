@@ -19,6 +19,7 @@ pub struct DeviceMultiStarkProvingKey<'a, PB: ProverBackend> {
     /// Each [LinearConstraint] is indexed by AIR ID.
     /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in `per_air`.
     pub trace_height_constraints: Vec<LinearConstraint>,
+    pub vk_pre_hash: PB::Commitment,
 }
 
 impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
@@ -26,12 +27,14 @@ impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
         air_ids: Vec<usize>,
         per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
         trace_height_constraints: Vec<LinearConstraint>,
+        vk_pre_hash: PB::Commitment,
     ) -> Self {
         assert_eq!(air_ids.len(), per_air.len());
         Self {
             air_ids,
             per_air,
             trace_height_constraints,
+            vk_pre_hash,
         }
     }
 }

@@ -84,6 +84,7 @@ where
         #[cfg(feature = "bench-metrics")]
         let start = std::time::Instant::now();
         assert!(mpk.validate(&ctx), "Invalid proof input");
+        self.challenger.observe(mpk.vk_pre_hash.clone());
 
         let num_air = ctx.per_air.len();
         info!(num_air);
@@ -307,6 +308,7 @@ impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
         MultiStarkVerifyingKeyView::new(
             self.per_air.iter().map(|pk| pk.vk).collect(),
             &self.trace_height_constraints,
+            self.vk_pre_hash.clone(),
         )
     }
 }

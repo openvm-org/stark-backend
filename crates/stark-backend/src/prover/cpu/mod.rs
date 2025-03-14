@@ -443,7 +443,12 @@ where
                 }
             })
             .collect();
-        DeviceMultiStarkProvingKey::new(air_ids, per_air, mpk.trace_height_constraints.clone())
+        DeviceMultiStarkProvingKey::new(
+            air_ids,
+            per_air,
+            mpk.trace_height_constraints.clone(),
+            mpk.vk_pre_hash.clone(),
+        )
     }
     fn transport_matrix_to_device(
         &self,
