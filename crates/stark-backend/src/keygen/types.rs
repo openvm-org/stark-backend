@@ -84,20 +84,22 @@ pub struct StarkVerifyingKey<Val, Com> {
     deserialize = "Com<SC>: Deserialize<'de>"
 ))]
 pub struct MultiStarkVerifyingKey<SC: StarkGenericConfig> {
-    pub per_air: Vec<StarkVerifyingKey<Val<SC>, Com<SC>>>,
-    pub trace_height_constraints: Vec<LinearConstraint>,
-    pub log_up_pow_bits: usize,
+    /// All parts of the verifying key needed by the verifier, except
+    /// the `pre_hash` used to initialize the Fiat-Shamir transcript.
+    pub inner: MultiStarkVerifyingKey0<SC>,
     /// The hash of all other parts of the verifying key. The Fiat-Shamir hasher will
     /// initialize by observing this hash.
     pub pre_hash: Com<SC>,
 }
 
-#[derive(Serialize, Deserialize)]
+/// Everything in [MultiStarkVerifyingKey] except the `pre_hash` used to initialize the Fiat-Shamir transcript.
+#[derive(Derivative, Serialize, Deserialize)]
+#[derivative(Clone(bound = "Com<SC>: Clone"))]
 #[serde(bound(
     serialize = "Com<SC>: Serialize",
     deserialize = "Com<SC>: Deserialize<'de>"
 ))]
-pub(crate) struct MultiStarkVerifyingKey0<SC: StarkGenericConfig> {
+pub struct MultiStarkVerifyingKey0<SC: StarkGenericConfig> {
     pub per_air: Vec<StarkVerifyingKey<Val<SC>, Com<SC>>>,
     pub trace_height_constraints: Vec<LinearConstraint>,
     pub log_up_pow_bits: usize,
@@ -164,10 +166,16 @@ impl<Val, Com> StarkVerifyingKey<Val, Com> {
 impl<SC: StarkGenericConfig> MultiStarkProvingKey<SC> {
     pub fn get_vk(&self) -> MultiStarkVerifyingKey<SC> {
         MultiStarkVerifyingKey {
+            inner: self.get_vk0(),
+            pre_hash: self.vk_pre_hash.clone(),
+        }
+    }
+
+    fn get_vk0(&self) -> MultiStarkVerifyingKey0<SC> {
+        MultiStarkVerifyingKey0 {
             per_air: self.per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: self.trace_height_constraints.clone(),
             log_up_pow_bits: self.log_up_pow_bits,
-            pre_hash: self.vk_pre_hash.clone(),
         }
     }
 }

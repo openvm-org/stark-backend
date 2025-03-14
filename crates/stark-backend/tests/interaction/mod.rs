@@ -46,7 +46,7 @@ fn test_interaction_trace_height_constraints() {
     keygen_builder.add_air(Arc::new(sender_air_2));
     keygen_builder.add_air(Arc::new(sender_air_3));
     let pk = keygen_builder.generate_pk();
-    let vk = pk.get_vk();
+    let vk = pk.get_vk().inner;
 
     assert_eq!(vk.trace_height_constraints.len(), 3);
 
