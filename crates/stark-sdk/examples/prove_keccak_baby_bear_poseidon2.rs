@@ -1,4 +1,4 @@
-//! Prove poseidon2-air over BabyBear using poseidon2 for FRI hash.
+//! Prove keccakf-air over BabyBear using poseidon2 for FRI hash.
 
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ use p3_keccak_air::KeccakAir;
 use rand::Rng;
 
 const NUM_PERMUTATIONS: usize = 1 << 15;
-const LOG_BLOWUP: usize = 2;
+const LOG_BLOWUP: usize = 1;
 
 // Newtype to implement extended traits
 struct TestAir(KeccakAir);
