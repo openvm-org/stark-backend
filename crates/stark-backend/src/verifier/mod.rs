@@ -58,7 +58,9 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError> {
         challenger.observe(mvk.pre_hash.clone());
-        for air_id in proof.get_air_ids() {
+        let air_ids = proof.get_air_ids();
+        challenger.observe(Val::<SC>::from_canonical_usize(air_ids.len()));
+        for &air_id in &air_ids {
             challenger.observe(Val::<SC>::from_canonical_usize(air_id));
         }
         // Enforce trace height linear inequalities
@@ -74,7 +76,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         }
         // Check that all `air_id`s are different
         {
-            let mut air_ids: Vec<_> = proof.per_air.iter().map(|apd| apd.air_id).collect();
+            let mut air_ids = air_ids;
             air_ids.sort();
             for ids in air_ids.windows(2) {
                 assert!(ids[0] < ids[1], "all `air_id`s must be different");
