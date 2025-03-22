@@ -58,6 +58,9 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError> {
         challenger.observe(mvk.pre_hash.clone());
+        for air_id in proof.get_air_ids() {
+            challenger.observe(Val::<SC>::from_canonical_usize(air_id));
+        }
         // Enforce trace height linear inequalities
         for constraint in mvk.trace_height_constraints {
             let sum = proof

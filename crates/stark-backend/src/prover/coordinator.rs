@@ -96,7 +96,8 @@ where
             Vec<Vec<PB::Val>>,
         ) = ctx
             .into_iter()
-            .map(|(_, ctx)| {
+            .map(|(air_id, ctx)| {
+                self.challenger.observe(Val::<SC>::from_canonical_usize(air_id));
                 let (cached_commits, cached_views): (Vec<_>, Vec<_>) =
                     ctx.cached_mains.into_iter().unzip();
                 (
