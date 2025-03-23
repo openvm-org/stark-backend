@@ -41,7 +41,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         mvk: &MultiStarkVerifyingKey<SC>,
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError> {
-        // Note: construction of view panics if any air_id exceeds num_airs
+        // Note: construction of view panics if any air_id exceeds number of AIRs in provided `MultiStarkVerifyingKey`
         let mvk = mvk.view(&proof.get_air_ids());
         self.verify_raps(challenger, &mvk, proof)?;
         Ok(())
