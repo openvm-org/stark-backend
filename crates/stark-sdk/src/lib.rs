@@ -4,6 +4,7 @@ pub use p3_blake3;
 pub use p3_bn254_fr;
 pub use p3_goldilocks;
 pub use p3_keccak;
+pub use p3_koala_bear;
 
 pub mod bench;
 pub mod config;
