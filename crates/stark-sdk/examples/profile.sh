@@ -23,12 +23,13 @@ cargo build --profile=profiling --example prove_keccak_baby_bear_poseidon2 --fea
 
 export JEMALLOC_SYS_WITH_MALLOC_CONF="retain:true,background_thread:true,metadata_thp:always,thp:always,dirty_decay_ms:-1,muzzy_decay_ms:-1,abort_conf:true"
 
-# Check if samply is installed
-if ! command -v samply &> /dev/null; then
-    echo "samply not found. Installing..."
-    cargo install samply
-else
-    echo "samply is already installed"
-fi
+# # Check if samply is installed
+# if ! command -v samply &> /dev/null; then
+#     echo "samply not found. Installing..."
+#     cargo install samply
+# else
+#     echo "samply is already installed"
+# fi
 
-samply record $git_root/target/profiling/examples/prove_keccak_baby_bear_poseidon2
+# samply record $git_root/target/profiling/examples/prove_keccak_baby_bear_poseidon2
+$git_root/target/profiling/examples/prove_keccak_baby_bear_poseidon2

@@ -1,5 +1,3 @@
-use derive_more::Display;
-use serde::{Deserialize, Serialize};
 use tracing::Level;
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
@@ -29,14 +27,4 @@ pub fn setup_tracing_with_log_level(level: Level) {
         .with(env_filter)
         .with(ForestLayer::default())
         .try_init();
-}
-
-#[derive(Clone, Copy, Default, Display, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum EngineType {
-    #[default]
-    BabyBearPoseidon2,
-    BabyBearBlake3,
-    BabyBearKeccak,
-    GoldilocksPoseidon,
 }

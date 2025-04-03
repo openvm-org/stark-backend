@@ -31,7 +31,6 @@ metrics.workspace = true
 serde_json.workspace = true
 static_assertions.workspace = true
 toml = "0.8.14"
-derive_more = "0.99.18"
 tracing-subscriber = { version = "0.3.17", features = ["std", "env-filter"] }
 tracing-forest = { version = "0.1.6", features = ["ansi", "smallvec"] }
 metrics-tracing-context = "0.16.0"
@@ -39,15 +38,13 @@ metrics-util = "0.17.0"
 
 [dev-dependencies]
 p3-keccak-air = { workspace = true }
+pprof = { version = "0.14", features = ["frame-pointer", "flamegraph", "prost-codec"] }
+# pprof: macOS requires frame-pointer: https://github.com/tikv/pprof-rs/issues/131
 
 [features]
 default = ["parallel"]
 parallel = ["openvm-stark-backend/parallel"]
-nightly-features = [
-    "p3-dft/nightly-features",
-    "p3-keccak/nightly-features",
-    "p3-poseidon2/nightly-features",
-]
+nightly-features = ["p3-dft/nightly-features", "p3-keccak/nightly-features", "p3-poseidon2/nightly-features"]
 mimalloc = ["openvm-stark-backend/mimalloc"]
 jemalloc = ["openvm-stark-backend/jemalloc"]
 jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
