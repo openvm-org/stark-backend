@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     interaction::fri_log_up::FriLogUpPhase,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
-    p3_field::{extension::BinomialExtensionField, Field, FieldAlgebra},
+    p3_field::{Field, FieldAlgebra},
 };
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_dft::Radix2DitParallel;
@@ -29,6 +29,7 @@ use crate::{
         fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
     },
     engine::{StarkEngine, StarkEngineWithHashInstrumentation, StarkFriEngine},
+    fast_ext_field::FastBinomialExtensionField,
 };
 
 const RATE: usize = 8;
@@ -38,7 +39,7 @@ const DIGEST_WIDTH: usize = 8;
 
 type Val = BabyBear;
 type PackedVal = <Val as Field>::Packing;
-type Challenge = BinomialExtensionField<Val, 4>;
+type Challenge = FastBinomialExtensionField<Val, 4>;
 type Perm = Poseidon2BabyBear<WIDTH>;
 type InstrPerm = Instrumented<Perm>;
 

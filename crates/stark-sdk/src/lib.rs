@@ -12,4 +12,5 @@ pub mod config;
 pub mod cost_estimate;
 pub mod dummy_airs;
 pub mod engine;
+pub mod fast_ext_field;
 pub mod utils;

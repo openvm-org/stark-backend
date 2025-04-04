@@ -7,6 +7,7 @@ use core::{
 
 use itertools::Itertools;
 use num_bigint::BigUint;
+use openvm_stark_backend::{p3_field, p3_util};
 use p3_field::{
     extension::{BinomiallyExtendable, HasFrobenius, HasTwoAdicBinomialExtension},
     field_to_array, ExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra, Packable,
@@ -15,6 +16,9 @@ use p3_field::{
 use p3_util::convert_vec;
 use rand::{distributions::Standard, prelude::Distribution, Rng};
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+pub mod test;
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize, PartialOrd, Ord)]
 #[repr(transparent)] // to make the zero_vec implementation safe

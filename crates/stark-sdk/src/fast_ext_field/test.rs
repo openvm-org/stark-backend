@@ -1,11 +1,12 @@
 use std::time::Instant;
 
-use openvm_stark_backend::{
-    fast_ext_field::FastBinomialExtensionField,
-    p3_field::{extension::BinomialExtensionField, FieldExtensionAlgebra},
-};
-use openvm_stark_sdk::{p3_baby_bear::BabyBear, utils::create_seeded_rng};
+use openvm_stark_backend::p3_field::{extension::BinomialExtensionField, FieldExtensionAlgebra};
+use p3_baby_bear::BabyBear;
 use zkhash::ark_ff::UniformRand;
+
+use crate::utils::create_seeded_rng;
+
+use super::FastBinomialExtensionField;
 
 pub type OldBabyBearExt4 = BinomialExtensionField<BabyBear, 4>;
 pub type BabyBearExt4 = FastBinomialExtensionField<BabyBear, 4>;
