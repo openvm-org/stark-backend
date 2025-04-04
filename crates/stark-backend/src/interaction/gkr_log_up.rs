@@ -404,12 +404,13 @@ fn num_interaction_dimensions(num_interactions: usize) -> usize {
 #[derive(Debug, Clone)]
 struct GkrLogUpPermutationCols<T> {
     cr: T,
+    s: T,
     cum_sum: T,
 }
 
 impl<T> Borrow<GkrLogUpPermutationCols<T>> for [T] {
     fn borrow(&self) -> &GkrLogUpPermutationCols<T> {
-        debug_assert_eq!(self.len(), 2);
+        debug_assert_eq!(self.len(), 3);
         let (prefix, shorts, suffix) = unsafe { self.align_to::<GkrLogUpPermutationCols<T>>() };
         debug_assert!(prefix.is_empty(), "Alignment should match");
         debug_assert!(suffix.is_empty(), "Alignment should match");
@@ -445,8 +446,6 @@ where
         s_next += gamma_pows.next().unwrap() * sigma;
     }
 
-    // deg(s_next) = deg(interaction.count)
-
     let exposed_values = builder.permutation_exposed_values();
     let cumulative_sum = exposed_values[0];
 
@@ -458,12 +457,13 @@ where
     builder
         .when_first_row()
         .assert_zero_ext(local.cum_sum.into());
+    builder.assert_eq_ext(s_next, local.s);
     builder.when_transition().assert_eq_ext(
-        local.cr.into() * s_next.clone() + local.cum_sum.into(),
+        local.cr.into() * local.s.into() + local.cum_sum.into(),
         next.cum_sum.into(),
     );
     builder.when_last_row().assert_eq_ext(
-        local.cr.into() * s_next.clone() + local.cum_sum.into(),
+        local.cr.into() * local.s.into() + local.cum_sum.into(),
         cumulative_sum,
     );
 }

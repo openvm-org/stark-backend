@@ -409,7 +409,7 @@ impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
                     self.interaction_partitions.replace(interaction_partitions);
                     num_chunks + 1
                 }
-                RapPhaseSeqKind::GkrLogUp => 2,
+                RapPhaseSeqKind::GkrLogUp => 3,
             };
             self.after_challenge = Self::new_after_challenge(&[perm_width]);
 

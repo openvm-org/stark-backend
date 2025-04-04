@@ -244,11 +244,12 @@ where
             );
 
             after_challenge_trace_data.push(eq_at_r);
+            after_challenge_trace_data.push(s_at_row);
             after_challenge_trace_data.push(partial_sum);
 
             partial_sum += eq_at_r * s_at_row;
         }
-        let after_challenge_trace = RowMajorMatrix::new(after_challenge_trace_data, 2);
+        let after_challenge_trace = RowMajorMatrix::new(after_challenge_trace_data, 3);
         (
             after_challenge_trace,
             vec![partial_sum],
