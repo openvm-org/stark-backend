@@ -8,6 +8,7 @@ use std::{
 use itertools::Itertools;
 use p3_challenger::FieldChallenger;
 use p3_field::{ExtensionField, Field};
+use p3_maybe_rayon::prelude::*;
 use thiserror::Error;
 
 use crate::{
@@ -190,48 +191,52 @@ fn eval_grand_product_sum<F: Field>(
 /// x, 1))` at `t=0` and `t=2`.
 ///
 /// Output of the form: `(eval_at_0, eval_at_2)`.
-fn eval_logup_sum<F: Field>(
+fn eval_logup_sum<F: Field + Send + Sync>(
     eq_evals: &HypercubeEqEvals<F>,
     input_numerators: &Mle<F>,
     input_denominators: &Mle<F>,
     n_terms: usize,
     lambda: F,
 ) -> (F, F) {
-    let mut eval_at_0 = F::ZERO;
-    let mut eval_at_2 = F::ZERO;
+    (0..n_terms)
+        .into_par_iter()
+        .map(|i| {
+            // Gather input values at (r, {0, 1, 2}, bits(i), {0, 1})
+            let (numer_r0_0, denom_r0_0) = (input_numerators[i * 2], input_denominators[i * 2]);
+            let (numer_r0_1, denom_r0_1) =
+                (input_numerators[i * 2 + 1], input_denominators[i * 2 + 1]);
+            let (numer_r1_0, denom_r1_0) = (
+                input_numerators[(n_terms + i) * 2],
+                input_denominators[(n_terms + i) * 2],
+            );
+            let (numer_r1_1, denom_r1_1) = (
+                input_numerators[(n_terms + i) * 2 + 1],
+                input_denominators[(n_terms + i) * 2 + 1],
+            );
 
-    for i in 0..n_terms {
-        // Gather input values at (r, {0, 1, 2}, bits(i), {0, 1})
-        let (numer_r0_0, denom_r0_0) = (input_numerators[i * 2], input_denominators[i * 2]);
-        let (numer_r0_1, denom_r0_1) = (input_numerators[i * 2 + 1], input_denominators[i * 2 + 1]);
-        let (numer_r1_0, denom_r1_0) = (
-            input_numerators[(n_terms + i) * 2],
-            input_denominators[(n_terms + i) * 2],
-        );
-        let (numer_r1_1, denom_r1_1) = (
-            input_numerators[(n_terms + i) * 2 + 1],
-            input_denominators[(n_terms + i) * 2 + 1],
-        );
+            // Calculate values at r, t = 2
+            let numer_r2_0 = numer_r1_0.double() - numer_r0_0;
+            let denom_r2_0 = denom_r1_0.double() - denom_r0_0;
+            let numer_r2_1 = numer_r1_1.double() - numer_r0_1;
+            let denom_r2_1 = denom_r1_1.double() - denom_r0_1;
 
-        // Calculate values at r, t = 2
-        let numer_r2_0 = numer_r1_0.double() - numer_r0_0;
-        let denom_r2_0 = denom_r1_0.double() - denom_r0_0;
-        let numer_r2_1 = numer_r1_1.double() - numer_r0_1;
-        let denom_r2_1 = denom_r1_1.double() - denom_r0_1;
+            // Compute fractions at t = 0 and t = 2
+            let numer_at_r0i = numer_r0_0 * denom_r0_1 + numer_r0_1 * denom_r0_0;
+            let denom_at_r0i = denom_r0_1 * denom_r0_0;
+            let numer_at_r2i = numer_r2_0 * denom_r2_1 + numer_r2_1 * denom_r2_0;
+            let denom_at_r2i = denom_r2_1 * denom_r2_0;
 
-        // Compute fractions at t = 0 and t = 2
-        let numer_at_r0i = numer_r0_0 * denom_r0_1 + numer_r0_1 * denom_r0_0;
-        let denom_at_r0i = denom_r0_1 * denom_r0_0;
-        let numer_at_r2i = numer_r2_0 * denom_r2_1 + numer_r2_1 * denom_r2_0;
-        let denom_at_r2i = denom_r2_1 * denom_r2_0;
+            // Accumulate the evaluated terms
+            let eq_eval_at_0i = eq_evals[i];
+            let eval_at_0_i = eq_eval_at_0i * (numer_at_r0i + lambda * denom_at_r0i);
+            let eval_at_2_i = eq_eval_at_0i * (numer_at_r2i + lambda * denom_at_r2i);
 
-        // Accumulate the evaluated terms
-        let eq_eval_at_0i = eq_evals[i];
-        eval_at_0 += eq_eval_at_0i * (numer_at_r0i + lambda * denom_at_r0i);
-        eval_at_2 += eq_eval_at_0i * (numer_at_r2i + lambda * denom_at_r2i);
-    }
-
-    (eval_at_0, eval_at_2)
+            (eval_at_0_i, eval_at_2_i)
+        })
+        .reduce(
+            || (F::ZERO, F::ZERO),
+            |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
+        )
 }
 
 /// Evaluates `sum_x eq(({0}^|r|, 0, x), y) * (inp_denom(r, t, x, 1) + inp_denom(r, t, x, 0) +
@@ -332,17 +337,17 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
     input_layer_by_instance: Vec<Layer<EF>>,
 ) -> (GkrBatchProof<EF>, GkrArtifact<EF>) {
     let n_instances = input_layer_by_instance.len();
-    let n_layers_by_instance = input_layer_by_instance
-        .iter()
+    let n_layers_by_instance: Vec<_> = input_layer_by_instance
+        .par_iter()
         .map(|l| l.n_variables())
-        .collect_vec();
+        .collect();
     let n_layers = *n_layers_by_instance.iter().max().unwrap();
 
     // Evaluate all instance circuits and collect the layer values.
-    let mut layers_by_instance = input_layer_by_instance
-        .into_iter()
+    let mut layers_by_instance: Vec<_> = input_layer_by_instance
+        .into_par_iter()
         .map(|input_layer| gen_layers(input_layer).into_iter().rev())
-        .collect_vec();
+        .collect();
 
     let mut output_claims_by_instance = vec![None; n_instances];
     let mut layer_masks_by_instance = (0..n_instances).map(|_| Vec::new()).collect_vec();
@@ -411,10 +416,10 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
 
         sumcheck_proofs.push(sumcheck_proof);
 
-        let masks = constant_poly_oracles
-            .into_iter()
+        let masks: Vec<_> = constant_poly_oracles
+            .into_par_iter()
             .map(|oracle| oracle.try_into_mask().unwrap())
-            .collect_vec();
+            .collect();
 
         // Seed the channel with the layer masks.
         for (&instance, mask) in zip(&sumcheck_instances, &masks) {

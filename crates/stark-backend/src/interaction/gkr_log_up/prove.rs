@@ -21,10 +21,7 @@ use crate::{
         trace::Evaluator,
         PairTraceView, SymbolicInteraction,
     },
-    poly::{
-        multi::{hypercube_eq_partial, Mle},
-        uni::random_linear_combination_iter,
-    },
+    poly::multi::{hypercube_eq_partial, Mle},
 };
 
 /// A struct that holds the interaction-related data for a single GKR instance:
@@ -244,16 +241,17 @@ where
         let eqs_at_r = hypercube_eq_partial(r);
         let mut partial_sum = EF::ZERO;
 
+        let gamma_pows = gamma.powers().take(2 * eqs_at_r.len()).collect_vec();
+
         let mut after_challenge_trace_data = vec![];
         for (count_row, sigma_row, eq_at_r) in izip!(
             gkr_instance.counts.row_slices(),
             gkr_instance.sigmas.row_slices(),
             eqs_at_r
         ) {
-            let s_at_row = random_linear_combination_iter(
-                &mut itertools::interleave(count_row, sigma_row),
-                gamma,
-            );
+            let s_at_row = itertools::interleave(count_row, sigma_row)
+                .zip(&gamma_pows)
+                .fold(EF::ZERO, |acc, (&val, &gamma_pow)| acc + gamma_pow * val);
 
             after_challenge_trace_data.push(eq_at_r);
             after_challenge_trace_data.push(s_at_row);
