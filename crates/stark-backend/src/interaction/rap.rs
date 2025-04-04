@@ -6,6 +6,7 @@ use p3_air::{Air, AirBuilder};
 use super::{InteractionBuilder, RapPhaseSeqKind, SymbolicInteraction};
 use crate::{
     interaction::fri_log_up::eval_fri_log_up_phase,
+    interaction::gkr_log_up::eval_gkr_log_up_phase,
     rap::{PermutationAirBuilderWithExposedValues, Rap},
 };
 
@@ -38,6 +39,7 @@ where
                         builder.max_constraint_degree(),
                     );
                 }
+                RapPhaseSeqKind::GkrLogUp => eval_gkr_log_up_phase(builder),
             }
         }
     }

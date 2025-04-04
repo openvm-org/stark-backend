@@ -24,7 +24,7 @@ use crate::{
         StarkGenericConfig, Val,
     },
     interaction::RapPhaseSeq,
-    keygen::{types::MultiStarkProvingKey, view::MultiStarkVerifyingKeyView},
+    keygen::types::MultiStarkProvingKey,
     proof::OpeningProof,
     prover::{hal::TraceCommitter, types::RapSinglePhaseView},
     utils::metrics_span,
@@ -101,13 +101,13 @@ impl<SC: StarkGenericConfig> CpuDevice<'_, SC> {
 
 impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'_, SC> {}
 
-impl<SC: StarkGenericConfig> hal::TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsData<SC>) {
         let pcs = self.pcs();
         let (log_trace_heights, traces_with_domains): (Vec<_>, Vec<_>) = traces
             .iter()
             .map(|matrix| {
-                let height = matrix.as_ref().height();
+                let height = matrix.height();
                 let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
                 // Recomputing the domain is lightweight
                 let domain = pcs.natural_domain_for_degree(height);
@@ -129,14 +129,17 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
     fn partially_prove<'a>(
         &self,
         challenger: &mut SC::Challenger,
-        pk_views: &[DeviceStarkProvingKey<'a, CpuBackend<SC>>],
+        mpk: &DeviceMultiStarkProvingKey<'a, CpuBackend<SC>>,
         trace_views: Vec<PairView<&'a Arc<RowMajorMatrix<Val<SC>>>, Val<SC>>>,
     ) -> (
         Option<RapPhaseSeqPartialProof<SC>>,
         ProverDataAfterRapPhases<CpuBackend<SC>>,
     ) {
-        assert_eq!(pk_views.len(), trace_views.len());
-        let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = pk_views
+        let num_airs = mpk.per_air.len();
+        assert_eq!(num_airs, trace_views.len());
+
+        let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = mpk
+            .per_air
             .iter()
             .map(|pk| {
                 (
@@ -166,16 +169,18 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             )
             .map_or((None, None), |(p, d)| (Some(p), Some(d)));
 
-        let mvk_view = MultiStarkVerifyingKeyView::new(pk_views.iter().map(|pk| pk.vk).collect());
+        let mvk_view = mpk.vk_view();
 
-        let num_airs = pk_views.len();
         let mut perm_matrix_idx = 0usize;
         let rap_views_per_phase;
         let perm_trace_per_air = if let Some(phase_data) = rap_phase_seq_data {
             assert_eq!(mvk_view.num_phases(), 1);
-            assert_eq!(
-                mvk_view.num_challenges_in_phase(0),
-                phase_data.challenges.len()
+            assert_eq!(phase_data.challenges_per_phase.len(), 1);
+            // mvk_view.num_challenges_in_phase are the number of challenge variables used in the AIR constraints.
+            // there may be additional randomness used to generate the trace data that is constrained externally.
+            assert!(
+                mvk_view.num_challenges_in_phase(0) <=
+                phase_data.challenges_per_phase[0].len()
             );
             let perm_views = zip_eq(
                 &phase_data.after_challenge_trace_per_air,
@@ -189,7 +194,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
                 }
                 RapSinglePhaseView {
                     inner: matrix_idx,
-                    challenges: phase_data.challenges.clone(),
+                    challenges: phase_data.challenges_per_phase[0].clone(),
                     exposed_values: exposed_values.unwrap_or_default(),
                 }
             })
@@ -369,7 +374,11 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
 
         let pcs = self.pcs();
         let domain = |log_height| pcs.natural_domain_for_degree(1usize << log_height);
-        let opener = OpeningProver::<SC>::new(pcs, zeta);
+
+        let after_phase_domains = after_phase.iter().next().map(|v| v.log_trace_heights.iter().copied().map(domain).collect_vec());
+        let extra_after_challenge_points = self.config.rap_phase_seq().extra_opening_points(zeta, &after_phase_domains.unwrap_or(vec![]));
+
+        let opener = OpeningProver::<SC>::new(pcs, zeta, extra_after_challenge_points);
         let preprocessed = preprocessed
             .iter()
             .map(|v| {
@@ -441,7 +450,12 @@ where
                 }
             })
             .collect();
-        DeviceMultiStarkProvingKey::new(air_ids, per_air)
+        DeviceMultiStarkProvingKey::new(
+            air_ids,
+            per_air,
+            mpk.trace_height_constraints.clone(),
+            mpk.vk_pre_hash.clone(),
+        )
     }
     fn transport_matrix_to_device(
         &self,

@@ -1,6 +1,7 @@
 use std::ops::Index;
 
 use p3_field::Field;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -12,6 +13,7 @@ use crate::{
 };
 
 /// Batch GKR proof.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GkrBatchProof<F> {
     /// Sum-check proof for each layer.
     pub sumcheck_proofs: Vec<SumcheckProof<F>>,
@@ -22,6 +24,7 @@ pub struct GkrBatchProof<F> {
 }
 
 /// Values of interest obtained from the execution of the GKR protocol.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GkrArtifact<F> {
     /// Out-of-domain (OOD) point for evaluating columns in the input layer.
     pub ood_point: Vec<F>,
@@ -32,7 +35,7 @@ pub struct GkrArtifact<F> {
 }
 
 /// Stores two evaluations of each column in a GKR layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GkrMask<F> {
     columns: Vec<[F; 2]>,
 }
@@ -169,7 +172,7 @@ impl<F: Field> Layer<F> {
             .chunks_exact(2) // Process in chunks of 2 elements
             .map(|chunk| chunk[0] * chunk[1]) // Multiply each pair
             .collect();
-        Layer::GrandProduct(Mle::new(res))
+        Layer::GrandProduct(Mle::from_vec(res))
     }
 
     fn next_logup_layer(numerators: MleExpr<'_, F>, denominators: &Mle<F>) -> Layer<F> {
@@ -186,8 +189,8 @@ impl<F: Field> Layer<F> {
         }
 
         Layer::LogUpGeneric {
-            numerators: Mle::new(next_numerators),
-            denominators: Mle::new(next_denominators),
+            numerators: Mle::from_vec(next_numerators),
+            denominators: Mle::from_vec(next_denominators),
         }
     }
 

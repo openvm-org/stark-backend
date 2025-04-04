@@ -12,9 +12,13 @@ The backend is designed to be modular and compatible with different proof system
 - [`openvm-stark-backend`](crates/stark-backend): General purpose STARK proving system with multi-trace and logup support, built on top of Plonky3.
 - [`openvm-stark-sdk`](crates/stark-sdk): Low-level SDK for use with STARK backend to generate proofs for specific STARK configurations.
 
-## Security Status
+## Status
 
-As of December 2024, the STARK backend has not been audited and is currently not recommended for production use. We plan to continue development towards a production-ready release in 2025.
+As of the v1.0.0 release in March 2025, OpenVM is recommended for production use. OpenVM completed an external [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-cantina-report.pdf) on [Cantina](https://cantina.xyz/) from January to March 2025 as well as an internal [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-internal/README.md) by members of the [Axiom](https://axiom.xyz/) team during the same timeframe.
+
+## Security
+
+See [SECURITY.md](./SECURITY.md).
 
 ## Acknowledgements
 

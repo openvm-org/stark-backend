@@ -18,7 +18,7 @@ use super::{dag::SymbolicExpressionNode, symbolic_variable::SymbolicVariable};
 
 /// An expression over `SymbolicVariable`s.
 // Note: avoid deriving Hash because it will hash the entire sub-tree
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "F: Field")]
 pub enum SymbolicExpression<F> {
     Variable(SymbolicVariable<F>),
@@ -77,6 +77,43 @@ impl<F: Field> Hash for SymbolicExpression<F> {
     }
 }
 
+// We intentionally do not compare degree_multiple in PartialEq and Eq because degree_multiple is
+// metadata used for optimization/debugging purposes but it does not change the underlying expression.
+impl<F: Field> PartialEq for SymbolicExpression<F> {
+    fn eq(&self, other: &Self) -> bool {
+        // First check if the variants match
+        if std::mem::discriminant(self) != std::mem::discriminant(other) {
+            return false;
+        }
+
+        // Then check equality based on variant-specific data
+        match (self, other) {
+            (Self::Variable(v1), Self::Variable(v2)) => v1 == v2,
+            // IsFirstRow, IsLastRow, and IsTransition are all unit variants,
+            // so if the discriminants match, they're equal
+            (Self::IsFirstRow, Self::IsFirstRow) => true,
+            (Self::IsLastRow, Self::IsLastRow) => true,
+            (Self::IsTransition, Self::IsTransition) => true,
+            (Self::Constant(c1), Self::Constant(c2)) => c1 == c2,
+            // For compound expressions, compare pointers to match how Hash is implemented
+            (Self::Add { x: x1, y: y1, .. }, Self::Add { x: x2, y: y2, .. }) => {
+                Arc::ptr_eq(x1, x2) && Arc::ptr_eq(y1, y2)
+            }
+            (Self::Sub { x: x1, y: y1, .. }, Self::Sub { x: x2, y: y2, .. }) => {
+                Arc::ptr_eq(x1, x2) && Arc::ptr_eq(y1, y2)
+            }
+            (Self::Neg { x: x1, .. }, Self::Neg { x: x2, .. }) => Arc::ptr_eq(x1, x2),
+            (Self::Mul { x: x1, y: y1, .. }, Self::Mul { x: x2, y: y2, .. }) => {
+                Arc::ptr_eq(x1, x2) && Arc::ptr_eq(y1, y2)
+            }
+            // This should never be reached because we've already checked the discriminants
+            _ => false,
+        }
+    }
+}
+
+impl<F: Field> Eq for SymbolicExpression<F> {}
+
 impl<F: Field> SymbolicExpression<F> {
     /// Returns the multiple of `n` (the trace length) in this expression's degree.
     pub const fn degree_multiple(&self) -> usize {
@@ -99,51 +136,6 @@ impl<F: Field> SymbolicExpression<F> {
                 degree_multiple, ..
             } => *degree_multiple,
         }
-    }
-
-    pub fn rotate(&self, offset: usize) -> Self {
-        match self {
-            SymbolicExpression::Variable(v) => v.rotate(offset).into(),
-            SymbolicExpression::IsFirstRow => unreachable!("IsFirstRow should not be rotated"),
-            SymbolicExpression::IsLastRow => unreachable!("IsLastRow should not be rotated"),
-            SymbolicExpression::IsTransition => unreachable!("IsTransition should not be rotated"),
-            SymbolicExpression::Constant(c) => Self::Constant(*c),
-            SymbolicExpression::Add {
-                x,
-                y,
-                degree_multiple,
-            } => Self::Add {
-                x: Arc::new(x.rotate(offset)),
-                y: Arc::new(y.rotate(offset)),
-                degree_multiple: *degree_multiple,
-            },
-            SymbolicExpression::Sub {
-                x,
-                y,
-                degree_multiple,
-            } => Self::Sub {
-                x: Arc::new(x.rotate(offset)),
-                y: Arc::new(y.rotate(offset)),
-                degree_multiple: *degree_multiple,
-            },
-            SymbolicExpression::Neg { x, degree_multiple } => Self::Neg {
-                x: Arc::new(x.rotate(offset)),
-                degree_multiple: *degree_multiple,
-            },
-            SymbolicExpression::Mul {
-                x,
-                y,
-                degree_multiple,
-            } => Self::Mul {
-                x: Arc::new(x.rotate(offset)),
-                y: Arc::new(y.rotate(offset)),
-                degree_multiple: *degree_multiple,
-            },
-        }
-    }
-
-    pub fn next(&self) -> Self {
-        self.rotate(1)
     }
 }
 

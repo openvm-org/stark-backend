@@ -11,8 +11,8 @@ use super::{symbolic::SymbolicConstraints, PartitionedAirBuilder, ViewPair};
 use crate::{
     config::{StarkGenericConfig, Val},
     interaction::{
-        rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, InteractionType,
-        RapPhaseSeqKind, SymbolicInteraction,
+        rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, RapPhaseSeqKind,
+        SymbolicInteraction,
     },
     keygen::types::StarkProvingKey,
     rap::{AnyRap, PermutationAirBuilderWithExposedValues},
@@ -21,6 +21,8 @@ use crate::{
 mod check_constraints;
 
 use check_constraints::*;
+
+use crate::interaction::BusIndex;
 
 thread_local! {
    pub static USE_DEBUG_BUILDER: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
@@ -260,10 +262,10 @@ where
 {
     fn push_interaction<E: Into<Self::Expr>>(
         &mut self,
-        _bus_index: usize,
+        _bus_index: BusIndex,
         _fields: impl IntoIterator<Item = E>,
         _count: impl Into<Self::Expr>,
-        _interaction_type: InteractionType,
+        _count_weight: u32,
     ) {
         // no-op, interactions are debugged elsewhere
     }

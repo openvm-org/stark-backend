@@ -13,6 +13,7 @@ pub mod baby_bear_poseidon2_root;
 pub mod fri_params;
 pub mod goldilocks_poseidon;
 pub mod instrument;
+pub mod log_up_params;
 
 pub use fri_params::FriParameters;
 

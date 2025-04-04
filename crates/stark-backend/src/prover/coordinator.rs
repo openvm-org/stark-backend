@@ -1,21 +1,26 @@
 use std::{iter, marker::PhantomData};
 
-use itertools::{izip, multiunzip, Itertools};
+use itertools::{izip, Itertools};
 use p3_challenger::CanObserve;
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 use super::{
     hal::{ProverBackend, ProverDevice},
-    types::{DeviceMultiStarkProvingKey, HalProof, ProvingContext, SingleCommitPreimage},
+    types::{DeviceMultiStarkProvingKey, HalProof, ProvingContext},
     Prover,
 };
+#[cfg(feature = "bench-metrics")]
+use crate::prover::metrics::trace_metrics;
 use crate::{
     config::{Com, StarkGenericConfig, Val},
     keygen::view::MultiStarkVerifyingKeyView,
     proof::{AirProofData, Commitments},
-    prover::{hal::MatrixDimensions, metrics::trace_metrics, types::PairView},
+    prover::{
+        hal::MatrixDimensions,
+        types::{PairView, SingleCommitPreimage},
+    },
     utils::metrics_span,
 };
 
@@ -79,25 +84,32 @@ where
         #[cfg(feature = "bench-metrics")]
         let start = std::time::Instant::now();
         assert!(mpk.validate(&ctx), "Invalid proof input");
+        self.challenger.observe(mpk.vk_pre_hash.clone());
 
-        let (air_ids, air_ctxs): (Vec<_>, Vec<_>) = ctx.into_iter().unzip();
-        let num_air = air_ids.len();
+        let num_air = ctx.per_air.len();
+        self.challenger
+            .observe(Val::<SC>::from_canonical_usize(num_air));
+        info!(num_air);
         #[allow(clippy::type_complexity)]
         let (cached_commits_per_air, cached_views_per_air, common_main_per_air, pvs_per_air): (
             Vec<Vec<PB::Commitment>>,
             Vec<Vec<SingleCommitPreimage<&'a PB::Matrix, &'a PB::PcsData>>>,
             Vec<Option<PB::Matrix>>,
             Vec<Vec<PB::Val>>,
-        ) = multiunzip(air_ctxs.into_iter().map(|ctx| {
-            let (cached_commits, cached_views): (Vec<_>, Vec<_>) =
-                ctx.cached_mains.into_iter().unzip();
-            (
-                cached_commits,
-                cached_views,
-                ctx.common_main,
-                ctx.public_values,
-            )
-        }));
+        ) = ctx
+            .into_iter()
+            .map(|(air_id, ctx)| {
+                self.challenger.observe(Val::<SC>::from_canonical_usize(air_id));
+                let (cached_commits, cached_views): (Vec<_>, Vec<_>) =
+                    ctx.cached_mains.into_iter().unzip();
+                (
+                    cached_commits,
+                    cached_views,
+                    ctx.common_main,
+                    ctx.public_values,
+                )
+            })
+            .multiunzip();
 
         // ==================== All trace commitments that do not require challenges ====================
         // Commit all common main traces in a commitment. Traces inside are ordered by AIR id.
@@ -142,9 +154,8 @@ where
             log_trace_height_per_air.push(log_trace_height);
             pair_trace_view_per_air.push(pair_trace_view);
         }
-        tracing::info!("{}", trace_metrics(&mpk.per_air, &log_trace_height_per_air));
         #[cfg(feature = "bench-metrics")]
-        trace_metrics(&mpk.per_air, &log_trace_height_per_air).emit();
+        trace_metrics(mpk, &log_trace_height_per_air).emit();
 
         // ============ Challenger observations before additional RAP phases =============
         // Observe public values:
@@ -167,11 +178,9 @@ where
         );
 
         // ==================== Partially prove all RAP phases that require challenges ====================
-        let (rap_partial_proof, prover_data_after) = self.device.partially_prove(
-            &mut self.challenger,
-            &mpk.per_air,
-            pair_trace_view_per_air,
-        );
+        let (rap_partial_proof, prover_data_after) =
+            self.device
+                .partially_prove(&mut self.challenger, mpk, pair_trace_view_per_air);
         // Challenger observes additional commitments if any exist:
         for (commit, _) in &prover_data_after.committed_pcs_data_per_phase {
             self.challenger.observe(commit.clone());
@@ -225,22 +234,22 @@ where
             .unzip();
         // ==================== Polynomial Opening Proofs ====================
         let opening = metrics_span("pcs_opening_time_ms", || {
-            let quotient_degrees = mpk
-                .per_air
-                .iter()
-                .map(|pk| pk.vk.quotient_degree)
-                .collect_vec();
-            let preprocessed = mpk
-                .per_air
-                .iter()
-                .flat_map(|pk| pk.preprocessed_data.as_ref().map(|d| &d.data))
-                .collect_vec();
+            let mut quotient_degrees = Vec::with_capacity(mpk.per_air.len());
+            let mut preprocessed = Vec::new();
+
+            for pk in &mpk.per_air {
+                quotient_degrees.push(pk.vk.quotient_degree);
+                if let Some(data) = pk.preprocessed_data.as_ref().map(|d| &d.data) {
+                    preprocessed.push(data);
+                }
+            }
+
             let main = cached_views_per_air
                 .into_iter()
                 .flatten()
                 .map(|cv| cv.data)
                 .chain(iter::once(&common_main_pcs_data))
-                .collect_vec();
+                .collect();
             self.device.open(
                 &mut self.challenger,
                 preprocessed,
@@ -289,24 +298,20 @@ where
 
 impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
     pub(crate) fn validate(&self, ctx: &ProvingContext<PB>) -> bool {
-        if ctx.per_air.len() != self.air_ids.len() {
-            return false;
-        }
-        if !ctx
-            .per_air
-            .iter()
-            .zip(&self.air_ids)
-            .all(|((id1, _), id2)| id1 == id2)
-        {
-            return false;
-        }
-        if !ctx.per_air.iter().tuple_windows().all(|(a, b)| a.0 < b.0) {
-            return false;
-        }
-        true
+        ctx.per_air.len() == self.air_ids.len()
+            && ctx
+                .per_air
+                .iter()
+                .zip(&self.air_ids)
+                .all(|((id1, _), id2)| id1 == id2)
+            && ctx.per_air.iter().tuple_windows().all(|(a, b)| a.0 < b.0)
     }
 
-    pub(crate) fn vk_view(&self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
-        MultiStarkVerifyingKeyView::new(self.per_air.iter().map(|pk| pk.vk).collect())
+    pub(crate) fn vk_view(&'a self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
+        MultiStarkVerifyingKeyView::new(
+            self.per_air.iter().map(|pk| pk.vk).collect(),
+            &self.trace_height_constraints,
+            self.vk_pre_hash.clone(),
+        )
     }
 }

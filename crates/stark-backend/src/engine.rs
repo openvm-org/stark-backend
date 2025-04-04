@@ -1,6 +1,6 @@
 use std::{iter::zip, sync::Arc};
 
-use itertools::{izip, Itertools};
+use itertools::{zip_eq, Itertools};
 use p3_matrix::Matrix;
 use p3_util::log2_strict_usize;
 
@@ -214,7 +214,7 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
         self.debug(&airs, &pk.per_air, &air_proof_inputs);
         let vk = pk.get_vk();
         let proof_input = ProofInput {
-            per_air: izip!(air_ids, air_proof_inputs).collect(),
+            per_air: zip_eq(air_ids, air_proof_inputs).collect(),
         };
         let proof = self.prove(&pk, proof_input);
         self.verify(&vk, &proof)?;

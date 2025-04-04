@@ -1,14 +1,13 @@
 use p3_keccak::Keccak256Hash;
 
-use super::{
-    baby_bear_bytehash::{
-        self, config_from_byte_hash, BabyBearByteHashConfig, BabyBearByteHashEngine,
-    },
-    FriParameters,
+use super::baby_bear_bytehash::{
+    self, config_from_byte_hash, BabyBearByteHashConfig, BabyBearByteHashEngine,
 };
 use crate::{
     assert_sc_compatible_with_serde,
-    config::baby_bear_bytehash::BabyBearByteHashEngineWithDefaultHash,
+    config::{
+        baby_bear_bytehash::BabyBearByteHashEngineWithDefaultHash, fri_params::SecurityParameters,
+    },
 };
 
 pub type BabyBearKeccakConfig = BabyBearByteHashConfig<Keccak256Hash>;
@@ -23,8 +22,7 @@ pub fn default_engine() -> BabyBearKeccakEngine {
 
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
 pub fn default_config() -> BabyBearKeccakConfig {
-    let fri_params = FriParameters::standard_fast();
-    config_from_byte_hash(Keccak256Hash, fri_params)
+    config_from_byte_hash(Keccak256Hash, SecurityParameters::standard_fast())
 }
 
 impl BabyBearByteHashEngineWithDefaultHash<Keccak256Hash> for BabyBearKeccakEngine {

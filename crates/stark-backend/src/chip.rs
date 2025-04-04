@@ -37,12 +37,6 @@ pub trait ChipUsageGetter {
     }
 }
 
-/// A chip whose state could be persisted.
-pub trait Stateful<S> {
-    fn load_state(&mut self, state: S);
-    fn store_state(&self) -> S;
-}
-
 impl<SC: StarkGenericConfig, C: Chip<SC>> Chip<SC> for RefCell<C> {
     fn air(&self) -> Arc<dyn AnyRap<SC>> {
         self.borrow().air()
@@ -144,14 +138,5 @@ impl<C: ChipUsageGetter> ChipUsageGetter for Mutex<C> {
     }
     fn trace_width(&self) -> usize {
         self.lock().unwrap().trace_width()
-    }
-}
-
-impl<S, C: Stateful<S>> Stateful<S> for RefCell<C> {
-    fn load_state(&mut self, state: S) {
-        self.borrow_mut().load_state(state)
-    }
-    fn store_state(&self) -> S {
-        self.borrow_mut().store_state()
     }
 }

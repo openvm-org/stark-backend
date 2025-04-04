@@ -33,3 +33,8 @@ jobs:
           # echo -e "\033[1;32mAll unique features across workspace:\033[0m" && cargo metadata --format-version=1 --no-deps | jq -r '.packages[].features | to_entries[] | .key' | sort -u | sed 's/^/• /'
           cargo clippy --all-targets --all --tests --features "default mimalloc nightly-features parallel" -- -D warnings
           cargo clippy --all-targets --all --tests --no-default-features --features "jemalloc jemalloc-prof" -- -D warnings
+
+      - name: Cargo audit
+        run: |
+          cargo install cargo-audit
+          cargo audit
