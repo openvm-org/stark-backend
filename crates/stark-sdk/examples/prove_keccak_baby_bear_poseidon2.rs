@@ -19,7 +19,7 @@ use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::Rng;
 
-const NUM_PERMUTATIONS: usize = 1 << 15;
+const NUM_PERMUTATIONS: usize = 1 << 10;
 const LOG_BLOWUP: usize = 1;
 
 // Newtype to implement extended traits
