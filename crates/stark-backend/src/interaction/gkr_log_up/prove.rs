@@ -1,7 +1,6 @@
 use std::iter;
-use std::iter::zip;
 
-use itertools::{izip, zip_eq, Itertools};
+use itertools::{izip, Itertools};
 use p3_challenger::FieldChallenger;
 use p3_field::{ExtensionField, Field};
 use p3_matrix::{
@@ -11,19 +10,20 @@ use p3_matrix::{
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 
-use crate::air_builders::symbolic::symbolic_expression::SymbolicExpression;
-use crate::interaction::PairTraceView;
 use crate::{
-    air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
+    air_builders::symbolic::{
+        symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
+        SymbolicConstraints,
+    },
     gkr::{GkrArtifact, Layer, Layer::LogUpGeneric},
     interaction::{
         gkr_log_up::{num_interaction_dimensions, GkrAuxData, GkrLogUpPhase},
         trace::Evaluator,
-        SymbolicInteraction,
+        PairTraceView, SymbolicInteraction,
     },
     poly::{
         multi::{hypercube_eq_partial, Mle},
-        uni::random_linear_combination,
+        uni::random_linear_combination_iter,
     },
 };
 
@@ -94,7 +94,9 @@ impl<EF: Field> GkrLogUpInstance<EF> {
                     .iter()
                     .chain(iter::once(&SymbolicExpression::Constant(b)))
                     .zip(beta_pows)
-                    .fold(EF::ZERO, |acc, (field, &beta)| acc + beta * evaluator.eval_expr(field));
+                    .fold(EF::ZERO, |acc, (field, &beta)| {
+                        acc + beta * evaluator.eval_expr(field)
+                    });
 
                 (count_val, sigma)
             })
@@ -244,12 +246,12 @@ where
 
         let mut after_challenge_trace_data = vec![];
         for (count_row, sigma_row, eq_at_r) in izip!(
-            gkr_instance.counts.rows(),
-            gkr_instance.sigmas.rows(),
+            gkr_instance.counts.row_slices(),
+            gkr_instance.sigmas.row_slices(),
             eqs_at_r
         ) {
-            let s_at_row = random_linear_combination(
-                &itertools::interleave(count_row, sigma_row).collect_vec(),
+            let s_at_row = random_linear_combination_iter(
+                &mut itertools::interleave(count_row, sigma_row),
                 gamma,
             );
 

@@ -179,14 +179,23 @@ impl<F: Field> Deref for UnivariatePolynomial<F> {
     }
 }
 
-/// Evaluates a polynomial represented by coefficients in a slice at a given point `x`.
-pub fn evaluate_on_slice<F: Field>(coeffs: &[F], x: F) -> F {
-    coeffs.iter().rfold(F::ZERO, |acc, &coeff| acc * x + coeff)
-}
-
 /// Returns `v_0 + alpha * v_1 + ... + alpha^(n-1) * v_{n-1}`.
 pub fn random_linear_combination<F: Field>(v: &[F], alpha: F) -> F {
-    evaluate_on_slice(v, alpha)
+    random_linear_combination_iter(v.iter(), alpha)
+}
+
+/// Returns `v_0 + alpha * v_1 + ... + alpha^(n-1) * v_{n-1}` using an iterator over `&F`.
+pub fn random_linear_combination_iter<I, F>(iter: I, alpha: F) -> F
+where
+    F: Field,
+    I: IntoIterator,
+    I::Item: Deref<Target = F>,
+{
+    let mut acc = F::ZERO;
+    for (val, alpha_pow) in iter.into_iter().zip(alpha.powers()) {
+        acc += alpha_pow * *val;
+    }
+    acc
 }
 
 /// Projective fraction.

@@ -4,11 +4,13 @@ use itertools::izip;
 use p3_challenger::FieldChallenger;
 use p3_field::{ExtensionField, Field};
 
-use crate::interaction::BusIndex;
 use crate::{
     gkr,
-    interaction::gkr_log_up::{
-        num_interaction_dimensions, GkrLogUpError, GkrLogUpPartialProof, GkrLogUpPhase,
+    interaction::{
+        gkr_log_up::{
+            num_interaction_dimensions, GkrLogUpError, GkrLogUpPartialProof, GkrLogUpPhase,
+        },
+        BusIndex,
     },
     poly::multi::hypercube_eq_partial,
 };

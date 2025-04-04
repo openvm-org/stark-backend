@@ -20,9 +20,10 @@ mod error;
 /// Constraint folder
 pub mod folder;
 
-use crate::air_builders::symbolic::SymbolicConstraints;
 pub use error::*;
 pub use folder::GenericVerifierConstraintFolder;
+
+use crate::air_builders::symbolic::SymbolicConstraints;
 
 /// Verifies a partitioned proof of multi-matrix AIRs.
 pub struct MultiTraceStarkVerifier<'c, SC: StarkGenericConfig> {

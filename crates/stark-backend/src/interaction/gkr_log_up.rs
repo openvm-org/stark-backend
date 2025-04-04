@@ -1,7 +1,7 @@
 mod prove;
 mod verify;
 
-use std::{array, borrow::Borrow, cmp::max, fmt::Debug, iter, iter::zip, marker::PhantomData};
+use std::{borrow::Borrow, cmp::max, fmt::Debug, iter, iter::zip, marker::PhantomData};
 
 use itertools::{izip, Itertools};
 use p3_air::ExtensionBuilder;
@@ -17,15 +17,13 @@ use rayon::iter::IntoParallelRefIterator;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::interaction::fri_log_up::{FriLogUpError, STARK_LU_NUM_CHALLENGES};
-use crate::interaction::{LogUpSecurityParameters, PairTraceView};
 use crate::{
     air_builders::symbolic::SymbolicConstraints,
     gkr,
     gkr::{Gate, GkrBatchProof},
     interaction::{
-        utils::generate_betas, InteractionBuilder, RapPhaseProverData, RapPhaseSeq,
-        RapPhaseSeqKind, RapPhaseVerifierData,
+        utils::generate_betas, InteractionBuilder, LogUpSecurityParameters, PairTraceView,
+        RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
     },
     rap::PermutationAirBuilderWithExposedValues,
 };

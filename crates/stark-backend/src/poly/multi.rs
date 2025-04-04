@@ -155,7 +155,7 @@ pub fn hypercube_eq_partial<F: Field>(r: &[F]) -> Vec<F> {
         for i in (0..cur_size).rev() {
             let val = result[i];
             result[2 * i] = val * one_minus_r; // x_i = 0
-            result[2 * i + 1] = val * r_i;     // x_i = 1
+            result[2 * i + 1] = val * r_i; // x_i = 1
         }
 
         cur_size *= 2;

@@ -3,8 +3,7 @@ use std::{cmp::min, iter, ops::Range};
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PackedValue};
-use p3_matrix::dense::RowMajorMatrix;
-use p3_matrix::Matrix;
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
@@ -140,7 +139,7 @@ where
             // skipping `next` if above scan showed no constraints need it:
             let preprocessed = preprocessed_trace_on_quotient_domain
                 .as_ref()
-                .map(|mat| pack_rows::<SC, M>(&mat, &row_idx_local, row_idx_next.as_deref()))
+                .map(|lde| pack_rows::<SC, M>(lde, &row_idx_local, row_idx_next.as_deref()))
                 .unwrap_or_else(|| ViewPair::new(vec![], None));
             let partitioned_main = partitioned_main_lde_on_quotient_domain
                 .iter()
@@ -258,6 +257,7 @@ impl<SC: StarkGenericConfig, M: Matrix<Val<SC>>> GkrLogUpAdapterFolder<'_, SC, M
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_max_rotation_and_verify_bounds<Val, Challenge, M>(
     constraints: &SymbolicExpressionDag<Val>,
     preprocessed_trace_on_quotient_domain: Option<&M>,

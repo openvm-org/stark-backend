@@ -374,7 +374,7 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
         let pcs = self.pcs();
         let domain = |log_height| pcs.natural_domain_for_degree(1usize << log_height);
 
-        let after_phase_domains = after_phase.iter().next().map(|v| {
+        let after_phase_domains = after_phase.first().map(|v| {
             v.log_trace_heights
                 .iter()
                 .copied()
@@ -384,7 +384,7 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
         let extra_after_challenge_points = self
             .config
             .rap_phase_seq()
-            .extra_opening_points(zeta, &after_phase_domains.unwrap_or(vec![]));
+            .extra_opening_points(zeta, &after_phase_domains.unwrap_or_default());
 
         let opener = OpeningProver::<SC>::new(pcs, zeta, extra_after_challenge_points);
         let preprocessed = preprocessed

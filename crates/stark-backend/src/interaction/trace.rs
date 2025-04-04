@@ -1,9 +1,10 @@
+use p3_field::Field;
+use p3_matrix::Matrix;
+
 use crate::air_builders::symbolic::{
     symbolic_expression::SymbolicEvaluator,
     symbolic_variable::{Entry, SymbolicVariable},
 };
-use p3_field::Field;
-use p3_matrix::Matrix;
 
 pub(super) struct Evaluator<'a, T, F: Field> {
     pub preprocessed: Option<T>,
