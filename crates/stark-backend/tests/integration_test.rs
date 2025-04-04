@@ -1,8 +1,9 @@
 use openvm_stark_backend::{p3_field::FieldAlgebra, utils::disable_debug_builder, Chip};
+use openvm_stark_sdk::config::FriParameters;
 /// Test utils
 use openvm_stark_sdk::{
     any_rap_arc_vec, config,
-    config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, FriParameters},
+    config::baby_bear_poseidon2::BabyBearPoseidon2Engine,
     dummy_airs::{
         fib_air::chip::FibonacciChip,
         interaction::dummy_interaction_air::{DummyInteractionChip, DummyInteractionData},

@@ -50,9 +50,9 @@ pub enum SymbolicExpressionNode<F> {
 #[repr(C)]
 pub struct SymbolicExpressionDag<F> {
     /// Nodes in **topological** order.
-    pub(crate) nodes: Vec<SymbolicExpressionNode<F>>,
+    pub nodes: Vec<SymbolicExpressionNode<F>>,
     /// Node indices of expressions to assert equal zero.
-    pub(crate) constraint_idx: Vec<usize>,
+    pub constraint_idx: Vec<usize>,
 }
 
 impl<F> SymbolicExpressionDag<F> {
@@ -64,6 +64,10 @@ impl<F> SymbolicExpressionDag<F> {
             }
         }
         rotation
+    }
+
+    pub fn num_constraints(&self) -> usize {
+        self.constraint_idx.len()
     }
 }
 
@@ -102,7 +106,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
         .iter()
         .map(|interaction| {
             let fields: Vec<usize> = interaction
-                .fields
+                .message
                 .iter()
                 .map(|field_expr| {
                     topological_sort_symbolic_expr(field_expr, &mut expr_to_idx, &mut nodes)
@@ -111,10 +115,10 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
             let count =
                 topological_sort_symbolic_expr(&interaction.count, &mut expr_to_idx, &mut nodes);
             Interaction {
-                fields,
+                message: fields,
                 count,
                 bus_index: interaction.bus_index,
-                interaction_type: interaction.interaction_type,
+                count_weight: interaction.count_weight,
             }
         })
         .collect();
@@ -272,16 +276,16 @@ impl<'a, F: Field> From<&'a SymbolicConstraintsDag<F>> for SymbolicConstraints<F
             .iter()
             .map(|interaction| {
                 let fields = interaction
-                    .fields
+                    .message
                     .iter()
                     .map(|&idx| exprs[idx].as_ref().clone())
                     .collect();
                 let count = exprs[interaction.count].as_ref().clone();
                 Interaction {
-                    fields,
+                    message: fields,
                     count,
                     bus_index: interaction.bus_index,
-                    interaction_type: interaction.interaction_type,
+                    count_weight: interaction.count_weight,
                 }
             })
             .collect::<Vec<_>>();
@@ -314,9 +318,8 @@ mod tests {
             dag::{build_symbolic_constraints_dag, SymbolicExpressionDag, SymbolicExpressionNode},
             symbolic_expression::SymbolicExpression,
             symbolic_variable::{Entry, SymbolicVariable},
-            SymbolicConstraints,
         },
-        interaction::{Interaction, InteractionType},
+        interaction::Interaction,
     };
 
     type F = BabyBear;
@@ -340,9 +343,9 @@ mod tests {
         ];
         let interactions = vec![Interaction {
             bus_index: 0,
-            fields: vec![expr.clone(), SymbolicExpression::Constant(F::TWO)],
+            message: vec![expr.clone(), SymbolicExpression::Constant(F::TWO)],
             count: SymbolicExpression::Constant(F::ONE),
-            interaction_type: InteractionType::Send,
+            count_weight: 1,
         }];
         let dag = build_symbolic_constraints_dag(&constraints, &interactions);
         assert_eq!(
@@ -404,18 +407,10 @@ mod tests {
             dag.interactions,
             vec![Interaction {
                 bus_index: 0,
-                fields: vec![8, 11],
+                message: vec![8, 11],
                 count: 3,
-                interaction_type: InteractionType::Send,
+                count_weight: 1,
             }]
         );
-
-        let sc = SymbolicConstraints {
-            constraints,
-            interactions,
-        };
-        let ser_str = serde_json::to_string(&sc).unwrap();
-        let new_sc: SymbolicConstraints<_> = serde_json::from_str(&ser_str).unwrap();
-        assert_eq!(sc, new_sc);
     }
 }

@@ -1,4 +1,4 @@
-// Copied from uni-stark/src/symbolic_builder.rs to allow A: ?Sized
+// Originally copied from uni-stark/src/symbolic_builder.rs to allow A: ?Sized
 
 use itertools::Itertools;
 use p3_air::{
@@ -7,7 +7,6 @@ use p3_air::{
 use p3_field::Field;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_ceil_usize;
-use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use self::{
@@ -18,7 +17,7 @@ use super::PartitionedAirBuilder;
 use crate::{
     interaction::{
         fri_log_up::find_interaction_chunks, rap::InteractionPhaseAirBuilder, Interaction,
-        InteractionBuilder, InteractionType, RapPhaseSeqKind, SymbolicInteraction,
+        InteractionBuilder, RapPhaseSeqKind, SymbolicInteraction,
     },
     keygen::types::{StarkVerifyingParams, TraceWidth},
     rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
@@ -30,14 +29,11 @@ pub mod symbolic_variable;
 
 pub use dag::*;
 
+use crate::interaction::BusIndex;
+
 /// Symbolic constraints for a single AIR with interactions.
 /// The constraints contain the constraints on the logup partial sums.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    bound = "F: Field",
-    from = "dag::SymbolicConstraintsDag<F>",
-    into = "dag::SymbolicConstraintsDag<F>"
-)]
+#[derive(Clone, Debug)]
 pub struct SymbolicConstraints<F> {
     /// All constraints of the RAP, including the constraints on the logup partial sums.
     pub constraints: Vec<SymbolicExpression<F>>,
@@ -73,7 +69,7 @@ impl<F: Field> SymbolicConstraints<F> {
             .iter()
             .map(|interaction| {
                 interaction
-                    .fields
+                    .message
                     .iter()
                     .map(|field| field.degree_multiple())
                     .max()
@@ -368,18 +364,18 @@ impl<F: Field> PermutationAirBuilderWithExposedValues for SymbolicRapBuilder<F> 
 impl<F: Field> InteractionBuilder for SymbolicRapBuilder<F> {
     fn push_interaction<E: Into<Self::Expr>>(
         &mut self,
-        bus_index: usize,
+        bus_index: BusIndex,
         fields: impl IntoIterator<Item = E>,
         count: impl Into<Self::Expr>,
-        interaction_type: InteractionType,
+        count_weight: u32,
     ) {
         let fields = fields.into_iter().map(|f| f.into()).collect();
         let count = count.into();
         self.interactions.push(Interaction {
             bus_index,
-            fields,
+            message: fields,
             count,
-            interaction_type,
+            count_weight,
         });
     }
 

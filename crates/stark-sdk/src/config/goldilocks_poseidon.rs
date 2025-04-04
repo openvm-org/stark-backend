@@ -15,12 +15,10 @@ use p3_poseidon::Poseidon;
 use p3_symmetric::{CryptographicPermutation, PaddingFreeSponge, TruncatedPermutation};
 use rand::{rngs::StdRng, SeedableRng};
 
-use super::{
-    instrument::{HashStatistics, Instrumented, StarkHashStatistics},
-    FriParameters,
-};
+use super::instrument::{HashStatistics, Instrumented, StarkHashStatistics};
 use crate::{
     assert_sc_compatible_with_serde,
+    config::fri_params::SecurityParameters,
     engine::{StarkEngine, StarkEngineWithHashInstrumentation},
 };
 
@@ -59,7 +57,7 @@ where
         + CryptographicPermutation<[PackedVal; WIDTH]>
         + Clone,
 {
-    fri_params: FriParameters,
+    security_params: SecurityParameters,
     pub config: GoldilocksPermutationConfig<P>,
     pub perm: P,
     pub max_constraint_degree: usize,
@@ -109,7 +107,7 @@ where
         StarkHashStatistics {
             name: type_name::<P>().to_string(),
             stats: HashStatistics { permutations },
-            fri_params: self.fri_params,
+            fri_params: self.security_params.fri_params,
             custom,
         }
     }
@@ -118,32 +116,37 @@ where
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
 pub fn default_engine() -> GoldilocksPoseidonEngine {
     let perm = random_perm();
-    let fri_params = FriParameters::standard_fast();
-    engine_from_perm(perm, fri_params)
+    engine_from_perm(perm, SecurityParameters::standard_fast())
 }
 
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
 pub fn default_config(perm: &Perm) -> GoldilocksPoseidonConfig {
-    let fri_params = FriParameters::standard_fast();
-    config_from_perm(perm, fri_params)
+    config_from_perm(perm, SecurityParameters::standard_fast())
 }
 
-pub fn engine_from_perm<P>(perm: P, fri_params: FriParameters) -> GoldilocksPermutationEngine<P>
+pub fn engine_from_perm<P>(
+    perm: P,
+    security_params: SecurityParameters,
+) -> GoldilocksPermutationEngine<P>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
         + Clone,
 {
-    let config = config_from_perm(&perm, fri_params);
+    let max_constraint_degree = security_params.fri_params.max_constraint_degree();
+    let config = config_from_perm(&perm, security_params.clone());
     GoldilocksPermutationEngine {
         config,
         perm,
-        fri_params,
-        max_constraint_degree: fri_params.max_constraint_degree(),
+        security_params,
+        max_constraint_degree,
     }
 }
 
-pub fn config_from_perm<P>(perm: &P, fri_params: FriParameters) -> GoldilocksPermutationConfig<P>
+pub fn config_from_perm<P>(
+    perm: &P,
+    security_params: SecurityParameters,
+) -> GoldilocksPermutationConfig<P>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
@@ -154,6 +157,10 @@ where
     let val_mmcs = ValMmcs::new(hash, compress);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft::default();
+    let SecurityParameters {
+        fri_params,
+        log_up_params,
+    } = security_params;
     let fri_config = FriConfig {
         log_blowup: fri_params.log_blowup,
         log_final_poly_len: fri_params.log_final_poly_len,
@@ -162,7 +169,7 @@ where
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
-    let rap_phase = RapPhase::new();
+    let rap_phase = RapPhase::new(log_up_params);
     GoldilocksPermutationConfig::new(pcs, rap_phase)
 }
 

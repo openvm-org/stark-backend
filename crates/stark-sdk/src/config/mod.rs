@@ -14,6 +14,7 @@ pub mod fast_baby_bear_poseidon2;
 pub mod fri_params;
 pub mod goldilocks_poseidon;
 pub mod instrument;
+pub mod log_up_params;
 
 pub use fri_params::FriParameters;
 

@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum VerificationError {
+    #[error("all `air_id`s must be different")]
+    DuplicateAirs,
     #[error("invalid proof shape")]
     InvalidProofShape,
     /// An error occurred while verifying the claimed openings.

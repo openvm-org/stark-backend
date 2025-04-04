@@ -1,5 +1,3 @@
-use std::any::type_name;
-
 use ff::PrimeField;
 use openvm_stark_backend::{
     config::StarkConfig, interaction::fri_log_up::FriLogUpPhase,
@@ -19,13 +17,13 @@ use zkhash::{
     poseidon2::poseidon2_instance_bn256::RC3,
 };
 
-use super::{
-    instrument::{HashStatistics, InstrumentCounter, Instrumented, StarkHashStatistics},
-    FriParameters,
-};
+use super::FriParameters;
 use crate::{
     assert_sc_compatible_with_serde,
-    engine::{StarkEngine, StarkEngineWithHashInstrumentation, StarkFriEngine},
+    config::{
+        fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
+    },
+    engine::{StarkEngine, StarkFriEngine},
 };
 
 const WIDTH: usize = 3;
@@ -80,66 +78,44 @@ where
     }
 }
 
-impl<P> StarkEngineWithHashInstrumentation<BabyBearPermutationRootConfig<Instrumented<P>>>
-    for BabyBearPermutationRootEngine<Instrumented<P>>
-where
-    P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
-{
-    fn clear_instruments(&mut self) {
-        self.perm.input_lens_by_type.lock().unwrap().clear();
-    }
-    fn stark_hash_statistics<T>(&self, custom: T) -> StarkHashStatistics<T> {
-        let counter = self.perm.input_lens_by_type.lock().unwrap();
-        let permutations = counter.iter().fold(0, |total, (name, lens)| {
-            if name == type_name::<[Val; WIDTH]>() {
-                let count: usize = lens.iter().sum();
-                println!("Permutation: {name}, Count: {count}");
-                total + count
-            } else {
-                panic!("Permutation type not yet supported: {}", name);
-            }
-        });
-
-        StarkHashStatistics {
-            name: type_name::<P>().to_string(),
-            stats: HashStatistics { permutations },
-            fri_params: self.fri_params,
-            custom,
-        }
-    }
-}
-
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
 pub fn default_engine() -> BabyBearPoseidon2RootEngine {
-    default_engine_impl(FriParameters::standard_fast())
+    default_engine_impl(SecurityParameters::standard_fast())
 }
 
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-fn default_engine_impl(fri_params: FriParameters) -> BabyBearPoseidon2RootEngine {
+fn default_engine_impl(security_params: SecurityParameters) -> BabyBearPoseidon2RootEngine {
     let perm = root_perm();
-    engine_from_perm(perm, fri_params)
+    engine_from_perm(perm, security_params)
 }
 
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
 pub fn default_config(perm: &Perm) -> BabyBearPoseidon2RootConfig {
-    let fri_params = FriParameters::standard_fast();
-    config_from_perm(perm, fri_params)
+    config_from_perm(perm, SecurityParameters::standard_fast())
 }
 
-pub fn engine_from_perm<P>(perm: P, fri_params: FriParameters) -> BabyBearPermutationRootEngine<P>
+pub fn engine_from_perm<P>(
+    perm: P,
+    security_params: SecurityParameters,
+) -> BabyBearPermutationRootEngine<P>
 where
     P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
 {
-    let config = config_from_perm(&perm, fri_params);
+    let fri_params = security_params.fri_params;
+    let max_constraint_degree = fri_params.max_constraint_degree();
+    let config = config_from_perm(&perm, security_params);
     BabyBearPermutationRootEngine {
         config,
         perm,
         fri_params,
-        max_constraint_degree: fri_params.max_constraint_degree(),
+        max_constraint_degree,
     }
 }
 
-pub fn config_from_perm<P>(perm: &P, fri_params: FriParameters) -> BabyBearPermutationRootConfig<P>
+pub fn config_from_perm<P>(
+    perm: &P,
+    security_params: SecurityParameters,
+) -> BabyBearPermutationRootConfig<P>
 where
     P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
 {
@@ -148,6 +124,10 @@ where
     let val_mmcs = ValMmcs::new(hash, compress);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft::default();
+    let SecurityParameters {
+        fri_params,
+        log_up_params,
+    } = security_params;
     let fri_config = FriConfig {
         log_blowup: fri_params.log_blowup,
         log_final_poly_len: fri_params.log_final_poly_len,
@@ -156,7 +136,7 @@ where
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
-    let rap_phase = FriLogUpPhase::new();
+    let rap_phase = FriLogUpPhase::new(log_up_params);
     BabyBearPermutationRootConfig::new(pcs, rap_phase)
 }
 
@@ -211,43 +191,13 @@ fn bn254_poseidon2_rc3() -> Vec<[Bn254Fr; 3]> {
         .collect()
 }
 
-/// Logs hash count statistics to stdout and returns as struct.
-/// Count of 1 corresponds to a Poseidon2 permutation with rate RATE that outputs OUT field elements
-#[allow(dead_code)]
-pub fn print_hash_counts(hash_counter: &InstrumentCounter, compress_counter: &InstrumentCounter) {
-    let hash_counter = hash_counter.lock().unwrap();
-    let mut hash_count = 0;
-    hash_counter.iter().for_each(|(name, lens)| {
-        if name == type_name::<(Val, [Val; DIGEST_WIDTH])>() {
-            let count = lens.iter().fold(0, |count, len| count + len.div_ceil(RATE));
-            println!("Hash: {name}, Count: {count}");
-            hash_count += count;
-        } else {
-            panic!("Hash type not yet supported: {}", name);
-        }
-    });
-    drop(hash_counter);
-    let compress_counter = compress_counter.lock().unwrap();
-    let mut compress_count = 0;
-    compress_counter.iter().for_each(|(name, lens)| {
-        if name == type_name::<[Val; DIGEST_WIDTH]>() {
-            let count = lens.iter().fold(0, |count, len| {
-                // len should always be N=2 for TruncatedPermutation
-                count + (DIGEST_WIDTH * len).div_ceil(WIDTH)
-            });
-            println!("Compress: {name}, Count: {count}");
-            compress_count += count;
-        } else {
-            panic!("Compress type not yet supported: {}", name);
-        }
-    });
-    let total_count = hash_count + compress_count;
-    println!("Total Count: {total_count}");
-}
-
 impl StarkFriEngine<BabyBearPoseidon2RootConfig> for BabyBearPoseidon2RootEngine {
     fn new(fri_params: FriParameters) -> Self {
-        default_engine_impl(fri_params)
+        let security_params = SecurityParameters {
+            fri_params,
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
+        };
+        default_engine_impl(security_params)
     }
     fn fri_params(&self) -> FriParameters {
         self.fri_params

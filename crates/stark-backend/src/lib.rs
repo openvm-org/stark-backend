@@ -40,7 +40,7 @@ pub mod utils;
 /// Verifier implementation
 pub mod verifier;
 
-pub use chip::{Chip, ChipUsageGetter, Stateful};
+pub use chip::{Chip, ChipUsageGetter};
 pub use rap::AirRef;
 
 // Use jemalloc as global allocator for performance

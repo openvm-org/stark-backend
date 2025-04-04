@@ -12,7 +12,12 @@ use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, CryptographicHasher, SerializingHasher32};
 
 use super::FriParameters;
-use crate::engine::{StarkEngine, StarkFriEngine};
+use crate::{
+    config::{
+        fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
+    },
+    engine::{StarkEngine, StarkFriEngine},
+};
 
 type Val = BabyBear;
 type Challenge = BinomialExtensionField<Val, 4>;
@@ -65,29 +70,30 @@ pub fn default_engine<H>(byte_hash: H) -> BabyBearByteHashEngine<H>
 where
     H: CryptographicHasher<u8, [u8; 32]> + Clone,
 {
-    let fri_params = FriParameters::standard_fast();
-    engine_from_byte_hash(byte_hash, fri_params)
+    engine_from_byte_hash(byte_hash, SecurityParameters::standard_fast())
 }
 
 pub fn engine_from_byte_hash<H>(
     byte_hash: H,
-    fri_params: FriParameters,
+    security_params: SecurityParameters,
 ) -> BabyBearByteHashEngine<H>
 where
     H: CryptographicHasher<u8, [u8; 32]> + Clone,
 {
-    let config = config_from_byte_hash(byte_hash.clone(), fri_params);
+    let fri_params = security_params.fri_params;
+    let max_constraint_degree = fri_params.max_constraint_degree();
+    let config = config_from_byte_hash(byte_hash.clone(), security_params);
     BabyBearByteHashEngine {
         config,
         byte_hash,
         fri_params,
-        max_constraint_degree: fri_params.max_constraint_degree(),
+        max_constraint_degree,
     }
 }
 
 pub fn config_from_byte_hash<H>(
     byte_hash: H,
-    fri_params: FriParameters,
+    security_params: SecurityParameters,
 ) -> BabyBearByteHashConfig<H>
 where
     H: CryptographicHasher<u8, [u8; 32]> + Clone,
@@ -97,6 +103,10 @@ where
     let val_mmcs = ValMmcs::new(field_hash, compress);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft::default();
+    let SecurityParameters {
+        fri_params,
+        log_up_params,
+    } = security_params;
     let fri_config = FriConfig {
         log_blowup: fri_params.log_blowup,
         log_final_poly_len: fri_params.log_final_poly_len,
@@ -105,7 +115,7 @@ where
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
-    let rap_phase = FriLogUpPhase::new();
+    let rap_phase = FriLogUpPhase::new(log_up_params);
     BabyBearByteHashConfig::new(pcs, rap_phase)
 }
 
@@ -122,7 +132,11 @@ where
     BabyBearByteHashEngine<H>: BabyBearByteHashEngineWithDefaultHash<H>,
 {
     fn new(fri_params: FriParameters) -> Self {
-        engine_from_byte_hash(Self::default_hash(), fri_params)
+        let security_params = SecurityParameters {
+            fri_params,
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
+        };
+        engine_from_byte_hash(Self::default_hash(), security_params)
     }
     fn fri_params(&self) -> FriParameters {
         self.fri_params

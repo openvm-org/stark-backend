@@ -9,7 +9,7 @@ use crate::{
     config::{StarkGenericConfig, Val},
     interaction::{
         debug::{generate_logical_interactions, LogicalInteractions},
-        InteractionType, RapPhaseSeqKind, SymbolicInteraction,
+        RapPhaseSeqKind, SymbolicInteraction,
     },
     rap::{PartitionedBaseAir, Rap},
 };
@@ -115,27 +115,17 @@ pub fn check_logup<F: Field>(
     // For each bus, check each `fields` key by summing up multiplicities.
     for (bus_idx, bus_interactions) in logical_interactions.at_bus.into_iter() {
         for (fields, connections) in bus_interactions.into_iter() {
-            let mut sum = F::ZERO;
-            for (_, itype, count) in &connections {
-                match *itype {
-                    InteractionType::Send => {
-                        sum += *count;
-                    }
-                    InteractionType::Receive => {
-                        sum -= *count;
-                    }
-                }
-            }
+            let sum: F = connections.iter().map(|(_, count)| *count).sum();
             if !sum.is_zero() {
                 logup_failed = true;
                 println!(
                     "Bus {} failed to balance the multiplicities for fields={:?}. The bus connections for this were:",
                     bus_idx, fields
                 );
-                for (air_idx, itype, count) in connections {
+                for (air_idx, count) in connections {
                     println!(
-                        "   Air idx: {}, Air name: {}, interaction type: {:?}, count: {:?}",
-                        air_idx, air_names[air_idx], itype, count
+                        "   Air idx: {}, Air name: {}, count: {:?}",
+                        air_idx, air_names[air_idx], count
                     );
                 }
             }

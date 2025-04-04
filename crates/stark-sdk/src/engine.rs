@@ -24,7 +24,7 @@ pub struct VerificationDataWithFriParams<SC: StarkGenericConfig> {
 
 /// Stark engine using Fri.
 pub trait StarkFriEngine<SC: StarkGenericConfig>: StarkEngine<SC> + Sized {
-    fn new(fri_parameters: FriParameters) -> Self;
+    fn new(fri_params: FriParameters) -> Self;
     fn fri_params(&self) -> FriParameters;
     fn run_test(
         &self,

@@ -11,7 +11,8 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{engine_from_perm, random_perm},
-        fri_params::standard_fri_params_with_100_bits_conjectured_security,
+        fri_params::{standard_fri_params_with_100_bits_conjectured_security, SecurityParameters},
+        log_up_params::log_up_security_params_baby_bear_100_bits,
         FriParameters,
     },
     dummy_airs::interaction::dummy_interaction_air::{
@@ -128,13 +129,14 @@ pub struct ProverStatistics {
 }
 
 fn compare_provers(
-    fri_params: FriParameters,
+    security_params: SecurityParameters,
     field_width: usize,
     log_degree: usize,
 ) -> ProverStatistics {
     let rng = StdRng::seed_from_u64(0);
     let trace = generate_random_trace(rng, field_width, 1 << log_degree);
-    let engine = engine_from_perm(random_perm(), fri_params);
+    let fri_params = security_params.fri_params;
+    let engine = engine_from_perm(random_perm(), security_params);
     let (_, _, _, without_ct) = prove(&engine, trace.clone(), false);
 
     let (_, _, _, with_ct) = prove(&engine, trace, true);
@@ -185,8 +187,12 @@ fn bench_cached_trace_prover() -> eyre::Result<()> {
 
     let mut all_stats = vec![];
     for fri_param in fri_params {
+        let security_param = SecurityParameters {
+            fri_params: fri_param,
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
+        };
         for (field_width, log_degree) in &data_sizes {
-            let stats = compare_provers(fri_param, *field_width, *log_degree);
+            let stats = compare_provers(security_param.clone(), *field_width, *log_degree);
             wtr.serialize(&stats)?;
             wtr.flush()?;
             all_stats.push(stats);

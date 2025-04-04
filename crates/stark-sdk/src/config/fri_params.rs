@@ -1,4 +1,7 @@
+use openvm_stark_backend::interaction::LogUpSecurityParameters;
 use serde::{Deserialize, Serialize};
+
+use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FriParameters {
@@ -19,16 +22,33 @@ impl FriParameters {
         challenge_field_bits.min(fri_query_security_bits)
     }
 
-    pub fn standard_fast() -> FriParameters {
+    pub fn standard_fast() -> Self {
         standard_fri_params_with_100_bits_conjectured_security(1)
     }
 
-    pub fn standard_with_100_bits_conjectured_security(log_blowup: usize) -> FriParameters {
+    pub fn standard_with_100_bits_conjectured_security(log_blowup: usize) -> Self {
         standard_fri_params_with_100_bits_conjectured_security(log_blowup)
     }
 
     pub fn max_constraint_degree(&self) -> usize {
         (1 << self.log_blowup) + 1
+    }
+
+    /// New FRI parameters for testing usage with the specific `log_blowup`.
+    /// If the environment variable `OPENVM_FAST_TEST` is set to "1", then the parameters are **not secure** and meant for fast testing only.
+    ///
+    /// In production, use `Self::standard_with_100_bits_conjectured_security` instead.
+    pub fn new_for_testing(log_blowup: usize) -> Self {
+        if let Ok("1") = std::env::var("OPENVM_FAST_TEST").as_deref() {
+            Self {
+                log_blowup,
+                log_final_poly_len: 0,
+                num_queries: 2,
+                proof_of_work_bits: 0,
+            }
+        } else {
+            Self::standard_with_100_bits_conjectured_security(log_blowup)
+        }
     }
 }
 
@@ -37,14 +57,6 @@ impl FriParameters {
 ///
 /// Assumes that the challenge field used as more than 100 bits.
 pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize) -> FriParameters {
-    if let Ok("1") = std::env::var("OPENVM_FAST_TEST").as_deref() {
-        return FriParameters {
-            log_blowup,
-            log_final_poly_len: 0,
-            num_queries: 2,
-            proof_of_work_bits: 0,
-        };
-    }
     let fri_params = match log_blowup {
         // plonky2 standard fast config uses num_queries=84: https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/starky/src/config.rs#L49
         // plonky3's default is num_queries=100, so we will use that. See https://github.com/Plonky3/Plonky3/issues/380 for related security discussion.
@@ -78,4 +90,25 @@ pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize)
     assert!(fri_params.get_conjectured_security_bits(100) >= 100);
     tracing::info!("FRI parameters | log_blowup: {log_blowup:<2} | num_queries: {:<2} | proof_of_work_bits: {:<2}", fri_params.num_queries, fri_params.proof_of_work_bits);
     fri_params
+}
+
+#[derive(Clone, Debug)]
+pub struct SecurityParameters {
+    pub fri_params: FriParameters,
+    pub log_up_params: LogUpSecurityParameters,
+}
+
+impl SecurityParameters {
+    pub fn standard_fast() -> Self {
+        Self {
+            fri_params: FriParameters::standard_fast(),
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
+        }
+    }
+    pub fn standard_100_bits_with_fri_log_blowup(log_blowup: usize) -> Self {
+        Self {
+            fri_params: FriParameters::standard_with_100_bits_conjectured_security(log_blowup),
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
+        }
+    }
 }

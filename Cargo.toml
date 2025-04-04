@@ -1,7 +1,7 @@
 [workspace.package]
-version = "1.0.0-rc.0"
+version = "1.0.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.83"
 authors = ["OpenVM contributors"]
 homepage = "https://openvm.dev"
 repository = "https://github.com/openvm-org/"
@@ -51,32 +51,35 @@ openvm-stark-backend = { path = "crates/stark-backend", default-features = false
 openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
 
 # Plonky3
-p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
+p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
 p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", features = [
     "nightly-features",
-], rev = "b0591e9" }
-p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-keccak = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-blake3 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-mds = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-monty-31 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-poseidon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
-p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" } # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
+], rev = "1ba4e5c" }
+p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3.git", features = [
+    "nightly-features",
+], rev = "1ba4e5c" }
+p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-keccak = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-blake3 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-mds = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-monty-31 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-poseidon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" } # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
 
 # Bn254 support
-p3-bn254-fr = { git = "https://github.com/Plonky3/Plonky3.git", rev = "b0591e9" }
+p3-bn254-fr = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
 zkhash = { git = "https://github.com/HorizenLabs/poseidon2.git", rev = "bb476b9" }
 ff = { version = "0.13.0", default-features = false }
 
@@ -108,9 +111,10 @@ async-trait = "0.1.83"
 getset = "0.1.3"
 rand = { version = "0.8.5", default-features = false }
 hex = { version = "0.4.3", default-features = false }
+bitcode = "0.6.5"
 
 # default-features = false for no_std
-itertools = { version = "0.13.0", default-features = false }
+itertools = { version = "0.14.0", default-features = false }
 serde = { version = "1.0.201", default-features = false, features = ["derive"] }
 
 # For local development. Add to your `.cargo/config.toml`

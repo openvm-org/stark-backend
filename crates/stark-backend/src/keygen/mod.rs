@@ -1,18 +1,19 @@
-use std::{iter::zip, sync::Arc};
+use std::{collections::HashMap, iter::zip, sync::Arc};
 
 use itertools::Itertools;
 use p3_commit::Pcs;
-use p3_field::FieldExtensionAlgebra;
-use p3_matrix::Matrix;
+use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra};
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use tracing::instrument;
+use types::MultiStarkVerifyingKey0;
 
 use crate::{
     air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
     config::{Com, RapPartialProvingKey, StarkGenericConfig, Val},
     interaction::{RapPhaseSeq, RapPhaseSeqKind},
     keygen::types::{
-        MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey, StarkVerifyingKey,
-        TraceWidth, VerifierSinglePreprocessedData,
+        LinearConstraint, MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey,
+        StarkVerifyingKey, TraceWidth, VerifierSinglePreprocessedData,
     },
     rap::AnyRap,
 };
@@ -143,9 +144,85 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             }
         }
 
+        let num_airs = symbolic_constraints_per_air.len();
+        let base_order = Val::<SC>::order().to_u32_digits()[0];
+        let mut count_weight_per_air_per_bus_index = HashMap::new();
+
+        // We compute the a_i's for the constraints of the form a_0 n_0 + ... + a_{k-1} n_{k-1} < a_k,
+        // First the constraints that the total number of interactions on each bus is at most the base field order.
+        for (i, constraints_per_air) in symbolic_constraints_per_air.iter().enumerate() {
+            for interaction in &constraints_per_air.interactions {
+                // Also make sure that this of interaction is valid given the security params.
+                // +1 because of the bus
+                let max_msg_len = self
+                    .config
+                    .rap_phase_seq()
+                    .log_up_security_params()
+                    .max_message_length();
+                // plus one because of the bus
+                let total_message_length = interaction.message.len() + 1;
+                assert!(
+                    total_message_length <= max_msg_len,
+                    "interaction message with bus has length {}, which is more than max {max_msg_len}",
+                    total_message_length,
+                );
+
+                let b = interaction.bus_index;
+                let constraint = count_weight_per_air_per_bus_index
+                    .entry(b)
+                    .or_insert_with(|| LinearConstraint {
+                        coefficients: vec![0; num_airs],
+                        threshold: base_order,
+                    });
+                constraint.coefficients[i] += interaction.count_weight;
+            }
+        }
+
+        // Sorting by bus index is not necessary, but makes debugging/testing easier.
+        let mut trace_height_constraints = count_weight_per_air_per_bus_index
+            .into_iter()
+            .sorted_by_key(|(bus_index, _)| *bus_index)
+            .map(|(_, constraint)| constraint)
+            .collect_vec();
+
+        let log_up_security_params = self.config.rap_phase_seq().log_up_security_params();
+
+        // Add a constraint for the total number of interactions.
+        trace_height_constraints.push(LinearConstraint {
+            coefficients: symbolic_constraints_per_air
+                .iter()
+                .map(|c| c.interactions.len() as u32)
+                .collect(),
+            threshold: log_up_security_params.max_interaction_count,
+        });
+
+        let pre_vk: MultiStarkVerifyingKey0<SC> = MultiStarkVerifyingKey0 {
+            per_air: pk_per_air.iter().map(|pk| pk.vk.clone()).collect(),
+            trace_height_constraints: trace_height_constraints.clone(),
+            log_up_pow_bits: log_up_security_params.log_up_pow_bits,
+        };
+        // To protect against weak Fiat-Shamir, we hash the "pre"-verifying key and include it in the
+        // final verifying key. This just needs to commit to the verifying key and does not need to be
+        // verified by the verifier, so we just use bincode to serialize it.
+        let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
+        tracing::info!("pre-vkey: {} bytes", vk_bytes.len());
+        // Purely to get type compatibility and convenience, we hash using pcs.commit as a single row
+        let vk_as_row = RowMajorMatrix::new_row(
+            vk_bytes
+                .into_iter()
+                .map(Val::<SC>::from_canonical_u8)
+                .collect(),
+        );
+        let pcs = self.config.pcs();
+        let deg_1_domain = pcs.natural_domain_for_degree(1);
+        let (vk_pre_hash, _) = pcs.commit(vec![(deg_1_domain, vk_as_row)]);
+
         MultiStarkProvingKey {
             per_air: pk_per_air,
+            trace_height_constraints,
             max_constraint_degree: self.max_constraint_degree,
+            log_up_pow_bits: log_up_security_params.log_up_pow_bits,
+            vk_pre_hash,
         }
     }
 }

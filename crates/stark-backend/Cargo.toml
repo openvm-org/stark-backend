@@ -28,8 +28,8 @@ derive-new.workspace = true
 metrics = { workspace = true, optional = true }
 cfg-if.workspace = true
 thiserror.workspace = true
-async-trait.workspace = true
 rustc-hash.workspace = true
+bitcode = { workspace = true, features = ["serde"] }
 
 rand = "0.8.5"
 num-bigint = { version = "0.4.6", default-features = false }
