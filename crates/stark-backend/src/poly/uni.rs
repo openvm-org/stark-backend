@@ -3,7 +3,7 @@ use std::{
     iter::Sum,
     ops::{Add, Deref, Mul, Neg, Sub},
 };
-
+use std::ops::MulAssign;
 use p3_field::Field;
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ impl<F: Field> UnivariatePolynomial<F> {
     /// Creates a new univariate polynomial from a vector of coefficients.
     pub fn from_coeffs(coeffs: Vec<F>) -> Self {
         let mut polynomial = Self { coeffs };
-        polynomial.trim_leading_zeroes();
+        polynomial.remove_trailing_zeroes();
         polynomial
     }
 
@@ -32,6 +32,14 @@ impl<F: Field> UnivariatePolynomial<F> {
 
     fn is_zero(&self) -> bool {
         self.coeffs.iter().all(F::is_zero)
+    }
+
+    pub fn evaluate_at_zero(&self) -> F {
+        self.coeffs.get(0).copied().unwrap_or(F::ZERO)
+    }
+
+    pub fn evaluate_at_one(&self) -> F {
+        self.coeffs.iter().copied().sum()
     }
 
     pub fn evaluate(&self, x: F) -> F {
@@ -67,7 +75,7 @@ impl<F: Field> UnivariatePolynomial<F> {
             coeffs = coeffs + selector * yi;
         }
 
-        coeffs.trim_leading_zeroes();
+        coeffs.remove_trailing_zeroes();
         coeffs
     }
 
@@ -77,7 +85,7 @@ impl<F: Field> UnivariatePolynomial<F> {
         }
     }
 
-    fn trim_leading_zeroes(&mut self) {
+    fn remove_trailing_zeroes(&mut self) {
         if let Some(non_zero_idx) = self.coeffs.iter().rposition(|&coeff| !coeff.is_zero()) {
             self.coeffs.truncate(non_zero_idx + 1);
         } else {
@@ -87,6 +95,16 @@ impl<F: Field> UnivariatePolynomial<F> {
 
     pub fn into_coeffs(self) -> Vec<F> {
         self.coeffs
+    }
+
+    pub fn add_scaled(&mut self, other: &Self, scale: F) {
+        if self.coeffs.len() < other.coeffs.len() {
+            self.coeffs.resize(other.coeffs.len(), F::ZERO);
+        }
+
+        for (a, b) in self.coeffs.iter_mut().zip(&other.coeffs) {
+            *a += *b * scale;
+        }
     }
 }
 
@@ -121,8 +139,8 @@ impl<F: Field> Mul for UnivariatePolynomial<F> {
             return Self::zero();
         }
 
-        self.trim_leading_zeroes();
-        rhs.trim_leading_zeroes();
+        self.remove_trailing_zeroes();
+        rhs.remove_trailing_zeroes();
 
         let mut res = vec![F::ZERO; self.coeffs.len() + rhs.coeffs.len() - 1];
 

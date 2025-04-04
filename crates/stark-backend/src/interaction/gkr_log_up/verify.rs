@@ -12,7 +12,7 @@ use crate::{
         },
         BusIndex,
     },
-    poly::multi::hypercube_eq_partial,
+    poly::multi::hypercube_eq_over_y,
 };
 
 impl<F, EF, Challenger> GkrLogUpPhase<F, EF, Challenger>
@@ -38,7 +38,7 @@ where
         gamma: EF,
     ) -> Result<(), GkrLogUpError<EF>> {
         // TDOO: Can cache this per height.
-        let eqs_at_z = hypercube_eq_partial(z);
+        let eqs_at_z = hypercube_eq_over_y(z);
 
         let mut expected_numerator = EF::ZERO;
         let mut expected_denominator = EF::ZERO;

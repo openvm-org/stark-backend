@@ -8,6 +8,7 @@
 
 use std::iter::zip;
 
+use p3_maybe_rayon::prelude::*;
 use itertools::Itertools;
 use p3_challenger::FieldChallenger;
 use p3_field::{ExtensionField, Field};
@@ -58,8 +59,10 @@ where
     let n_variables = polys.iter().map(O::arity).max().unwrap();
     assert_eq!(claims.len(), polys.len());
 
-    let mut round_polys = vec![];
-    let mut evaluation_point = vec![];
+    let lambda_pows = lambda.powers().take(polys.len()).collect_vec();;
+
+    let mut round_polys = Vec::with_capacity(n_variables);
+    let mut evaluation_point = Vec::with_capacity(n_variables);
 
     // Update the claims for the sum over `h`'s hypercube.
     for (claim, multivariate_poly) in zip(&mut claims, &polys) {
@@ -71,7 +74,7 @@ where
     for round in 0..n_variables {
         let n_remaining_rounds = n_variables - round;
 
-        let this_round_polys = zip(&polys, &claims)
+        let this_round_polys: Vec<_> = polys.par_iter().zip(claims.par_iter())
             .enumerate()
             .map(|(i, (multivariate_poly, &claim))| {
                 let round_poly = if n_remaining_rounds == multivariate_poly.arity() {
@@ -80,8 +83,8 @@ where
                     claim.halve().into()
                 };
 
-                let eval_at_0 = round_poly.evaluate(EF::ZERO);
-                let eval_at_1 = round_poly.evaluate(EF::ONE);
+                let eval_at_0 = round_poly.evaluate_at_zero();
+                let eval_at_1 = round_poly.evaluate_at_one();
 
                 assert_eq!(
                     eval_at_0 + eval_at_1,
@@ -97,9 +100,12 @@ where
 
                 round_poly
             })
-            .collect_vec();
+            .collect();
 
-        let round_poly = random_linear_combination(&this_round_polys, lambda);
+        let mut round_poly = UnivariatePolynomial::zero();
+        for (poly, lambda_pow) in this_round_polys.iter().zip(&lambda_pows) {
+            round_poly.add_scaled(poly, *lambda_pow);
+        }
 
         for coef in round_poly.as_ref() {
             challenger.observe_ext_element(*coef);
@@ -108,12 +114,11 @@ where
         let challenge = challenger.sample_ext_element();
 
         claims = this_round_polys
-            .iter()
+            .par_iter()
             .map(|round_poly| round_poly.evaluate(challenge))
             .collect();
 
-        polys = polys
-            .into_iter()
+        polys = polys.into_par_iter()
             .map(|multivariate_poly| {
                 if n_remaining_rounds != multivariate_poly.arity() {
                     multivariate_poly
@@ -172,7 +177,7 @@ pub fn partially_verify<F: Field, EF: ExtensionField<F>>(
 
         // TODO: optimize this by sending one less coefficient, and computing it from the
         // claim, instead of checking the claim. (Can also be done by quotienting).
-        let sum = round_poly.evaluate(EF::ZERO) + round_poly.evaluate(EF::ONE);
+        let sum = round_poly.evaluate_at_zero() + round_poly.evaluate_at_one();
 
         if claim != sum {
             return Err(SumcheckError::SumInvalid { claim, sum, round });

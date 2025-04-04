@@ -537,7 +537,7 @@ mod tests {
             fold_multilinear_lagrange_col_constraints,
         },
         p3_field::extension::BinomialExtensionField,
-        poly::multi::hypercube_eq_partial,
+        poly::multi::hypercube_eq_over_y,
     };
 
     #[test]
@@ -574,7 +574,7 @@ mod tests {
 
         let r: [EF; 5] = rng.gen();
         let n = 1 << r.len();
-        let cr = hypercube_eq_partial(&r);
+        let cr = hypercube_eq_over_y(&r);
 
         for i in 0..n {
             let perm_window = vec![

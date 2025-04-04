@@ -21,7 +21,7 @@ use crate::{
         trace::Evaluator,
         PairTraceView, SymbolicInteraction,
     },
-    poly::multi::{hypercube_eq_partial, Mle},
+    poly::multi::{hypercube_eq_over_y, Mle},
 };
 
 /// A struct that holds the interaction-related data for a single GKR instance:
@@ -169,6 +169,9 @@ where
     ) -> GkrAuxData<EF> {
         let ood_point = &gkr_artifact.ood_point;
 
+        let max_interactions = constraints_per_air.iter().map(|c| c.interactions.len()).max().unwrap();
+        let gamma_pows = gamma.powers().take(2 * max_interactions).collect_vec();
+
         let mut after_challenge_trace_per_air = Vec::with_capacity(constraints_per_air.len());
         let mut exposed_values_per_air = Vec::with_capacity(constraints_per_air.len());
         let mut count_mle_claims_per_instance = Vec::with_capacity(constraints_per_air.len());
@@ -195,7 +198,7 @@ where
             debug_assert_eq!(r.len(), log_height);
 
             let (after_challenge_trace, exposed_values, count_mle_claims, sigma_mle_claims) =
-                Self::generate_aux(gkr_instance, gamma, r);
+                Self::generate_aux(gkr_instance, &gamma_pows, r);
 
             // Send MLE claims to channel.
             for (count_mle_claim, sigma_mle_claim) in izip!(&count_mle_claims, &sigma_mle_claims) {
@@ -221,7 +224,7 @@ where
 
     fn generate_aux(
         gkr_instance: &GkrLogUpInstance<EF>,
-        gamma: EF,
+        gamma_pows: &[EF],
         r: &[EF],
     ) -> (DenseMatrix<EF>, Vec<EF>, Vec<EF>, Vec<EF>) {
         // For each column (corresponding to a single interaction), we compute the MLE.
@@ -238,26 +241,27 @@ where
             .map(|row| Mle::eval_slice(row, r))
             .collect();
 
-        let eqs_at_r = hypercube_eq_partial(r);
+        let s_at_rows: Vec<EF> = gkr_instance
+            .counts
+            .par_row_slices()
+            .zip(gkr_instance.sigmas.par_row_slices())
+            .map(|(count_row, sigma_row)| {
+                itertools::interleave(count_row, sigma_row)
+                    .zip(gamma_pows)
+                    .fold(EF::ZERO, |acc, (&val, &gamma_pow)| acc + gamma_pow * val)
+            })
+            .collect();
+
+        let eqs_at_r = hypercube_eq_over_y(r);
+
         let mut partial_sum = EF::ZERO;
-
-        let gamma_pows = gamma.powers().take(2 * eqs_at_r.len()).collect_vec();
-
-        let mut after_challenge_trace_data = vec![];
-        for (count_row, sigma_row, eq_at_r) in izip!(
-            gkr_instance.counts.row_slices(),
-            gkr_instance.sigmas.row_slices(),
-            eqs_at_r
-        ) {
-            let s_at_row = itertools::interleave(count_row, sigma_row)
-                .zip(&gamma_pows)
-                .fold(EF::ZERO, |acc, (&val, &gamma_pow)| acc + gamma_pow * val);
-
-            after_challenge_trace_data.push(eq_at_r);
-            after_challenge_trace_data.push(s_at_row);
+        let mut after_challenge_trace_data = Vec::with_capacity(eqs_at_r.len() * 3);
+        for (eq_at_r, s_at_row) in eqs_at_r.iter().zip(s_at_rows.iter()) {
+            after_challenge_trace_data.push(*eq_at_r);
+            after_challenge_trace_data.push(*s_at_row);
             after_challenge_trace_data.push(partial_sum);
 
-            partial_sum += eq_at_r * s_at_row;
+            partial_sum += *eq_at_r * *s_at_row;
         }
         let after_challenge_trace = RowMajorMatrix::new(after_challenge_trace_data, 3);
         (

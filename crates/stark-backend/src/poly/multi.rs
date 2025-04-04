@@ -4,12 +4,14 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use p3_maybe_rayon::prelude::*;
+
 use p3_field::{ExtensionField, Field};
 
 use super::uni::UnivariatePolynomial;
 
 /// Represents a multivariate polynomial `g(x_1, ..., x_n)`.
-pub trait MultivariatePolyOracle<F> {
+pub trait MultivariatePolyOracle<F>: Send + Sync {
     /// For an n-variate polynomial, returns n.
     fn arity(&self) -> usize;
 
@@ -44,7 +46,7 @@ impl<F: Field> Mle<F> {
         Self::eval_slice(&self.evals, point)
     }
 
-    /// Evaluates the multilinear extension at `point` from a slice of hypercube evaluations.
+    /// Evaluates the multilinear extension given by hypercube evaluations `evals` at `point`.
     ///
     /// # Panics
     ///
@@ -74,22 +76,27 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
     }
 
     fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F> {
-        let x0 = F::ZERO;
-        let x1 = F::ONE;
+        let half = self.len() / 2;
 
-        let y0 = self[0..self.len() / 2]
-            .iter()
-            .fold(F::ZERO, |acc, x| acc + *x);
+        // Efficient sum of first half
+        let mut y0 = F::ZERO;
+        for i in 0..half {
+            y0 += self[i];
+        }
+
         let y1 = claim - y0;
 
-        UnivariatePolynomial::from_points(&[(x0, y0), (x1, y1)])
+        // Direct degree-1 polynomial: f(x) = y0 + (y1 - y0) * x
+        let slope = y1 - y0;
+
+        UnivariatePolynomial::from_coeffs(vec![y0, slope])
     }
 
     fn partial_evaluation(self, alpha: F) -> Self {
         let midpoint = self.len() / 2;
         let (lhs_evals, rhs_evals) = self.split_at(midpoint);
 
-        let res = zip(lhs_evals, rhs_evals)
+        let res = lhs_evals.par_iter().zip(rhs_evals.par_iter())
             .map(|(&lhs_eval, &rhs_eval)| alpha * (rhs_eval - lhs_eval) + lhs_eval)
             .collect();
 
@@ -137,10 +144,10 @@ where
     assignment * (eval1 - eval0) + eval0
 }
 
-/// Computes eq_n(r, x) for fixed r and each x in {0, 1}^n, where
-///          eq_n(r, x) = prod_i (r_i x_i + (1 - r_i)(1 - x_i)).
-pub fn hypercube_eq_partial<F: Field>(r: &[F]) -> Vec<F> {
-    let n = r.len();
+/// Computes eq_n(x, y) for fixed x and each y in {0, 1}^n, where
+///          eq_n(x, y) = prod_i (x_i y_i + (1 - x_i)(1 - y_i)).
+pub fn hypercube_eq_over_y<F: Field>(y: &[F]) -> Vec<F> {
+    let n = y.len();
     let size = 1 << n;
 
     let mut result = vec![F::ZERO; size];
@@ -148,16 +155,15 @@ pub fn hypercube_eq_partial<F: Field>(r: &[F]) -> Vec<F> {
 
     let mut cur_size = 1;
 
-    for &r_i in r {
-        let one_minus_r = F::ONE - r_i;
+    for &yi in y {
+        let one_minus_yi = F::ONE - yi;
 
         // Fill in reverse to avoid overwriting values we still need
         for i in (0..cur_size).rev() {
             let val = result[i];
-            result[2 * i] = val * one_minus_r; // x_i = 0
-            result[2 * i + 1] = val * r_i; // x_i = 1
+            result[2 * i] = val * one_minus_yi; // x_i = 0
+            result[2 * i + 1] = val * yi; // x_i = 1
         }
-
         cur_size *= 2;
     }
     result
@@ -299,7 +305,7 @@ mod test {
     fn test_eqs_at_hypercube() {
         // Try on a hypercube point.
         let r = vec![BabyBear::ZERO, BabyBear::ONE, BabyBear::ONE, BabyBear::ZERO];
-        let eqs = hypercube_eq_partial(&r);
+        let eqs = hypercube_eq_over_y(&r);
 
         let mut expected = vec![BabyBear::ZERO; 16];
         expected[6] = BabyBear::ONE;
@@ -312,7 +318,7 @@ mod test {
 
         let [a, b, c] = rng.gen::<[BabyBear; 3]>();
 
-        let eqs = hypercube_eq_partial(&[a, b, c]);
+        let eqs = hypercube_eq_over_y(&[a, b, c]);
 
         let expected = vec![
             (BabyBear::ONE - a) * (BabyBear::ONE - b) * (BabyBear::ONE - c),
@@ -336,7 +342,7 @@ mod test {
 
         let r: [BabyBear; 10] = rng.gen();
 
-        let eqs_at_r = hypercube_eq_partial(&r);
+        let eqs_at_r = hypercube_eq_over_y(&r);
         let inner_prod: BabyBear = eqs_at_r
             .iter()
             .zip(vals.iter())

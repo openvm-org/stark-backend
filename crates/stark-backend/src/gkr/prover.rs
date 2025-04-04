@@ -27,12 +27,12 @@ use crate::{
 /// Evaluations are stored in lexicographic order i.e. `evals[0] = eq((0, ..., 0, 0), y)`,
 /// `evals[1] = eq((0, ..., 0, 1), y)`, etc.
 #[derive(Debug, Clone)]
-struct HypercubeEqEvals<F> {
+struct FixedFirstHypercubeEqEvals<F> {
     y: Vec<F>,
     evals: Vec<F>,
 }
 
-impl<F: Field> HypercubeEqEvals<F> {
+impl<F: Field> FixedFirstHypercubeEqEvals<F> {
     pub fn eval(y: &[F]) -> Self {
         let y = y.to_vec();
 
@@ -66,7 +66,7 @@ impl<F: Field> HypercubeEqEvals<F> {
     }
 }
 
-impl<F> Deref for HypercubeEqEvals<F> {
+impl<F> Deref for FixedFirstHypercubeEqEvals<F> {
     type Target = [F];
 
     fn deref(&self) -> &Self::Target {
@@ -93,7 +93,7 @@ impl<F> Deref for HypercubeEqEvals<F> {
 /// P(x) = eq(x, y) * (numer(x) + lambda * denom(x))
 /// ```
 struct GkrMultivariatePolyOracle<'a, F: Clone> {
-    pub eq_evals: &'a HypercubeEqEvals<F>,
+    pub eq_evals: &'a FixedFirstHypercubeEqEvals<F>,
     pub input_layer: Layer<F>,
     pub eq_fixed_var_correction: F,
     /// Used by LogUp to perform a random linear combination of the numerators and denominators.
@@ -134,7 +134,7 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
     }
 
     fn partial_evaluation(self, alpha: F) -> Self {
-        if self.is_constant() {
+        if self.has_zero_arity() {
             return self;
         }
 
@@ -154,7 +154,7 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
 ///
 /// Output of the form: `(eval_at_0, eval_at_2)`.
 fn eval_grand_product_sum<F: Field>(
-    eq_evals: &HypercubeEqEvals<F>,
+    eq_evals: &FixedFirstHypercubeEqEvals<F>,
     input_layer: &Mle<F>,
     n_terms: usize,
 ) -> (F, F) {
@@ -192,7 +192,7 @@ fn eval_grand_product_sum<F: Field>(
 ///
 /// Output of the form: `(eval_at_0, eval_at_2)`.
 fn eval_logup_sum<F: Field + Send + Sync>(
-    eq_evals: &HypercubeEqEvals<F>,
+    eq_evals: &FixedFirstHypercubeEqEvals<F>,
     input_numerators: &Mle<F>,
     input_denominators: &Mle<F>,
     n_terms: usize,
@@ -244,7 +244,7 @@ fn eval_logup_sum<F: Field + Send + Sync>(
 ///
 /// Output of the form: `(eval_at_0, eval_at_2)`.
 fn eval_logup_singles_sum<F: Field>(
-    eq_evals: &HypercubeEqEvals<F>,
+    eq_evals: &FixedFirstHypercubeEqEvals<F>,
     input_denominators: &Mle<F>,
     n_terms: usize,
     lambda: F,
@@ -281,7 +281,7 @@ fn eval_logup_singles_sum<F: Field>(
 }
 
 impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
-    fn is_constant(&self) -> bool {
+    fn has_zero_arity(&self) -> bool {
         self.arity() == 0
     }
 
@@ -295,9 +295,9 @@ impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
     /// Otherwise, an [`Err`] is returned.
     ///
     /// For more context see <https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf> page 64.
-    fn try_into_mask(self) -> Result<GkrMask<F>, NotConstantPolyError> {
-        if !self.is_constant() {
-            return Err(NotConstantPolyError);
+    fn try_into_mask(self) -> Result<GkrMask<F>, NotZeroArityPolyError> {
+        if !self.has_zero_arity() {
+            return Err(NotZeroArityPolyError);
         }
 
         let columns = match self.input_layer {
@@ -323,10 +323,10 @@ impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
     }
 }
 
-/// Error returned when a polynomial is expected to be constant but it is not.
+/// Error returned when a polynomial is expected to have zero arity but does not.
 #[derive(Debug, Error)]
-#[error("polynomial is not constant")]
-pub struct NotConstantPolyError;
+#[error("polynomial does not have zero arity")]
+pub struct NotZeroArityPolyError;
 
 /// Batch proves lookup circuits with GKR.
 ///
@@ -376,7 +376,7 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
             }
         }
 
-        let eq_evals = HypercubeEqEvals::eval(&ood_point);
+        let eq_evals = FixedFirstHypercubeEqEvals::eval(&ood_point);
         let sumcheck_alpha: EF = challenger.sample_ext_element();
         let instance_lambda: EF = challenger.sample_ext_element();
 
@@ -443,13 +443,13 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
 
     let output_claims_by_instance = output_claims_by_instance
         .into_iter()
-        .map(Option::unwrap)
-        .collect();
+        .collect::<Option<_>>()
+        .expect("all output claims should be populated");
 
     let claims_to_verify_by_instance = claims_to_verify_by_instance
         .into_iter()
-        .map(Option::unwrap)
-        .collect();
+        .collect::<Option<_>>()
+        .expect("all output claims should be populated");
 
     let proof = GkrBatchProof {
         sumcheck_proofs,
@@ -494,7 +494,11 @@ pub fn correct_sum_as_poly_in_first_variable<F: Field>(
 
     // We evaluated `f(0)` and `f(2)` - the inputs.
     // We want to compute `r(t) = f(t) * eq(t, y[n - k]) / eq(0, y[:n - k + 1])`.
-    let a_const = hypercube_eq(&vec![F::ZERO; n - k + 1], &y[..n - k + 1]).inverse();
+    let a_const = y[..n - k + 1]
+        .iter()
+        .map(|yi| F::ONE - *yi)
+        .product::<F>()
+        .inverse();
 
     // Find the additional root of `r(t)`, by finding the root of `eq(t, y[n - k])`:
     //    0 = eq(t, y[n - k])
@@ -505,9 +509,9 @@ pub fn correct_sum_as_poly_in_first_variable<F: Field>(
     let b_const = (F::ONE - y[n - k]) / (F::ONE - y[n - k].double());
 
     // We get that `r(t) = f(t) * eq(t, y[n - k]) * a`.
-    let r_at_0 = f_at_0 * hypercube_eq(&[F::ZERO], &[y[n - k]]) * a_const;
+    let r_at_0 = f_at_0 * (F::ONE - y[n - k]) * a_const;
     let r_at_1 = claim - r_at_0;
-    let r_at_2 = f_at_2 * hypercube_eq(&[F::TWO], &[y[n - k]]) * a_const;
+    let r_at_2 = f_at_2 * (F::from_canonical_u8(3) * y[n - k] - F::ONE) * a_const;
 
     // Interpolate.
     UnivariatePolynomial::from_points(&[
@@ -524,7 +528,7 @@ mod tests {
     use p3_field::FieldAlgebra;
     use rand::Rng;
 
-    use crate::{gkr::prover::HypercubeEqEvals, poly::multi::hypercube_eq};
+    use crate::{gkr::prover::FixedFirstHypercubeEqEvals, poly::multi::hypercube_eq};
 
     #[test]
     fn test_gen_eq_evals() {
@@ -535,7 +539,7 @@ mod tests {
         let v: F = rng.gen();
         let y: Vec<F> = vec![rng.gen(), rng.gen(), rng.gen()];
 
-        let eq_evals = HypercubeEqEvals::gen(&y, v);
+        let eq_evals = FixedFirstHypercubeEqEvals::gen(&y, v);
 
         assert_eq!(
             *eq_evals,
