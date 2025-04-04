@@ -179,8 +179,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             // mvk_view.num_challenges_in_phase are the number of challenge variables used in the AIR constraints.
             // there may be additional randomness used to generate the trace data that is constrained externally.
             assert!(
-                mvk_view.num_challenges_in_phase(0) <=
-                phase_data.challenges_per_phase[0].len()
+                mvk_view.num_challenges_in_phase(0) <= phase_data.challenges_per_phase[0].len()
             );
             let perm_views = zip_eq(
                 &phase_data.after_challenge_trace_per_air,
@@ -375,8 +374,17 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
         let pcs = self.pcs();
         let domain = |log_height| pcs.natural_domain_for_degree(1usize << log_height);
 
-        let after_phase_domains = after_phase.iter().next().map(|v| v.log_trace_heights.iter().copied().map(domain).collect_vec());
-        let extra_after_challenge_points = self.config.rap_phase_seq().extra_opening_points(zeta, &after_phase_domains.unwrap_or(vec![]));
+        let after_phase_domains = after_phase.iter().next().map(|v| {
+            v.log_trace_heights
+                .iter()
+                .copied()
+                .map(domain)
+                .collect_vec()
+        });
+        let extra_after_challenge_points = self
+            .config
+            .rap_phase_seq()
+            .extra_opening_points(zeta, &after_phase_domains.unwrap_or(vec![]));
 
         let opener = OpeningProver::<SC>::new(pcs, zeta, extra_after_challenge_points);
         let preprocessed = preprocessed

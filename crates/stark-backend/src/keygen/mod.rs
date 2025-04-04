@@ -10,7 +10,7 @@ use types::MultiStarkVerifyingKey0;
 use crate::{
     air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
     config::{Com, RapPartialProvingKey, StarkGenericConfig, Val},
-    interaction::{RapPhaseSeq},
+    interaction::RapPhaseSeq,
     keygen::types::{
         LinearConstraint, MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey,
         StarkVerifyingKey, TraceWidth, VerifierSinglePreprocessedData,

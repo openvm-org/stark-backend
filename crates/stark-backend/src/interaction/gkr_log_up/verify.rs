@@ -4,14 +4,14 @@ use itertools::izip;
 use p3_challenger::FieldChallenger;
 use p3_field::{ExtensionField, Field};
 
+use crate::interaction::BusIndex;
 use crate::{
     gkr,
     interaction::gkr_log_up::{
-        num_interaction_dimensions, GkrLogUpError, GkrLogUpPhase, GkrLogUpProof,
+        num_interaction_dimensions, GkrLogUpError, GkrLogUpPartialProof, GkrLogUpPhase,
     },
     poly::multi::hypercube_eq_partial,
 };
-use crate::interaction::BusIndex;
 
 impl<F, EF, Challenger> GkrLogUpPhase<F, EF, Challenger>
 where
@@ -75,7 +75,7 @@ where
         gkr_artifact: &gkr::GkrArtifact<EF>,
         bus_indices_per_instance: &[Vec<BusIndex>],
         exposed_values_per_air_per_phase: &[Vec<Vec<EF>>],
-        partial_proof: &GkrLogUpProof<EF>,
+        partial_proof: &GkrLogUpPartialProof<EF, F>,
         alpha: EF,
         gamma: EF,
     ) -> Result<(), GkrLogUpError<EF>> {

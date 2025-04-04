@@ -8,8 +8,11 @@ use p3_matrix::{
     dense::{DenseMatrix, RowMajorMatrix},
     Matrix,
 };
+use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 
+use crate::air_builders::symbolic::symbolic_expression::SymbolicExpression;
+use crate::interaction::PairTraceView;
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
     gkr::{GkrArtifact, Layer, Layer::LogUpGeneric},
@@ -23,8 +26,6 @@ use crate::{
         uni::random_linear_combination,
     },
 };
-use crate::air_builders::symbolic::symbolic_expression::SymbolicExpression;
-use crate::interaction::PairTraceView;
 
 /// A struct that holds the interaction-related data for a single GKR instance:
 /// - `counts`: A matrix of the count values for each interaction evaluated at each row.
@@ -58,36 +59,46 @@ impl<EF: Field> GkrLogUpInstance<EF> {
         let height = trace_view.partitioned_main[0].height();
         let num_padded_interactions = 1 << num_interaction_dimensions(interactions.len());
 
-        let mut count_data = vec![EF::ZERO; num_padded_interactions * height];
-        let mut sigma_data = vec![EF::ZERO; num_padded_interactions * height];
+        let partitioned_main_view = trace_view
+            .partitioned_main
+            .iter()
+            .map(|mat| mat.as_view())
+            .collect_vec();
+        let preprocessed_view = trace_view.preprocessed.map(|mat| mat.as_view());
 
-        for (i, interaction) in interactions.iter().enumerate() {
-            for (local_index, (count_row, sigma_row)) in izip!(
-                count_data.chunks_exact_mut(num_padded_interactions),
-                sigma_data.chunks_exact_mut(num_padded_interactions)
-            )
-            .enumerate()
-            {
-                let partitioned_main_view = trace_view.partitioned_main.iter().map(|mat| mat.as_view()).collect_vec();
+        let total = height * num_padded_interactions;
+        let (count_data, sigma_data): (Vec<EF>, Vec<EF>) = (0..total)
+            .into_par_iter()
+            .map(|i| {
+                let row = i / num_padded_interactions;
+                let col = i % num_padded_interactions;
+                if col >= interactions.len() {
+                    return (EF::ZERO, EF::ZERO);
+                }
+                let interaction = &interactions[col];
+
                 let evaluator = Evaluator {
-                    preprocessed: trace_view.preprocessed.map(|mat| mat.as_view()),
+                    preprocessed: preprocessed_view,
                     partitioned_main: &partitioned_main_view,
                     public_values: &trace_view.public_values,
                     height,
-                    local_index,
+                    local_index: row,
                 };
 
                 let count = evaluator.eval_expr(&interaction.count);
-                count_row[i] = EF::from_base(count);
+                let count_val = EF::from_base(count);
 
                 let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
-                let sigma = zip(interaction.message.iter().chain(iter::once(&SymbolicExpression::Constant(b))), beta_pows)
-                    .fold(EF::ZERO, |acc, (field, &beta)| {
-                        acc + beta * evaluator.eval_expr(field)
-                    });
-                sigma_row[i] = sigma;
-            }
-        }
+                let sigma = interaction
+                    .message
+                    .iter()
+                    .chain(iter::once(&SymbolicExpression::Constant(b)))
+                    .zip(beta_pows)
+                    .fold(EF::ZERO, |acc, (field, &beta)| acc + beta * evaluator.eval_expr(field));
+
+                (count_val, sigma)
+            })
+            .unzip();
 
         GkrLogUpInstance {
             counts: RowMajorMatrix::new(count_data, num_padded_interactions),
@@ -99,20 +110,20 @@ impl<EF: Field> GkrLogUpInstance<EF> {
         debug_assert_eq!(self.counts.height(), self.sigmas.height());
         debug_assert_eq!(self.counts.width(), self.sigmas.width());
 
-        let mut sum = EF::ZERO;
-        let mut numerators = vec![];
-        let mut denominators = vec![];
-        for col in 0..self.counts.width() {
-            for row in 0..self.counts.height() {
-                let numerator = self.counts.get(row, col);
-                numerators.push(numerator);
+        let width = self.counts.width();
+        let height = self.counts.height();
+        let total = width * height;
 
+        let (numerators, denominators): (Vec<EF>, Vec<EF>) = (0..total)
+            .into_par_iter()
+            .map(|i| {
+                let row = i % height;
+                let col = i / height;
+                let numerator = self.counts.get(row, col);
                 let denominator = alpha + self.sigmas.get(row, col);
-                denominators.push(denominator);
-                sum += numerator / denominator;
-            }
-        }
-        debug_assert_eq!(numerators.len(), denominators.len());
+                (numerator, denominator)
+            })
+            .unzip();
 
         LogUpGeneric {
             numerators: Mle::from_vec(numerators),
@@ -132,7 +143,9 @@ where
         constraints_per_air: &[&SymbolicConstraints<F>],
         beta_pows: &[EF],
     ) -> Vec<GkrLogUpInstance<EF>> {
-        zip_eq(constraints_per_air, trace_view_per_air)
+        constraints_per_air
+            .par_iter()
+            .zip_eq(trace_view_per_air.par_iter())
             .filter_map(|(constraints, trace_view)| {
                 if constraints.interactions.is_empty() {
                     None
@@ -213,21 +226,24 @@ where
         r: &[EF],
     ) -> (DenseMatrix<EF>, Vec<EF>, Vec<EF>, Vec<EF>) {
         // For each column (corresponding to a single interaction), we compute the MLE.
-        let count_mles = gkr_instance
+        let count_mle_claims: Vec<_> = gkr_instance
             .counts
             .transpose()
-            .rows()
-            .map(|row| Mle::from_vec(row.collect()))
-            .collect_vec();
-        let sigma_mles = gkr_instance
+            .par_rows()
+            .map(|row| {
+                let mle = Mle::from_vec(row.collect());
+                mle.eval(r)
+            })
+            .collect();
+        let sigma_mle_claims: Vec<_> = gkr_instance
             .sigmas
             .transpose()
-            .rows()
-            .map(|row| Mle::from_vec(row.collect()))
-            .collect_vec();
-
-        let count_mle_claims = count_mles.iter().map(|mle| mle.eval(r)).collect_vec();
-        let sigma_mle_claims = sigma_mles.iter().map(|mle| mle.eval(r)).collect_vec();
+            .par_rows()
+            .map(|row| {
+                let mle = Mle::from_vec(row.collect());
+                mle.eval(r)
+            })
+            .collect();
 
         let eqs_at_r = hypercube_eq_partial(r);
         let mut partial_sum = EF::ZERO;

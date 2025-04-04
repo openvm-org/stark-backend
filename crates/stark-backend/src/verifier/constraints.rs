@@ -17,11 +17,11 @@ use super::{
 use crate::{
     air_builders::symbolic::SymbolicExpressionDag,
     config::{Domain, StarkGenericConfig, Val},
-    proof::AdjacentOpenedValues,
     interaction::{
         gkr_log_up::{cyclic_selectors_at_point, fold_multilinear_lagrange_col_constraints},
         RapPhaseSeq, RapPhaseSeqKind,
     },
+    proof::AdjacentOpenedValues,
 };
 
 #[allow(clippy::too_many_arguments)]

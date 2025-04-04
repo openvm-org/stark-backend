@@ -1,32 +1,34 @@
 mod prove;
 mod verify;
 
-use std::{borrow::Borrow, cmp::max, fmt::Debug, iter, iter::zip, marker::PhantomData};
+use std::{array, borrow::Borrow, cmp::max, fmt::Debug, iter, iter::zip, marker::PhantomData};
 
 use itertools::{izip, Itertools};
 use p3_air::ExtensionBuilder;
-use p3_challenger::FieldChallenger;
+use p3_challenger::{FieldChallenger, GrindingChallenger};
 use p3_commit::PolynomialSpace;
 use p3_field::{
     cyclic_subgroup_coset_known_order, ExtensionField, Field, FieldAlgebra, TwoAdicField,
 };
 use p3_matrix::{dense::DenseMatrix, Matrix};
+use p3_maybe_rayon::prelude::*;
 use p3_util::{log2_ceil_usize, log2_strict_usize};
+use rayon::iter::IntoParallelRefIterator;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::interaction::fri_log_up::{FriLogUpError, STARK_LU_NUM_CHALLENGES};
+use crate::interaction::{LogUpSecurityParameters, PairTraceView};
 use crate::{
     air_builders::symbolic::SymbolicConstraints,
     gkr,
     gkr::{Gate, GkrBatchProof},
     interaction::{
-        utils::{generate_betas},
-        InteractionBuilder, RapPhaseProverData,
-        RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
+        utils::generate_betas, InteractionBuilder, RapPhaseProverData, RapPhaseSeq,
+        RapPhaseSeqKind, RapPhaseVerifierData,
     },
     rap::PermutationAirBuilderWithExposedValues,
 };
-use crate::interaction::{LogUpSecurityParameters, PairTraceView};
 
 pub struct GkrLogUpPhase<F, EF, Challenger> {
     // FIXME: USE THIS IN POW
@@ -38,13 +40,14 @@ pub struct GkrLogUpPhase<F, EF, Challenger> {
 pub struct GkrLogUpProvingKey;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct GkrLogUpProof<T> {
+pub struct GkrLogUpPartialProof<T, Witness> {
     /// The rational sumcheck proof that can be verified via [gkr::partially_verify].
-    gkr_proof: GkrBatchProof<T>,
+    pub gkr_proof: GkrBatchProof<T>,
     /// The purported evaluations of the count MLEs at `r`, per AIR, per interaction.
-    count_mle_claims_per_instance: Vec<Vec<T>>,
+    pub count_mle_claims_per_instance: Vec<Vec<T>>,
     /// The purported evaluations of the sigma MLEs at `r`, per AIR, per interaction.
-    sigma_mle_claims_per_instance: Vec<Vec<T>>,
+    pub sigma_mle_claims_per_instance: Vec<Vec<T>>,
+    pub logup_pow_witness: Witness,
 }
 
 #[derive(Error, Debug)]
@@ -59,6 +62,8 @@ pub enum GkrLogUpError<F> {
     LagrangePolynomialCheckFailed,
     #[error("GKR error: {0}")]
     GkrError(#[from] gkr::GkrError<F>),
+    #[error("invalid proof of work witness")]
+    InvalidPowWitness,
 }
 
 struct GkrAuxData<T> {
@@ -81,9 +86,9 @@ impl<F, EF, Challenger> RapPhaseSeq<F, EF, Challenger> for GkrLogUpPhase<F, EF, 
 where
     F: TwoAdicField,
     EF: ExtensionField<F>,
-    Challenger: FieldChallenger<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
 {
-    type PartialProof = GkrLogUpProof<EF>;
+    type PartialProof = GkrLogUpPartialProof<EF, F>;
     type PartialProvingKey = GkrLogUpProvingKey;
     type Error = GkrLogUpError<EF>;
     // The random evaluation point `r` from batch GKR.
@@ -100,7 +105,7 @@ where
     fn log_up_security_params(&self) -> &LogUpSecurityParameters {
         &self.log_up_params
     }
-    
+
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
@@ -116,8 +121,9 @@ where
             return None;
         }
 
-        let (alpha, beta) = self.generate_challenges(challenger);
+        let logup_pow_witness = challenger.grind(self.log_up_params.log_up_pow_bits);
 
+        let (alpha, beta) = self.generate_challenges(challenger);
         let beta_pows = generate_betas(beta, &all_interactions);
 
         // Build GKR instances.
@@ -126,9 +132,9 @@ where
 
         // Construct input layers and run GKR proof.
         let input_layers: Vec<_> = gkr_instances
-            .iter()
+            .par_iter()
             .map(|gkr_instance| gkr_instance.build_gkr_input_layer(alpha))
-            .collect_vec();
+            .collect();
 
         let (gkr_proof, gkr_artifact) = gkr::prove_batch(challenger, input_layers);
 
@@ -151,10 +157,11 @@ where
         challenges.extend_from_slice(&gkr_artifact.ood_point);
 
         Some((
-            GkrLogUpProof {
+            GkrLogUpPartialProof {
                 gkr_proof,
                 count_mle_claims_per_instance,
                 sigma_mle_claims_per_instance,
+                logup_pow_witness,
             },
             RapPhaseProverData {
                 challenges_per_phase: vec![challenges],
@@ -173,7 +180,7 @@ where
         Domain: PolynomialSpace<Val = F>,
     {
         if domains_per_air.is_empty() {
-            return vec![]
+            return vec![];
         }
         let points_per_air = domains_per_air
             .iter()
@@ -202,9 +209,15 @@ where
             });
         }
 
-        let (alpha, beta) = self.generate_challenges(challenger);
-
         let partial_proof = partial_proof.ok_or(Self::Error::MissingGkrProof)?;
+        if !challenger.check_witness(
+            self.log_up_params.log_up_pow_bits,
+            partial_proof.logup_pow_witness,
+        ) {
+            return Err(GkrLogUpError::InvalidPowWitness);
+        }
+
+        let (alpha, beta) = self.generate_challenges(challenger);
 
         let gkr_proof = &partial_proof.gkr_proof;
 
@@ -439,10 +452,9 @@ where
         let b = AB::Expr::from_canonical_u32(interaction.bus_index as u32 + 1);
         let message = interaction.message.iter().chain(iter::once(&b));
 
-        let sigma = zip(message, &beta_pows)
-            .fold(AB::ExprEF::ZERO, |acc, (field, beta)| {
-                acc + beta.clone() * field.clone()
-            });
+        let sigma = zip(message, &beta_pows).fold(AB::ExprEF::ZERO, |acc, (field, beta)| {
+            acc + beta.clone() * field.clone()
+        });
         s_next += gamma_pows.next().unwrap() * sigma;
     }
 

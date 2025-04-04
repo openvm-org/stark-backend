@@ -1,11 +1,9 @@
-use p3_field::Field;
-use p3_matrix::{Matrix};
-use crate::{
-    air_builders::symbolic::{
-        symbolic_expression::SymbolicEvaluator,
-        symbolic_variable::{Entry, SymbolicVariable},
-    },
+use crate::air_builders::symbolic::{
+    symbolic_expression::SymbolicEvaluator,
+    symbolic_variable::{Entry, SymbolicVariable},
 };
+use p3_field::Field;
+use p3_matrix::Matrix;
 
 pub(super) struct Evaluator<'a, T, F: Field> {
     pub preprocessed: Option<T>,
@@ -24,9 +22,11 @@ impl<T: Matrix<F>, F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, T, F> {
         let height = self.height;
         let index = symbolic_var.index;
         match symbolic_var.entry {
-            Entry::Preprocessed { offset } => {
-                self.preprocessed.as_ref().unwrap().get((n + offset) % height, index)
-            }
+            Entry::Preprocessed { offset } => self
+                .preprocessed
+                .as_ref()
+                .unwrap()
+                .get((n + offset) % height, index),
             Entry::Main { part_index, offset } => {
                 self.partitioned_main[part_index].get((n + offset) % height, index)
             }

@@ -17,8 +17,16 @@ pub struct OpeningProver<'pcs, SC: StarkGenericConfig> {
 }
 
 impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
-    pub fn new(pcs: &'pcs SC::Pcs, zeta: SC::Challenge, extra_after_challenge_points: Vec<Vec<Vec<SC::Challenge>>>) -> Self {
-        Self { pcs, zeta, extra_after_challenge_points }
+    pub fn new(
+        pcs: &'pcs SC::Pcs,
+        zeta: SC::Challenge,
+        extra_after_challenge_points: Vec<Vec<Vec<SC::Challenge>>>,
+    ) -> Self {
+        Self {
+            pcs,
+            zeta,
+            extra_after_challenge_points,
+        }
     }
 
     /// Opening proof for multiple RAP matrices, where

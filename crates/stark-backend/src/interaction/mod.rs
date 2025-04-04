@@ -1,8 +1,8 @@
 use std::fmt::Debug;
 
 use p3_air::AirBuilder;
-use p3_field::Field;
 use p3_commit::PolynomialSpace;
+use p3_field::Field;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_ceil_usize;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -228,7 +228,7 @@ pub struct RapPhaseProverData<Challenge> {
     pub exposed_values_per_air: Vec<Option<Vec<Challenge>>>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct RapPhaseVerifierData<Challenge> {
     /// Challenges from the challenger in this phase that determine RAP constraints and exposed values.
     pub challenges_per_phase: Vec<Vec<Challenge>>,

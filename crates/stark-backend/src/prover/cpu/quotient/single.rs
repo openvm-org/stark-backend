@@ -138,18 +138,19 @@ where
 
             // Vertically pack rows of each matrix,
             // skipping `next` if above scan showed no constraints need it:
-            let preprocessed = preprocessed_trace_on_quotient_domain.as_ref().map(|mat| pack_rows::<SC, M>(
-                &mat,
-                &row_idx_local,
-                row_idx_next.as_deref(),
-            )).unwrap_or_else(|| ViewPair::new(vec![], None));
+            let preprocessed = preprocessed_trace_on_quotient_domain
+                .as_ref()
+                .map(|mat| pack_rows::<SC, M>(&mat, &row_idx_local, row_idx_next.as_deref()))
+                .unwrap_or_else(|| ViewPair::new(vec![], None));
             let partitioned_main = partitioned_main_lde_on_quotient_domain
                 .iter()
                 .map(|lde| pack_rows::<SC, M>(lde, &row_idx_local, row_idx_next.as_deref()))
                 .collect_vec();
             let after_challenge = after_challenge_lde_on_quotient_domain
                 .iter()
-                .map(|lde| pack_challenge_rows::<SC, M>(lde, &row_idx_local, row_idx_next.as_deref()))
+                .map(|lde| {
+                    pack_challenge_rows::<SC, M>(lde, &row_idx_local, row_idx_next.as_deref())
+                })
                 .collect_vec();
 
             let evaluator = ProverConstraintEvaluator::<SC> {
@@ -267,7 +268,11 @@ fn compute_max_rotation_and_verify_bounds<Val, Challenge, M>(
     exposed_values_after_challenge: &[Vec<Challenge>],
     quotient_size: usize,
     ext_degree: usize,
-) -> usize where Val: Send + Sync, M: Matrix<Val> {
+) -> usize
+where
+    Val: Send + Sync,
+    M: Matrix<Val>,
+{
     let mut rotation = 0;
     for node in &constraints.nodes {
         if let SymbolicExpressionNode::Variable(var) = node {
@@ -333,11 +338,7 @@ fn pack_rows<SC: StarkGenericConfig, M: Matrix<Val<SC>>>(
     let [local, next] = [Some(row_idx_local), row_idx_next].map(|wrapped_idx| {
         wrapped_idx.map(|wrapped_idx| {
             (0..matrix.width())
-                .map(|col| {
-                    PackedVal::<SC>::from_fn(|offset| {
-                        matrix.get(wrapped_idx[offset], col)
-                    })
-                })
+                .map(|col| PackedVal::<SC>::from_fn(|offset| matrix.get(wrapped_idx[offset], col)))
                 .collect_vec()
         })
     });
@@ -355,9 +356,7 @@ fn pack_challenge_rows<SC: StarkGenericConfig, M: Matrix<Val<SC>>>(
                 .step_by(SC::Challenge::D)
                 .map(|col| {
                     PackedChallenge::<SC>::from_base_fn(|i| {
-                        PackedVal::<SC>::from_fn(|offset| {
-                            matrix.get(wrapped_idx[offset], col + i)
-                        })
+                        PackedVal::<SC>::from_fn(|offset| matrix.get(wrapped_idx[offset], col + i))
                     })
                 })
                 .collect_vec()

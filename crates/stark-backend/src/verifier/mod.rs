@@ -20,9 +20,9 @@ mod error;
 /// Constraint folder
 pub mod folder;
 
+use crate::air_builders::symbolic::SymbolicConstraints;
 pub use error::*;
 pub use folder::GenericVerifierConstraintFolder;
-use crate::air_builders::symbolic::SymbolicConstraints;
 
 /// Verifies a partitioned proof of multi-matrix AIRs.
 pub struct MultiTraceStarkVerifier<'c, SC: StarkGenericConfig> {
@@ -154,17 +154,22 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             return Err(VerificationError::InvalidProofShape);
         }
 
-        let rap_phase_verifier_data = rap_phase
-            .partially_verify(
-                challenger,
-                proof.rap_phase_seq_proof.as_ref(),
-                &mvk.per_air
-                    .iter()
-                    .map(|vk| SymbolicConstraints::from(&vk.symbolic_constraints))
-                    .collect_vec(),
-                &exposed_values_per_air_per_phase,
-            )
-            .map_err(|_| VerificationError::ChallengePhaseError)?;
+        let rap_phase_verifier_data = rap_phase.partially_verify(
+            challenger,
+            proof.rap_phase_seq_proof.as_ref(),
+            &mvk.per_air
+                .iter()
+                .map(|vk| SymbolicConstraints::from(&vk.symbolic_constraints))
+                .collect_vec(),
+            &exposed_values_per_air_per_phase,
+        );
+
+        // if rap_phase_verifier_data.is_err() {
+        //     panic!("error: {:?}", rap_phase_verifier_data);
+        // }
+
+        let rap_phase_verifier_data =
+            rap_phase_verifier_data.map_err(|_| VerificationError::ChallengePhaseError)?;
 
         for commitment in proof.commitments.after_challenge.iter() {
             challenger.observe(commitment.clone());
