@@ -39,23 +39,32 @@ impl<F: Field> Mle<F> {
         Self { evals }
     }
 
-    /// Evaluates the multilinear polynomial at `point`.
+    /// Evaluates the multilinear extension at `point`.
     pub fn eval(&self, point: &[F]) -> F {
-        pub fn eval_rec<F: Field>(mle_evals: &[F], p: &[F]) -> F {
-            match p {
-                [] => mle_evals[0],
-                &[p_i, ref p @ ..] => {
-                    let (lhs, rhs) = mle_evals.split_at(mle_evals.len() / 2);
-                    let lhs_eval = eval_rec(lhs, p);
-                    let rhs_eval = eval_rec(rhs, p);
-                    // Equivalent to `eq(0, p_i) * lhs_eval + eq(1, p_i) * rhs_eval`.
-                    p_i * (rhs_eval - lhs_eval) + lhs_eval
-                }
+        Self::eval_slice(&self.evals, point)
+    }
+
+    /// Evaluates the multilinear extension at `point` from a slice of hypercube evaluations.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `evals.len() != 2^point.len()`
+    pub fn eval_slice(evals: &[F], point: &[F]) -> F {
+        let n = point.len();
+        assert_eq!(evals.len(), 1 << n, "Point dimension mismatch");
+
+        let mut buf = evals.to_vec();
+        let mut len = buf.len();
+
+        for &x_i in point.iter().rev() {
+            len /= 2;
+            for i in 0..len {
+                let a = buf[2 * i];
+                let b = buf[2 * i + 1];
+                buf[i] = a + x_i * (b - a);
             }
         }
-
-        let mle_evals = self.evals.clone();
-        eval_rec(&mle_evals, point)
+        buf[0]
     }
 }
 
@@ -131,24 +140,27 @@ where
 /// Computes eq_n(r, x) for fixed r and each x in {0, 1}^n, where
 ///          eq_n(r, x) = prod_i (r_i x_i + (1 - r_i)(1 - x_i)).
 pub fn hypercube_eq_partial<F: Field>(r: &[F]) -> Vec<F> {
-    let height = 1 << r.len();
+    let n = r.len();
+    let size = 1 << n;
 
-    // This runs in time O(n 2^n) but can be optimized to O(2^n).
-    (0..height)
-        .map(|k| {
-            let mut eq_eval = F::ONE;
-            let mut k_left = k;
-            for &r_i in r.iter().rev() {
-                if k_left % 2 == 0 {
-                    eq_eval *= F::ONE - r_i;
-                } else {
-                    eq_eval *= r_i;
-                }
-                k_left /= 2;
-            }
-            eq_eval
-        })
-        .collect()
+    let mut result = vec![F::ZERO; size];
+    result[0] = F::ONE;
+
+    let mut cur_size = 1;
+
+    for &r_i in r {
+        let one_minus_r = F::ONE - r_i;
+
+        // Fill in reverse to avoid overwriting values we still need
+        for i in (0..cur_size).rev() {
+            let val = result[i];
+            result[2 * i] = val * one_minus_r; // x_i = 0
+            result[2 * i + 1] = val * r_i;     // x_i = 1
+        }
+
+        cur_size *= 2;
+    }
+    result
 }
 
 #[cfg(test)]

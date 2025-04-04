@@ -229,20 +229,14 @@ where
         let count_mle_claims: Vec<_> = gkr_instance
             .counts
             .transpose()
-            .par_rows()
-            .map(|row| {
-                let mle = Mle::from_vec(row.collect());
-                mle.eval(r)
-            })
+            .par_row_slices()
+            .map(|row| Mle::eval_slice(row, r))
             .collect();
         let sigma_mle_claims: Vec<_> = gkr_instance
             .sigmas
             .transpose()
-            .par_rows()
-            .map(|row| {
-                let mle = Mle::from_vec(row.collect());
-                mle.eval(r)
-            })
+            .par_row_slices()
+            .map(|row| Mle::eval_slice(row, r))
             .collect();
 
         let eqs_at_r = hypercube_eq_partial(r);
