@@ -119,14 +119,7 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
             Layer::LogUpGeneric {
                 numerators,
                 denominators,
-            }
-            | Layer::LogUpMultiplicities {
-                numerators,
-                denominators,
             } => eval_logup_sum(self.eq_evals, numerators, denominators, n_terms, lambda),
-            Layer::LogUpSingles { denominators } => {
-                eval_logup_singles_sum(self.eq_evals, denominators, n_terms, lambda)
-            }
         };
 
         eval_at_0 *= self.eq_fixed_var_correction;
@@ -236,47 +229,6 @@ fn eval_logup_sum<F: Field>(
         )
 }
 
-/// Evaluates `sum_x eq(({0}^|r|, 0, x), y) * (inp_denom(r, t, x, 1) + inp_denom(r, t, x, 0) +
-/// lambda * inp_denom(r, t, x, 0) * inp_denom(r, t, x, 1))` at `t=0` and `t=2`.
-///
-/// Output of the form: `(eval_at_0, eval_at_2)`.
-fn eval_logup_singles_sum<F: Field>(
-    eq_evals: &FixedFirstHypercubeEqEvals<F>,
-    input_denominators: &Mle<F>,
-    n_terms: usize,
-    lambda: F,
-) -> (F, F) {
-    let mut eval_at_0 = F::ZERO;
-    let mut eval_at_2 = F::ZERO;
-
-    for i in 0..n_terms {
-        // Input denominator values at (r, {0, 1, 2}, bits(i), {0, 1})
-        let (inp_denom_r0_0, inp_denom_r0_1) =
-            (input_denominators[i * 2], input_denominators[i * 2 + 1]);
-        let (inp_denom_r1_0, inp_denom_r1_1) = (
-            input_denominators[(n_terms + i) * 2],
-            input_denominators[(n_terms + i) * 2 + 1],
-        );
-
-        // Calculate values at t = 2
-        let inp_denom_r2_0 = inp_denom_r1_0.double() - inp_denom_r0_0;
-        let inp_denom_r2_1 = inp_denom_r1_1.double() - inp_denom_r0_1;
-
-        // Fraction addition polynomials at t = 0 and t = 2
-        let numer_at_r0i = inp_denom_r0_0 + inp_denom_r0_1;
-        let denom_at_r0i = inp_denom_r0_0 * inp_denom_r0_1;
-        let numer_at_r2i = inp_denom_r2_0 + inp_denom_r2_1;
-        let denom_at_r2i = inp_denom_r2_0 * inp_denom_r2_1;
-
-        // Accumulate evaluated terms
-        let eq_eval_at_0i = eq_evals[i];
-        eval_at_0 += eq_eval_at_0i * (numer_at_r0i + lambda * denom_at_r0i);
-        eval_at_2 += eq_eval_at_0i * (numer_at_r2i + lambda * denom_at_r2i);
-    }
-
-    (eval_at_0, eval_at_2)
-}
-
 impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
     fn has_zero_arity(&self) -> bool {
         self.arity() == 0
@@ -304,13 +256,6 @@ impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
                 denominators,
             } => {
                 let numerators = numerators.as_ref().try_into().unwrap();
-                let denominators = denominators.as_ref().try_into().unwrap();
-                vec![numerators, denominators]
-            }
-            // Should never get called.
-            Layer::LogUpMultiplicities { .. } => unimplemented!(),
-            Layer::LogUpSingles { denominators } => {
-                let numerators = [F::ONE; 2];
                 let denominators = denominators.as_ref().try_into().unwrap();
                 vec![numerators, denominators]
             }

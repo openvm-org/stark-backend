@@ -113,14 +113,6 @@ pub enum Layer<F> {
         numerators: Mle<F>,
         denominators: Mle<F>,
     },
-    LogUpMultiplicities {
-        numerators: Mle<F>,
-        denominators: Mle<F>,
-    },
-    /// All numerators implicitly equal "1".
-    LogUpSingles {
-        denominators: Mle<F>,
-    },
 }
 
 impl<F: Field> Layer<F> {
@@ -128,10 +120,6 @@ impl<F: Field> Layer<F> {
     pub fn n_variables(&self) -> usize {
         match self {
             Self::GrandProduct(mle)
-            | Self::LogUpSingles { denominators: mle }
-            | Self::LogUpMultiplicities {
-                denominators: mle, ..
-            }
             | Self::LogUpGeneric {
                 denominators: mle, ..
             } => mle.arity(),
@@ -156,14 +144,7 @@ impl<F: Field> Layer<F> {
             Layer::LogUpGeneric {
                 numerators,
                 denominators,
-            }
-            | Layer::LogUpMultiplicities {
-                numerators,
-                denominators,
-            } => Self::next_logup_layer(MleExpr::Mle(numerators), denominators),
-            Layer::LogUpSingles { denominators } => {
-                Self::next_logup_layer(MleExpr::Constant(F::ONE), denominators)
-            }
+            } => Self::next_logup_layer(numerators, denominators),
         };
         Some(next_layer)
     }
@@ -176,7 +157,7 @@ impl<F: Field> Layer<F> {
         Layer::GrandProduct(Mle::from_vec(res))
     }
 
-    fn next_logup_layer(numerators: MleExpr<'_, F>, denominators: &Mle<F>) -> Layer<F> {
+    fn next_logup_layer(numerators: &Mle<F>, denominators: &Mle<F>) -> Layer<F> {
         let (next_numerators, next_denominators): (Vec<_>, Vec<_>) = (0..denominators.len() / 2)
             .into_par_iter()
             .map(|i| {
@@ -201,16 +182,7 @@ impl<F: Field> Layer<F> {
         }
 
         Ok(match self {
-            Layer::LogUpSingles { denominators } => {
-                let numerator = F::ONE;
-                let denominator = denominators[0];
-                vec![numerator, denominator]
-            }
             Layer::LogUpGeneric {
-                numerators,
-                denominators,
-            }
-            | Layer::LogUpMultiplicities {
                 numerators,
                 denominators,
             } => {
@@ -235,15 +207,8 @@ impl<F: Field> Layer<F> {
             Self::LogUpGeneric {
                 numerators,
                 denominators,
-            }
-            | Self::LogUpMultiplicities {
-                numerators,
-                denominators,
             } => Self::LogUpGeneric {
                 numerators: numerators.partial_evaluation(x0),
-                denominators: denominators.partial_evaluation(x0),
-            },
-            Self::LogUpSingles { denominators } => Self::LogUpSingles {
                 denominators: denominators.partial_evaluation(x0),
             },
         }
@@ -252,19 +217,3 @@ impl<F: Field> Layer<F> {
 
 #[derive(Debug)]
 pub struct NotOutputLayerError;
-
-enum MleExpr<'a, F: Field> {
-    Constant(F),
-    Mle(&'a Mle<F>),
-}
-
-impl<F: Field> Index<usize> for MleExpr<'_, F> {
-    type Output = F;
-
-    fn index(&self, index: usize) -> &F {
-        match self {
-            Self::Constant(v) => v,
-            Self::Mle(mle) => &mle[index],
-        }
-    }
-}
