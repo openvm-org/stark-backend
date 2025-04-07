@@ -27,15 +27,13 @@ use crate::{
 /// Evaluations are stored in lexicographic order i.e. `evals[0] = eq((0, ..., 0, 0), y)`,
 /// `evals[1] = eq((0, ..., 0, 1), y)`, etc.
 #[derive(Debug, Clone)]
-struct FixedFirstHypercubeEqEvals<F> {
-    y: Vec<F>,
+struct FixedFirstHypercubeEqEvals<'a, F> {
+    y: &'a [F],
     evals: Vec<F>,
 }
 
-impl<F: Field> FixedFirstHypercubeEqEvals<F> {
-    pub fn eval(y: &[F]) -> Self {
-        let y = y.to_vec();
-
+impl<'a, F: Field> FixedFirstHypercubeEqEvals<'a, F> {
+    pub fn eval(y: &'a [F]) -> Self {
         if y.is_empty() {
             let evals = vec![F::ONE];
             return Self { evals, y };
@@ -48,7 +46,7 @@ impl<F: Field> FixedFirstHypercubeEqEvals<F> {
     }
 
     /// Returns evaluations of the function `x -> eq(x, y) * v` for each `x` in `{0, 1}^n`.
-    fn gen(y: &[F], v: F) -> Vec<F> {
+    fn gen(y: &'a [F], v: F) -> Vec<F> {
         let n = 1 << y.len();
         let mut evals = vec![F::ZERO; n];
         evals[0] = v;
@@ -67,7 +65,7 @@ impl<F: Field> FixedFirstHypercubeEqEvals<F> {
     }
 }
 
-impl<F> Deref for FixedFirstHypercubeEqEvals<F> {
+impl<F> Deref for FixedFirstHypercubeEqEvals<'_, F> {
     type Target = [F];
 
     fn deref(&self) -> &Self::Target {
@@ -94,7 +92,7 @@ impl<F> Deref for FixedFirstHypercubeEqEvals<F> {
 /// P(x) = eq(x, y) * (numer(x) + lambda * denom(x))
 /// ```
 struct GkrMultivariatePolyOracle<'a, F: Clone> {
-    pub eq_evals: &'a FixedFirstHypercubeEqEvals<F>,
+    pub eq_evals: &'a FixedFirstHypercubeEqEvals<'a, F>,
     pub input_layer: Layer<F>,
     pub eq_fixed_var_correction: F,
     /// Used by LogUp to perform a random linear combination of the numerators and denominators.
