@@ -368,14 +368,26 @@ where
     let xs =
         cyclic_subgroup_coset_known_order(coset_gen, coset_shift, 1 << coset_log_n).collect_vec();
 
-    // TODO: Optimize this.
-    (0..domain_log_n)
-        .map(|k| {
-            xs.iter()
-                .map(|&x| (x.exp_power_of_2(domain_log_n) - one) / (x.exp_power_of_2(k) - one))
-                .collect_vec()
+    let x_powers: Vec<Vec<_>> = xs
+        .par_iter()
+        .map(|&x| {
+            let mut powers = Vec::with_capacity(domain_log_n + 1);
+            for k in 0..=domain_log_n {
+                powers.push(x.exp_power_of_2(k));
+            }
+            powers
         })
-        .collect_vec()
+        .collect();
+
+    (0..domain_log_n)
+        .into_par_iter()
+        .map(|k| {
+            x_powers
+                .par_iter()
+                .map(|powers| (powers[domain_log_n] - one) / (powers[k] - one))
+                .collect()
+        })
+        .collect()
 }
 
 impl<F, EF, Challenger> GkrLogUpPhase<F, EF, Challenger>

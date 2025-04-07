@@ -49,19 +49,20 @@ impl<F: Field> FixedFirstHypercubeEqEvals<F> {
 
     /// Returns evaluations of the function `x -> eq(x, y) * v` for each `x` in `{0, 1}^n`.
     fn gen(y: &[F], v: F) -> Vec<F> {
-        let mut evals = Vec::with_capacity(1 << y.len());
-        evals.push(v);
+        let n = 1 << y.len();
+        let mut evals = vec![F::ZERO; n];
+        evals[0] = v;
+        let mut curr_len = 1;
 
         for &y_i in y.iter().rev() {
-            for j in 0..evals.len() {
-                // `lhs[j] = eq(0, y_i) * c[i]`
-                // `rhs[j] = eq(1, y_i) * c[i]`
-                let tmp = evals[j] * y_i;
-                evals.push(tmp);
-                evals[j] -= tmp;
-            }
+            let (left, right) = evals.split_at_mut(curr_len);
+            left.par_iter_mut().zip(right.par_iter_mut()).for_each(|(l, r)| {
+                let tmp = *l * y_i;
+                *r = tmp;
+                *l -= tmp;
+            });
+            curr_len *= 2;
         }
-
         evals
     }
 }
@@ -139,7 +140,7 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
         }
 
         let z0 = self.eq_evals.y[self.eq_evals.y.len() - self.arity()];
-        let eq_fixed_var_correction = self.eq_fixed_var_correction * hypercube_eq(&[alpha], &[z0]);
+        let eq_fixed_var_correction = self.eq_fixed_var_correction * (alpha * z0 + (F::ONE - alpha) * (F::ONE - z0));
 
         Self {
             eq_evals: self.eq_evals,
@@ -186,52 +187,48 @@ fn eval_grand_product_sum<F: Field>(
     (eval_at_0, eval_at_2)
 }
 
-/// Evaluates `sum_x eq(({0}^|r|, 0, x), y) * (inp_numer(r, t, x, 0) * inp_denom(r, t, x, 1) +
-/// inp_numer(r, t, x, 1) * inp_denom(r, t, x, 0) + lambda * inp_denom(r, t, x, 0) * inp_denom(r, t,
-/// x, 1))` at `t=0` and `t=2`.
+/// Evaluates the expression:
+/// `sum_x eq_evals(x) * (f(x, t) + λ * denom(x, t))`
+/// where `f(x, t) = numer_0(x, t) * denom_1(x, t) + numer_1(x, t) * denom_0(x, t)`
+/// and the evaluation is done for `t = 0` and `t = 2`.
 ///
-/// Output of the form: `(eval_at_0, eval_at_2)`.
-fn eval_logup_sum<F: Field + Send + Sync>(
+/// Returns a tuple: `(sum_at_t0, sum_at_t2)`
+fn eval_logup_sum<F: Field>(
     eq_evals: &FixedFirstHypercubeEqEvals<F>,
-    input_numerators: &Mle<F>,
-    input_denominators: &Mle<F>,
+    numerators: &Mle<F>,
+    denominators: &Mle<F>,
     n_terms: usize,
     lambda: F,
 ) -> (F, F) {
     (0..n_terms)
         .into_par_iter()
         .map(|i| {
-            // Gather input values at (r, {0, 1, 2}, bits(i), {0, 1})
-            let (numer_r0_0, denom_r0_0) = (input_numerators[i * 2], input_denominators[i * 2]);
-            let (numer_r0_1, denom_r0_1) =
-                (input_numerators[i * 2 + 1], input_denominators[i * 2 + 1]);
-            let (numer_r1_0, denom_r1_0) = (
-                input_numerators[(n_terms + i) * 2],
-                input_denominators[(n_terms + i) * 2],
+            let (r0, r1) = (i * 2, (n_terms + i) * 2);
+
+            // Extract input values for t=0 (r0) and t=1 (r1)
+            let (n0_0, d0_0) = (numerators[r0], denominators[r0]);
+            let (n0_1, d0_1) = (numerators[r0 + 1], denominators[r0 + 1]);
+            let (n1_0, d1_0) = (numerators[r1], denominators[r1]);
+            let (n1_1, d1_1) = (numerators[r1 + 1], denominators[r1 + 1]);
+
+            // Interpolate to get values at t=2
+            let (n2_0, d2_0) = (n1_0.double() - n0_0, d1_0.double() - d0_0);
+            let (n2_1, d2_1) = (n1_1.double() - n0_1, d1_1.double() - d0_1);
+
+            let (num_t0, den_t0) = (
+                n0_0 * d0_1 + n0_1 * d0_0,
+                d0_0 * d0_1,
             );
-            let (numer_r1_1, denom_r1_1) = (
-                input_numerators[(n_terms + i) * 2 + 1],
-                input_denominators[(n_terms + i) * 2 + 1],
+            let (num_t2, den_t2) = (
+                n2_0 * d2_1 + n2_1 * d2_0,
+                d2_0 * d2_1,
             );
 
-            // Calculate values at r, t = 2
-            let numer_r2_0 = numer_r1_0.double() - numer_r0_0;
-            let denom_r2_0 = denom_r1_0.double() - denom_r0_0;
-            let numer_r2_1 = numer_r1_1.double() - numer_r0_1;
-            let denom_r2_1 = denom_r1_1.double() - denom_r0_1;
+            let eq = eq_evals[i];
+            let eval_t0 = eq * (num_t0 + lambda * den_t0);
+            let eval_t2 = eq * (num_t2 + lambda * den_t2);
 
-            // Compute fractions at t = 0 and t = 2
-            let numer_at_r0i = numer_r0_0 * denom_r0_1 + numer_r0_1 * denom_r0_0;
-            let denom_at_r0i = denom_r0_1 * denom_r0_0;
-            let numer_at_r2i = numer_r2_0 * denom_r2_1 + numer_r2_1 * denom_r2_0;
-            let denom_at_r2i = denom_r2_1 * denom_r2_0;
-
-            // Accumulate the evaluated terms
-            let eq_eval_at_0i = eq_evals[i];
-            let eval_at_0_i = eq_eval_at_0i * (numer_at_r0i + lambda * denom_at_r0i);
-            let eval_at_2_i = eq_eval_at_0i * (numer_at_r2i + lambda * denom_at_r2i);
-
-            (eval_at_0_i, eval_at_2_i)
+            (eval_t0, eval_t2)
         })
         .reduce(
             || (F::ZERO, F::ZERO),

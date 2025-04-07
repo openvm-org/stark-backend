@@ -76,11 +76,8 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
     }
 
     fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F> {
-        let half = self.len() / 2;
-
-        // Efficient sum of first half
         let mut y0 = F::ZERO;
-        for i in 0..half {
+        for i in 0..self.len() / 2 {
             y0 += self[i];
         }
 
@@ -92,15 +89,18 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
         UnivariatePolynomial::from_coeffs(vec![y0, slope])
     }
 
-    fn partial_evaluation(self, alpha: F) -> Self {
+
+    fn partial_evaluation(mut self, alpha: F) -> Self {
         let midpoint = self.len() / 2;
-        let (lhs_evals, rhs_evals) = self.split_at(midpoint);
-
-        let res = lhs_evals.par_iter().zip(rhs_evals.par_iter())
-            .map(|(&lhs_eval, &rhs_eval)| alpha * (rhs_eval - lhs_eval) + lhs_eval)
-            .collect();
-
-        Mle::from_vec(res)
+        let (lhs_evals, rhs_evals) = self.split_at_mut(midpoint);
+        lhs_evals
+            .par_iter_mut()
+            .zip(rhs_evals.par_iter())
+            .for_each(|(lhs, &rhs)| {
+                *lhs += alpha * (rhs - *lhs);
+            });
+        self.evals.truncate(midpoint);
+        self
     }
 }
 

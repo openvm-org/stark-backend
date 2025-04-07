@@ -64,16 +64,14 @@ impl<EF: Field> GkrLogUpInstance<EF> {
         let preprocessed_view = trace_view.preprocessed.map(|mat| mat.as_view());
 
         let total = height * num_padded_interactions;
-        let (count_data, sigma_data): (Vec<EF>, Vec<EF>) = (0..total)
-            .into_par_iter()
-            .map(|i| {
-                let row = i / num_padded_interactions;
-                let col = i % num_padded_interactions;
-                if col >= interactions.len() {
-                    return (EF::ZERO, EF::ZERO);
-                }
-                let interaction = &interactions[col];
+        let mut count_data = vec![EF::ZERO; total];
+        let mut sigma_data = vec![EF::ZERO; total];
 
+        count_data
+            .par_chunks_mut(num_padded_interactions)
+            .zip(sigma_data.par_chunks_mut(num_padded_interactions))
+            .enumerate()
+            .for_each(|(row, (count_row, sigma_row))| {
                 let evaluator = Evaluator {
                     preprocessed: preprocessed_view,
                     partitioned_main: &partitioned_main_view,
@@ -82,22 +80,22 @@ impl<EF: Field> GkrLogUpInstance<EF> {
                     local_index: row,
                 };
 
-                let count = evaluator.eval_expr(&interaction.count);
-                let count_val = EF::from_base(count);
+                for col in 0..interactions.len() {
+                    let interaction = &interactions[col];
 
-                let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
-                let sigma = interaction
-                    .message
-                    .iter()
-                    .chain(iter::once(&SymbolicExpression::Constant(b)))
-                    .zip(beta_pows)
-                    .fold(EF::ZERO, |acc, (field, &beta)| {
-                        acc + beta * evaluator.eval_expr(field)
-                    });
+                    count_row[col] = EF::from_base(evaluator.eval_expr(&interaction.count));
 
-                (count_val, sigma)
-            })
-            .unzip();
+                    let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
+                    let sigma = interaction
+                        .message
+                        .iter()
+                        .chain(iter::once(&SymbolicExpression::Constant(b)))
+                        .zip(beta_pows)
+                        .fold(EF::ZERO, |acc, (expr, &beta)| acc + beta * evaluator.eval_expr(expr));
+
+                    sigma_row[col] = sigma;
+                }
+            });
 
         GkrLogUpInstance {
             counts: RowMajorMatrix::new(count_data, num_padded_interactions),
@@ -169,50 +167,79 @@ where
     ) -> GkrAuxData<EF> {
         let ood_point = &gkr_artifact.ood_point;
 
-        let max_interactions = constraints_per_air.iter().map(|c| c.interactions.len()).max().unwrap();
+        let max_interactions = constraints_per_air
+            .iter()
+            .map(|c| c.interactions.len())
+            .max()
+            .unwrap();
         let gamma_pows = gamma.powers().take(2 * max_interactions).collect_vec();
+
+        let (interactions_per_air, trace_view_per_air_filtered): (Vec<_>, Vec<_>) =
+            constraints_per_air
+                .iter()
+                .zip(trace_view_per_air.iter())
+                .filter_map(|(c, view)| {
+                    if c.interactions.is_empty() {
+                        None
+                    } else {
+                        Some((&c.interactions, view))
+                    }
+                })
+                .unzip();
+
+        assert_eq!(interactions_per_air.len(), trace_view_per_air_filtered.len());
+        assert_eq!(interactions_per_air.len(), gkr_instances.len());
+        assert_eq!(interactions_per_air.len(), gkr_artifact.n_variables_by_instance.len());
+
+        let results: Vec<_> = interactions_per_air
+            .par_iter()
+            .zip(trace_view_per_air_filtered.par_iter())
+            .zip(gkr_instances.par_iter())
+            .zip(gkr_artifact.n_variables_by_instance.par_iter())
+            .map(|(((interactions, trace_view), gkr_instance), &n_vars)| {
+                let height = trace_view.partitioned_main[0].height();
+                let log_height = log2_strict_usize(height);
+
+                let instance_ood = &ood_point[ood_point.len() - n_vars..];
+                let (_, r) = instance_ood.split_at(n_vars - log_height);
+                debug_assert_eq!(r.len(), log_height);
+
+                let (after_challenge_trace, exposed_values, count_mle_claims, sigma_mle_claims) =
+                    Self::generate_aux(gkr_instance, &gamma_pows, r);
+
+                (
+                    after_challenge_trace,
+                    exposed_values,
+                    count_mle_claims,
+                    sigma_mle_claims,
+                )
+            })
+            .collect();
+
+        let mut results_iter = results.into_iter();
 
         let mut after_challenge_trace_per_air = Vec::with_capacity(constraints_per_air.len());
         let mut exposed_values_per_air = Vec::with_capacity(constraints_per_air.len());
         let mut count_mle_claims_per_instance = Vec::with_capacity(constraints_per_air.len());
         let mut sigma_mle_claims_per_instance = Vec::with_capacity(constraints_per_air.len());
 
-        let mut i = 0;
-        for (constraints, trace_view) in izip!(constraints_per_air, trace_view_per_air,) {
-            let interactions = &constraints.interactions;
-
-            if interactions.is_empty() {
+        for c in constraints_per_air.iter() {
+            if c.interactions.is_empty() {
                 after_challenge_trace_per_air.push(None);
                 exposed_values_per_air.push(None);
-                continue;
+            } else {
+                let
+                    (after_trace, exposed, count_mle, sigma_mle) = results_iter.next().unwrap();
+
+                for (count_mle_claim, sigma_mle_claim) in count_mle.iter().zip(sigma_mle.iter()) {
+                    challenger.observe_ext_element(*count_mle_claim);
+                    challenger.observe_ext_element(*sigma_mle_claim);
+                }
+                after_challenge_trace_per_air.push(Some(after_trace));
+                exposed_values_per_air.push(Some(exposed));
+                count_mle_claims_per_instance.push(count_mle);
+                sigma_mle_claims_per_instance.push(sigma_mle);
             }
-
-            let gkr_instance = &gkr_instances[i];
-            let height = trace_view.partitioned_main[0].height();
-            let log_height = log2_strict_usize(height);
-            let n_vars = gkr_artifact.n_variables_by_instance[i];
-
-            let instance_ood = &ood_point[ood_point.len() - n_vars..];
-            let (_, r) = instance_ood.split_at(n_vars - log_height);
-
-            debug_assert_eq!(r.len(), log_height);
-
-            let (after_challenge_trace, exposed_values, count_mle_claims, sigma_mle_claims) =
-                Self::generate_aux(gkr_instance, &gamma_pows, r);
-
-            // Send MLE claims to channel.
-            for (count_mle_claim, sigma_mle_claim) in izip!(&count_mle_claims, &sigma_mle_claims) {
-                challenger.observe_ext_element(*count_mle_claim);
-                challenger.observe_ext_element(*sigma_mle_claim);
-            }
-
-            after_challenge_trace_per_air.push(Some(after_challenge_trace));
-            exposed_values_per_air.push(Some(exposed_values));
-
-            count_mle_claims_per_instance.push(count_mle_claims);
-            sigma_mle_claims_per_instance.push(sigma_mle_claims);
-
-            i += 1;
         }
         GkrAuxData {
             after_challenge_trace_per_air,

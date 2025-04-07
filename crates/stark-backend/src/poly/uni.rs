@@ -1,11 +1,11 @@
 //! Copied from starkware-libs/stwo under Apache-2.0 license.
+use p3_field::Field;
+use serde::{Deserialize, Serialize};
+use std::ops::MulAssign;
 use std::{
     iter::Sum,
     ops::{Add, Deref, Mul, Neg, Sub},
 };
-use std::ops::MulAssign;
-use p3_field::Field;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnivariatePolynomial<F> {
@@ -15,9 +15,7 @@ pub struct UnivariatePolynomial<F> {
 impl<F: Field> UnivariatePolynomial<F> {
     /// Creates a new univariate polynomial from a vector of coefficients.
     pub fn from_coeffs(coeffs: Vec<F>) -> Self {
-        let mut polynomial = Self { coeffs };
-        polynomial.remove_trailing_zeroes();
-        polynomial
+        Self { coeffs }
     }
 
     pub fn zero() -> Self {
@@ -86,11 +84,9 @@ impl<F: Field> UnivariatePolynomial<F> {
     }
 
     fn remove_trailing_zeroes(&mut self) {
-        if let Some(non_zero_idx) = self.coeffs.iter().rposition(|&coeff| !coeff.is_zero()) {
-            self.coeffs.truncate(non_zero_idx + 1);
-        } else {
-            self.coeffs.clear();
-        }
+        self.coeffs.truncate(
+            self.coeffs.iter().rposition(|c| !c.is_zero()).map_or(0, |i| i + 1)
+        );
     }
 
     pub fn into_coeffs(self) -> Vec<F> {

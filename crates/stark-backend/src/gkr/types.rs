@@ -1,5 +1,6 @@
 use std::ops::Index;
 
+use p3_maybe_rayon::prelude::*;
 use p3_field::Field;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -176,17 +177,16 @@ impl<F: Field> Layer<F> {
     }
 
     fn next_logup_layer(numerators: MleExpr<'_, F>, denominators: &Mle<F>) -> Layer<F> {
-        let half_n = 1 << (denominators.arity() - 1);
-        let mut next_numerators = Vec::with_capacity(half_n);
-        let mut next_denominators = Vec::with_capacity(half_n);
-
-        for i in 0..half_n {
-            let a = Fraction::new(numerators[i * 2], denominators[i * 2]);
-            let b = Fraction::new(numerators[i * 2 + 1], denominators[i * 2 + 1]);
-            let res = a + b;
-            next_numerators.push(res.numerator);
-            next_denominators.push(res.denominator);
-        }
+        let (next_numerators, next_denominators): (Vec<_>, Vec<_>) = (0..denominators.len() / 2)
+            .into_par_iter()
+            .map(|i| {
+                let num_1 = numerators[i * 2];
+                let num_2 = numerators[i * 2 + 1];
+                let den_1 = denominators[i * 2];
+                let den_2 = denominators[i * 2 + 1];
+                (num_1 * den_2 + num_2 * den_1, den_1 * den_2)
+            })
+            .unzip();
 
         Layer::LogUpGeneric {
             numerators: Mle::from_vec(next_numerators),

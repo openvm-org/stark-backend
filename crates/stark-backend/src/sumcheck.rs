@@ -8,10 +8,10 @@
 
 use std::iter::zip;
 
-use p3_maybe_rayon::prelude::*;
 use itertools::Itertools;
 use p3_challenger::FieldChallenger;
 use p3_field::{ExtensionField, Field};
+use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -59,7 +59,7 @@ where
     let n_variables = polys.iter().map(O::arity).max().unwrap();
     assert_eq!(claims.len(), polys.len());
 
-    let lambda_pows = lambda.powers().take(polys.len()).collect_vec();;
+    let lambda_pows = lambda.powers().take(polys.len()).collect_vec();
 
     let mut round_polys = Vec::with_capacity(n_variables);
     let mut evaluation_point = Vec::with_capacity(n_variables);
@@ -74,7 +74,9 @@ where
     for round in 0..n_variables {
         let n_remaining_rounds = n_variables - round;
 
-        let this_round_polys: Vec<_> = polys.par_iter().zip(claims.par_iter())
+        let this_round_polys: Vec<_> = polys
+            .par_iter()
+            .zip(claims.par_iter())
             .enumerate()
             .map(|(i, (multivariate_poly, &claim))| {
                 let round_poly = if n_remaining_rounds == multivariate_poly.arity() {
@@ -113,12 +115,14 @@ where
 
         let challenge = challenger.sample_ext_element();
 
+        // TODO: Compute challenge.powers() so we can re-use.
         claims = this_round_polys
             .par_iter()
             .map(|round_poly| round_poly.evaluate(challenge))
             .collect();
 
-        polys = polys.into_par_iter()
+        polys = polys
+            .into_par_iter()
             .map(|multivariate_poly| {
                 if n_remaining_rounds != multivariate_poly.arity() {
                     multivariate_poly
