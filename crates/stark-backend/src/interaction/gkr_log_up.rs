@@ -27,6 +27,7 @@ use crate::{
     },
     rap::PermutationAirBuilderWithExposedValues,
 };
+use crate::interaction::SymbolicInteraction;
 
 pub struct GkrLogUpPhase<F, EF, Challenger> {
     // FIXME: USE THIS IN POW
@@ -107,13 +108,14 @@ where
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        constraints_per_air: &[&SymbolicConstraints<F>],
+        interactions_per_air: &[Vec<SymbolicInteraction<F>>],
         _params_per_air: &[&Self::PartialProvingKey],
         trace_view_per_air: &[PairTraceView<'_, F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<EF>)> {
-        let all_interactions = constraints_per_air
+        let all_interactions = interactions_per_air
             .iter()
-            .flat_map(|c| c.interactions.clone())
+            .cloned()
+            .flatten()
             .collect_vec();
         if all_interactions.is_empty() {
             return None;
@@ -126,7 +128,7 @@ where
 
         // Build GKR instances.
         let gkr_instances: Vec<_> =
-            Self::build_gkr_instances(trace_view_per_air, constraints_per_air, &beta_pows);
+            Self::build_gkr_instances(trace_view_per_air, interactions_per_air, &beta_pows);
 
         // Construct input layers and run GKR proof.
         let input_layers: Vec<_> = gkr_instances
@@ -144,7 +146,7 @@ where
             sigma_mle_claims_per_instance,
         } = Self::generate_aux_per_air(
             challenger,
-            constraints_per_air,
+            interactions_per_air,
             trace_view_per_air,
             alpha,
             &gkr_instances,

@@ -137,19 +137,19 @@ where
 {
     pub(super) fn build_gkr_instances(
         trace_view_per_air: &[PairTraceView<F>],
-        constraints_per_air: &[&SymbolicConstraints<F>],
+        interactions_per_air: &[Vec<SymbolicInteraction<F>>],
         beta_pows: &[EF],
     ) -> Vec<GkrLogUpInstance<EF>> {
-        constraints_per_air
+        interactions_per_air
             .par_iter()
             .zip_eq(trace_view_per_air.par_iter())
-            .filter_map(|(constraints, trace_view)| {
-                if constraints.interactions.is_empty() {
+            .filter_map(|(interactions, trace_view)| {
+                if interactions.is_empty() {
                     None
                 } else {
                     Some(GkrLogUpInstance::from_interactions(
                         trace_view,
-                        &constraints.interactions,
+                        &interactions,
                         beta_pows,
                     ))
                 }
@@ -159,7 +159,7 @@ where
 
     pub(super) fn generate_aux_per_air(
         challenger: &mut Challenger,
-        constraints_per_air: &[&SymbolicConstraints<F>],
+        interactions_per_air: &[Vec<SymbolicInteraction<F>>],
         trace_view_per_air: &[PairTraceView<F>],
         gamma: EF,
         gkr_instances: &[GkrLogUpInstance<EF>],
@@ -167,31 +167,27 @@ where
     ) -> GkrAuxData<EF> {
         let ood_point = &gkr_artifact.ood_point;
 
-        let max_interactions = constraints_per_air
+        let max_interactions = interactions_per_air
             .iter()
-            .map(|c| c.interactions.len())
+            .map(|v| v.len())
             .max()
             .unwrap();
         let gamma_pows = gamma.powers().take(2 * max_interactions).collect_vec();
 
-        let (interactions_per_air, trace_view_per_air_filtered): (Vec<_>, Vec<_>) =
-            constraints_per_air
+        let (interactions_per_air_filtered, trace_view_per_air_filtered): (Vec<_>, Vec<_>) =
+            interactions_per_air
                 .iter()
                 .zip(trace_view_per_air.iter())
-                .filter_map(|(c, view)| {
-                    if c.interactions.is_empty() {
+                .filter_map(|(interactions, view)| {
+                    if interactions.is_empty() {
                         None
                     } else {
-                        Some((&c.interactions, view))
+                        Some((interactions, view))
                     }
                 })
                 .unzip();
 
-        assert_eq!(interactions_per_air.len(), trace_view_per_air_filtered.len());
-        assert_eq!(interactions_per_air.len(), gkr_instances.len());
-        assert_eq!(interactions_per_air.len(), gkr_artifact.n_variables_by_instance.len());
-
-        let results: Vec<_> = interactions_per_air
+        let results: Vec<_> = interactions_per_air_filtered
             .par_iter()
             .zip(trace_view_per_air_filtered.par_iter())
             .zip(gkr_instances.par_iter())
@@ -218,13 +214,14 @@ where
 
         let mut results_iter = results.into_iter();
 
-        let mut after_challenge_trace_per_air = Vec::with_capacity(constraints_per_air.len());
-        let mut exposed_values_per_air = Vec::with_capacity(constraints_per_air.len());
-        let mut count_mle_claims_per_instance = Vec::with_capacity(constraints_per_air.len());
-        let mut sigma_mle_claims_per_instance = Vec::with_capacity(constraints_per_air.len());
+        let n_airs = interactions_per_air.len();
+        let mut after_challenge_trace_per_air = Vec::with_capacity(n_airs);
+        let mut exposed_values_per_air = Vec::with_capacity(n_airs);
+        let mut count_mle_claims_per_instance = Vec::with_capacity(n_airs);
+        let mut sigma_mle_claims_per_instance = Vec::with_capacity(n_airs);
 
-        for c in constraints_per_air.iter() {
-            if c.interactions.is_empty() {
+        for interactions in interactions_per_air.iter() {
+            if interactions.is_empty() {
                 after_challenge_trace_per_air.push(None);
                 exposed_values_per_air.push(None);
             } else {

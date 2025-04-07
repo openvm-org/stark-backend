@@ -298,7 +298,7 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        constraints_per_air: &[&SymbolicConstraints<F>],
+        interactions_per_air: &[Vec<SymbolicInteraction<F>>],
         params_per_air: &[&Self::PartialProvingKey],
         trace_view_per_air: &[PairTraceView<F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)>;

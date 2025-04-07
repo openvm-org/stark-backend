@@ -86,6 +86,7 @@ where
     }
 
     let gkr_folder = is_gkr.then(|| {
+        // TODO[zach]: Compute this once per height.
         let mut cyclic_sels = cyclic_selectors_on_coset(trace_domain, quotient_domain);
         for _ in quotient_size..PackedVal::<SC>::WIDTH {
             for is_pow2k_sel in cyclic_sels.iter_mut() {

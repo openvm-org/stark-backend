@@ -97,13 +97,13 @@ where
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
-        constraints_per_air: &[&SymbolicConstraints<F>],
+        interactions_per_air: &[Vec<SymbolicInteraction<F>>],
         params_per_air: &[&FriLogUpProvingKey],
         trace_view_per_air: &[PairTraceView<F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)> {
-        let has_any_interactions = constraints_per_air
+        let has_any_interactions = interactions_per_air
             .iter()
-            .any(|constraints| !constraints.interactions.is_empty());
+            .any(|interaction| !interaction.is_empty());
 
         if !has_any_interactions {
             return None;
@@ -117,7 +117,7 @@ where
         let after_challenge_trace_per_air = metrics_span("generate_perm_trace_time_ms", || {
             Self::generate_after_challenge_traces_per_air(
                 &challenges,
-                constraints_per_air,
+                interactions_per_air,
                 params_per_air,
                 trace_view_per_air,
             )
@@ -241,14 +241,14 @@ where
     /// Returns a list of optional tuples of (permutation trace,cumulative sum) for each AIR.
     fn generate_after_challenge_traces_per_air(
         challenges: &[Challenge; STARK_LU_NUM_CHALLENGES],
-        constraints_per_air: &[&SymbolicConstraints<F>],
+        interactions_per_air: &[Vec<SymbolicInteraction<F>>],
         params_per_air: &[&FriLogUpProvingKey],
         trace_view_per_air: &[PairTraceView<F>],
     ) -> Vec<Option<RowMajorMatrix<Challenge>>> {
-        parizip!(constraints_per_air, trace_view_per_air, params_per_air)
-            .map(|(constraints, trace_view, params)| {
+        parizip!(interactions_per_air, trace_view_per_air, params_per_air)
+            .map(|(interactions, trace_view, params)| {
                 Self::generate_after_challenge_trace(
-                    &constraints.interactions,
+                    &interactions,
                     trace_view,
                     challenges,
                     &params.interaction_partitions,

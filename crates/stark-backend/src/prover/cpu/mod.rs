@@ -138,12 +138,12 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         let num_airs = mpk.per_air.len();
         assert_eq!(num_airs, trace_views.len());
 
-        let (constraints_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = mpk
+        let (interactions_per_air, rap_pk_per_air): (Vec<_>, Vec<_>) = mpk
             .per_air
             .iter()
             .map(|pk| {
                 (
-                    SymbolicConstraints::from(&pk.vk.symbolic_constraints),
+                    SymbolicConstraints::from(&pk.vk.symbolic_constraints).interactions,
                     &pk.rap_partial_pk,
                 )
             })
@@ -163,7 +163,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             .rap_phase_seq()
             .partially_prove(
                 challenger,
-                &constraints_per_air.iter().collect_vec(),
+                &interactions_per_air,
                 &rap_pk_per_air,
                 &trace_views,
             )
