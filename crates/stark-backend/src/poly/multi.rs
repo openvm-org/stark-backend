@@ -16,7 +16,7 @@ pub trait MultivariatePolyOracle<F>: Send + Sync {
     fn arity(&self) -> usize;
 
     /// Returns the sum of `g(x_1, x_2, ..., x_n)` over all `(x_2, ..., x_n)` in `{0, 1}^(n-1)` as a polynomial in `x_1`.
-    fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F>;
+    fn partial_hypercube_sum(&self, claim: F) -> UnivariatePolynomial<F>;
 
     /// Returns the multivariate polynomial `h(x_2, ..., x_n) = g(alpha, x_2, ..., x_n)`.
     fn fix_first_in_place(&mut self, alpha: F);
@@ -75,7 +75,7 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
         self.evals.len().ilog2() as usize
     }
 
-    fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F> {
+    fn partial_hypercube_sum(&self, claim: F) -> UnivariatePolynomial<F> {
         let mut y0 = F::ZERO;
         for i in 0..self.len() / 2 {
             y0 += self[i];
@@ -232,7 +232,7 @@ mod test {
         // (1 - x_1)(1 - x_2) + 2 (1 - x_1) x_2 + 3 x_1 (1 - x_2) + 4 x_1 x_2
         let mle = Mle::from_vec(evals);
         // (1 - x_1) + 2 (1 - x_1) + 3 x_1 + 4 x_1
-        let poly = mle.marginalize_first(sum);
+        let poly = mle.partial_hypercube_sum(sum);
 
         assert_eq!(
             poly.evaluate(BabyBear::ZERO),

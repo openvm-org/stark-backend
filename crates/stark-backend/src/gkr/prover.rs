@@ -104,25 +104,22 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
         self.input_layer.n_variables() - 1
     }
 
-    fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F> {
+    fn partial_hypercube_sum(&self, claim: F) -> UnivariatePolynomial<F> {
         let n_variables = self.arity();
         assert_ne!(n_variables, 0);
         let n_terms = 1 << (n_variables - 1);
-        // Vector used to generate evaluations of `eq(x, y)` for `x` in the boolean hypercube.
-        let y = &self.eq_evals.y;
-        let lambda = self.lambda;
 
         let (mut eval_at_0, mut eval_at_2) = match &self.input_layer {
             Layer::GrandProduct(col) => eval_grand_product_sum(self.eq_evals, col, n_terms),
             Layer::LogUpGeneric {
                 numerators,
                 denominators,
-            } => eval_logup_sum(self.eq_evals, numerators, denominators, n_terms, lambda),
+            } => eval_logup_sum(self.eq_evals, numerators, denominators, n_terms, self.lambda),
         };
 
         eval_at_0 *= self.eq_fixed_var_correction;
         eval_at_2 *= self.eq_fixed_var_correction;
-        correct_sum_as_poly_in_first_variable(eval_at_0, eval_at_2, claim, y, n_variables)
+        correct_sum_as_poly_in_first_variable(eval_at_0, eval_at_2, claim, self.eq_evals.y, n_variables)
     }
 
     fn fix_first_in_place(&mut self, alpha: F) {
@@ -440,12 +437,13 @@ pub fn correct_sum_as_poly_in_first_variable<F: Field>(
     //      = 1 - y[n - k] - t(1 - 2 * y[n - k])
     // => t = (1 - y[n - k]) / (1 - 2 * y[n - k])
     //      = b
-    let b_const = (F::ONE - y[n - k]) / (F::ONE - y[n - k].double());
+    let one_minus_y = F::ONE - y[n - k];
+    let b_const = one_minus_y / (F::ONE - y[n - k].double());
 
     // We get that `r(t) = f(t) * eq(t, y[n - k]) * a`.
-    let r_at_0 = f_at_0 * (F::ONE - y[n - k]) * a_const;
+    let r_at_0 = f_at_0 * one_minus_y * a_const;
     let r_at_1 = claim - r_at_0;
-    let r_at_2 = f_at_2 * (F::from_canonical_u8(3) * y[n - k] - F::ONE) * a_const;
+    let r_at_2 = f_at_2 * (y[n - k].double() - one_minus_y) * a_const;
 
     // Interpolate.
     UnivariatePolynomial::from_points(&[

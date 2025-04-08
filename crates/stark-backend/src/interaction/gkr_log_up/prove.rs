@@ -174,7 +174,7 @@ where
             .unwrap();
         let gamma_pows = gamma.powers().take(2 * max_interactions).collect_vec();
 
-        let (interactions_per_air_filtered, trace_view_per_air_filtered): (Vec<_>, Vec<_>) =
+        let trace_view_per_air_filtered =
             interactions_per_air
                 .iter()
                 .zip(trace_view_per_air.iter())
@@ -182,17 +182,14 @@ where
                     if interactions.is_empty() {
                         None
                     } else {
-                        Some((interactions, view))
+                        Some(view)
                     }
-                })
-                .unzip();
+                }).collect_vec();
 
-        let results: Vec<_> = interactions_per_air_filtered
-            .par_iter()
-            .zip(trace_view_per_air_filtered.par_iter())
+        let results: Vec<_> = trace_view_per_air_filtered.par_iter()
             .zip(gkr_instances.par_iter())
             .zip(gkr_artifact.n_variables_by_instance.par_iter())
-            .map(|(((interactions, trace_view), gkr_instance), &n_vars)| {
+            .map(|((trace_view, gkr_instance), &n_vars)| {
                 let height = trace_view.partitioned_main[0].height();
                 let log_height = log2_strict_usize(height);
 

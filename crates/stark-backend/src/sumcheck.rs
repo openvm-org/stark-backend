@@ -80,7 +80,7 @@ where
             .enumerate()
             .map(|(i, (multivariate_poly, &claim))| {
                 let round_poly = if n_remaining_rounds == multivariate_poly.arity() {
-                    multivariate_poly.marginalize_first(claim)
+                    multivariate_poly.partial_hypercube_sum(claim)
                 } else {
                     claim.halve().into()
                 };
