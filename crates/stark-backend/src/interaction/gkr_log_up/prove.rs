@@ -1,6 +1,6 @@
 use std::iter;
 
-use itertools::{izip, Itertools};
+use itertools::Itertools;
 use p3_challenger::FieldChallenger;
 use p3_field::{ExtensionField, Field};
 use p3_matrix::{
@@ -11,10 +11,7 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 
 use crate::{
-    air_builders::symbolic::{
-        symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
-        SymbolicConstraints,
-    },
+    air_builders::symbolic::symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
     gkr::{GkrArtifact, Layer, Layer::LogUpGeneric},
     interaction::{
         gkr_log_up::{num_interaction_dimensions, GkrAuxData, GkrLogUpPhase},
@@ -91,7 +88,9 @@ impl<EF: Field> GkrLogUpInstance<EF> {
                         .iter()
                         .chain(iter::once(&SymbolicExpression::Constant(b)))
                         .zip(beta_pows)
-                        .fold(EF::ZERO, |acc, (expr, &beta)| acc + beta * evaluator.eval_expr(expr));
+                        .fold(EF::ZERO, |acc, (expr, &beta)| {
+                            acc + beta * evaluator.eval_expr(expr)
+                        });
 
                     sigma_row[col] = sigma;
                 }
@@ -167,26 +166,23 @@ where
     ) -> GkrAuxData<EF> {
         let ood_point = &gkr_artifact.ood_point;
 
-        let max_interactions = interactions_per_air
-            .iter()
-            .map(|v| v.len())
-            .max()
-            .unwrap();
+        let max_interactions = interactions_per_air.iter().map(|v| v.len()).max().unwrap();
         let gamma_pows = gamma.powers().take(2 * max_interactions).collect_vec();
 
-        let trace_view_per_air_filtered =
-            interactions_per_air
-                .iter()
-                .zip(trace_view_per_air.iter())
-                .filter_map(|(interactions, view)| {
-                    if interactions.is_empty() {
-                        None
-                    } else {
-                        Some(view)
-                    }
-                }).collect_vec();
+        let trace_view_per_air_filtered = interactions_per_air
+            .iter()
+            .zip(trace_view_per_air.iter())
+            .filter_map(|(interactions, view)| {
+                if interactions.is_empty() {
+                    None
+                } else {
+                    Some(view)
+                }
+            })
+            .collect_vec();
 
-        let results: Vec<_> = trace_view_per_air_filtered.par_iter()
+        let results: Vec<_> = trace_view_per_air_filtered
+            .par_iter()
             .zip(gkr_instances.par_iter())
             .zip(gkr_artifact.n_variables_by_instance.par_iter())
             .map(|((trace_view, gkr_instance), &n_vars)| {
@@ -222,8 +218,7 @@ where
                 after_challenge_trace_per_air.push(None);
                 exposed_values_per_air.push(None);
             } else {
-                let
-                    (after_trace, exposed, count_mle, sigma_mle) = results_iter.next().unwrap();
+                let (after_trace, exposed, count_mle, sigma_mle) = results_iter.next().unwrap();
 
                 for (count_mle_claim, sigma_mle_claim) in count_mle.iter().zip(sigma_mle.iter()) {
                     challenger.observe_ext_element(*count_mle_claim);

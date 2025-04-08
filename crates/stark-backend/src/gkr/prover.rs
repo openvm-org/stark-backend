@@ -54,11 +54,13 @@ impl<'a, F: Field> FixedFirstHypercubeEqEvals<'a, F> {
 
         for &y_i in y.iter().rev() {
             let (left, right) = evals.split_at_mut(curr_len);
-            left.par_iter_mut().zip(right.par_iter_mut()).for_each(|(l, r)| {
-                let tmp = *l * y_i;
-                *r = tmp;
-                *l -= tmp;
-            });
+            left.par_iter_mut()
+                .zip(right.par_iter_mut())
+                .for_each(|(l, r)| {
+                    let tmp = *l * y_i;
+                    *r = tmp;
+                    *l -= tmp;
+                });
             curr_len *= 2;
         }
         evals
@@ -91,7 +93,7 @@ impl<F> Deref for FixedFirstHypercubeEqEvals<'_, F> {
 ///
 /// P(x) = eq(x, y) * (numer(x) + lambda * denom(x))
 /// ```
-struct GkrMultivariatePolyOracle<'a, F: Clone> {
+struct GkrMultivariatePolyOracle<'a, F> {
     pub eq_evals: &'a FixedFirstHypercubeEqEvals<'a, F>,
     pub input_layer: Layer<F>,
     pub eq_fixed_var_correction: F,
@@ -114,12 +116,24 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
             Layer::LogUpGeneric {
                 numerators,
                 denominators,
-            } => eval_logup_sum(self.eq_evals, numerators, denominators, n_terms, self.lambda),
+            } => eval_logup_sum(
+                self.eq_evals,
+                numerators,
+                denominators,
+                n_terms,
+                self.lambda,
+            ),
         };
 
         eval_at_0 *= self.eq_fixed_var_correction;
         eval_at_2 *= self.eq_fixed_var_correction;
-        correct_sum_as_poly_in_first_variable(eval_at_0, eval_at_2, claim, self.eq_evals.y, n_variables)
+        correct_sum_as_poly_in_first_variable(
+            eval_at_0,
+            eval_at_2,
+            claim,
+            self.eq_evals.y,
+            n_variables,
+        )
     }
 
     fn fix_first_in_place(&mut self, alpha: F) {
@@ -197,14 +211,8 @@ fn eval_logup_sum<F: Field>(
             let (n2_0, d2_0) = (n1_0.double() - n0_0, d1_0.double() - d0_0);
             let (n2_1, d2_1) = (n1_1.double() - n0_1, d1_1.double() - d0_1);
 
-            let (num_t0, den_t0) = (
-                n0_0 * d0_1 + n0_1 * d0_0,
-                d0_0 * d0_1,
-            );
-            let (num_t2, den_t2) = (
-                n2_0 * d2_1 + n2_1 * d2_0,
-                d2_0 * d2_1,
-            );
+            let (num_t0, den_t0) = (n0_0 * d0_1 + n0_1 * d0_0, d0_0 * d0_1);
+            let (num_t2, den_t2) = (n2_0 * d2_1 + n2_1 * d2_0, d2_0 * d2_1);
 
             let eq = eq_evals[i];
             let eval_t0 = eq * (num_t0 + lambda * den_t0);
@@ -281,23 +289,25 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
         .collect();
 
     let mut output_claims_by_instance = vec![None; n_instances];
-    let mut layer_masks_by_instance = (0..n_instances).map(|_| Vec::new()).collect_vec();
+    let mut layer_masks_by_instance = vec![vec![]; n_instances];
     let mut sumcheck_proofs = Vec::new();
 
     let mut ood_point = Vec::new();
     let mut claims_to_verify_by_instance = vec![None; n_instances];
 
-    for layer in 0..n_layers {
-        let n_remaining_layers = n_layers - layer;
+    let mut output_instances_by_layer: Vec<Vec<usize>> = vec![Vec::new(); n_layers];
+    for (instance, &instance_n_layers) in n_layers_by_instance.iter().enumerate() {
+        let output_layer = n_layers - instance_n_layers;
+        output_instances_by_layer[output_layer].push(instance);
+    }
 
+    for layer in 0..n_layers {
         // Check all the instances for output layers.
-        for (instance, layers) in layers_by_instance.iter_mut().enumerate() {
-            if n_layers_by_instance[instance] == n_remaining_layers {
-                let output_layer = layers.next().unwrap();
-                let output_layer_values = output_layer.try_into_output_layer_values().unwrap();
-                claims_to_verify_by_instance[instance] = Some(output_layer_values.clone());
-                output_claims_by_instance[instance] = Some(output_layer_values);
-            }
+        for &instance in &output_instances_by_layer[layer] {
+            let output_layer = layers_by_instance[instance].next().unwrap();
+            let output_layer_values = output_layer.try_into_output_layer_values().unwrap();
+            claims_to_verify_by_instance[instance] = Some(output_layer_values.clone());
+            output_claims_by_instance[instance] = Some(output_layer_values);
         }
 
         // Seed the channel with layer claims.

@@ -88,13 +88,13 @@ where
                 let eval_at_0 = round_poly.evaluate_at_zero();
                 let eval_at_1 = round_poly.evaluate_at_one();
 
-                assert_eq!(
+                debug_assert_eq!(
                     eval_at_0 + eval_at_1,
                     claim,
                     "Round {round}, poly {i}: eval(0) + eval(1) != claim ({} != {claim})",
                     eval_at_0 + eval_at_1,
                 );
-                assert!(
+                debug_assert!(
                     round_poly.degree() <= MAX_DEGREE,
                     "Round {round}, poly {i}: degree {} > max {MAX_DEGREE}",
                     round_poly.degree(),
@@ -115,17 +115,16 @@ where
 
         let challenge = challenger.sample_ext_element();
 
-        claims.par_iter_mut().zip(this_round_polys
-            .par_iter())
+        claims
+            .par_iter_mut()
+            .zip(this_round_polys.par_iter())
             .for_each(|(claim, round_poly)| *claim = round_poly.evaluate(challenge));
 
-        polys
-            .par_iter_mut()
-            .for_each(|multivariate_poly| {
-                if n_remaining_rounds == multivariate_poly.arity() {
-                    multivariate_poly.fix_first_in_place(challenge)
-                }
-            });
+        polys.par_iter_mut().for_each(|multivariate_poly| {
+            if n_remaining_rounds == multivariate_poly.arity() {
+                multivariate_poly.fix_first_in_place(challenge)
+            }
+        });
 
         round_polys.push(round_poly);
         evaluation_point.push(challenge);

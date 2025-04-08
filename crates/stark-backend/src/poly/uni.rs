@@ -1,7 +1,6 @@
 //! Copied from starkware-libs/stwo under Apache-2.0 license.
 use p3_field::Field;
 use serde::{Deserialize, Serialize};
-use std::ops::MulAssign;
 use std::{
     iter::Sum,
     ops::{Add, Deref, Mul, Neg, Sub},
@@ -85,7 +84,10 @@ impl<F: Field> UnivariatePolynomial<F> {
 
     fn remove_trailing_zeroes(&mut self) {
         self.coeffs.truncate(
-            self.coeffs.iter().rposition(|c| !c.is_zero()).map_or(0, |i| i + 1)
+            self.coeffs
+                .iter()
+                .rposition(|c| !c.is_zero())
+                .map_or(0, |i| i + 1),
         );
     }
 

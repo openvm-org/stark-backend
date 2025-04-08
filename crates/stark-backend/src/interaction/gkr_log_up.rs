@@ -17,6 +17,7 @@ use rayon::iter::IntoParallelRefIterator;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::interaction::SymbolicInteraction;
 use crate::{
     air_builders::symbolic::SymbolicConstraints,
     gkr,
@@ -27,7 +28,6 @@ use crate::{
     },
     rap::PermutationAirBuilderWithExposedValues,
 };
-use crate::interaction::SymbolicInteraction;
 
 pub struct GkrLogUpPhase<F, EF, Challenger> {
     // FIXME: USE THIS IN POW
@@ -112,11 +112,7 @@ where
         _params_per_air: &[&Self::PartialProvingKey],
         trace_view_per_air: &[PairTraceView<'_, F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<EF>)> {
-        let all_interactions = interactions_per_air
-            .iter()
-            .cloned()
-            .flatten()
-            .collect_vec();
+        let all_interactions = interactions_per_air.iter().cloned().flatten().collect_vec();
         if all_interactions.is_empty() {
             return None;
         }

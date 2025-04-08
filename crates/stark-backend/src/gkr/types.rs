@@ -1,15 +1,10 @@
-use std::ops::Index;
-
-use p3_maybe_rayon::prelude::*;
 use p3_field::Field;
+use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    poly::{
-        multi::{fold_mle_evals, Mle, MultivariatePolyOracle},
-        uni::Fraction,
-    },
+    poly::multi::{fold_mle_evals, Mle, MultivariatePolyOracle},
     sumcheck::{SumcheckError, SumcheckProof},
 };
 
@@ -207,10 +202,10 @@ impl<F: Field> Layer<F> {
             Self::LogUpGeneric {
                 numerators,
                 denominators,
-            } =>  {
+            } => {
                 numerators.fix_first_in_place(x0);
                 denominators.fix_first_in_place(x0);
-            },
+            }
         }
     }
 }

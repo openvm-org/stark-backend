@@ -89,7 +89,6 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
         UnivariatePolynomial::from_coeffs(vec![y0, slope])
     }
 
-
     fn fix_first_in_place(&mut self, alpha: F) {
         let midpoint = self.len() / 2;
         let (lhs_evals, rhs_evals) = self.split_at_mut(midpoint);
@@ -258,14 +257,8 @@ mod test {
         // -(1 - x_2) - 2 x_2 + 6 (1 - x_2) + 8 x_2 = x_2 + 5
         mle.fix_first_in_place(alpha);
 
-        assert_eq!(
-            mle.eval(&[BabyBear::ZERO]),
-            BabyBear::from_canonical_u32(5)
-        );
-        assert_eq!(
-            mle.eval(&[BabyBear::ONE]),
-            BabyBear::from_canonical_u32(6)
-        );
+        assert_eq!(mle.eval(&[BabyBear::ZERO]), BabyBear::from_canonical_u32(5));
+        assert_eq!(mle.eval(&[BabyBear::ONE]), BabyBear::from_canonical_u32(6));
     }
 
     #[test]
