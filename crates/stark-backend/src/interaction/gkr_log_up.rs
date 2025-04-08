@@ -28,6 +28,7 @@ use crate::{
     },
     rap::PermutationAirBuilderWithExposedValues,
 };
+use crate::utils::metrics_span;
 
 pub struct GkrLogUpPhase<F, EF, Challenger> {
     // FIXME: USE THIS IN POW
@@ -132,7 +133,9 @@ where
             .map(|gkr_instance| gkr_instance.build_gkr_input_layer(alpha))
             .collect();
 
-        let (gkr_proof, gkr_artifact) = gkr::prove_batch(challenger, input_layers);
+        let (gkr_proof, gkr_artifact) = metrics_span("gkr_prove_batch_ms", || {
+            gkr::prove_batch(challenger, input_layers)
+        });
 
         // Generate after challenge trace, exposed values, and MLE claims for each instance.
         let GkrAuxData {
@@ -140,14 +143,16 @@ where
             exposed_values_per_air,
             count_mle_claims_per_instance,
             sigma_mle_claims_per_instance,
-        } = Self::generate_aux_per_air(
-            challenger,
-            interactions_per_air,
-            trace_view_per_air,
-            alpha,
-            &gkr_instances,
-            &gkr_artifact,
-        );
+        } = metrics_span("generate_perm_trace_time_ms", || {
+            Self::generate_aux_per_air(
+                challenger,
+                interactions_per_air,
+                trace_view_per_air,
+                alpha,
+                &gkr_instances,
+                &gkr_artifact,
+            )
+        });
 
         let mut challenges = vec![beta, alpha];
         challenges.extend_from_slice(&gkr_artifact.ood_point);

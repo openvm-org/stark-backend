@@ -11,15 +11,11 @@ use p3_field::{ExtensionField, Field};
 use p3_maybe_rayon::prelude::*;
 use thiserror::Error;
 
-use crate::{
-    gkr::types::{GkrArtifact, GkrBatchProof, GkrMask, Layer},
-    poly::{
-        multi::{hypercube_eq, Mle, MultivariatePolyOracle},
-        uni::{random_linear_combination, UnivariatePolynomial},
-    },
-    sumcheck,
-    sumcheck::SumcheckArtifacts,
-};
+use crate::{gkr::types::{GkrArtifact, GkrBatchProof, GkrMask, Layer}, poly::{
+    multi::{hypercube_eq, Mle, MultivariatePolyOracle},
+    uni::{random_linear_combination, UnivariatePolynomial},
+}, sumcheck, sumcheck::SumcheckArtifacts};
+use crate::utils::metrics_span;
 
 /// For a given `y`, stores evaluations of [hypercube_eq](x, y) on all 2^{n-1} boolean hypercube
 /// points of the form `x = (0, x_2, ..., x_n)`.
@@ -348,12 +344,14 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
                 constant_poly_oracles,
                 ..
             },
-        ) = sumcheck::prove_batch(
-            sumcheck_claims,
-            sumcheck_oracles,
-            sumcheck_alpha,
-            challenger,
-        );
+        ) = metrics_span("sumcheck_prove_batch_ms", || {
+            sumcheck::prove_batch(
+                sumcheck_claims,
+                sumcheck_oracles,
+                sumcheck_alpha,
+                challenger,
+            )
+        });
 
         sumcheck_proofs.push(sumcheck_proof);
 
