@@ -13,11 +13,11 @@ use p3_field::{
 use p3_matrix::{dense::DenseMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::{log2_ceil_usize, log2_strict_usize};
-use rayon::iter::IntoParallelRefIterator;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::interaction::SymbolicInteraction;
+use crate::utils::metrics_span;
 use crate::{
     air_builders::symbolic::SymbolicConstraints,
     gkr,
@@ -28,7 +28,6 @@ use crate::{
     },
     rap::PermutationAirBuilderWithExposedValues,
 };
-use crate::utils::metrics_span;
 
 pub struct GkrLogUpPhase<F, EF, Challenger> {
     // FIXME: USE THIS IN POW
@@ -113,7 +112,7 @@ where
         _params_per_air: &[&Self::PartialProvingKey],
         trace_view_per_air: &[PairTraceView<'_, F>],
     ) -> Option<(Self::PartialProof, RapPhaseProverData<EF>)> {
-        let all_interactions = interactions_per_air.iter().cloned().flatten().collect_vec();
+        let all_interactions = interactions_per_air.iter().flatten().collect_vec();
         if all_interactions.is_empty() {
             return None;
         }
@@ -143,16 +142,14 @@ where
             exposed_values_per_air,
             count_mle_claims_per_instance,
             sigma_mle_claims_per_instance,
-        } = metrics_span("generate_perm_trace_time_ms", || {
-            Self::generate_aux_per_air(
-                challenger,
-                interactions_per_air,
-                trace_view_per_air,
-                alpha,
-                &gkr_instances,
-                &gkr_artifact,
-            )
-        });
+        } = Self::generate_aux_per_air(
+            challenger,
+            interactions_per_air,
+            trace_view_per_air,
+            alpha,
+            &gkr_instances,
+            &gkr_artifact,
+        );
 
         let mut challenges = vec![beta, alpha];
         challenges.extend_from_slice(&gkr_artifact.ood_point);

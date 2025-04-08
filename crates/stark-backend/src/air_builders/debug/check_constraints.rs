@@ -100,6 +100,7 @@ pub fn check_constraints<R, SC>(
     });
 }
 
+#[allow(dead_code)]
 fn check_gkr_log_up_adapter_constraints_for_row<SC: StarkGenericConfig>(
     after_challenge: &[RowMajorMatrixView<SC::Challenge>],
     challenges: &[Vec<SC::Challenge>],

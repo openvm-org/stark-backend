@@ -59,6 +59,23 @@ pub fn metrics_span<R, F: FnOnce() -> R>(name: impl Into<Cow<'static, str>>, f: 
     }
 }
 
+/// A span that will run the given closure `f`,
+/// and emit a metric with the given `name` using [`gauge`](metrics::gauge)
+/// when the feature `"bench-metrics"` is enabled.
+#[allow(unused_variables)]
+pub fn metrics_span_increment<R, F: FnOnce() -> R>(name: impl Into<Cow<'static, str>>, f: F) -> R {
+    cfg_if! {
+        if #[cfg(feature = "bench-metrics")] {
+            let start = std::time::Instant::now();
+            let res = f();
+            metrics::gauge!(name.into()).increment(start.elapsed().as_millis() as f64);
+            res
+        } else {
+            f()
+        }
+    }
+}
+
 #[macro_export]
 #[cfg(feature = "parallel")]
 macro_rules! parizip {

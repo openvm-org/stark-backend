@@ -248,7 +248,7 @@ where
         parizip!(interactions_per_air, trace_view_per_air, params_per_air)
             .map(|(interactions, trace_view, params)| {
                 Self::generate_after_challenge_trace(
-                    &interactions,
+                    interactions,
                     trace_view,
                     challenges,
                     &params.interaction_partitions,

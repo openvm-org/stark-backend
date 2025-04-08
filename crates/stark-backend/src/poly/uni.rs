@@ -32,7 +32,7 @@ impl<F: Field> UnivariatePolynomial<F> {
     }
 
     pub fn evaluate_at_zero(&self) -> F {
-        self.coeffs.get(0).copied().unwrap_or(F::ZERO)
+        *self.coeffs.first().unwrap_or(&F::ZERO)
     }
 
     pub fn evaluate_at_one(&self) -> F {

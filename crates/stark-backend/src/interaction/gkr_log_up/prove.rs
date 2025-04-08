@@ -12,13 +12,18 @@ use p3_util::log2_strict_usize;
 
 use crate::{
     air_builders::symbolic::symbolic_expression::{SymbolicEvaluator, SymbolicExpression},
-    gkr::{GkrArtifact, Layer, Layer::LogUpGeneric},
+    gkr::{
+        GkrArtifact,
+        Layer::{self, LogUpGeneric},
+    },
     interaction::{
         gkr_log_up::{num_interaction_dimensions, GkrAuxData, GkrLogUpPhase},
         trace::Evaluator,
         PairTraceView, SymbolicInteraction,
     },
+    parizip,
     poly::multi::{hypercube_eq_over_y, Mle},
+    utils::metrics_span_increment,
 };
 
 /// A struct that holds the interaction-related data for a single GKR instance:
@@ -148,7 +153,7 @@ where
                 } else {
                     Some(GkrLogUpInstance::from_interactions(
                         trace_view,
-                        &interactions,
+                        interactions,
                         beta_pows,
                     ))
                 }
@@ -181,29 +186,30 @@ where
             })
             .collect_vec();
 
-        let results: Vec<_> = trace_view_per_air_filtered
-            .par_iter()
-            .zip(gkr_instances.par_iter())
-            .zip(gkr_artifact.n_variables_by_instance.par_iter())
-            .map(|((trace_view, gkr_instance), &n_vars)| {
-                let height = trace_view.partitioned_main[0].height();
-                let log_height = log2_strict_usize(height);
+        let results: Vec<_> = parizip!(
+            trace_view_per_air_filtered,
+            gkr_instances,
+            &gkr_artifact.n_variables_by_instance
+        )
+        .map(|(trace_view, gkr_instance, &n_vars)| {
+            let height = trace_view.partitioned_main[0].height();
+            let log_height = log2_strict_usize(height);
 
-                let instance_ood = &ood_point[ood_point.len() - n_vars..];
-                let (_, r) = instance_ood.split_at(n_vars - log_height);
-                debug_assert_eq!(r.len(), log_height);
+            let instance_ood = &ood_point[ood_point.len() - n_vars..];
+            let (_, r) = instance_ood.split_at(n_vars - log_height);
+            debug_assert_eq!(r.len(), log_height);
 
-                let (after_challenge_trace, exposed_values, count_mle_claims, sigma_mle_claims) =
-                    Self::generate_aux(gkr_instance, &gamma_pows, r);
+            let (after_challenge_trace, exposed_values, count_mle_claims, sigma_mle_claims) =
+                Self::generate_aux(gkr_instance, &gamma_pows, r);
 
-                (
-                    after_challenge_trace,
-                    exposed_values,
-                    count_mle_claims,
-                    sigma_mle_claims,
-                )
-            })
-            .collect();
+            (
+                after_challenge_trace,
+                exposed_values,
+                count_mle_claims,
+                sigma_mle_claims,
+            )
+        })
+        .collect();
 
         let mut results_iter = results.into_iter();
 
@@ -257,32 +263,38 @@ where
             .map(|row| Mle::eval_slice(row, r))
             .collect();
 
-        let s_at_rows: Vec<EF> = gkr_instance
-            .counts
-            .par_row_slices()
-            .zip(gkr_instance.sigmas.par_row_slices())
-            .map(|(count_row, sigma_row)| {
-                itertools::interleave(count_row, sigma_row)
-                    .zip(gamma_pows)
-                    .fold(EF::ZERO, |acc, (&val, &gamma_pow)| acc + gamma_pow * val)
-            })
-            .collect();
+        let (after_challenge_trace, exposed_values) =
+            metrics_span_increment("generate_perm_trace_time_ms", || {
+                let s_at_rows: Vec<EF> = gkr_instance
+                    .counts
+                    .par_row_slices()
+                    .zip(gkr_instance.sigmas.par_row_slices())
+                    .map(|(count_row, sigma_row)| {
+                        itertools::interleave(count_row, sigma_row)
+                            .zip(gamma_pows)
+                            .fold(EF::ZERO, |acc, (&val, &gamma_pow)| acc + gamma_pow * val)
+                    })
+                    .collect();
 
-        let eqs_at_r = hypercube_eq_over_y(r);
+                // TODO: Precompute these per height.
+                let eqs_at_r = hypercube_eq_over_y(r);
 
-        let mut partial_sum = EF::ZERO;
-        let mut after_challenge_trace_data = Vec::with_capacity(eqs_at_r.len() * 3);
-        for (eq_at_r, s_at_row) in eqs_at_r.iter().zip(s_at_rows.iter()) {
-            after_challenge_trace_data.push(*eq_at_r);
-            after_challenge_trace_data.push(*s_at_row);
-            after_challenge_trace_data.push(partial_sum);
+                let mut partial_sum = EF::ZERO;
+                let mut after_challenge_trace_data = Vec::with_capacity(eqs_at_r.len() * 3);
+                for (eq_at_r, s_at_row) in eqs_at_r.iter().zip(s_at_rows.iter()) {
+                    after_challenge_trace_data.push(*eq_at_r);
+                    after_challenge_trace_data.push(*s_at_row);
+                    after_challenge_trace_data.push(partial_sum);
 
-            partial_sum += *eq_at_r * *s_at_row;
-        }
-        let after_challenge_trace = RowMajorMatrix::new(after_challenge_trace_data, 3);
+                    partial_sum += *eq_at_r * *s_at_row;
+                }
+                let after_challenge_trace = RowMajorMatrix::new(after_challenge_trace_data, 3);
+                (after_challenge_trace, vec![partial_sum])
+            });
+
         (
             after_challenge_trace,
-            vec![partial_sum],
+            exposed_values,
             count_mle_claims,
             sigma_mle_claims,
         )

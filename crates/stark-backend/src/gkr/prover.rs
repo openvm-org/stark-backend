@@ -11,11 +11,16 @@ use p3_field::{ExtensionField, Field};
 use p3_maybe_rayon::prelude::*;
 use thiserror::Error;
 
-use crate::{gkr::types::{GkrArtifact, GkrBatchProof, GkrMask, Layer}, poly::{
-    multi::{hypercube_eq, Mle, MultivariatePolyOracle},
-    uni::{random_linear_combination, UnivariatePolynomial},
-}, sumcheck, sumcheck::SumcheckArtifacts};
-use crate::utils::metrics_span;
+use crate::utils::{metrics_span, metrics_span_increment};
+use crate::{
+    gkr::types::{GkrArtifact, GkrBatchProof, GkrMask, Layer},
+    poly::{
+        multi::{Mle, MultivariatePolyOracle},
+        uni::{random_linear_combination, UnivariatePolynomial},
+    },
+    sumcheck,
+    sumcheck::SumcheckArtifacts,
+};
 
 /// For a given `y`, stores evaluations of [hypercube_eq](x, y) on all 2^{n-1} boolean hypercube
 /// points of the form `x = (0, x_2, ..., x_n)`.
@@ -279,10 +284,12 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
     let n_layers = *n_layers_by_instance.iter().max().unwrap();
 
     // Evaluate all instance circuits and collect the layer values.
-    let mut layers_by_instance: Vec<_> = input_layer_by_instance
-        .into_par_iter()
-        .map(|input_layer| gen_layers(input_layer).into_iter().rev())
-        .collect();
+    let mut layers_by_instance: Vec<_> = metrics_span("gkr_gen_layers_ms", || {
+        input_layer_by_instance
+            .into_par_iter()
+            .map(|input_layer| gen_layers(input_layer).into_iter().rev())
+            .collect()
+    });
 
     let mut output_claims_by_instance = vec![None; n_instances];
     let mut layer_masks_by_instance = vec![vec![]; n_instances];
@@ -297,6 +304,7 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
         output_instances_by_layer[output_layer].push(instance);
     }
 
+    #[allow(clippy::needless_range_loop)]
     for layer in 0..n_layers {
         // Check all the instances for output layers.
         for &instance in &output_instances_by_layer[layer] {
@@ -344,7 +352,7 @@ pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
                 constant_poly_oracles,
                 ..
             },
-        ) = metrics_span("sumcheck_prove_batch_ms", || {
+        ) = metrics_span_increment("sumcheck_prove_batch_ms", || {
             sumcheck::prove_batch(
                 sumcheck_claims,
                 sumcheck_oracles,

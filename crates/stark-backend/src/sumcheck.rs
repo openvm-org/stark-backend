@@ -120,6 +120,7 @@ where
             .zip(this_round_polys.par_iter())
             .for_each(|(claim, round_poly)| *claim = round_poly.evaluate(challenge));
 
+        // TODO: This can be optimized if we keep track of the active polynomials.
         polys.par_iter_mut().for_each(|multivariate_poly| {
             if n_remaining_rounds == multivariate_poly.arity() {
                 multivariate_poly.fix_first_in_place(challenge)
