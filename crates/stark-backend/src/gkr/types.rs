@@ -197,19 +197,19 @@ impl<F: Field> Layer<F> {
     }
 
     /// Returns a transformed layer with the first variable of each column fixed to `assignment`.
-    pub fn fix_first_variable(self, x0: F) -> Self {
+    pub fn fix_first_variable_in_place(&mut self, x0: F) {
         if self.n_variables() == 0 {
-            return self;
+            return;
         }
 
         match self {
-            Self::GrandProduct(mle) => Self::GrandProduct(mle.partial_evaluation(x0)),
+            Self::GrandProduct(mle) => mle.fix_first_in_place(x0),
             Self::LogUpGeneric {
                 numerators,
                 denominators,
-            } => Self::LogUpGeneric {
-                numerators: numerators.partial_evaluation(x0),
-                denominators: denominators.partial_evaluation(x0),
+            } =>  {
+                numerators.fix_first_in_place(x0);
+                denominators.fix_first_in_place(x0);
             },
         }
     }

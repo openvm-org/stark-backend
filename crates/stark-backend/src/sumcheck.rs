@@ -115,22 +115,17 @@ where
 
         let challenge = challenger.sample_ext_element();
 
-        // TODO: Compute challenge.powers() so we can re-use.
-        claims = this_round_polys
-            .par_iter()
-            .map(|round_poly| round_poly.evaluate(challenge))
-            .collect();
+        claims.par_iter_mut().zip(this_round_polys
+            .par_iter())
+            .for_each(|(claim, round_poly)| *claim = round_poly.evaluate(challenge));
 
-        polys = polys
-            .into_par_iter()
-            .map(|multivariate_poly| {
-                if n_remaining_rounds != multivariate_poly.arity() {
-                    multivariate_poly
-                } else {
-                    multivariate_poly.partial_evaluation(challenge)
+        polys
+            .par_iter_mut()
+            .for_each(|multivariate_poly| {
+                if n_remaining_rounds == multivariate_poly.arity() {
+                    multivariate_poly.fix_first_in_place(challenge)
                 }
-            })
-            .collect();
+            });
 
         round_polys.push(round_poly);
         evaluation_point.push(challenge);

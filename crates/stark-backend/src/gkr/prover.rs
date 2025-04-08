@@ -125,20 +125,14 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
         correct_sum_as_poly_in_first_variable(eval_at_0, eval_at_2, claim, y, n_variables)
     }
 
-    fn partial_evaluation(self, alpha: F) -> Self {
+    fn fix_first_in_place(&mut self, alpha: F) {
         if self.has_zero_arity() {
-            return self;
+            return;
         }
 
         let z0 = self.eq_evals.y[self.eq_evals.y.len() - self.arity()];
-        let eq_fixed_var_correction = self.eq_fixed_var_correction * (alpha * z0 + (F::ONE - alpha) * (F::ONE - z0));
-
-        Self {
-            eq_evals: self.eq_evals,
-            eq_fixed_var_correction,
-            input_layer: self.input_layer.fix_first_variable(alpha),
-            lambda: self.lambda,
-        }
+        self.eq_fixed_var_correction *= alpha * z0 + (F::ONE - alpha) * (F::ONE - z0);
+        self.input_layer.fix_first_variable_in_place(alpha);
     }
 }
 

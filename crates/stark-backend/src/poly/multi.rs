@@ -19,7 +19,7 @@ pub trait MultivariatePolyOracle<F>: Send + Sync {
     fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F>;
 
     /// Returns the multivariate polynomial `h(x_2, ..., x_n) = g(alpha, x_2, ..., x_n)`.
-    fn partial_evaluation(self, alpha: F) -> Self;
+    fn fix_first_in_place(&mut self, alpha: F);
 }
 
 /// Multilinear extension of the function defined on the boolean hypercube.
@@ -90,7 +90,7 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
     }
 
 
-    fn partial_evaluation(mut self, alpha: F) -> Self {
+    fn fix_first_in_place(&mut self, alpha: F) {
         let midpoint = self.len() / 2;
         let (lhs_evals, rhs_evals) = self.split_at_mut(midpoint);
         lhs_evals
@@ -100,7 +100,6 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
                 *lhs += alpha * (rhs - *lhs);
             });
         self.evals.truncate(midpoint);
-        self
     }
 }
 
@@ -254,17 +253,17 @@ mod test {
             BabyBear::from_canonical_u32(4),
         ];
         // (1 - x_1)(1 - x_2) + 2 (1 - x_1) x_2 + 3 x_1 (1 - x_2) + 4 x_1 x_2
-        let mle = Mle::from_vec(evals);
+        let mut mle = Mle::from_vec(evals);
         let alpha = BabyBear::from_canonical_u32(2);
         // -(1 - x_2) - 2 x_2 + 6 (1 - x_2) + 8 x_2 = x_2 + 5
-        let partial_eval = mle.partial_evaluation(alpha);
+        mle.fix_first_in_place(alpha);
 
         assert_eq!(
-            partial_eval.eval(&[BabyBear::ZERO]),
+            mle.eval(&[BabyBear::ZERO]),
             BabyBear::from_canonical_u32(5)
         );
         assert_eq!(
-            partial_eval.eval(&[BabyBear::ONE]),
+            mle.eval(&[BabyBear::ONE]),
             BabyBear::from_canonical_u32(6)
         );
     }
