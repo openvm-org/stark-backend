@@ -1,6 +1,5 @@
 use openvm_stark_backend::interaction::LogUpSecurityParameters;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 

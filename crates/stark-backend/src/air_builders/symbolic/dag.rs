@@ -50,9 +50,9 @@ pub enum SymbolicExpressionNode<F> {
 #[repr(C)]
 pub struct SymbolicExpressionDag<F> {
     /// Nodes in **topological** order.
-    pub(crate) nodes: Vec<SymbolicExpressionNode<F>>,
+    pub nodes: Vec<SymbolicExpressionNode<F>>,
     /// Node indices of expressions to assert equal zero.
-    pub(crate) constraint_idx: Vec<usize>,
+    pub constraint_idx: Vec<usize>,
 }
 
 impl<F> SymbolicExpressionDag<F> {
@@ -64,6 +64,10 @@ impl<F> SymbolicExpressionDag<F> {
             }
         }
         rotation
+    }
+
+    pub fn num_constraints(&self) -> usize {
+        self.constraint_idx.len()
     }
 }
 
