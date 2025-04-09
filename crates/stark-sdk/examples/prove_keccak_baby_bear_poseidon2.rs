@@ -10,7 +10,10 @@ use openvm_stark_backend::{
     utils::metrics_span,
 };
 use openvm_stark_sdk::{
-    config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, setup_tracing, FriParameters},
+    config::{
+        baby_bear_poseidon2::BabyBearPoseidon2Engine, setup_tracing, setup_tracing_with_log_level,
+        FriParameters,
+    },
     engine::StarkFriEngine,
     openvm_stark_backend::engine::StarkEngine,
     utils::create_seeded_rng,
@@ -18,8 +21,9 @@ use openvm_stark_sdk::{
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::Rng;
+use tracing_subscriber::EnvFilter;
 
-const NUM_PERMUTATIONS: usize = 1 << 15;
+const NUM_PERMUTATIONS: usize = 1 << 14;
 const LOG_BLOWUP: usize = 2;
 
 // Newtype to implement extended traits
@@ -40,7 +44,25 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 }
 
 fn main() {
-    setup_tracing();
+    // setup_tracing();
+    // setup_tracing_with_log_level(Level::DEBUG);
+    // tracing_subscriber::fmt()
+    //     .with_env_filter(EnvFilter::from_default_env())
+    //     .init();
+
+    let filter = EnvFilter::new("debug");
+
+    // Set up a simple console subscriber with that filter
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true) // Show target (module path)
+        .with_file(true) // Show file names in logs
+        .with_line_number(true) // Show line numbers
+        .init();
+
+    tracing::debug!("Debug tracing initialized");
+
+    tracing::info!("Starting proof generation");
     let mut rng = create_seeded_rng();
     let air = TestAir(KeccakAir {});
 
@@ -60,6 +82,9 @@ fn main() {
         &pk,
         ProofInput::new(vec![(air_id, AirProofInput::simple_no_pis(trace))]),
     );
+
+    let proof_bytes = bitcode::serialize(&proof.opening.proof).unwrap();
+    tracing::info!("Size of proof is {:?} bytes", proof_bytes.len());
 
     engine.verify(&pk.get_vk(), &proof).unwrap();
 }

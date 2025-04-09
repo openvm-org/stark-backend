@@ -134,6 +134,7 @@ where
         num_queries: fri_params.num_queries,
         proof_of_work_bits: fri_params.proof_of_work_bits,
         mmcs: challenge_mmcs,
+        arity_bits: fri_params.arity_bits,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
     let rap_phase = FriLogUpPhase::new(log_up_params);

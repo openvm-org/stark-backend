@@ -1,5 +1,6 @@
 use openvm_stark_backend::interaction::LogUpSecurityParameters;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 
@@ -9,6 +10,7 @@ pub struct FriParameters {
     pub log_final_poly_len: usize,
     pub num_queries: usize,
     pub proof_of_work_bits: usize,
+    pub arity_bits: usize,
 }
 
 impl FriParameters {
@@ -45,6 +47,7 @@ impl FriParameters {
                 log_final_poly_len: 0,
                 num_queries: 2,
                 proof_of_work_bits: 0,
+                arity_bits: 1,
             }
         } else {
             Self::standard_with_100_bits_conjectured_security(log_blowup)
@@ -65,12 +68,14 @@ pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize)
             log_final_poly_len: 0,
             num_queries: 100,
             proof_of_work_bits: 16,
+            arity_bits: 1,
         },
         2 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 42,
             proof_of_work_bits: 16,
+            arity_bits: 1,
         },
         // plonky2 standard recursion config: https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/plonky2/src/plonk/circuit_data.rs#L101
         3 => FriParameters {
@@ -78,17 +83,19 @@ pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize)
             log_final_poly_len: 0,
             num_queries: 28,
             proof_of_work_bits: 16,
+            arity_bits: 1,
         },
         4 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 21,
             proof_of_work_bits: 16,
+            arity_bits: 1,
         },
         _ => todo!("No standard FRI params defined for log blowup {log_blowup}",),
     };
     assert!(fri_params.get_conjectured_security_bits(100) >= 100);
-    tracing::info!("FRI parameters | log_blowup: {log_blowup:<2} | num_queries: {:<2} | proof_of_work_bits: {:<2}", fri_params.num_queries, fri_params.proof_of_work_bits);
+    tracing::info!("FRI parameters | log_blowup: {log_blowup:<2} | num_queries: {:<2} | proof_of_work_bits: {:<2} | arity_bits: {:<2}", fri_params.num_queries, fri_params.proof_of_work_bits, fri_params.arity_bits);
     fri_params
 }
 
