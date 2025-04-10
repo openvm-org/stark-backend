@@ -149,7 +149,7 @@ impl<F: Field> Layer<F> {
             .chunks_exact(2) // Process in chunks of 2 elements
             .map(|chunk| chunk[0] * chunk[1]) // Multiply each pair
             .collect();
-        Layer::GrandProduct(Mle::from_vec(res))
+        Layer::GrandProduct(Mle::new(res))
     }
 
     fn next_logup_layer(numerators: &Mle<F>, denominators: &Mle<F>) -> Layer<F> {
@@ -165,8 +165,8 @@ impl<F: Field> Layer<F> {
             .unzip();
 
         Layer::LogUpGeneric {
-            numerators: Mle::from_vec(next_numerators),
-            denominators: Mle::from_vec(next_denominators),
+            numerators: Mle::new(next_numerators),
+            denominators: Mle::new(next_denominators),
         }
     }
 

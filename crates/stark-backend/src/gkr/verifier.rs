@@ -10,10 +10,7 @@ use crate::{
         types::{GkrArtifact, GkrBatchProof, GkrError},
     },
     p3_field::ExtensionField,
-    poly::{
-        multi::hypercube_eq,
-        uni::{random_linear_combination, random_linear_combination_iter},
-    },
+    poly::{multi::hypercube_eq, uni::random_linear_combination},
     sumcheck,
 };
 
@@ -85,8 +82,7 @@ pub fn partially_verify_batch<F: Field, EF: ExtensionField<F>>(
                 let n_unused_variables = n_layers - instance_n_layers(instance);
                 let doubling_factor = F::from_canonical_u32(1 << n_unused_variables);
                 let claim =
-                    random_linear_combination_iter(claims_to_verify.iter(), instance_lambda)
-                        * doubling_factor;
+                    random_linear_combination(claims_to_verify, instance_lambda) * doubling_factor;
                 sumcheck_claims.push(claim);
                 sumcheck_instances.push(instance);
             }

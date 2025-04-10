@@ -42,10 +42,10 @@ pub struct GkrLogUpProvingKey;
 pub struct GkrLogUpPartialProof<T, Witness> {
     /// The rational sumcheck proof that can be verified via [gkr::partially_verify].
     pub gkr_proof: GkrBatchProof<T>,
-    /// The purported evaluations of the count MLEs at `r`, per AIR, per interaction.
-    pub count_mle_claims_per_instance: Vec<Vec<T>>,
-    /// The purported evaluations of the sigma MLEs at `r`, per AIR, per interaction.
-    pub sigma_mle_claims_per_instance: Vec<Vec<T>>,
+    /// The purported evaluations of the numerator MLEs at `r`, per AIR.
+    pub numer_mle_claims_per_instance: Vec<Vec<T>>,
+    /// The purported evaluations of the denominator MLEs at `r`, per AIR.
+    pub denom_mle_claims_per_instance: Vec<Vec<T>>,
     pub logup_pow_witness: Witness,
 }
 
@@ -68,8 +68,8 @@ pub enum GkrLogUpError<F> {
 struct GkrAuxData<T> {
     after_challenge_trace_per_air: Vec<Option<DenseMatrix<T, Vec<T>>>>,
     exposed_values_per_air: Vec<Option<Vec<T>>>,
-    count_mle_claims_per_instance: Vec<Vec<T>>,
-    sigma_mle_claims_per_instance: Vec<Vec<T>>,
+    numer_mle_claims_per_instance: Vec<Vec<T>>,
+    denom_mle_claims_per_instance: Vec<Vec<T>>,
 }
 
 impl<F, EF, Challenger> GkrLogUpPhase<F, EF, Challenger> {
@@ -119,17 +119,17 @@ where
 
         let logup_pow_witness = challenger.grind(self.log_up_params.log_up_pow_bits);
 
-        let (alpha, beta) = self.generate_challenges(challenger);
+        let (alpha, beta, gamma) = self.generate_challenges(challenger);
         let beta_pows = generate_betas(beta, &all_interactions);
 
         // Build GKR instances.
         let gkr_instances: Vec<_> =
-            Self::build_gkr_instances(trace_view_per_air, interactions_per_air, &beta_pows);
+            Self::build_gkr_instances(trace_view_per_air, interactions_per_air, alpha, &beta_pows);
 
         // Construct input layers and run GKR proof.
         let input_layers: Vec<_> = gkr_instances
             .par_iter()
-            .map(|gkr_instance| gkr_instance.build_gkr_input_layer(alpha))
+            .map(|gkr_instance| gkr_instance.build_gkr_input_layer())
             .collect();
 
         let (gkr_proof, gkr_artifact) = metrics_span("gkr_prove_batch_ms", || {
@@ -140,25 +140,25 @@ where
         let GkrAuxData {
             after_challenge_trace_per_air,
             exposed_values_per_air,
-            count_mle_claims_per_instance,
-            sigma_mle_claims_per_instance,
+            numer_mle_claims_per_instance,
+            denom_mle_claims_per_instance,
         } = Self::generate_aux_per_air(
             challenger,
             interactions_per_air,
             trace_view_per_air,
-            alpha,
+            gamma,
             &gkr_instances,
             &gkr_artifact,
         );
 
-        let mut challenges = vec![beta, alpha];
+        let mut challenges = vec![alpha, beta, gamma];
         challenges.extend_from_slice(&gkr_artifact.ood_point);
 
         Some((
             GkrLogUpPartialProof {
                 gkr_proof,
-                count_mle_claims_per_instance,
-                sigma_mle_claims_per_instance,
+                numer_mle_claims_per_instance,
+                denom_mle_claims_per_instance,
                 logup_pow_witness,
             },
             RapPhaseProverData {
@@ -215,7 +215,7 @@ where
             return Err(GkrLogUpError::InvalidPowWitness);
         }
 
-        let (alpha, beta) = self.generate_challenges(challenger);
+        let (alpha, beta, gamma) = self.generate_challenges(challenger);
 
         let gkr_proof = &partial_proof.gkr_proof;
 
@@ -234,13 +234,13 @@ where
             gkr::partially_verify_batch(vec![Gate::LogUp; n_instances], gkr_proof, challenger)
                 .map_err(|e| Self::Error::GkrError(e))?;
 
-        for (count_mle_claims, sigma_mle_claims) in izip!(
-            partial_proof.count_mle_claims_per_instance.iter(),
-            partial_proof.sigma_mle_claims_per_instance.iter()
+        for (numer_mle_claims, denom_mle_claims) in izip!(
+            partial_proof.numer_mle_claims_per_instance.iter(),
+            partial_proof.denom_mle_claims_per_instance.iter()
         ) {
-            for (count_mle_claim, sigma_mle_claim) in izip!(count_mle_claims, sigma_mle_claims) {
-                challenger.observe_ext_element(*count_mle_claim);
-                challenger.observe_ext_element(*sigma_mle_claim);
+            for (denom_mle_claim, numer_mle_claim) in izip!(numer_mle_claims, denom_mle_claims) {
+                challenger.observe_ext_element(*denom_mle_claim);
+                challenger.observe_ext_element(*numer_mle_claim);
             }
         }
 
@@ -254,8 +254,7 @@ where
             &bus_indices_per_air,
             exposed_values_per_air_per_phase,
             partial_proof,
-            alpha,
-            alpha,
+            gamma,
         )?;
 
         let mut j = 0;
@@ -276,10 +275,10 @@ where
             let numerator_claim = claims_to_verify[0];
             let denominator_claim = claims_to_verify[1];
 
-            let count_mle_claims = &partial_proof.count_mle_claims_per_instance[j];
-            let sigma_mle_claims = &partial_proof.sigma_mle_claims_per_instance[j];
+            let numer_mle_claims = &partial_proof.numer_mle_claims_per_instance[j];
+            let denom_mle_claims = &partial_proof.denom_mle_claims_per_instance[j];
 
-            if count_mle_claims.len() != padded_len || sigma_mle_claims.len() != padded_len {
+            if numer_mle_claims.len() != padded_len || denom_mle_claims.len() != padded_len {
                 return Err(Self::Error::MalformedGkrLogUpProof);
             }
 
@@ -300,11 +299,9 @@ where
                 numerator_claim,
                 denominator_claim,
                 actual_sr,
-                count_mle_claims,
-                sigma_mle_claims,
-                bus_indices,
-                alpha,
-                alpha, // using alpha as gamma—check this
+                numer_mle_claims,
+                denom_mle_claims,
+                gamma,
             )?;
 
             j += 1;
@@ -320,7 +317,7 @@ where
             return Err(Self::Error::NonZeroCumulativeSum);
         }
 
-        let mut challenges = vec![beta, alpha];
+        let mut challenges = vec![alpha, beta, gamma];
         challenges.extend_from_slice(&gkr_artifact.ood_point);
 
         Ok(RapPhaseVerifierData {
@@ -396,10 +393,11 @@ where
     EF: ExtensionField<F>,
     Challenger: FieldChallenger<F>,
 {
-    fn generate_challenges(&self, challenger: &mut Challenger) -> (EF, EF) {
+    fn generate_challenges(&self, challenger: &mut Challenger) -> (EF, EF, EF) {
         let alpha: EF = challenger.sample_ext_element();
         let beta: EF = challenger.sample_ext_element();
-        (alpha, beta)
+        let gamma: EF = challenger.sample_ext_element();
+        (alpha, beta, gamma)
     }
 }
 
@@ -446,26 +444,41 @@ pub fn eval_gkr_log_up_phase<AB>(builder: &mut AB)
 where
     AB: InteractionBuilder + PermutationAirBuilderWithExposedValues,
 {
-    let &[beta, gamma] = builder.permutation_randomness() else {
-        panic!("PermutationAirBuilderWithExposedValues requires 2 randomness elements");
+    let &[alpha, beta, gamma] = builder.permutation_randomness() else {
+        panic!("PermutationAirBuilderWithExposedValues requires 3 randomness elements");
     };
 
     let all_interactions = builder.all_interactions();
+    let num_padded_interactions = if all_interactions.len() == 1 {
+        2
+    } else {
+        all_interactions.len().next_power_of_two()
+    };
 
-    let mut gamma_pows = gamma.into().powers().take(2 * all_interactions.len());
+    let mut gamma_pows = gamma.into().powers().take(2 * num_padded_interactions);
     let beta_pows = generate_betas(beta.into(), all_interactions);
 
     let mut s_next = AB::ExprEF::ZERO;
-    for interaction in all_interactions {
-        s_next += gamma_pows.next().unwrap() * AB::ExprEF::from(interaction.count.clone());
+    for i in 0..num_padded_interactions {
+        let numerator = if i < all_interactions.len() {
+            all_interactions[i].count.clone().into()
+        } else {
+            AB::ExprEF::ZERO
+        };
+        s_next += gamma_pows.next().unwrap() * numerator;
 
-        let b = AB::Expr::from_canonical_u32(interaction.bus_index as u32 + 1);
-        let message = interaction.message.iter().chain(iter::once(&b));
+        let denominator = if i < all_interactions.len() {
+            let b = AB::Expr::from_canonical_u32(all_interactions[i].bus_index as u32 + 1);
+            let message = all_interactions[i].message.iter().chain(iter::once(&b));
 
-        let sigma = zip(message, &beta_pows).fold(AB::ExprEF::ZERO, |acc, (field, beta)| {
-            acc + beta.clone() * field.clone()
-        });
-        s_next += gamma_pows.next().unwrap() * sigma;
+            let sigma = zip(message, &beta_pows).fold(AB::ExprEF::ZERO, |acc, (field, beta)| {
+                acc + beta.clone() * field.clone()
+            });
+            alpha.into() + sigma
+        } else {
+            AB::ExprEF::ONE
+        };
+        s_next += gamma_pows.next().unwrap() * denominator;
     }
 
     let exposed_values = builder.permutation_exposed_values();

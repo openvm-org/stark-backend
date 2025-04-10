@@ -27,7 +27,7 @@ pub trait MultivariatePolyOracle<F>: Send + Sync {
 /// The evaluations are stored in lexicographic order.
 #[derive(Debug, Clone)]
 pub struct Mle<F> {
-    pub evals: Vec<F>,
+    evals: Vec<F>,
 }
 
 impl<F: Field> Mle<F> {
@@ -36,7 +36,7 @@ impl<F: Field> Mle<F> {
     /// # Panics
     ///
     /// Panics if the number of evaluations is not a power of two.
-    pub fn from_vec(evals: Vec<F>) -> Self {
+    pub fn new(evals: Vec<F>) -> Self {
         assert!(evals.len().is_power_of_two());
         Self { evals }
     }
@@ -188,7 +188,7 @@ mod test {
             BabyBear::from_canonical_u32(4),
         ];
         // (1 - x_1)(1 - x_2) + 2 (1 - x_1) x_2 + 3 x_1 (1 - x_2) + 4 x_1 x_2
-        let mle = Mle::from_vec(evals);
+        let mle = Mle::new(evals);
         let point = vec![
             BabyBear::from_canonical_u32(0),
             BabyBear::from_canonical_u32(0),
@@ -232,7 +232,7 @@ mod test {
         let sum = BabyBear::from_canonical_u32(10);
 
         // (1 - x_1)(1 - x_2) + 2 (1 - x_1) x_2 + 3 x_1 (1 - x_2) + 4 x_1 x_2
-        let mle = Mle::from_vec(evals);
+        let mle = Mle::new(evals);
         // (1 - x_1) + 2 (1 - x_1) + 3 x_1 + 4 x_1
         let poly = mle.partial_hypercube_sum(sum);
 
@@ -255,7 +255,7 @@ mod test {
             BabyBear::from_canonical_u32(4),
         ];
         // (1 - x_1)(1 - x_2) + 2 (1 - x_1) x_2 + 3 x_1 (1 - x_2) + 4 x_1 x_2
-        let mut mle = Mle::from_vec(evals);
+        let mut mle = Mle::new(evals);
         let alpha = BabyBear::from_canonical_u32(2);
         // -(1 - x_2) - 2 x_2 + 6 (1 - x_2) + 8 x_2 = x_2 + 5
         mle.fix_first_in_place(alpha);
@@ -333,7 +333,7 @@ mod test {
         let mut rng = create_seeded_rng();
 
         let vals: [BabyBear; 1024] = rng.gen();
-        let mle = Mle::from_vec(vals.to_vec());
+        let mle = Mle::new(vals.to_vec());
 
         let r: [BabyBear; 10] = rng.gen();
 

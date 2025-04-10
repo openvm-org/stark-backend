@@ -223,7 +223,7 @@ mod tests {
         let values: Vec<F> = (0..32).map(|_| rng.gen()).collect();
         let claim = values.iter().copied().sum();
 
-        let mle = Mle::from_vec(values);
+        let mle = Mle::new(values);
 
         let lambda = F::ONE;
 
@@ -251,8 +251,8 @@ mod tests {
         let claim0 = values0.iter().copied().sum();
         let claim1 = values1.iter().copied().sum();
 
-        let mle0 = Mle::from_vec(values0.clone());
-        let mle1 = Mle::from_vec(values1.clone());
+        let mle0 = Mle::new(values0.clone());
+        let mle1 = Mle::new(values1.clone());
 
         let lambda: F = rng.gen();
 
@@ -282,8 +282,8 @@ mod tests {
         let claim0 = values0.iter().copied().sum();
         let claim1 = values1.iter().copied().sum();
 
-        let mle0 = Mle::from_vec(values0.clone());
-        let mle1 = Mle::from_vec(values1.clone());
+        let mle0 = Mle::new(values0.clone());
+        let mle1 = Mle::new(values1.clone());
 
         let lambda: F = rng.gen();
 
@@ -316,7 +316,7 @@ mod tests {
         let mut invalid_values = values;
         invalid_values[0] += F::ONE;
         let invalid_claim = claim + F::ONE;
-        let invalid_mle = Mle::from_vec(invalid_values.clone());
+        let invalid_mle = Mle::new(invalid_values.clone());
         let (invalid_proof, _) = prove_batch(
             vec![invalid_claim],
             vec![invalid_mle],

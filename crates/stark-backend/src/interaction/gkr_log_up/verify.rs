@@ -22,19 +22,17 @@ where
     Challenger: FieldChallenger<F>,
 {
     /// Verifies the following:
-    /// * numerator_claim in terms of count_mle_claims
-    /// * denominator_claim in terms of sigma_mle_claims
-    /// * count_mle_claims and sigma_mle_claims in terms of actual_sr
+    /// * numerator_claim in terms of numer_mle_claims
+    /// * denominator_claim in terms of denom_mle_claims
+    /// * numer_mle_claims and denom_mle_claims in terms of actual_sr
     #[allow(clippy::too_many_arguments)]
     pub(super) fn verify_instance_claims(
         z: &[EF],
         numerator_claim: EF,
         denominator_claim: EF,
         actual_sr: EF,
-        count_mle_claims: &[EF],
-        sigma_mle_claims: &[EF],
-        bus_indices: &[BusIndex],
-        alpha: EF,
+        numerator_mle_claims: &[EF],
+        denominator_mle_claims: &[EF],
         gamma: EF,
     ) -> Result<(), GkrLogUpError<EF>> {
         // TDOO: Can cache this per height.
@@ -46,18 +44,21 @@ where
 
         let mut gamma_pow = EF::ONE;
 
-        for (j, (&count_j, &sigma_j, eq_at_z)) in
-            izip!(count_mle_claims, sigma_mle_claims, eqs_at_z).enumerate()
+        for (&numer_j, &denom_j, eq_at_z) in
+            izip!(numerator_mle_claims, denominator_mle_claims, eqs_at_z)
         {
-            expected_numerator += eq_at_z * count_j;
-            expected_denominator += eq_at_z * (alpha + sigma_j);
+            expected_numerator += eq_at_z * numer_j;
+            expected_denominator += eq_at_z * denom_j;
 
-            expected_sr += gamma_pow * count_j;
+            expected_sr += gamma_pow * numer_j;
             gamma_pow *= gamma;
-            expected_sr += gamma_pow * sigma_j;
+            expected_sr += gamma_pow * denom_j;
             gamma_pow *= gamma;
         }
-        if expected_numerator != numerator_claim || expected_denominator != denominator_claim {
+        if expected_numerator != numerator_claim {
+            return Err(GkrLogUpError::MalformedGkrLogUpProof);
+        }
+        if expected_denominator != denominator_claim {
             return Err(GkrLogUpError::MalformedGkrLogUpProof);
         }
         if expected_sr != actual_sr {
@@ -73,7 +74,6 @@ where
         bus_indices_per_instance: &[Vec<BusIndex>],
         exposed_values_per_air_per_phase: &[Vec<Vec<EF>>],
         partial_proof: &GkrLogUpPartialProof<EF, F>,
-        alpha: EF,
         gamma: EF,
     ) -> Result<(), GkrLogUpError<EF>> {
         let mut j = 0;
@@ -95,10 +95,9 @@ where
                 bus_indices,
                 exposed_values_per_phase,
                 instance_ood,
-                &partial_proof.count_mle_claims_per_instance[j],
-                &partial_proof.sigma_mle_claims_per_instance[j],
+                &partial_proof.numer_mle_claims_per_instance[j],
+                &partial_proof.denom_mle_claims_per_instance[j],
                 &gkr_artifact.claims_to_verify_by_instance[j],
-                alpha,
                 gamma,
             )?;
 
@@ -119,10 +118,9 @@ where
         bus_indices: &[BusIndex],
         exposed_values_per_phase: &[Vec<EF>],
         ood_point: &[EF],
-        count_mle_claims: &[EF],
-        sigma_mle_claims: &[EF],
+        numer_mle_claims: &[EF],
+        denom_mle_claims: &[EF],
         gkr_claims_to_verify: &[EF],
-        alpha: EF,
         gamma: EF,
     ) -> Result<(), GkrLogUpError<EF>> {
         if exposed_values_per_phase.len() != 1 || exposed_values_per_phase[0].len() != 1 {
@@ -133,8 +131,8 @@ where
         let interactions_size = 1 << interactions_dim;
 
         // Check MLE claim lengths match the padded length.
-        if count_mle_claims.len() != interactions_size
-            || sigma_mle_claims.len() != interactions_size
+        if numer_mle_claims.len() != interactions_size
+            || denom_mle_claims.len() != interactions_size
         {
             return Err(GkrLogUpError::MalformedGkrLogUpProof);
         }
@@ -155,10 +153,8 @@ where
             numerator_claim,
             denominator_claim,
             actual_sr,
-            count_mle_claims,
-            sigma_mle_claims,
-            bus_indices,
-            alpha,
+            numer_mle_claims,
+            denom_mle_claims,
             gamma,
         )?;
 

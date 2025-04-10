@@ -259,7 +259,7 @@ impl RapPhaseSeqKind {
                 num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
             }],
             RapPhaseSeqKind::GkrLogUp => vec![RapPhaseShape {
-                num_challenges: 2,
+                num_challenges: 3,
                 num_exposed_values: 1,
             }],
         }
