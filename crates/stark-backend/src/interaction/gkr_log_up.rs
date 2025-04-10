@@ -123,14 +123,17 @@ where
         let beta_pows = generate_betas(beta, &all_interactions);
 
         // Build GKR instances.
-        let gkr_instances: Vec<_> =
-            Self::build_gkr_instances(trace_view_per_air, interactions_per_air, alpha, &beta_pows);
+        let gkr_instances: Vec<_> = metrics_span("gkr_build_instances_ms", || {
+            Self::build_gkr_instances(trace_view_per_air, interactions_per_air, alpha, &beta_pows)
+        });
 
         // Construct input layers and run GKR proof.
-        let input_layers: Vec<_> = gkr_instances
-            .par_iter()
-            .map(|gkr_instance| gkr_instance.build_gkr_input_layer())
-            .collect();
+        let input_layers: Vec<_> = metrics_span("build_gkr_input_layer_ms", || {
+            gkr_instances
+                .par_iter()
+                .map(|gkr_instance| gkr_instance.build_gkr_input_layer())
+                .collect()
+        });
 
         let (gkr_proof, gkr_artifact) = metrics_span("gkr_prove_batch_ms", || {
             gkr::prove_batch(challenger, input_layers)
@@ -142,14 +145,16 @@ where
             exposed_values_per_air,
             numer_mle_claims_per_instance,
             denom_mle_claims_per_instance,
-        } = Self::generate_aux_per_air(
-            challenger,
-            interactions_per_air,
-            trace_view_per_air,
-            gamma,
-            &gkr_instances,
-            &gkr_artifact,
-        );
+        } = metrics_span("gkr_generate_aux", || {
+            Self::generate_aux_per_air(
+                challenger,
+                interactions_per_air,
+                trace_view_per_air,
+                gamma,
+                &gkr_instances,
+                &gkr_artifact,
+            )
+        });
 
         let mut challenges = vec![alpha, beta, gamma];
         challenges.extend_from_slice(&gkr_artifact.ood_point);

@@ -24,7 +24,7 @@ use crate::{
     },
     parizip,
     poly::multi::{hypercube_eq_over_y, Mle},
-    utils::metrics_span_increment,
+    utils::metrics_span,
 };
 
 /// A struct that holds the interaction-related data for a single GKR instance:
@@ -165,68 +165,75 @@ where
             .unwrap();
         let gamma_pows = gamma.powers().take(2 * max_interactions).collect_vec();
 
-        let trace_view_per_air_filtered = interactions_per_air
+        let ood_point_per_instance: Vec<_> = interactions_per_air
             .iter()
             .zip(trace_view_per_air.iter())
-            .filter_map(|(interactions, view)| {
-                if interactions.is_empty() {
-                    None
-                } else {
-                    Some(view)
-                }
+            .filter_map(|(interactions, view)| (!interactions.is_empty()).then_some(view))
+            .zip(&gkr_artifact.n_variables_by_instance)
+            .map(|(trace_view, &n_vars)| {
+                let height = trace_view.partitioned_main[0].height();
+                let log_height = log2_strict_usize(height);
+                let instance_ood = &ood_point[ood_point.len() - n_vars..];
+                let (_, r) = instance_ood.split_at(n_vars - log_height);
+                r
             })
-            .collect_vec();
+            .collect();
 
-        let results: Vec<_> = parizip!(
-            trace_view_per_air_filtered,
-            gkr_instances,
-            &gkr_artifact.n_variables_by_instance
-        )
-        .map(|(trace_view, gkr_instance, &n_vars)| {
-            let height = trace_view.partitioned_main[0].height();
-            let log_height = log2_strict_usize(height);
+        let numer_mle_claims_per_instance: Vec<Vec<_>> =
+            parizip!(&ood_point_per_instance, gkr_instances,)
+                .map(|(r, gkr_instance)| {
+                    gkr_instance
+                        .numerators
+                        .transpose()
+                        .par_rows_mut()
+                        .map(|row| Mle::eval_slice_with_buf(row, r))
+                        .collect()
+                })
+                .collect();
 
-            let instance_ood = &ood_point[ood_point.len() - n_vars..];
-            let (_, r) = instance_ood.split_at(n_vars - log_height);
-            debug_assert_eq!(r.len(), log_height);
+        let denom_mle_claims_per_instance: Vec<Vec<_>> =
+            parizip!(&ood_point_per_instance, gkr_instances,)
+                .map(|(r, gkr_instance)| {
+                    gkr_instance
+                        .denominators
+                        .transpose()
+                        .par_rows_mut()
+                        .map(|row| Mle::eval_slice_with_buf(row, r))
+                        .collect()
+                })
+                .collect();
 
-            let (after_challenge_trace, exposed_values, numer_mle_claims, denom_mle_claims) =
-                Self::generate_aux(gkr_instance, &gamma_pows, r);
+        for (numer_mle, denom_mle) in numer_mle_claims_per_instance
+            .iter()
+            .zip(denom_mle_claims_per_instance.iter())
+        {
+            for (numer_mle_claim, denom_mle_claim) in numer_mle.iter().zip(denom_mle.iter()) {
+                challenger.observe_ext_element(*numer_mle_claim);
+                challenger.observe_ext_element(*denom_mle_claim);
+            }
+        }
 
-            (
-                after_challenge_trace,
-                exposed_values,
-                numer_mle_claims,
-                denom_mle_claims,
-            )
-        })
-        .collect();
+        let results: Vec<_> = metrics_span("generate_perm_trace_time_ms", || {
+            parizip!(&ood_point_per_instance, gkr_instances)
+                .map(|(r, gkr_instance)| Self::generate_perm_trace(gkr_instance, &gamma_pows, r))
+                .collect()
+        });
 
         let mut results_iter = results.into_iter();
 
-        let n_airs = interactions_per_air.len();
-        let mut after_challenge_trace_per_air = Vec::with_capacity(n_airs);
-        let mut exposed_values_per_air = Vec::with_capacity(n_airs);
-        let mut numer_mle_claims_per_instance = Vec::with_capacity(n_airs);
-        let mut denom_mle_claims_per_instance = Vec::with_capacity(n_airs);
+        let (after_challenge_trace_per_air, exposed_values_per_air): (Vec<_>, Vec<_>) =
+            interactions_per_air
+                .iter()
+                .map(|interactions| {
+                    if interactions.is_empty() {
+                        (None, None)
+                    } else {
+                        let (after_trace, exposed) = results_iter.next().unwrap();
+                        (Some(after_trace), Some(exposed))
+                    }
+                })
+                .unzip();
 
-        for interactions in interactions_per_air.iter() {
-            if interactions.is_empty() {
-                after_challenge_trace_per_air.push(None);
-                exposed_values_per_air.push(None);
-            } else {
-                let (after_trace, exposed, numer_mle, denom_mle) = results_iter.next().unwrap();
-
-                for (numer_mle_claim, denom_mle_claim) in numer_mle.iter().zip(denom_mle.iter()) {
-                    challenger.observe_ext_element(*numer_mle_claim);
-                    challenger.observe_ext_element(*denom_mle_claim);
-                }
-                after_challenge_trace_per_air.push(Some(after_trace));
-                exposed_values_per_air.push(Some(exposed));
-                numer_mle_claims_per_instance.push(numer_mle);
-                denom_mle_claims_per_instance.push(denom_mle);
-            }
-        }
         GkrAuxData {
             after_challenge_trace_per_air,
             exposed_values_per_air,
@@ -235,59 +242,35 @@ where
         }
     }
 
-    fn generate_aux(
+    fn generate_perm_trace(
         gkr_instance: &GkrLogUpInstance<EF>,
         gamma_pows: &[EF],
         r: &[EF],
-    ) -> (DenseMatrix<EF>, Vec<EF>, Vec<EF>, Vec<EF>) {
-        let numer_mle_claims: Vec<_> = gkr_instance
+    ) -> (DenseMatrix<EF>, Vec<EF>) {
+        let s_at_rows: Vec<EF> = gkr_instance
             .numerators
-            .transpose()
-            .par_rows_mut()
-            .map(|row| Mle::eval_slice(row, r))
+            .par_row_slices()
+            .zip(gkr_instance.denominators.par_row_slices())
+            .map(|(count_row, sigma_row)| {
+                itertools::interleave(count_row, sigma_row)
+                    .zip(gamma_pows)
+                    .fold(EF::ZERO, |acc, (&val, &gamma_pow)| acc + gamma_pow * val)
+            })
             .collect();
 
-        let denom_mle_claims: Vec<_> = gkr_instance
-            .denominators
-            .transpose()
-            .par_rows_mut()
-            .map(|row| Mle::eval_slice(row, r))
-            .collect();
+        // TODO: Precompute these per height.
+        let eqs_at_r = hypercube_eq_over_y(r);
 
-        let (after_challenge_trace, exposed_values) =
-            metrics_span_increment("generate_perm_trace_time_ms", || {
-                let s_at_rows: Vec<EF> = gkr_instance
-                    .numerators
-                    .par_row_slices()
-                    .zip(gkr_instance.denominators.par_row_slices())
-                    .map(|(count_row, sigma_row)| {
-                        itertools::interleave(count_row, sigma_row)
-                            .zip(gamma_pows)
-                            .fold(EF::ZERO, |acc, (&val, &gamma_pow)| acc + gamma_pow * val)
-                    })
-                    .collect();
+        let mut partial_sum = EF::ZERO;
+        let mut after_challenge_trace_data = Vec::with_capacity(eqs_at_r.len() * 3);
+        for (eq_at_r, s_at_row) in eqs_at_r.iter().zip(s_at_rows.iter()) {
+            after_challenge_trace_data.push(*eq_at_r);
+            after_challenge_trace_data.push(*s_at_row);
+            after_challenge_trace_data.push(partial_sum);
 
-                // TODO: Precompute these per height.
-                let eqs_at_r = hypercube_eq_over_y(r);
-
-                let mut partial_sum = EF::ZERO;
-                let mut after_challenge_trace_data = Vec::with_capacity(eqs_at_r.len() * 3);
-                for (eq_at_r, s_at_row) in eqs_at_r.iter().zip(s_at_rows.iter()) {
-                    after_challenge_trace_data.push(*eq_at_r);
-                    after_challenge_trace_data.push(*s_at_row);
-                    after_challenge_trace_data.push(partial_sum);
-
-                    partial_sum += *eq_at_r * *s_at_row;
-                }
-                let after_challenge_trace = RowMajorMatrix::new(after_challenge_trace_data, 3);
-                (after_challenge_trace, vec![partial_sum])
-            });
-
-        (
-            after_challenge_trace,
-            exposed_values,
-            numer_mle_claims,
-            denom_mle_claims,
-        )
+            partial_sum += *eq_at_r * *s_at_row;
+        }
+        let after_challenge_trace = RowMajorMatrix::new(after_challenge_trace_data, 3);
+        (after_challenge_trace, vec![partial_sum])
     }
 }
