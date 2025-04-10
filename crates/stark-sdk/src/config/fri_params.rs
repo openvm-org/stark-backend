@@ -67,14 +67,14 @@ pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize)
             log_final_poly_len: 0,
             num_queries: 100,
             proof_of_work_bits: 16,
-            arity_bits: 1,
+            arity_bits: 4,
         },
         2 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 42,
             proof_of_work_bits: 16,
-            arity_bits: 1,
+            arity_bits: 4,
         },
         // plonky2 standard recursion config: https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/plonky2/src/plonk/circuit_data.rs#L101
         3 => FriParameters {
@@ -82,14 +82,14 @@ pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize)
             log_final_poly_len: 0,
             num_queries: 28,
             proof_of_work_bits: 16,
-            arity_bits: 1,
+            arity_bits: 4,
         },
         4 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 21,
             proof_of_work_bits: 16,
-            arity_bits: 1,
+            arity_bits: 4,
         },
         _ => todo!("No standard FRI params defined for log blowup {log_blowup}",),
     };
