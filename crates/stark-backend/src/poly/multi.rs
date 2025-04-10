@@ -43,20 +43,23 @@ impl<F: Field> Mle<F> {
 
     /// Evaluates the multilinear extension at `point`.
     pub fn eval(&self, point: &[F]) -> F {
-        Self::eval_slice(&self.evals, point)
+        let mut buf = self.evals.clone();
+        Self::eval_slice(&mut buf, point)
     }
 
     /// Evaluates the multilinear extension given by hypercube evaluations `evals` at `point`.
     ///
+    /// Uses `evals` as a computational buffer.
+    ///
     /// # Panics
     ///
     /// Panics if `evals.len() != 2^point.len()`
-    pub fn eval_slice(evals: &[F], point: &[F]) -> F {
+    pub fn eval_slice(evals: &mut [F], point: &[F]) -> F {
+        let buf = evals;
         let n = point.len();
-        assert_eq!(evals.len(), 1 << n, "Point dimension mismatch");
-
-        let mut buf = evals.to_vec();
         let mut len = buf.len();
+
+        assert_eq!(len, 1 << n, "Point dimension mismatch");
 
         for &x_i in point.iter().rev() {
             len /= 2;

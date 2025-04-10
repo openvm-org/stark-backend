@@ -141,19 +141,6 @@ where
     (proof, artifacts)
 }
 
-/// Returns `p_0 + alpha * p_1 + ... + alpha^(n-1) * p_{n-1}`.
-#[allow(dead_code)]
-fn random_linear_combination<F: Field>(
-    polys: &[UnivariatePolynomial<F>],
-    alpha: F,
-) -> UnivariatePolynomial<F> {
-    polys
-        .iter()
-        .rfold(UnivariatePolynomial::<F>::zero(), |acc, poly| {
-            acc * alpha + poly.clone()
-        })
-}
-
 /// Partially verifies a sum-check proof.
 ///
 /// Only "partial" since it does not fully verify the prover's claimed evaluation on the variable

@@ -253,13 +253,13 @@ where
         let count_mle_claims: Vec<_> = gkr_instance
             .counts
             .transpose()
-            .par_row_slices()
+            .par_rows_mut()
             .map(|row| Mle::eval_slice(row, r))
             .collect();
         let sigma_mle_claims: Vec<_> = gkr_instance
             .sigmas
             .transpose()
-            .par_row_slices()
+            .par_rows_mut()
             .map(|row| Mle::eval_slice(row, r))
             .collect();
 

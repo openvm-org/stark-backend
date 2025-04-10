@@ -50,12 +50,7 @@ where
             izip!(count_mle_claims, sigma_mle_claims, eqs_at_z).enumerate()
         {
             expected_numerator += eq_at_z * count_j;
-            let denom = if j < bus_indices.len() {
-                alpha + sigma_j
-            } else {
-                alpha
-            };
-            expected_denominator += eq_at_z * denom;
+            expected_denominator += eq_at_z * (alpha + sigma_j);
 
             expected_sr += gamma_pow * count_j;
             gamma_pow *= gamma;
