@@ -156,14 +156,12 @@ pub fn hypercube_eq_over_y<F: Field>(y: &[F]) -> Vec<F> {
 
     let mut cur_size = 1;
 
-    for &yi in y {
+    for &yi in y.iter().rev() {
         let one_minus_yi = F::ONE - yi;
 
-        // Fill in reverse to avoid overwriting values we still need
         for i in (0..cur_size).rev() {
-            let val = result[i];
-            result[2 * i] = val * one_minus_yi; // x_i = 0
-            result[2 * i + 1] = val * yi; // x_i = 1
+            result[i + cur_size] = result[i] * yi;
+            result[i] *= one_minus_yi;
         }
         cur_size *= 2;
     }

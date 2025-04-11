@@ -197,7 +197,7 @@ fn eval_logup_sum<F: Field>(
     n_terms: usize,
     lambda: F,
 ) -> (F, F) {
-    (0..n_terms)
+    let partials: Vec<_> = (0..n_terms)
         .into_par_iter()
         .map(|i| {
             let (r0, r1) = (i * 2, (n_terms + i) * 2);
@@ -221,10 +221,13 @@ fn eval_logup_sum<F: Field>(
 
             (eval_t0, eval_t2)
         })
-        .reduce(
-            || (F::ZERO, F::ZERO),
-            |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-        )
+        .collect();
+
+    partials
+        .into_iter()
+        .fold((F::ZERO, F::ZERO), |(acc0, acc2), (v0, v2)| {
+            (acc0 + v0, acc2 + v2)
+        })
 }
 
 impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
