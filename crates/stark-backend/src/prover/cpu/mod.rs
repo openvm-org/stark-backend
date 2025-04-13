@@ -1,11 +1,11 @@
-use std::{iter::zip, marker::PhantomData, ops::Deref, sync::Arc};
+use std::{iter::zip, marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 
 use derivative::Derivative;
 use itertools::{izip, zip_eq, Itertools};
 use opener::OpeningProver;
 use p3_challenger::FieldChallenger;
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::FieldExtensionAlgebra;
+use p3_field::{ExtensionField, Field, FieldExtensionAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use quotient::QuotientCommitter;
@@ -36,12 +36,23 @@ pub mod opener;
 pub mod quotient;
 
 /// CPU backend using Plonky3 traits.
+///
+/// # Safety
+/// For performance optimization of extension field operations, we assumes that `SC::Challenge` is
+/// an extension field of `F = Val<SC>` that is `repr(C)` or `repr(transparent)` with
+/// internal memory layout `[F; SC::Challenge::D]`.
+/// This ensures `SC::Challenge` and `F` have the same alignment and
+/// `size_of::<SC::Challenge>() == size_of::<F>() * SC::Challenge::D`.
+/// We assume that `<SC::Challenge as ExtensionField<F>::as_base_slice` is the same as
+/// transmuting `SC::Challenge` to `[F; SC::Challenge::D]`.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Copy(bound = ""), Default(bound = ""))]
 pub struct CpuBackend<SC> {
     phantom: PhantomData<SC>,
 }
 
+/// # Safety
+/// See [`CpuBackend`].
 #[derive(Derivative, derive_new::new)]
 #[derivative(Clone(bound = ""), Copy(bound = ""))]
 pub struct CpuDevice<'a, SC> {
@@ -65,7 +76,7 @@ impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
     type RapPartialProvingKey = RapPartialProvingKey<SC>;
 }
 
-#[derive(Derivative)]
+#[derive(Derivative, derive_new::new)]
 #[derivative(Clone(bound = ""))]
 pub struct PcsData<SC: StarkGenericConfig> {
     /// The preimage of a single commitment.
@@ -232,16 +243,23 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         // One shared commit for all permutation traces
         let committed_pcs_data_per_phase: Vec<(Com<SC>, PcsData<SC>)> =
             metrics_span("perm_trace_commit_time_ms", || {
-                let flattened_traces: Vec<_> = perm_trace_per_air
+                let (log_trace_heights, flattened_traces): (Vec<_>, Vec<_>) = perm_trace_per_air
                     .into_iter()
-                    .flat_map(|perm_trace| {
-                        perm_trace.map(|trace| Arc::new(trace.flatten_to_base()))
+                    .flatten()
+                    .map(|perm_trace| {
+                        // SAFETY: `Challenge` is assumed to be extension field of `F`
+                        // with memory layout `[F; Challenge::D]`
+                        let trace = unsafe { transmute_to_base(perm_trace) };
+                        let height = trace.height();
+                        let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
+                        let domain = self.pcs().natural_domain_for_degree(height);
+                        (log_height, (domain, trace))
                     })
                     .collect();
                 // Only commit if there are permutation traces
                 if !flattened_traces.is_empty() {
-                    let (commit, data) = self.commit(&flattened_traces);
-                    Some((commit, data))
+                    let (commit, data) = self.pcs().commit(flattened_traces);
+                    Some((commit, PcsData::new(Arc::new(data), log_trace_heights)))
                 } else {
                     None
                 }
@@ -484,4 +502,27 @@ where
     fn transport_pcs_data_to_device(&self, data: &PcsData<SC>) -> PcsData<SC> {
         data.clone()
     }
+}
+
+/// # Safety
+/// Assumes that `EF` is `repr(C)` or `repr(transparent)` with internal memory layout `[F; EF::D]`.
+/// This ensures `EF` and `F` have the same alignment and `size_of::<EF>() == size_of::<F>() * EF::D`.
+/// We assume that `EF::as_base_slice` is the same as transmuting `EF` to `[F; EF::D]`.
+unsafe fn transmute_to_base<F: Field, EF: ExtensionField<F>>(
+    ext_matrix: RowMajorMatrix<EF>,
+) -> RowMajorMatrix<F> {
+    let width = ext_matrix.width * EF::D;
+    // Prevent ptr from deallocating
+    let mut values = ManuallyDrop::new(ext_matrix.values);
+    let mut len = values.len();
+    let mut cap = values.capacity();
+    let ptr = values.as_mut_ptr();
+    len *= EF::D;
+    cap *= EF::D;
+    // SAFETY:
+    // - We know that `ptr` is from `Vec` so it is allocated by global allocator,
+    // - Based on assumptions, `T` and `F` have the same alignment
+    // - Based on memory layout assumptions, length and capacity is correct
+    let base_values = Vec::from_raw_parts(ptr as *mut F, len, cap);
+    RowMajorMatrix::new(base_values, width)
 }

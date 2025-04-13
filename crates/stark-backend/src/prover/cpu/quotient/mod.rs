@@ -8,7 +8,7 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use self::single::compute_single_rap_quotient_values;
-use super::PcsData;
+use super::{transmute_to_base, PcsData};
 use crate::{
     air_builders::symbolic::SymbolicExpressionDag,
     config::{Com, Domain, PackedChallenge, StarkGenericConfig, Val},
@@ -156,7 +156,10 @@ impl<SC: StarkGenericConfig> SingleQuotientData<SC> {
         let quotient_degree = self.quotient_degree;
         let quotient_domain = self.quotient_domain;
         // Flatten from extension field elements to base field elements
-        let quotient_flat = RowMajorMatrix::new_col(self.quotient_values).flatten_to_base();
+        // SAFETY: `Challenge` is assumed to be extension field of `F`
+        // with memory layout `[F; Challenge::D]`
+        let quotient_flat =
+            unsafe { transmute_to_base(RowMajorMatrix::new_col(self.quotient_values)) };
         let quotient_chunks = quotient_domain.split_evals(quotient_degree, quotient_flat);
         let qc_domains = quotient_domain.split_domains(quotient_degree);
         qc_domains
