@@ -13,7 +13,7 @@ use crate::{
     },
     proof::Proof,
     prover::{
-        cpu::{CpuBackend, CpuDevice, PcsData},
+        cpu::PcsData,
         hal::{DeviceDataTransporter, TraceCommitter},
         types::{
             AirProofInput, AirProvingContext, ProofInput, ProvingContext, SingleCommitPreimage,
@@ -57,14 +57,7 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
 
     fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, SC>
     where
-        Self: 'a,
-    {
-        MultiTraceStarkProver::new(
-            CpuBackend::<SC>::default(),
-            CpuDevice::new(self.config()),
-            self.new_challenger(),
-        )
-    }
+        Self: 'a;
 
     fn verifier(&self) -> MultiTraceStarkVerifier<SC> {
         MultiTraceStarkVerifier::new(self.config())

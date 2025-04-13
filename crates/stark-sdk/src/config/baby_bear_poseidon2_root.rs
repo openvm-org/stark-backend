@@ -1,8 +1,14 @@
 use ff::PrimeField;
 use openvm_stark_backend::{
-    config::StarkConfig, interaction::fri_log_up::FriLogUpPhase,
-    p3_challenger::MultiField32Challenger, p3_commit::ExtensionMmcs,
+    config::StarkConfig,
+    interaction::fri_log_up::FriLogUpPhase,
+    p3_challenger::MultiField32Challenger,
+    p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
+    prover::{
+        cpu::{CpuBackend, CpuDevice},
+        MultiTraceStarkProver,
+    },
 };
 use p3_baby_bear::BabyBear;
 use p3_bn254_fr::{Bn254Fr, FFBn254Fr, Poseidon2Bn254};
@@ -67,6 +73,17 @@ where
 {
     fn config(&self) -> &BabyBearPermutationRootConfig<P> {
         &self.config
+    }
+
+    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, BabyBearPermutationRootConfig<P>>
+    where
+        Self: 'a,
+    {
+        MultiTraceStarkProver::new(
+            CpuBackend::default(),
+            CpuDevice::new(self.config(), self.fri_params.log_blowup),
+            self.new_challenger(),
+        )
     }
 
     fn max_constraint_degree(&self) -> Option<usize> {

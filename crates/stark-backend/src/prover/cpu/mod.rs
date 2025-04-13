@@ -35,12 +35,6 @@ pub mod opener;
 /// Computation of DEEP quotient polynomial and commitment
 pub mod quotient;
 
-/// Proves multiple chips with interactions together.
-/// This prover implementation is specialized for Interactive AIRs.
-pub struct MultiTraceStarkProver<'c, SC: StarkGenericConfig> {
-    pub config: &'c SC,
-}
-
 /// CPU backend using Plonky3 traits.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Copy(bound = ""), Default(bound = ""))]
@@ -52,6 +46,9 @@ pub struct CpuBackend<SC> {
 #[derivative(Clone(bound = ""), Copy(bound = ""))]
 pub struct CpuDevice<'a, SC> {
     config: &'a SC,
+    /// When committing a matrix, the matrix is cloned into newly allocated memory.
+    /// The size of the newly allocated memory will be `matrix.size() << log_blowup_factor`.
+    log_blowup_factor: usize,
 }
 
 impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
@@ -103,6 +100,7 @@ impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'_, SC> 
 
 impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsData<SC>) {
+        let log_blowup_factor = self.log_blowup_factor;
         let pcs = self.pcs();
         let (log_trace_heights, traces_with_domains): (Vec<_>, Vec<_>) = traces
             .iter()
@@ -111,7 +109,33 @@ impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC
                 let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
                 // Recomputing the domain is lightweight
                 let domain = pcs.natural_domain_for_degree(height);
-                (log_height, (domain, matrix.as_ref().clone()))
+                // pcs.commit takes the trace matrix and in the case of FRI, does in-place cosetDFT
+                // which requires resizing to a larger buffer size. Since we are cloning anyways,
+                // we should just allocate the larger size to avoid memory-reallocation
+                // ref: https://github.com/Plonky3/Plonky3/blob/8c8bbb4c17bd2b7ef2404338ab8f9036d5f08337/dft/src/traits.rs#L116
+                let trace_slice = &matrix.as_ref().values;
+                let new_buffer_size = trace_slice
+                    .len()
+                    .checked_shl(log_blowup_factor.try_into().unwrap())
+                    .unwrap();
+                let mut new_buffer = Vec::with_capacity(new_buffer_size);
+                // SAFETY:
+                // - `trace_slice` is allocated for `trace_slice.len() * size_of::<F>` bytes, obviously
+                // - we just allocated `new_buffer` for at least `trace_slice.len() * size_of::<F>` bytes above (more if there's blowup)
+                // - both are slices of &[F] so alignment is guaranteed
+                // - `new_buffer` is newly allocated so non-overlapping with `trace_slice`
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        trace_slice.as_ptr(),
+                        new_buffer.as_mut_ptr(),
+                        trace_slice.len(),
+                    );
+                    new_buffer.set_len(trace_slice.len());
+                }
+                (
+                    log_height,
+                    (domain, RowMajorMatrix::new(new_buffer, matrix.width)),
+                )
             })
             .unzip();
         let (commit, data) = pcs.commit(traces_with_domains);

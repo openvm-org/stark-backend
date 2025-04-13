@@ -162,7 +162,7 @@ where
     ) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index).partition();
         Self {
-            device: Some(CpuDevice::new(config)),
+            device: Some(CpuDevice::new(config, 0)),
             data: None,
             air,
         }
