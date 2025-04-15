@@ -1,3 +1,4 @@
+use core::array;
 use std::iter;
 
 use itertools::Itertools;
@@ -214,8 +215,22 @@ where
         }
 
         let results: Vec<_> = metrics_span("generate_perm_trace_time_ms", || {
+            let mut eqs_at_r_per_log_height: [_; 32] = array::from_fn(|_| None);
+            for ood_point in ood_point_per_instance.iter() {
+                let log_height = ood_point.len();
+                if eqs_at_r_per_log_height[log_height].is_none() {
+                    let eqs_at_r = hypercube_eq_over_y(ood_point);
+                    eqs_at_r_per_log_height[log_height] = Some(eqs_at_r);
+                }
+            }
             parizip!(&ood_point_per_instance, gkr_instances)
-                .map(|(r, gkr_instance)| Self::generate_perm_trace(gkr_instance, &gamma_pows, r))
+                .map(|(r, gkr_instance)| {
+                    Self::generate_perm_trace(
+                        gkr_instance,
+                        &gamma_pows,
+                        eqs_at_r_per_log_height[r.len()].as_ref().unwrap(),
+                    )
+                })
                 .collect()
         });
 
@@ -245,7 +260,7 @@ where
     fn generate_perm_trace(
         gkr_instance: &GkrLogUpInstance<EF>,
         gamma_pows: &[EF],
-        r: &[EF],
+        eqs_at_r: &[EF],
     ) -> (DenseMatrix<EF>, Vec<EF>) {
         let s_at_rows: Vec<EF> = gkr_instance
             .numerators
@@ -257,9 +272,6 @@ where
                     .fold(EF::ZERO, |acc, (&val, &gamma_pow)| acc + gamma_pow * val)
             })
             .collect();
-
-        // TODO: Precompute these per height.
-        let eqs_at_r = hypercube_eq_over_y(r);
 
         let mut partial_sum = EF::ZERO;
         let mut after_challenge_trace_data = Vec::with_capacity(eqs_at_r.len() * 3);
