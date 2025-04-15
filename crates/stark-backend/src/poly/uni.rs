@@ -1,12 +1,12 @@
 //! Copied from starkware-libs/stwo under Apache-2.0 license.
+use p3_field::Field;
+use serde::{Deserialize, Serialize};
 use std::{
     iter::Sum,
     ops::{Add, Deref, Mul, Neg, Sub},
 };
 
-use p3_field::Field;
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnivariatePolynomial<F> {
     coeffs: Vec<F>,
 }
@@ -14,9 +14,7 @@ pub struct UnivariatePolynomial<F> {
 impl<F: Field> UnivariatePolynomial<F> {
     /// Creates a new univariate polynomial from a vector of coefficients.
     pub fn from_coeffs(coeffs: Vec<F>) -> Self {
-        let mut polynomial = Self { coeffs };
-        polynomial.trim_leading_zeroes();
-        polynomial
+        Self { coeffs }
     }
 
     pub fn zero() -> Self {
@@ -31,6 +29,14 @@ impl<F: Field> UnivariatePolynomial<F> {
 
     fn is_zero(&self) -> bool {
         self.coeffs.iter().all(F::is_zero)
+    }
+
+    pub fn evaluate_at_zero(&self) -> F {
+        *self.coeffs.first().unwrap_or(&F::ZERO)
+    }
+
+    pub fn evaluate_at_one(&self) -> F {
+        self.coeffs.iter().copied().sum()
     }
 
     pub fn evaluate(&self, x: F) -> F {
@@ -48,7 +54,7 @@ impl<F: Field> UnivariatePolynomial<F> {
     /// # Panics
     ///
     /// Panics if `points` contains duplicate x-coordinates.
-    pub fn from_interpolation(points: &[(F, F)]) -> Self {
+    pub fn from_points(points: &[(F, F)]) -> Self {
         let mut coeffs = Self::zero();
 
         for (i, &(xi, yi)) in points.iter().enumerate() {
@@ -66,7 +72,7 @@ impl<F: Field> UnivariatePolynomial<F> {
             coeffs = coeffs + selector * yi;
         }
 
-        coeffs.trim_leading_zeroes();
+        coeffs.remove_trailing_zeroes();
         coeffs
     }
 
@@ -76,16 +82,27 @@ impl<F: Field> UnivariatePolynomial<F> {
         }
     }
 
-    fn trim_leading_zeroes(&mut self) {
-        if let Some(non_zero_idx) = self.coeffs.iter().rposition(|&coeff| !coeff.is_zero()) {
-            self.coeffs.truncate(non_zero_idx + 1);
-        } else {
-            self.coeffs.clear();
-        }
+    fn remove_trailing_zeroes(&mut self) {
+        self.coeffs.truncate(
+            self.coeffs
+                .iter()
+                .rposition(|c| !c.is_zero())
+                .map_or(0, |i| i + 1),
+        );
     }
 
     pub fn into_coeffs(self) -> Vec<F> {
         self.coeffs
+    }
+
+    pub fn add_scaled(&mut self, other: &Self, scale: F) {
+        if self.coeffs.len() < other.coeffs.len() {
+            self.coeffs.resize(other.coeffs.len(), F::ZERO);
+        }
+
+        for (a, b) in self.coeffs.iter_mut().zip(&other.coeffs) {
+            *a += *b * scale;
+        }
     }
 }
 
@@ -120,8 +137,8 @@ impl<F: Field> Mul for UnivariatePolynomial<F> {
             return Self::zero();
         }
 
-        self.trim_leading_zeroes();
-        rhs.trim_leading_zeroes();
+        self.remove_trailing_zeroes();
+        rhs.remove_trailing_zeroes();
 
         let mut res = vec![F::ZERO; self.coeffs.len() + rhs.coeffs.len() - 1];
 
@@ -178,14 +195,23 @@ impl<F: Field> Deref for UnivariatePolynomial<F> {
     }
 }
 
-/// Evaluates a polynomial represented by coefficients in a slice at a given point `x`.
-pub fn evaluate_on_slice<F: Field>(coeffs: &[F], x: F) -> F {
-    coeffs.iter().rfold(F::ZERO, |acc, &coeff| acc * x + coeff)
-}
-
 /// Returns `v_0 + alpha * v_1 + ... + alpha^(n-1) * v_{n-1}`.
 pub fn random_linear_combination<F: Field>(v: &[F], alpha: F) -> F {
-    evaluate_on_slice(v, alpha)
+    random_linear_combination_iter(v.iter(), alpha)
+}
+
+/// Returns `v_0 + alpha * v_1 + ... + alpha^(n-1) * v_{n-1}` using an iterator over `&F`.
+pub fn random_linear_combination_iter<I, F>(iter: I, alpha: F) -> F
+where
+    F: Field,
+    I: IntoIterator,
+    I::Item: Deref<Target = F>,
+{
+    let mut acc = F::ZERO;
+    for (val, alpha_pow) in iter.into_iter().zip(alpha.powers()) {
+        acc += alpha_pow * *val;
+    }
+    acc
 }
 
 /// Projective fraction.
@@ -252,7 +278,7 @@ mod tests {
         let ys = bbvec![1, 2, 3, 4];
         let points = zip(&xs, &ys).map(|(x, y)| (*x, *y)).collect_vec();
 
-        let poly = UnivariatePolynomial::from_interpolation(&points);
+        let poly = UnivariatePolynomial::from_points(&points);
 
         for (x, y) in zip(xs, ys) {
             assert_eq!(poly.evaluate(x), y, "mismatch for x={x}");

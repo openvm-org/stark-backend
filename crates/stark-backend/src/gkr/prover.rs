@@ -7,13 +7,15 @@ use std::{
 
 use itertools::Itertools;
 use p3_challenger::FieldChallenger;
-use p3_field::Field;
+use p3_field::{ExtensionField, Field};
+use p3_maybe_rayon::prelude::*;
 use thiserror::Error;
 
+use crate::utils::{metrics_span, metrics_span_increment};
 use crate::{
     gkr::types::{GkrArtifact, GkrBatchProof, GkrMask, Layer},
     poly::{
-        multi::{hypercube_eq, Mle, MultivariatePolyOracle},
+        multi::{Mle, MultivariatePolyOracle},
         uni::{random_linear_combination, UnivariatePolynomial},
     },
     sumcheck,
@@ -26,15 +28,13 @@ use crate::{
 /// Evaluations are stored in lexicographic order i.e. `evals[0] = eq((0, ..., 0, 0), y)`,
 /// `evals[1] = eq((0, ..., 0, 1), y)`, etc.
 #[derive(Debug, Clone)]
-struct HypercubeEqEvals<F> {
-    y: Vec<F>,
+struct FixedFirstHypercubeEqEvals<'a, F> {
+    y: &'a [F],
     evals: Vec<F>,
 }
 
-impl<F: Field> HypercubeEqEvals<F> {
-    pub fn eval(y: &[F]) -> Self {
-        let y = y.to_vec();
-
+impl<'a, F: Field> FixedFirstHypercubeEqEvals<'a, F> {
+    pub fn eval(y: &'a [F]) -> Self {
         if y.is_empty() {
             let evals = vec![F::ONE];
             return Self { evals, y };
@@ -47,25 +47,28 @@ impl<F: Field> HypercubeEqEvals<F> {
     }
 
     /// Returns evaluations of the function `x -> eq(x, y) * v` for each `x` in `{0, 1}^n`.
-    fn gen(y: &[F], v: F) -> Vec<F> {
-        let mut evals = Vec::with_capacity(1 << y.len());
-        evals.push(v);
+    fn gen(y: &'a [F], v: F) -> Vec<F> {
+        let n = 1 << y.len();
+        let mut evals = vec![F::ZERO; n];
+        evals[0] = v;
+        let mut curr_len = 1;
 
         for &y_i in y.iter().rev() {
-            for j in 0..evals.len() {
-                // `lhs[j] = eq(0, y_i) * c[i]`
-                // `rhs[j] = eq(1, y_i) * c[i]`
-                let tmp = evals[j] * y_i;
-                evals.push(tmp);
-                evals[j] -= tmp;
-            }
+            let (left, right) = evals.split_at_mut(curr_len);
+            left.par_iter_mut()
+                .zip(right.par_iter_mut())
+                .for_each(|(l, r)| {
+                    let tmp = *l * y_i;
+                    *r = tmp;
+                    *l -= tmp;
+                });
+            curr_len *= 2;
         }
-
         evals
     }
 }
 
-impl<F> Deref for HypercubeEqEvals<F> {
+impl<F> Deref for FixedFirstHypercubeEqEvals<'_, F> {
     type Target = [F];
 
     fn deref(&self) -> &Self::Target {
@@ -91,8 +94,8 @@ impl<F> Deref for HypercubeEqEvals<F> {
 ///
 /// P(x) = eq(x, y) * (numer(x) + lambda * denom(x))
 /// ```
-struct GkrMultivariatePolyOracle<'a, F: Clone> {
-    pub eq_evals: &'a HypercubeEqEvals<F>,
+struct GkrMultivariatePolyOracle<'a, F> {
+    pub eq_evals: &'a FixedFirstHypercubeEqEvals<'a, F>,
     pub input_layer: Layer<F>,
     pub eq_fixed_var_correction: F,
     /// Used by LogUp to perform a random linear combination of the numerators and denominators.
@@ -104,48 +107,44 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
         self.input_layer.n_variables() - 1
     }
 
-    fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F> {
+    fn partial_hypercube_sum(&self, claim: F) -> UnivariatePolynomial<F> {
         let n_variables = self.arity();
         assert_ne!(n_variables, 0);
         let n_terms = 1 << (n_variables - 1);
-        // Vector used to generate evaluations of `eq(x, y)` for `x` in the boolean hypercube.
-        let y = &self.eq_evals.y;
-        let lambda = self.lambda;
 
         let (mut eval_at_0, mut eval_at_2) = match &self.input_layer {
             Layer::GrandProduct(col) => eval_grand_product_sum(self.eq_evals, col, n_terms),
             Layer::LogUpGeneric {
                 numerators,
                 denominators,
-            }
-            | Layer::LogUpMultiplicities {
+            } => eval_logup_sum(
+                self.eq_evals,
                 numerators,
                 denominators,
-            } => eval_logup_sum(self.eq_evals, numerators, denominators, n_terms, lambda),
-            Layer::LogUpSingles { denominators } => {
-                eval_logup_singles_sum(self.eq_evals, denominators, n_terms, lambda)
-            }
+                n_terms,
+                self.lambda,
+            ),
         };
 
         eval_at_0 *= self.eq_fixed_var_correction;
         eval_at_2 *= self.eq_fixed_var_correction;
-        correct_sum_as_poly_in_first_variable(eval_at_0, eval_at_2, claim, y, n_variables)
+        correct_sum_as_poly_in_first_variable(
+            eval_at_0,
+            eval_at_2,
+            claim,
+            self.eq_evals.y,
+            n_variables,
+        )
     }
 
-    fn partial_evaluation(self, alpha: F) -> Self {
-        if self.is_constant() {
-            return self;
+    fn fix_first_in_place(&mut self, alpha: F) {
+        if self.has_zero_arity() {
+            return;
         }
 
         let z0 = self.eq_evals.y[self.eq_evals.y.len() - self.arity()];
-        let eq_fixed_var_correction = self.eq_fixed_var_correction * hypercube_eq(&[alpha], &[z0]);
-
-        Self {
-            eq_evals: self.eq_evals,
-            eq_fixed_var_correction,
-            input_layer: self.input_layer.fix_first_variable(alpha),
-            lambda: self.lambda,
-        }
+        self.eq_fixed_var_correction *= alpha * z0 + (F::ONE - alpha) * (F::ONE - z0);
+        self.input_layer.fix_first_variable_in_place(alpha);
     }
 }
 
@@ -153,7 +152,7 @@ impl<F: Field> MultivariatePolyOracle<F> for GkrMultivariatePolyOracle<'_, F> {
 ///
 /// Output of the form: `(eval_at_0, eval_at_2)`.
 fn eval_grand_product_sum<F: Field>(
-    eq_evals: &HypercubeEqEvals<F>,
+    eq_evals: &FixedFirstHypercubeEqEvals<F>,
     input_layer: &Mle<F>,
     n_terms: usize,
 ) -> (F, F) {
@@ -185,98 +184,54 @@ fn eval_grand_product_sum<F: Field>(
     (eval_at_0, eval_at_2)
 }
 
-/// Evaluates `sum_x eq(({0}^|r|, 0, x), y) * (inp_numer(r, t, x, 0) * inp_denom(r, t, x, 1) +
-/// inp_numer(r, t, x, 1) * inp_denom(r, t, x, 0) + lambda * inp_denom(r, t, x, 0) * inp_denom(r, t,
-/// x, 1))` at `t=0` and `t=2`.
+/// Evaluates the expression:
+/// `sum_x eq_evals(x) * (f(x, t) + λ * denom(x, t))`
+/// where `f(x, t) = numer_0(x, t) * denom_1(x, t) + numer_1(x, t) * denom_0(x, t)`
+/// and the evaluation is done for `t = 0` and `t = 2`.
 ///
-/// Output of the form: `(eval_at_0, eval_at_2)`.
+/// Returns a tuple: `(sum_at_t0, sum_at_t2)`
 fn eval_logup_sum<F: Field>(
-    eq_evals: &HypercubeEqEvals<F>,
-    input_numerators: &Mle<F>,
-    input_denominators: &Mle<F>,
+    eq_evals: &FixedFirstHypercubeEqEvals<F>,
+    numerators: &Mle<F>,
+    denominators: &Mle<F>,
     n_terms: usize,
     lambda: F,
 ) -> (F, F) {
-    let mut eval_at_0 = F::ZERO;
-    let mut eval_at_2 = F::ZERO;
+    let partials: Vec<_> = (0..n_terms)
+        .into_par_iter()
+        .map(|i| {
+            let (r0, r1) = (i * 2, (n_terms + i) * 2);
 
-    for i in 0..n_terms {
-        // Gather input values at (r, {0, 1, 2}, bits(i), {0, 1})
-        let (numer_r0_0, denom_r0_0) = (input_numerators[i * 2], input_denominators[i * 2]);
-        let (numer_r0_1, denom_r0_1) = (input_numerators[i * 2 + 1], input_denominators[i * 2 + 1]);
-        let (numer_r1_0, denom_r1_0) = (
-            input_numerators[(n_terms + i) * 2],
-            input_denominators[(n_terms + i) * 2],
-        );
-        let (numer_r1_1, denom_r1_1) = (
-            input_numerators[(n_terms + i) * 2 + 1],
-            input_denominators[(n_terms + i) * 2 + 1],
-        );
+            // Extract input values for t=0 (r0) and t=1 (r1)
+            let (n0_0, d0_0) = (numerators[r0], denominators[r0]);
+            let (n0_1, d0_1) = (numerators[r0 + 1], denominators[r0 + 1]);
+            let (n1_0, d1_0) = (numerators[r1], denominators[r1]);
+            let (n1_1, d1_1) = (numerators[r1 + 1], denominators[r1 + 1]);
 
-        // Calculate values at r, t = 2
-        let numer_r2_0 = numer_r1_0.double() - numer_r0_0;
-        let denom_r2_0 = denom_r1_0.double() - denom_r0_0;
-        let numer_r2_1 = numer_r1_1.double() - numer_r0_1;
-        let denom_r2_1 = denom_r1_1.double() - denom_r0_1;
+            // Interpolate to get values at t=2
+            let (n2_0, d2_0) = (n1_0.double() - n0_0, d1_0.double() - d0_0);
+            let (n2_1, d2_1) = (n1_1.double() - n0_1, d1_1.double() - d0_1);
 
-        // Compute fractions at t = 0 and t = 2
-        let numer_at_r0i = numer_r0_0 * denom_r0_1 + numer_r0_1 * denom_r0_0;
-        let denom_at_r0i = denom_r0_1 * denom_r0_0;
-        let numer_at_r2i = numer_r2_0 * denom_r2_1 + numer_r2_1 * denom_r2_0;
-        let denom_at_r2i = denom_r2_1 * denom_r2_0;
+            let (num_t0, den_t0) = (n0_0 * d0_1 + n0_1 * d0_0, d0_0 * d0_1);
+            let (num_t2, den_t2) = (n2_0 * d2_1 + n2_1 * d2_0, d2_0 * d2_1);
 
-        // Accumulate the evaluated terms
-        let eq_eval_at_0i = eq_evals[i];
-        eval_at_0 += eq_eval_at_0i * (numer_at_r0i + lambda * denom_at_r0i);
-        eval_at_2 += eq_eval_at_0i * (numer_at_r2i + lambda * denom_at_r2i);
-    }
+            let eq = eq_evals[i];
+            let eval_t0 = eq * (num_t0 + lambda * den_t0);
+            let eval_t2 = eq * (num_t2 + lambda * den_t2);
 
-    (eval_at_0, eval_at_2)
-}
+            (eval_t0, eval_t2)
+        })
+        .collect();
 
-/// Evaluates `sum_x eq(({0}^|r|, 0, x), y) * (inp_denom(r, t, x, 1) + inp_denom(r, t, x, 0) +
-/// lambda * inp_denom(r, t, x, 0) * inp_denom(r, t, x, 1))` at `t=0` and `t=2`.
-///
-/// Output of the form: `(eval_at_0, eval_at_2)`.
-fn eval_logup_singles_sum<F: Field>(
-    eq_evals: &HypercubeEqEvals<F>,
-    input_denominators: &Mle<F>,
-    n_terms: usize,
-    lambda: F,
-) -> (F, F) {
-    let mut eval_at_0 = F::ZERO;
-    let mut eval_at_2 = F::ZERO;
-
-    for i in 0..n_terms {
-        // Input denominator values at (r, {0, 1, 2}, bits(i), {0, 1})
-        let (inp_denom_r0_0, inp_denom_r0_1) =
-            (input_denominators[i * 2], input_denominators[i * 2 + 1]);
-        let (inp_denom_r1_0, inp_denom_r1_1) = (
-            input_denominators[(n_terms + i) * 2],
-            input_denominators[(n_terms + i) * 2 + 1],
-        );
-
-        // Calculate values at t = 2
-        let inp_denom_r2_0 = inp_denom_r1_0.double() - inp_denom_r0_0;
-        let inp_denom_r2_1 = inp_denom_r1_1.double() - inp_denom_r0_1;
-
-        // Fraction addition polynomials at t = 0 and t = 2
-        let numer_at_r0i = inp_denom_r0_0 + inp_denom_r0_1;
-        let denom_at_r0i = inp_denom_r0_0 * inp_denom_r0_1;
-        let numer_at_r2i = inp_denom_r2_0 + inp_denom_r2_1;
-        let denom_at_r2i = inp_denom_r2_0 * inp_denom_r2_1;
-
-        // Accumulate evaluated terms
-        let eq_eval_at_0i = eq_evals[i];
-        eval_at_0 += eq_eval_at_0i * (numer_at_r0i + lambda * denom_at_r0i);
-        eval_at_2 += eq_eval_at_0i * (numer_at_r2i + lambda * denom_at_r2i);
-    }
-
-    (eval_at_0, eval_at_2)
+    partials
+        .into_iter()
+        .fold((F::ZERO, F::ZERO), |(acc0, acc2), (v0, v2)| {
+            (acc0 + v0, acc2 + v2)
+        })
 }
 
 impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
-    fn is_constant(&self) -> bool {
+    fn has_zero_arity(&self) -> bool {
         self.arity() == 0
     }
 
@@ -290,9 +245,9 @@ impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
     /// Otherwise, an [`Err`] is returned.
     ///
     /// For more context see <https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf> page 64.
-    fn try_into_mask(self) -> Result<GkrMask<F>, NotConstantPolyError> {
-        if !self.is_constant() {
-            return Err(NotConstantPolyError);
+    fn try_into_mask(self) -> Result<GkrMask<F>, NotZeroArityPolyError> {
+        if !self.has_zero_arity() {
+            return Err(NotZeroArityPolyError);
         }
 
         let columns = match self.input_layer {
@@ -305,73 +260,73 @@ impl<F: Field> GkrMultivariatePolyOracle<'_, F> {
                 let denominators = denominators.as_ref().try_into().unwrap();
                 vec![numerators, denominators]
             }
-            // Should never get called.
-            Layer::LogUpMultiplicities { .. } => unimplemented!(),
-            Layer::LogUpSingles { denominators } => {
-                let numerators = [F::ONE; 2];
-                let denominators = denominators.as_ref().try_into().unwrap();
-                vec![numerators, denominators]
-            }
         };
 
         Ok(GkrMask::new(columns))
     }
 }
 
-/// Error returned when a polynomial is expected to be constant but it is not.
+/// Error returned when a polynomial is expected to have zero arity but does not.
 #[derive(Debug, Error)]
-#[error("polynomial is not constant")]
-pub struct NotConstantPolyError;
+#[error("polynomial does not have zero arity")]
+pub struct NotZeroArityPolyError;
 
 /// Batch proves lookup circuits with GKR.
 ///
 /// The input layers should be committed to the channel before calling this function.
 // GKR algorithm: <https://people.cs.georgetown.edu/jthaler/ProofsArgsAndZK.pdf> (page 64)
-pub fn prove_batch<F: Field>(
+pub fn prove_batch<F: Field, EF: ExtensionField<F>>(
     challenger: &mut impl FieldChallenger<F>,
-    input_layer_by_instance: Vec<Layer<F>>,
-) -> (GkrBatchProof<F>, GkrArtifact<F>) {
+    input_layer_by_instance: Vec<Layer<EF>>,
+) -> (GkrBatchProof<EF>, GkrArtifact<EF>) {
     let n_instances = input_layer_by_instance.len();
-    let n_layers_by_instance = input_layer_by_instance
-        .iter()
+    let n_layers_by_instance: Vec<_> = input_layer_by_instance
+        .par_iter()
         .map(|l| l.n_variables())
-        .collect_vec();
+        .collect();
     let n_layers = *n_layers_by_instance.iter().max().unwrap();
 
     // Evaluate all instance circuits and collect the layer values.
-    let mut layers_by_instance = input_layer_by_instance
-        .into_iter()
-        .map(|input_layer| gen_layers(input_layer).into_iter().rev())
-        .collect_vec();
+    let mut layers_by_instance: Vec<_> = metrics_span("gkr_gen_layers_ms", || {
+        input_layer_by_instance
+            .into_par_iter()
+            .map(|input_layer| gen_layers(input_layer).into_iter().rev())
+            .collect()
+    });
 
     let mut output_claims_by_instance = vec![None; n_instances];
-    let mut layer_masks_by_instance = (0..n_instances).map(|_| Vec::new()).collect_vec();
+    let mut layer_masks_by_instance = vec![vec![]; n_instances];
     let mut sumcheck_proofs = Vec::new();
 
     let mut ood_point = Vec::new();
     let mut claims_to_verify_by_instance = vec![None; n_instances];
 
-    for layer in 0..n_layers {
-        let n_remaining_layers = n_layers - layer;
+    let mut output_instances_by_layer: Vec<Vec<usize>> = vec![Vec::new(); n_layers];
+    for (instance, &instance_n_layers) in n_layers_by_instance.iter().enumerate() {
+        let output_layer = n_layers - instance_n_layers;
+        output_instances_by_layer[output_layer].push(instance);
+    }
 
+    #[allow(clippy::needless_range_loop)]
+    for layer in 0..n_layers {
         // Check all the instances for output layers.
-        for (instance, layers) in layers_by_instance.iter_mut().enumerate() {
-            if n_layers_by_instance[instance] == n_remaining_layers {
-                let output_layer = layers.next().unwrap();
-                let output_layer_values = output_layer.try_into_output_layer_values().unwrap();
-                claims_to_verify_by_instance[instance] = Some(output_layer_values.clone());
-                output_claims_by_instance[instance] = Some(output_layer_values);
-            }
+        for &instance in &output_instances_by_layer[layer] {
+            let output_layer = layers_by_instance[instance].next().unwrap();
+            let output_layer_values = output_layer.try_into_output_layer_values().unwrap();
+            claims_to_verify_by_instance[instance] = Some(output_layer_values.clone());
+            output_claims_by_instance[instance] = Some(output_layer_values);
         }
 
         // Seed the channel with layer claims.
         for claims_to_verify in claims_to_verify_by_instance.iter().flatten() {
-            challenger.observe_slice(claims_to_verify);
+            for claim in claims_to_verify {
+                challenger.observe_ext_element(*claim);
+            }
         }
 
-        let eq_evals = HypercubeEqEvals::eval(&ood_point);
-        let sumcheck_alpha = challenger.sample();
-        let instance_lambda = challenger.sample();
+        let eq_evals = FixedFirstHypercubeEqEvals::eval(&ood_point);
+        let sumcheck_alpha: EF = challenger.sample_ext_element();
+        let instance_lambda: EF = challenger.sample_ext_element();
 
         let mut sumcheck_oracles = Vec::new();
         let mut sumcheck_claims = Vec::new();
@@ -385,7 +340,7 @@ pub fn prove_batch<F: Field>(
                 sumcheck_oracles.push(GkrMultivariatePolyOracle {
                     eq_evals: &eq_evals,
                     input_layer: layer,
-                    eq_fixed_var_correction: F::ONE,
+                    eq_fixed_var_correction: EF::ONE,
                     lambda: instance_lambda,
                 });
                 sumcheck_claims.push(random_linear_combination(claims_to_verify, instance_lambda));
@@ -400,29 +355,33 @@ pub fn prove_batch<F: Field>(
                 constant_poly_oracles,
                 ..
             },
-        ) = sumcheck::prove_batch(
-            sumcheck_claims,
-            sumcheck_oracles,
-            sumcheck_alpha,
-            challenger,
-        );
+        ) = metrics_span_increment("sumcheck_prove_batch_ms", || {
+            sumcheck::prove_batch(
+                sumcheck_claims,
+                sumcheck_oracles,
+                sumcheck_alpha,
+                challenger,
+            )
+        });
 
         sumcheck_proofs.push(sumcheck_proof);
 
-        let masks = constant_poly_oracles
-            .into_iter()
+        let masks: Vec<_> = constant_poly_oracles
+            .into_par_iter()
             .map(|oracle| oracle.try_into_mask().unwrap())
-            .collect_vec();
+            .collect();
 
         // Seed the channel with the layer masks.
         for (&instance, mask) in zip(&sumcheck_instances, &masks) {
             for column in mask.columns() {
-                challenger.observe_slice(column);
+                for el in column {
+                    challenger.observe_ext_element(*el);
+                }
             }
             layer_masks_by_instance[instance].push(mask.clone());
         }
 
-        let challenge = challenger.sample();
+        let challenge: EF = challenger.sample_ext_element();
         ood_point = sumcheck_ood_point;
         ood_point.push(challenge);
 
@@ -434,13 +393,13 @@ pub fn prove_batch<F: Field>(
 
     let output_claims_by_instance = output_claims_by_instance
         .into_iter()
-        .map(Option::unwrap)
-        .collect();
+        .collect::<Option<_>>()
+        .expect("all output claims should be populated");
 
     let claims_to_verify_by_instance = claims_to_verify_by_instance
         .into_iter()
-        .map(Option::unwrap)
-        .collect();
+        .collect::<Option<_>>()
+        .expect("all output claims should be populated");
 
     let proof = GkrBatchProof {
         sumcheck_proofs,
@@ -485,7 +444,11 @@ pub fn correct_sum_as_poly_in_first_variable<F: Field>(
 
     // We evaluated `f(0)` and `f(2)` - the inputs.
     // We want to compute `r(t) = f(t) * eq(t, y[n - k]) / eq(0, y[:n - k + 1])`.
-    let a_const = hypercube_eq(&vec![F::ZERO; n - k + 1], &y[..n - k + 1]).inverse();
+    let a_const = y[..n - k + 1]
+        .iter()
+        .map(|yi| F::ONE - *yi)
+        .product::<F>()
+        .inverse();
 
     // Find the additional root of `r(t)`, by finding the root of `eq(t, y[n - k])`:
     //    0 = eq(t, y[n - k])
@@ -493,15 +456,16 @@ pub fn correct_sum_as_poly_in_first_variable<F: Field>(
     //      = 1 - y[n - k] - t(1 - 2 * y[n - k])
     // => t = (1 - y[n - k]) / (1 - 2 * y[n - k])
     //      = b
-    let b_const = (F::ONE - y[n - k]) / (F::ONE - y[n - k].double());
+    let one_minus_y = F::ONE - y[n - k];
+    let b_const = one_minus_y / (F::ONE - y[n - k].double());
 
     // We get that `r(t) = f(t) * eq(t, y[n - k]) * a`.
-    let r_at_0 = f_at_0 * hypercube_eq(&[F::ZERO], &[y[n - k]]) * a_const;
+    let r_at_0 = f_at_0 * one_minus_y * a_const;
     let r_at_1 = claim - r_at_0;
-    let r_at_2 = f_at_2 * hypercube_eq(&[F::TWO], &[y[n - k]]) * a_const;
+    let r_at_2 = f_at_2 * (y[n - k].double() - one_minus_y) * a_const;
 
     // Interpolate.
-    UnivariatePolynomial::from_interpolation(&[
+    UnivariatePolynomial::from_points(&[
         (F::ZERO, r_at_0),
         (F::ONE, r_at_1),
         (F::TWO, r_at_2),
@@ -515,7 +479,7 @@ mod tests {
     use p3_field::FieldAlgebra;
     use rand::Rng;
 
-    use crate::{gkr::prover::HypercubeEqEvals, poly::multi::hypercube_eq};
+    use crate::{gkr::prover::FixedFirstHypercubeEqEvals, poly::multi::hypercube_eq};
 
     #[test]
     fn test_gen_eq_evals() {
@@ -526,7 +490,7 @@ mod tests {
         let v: F = rng.gen();
         let y: Vec<F> = vec![rng.gen(), rng.gen(), rng.gen()];
 
-        let eq_evals = HypercubeEqEvals::gen(&y, v);
+        let eq_evals = FixedFirstHypercubeEqEvals::gen(&y, v);
 
         assert_eq!(
             *eq_evals,

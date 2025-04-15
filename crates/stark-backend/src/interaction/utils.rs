@@ -1,4 +1,5 @@
 use p3_field::FieldAlgebra;
+use std::borrow::Borrow;
 
 use super::Interaction;
 
@@ -6,11 +7,11 @@ use super::Interaction;
 /// where max_num_fields is the maximum length of `fields` in any interaction.
 pub fn generate_betas<AF: FieldAlgebra, E>(
     beta: AF,
-    all_interactions: &[Interaction<E>],
+    all_interactions: &[impl Borrow<Interaction<E>>],
 ) -> Vec<AF> {
     let max_fields_len = all_interactions
         .iter()
-        .map(|interaction| interaction.message.len())
+        .map(|interaction| interaction.borrow().message.len())
         .max()
         .unwrap_or(0);
 

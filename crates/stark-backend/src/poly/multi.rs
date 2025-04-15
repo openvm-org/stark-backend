@@ -4,20 +4,22 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use p3_maybe_rayon::prelude::*;
+
 use p3_field::{ExtensionField, Field};
 
 use super::uni::UnivariatePolynomial;
 
 /// Represents a multivariate polynomial `g(x_1, ..., x_n)`.
-pub trait MultivariatePolyOracle<F> {
+pub trait MultivariatePolyOracle<F>: Send + Sync {
     /// For an n-variate polynomial, returns n.
     fn arity(&self) -> usize;
 
     /// Returns the sum of `g(x_1, x_2, ..., x_n)` over all `(x_2, ..., x_n)` in `{0, 1}^(n-1)` as a polynomial in `x_1`.
-    fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F>;
+    fn partial_hypercube_sum(&self, claim: F) -> UnivariatePolynomial<F>;
 
     /// Returns the multivariate polynomial `h(x_2, ..., x_n) = g(alpha, x_2, ..., x_n)`.
-    fn partial_evaluation(self, alpha: F) -> Self;
+    fn fix_first_in_place(&mut self, alpha: F);
 }
 
 /// Multilinear extension of the function defined on the boolean hypercube.
@@ -39,8 +41,35 @@ impl<F: Field> Mle<F> {
         Self { evals }
     }
 
-    pub fn into_evals(self) -> Vec<F> {
-        self.evals
+    /// Evaluates the multilinear extension at `point`.
+    pub fn eval(&self, point: &[F]) -> F {
+        let mut buf = self.evals.clone();
+        Self::eval_slice_with_buf(&mut buf, point)
+    }
+
+    /// Evaluates the multilinear extension given by hypercube evaluations `evals` at `point`.
+    ///
+    /// Uses `evals` as a computational buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `evals.len() != 2^point.len()`
+    pub fn eval_slice_with_buf(evals: &mut [F], point: &[F]) -> F {
+        let buf = evals;
+        let n = point.len();
+        let mut len = buf.len();
+
+        assert_eq!(len, 1 << n, "Point dimension mismatch");
+
+        for &x_i in point.iter().rev() {
+            len /= 2;
+            for i in 0..len {
+                let a = buf[2 * i];
+                let b = buf[2 * i + 1];
+                buf[i] = a + x_i * (b - a);
+            }
+        }
+        buf[0]
     }
 }
 
@@ -49,27 +78,30 @@ impl<F: Field> MultivariatePolyOracle<F> for Mle<F> {
         self.evals.len().ilog2() as usize
     }
 
-    fn marginalize_first(&self, claim: F) -> UnivariatePolynomial<F> {
-        let x0 = F::ZERO;
-        let x1 = F::ONE;
+    fn partial_hypercube_sum(&self, claim: F) -> UnivariatePolynomial<F> {
+        let mut y0 = F::ZERO;
+        for i in 0..self.len() / 2 {
+            y0 += self[i];
+        }
 
-        let y0 = self[0..self.len() / 2]
-            .iter()
-            .fold(F::ZERO, |acc, x| acc + *x);
         let y1 = claim - y0;
 
-        UnivariatePolynomial::from_interpolation(&[(x0, y0), (x1, y1)])
+        // Direct degree-1 polynomial: f(x) = y0 + (y1 - y0) * x
+        let slope = y1 - y0;
+
+        UnivariatePolynomial::from_coeffs(vec![y0, slope])
     }
 
-    fn partial_evaluation(self, alpha: F) -> Self {
+    fn fix_first_in_place(&mut self, alpha: F) {
         let midpoint = self.len() / 2;
-        let (lhs_evals, rhs_evals) = self.split_at(midpoint);
-
-        let res = zip(lhs_evals, rhs_evals)
-            .map(|(&lhs_eval, &rhs_eval)| alpha * (rhs_eval - lhs_eval) + lhs_eval)
-            .collect();
-
-        Mle::new(res)
+        let (lhs_evals, rhs_evals) = self.split_at_mut(midpoint);
+        lhs_evals
+            .par_iter_mut()
+            .zip(rhs_evals.par_iter())
+            .for_each(|(lhs, &rhs)| {
+                *lhs += alpha * (rhs - *lhs);
+            });
+        self.evals.truncate(midpoint);
     }
 }
 
@@ -113,33 +145,37 @@ where
     assignment * (eval1 - eval0) + eval0
 }
 
+/// Computes eq_n(x, y) for fixed x and each y in {0, 1}^n, where
+///          eq_n(x, y) = prod_i (x_i y_i + (1 - x_i)(1 - y_i)).
+pub fn hypercube_eq_over_y<F: Field>(y: &[F]) -> Vec<F> {
+    let n = y.len();
+    let size = 1 << n;
+
+    let mut result = vec![F::ZERO; size];
+    result[0] = F::ONE;
+
+    let mut cur_size = 1;
+
+    for &yi in y.iter().rev() {
+        let one_minus_yi = F::ONE - yi;
+
+        for i in (0..cur_size).rev() {
+            result[i + cur_size] = result[i] * yi;
+            result[i] *= one_minus_yi;
+        }
+        cur_size *= 2;
+    }
+    result
+}
+
 #[cfg(test)]
 mod test {
+    use openvm_stark_sdk::utils::create_seeded_rng;
     use p3_baby_bear::BabyBear;
-    use p3_field::{Field, FieldAlgebra};
+    use p3_field::FieldAlgebra;
+    use rand::Rng;
 
     use super::*;
-
-    impl<F: Field> Mle<F> {
-        /// Evaluates the multilinear polynomial at `point`.
-        pub(crate) fn eval(&self, point: &[F]) -> F {
-            pub fn eval_rec<F: Field>(mle_evals: &[F], p: &[F]) -> F {
-                match p {
-                    [] => mle_evals[0],
-                    &[p_i, ref p @ ..] => {
-                        let (lhs, rhs) = mle_evals.split_at(mle_evals.len() / 2);
-                        let lhs_eval = eval_rec(lhs, p);
-                        let rhs_eval = eval_rec(rhs, p);
-                        // Equivalent to `eq(0, p_i) * lhs_eval + eq(1, p_i) * rhs_eval`.
-                        p_i * (rhs_eval - lhs_eval) + lhs_eval
-                    }
-                }
-            }
-
-            let mle_evals = self.clone().into_evals();
-            eval_rec(&mle_evals, point)
-        }
-    }
 
     #[test]
     fn test_mle_evaluation() {
@@ -196,7 +232,7 @@ mod test {
         // (1 - x_1)(1 - x_2) + 2 (1 - x_1) x_2 + 3 x_1 (1 - x_2) + 4 x_1 x_2
         let mle = Mle::new(evals);
         // (1 - x_1) + 2 (1 - x_1) + 3 x_1 + 4 x_1
-        let poly = mle.marginalize_first(sum);
+        let poly = mle.partial_hypercube_sum(sum);
 
         assert_eq!(
             poly.evaluate(BabyBear::ZERO),
@@ -217,19 +253,13 @@ mod test {
             BabyBear::from_canonical_u32(4),
         ];
         // (1 - x_1)(1 - x_2) + 2 (1 - x_1) x_2 + 3 x_1 (1 - x_2) + 4 x_1 x_2
-        let mle = Mle::new(evals);
+        let mut mle = Mle::new(evals);
         let alpha = BabyBear::from_canonical_u32(2);
         // -(1 - x_2) - 2 x_2 + 6 (1 - x_2) + 8 x_2 = x_2 + 5
-        let partial_eval = mle.partial_evaluation(alpha);
+        mle.fix_first_in_place(alpha);
 
-        assert_eq!(
-            partial_eval.eval(&[BabyBear::ZERO]),
-            BabyBear::from_canonical_u32(5)
-        );
-        assert_eq!(
-            partial_eval.eval(&[BabyBear::ONE]),
-            BabyBear::from_canonical_u32(6)
-        );
+        assert_eq!(mle.eval(&[BabyBear::ZERO]), BabyBear::from_canonical_u32(5));
+        assert_eq!(mle.eval(&[BabyBear::ONE]), BabyBear::from_canonical_u32(6));
     }
 
     #[test]
@@ -262,5 +292,55 @@ mod test {
         let one = BabyBear::ONE;
 
         hypercube_eq(&[zero, one], &[zero]);
+    }
+
+    #[test]
+    fn test_eqs_at_hypercube() {
+        // Try on a hypercube point.
+        let r = vec![BabyBear::ZERO, BabyBear::ONE, BabyBear::ONE, BabyBear::ZERO];
+        let eqs = hypercube_eq_over_y(&r);
+
+        let mut expected = vec![BabyBear::ZERO; 16];
+        expected[6] = BabyBear::ONE;
+        assert_eq!(eqs, expected);
+    }
+
+    #[test]
+    fn test_eqs_at_dim_3() {
+        let mut rng = create_seeded_rng();
+
+        let [a, b, c] = rng.gen::<[BabyBear; 3]>();
+
+        let eqs = hypercube_eq_over_y(&[a, b, c]);
+
+        let expected = vec![
+            (BabyBear::ONE - a) * (BabyBear::ONE - b) * (BabyBear::ONE - c),
+            (BabyBear::ONE - a) * (BabyBear::ONE - b) * c,
+            (BabyBear::ONE - a) * b * (BabyBear::ONE - c),
+            (BabyBear::ONE - a) * b * c,
+            a * (BabyBear::ONE - b) * (BabyBear::ONE - c),
+            a * (BabyBear::ONE - b) * c,
+            a * b * (BabyBear::ONE - c),
+            a * b * c,
+        ];
+        assert_eq!(eqs, expected);
+    }
+
+    #[test]
+    fn test_eqs_at_vs_mle() {
+        let mut rng = create_seeded_rng();
+
+        let vals: [BabyBear; 1024] = rng.gen();
+        let mle = Mle::new(vals.to_vec());
+
+        let r: [BabyBear; 10] = rng.gen();
+
+        let eqs_at_r = hypercube_eq_over_y(&r);
+        let inner_prod: BabyBear = eqs_at_r
+            .iter()
+            .zip(vals.iter())
+            .map(|(&eq, &val)| eq * val)
+            .sum();
+        assert_eq!(inner_prod, mle.eval(&r));
     }
 }

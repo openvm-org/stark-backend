@@ -2,7 +2,7 @@ use std::any::type_name;
 
 use openvm_stark_backend::{
     config::StarkConfig,
-    interaction::fri_log_up::FriLogUpPhase,
+    interaction::gkr_log_up::GkrLogUpPhase,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
     p3_field::{extension::BinomialExtensionField, Field},
@@ -42,7 +42,8 @@ type ChallengeMmcs<P> = ExtensionMmcs<Val, Challenge, ValMmcs<P>>;
 pub type Challenger<P> = DuplexChallenger<Val, P, WIDTH, RATE>;
 type Dft = Radix2DitParallel<Val>;
 type Pcs<P> = TwoAdicFriPcs<Val, Dft, ValMmcs<P>, ChallengeMmcs<P>>;
-type RapPhase<P> = FriLogUpPhase<Val, Challenge, Challenger<P>>;
+// type RapPhase<P> = FriLogUpPhase<Val, Challenge, Challenger<P>>;
+type RapPhase<P> = GkrLogUpPhase<Val, Challenge, Challenger<P>>;
 
 pub type GoldilocksPermutationConfig<P> =
     StarkConfig<Pcs<P>, RapPhase<P>, Challenge, Challenger<P>>;

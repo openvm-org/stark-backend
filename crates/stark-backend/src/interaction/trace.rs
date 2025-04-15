@@ -1,20 +1,20 @@
 use p3_field::Field;
-use p3_matrix::{dense::RowMajorMatrixView, Matrix};
+use p3_matrix::Matrix;
 
 use crate::air_builders::symbolic::{
     symbolic_expression::SymbolicEvaluator,
     symbolic_variable::{Entry, SymbolicVariable},
 };
 
-pub(super) struct Evaluator<'a, F: Field> {
-    pub preprocessed: &'a Option<RowMajorMatrixView<'a, F>>,
-    pub partitioned_main: &'a [RowMajorMatrixView<'a, F>],
+pub(super) struct Evaluator<'a, T, F: Field> {
+    pub preprocessed: Option<T>,
+    pub partitioned_main: &'a [T],
     pub public_values: &'a [F],
     pub height: usize,
     pub local_index: usize,
 }
 
-impl<F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, F> {
+impl<T: Matrix<F>, F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, T, F> {
     fn eval_const(&self, c: F) -> F {
         c
     }
@@ -23,9 +23,11 @@ impl<F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, F> {
         let height = self.height;
         let index = symbolic_var.index;
         match symbolic_var.entry {
-            Entry::Preprocessed { offset } => {
-                self.preprocessed.unwrap().get((n + offset) % height, index)
-            }
+            Entry::Preprocessed { offset } => self
+                .preprocessed
+                .as_ref()
+                .unwrap()
+                .get((n + offset) % height, index),
             Entry::Main { part_index, offset } => {
                 self.partitioned_main[part_index].get((n + offset) % height, index)
             }

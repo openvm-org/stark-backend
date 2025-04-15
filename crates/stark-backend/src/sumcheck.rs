@@ -10,7 +10,9 @@ use std::iter::zip;
 
 use itertools::Itertools;
 use p3_challenger::FieldChallenger;
-use p3_field::Field;
+use p3_field::{ExtensionField, Field};
+use p3_maybe_rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::poly::{multi::MultivariatePolyOracle, uni::UnivariatePolynomial};
@@ -43,17 +45,24 @@ pub struct SumcheckArtifacts<F, O> {
 /// - There aren't the same number of multivariate polynomials and claims.
 /// - The degree of any multivariate polynomial exceeds [`MAX_DEGREE`] in any variable.
 /// - The round polynomials are inconsistent with their corresponding claimed sum on `0` and `1`.
-pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
-    mut claims: Vec<F>,
+pub fn prove_batch<F, EF, O>(
+    mut claims: Vec<EF>,
     mut polys: Vec<O>,
-    lambda: F,
+    lambda: EF,
     challenger: &mut impl FieldChallenger<F>,
-) -> (SumcheckProof<F>, SumcheckArtifacts<F, O>) {
+) -> (SumcheckProof<EF>, SumcheckArtifacts<EF, O>)
+where
+    F: Field,
+    EF: ExtensionField<F>,
+    O: MultivariatePolyOracle<EF>,
+{
     let n_variables = polys.iter().map(O::arity).max().unwrap();
     assert_eq!(claims.len(), polys.len());
 
-    let mut round_polys = vec![];
-    let mut evaluation_point = vec![];
+    let lambda_pows = lambda.powers().take(polys.len()).collect_vec();
+
+    let mut round_polys = Vec::with_capacity(n_variables);
+    let mut evaluation_point = Vec::with_capacity(n_variables);
 
     // Update the claims for the sum over `h`'s hypercube.
     for (claim, multivariate_poly) in zip(&mut claims, &polys) {
@@ -65,25 +74,27 @@ pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
     for round in 0..n_variables {
         let n_remaining_rounds = n_variables - round;
 
-        let this_round_polys = zip(&polys, &claims)
+        let this_round_polys: Vec<_> = polys
+            .par_iter()
+            .zip(claims.par_iter())
             .enumerate()
             .map(|(i, (multivariate_poly, &claim))| {
                 let round_poly = if n_remaining_rounds == multivariate_poly.arity() {
-                    multivariate_poly.marginalize_first(claim)
+                    multivariate_poly.partial_hypercube_sum(claim)
                 } else {
                     claim.halve().into()
                 };
 
-                let eval_at_0 = round_poly.evaluate(F::ZERO);
-                let eval_at_1 = round_poly.evaluate(F::ONE);
+                let eval_at_0 = round_poly.evaluate_at_zero();
+                let eval_at_1 = round_poly.evaluate_at_one();
 
-                assert_eq!(
+                debug_assert_eq!(
                     eval_at_0 + eval_at_1,
                     claim,
                     "Round {round}, poly {i}: eval(0) + eval(1) != claim ({} != {claim})",
                     eval_at_0 + eval_at_1,
                 );
-                assert!(
+                debug_assert!(
                     round_poly.degree() <= MAX_DEGREE,
                     "Round {round}, poly {i}: degree {} > max {MAX_DEGREE}",
                     round_poly.degree(),
@@ -91,29 +102,30 @@ pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
 
                 round_poly
             })
-            .collect_vec();
+            .collect();
 
-        let round_poly = random_linear_combination(&this_round_polys, lambda);
+        let mut round_poly = UnivariatePolynomial::zero();
+        for (poly, lambda_pow) in this_round_polys.iter().zip(&lambda_pows) {
+            round_poly.add_scaled(poly, *lambda_pow);
+        }
 
-        challenger.observe_slice(&round_poly);
+        for coef in round_poly.as_ref() {
+            challenger.observe_ext_element(*coef);
+        }
 
         let challenge = challenger.sample_ext_element();
 
-        claims = this_round_polys
-            .iter()
-            .map(|round_poly| round_poly.evaluate(challenge))
-            .collect();
+        claims
+            .par_iter_mut()
+            .zip(this_round_polys.par_iter())
+            .for_each(|(claim, round_poly)| *claim = round_poly.evaluate(challenge));
 
-        polys = polys
-            .into_iter()
-            .map(|multivariate_poly| {
-                if n_remaining_rounds != multivariate_poly.arity() {
-                    multivariate_poly
-                } else {
-                    multivariate_poly.partial_evaluation(challenge)
-                }
-            })
-            .collect();
+        // TODO: This can be optimized if we keep track of the active polynomials.
+        polys.par_iter_mut().for_each(|multivariate_poly| {
+            if n_remaining_rounds == multivariate_poly.arity() {
+                multivariate_poly.fix_first_in_place(challenge)
+            }
+        });
 
         round_polys.push(round_poly);
         evaluation_point.push(challenge);
@@ -129,19 +141,6 @@ pub fn prove_batch<F: Field, O: MultivariatePolyOracle<F>>(
     (proof, artifacts)
 }
 
-/// Returns `p_0 + alpha * p_1 + ... + alpha^(n-1) * p_{n-1}`.
-#[allow(dead_code)]
-fn random_linear_combination<F: Field>(
-    polys: &[UnivariatePolynomial<F>],
-    alpha: F,
-) -> UnivariatePolynomial<F> {
-    polys
-        .iter()
-        .rfold(UnivariatePolynomial::<F>::zero(), |acc, poly| {
-            acc * alpha + poly.clone()
-        })
-}
-
 /// Partially verifies a sum-check proof.
 ///
 /// Only "partial" since it does not fully verify the prover's claimed evaluation on the variable
@@ -150,11 +149,11 @@ fn random_linear_combination<F: Field>(
 /// claimed evaluation are returned for the caller to validate otherwise an [`Err`] is returned.
 ///
 /// Output is of the form `(variable_assignment, claimed_eval)`.
-pub fn partially_verify<F: Field>(
-    mut claim: F,
-    proof: &SumcheckProof<F>,
+pub fn partially_verify<F: Field, EF: ExtensionField<F>>(
+    mut claim: EF,
+    proof: &SumcheckProof<EF>,
     challenger: &mut impl FieldChallenger<F>,
-) -> Result<(Vec<F>, F), SumcheckError<F>> {
+) -> Result<(Vec<EF>, EF), SumcheckError<EF>> {
     let mut assignment = Vec::new();
 
     for (round, round_poly) in proof.round_polys.iter().enumerate() {
@@ -164,13 +163,15 @@ pub fn partially_verify<F: Field>(
 
         // TODO: optimize this by sending one less coefficient, and computing it from the
         // claim, instead of checking the claim. (Can also be done by quotienting).
-        let sum = round_poly.evaluate(F::ZERO) + round_poly.evaluate(F::ONE);
+        let sum = round_poly.evaluate_at_zero() + round_poly.evaluate_at_one();
 
         if claim != sum {
             return Err(SumcheckError::SumInvalid { claim, sum, round });
         }
 
-        challenger.observe_slice(round_poly);
+        for elt in round_poly.iter() {
+            challenger.observe_ext_element(*elt);
+        }
         let challenge = challenger.sample_ext_element();
 
         claim = round_poly.evaluate(challenge);
@@ -180,7 +181,7 @@ pub fn partially_verify<F: Field>(
     Ok((assignment, claim))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SumcheckProof<F> {
     pub round_polys: Vec<UnivariatePolynomial<F>>,
 }
