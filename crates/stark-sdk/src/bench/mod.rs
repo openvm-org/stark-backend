@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, ffi::OsStr};
 
+use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
 use metrics_util::{
     debugging::{DebugValue, DebuggingRecorder, Snapshot},
@@ -40,6 +41,45 @@ pub fn run_with_metric_collection<R>(
         serde_json::to_writer_pretty(&file, &serialize_metric_snapshot(snapshotter.snapshot()))
             .unwrap();
     }
+    res
+}
+
+/// Run a function with metric exporter enabled. The metrics will be served on the port specified
+/// by an environment variable which name is `metrics_port_envar`.
+pub fn run_with_metric_exporter<R>(
+    metrics_port_envar: impl AsRef<OsStr>,
+    f: impl FnOnce() -> R,
+) -> R {
+    // Set up tracing:
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,p3_=warn"));
+    // Plonky3 logging is more verbose, so we set default to debug.
+    let subscriber = Registry::default()
+        .with(env_filter)
+        .with(ForestLayer::default())
+        .with(MetricsLayer::new());
+    // Prepare tracing.
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    // Get the port from environment variable or use a default
+    let metrics_port = std::env::var(metrics_port_envar)
+        .map(|port| port.parse::<u16>().unwrap_or(9091))
+        .unwrap();
+    let endpoint = format!("http://127.0.0.1:{}/metrics/job/stark-sdk", metrics_port);
+    // Set up Prometheus exporter
+    PrometheusBuilder::new()
+        .with_push_gateway(endpoint, std::time::Duration::from_secs(5), None, None)
+        .expect("push gateway endpoint should be valid")
+        .install()
+        .expect("failed to install Prometheus recorder");
+
+    // Run the actual function
+    let res = f();
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    println!(
+        "Metrics available at http://127.0.0.1:{}/metrics/job/stark-sdk",
+        metrics_port
+    );
     res
 }
 
