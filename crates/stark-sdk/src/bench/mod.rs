@@ -69,19 +69,30 @@ pub fn run_with_metric_exporter<R>(
     let builder = PrometheusBuilder::new()
         .with_push_gateway(endpoint, std::time::Duration::from_secs(5), None, None)
         .expect("Push gateway endpoint should be valid");
-    let thread_name = "metrics-exporter-prometheus-push-gateway";
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let (recorder, exporter) = {
-        let _g = runtime.enter();
-        builder.build().unwrap()
+
+    let recorder = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let (recorder, exporter) = {
+            let _g = handle.enter();
+            builder.build().unwrap()
+        };
+        handle.spawn(exporter);
+        recorder
+    } else {
+        let thread_name = "metrics-exporter-prometheus-push-gateway";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (recorder, exporter) = {
+            let _g = runtime.enter();
+            builder.build().unwrap()
+        };
+        std::thread::Builder::new()
+            .name(thread_name.to_string())
+            .spawn(move || runtime.block_on(exporter))
+            .unwrap();
+        recorder
     };
-    std::thread::Builder::new()
-        .name(thread_name.to_string())
-        .spawn(move || runtime.block_on(exporter))
-        .unwrap();
 
     // Set up tracing:
     let env_filter =
