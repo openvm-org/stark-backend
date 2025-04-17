@@ -410,14 +410,15 @@ impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
                 self.interaction_partitions.replace(interaction_partitions);
                 let perm_width = num_chunks + 1;
                 self.after_challenge = Self::new_after_challenge(&[perm_width]);
+
+                let phases_shapes = self.rap_phase_seq_kind.shape();
+
+                let phase_shape = phases_shapes.first().unwrap();
+
+                self.challenges = Self::new_challenges(&[phase_shape.num_challenges]);
+                self.exposed_values_after_challenge =
+                    Self::new_exposed_values_after_challenge(&[phase_shape.num_exposed_values]);
             }
-
-            let phases_shapes = self.rap_phase_seq_kind.shape();
-            let phase_shape = phases_shapes.first().unwrap();
-
-            self.challenges = Self::new_challenges(&[phase_shape.num_challenges]);
-            self.exposed_values_after_challenge =
-                Self::new_exposed_values_after_challenge(&[phase_shape.num_exposed_values]);
         }
     }
 

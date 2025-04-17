@@ -256,6 +256,7 @@ pub enum RapPhaseSeqKind {
     /// Up to one phase with prover/verifier given by [[fri_log_up::FriLogUpPhase]] and
     /// constraints given by [[fri_log_up::eval_fri_log_up_phase]].
     FriLogUp,
+    None,
 }
 
 impl RapPhaseSeqKind {
@@ -266,6 +267,7 @@ impl RapPhaseSeqKind {
                 num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
                 extra_opening_rots: vec![],
             }],
+            RapPhaseSeqKind::None => vec![],
         }
     }
 }

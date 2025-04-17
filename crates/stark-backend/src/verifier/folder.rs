@@ -1,6 +1,6 @@
 use std::{
     marker::PhantomData,
-    ops::{AddAssign, MulAssign},
+    ops::{Add, AddAssign, MulAssign},
 };
 
 use p3_field::{ExtensionField, Field, FieldAlgebra};
@@ -59,15 +59,27 @@ where
         // We do a simple serial evaluation in topological order.
         // This can be parallelized if necessary.
         let exprs = self.eval_nodes(&dag.nodes);
-        for &idx in &dag.constraint_idx {
-            self.assert_zero(exprs[idx].clone());
-        }
+        let v: Vec<Expr> = dag
+            .constraint_idx
+            .iter()
+            .map(|idx| exprs[*idx].clone())
+            .rev()
+            .scan(F::ONE.into(), |state: &mut Expr, next_elem| {
+                let r = next_elem * state.clone();
+                *state *= self.alpha;
+                Some(r)
+            })
+            .collect();
+        self.accumulator = balanced_sum_rec(&v);
     }
+}
 
-    pub fn assert_zero(&mut self, x: impl Into<Expr>) {
-        let x = x.into();
-        self.accumulator *= self.alpha;
-        self.accumulator += x;
+fn balanced_sum_rec<E: Clone + Add<Output = E>>(v: &[E]) -> E {
+    if v.len() == 1 {
+        v[0].clone()
+    } else {
+        let (left, right) = v.split_at(v.len() / 2);
+        balanced_sum_rec(left) + balanced_sum_rec(right)
     }
 }
 

@@ -20,7 +20,7 @@ use openvm_stark_backend::{
         hal::TraceCommitter,
         types::{AirProvingContext, CommittedTraceData},
     },
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    rap::{BaseAirWithPublicValues, ColumnsAir, PartitionedBaseAir},
     AirRef, Chip, ChipUsageGetter,
 };
 
@@ -44,6 +44,8 @@ pub struct DummyInteractionAir {
     /// If true, then | count | and | fields[..] | are in separate main trace partitions.
     pub partition: bool,
 }
+
+impl<F: Field> ColumnsAir<F> for DummyInteractionAir {}
 
 impl DummyInteractionAir {
     pub fn new(field_width: usize, is_send: bool, bus_index: BusIndex) -> Self {

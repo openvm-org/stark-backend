@@ -74,11 +74,22 @@ Rap<SymbolicRapBuilder<Val<SC>>> // for keygen to extract fixed data about the R
     + for<'a> Rap<DebugConstraintBuilder<'a, SC>> // for debugging
     + BaseAirWithPublicValues<Val<SC>>
     + PartitionedBaseAir<Val<SC>>
+    // + ColumnsAir<Val<SC>>
     + Send + Sync
 {
     fn as_any(&self) -> &dyn Any;
     /// Name for display purposes
     fn name(&self) -> String;
+}
+
+/// Trait for AIRs that can provide column names
+pub trait ColumnsAir<F>: BaseAir<F> {
+    /// If available, returns the names of columns used in this AIR.
+    /// If the result is `Some(names)`, `names.len() == air.width()` should always
+    /// be true
+    fn columns(&self) -> Option<Vec<String>> {
+        None
+    }
 }
 
 impl<SC, T> AnyRap<SC> for T
@@ -88,6 +99,7 @@ where
         + for<'a> Rap<DebugConstraintBuilder<'a, SC>>
         + BaseAirWithPublicValues<Val<SC>>
         + PartitionedBaseAir<Val<SC>>
+        // + ColumnsAir<Val<SC>>
         + Send
         + Sync
         + 'static,

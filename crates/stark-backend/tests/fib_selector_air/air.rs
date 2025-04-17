@@ -3,7 +3,7 @@ use std::borrow::Borrow;
 use openvm_stark_backend::{
     interaction::{InteractionBuilder, LookupBus},
     p3_field::{Field, FieldAlgebra},
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    rap::{BaseAirWithPublicValues, ColumnsAir, PartitionedBaseAir},
 };
 use openvm_stark_sdk::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, PairBuilder};
@@ -40,6 +40,8 @@ impl<F: Field> BaseAir<F> for FibonacciSelectorAir {
         Some(RowMajorMatrix::new_col(sels))
     }
 }
+
+impl<F: Field> ColumnsAir<F> for FibonacciSelectorAir {}
 
 impl<F: Field> BaseAirWithPublicValues<F> for FibonacciSelectorAir {
     fn num_public_values(&self) -> usize {

@@ -39,6 +39,7 @@ where
                         builder.max_constraint_degree(),
                     );
                 }
+                RapPhaseSeqKind::None => {}
             }
         }
     }

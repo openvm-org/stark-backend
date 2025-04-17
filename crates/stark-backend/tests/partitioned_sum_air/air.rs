@@ -6,7 +6,7 @@
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
     p3_field::FieldAlgebra,
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    rap::{BaseAirWithPublicValues, ColumnsAir, PartitionedBaseAir},
 };
 use p3_air::{Air, BaseAir};
 use p3_matrix::Matrix;
@@ -28,6 +28,8 @@ impl<F> BaseAir<F> for SumAir {
         self.0 + 1
     }
 }
+
+impl<F> ColumnsAir<F> for SumAir {}
 
 impl<AB: PartitionedAirBuilder> Air<AB> for SumAir {
     fn eval(&self, builder: &mut AB) {
