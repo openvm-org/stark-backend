@@ -72,7 +72,7 @@ pub fn run_with_metric_exporter<R>(
 
     // Set up Prometheus recorder and exporter
     let builder = PrometheusBuilder::new()
-        .with_push_gateway(endpoint, std::time::Duration::from_secs(5), None, None)
+        .with_push_gateway(endpoint, std::time::Duration::from_secs(60), None, None)
         .expect("Push gateway endpoint should be valid");
 
     let recorder = if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -117,7 +117,7 @@ pub fn run_with_metric_exporter<R>(
 
     // Run the actual function
     let res = f();
-    std::thread::sleep(std::time::Duration::from_secs(10));
+    std::thread::sleep(std::time::Duration::from_secs(60));
     println!(
         "Metrics available at http://127.0.0.1:{}/metrics/job/stark-sdk",
         metrics_port
