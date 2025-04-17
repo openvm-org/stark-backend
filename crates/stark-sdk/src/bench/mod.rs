@@ -65,6 +65,11 @@ pub fn run_with_metric_exporter<R>(
         println!("Metrics cleared successfully");
     }
 
+    // Install the default crypto provider
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install default crypto provider");
+
     // Set up Prometheus recorder and exporter
     let builder = PrometheusBuilder::new()
         .with_push_gateway(endpoint, std::time::Duration::from_secs(5), None, None)
