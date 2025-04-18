@@ -15,6 +15,12 @@ pub mod goldilocks_poseidon;
 pub mod instrument;
 pub mod log_up_params;
 
+pub mod koala_bear_blake3;
+pub mod koala_bear_bytehash;
+pub mod koala_bear_keccak;
+pub mod koala_bear_poseidon2;
+pub mod koala_bear_poseidon2_root;
+
 pub use fri_params::FriParameters;
 
 pub fn setup_tracing() {
