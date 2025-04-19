@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     interaction::fri_log_up::FriLogUpPhase,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
-    p3_field::{extension::BinomialExtensionField, Field, FieldAlgebra},
+    p3_field::{extension::BinomialExtensionField, Field, FieldAlgebra, PrimeField32},
 };
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_dft::Radix2DitParallel;
@@ -246,6 +246,47 @@ pub fn horizen_round_consts_16() -> (ExternalLayerConstants<BabyBear, 16>, Vec<B
         ExternalLayerConstants::new(initial, terminal),
         internal_round_constants,
     )
+}
+
+// TODO[stephen]: DELETE THIS, DO NOT COMMIT TO  MAIN
+pub fn horizen_round_consts_16_generic<F: Field>() -> (Vec<[F; 16]>, Vec<[F; 16]>, Vec<F>) {
+    let p3_rc16: Vec<Vec<BabyBear>> = RC16
+        .iter()
+        .map(|round| {
+            round
+                .iter()
+                .map(|babybear| horizen_to_p3(*babybear))
+                .collect()
+        })
+        .collect();
+
+    let rounds_f = 8;
+    let rounds_p = 13;
+    let rounds_f_beginning = rounds_f / 2;
+    let p_end = rounds_f_beginning + rounds_p;
+    let initial: Vec<[BabyBear; 16]> = p3_rc16[..rounds_f_beginning]
+        .iter()
+        .cloned()
+        .map(|round| round.try_into().unwrap())
+        .collect();
+    let terminal: Vec<[BabyBear; 16]> = p3_rc16[p_end..]
+        .iter()
+        .cloned()
+        .map(|round| round.try_into().unwrap())
+        .collect();
+    let internal_round_constants: Vec<BabyBear> = p3_rc16[rounds_f_beginning..p_end]
+        .iter()
+        .map(|round| round[0])
+        .collect();
+
+    let to_f = |x: BabyBear| F::from_canonical_u32(x.as_canonical_u32());
+
+    let initial_f: Vec<[F; 16]> = initial.iter().map(|round| round.map(to_f)).collect();
+    let terminal_f: Vec<[F; 16]> = terminal.iter().map(|round| round.map(to_f)).collect();
+    let internal_round_constants_f: Vec<F> =
+        internal_round_constants.iter().cloned().map(to_f).collect();
+
+    (initial_f, terminal_f, internal_round_constants_f)
 }
 
 /// Logs hash count statistics to stdout and returns as struct.

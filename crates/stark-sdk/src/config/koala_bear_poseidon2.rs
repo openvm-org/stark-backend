@@ -16,6 +16,7 @@ use p3_symmetric::{CryptographicPermutation, PaddingFreeSponge, TruncatedPermuta
 use rand::{rngs::StdRng, SeedableRng};
 
 use super::{
+    baby_bear_poseidon2::horizen_round_consts_16_generic,
     instrument::{HashStatistics, Instrumented, StarkHashStatistics},
     FriParameters,
 };
@@ -118,7 +119,7 @@ where
 }
 
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-fn rng_engine_impl(fri_params: FriParameters) -> KoalaBearPoseidon2Engine {
+fn _rng_engine_impl(fri_params: FriParameters) -> KoalaBearPoseidon2Engine {
     let perm = random_perm();
     let security_params = SecurityParameters {
         fri_params,
@@ -182,7 +183,7 @@ where
     KoalaBearPermutationConfig::new(pcs, rap_phase)
 }
 
-pub fn perm_from_constants<const WIDTH: usize>(
+pub fn perm_from_constants(
     initial_ext: Vec<[KoalaBear; 16]>,
     terminal_ext: Vec<[KoalaBear; 16]>,
     partial: Vec<KoalaBear>,
@@ -204,7 +205,14 @@ pub fn random_instrumented_perm() -> InstrPerm {
 
 impl StarkFriEngine<KoalaBearPoseidon2Config> for KoalaBearPoseidon2Engine {
     fn new(fri_params: FriParameters) -> Self {
-        rng_engine_impl(fri_params)
+        let (initial_f, terminal_f, internal_round_constants_f) =
+            horizen_round_consts_16_generic::<KoalaBear>();
+        let perm = perm_from_constants(initial_f, terminal_f, internal_round_constants_f);
+        let security_params = SecurityParameters {
+            fri_params,
+            log_up_params: log_up_security_params_baby_bear_100_bits(),
+        };
+        engine_from_perm(perm, security_params)
     }
     fn fri_params(&self) -> FriParameters {
         self.fri_params
