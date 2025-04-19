@@ -283,8 +283,12 @@ pub fn horizen_round_consts_16_generic<F: Field>() -> (Vec<[F; 16]>, Vec<[F; 16]
 
     let initial_f: Vec<[F; 16]> = initial.iter().map(|round| round.map(to_f)).collect();
     let terminal_f: Vec<[F; 16]> = terminal.iter().map(|round| round.map(to_f)).collect();
-    let internal_round_constants_f: Vec<F> =
+    let mut internal_round_constants_f: Vec<F> =
         internal_round_constants.iter().cloned().map(to_f).collect();
+
+    // Copy the first 7 elements and append them to the end. We do this as a temp fix.
+    let first_seven: Vec<F> = internal_round_constants_f.iter().take(7).cloned().collect();
+    internal_round_constants_f.extend(first_seven);
 
     (initial_f, terminal_f, internal_round_constants_f)
 }
