@@ -18,6 +18,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use super::{
     baby_bear_poseidon2::horizen_round_consts_16_generic,
     instrument::{HashStatistics, Instrumented, StarkHashStatistics},
+    log_up_params::log_up_security_params_koala_bear_100_bits,
     FriParameters,
 };
 use crate::{
@@ -203,16 +204,28 @@ pub fn random_instrumented_perm() -> InstrPerm {
     Instrumented::new(perm)
 }
 
+pub fn default_perm() -> Perm {
+    let (initial_f, terminal_f, internal_round_constants_f) =
+        horizen_round_consts_16_generic::<KoalaBear>();
+    perm_from_constants(initial_f, terminal_f, internal_round_constants_f)
+}
+
+pub fn default_engine_fri_params(fri_params: FriParameters) -> KoalaBearPoseidon2Engine {
+    let perm = default_perm();
+    let security_params = SecurityParameters {
+        fri_params,
+        log_up_params: log_up_security_params_koala_bear_100_bits(),
+    };
+    engine_from_perm(perm, security_params)
+}
+
+pub fn default_engine() -> KoalaBearPoseidon2Engine {
+    default_engine_fri_params(FriParameters::standard_fast())
+}
+
 impl StarkFriEngine<KoalaBearPoseidon2Config> for KoalaBearPoseidon2Engine {
     fn new(fri_params: FriParameters) -> Self {
-        let (initial_f, terminal_f, internal_round_constants_f) =
-            horizen_round_consts_16_generic::<KoalaBear>();
-        let perm = perm_from_constants(initial_f, terminal_f, internal_round_constants_f);
-        let security_params = SecurityParameters {
-            fri_params,
-            log_up_params: log_up_security_params_baby_bear_100_bits(),
-        };
-        engine_from_perm(perm, security_params)
+        default_engine_fri_params(fri_params)
     }
     fn fri_params(&self) -> FriParameters {
         self.fri_params

@@ -3,6 +3,7 @@ use openvm_stark_backend::{
     p3_field::{extension::BinomialExtensionField, PrimeField32},
 };
 use p3_baby_bear::BabyBear;
+use p3_koala_bear::KoalaBear;
 
 pub fn log_up_security_params_baby_bear_100_bits() -> LogUpSecurityParameters {
     let params = LogUpSecurityParameters {
@@ -11,5 +12,15 @@ pub fn log_up_security_params_baby_bear_100_bits() -> LogUpSecurityParameters {
         log_up_pow_bits: 15,
     };
     assert!(params.conjectured_bits_of_security::<BinomialExtensionField<BabyBear, 4>>() >= 100);
+    params
+}
+
+pub fn log_up_security_params_koala_bear_100_bits() -> LogUpSecurityParameters {
+    let params = LogUpSecurityParameters {
+        max_interaction_count: KoalaBear::ORDER_U32,
+        log_max_message_length: 7,
+        log_up_pow_bits: 15,
+    };
+    assert!(params.conjectured_bits_of_security::<BinomialExtensionField<KoalaBear, 4>>() >= 100);
     params
 }
