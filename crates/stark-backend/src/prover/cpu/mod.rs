@@ -512,6 +512,8 @@ where
 unsafe fn transmute_to_base<F: Field, EF: ExtensionField<F>>(
     ext_matrix: RowMajorMatrix<EF>,
 ) -> RowMajorMatrix<F> {
+    debug_assert_eq!(align_of::<EF>(), align_of::<F>());
+    debug_assert_eq!(size_of::<EF>(), size_of::<F>() * EF::D);
     let width = ext_matrix.width * EF::D;
     // Prevent ptr from deallocating
     let mut values = ManuallyDrop::new(ext_matrix.values);
@@ -522,7 +524,7 @@ unsafe fn transmute_to_base<F: Field, EF: ExtensionField<F>>(
     cap *= EF::D;
     // SAFETY:
     // - We know that `ptr` is from `Vec` so it is allocated by global allocator,
-    // - Based on assumptions, `T` and `F` have the same alignment
+    // - Based on assumptions, `EF` and `F` have the same alignment
     // - Based on memory layout assumptions, length and capacity is correct
     let base_values = Vec::from_raw_parts(ptr as *mut F, len, cap);
     RowMajorMatrix::new(base_values, width)
