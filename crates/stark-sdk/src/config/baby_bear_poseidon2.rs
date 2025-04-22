@@ -6,6 +6,10 @@ use openvm_stark_backend::{
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
     p3_field::{Field, FieldAlgebra},
+    prover::{
+        cpu::{CpuBackend, CpuDevice},
+        MultiTraceStarkProver,
+    },
 };
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_dft::Radix2DitParallel;
@@ -80,6 +84,17 @@ where
 {
     fn config(&self) -> &BabyBearPermutationConfig<P> {
         &self.config
+    }
+
+    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, BabyBearPermutationConfig<P>>
+    where
+        Self: 'a,
+    {
+        MultiTraceStarkProver::new(
+            CpuBackend::default(),
+            CpuDevice::new(self.config(), self.fri_params.log_blowup),
+            self.new_challenger(),
+        )
     }
 
     fn max_constraint_degree(&self) -> Option<usize> {

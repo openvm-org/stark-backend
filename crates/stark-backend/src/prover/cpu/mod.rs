@@ -1,11 +1,11 @@
-use std::{iter::zip, marker::PhantomData, ops::Deref, sync::Arc};
+use std::{iter::zip, marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 
 use derivative::Derivative;
 use itertools::{izip, zip_eq, Itertools};
 use opener::OpeningProver;
 use p3_challenger::FieldChallenger;
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::FieldExtensionAlgebra;
+use p3_field::{ExtensionField, Field, FieldExtensionAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use quotient::QuotientCommitter;
@@ -35,23 +35,31 @@ pub mod opener;
 /// Computation of DEEP quotient polynomial and commitment
 pub mod quotient;
 
-/// Proves multiple chips with interactions together.
-/// This prover implementation is specialized for Interactive AIRs.
-pub struct MultiTraceStarkProver<'c, SC: StarkGenericConfig> {
-    pub config: &'c SC,
-}
-
 /// CPU backend using Plonky3 traits.
+///
+/// # Safety
+/// For performance optimization of extension field operations, we assumes that `SC::Challenge` is
+/// an extension field of `F = Val<SC>` that is `repr(C)` or `repr(transparent)` with
+/// internal memory layout `[F; SC::Challenge::D]`.
+/// This ensures `SC::Challenge` and `F` have the same alignment and
+/// `size_of::<SC::Challenge>() == size_of::<F>() * SC::Challenge::D`.
+/// We assume that `<SC::Challenge as ExtensionField<F>::as_base_slice` is the same as
+/// transmuting `SC::Challenge` to `[F; SC::Challenge::D]`.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Copy(bound = ""), Default(bound = ""))]
 pub struct CpuBackend<SC> {
     phantom: PhantomData<SC>,
 }
 
+/// # Safety
+/// See [`CpuBackend`].
 #[derive(Derivative, derive_new::new)]
 #[derivative(Clone(bound = ""), Copy(bound = ""))]
 pub struct CpuDevice<'a, SC> {
     config: &'a SC,
+    /// When committing a matrix, the matrix is cloned into newly allocated memory.
+    /// The size of the newly allocated memory will be `matrix.size() << log_blowup_factor`.
+    log_blowup_factor: usize,
 }
 
 impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
@@ -68,7 +76,7 @@ impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
     type RapPartialProvingKey = RapPartialProvingKey<SC>;
 }
 
-#[derive(Derivative)]
+#[derive(Derivative, derive_new::new)]
 #[derivative(Clone(bound = ""))]
 pub struct PcsData<SC: StarkGenericConfig> {
     /// The preimage of a single commitment.
@@ -103,6 +111,7 @@ impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'_, SC> 
 
 impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsData<SC>) {
+        let log_blowup_factor = self.log_blowup_factor;
         let pcs = self.pcs();
         let (log_trace_heights, traces_with_domains): (Vec<_>, Vec<_>) = traces
             .iter()
@@ -111,7 +120,33 @@ impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC
                 let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
                 // Recomputing the domain is lightweight
                 let domain = pcs.natural_domain_for_degree(height);
-                (log_height, (domain, matrix.as_ref().clone()))
+                // pcs.commit takes the trace matrix and in the case of FRI, does in-place cosetDFT
+                // which requires resizing to a larger buffer size. Since we are cloning anyways,
+                // we should just allocate the larger size to avoid memory-reallocation
+                // ref: https://github.com/Plonky3/Plonky3/blob/8c8bbb4c17bd2b7ef2404338ab8f9036d5f08337/dft/src/traits.rs#L116
+                let trace_slice = &matrix.as_ref().values;
+                let new_buffer_size = trace_slice
+                    .len()
+                    .checked_shl(log_blowup_factor.try_into().unwrap())
+                    .unwrap();
+                let mut new_buffer = Vec::with_capacity(new_buffer_size);
+                // SAFETY:
+                // - `trace_slice` is allocated for `trace_slice.len() * size_of::<F>` bytes, obviously
+                // - we just allocated `new_buffer` for at least `trace_slice.len() * size_of::<F>` bytes above (more if there's blowup)
+                // - both are slices of &[F] so alignment is guaranteed
+                // - `new_buffer` is newly allocated so non-overlapping with `trace_slice`
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        trace_slice.as_ptr(),
+                        new_buffer.as_mut_ptr(),
+                        trace_slice.len(),
+                    );
+                    new_buffer.set_len(trace_slice.len());
+                }
+                (
+                    log_height,
+                    (domain, RowMajorMatrix::new(new_buffer, matrix.width)),
+                )
             })
             .unzip();
         let (commit, data) = pcs.commit(traces_with_domains);
@@ -208,16 +243,23 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         // One shared commit for all permutation traces
         let committed_pcs_data_per_phase: Vec<(Com<SC>, PcsData<SC>)> =
             metrics_span("perm_trace_commit_time_ms", || {
-                let flattened_traces: Vec<_> = perm_trace_per_air
+                let (log_trace_heights, flattened_traces): (Vec<_>, Vec<_>) = perm_trace_per_air
                     .into_iter()
-                    .flat_map(|perm_trace| {
-                        perm_trace.map(|trace| Arc::new(trace.flatten_to_base()))
+                    .flatten()
+                    .map(|perm_trace| {
+                        // SAFETY: `Challenge` is assumed to be extension field of `F`
+                        // with memory layout `[F; Challenge::D]`
+                        let trace = unsafe { transmute_to_base(perm_trace) };
+                        let height = trace.height();
+                        let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
+                        let domain = self.pcs().natural_domain_for_degree(height);
+                        (log_height, (domain, trace))
                     })
                     .collect();
                 // Only commit if there are permutation traces
                 if !flattened_traces.is_empty() {
-                    let (commit, data) = self.commit(&flattened_traces);
-                    Some((commit, data))
+                    let (commit, data) = self.pcs().commit(flattened_traces);
+                    Some((commit, PcsData::new(Arc::new(data), log_trace_heights)))
                 } else {
                     None
                 }
@@ -460,4 +502,30 @@ where
     fn transport_pcs_data_to_device(&self, data: &PcsData<SC>) -> PcsData<SC> {
         data.clone()
     }
+}
+
+// TODO[jpw]: Avoid using this after switching to new plonky3 commit with <https://github.com/Plonky3/Plonky3/pull/796>
+/// # Safety
+/// Assumes that `EF` is `repr(C)` or `repr(transparent)` with internal memory layout `[F; EF::D]`.
+/// This ensures `EF` and `F` have the same alignment and `size_of::<EF>() == size_of::<F>() * EF::D`.
+/// We assume that `EF::as_base_slice` is the same as transmuting `EF` to `[F; EF::D]`.
+unsafe fn transmute_to_base<F: Field, EF: ExtensionField<F>>(
+    ext_matrix: RowMajorMatrix<EF>,
+) -> RowMajorMatrix<F> {
+    debug_assert_eq!(align_of::<EF>(), align_of::<F>());
+    debug_assert_eq!(size_of::<EF>(), size_of::<F>() * EF::D);
+    let width = ext_matrix.width * EF::D;
+    // Prevent ptr from deallocating
+    let mut values = ManuallyDrop::new(ext_matrix.values);
+    let mut len = values.len();
+    let mut cap = values.capacity();
+    let ptr = values.as_mut_ptr();
+    len *= EF::D;
+    cap *= EF::D;
+    // SAFETY:
+    // - We know that `ptr` is from `Vec` so it is allocated by global allocator,
+    // - Based on assumptions, `EF` and `F` have the same alignment
+    // - Based on memory layout assumptions, length and capacity is correct
+    let base_values = Vec::from_raw_parts(ptr as *mut F, len, cap);
+    RowMajorMatrix::new(base_values, width)
 }
