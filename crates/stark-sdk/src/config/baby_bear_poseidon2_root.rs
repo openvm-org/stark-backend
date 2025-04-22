@@ -4,7 +4,6 @@ use openvm_stark_backend::{
     interaction::fri_log_up::FriLogUpPhase,
     p3_challenger::MultiField32Challenger,
     p3_commit::ExtensionMmcs,
-    p3_field::extension::BinomialExtensionField,
     prover::{
         cpu::{CpuBackend, CpuDevice},
         MultiTraceStarkProver,
@@ -30,6 +29,7 @@ use crate::{
         fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
     },
     engine::{StarkEngine, StarkFriEngine},
+    fast_ext_field::FastBinomialExtensionField,
 };
 
 const WIDTH: usize = 3;
@@ -39,7 +39,7 @@ const DIGEST_WIDTH: usize = 1;
 
 /// A configuration for  recursion.
 type Val = BabyBear;
-type Challenge = BinomialExtensionField<Val, 4>;
+type Challenge = FastBinomialExtensionField<Val, 4>;
 type Perm = Poseidon2Bn254<WIDTH>;
 type Hash<P> = MultiField32PaddingFreeSponge<Val, Bn254Fr, P, WIDTH, RATE, DIGEST_WIDTH>;
 type Compress<P> = TruncatedPermutation<P, 2, 1, WIDTH>;
