@@ -38,14 +38,14 @@ metrics-tracing-context = "0.16.0"
 metrics-util = "0.17.0"
 metrics-exporter-prometheus = { version = "0.15.3", features = [
     "push-gateway",
-] }
+], optional = true }
 tokio = { version = "1.43.1", default-features = false, features = [
     "rt",
     "rt-multi-thread",
-] }
+], optional = true }
 rustls = { version = "0.23", default-features = false, features = [
     "aws-lc-rs",
-] }
+], optional = true }
 
 [dev-dependencies]
 p3-keccak-air = { workspace = true }
@@ -62,3 +62,9 @@ mimalloc = ["openvm-stark-backend/mimalloc"]
 jemalloc = ["openvm-stark-backend/jemalloc"]
 jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
 bench-metrics = ["openvm-stark-backend/bench-metrics"]
+prometheus = [
+    "bench-metrics",
+    "dep:metrics-exporter-prometheus",
+    "dep:tokio",
+    "dep:rustls",
+]

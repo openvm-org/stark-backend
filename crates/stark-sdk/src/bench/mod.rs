@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, ffi::OsStr};
 
+#[cfg(feature = "prometheus")]
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
 use metrics_util::{
@@ -46,6 +47,7 @@ pub fn run_with_metric_collection<R>(
 
 /// Run a function with metric exporter enabled. The metrics will be served on the port specified
 /// by an environment variable which name is `metrics_port_envar`.
+#[cfg(feature = "prometheus")]
 pub fn run_with_metric_exporter<R>(
     metrics_port_envar: impl AsRef<OsStr>,
     f: impl FnOnce() -> R,
