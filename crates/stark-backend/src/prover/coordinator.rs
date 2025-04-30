@@ -160,7 +160,7 @@ where
             air_trace_views_per_air.push(air_trace_view);
         }
         #[cfg(feature = "bench-metrics")]
-        trace_metrics(mpk, &log_trace_height_per_air).emit();
+        trace_metrics(&mpk, &log_trace_height_per_air).emit();
 
         // ============ Challenger observations before additional RAP phases =============
         // Observe public values:
@@ -186,6 +186,8 @@ where
         let (rap_partial_proof, prover_data_after) =
             self.device
                 .partially_prove(&mut self.challenger, &mpk, air_trace_views_per_air);
+        // At this point, main trace should be dropped
+
         // Challenger observes additional commitments if any exist:
         for (commit, _) in &prover_data_after.committed_pcs_data_per_phase {
             self.challenger.observe(commit.clone());
