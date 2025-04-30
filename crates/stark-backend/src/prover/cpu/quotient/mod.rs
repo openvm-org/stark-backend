@@ -58,7 +58,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
         view: RapView<impl Matrix<Val<SC>>, Val<SC>, SC::Challenge>,
         quotient_degree: u8,
     ) -> SingleQuotientData<SC> {
-        let log_trace_height = view.pair.log_trace_height;
+        let log_trace_height = view.log_trace_height;
         let trace_domain = self
             .pcs
             .natural_domain_for_degree(1usize << log_trace_height);
@@ -88,12 +88,12 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
             constraints,
             trace_domain,
             quotient_domain,
-            view.pair.preprocessed,
-            view.pair.partitioned_main,
+            view.preprocessed,
+            view.partitioned_main,
             after_challenge_lde_on_quotient_domain,
             &challenges,
             self.alpha,
-            &view.pair.public_values,
+            &view.public_values,
             &exposed_values_after_challenge,
         );
         SingleQuotientData {

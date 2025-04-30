@@ -19,7 +19,7 @@ use crate::{
     proof::{AirProofData, Commitments},
     prover::{
         hal::MatrixDimensions,
-        types::{PairView, SingleCommitPreimage},
+        types::{AirView, SingleCommitPreimage},
     },
     utils::metrics_span,
 };
@@ -61,7 +61,7 @@ where
 {
     type Proof = HalProof<PB>;
     type ProvingKeyView<'a>
-        = &'a DeviceMultiStarkProvingKey<'a, PB>
+        = DeviceMultiStarkProvingKey<'a, PB>
     where
         Self: 'a;
 
@@ -93,7 +93,7 @@ where
         #[allow(clippy::type_complexity)]
         let (cached_commits_per_air, cached_views_per_air, common_main_per_air, pvs_per_air): (
             Vec<Vec<PB::Commitment>>,
-            Vec<Vec<SingleCommitPreimage<&'a PB::Matrix, &'a PB::PcsData>>>,
+            Vec<Vec<SingleCommitPreimage<PB::Matrix, PB::PcsData>>>,
             Vec<Option<PB::Matrix>>,
             Vec<Vec<PB::Val>>,
         ) = ctx
@@ -133,26 +133,31 @@ where
             .collect();
 
         // All commitments that don't require challenges have been made, so we collect them into trace views:
-        let mut common_main_idx = 0;
+        let mut common_main_traces_it = common_main_traces.into_iter();
         let mut log_trace_height_per_air: Vec<u8> = Vec::with_capacity(num_air);
-        let mut pair_trace_view_per_air = Vec::with_capacity(num_air);
-        for (pk, cached_views, pvs) in izip!(&mpk.per_air, &cached_views_per_air, &pvs_per_air) {
-            let mut main_trace_views: Vec<&PB::Matrix> =
-                cached_views.iter().map(|view| view.trace).collect_vec();
+        let mut air_trace_views_per_air = Vec::with_capacity(num_air);
+        let mut cached_pcs_datas_per_air = Vec::with_capacity(num_air);
+        for (pk, cached_views, pvs) in izip!(&mpk.per_air, cached_views_per_air, &pvs_per_air) {
+            let (mut main_trace_views, cached_pcs_datas): (Vec<PB::Matrix>, Vec<PB::PcsData>) =
+                cached_views
+                    .into_iter()
+                    .map(|view| {
+                        debug_assert_eq!(view.matrix_idx, 0);
+                        (view.trace, view.data)
+                    })
+                    .unzip();
+            cached_pcs_datas_per_air.push(cached_pcs_datas);
             if pk.vk.has_common_main() {
-                main_trace_views.push(&common_main_traces[common_main_idx]);
-                common_main_idx += 1;
+                main_trace_views.push(common_main_traces_it.next().expect("expected common main"));
             }
             let trace_height = main_trace_views.first().expect("no main trace").height();
             let log_trace_height: u8 = log2_strict_usize(trace_height).try_into().unwrap();
-            let pair_trace_view = PairView {
-                log_trace_height,
-                preprocessed: pk.preprocessed_data.as_ref().map(|d| &d.trace),
+            let air_trace_view = AirView {
                 partitioned_main: main_trace_views,
                 public_values: pvs.to_vec(),
             };
             log_trace_height_per_air.push(log_trace_height);
-            pair_trace_view_per_air.push(pair_trace_view);
+            air_trace_views_per_air.push(air_trace_view);
         }
         #[cfg(feature = "bench-metrics")]
         trace_metrics(mpk, &log_trace_height_per_air).emit();
@@ -180,7 +185,7 @@ where
         // ==================== Partially prove all RAP phases that require challenges ====================
         let (rap_partial_proof, prover_data_after) =
             self.device
-                .partially_prove(&mut self.challenger, mpk, pair_trace_view_per_air);
+                .partially_prove(&mut self.challenger, &mpk, air_trace_views_per_air);
         // Challenger observes additional commitments if any exist:
         for (commit, _) in &prover_data_after.committed_pcs_data_per_phase {
             self.challenger.observe(commit.clone());
@@ -221,7 +226,7 @@ where
             &mut self.challenger,
             &mpk.per_air,
             &pvs_per_air,
-            &cached_views_per_air,
+            &cached_pcs_datas_per_air,
             &common_main_pcs_data,
             &prover_data_after,
         );
@@ -237,18 +242,17 @@ where
             let mut quotient_degrees = Vec::with_capacity(mpk.per_air.len());
             let mut preprocessed = Vec::new();
 
-            for pk in &mpk.per_air {
+            for pk in mpk.per_air {
                 quotient_degrees.push(pk.vk.quotient_degree);
-                if let Some(data) = pk.preprocessed_data.as_ref().map(|d| &d.data) {
-                    preprocessed.push(data);
+                if let Some(preprocessed_data) = pk.preprocessed_data {
+                    preprocessed.push(preprocessed_data.data);
                 }
             }
 
-            let main = cached_views_per_air
+            let main = cached_pcs_datas_per_air
                 .into_iter()
                 .flatten()
-                .map(|cv| cv.data)
-                .chain(iter::once(&common_main_pcs_data))
+                .chain(iter::once(common_main_pcs_data))
                 .collect();
             self.device.open(
                 &mut self.challenger,

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use derivative::Derivative;
 use p3_field::Field;
@@ -94,22 +94,30 @@ pub struct AirProvingContext<'a, PB: ProverBackend> {
     #[allow(clippy::type_complexity)]
     pub cached_mains: Vec<(
         PB::Commitment,
-        SingleCommitPreimage<&'a PB::Matrix, &'a PB::PcsData>,
+        SingleCommitPreimage<PB::Matrix, PB::PcsData>,
     )>,
     /// Common main trace matrix
     pub common_main: Option<PB::Matrix>,
     /// Public values
     // [jpw] This is on host for now because it seems more convenient for the challenger to be on host.
     pub public_values: Vec<PB::Val>,
+    // Placeholder for lifetime of the cached data. For now it's easier to assume `cached_mains`
+    // are owned, and any sharing is done via smart pointers.
+    pub cached_lifetime: PhantomData<&'a PB::PcsData>,
 }
 
-/// A view of just the preprocessed AIR (PAIR), without any after challenge columns.
-/// The PAIR trace consists of horizontal concatenation of multiple matrices of the same height:
-/// - preprocessed trace matrix
-/// - the main trace matrix is horizontally partitioned into multiple matrices,
-///   where each matrix can belong to a separate matrix commitment.
+/// A view of just the AIR, without any preprocessed or after challenge columns.
+/// The AIR's main trace is horizontally partitioned into multiple matrices,
+/// where each matrix can belong to a separate matrix commitment.
 ///
 /// The generic `T` may be either just the trace matrix view or the LDE matrix view.
+pub struct AirView<T, Val> {
+    /// Main trace data, horizontally partitioned into multiple matrices
+    pub partitioned_main: Vec<T>,
+    /// Public values
+    pub public_values: Vec<Val>,
+}
+
 pub struct PairView<T, Val> {
     /// Log_2 of the trace domain size (i.e., height of matrices)
     pub log_trace_height: u8,
@@ -135,7 +143,14 @@ pub struct PairView<T, Val> {
 ///
 /// The generic `T` may be either just the trace matrix view or the LDE matrix view.
 pub struct RapView<T, Val, Challenge> {
-    pub pair: PairView<T, Val>,
+    /// Log_2 of the trace domain size (i.e., height of matrices)
+    pub log_trace_height: u8,
+    /// Preprocessed trace data, if any
+    pub preprocessed: Option<T>,
+    /// Main trace data, horizontally partitioned into multiple matrices
+    pub partitioned_main: Vec<T>,
+    /// Public values
+    pub public_values: Vec<Val>,
     /// `per_phase[i]` is a view which is calculated after sampling challenges
     /// which depend on observing commitments to `pair` and `per_phase[..i]`.
     pub per_phase: Vec<RapSinglePhaseView<T, Challenge>>,

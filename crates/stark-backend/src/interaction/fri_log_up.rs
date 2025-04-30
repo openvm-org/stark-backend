@@ -93,12 +93,13 @@ where
             .collect()
     }
 
+    /// This consumes `trace_view_per_air`, dropping it after the permutation trace is created.
     fn partially_prove(
         &self,
         challenger: &mut Challenger,
         constraints_per_air: &[&SymbolicConstraints<F>],
         params_per_air: &[&FriLogUpProvingKey],
-        trace_view_per_air: &[PairTraceView<F>],
+        trace_view_per_air: Vec<PairTraceView<F>>,
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)> {
         let has_any_interactions = constraints_per_air
             .iter()
@@ -240,11 +241,13 @@ where
     Challenger: FieldChallenger<F>,
 {
     /// Returns a list of optional tuples of (permutation trace,cumulative sum) for each AIR.
+    ///
+    /// This consumes `trace_view_per_air`, dropping it after the permutation trace is created.
     fn generate_after_challenge_traces_per_air(
         challenges: &[Challenge; STARK_LU_NUM_CHALLENGES],
         constraints_per_air: &[&SymbolicConstraints<F>],
         params_per_air: &[&FriLogUpProvingKey],
-        trace_view_per_air: &[PairTraceView<F>],
+        trace_view_per_air: Vec<PairTraceView<F>>,
     ) -> Vec<Option<RowMajorMatrix<Challenge>>> {
         parizip!(constraints_per_air, trace_view_per_air, params_per_air)
             .map(|(constraints, trace_view, params)| {
@@ -287,7 +290,7 @@ where
     /// - If `partitioned_main` is empty.
     pub fn generate_after_challenge_trace(
         all_interactions: &[SymbolicInteraction<F>],
-        trace_view: &PairTraceView<F>,
+        trace_view: PairTraceView<F>,
         permutation_randomness: &[Challenge; STARK_LU_NUM_CHALLENGES],
         interaction_partitions: &[Vec<usize>],
     ) -> Option<RowMajorMatrix<Challenge>>
@@ -415,6 +418,8 @@ where
                         perm_row[perm_width - 1] = row_sum;
                     });
             });
+        // We can drop preprocessed and main trace now that we have created perm trace
+        drop(trace_view);
 
         // At this point, the trace matrix is complete except that the last column
         // has the row sum but not the partial sum

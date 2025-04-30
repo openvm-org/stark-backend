@@ -10,8 +10,7 @@ use p3_matrix::dense::RowMajorMatrix;
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::types::{
-    DeviceMultiStarkProvingKey, DeviceStarkProvingKey, PairView, ProverDataAfterRapPhases,
-    SingleCommitPreimage,
+    AirView, DeviceMultiStarkProvingKey, DeviceStarkProvingKey, ProverDataAfterRapPhases,
 };
 use crate::{
     config::{Com, StarkGenericConfig, Val},
@@ -77,14 +76,17 @@ pub trait TraceCommitter<PB: ProverBackend> {
 /// - commit to additional trace data
 /// - generate other partial proof data
 pub trait RapPartialProver<PB: ProverBackend> {
-    /// The `trace_views` are the views of the respective trace matrices, evaluated on the trace domain.
+    /// The `trace_views` are the respective (owned) trace matrices, evaluated on the trace domain.
     /// Currently this function does not provide a view of any already committed data associated
     /// with the trace views, although that data is available.
-    fn partially_prove<'a>(
+    ///
+    /// The [AirView] are owned matrices because it is expected these matrices may be dropped
+    /// after this function call.
+    fn partially_prove(
         &self,
         challenger: &mut PB::Challenger,
-        mpk: &DeviceMultiStarkProvingKey<'a, PB>,
-        trace_views: Vec<PairView<&'a PB::Matrix, PB::Val>>,
+        mpk: &DeviceMultiStarkProvingKey<'_, PB>,
+        trace_views: Vec<AirView<PB::Matrix, PB::Val>>,
     ) -> (PB::RapPartialProof, ProverDataAfterRapPhases<PB>);
 }
 
@@ -98,7 +100,7 @@ pub trait QuotientCommitter<PB: ProverBackend> {
     /// The lengths of
     /// - `pk_views`: proving key per AIR
     /// - `public_values`: public values per AIR
-    /// - `cached_views_per_air`: committed trace views per AIR (if any)
+    /// - `cached_pcs_datas_per_air`: pcs data from cached traces per AIR (if any)
     ///
     /// must be equal, and all equal to the number of AIRs.
     ///
@@ -110,7 +112,7 @@ pub trait QuotientCommitter<PB: ProverBackend> {
         challenger: &mut PB::Challenger,
         pk_views: &[DeviceStarkProvingKey<PB>],
         public_values: &[Vec<PB::Val>],
-        cached_views_per_air: &[Vec<SingleCommitPreimage<&PB::Matrix, &PB::PcsData>>],
+        cached_pcs_datas_per_air: &[Vec<PB::PcsData>],
         common_main_pcs_data: &PB::PcsData,
         prover_data_after: &ProverDataAfterRapPhases<PB>,
     ) -> (PB::Commitment, PB::PcsData);
@@ -123,18 +125,16 @@ pub trait OpeningProver<PB: ProverBackend> {
     /// - main trace matrices can have multiple commitments
     /// - for each after_challenge phase, all matrices in the phase share a commitment
     /// - quotient poly chunks are all committed together
-    // Note[jpw]: pass `preprocessed, main` by reference because there is cached data
-    // that is not owned. We assume `after_phase, quotient_data` will never be used after this.
     fn open(
         &self,
         challenger: &mut PB::Challenger,
         // For each preprocessed trace commitment, the prover data and
         // the log height of the matrix, in order
-        preprocessed: Vec<&PB::PcsData>,
+        preprocessed: Vec<PB::PcsData>,
         // For each main trace commitment, the prover data and
         // the log height of each matrix, in order
         // Note: this is all one challenge phase.
-        main: Vec<&PB::PcsData>,
+        main: Vec<PB::PcsData>,
         // `after_phase[i]` has shared commitment prover data for all matrices in phase `i + 1`.
         after_phase: Vec<PB::PcsData>,
         // Quotient poly commitment prover data

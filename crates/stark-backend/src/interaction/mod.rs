@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use p3_air::AirBuilder;
 use p3_challenger::CanObserve;
@@ -302,7 +302,7 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
         challenger: &mut Challenger,
         constraints_per_air: &[&SymbolicConstraints<F>],
         params_per_air: &[&Self::PartialProvingKey],
-        trace_view_per_air: &[PairTraceView<F>],
+        trace_view_per_air: Vec<PairTraceView<F>>,
     ) -> Option<(Self::PartialProof, RapPhaseProverData<Challenge>)>;
 
     /// Partially verifies the challenge phases.
@@ -324,7 +324,7 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
         Challenger: CanObserve<Commitment>;
 }
 
-type PairTraceView<'a, F> = PairView<&'a RowMajorMatrix<F>, F>;
+type PairTraceView<'a, F> = PairView<Arc<RowMajorMatrix<F>>, F>;
 
 /// Parameters to ensure sufficient soundness of the LogUp part of the protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]

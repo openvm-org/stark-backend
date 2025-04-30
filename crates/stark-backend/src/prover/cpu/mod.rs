@@ -13,7 +13,7 @@ use quotient::QuotientCommitter;
 use super::{
     hal::{self, DeviceDataTransporter, MatrixDimensions, ProverBackend, ProverDevice},
     types::{
-        DeviceMultiStarkProvingKey, DeviceStarkProvingKey, PairView, ProverDataAfterRapPhases,
+        AirView, DeviceMultiStarkProvingKey, DeviceStarkProvingKey, ProverDataAfterRapPhases,
         RapView, SingleCommitPreimage,
     },
 };
@@ -26,7 +26,10 @@ use crate::{
     interaction::RapPhaseSeq,
     keygen::types::MultiStarkProvingKey,
     proof::OpeningProof,
-    prover::{hal::TraceCommitter, types::RapSinglePhaseView},
+    prover::{
+        hal::TraceCommitter,
+        types::{PairView, RapSinglePhaseView},
+    },
     utils::metrics_span,
 };
 
@@ -161,11 +164,11 @@ impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC
 }
 
 impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice<'_, SC> {
-    fn partially_prove<'a>(
+    fn partially_prove(
         &self,
         challenger: &mut SC::Challenger,
-        mpk: &DeviceMultiStarkProvingKey<'a, CpuBackend<SC>>,
-        trace_views: Vec<PairView<&'a Arc<RowMajorMatrix<Val<SC>>>, Val<SC>>>,
+        mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+        trace_views: Vec<AirView<Arc<RowMajorMatrix<Val<SC>>>, Val<SC>>>,
     ) -> (
         Option<RapPhaseSeqPartialProof<SC>>,
         ProverDataAfterRapPhases<CpuBackend<SC>>,
@@ -184,13 +187,13 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             })
             .unzip();
 
-        let trace_views = trace_views
-            .iter()
-            .map(|v| PairView {
-                log_trace_height: v.log_trace_height,
-                preprocessed: v.preprocessed.as_ref().map(|p| p.as_ref()),
-                partitioned_main: v.partitioned_main.iter().map(|m| m.as_ref()).collect(),
-                public_values: v.public_values.clone(),
+        let trace_views = zip(&mpk.per_air, trace_views)
+            .map(|(pk, v)| PairView {
+                log_trace_height: log2_strict_usize(v.partitioned_main.first().unwrap().height())
+                    as u8,
+                preprocessed: pk.preprocessed_data.as_ref().map(|p| p.trace.clone()), // Arc::clone for now
+                partitioned_main: v.partitioned_main,
+                public_values: v.public_values,
             })
             .collect_vec();
         let (rap_phase_seq_proof, rap_phase_seq_data) = self
@@ -200,7 +203,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
                 challenger,
                 &constraints_per_air.iter().collect_vec(),
                 &rap_pk_per_air,
-                &trace_views,
+                trace_views,
             )
             .map_or((None, None), |(p, d)| (Some(p), Some(d)));
 
@@ -280,9 +283,7 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
         challenger: &mut SC::Challenger,
         pk_views: &[DeviceStarkProvingKey<CpuBackend<SC>>],
         public_values: &[Vec<Val<SC>>],
-        cached_views_per_air: &[Vec<
-            SingleCommitPreimage<&Arc<RowMajorMatrix<Val<SC>>>, &PcsData<SC>>,
-        >],
+        cached_pcs_datas_per_air: &[Vec<PcsData<SC>>],
         common_main_pcs_data: &PcsData<SC>,
         prover_data_after: &ProverDataAfterRapPhases<CpuBackend<SC>>,
     ) -> (Com<SC>, PcsData<SC>) {
@@ -292,14 +293,14 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
         tracing::debug!("alpha: {alpha:?}");
         // Prepare extended views:
         let mut common_main_idx = 0;
-        let extended_views = izip!(pk_views, cached_views_per_air, public_values)
+        let extended_views = izip!(pk_views, cached_pcs_datas_per_air, public_values)
             .enumerate()
-            .map(|(i, (pk, cached_views, pvs))| {
+            .map(|(i, (pk, cached_pcs_datas, pvs))| {
                 let quotient_degree = pk.vk.quotient_degree;
                 let log_trace_height = if pk.vk.has_common_main() {
                     common_main_pcs_data.log_trace_heights[common_main_idx]
                 } else {
-                    log2_strict_usize(cached_views[0].trace.height()) as u8
+                    cached_pcs_datas[0].log_trace_heights[0]
                 };
                 let trace_domain = pcs.natural_domain_for_degree(1usize << log_trace_height);
                 let quotient_domain = trace_domain
@@ -312,15 +313,10 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
                         quotient_domain,
                     )
                 });
-                let mut partitioned_main: Vec<_> = cached_views
+                // Each cached pcs data is commitment of a single matrix, so matrix_idx=0
+                let mut partitioned_main: Vec<_> = cached_pcs_datas
                     .iter()
-                    .map(|cv| {
-                        pcs.get_evaluations_on_domain(
-                            &cv.data.data,
-                            cv.matrix_idx as usize,
-                            quotient_domain,
-                        )
-                    })
+                    .map(|cv| pcs.get_evaluations_on_domain(&cv.data, 0, quotient_domain))
                     .collect();
                 if pk.vk.has_common_main() {
                     partitioned_main.push(pcs.get_evaluations_on_domain(
@@ -330,12 +326,6 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
                     ));
                     common_main_idx += 1;
                 }
-                let pair = PairView {
-                    log_trace_height,
-                    preprocessed,
-                    partitioned_main,
-                    public_values: pvs.to_vec(),
-                };
                 let mut per_phase = zip(
                     &prover_data_after.committed_pcs_data_per_phase,
                     &prover_data_after.rap_views_per_phase,
@@ -364,7 +354,13 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
                     .map(|v| v.unwrap_or_default())
                     .collect();
 
-                RapView { pair, per_phase }
+                RapView {
+                    log_trace_height,
+                    preprocessed,
+                    partitioned_main,
+                    public_values: pvs.to_vec(),
+                    per_phase,
+                }
             })
             .collect_vec();
 
@@ -395,11 +391,11 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
         challenger: &mut SC::Challenger,
         // For each preprocessed trace commitment, the prover data and
         // the log height of the matrix, in order
-        preprocessed: Vec<&PcsData<SC>>,
+        preprocessed: Vec<PcsData<SC>>,
         // For each main trace commitment, the prover data and
         // the log height of each matrix, in order
         // Note: this is all one challenge phase.
-        main: Vec<&PcsData<SC>>,
+        main: Vec<PcsData<SC>>,
         // `after_phase[i]` has shared commitment prover data for all matrices in phase `i + 1`.
         after_phase: Vec<PcsData<SC>>,
         // Quotient poly commitment prover data
