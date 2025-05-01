@@ -30,7 +30,7 @@ use crate::{
 /// `quotient_domain.split_evals(quotient_degree, quotient_flat)` function from Plonky3 works
 /// as follows (currently true for all known implementations):
 /// The quotient polynomial will is treated as long columns of the form
-/// ```
+/// ```ignore
 /// [q_0]
 /// [q_1]
 /// ...
@@ -38,7 +38,7 @@ use crate::{
 /// ```
 /// where each `q_i` is column of length `trace_height` of extension field elements.
 /// We treat them as separate base field matrices
-/// ```
+/// ```ignore
 /// [q_0], [q_1], ..., [q_{quotient_degree - 1}]
 /// ```
 /// Each matrix is a "chunk".
@@ -98,10 +98,13 @@ where
     // So this will be alpha^{num_constraints - 1}, ..., alpha^0
     alpha_powers.reverse();
 
-    // assert!(quotient_size >= PackedVal::<SC>::WIDTH);
-    // We take PackedVal::<SC>::WIDTH worth of values at a time from a quotient_size slice, so we need to
-    // pad with default values in the case where quotient_size is smaller than PackedVal::<SC>::WIDTH.
-    for _ in quotient_size..PackedVal::<SC>::WIDTH {
+    // We take PackedVal::<SC>::WIDTH worth of values at a time from `quotient_degree` chunks of size
+    // `trace_height`, so we need to pad with default values in the case where quotient_size is
+    // smaller than PackedVal::<SC>::WIDTH.
+    // Note: this resizes vecs but only if trace_height < PackedVal::<SC>::WIDTH, which is small
+    for _ in quotient_size
+        ..trace_height.div_ceil(PackedVal::<SC>::WIDTH) * PackedVal::<SC>::WIDTH * quotient_degree
+    {
         sels.is_first_row.push(Val::<SC>::default());
         sels.is_last_row.push(Val::<SC>::default());
         sels.is_transition.push(Val::<SC>::default());
