@@ -23,13 +23,17 @@ use crate::{
 
 pub struct FriLogUpPhase<F, Challenge, Challenger> {
     log_up_params: LogUpSecurityParameters,
+    /// When the perm trace is created, the matrix will be allocated with `capacity = trace_length << extra_capacity_bits`.
+    /// This is to avoid resizing for the coset LDE.
+    extra_capacity_bits: usize,
     _marker: PhantomData<(F, Challenge, Challenger)>,
 }
 
 impl<F, Challenge, Challenger> FriLogUpPhase<F, Challenge, Challenger> {
-    pub fn new(log_up_params: LogUpSecurityParameters) -> Self {
+    pub fn new(log_up_params: LogUpSecurityParameters, extra_capacity_bits: usize) -> Self {
         Self {
             log_up_params,
+            extra_capacity_bits,
             _marker: PhantomData,
         }
     }
@@ -120,6 +124,7 @@ where
                 constraints_per_air,
                 params_per_air,
                 trace_view_per_air,
+                self.extra_capacity_bits,
             )
         });
         let cumulative_sum_per_air = Self::extract_cumulative_sums(&after_challenge_trace_per_air);
@@ -248,6 +253,7 @@ where
         constraints_per_air: &[&SymbolicConstraints<F>],
         params_per_air: &[&FriLogUpProvingKey],
         trace_view_per_air: Vec<PairTraceView<F>>,
+        extra_capacity_bits: usize,
     ) -> Vec<Option<RowMajorMatrix<Challenge>>> {
         parizip!(constraints_per_air, trace_view_per_air, params_per_air)
             .map(|(constraints, trace_view, params)| {
@@ -256,6 +262,7 @@ where
                     trace_view,
                     challenges,
                     &params.interaction_partitions,
+                    extra_capacity_bits,
                 )
             })
             .collect::<Vec<_>>()
@@ -293,6 +300,7 @@ where
         trace_view: PairTraceView<F>,
         permutation_randomness: &[Challenge; STARK_LU_NUM_CHALLENGES],
         interaction_partitions: &[Vec<usize>],
+        extra_capacity_bits: usize,
     ) -> Option<RowMajorMatrix<Challenge>>
     where
         F: Field,
@@ -329,7 +337,10 @@ where
         // on the fly. If we introduce a more advanced chunking algorithm, then we will need to
         // cache the chunking information in the proving key.
         let perm_width = interaction_partitions.len() + 1;
-        let mut perm_values = Challenge::zero_vec(height * perm_width);
+        // We allocate extra_capacity_bits now as it will be needed by the coset_lde later in pcs.commit
+        let perm_trace_len = height * perm_width;
+        let mut perm_values = Challenge::zero_vec(perm_trace_len << extra_capacity_bits);
+        perm_values.truncate(perm_trace_len);
         debug_assert!(
             trace_view
                 .partitioned_main

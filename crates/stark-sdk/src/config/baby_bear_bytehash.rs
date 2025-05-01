@@ -130,7 +130,7 @@ where
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
-    let rap_phase = FriLogUpPhase::new(log_up_params);
+    let rap_phase = FriLogUpPhase::new(log_up_params, fri_params.log_blowup);
     BabyBearByteHashConfig::new(pcs, rap_phase)
 }
 
