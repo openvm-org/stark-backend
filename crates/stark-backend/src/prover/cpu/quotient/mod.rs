@@ -8,7 +8,7 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use self::single::compute_single_rap_quotient_values;
-use super::{transmute_to_base, PcsData};
+use super::PcsData;
 use crate::{
     air_builders::symbolic::SymbolicExpressionDag,
     config::{Com, Domain, PackedChallenge, StarkGenericConfig, Val},
@@ -21,11 +21,16 @@ pub(crate) mod single;
 pub struct QuotientCommitter<'pcs, SC: StarkGenericConfig> {
     pcs: &'pcs SC::Pcs,
     alpha: SC::Challenge,
+    extra_capacity_bits: usize,
 }
 
 impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
-    pub fn new(pcs: &'pcs SC::Pcs, alpha: SC::Challenge) -> Self {
-        Self { pcs, alpha }
+    pub fn new(pcs: &'pcs SC::Pcs, alpha: SC::Challenge, extra_capacity_bits: usize) -> Self {
+        Self {
+            pcs,
+            alpha,
+            extra_capacity_bits,
+        }
     }
 
     /// Constructs quotient domains and computes the evaluation of the quotient polynomials
@@ -35,6 +40,23 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     /// - `constraints`, `extended_views`, `quotient_degrees` have equal lengths and the length equals number of RAPs.
     /// - `quotient_degrees` is the factor to **multiply** the trace degree by to get the degree of the quotient polynomial. This should be determined from the constraint degree of the RAP.
     /// - `extended_views` is a view of the trace polynomials evaluated on the quotient domain, with rows bit reversed to account for the fact that the quotient domain is different for each RAP.
+    ///
+    /// **Note**: This function assumes that the
+    /// `quotient_domain.split_evals(quotient_degree, quotient_flat)` function from Plonky3 works
+    /// as follows (currently true for all known implementations):
+    /// The quotient polynomial will is treated as long columns of the form
+    /// ```
+    /// [q_0]
+    /// [q_1]
+    /// ...
+    /// [q_{quotient_degree - 1}]
+    /// ```
+    /// where each `q_i` is column of length `trace_height` of extension field elements.
+    /// We treat them as separate base field matrices
+    /// ```
+    /// [q_0], [q_1], ..., [q_{quotient_degree - 1}]
+    /// ```
+    /// Each matrix is a "chunk".
     #[instrument(name = "compute quotient values", level = "info", skip_all)]
     pub fn quotient_values(
         &self,
@@ -44,12 +66,12 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     ) -> QuotientData<SC> {
         assert_eq!(constraints.len(), extended_views.len());
         assert_eq!(constraints.len(), quotient_degrees.len());
-        let inner = izip!(constraints, extended_views, quotient_degrees)
-            .map(|(constraints, extended_view, &quotient_degree)| {
+        let chunks = izip!(constraints, extended_views, quotient_degrees)
+            .flat_map(|(constraints, extended_view, &quotient_degree)| {
                 self.single_rap_quotient_values(constraints, extended_view, quotient_degree)
             })
             .collect();
-        QuotientData { inner }
+        QuotientData { chunks }
     }
 
     pub(super) fn single_rap_quotient_values(
@@ -57,7 +79,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
         constraints: &SymbolicExpressionDag<Val<SC>>,
         view: RapView<impl Matrix<Val<SC>>, Val<SC>, SC::Challenge>,
         quotient_degree: u8,
-    ) -> SingleQuotientData<SC> {
+    ) -> impl IntoIterator<Item = QuotientChunk<SC>> {
         let log_trace_height = view.log_trace_height;
         let trace_domain = self
             .pcs
@@ -84,7 +106,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
             )
         }));
 
-        let quotient_values = compute_single_rap_quotient_values::<SC, _>(
+        compute_single_rap_quotient_values::<SC, _>(
             constraints,
             trace_domain,
             quotient_domain,
@@ -95,23 +117,19 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
             self.alpha,
             &view.public_values,
             &exposed_values_after_challenge,
-        );
-        SingleQuotientData {
-            quotient_degree: quotient_degree as usize,
-            quotient_domain,
-            quotient_values,
-        }
+            self.extra_capacity_bits,
+        )
     }
 
     #[instrument(name = "commit to quotient poly chunks", skip_all)]
     pub fn commit(&self, data: QuotientData<SC>) -> (Com<SC>, PcsData<SC>) {
         let (log_trace_heights, quotient_domains_and_chunks): (Vec<_>, Vec<_>) = data
-            .split()
+            .chunks
             .into_iter()
             .map(|q| {
                 (
                     log2_strict_usize(q.domain.size()) as u8,
-                    (q.domain, q.chunk),
+                    (q.domain, q.matrix),
                 )
             })
             .unzip();
@@ -128,45 +146,8 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
 
 /// The quotient polynomials from multiple RAP matrices.
 pub(super) struct QuotientData<SC: StarkGenericConfig> {
-    inner: Vec<SingleQuotientData<SC>>,
-}
-
-impl<SC: StarkGenericConfig> QuotientData<SC> {
-    /// Splits the quotient polynomials from multiple AIRs into chunks of size equal to the trace domain size.
-    pub fn split(self) -> impl IntoIterator<Item = QuotientChunk<SC>> {
-        self.inner.into_iter().flat_map(|data| data.split())
-    }
-}
-
-/// The quotient polynomial from a single matrix RAP, evaluated on the quotient domain.
-pub(super) struct SingleQuotientData<SC: StarkGenericConfig> {
-    quotient_degree: usize,
-    /// Quotient domain
-    quotient_domain: Domain<SC>,
-    /// Evaluations of the quotient polynomial on the quotient domain
-    quotient_values: Vec<SC::Challenge>,
-}
-
-impl<SC: StarkGenericConfig> SingleQuotientData<SC> {
-    /// The vector of evaluations of the quotient polynomial on the quotient domain,
-    /// first flattened from vector of extension field elements to matrix of base field elements,
-    /// and then split into chunks of size equal to the trace domain size (quotient domain size
-    /// divided by `quotient_degree`).
-    pub fn split(self) -> impl IntoIterator<Item = QuotientChunk<SC>> {
-        let quotient_degree = self.quotient_degree;
-        let quotient_domain = self.quotient_domain;
-        // Flatten from extension field elements to base field elements
-        // SAFETY: `Challenge` is assumed to be extension field of `F`
-        // with memory layout `[F; Challenge::D]`
-        let quotient_flat =
-            unsafe { transmute_to_base(RowMajorMatrix::new_col(self.quotient_values)) };
-        let quotient_chunks = quotient_domain.split_evals(quotient_degree, quotient_flat);
-        let qc_domains = quotient_domain.split_domains(quotient_degree);
-        qc_domains
-            .into_iter()
-            .zip_eq(quotient_chunks)
-            .map(|(domain, chunk)| QuotientChunk { domain, chunk })
-    }
+    /// Length equals `quotient_ degree`.
+    chunks: Vec<QuotientChunk<SC>>,
 }
 
 /// The vector of evaluations of the quotient polynomial on the quotient domain,
@@ -180,5 +161,5 @@ pub struct QuotientChunk<SC: StarkGenericConfig> {
     pub domain: Domain<SC>,
     /// Matrix with number of rows equal to trace domain size,
     /// and number of columns equal to extension field degree.
-    pub chunk: RowMajorMatrix<Val<SC>>,
+    pub matrix: RowMajorMatrix<Val<SC>>,
 }

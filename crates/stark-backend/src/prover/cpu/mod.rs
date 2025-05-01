@@ -373,7 +373,7 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
                 )
             })
             .unzip();
-        let qc = QuotientCommitter::new(self.pcs(), alpha);
+        let qc = QuotientCommitter::new(self.pcs(), alpha, self.log_blowup_factor);
         let quotient_values = metrics_span("quotient_poly_compute_time_ms", || {
             qc.quotient_values(&constraints, extended_views, &quotient_degrees)
         });
