@@ -26,6 +26,8 @@ pub struct SingleTraceMetrics {
     /// Omitting preprocessed trace, the total base field cells from main and after challenge
     /// traces.
     pub total_cells: usize,
+    /// Base field cells for evaluation of quotient polynomial on the quotient domain
+    pub quotient_poly_cells: usize,
 }
 
 /// Trace cells, counted in terms of number of **base field** elements.
@@ -71,6 +73,16 @@ impl Display for TraceMetrics {
                 self.per_air
                     .iter()
                     .map(|m| m.cells.after_challenge.iter().sum::<usize>())
+                    .sum::<usize>()
+            )
+        )?;
+        writeln!(
+            f,
+            "quotient_poly_cells = {}",
+            format_number_with_underscores(
+                self.per_air
+                    .iter()
+                    .map(|m| m.quotient_poly_cells)
                     .sum::<usize>()
             )
         )?;
@@ -152,6 +164,7 @@ pub fn trace_metrics<PB: ProverBackend>(
                 width,
                 cells,
                 total_cells,
+                quotient_poly_cells: height * (pk.vk.quotient_degree as usize) * ext_degree,
             }
         })
         .collect();
