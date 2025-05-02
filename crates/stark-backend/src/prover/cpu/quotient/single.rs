@@ -42,12 +42,12 @@ use crate::{
 /// which is "vertically strided" with stride `quotient_degree`.
 /// We regroup them into evaluations on cosets of the trace domain subgroup as separate base field matrices
 /// ```ignore
-/// [q_{0,0}], [q_{1,0}], ..., [q_{quotient_degree - 1,0}]
-/// [q_{0,1}], [q_{1,1}], ..., [q_{quotient_degree - 1,1}]
+/// [q_{0,0}               ]   [q_{1,0}               ]  ...  [q_{quotient_degree - 1,0}               ]
+/// [q_{0,1}               ]   [q_{1,1}               ]  ...  [q_{quotient_degree - 1,1}               ]
 /// ...
-/// [q_{0,trace_height - 1}], [q_{1,trace_height - 1}], ..., [q_{quotient_degree - 1,trace_height - 1}]
+/// [q_{0,trace_height - 1}]   [q_{1,trace_height - 1}]  ...  [q_{quotient_degree - 1,trace_height - 1}]
 /// ```
-/// Each matrix is a "chunk".
+/// where `q_{0,*}` and `q_{1,*}` are separate matrices. Each matrix is called a "chunk".
 #[allow(clippy::too_many_arguments)]
 #[instrument(
     name = "compute single RAP quotient polynomial",
