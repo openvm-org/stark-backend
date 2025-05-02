@@ -43,20 +43,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     ///
     /// **Note**: This function assumes that the
     /// `quotient_domain.split_evals(quotient_degree, quotient_flat)` function from Plonky3 works
-    /// as follows (currently true for all known implementations):
-    /// The quotient polynomial will is treated as long columns of the form
-    /// ```ignore
-    /// [q_0]
-    /// [q_1]
-    /// ...
-    /// [q_{quotient_degree - 1}]
-    /// ```
-    /// where each `q_i` is column of length `trace_height` of extension field elements.
-    /// We treat them as separate base field matrices
-    /// ```ignore
-    /// [q_0], [q_1], ..., [q_{quotient_degree - 1}]
-    /// ```
-    /// Each matrix is a "chunk".
+    /// as described in [compute_single_rap_quotient_values].
     #[instrument(name = "compute quotient values", level = "info", skip_all)]
     pub fn quotient_values(
         &self,

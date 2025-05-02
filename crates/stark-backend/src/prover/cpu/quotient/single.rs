@@ -29,17 +29,23 @@ use crate::{
 /// **Note**: This function assumes that the
 /// `quotient_domain.split_evals(quotient_degree, quotient_flat)` function from Plonky3 works
 /// as follows (currently true for all known implementations):
-/// The quotient polynomial will is treated as long columns of the form
+/// The evaluations of the quotient polynomial on the quotient domain (shift of a subgroup) is viewed as a long column of the form
 /// ```ignore
-/// [q_0]
-/// [q_1]
+/// [q_{0,0}]
+/// [q_{1,0}]
 /// ...
-/// [q_{quotient_degree - 1}]
+/// [q_{quotient_degree - 1,0}]
+/// [q_{0,1}]
+/// ...
+/// [q_{quotient_degree - 1, trace_height - 1}]
 /// ```
-/// where each `q_i` is column of length `trace_height` of extension field elements.
-/// We treat them as separate base field matrices
+/// which is "vertically strided" with stride `quotient_degree`.
+/// We regroup them into evaluations on cosets of the trace domain subgroup as separate base field matrices
 /// ```ignore
-/// [q_0], [q_1], ..., [q_{quotient_degree - 1}]
+/// [q_{0,0}], [q_{1,0}], ..., [q_{quotient_degree - 1,0}]
+/// [q_{0,1}], [q_{1,1}], ..., [q_{quotient_degree - 1,1}]
+/// ...
+/// [q_{0,trace_height - 1}], [q_{1,trace_height - 1}], ..., [q_{quotient_degree - 1,trace_height - 1}]
 /// ```
 /// Each matrix is a "chunk".
 #[allow(clippy::too_many_arguments)]
@@ -79,13 +85,11 @@ where
         .as_ref()
         .map(|m| m.width())
         .unwrap_or(0);
-    let mut sels = trace_domain.selectors_on_coset(quotient_domain);
+    let sels = trace_domain.selectors_on_coset(quotient_domain);
 
     let qdb = log2_strict_usize(quotient_size) - log2_strict_usize(trace_height);
     let quotient_degree = 1 << qdb;
     debug_assert_eq!(quotient_size, trace_height * quotient_degree);
-    // The input values are evaluations on quotient domain, so the trace evaluations are spaced quotient_degree apart
-    let next_step = quotient_degree;
 
     let ext_degree = SC::Challenge::D;
 
@@ -97,19 +101,6 @@ where
     // We want alpha powers to have highest power first, because of how accumulator "folding" works
     // So this will be alpha^{num_constraints - 1}, ..., alpha^0
     alpha_powers.reverse();
-
-    // We take PackedVal::<SC>::WIDTH worth of values at a time from `quotient_degree` chunks of size
-    // `trace_height`, so we need to pad with default values in the case where quotient_size is
-    // smaller than PackedVal::<SC>::WIDTH.
-    // Note: this resizes vecs but only if trace_height < PackedVal::<SC>::WIDTH, which is small
-    for _ in quotient_size
-        ..trace_height.div_ceil(PackedVal::<SC>::WIDTH) * PackedVal::<SC>::WIDTH * quotient_degree
-    {
-        sels.is_first_row.push(Val::<SC>::default());
-        sels.is_last_row.push(Val::<SC>::default());
-        sels.is_transition.push(Val::<SC>::default());
-        sels.inv_zeroifier.push(Val::<SC>::default());
-    }
 
     // Scan constraints to see if we need `next` row and also check index bounds
     // so we don't need to check them per row.
@@ -183,26 +174,32 @@ where
                 .par_chunks_mut(PackedVal::<SC>::WIDTH)
                 .enumerate()
                 .for_each(|(fat_row_idx, packed_ef_mut)| {
-                    let i_start = chunk_idx * trace_height + fat_row_idx * PackedVal::<SC>::WIDTH;
-                    let wrap = |i| i % quotient_size;
-                    let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;
+                    // `packed_ef_mut` is a vertical sub-column, index `offset` of `packed_ef_mut`
+                    // is supposed to be the `chunk_row_idx = fat_row_idx * PackedVal::<SC>::WIDTH + offset` row of the chunk matrix,
+                    // which is the `chunk_idx + chunk_row_idx * quotient_degree`th row of the evaluation of quotient polynomial on the quotient domain
+                    // PERF[jpw]: This may not be cache friendly - would it be better to generate the quotient values in order first and then do some in-place permutation?
+                    let quot_row_idx = |offset| {
+                        (chunk_idx
+                            + (fat_row_idx * PackedVal::<SC>::WIDTH + offset) * quotient_degree)
+                            % quotient_size
+                    };
 
-                    let [row_idx_local, row_idx_next] = [0, next_step].map(|shift| {
+                    let [row_idx_local, row_idx_next] = [0, 1].map(|shift| {
                         (0..PackedVal::<SC>::WIDTH)
-                            .map(|offset| wrap(i_start + offset + shift))
+                            .map(|offset| quot_row_idx(offset + shift))
                             .collect::<Vec<_>>()
                     });
                     let row_idx_local = Some(row_idx_local);
                     let row_idx_next = needs_next.then_some(row_idx_next);
 
                     let is_first_row =
-                        *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
+                        PackedVal::<SC>::from_fn(|offset| sels.is_first_row[quot_row_idx(offset)]);
                     let is_last_row =
-                        *PackedVal::<SC>::from_slice(&sels.is_last_row[i_range.clone()]);
+                        PackedVal::<SC>::from_fn(|offset| sels.is_last_row[quot_row_idx(offset)]);
                     let is_transition =
-                        *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
+                        PackedVal::<SC>::from_fn(|offset| sels.is_transition[quot_row_idx(offset)]);
                     let inv_zeroifier =
-                        *PackedVal::<SC>::from_slice(&sels.inv_zeroifier[i_range.clone()]);
+                        PackedVal::<SC>::from_fn(|offset| sels.inv_zeroifier[quot_row_idx(offset)]);
 
                     // Vertically pack rows of each matrix,
                     // skipping `next` if above scan showed no constraints need it:
