@@ -132,7 +132,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
 }
 
 /// The quotient polynomials from multiple RAP matrices.
-pub(super) struct QuotientData<SC: StarkGenericConfig> {
+pub struct QuotientData<SC: StarkGenericConfig> {
     /// Length equals `quotient_ degree`.
     chunks: Vec<QuotientChunk<SC>>,
 }
