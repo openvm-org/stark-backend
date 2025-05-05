@@ -14,7 +14,7 @@ We (`stark-backend`) do this by storing the constraints as a direct acyclic grap
 Then evaluation is an **interpreter** of the DAG which does traversal of the DAG, which is already in topologically sorted order.
 
 Optimizations to try:
-1. Does not using `par_iter` and using more explicit multi-threading have better cache/memory properties?
+1. ✅ Does not using `par_iter` and using more explicit multi-threading have better cache/memory properties? Done: see `parallelize_chunks`
 2. avoid per-iter allocations of the fat row, also the interpreter also allocates right now
 3. Getting rid of interpreter overhead
   3a. Use function pointers to avoid match statements
