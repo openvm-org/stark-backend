@@ -1,10 +1,9 @@
-use std::cmp::max;
+use std::cmp::{max, min};
 
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PackedValue};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
-use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
@@ -18,6 +17,7 @@ use crate::{
     },
     config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
     prover::cpu::transmute_to_base,
+    utils::parallelize_chunks,
 };
 
 // Starting reference: p3_uni_stark::prover::quotient_values
@@ -169,20 +169,21 @@ where
             let mut chunk = SC::Challenge::zero_vec(trace_height << extra_capacity_bits);
             chunk.truncate(trace_height);
             // We parallel iterate over "fat" rows, which are consecutive rows packed for SIMD.
-            // Use par_chunks instead of par_chunks_exact in case trace_height is not a multiple of PackedVal::WIDTH
-            chunk
-                .par_chunks_mut(PackedVal::<SC>::WIDTH)
-                .enumerate()
-                .for_each(|(fat_row_idx, packed_ef_mut)| {
+            // If trace_height is smaller than PackedVal::<SC>::WIDTH, we just don't parallelize
+            let simd_width = min(trace_height, PackedVal::<SC>::WIDTH);
+            parallelize_chunks(&mut chunk, simd_width, |chunk, start_row_idx| {
+                debug_assert_eq!(start_row_idx % PackedVal::<SC>::WIDTH, 0);
+                // Use chunks instead of chunks_exact in case trace_height is not a multiple of PackedVal::WIDTH
+                for (local_fat_row_idx, packed_ef_mut) in
+                    chunk.chunks_mut(PackedVal::<SC>::WIDTH).enumerate()
+                {
+                    let row_idx = start_row_idx + local_fat_row_idx * PackedVal::<SC>::WIDTH;
                     // `packed_ef_mut` is a vertical sub-column, index `offset` of `packed_ef_mut`
-                    // is supposed to be the `chunk_row_idx = fat_row_idx * PackedVal::<SC>::WIDTH + offset` row of the chunk matrix,
+                    // is supposed to be the `chunk_row_idx = row_idx + offset` row of the chunk matrix
                     // which is the `chunk_idx + chunk_row_idx * quotient_degree`th row of the evaluation of quotient polynomial on the quotient domain
                     // PERF[jpw]: This may not be cache friendly - would it be better to generate the quotient values in order first and then do some in-place permutation?
-                    let quot_row_idx = |offset| {
-                        (chunk_idx
-                            + (fat_row_idx * PackedVal::<SC>::WIDTH + offset) * quotient_degree)
-                            % quotient_size
-                    };
+                    let quot_row_idx =
+                        |offset| (chunk_idx + (row_idx + offset) * quotient_degree) % quotient_size;
 
                     let [row_idx_local, row_idx_next] = [0, 1].map(|shift| {
                         (0..PackedVal::<SC>::WIDTH)
@@ -287,7 +288,8 @@ where
                             quotient.as_base_slice()[coeff_idx].as_slice()[idx_in_packing]
                         });
                     }
-                });
+                }
+            });
             // Flatten from extension field elements to base field elements
             // SAFETY: `Challenge` is assumed to be extension field of `F`
             // with memory layout `[F; Challenge::D]`
