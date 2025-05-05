@@ -9,10 +9,10 @@ cd $git_root/crates/stark-sdk
 arch=$(uname -m)
 case $arch in
     arm64|aarch64)
-        RUSTFLAGS="-Ctarget-cpu=native -g"
+        export RUSTFLAGS="-Ctarget-cpu=native -g -C force-frame-pointers=yes"
         ;;
     x86_64|amd64)
-        RUSTFLAGS="-Ctarget-cpu=native -C target-feature=+avx512f -g"
+        export RUSTFLAGS="-Ctarget-cpu=native -C target-feature=+avx512f -g -C force-frame-pointers=yes"
         ;;
     *)
         echo "Unsupported architecture: $arch"
@@ -22,7 +22,7 @@ esac
 
 export JEMALLOC_SYS_WITH_MALLOC_CONF="retain:true,background_thread:true,metadata_thp:always,dirty_decay_ms:-1,muzzy_decay_ms:-1,abort_conf:true"
 
-RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile=profiling --example $eg_name --no-default-features --features=nightly-features,jemalloc,parallel
+cargo build --profile=profiling --example $eg_name --no-default-features --features=nightly-features,jemalloc,parallel
 
 # Check if samply is installed
 if ! command -v samply &> /dev/null; then
