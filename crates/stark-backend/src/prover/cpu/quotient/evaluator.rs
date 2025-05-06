@@ -1,4 +1,7 @@
-use std::ops::{Add, Mul, Neg, Sub};
+use std::{
+    iter::zip,
+    ops::{Add, Mul, Neg, Sub},
+};
 
 use derivative::Derivative;
 use p3_field::FieldAlgebra;
@@ -166,7 +169,8 @@ where
 
 impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
     /// # Safety
-    /// The `nodes` must already be topologically sorted, so they only reference previous nodes.
+    /// - The `nodes` must already be topologically sorted, so they only reference previous nodes.
+    /// - `exprs` should have capacity at least `constraints.nodes.len()`.
     unsafe fn eval_nodes_mut(
         &self,
         nodes: &[SymbolicExpressionNode<Val<SC>>],
@@ -174,9 +178,15 @@ impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
     ) where
         PackedExpr<SC>: Clone,
     {
-        exprs.clear();
+        debug_assert!(exprs.capacity() >= nodes.len());
+        // SAFETY: we will set all `exprs` in the loop; this is to make debug assertions happy for `exprs.get_unchecked`.
+        unsafe {
+            exprs.set_len(nodes.len());
+        }
+        let mut expr_ptr = exprs.as_mut_ptr();
         for node in nodes.iter() {
-            let expr = match *node {
+            // SAFETY: dereference raw pointer `expr_ptr` because we assume `exprs` has enough capacity.
+            *expr_ptr = match *node {
                 SymbolicExpressionNode::Variable(var) => self.eval_var(var),
                 SymbolicExpressionNode::Constant(c) => self.eval_const(c),
                 SymbolicExpressionNode::Add {
@@ -199,14 +209,18 @@ impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
                 SymbolicExpressionNode::IsLastRow => self.eval_is_last_row(),
                 SymbolicExpressionNode::IsTransition => self.eval_is_transition(),
             };
-            exprs.push(expr);
+            expr_ptr = expr_ptr.add(1);
         }
     }
 
-    /// `alpha_powers` are in **reversed** order, with highest power coming first.
+    /// `alpha_powers` are in **increasing** order of powers, `alpha^0, alpha^1, ...`
+    ///
+    /// # Panics
+    /// If `alpha_powers.len() < constraints.constraint_idx.len()`.
     ///
     /// # Safety
-    /// The `nodes` must already be topologically sorted, so they only reference previous nodes.
+    /// - The `nodes` must already be topologically sorted, so they only reference previous nodes.
+    /// - `exprs` should have capacity at least `constraints.nodes.len()`.
     // Note: this could be split into multiple functions if additional constraints need to be folded in
     pub unsafe fn accumulate(
         &self,
@@ -214,9 +228,12 @@ impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
         alpha_powers: &[PackedChallenge<SC>],
         exprs: &mut Vec<PackedExpr<SC>>,
     ) -> PackedChallenge<SC> {
+        debug_assert!(alpha_powers.len() >= constraints.constraint_idx.len());
+        // We want alpha powers to have highest power first, because of how accumulator "folding" works
+        // So this will be alpha^{num_constraints - 1}, ..., alpha^0
         self.eval_nodes_mut(&constraints.nodes, exprs);
         let mut accumulator = PackedChallenge::<SC>::ZERO;
-        for (&alpha_pow, &node_idx) in alpha_powers.iter().zip(&constraints.constraint_idx) {
+        for (&alpha_pow, &node_idx) in zip(alpha_powers, constraints.constraint_idx.iter().rev()) {
             match *exprs.get_unchecked(node_idx) {
                 PackedExpr::Val(x) => accumulator += alpha_pow * x,
                 PackedExpr::Challenge(x) => accumulator += alpha_pow * x,
