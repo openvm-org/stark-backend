@@ -32,5 +32,10 @@ else
     echo "samply is already installed"
 fi
 
-# TODO: linux should use perf with framepointer for better results
-samply record $git_root/target/profiling/examples/$eg_name
+
+if command -v perf &> /dev/null && [[ "$(uname -s)" == "Linux" ]]; then
+    perf record -F 100 --call-graph=fp -g -o perf.data -- $git_root/target/profiling/examples/$eg_name
+    samply import perf.data
+else
+    samply record $git_root/target/profiling/examples/$eg_name
+fi
