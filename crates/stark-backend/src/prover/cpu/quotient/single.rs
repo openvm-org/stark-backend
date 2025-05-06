@@ -1,6 +1,8 @@
-use std::cmp::{max, min};
+use std::{
+    cmp::{max, min},
+    iter::zip,
+};
 
-use itertools::Itertools;
 use p3_commit::PolynomialSpace;
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PackedValue};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
@@ -63,7 +65,7 @@ pub fn compute_single_rap_quotient_values<'a, SC, M>(
     after_challenge_lde_on_quotient_domain: Vec<M>,
     // For each challenge round, the challenges drawn
     challenges: &'a [Vec<PackedChallenge<SC>>],
-    alpha: SC::Challenge,
+    alpha_powers: &[PackedChallenge<SC>],
     public_values: &'a [Val<SC>],
     // Values exposed to verifier after challenge round i
     exposed_values_after_challenge: &'a [Vec<PackedChallenge<SC>>],
@@ -92,15 +94,6 @@ where
     debug_assert_eq!(quotient_size, trace_height * quotient_degree);
 
     let ext_degree = SC::Challenge::D;
-
-    let mut alpha_powers = alpha
-        .powers()
-        .take(constraints.constraint_idx.len())
-        .map(PackedChallenge::<SC>::from_f)
-        .collect_vec();
-    // We want alpha powers to have highest power first, because of how accumulator "folding" works
-    // So this will be alpha^{num_constraints - 1}, ..., alpha^0
-    alpha_powers.reverse();
 
     // Scan constraints to see if we need `next` row and also check index bounds
     // so we don't need to check them per row.
@@ -177,10 +170,29 @@ where
                 // Pre-allocate vectors
                 let mut row_idx_local = Vec::with_capacity(PackedVal::<SC>::WIDTH);
                 let mut row_idx_next = Vec::with_capacity(PackedVal::<SC>::WIDTH);
+                // SAFETY: we will set these vectors to exactly this length in each inner loop per fat row
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    row_idx_local.set_len(PackedVal::<SC>::WIDTH);
+                    row_idx_next.set_len(PackedVal::<SC>::WIDTH);
+                }
 
                 fn new_view_pair<T>(width: usize, needs_next: bool) -> ViewPair<T> {
-                    let local = Vec::with_capacity(width);
-                    let next = needs_next.then(|| Vec::with_capacity(width));
+                    let mut local = Vec::with_capacity(width);
+                    // SAFETY: these vectors will always have a known width (the matrix width), and we
+                    // populate them with the appropriate values in each inner loop per fat row
+                    #[allow(clippy::uninit_vec)]
+                    unsafe {
+                        local.set_len(width);
+                    }
+                    let next = needs_next.then(|| {
+                        let mut next = Vec::with_capacity(width);
+                        #[allow(clippy::uninit_vec)]
+                        unsafe {
+                            next.set_len(width);
+                        }
+                        next
+                    });
                     ViewPair::new(local, next)
                 }
 
@@ -210,11 +222,11 @@ where
                     let quot_row_idx =
                         |offset| (chunk_idx + (row_idx + offset) * quotient_degree) % quotient_size;
 
-                    row_idx_local.clear();
-                    row_idx_next.clear();
-                    for offset in 0..PackedVal::<SC>::WIDTH {
-                        row_idx_local.push(quot_row_idx(offset));
-                        row_idx_next.push(quot_row_idx(offset + 1));
+                    for (offset, (local, next)) in
+                        zip(&mut row_idx_local, &mut row_idx_next).enumerate()
+                    {
+                        *local = quot_row_idx(offset);
+                        *next = quot_row_idx(offset + 1);
                     }
 
                     let is_first_row =
@@ -233,14 +245,13 @@ where
                         (&row_idx_next, Option::as_mut(&mut preprocessed_pair.next)),
                     ] {
                         if let Some(row_buf) = row_buf {
-                            row_buf.clear();
-                            for col in 0..preprocessed_width {
-                                row_buf.push(PackedVal::<SC>::from_fn(|offset| {
+                            for (col, row_elt) in row_buf.iter_mut().enumerate() {
+                                *row_elt = PackedVal::<SC>::from_fn(|offset| unsafe {
                                     preprocessed_trace_on_quotient_domain
                                         .as_ref()
-                                        .unwrap()
-                                        .get(wrapped_idx[offset], col)
-                                }));
+                                        .unwrap_unchecked()
+                                        .get(*wrapped_idx.get_unchecked(offset), col)
+                                });
                             }
                         }
                     }
@@ -249,17 +260,15 @@ where
                         .iter()
                         .zip(partitioned_main_pairs.iter_mut())
                     {
-                        let width = lde.width();
                         for (wrapped_idx, row_buf) in [
                             (&row_idx_local, Some(&mut view_pair.local)),
                             (&row_idx_next, Option::as_mut(&mut view_pair.next)),
                         ] {
                             if let Some(row_buf) = row_buf {
-                                row_buf.clear();
-                                for col in 0..width {
-                                    row_buf.push(PackedVal::<SC>::from_fn(|offset| {
-                                        lde.get(wrapped_idx[offset], col)
-                                    }));
+                                for (col, row_elt) in row_buf.iter_mut().enumerate() {
+                                    *row_elt = PackedVal::<SC>::from_fn(|offset| {
+                                        lde.get(unsafe { *wrapped_idx.get_unchecked(offset) }, col)
+                                    });
                                 }
                             }
                         }
@@ -270,19 +279,20 @@ where
                         .zip(after_challenge_pairs.iter_mut())
                     {
                         // Width in base field with extension field elements flattened
-                        let base_width = lde.width();
                         for (wrapped_idx, row_buf) in [
                             (&row_idx_local, Some(&mut view_pair.local)),
                             (&row_idx_next, Option::as_mut(&mut view_pair.next)),
                         ] {
                             if let Some(row_buf) = row_buf {
-                                row_buf.clear();
-                                for col in (0..base_width).step_by(ext_degree) {
-                                    row_buf.push(PackedChallenge::<SC>::from_base_fn(|i| {
+                                for (col, row_elt) in row_buf.iter_mut().enumerate() {
+                                    *row_elt = PackedChallenge::<SC>::from_base_fn(|i| {
                                         PackedVal::<SC>::from_fn(|offset| {
-                                            lde.get(wrapped_idx[offset], col + i)
+                                            lde.get(
+                                                unsafe { *wrapped_idx.get_unchecked(offset) },
+                                                col * ext_degree + i,
+                                            )
                                         })
-                                    }));
+                                    });
                                 }
                             }
                         }
@@ -300,9 +310,8 @@ where
                         exposed_values_after_challenge,
                     };
                     // SAFETY: `constraints.nodes` should be in topological order
-                    let accumulator = unsafe {
-                        evaluator.accumulate(constraints, &alpha_powers, &mut node_exprs)
-                    };
+                    let accumulator =
+                        unsafe { evaluator.accumulate(constraints, alpha_powers, &mut node_exprs) };
                     // quotient(x) = constraints(x) / Z_H(x)
                     let quotient: PackedChallenge<SC> = accumulator * inv_zeroifier;
 

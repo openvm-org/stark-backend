@@ -51,11 +51,27 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
         extended_views: Vec<RapView<impl Matrix<Val<SC>>, Val<SC>, SC::Challenge>>,
         quotient_degrees: &[u8],
     ) -> QuotientData<SC> {
+        let max_alpha_pow = constraints
+            .iter()
+            .map(|c| c.constraint_idx.len())
+            .max()
+            .unwrap_or(0);
+        let alpha_powers = self
+            .alpha
+            .powers()
+            .take(max_alpha_pow)
+            .map(PackedChallenge::<SC>::from_f)
+            .collect_vec();
         assert_eq!(constraints.len(), extended_views.len());
         assert_eq!(constraints.len(), quotient_degrees.len());
         let chunks = izip!(constraints, extended_views, quotient_degrees)
             .flat_map(|(constraints, extended_view, &quotient_degree)| {
-                self.single_rap_quotient_values(constraints, extended_view, quotient_degree)
+                self.single_rap_quotient_values(
+                    constraints,
+                    extended_view,
+                    quotient_degree,
+                    &alpha_powers,
+                )
             })
             .collect();
         QuotientData { chunks }
@@ -66,6 +82,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
         constraints: &SymbolicExpressionDag<Val<SC>>,
         view: RapView<impl Matrix<Val<SC>>, Val<SC>, SC::Challenge>,
         quotient_degree: u8,
+        alpha_powers: &[PackedChallenge<SC>],
     ) -> impl IntoIterator<Item = QuotientChunk<SC>> {
         let log_trace_height = view.log_trace_height;
         let trace_domain = self
@@ -101,7 +118,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
             view.partitioned_main,
             after_challenge_lde_on_quotient_domain,
             &challenges,
-            self.alpha,
+            alpha_powers,
             &view.public_values,
             &exposed_values_after_challenge,
             self.extra_capacity_bits,
