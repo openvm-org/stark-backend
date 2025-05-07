@@ -119,7 +119,7 @@ pub fn run_with_metric_exporter<R>(
 
     // Run the actual function
     let res = f();
-    std::thread::sleep(std::time::Duration::from_secs(60));
+    std::thread::sleep(std::time::Duration::from_secs(80));
     println!(
         "Metrics available at http://127.0.0.1:{}/metrics/job/stark-sdk",
         metrics_port
