@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, ffi::OsStr};
 
+#[cfg(feature = "prometheus")]
+use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
 use metrics_util::{
     debugging::{DebugValue, DebuggingRecorder, Snapshot},
@@ -40,6 +42,88 @@ pub fn run_with_metric_collection<R>(
         serde_json::to_writer_pretty(&file, &serialize_metric_snapshot(snapshotter.snapshot()))
             .unwrap();
     }
+    res
+}
+
+/// Run a function with metric exporter enabled. The metrics will be served on the port specified
+/// by an environment variable which name is `metrics_port_envar`.
+#[cfg(feature = "prometheus")]
+pub fn run_with_metric_exporter<R>(
+    metrics_port_envar: impl AsRef<OsStr>,
+    f: impl FnOnce() -> R,
+) -> R {
+    // Get the port from environment variable or use a default
+    let metrics_port = std::env::var(metrics_port_envar)
+        .map(|port| port.parse::<u16>().unwrap_or(9091))
+        .unwrap();
+    let endpoint = format!("http://127.0.0.1:{}/metrics/job/stark-sdk", metrics_port);
+
+    // Clear metrics before pushing to the push gateway
+    let status = std::process::Command::new("curl")
+        .args(["-X", "DELETE", &endpoint])
+        .status()
+        .expect("Failed to clear metrics");
+    if status.success() {
+        println!("Metrics cleared successfully");
+    }
+
+    // Install the default crypto provider
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install default crypto provider");
+
+    // Set up Prometheus recorder and exporter
+    let builder = PrometheusBuilder::new()
+        .with_push_gateway(endpoint, std::time::Duration::from_secs(60), None, None)
+        .expect("Push gateway endpoint should be valid");
+
+    let recorder = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let (recorder, exporter) = {
+            let _g = handle.enter();
+            builder.build().unwrap()
+        };
+        handle.spawn(exporter);
+        recorder
+    } else {
+        let thread_name = "metrics-exporter-prometheus-push-gateway";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (recorder, exporter) = {
+            let _g = runtime.enter();
+            builder.build().unwrap()
+        };
+        std::thread::Builder::new()
+            .name(thread_name.to_string())
+            .spawn(move || runtime.block_on(exporter))
+            .unwrap();
+        recorder
+    };
+
+    // Set up tracing:
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,p3_=warn"));
+    // Plonky3 logging is more verbose, so we set default to debug.
+    let subscriber = Registry::default()
+        .with(env_filter)
+        .with(ForestLayer::default())
+        .with(MetricsLayer::new());
+    // Prepare tracing.
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    // Prepare metrics
+    let recorder = TracingContextLayer::all().layer(recorder);
+    // Install the registry as the global recorder
+    metrics::set_global_recorder(recorder).unwrap();
+
+    // Run the actual function
+    let res = f();
+    std::thread::sleep(std::time::Duration::from_secs(80));
+    println!(
+        "Metrics available at http://127.0.0.1:{}/metrics/job/stark-sdk",
+        metrics_port
+    );
     res
 }
 
