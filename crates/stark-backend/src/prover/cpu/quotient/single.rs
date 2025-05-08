@@ -1,10 +1,11 @@
-use std::cmp::max;
+use std::{
+    cmp::{max, min},
+    iter::zip,
+};
 
-use itertools::Itertools;
 use p3_commit::PolynomialSpace;
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PackedValue};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
-use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
@@ -18,6 +19,7 @@ use crate::{
     },
     config::{Domain, PackedChallenge, PackedVal, StarkGenericConfig, Val},
     prover::cpu::transmute_to_base,
+    utils::parallelize_chunks,
 };
 
 // Starting reference: p3_uni_stark::prover::quotient_values
@@ -63,7 +65,7 @@ pub fn compute_single_rap_quotient_values<'a, SC, M>(
     after_challenge_lde_on_quotient_domain: Vec<M>,
     // For each challenge round, the challenges drawn
     challenges: &'a [Vec<PackedChallenge<SC>>],
-    alpha: SC::Challenge,
+    alpha_powers: &[PackedChallenge<SC>],
     public_values: &'a [Val<SC>],
     // Values exposed to verifier after challenge round i
     exposed_values_after_challenge: &'a [Vec<PackedChallenge<SC>>],
@@ -92,15 +94,6 @@ where
     debug_assert_eq!(quotient_size, trace_height * quotient_degree);
 
     let ext_degree = SC::Challenge::D;
-
-    let mut alpha_powers = alpha
-        .powers()
-        .take(constraints.constraint_idx.len())
-        .map(PackedChallenge::<SC>::from_f)
-        .collect_vec();
-    // We want alpha powers to have highest power first, because of how accumulator "folding" works
-    // So this will be alpha^{num_constraints - 1}, ..., alpha^0
-    alpha_powers.reverse();
 
     // Scan constraints to see if we need `next` row and also check index bounds
     // so we don't need to check them per row.
@@ -169,28 +162,72 @@ where
             let mut chunk = SC::Challenge::zero_vec(trace_height << extra_capacity_bits);
             chunk.truncate(trace_height);
             // We parallel iterate over "fat" rows, which are consecutive rows packed for SIMD.
-            // Use par_chunks instead of par_chunks_exact in case trace_height is not a multiple of PackedVal::WIDTH
-            chunk
-                .par_chunks_mut(PackedVal::<SC>::WIDTH)
-                .enumerate()
-                .for_each(|(fat_row_idx, packed_ef_mut)| {
+            // If trace_height is smaller than PackedVal::<SC>::WIDTH, we just don't parallelize
+            let simd_width = min(trace_height, PackedVal::<SC>::WIDTH);
+            parallelize_chunks(&mut chunk, simd_width, |chunk, start_row_idx| {
+                debug_assert_eq!(start_row_idx % PackedVal::<SC>::WIDTH, 0);
+
+                // Pre-allocate vectors
+                let mut row_idx_local = Vec::with_capacity(PackedVal::<SC>::WIDTH);
+                let mut row_idx_next = Vec::with_capacity(PackedVal::<SC>::WIDTH);
+                // SAFETY: we will set these vectors to exactly this length in each inner loop per fat row
+                #[allow(clippy::uninit_vec)]
+                unsafe {
+                    row_idx_local.set_len(PackedVal::<SC>::WIDTH);
+                    row_idx_next.set_len(PackedVal::<SC>::WIDTH);
+                }
+
+                fn new_view_pair<T>(width: usize, needs_next: bool) -> ViewPair<T> {
+                    let mut local = Vec::with_capacity(width);
+                    // SAFETY: these vectors will always have a known width (the matrix width), and we
+                    // populate them with the appropriate values in each inner loop per fat row
+                    #[allow(clippy::uninit_vec)]
+                    unsafe {
+                        local.set_len(width);
+                    }
+                    let next = needs_next.then(|| {
+                        let mut next = Vec::with_capacity(width);
+                        #[allow(clippy::uninit_vec)]
+                        unsafe {
+                            next.set_len(width);
+                        }
+                        next
+                    });
+                    ViewPair::new(local, next)
+                }
+
+                let mut preprocessed_pair: ViewPair<PackedVal<SC>> =
+                    new_view_pair(preprocessed_width, needs_next);
+                let mut partitioned_main_pairs: Vec<ViewPair<PackedVal<SC>>> =
+                    partitioned_main_lde_on_quotient_domain
+                        .iter()
+                        .map(|lde| new_view_pair(lde.width(), needs_next))
+                        .collect();
+                let mut after_challenge_pairs: Vec<ViewPair<PackedChallenge<SC>>> =
+                    after_challenge_lde_on_quotient_domain
+                        .iter()
+                        .map(|lde| new_view_pair(lde.width() / ext_degree, needs_next))
+                        .collect();
+                let mut node_exprs = Vec::with_capacity(constraints.nodes.len());
+
+                // Use chunks instead of chunks_exact in case trace_height is not a multiple of PackedVal::WIDTH
+                for (local_fat_row_idx, packed_ef_mut) in
+                    chunk.chunks_mut(PackedVal::<SC>::WIDTH).enumerate()
+                {
+                    let row_idx = start_row_idx + local_fat_row_idx * PackedVal::<SC>::WIDTH;
                     // `packed_ef_mut` is a vertical sub-column, index `offset` of `packed_ef_mut`
-                    // is supposed to be the `chunk_row_idx = fat_row_idx * PackedVal::<SC>::WIDTH + offset` row of the chunk matrix,
+                    // is supposed to be the `chunk_row_idx = row_idx + offset` row of the chunk matrix
                     // which is the `chunk_idx + chunk_row_idx * quotient_degree`th row of the evaluation of quotient polynomial on the quotient domain
                     // PERF[jpw]: This may not be cache friendly - would it be better to generate the quotient values in order first and then do some in-place permutation?
-                    let quot_row_idx = |offset| {
-                        (chunk_idx
-                            + (fat_row_idx * PackedVal::<SC>::WIDTH + offset) * quotient_degree)
-                            % quotient_size
-                    };
+                    let quot_row_idx =
+                        |offset| (chunk_idx + (row_idx + offset) * quotient_degree) % quotient_size;
 
-                    let [row_idx_local, row_idx_next] = [0, 1].map(|shift| {
-                        (0..PackedVal::<SC>::WIDTH)
-                            .map(|offset| quot_row_idx(offset + shift))
-                            .collect::<Vec<_>>()
-                    });
-                    let row_idx_local = Some(row_idx_local);
-                    let row_idx_next = needs_next.then_some(row_idx_next);
+                    for (offset, (local, next)) in
+                        zip(&mut row_idx_local, &mut row_idx_next).enumerate()
+                    {
+                        *local = quot_row_idx(offset);
+                        *next = quot_row_idx(offset + 1);
+                    }
 
                     let is_first_row =
                         PackedVal::<SC>::from_fn(|offset| sels.is_first_row[quot_row_idx(offset)]);
@@ -203,73 +240,68 @@ where
 
                     // Vertically pack rows of each matrix,
                     // skipping `next` if above scan showed no constraints need it:
+                    for (wrapped_idx, row_buf) in [
+                        (&row_idx_local, Some(&mut preprocessed_pair.local)),
+                        (&row_idx_next, Option::as_mut(&mut preprocessed_pair.next)),
+                    ] {
+                        if let Some(row_buf) = row_buf {
+                            for (col, row_elt) in row_buf.iter_mut().enumerate() {
+                                *row_elt = PackedVal::<SC>::from_fn(|offset| unsafe {
+                                    preprocessed_trace_on_quotient_domain
+                                        .as_ref()
+                                        .unwrap_unchecked()
+                                        .get(*wrapped_idx.get_unchecked(offset), col)
+                                });
+                            }
+                        }
+                    }
 
-                    let [preprocessed_local, preprocessed_next] = [&row_idx_local, &row_idx_next]
-                        .map(|wrapped_idx| {
-                            wrapped_idx.as_ref().map(|wrapped_idx| {
-                                (0..preprocessed_width)
-                                    .map(|col| {
+                    for (lde, view_pair) in partitioned_main_lde_on_quotient_domain
+                        .iter()
+                        .zip(partitioned_main_pairs.iter_mut())
+                    {
+                        for (wrapped_idx, row_buf) in [
+                            (&row_idx_local, Some(&mut view_pair.local)),
+                            (&row_idx_next, Option::as_mut(&mut view_pair.next)),
+                        ] {
+                            if let Some(row_buf) = row_buf {
+                                for (col, row_elt) in row_buf.iter_mut().enumerate() {
+                                    *row_elt = PackedVal::<SC>::from_fn(|offset| {
+                                        lde.get(unsafe { *wrapped_idx.get_unchecked(offset) }, col)
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    for (lde, view_pair) in after_challenge_lde_on_quotient_domain
+                        .iter()
+                        .zip(after_challenge_pairs.iter_mut())
+                    {
+                        // Width in base field with extension field elements flattened
+                        for (wrapped_idx, row_buf) in [
+                            (&row_idx_local, Some(&mut view_pair.local)),
+                            (&row_idx_next, Option::as_mut(&mut view_pair.next)),
+                        ] {
+                            if let Some(row_buf) = row_buf {
+                                for (col, row_elt) in row_buf.iter_mut().enumerate() {
+                                    *row_elt = PackedChallenge::<SC>::from_base_fn(|i| {
                                         PackedVal::<SC>::from_fn(|offset| {
-                                            preprocessed_trace_on_quotient_domain
-                                                .as_ref()
-                                                .unwrap()
-                                                .get(wrapped_idx[offset], col)
+                                            lde.get(
+                                                unsafe { *wrapped_idx.get_unchecked(offset) },
+                                                col * ext_degree + i,
+                                            )
                                         })
-                                    })
-                                    .collect_vec()
-                            })
-                        });
-                    let preprocessed_pair =
-                        ViewPair::new(preprocessed_local.unwrap(), preprocessed_next);
-
-                    let partitioned_main_pairs = partitioned_main_lde_on_quotient_domain
-                        .iter()
-                        .map(|lde| {
-                            let width = lde.width();
-                            let [local, next] =
-                                [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
-                                    wrapped_idx.as_ref().map(|wrapped_idx| {
-                                        (0..width)
-                                            .map(|col| {
-                                                PackedVal::<SC>::from_fn(|offset| {
-                                                    lde.get(wrapped_idx[offset], col)
-                                                })
-                                            })
-                                            .collect_vec()
-                                    })
-                                });
-                            ViewPair::new(local.unwrap(), next)
-                        })
-                        .collect_vec();
-
-                    let after_challenge_pairs = after_challenge_lde_on_quotient_domain
-                        .iter()
-                        .map(|lde| {
-                            // Width in base field with extension field elements flattened
-                            let base_width = lde.width();
-                            let [local, next] =
-                                [&row_idx_local, &row_idx_next].map(|wrapped_idx| {
-                                    wrapped_idx.as_ref().map(|wrapped_idx| {
-                                        (0..base_width)
-                                            .step_by(ext_degree)
-                                            .map(|col| {
-                                                PackedChallenge::<SC>::from_base_fn(|i| {
-                                                    PackedVal::<SC>::from_fn(|offset| {
-                                                        lde.get(wrapped_idx[offset], col + i)
-                                                    })
-                                                })
-                                            })
-                                            .collect_vec()
-                                    })
-                                });
-                            ViewPair::new(local.unwrap(), next)
-                        })
-                        .collect_vec();
+                                    });
+                                }
+                            }
+                        }
+                    }
 
                     let evaluator: ProverConstraintEvaluator<SC> = ProverConstraintEvaluator {
-                        preprocessed: preprocessed_pair,
-                        partitioned_main: partitioned_main_pairs,
-                        after_challenge: after_challenge_pairs,
+                        preprocessed: &preprocessed_pair,
+                        partitioned_main: &partitioned_main_pairs,
+                        after_challenge: &after_challenge_pairs,
                         challenges,
                         is_first_row,
                         is_last_row,
@@ -277,7 +309,9 @@ where
                         public_values,
                         exposed_values_after_challenge,
                     };
-                    let accumulator = evaluator.accumulate(constraints, &alpha_powers);
+                    // SAFETY: `constraints.nodes` should be in topological order
+                    let accumulator =
+                        unsafe { evaluator.accumulate(constraints, alpha_powers, &mut node_exprs) };
                     // quotient(x) = constraints(x) / Z_H(x)
                     let quotient: PackedChallenge<SC> = accumulator * inv_zeroifier;
 
@@ -287,7 +321,8 @@ where
                             quotient.as_base_slice()[coeff_idx].as_slice()[idx_in_packing]
                         });
                     }
-                });
+                }
+            });
             // Flatten from extension field elements to base field elements
             // SAFETY: `Challenge` is assumed to be extension field of `F`
             // with memory layout `[F; Challenge::D]`

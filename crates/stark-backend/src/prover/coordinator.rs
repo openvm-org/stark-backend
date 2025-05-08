@@ -78,7 +78,7 @@ where
     #[instrument(name = "Coordinator::prove", level = "info", skip_all)]
     fn prove<'a>(
         &'a mut self,
-        mpk: Self::ProvingKeyView<'a>,
+        mut mpk: Self::ProvingKeyView<'a>,
         ctx: Self::ProvingContext<'a>,
     ) -> Self::Proof {
         #[cfg(feature = "bench-metrics")]
@@ -113,7 +113,7 @@ where
 
         // ==================== All trace commitments that do not require challenges ====================
         // Commit all common main traces in a commitment. Traces inside are ordered by AIR id.
-        let (common_main_traces, (common_main_commit, common_main_pcs_data)) =
+        let (common_main_traces, (common_main_commit, mut common_main_pcs_data)) =
             metrics_span("main_trace_commit_time_ms", || {
                 let traces = common_main_per_air.into_iter().flatten().collect_vec();
                 let prover_data = self.device.commit(&traces);
@@ -183,7 +183,7 @@ where
         );
 
         // ==================== Partially prove all RAP phases that require challenges ====================
-        let (rap_partial_proof, prover_data_after) =
+        let (rap_partial_proof, mut prover_data_after) =
             self.device
                 .partially_prove(&mut self.challenger, &mpk, air_trace_views_per_air);
         // At this point, main trace should be dropped
@@ -226,11 +226,11 @@ where
         // do not require quotient poly.
         let (quotient_commit, quotient_data) = self.device.eval_and_commit_quotient(
             &mut self.challenger,
-            &mpk.per_air,
+            &mut mpk.per_air,
             &pvs_per_air,
-            &cached_pcs_datas_per_air,
-            &common_main_pcs_data,
-            &prover_data_after,
+            &mut cached_pcs_datas_per_air,
+            &mut common_main_pcs_data,
+            &mut prover_data_after,
         );
         // Observe quotient commitment
         self.challenger.observe(quotient_commit.clone());

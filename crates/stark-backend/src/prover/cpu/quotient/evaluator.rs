@@ -1,4 +1,7 @@
-use std::ops::{Add, Mul, Neg, Sub};
+use std::{
+    iter::zip,
+    ops::{Add, Mul, Neg, Sub},
+};
 
 use derivative::Derivative;
 use p3_field::FieldAlgebra;
@@ -7,14 +10,14 @@ use crate::{
     air_builders::symbolic::{
         symbolic_expression::SymbolicEvaluator,
         symbolic_variable::{Entry, SymbolicVariable},
-        SymbolicExpressionDag,
+        SymbolicExpressionDag, SymbolicExpressionNode,
     },
     config::{PackedChallenge, PackedVal, StarkGenericConfig, Val},
 };
 
 pub(super) struct ViewPair<T> {
-    local: Vec<T>,
-    next: Option<Vec<T>>,
+    pub(super) local: Vec<T>,
+    pub(super) next: Option<Vec<T>>,
 }
 
 impl<T> ViewPair<T> {
@@ -39,9 +42,9 @@ impl<T> ViewPair<T> {
 /// A struct for quotient polynomial evaluation. This evaluates `WIDTH` rows of the quotient polynomial
 /// simultaneously using SIMD (if target arch allows it) via `PackedVal` and `PackedChallenge` types.
 pub(super) struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
-    pub preprocessed: ViewPair<PackedVal<SC>>,
-    pub partitioned_main: Vec<ViewPair<PackedVal<SC>>>,
-    pub after_challenge: Vec<ViewPair<PackedChallenge<SC>>>,
+    pub preprocessed: &'a ViewPair<PackedVal<SC>>,
+    pub partitioned_main: &'a [ViewPair<PackedVal<SC>>],
+    pub after_challenge: &'a [ViewPair<PackedChallenge<SC>>],
     pub challenges: &'a [Vec<PackedChallenge<SC>>],
     pub is_first_row: PackedVal<SC>,
     pub is_last_row: PackedVal<SC>,
@@ -54,7 +57,7 @@ pub(super) struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
 /// the smallest packed expression possible.
 #[derive(Derivative, Copy)]
 #[derivative(Clone(bound = ""))]
-enum PackedExpr<SC: StarkGenericConfig> {
+pub(super) enum PackedExpr<SC: StarkGenericConfig> {
     Val(PackedVal<SC>),
     Challenge(PackedChallenge<SC>),
 }
@@ -165,17 +168,73 @@ where
 }
 
 impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
-    /// `alpha_powers` are in **reversed** order, with highest power coming first.
+    /// # Safety
+    /// - The `nodes` must already be topologically sorted, so they only reference previous nodes.
+    /// - `exprs` should have capacity at least `constraints.nodes.len()`.
+    unsafe fn eval_nodes_mut(
+        &self,
+        nodes: &[SymbolicExpressionNode<Val<SC>>],
+        exprs: &mut Vec<PackedExpr<SC>>,
+    ) where
+        PackedExpr<SC>: Clone,
+    {
+        debug_assert!(exprs.capacity() >= nodes.len());
+        // SAFETY: we will set all `exprs` in the loop; this is to make debug assertions happy for `exprs.get_unchecked`.
+        unsafe {
+            exprs.set_len(nodes.len());
+        }
+        let mut expr_ptr = exprs.as_mut_ptr();
+        for node in nodes.iter() {
+            // SAFETY: dereference raw pointer `expr_ptr` because we assume `exprs` has enough capacity.
+            *expr_ptr = match *node {
+                SymbolicExpressionNode::Variable(var) => self.eval_var(var),
+                SymbolicExpressionNode::Constant(c) => self.eval_const(c),
+                SymbolicExpressionNode::Add {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs.get_unchecked(left_idx).clone() + exprs.get_unchecked(right_idx).clone(),
+                SymbolicExpressionNode::Sub {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs.get_unchecked(left_idx).clone() - exprs.get_unchecked(right_idx).clone(),
+                SymbolicExpressionNode::Neg { idx, .. } => -exprs.get_unchecked(idx).clone(),
+                SymbolicExpressionNode::Mul {
+                    left_idx,
+                    right_idx,
+                    ..
+                } => exprs.get_unchecked(left_idx).clone() * exprs.get_unchecked(right_idx).clone(),
+                SymbolicExpressionNode::IsFirstRow => self.eval_is_first_row(),
+                SymbolicExpressionNode::IsLastRow => self.eval_is_last_row(),
+                SymbolicExpressionNode::IsTransition => self.eval_is_transition(),
+            };
+            expr_ptr = expr_ptr.add(1);
+        }
+    }
+
+    /// `alpha_powers` are in **increasing** order of powers, `alpha^0, alpha^1, ...`
+    ///
+    /// # Panics
+    /// If `alpha_powers.len() < constraints.constraint_idx.len()`.
+    ///
+    /// # Safety
+    /// - The `nodes` must already be topologically sorted, so they only reference previous nodes.
+    /// - `exprs` should have capacity at least `constraints.nodes.len()`.
     // Note: this could be split into multiple functions if additional constraints need to be folded in
-    pub fn accumulate(
+    pub unsafe fn accumulate(
         &self,
         constraints: &SymbolicExpressionDag<Val<SC>>,
         alpha_powers: &[PackedChallenge<SC>],
+        exprs: &mut Vec<PackedExpr<SC>>,
     ) -> PackedChallenge<SC> {
-        let evaluated_nodes = self.eval_nodes(&constraints.nodes);
+        debug_assert!(alpha_powers.len() >= constraints.constraint_idx.len());
+        // We want alpha powers to have highest power first, because of how accumulator "folding" works
+        // So this will be alpha^{num_constraints - 1}, ..., alpha^0
+        self.eval_nodes_mut(&constraints.nodes, exprs);
         let mut accumulator = PackedChallenge::<SC>::ZERO;
-        for (&alpha_pow, &node_idx) in alpha_powers.iter().zip(&constraints.constraint_idx) {
-            match evaluated_nodes[node_idx] {
+        for (&alpha_pow, &node_idx) in zip(alpha_powers, constraints.constraint_idx.iter().rev()) {
+            match *exprs.get_unchecked(node_idx) {
                 PackedExpr::Val(x) => accumulator += alpha_pow * x,
                 PackedExpr::Challenge(x) => accumulator += alpha_pow * x,
             }
