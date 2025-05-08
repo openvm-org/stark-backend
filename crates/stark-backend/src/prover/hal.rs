@@ -107,14 +107,15 @@ pub trait QuotientCommitter<PB: ProverBackend> {
     /// Quotient polynomials for multiple RAP matrices are committed together into a single commitment.
     /// The quotient polynomials can be committed together even if the corresponding trace matrices
     /// are committed separately.
+    // @dev: pass in mutable ref for more flexibility
     fn eval_and_commit_quotient(
         &self,
         challenger: &mut PB::Challenger,
-        pk_views: &[DeviceStarkProvingKey<PB>],
+        pk_views: &mut [DeviceStarkProvingKey<PB>],
         public_values: &[Vec<PB::Val>],
-        cached_pcs_datas_per_air: &[Vec<PB::PcsData>],
-        common_main_pcs_data: &PB::PcsData,
-        prover_data_after: &ProverDataAfterRapPhases<PB>,
+        cached_pcs_datas_per_air: &mut [Vec<PB::PcsData>],
+        common_main_pcs_data: &mut PB::PcsData,
+        prover_data_after: &mut ProverDataAfterRapPhases<PB>,
     ) -> (PB::Commitment, PB::PcsData);
 }
 

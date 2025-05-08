@@ -281,11 +281,11 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
     fn eval_and_commit_quotient(
         &self,
         challenger: &mut SC::Challenger,
-        pk_views: &[DeviceStarkProvingKey<CpuBackend<SC>>],
+        pk_views: &mut [DeviceStarkProvingKey<CpuBackend<SC>>],
         public_values: &[Vec<Val<SC>>],
-        cached_pcs_datas_per_air: &[Vec<PcsData<SC>>],
-        common_main_pcs_data: &PcsData<SC>,
-        prover_data_after: &ProverDataAfterRapPhases<CpuBackend<SC>>,
+        cached_pcs_datas_per_air: &mut [Vec<PcsData<SC>>],
+        common_main_pcs_data: &mut PcsData<SC>,
+        prover_data_after: &mut ProverDataAfterRapPhases<CpuBackend<SC>>,
     ) -> (Com<SC>, PcsData<SC>) {
         let pcs = self.pcs();
         // Generate `alpha` challenge
@@ -293,7 +293,7 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
         tracing::debug!("alpha: {alpha:?}");
         // Prepare extended views:
         let mut common_main_idx = 0;
-        let extended_views = izip!(pk_views, cached_pcs_datas_per_air, public_values)
+        let extended_views = izip!(pk_views.iter(), cached_pcs_datas_per_air, public_values)
             .enumerate()
             .map(|(i, (pk, cached_pcs_datas, pvs))| {
                 let quotient_degree = pk.vk.quotient_degree;
