@@ -345,7 +345,7 @@ impl LogUpSecurityParameters {
         // See Section 4 of [docs/Soundness_of_Interactions_via_LogUp.pdf].
         let log_order = u32::try_from(F::order().bits() - 1).unwrap();
         log_order
-            - log2_ceil_usize(self.max_interaction_count as usize) as u32
+            - log2_ceil_usize(2 * self.max_interaction_count as usize) as u32  // multiply by two to account for the poles as well
             - self.log_max_message_length
             + u32::try_from(self.log_up_pow_bits).unwrap()
     }
