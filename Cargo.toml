@@ -1,0 +1,54 @@
+[package]
+name = "stark-backend-gpu"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cuda-utils.workspace = true
+cuda_kernels = { package = "cuda-kernels-backend", path = "../../cuda/kernels/backend" }
+
+bytesize.workspace = true
+derive-new.workspace = true
+tracing.workspace = true
+derivative = "2.2"
+itertools = { version = "0.14.0", default-features = false, features = ["use_std"] }
+rustc-hash = "2.0.0"
+serde = { version = "1.0", default-features = false }
+serde_json = "1.0.113"
+bincode = "2.0.1"
+bincode_derive = "2.0.1"
+
+# Stark backend
+openvm-stark-backend.workspace = true
+openvm-stark-sdk.workspace = true
+
+# Plonky3
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", features = [
+    "nightly-features",
+], rev = "1ba4e5c" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+
+[dev-dependencies]
+clap = { version = "4.4", features = ["derive"] }
+rand = { version = "0.8.5", default-features = false }
+p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "1ba4e5c" }
+openvm-keccak256-circuit.workspace = true
+openvm-circuit = { workspace = true, features = ["test-utils"] }
+openvm-circuit-primitives = { git = "https://github.com/openvm-org/openvm.git", tag = "v1.1.1" }
+openvm-keccak256-transpiler.workspace = true
+openvm-instructions = { git = "https://github.com/openvm-org/openvm.git", tag = "v1.1.1" }
+
+[features]
+lde-cached = []
+lde-on-demand = []
