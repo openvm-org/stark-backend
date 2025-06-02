@@ -14,7 +14,7 @@ The backend is designed to be modular and compatible with different proof system
 
 ## Status
 
-As of May 2025, STARK Backend v1.1.0 and later are recommended for production use. STARK Backend completed an external [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-cantina-report.pdf) on [Cantina](https://cantina.xyz/) from January to March 2025 as well as an internal [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-internal/README.md) by members of the [Axiom](https://axiom.xyz/) team during the same timeframe.
+As of June 2025, STARK Backend v1.1.0 and later are recommended for production use. STARK Backend completed an external [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-cantina-report.pdf) on [Cantina](https://cantina.xyz/) from January to March 2025 as well as an internal [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-internal/README.md) by members of the [Axiom](https://axiom.xyz/) team during the same timeframe.
 
 ## Security
 
