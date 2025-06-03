@@ -19,20 +19,15 @@ mod chip;
 pub mod config;
 /// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
 pub mod engine;
-/// GKR batch prover for Grand Product and LogUp lookup arguments.
-pub mod gkr;
 /// Log-up permutation argument implementation as RAP.
 pub mod interaction;
 /// Proving and verifying key generation
 pub mod keygen;
-/// Polynomials
-pub mod poly;
 /// Definition of the STARK proof struct.
 pub mod proof;
 pub mod prover;
 /// Trait for RAP (Randomized AIR with Preprocessing)
 pub mod rap;
-pub mod sumcheck;
 /// Utility functions
 pub mod utils;
 /// Verifier implementation

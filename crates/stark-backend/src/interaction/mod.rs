@@ -250,7 +250,6 @@ pub struct RapPhaseShape {
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RapPhaseSeqKind {
-    // GkrLogUp,
     /// Up to one phase with prover/verifier given by [[fri_log_up::FriLogUpPhase]] and
     /// constraints given by [[fri_log_up::eval_fri_log_up_phase]].
     FriLogUp,
