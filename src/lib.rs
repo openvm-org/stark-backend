@@ -1,4 +1,4 @@
-mod base;
+pub mod base;
 mod committer;
 mod fri_log_up;
 mod lde;
