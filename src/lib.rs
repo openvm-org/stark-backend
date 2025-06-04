@@ -1,12 +1,12 @@
 pub mod base;
 mod committer;
-mod fri_log_up;
+pub mod fri_log_up;
 mod lde;
 mod merkle_tree;
 mod opener;
 mod quotient;
 mod transpiler;
-mod types;
+pub mod types;
 mod view; // temporary until we have GPU perm trace
 
 pub mod prelude {

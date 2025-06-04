@@ -43,7 +43,7 @@ rand = { version = "0.8.5", default-features = false }
 p3-keccak-air = { workspace = true }
 openvm-keccak256-circuit.workspace = true
 openvm-circuit = { workspace = true, features = ["test-utils"] }
-openvm-circuit-primitives = { git = "https://github.com/openvm-org/openvm.git", tag = "v1.1.1" }
+openvm-circuit-primitives.workspace = true
 openvm-keccak256-transpiler.workspace = true
 openvm-instructions = { git = "https://github.com/openvm-org/openvm.git", tag = "v1.1.1" }
 

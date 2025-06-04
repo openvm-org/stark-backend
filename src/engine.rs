@@ -9,7 +9,10 @@ use openvm_stark_backend::{
     prover::{
         coordinator::Coordinator,
         hal::{DeviceDataTransporter, TraceCommitter},
-        types::{AirProvingContext, ProofInput, ProvingContext, SingleCommitPreimage},
+        types::{
+            AirProvingContext, DeviceMultiStarkProvingKey, ProofInput, ProvingContext,
+            SingleCommitPreimage,
+        },
         MultiTraceStarkProver, Prover,
     },
 };
@@ -29,6 +32,7 @@ use crate::{
     lde::GpuLdeDefault,
     prelude::SC,
     prover_backend::GpuBackend,
+    types::{DeviceAirProofRawInput, DeviceProofInput},
 };
 
 pub type MultiTraceStarkProverGPU = Coordinator<SC, GpuBackend, GpuDevice>;
@@ -57,12 +61,59 @@ impl StarkFriEngine<SC> for GpuBabyBearPoseidon2Engine {
 }
 
 impl GpuBabyBearPoseidon2Engine {
+    pub fn device(&self) -> GpuDevice {
+        self.device.clone()
+    }
+
     fn gpu_prover(&self) -> MultiTraceStarkProverGPU {
         MultiTraceStarkProverGPU::new(
             GpuBackend::default(),
             self.device.clone(),
             self.new_challenger(),
         )
+    }
+
+    pub fn gpu_prove<'a>(
+        &self,
+        mpk_view: DeviceMultiStarkProvingKey<'a, GpuBackend>,
+        input: DeviceProofInput<GpuBackend>,
+    ) -> Proof<SC> {
+        let mut prover = self.gpu_prover();
+        let ctx_per_air = input
+            .per_air
+            .into_iter()
+            .map(|(air_id, input)| {
+                let cached_mains = input
+                    .cached_mains
+                    .into_iter()
+                    .map(|trace| {
+                        let traces = [trace];
+                        let (com, data) = prover.device.commit(&traces);
+                        let [trace] = traces;
+                        (
+                            com,
+                            SingleCommitPreimage {
+                                trace,
+                                data,
+                                matrix_idx: 0,
+                            },
+                        )
+                    })
+                    .collect_vec();
+                let air_ctx = AirProvingContext {
+                    cached_mains,
+                    common_main: input.common_main,
+                    public_values: input.public_values.clone(),
+                    cached_lifetime: PhantomData,
+                };
+                (air_id, air_ctx)
+            })
+            .collect();
+        let ctx = ProvingContext {
+            per_air: ctx_per_air,
+        };
+        let proof = Prover::prove(&mut prover, mpk_view, ctx);
+        proof.into()
     }
 }
 
@@ -86,51 +137,34 @@ impl StarkEngine<SC> for GpuBabyBearPoseidon2Engine {
         tracing::info!("LDE mode: {}", type_name::<GpuLdeDefault>());
         let mut mem = MemTracker::start("prove");
         mem.reset_peak();
-        let mut prover = self.gpu_prover();
-        let device = &prover.device;
+        let device = self.device();
         let air_ids = proof_input.per_air.iter().map(|(id, _)| *id).collect();
-        let ctx_per_air = proof_input
-            .per_air
-            .into_iter()
-            .map(|(air_id, input)| {
-                let cached_mains = input
-                    .raw
-                    .cached_mains
-                    .into_iter()
-                    .map(|trace| {
-                        // On GPU always commit to cached traces on device instead of h2d copy
-                        let trace = device.transport_matrix_to_device(&trace);
-                        let traces = [trace];
-                        let (com, data) = device.commit(&traces);
-                        let [trace] = traces;
-                        (
-                            com,
-                            SingleCommitPreimage {
-                                trace,
-                                data,
-                                matrix_idx: 0,
-                            },
-                        )
-                    })
-                    .collect_vec();
-                let air_ctx = AirProvingContext {
-                    cached_mains,
-                    common_main: input.raw.common_main.map(|matrix| {
-                        let matrix = Arc::new(matrix);
-                        device.transport_matrix_to_device(&matrix)
-                    }),
-                    public_values: input.raw.public_values.clone(),
-                    cached_lifetime: PhantomData,
-                };
-                (air_id, air_ctx)
-            })
-            .collect();
-        let ctx = ProvingContext {
-            per_air: ctx_per_air,
+        let device_input = DeviceProofInput {
+            per_air: proof_input
+                .per_air
+                .into_iter()
+                .map(|(air_id, input)| {
+                    (
+                        air_id,
+                        DeviceAirProofRawInput::<GpuBackend> {
+                            cached_mains: input
+                                .raw
+                                .cached_mains
+                                .into_iter()
+                                .map(|trace| device.transport_matrix_to_device(&trace))
+                                .collect(),
+                            common_main: input.raw.common_main.map(|trace| {
+                                let trace = Arc::new(trace);
+                                device.transport_matrix_to_device(&trace)
+                            }),
+                            public_values: input.raw.public_values,
+                        },
+                    )
+                })
+                .collect(),
         };
         let mpk_view = device.transport_pk_to_device(mpk, air_ids);
         mem.tracing_info("after transport to device");
-        let proof = Prover::prove(&mut prover, mpk_view, ctx);
-        proof.into()
+        self.gpu_prove(mpk_view, device_input)
     }
 }
