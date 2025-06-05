@@ -183,6 +183,14 @@ impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
     pub fn num_challenges_per_phase(&self) -> Vec<usize> {
         self.full_view().num_challenges_per_phase()
     }
+
+    pub fn total_widths(&self) -> Vec<usize> {
+        self.full_view().total_widths::<SC::Challenge>()
+    }
+
+    pub fn num_interactions(&self) -> Vec<usize> {
+        self.full_view().num_interactions()
+    }
 }
 
 /// Prover only data for preprocessed trace for a single AIR.
