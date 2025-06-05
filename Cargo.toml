@@ -5,6 +5,7 @@ rust-version = "1.83"
 authors = ["OpenVM contributors"]
 homepage = "https://openvm.dev"
 repository = "https://github.com/openvm-org/"
+license = "MIT OR Apache-2.0"
 
 [workspace]
 members = ["crates/stark-backend", "crates/stark-sdk"]
