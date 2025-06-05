@@ -226,6 +226,45 @@ fn test_optional_air() {
     }
 }
 
+#[test]
+fn test_vkey_methods() {
+    use openvm_stark_backend::engine::StarkEngine;
+    use openvm_stark_sdk::{
+        config::{setup_tracing, FriParameters},
+        dummy_airs::fib_air::air::FibonacciAir,
+    };
+    use p3_air::BaseAir;
+
+    setup_tracing();
+
+    let engine = BabyBearPoseidon2Engine::new(FriParameters::standard_fast());
+
+    let fib_chip = FibonacciChip::new(0, 1, 8);
+    let send_chip = DummyInteractionChip::new_without_partition(1, true, 0);
+    let recv_chip = DummyInteractionChip::new_without_partition(1, false, 0);
+
+    let mut keygen_builder = engine.keygen_builder();
+    let _ = keygen_builder.add_air(fib_chip.air());
+    let _ = keygen_builder.add_air(send_chip.air());
+    let _ = keygen_builder.add_air(recv_chip.air());
+    let pk = keygen_builder.generate_pk();
+
+    let vk = pk.get_vk();
+
+    let widths = vk.total_widths();
+    assert_eq!(widths.len(), 3);
+    assert_eq!(widths[0], BaseAir::<BabyBear>::width(&FibonacciAir));
+    // 1 interaction -> 1 perm col + 1 cumsum col -> 8 cols in base field
+    assert_eq!(widths[1], BaseAir::<BabyBear>::width(&send_chip.air) + 8);
+    assert_eq!(widths[2], BaseAir::<BabyBear>::width(&recv_chip.air) + 8);
+
+    let interactions = vk.num_interactions();
+    assert_eq!(interactions.len(), 3);
+    assert_eq!(interactions[0], 0);
+    assert_eq!(interactions[1], 1);
+    assert_eq!(interactions[2], 1);
+}
+
 fn get_fib_number(n: usize) -> u32 {
     let mut a = 0;
     let mut b = 1;
