@@ -73,9 +73,9 @@ impl GpuBabyBearPoseidon2Engine {
         )
     }
 
-    pub fn gpu_prove<'a>(
+    pub fn gpu_prove(
         &self,
-        mpk_view: DeviceMultiStarkProvingKey<'a, GpuBackend>,
+        mpk_view: DeviceMultiStarkProvingKey<'_, GpuBackend>,
         input: DeviceProofInput<GpuBackend>,
     ) -> Proof<SC> {
         let mut prover = self.gpu_prover();
