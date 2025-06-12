@@ -6,7 +6,7 @@ use crate::{
 };
 
 #[derive(Clone, derive_new::new)]
-pub(crate) struct MultiStarkVerifyingKeyView<'a, Val, Com> {
+pub struct MultiStarkVerifyingKeyView<'a, Val, Com> {
     pub per_air: Vec<&'a StarkVerifyingKey<Val, Com>>,
     /// Trace height constraints are *not* filtered by AIR. When computing the dot product, this
     /// will be indexed into by air_id.
