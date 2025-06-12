@@ -61,7 +61,7 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
             .collect_vec();
 
         // open every quotient chunk at zeta
-        let num_chunks = quotient_degrees.iter().sum::<u8>() as usize;
+        let num_chunks = quotient_degrees.iter().map(|x| *x as usize).sum();
         let quotient_opening_points = vec![vec![zeta]; num_chunks];
         rounds.push((quotient_data, quotient_opening_points));
 
