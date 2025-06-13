@@ -1,11 +1,16 @@
-use cuda_kernels::{lde::*, matrix::matrix_get_rows_fp_kernel, ntt::*};
-use cuda_utils::copy::MemCopyH2D;
 use itertools::Itertools;
 use openvm_stark_backend::prover::hal::MatrixDimensions;
 use p3_field::{FieldAlgebra, PrimeField32, TwoAdicField};
 use p3_util::log2_strict_usize;
 
-use crate::{base::DeviceMatrix, prelude::F};
+use crate::{
+    base::DeviceMatrix,
+    cuda::{
+        copy::MemCopyH2D,
+        kernels::{lde::*, matrix::matrix_get_rows_fp_kernel, ntt::*},
+    },
+    prelude::F,
+};
 
 pub(crate) fn inplace_ifft(trace_matrix: DeviceMatrix<F>, device_id: u32) -> DeviceMatrix<F> {
     let width = trace_matrix.width();

@@ -1,5 +1,6 @@
 pub mod base;
 mod committer;
+pub mod cuda;
 pub mod fri_log_up;
 mod lde;
 mod merkle_tree;

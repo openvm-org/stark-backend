@@ -1,6 +1,5 @@
 use std::iter::zip;
 
-use cuda_utils::{memory_manager::MemTracker, stream::gpu_metrics_span};
 use itertools::{izip, zip_eq, Itertools};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints,
@@ -25,6 +24,7 @@ use tracing::{info_span, instrument};
 
 use crate::{
     base::DeviceMatrix,
+    cuda::{memory_manager::MemTracker, stream::gpu_metrics_span},
     gpu_device::GpuDevice,
     lde::{GpuLde, GpuLdeDefault},
     merkle_tree::GpuMerkleTree,

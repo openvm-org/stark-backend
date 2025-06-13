@@ -1,0 +1,208 @@
+// FROM https://github.com/scroll-tech/plonky3-gpu/blob/openvm-v2/gpu-backend/src/cuda/kernels/lde.cu
+
+// Copyright 2024 RISC Zero, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "fp.h"
+#include "launcher.cuh"
+
+__global__ void multi_bit_reverse_kernel(Fp *io, const uint32_t nBits, const uint32_t count) {
+    uint totIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (totIdx < count) {
+        uint32_t rowSize = 1 << nBits;
+        uint32_t idx = totIdx & (rowSize - 1);
+        uint32_t s = totIdx >> nBits;
+        uint32_t ridx = __brev(idx) >> (32 - nBits);
+        if (idx < ridx) {
+            size_t idx1 = s * rowSize + idx;
+            size_t idx2 = s * rowSize + ridx;
+            Fp tmp = io[idx1];
+            io[idx1] = io[idx2];
+            io[idx2] = tmp;
+        }
+    }
+}
+
+__global__ void rows_bit_reverse_kernel(
+    Fp *out,
+    const Fp *in,
+    const uint32_t nBits,
+    const uint32_t height,
+    const uint32_t width
+) {
+    uint32_t hIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t wIdx = blockIdx.y * blockDim.y + threadIdx.y;
+    uint32_t n = 1 << nBits;
+    if (hIdx >= n || wIdx >= width)
+        return;
+    uint32_t revIdx = __brev(hIdx) >> (32 - nBits);
+    out[wIdx * n + hIdx] = in[wIdx * height + revIdx];
+}
+
+// io[j][i] *= shift^i
+__global__ void zk_shift_kernel(
+    Fp *io,
+    const uint32_t io_size,
+    const uint32_t log_n,
+    const uint32_t shift
+) {
+    Fp base = Fp(shift);
+    uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint n = 1 << log_n;
+    uint polyCount = io_size >> log_n;
+    if (idx < n) {
+        // the degree of each polynomial is 2^log_n - 1
+        uint32_t pos = idx & ((1 << log_n) - 1);
+        Fp power = pow(base, pos);
+        for (uint i = 0; i < polyCount; i++) {
+            io[i * n + idx] *= power;
+        }
+    }
+}
+
+// memory layout of in: column-major
+// if polyCount = 4, then the layout of in is expected to be
+// in:  |  poly0  |  poly1  |  poly2  |  poly3  |
+//
+// if outSize / inSize = 2, then the layout of out is expected to be
+// out: |  poly0  |    0    |  poly1  |    0    |   poly2  |    0    |  poly3  |    0    |
+__global__ void batch_expand_pad_kernel(
+    Fp *out,
+    const Fp *in,
+    const uint32_t polyCount,
+    const uint32_t outSize,
+    const uint32_t inSize
+) {
+    uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < outSize) {
+        for (uint32_t i = 0; i < polyCount; i++) {
+            Fp res = Fp(0);
+            if (idx < inSize) {
+                res = in[i * inSize + idx];
+            }
+            out[i * outSize + idx] = res;
+        }
+    }
+}
+// END OF FILE gpu-backend/src/cuda/kernels/lde.cu
+
+// Returns the result of the polynomial evaluation of the trace at the points in the column-major
+// matrix
+__global__ void batch_polynomial_eval_kernel(
+    Fp *out,
+    const Fp *in,
+    const Fp *points,
+    const uint32_t width,
+    const uint32_t log_trace_height
+) {
+    const uint block_row = blockDim.x;  // min(trace_height, MAX_THREADS)
+    const uint row_local = threadIdx.x; // [0..block_row)
+
+    const uint point_idx = blockIdx.x; // [0..num_points)
+
+    const uint block_col = blockDim.y;  // min(width, MAX_THREADS / block_row / trace_height)
+    const uint col_local = threadIdx.y; // [0..block_col)
+    const uint col = blockIdx.y * block_col + col_local; // [0..width)
+    if (col >= width)
+        return;
+
+    extern __shared__ Fp sh_mem[]; // block_row * block_col capacity
+    Fp *sh_sum_k = sh_mem + (col_local * block_row);
+    {
+        const uint32_t trace_height = 1 << log_trace_height;
+        const Fp *column = in + (col * trace_height);
+        const Fp X = points[point_idx];
+        const Fp X_pow_k = pow(X, block_row);
+        Fp X_k = pow(X, row_local);
+        Fp sum_k = Fp(0);
+#pragma unroll
+        for (auto k = row_local; k < trace_height; k += block_row) {
+            sum_k += X_k * column[k];
+            X_k *= X_pow_k;
+        }
+        sh_sum_k[row_local] = sum_k;
+    }
+
+    // SUM over shared memory
+    for (int step = block_row >> 1; step > 0; step >>= 1) {
+        __syncthreads();
+        if (row_local < step)
+            sh_sum_k[row_local] += sh_sum_k[row_local + step];
+    }
+    if (row_local == 0)
+        out[point_idx * width + col] = sh_sum_k[0];
+}
+// KERNEL LAUNCHERS
+
+extern "C" int _multi_bit_reverse(Fp *io, const uint32_t nBits, const uint32_t count) {
+    auto [grid, block] = kernel_launch_params(count);
+    multi_bit_reverse_kernel<<<grid, block>>>(io, nBits, count);
+    return cudaGetLastError();
+}
+
+extern "C" int _zk_shift(
+    Fp *io,
+    const uint32_t io_size,
+    const uint32_t log_n,
+    const uint32_t shift
+) {
+    const uint32_t n = 1 << log_n;
+    auto [grid, block] = kernel_launch_params(n);
+    zk_shift_kernel<<<grid, block>>>(io, io_size, log_n, shift);
+    return cudaGetLastError();
+}
+
+extern "C" int _batch_expand_pad(
+    Fp *out,
+    const Fp *in,
+    const uint32_t polyCount,
+    const uint32_t outSize,
+    const uint32_t inSize
+) {
+    auto [grid, block] = kernel_launch_params(outSize);
+    batch_expand_pad_kernel<<<grid, block>>>(out, in, polyCount, outSize, inSize);
+    return cudaGetLastError();
+}
+
+extern "C" int _rows_bit_reverse(
+    Fp *out,
+    const Fp *in,
+    const uint32_t nBits,
+    const uint32_t height,
+    const uint32_t width
+) {
+    uint32_t n = 1 << nBits;
+    auto [grid, block] = kernel_launch_2d_params(n, width);
+    rows_bit_reverse_kernel<<<grid, block>>>(out, in, nBits, height, width);
+    return cudaGetLastError();
+}
+
+extern "C" int _batch_polynomial_eval(
+    Fp *out,
+    const Fp *in,
+    const Fp *points,
+    const size_t num_points,
+    const size_t width,
+    const size_t log_trace_height
+) {
+    const size_t trace_height = 1u << log_trace_height;
+    auto height_per_block = std::min(MAX_THREADS, trace_height);
+    auto width_per_block = std::min(MAX_THREADS / height_per_block, width);
+    auto block = dim3(height_per_block, width_per_block);
+    auto grid = dim3(num_points, div_ceil(width, width_per_block));
+    batch_polynomial_eval_kernel<<<grid, block, sizeof(Fp) * height_per_block * width_per_block>>>(
+        out, in, points, width, log_trace_height
+    );
+    return cudaGetLastError();
+}

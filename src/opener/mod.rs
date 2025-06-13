@@ -1,6 +1,5 @@
 use std::{collections::BTreeMap, fmt::Debug, iter};
 
-use cuda_utils::{copy::MemCopyD2H, d_buffer::DeviceBuffer, memory_manager::MemTracker};
 use itertools::{izip, Itertools};
 use openvm_stark_backend::{
     config::Com,
@@ -21,6 +20,7 @@ use tracing::{debug_span, info_span};
 
 use crate::{
     base::{DevicePoly, ExtendedLagrangeCoeff},
+    cuda::{copy::MemCopyD2H, d_buffer::DeviceBuffer, memory_manager::MemTracker},
     gpu_device::GpuDevice,
     lde::GpuLde,
     merkle_tree::GpuMerkleTree,

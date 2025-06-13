@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use cuda_kernels::matrix::matrix_transpose;
-use cuda_utils::copy::MemCopyH2D;
 use openvm_stark_backend::{
     keygen::types::MultiStarkProvingKey,
     prover::{
@@ -14,6 +12,7 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
     base::DeviceMatrix,
+    cuda::{copy::MemCopyH2D, kernels::matrix::matrix_transpose},
     gpu_device::GpuDevice,
     prelude::{F, SC},
     prover_backend::{GpuBackend, GpuPcsData},

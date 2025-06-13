@@ -1,5 +1,3 @@
-use cuda_kernels::matrix::split_ext_poly_to_multiple_base_matrix;
-use cuda_utils::copy::MemCopyH2D;
 use itertools::{multiunzip, Itertools};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicExpressionDag,
@@ -12,6 +10,7 @@ use tracing::instrument;
 use self::single::compute_single_rap_quotient_values_gpu;
 use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
+    cuda::{copy::MemCopyH2D, kernels::matrix::split_ext_poly_to_multiple_base_matrix},
     gpu_device::GpuDevice,
     prelude::*,
 };

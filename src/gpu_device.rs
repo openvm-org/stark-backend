@@ -1,5 +1,3 @@
-use cuda_kernels::{ntt::sppark_init, poseidon2::init_poseidon2_constants};
-use cuda_utils::common::set_device;
 use derivative::Derivative;
 use openvm_stark_sdk::config::{baby_bear_poseidon2::horizen_round_consts_16, FriParameters};
 use p3_baby_bear::BabyBear;
@@ -7,7 +5,13 @@ use p3_commit::TwoAdicMultiplicativeCoset;
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
 
-use crate::fri_log_up::FriLogUpPhaseGpu;
+use crate::{
+    cuda::{
+        common::set_device,
+        kernels::{ntt::sppark_init, poseidon2::init_poseidon2_constants},
+    },
+    fri_log_up::FriLogUpPhaseGpu,
+};
 
 #[derive(Derivative, derive_new::new, Clone, Copy, Debug)]
 pub struct GpuConfig {

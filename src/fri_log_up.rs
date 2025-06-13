@@ -1,12 +1,5 @@
 use std::array;
 
-use cuda_kernels::{permute::*, prefix::*};
-use cuda_utils::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-    error::CudaError,
-    stream::gpu_metrics_span,
-};
 use itertools::Itertools;
 use openvm_stark_backend::{
     air_builders::symbolic::{
@@ -25,6 +18,13 @@ use p3_field::{FieldAlgebra, FieldExtensionAlgebra};
 
 use crate::{
     base::DeviceMatrix,
+    cuda::{
+        copy::{MemCopyD2H, MemCopyH2D},
+        d_buffer::DeviceBuffer,
+        error::CudaError,
+        kernels::{permute::*, prefix::*},
+        stream::gpu_metrics_span,
+    },
     prelude::*,
     transpiler::{
         codec::{encode_inv, Codec},

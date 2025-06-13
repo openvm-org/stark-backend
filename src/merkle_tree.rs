@@ -1,18 +1,23 @@
 use std::{cmp::Reverse, collections::HashMap};
 
-use cuda_kernels::poseidon2::*;
-use cuda_utils::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-    error::CudaError,
-};
 use itertools::Itertools;
 use openvm_stark_backend::prover::hal::MatrixDimensions;
 use p3_symmetric::Hash;
 use p3_util::{log2_ceil_usize, log2_strict_usize};
 use tracing::debug_span;
 
-use crate::{base::DeviceMatrix, gpu_device::GpuDevice, lde::GpuLde, prelude::F};
+use crate::{
+    base::DeviceMatrix,
+    cuda::{
+        copy::{MemCopyD2H, MemCopyH2D},
+        d_buffer::DeviceBuffer,
+        error::CudaError,
+        kernels::poseidon2::*,
+    },
+    gpu_device::GpuDevice,
+    lde::GpuLde,
+    prelude::F,
+};
 
 const DIGEST_WIDTH: usize = 8;
 type H = [F; DIGEST_WIDTH];

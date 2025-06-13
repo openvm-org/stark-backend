@@ -1,6 +1,5 @@
 use std::{any::type_name, marker::PhantomData, sync::Arc};
 
-use cuda_utils::memory_manager::MemTracker;
 use itertools::Itertools;
 use openvm_stark_backend::{
     config::StarkGenericConfig,
@@ -27,6 +26,7 @@ use p3_baby_bear::BabyBear;
 use p3_field::Field;
 
 use crate::{
+    cuda::memory_manager::MemTracker,
     fri_log_up::FriLogUpPhaseGpu,
     gpu_device::{GpuConfig, GpuDevice},
     lde::GpuLdeDefault,

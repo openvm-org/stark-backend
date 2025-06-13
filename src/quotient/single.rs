@@ -1,5 +1,3 @@
-use cuda_kernels::quotient::*;
-use cuda_utils::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use itertools::Itertools;
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicExpressionDag, config::Domain, prover::hal::MatrixDimensions,
@@ -11,6 +9,7 @@ use tracing::instrument;
 
 use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
+    cuda::{copy::MemCopyH2D, d_buffer::DeviceBuffer, kernels::quotient::*},
     prelude::*,
     transpiler::{codec::Codec, SymbolicRulesOnGpu},
 };
