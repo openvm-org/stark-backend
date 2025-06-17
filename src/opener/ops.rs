@@ -315,8 +315,9 @@ pub(crate) fn fri_fold(
 
     let half_one = (F::ONE / F::from_canonical_usize(2)).into();
     let half_beta = beta * half_one;
+    let beta_square = beta * beta;
 
-    let d_constants = [half_beta, half_one].to_device().unwrap();
+    let d_constants = [half_beta, half_one, beta_square].to_device().unwrap();
 
     let half_folded_len = folded.len() / 2;
     let g_invs = DeviceBuffer::<F>::with_capacity(half_folded_len);

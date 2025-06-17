@@ -367,6 +367,7 @@ fn commit_phase_on_gpu(
     }
 
     let mut folded_on_host: Vec<EF> = folded.coeff.to_host().unwrap();
+    folded_on_host.truncate(final_poly_len);
 
     // folded was bit reversed, now convert it to non-bit reversed form
     reverse_slice_index_bits(&mut folded_on_host);

@@ -4,7 +4,7 @@ use openvm_circuit_primitives::bitwise_op_lookup::{
     BitwiseOperationLookupBus, SharedBitwiseOperationLookupChip,
 };
 use openvm_instructions::{instruction::Instruction, LocalOpcode};
-use openvm_keccak256_circuit::KeccakVmChip;
+use openvm_keccak256_circuit::{KeccakVmAir, KeccakVmChip, KeccakVmStep};
 use openvm_keccak256_transpiler::Rv32KeccakOpcode;
 use openvm_stark_backend::prover::types::ProofInput;
 use openvm_stark_sdk::{
@@ -21,6 +21,7 @@ use rand::Rng;
 use stark_backend_gpu::engine::GpuBabyBearPoseidon2Engine;
 
 type F = BabyBear;
+const MAX_INS_CAPACITY: usize = 8192;
 
 fn build_keccak256_test(inputs: Vec<Vec<u8>>) -> VmChipTester<BabyBearPoseidon2Config> {
     let bitwise_bus = BitwiseOperationLookupBus::new(BITWISE_OP_LOOKUP_BUS);
@@ -28,14 +29,21 @@ fn build_keccak256_test(inputs: Vec<Vec<u8>>) -> VmChipTester<BabyBearPoseidon2C
 
     let mut tester = VmChipTestBuilder::default();
     let mut chip = KeccakVmChip::new(
-        tester.execution_bus(),
-        tester.program_bus(),
-        tester.memory_bridge(),
-        tester.address_bits(),
-        bitwise_chip.clone(),
-        Rv32KeccakOpcode::CLASS_OFFSET,
-        tester.offline_memory_mutex_arc(),
+        KeccakVmAir::new(
+            tester.execution_bridge(),
+            tester.memory_bridge(),
+            bitwise_bus,
+            tester.address_bits(),
+            Rv32KeccakOpcode::CLASS_OFFSET,
+        ),
+        KeccakVmStep::new(
+            bitwise_chip.clone(),
+            Rv32KeccakOpcode::CLASS_OFFSET,
+            tester.address_bits(),
+        ),
+        tester.memory_helper(),
     );
+    chip.set_trace_buffer_height(MAX_INS_CAPACITY);
 
     let mut dst = 0;
     let src = 0;
@@ -51,9 +59,14 @@ fn build_keccak256_test(inputs: Vec<Vec<u8>>) -> VmChipTester<BabyBearPoseidon2C
             c,
             (input.len() as u32).to_le_bytes().map(F::from_canonical_u8),
         );
-        for (i, byte) in input.iter().enumerate() {
-            tester.write_cell(e, src + i, F::from_canonical_u8(*byte));
-        }
+        input.chunks(4).enumerate().for_each(|(i, chunk)| {
+            let chunk: [&u8; 4] = std::array::from_fn(|i| chunk.get(i).unwrap_or(&0));
+            tester.write(
+                e,
+                src as usize + i * 4,
+                chunk.map(|&x| F::from_canonical_u8(x)),
+            );
+        });
 
         tester.execute(
             &mut chip,

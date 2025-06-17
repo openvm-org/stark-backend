@@ -11,7 +11,7 @@ __forceinline__ __device__ uint32_t bit_rev(uint32_t x, uint32_t n) {
 
 // result[i] = (1/2 + beta/2 g_inv^i) * folded[2*i]
 //           + (1/2 - beta/2 g_inv^i) * folded[2*i+1]
-//           + fri_input[i]
+//           + beta^2 *fri_input[i]
 __global__ void cukernel_fri_fold(
     FpExt *result,
     FpExt *folded,
@@ -22,6 +22,7 @@ __global__ void cukernel_fri_fold(
 ) {
     FpExt half_beta = d_constants[0]; // beta/2
     FpExt half_one = d_constants[1];  // 1/2
+    FpExt beta_square = d_constants[2]; // beta^2
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < N) {
@@ -33,7 +34,7 @@ __global__ void cukernel_fri_fold(
         FpExt res = c1 * a;
         res += c2 * b;
         if (fri_input != nullptr) {
-            res += fri_input[idx];
+            res += beta_square * fri_input[idx];
         }
         result[idx] = res;
     }
