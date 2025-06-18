@@ -2,8 +2,15 @@ use std::{ffi::c_void, fmt::Debug, ptr};
 
 use crate::cuda::{
     copy::MemCopyD2H,
+    error::{check, CudaError},
     memory_manager::{d_free, d_malloc},
+    stream::{cudaStreamPerThread, cudaStream_t},
 };
+
+#[link(name = "cudart")]
+extern "C" {
+    fn cudaMemsetAsync(dst: *mut c_void, value: i32, count: usize, stream: cudaStream_t) -> i32;
+}
 
 pub struct DeviceBuffer<T> {
     ptr: *mut T,
@@ -34,6 +41,13 @@ impl<T> DeviceBuffer<T> {
             ptr: typed_ptr,
             len,
         }
+    }
+
+    /// Fills the buffer with zeros.
+    pub fn fill_zero(&self) -> Result<(), CudaError> {
+        assert_ne!(self.len, 0, "Empty buffer");
+        let size_bytes = std::mem::size_of::<T>() * self.len;
+        check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, cudaStreamPerThread) })
     }
 
     /// Returns the number of elements in this buffer.
@@ -90,6 +104,7 @@ impl<T: Debug> Debug for DeviceBuffer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cuda::copy::MemCopyH2D;
 
     #[test]
     fn test_device_buffer_float() {
@@ -101,5 +116,13 @@ mod tests {
         assert!(!db.is_empty());
 
         // The buffer will be automatically freed at the end of this test
+    }
+
+    #[test]
+    fn test_device_buffer_fill_zero() {
+        let v: Vec<u64> = (0..10).collect();
+        let d_array = v.to_device().unwrap();
+        d_array.fill_zero().unwrap();
+        assert_eq!(d_array.to_host().unwrap(), vec![0; v.len()]);
     }
 }
