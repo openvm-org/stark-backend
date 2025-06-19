@@ -16,6 +16,7 @@
 // #include <stdio.h>
 #include "fp.h"
 #include "launcher.cuh"
+#include "poseidon2.cuh"
 
 #define CELLS 16
 #define CELLS_RATE 8
@@ -33,10 +34,6 @@
         }                                                                                          \
         printf("]\r\n");                                                                           \
     }
-
-__constant__ Fp INITIAL_ROUND_CONSTANTS[64];
-__constant__ Fp TERMINAL_ROUND_CONSTANTS[64];
-__constant__ Fp INTERNAL_ROUND_CONSTANTS[13];
 
 namespace poseidon2 {
 
@@ -312,8 +309,6 @@ __global__ void cukernel_query_digest_layers(
 
 // END OF FILE gpu-backend/src/cuda/kernels/poseidon2.cu
 
-static bool poseidon2_initialized = false;
-
 extern "C" int _poseidon2_rows_p3_multi(
     Fp *out,
     const uint64_t *matrices_ptr,
@@ -350,29 +345,6 @@ extern "C" int _babybear_encode_mont_form(Fp *inout, uint32_t size) {
     auto [grid, block] = kernel_launch_params(size);
     babybear_encode_mont_form_kernel<<<grid, block>>>(inout, size);
     return cudaGetLastError();
-}
-
-extern "C" int _init_poseidon2_constants(
-    const Fp *initial_round_constants,
-    const Fp *terminal_round_constants,
-    const Fp *internal_round_constants
-) {
-    cudaError_t error;
-    error = cudaMemcpyToSymbol(INITIAL_ROUND_CONSTANTS, initial_round_constants, 64 * sizeof(Fp));
-    if (error != cudaSuccess)
-        return error;
-
-    error = cudaMemcpyToSymbol(TERMINAL_ROUND_CONSTANTS, terminal_round_constants, 64 * sizeof(Fp));
-    if (error != cudaSuccess)
-        return error;
-
-    error = cudaMemcpyToSymbol(INTERNAL_ROUND_CONSTANTS, internal_round_constants, 13 * sizeof(Fp));
-    if (error != cudaSuccess)
-        return error;
-
-    poseidon2_initialized = true;
-
-    return cudaDeviceSynchronize();
 }
 
 static const size_t QUERY_DIGEST_THREADS = 128;

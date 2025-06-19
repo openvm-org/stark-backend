@@ -7,8 +7,8 @@ use p3_util::log2_strict_usize;
 
 use crate::{
     cuda::{
-        common::set_device,
-        kernels::{ntt::sppark_init, poseidon2::init_poseidon2_constants},
+        common::set_device, kernels::ntt::sppark_init,
+        poseidon2_constants::init_poseidon2_constants,
     },
     fri_log_up::FriLogUpPhaseGpu,
 };

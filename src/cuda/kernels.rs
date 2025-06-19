@@ -301,12 +301,6 @@ pub mod poseidon2 {
 
         fn _babybear_encode_mont_form(inout: *mut std::ffi::c_void, size: u32) -> i32;
 
-        fn _init_poseidon2_constants(
-            initial_round_constants: *const std::ffi::c_void,
-            terminal_round_constants: *const std::ffi::c_void,
-            internal_round_constants: *const std::ffi::c_void,
-        ) -> i32;
-
         fn _query_digest_layers(
             d_digest_matrix: *mut std::ffi::c_void,
             d_layers_ptr: *const u64,
@@ -353,18 +347,6 @@ pub mod poseidon2 {
         size: u32,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_babybear_encode_mont_form(inout.as_mut_raw_ptr(), size))
-    }
-
-    pub unsafe fn init_poseidon2_constants<T>(
-        initial_round_constants: *const [T; 16],
-        terminal_round_constants: *const [T; 16],
-        internal_round_constants: *const T,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_init_poseidon2_constants(
-            initial_round_constants as *const _,
-            terminal_round_constants as *const _,
-            internal_round_constants as *const _,
-        ))
     }
 
     pub unsafe fn query_digest_layers_kernel<T>(
