@@ -14,9 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 // #include <stdio.h>
+#include "constants.cuh"
 #include "fp.h"
 #include "launcher.cuh"
-#include "poseidon2.cuh"
 
 #define CELLS 16
 #define CELLS_RATE 8
@@ -317,9 +317,6 @@ extern "C" int _poseidon2_rows_p3_multi(
     const uint64_t row_size,
     uint64_t matrix_num
 ) {
-    if (!poseidon2_initialized) {
-        return cudaErrorNotReady;
-    }
     auto [grid, block] = kernel_launch_params(row_size);
     poseidon2_rows_p3_multi_kernel<<<grid, block>>>(
         out, matrices_ptr, matrices_col, matrices_row, row_size, matrix_num
@@ -333,9 +330,6 @@ extern "C" int _poseidon2_compress(
     uint32_t output_size,
     bool is_inject
 ) {
-    if (!poseidon2_initialized) {
-        return cudaErrorNotReady;
-    }
     auto [grid, block] = kernel_launch_params(output_size);
     poseidon2_compress_kernel<<<grid, block>>>(output, input, output_size, is_inject);
     return cudaGetLastError();

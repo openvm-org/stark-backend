@@ -1,15 +1,12 @@
 use derivative::Derivative;
-use openvm_stark_sdk::config::{baby_bear_poseidon2::horizen_round_consts_16, FriParameters};
+use openvm_stark_sdk::config::FriParameters;
 use p3_baby_bear::BabyBear;
 use p3_commit::TwoAdicMultiplicativeCoset;
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
 
 use crate::{
-    cuda::{
-        common::set_device, kernels::ntt::sppark_init,
-        poseidon2_constants::init_poseidon2_constants,
-    },
+    cuda::{common::set_device, kernels::ntt::sppark_init},
     fri_log_up::FriLogUpPhaseGpu,
 };
 
@@ -29,17 +26,8 @@ pub struct GpuDevice {
 #[warn(dead_code)]
 impl GpuDevice {
     pub fn new(id: u32, config: GpuConfig, rap_phase_seq: Option<FriLogUpPhaseGpu>) -> Self {
-        let (external, internal) = horizen_round_consts_16();
         unsafe {
             set_device(id as i32).unwrap();
-
-            init_poseidon2_constants(
-                external.get_initial_constants().as_ptr(),
-                external.get_terminal_constants().as_ptr(),
-                internal.as_ptr(),
-            )
-            .unwrap();
-
             sppark_init(id).unwrap();
         }
         Self {
