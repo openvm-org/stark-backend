@@ -184,6 +184,10 @@ impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
         self.full_view().num_challenges_per_phase()
     }
 
+    pub fn main_widths(&self) -> Vec<usize> {
+        self.full_view().main_widths()
+    }
+
     pub fn total_widths(&self) -> Vec<usize> {
         self.full_view().total_widths::<SC::Challenge>()
     }
