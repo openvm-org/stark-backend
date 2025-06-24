@@ -51,6 +51,23 @@ where
             },
         }
     }
+
+    fn generate_air_proof_input_with_trace(
+        self,
+        trace: openvm_stark_backend::p3_matrix::dense::RowMajorMatrix<Val<SC>>,
+    ) -> AirProofInput<SC> {
+        let a = trace.get(0, 0);
+        let b = trace.get(0, 1);
+        let last_val = trace.get(self.n - 1, 1);
+        AirProofInput {
+            cached_mains_pdata: vec![],
+            raw: AirProofRawInput {
+                cached_mains: vec![],
+                common_main: Some(trace),
+                public_values: vec![a, b, last_val],
+            },
+        }
+    }
 }
 
 impl ChipUsageGetter for FibonacciChip {

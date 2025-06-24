@@ -4,7 +4,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{config::StarkGenericConfig, prover::types::AirProofInput, rap::AnyRap};
+use p3_matrix::dense::RowMajorMatrix;
+
+use crate::{
+    config::{StarkGenericConfig, Val},
+    prover::types::AirProofInput,
+    rap::AnyRap,
+};
 
 /// A chip is a stateful struct that stores the state necessary to
 /// generate the trace of an AIR. This trait is for proving purposes
@@ -16,6 +22,11 @@ pub trait Chip<SC: StarkGenericConfig>: ChipUsageGetter + Sized {
     fn generate_air_proof_input_with_id(self, air_id: usize) -> (usize, AirProofInput<SC>) {
         (air_id, self.generate_air_proof_input())
     }
+    // TODO(ayush): take RecordArena?
+    fn generate_air_proof_input_with_trace(
+        self,
+        trace: RowMajorMatrix<Val<SC>>,
+    ) -> AirProofInput<SC>;
 }
 
 /// A trait to get chip usage information.
@@ -44,6 +55,12 @@ impl<SC: StarkGenericConfig, C: Chip<SC>> Chip<SC> for RefCell<C> {
     fn generate_air_proof_input(self) -> AirProofInput<SC> {
         self.into_inner().generate_air_proof_input()
     }
+    fn generate_air_proof_input_with_trace(
+        self,
+        trace: RowMajorMatrix<Val<SC>>,
+    ) -> AirProofInput<SC> {
+        self.into_inner().generate_air_proof_input_with_trace(trace)
+    }
 }
 
 impl<SC: StarkGenericConfig, C: Chip<SC>> Chip<SC> for Rc<C> {
@@ -53,6 +70,16 @@ impl<SC: StarkGenericConfig, C: Chip<SC>> Chip<SC> for Rc<C> {
     fn generate_air_proof_input(self) -> AirProofInput<SC> {
         if let Some(c) = Rc::into_inner(self) {
             c.generate_air_proof_input()
+        } else {
+            panic!("Cannot generate AirProofInput while other chips still hold a reference");
+        }
+    }
+    fn generate_air_proof_input_with_trace(
+        self,
+        trace: RowMajorMatrix<Val<SC>>,
+    ) -> AirProofInput<SC> {
+        if let Some(c) = Rc::into_inner(self) {
+            c.generate_air_proof_input_with_trace(trace)
         } else {
             panic!("Cannot generate AirProofInput while other chips still hold a reference");
         }
@@ -100,6 +127,16 @@ impl<SC: StarkGenericConfig, C: Chip<SC>> Chip<SC> for Arc<C> {
             panic!("Cannot generate AirProofInput while other chips still hold a reference");
         }
     }
+    fn generate_air_proof_input_with_trace(
+        self,
+        trace: RowMajorMatrix<Val<SC>>,
+    ) -> AirProofInput<SC> {
+        if let Some(c) = Arc::into_inner(self) {
+            c.generate_air_proof_input_with_trace(trace)
+        } else {
+            panic!("Cannot generate AirProofInput while other chips still hold a reference");
+        }
+    }
 }
 
 impl<C: ChipUsageGetter> ChipUsageGetter for Arc<C> {
@@ -123,6 +160,14 @@ impl<SC: StarkGenericConfig, C: Chip<SC>> Chip<SC> for Mutex<C> {
     }
     fn generate_air_proof_input(self) -> AirProofInput<SC> {
         self.into_inner().unwrap().generate_air_proof_input()
+    }
+    fn generate_air_proof_input_with_trace(
+        self,
+        trace: RowMajorMatrix<Val<SC>>,
+    ) -> AirProofInput<SC> {
+        self.into_inner()
+            .unwrap()
+            .generate_air_proof_input_with_trace(trace)
     }
 }
 

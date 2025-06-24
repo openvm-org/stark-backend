@@ -269,6 +269,13 @@ impl<SC: StarkGenericConfig> Chip<SC> for DummyInteractionChip<'_, SC> {
             }
         }
     }
+
+    fn generate_air_proof_input_with_trace(
+        self,
+        _trace: openvm_stark_backend::p3_matrix::dense::RowMajorMatrix<Val<SC>>,
+    ) -> AirProofInput<SC> {
+        todo!()
+    }
 }
 
 impl<SC: StarkGenericConfig> ChipUsageGetter for DummyInteractionChip<'_, SC> {
