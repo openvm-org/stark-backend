@@ -1,8 +1,9 @@
 use std::{any::type_name, marker::PhantomData, sync::Arc};
 
-use itertools::Itertools;
+use itertools::{zip_eq, Itertools};
 use openvm_stark_backend::{
     config::StarkGenericConfig,
+    engine::VerificationData,
     keygen::types::MultiStarkProvingKey,
     proof::Proof,
     prover::{
@@ -14,6 +15,8 @@ use openvm_stark_backend::{
         },
         MultiTraceStarkProver, Prover,
     },
+    verifier::VerificationError,
+    AirRef,
 };
 use openvm_stark_sdk::{
     config::{
@@ -114,6 +117,25 @@ impl GpuBabyBearPoseidon2Engine {
         };
         let proof = Prover::prove(&mut prover, mpk_view, ctx);
         proof.into()
+    }
+
+    pub fn gpu_run_test(
+        &self,
+        airs: Vec<AirRef<SC>>,
+        raw_inputs: Vec<DeviceAirProofRawInput<GpuBackend>>,
+    ) -> Result<VerificationData<SC>, VerificationError> {
+        let mut keygen_builder = self.keygen_builder();
+        let air_ids = self.set_up_keygen_builder(&mut keygen_builder, &airs);
+        let device_input = DeviceProofInput {
+            per_air: zip_eq(air_ids.iter().copied(), raw_inputs).collect(),
+        };
+        let pk = keygen_builder.generate_pk();
+        // TODO[stephen]: implement debug for GPU engine and run here
+        let mpk_view = self.device().transport_pk_to_device(&pk, air_ids);
+        let vk = pk.get_vk();
+        let proof = self.gpu_prove(mpk_view, device_input);
+        self.verify(&vk, &proof)?;
+        Ok(VerificationData { vk, proof })
     }
 }
 

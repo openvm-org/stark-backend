@@ -99,10 +99,10 @@ type GBCommitment = <GB as ProverBackend>::Commitment;
 
 impl RapPartialProver<GB> for GpuDevice {
     #[instrument(skip_all)]
-    fn partially_prove<'a>(
+    fn partially_prove(
         &self,
         challenger: &mut GBChallenger,
-        mpk: &DeviceMultiStarkProvingKey<'a, GB>,
+        mpk: &DeviceMultiStarkProvingKey<'_, GB>,
         trace_views: Vec<AirView<GBMatrix, GBVal>>,
     ) -> (
         Option<RapPhaseSeqPartialProof<SC>>,

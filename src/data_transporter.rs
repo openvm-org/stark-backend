@@ -12,7 +12,11 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
     base::DeviceMatrix,
-    cuda::{copy::MemCopyH2D, kernels::matrix::matrix_transpose},
+    cuda::{
+        copy::{MemCopyD2H, MemCopyH2D},
+        d_buffer::DeviceBuffer,
+        kernels::matrix::matrix_transpose,
+    },
     gpu_device::GpuDevice,
     prelude::{F, SC},
     prover_backend::{GpuBackend, GpuPcsData},
@@ -85,4 +89,20 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
     fn transport_pcs_data_to_device(&self, _pcs_data: &PcsData<SC>) -> GpuPcsData {
         unimplemented!()
     }
+}
+
+pub fn transport_device_matrix_to_host<T: Clone + Send + Sync>(
+    matrix: &DeviceMatrix<T>,
+) -> RowMajorMatrix<T> {
+    let matrix_buffer = DeviceBuffer::<T>::with_capacity(matrix.height() * matrix.width());
+    unsafe {
+        matrix_transpose::<T>(
+            &matrix_buffer,
+            matrix.buffer(),
+            matrix.height(),
+            matrix.width(),
+        )
+        .unwrap();
+    }
+    RowMajorMatrix::<T>::new(matrix_buffer.to_host().unwrap(), matrix.width())
 }
