@@ -251,12 +251,24 @@ fn test_vkey_methods() {
 
     let vk = pk.get_vk();
 
-    let widths = vk.total_widths();
-    assert_eq!(widths.len(), 3);
-    assert_eq!(widths[0], BaseAir::<BabyBear>::width(&FibonacciAir));
+    let main_widths = vk.main_widths();
+    assert_eq!(main_widths.len(), 3);
+    assert_eq!(main_widths[0], BaseAir::<BabyBear>::width(&FibonacciAir));
+    assert_eq!(main_widths[1], BaseAir::<BabyBear>::width(&send_chip.air));
+    assert_eq!(main_widths[2], BaseAir::<BabyBear>::width(&recv_chip.air));
+
+    let total_widths = vk.total_widths();
+    assert_eq!(total_widths.len(), 3);
+    assert_eq!(total_widths[0], BaseAir::<BabyBear>::width(&FibonacciAir));
     // 1 interaction -> 1 perm col + 1 cumsum col -> 8 cols in base field
-    assert_eq!(widths[1], BaseAir::<BabyBear>::width(&send_chip.air) + 8);
-    assert_eq!(widths[2], BaseAir::<BabyBear>::width(&recv_chip.air) + 8);
+    assert_eq!(
+        total_widths[1],
+        BaseAir::<BabyBear>::width(&send_chip.air) + 8
+    );
+    assert_eq!(
+        total_widths[2],
+        BaseAir::<BabyBear>::width(&recv_chip.air) + 8
+    );
 
     let interactions = vk.num_interactions();
     assert_eq!(interactions.len(), 3);
