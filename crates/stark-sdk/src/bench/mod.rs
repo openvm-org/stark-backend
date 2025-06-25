@@ -3,8 +3,6 @@ use std::{collections::BTreeMap, ffi::OsStr};
 #[cfg(feature = "prometheus")]
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
-#[cfg(feature = "bench-metrics")]
-use crate::metrics_tracing::TimingMetricsLayer;
 use metrics_util::{
     debugging::{DebugValue, DebuggingRecorder, Snapshot},
     layers::Layer,
@@ -13,6 +11,9 @@ use metrics_util::{
 use serde_json::json;
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+
+#[cfg(feature = "bench-metrics")]
+use crate::metrics_tracing::TimingMetricsLayer;
 
 /// Run a function with metric collection enabled. The metrics will be written to a file specified
 /// by an environment variable which name is `output_path_envar`.

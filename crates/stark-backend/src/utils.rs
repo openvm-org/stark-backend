@@ -110,7 +110,6 @@ pub fn disable_debug_builder() {
     });
 }
 
-
 #[macro_export]
 #[cfg(feature = "parallel")]
 macro_rules! parizip {
