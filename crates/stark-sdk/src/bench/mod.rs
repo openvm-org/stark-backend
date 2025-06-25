@@ -12,6 +12,9 @@ use serde_json::json;
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 
+#[cfg(feature = "bench-metrics")]
+use crate::metrics_tracing::TimingMetricsLayer;
+
 /// Run a function with metric collection enabled. The metrics will be written to a file specified
 /// by an environment variable which name is `output_path_envar`.
 pub fn run_with_metric_collection<R>(
@@ -27,6 +30,8 @@ pub fn run_with_metric_collection<R>(
         .with(env_filter)
         .with(ForestLayer::default())
         .with(MetricsLayer::new());
+    #[cfg(feature = "bench-metrics")]
+    let subscriber = subscriber.with(TimingMetricsLayer::new());
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
@@ -109,6 +114,8 @@ pub fn run_with_metric_exporter<R>(
         .with(env_filter)
         .with(ForestLayer::default())
         .with(MetricsLayer::new());
+    #[cfg(feature = "bench-metrics")]
+    let subscriber = subscriber.with(TimingMetricsLayer::new());
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
 

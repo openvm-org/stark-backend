@@ -4,7 +4,7 @@ use itertools::{izip, Itertools};
 use p3_challenger::CanObserve;
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
-use tracing::{info, instrument};
+use tracing::{info, info_span, instrument};
 
 use super::{
     hal::{ProverBackend, ProverDevice},
@@ -21,7 +21,6 @@ use crate::{
         hal::MatrixDimensions,
         types::{AirView, SingleCommitPreimage},
     },
-    utils::metrics_span,
 };
 
 /// Host-to-device coordinator for full prover implementation.
@@ -75,14 +74,12 @@ where
     /// Assumes the main traces have been generated and committed already.
     ///
     /// The [DeviceMultiStarkProvingKey] should already be filtered to only include the relevant AIR's proving keys.
-    #[instrument(name = "Coordinator::prove", level = "info", skip_all)]
+    #[instrument(name = "stark_prove_excluding_trace", level = "info", skip_all)]
     fn prove<'a>(
         &'a mut self,
         mpk: Self::ProvingKeyView<'a>,
         ctx: Self::ProvingContext<'a>,
     ) -> Self::Proof {
-        #[cfg(feature = "bench-metrics")]
-        let start = std::time::Instant::now();
         assert!(mpk.validate(&ctx), "Invalid proof input");
         self.challenger.observe(mpk.vk_pre_hash.clone());
 
@@ -114,7 +111,7 @@ where
         // ==================== All trace commitments that do not require challenges ====================
         // Commit all common main traces in a commitment. Traces inside are ordered by AIR id.
         let (common_main_traces, (common_main_commit, common_main_pcs_data)) =
-            metrics_span("main_trace_commit_time_ms", || {
+            info_span!("main_trace_commit").in_scope(|| {
                 let traces = common_main_per_air.into_iter().flatten().collect_vec();
                 let prover_data = self.device.commit(&traces);
                 (traces, prover_data)
@@ -240,7 +237,7 @@ where
             .into_iter()
             .unzip();
         // ==================== Polynomial Opening Proofs ====================
-        let opening = metrics_span("pcs_opening_time_ms", || {
+        let opening = info_span!("pcs_opening").in_scope(|| {
             let mut quotient_degrees = Vec::with_capacity(mpk.per_air.len());
             let mut preprocessed = Vec::new();
 
@@ -273,7 +270,7 @@ where
             after_challenge: commitments_after,
             quotient: quotient_commit,
         };
-        let proof = HalProof {
+        HalProof {
             commitments,
             opening,
             per_air: izip!(
@@ -292,13 +289,7 @@ where
             )
             .collect(),
             rap_partial_proof,
-        };
-
-        #[cfg(feature = "bench-metrics")]
-        ::metrics::gauge!("stark_prove_excluding_trace_time_ms")
-            .set(start.elapsed().as_millis() as f64);
-
-        proof
+        }
     }
 }
 
