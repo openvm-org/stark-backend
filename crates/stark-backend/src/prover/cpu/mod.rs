@@ -30,8 +30,8 @@ use crate::{
         hal::TraceCommitter,
         types::{PairView, RapSinglePhaseView},
     },
-    utils::metrics_span,
 };
+use tracing::info_span;
 
 /// Polynomial opening proofs
 pub mod opener;
@@ -245,7 +245,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         // Commit to permutation traces: this means only 1 challenge round right now
         // One shared commit for all permutation traces
         let committed_pcs_data_per_phase: Vec<(Com<SC>, PcsData<SC>)> =
-            metrics_span("perm_trace_commit_time_ms", || {
+            info_span!("perm_trace_commit_time_ms").in_scope(|| {
                 let (log_trace_heights, flattened_traces): (Vec<_>, Vec<_>) = perm_trace_per_air
                     .into_iter()
                     .flatten()
@@ -374,12 +374,12 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
             })
             .unzip();
         let qc = QuotientCommitter::new(self.pcs(), alpha, self.log_blowup_factor);
-        let quotient_values = metrics_span("quotient_poly_compute_time_ms", || {
+        let quotient_values = info_span!("quotient_poly_compute_time_ms").in_scope(|| {
             qc.quotient_values(&constraints, extended_views, &quotient_degrees)
         });
 
         // Commit to quotient polynomials. One shared commit for all quotient polynomials
-        metrics_span("quotient_poly_commit_time_ms", || {
+        info_span!("quotient_poly_commit_time_ms").in_scope(|| {
             qc.commit(quotient_values)
         })
     }

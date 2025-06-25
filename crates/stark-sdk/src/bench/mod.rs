@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, ffi::OsStr};
 #[cfg(feature = "prometheus")]
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
+#[cfg(feature = "bench-metrics")]
+use crate::metrics_tracing::TimingMetricsLayer;
 use metrics_util::{
     debugging::{DebugValue, DebuggingRecorder, Snapshot},
     layers::Layer,
@@ -27,6 +29,8 @@ pub fn run_with_metric_collection<R>(
         .with(env_filter)
         .with(ForestLayer::default())
         .with(MetricsLayer::new());
+    #[cfg(feature = "bench-metrics")]
+    let subscriber = subscriber.with(TimingMetricsLayer::new());
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
@@ -109,6 +113,8 @@ pub fn run_with_metric_exporter<R>(
         .with(env_filter)
         .with(ForestLayer::default())
         .with(MetricsLayer::new());
+    #[cfg(feature = "bench-metrics")]
+    let subscriber = subscriber.with(TimingMetricsLayer::new());
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
 

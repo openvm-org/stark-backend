@@ -8,6 +8,7 @@ use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::info_span;
 
 use super::{LogUpSecurityParameters, PairTraceView, SymbolicInteraction};
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
     },
     parizip,
     rap::PermutationAirBuilderWithExposedValues,
-    utils::{metrics_span, parallelize_chunks},
+    utils::parallelize_chunks,
 };
 
 pub struct FriLogUpPhase<F, Challenge, Challenger> {
@@ -118,7 +119,7 @@ where
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
             array::from_fn(|_| challenger.sample_ext_element::<Challenge>());
 
-        let after_challenge_trace_per_air = metrics_span("generate_perm_trace_time_ms", || {
+        let after_challenge_trace_per_air = info_span!("generate_perm_trace_time_ms").in_scope(|| {
             Self::generate_after_challenge_traces_per_air(
                 &challenges,
                 constraints_per_air,

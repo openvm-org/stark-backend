@@ -7,7 +7,6 @@ use openvm_stark_backend::{
     p3_field::Field,
     prover::types::{AirProofInput, ProofInput},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
-    utils::metrics_span,
 };
 use openvm_stark_sdk::{
     config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, setup_tracing, FriParameters},
@@ -18,6 +17,7 @@ use openvm_stark_sdk::{
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::Rng;
+use tracing::info_span;
 
 const NUM_PERMUTATIONS: usize = 1 << 10;
 const LOG_BLOWUP: usize = 1;
@@ -52,7 +52,7 @@ fn main() {
     let pk = keygen_builder.generate_pk();
 
     let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
-    let trace = metrics_span("generate_trace", || {
+    let trace = info_span!("generate_trace").in_scope(|| {
         p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0)
     });
 

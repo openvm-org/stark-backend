@@ -21,8 +21,8 @@ use crate::{
         hal::MatrixDimensions,
         types::{AirView, SingleCommitPreimage},
     },
-    utils::metrics_span,
 };
+use tracing::info_span;
 
 /// Host-to-device coordinator for full prover implementation.
 ///
@@ -114,7 +114,7 @@ where
         // ==================== All trace commitments that do not require challenges ====================
         // Commit all common main traces in a commitment. Traces inside are ordered by AIR id.
         let (common_main_traces, (common_main_commit, common_main_pcs_data)) =
-            metrics_span("main_trace_commit_time_ms", || {
+            info_span!("main_trace_commit_time_ms").in_scope(|| {
                 let traces = common_main_per_air.into_iter().flatten().collect_vec();
                 let prover_data = self.device.commit(&traces);
                 (traces, prover_data)
@@ -240,7 +240,7 @@ where
             .into_iter()
             .unzip();
         // ==================== Polynomial Opening Proofs ====================
-        let opening = metrics_span("pcs_opening_time_ms", || {
+        let opening = info_span!("pcs_opening_time_ms").in_scope(|| {
             let mut quotient_degrees = Vec::with_capacity(mpk.per_air.len());
             let mut preprocessed = Vec::new();
 
