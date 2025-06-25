@@ -2,7 +2,6 @@ use std::fmt::Debug;
 
 use itertools::Itertools;
 use p3_commit::{Pcs, PolynomialSpace};
-use tracing::instrument;
 
 use crate::{
     config::{Domain, PcsProof, PcsProverData, StarkGenericConfig},
@@ -24,7 +23,6 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
     /// - main trace matrices can have multiple commitments
     /// - for each after_challenge phase, all matrices in the phase share a commitment
     /// - quotient poly chunks are all committed together
-    #[instrument(name = "PCS opening proofs", skip_all)]
     pub fn open(
         &self,
         challenger: &mut SC::Challenger,

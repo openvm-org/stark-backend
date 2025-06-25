@@ -80,8 +80,6 @@ where
         mpk: Self::ProvingKeyView<'a>,
         ctx: Self::ProvingContext<'a>,
     ) -> Self::Proof {
-        #[cfg(feature = "bench-metrics")]
-        let start = std::time::Instant::now();
         assert!(mpk.validate(&ctx), "Invalid proof input");
         self.challenger.observe(mpk.vk_pre_hash.clone());
 

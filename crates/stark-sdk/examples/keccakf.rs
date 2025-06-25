@@ -9,7 +9,8 @@ use openvm_stark_backend::{
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
 use openvm_stark_sdk::{
-    config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, setup_tracing, FriParameters},
+    bench::run_with_metric_collection,
+    config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, FriParameters},
     engine::StarkFriEngine,
     openvm_stark_backend::engine::StarkEngine,
     utils::create_seeded_rng,
@@ -40,26 +41,26 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 }
 
 fn main() {
-    setup_tracing();
-    let mut rng = create_seeded_rng();
-    let air = TestAir(KeccakAir {});
+    run_with_metric_collection("OUTPUT_PATH", || {
+        let mut rng = create_seeded_rng();
+        let air = TestAir(KeccakAir {});
 
-    let engine = BabyBearPoseidon2Engine::new(
-        FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
-    );
-    let mut keygen_builder = engine.keygen_builder();
-    let air_id = keygen_builder.add_air(Arc::new(air));
-    let pk = keygen_builder.generate_pk();
+        let engine = BabyBearPoseidon2Engine::new(
+            FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
+        );
+        let mut keygen_builder = engine.keygen_builder();
+        let air_id = keygen_builder.add_air(Arc::new(air));
+        let pk = keygen_builder.generate_pk();
 
-    let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
-    let trace = info_span!("generate_trace").in_scope(|| {
-        p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0)
+        let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
+        let trace = info_span!("generate_trace")
+            .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
+
+        let proof = engine.prove(
+            &pk,
+            ProofInput::new(vec![(air_id, AirProofInput::simple_no_pis(trace))]),
+        );
+
+        engine.verify(&pk.get_vk(), &proof).unwrap();
     });
-
-    let proof = engine.prove(
-        &pk,
-        ProofInput::new(vec![(air_id, AirProofInput::simple_no_pis(trace))]),
-    );
-
-    engine.verify(&pk.get_vk(), &proof).unwrap();
 }
