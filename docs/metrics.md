@@ -2,6 +2,8 @@
 
 We use the [`metrics`](https://docs.rs/metrics/latest/metrics/) crate to collect metrics for the STARK prover. We refer to [reth docs](https://github.com/paradigmxyz/reth/blob/main/docs/design/metrics.md) for more guidelines on how to use metrics.
 
+Timing metrics are collected by using a custom tracing layer [`TimingMetricsLayer`](../crates/stark-sdk/src/metrics_tracing.rs). This layer will emit a gauge metric with name `${name}_time_ms` for the timing of a tracing span with name `${name}` in milliseconds.
+
 Each invocation of `MultiTraceStarkProver::prove` will collect the following metrics, all as `Gauge`s. We use gauge instead of histogram because these metrics are not frequently sampled and we care about the exact value. Any application that uses this backend is responsible for adding additional namespace labels if they wish to distinguish between different proof invocations.
 
 - `stark_prove_excluding_trace_time_ms`: The total elapsed time in milliseconds of `prove`. This excludes the main trace generation because that is not done by `stark-backend`.
