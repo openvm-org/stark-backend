@@ -44,7 +44,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     /// **Note**: This function assumes that the
     /// `quotient_domain.split_evals(quotient_degree, quotient_flat)` function from Plonky3 works
     /// as described in [compute_single_rap_quotient_values].
-    #[instrument(name = "compute quotient values", level = "info", skip_all)]
+    #[instrument(name = "quotient_poly_compute", level = "info", skip_all)]
     pub fn quotient_values(
         &self,
         constraints: &[&SymbolicExpressionDag<Val<SC>>],
@@ -125,7 +125,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
         )
     }
 
-    #[instrument(name = "commit to quotient poly chunks", skip_all)]
+    #[instrument(name = "quotient_poly_commit", skip_all)]
     pub fn commit(&self, data: QuotientData<SC>) -> (Com<SC>, PcsData<SC>) {
         let (log_trace_heights, quotient_domains_and_chunks): (Vec<_>, Vec<_>) = data
             .chunks

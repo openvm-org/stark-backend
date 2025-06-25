@@ -9,6 +9,7 @@ use p3_field::{ExtensionField, Field, FieldExtensionAlgebra};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use quotient::QuotientCommitter;
+use tracing::info_span;
 
 use super::{
     hal::{self, DeviceDataTransporter, MatrixDimensions, ProverBackend, ProverDevice},
@@ -31,7 +32,6 @@ use crate::{
         types::{PairView, RapSinglePhaseView},
     },
 };
-use tracing::info_span;
 
 /// Polynomial opening proofs
 pub mod opener;
@@ -245,30 +245,32 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         // Commit to permutation traces: this means only 1 challenge round right now
         // One shared commit for all permutation traces
         let committed_pcs_data_per_phase: Vec<(Com<SC>, PcsData<SC>)> =
-            info_span!("perm_trace_commit_time_ms").in_scope(|| {
-                let (log_trace_heights, flattened_traces): (Vec<_>, Vec<_>) = perm_trace_per_air
-                    .into_iter()
-                    .flatten()
-                    .map(|perm_trace| {
-                        // SAFETY: `Challenge` is assumed to be extension field of `F`
-                        // with memory layout `[F; Challenge::D]`
-                        let trace = unsafe { transmute_to_base(perm_trace) };
-                        let height = trace.height();
-                        let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
-                        let domain = self.pcs().natural_domain_for_degree(height);
-                        (log_height, (domain, trace))
-                    })
-                    .collect();
-                // Only commit if there are permutation traces
-                if !flattened_traces.is_empty() {
-                    let (commit, data) = self.pcs().commit(flattened_traces);
-                    Some((commit, PcsData::new(Arc::new(data), log_trace_heights)))
-                } else {
-                    None
-                }
-            })
-            .into_iter()
-            .collect();
+            info_span!("perm_trace_commit")
+                .in_scope(|| {
+                    let (log_trace_heights, flattened_traces): (Vec<_>, Vec<_>) =
+                        perm_trace_per_air
+                            .into_iter()
+                            .flatten()
+                            .map(|perm_trace| {
+                                // SAFETY: `Challenge` is assumed to be extension field of `F`
+                                // with memory layout `[F; Challenge::D]`
+                                let trace = unsafe { transmute_to_base(perm_trace) };
+                                let height = trace.height();
+                                let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
+                                let domain = self.pcs().natural_domain_for_degree(height);
+                                (log_height, (domain, trace))
+                            })
+                            .collect();
+                    // Only commit if there are permutation traces
+                    if !flattened_traces.is_empty() {
+                        let (commit, data) = self.pcs().commit(flattened_traces);
+                        Some((commit, PcsData::new(Arc::new(data), log_trace_heights)))
+                    } else {
+                        None
+                    }
+                })
+                .into_iter()
+                .collect();
         let prover_view = ProverDataAfterRapPhases {
             committed_pcs_data_per_phase,
             rap_views_per_phase,
@@ -374,14 +376,10 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
             })
             .unzip();
         let qc = QuotientCommitter::new(self.pcs(), alpha, self.log_blowup_factor);
-        let quotient_values = info_span!("quotient_poly_compute_time_ms").in_scope(|| {
-            qc.quotient_values(&constraints, extended_views, &quotient_degrees)
-        });
+        let quotient_values = qc.quotient_values(&constraints, extended_views, &quotient_degrees);
 
         // Commit to quotient polynomials. One shared commit for all quotient polynomials
-        info_span!("quotient_poly_commit_time_ms").in_scope(|| {
-            qc.commit(quotient_values)
-        })
+        qc.commit(quotient_values)
     }
 }
 

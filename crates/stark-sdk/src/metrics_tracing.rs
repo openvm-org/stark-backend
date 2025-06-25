@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use dashmap::DashMap;
-use tracing::field::{Field, Visit};
-use tracing::{Id, Subscriber};
-use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
+use tracing::{
+    field::{Field, Visit},
+    Id, Subscriber,
+};
+use tracing_subscriber::{registry::LookupSpan, Layer};
 
 /// A tracing layer that automatically emits metric gauges for all span durations.
 /// This replaces the need for manual metrics_span calls by leveraging the tracing infrastructure.
@@ -17,7 +17,6 @@ pub struct TimingMetricsLayer {
 
 #[derive(Debug)]
 struct SpanTiming {
-    #[cfg(feature = "bench-metrics")]
     name: String,
     start_time: Instant,
 }
@@ -60,7 +59,7 @@ where
         if let Some(span) = ctx.span(id) {
             let metadata = span.metadata();
             let name = metadata.name();
-            
+
             // Only track spans at INFO level or higher to match metrics_span behavior
             if metadata.level() <= &tracing::Level::INFO {
                 self.span_timings.insert(
@@ -74,28 +73,23 @@ where
         }
     }
 
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         // Check if this is a return event in an instrumented function
         let mut visitor = ReturnValueVisitor { has_return: false };
         event.record(&mut visitor);
-        
+
         if visitor.has_return {
             // Get the current span
             if let Some(span) = ctx.event_span(event) {
                 let span_id = span.id();
-                
+
                 // Emit metric for the span that's returning
                 if let Some((_, timing)) = self.span_timings.remove(&span_id) {
                     let duration_ms = timing.start_time.elapsed().as_millis() as f64;
-                    
+
                     // Emit the metric gauge with the span name
                     // This matches the behavior of metrics_span
-                    #[cfg(feature = "bench-metrics")]
-                    metrics::gauge!(timing.name).set(duration_ms);
+                    metrics::gauge!(format!("{}_time_ms", timing.name)).set(duration_ms);
                 }
             }
         }
@@ -106,20 +100,19 @@ where
         // This handles spans that don't have instrumented return values
         if let Some((_, timing)) = self.span_timings.remove(&id) {
             let duration_ms = timing.start_time.elapsed().as_millis() as f64;
-            
+
             // Emit the metric gauge with the span name
-            #[cfg(feature = "bench-metrics")]
-            metrics::gauge!(timing.name).set(duration_ms);
+            metrics::gauge!(format!("{}_time_ms", timing.name)).set(duration_ms);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tracing::instrument;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
+    use tracing_subscriber::{layer::SubscriberExt, Registry};
+
+    use super::*;
 
     #[instrument(level = "info")]
     fn example_function() -> i32 {
@@ -130,7 +123,7 @@ mod tests {
     #[test]
     fn test_metrics_layer() {
         let subscriber = Registry::default().with(TimingMetricsLayer::new());
-        
+
         tracing::subscriber::with_default(subscriber, || {
             let result = example_function();
             assert_eq!(result, 42);
