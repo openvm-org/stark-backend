@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 pub mod common;
 pub mod copy;
 pub mod d_buffer;
