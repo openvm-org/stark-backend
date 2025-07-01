@@ -5,7 +5,6 @@ use openvm_stark_backend::{
     p3_field::Field,
     prover::types::{AirProofInput, ProofInput},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
-    utils::metrics_span,
 };
 use openvm_stark_sdk::{
     config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, setup_tracing, FriParameters},
@@ -17,6 +16,7 @@ use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::Rng;
 use stark_backend_gpu::engine::GpuBabyBearPoseidon2Engine;
+use tracing::info_span;
 
 struct TestAir(KeccakAir);
 
@@ -50,9 +50,8 @@ fn main() {
     let pk = keygen_builder.generate_pk();
 
     let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
-    let trace = metrics_span("generate_trace", || {
-        p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0)
-    });
+    let trace = info_span!("generate_trace")
+        .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
     let cpu_proof_input = ProofInput::new(vec![(air_id, AirProofInput::simple_no_pis(trace))]);
     let gpu_proof_input = cpu_proof_input.clone();
 

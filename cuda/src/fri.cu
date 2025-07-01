@@ -20,8 +20,8 @@ __global__ void cukernel_fri_fold(
     Fp *g_inv_powers,
     uint64_t N
 ) {
-    FpExt half_beta = d_constants[0]; // beta/2
-    FpExt half_one = d_constants[1];  // 1/2
+    FpExt half_beta = d_constants[0];   // beta/2
+    FpExt half_one = d_constants[1];    // 1/2
     FpExt beta_square = d_constants[2]; // beta^2
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -192,8 +192,8 @@ __global__ void batch_invert(FpExt *data, uint64_t log_n) {
 static const uint32_t REDUCTION_THREADS_PER_BLOCK = 256;
 
 /// matrix could have bigger height than domain size
-/// in this case we shoud do bit_rev twice (first time for domain height, second time for matrix
-/// height)
+/// in this case we should do bit_rev twice (first time for domain height,
+/// second time for matrix height)
 __global__ void matrix_scale_rows_then_reduce(
     FpExt *o_matrix,
     Fp *matrix,

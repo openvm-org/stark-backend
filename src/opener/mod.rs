@@ -82,7 +82,7 @@ impl OpeningProverGpu {
 
         let mut inv_denoms = LinearMap::new();
         let mut last_shift = None;
-        let all_opened_values: OpenedValues<EF> = info_span!("evalute matrix").in_scope(|| {
+        let all_opened_values: OpenedValues<EF> = info_span!("evaluate matrix").in_scope(|| {
             mats_and_points
                 .iter()
                 .map(|(mats, points)| {

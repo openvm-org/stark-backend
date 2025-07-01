@@ -158,8 +158,8 @@ pub(crate) fn matrix_evaluate(
     const REDUCTION_THREADS_PER_BLOCK: u32 = 256;
     const REDUCTION_BLOCK_NUM: u32 = 512;
 
-    let treshhold = REDUCTION_BLOCK_NUM * REDUCTION_THREADS_PER_BLOCK;
-    let mut reduce_matrix_height = if height < treshhold as usize {
+    let threshold = REDUCTION_BLOCK_NUM * REDUCTION_THREADS_PER_BLOCK;
+    let mut reduce_matrix_height = if height < threshold as usize {
         (height as u32).div_ceil(REDUCTION_THREADS_PER_BLOCK)
     } else {
         REDUCTION_BLOCK_NUM // better performance for large matrix height
@@ -168,7 +168,7 @@ pub(crate) fn matrix_evaluate(
     let mut d_r1_matrix = DeviceBuffer::<EF>::with_capacity(width * reduce_matrix_height as usize);
     let mut d_r2_matrix = DeviceBuffer::<EF>::with_capacity(width * reduce_matrix_height as usize);
     // 1. scale rows and reduce the input matrix to a intermediate `reduce_matrix` (col-major)
-    //    for convience, the size of `r2_matrix` is the same as `r1_matrix`
+    //    for convenience, the size of `r2_matrix` is the same as `r1_matrix`
     unsafe {
         scale_and_reduce_kernel(
             &d_r1_matrix,
