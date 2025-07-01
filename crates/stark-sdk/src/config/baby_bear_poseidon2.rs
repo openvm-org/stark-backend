@@ -1,4 +1,4 @@
-use std::any::type_name;
+use std::{any::type_name, sync::Arc};
 
 use openvm_stark_backend::{
     config::StarkConfig,
@@ -70,7 +70,7 @@ where
         + Clone,
 {
     pub fri_params: FriParameters,
-    pub config: BabyBearPermutationConfig<P>,
+    pub device: CpuDevice<BabyBearPermutationConfig<P>>,
     pub perm: P,
     pub max_constraint_degree: usize,
 }
@@ -82,16 +82,17 @@ where
         + Clone,
 {
     fn config(&self) -> &BabyBearPermutationConfig<P> {
-        &self.config
+        &self.device.config
     }
 
-    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, BabyBearPermutationConfig<P>>
-    where
-        Self: 'a,
-    {
+    fn device(&self) -> &CpuDevice<BabyBearPermutationConfig<P>> {
+        &self.device
+    }
+
+    fn prover(&self) -> MultiTraceStarkProver<BabyBearPermutationConfig<P>> {
         MultiTraceStarkProver::new(
             CpuBackend::default(),
-            CpuDevice::new(self.config(), self.fri_params.log_blowup),
+            self.device.clone(),
             self.new_challenger(),
         )
     }
@@ -169,7 +170,7 @@ where
     let max_constraint_degree = fri_params.max_constraint_degree();
     let config = config_from_perm(&perm, security_params);
     BabyBearPermutationEngine {
-        config,
+        device: CpuDevice::new(Arc::new(config), fri_params.log_blowup),
         perm,
         fri_params,
         max_constraint_degree,

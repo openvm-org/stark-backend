@@ -1,4 +1,9 @@
-use openvm_stark_backend::{p3_field::FieldAlgebra, utils::disable_debug_builder, Chip};
+use openvm_stark_backend::{
+    p3_field::FieldAlgebra,
+    prover::{hal::DeviceDataTransporter, types::ProvingContext},
+    utils::disable_debug_builder,
+    Chip,
+};
 use openvm_stark_sdk::config::FriParameters;
 /// Test utils
 use openvm_stark_sdk::{
@@ -130,12 +135,12 @@ fn test_double_fib_starks() {
 
 #[test]
 fn test_optional_air() {
-    use openvm_stark_backend::{engine::StarkEngine, prover::types::ProofInput};
+    use openvm_stark_backend::engine::StarkEngine;
 
     let engine = BabyBearPoseidon2Engine::new(FriParameters::standard_fast());
     let fib_chip = FibonacciChip::new(0, 1, 8);
     let send_chip1 = DummyInteractionChip::new_without_partition(1, true, 0);
-    let send_chip2 = DummyInteractionChip::new_with_partition(engine.config(), 1, true, 0);
+    let send_chip2 = DummyInteractionChip::new_with_partition(engine.device.clone(), 1, true, 0);
     let recv_chip1 = DummyInteractionChip::new_without_partition(1, false, 0);
     let mut keygen_builder = engine.keygen_builder();
     let fib_chip_id = keygen_builder.add_air(fib_chip.air());
@@ -163,20 +168,18 @@ fn test_optional_air() {
             count: vec![2, 4, 12],
             fields: vec![vec![1], vec![2], vec![3]],
         });
-        let proof = engine.prove(
-            &pk,
-            ProofInput {
-                per_air: vec![
-                    fib_chip.generate_air_proof_input_with_id(fib_chip_id),
-                    send_chip1.generate_air_proof_input_with_id(send_chip1_id),
-                    send_chip2.generate_air_proof_input_with_id(send_chip2_id),
-                    recv_chip1.generate_air_proof_input_with_id(recv_chip1_id),
-                ],
-            },
-        );
-        let mut challenger = engine.new_challenger();
-        verifier
-            .verify(&mut challenger, &pk.get_vk(), &proof)
+        engine
+            .prove_then_verify(
+                &pk,
+                ProvingContext {
+                    per_air: vec![
+                        (fib_chip_id, fib_chip.generate_proving_ctx(())),
+                        (send_chip1_id, send_chip1.generate_proving_ctx(())),
+                        (send_chip2_id, send_chip2.generate_proving_ctx(())),
+                        (recv_chip1_id, recv_chip1.generate_proving_ctx(())),
+                    ],
+                },
+            )
             .expect("Verification failed");
     }
     // Case 2: The second AIR is not presented.
@@ -191,18 +194,16 @@ fn test_optional_air() {
             count: vec![1, 2, 4],
             fields: vec![vec![1], vec![2], vec![3]],
         });
-        let proof = engine.prove(
-            &pk,
-            ProofInput {
-                per_air: vec![
-                    send_chip1.generate_air_proof_input_with_id(send_chip1_id),
-                    recv_chip1.generate_air_proof_input_with_id(recv_chip1_id),
-                ],
-            },
-        );
-        let mut challenger = engine.new_challenger();
-        verifier
-            .verify(&mut challenger, &pk.get_vk(), &proof)
+        engine
+            .prove_then_verify(
+                &pk,
+                ProvingContext {
+                    per_air: vec![
+                        (send_chip1_id, send_chip1.generate_proving_ctx(())),
+                        (recv_chip1_id, recv_chip1.generate_proving_ctx(())),
+                    ],
+                },
+            )
             .expect("Verification failed");
     }
     // Case 3: Negative - unbalanced interactions.
@@ -213,10 +214,13 @@ fn test_optional_air() {
             count: vec![1, 2, 4],
             fields: vec![vec![1], vec![2], vec![3]],
         });
+        let pk_view = engine
+            .device()
+            .transport_pk_to_device(&pk, vec![recv_chip1_id]);
         let proof = engine.prove(
-            &pk,
-            ProofInput {
-                per_air: vec![recv_chip1.generate_air_proof_input_with_id(recv_chip1_id)],
+            pk_view,
+            ProvingContext {
+                per_air: vec![(recv_chip1_id, recv_chip1.generate_proving_ctx(()))],
             },
         );
         let mut challenger = engine.new_challenger();

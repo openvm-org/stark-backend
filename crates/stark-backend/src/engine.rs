@@ -1,24 +1,19 @@
-use std::{iter::zip, marker::PhantomData, sync::Arc};
-
 use itertools::{zip_eq, Itertools};
-use p3_matrix::Matrix;
-use p3_util::log2_strict_usize;
 
 use crate::{
     air_builders::debug::debug_constraints_and_interactions,
-    config::StarkGenericConfig,
+    config::{Com, PcsProof, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
     keygen::{
         types::{MultiStarkProvingKey, MultiStarkVerifyingKey, StarkProvingKey},
         MultiStarkKeygenBuilder,
     },
-    proof::Proof,
+    proof::{OpeningProof, Proof},
     prover::{
-        cpu::PcsData,
-        hal::{DeviceDataTransporter, TraceCommitter},
-        types::{
-            AirProofInput, AirProvingContext, ProofInput, ProvingContext, SingleCommitPreimage,
-        },
-        MultiTraceStarkProver, Prover,
+        coordinator::Coordinator,
+        cpu::{CpuBackend, CpuDevice},
+        hal::{DeviceDataTransporter, ProverBackend, ProverDevice},
+        types::{AirProofRawInput, AirProvingContext, DeviceMultiStarkProvingKey, ProvingContext},
+        Prover,
     },
     verifier::{MultiTraceStarkVerifier, VerificationError},
     AirRef,
@@ -32,7 +27,19 @@ pub struct VerificationData<SC: StarkGenericConfig> {
 
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving. Currently this trait is CPU specific.
-pub trait StarkEngine<SC: StarkGenericConfig> {
+pub trait StarkEngine<SC, PB = CpuBackend<SC>, PD = CpuDevice<SC>>
+where
+    SC: StarkGenericConfig,
+    PB: ProverBackend<
+        Val = Val<SC>,
+        Challenge = SC::Challenge,
+        Commitment = Com<SC>,
+        Challenger = SC::Challenger,
+    >,
+    PB::OpeningProof: Into<OpeningProof<PcsProof<SC>, SC::Challenge>>,
+    PB::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
+    PD: ProverDevice<PB> + DeviceDataTransporter<SC, PB>,
+{
     /// Stark config
     fn config(&self) -> &SC;
 
@@ -55,9 +62,9 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
         builder
     }
 
-    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, SC>
-    where
-        Self: 'a;
+    fn device(&self) -> &PD;
+
+    fn prover(&self) -> Coordinator<SC, PB, PD>;
 
     fn verifier(&self) -> MultiTraceStarkVerifier<SC> {
         MultiTraceStarkVerifier::new(self.config())
@@ -74,89 +81,33 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
             .collect()
     }
 
+    /// As a convenience, this function also transports the proving key from host to device.
+    /// Note that the [Self::prove] function starts from a [DeviceMultiStarkProvingKey],
+    /// which should be used if the proving key is already cached in device memory.
     fn prove_then_verify(
         &self,
         mpk: &MultiStarkProvingKey<SC>,
-        proof_input: ProofInput<SC>,
-    ) -> Result<(), VerificationError> {
-        let proof = self.prove(mpk, proof_input);
-        self.verify(&mpk.get_vk(), &proof)
+        ctx: ProvingContext<PB>,
+    ) -> Result<Proof<SC>, VerificationError> {
+        let air_ids = ctx.per_air.iter().map(|(id, _)| *id).collect();
+        let mut prover = self.prover();
+        let mpk_view = prover.device.transport_pk_to_device(mpk, air_ids);
+        let proof = prover.prove(mpk_view, ctx).into();
+        self.verify(&mpk.get_vk(), &proof)?;
+        Ok(proof)
     }
 
-    fn prove(&self, mpk: &MultiStarkProvingKey<SC>, proof_input: ProofInput<SC>) -> Proof<SC> {
+    fn prove(
+        &self,
+        mpk_view: DeviceMultiStarkProvingKey<'_, PB>,
+        ctx: ProvingContext<PB>,
+    ) -> Proof<SC>
+    where
+        PB::OpeningProof: Into<OpeningProof<PcsProof<SC>, SC::Challenge>>,
+        PB::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
+    {
         let mut prover = self.prover();
-        let backend = prover.backend;
-        let air_ids = proof_input.per_air.iter().map(|(id, _)| *id).collect();
-        // Commit cached traces if they are not provided
-        let cached_mains_per_air = proof_input
-            .per_air
-            .iter()
-            .map(|(_, input)| {
-                if input.cached_mains_pdata.len() != input.raw.cached_mains.len() {
-                    input
-                        .raw
-                        .cached_mains
-                        .iter()
-                        .map(|trace| {
-                            let trace = backend.transport_matrix_to_device(trace);
-                            let (com, data) = prover.device.commit(&[trace.clone()]);
-                            (
-                                com,
-                                SingleCommitPreimage {
-                                    trace,
-                                    data,
-                                    matrix_idx: 0,
-                                },
-                            )
-                        })
-                        .collect_vec()
-                } else {
-                    zip(&input.cached_mains_pdata, &input.raw.cached_mains)
-                        .map(|((com, data), trace)| {
-                            let data_view = PcsData {
-                                data: data.clone(),
-                                log_trace_heights: vec![log2_strict_usize(trace.height()) as u8],
-                            };
-                            let preimage = SingleCommitPreimage {
-                                trace: trace.clone(),
-                                data: data_view,
-                                matrix_idx: 0,
-                            };
-                            (com.clone(), preimage)
-                        })
-                        .collect_vec()
-                }
-            })
-            .collect_vec();
-        let ctx_per_air = zip(proof_input.per_air, cached_mains_per_air)
-            .map(|((air_id, input), cached_mains)| {
-                let cached_mains = cached_mains
-                    .into_iter()
-                    .map(|(com, preimage)| {
-                        (
-                            com.clone(),
-                            SingleCommitPreimage {
-                                trace: preimage.trace,
-                                data: preimage.data,
-                                matrix_idx: preimage.matrix_idx,
-                            },
-                        )
-                    })
-                    .collect_vec();
-                let air_ctx = AirProvingContext {
-                    cached_mains,
-                    common_main: input.raw.common_main.map(Arc::new),
-                    public_values: input.raw.public_values,
-                    cached_lifetime: PhantomData,
-                };
-                (air_id, air_ctx)
-            })
-            .collect();
-        let ctx = ProvingContext {
-            per_air: ctx_per_air,
-        };
-        let mpk_view = backend.transport_pk_to_device(mpk, air_ids);
-        let proof = Prover::prove(&mut prover, mpk_view, ctx);
+        let proof = prover.prove(mpk_view, ctx);
         proof.into()
     }
 
@@ -175,21 +126,20 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
         &self,
         airs: &[AirRef<SC>],
         pk: &[StarkProvingKey<SC>],
-        proof_inputs: &[AirProofInput<SC>],
+        proof_inputs: &[AirProofRawInput<Val<SC>>],
     ) {
         let (trace_views, pvs): (Vec<_>, Vec<_>) = proof_inputs
             .iter()
             .map(|input| {
                 let mut views = input
-                    .raw
                     .cached_mains
                     .iter()
                     .map(|trace| trace.as_view())
                     .collect_vec();
-                if let Some(trace) = input.raw.common_main.as_ref() {
+                if let Some(trace) = input.common_main.as_ref() {
                     views.push(trace.as_view());
                 }
-                (views, input.raw.public_values.clone())
+                (views, input.public_values.clone())
             })
             .unzip();
         debug_constraints_and_interactions(airs, pk, &trace_views, &pvs);
@@ -200,18 +150,38 @@ pub trait StarkEngine<SC: StarkGenericConfig> {
     fn run_test_impl(
         &self,
         airs: Vec<AirRef<SC>>,
-        air_proof_inputs: Vec<AirProofInput<SC>>,
+        ctx: Vec<AirProvingContext<PB>>,
     ) -> Result<VerificationData<SC>, VerificationError> {
         let mut keygen_builder = self.keygen_builder();
         let air_ids = self.set_up_keygen_builder(&mut keygen_builder, &airs);
         let pk = keygen_builder.generate_pk();
-        self.debug(&airs, &pk.per_air, &air_proof_inputs);
+        let device = self.prover().device;
+        let proof_inputs = ctx
+            .iter()
+            .map(|air_ctx| {
+                let cached_mains = air_ctx
+                    .cached_mains
+                    .iter()
+                    .map(|(_, pre)| device.transport_matrix_from_device_to_host(&pre.trace))
+                    .collect_vec();
+                let common_main = air_ctx
+                    .common_main
+                    .as_ref()
+                    .map(|m| device.transport_matrix_from_device_to_host(m));
+                let public_values = air_ctx.public_values.clone();
+                AirProofRawInput {
+                    cached_mains,
+                    common_main,
+                    public_values,
+                }
+            })
+            .collect_vec();
+        self.debug(&airs, &pk.per_air, &proof_inputs);
         let vk = pk.get_vk();
-        let proof_input = ProofInput {
-            per_air: zip_eq(air_ids, air_proof_inputs).collect(),
+        let ctx = ProvingContext {
+            per_air: zip_eq(air_ids, ctx).collect(),
         };
-        let proof = self.prove(&pk, proof_input);
-        self.verify(&vk, &proof)?;
+        let proof = self.prove_then_verify(&pk, ctx)?;
         Ok(VerificationData { vk, proof })
     }
 }

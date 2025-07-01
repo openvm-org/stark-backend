@@ -1,4 +1,4 @@
-use std::any::type_name;
+use std::{any::type_name, sync::Arc};
 
 use openvm_stark_backend::{
     config::StarkConfig,
@@ -62,7 +62,7 @@ where
         + Clone,
 {
     security_params: SecurityParameters,
-    pub config: GoldilocksPermutationConfig<P>,
+    pub device: CpuDevice<GoldilocksPermutationConfig<P>>,
     pub perm: P,
     pub max_constraint_degree: usize,
 }
@@ -74,16 +74,17 @@ where
         + Clone,
 {
     fn config(&self) -> &GoldilocksPermutationConfig<P> {
-        &self.config
+        &self.device.config
     }
 
-    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, GoldilocksPermutationConfig<P>>
-    where
-        Self: 'a,
-    {
+    fn device(&self) -> &CpuDevice<GoldilocksPermutationConfig<P>> {
+        &self.device
+    }
+
+    fn prover(&self) -> MultiTraceStarkProver<GoldilocksPermutationConfig<P>> {
         MultiTraceStarkProver::new(
             CpuBackend::default(),
-            CpuDevice::new(self.config(), self.security_params.fri_params.log_blowup),
+            self.device.clone(),
             self.new_challenger(),
         )
     }
@@ -151,7 +152,7 @@ where
     let max_constraint_degree = security_params.fri_params.max_constraint_degree();
     let config = config_from_perm(&perm, security_params.clone());
     GoldilocksPermutationEngine {
-        config,
+        device: CpuDevice::new(Arc::new(config), security_params.fri_params.log_blowup),
         perm,
         security_params,
         max_constraint_degree,

@@ -57,9 +57,10 @@ pub struct CpuBackend<SC> {
 /// # Safety
 /// See [`CpuBackend`].
 #[derive(Derivative, derive_new::new)]
-#[derivative(Clone(bound = ""), Copy(bound = ""))]
-pub struct CpuDevice<'a, SC> {
-    config: &'a SC,
+#[derivative(Clone(bound = ""))]
+pub struct CpuDevice<SC> {
+    // Use Arc to get around Clone-ing SC
+    pub config: Arc<SC>,
     /// When committing a matrix, the matrix is cloned into newly allocated memory.
     /// The size of the newly allocated memory will be `matrix.size() << log_blowup_factor`.
     log_blowup_factor: usize,
@@ -98,21 +99,21 @@ impl<T: Send + Sync + Clone> MatrixDimensions for Arc<RowMajorMatrix<T>> {
     }
 }
 
-impl<SC> CpuDevice<'_, SC> {
+impl<SC> CpuDevice<SC> {
     pub fn config(&self) -> &SC {
-        self.config
+        &self.config
     }
 }
 
-impl<SC: StarkGenericConfig> CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> CpuDevice<SC> {
     pub fn pcs(&self) -> &SC::Pcs {
         self.config.pcs()
     }
 }
 
-impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'_, SC> {}
+impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<SC> {}
 
-impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsData<SC>) {
         let log_blowup_factor = self.log_blowup_factor;
         let pcs = self.pcs();
@@ -163,7 +164,7 @@ impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC
     }
 }
 
-impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice<SC> {
     fn partially_prove(
         &self,
         challenger: &mut SC::Challenger,
@@ -279,7 +280,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
     }
 }
 
-impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevice<SC> {
     fn eval_and_commit_quotient(
         &self,
         challenger: &mut SC::Challenger,
@@ -383,7 +384,7 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
     }
 }
 
-impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<SC> {
     fn open(
         &self,
         challenger: &mut SC::Challenger,
@@ -440,7 +441,7 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
     }
 }
 
-impl<SC> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuBackend<SC>
+impl<SC> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuDevice<SC>
 where
     SC: StarkGenericConfig,
 {
@@ -495,6 +496,13 @@ where
 
     fn transport_pcs_data_to_device(&self, data: &PcsData<SC>) -> PcsData<SC> {
         data.clone()
+    }
+
+    fn transport_matrix_from_device_to_host(
+        &self,
+        matrix: &Arc<RowMajorMatrix<Val<SC>>>,
+    ) -> Arc<RowMajorMatrix<Val<SC>>> {
+        matrix.clone()
     }
 }
 

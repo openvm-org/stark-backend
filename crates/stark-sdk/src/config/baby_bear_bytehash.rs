@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use openvm_stark_backend::{
     config::StarkConfig,
     interaction::fri_log_up::FriLogUpPhase,
@@ -47,7 +49,7 @@ where
     H: CryptographicHasher<u8, [u8; 32]> + Clone,
 {
     pub fri_params: FriParameters,
-    pub config: BabyBearByteHashConfig<H>,
+    pub device: CpuDevice<BabyBearByteHashConfig<H>>,
     pub byte_hash: H,
     pub max_constraint_degree: usize,
 }
@@ -57,16 +59,17 @@ where
     H: CryptographicHasher<u8, [u8; 32]> + Clone + Send + Sync,
 {
     fn config(&self) -> &BabyBearByteHashConfig<H> {
-        &self.config
+        &self.device.config
     }
 
-    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, BabyBearByteHashConfig<H>>
-    where
-        Self: 'a,
-    {
+    fn device(&self) -> &CpuDevice<BabyBearByteHashConfig<H>> {
+        &self.device
+    }
+
+    fn prover(&self) -> MultiTraceStarkProver<BabyBearByteHashConfig<H>> {
         MultiTraceStarkProver::new(
             CpuBackend::default(),
-            CpuDevice::new(self.config(), self.fri_params.log_blowup),
+            self.device.clone(),
             self.new_challenger(),
         )
     }
@@ -99,7 +102,7 @@ where
     let max_constraint_degree = fri_params.max_constraint_degree();
     let config = config_from_byte_hash(byte_hash.clone(), security_params);
     BabyBearByteHashEngine {
-        config,
+        device: CpuDevice::new(Arc::new(config), fri_params.log_blowup),
         byte_hash,
         fri_params,
         max_constraint_degree,

@@ -1,13 +1,13 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 use derivative::Derivative;
 use p3_field::Field;
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_matrix::dense::RowMajorMatrix;
 use serde::{Deserialize, Serialize};
 
 use super::hal::ProverBackend;
 use crate::{
-    config::{Com, PcsProof, PcsProverData, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
+    config::{Com, PcsProof, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
     keygen::types::{LinearConstraint, StarkVerifyingKey},
     proof::{AirProofData, Commitments, OpeningProof, Proof},
 };
@@ -62,19 +62,19 @@ pub struct SingleCommitPreimage<Matrix, PcsData> {
 }
 
 #[derive(derive_new::new)]
-pub struct ProvingContext<'a, PB: ProverBackend> {
+pub struct ProvingContext<PB: ProverBackend> {
     /// (AIR id, AIR input)
-    pub per_air: Vec<(usize, AirProvingContext<'a, PB>)>,
+    pub per_air: Vec<(usize, AirProvingContext<PB>)>,
 }
 
-impl<'a, PB: ProverBackend> ProvingContext<'a, PB> {
-    pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<'a, PB>> {
+impl<PB: ProverBackend> ProvingContext<PB> {
+    pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<PB>> {
         self.per_air.into_iter().map(|(_, x)| x).collect()
     }
 }
 
-impl<'a, PB: ProverBackend> IntoIterator for ProvingContext<'a, PB> {
-    type Item = (usize, AirProvingContext<'a, PB>);
+impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
+    type Item = (usize, AirProvingContext<PB>);
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -89,9 +89,12 @@ impl<'a, PB: ProverBackend> IntoIterator for ProvingContext<'a, PB> {
 /// Public values: for each AIR, a separate list of public values.
 /// The prover can support global public values that are shared among all AIRs,
 /// but we currently split public values per-AIR for modularity.
-pub struct AirProvingContext<'a, PB: ProverBackend> {
+#[allow(clippy::type_complexity)]
+#[derive(derive_new::new)]
+pub struct AirProvingContext<PB: ProverBackend> {
     /// Cached main trace matrices with commitments. One matrix per commitment.
-    #[allow(clippy::type_complexity)]
+    // Note[jpw]: The cached data should have a lifetime since it may outlive a single proof invocation.
+    // But for now it's easier to assume `cached_mains` are owned, and any sharing is done via smart pointers.
     pub cached_mains: Vec<(
         PB::Commitment,
         SingleCommitPreimage<PB::Matrix, PB::PcsData>,
@@ -101,9 +104,6 @@ pub struct AirProvingContext<'a, PB: ProverBackend> {
     /// Public values
     // [jpw] This is on host for now because it seems more convenient for the challenger to be on host.
     pub public_values: Vec<PB::Val>,
-    // Placeholder for lifetime of the cached data. For now it's easier to assume `cached_mains`
-    // are owned, and any sharing is done via smart pointers.
-    pub cached_lifetime: PhantomData<&'a PB::PcsData>,
 }
 
 /// A view of just the AIR, without any preprocessed or after challenge columns.
@@ -223,72 +223,13 @@ where
     }
 }
 
-// ============= Below are common types independent of hardware ============
-
-#[derive(Derivative, derive_new::new)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct ProofInput<SC: StarkGenericConfig> {
-    /// (AIR id, AIR input)
-    pub per_air: Vec<(usize, AirProofInput<SC>)>,
-}
-
-#[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound(
-    serialize = "PcsProverData<SC>: Serialize",
-    deserialize = "PcsProverData<SC>: Deserialize<'de>"
-))]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct CommittedTraceData<SC: StarkGenericConfig> {
-    pub trace: Arc<RowMajorMatrix<Val<SC>>>,
-    pub commitment: Com<SC>,
-    pub pcs_data: Arc<PcsProverData<SC>>,
-}
-
-/// Necessary input for proving a single AIR.
-///
-/// The [Chip](crate::chip::Chip) trait is currently specific to the
-/// CPU backend and in particular to `RowMajorMatrix`. We may extend
-/// to more general [ProverBackend](super::hal::ProverBackend)s, but
-/// currently we use this struct as a common interface.
-#[derive(Derivative)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct AirProofInput<SC: StarkGenericConfig> {
-    /// Prover data for cached main traces.
-    /// They must either be all provided or they will be regenerated
-    /// from the raw traces.
-    pub cached_mains_pdata: Vec<(Com<SC>, Arc<PcsProverData<SC>>)>,
-    pub raw: AirProofRawInput<Val<SC>>,
-}
-
-/// Raw input for proving a single AIR.
+/// Raw input for proving a single AIR. For DEBUG use only.
 #[derive(Clone, Debug)]
 pub struct AirProofRawInput<F: Field> {
     /// Cached main trace matrices
     pub cached_mains: Vec<Arc<RowMajorMatrix<F>>>,
     /// Common main trace matrix
-    pub common_main: Option<RowMajorMatrix<F>>,
+    pub common_main: Option<Arc<RowMajorMatrix<F>>>,
     /// Public values
     pub public_values: Vec<F>,
-}
-
-impl<F: Field> AirProofRawInput<F> {
-    pub fn height(&self) -> usize {
-        let mut height = None;
-        for m in self.cached_mains.iter() {
-            if let Some(h) = height {
-                assert_eq!(h, m.height());
-            } else {
-                height = Some(m.height());
-            }
-        }
-        let common_h = self.common_main.as_ref().map(|trace| trace.height());
-        if let Some(h) = height {
-            if let Some(common_h) = common_h {
-                assert_eq!(h, common_h);
-            }
-            h
-        } else {
-            common_h.unwrap_or(0)
-        }
-    }
 }

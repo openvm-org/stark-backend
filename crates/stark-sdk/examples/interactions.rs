@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use openvm_stark_backend::{
     p3_matrix::dense::RowMajorMatrix,
-    prover::types::{AirProofInput, ProofInput},
+    prover::types::{AirProvingContext, ProvingContext},
 };
 use openvm_stark_sdk::{
     config::{baby_bear_poseidon2::BabyBearPoseidon2Engine, setup_tracing, FriParameters},
@@ -38,8 +38,10 @@ fn main() {
     //   7    4
     //   3    5
     // 546  889
-    let sender_trace =
-        RowMajorMatrix::new(to_field_vec::<Val>(vec![0, 1, 3, 5, 7, 4, 546, 889]), 2);
+    let sender_trace = Arc::new(RowMajorMatrix::new(
+        to_field_vec::<Val>(vec![0, 1, 3, 5, 7, 4, 546, 889]),
+        2,
+    ));
     // Mul  Val
     //   1    5
     //   3    4
@@ -49,20 +51,23 @@ fn main() {
     // 545  889
     //   1  889
     //   0  456
-    let receiver_trace = RowMajorMatrix::new(
+    let receiver_trace = Arc::new(RowMajorMatrix::new(
         to_field_vec(vec![
             1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 1, 889, 0, 456,
         ]),
         2,
-    );
+    ));
 
-    let proof = engine.prove(
-        &pk,
-        ProofInput::new(vec![
-            (sender_id, AirProofInput::simple_no_pis(sender_trace)),
-            (receiver_id, AirProofInput::simple_no_pis(receiver_trace)),
-        ]),
-    );
-
-    engine.verify(&pk.get_vk(), &proof).unwrap();
+    engine
+        .prove_then_verify(
+            &pk,
+            ProvingContext::new(vec![
+                (sender_id, AirProvingContext::simple_no_pis(sender_trace)),
+                (
+                    receiver_id,
+                    AirProvingContext::simple_no_pis(receiver_trace),
+                ),
+            ]),
+        )
+        .unwrap();
 }

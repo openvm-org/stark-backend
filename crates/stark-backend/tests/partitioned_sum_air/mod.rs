@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     p3_field::FieldAlgebra,
     prover::{
         hal::TraceCommitter,
-        types::{AirProofInput, AirProofRawInput, ProofInput},
+        types::{AirProvingContext, ProvingContext, SingleCommitPreimage},
     },
     utils::disable_debug_builder,
     verifier::VerificationError,
@@ -41,29 +41,26 @@ fn prove_and_verify_sum_air(x: Vec<Val>, ys: Vec<Vec<Val>>) -> Result<(), Verifi
     let mut keygen_builder = engine.keygen_builder();
     let air_id = keygen_builder.add_air(air.clone());
     let pk = keygen_builder.generate_pk();
-    let vk = pk.get_vk();
 
     let prover = engine.prover();
     // Demonstrate y is cached
     let (y_com, y_data) = prover.device.commit(&[y_trace.clone()]);
     // Load x normally
-    let air_proof_input = AirProofInput {
-        cached_mains_pdata: vec![(y_com, y_data.data)],
-        raw: AirProofRawInput {
-            cached_mains: vec![y_trace],
-            common_main: Some(x_trace),
-            public_values: vec![],
-        },
+    let air_ctx = AirProvingContext {
+        cached_mains: vec![(
+            y_com,
+            SingleCommitPreimage {
+                trace: y_trace,
+                data: y_data,
+                matrix_idx: 0,
+            },
+        )],
+        common_main: Some(Arc::new(x_trace)),
+        public_values: vec![],
     };
-    let proof_input = ProofInput::new(vec![(air_id, air_proof_input)]);
+    let ctx = ProvingContext::new(vec![(air_id, air_ctx)]);
 
-    let proof = engine.prove(&pk, proof_input);
-
-    // Verify the proof:
-    // Start from clean challenger
-    let mut challenger = engine.new_challenger();
-    let verifier = engine.verifier();
-    verifier.verify(&mut challenger, &vk, &proof)
+    engine.prove_then_verify(&pk, ctx).map(|_| ())
 }
 
 #[test]

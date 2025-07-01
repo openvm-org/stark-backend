@@ -65,7 +65,7 @@ where
         Self: 'a;
 
     type ProvingContext<'a>
-        = ProvingContext<'a, PB>
+        = ProvingContext<PB>
     where
         Self: 'a;
 

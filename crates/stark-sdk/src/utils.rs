@@ -2,8 +2,12 @@ use std::{cmp::Reverse, iter::zip};
 
 use itertools::Itertools;
 use openvm_stark_backend::{
-    config::StarkGenericConfig, p3_field::FieldAlgebra, p3_matrix::Matrix,
-    prover::types::AirProofInput, verifier::VerificationError, AirRef,
+    config::StarkGenericConfig,
+    p3_field::FieldAlgebra,
+    p3_matrix::Matrix,
+    prover::{cpu::CpuBackend, types::AirProvingContext},
+    verifier::VerificationError,
+    AirRef,
 };
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -12,7 +16,7 @@ use crate::engine::{StarkFriEngine, VerificationDataWithFriParams};
 /// `stark-backend::prover::types::ProofInput` without specifying AIR IDs.
 pub struct ProofInputForTest<SC: StarkGenericConfig> {
     pub airs: Vec<AirRef<SC>>,
-    pub per_air: Vec<AirProofInput<SC>>,
+    pub per_air: Vec<AirProvingContext<CpuBackend<SC>>>,
 }
 
 impl<SC: StarkGenericConfig> ProofInputForTest<SC> {
@@ -29,12 +33,11 @@ impl<SC: StarkGenericConfig> ProofInputForTest<SC> {
     /// Reference: <https://github.com/Plonky3/Plonky3/blob/27b3127dab047e07145c38143379edec2960b3e1/merkle-tree/src/merkle_tree.rs#L53>
     pub fn sort_chips(&mut self) {
         let airs = std::mem::take(&mut self.airs);
-        let air_proof_inputs = std::mem::take(&mut self.per_air);
-        let (airs, air_proof_inputs): (Vec<_>, Vec<_>) = zip(airs, air_proof_inputs)
-            .sorted_by_key(|(_, air_proof_input)| {
+        let air_proving_ctxs = std::mem::take(&mut self.per_air);
+        let (airs, air_proof_inputs): (Vec<_>, Vec<_>) = zip(airs, air_proving_ctxs)
+            .sorted_by_key(|(_, air_proving_ctx)| {
                 Reverse(
-                    air_proof_input
-                        .raw
+                    air_proving_ctx
                         .common_main
                         .as_ref()
                         .map(|trace| trace.height())
