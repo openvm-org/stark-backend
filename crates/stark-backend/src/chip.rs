@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cell::RefCell,
     rc::Rc,
     sync::{Arc, Mutex},
@@ -11,6 +12,17 @@ pub trait Chip<R, PB: ProverBackend> {
     /// Generate all necessary context for proving a single AIR.
     // The lifetime parameter `'b` is a placeholder for the lifetime of any cached trace. It should not be related to the lifetime of the borrow.
     fn generate_proving_ctx(&self, records: R) -> AirProvingContext<PB>;
+}
+
+/// Auto-implemented trait for downcasting of trait objects.
+pub trait AnyChip<R, PB: ProverBackend>: Chip<R, PB> {
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl<R, PB: ProverBackend, C: Chip<R, PB> + 'static> AnyChip<R, PB> for C {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl<R, PB: ProverBackend, C: Chip<R, PB>> Chip<R, PB> for RefCell<C> {
