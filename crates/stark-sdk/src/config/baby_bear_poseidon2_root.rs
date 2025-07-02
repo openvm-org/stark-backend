@@ -69,10 +69,14 @@ where
     pub max_constraint_degree: usize,
 }
 
-impl<P> StarkEngine<BabyBearPermutationRootConfig<P>> for BabyBearPermutationRootEngine<P>
+impl<P> StarkEngine for BabyBearPermutationRootEngine<P>
 where
     P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
 {
+    type SC = BabyBearPermutationRootConfig<P>;
+    type PB = CpuBackend<Self::SC>;
+    type PD = CpuDevice<Self::SC>;
+
     fn config(&self) -> &BabyBearPermutationRootConfig<P> {
         &self.device.config
     }
@@ -211,7 +215,7 @@ fn bn254_poseidon2_rc3() -> Vec<[Bn254Fr; 3]> {
         .collect()
 }
 
-impl StarkFriEngine<BabyBearPoseidon2RootConfig> for BabyBearPoseidon2RootEngine {
+impl StarkFriEngine for BabyBearPoseidon2RootEngine {
     fn new(fri_params: FriParameters) -> Self {
         let security_params = SecurityParameters {
             fri_params,

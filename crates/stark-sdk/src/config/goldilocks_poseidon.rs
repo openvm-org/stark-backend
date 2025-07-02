@@ -67,12 +67,16 @@ where
     pub max_constraint_degree: usize,
 }
 
-impl<P> StarkEngine<GoldilocksPermutationConfig<P>> for GoldilocksPermutationEngine<P>
+impl<P> StarkEngine for GoldilocksPermutationEngine<P>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
         + Clone,
 {
+    type SC = GoldilocksPermutationConfig<P>;
+    type PB = CpuBackend<Self::SC>;
+    type PD = CpuDevice<Self::SC>;
+
     fn config(&self) -> &GoldilocksPermutationConfig<P> {
         &self.device.config
     }
@@ -98,8 +102,7 @@ where
     }
 }
 
-impl<P> StarkEngineWithHashInstrumentation<GoldilocksPermutationConfig<Instrumented<P>>>
-    for GoldilocksPermutationEngine<Instrumented<P>>
+impl<P> StarkEngineWithHashInstrumentation for GoldilocksPermutationEngine<Instrumented<P>>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>

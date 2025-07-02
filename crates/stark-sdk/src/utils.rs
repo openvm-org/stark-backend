@@ -5,7 +5,10 @@ use openvm_stark_backend::{
     config::StarkGenericConfig,
     p3_field::FieldAlgebra,
     p3_matrix::Matrix,
-    prover::{cpu::CpuBackend, types::AirProvingContext},
+    prover::{
+        cpu::{CpuBackend, CpuDevice},
+        types::AirProvingContext,
+    },
     verifier::VerificationError,
     AirRef,
 };
@@ -22,7 +25,7 @@ pub struct ProofInputForTest<SC: StarkGenericConfig> {
 impl<SC: StarkGenericConfig> ProofInputForTest<SC> {
     pub fn run_test(
         self,
-        engine: &impl StarkFriEngine<SC>,
+        engine: &impl StarkFriEngine<SC = SC, PB = CpuBackend<SC>, PD = CpuDevice<SC>>,
     ) -> Result<VerificationDataWithFriParams<SC>, VerificationError> {
         assert_eq!(self.airs.len(), self.per_air.len());
         engine.run_test(self.airs, self.per_air)

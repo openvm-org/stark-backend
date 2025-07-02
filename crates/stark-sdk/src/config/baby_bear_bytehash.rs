@@ -54,10 +54,14 @@ where
     pub max_constraint_degree: usize,
 }
 
-impl<H> StarkEngine<BabyBearByteHashConfig<H>> for BabyBearByteHashEngine<H>
+impl<H> StarkEngine for BabyBearByteHashEngine<H>
 where
     H: CryptographicHasher<u8, [u8; 32]> + Clone + Send + Sync,
 {
+    type SC = BabyBearByteHashConfig<H>;
+    type PB = CpuBackend<Self::SC>;
+    type PD = CpuDevice<Self::SC>;
+
     fn config(&self) -> &BabyBearByteHashConfig<H> {
         &self.device.config
     }
@@ -144,8 +148,8 @@ where
     fn default_hash() -> H;
 }
 
-impl<H: CryptographicHasher<u8, [u8; 32]> + Clone + Send + Sync>
-    StarkFriEngine<BabyBearByteHashConfig<H>> for BabyBearByteHashEngine<H>
+impl<H: CryptographicHasher<u8, [u8; 32]> + Clone + Send + Sync> StarkFriEngine
+    for BabyBearByteHashEngine<H>
 where
     BabyBearByteHashEngine<H>: BabyBearByteHashEngineWithDefaultHash<H>,
 {

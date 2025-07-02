@@ -8,7 +8,11 @@ use openvm_stark_backend::{
     config::StarkGenericConfig,
     keygen::types::MultiStarkVerifyingKey,
     proof::Proof,
-    prover::{hal::DeviceDataTransporter, types::ProvingContext},
+    prover::{
+        cpu::{CpuBackend, CpuDevice},
+        hal::DeviceDataTransporter,
+        types::ProvingContext,
+    },
     utils::disable_debug_builder,
     Chip,
 };
@@ -29,7 +33,10 @@ use serde::{Deserialize, Serialize};
 
 // Lookup table is cached, everything else (including counts) is committed together
 #[allow(clippy::type_complexity)]
-pub fn prove<SC: StarkGenericConfig, E: StarkEngine<SC>>(
+pub fn prove<
+    SC: StarkGenericConfig,
+    E: StarkEngine<SC = SC, PB = CpuBackend<SC>, PD = CpuDevice<SC>>,
+>(
     engine: &E,
     trace: Vec<(u32, Vec<u32>)>,
     partition: bool,

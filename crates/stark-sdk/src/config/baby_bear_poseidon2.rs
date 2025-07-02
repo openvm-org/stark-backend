@@ -75,12 +75,16 @@ where
     pub max_constraint_degree: usize,
 }
 
-impl<P> StarkEngine<BabyBearPermutationConfig<P>> for BabyBearPermutationEngine<P>
+impl<P> StarkEngine for BabyBearPermutationEngine<P>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
         + Clone,
 {
+    type SC = BabyBearPermutationConfig<P>;
+    type PB = CpuBackend<Self::SC>;
+    type PD = CpuDevice<Self::SC>;
+
     fn config(&self) -> &BabyBearPermutationConfig<P> {
         &self.device.config
     }
@@ -106,8 +110,7 @@ where
     }
 }
 
-impl<P> StarkEngineWithHashInstrumentation<BabyBearPermutationConfig<Instrumented<P>>>
-    for BabyBearPermutationEngine<Instrumented<P>>
+impl<P> StarkEngineWithHashInstrumentation for BabyBearPermutationEngine<Instrumented<P>>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
@@ -298,7 +301,7 @@ pub fn print_hash_counts(hash_counter: &InstrumentCounter, compress_counter: &In
     println!("Total Count: {total_count}");
 }
 
-impl StarkFriEngine<BabyBearPoseidon2Config> for BabyBearPoseidon2Engine {
+impl StarkFriEngine for BabyBearPoseidon2Engine {
     fn new(fri_params: FriParameters) -> Self {
         default_engine_impl(fri_params)
     }

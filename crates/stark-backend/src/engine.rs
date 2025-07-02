@@ -10,7 +10,6 @@ use crate::{
     proof::{OpeningProof, Proof},
     prover::{
         coordinator::Coordinator,
-        cpu::{CpuBackend, CpuDevice},
         hal::{DeviceDataTransporter, ProverBackend, ProverDevice},
         types::{AirProofRawInput, AirProvingContext, DeviceMultiStarkProvingKey, ProvingContext},
         Prover,
@@ -27,21 +26,23 @@ pub struct VerificationData<SC: StarkGenericConfig> {
 
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving. Currently this trait is CPU specific.
-pub trait StarkEngine<SC, PB = CpuBackend<SC>, PD = CpuDevice<SC>>
+pub trait StarkEngine
 where
-    SC: StarkGenericConfig,
-    PB: ProverBackend<
-        Val = Val<SC>,
-        Challenge = SC::Challenge,
-        Commitment = Com<SC>,
-        Challenger = SC::Challenger,
-    >,
-    PB::OpeningProof: Into<OpeningProof<PcsProof<SC>, SC::Challenge>>,
-    PB::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
-    PD: ProverDevice<PB> + DeviceDataTransporter<SC, PB>,
+    <Self::PB as ProverBackend>::OpeningProof:
+        Into<OpeningProof<PcsProof<Self::SC>, <Self::SC as StarkGenericConfig>::Challenge>>,
+    <Self::PB as ProverBackend>::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<Self::SC>>>,
 {
+    type SC: StarkGenericConfig;
+    type PB: ProverBackend<
+        Val = Val<Self::SC>,
+        Challenge = <Self::SC as StarkGenericConfig>::Challenge,
+        Commitment = Com<Self::SC>,
+        Challenger = <Self::SC as StarkGenericConfig>::Challenger,
+    >;
+    type PD: ProverDevice<Self::PB> + DeviceDataTransporter<Self::SC, Self::PB>;
+
     /// Stark config
-    fn config(&self) -> &SC;
+    fn config(&self) -> &Self::SC;
 
     /// During keygen, the circuit may be optimized but it will **try** to keep the
     /// constraint degree at most this value.
@@ -52,9 +53,9 @@ where
     /// Creates a new challenger with a deterministic state.
     /// Creating new challenger for prover and verifier separately will result in
     /// them having the same starting state.
-    fn new_challenger(&self) -> SC::Challenger;
+    fn new_challenger(&self) -> <Self::SC as StarkGenericConfig>::Challenger;
 
-    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<SC> {
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<Self::SC> {
         let mut builder = MultiStarkKeygenBuilder::new(self.config());
         if let Some(max_constraint_degree) = self.max_constraint_degree() {
             builder.set_max_constraint_degree(max_constraint_degree);
@@ -62,19 +63,19 @@ where
         builder
     }
 
-    fn device(&self) -> &PD;
+    fn device(&self) -> &Self::PD;
 
-    fn prover(&self) -> Coordinator<SC, PB, PD>;
+    fn prover(&self) -> Coordinator<Self::SC, Self::PB, Self::PD>;
 
-    fn verifier(&self) -> MultiTraceStarkVerifier<SC> {
+    fn verifier(&self) -> MultiTraceStarkVerifier<Self::SC> {
         MultiTraceStarkVerifier::new(self.config())
     }
 
     /// Add AIRs and get AIR IDs
     fn set_up_keygen_builder(
         &self,
-        keygen_builder: &mut MultiStarkKeygenBuilder<'_, SC>,
-        airs: &[AirRef<SC>],
+        keygen_builder: &mut MultiStarkKeygenBuilder<'_, Self::SC>,
+        airs: &[AirRef<Self::SC>],
     ) -> Vec<usize> {
         airs.iter()
             .map(|air| keygen_builder.add_air(air.clone()))
@@ -86,9 +87,9 @@ where
     /// which should be used if the proving key is already cached in device memory.
     fn prove_then_verify(
         &self,
-        mpk: &MultiStarkProvingKey<SC>,
-        ctx: ProvingContext<PB>,
-    ) -> Result<Proof<SC>, VerificationError> {
+        mpk: &MultiStarkProvingKey<Self::SC>,
+        ctx: ProvingContext<Self::PB>,
+    ) -> Result<Proof<Self::SC>, VerificationError> {
         let air_ids = ctx.per_air.iter().map(|(id, _)| *id).collect();
         let mut prover = self.prover();
         let mpk_view = prover.device.transport_pk_to_device(mpk, air_ids);
@@ -99,13 +100,9 @@ where
 
     fn prove(
         &self,
-        mpk_view: DeviceMultiStarkProvingKey<'_, PB>,
-        ctx: ProvingContext<PB>,
-    ) -> Proof<SC>
-    where
-        PB::OpeningProof: Into<OpeningProof<PcsProof<SC>, SC::Challenge>>,
-        PB::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
-    {
+        mpk_view: DeviceMultiStarkProvingKey<'_, Self::PB>,
+        ctx: ProvingContext<Self::PB>,
+    ) -> Proof<Self::SC> {
         let mut prover = self.prover();
         let proof = prover.prove(mpk_view, ctx);
         proof.into()
@@ -113,8 +110,8 @@ where
 
     fn verify(
         &self,
-        vk: &MultiStarkVerifyingKey<SC>,
-        proof: &Proof<SC>,
+        vk: &MultiStarkVerifyingKey<Self::SC>,
+        proof: &Proof<Self::SC>,
     ) -> Result<(), VerificationError> {
         let mut challenger = self.new_challenger();
         let verifier = self.verifier();
@@ -124,9 +121,9 @@ where
     // mpk can be removed if we use BaseAir trait to regenerate preprocessed traces
     fn debug(
         &self,
-        airs: &[AirRef<SC>],
-        pk: &[StarkProvingKey<SC>],
-        proof_inputs: &[AirProofRawInput<Val<SC>>],
+        airs: &[AirRef<Self::SC>],
+        pk: &[StarkProvingKey<Self::SC>],
+        proof_inputs: &[AirProofRawInput<Val<Self::SC>>],
     ) {
         let (trace_views, pvs): (Vec<_>, Vec<_>) = proof_inputs
             .iter()
@@ -149,9 +146,9 @@ where
     /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
     fn run_test_impl(
         &self,
-        airs: Vec<AirRef<SC>>,
-        ctx: Vec<AirProvingContext<PB>>,
-    ) -> Result<VerificationData<SC>, VerificationError> {
+        airs: Vec<AirRef<Self::SC>>,
+        ctx: Vec<AirProvingContext<Self::PB>>,
+    ) -> Result<VerificationData<Self::SC>, VerificationError> {
         let mut keygen_builder = self.keygen_builder();
         let air_ids = self.set_up_keygen_builder(&mut keygen_builder, &airs);
         let pk = keygen_builder.generate_pk();
