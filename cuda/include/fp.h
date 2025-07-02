@@ -101,6 +101,9 @@ class Fp {
     /// Fp with one value
     __device__ static constexpr Fp one() { return Fp(1); }
 
+    /// Fp with negative one value
+    __device__ static constexpr Fp neg_one() { return maxVal(); }
+
     /// Convert to a uint32_t
     __device__ constexpr uint32_t asUInt32() const { return decode(val); }
 
