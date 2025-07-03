@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     p3_field::FieldAlgebra,
     prover::{
         hal::TraceCommitter,
-        types::{AirProvingContext, ProvingContext, SingleCommitPreimage},
+        types::{AirProvingContext, CommittedTraceData, ProvingContext},
     },
     utils::disable_debug_builder,
     verifier::VerificationError,
@@ -47,14 +47,11 @@ fn prove_and_verify_sum_air(x: Vec<Val>, ys: Vec<Vec<Val>>) -> Result<(), Verifi
     let (y_com, y_data) = prover.device.commit(&[y_trace.clone()]);
     // Load x normally
     let air_ctx = AirProvingContext {
-        cached_mains: vec![(
-            y_com,
-            SingleCommitPreimage {
-                trace: y_trace,
-                data: y_data,
-                matrix_idx: 0,
-            },
-        )],
+        cached_mains: vec![CommittedTraceData {
+            commitment: y_com,
+            trace: y_trace,
+            data: y_data,
+        }],
         common_main: Some(Arc::new(x_trace)),
         public_values: vec![],
     };

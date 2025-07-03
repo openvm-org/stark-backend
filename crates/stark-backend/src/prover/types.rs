@@ -61,6 +61,14 @@ pub struct SingleCommitPreimage<Matrix, PcsData> {
     pub matrix_idx: u32,
 }
 
+/// Commitment to a single trace matrix, together with the trace matrix and prover data.
+#[derive(Clone)]
+pub struct CommittedTraceData<PB: ProverBackend> {
+    pub commitment: PB::Commitment,
+    pub trace: PB::Matrix,
+    pub data: PB::PcsData,
+}
+
 #[derive(derive_new::new)]
 pub struct ProvingContext<PB: ProverBackend> {
     /// (AIR id, AIR input)
@@ -89,16 +97,12 @@ impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
 /// Public values: for each AIR, a separate list of public values.
 /// The prover can support global public values that are shared among all AIRs,
 /// but we currently split public values per-AIR for modularity.
-#[allow(clippy::type_complexity)]
 #[derive(derive_new::new)]
 pub struct AirProvingContext<PB: ProverBackend> {
     /// Cached main trace matrices with commitments. One matrix per commitment.
     // Note[jpw]: The cached data should have a lifetime since it may outlive a single proof invocation.
     // But for now it's easier to assume `cached_mains` are owned, and any sharing is done via smart pointers.
-    pub cached_mains: Vec<(
-        PB::Commitment,
-        SingleCommitPreimage<PB::Matrix, PB::PcsData>,
-    )>,
+    pub cached_mains: Vec<CommittedTraceData<PB>>,
     /// Common main trace matrix
     pub common_main: Option<PB::Matrix>,
     /// Public values

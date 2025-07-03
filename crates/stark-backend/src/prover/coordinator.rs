@@ -17,10 +17,7 @@ use crate::{
     config::{Com, StarkGenericConfig, Val},
     keygen::view::MultiStarkVerifyingKeyView,
     proof::{AirProofData, Commitments},
-    prover::{
-        hal::MatrixDimensions,
-        types::{AirView, SingleCommitPreimage},
-    },
+    prover::{hal::MatrixDimensions, types::AirView},
 };
 
 /// Host-to-device coordinator for full prover implementation.
@@ -90,7 +87,7 @@ where
         #[allow(clippy::type_complexity)]
         let (cached_commits_per_air, cached_views_per_air, common_main_per_air, pvs_per_air): (
             Vec<Vec<PB::Commitment>>,
-            Vec<Vec<SingleCommitPreimage<PB::Matrix, PB::PcsData>>>,
+            Vec<Vec<(PB::Matrix, PB::PcsData)>>,
             Vec<Option<PB::Matrix>>,
             Vec<Vec<PB::Val>>,
         ) = ctx
@@ -98,7 +95,7 @@ where
             .map(|(air_id, ctx)| {
                 self.challenger.observe(Val::<SC>::from_canonical_usize(air_id));
                 let (cached_commits, cached_views): (Vec<_>, Vec<_>) =
-                    ctx.cached_mains.into_iter().unzip();
+                    ctx.cached_mains.into_iter().map(|cm| (cm.commitment, (cm.trace, cm.data))).unzip();
                 (
                     cached_commits,
                     cached_views,
@@ -136,13 +133,7 @@ where
         let mut cached_pcs_datas_per_air = Vec::with_capacity(num_air);
         for (pk, cached_views, pvs) in izip!(&mpk.per_air, cached_views_per_air, &pvs_per_air) {
             let (mut main_trace_views, cached_pcs_datas): (Vec<PB::Matrix>, Vec<PB::PcsData>) =
-                cached_views
-                    .into_iter()
-                    .map(|view| {
-                        debug_assert_eq!(view.matrix_idx, 0);
-                        (view.trace, view.data)
-                    })
-                    .unzip();
+                cached_views.into_iter().unzip();
             cached_pcs_datas_per_air.push(cached_pcs_datas);
             if pk.vk.has_common_main() {
                 main_trace_views.push(common_main_traces_it.next().expect("expected common main"));

@@ -159,7 +159,7 @@ where
                 let cached_mains = air_ctx
                     .cached_mains
                     .iter()
-                    .map(|(_, pre)| device.transport_matrix_from_device_to_host(&pre.trace))
+                    .map(|pre| device.transport_matrix_from_device_to_host(&pre.trace))
                     .collect_vec();
                 let common_main = air_ctx
                     .common_main

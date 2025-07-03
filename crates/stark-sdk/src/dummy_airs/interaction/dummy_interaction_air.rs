@@ -18,7 +18,7 @@ use openvm_stark_backend::{
     prover::{
         cpu::{CpuBackend, CpuDevice},
         hal::TraceCommitter,
-        types::{AirProvingContext, SingleCommitPreimage},
+        types::{AirProvingContext, CommittedTraceData},
     },
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
     AirRef, Chip, ChipUsageGetter,
@@ -212,14 +212,11 @@ where
             .commit(&[cached_trace.clone()]);
 
         AirProvingContext {
-            cached_mains: vec![(
-                commit,
-                SingleCommitPreimage {
-                    data,
-                    trace: cached_trace,
-                    matrix_idx: 0,
-                },
-            )],
+            cached_mains: vec![CommittedTraceData {
+                commitment: commit,
+                data,
+                trace: cached_trace,
+            }],
             common_main: Some(Arc::new(RowMajorMatrix::new(common_main_val, 1))),
             public_values: vec![],
         }

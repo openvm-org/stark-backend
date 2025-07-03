@@ -30,7 +30,7 @@ impl<PB: ProverBackend> AirProvingContext<PB> {
             // An AIR must have a main trace.
             self.common_main.as_ref().unwrap().height()
         } else {
-            self.cached_mains[0].1.trace.height()
+            self.cached_mains[0].trace.height()
         }
     }
 }
