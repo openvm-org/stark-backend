@@ -58,6 +58,8 @@ nightly-features = [
     "p3-dft/nightly-features",
     "p3-keccak/nightly-features",
     "p3-poseidon2/nightly-features",
+    "p3-baby-bear/nightly-features",
+    "p3-koala-bear/nightly-features",
 ]
 mimalloc = ["openvm-stark-backend/mimalloc"]
 jemalloc = ["openvm-stark-backend/jemalloc"]
