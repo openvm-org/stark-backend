@@ -162,4 +162,10 @@ where
     fn transport_matrix_to_device(&self, matrix: &Arc<RowMajorMatrix<Val<SC>>>) -> PB::Matrix;
 
     fn transport_pcs_data_to_device(&self, data: &super::cpu::PcsData<SC>) -> PB::PcsData;
+
+    /// Transport a device matrix to host. This should only be used for testing / debugging purposes.
+    fn transport_matrix_from_device_to_host(
+        &self,
+        matrix: &PB::Matrix,
+    ) -> Arc<RowMajorMatrix<Val<SC>>>;
 }

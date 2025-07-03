@@ -64,7 +64,7 @@ fn main() {
     let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
     let trace = p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0);
     let trace_height = trace.height();
-    let pcs = engine.config.pcs();
+    let pcs = engine.config().pcs();
     let trace_domain: Domain<SC> =
         Pcs::<Challenge, Challenger>::natural_domain_for_degree(pcs, trace_height);
     let log_trace_height = log2_strict_usize(trace.height());
