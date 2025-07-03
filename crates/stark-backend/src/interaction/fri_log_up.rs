@@ -570,7 +570,7 @@ pub fn eval_fri_log_up_phase<AB>(
 ///
 /// ## Panics
 /// If `max_constraint_degree > 0` and there are interactions that cannot fit in a singleton chunk.
-pub(crate) fn find_interaction_chunks<F: Field>(
+pub fn find_interaction_chunks<F: Field>(
     interactions: &[SymbolicInteraction<F>],
     max_constraint_degree: usize,
 ) -> FriLogUpProvingKey {
