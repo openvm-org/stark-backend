@@ -38,6 +38,14 @@ impl TraceWidth {
     pub fn main_width(&self) -> usize {
         self.cached_mains.iter().sum::<usize>() + self.common_main
     }
+
+    /// Total width of the trace matrix, including the preprocessed width, main width, and
+    /// after-challenge widths.
+    pub fn total_width(&self, ext_degree: usize) -> usize {
+        self.preprocessed.unwrap_or(0)
+            + self.main_width()
+            + self.after_challenge.iter().sum::<usize>() * ext_degree
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
