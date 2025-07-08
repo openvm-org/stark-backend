@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use derivative::Derivative;
+use itertools::Itertools;
 use p3_field::Field;
 use p3_matrix::dense::RowMajorMatrix;
 use serde::{Deserialize, Serialize};
@@ -12,37 +13,50 @@ use crate::{
     proof::{AirProofData, Commitments, OpeningProof, Proof},
 };
 
-/// A view of the proving key after it has been transferred to device.
-pub struct DeviceMultiStarkProvingKey<'a, PB: ProverBackend> {
+/// A view of the proving key after it has been transferred to device. The view is filtered for only
+/// the proving keys corresponding to specific `air_ids`.
+pub struct DeviceMultiStarkProvingKeyView<'a, PB: ProverBackend> {
     pub(super) air_ids: Vec<usize>,
-    pub per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
+    pub per_air: Vec<&'a DeviceStarkProvingKey<PB>>,
     /// Each [LinearConstraint] is indexed by AIR ID.
-    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in `per_air`.
+    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in
+    /// `per_air`.
+    pub trace_height_constraints: &'a [LinearConstraint],
+    pub vk_pre_hash: &'a PB::Commitment,
+}
+
+/// The proving key for a circuit consisting of multiple AIRs, after prover-specific data has been
+/// transferred to device. The host data (e.g., vkey) is owned by this struct.
+#[derive(derive_new::new)]
+pub struct DeviceMultiStarkProvingKey<PB: ProverBackend> {
+    pub per_air: Vec<DeviceStarkProvingKey<PB>>,
+    /// Each [LinearConstraint] is indexed by AIR ID.
+    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in
+    /// `per_air`.
     pub trace_height_constraints: Vec<LinearConstraint>,
     pub vk_pre_hash: PB::Commitment,
 }
 
-impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
-    pub fn new(
-        air_ids: Vec<usize>,
-        per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
-        trace_height_constraints: Vec<LinearConstraint>,
-        vk_pre_hash: PB::Commitment,
-    ) -> Self {
-        assert_eq!(air_ids.len(), per_air.len());
-        Self {
+impl<PB: ProverBackend> DeviceMultiStarkProvingKey<PB> {
+    pub fn view(&self, air_ids: Vec<usize>) -> DeviceMultiStarkProvingKeyView<'_, PB> {
+        let deduped: Vec<_> = air_ids.iter().dedup().collect();
+        assert_eq!(deduped.len(), air_ids.len(), "Duplicate AIR IDs found");
+        let per_air = air_ids.iter().map(|&id| &self.per_air[id]).collect();
+        DeviceMultiStarkProvingKeyView {
             air_ids,
             per_air,
-            trace_height_constraints,
-            vk_pre_hash,
+            trace_height_constraints: &self.trace_height_constraints,
+            vk_pre_hash: &self.vk_pre_hash,
         }
     }
 }
 
-pub struct DeviceStarkProvingKey<'a, PB: ProverBackend> {
+/// The proving key after prover-specific data has been transferred to device. The host data (e.g.,
+/// vkey) is owned by this struct.
+pub struct DeviceStarkProvingKey<PB: ProverBackend> {
     /// Type name of the AIR, for display purposes only
-    pub air_name: &'a str,
-    pub vk: &'a StarkVerifyingKey<PB::Val, PB::Commitment>,
+    pub air_name: String,
+    pub vk: StarkVerifyingKey<PB::Val, PB::Commitment>,
     /// Prover only data for preprocessed trace
     pub preprocessed_data: Option<SingleCommitPreimage<PB::Matrix, PB::PcsData>>,
     /// Additional configuration or preprocessed data for the RAP phases
@@ -79,6 +93,10 @@ impl<PB: ProverBackend> ProvingContext<PB> {
     pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<PB>> {
         self.per_air.into_iter().map(|(_, x)| x).collect()
     }
+
+    pub fn air_ids(&self) -> Vec<usize> {
+        self.per_air.iter().map(|(id, _)| *id).collect()
+    }
 }
 
 impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
@@ -100,13 +118,15 @@ impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
 #[derive(derive_new::new)]
 pub struct AirProvingContext<PB: ProverBackend> {
     /// Cached main trace matrices with commitments. One matrix per commitment.
-    // Note[jpw]: The cached data should have a lifetime since it may outlive a single proof invocation.
-    // But for now it's easier to assume `cached_mains` are owned, and any sharing is done via smart pointers.
+    // Note[jpw]: The cached data should have a lifetime since it may outlive a single proof
+    // invocation. But for now it's easier to assume `cached_mains` are owned, and any sharing
+    // is done via smart pointers.
     pub cached_mains: Vec<CommittedTraceData<PB>>,
     /// Common main trace matrix
     pub common_main: Option<PB::Matrix>,
     /// Public values
-    // [jpw] This is on host for now because it seems more convenient for the challenger to be on host.
+    // [jpw] This is on host for now because it seems more convenient for the challenger to be on
+    // host.
     pub public_values: Vec<PB::Val>,
 }
 
@@ -135,8 +155,8 @@ pub struct PairView<T, Val> {
 
 /// The full RAP trace consists of horizontal concatenation of multiple matrices of the same height:
 /// - preprocessed trace matrix
-/// - the main trace matrix is horizontally partitioned into multiple matrices,
-///   where each matrix can belong to a separate matrix commitment.
+/// - the main trace matrix is horizontally partitioned into multiple matrices, where each matrix
+///   can belong to a separate matrix commitment.
 /// - after each round of challenges, a trace matrix for trace allowed to use those challenges
 ///
 /// Each of these matrices is allowed to be in a separate commitment.

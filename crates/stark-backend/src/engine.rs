@@ -87,22 +87,21 @@ where
     /// which should be used if the proving key is already cached in device memory.
     fn prove_then_verify(
         &self,
-        mpk: &MultiStarkProvingKey<Self::SC>,
+        pk: &MultiStarkProvingKey<Self::SC>,
         ctx: ProvingContext<Self::PB>,
     ) -> Result<Proof<Self::SC>, VerificationError> {
-        let air_ids = ctx.per_air.iter().map(|(id, _)| *id).collect();
-        let mut prover = self.prover();
-        let mpk_view = prover.device.transport_pk_to_device(mpk, air_ids);
-        let proof = prover.prove(mpk_view, ctx).into();
-        self.verify(&mpk.get_vk(), &proof)?;
+        let pk_device = self.device().transport_pk_to_device(pk);
+        let proof = self.prove(&pk_device, ctx);
+        self.verify(&pk.get_vk(), &proof)?;
         Ok(proof)
     }
 
     fn prove(
         &self,
-        mpk_view: DeviceMultiStarkProvingKey<'_, Self::PB>,
+        pk: &DeviceMultiStarkProvingKey<Self::PB>,
         ctx: ProvingContext<Self::PB>,
     ) -> Proof<Self::SC> {
+        let mpk_view = pk.view(ctx.air_ids());
         let mut prover = self.prover();
         let proof = prover.prove(mpk_view, ctx);
         proof.into()

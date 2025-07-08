@@ -75,11 +75,11 @@ pub fn prove<
         chip.generate_proving_ctx(())
     };
     let ctx = ProvingContext::new(vec![(air_id, air_ctx)]);
-    let pk_view = engine.device().transport_pk_to_device(&pk, vec![air_id]);
+    let pk_device = engine.device().transport_pk_to_device(&pk);
     start = Instant::now();
     // Disable debug prover since we don't balance the buses
     disable_debug_builder();
-    let proof = engine.prove(pk_view, ctx);
+    let proof = engine.prove(&pk_device, ctx);
     benchmarks.prove_time_without_trace_gen = start.elapsed().as_micros();
 
     (vk, air, proof, benchmarks)
@@ -166,7 +166,8 @@ fn compare_provers(
     }
 }
 
-// Run with `RUSTFLAGS="-Ctarget-cpu=native" cargo t --release -- --ignored --nocapture bench_cached_trace_prover`
+// Run with `RUSTFLAGS="-Ctarget-cpu=native" cargo t --release -- --ignored --nocapture
+// bench_cached_trace_prover`
 #[test]
 #[ignore = "bench"]
 fn bench_cached_trace_prover() -> eyre::Result<()> {

@@ -214,11 +214,9 @@ fn test_optional_air() {
             count: vec![1, 2, 4],
             fields: vec![vec![1], vec![2], vec![3]],
         });
-        let pk_view = engine
-            .device()
-            .transport_pk_to_device(&pk, vec![recv_chip1_id]);
+        let pk_device = engine.device().transport_pk_to_device(&pk);
         let proof = engine.prove(
-            pk_view,
+            &pk_device,
             ProvingContext {
                 per_air: vec![(recv_chip1_id, recv_chip1.generate_proving_ctx(()))],
             },

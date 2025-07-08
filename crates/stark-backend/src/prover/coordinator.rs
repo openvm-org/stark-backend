@@ -8,7 +8,7 @@ use tracing::{info, info_span, instrument};
 
 use super::{
     hal::{ProverBackend, ProverDevice},
-    types::{DeviceMultiStarkProvingKey, HalProof, ProvingContext},
+    types::{HalProof, ProvingContext},
     Prover,
 };
 #[cfg(feature = "bench-metrics")]
@@ -17,7 +17,10 @@ use crate::{
     config::{Com, StarkGenericConfig, Val},
     keygen::view::MultiStarkVerifyingKeyView,
     proof::{AirProofData, Commitments},
-    prover::{hal::MatrixDimensions, types::AirView},
+    prover::{
+        hal::MatrixDimensions,
+        types::{AirView, DeviceMultiStarkProvingKeyView},
+    },
 };
 
 /// Host-to-device coordinator for full prover implementation.
@@ -57,7 +60,7 @@ where
 {
     type Proof = HalProof<PB>;
     type ProvingKeyView<'a>
-        = DeviceMultiStarkProvingKey<'a, PB>
+        = DeviceMultiStarkProvingKeyView<'a, PB>
     where
         Self: 'a;
 
@@ -70,7 +73,8 @@ where
     /// Handles trace generation of the permutation traces.
     /// Assumes the main traces have been generated and committed already.
     ///
-    /// The [DeviceMultiStarkProvingKey] should already be filtered to only include the relevant AIR's proving keys.
+    /// The [DeviceMultiStarkProvingKey] should already be filtered to only include the relevant
+    /// AIR's proving keys.
     #[instrument(name = "stark_prove_excluding_trace", level = "info", skip_all)]
     fn prove<'a>(
         &'a mut self,
@@ -105,8 +109,9 @@ where
             })
             .multiunzip();
 
-        // ==================== All trace commitments that do not require challenges ====================
-        // Commit all common main traces in a commitment. Traces inside are ordered by AIR id.
+        // ==================== All trace commitments that do not require challenges
+        // ==================== Commit all common main traces in a commitment. Traces inside
+        // are ordered by AIR id.
         let (common_main_traces, (common_main_commit, common_main_pcs_data)) =
             info_span!("main_trace_commit").in_scope(|| {
                 let traces = common_main_per_air.into_iter().flatten().collect_vec();
@@ -126,7 +131,8 @@ where
             .cloned()
             .collect();
 
-        // All commitments that don't require challenges have been made, so we collect them into trace views:
+        // All commitments that don't require challenges have been made, so we collect them into
+        // trace views:
         let mut common_main_traces_it = common_main_traces.into_iter();
         let mut log_trace_height_per_air: Vec<u8> = Vec::with_capacity(num_air);
         let mut air_trace_views_per_air = Vec::with_capacity(num_air);
@@ -170,7 +176,8 @@ where
                 .collect_vec(),
         );
 
-        // ==================== Partially prove all RAP phases that require challenges ====================
+        // ==================== Partially prove all RAP phases that require challenges
+        // ====================
         let (rap_partial_proof, prover_data_after) =
             self.device
                 .partially_prove(&mut self.challenger, &mpk, air_trace_views_per_air);
@@ -209,9 +216,9 @@ where
             })
             .collect_vec();
 
-        // ==================== Quotient polynomial computation and commitment, if any ====================
-        // Note[jpw]: Currently we always call this step, we could add a flag to skip it for protocols that
-        // do not require quotient poly.
+        // ==================== Quotient polynomial computation and commitment, if any
+        // ==================== Note[jpw]: Currently we always call this step, we could add
+        // a flag to skip it for protocols that do not require quotient poly.
         let (quotient_commit, quotient_data) = self.device.eval_and_commit_quotient(
             &mut self.challenger,
             &mpk.per_air,
@@ -234,8 +241,8 @@ where
 
             for pk in mpk.per_air {
                 quotient_degrees.push(pk.vk.quotient_degree);
-                if let Some(preprocessed_data) = pk.preprocessed_data {
-                    preprocessed.push(preprocessed_data.data);
+                if let Some(preprocessed_data) = &pk.preprocessed_data {
+                    preprocessed.push(&preprocessed_data.data);
                 }
             }
 
@@ -284,7 +291,7 @@ where
     }
 }
 
-impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
+impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKeyView<'a, PB> {
     pub(crate) fn validate(&self, ctx: &ProvingContext<PB>) -> bool {
         ctx.per_air.len() == self.air_ids.len()
             && ctx
@@ -297,8 +304,8 @@ impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
 
     pub(crate) fn vk_view(&'a self) -> MultiStarkVerifyingKeyView<'a, PB::Val, PB::Commitment> {
         MultiStarkVerifyingKeyView::new(
-            self.per_air.iter().map(|pk| pk.vk).collect(),
-            &self.trace_height_constraints,
+            self.per_air.iter().map(|pk| &pk.vk).collect(),
+            self.trace_height_constraints,
             self.vk_pre_hash.clone(),
         )
     }
