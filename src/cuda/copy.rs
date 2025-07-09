@@ -43,7 +43,7 @@ pub trait MemCopyH2D<T> {
 
 impl<T> MemCopyH2D<T> for [T] {
     fn copy_to(&self, dst: &mut DeviceBuffer<T>) -> Result<(), MemCopyError> {
-        if self.len() != dst.len() {
+        if self.len() > dst.len() {
             return Err(MemCopyError::SizeMismatch {
                 operation: "copy_to_device",
                 host_len: self.len(),

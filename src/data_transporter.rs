@@ -68,27 +68,29 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
     }
 
     fn transport_matrix_to_device(&self, matrix: &Arc<RowMajorMatrix<F>>) -> DeviceMatrix<F> {
-        // Convert RowMajorMatrix to flat vector and transfer to GPU
-        let data = matrix.values.as_slice();
-        let input_buffer = data.to_device().unwrap();
-        let output = DeviceMatrix::<F>::with_capacity(matrix.height(), matrix.width());
-        unsafe {
-            matrix_transpose::<F>(
-                output.buffer(),
-                &input_buffer,
-                matrix.width(),
-                matrix.height(),
-            )
-            .unwrap();
-        }
-        assert_eq!(output.strong_count(), 1);
-
-        output
+        transport_matrix_to_device(matrix.clone())
     }
 
     fn transport_pcs_data_to_device(&self, _pcs_data: &PcsData<SC>) -> GpuPcsData {
         unimplemented!()
     }
+}
+
+pub fn transport_matrix_to_device(matrix: Arc<RowMajorMatrix<F>>) -> DeviceMatrix<F> {
+    let data = matrix.values.as_slice();
+    let input_buffer = data.to_device().unwrap();
+    let output = DeviceMatrix::<F>::with_capacity(matrix.height(), matrix.width());
+    unsafe {
+        matrix_transpose::<F>(
+            output.buffer(),
+            &input_buffer,
+            matrix.width(),
+            matrix.height(),
+        )
+        .unwrap();
+    }
+    assert_eq!(output.strong_count(), 1);
+    output
 }
 
 pub fn transport_device_matrix_to_host<T: Clone + Send + Sync>(
