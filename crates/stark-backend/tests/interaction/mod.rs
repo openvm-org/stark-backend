@@ -6,11 +6,14 @@ use openvm_stark_backend::{
     interaction::RapPhaseSeq,
     keygen::{types::LinearConstraint, MultiStarkKeygenBuilder},
     p3_field::FieldAlgebra,
+    utils::disable_debug_builder,
     verifier::VerificationError,
 };
 use openvm_stark_sdk::{
-    any_rap_arc_vec, config,
-    dummy_airs::interaction::{dummy_interaction_air::DummyInteractionAir, verify_interactions},
+    any_rap_arc_vec,
+    config::{self, baby_bear_poseidon2::BabyBearPoseidon2Engine},
+    dummy_airs::interaction::dummy_interaction_air::DummyInteractionAir,
+    engine::StarkFriEngine,
 };
 use p3_baby_bear::BabyBear;
 use p3_field::PrimeField32;
@@ -109,9 +112,9 @@ fn test_interaction_fib_selector_happy_path() {
     }
     let sender_trace = RowMajorMatrix::new(vals, 2);
     let sender_air = DummyInteractionAir::new(1, true, 0);
-    verify_interactions(
-        vec![trace, sender_trace],
+    BabyBearPoseidon2Engine::run_simple_test_fast(
         any_rap_arc_vec![air, sender_air],
+        vec![trace, sender_trace],
         vec![pis, vec![]],
     )
     .expect("Verification failed");
@@ -144,9 +147,9 @@ fn test_interaction_stark_multi_rows_happy_path() {
         2,
     );
     let receiver_air = DummyInteractionAir::new(1, false, 0);
-    verify_interactions(
-        vec![sender_trace, receiver_trace],
+    BabyBearPoseidon2Engine::run_simple_test_fast(
         any_rap_arc_vec![sender_air, receiver_air],
+        vec![sender_trace, receiver_trace],
         vec![vec![], vec![]],
     )
     .expect("Verification failed");
@@ -177,11 +180,13 @@ fn test_interaction_stark_multi_rows_neg() {
         2,
     );
     let receiver_air = DummyInteractionAir::new(1, false, 0);
-    let res = verify_interactions(
-        vec![sender_trace, receiver_trace],
+    disable_debug_builder();
+    let res = BabyBearPoseidon2Engine::run_simple_test_fast(
         any_rap_arc_vec![sender_air, receiver_air],
+        vec![sender_trace, receiver_trace],
         vec![vec![], vec![]],
-    );
+    )
+    .map(|_| ());
     assert_eq!(res, Err(VerificationError::ChallengePhaseError));
 }
 
@@ -194,9 +199,9 @@ fn test_interaction_stark_all_0_sender_happy_path() {
     //   0  589
     let sender_trace = RowMajorMatrix::new(to_field_vec(vec![0, 1, 0, 5, 0, 4, 0, 889]), 2);
     let sender_air = DummyInteractionAir::new(1, true, 0);
-    verify_interactions(
-        vec![sender_trace],
+    BabyBearPoseidon2Engine::run_simple_test_fast(
         any_rap_arc_vec![sender_air],
+        vec![sender_trace],
         vec![vec![]],
     )
     .expect("Verification failed");
@@ -233,9 +238,9 @@ fn test_interaction_stark_multi_senders_happy_path() {
         2,
     );
     let receiver_air = DummyInteractionAir::new(1, false, 0);
-    verify_interactions(
-        vec![sender_trace1, sender_trace2, receiver_trace],
+    BabyBearPoseidon2Engine::run_simple_test_fast(
         any_rap_arc_vec![sender_air, sender_air, receiver_air],
+        vec![sender_trace1, sender_trace2, receiver_trace],
         vec![vec![]; 3],
     )
     .expect("Verification failed");
@@ -272,11 +277,13 @@ fn test_interaction_stark_multi_senders_neg() {
         2,
     );
     let receiver_air = DummyInteractionAir::new(1, false, 0);
-    let res = verify_interactions(
-        vec![sender_trace1, sender_trace2, receiver_trace],
+    disable_debug_builder();
+    let res = BabyBearPoseidon2Engine::run_simple_test_fast(
         any_rap_arc_vec![sender_air, sender_air, receiver_air],
+        vec![sender_trace1, sender_trace2, receiver_trace],
         vec![vec![]; 3],
-    );
+    )
+    .map(|_| ());
     assert_eq!(res, Err(VerificationError::ChallengePhaseError));
 }
 
@@ -315,14 +322,14 @@ fn test_interaction_stark_multi_sender_receiver_happy_path() {
     //   1  889
     let receiver_trace2 = RowMajorMatrix::new(to_field_vec(vec![1, 889]), 2);
     let receiver_air = DummyInteractionAir::new(1, false, 0);
-    verify_interactions(
+    BabyBearPoseidon2Engine::run_simple_test_fast(
+        any_rap_arc_vec![sender_air, sender_air, receiver_air, receiver_air],
         vec![
             sender_trace1,
             sender_trace2,
             receiver_trace1,
             receiver_trace2,
         ],
-        any_rap_arc_vec![sender_air, sender_air, receiver_air, receiver_air],
         vec![vec![]; 4],
     )
     .expect("Verification failed");

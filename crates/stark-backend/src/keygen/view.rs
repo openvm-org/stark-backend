@@ -30,7 +30,8 @@ impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
 }
 
 impl<Val, Com: Clone> MultiStarkVerifyingKeyView<'_, Val, Com> {
-    /// Returns the preprocessed commit of each AIR. If the AIR does not have a preprocessed trace, returns None.
+    /// Returns the preprocessed commit of each AIR. If the AIR does not have a preprocessed trace,
+    /// returns None.
     pub fn preprocessed_commits(&self) -> Vec<Option<Com>> {
         self.per_air
             .iter()
@@ -77,6 +78,14 @@ impl<Val, Com: Clone> MultiStarkVerifyingKeyView<'_, Val, Com> {
             .unwrap_or_else(|| panic!("No challenges used in challenge phase {phase_idx}"))
     }
 
+    /// Returns the main width for each AIR.
+    pub fn main_widths(&self) -> Vec<usize> {
+        self.per_air
+            .iter()
+            .map(|vk| vk.params.width.main_width())
+            .collect()
+    }
+
     /// Returns the total width for each AIR.
     pub fn total_widths<E>(&self) -> Vec<usize>
     where
@@ -85,12 +94,7 @@ impl<Val, Com: Clone> MultiStarkVerifyingKeyView<'_, Val, Com> {
     {
         self.per_air
             .iter()
-            .map(|vk| {
-                vk.params.width.preprocessed.unwrap_or(0)
-                    + vk.params.width.cached_mains.iter().sum::<usize>()
-                    + vk.params.width.common_main
-                    + vk.params.width.after_challenge.iter().sum::<usize>() * E::D
-            })
+            .map(|vk| vk.params.width.total_width(E::D))
             .collect()
     }
 

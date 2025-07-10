@@ -4,8 +4,8 @@ use itertools::zip_eq;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use super::{hal::ProverBackend, types::DeviceMultiStarkProvingKey};
-use crate::keygen::types::TraceWidth;
+use super::hal::ProverBackend;
+use crate::{keygen::types::TraceWidth, prover::types::DeviceMultiStarkProvingKeyView};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceMetrics {
@@ -116,7 +116,7 @@ impl Display for SingleTraceMetrics {
 
 /// heights are the trace heights for each air
 pub fn trace_metrics<PB: ProverBackend>(
-    mpk: &DeviceMultiStarkProvingKey<PB>,
+    mpk: &DeviceMultiStarkProvingKeyView<PB>,
     log_trace_heights: &[u8],
 ) -> TraceMetrics {
     let heights = log_trace_heights
@@ -140,7 +140,7 @@ pub fn trace_metrics<PB: ProverBackend>(
         .collect::<Vec<_>>();
     let per_air: Vec<_> = zip_eq(&mpk.per_air, heights)
         .map(|(pk, height)| {
-            let air_name = pk.air_name;
+            let air_name = &pk.air_name;
             let mut width = pk.vk.params.width.clone();
             let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
             for w in &mut width.after_challenge {

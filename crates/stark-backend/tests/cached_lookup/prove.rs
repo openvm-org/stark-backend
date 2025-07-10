@@ -5,8 +5,16 @@ use std::{
 };
 
 use openvm_stark_backend::{
-    config::StarkGenericConfig, keygen::types::MultiStarkVerifyingKey, proof::Proof,
-    prover::types::ProofInput, utils::disable_debug_builder, Chip,
+    config::StarkGenericConfig,
+    keygen::types::MultiStarkVerifyingKey,
+    proof::Proof,
+    prover::{
+        cpu::{CpuBackend, CpuDevice},
+        hal::DeviceDataTransporter,
+        types::ProvingContext,
+    },
+    utils::disable_debug_builder,
+    Chip,
 };
 use openvm_stark_sdk::{
     config::{
@@ -25,7 +33,10 @@ use serde::{Deserialize, Serialize};
 
 // Lookup table is cached, everything else (including counts) is committed together
 #[allow(clippy::type_complexity)]
-pub fn prove<SC: StarkGenericConfig, E: StarkEngine<SC>>(
+pub fn prove<
+    SC: StarkGenericConfig,
+    E: StarkEngine<SC = SC, PB = CpuBackend<SC>, PD = CpuDevice<SC>>,
+>(
     engine: &E,
     trace: Vec<(u32, Vec<u32>)>,
     partition: bool,
@@ -35,8 +46,12 @@ pub fn prove<SC: StarkGenericConfig, E: StarkEngine<SC>>(
     Proof<SC>,
     ProverBenchmarks,
 ) {
-    let mut chip =
-        DummyInteractionChip::new_with_partition(engine.config(), trace[0].1.len(), false, 0);
+    let mut chip = DummyInteractionChip::new_with_partition(
+        engine.device().clone(),
+        trace[0].1.len(),
+        false,
+        0,
+    );
     let (count, fields): (Vec<_>, Vec<_>) = trace.into_iter().unzip();
     let data = DummyInteractionData { count, fields };
     chip.load_data(data);
@@ -50,23 +65,21 @@ pub fn prove<SC: StarkGenericConfig, E: StarkEngine<SC>>(
     let air = Arc::new(chip.air);
     // Must add trace matrices in the same order as above
     let mut start;
-    let air_proof_input = if partition {
+    let air_ctx = if partition {
         start = Instant::now();
         // Receiver fields table is cached
-        let ret = chip.generate_air_proof_input_with_id(air_id);
+        let ctx = chip.generate_proving_ctx(());
         benchmarks.cached_commit_time = start.elapsed().as_micros();
-        ret
+        ctx
     } else {
-        chip.generate_air_proof_input_with_id(air_id)
+        chip.generate_proving_ctx(())
     };
-    let proof_input = ProofInput {
-        per_air: vec![air_proof_input],
-    };
+    let ctx = ProvingContext::new(vec![(air_id, air_ctx)]);
+    let pk_device = engine.device().transport_pk_to_device(&pk);
     start = Instant::now();
-
     // Disable debug prover since we don't balance the buses
     disable_debug_builder();
-    let proof = engine.prove(&pk, proof_input);
+    let proof = engine.prove(&pk_device, ctx);
     benchmarks.prove_time_without_trace_gen = start.elapsed().as_micros();
 
     (vk, air, proof, benchmarks)
@@ -153,7 +166,8 @@ fn compare_provers(
     }
 }
 
-// Run with `RUSTFLAGS="-Ctarget-cpu=native" cargo t --release -- --ignored --nocapture bench_cached_trace_prover`
+// Run with `RUSTFLAGS="-Ctarget-cpu=native" cargo t --release -- --ignored --nocapture
+// bench_cached_trace_prover`
 #[test]
 #[ignore = "bench"]
 fn bench_cached_trace_prover() -> eyre::Result<()> {
