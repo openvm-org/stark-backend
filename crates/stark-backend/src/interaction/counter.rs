@@ -1,4 +1,4 @@
-use p3_air::{AirBuilder, AirBuilderWithPublicValues, BaseAir};
+use p3_air::{AirBuilder, AirBuilderWithPublicValues, BaseAir, PairBuilder};
 use p3_field::{Field, FieldAlgebra};
 use p3_matrix::{dense::DenseMatrix, Matrix};
 
@@ -20,7 +20,7 @@ pub struct DummyExpr<F: Field> {
 
 impl<F: Field> DummyExpr<F> {
     #[inline(always)]
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             _phantom: std::marker::PhantomData,
         }
@@ -311,6 +311,15 @@ impl<F: Field> AirBuilderWithPublicValues for InteractionCounterBuilder<F> {
     #[inline(always)]
     fn public_values(&self) -> &[Self::PublicVar] {
         &[]
+    }
+}
+
+impl<F: Field> PairBuilder for InteractionCounterBuilder<F> {
+    #[inline(always)]
+    fn preprocessed(&self) -> Self::M {
+        DummyMatrix {
+            _phantom: std::marker::PhantomData,
+        }
     }
 }
 

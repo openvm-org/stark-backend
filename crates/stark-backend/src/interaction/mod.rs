@@ -13,6 +13,7 @@ use crate::{
     prover::types::PairView,
 };
 
+pub mod counter;
 /// Interaction debugging tools
 pub mod debug;
 pub mod fri_log_up;

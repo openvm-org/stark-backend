@@ -2,7 +2,6 @@ use p3_air::AirBuilder;
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 
 pub mod debug;
-pub mod interaction_counter;
 pub mod sub;
 /// AIR builder that collects the constraints expressed via the [Air](p3_air::Air) trait into
 /// a directed acyclic graph of symbolic expressions for serialization purposes.

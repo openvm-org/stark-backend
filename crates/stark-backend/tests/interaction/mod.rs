@@ -1,3 +1,5 @@
+mod counter;
+
 use std::sync::Arc;
 
 use itertools::Itertools;
