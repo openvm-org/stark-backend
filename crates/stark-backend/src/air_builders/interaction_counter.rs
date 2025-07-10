@@ -19,7 +19,7 @@ pub struct DummyExpr<F: Field> {
 }
 
 impl<F: Field> DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn new() -> Self {
         Self {
             _phantom: std::marker::PhantomData,
@@ -28,7 +28,7 @@ impl<F: Field> DummyExpr<F> {
 }
 
 impl<F: Field> From<F> for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn from(_: F) -> Self {
         Self::new()
     }
@@ -50,47 +50,47 @@ impl<F: Field> FieldAlgebra for DummyExpr<F> {
         _phantom: std::marker::PhantomData,
     };
 
-    #[inline]
+    #[inline(always)]
     fn from_f(_f: Self::F) -> Self {
         Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_bool(_b: bool) -> Self {
         Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_canonical_u8(_n: u8) -> Self {
         Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_canonical_u16(_n: u16) -> Self {
         Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_canonical_u32(_n: u32) -> Self {
         Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_canonical_u64(_n: u64) -> Self {
         Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_canonical_usize(_n: usize) -> Self {
         Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_wrapped_u32(_n: u32) -> Self {
         Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_wrapped_u64(_n: u64) -> Self {
         Self::new()
     }
@@ -99,7 +99,7 @@ impl<F: Field> FieldAlgebra for DummyExpr<F> {
 // Arithmetic operations
 impl<F: Field> std::ops::Add for DummyExpr<F> {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn add(self, _: Self) -> Self {
         Self::new()
     }
@@ -107,7 +107,7 @@ impl<F: Field> std::ops::Add for DummyExpr<F> {
 
 impl<F: Field> std::ops::Add<F> for DummyExpr<F> {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn add(self, _: F) -> Self {
         Self::new()
     }
@@ -115,7 +115,7 @@ impl<F: Field> std::ops::Add<F> for DummyExpr<F> {
 
 impl<F: Field> std::ops::Sub for DummyExpr<F> {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn sub(self, _: Self) -> Self {
         Self::new()
     }
@@ -123,7 +123,7 @@ impl<F: Field> std::ops::Sub for DummyExpr<F> {
 
 impl<F: Field> std::ops::Sub<F> for DummyExpr<F> {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn sub(self, _: F) -> Self {
         Self::new()
     }
@@ -131,7 +131,7 @@ impl<F: Field> std::ops::Sub<F> for DummyExpr<F> {
 
 impl<F: Field> std::ops::Mul for DummyExpr<F> {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn mul(self, _: Self) -> Self {
         Self::new()
     }
@@ -139,7 +139,7 @@ impl<F: Field> std::ops::Mul for DummyExpr<F> {
 
 impl<F: Field> std::ops::Mul<F> for DummyExpr<F> {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn mul(self, _: F) -> Self {
         Self::new()
     }
@@ -147,51 +147,51 @@ impl<F: Field> std::ops::Mul<F> for DummyExpr<F> {
 
 impl<F: Field> std::ops::Neg for DummyExpr<F> {
     type Output = Self;
-    #[inline]
+    #[inline(always)]
     fn neg(self) -> Self {
         Self::new()
     }
 }
 
 impl<F: Field> std::ops::AddAssign for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn add_assign(&mut self, _: Self) {}
 }
 
 impl<F: Field> std::ops::AddAssign<F> for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn add_assign(&mut self, _: F) {}
 }
 
 impl<F: Field> std::ops::SubAssign for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn sub_assign(&mut self, _: Self) {}
 }
 
 impl<F: Field> std::ops::SubAssign<F> for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn sub_assign(&mut self, _: F) {}
 }
 
 impl<F: Field> std::ops::MulAssign for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn mul_assign(&mut self, _: Self) {}
 }
 
 impl<F: Field> std::ops::MulAssign<F> for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn mul_assign(&mut self, _: F) {}
 }
 
 impl<F: Field> std::iter::Sum for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn sum<I: Iterator<Item = Self>>(_iter: I) -> Self {
         Self::new()
     }
 }
 
 impl<F: Field> std::iter::Product for DummyExpr<F> {
-    #[inline]
+    #[inline(always)]
     fn product<I: Iterator<Item = Self>>(_iter: I) -> Self {
         Self::new()
     }
@@ -205,7 +205,7 @@ pub struct DummyRowIter<F: Field> {
 impl<F: Field> Iterator for DummyRowIter<F> {
     type Item = DummyExpr<F>;
 
-    #[inline]
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         None
     }
@@ -217,12 +217,12 @@ pub struct DummyMatrix<F: Field> {
 }
 
 impl<F: Field> Matrix<DummyExpr<F>> for DummyMatrix<F> {
-    #[inline]
+    #[inline(always)]
     fn width(&self) -> usize {
         0
     }
 
-    #[inline]
+    #[inline(always)]
     fn height(&self) -> usize {
         0
     }
@@ -232,7 +232,7 @@ impl<F: Field> Matrix<DummyExpr<F>> for DummyMatrix<F> {
     where
         Self: 'a;
 
-    #[inline]
+    #[inline(always)]
     fn row(&self, _r: usize) -> Self::Row<'_> {
         DummyRowIter {
             _phantom: std::marker::PhantomData,
@@ -241,7 +241,7 @@ impl<F: Field> Matrix<DummyExpr<F>> for DummyMatrix<F> {
 }
 
 impl<F: Field> InteractionCounterBuilder<F> {
-    #[inline]
+    #[inline(always)]
     pub fn new() -> Self {
         Self {
             interaction_count: 0,
@@ -249,19 +249,19 @@ impl<F: Field> InteractionCounterBuilder<F> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn interaction_count(&self) -> usize {
         self.interaction_count
     }
 }
 
 impl<F: Field> BaseAir<F> for InteractionCounterBuilder<F> {
-    #[inline]
+    #[inline(always)]
     fn width(&self) -> usize {
         0
     }
 
-    #[inline]
+    #[inline(always)]
     fn preprocessed_trace(&self) -> Option<DenseMatrix<F>> {
         None
     }
@@ -273,49 +273,49 @@ impl<F: Field> AirBuilder for InteractionCounterBuilder<F> {
     type Var = DummyExpr<F>;
     type M = DummyMatrix<F>;
 
-    #[inline]
+    #[inline(always)]
     fn main(&self) -> Self::M {
         DummyMatrix {
             _phantom: std::marker::PhantomData,
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_first_row(&self) -> Self::Expr {
         DummyExpr::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_last_row(&self) -> Self::Expr {
         DummyExpr::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_transition_window(&self, _size: usize) -> Self::Expr {
         DummyExpr::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn assert_zero<I: Into<Self::Expr>>(&mut self, _x: I) {}
 
-    #[inline]
+    #[inline(always)]
     fn assert_one<I: Into<Self::Expr>>(&mut self, _x: I) {}
 
-    #[inline]
+    #[inline(always)]
     fn assert_eq<I1: Into<Self::Expr>, I2: Into<Self::Expr>>(&mut self, _x: I1, _y: I2) {}
 }
 
 impl<F: Field> AirBuilderWithPublicValues for InteractionCounterBuilder<F> {
     type PublicVar = DummyExpr<F>;
 
-    #[inline]
+    #[inline(always)]
     fn public_values(&self) -> &[Self::PublicVar] {
         &[]
     }
 }
 
 impl<F: Field> InteractionBuilder for InteractionCounterBuilder<F> {
-    #[inline]
+    #[inline(always)]
     fn push_interaction<E: Into<Self::Expr>>(
         &mut self,
         _bus_index: u16,
@@ -326,7 +326,7 @@ impl<F: Field> InteractionBuilder for InteractionCounterBuilder<F> {
         self.interaction_count += 1;
     }
 
-    #[inline]
+    #[inline(always)]
     fn num_interactions(&self) -> usize {
         self.interaction_count
     }
