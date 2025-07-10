@@ -76,7 +76,8 @@ pub struct SingleCommitPreimage<Matrix, PcsData> {
 }
 
 /// Commitment to a single trace matrix, together with the trace matrix and prover data.
-#[derive(Clone)]
+#[derive(Derivative)]
+#[derivative(Clone(bound = "PB::Matrix: Clone, PB::PcsData: Clone"))]
 pub struct CommittedTraceData<PB: ProverBackend> {
     pub commitment: PB::Commitment,
     pub trace: PB::Matrix,
@@ -115,7 +116,8 @@ impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
 /// Public values: for each AIR, a separate list of public values.
 /// The prover can support global public values that are shared among all AIRs,
 /// but we currently split public values per-AIR for modularity.
-#[derive(derive_new::new)]
+#[derive(Derivative, derive_new::new)]
+#[derivative(Clone(bound = "PB::Matrix: Clone, PB::PcsData: Clone"))]
 pub struct AirProvingContext<PB: ProverBackend> {
     /// Cached main trace matrices with commitments. One matrix per commitment.
     // Note[jpw]: The cached data should have a lifetime since it may outlive a single proof
