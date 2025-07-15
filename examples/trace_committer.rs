@@ -62,11 +62,12 @@ fn main() {
     let trace_vec = vec![matrix.clone(); matrix_num.try_into().unwrap()];
 
     // --- CPU commit ---
-    let config = config_from_perm(
+    #[allow(clippy::arc_with_non_send_sync)]
+    let config = Arc::new(config_from_perm(
         &default_perm(),
         SecurityParameters::standard_100_bits_with_fri_log_blowup(log_blowup),
-    );
-    let cpu_device = CpuDevice::<BabyBearPoseidon2Config>::new(&config, log_blowup);
+    ));
+    let cpu_device = CpuDevice::<BabyBearPoseidon2Config>::new(config, log_blowup);
     let cpu_time = std::time::Instant::now();
     let (root, _pcs_data) = cpu_device.commit(&trace_vec);
     let cpu_time = cpu_time.elapsed();
