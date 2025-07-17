@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, collections::HashMap};
+use std::{cmp::Reverse, collections::HashMap, sync::Arc};
 
 use itertools::Itertools;
 use openvm_stark_backend::prover::hal::MatrixDimensions;
@@ -22,9 +22,10 @@ use crate::{
 const DIGEST_WIDTH: usize = 8;
 type H = [F; DIGEST_WIDTH];
 
+#[derive(Clone)]
 pub struct GpuMerkleTree<LDE: GpuLde> {
     pub(crate) leaves: Vec<LDE>,
-    pub(crate) digest_layers: Vec<DeviceBuffer<H>>,
+    pub(crate) digest_layers: Vec<Arc<DeviceBuffer<H>>>,
 }
 
 impl<LDE: GpuLde> GpuMerkleTree<LDE> {
@@ -38,7 +39,7 @@ impl<LDE: GpuLde> GpuMerkleTree<LDE> {
 
         let max_height = matrices_largest_first.peek().unwrap().height();
 
-        let digests = DeviceBuffer::<H>::with_capacity(max_height);
+        let digests = Arc::new(DeviceBuffer::<H>::with_capacity(max_height));
         {
             let tallest_matrices = matrices_largest_first
                 .peeking_take_while(|m| m.height() == max_height)
@@ -47,14 +48,14 @@ impl<LDE: GpuLde> GpuMerkleTree<LDE> {
 
             Self::hash_matrices(&digests, &tallest_matrices).unwrap();
         }
-        let mut digest_layers: Vec<DeviceBuffer<H>> = vec![digests];
+        let mut digest_layers: Vec<Arc<DeviceBuffer<H>>> = vec![digests];
         loop {
             let prev_layer = digest_layers.last().unwrap();
             if prev_layer.len() == 1 {
                 break;
             }
             let next_layer_len = prev_layer.len() / 2;
-            let next_layer = DeviceBuffer::<H>::with_capacity(next_layer_len);
+            let next_layer = Arc::new(DeviceBuffer::<H>::with_capacity(next_layer_len));
             let is_inject = {
                 let matrices_to_inject = matrices_largest_first
                     .peeking_take_while(|m| m.height().next_power_of_two() == next_layer_len)
@@ -222,7 +223,7 @@ impl<LDE: GpuLde> GpuMerkleTree<LDE> {
     }
 
     fn query_digest_layers(
-        digest_layers: &[DeviceBuffer<H>],
+        digest_layers: &[Arc<DeviceBuffer<H>>],
         indices: &[u64],
         num_query: usize,
         num_layer: usize,

@@ -50,8 +50,10 @@ enum GpuLdeDataType {
 pub trait GpuLdeMode {}
 
 /// Fully precomputes and stores LDE matrix at construction.
+#[derive(Clone)]
 pub struct Cached;
 /// Computes LDE matrix on each request without storing it.
+#[derive(Clone)]
 pub struct OnDemand;
 
 impl GpuLdeMode for Cached {}
@@ -60,6 +62,7 @@ impl GpuLdeMode for OnDemand {}
 pub type GpuLdeCached = GpuLdeImpl<Cached>;
 pub type GpuLdeOnDemand = GpuLdeImpl<OnDemand>;
 
+#[derive(Clone)]
 pub struct GpuLdeImpl<M: GpuLdeMode> {
     device_id: u32,
     data: GpuLdeDataType,

@@ -55,6 +55,7 @@ impl ProverBackend for GpuBackend {
     type RapPartialProvingKey = RapPartialProvingKey<SC>;
 }
 
+#[derive(Clone)]
 pub struct GpuPcsData {
     pub data: GpuMerkleTree<GpuLdeDefault>,
     pub log_trace_heights: Vec<u8>,
