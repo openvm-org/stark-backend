@@ -1,5 +1,7 @@
 # OpenVM Stark Backend
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/openvm-org/stark-backend)
+
 [Contributor Docs](./docs)
 | [Crate Docs](https://docs.openvm.dev/stark-backend)
 
