@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
 use openvm_stark_backend::{
+    config::{Com, PcsProverData, Val},
     keygen::types::MultiStarkProvingKey,
     prover::{
-        cpu::PcsData,
         hal::{DeviceDataTransporter, MatrixDimensions, TraceCommitter},
-        types::{DeviceMultiStarkProvingKey, DeviceStarkProvingKey, SingleCommitPreimage},
+        types::{
+            CommittedTraceData, DeviceMultiStarkProvingKey, DeviceStarkProvingKey,
+            SingleCommitPreimage,
+        },
     },
 };
 use p3_matrix::dense::RowMajorMatrix;
@@ -19,7 +22,7 @@ use crate::{
     },
     gpu_device::GpuDevice,
     prelude::{F, SC},
-    prover_backend::{GpuBackend, GpuPcsData},
+    prover_backend::GpuBackend,
 };
 
 impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
@@ -61,8 +64,24 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
         transport_matrix_to_device(matrix.clone())
     }
 
-    fn transport_pcs_data_to_device(&self, _pcs_data: &PcsData<SC>) -> GpuPcsData {
-        unimplemented!()
+    /// We ignore the host prover data because it's faster to just re-commit on GPU instead of doing H2D transfer.
+    fn transport_committed_trace_to_device(
+        &self,
+        commitment: Com<SC>,
+        trace: &Arc<RowMajorMatrix<Val<SC>>>,
+        _: &Arc<PcsProverData<SC>>,
+    ) -> CommittedTraceData<GpuBackend> {
+        let trace = self.transport_matrix_to_device(trace);
+        let (d_commitment, data) = self.commit(&[trace.clone()]);
+        assert_eq!(
+            d_commitment, commitment,
+            "GPU commitment does not match host"
+        );
+        CommittedTraceData {
+            commitment,
+            trace,
+            data,
+        }
     }
 
     fn transport_matrix_from_device_to_host(
