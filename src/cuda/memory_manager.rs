@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 
 use crate::cuda::{
     error::{check, MemoryError},
-    stream::{cudaStreamPerThread, cudaStream_t, stream_sync},
+    stream::{cudaStreamPerThread, cudaStream_t, default_stream_sync},
 };
 
 #[link(name = "cudart")]
@@ -72,7 +72,7 @@ impl Drop for MemoryManager {
         for &nn in self.allocated_ptrs.keys() {
             unsafe { d_free(nn.as_ptr()).unwrap() };
         }
-        stream_sync().unwrap();
+        default_stream_sync().unwrap();
         if !self.allocated_ptrs.is_empty() {
             println!(
                 "Warning: {} allocations were automatically freed on MemoryManager drop",
