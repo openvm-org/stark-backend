@@ -14,9 +14,9 @@ use super::types::{
     AirView, DeviceMultiStarkProvingKey, DeviceStarkProvingKey, ProverDataAfterRapPhases,
 };
 use crate::{
-    config::{Com, StarkGenericConfig, Val},
+    config::{Com, PcsProverData, StarkGenericConfig, Val},
     keygen::types::MultiStarkProvingKey,
-    prover::types::DeviceMultiStarkProvingKeyView,
+    prover::types::{CommittedTraceData, DeviceMultiStarkProvingKeyView},
 };
 
 /// Associated types needed by the prover, in the form of buffers and views,
@@ -164,7 +164,14 @@ where
 
     fn transport_matrix_to_device(&self, matrix: &Arc<RowMajorMatrix<Val<SC>>>) -> PB::Matrix;
 
-    fn transport_pcs_data_to_device(&self, data: &super::cpu::PcsData<SC>) -> PB::PcsData;
+    /// The `commitment` and `prover_data` are assumed to have been previously computed from the
+    /// `trace`.
+    fn transport_committed_trace_to_device(
+        &self,
+        commitment: Com<SC>,
+        trace: &Arc<RowMajorMatrix<Val<SC>>>,
+        prover_data: &Arc<PcsProverData<SC>>,
+    ) -> CommittedTraceData<PB>;
 
     /// Transport a device matrix to host. This should only be used for testing / debugging
     /// purposes.

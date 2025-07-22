@@ -29,7 +29,7 @@ use crate::{
     proof::OpeningProof,
     prover::{
         hal::TraceCommitter,
-        types::{DeviceMultiStarkProvingKeyView, PairView, RapSinglePhaseView},
+        types::{CommittedTraceData, DeviceMultiStarkProvingKeyView, PairView, RapSinglePhaseView},
     },
 };
 
@@ -488,8 +488,19 @@ where
         matrix.clone()
     }
 
-    fn transport_pcs_data_to_device(&self, data: &PcsData<SC>) -> PcsData<SC> {
-        data.clone()
+    fn transport_committed_trace_to_device(
+        &self,
+        commitment: Com<SC>,
+        trace: &Arc<RowMajorMatrix<Val<SC>>>,
+        prover_data: &Arc<PcsProverData<SC>>,
+    ) -> CommittedTraceData<CpuBackend<SC>> {
+        let log_trace_height: u8 = log2_strict_usize(trace.height()).try_into().unwrap();
+        let data = PcsData::new(prover_data.clone(), vec![log_trace_height]);
+        CommittedTraceData {
+            commitment,
+            trace: trace.clone(),
+            data,
+        }
     }
 
     fn transport_matrix_from_device_to_host(
