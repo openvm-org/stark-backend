@@ -1,12 +1,15 @@
 use itertools::Itertools;
-use openvm_circuit::arch::testing::{VmChipTestBuilder, VmChipTester, BITWISE_OP_LOOKUP_BUS};
+use openvm_circuit::arch::{
+    testing::{VmChipTestBuilder, VmChipTester, BITWISE_OP_LOOKUP_BUS},
+    VmChipWrapper,
+};
 use openvm_circuit_primitives::bitwise_op_lookup::{
     BitwiseOperationLookupBus, SharedBitwiseOperationLookupChip,
 };
 use openvm_instructions::{instruction::Instruction, LocalOpcode};
 use openvm_keccak256_circuit::{KeccakVmAir, KeccakVmChip, KeccakVmStep};
 use openvm_keccak256_transpiler::Rv32KeccakOpcode;
-use openvm_stark_backend::prover::types::ProofInput;
+use openvm_stark_backend::prover::types::ProvingContext;
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{BabyBearPoseidon2Config, BabyBearPoseidon2Engine},
@@ -28,7 +31,7 @@ fn build_keccak256_test(inputs: Vec<Vec<u8>>) -> VmChipTester<BabyBearPoseidon2C
     let bitwise_chip = SharedBitwiseOperationLookupChip::<8>::new(bitwise_bus);
 
     let mut tester = VmChipTestBuilder::default();
-    let mut chip = KeccakVmChip::new(
+    let mut chip = VmChipWrapper::new(
         KeccakVmAir::new(
             tester.execution_bridge(),
             tester.memory_bridge(),
@@ -118,7 +121,7 @@ fn main() {
         .collect_vec();
 
     let pk = keygen_builder.generate_pk();
-    let cpu_proof_input = ProofInput::new(air_id_and_inputs);
+    let cpu_proof_input = ProvingContext::new(air_id_and_inputs);
     let gpu_proof_input = cpu_proof_input.clone();
 
     // CPU

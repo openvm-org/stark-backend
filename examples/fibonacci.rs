@@ -1,7 +1,13 @@
+use std::sync::Arc;
+
 use itertools::zip_eq;
 use openvm_stark_backend::{
     engine::StarkEngine,
-    prover::types::{AirProofInput, ProofInput},
+    prover::{
+        cpu::CpuBackend,
+        hal::DeviceDataTransporter,
+        types::{AirProvingContext, ProvingContext},
+    },
 };
 use openvm_stark_sdk::{
     any_rap_arc_vec,
@@ -11,7 +17,9 @@ use openvm_stark_sdk::{
 };
 use p3_baby_bear::BabyBear;
 use p3_field::FieldAlgebra;
-use stark_backend_gpu::engine::GpuBabyBearPoseidon2Engine;
+use stark_backend_gpu::{
+    engine::GpuBabyBearPoseidon2Engine, prover_backend::GpuBackend, types::SC,
+};
 
 const LOG_BLOWUP: usize = 2;
 const LOG_TRACE_DEGREE: usize = 3;
@@ -38,40 +46,43 @@ fn main() {
     setup_tracing();
     println!("test_single_fib_stark");
 
-    let pis = [A, B, get_fib_number(N)]
+    let public_values = [A, B, get_fib_number(N)]
         .map(BabyBear::from_canonical_u32)
         .to_vec();
     let air = FibonacciAir;
 
-    let trace = generate_trace_rows::<Val>(A, B, N);
+    let cpu_trace = Arc::new(generate_trace_rows::<Val>(A, B, N));
 
     let airs = any_rap_arc_vec![air];
-    let traces = vec![trace];
-    let public_values = vec![pis];
-
-    let air_proof_inputs = AirProofInput::multiple_simple(traces, public_values);
 
     let gpu_engine = GpuBabyBearPoseidon2Engine::new(
         FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
     );
+    let gpu_trace = gpu_engine.device().transport_matrix_to_device(&cpu_trace);
+
+    let cpu_air_ctx = AirProvingContext::<CpuBackend<SC>>::simple(cpu_trace, public_values.clone());
+    let gpu_air_ctx = AirProvingContext::<GpuBackend>::simple(gpu_trace, public_values);
+
     let mut keygen_builder = gpu_engine.keygen_builder();
     let air_ids = gpu_engine.set_up_keygen_builder(&mut keygen_builder, &airs);
-    let pk = keygen_builder.generate_pk();
+    let pk_host = keygen_builder.generate_pk();
+    let vk = pk_host.get_vk();
+    let pk = gpu_engine.device().transport_pk_to_device(&pk_host);
     // engine.debug(&airs, &pk.per_air, &air_proof_inputs);
-    let proof_input = ProofInput {
-        per_air: zip_eq(air_ids, air_proof_inputs).collect(),
-    };
+    let cpu_ctx = ProvingContext::new(zip_eq(air_ids.clone(), vec![cpu_air_ctx]).collect());
+    let gpu_ctx = ProvingContext::new(zip_eq(air_ids, vec![gpu_air_ctx]).collect());
 
     // CPU    // CPU
     println!("\nStarting CPU proof");
     let cpu_engine = BabyBearPoseidon2Engine::new(
         FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
     );
-    let cpu_proof = cpu_engine.prove(&pk, proof_input.clone());
-    cpu_engine.verify(&pk.get_vk(), &cpu_proof).unwrap();
+    let cpu_pk = cpu_engine.device().transport_pk_to_device(&pk_host);
+    let cpu_proof = cpu_engine.prove(&cpu_pk, cpu_ctx);
+    cpu_engine.verify(&vk, &cpu_proof).unwrap();
 
     // GPU
     println!("\nStarting GPU proof");
-    let gpu_proof = gpu_engine.prove(&pk, proof_input.clone());
-    gpu_engine.verify(&pk.get_vk(), &gpu_proof).unwrap();
+    let gpu_proof = gpu_engine.prove(&pk, gpu_ctx);
+    gpu_engine.verify(&vk, &gpu_proof).unwrap();
 }

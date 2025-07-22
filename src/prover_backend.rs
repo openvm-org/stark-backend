@@ -12,7 +12,7 @@ use openvm_stark_backend::{
             RapPartialProver, TraceCommitter,
         },
         types::{
-            AirView, DeviceMultiStarkProvingKey, DeviceStarkProvingKey, PairView,
+            AirView, DeviceMultiStarkProvingKeyView, DeviceStarkProvingKey, PairView,
             ProverDataAfterRapPhases, RapSinglePhaseView, RapView,
         },
     },
@@ -102,7 +102,7 @@ impl RapPartialProver<GB> for GpuDevice {
     fn partially_prove(
         &self,
         challenger: &mut GBChallenger,
-        mpk: &DeviceMultiStarkProvingKey<'_, GB>,
+        mpk: &DeviceMultiStarkProvingKeyView<'_, GB>,
         trace_views: Vec<AirView<GBMatrix, GBVal>>,
     ) -> (
         Option<RapPhaseSeqPartialProof<SC>>,
@@ -148,9 +148,9 @@ impl RapPartialProver<GB> for GpuDevice {
 
         // Set up for the final output
         let mvk_view = MultiStarkVerifyingKeyView::new(
-            mpk.per_air.iter().map(|pk| pk.vk).collect(),
-            &mpk.trace_height_constraints,
-            mpk.vk_pre_hash,
+            mpk.per_air.iter().map(|pk| &pk.vk).collect(),
+            mpk.trace_height_constraints,
+            *mpk.vk_pre_hash,
         );
 
         let mut perm_matrix_idx = 0usize;
@@ -229,7 +229,7 @@ impl QuotientCommitter<GB> for GpuDevice {
     fn eval_and_commit_quotient(
         &self,
         challenger: &mut GBChallenger,
-        pk_views: &[DeviceStarkProvingKey<GB>],
+        pk_views: &[&DeviceStarkProvingKey<GB>],
         public_values: &[Vec<GBVal>],
         cached_pcs_datas_per_air: &[Vec<GBPcsData>],
         common_main_pcs_data: &GBPcsData,
@@ -351,7 +351,7 @@ impl OpeningProver<GB> for GpuDevice {
     fn open(
         &self,
         challenger: &mut GBChallenger,
-        preprocessed: Vec<GBPcsData>,
+        preprocessed: Vec<&GBPcsData>,
         main: Vec<GBPcsData>,
         after_phase: Vec<GBPcsData>,
         quotient_data: GBPcsData,

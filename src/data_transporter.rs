@@ -23,23 +23,14 @@ use crate::{
 };
 
 impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
-    fn transport_pk_to_device<'a>(
+    fn transport_pk_to_device(
         &self,
-        mpk: &'a MultiStarkProvingKey<SC>,
-        air_ids: Vec<usize>,
-    ) -> DeviceMultiStarkProvingKey<'a, GpuBackend>
-    where
-        SC: 'a,
-    {
-        assert!(
-            air_ids.len() <= mpk.per_air.len(),
-            "filtering more AIRs than available"
-        );
-
-        let per_air = air_ids
+        mpk: &MultiStarkProvingKey<SC>,
+    ) -> DeviceMultiStarkProvingKey<GpuBackend> {
+        let per_air = mpk
+            .per_air
             .iter()
-            .map(|&air_idx| {
-                let pk = &mpk.per_air[air_idx];
+            .map(|pk| {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|pd| {
                     let trace = self.transport_matrix_to_device(&pd.trace);
                     let (_, data) = self.commit(&[trace.clone()]);
@@ -51,8 +42,8 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
                 });
 
                 DeviceStarkProvingKey {
-                    air_name: &pk.air_name,
-                    vk: &pk.vk,
+                    air_name: pk.air_name.clone(),
+                    vk: pk.vk.clone(),
                     preprocessed_data,
                     rap_partial_pk: pk.rap_partial_pk.clone(),
                 }
@@ -60,7 +51,6 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
             .collect();
 
         DeviceMultiStarkProvingKey::new(
-            air_ids,
             per_air,
             mpk.trace_height_constraints.clone(),
             mpk.vk_pre_hash,
@@ -73,6 +63,14 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
 
     fn transport_pcs_data_to_device(&self, _pcs_data: &PcsData<SC>) -> GpuPcsData {
         unimplemented!()
+    }
+
+    fn transport_matrix_from_device_to_host(
+        &self,
+        matrix: &DeviceMatrix<F>,
+    ) -> Arc<RowMajorMatrix<F>> {
+        let matrix_host = transport_device_matrix_to_host(matrix);
+        Arc::new(matrix_host)
     }
 }
 
