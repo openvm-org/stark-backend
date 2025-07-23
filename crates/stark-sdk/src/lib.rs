@@ -12,6 +12,6 @@ pub mod config;
 pub mod cost_estimate;
 pub mod dummy_airs;
 pub mod engine;
-#[cfg(feature = "bench-metrics")]
+#[cfg(feature = "metrics")]
 pub mod metrics_tracing;
 pub mod utils;

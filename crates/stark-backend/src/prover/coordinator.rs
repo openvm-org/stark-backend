@@ -11,7 +11,7 @@ use super::{
     types::{HalProof, ProvingContext},
     Prover,
 };
-#[cfg(feature = "bench-metrics")]
+#[cfg(feature = "metrics")]
 use crate::prover::metrics::trace_metrics;
 use crate::{
     config::{Com, StarkGenericConfig, Val},
@@ -153,7 +153,7 @@ where
             log_trace_height_per_air.push(log_trace_height);
             air_trace_views_per_air.push(air_trace_view);
         }
-        #[cfg(feature = "bench-metrics")]
+        #[cfg(feature = "metrics")]
         trace_metrics(&mpk, &log_trace_height_per_air).emit();
 
         // ============ Challenger observations before additional RAP phases =============

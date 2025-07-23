@@ -194,7 +194,7 @@ pub fn format_number_with_underscores(n: usize) -> String {
     result.chars().rev().collect()
 }
 
-#[cfg(feature = "bench-metrics")]
+#[cfg(feature = "metrics")]
 mod emit {
     use metrics::counter;
 
