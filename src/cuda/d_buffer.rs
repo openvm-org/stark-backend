@@ -35,6 +35,13 @@ impl<T> DeviceBuffer<T> {
         assert_ne!(len, 0, "Zero capacity request is wrong");
         let size_bytes = std::mem::size_of::<T>() * len;
         let raw_ptr = d_malloc(size_bytes).expect("GPU allocation failed");
+        #[cfg(feature = "touchemall")]
+        {
+            // 0xffffffff is `Fp::invalid()` and shouldn't occur in a trace
+            unsafe {
+                cudaMemsetAsync(raw_ptr, 0xff, size_bytes, cudaStreamPerThread);
+            }
+        }
         let typed_ptr = raw_ptr as *mut T;
 
         DeviceBuffer {
