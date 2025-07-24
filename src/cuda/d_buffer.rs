@@ -57,6 +57,23 @@ impl<T> DeviceBuffer<T> {
         check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, cudaStreamPerThread) })
     }
 
+    // Fills a suffix of the buffer with zeros.
+    pub fn fill_zero_suffix(&self, start_idx: usize) -> Result<(), CudaError> {
+        assert!(
+            start_idx < self.len,
+            "start index has to be smaller than length"
+        );
+        let size_bytes = std::mem::size_of::<T>() * (self.len - start_idx);
+        check(unsafe {
+            cudaMemsetAsync(
+                self.as_mut_raw_ptr().add(start_idx),
+                0,
+                size_bytes,
+                cudaStreamPerThread,
+            )
+        })
+    }
+
     /// Returns the number of elements in this buffer.
     pub fn len(&self) -> usize {
         self.len
