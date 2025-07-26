@@ -1,4 +1,4 @@
-use std::any::type_name;
+use std::{any::type_name, sync::Arc};
 
 use openvm_stark_backend::{
     config::StarkConfig,
@@ -70,28 +70,33 @@ where
         + Clone,
 {
     pub fri_params: FriParameters,
-    pub config: BabyBearPermutationConfig<P>,
+    pub device: CpuDevice<BabyBearPermutationConfig<P>>,
     pub perm: P,
     pub max_constraint_degree: usize,
 }
 
-impl<P> StarkEngine<BabyBearPermutationConfig<P>> for BabyBearPermutationEngine<P>
+impl<P> StarkEngine for BabyBearPermutationEngine<P>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
         + Clone,
 {
+    type SC = BabyBearPermutationConfig<P>;
+    type PB = CpuBackend<Self::SC>;
+    type PD = CpuDevice<Self::SC>;
+
     fn config(&self) -> &BabyBearPermutationConfig<P> {
-        &self.config
+        &self.device.config
     }
 
-    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, BabyBearPermutationConfig<P>>
-    where
-        Self: 'a,
-    {
+    fn device(&self) -> &CpuDevice<BabyBearPermutationConfig<P>> {
+        &self.device
+    }
+
+    fn prover(&self) -> MultiTraceStarkProver<BabyBearPermutationConfig<P>> {
         MultiTraceStarkProver::new(
             CpuBackend::default(),
-            CpuDevice::new(self.config(), self.fri_params.log_blowup),
+            self.device.clone(),
             self.new_challenger(),
         )
     }
@@ -105,8 +110,7 @@ where
     }
 }
 
-impl<P> StarkEngineWithHashInstrumentation<BabyBearPermutationConfig<Instrumented<P>>>
-    for BabyBearPermutationEngine<Instrumented<P>>
+impl<P> StarkEngineWithHashInstrumentation for BabyBearPermutationEngine<Instrumented<P>>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
@@ -169,7 +173,7 @@ where
     let max_constraint_degree = fri_params.max_constraint_degree();
     let config = config_from_perm(&perm, security_params);
     BabyBearPermutationEngine {
-        config,
+        device: CpuDevice::new(Arc::new(config), fri_params.log_blowup),
         perm,
         fri_params,
         max_constraint_degree,
@@ -297,7 +301,7 @@ pub fn print_hash_counts(hash_counter: &InstrumentCounter, compress_counter: &In
     println!("Total Count: {total_count}");
 }
 
-impl StarkFriEngine<BabyBearPoseidon2Config> for BabyBearPoseidon2Engine {
+impl StarkFriEngine for BabyBearPoseidon2Engine {
     fn new(fri_params: FriParameters) -> Self {
         default_engine_impl(fri_params)
     }

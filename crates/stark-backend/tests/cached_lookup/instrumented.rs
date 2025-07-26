@@ -1,8 +1,7 @@
 use std::fs::{self, File};
 
 use openvm_stark_backend::{
-    config::StarkGenericConfig, keygen::types::MultiStarkVerifyingKey, proof::Proof,
-    verifier::VerificationError,
+    keygen::types::MultiStarkVerifyingKey, proof::Proof, verifier::VerificationError,
 };
 use openvm_stark_sdk::{
     config::{
@@ -26,11 +25,11 @@ use crate::{
     },
 };
 
-fn instrumented_verify<SC: StarkGenericConfig, E: StarkEngineWithHashInstrumentation<SC>>(
+fn instrumented_verify<E: StarkEngineWithHashInstrumentation>(
     engine: &mut E,
-    vk: MultiStarkVerifyingKey<SC>,
+    vk: MultiStarkVerifyingKey<E::SC>,
     air: &DummyInteractionAir,
-    proof: Proof<SC>,
+    proof: Proof<E::SC>,
 ) -> StarkHashStatistics<BenchParams> {
     let degree = proof.per_air[0].degree;
     let log_degree = log2_ceil_usize(degree);

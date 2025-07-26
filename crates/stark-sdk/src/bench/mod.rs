@@ -12,7 +12,7 @@ use serde_json::json;
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 
-#[cfg(feature = "bench-metrics")]
+#[cfg(feature = "metrics")]
 use crate::metrics_tracing::TimingMetricsLayer;
 
 /// Run a function with metric collection enabled. The metrics will be written to a file specified
@@ -30,7 +30,7 @@ pub fn run_with_metric_collection<R>(
         .with(env_filter)
         .with(ForestLayer::default())
         .with(MetricsLayer::new());
-    #[cfg(feature = "bench-metrics")]
+    #[cfg(feature = "metrics")]
     let subscriber = subscriber.with(TimingMetricsLayer::new());
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
@@ -114,7 +114,7 @@ pub fn run_with_metric_exporter<R>(
         .with(env_filter)
         .with(ForestLayer::default())
         .with(MetricsLayer::new());
-    #[cfg(feature = "bench-metrics")]
+    #[cfg(feature = "metrics")]
     let subscriber = subscriber.with(TimingMetricsLayer::new());
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
@@ -143,7 +143,6 @@ pub fn run_with_metric_exporter<R>(
 ///     ],
 ///    "value": <float value if gauge | integer value if counter>
 /// }
-///
 fn serialize_metric(ckey: CompositeKey, value: DebugValue) -> serde_json::Value {
     let (_kind, key) = ckey.into_parts();
     let (key_name, labels) = key.into_parts();
@@ -182,7 +181,6 @@ fn serialize_metric(ckey: CompositeKey, value: DebugValue) -> serde_json::Value 
 ///   ],
 ///   ...
 /// }
-///
 pub fn serialize_metric_snapshot(snapshot: Snapshot) -> serde_json::Value {
     let mut ret = BTreeMap::<_, Vec<serde_json::Value>>::new();
     for (ckey, _, _, value) in snapshot.into_vec() {

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ff::PrimeField;
 use openvm_stark_backend::{
     config::StarkConfig,
@@ -62,26 +64,31 @@ where
     P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
 {
     pub fri_params: FriParameters,
-    pub config: BabyBearPermutationRootConfig<P>,
+    pub device: CpuDevice<BabyBearPermutationRootConfig<P>>,
     pub perm: P,
     pub max_constraint_degree: usize,
 }
 
-impl<P> StarkEngine<BabyBearPermutationRootConfig<P>> for BabyBearPermutationRootEngine<P>
+impl<P> StarkEngine for BabyBearPermutationRootEngine<P>
 where
     P: CryptographicPermutation<[Bn254Fr; WIDTH]> + Clone,
 {
+    type SC = BabyBearPermutationRootConfig<P>;
+    type PB = CpuBackend<Self::SC>;
+    type PD = CpuDevice<Self::SC>;
+
     fn config(&self) -> &BabyBearPermutationRootConfig<P> {
-        &self.config
+        &self.device.config
     }
 
-    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, BabyBearPermutationRootConfig<P>>
-    where
-        Self: 'a,
-    {
+    fn device(&self) -> &CpuDevice<BabyBearPermutationRootConfig<P>> {
+        &self.device
+    }
+
+    fn prover(&self) -> MultiTraceStarkProver<BabyBearPermutationRootConfig<P>> {
         MultiTraceStarkProver::new(
             CpuBackend::default(),
-            CpuDevice::new(self.config(), self.fri_params.log_blowup),
+            self.device.clone(),
             self.new_challenger(),
         )
     }
@@ -122,7 +129,7 @@ where
     let max_constraint_degree = fri_params.max_constraint_degree();
     let config = config_from_perm(&perm, security_params);
     BabyBearPermutationRootEngine {
-        config,
+        device: CpuDevice::new(Arc::new(config), fri_params.log_blowup),
         perm,
         fri_params,
         max_constraint_degree,
@@ -208,7 +215,7 @@ fn bn254_poseidon2_rc3() -> Vec<[Bn254Fr; 3]> {
         .collect()
 }
 
-impl StarkFriEngine<BabyBearPoseidon2RootConfig> for BabyBearPoseidon2RootEngine {
+impl StarkFriEngine for BabyBearPoseidon2RootEngine {
     fn new(fri_params: FriParameters) -> Self {
         let security_params = SecurityParameters {
             fri_params,
