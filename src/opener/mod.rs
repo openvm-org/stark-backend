@@ -52,7 +52,8 @@ impl OpeningProverGpu {
     ) {
         let mem = MemTracker::start("open");
         // for each matrix (with columns p_i) and opening point z, we want:
-        //         reduced[X] += alpha_offset * inv_denom[X] * [ sum_i [ alpha^i * p_i[X] ] - sum_i [ alpha^i * y[i] ] ]
+        //         reduced[X] += alpha_offset * inv_denom[X] * [ sum_i [ alpha^i * p_i[X] ] - sum_i
+        // [ alpha^i * y[i] ] ]
         let mats_and_points = rounds
             .iter()
             .map(|(data, points)| {
@@ -111,7 +112,8 @@ impl OpeningProverGpu {
 
                             // if last_shift is not set or not equal to current shift
                             if last_shift.is_none() || last_shift.unwrap() != shift {
-                                // for each point and each log height, we will precompute 1/(X - z) for subgroup of order 2^log_height.
+                                // for each point and each log height, we will precompute 1/(X - z)
+                                // for subgroup of order 2^log_height.
                                 // TODO: reduce inv_denoms' size
                                 inv_denoms = compute_non_bitrev_inverse_denominators_on_gpu(
                                     trace_heights_and_points.as_slice(),
@@ -341,7 +343,8 @@ fn commit_phase_on_gpu(
     let final_poly_len = 1 << fri_log_final_poly_len;
 
     while folded.len() > blowup * final_poly_len {
-        // folded is converted to a matrix over base field with width = 8 and height = folded.len()/2
+        // folded is converted to a matrix over base field with width = 8 and height =
+        // folded.len()/2
         let folded_as_matrix = fri_ext_poly_to_base_matrix(&folded).unwrap();
         let (log_trace_heights, merkle_tree) = device.commit_trace(folded_as_matrix);
         let (commit, prover_data) = (

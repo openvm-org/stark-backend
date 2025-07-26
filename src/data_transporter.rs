@@ -64,7 +64,8 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
         transport_matrix_to_device(matrix.clone())
     }
 
-    /// We ignore the host prover data because it's faster to just re-commit on GPU instead of doing H2D transfer.
+    /// We ignore the host prover data because it's faster to just re-commit on GPU instead of doing
+    /// H2D transfer.
     fn transport_committed_trace_to_device(
         &self,
         commitment: Com<SC>,

@@ -106,7 +106,8 @@ const SOURCE_IS_FIRST: u64 = SOURCE_CONSTANT + 1;
 const SOURCE_IS_LAST: u64 = SOURCE_IS_FIRST + 1;
 const SOURCE_IS_TRANSITION: u64 = SOURCE_IS_LAST + 1;
 
-// Source is encoded in 48-bit little-endian and the enum discriminant is encoded by least significant 4-bits
+// Source is encoded in 48-bit little-endian and the enum discriminant is encoded by least
+// significant 4-bits
 impl<F: Field + PrimeField32> Codec for Source<F> {
     type Encoded = u64;
 

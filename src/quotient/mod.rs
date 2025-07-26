@@ -28,9 +28,10 @@ impl QuotientCommitterGpu {
 }
 
 impl QuotientCommitterGpu {
-    /// "GPU quotient should process one RAP at a time using `single_rap_quotient_values`, to prevent GPU OOM)"
-    // @dev: view_gpu is the extended view of the evaluation on quotient domain (subset of LDE domain),
-    // which is always larger than trace domain
+    /// "GPU quotient should process one RAP at a time using `single_rap_quotient_values`, to
+    /// prevent GPU OOM)"
+    // @dev: view_gpu is the extended view of the evaluation on quotient domain (subset of LDE
+    // domain), which is always larger than trace domain
     #[instrument(name = "compute single RAP quotient values on gpu", level = "debug", skip_all, fields(
         quotient_domain_size = (1usize << view_gpu.log_trace_height) * (quotient_degree as usize),
         num_constraints = constraints.num_constraints()
@@ -92,7 +93,8 @@ pub(crate) struct QuotientDataGpu {
 }
 
 impl QuotientDataGpu {
-    /// Splits the quotient polynomials from multiple AIRs into chunks of size equal to the trace domain size.
+    /// Splits the quotient polynomials from multiple AIRs into chunks of size equal to the trace
+    /// domain size.
     #[instrument(name = "split quotient data", level = "debug", skip_all)]
     pub fn split(self) -> impl IntoIterator<Item = QuotientChunkGpu> {
         self.inner.into_iter().flat_map(|data| data.split())

@@ -11,7 +11,8 @@ pub(crate) struct MultiStarkVerifyingKeyView<'a, Val, Com> {
 }
 
 impl<Val, Com: Clone> MultiStarkVerifyingKeyView<'_, Val, Com> {
-    /// Returns the preprocessed commit of each AIR. If the AIR does not have a preprocessed trace, returns None.
+    /// Returns the preprocessed commit of each AIR. If the AIR does not have a preprocessed trace,
+    /// returns None.
     #[allow(dead_code)]
     pub fn preprocessed_commits(&self) -> Vec<Option<Com>> {
         self.per_air

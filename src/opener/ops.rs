@@ -48,10 +48,10 @@ pub(crate) fn compute_inverse_denominators_on_gpu(
 }
 
 // return a map from point to inverse denominators of different heights in non-bitrev order
-// note this function at most takes twice the memory of `compute_bitrev_inverse_denominators_on_gpu`.
-// if the max log height is 23, then the memory usage for one point is 2^23 * 2 * sizeof<EF>.
-// for field like babybear and its deg 4 extension, the memory usage is 2^23 * 2 * 16 = 256MB.
-// #[allow(clippy::type_complexity)]
+// note this function at most takes twice the memory of
+// `compute_bitrev_inverse_denominators_on_gpu`. if the max log height is 23, then the memory usage
+// for one point is 2^23 * 2 * sizeof<EF>. for field like babybear and its deg 4 extension, the
+// memory usage is 2^23 * 2 * 16 = 256MB. #[allow(clippy::type_complexity)]
 pub(crate) fn compute_non_bitrev_inverse_denominators_on_gpu(
     heights_and_points: &[(Vec<usize>, &Vec<Vec<EF>>)],
     coset_shift: F,
@@ -167,8 +167,8 @@ pub(crate) fn matrix_evaluate(
 
     let mut d_r1_matrix = DeviceBuffer::<EF>::with_capacity(width * reduce_matrix_height as usize);
     let mut d_r2_matrix = DeviceBuffer::<EF>::with_capacity(width * reduce_matrix_height as usize);
-    // 1. scale rows and reduce the input matrix to a intermediate `reduce_matrix` (col-major)
-    //    for convenience, the size of `r2_matrix` is the same as `r1_matrix`
+    // 1. scale rows and reduce the input matrix to a intermediate `reduce_matrix` (col-major) for
+    //    convenience, the size of `r2_matrix` is the same as `r1_matrix`
     unsafe {
         scale_and_reduce_kernel(
             &d_r1_matrix,
@@ -203,8 +203,8 @@ pub(crate) fn matrix_evaluate(
         reduce_matrix_height = next_round_height;
     }
 
-    // 3. get the first column of the `reduce_matrix`
-    //    col-major matrix: need explicit copy to a column buffer
+    // 3. get the first column of the `reduce_matrix` col-major matrix: need explicit copy to a
+    //    column buffer
     let d_reduced_cols = DeviceBuffer::<EF>::with_capacity(width);
     unsafe {
         get_first_col_kernel(
