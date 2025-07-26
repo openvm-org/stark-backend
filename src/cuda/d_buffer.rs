@@ -57,7 +57,8 @@ impl<T> DeviceBuffer<T> {
         check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, cudaStreamPerThread) })
     }
 
-    // Fills a suffix of the buffer with zeros.
+    /// Fills a suffix of the buffer with zeros.
+    /// The `start_idx` is the index in the buffer, in `T` elements.
     pub fn fill_zero_suffix(&self, start_idx: usize) -> Result<(), CudaError> {
         assert!(
             start_idx < self.len,
@@ -66,7 +67,7 @@ impl<T> DeviceBuffer<T> {
         let size_bytes = std::mem::size_of::<T>() * (self.len - start_idx);
         check(unsafe {
             cudaMemsetAsync(
-                self.as_mut_raw_ptr().add(start_idx),
+                self.as_mut_ptr().add(start_idx) as *mut c_void,
                 0,
                 size_bytes,
                 cudaStreamPerThread,
