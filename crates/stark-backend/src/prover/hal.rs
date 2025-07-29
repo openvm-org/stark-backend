@@ -1,7 +1,8 @@
 //! # Hardware Abstraction Layer
 //!
 //! Not all hardware implementations need to implement this.
-//! A pure external device implementation can just implement the [Prover](super::Prover) trait directly.
+//! A pure external device implementation can just implement the [Prover](super::Prover) trait
+//! directly.
 
 use std::sync::Arc;
 
@@ -13,8 +14,9 @@ use super::types::{
     AirView, DeviceMultiStarkProvingKey, DeviceStarkProvingKey, ProverDataAfterRapPhases,
 };
 use crate::{
-    config::{Com, StarkGenericConfig, Val},
+    config::{Com, PcsProverData, StarkGenericConfig, Val},
     keygen::types::MultiStarkProvingKey,
+    prover::types::{CommittedTraceData, DeviceMultiStarkProvingKeyView},
 };
 
 /// Associated types needed by the prover, in the form of buffers and views,
@@ -22,7 +24,8 @@ use crate::{
 ///
 /// Memory allocation and copying is not handled by this trait.
 pub trait ProverBackend {
-    /// Extension field degree for the challenge field `Self::Challenge` over base field `Self::Val`.
+    /// Extension field degree for the challenge field `Self::Challenge` over base field
+    /// `Self::Val`.
     const CHALLENGE_EXT_DEGREE: u8;
     // ==== Host Types ====
     /// Base field type, on host.
@@ -34,20 +37,22 @@ pub trait ProverBackend {
     /// Partial proof for multiple RAPs
     type RapPartialProof: Clone + Send + Sync + Serialize + DeserializeOwned;
     /// Single commitment on host.
-    // Commitments are small in size and need to be transferred back to host to be included in proof.
+    // Commitments are small in size and need to be transferred back to host to be included in
+    // proof.
     type Commitment: Clone + Send + Sync + Serialize + DeserializeOwned;
     /// Challenger to observe commitments. Sampling is left to other trait implementations.
     /// We anticipate that the challenger largely operates on the host.
     type Challenger: CanObserve<Self::Val> + CanObserve<Self::Commitment>;
 
     // ==== Device Types ====
-    /// Single matrix buffer on device together with dimension metadata. Owning this means nothing else has a shared
-    /// reference to the buffer.
+    /// Single matrix buffer on device together with dimension metadata. Owning this means nothing
+    /// else has a shared reference to the buffer.
     type Matrix: MatrixDimensions + Send + Sync;
     /// Owned buffer for the preimage of a PCS commitment on device, together with any metadata
     /// necessary for computing opening proofs.
     ///
-    /// For example, multiple buffers for LDE matrices, their trace domain sizes, and pointer to mixed merkle tree.
+    /// For example, multiple buffers for LDE matrices, their trace domain sizes, and pointer to
+    /// mixed merkle tree.
     type PcsData: Send + Sync;
     /// Part of proving key for a single RAP specific for the RAP challenge phases
     type RapPartialProvingKey: Send + Sync;
@@ -63,7 +68,8 @@ pub trait ProverDevice<PB: ProverBackend>:
 {
 }
 
-/// Provides functionality for committing to a batch of trace matrices, possibly of different heights.
+/// Provides functionality for committing to a batch of trace matrices, possibly of different
+/// heights.
 pub trait TraceCommitter<PB: ProverBackend> {
     fn commit(&self, traces: &[PB::Matrix]) -> (PB::Commitment, PB::PcsData);
 }
@@ -85,7 +91,7 @@ pub trait RapPartialProver<PB: ProverBackend> {
     fn partially_prove(
         &self,
         challenger: &mut PB::Challenger,
-        mpk: &DeviceMultiStarkProvingKey<'_, PB>,
+        mpk: &DeviceMultiStarkProvingKeyView<'_, PB>,
         trace_views: Vec<AirView<PB::Matrix, PB::Val>>,
     ) -> (PB::RapPartialProof, ProverDataAfterRapPhases<PB>);
 }
@@ -104,13 +110,13 @@ pub trait QuotientCommitter<PB: ProverBackend> {
     ///
     /// must be equal, and all equal to the number of AIRs.
     ///
-    /// Quotient polynomials for multiple RAP matrices are committed together into a single commitment.
-    /// The quotient polynomials can be committed together even if the corresponding trace matrices
-    /// are committed separately.
+    /// Quotient polynomials for multiple RAP matrices are committed together into a single
+    /// commitment. The quotient polynomials can be committed together even if the corresponding
+    /// trace matrices are committed separately.
     fn eval_and_commit_quotient(
         &self,
         challenger: &mut PB::Challenger,
-        pk_views: &[DeviceStarkProvingKey<PB>],
+        pk_views: &[&DeviceStarkProvingKey<PB>],
         public_values: &[Vec<PB::Val>],
         cached_pcs_datas_per_air: &[Vec<PB::PcsData>],
         common_main_pcs_data: &PB::PcsData,
@@ -130,7 +136,7 @@ pub trait OpeningProver<PB: ProverBackend> {
         challenger: &mut PB::Challenger,
         // For each preprocessed trace commitment, the prover data and
         // the log height of the matrix, in order
-        preprocessed: Vec<PB::PcsData>,
+        preprocessed: Vec<&PB::PcsData>,
         // For each main trace commitment, the prover data and
         // the log height of each matrix, in order
         // Note: this is all one challenge phase.
@@ -151,15 +157,26 @@ where
     PB: ProverBackend<Val = Val<SC>, Challenge = SC::Challenge, Commitment = Com<SC>>,
 {
     /// Transport the proving key to the device, filtering for only the provided `air_ids`.
-    fn transport_pk_to_device<'a>(
+    fn transport_pk_to_device(
         &self,
-        mpk: &'a MultiStarkProvingKey<SC>,
-        air_ids: Vec<usize>,
-    ) -> DeviceMultiStarkProvingKey<'a, PB>
-    where
-        SC: 'a;
+        mpk: &MultiStarkProvingKey<SC>,
+    ) -> DeviceMultiStarkProvingKey<PB>;
 
     fn transport_matrix_to_device(&self, matrix: &Arc<RowMajorMatrix<Val<SC>>>) -> PB::Matrix;
 
-    fn transport_pcs_data_to_device(&self, data: &super::cpu::PcsData<SC>) -> PB::PcsData;
+    /// The `commitment` and `prover_data` are assumed to have been previously computed from the
+    /// `trace`.
+    fn transport_committed_trace_to_device(
+        &self,
+        commitment: Com<SC>,
+        trace: &Arc<RowMajorMatrix<Val<SC>>>,
+        prover_data: &Arc<PcsProverData<SC>>,
+    ) -> CommittedTraceData<PB>;
+
+    /// Transport a device matrix to host. This should only be used for testing / debugging
+    /// purposes.
+    fn transport_matrix_from_device_to_host(
+        &self,
+        matrix: &PB::Matrix,
+    ) -> Arc<RowMajorMatrix<Val<SC>>>;
 }
