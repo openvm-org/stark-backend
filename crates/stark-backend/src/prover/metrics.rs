@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use itertools::zip_eq;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{debug, info};
 
 use super::hal::ProverBackend;
 use crate::{keygen::types::TraceWidth, prover::types::DeviceMultiStarkProvingKeyView};
@@ -41,51 +41,6 @@ pub struct TraceCells {
 
 impl Display for TraceMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "total_trace_cells = {} (excluding preprocessed)",
-            format_number_with_underscores(self.total_cells)
-        )?;
-        writeln!(
-            f,
-            "preprocessed_trace_cells = {}",
-            format_number_with_underscores(
-                self.per_air
-                    .iter()
-                    .map(|m| m.cells.preprocessed.unwrap_or(0))
-                    .sum::<usize>()
-            )
-        )?;
-        writeln!(
-            f,
-            "main_trace_cells = {}",
-            format_number_with_underscores(
-                self.per_air
-                    .iter()
-                    .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
-                    .sum::<usize>()
-            )
-        )?;
-        writeln!(
-            f,
-            "perm_trace_cells = {}",
-            format_number_with_underscores(
-                self.per_air
-                    .iter()
-                    .map(|m| m.cells.after_challenge.iter().sum::<usize>())
-                    .sum::<usize>()
-            )
-        )?;
-        writeln!(
-            f,
-            "quotient_poly_cells = {}",
-            format_number_with_underscores(
-                self.per_air
-                    .iter()
-                    .map(|m| m.quotient_poly_cells)
-                    .sum::<usize>()
-            )
-        )?;
         for (i, (weighted_sum, threshold)) in self.trace_height_inequalities.iter().enumerate() {
             writeln!(
                 f,
@@ -174,7 +129,51 @@ pub fn trace_metrics<PB: ProverBackend>(
         total_cells,
         trace_height_inequalities,
     };
-    info!("{}", metrics);
+    info!(
+        "total_trace_cells = {} (excluding preprocessed)",
+        format_number_with_underscores(metrics.total_cells)
+    );
+    info!(
+        "preprocessed_trace_cells = {}",
+        format_number_with_underscores(
+            metrics
+                .per_air
+                .iter()
+                .map(|m| m.cells.preprocessed.unwrap_or(0))
+                .sum::<usize>()
+        )
+    );
+    info!(
+        "main_trace_cells = {}",
+        format_number_with_underscores(
+            metrics
+                .per_air
+                .iter()
+                .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
+                .sum::<usize>()
+        )
+    );
+    info!(
+        "perm_trace_cells = {}",
+        format_number_with_underscores(
+            metrics
+                .per_air
+                .iter()
+                .map(|m| m.cells.after_challenge.iter().sum::<usize>())
+                .sum::<usize>()
+        )
+    );
+    info!(
+        "quotient_poly_cells = {}",
+        format_number_with_underscores(
+            metrics
+                .per_air
+                .iter()
+                .map(|m| m.quotient_poly_cells)
+                .sum::<usize>()
+        )
+    );
+    debug!("{}", metrics);
     metrics
 }
 
