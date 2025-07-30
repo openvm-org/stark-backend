@@ -65,6 +65,10 @@ impl StarkEngine for GpuBabyBearPoseidon2Engine {
         self.engine.config()
     }
 
+    fn max_constraint_degree(&self) -> Option<usize> {
+        Some(self.engine.max_constraint_degree)
+    }
+
     fn new_challenger(&self) -> <SC as StarkGenericConfig>::Challenger {
         self.engine.new_challenger()
     }
