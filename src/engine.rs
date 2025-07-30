@@ -1,5 +1,7 @@
 use std::any::type_name;
 
+#[cfg(feature = "touchemall")]
+use openvm_stark_backend::prover::types::AirProvingContext;
 use openvm_stark_backend::{
     config::StarkGenericConfig,
     proof::Proof,
@@ -89,8 +91,36 @@ impl StarkEngine for GpuBabyBearPoseidon2Engine {
         mem.reset_peak();
 
         let mpk_view = pk.view(ctx.air_ids());
+        #[cfg(feature = "touchemall")]
+        {
+            for (air_id, air_ctx) in ctx.per_air.iter() {
+                check_trace_validity(air_ctx, &pk.per_air[*air_id].air_name);
+            }
+        }
         let mut prover = self.prover();
         let proof = prover.prove(mpk_view, ctx);
         proof.into()
+    }
+}
+
+#[cfg(feature = "touchemall")]
+pub fn check_trace_validity(proving_ctx: &AirProvingContext<GpuBackend>, name: &str) {
+    use openvm_stark_backend::prover::hal::MatrixDimensions;
+
+    use crate::{cuda::copy::MemCopyD2H, types::F};
+
+    let trace = proving_ctx.common_main.as_ref().unwrap();
+    let height = trace.height();
+    let width = trace.width();
+    let trace = trace.to_host().unwrap();
+    for r in 0..height {
+        for c in 0..width {
+            let value = trace[c * height + r];
+            let value_u32 = unsafe { *(&value as *const F as *const u32) };
+            assert!(
+                value_u32 != 0xffffffff,
+                "potentially untouched value at ({r}, {c}) of a trace of size {height}x{width} for air {name}"
+            );
+        }
     }
 }

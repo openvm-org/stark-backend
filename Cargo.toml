@@ -40,7 +40,7 @@ p3-fri = { workspace = true }
 p3-dft = { workspace = true }
 
 [build-dependencies]
-cc = { version = "1.0", features = ["parallel"] }  # For CUDA compilation
+cc = { version = "1.0", features = ["parallel"] } # For CUDA compilation
 
 [dev-dependencies]
 clap = { version = "4.4", features = ["derive"] }
