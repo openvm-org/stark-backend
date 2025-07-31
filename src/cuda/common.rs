@@ -12,19 +12,16 @@ pub const cudaMemPoolAttrReuseFollowEventDependencies: u32 = 1;
 #[link(name = "cudart")]
 extern "C" {
     fn cudaGetDevice(device: *mut i32) -> i32;
-    fn cudaSetDevice(id: i32) -> i32;
     fn cudaDeviceReset() -> i32;
     fn cudaDeviceGetDefaultMemPool(pool: *mut cudaMemPool_t, device: i32) -> i32;
     fn cudaMemPoolSetAttribute(pool: cudaMemPool_t, attr: u32, value: *const c_void) -> i32;
     fn cudaDeviceSetMemPool(device: i32, pool: cudaMemPool_t) -> i32;
 }
 
-pub fn set_device(id: i32) -> Result<(), CudaError> {
+pub fn set_device() -> Result<u32, CudaError> {
     std::env::set_var("CUDA_DEVICE_DEFAULT_STREAM", "per-thread");
+    let mut device = 0;
     unsafe {
-        check(cudaSetDevice(id))?;
-
-        let mut device = 0;
         check(cudaGetDevice(&mut device))?;
 
         let mut pool: cudaMemPool_t = std::ptr::null_mut();
@@ -48,9 +45,9 @@ pub fn set_device(id: i32) -> Result<(), CudaError> {
         // 3. Optional but safe: assign pool back to device
         check(cudaDeviceSetMemPool(device, pool))?;
 
-        assert_eq!(device, id);
+        assert!(device >= 0);
     }
-    Ok(())
+    Ok(device as u32)
 }
 
 pub fn reset_device() -> Result<(), CudaError> {

@@ -43,7 +43,6 @@ impl StarkFriEngine for GpuBabyBearPoseidon2Engine {
         Self {
             engine: BabyBearPoseidon2Engine::new(fri_params),
             device: GpuDevice::new(
-                0,
                 GpuConfig::new(fri_params, BabyBear::GENERATOR),
                 Some(FriLogUpPhaseGpu::new(
                     log_up_security_params_baby_bear_100_bits(),

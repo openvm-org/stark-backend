@@ -76,7 +76,6 @@ fn main() {
     // --- GPU commit ---
     let gpu_time = std::time::Instant::now();
     let gpu_device = GpuDevice::new(
-        0,
         GpuConfig::new(
             FriParameters::standard_with_100_bits_conjectured_security(log_blowup),
             shift,
