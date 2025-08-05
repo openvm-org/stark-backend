@@ -31,7 +31,12 @@ fn main() {
     };
     println!("cargo:rerun-if-changed=build.rs");
 
-    let opt_level = env::var("CUDA_OPT_LEVEL").unwrap_or("3".to_string());
+    // Get CUDA_OPT_LEVEL from environment or use default value
+    // 0 → No optimization (fast compile, debug-friendly)
+    // 1 → Minimal optimization
+    // 2 → Balanced optimization (often same as -O3 for some kernels)
+    // 3 → Maximum optimization (usually default for release builds)
+    let cuda_opt_level = env::var("CUDA_OPT_LEVEL").unwrap_or("3".to_string());
     let sppark_root = env::var("DEP_SPPARK_ROOT").expect("sppark dependency not found");
 
     let mut builder = cc::Build::new();
@@ -47,12 +52,14 @@ fn main() {
         .flag("-gencode")
         .flag(format!("arch=compute_{},code=sm_{}", cuda_arch, cuda_arch));
 
-    // Add optimization flags based on build type
-    if env::var("DEBUG").unwrap_or_default() == "true" {
-        builder.flag("-O0").flag("-g");
+    if cuda_opt_level == "0" {
+        builder.debug(true);
+        builder.flag("-O0");
     } else {
-        builder.flag(format!("--ptxas-options=-O{}", opt_level));
+        builder.debug(false);
+        builder.flag(format!("--ptxas-options=-O{}", cuda_opt_level));
     }
+
     if let Ok(cuda_path) = env::var("CUDA_PATH") {
         builder.include(format!("{}/include", cuda_path));
     }
@@ -89,10 +96,12 @@ fn main() {
             cuda_arch, cuda_arch
         ));
 
-    if env::var("DEBUG").unwrap_or_default() == "true" {
-        ntt_builder.flag("-O0").flag("-g");
+    if cuda_opt_level == "0" {
+        ntt_builder.debug(true);
+        ntt_builder.flag("-O0");
     } else {
-        ntt_builder.flag(format!("--ptxas-options=-O{}", opt_level));
+        ntt_builder.debug(false);
+        ntt_builder.flag(format!("--ptxas-options=-O{}", cuda_opt_level));
     }
     if let Ok(cuda_path) = env::var("CUDA_PATH") {
         ntt_builder.include(format!("{}/include", cuda_path));
