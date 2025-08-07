@@ -73,6 +73,10 @@ pub struct CudaEvent {
     event: cudaEvent_t,
 }
 
+pub fn default_stream_wait(event: &CudaEvent) -> Result<(), CudaError> {
+    check(unsafe { cudaStreamWaitEvent(cudaStreamPerThread, event.event, 0) })
+}
+
 unsafe impl Send for CudaEvent {}
 unsafe impl Sync for CudaEvent {}
 

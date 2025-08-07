@@ -22,3 +22,17 @@ inline std::pair<dim3, dim3> kernel_launch_2d_params(size_t x, size_t y) {
     dim3 grid = dim3(div_ceil(x, block.x), div_ceil(y, block.y));
     return std::make_pair(grid, block);
 }
+
+#ifdef DEBUG
+#define CHECK_CUDA_KERNEL() \
+    do { \
+        cudaDeviceSynchronize(); \
+        auto err = cudaGetLastError(); \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA kernel error at %s:%d: %s\n", \
+                    __FILE__, __LINE__, cudaGetErrorString(err)); \
+            return err; \
+        } \
+    } while (0)
+    
+#endif

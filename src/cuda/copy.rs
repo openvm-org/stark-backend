@@ -35,6 +35,25 @@ extern "C" {
     ) -> i32;
 }
 
+pub unsafe fn cuda_memcpy<const SRC_DEVICE: bool, const DST_DEVICE: bool>(
+    dst: *mut c_void,
+    src: *const c_void,
+    size_bytes: usize,
+) -> Result<(), MemCopyError> {
+    check(unsafe {
+        cudaMemcpyAsync(
+            dst,
+            src,
+            size_bytes,
+            std::mem::transmute::<i32, cudaMemcpyKind>(
+                if DST_DEVICE { 1 } else { 0 } + if SRC_DEVICE { 2 } else { 0 },
+            ),
+            cudaStreamPerThread,
+        )
+    })
+    .map_err(MemCopyError::from)
+}
+
 // Host -> Device
 pub trait MemCopyH2D<T> {
     fn copy_to(&self, dst: &mut DeviceBuffer<T>) -> Result<(), MemCopyError>;
