@@ -9,7 +9,7 @@ use openvm_circuit_primitives::bitwise_op_lookup::{
     BitwiseOperationLookupAir, BitwiseOperationLookupBus, BitwiseOperationLookupChip,
 };
 use openvm_instructions::{instruction::Instruction, LocalOpcode};
-use openvm_keccak256_circuit::{KeccakVmAir, KeccakVmFiller, KeccakVmStep};
+use openvm_keccak256_circuit::{KeccakVmAir, KeccakVmExecutor, KeccakVmFiller};
 use openvm_keccak256_transpiler::Rv32KeccakOpcode;
 use openvm_stark_backend::prover::{
     hal::DeviceDataTransporter,
@@ -36,7 +36,7 @@ fn build_keccak256_test(inputs: Vec<Vec<u8>>) -> VmChipTester<BabyBearPoseidon2C
     let bitwise_chip = Arc::new(BitwiseOperationLookupChip::<8>::new(bitwise_bus));
 
     let mut tester = VmChipTestBuilder::default();
-    let executor = KeccakVmStep::new(Rv32KeccakOpcode::CLASS_OFFSET, tester.address_bits());
+    let executor = KeccakVmExecutor::new(Rv32KeccakOpcode::CLASS_OFFSET, tester.address_bits());
     let air = KeccakVmAir::new(
         tester.execution_bridge(),
         tester.memory_bridge(),
