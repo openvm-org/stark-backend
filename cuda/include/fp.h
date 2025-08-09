@@ -46,6 +46,10 @@ class Fp {
     static constexpr uint32_t MONTY_MASK = 0xffffffff; // uint32_t((uint64_t(1) << MONTY_BITS) - 1);
     static constexpr uint32_t HALF_P_PLUS_1 = (P + 1) >> 1;
     static constexpr uint32_t TWO_ADICITY = 27;
+    // Precomputed inverse of 2^(2*FIELD_BITS - 2) mod P for FIELD_BITS = 31
+    // FIELD_BITS = 31, so k = 2*FIELD_BITS - 2 = 60
+    // INV_2EXP_K = (2^k)^(-1) mod P
+    static constexpr uint32_t INV_2EXP_K = 975175684u;
 
   private:
     // The actual value, always < P.
@@ -248,12 +252,51 @@ __device__ constexpr inline Fp pow(Fp x, size_t n) {
     return tot;
 }
 
-/// Compute the multiplicative inverse of x, or `1/x` in finite field terms.  Since `x^(P-1) == 1
-/// (mod P)` for any x != 0 (as a consequence of Fermat's little theorem), it follows that `x *
-/// x^(P-2) == 1 (mod P)` for x != 0.  That is, `x^(P-2)` is the multiplicative inverse of x.
-/// Computed this way, the 'inverse' of zero comes out as zero, which is convenient in many cases,
-/// so we leave it.
-__device__ constexpr inline Fp inv(Fp x) { return pow(x, Fp::P - 2); }
+/// Helper: gcd-based inversion for 32-bit prime fields with FIELD_BITS <= 32.
+/// Returns v = 2^{2*FIELD_BITS - 2} * a^{-1} mod P where FIELD_BITS = 31 and P is odd prime.
+/// Copied from Plonky3: https://github.com/Plonky3/Plonky3/pull/921
+static __device__ constexpr inline int64_t gcd_inversion_prime_field_32(uint32_t a, uint32_t b) {
+    int64_t u = 1;
+    int64_t v = 0;
+    // FIELD_BITS = 31 => iterate 2*FIELD_BITS - 2 = 60 times
+    for (uint32_t i = 0; i < 60; i++) {
+        if ((a & 1u) != 0u) {
+            if (a < b) {
+                // temp variable swap for a, b and u, v
+                uint32_t tmp_ab = a;
+                a = b;
+                b = tmp_ab;
+                int64_t tmp_uv = u;
+                u = v;
+                v = tmp_uv;
+            }
+            a -= b;
+            u -= v;
+        }
+        a >>= 1;
+        v <<= 1;
+    }
+    return v;
+}
+
+/// Compute the multiplicative inverse of x, or `1/x` in finite field terms, using a fast
+/// gcd-based algorithm specialized for 31-bit prime P.
+/// For x = 0, returns 0.
+__device__ constexpr inline Fp inv(Fp x) {
+    if (x.asRaw() == 0u) {
+        return Fp::zero();
+    }
+
+    uint32_t a = x.asUInt32();
+    int64_t v = gcd_inversion_prime_field_32(a, Fp::P);
+    // Bring v into [0, P)
+    int64_t v_mod = v % static_cast<int64_t>(Fp::P);
+    if (v_mod < 0) {
+        v_mod += static_cast<int64_t>(Fp::P);
+    }
+
+    return Fp(static_cast<uint32_t>(v_mod)) * Fp(Fp::INV_2EXP_K);
+}
 
 constexpr __device__ Fp TWO_ADIC_GENERATORS[Fp::TWO_ADICITY + 1] = {
     Fp(0x1),        // Fp(0x0ffffffeu),
