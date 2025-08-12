@@ -685,7 +685,8 @@ pub mod permute {
     use super::*;
 
     extern "C" {
-        fn _permute_trace_gen_global(
+        fn _calculate_cumulative_sums(
+            is_global: bool,
             d_permutation: *mut std::ffi::c_void,
             d_cumulative_sums: *mut std::ffi::c_void,
             d_preprocessed: *const std::ffi::c_void,
@@ -693,21 +694,9 @@ pub mod permute {
             d_challenges: *const std::ffi::c_void,
             d_intermediates: *const std::ffi::c_void,
             d_rules: *const std::ffi::c_void,
-            num_rules: u32,
-            permutation_height: u32,
-            permutation_width_ext: u32,
-            num_rows_per_tile: u32,
-        ) -> i32;
-
-        fn _permute_trace_gen_register(
-            d_permutation: *mut std::ffi::c_void,
-            d_cumulative_sums: *mut std::ffi::c_void,
-            d_preprocessed: *const std::ffi::c_void,
-            d_main: *const u64,
-            d_challenges: *const std::ffi::c_void,
-            d_intermediates: *const std::ffi::c_void,
-            d_rules: *const std::ffi::c_void,
-            num_rules: u32,
+            d_used_nodes: *const usize,
+            d_partition_lens: *const u32,
+            num_partitions: u32,
             permutation_height: u32,
             permutation_width_ext: u32,
             num_rows_per_tile: u32,
@@ -723,65 +712,7 @@ pub mod permute {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub unsafe fn permute_trace_gen_global<F, EF, R>(
-        d_permutation: &DeviceBuffer<F>,
-        d_cumulative_sums: &DeviceBuffer<EF>,
-        d_preprocessed: &DeviceBuffer<F>,
-        d_main: &DeviceBuffer<u64>,
-        d_challenges: &DeviceBuffer<EF>,
-        d_intermediates: &DeviceBuffer<EF>,
-        d_rules: &DeviceBuffer<R>,
-        num_rules: u32,
-        permutation_height: u32,
-        permutation_width_ext: u32,
-        num_rows_per_tile: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_permute_trace_gen_global(
-            d_permutation.as_mut_raw_ptr(),
-            d_cumulative_sums.as_mut_raw_ptr(),
-            d_preprocessed.as_raw_ptr(),
-            d_main.as_ptr(),
-            d_challenges.as_raw_ptr(),
-            d_intermediates.as_raw_ptr(),
-            d_rules.as_raw_ptr(),
-            num_rules,
-            permutation_height,
-            permutation_width_ext,
-            num_rows_per_tile,
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn permute_trace_gen_register<F, EF, R>(
-        d_permutation: &DeviceBuffer<F>,
-        d_cumulative_sums: &DeviceBuffer<EF>,
-        d_preprocessed: &DeviceBuffer<F>,
-        d_main: &DeviceBuffer<u64>,
-        d_challenges: &DeviceBuffer<EF>,
-        d_intermediates: &DeviceBuffer<EF>,
-        d_rules: &DeviceBuffer<R>,
-        num_rules: u32,
-        permutation_height: u32,
-        permutation_width_ext: u32,
-        num_rows_per_tile: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_permute_trace_gen_register(
-            d_permutation.as_mut_raw_ptr(),
-            d_cumulative_sums.as_mut_raw_ptr(),
-            d_preprocessed.as_raw_ptr(),
-            d_main.as_ptr(),
-            d_challenges.as_raw_ptr(),
-            d_intermediates.as_raw_ptr(),
-            d_rules.as_raw_ptr(),
-            num_rules,
-            permutation_height,
-            permutation_width_ext,
-            num_rows_per_tile,
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn permute_trace_gen_global_or_register<F, EF, R>(
+    pub unsafe fn calculate_cumulative_sums<F, EF, R>(
         is_global: bool,
         d_permutation: &DeviceBuffer<F>,
         d_cumulative_sums: &DeviceBuffer<EF>,
@@ -790,40 +721,29 @@ pub mod permute {
         d_challenges: &DeviceBuffer<EF>,
         d_intermediates: &DeviceBuffer<EF>,
         d_rules: &DeviceBuffer<R>,
-        num_rules: u32,
+        d_used_nodes: &DeviceBuffer<usize>,
+        d_partition_lens: &DeviceBuffer<u32>,
+        num_partitions: u32,
         permutation_height: u32,
         permutation_width_ext: u32,
         num_rows_per_tile: u32,
     ) -> Result<(), CudaError> {
-        if is_global {
-            permute_trace_gen_global(
-                d_permutation,
-                d_cumulative_sums,
-                d_preprocessed,
-                d_main,
-                d_challenges,
-                d_intermediates,
-                d_rules,
-                num_rules,
-                permutation_height,
-                permutation_width_ext,
-                num_rows_per_tile,
-            )
-        } else {
-            permute_trace_gen_register(
-                d_permutation,
-                d_cumulative_sums,
-                d_preprocessed,
-                d_main,
-                d_challenges,
-                d_intermediates,
-                d_rules,
-                num_rules,
-                permutation_height,
-                permutation_width_ext,
-                num_rows_per_tile,
-            )
-        }
+        CudaError::from_result(_calculate_cumulative_sums(
+            is_global,
+            d_permutation.as_mut_raw_ptr(),
+            d_cumulative_sums.as_mut_raw_ptr(),
+            d_preprocessed.as_raw_ptr(),
+            d_main.as_ptr(),
+            d_challenges.as_raw_ptr(),
+            d_intermediates.as_raw_ptr(),
+            d_rules.as_raw_ptr(),
+            d_used_nodes.as_ptr(),
+            d_partition_lens.as_ptr(),
+            num_partitions,
+            permutation_height,
+            permutation_width_ext,
+            num_rows_per_tile,
+        ))
     }
 
     pub unsafe fn permute_update<F, EF>(

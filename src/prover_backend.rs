@@ -307,7 +307,7 @@ impl QuotientCommitter<GB> for GpuDevice {
                         public_values: pvs.to_vec(),
                         per_phase,
                     };
-                    let constraints = &pk.vk.symbolic_constraints.constraints;
+                    let constraints = &pk.vk.symbolic_constraints;
                     let quotient_degree = pk.vk.quotient_degree;
                     qc.single_rap_quotient_values(
                         self,

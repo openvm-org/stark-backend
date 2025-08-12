@@ -168,7 +168,6 @@ const OP_SUB: u8 = 1;
 const OP_MUL: u8 = 2;
 const OP_NEG: u8 = 3;
 const OP_VAR: u8 = 4;
-const OP_INV: u8 = 5;
 
 const INPUT_OPERANDS_MASK: u64 = (1 << 48) - 1; // 48-bit mask
 const OUTPUT_OPERAND_MASK: u64 = (1 << 24) - 1; // 24-bit mask
@@ -232,20 +231,4 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
             need_accumulate,
         }
     }
-}
-
-pub fn encode_inv<F: Field + PrimeField32>(
-    x: &Source<F>,
-    z: &Source<F>,
-    need_accumulate: bool,
-) -> u128 {
-    let dummy_source = Source::Constant(F::ZERO);
-    let x = x.encode() & INPUT_OPERANDS_MASK;
-    let y = dummy_source.encode() & INPUT_OPERANDS_MASK;
-    let z = z.encode() & OUTPUT_OPERAND_MASK;
-    (x as u128)
-        | ((y as u128) << 48)
-        | ((z as u128) << 96)
-        | ((OP_INV as u128) << 120)
-        | ((need_accumulate as u128) << 127)
 }

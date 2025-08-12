@@ -1,13 +1,12 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use codec::as_intermediate;
 use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
-    symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
-    SymbolicExpressionDag, SymbolicExpressionNode,
+    symbolic_variable::SymbolicVariable, SymbolicConstraintsDag, SymbolicExpressionNode,
 };
 use p3_field::{Field, PrimeField32};
 use rustc_hash::FxHashMap;
@@ -76,8 +75,10 @@ impl<F: Field + PrimeField32> ConstraintWithFlag<F> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct SymbolicRulesOnGpu<F: Field> {
     pub constraints: Vec<ConstraintWithFlag<F>>,
+    pub used_nodes: Vec<usize>,
     pub num_intermediates: usize,
 }
 
@@ -85,7 +86,25 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
     /// transpile constraints in dag to a form that can be evaluated by the gpu prover
     /// especially we minimize the vector for storing intermediates to fit in gpu shared memory
     #[instrument(name = "SymbolicRulesOnGpu.new", skip_all, level = "debug")]
-    pub fn new(dag: SymbolicExpressionDag<F>) -> Self {
+    pub fn new(dag_constraints: SymbolicConstraintsDag<F>) -> Self {
+        let dag = dag_constraints.constraints;
+
+        let mut used_nodes = if dag.constraint_idx.is_empty() {
+            // NOTE: this branch is used only for encoding SymbolicInteractions for use during perm
+            // trace generation. The `message` is always a single expression for the
+            // denominator.
+            dag_constraints
+                .interactions
+                .iter()
+                .flat_map(|i| {
+                    assert_eq!(i.message.len(), 1);
+                    [i.count, *i.message.first().unwrap()]
+                })
+                .collect_vec()
+        } else {
+            dag.constraint_idx.clone()
+        };
+
         // create a mapping from non-intermediate node to their index in dag
         let mut vars_index_map = FxHashMap::default();
         for (idx, node) in dag.nodes.iter().enumerate() {
@@ -116,13 +135,24 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
             }
         };
         let mut compiled_constraints = Vec::with_capacity(dag.nodes.len());
-        let constraint_idx_set: HashSet<usize> =
-            HashSet::from_iter(dag.constraint_idx.iter().copied());
+        let constraint_idx_set: HashSet<usize> = HashSet::from_iter(used_nodes.iter().copied());
+
         for (node_idx, node) in dag.nodes.into_iter().enumerate() {
             let assert_zero = constraint_idx_set.contains(&node_idx);
 
             let constraint = if !is_intermediate(&node) {
-                Constraint::Variable(node.into())
+                // We add Variable constraint only if we accumulate it
+                if assert_zero {
+                    Constraint::Variable(node.into())
+                } else {
+                    let compiled_constraint_len = compiled_constraints.len();
+                    for node in used_nodes.iter_mut() {
+                        if *node >= compiled_constraint_len {
+                            *node -= 1;
+                        }
+                    }
+                    continue;
+                }
             } else {
                 match node {
                     SymbolicExpressionNode::Add {
@@ -161,6 +191,7 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
 
             compiled_constraints.push(ConstraintWithFlag::new(constraint, assert_zero));
         }
+
         // have same set of assert-zero constraints as dag
         assert_eq!(
             compiled_constraints
@@ -169,7 +200,7 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
                 .filter(|(_, c)| c.need_accumulate)
                 .map(|(idx, _)| idx)
                 .collect::<Vec<usize>>(),
-            dag.constraint_idx
+            used_nodes.iter().copied().unique().sorted().collect_vec()
         );
 
         let num_intermediates_before_reduction = num_intermediates_array
@@ -179,7 +210,7 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
             .unwrap_or(0);
 
         let mut analyzer = IntermediateAllocator::new(compiled_constraints);
-        analyzer.reallocate();
+        analyzer.reallocate(used_nodes.clone());
 
         tracing::debug!(
             "[IntermediateAllocator] size of minimal vector to store intermediates: before = {}, after = {}",
@@ -190,6 +221,7 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
 
         SymbolicRulesOnGpu {
             constraints: analyzer.constraints,
+            used_nodes,
             num_intermediates: analyzer.num_intermediates,
         }
     }
@@ -269,18 +301,45 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
     /// * Reuses variable slots when their previous occupants are no longer needed
     /// * Maintains correctness by respecting variable dependencies
     #[instrument(name = "reallocate intermediates", skip_all, level = "debug")]
-    pub fn reallocate(&mut self) {
-        self.collect_variable_info();
+    pub fn reallocate(&mut self, used_nodes: Vec<usize>) {
+        let nodes_map = self.map_potential_overwrites(&used_nodes);
+        self.collect_variable_info(nodes_map);
         self.compact_variable_ids();
         self.apply_variable_mapping();
         if !self.constraints.is_empty() {
-            assert!(self.num_intermediates > 0);
+            assert!(
+                self.constraints
+                    .iter()
+                    .any(|c| !matches!(c.constraint, Constraint::Variable(_))),
+                "All constraints are pure Variable copies; no computation will be performed."
+            );
         }
     }
 
-    fn collect_variable_info(&mut self) {
+    /// Map the used_nodes to the max previous node for each node in asc order
+    fn map_potential_overwrites(&self, used_nodes: &[usize]) -> Vec<usize> {
+        // if used_nodes is sorted and unique, we can return it directly for O(N)
+        if used_nodes.windows(2).all(|w| w[0] < w[1]) {
+            return used_nodes.to_vec();
+        }
+        // iterate through all used_nodes to find max prev node for O(NlogN)
+        let mut m: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut max_so_far = 0;
+
+        for &node_idx in used_nodes {
+            if node_idx > max_so_far {
+                max_so_far = node_idx;
+            }
+            m.insert(node_idx, max_so_far);
+        }
+
+        m.values().cloned().collect()
+    }
+
+    fn collect_variable_info(&mut self, nodes_map: Vec<usize>) {
         // Iterate through all constraints to collect for each intermediate variable
         let mut variable_info = HashMap::new();
+        let mut nodes_iter = nodes_map.iter().copied();
         for (idx, c) in self.constraints.iter().enumerate() {
             match &c.constraint {
                 Constraint::Add(src1, src2, dest)
@@ -290,16 +349,24 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
                     // an intermediate variable is first defined in the `dest` field
                     if let Source::Intermediate(dest_id) = dest {
                         let dest_var = IntermediateVariable { id: *dest_id };
-                        variable_info
-                            .entry(dest_var.clone())
-                            .or_insert_with(|| VariableInfo {
-                                def_point: idx,
-                                first_use: usize::MAX,
-                                last_use: idx,
-                                use_count: 0,
-                                dependencies: HashSet::new(),
-                                dependents: HashSet::new(),
-                            });
+                        let info =
+                            variable_info
+                                .entry(dest_var.clone())
+                                .or_insert_with(|| VariableInfo {
+                                    def_point: idx,
+                                    first_use: usize::MAX,
+                                    last_use: idx,
+                                    use_count: 0,
+                                    dependencies: HashSet::new(),
+                                    dependents: HashSet::new(),
+                                });
+                        // We need to be sure that previous node will not erase accumulated value
+                        if c.need_accumulate {
+                            let max_prev_node = nodes_iter
+                                .next()
+                                .expect("nodes map shorter than number of accumulators");
+                            info.last_use = info.last_use.max(max_prev_node);
+                        }
                     }
 
                     // if an intermediate variable is used in the `src`, update its use info
@@ -313,23 +380,31 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
                 Constraint::Neg(src, dest) => {
                     if let Source::Intermediate(dest_id) = dest {
                         let dest_var = IntermediateVariable { id: *dest_id };
-                        variable_info
-                            .entry(dest_var.clone())
-                            .or_insert_with(|| VariableInfo {
-                                def_point: idx,
-                                first_use: usize::MAX,
-                                last_use: idx,
-                                use_count: 0,
-                                dependencies: HashSet::new(),
-                                dependents: HashSet::new(),
-                            });
+                        let info =
+                            variable_info
+                                .entry(dest_var.clone())
+                                .or_insert_with(|| VariableInfo {
+                                    def_point: idx,
+                                    first_use: usize::MAX,
+                                    last_use: idx,
+                                    use_count: 0,
+                                    dependencies: HashSet::new(),
+                                    dependents: HashSet::new(),
+                                });
+
+                        // We need to be sure that previous node will not erase accumulated value
+                        if c.need_accumulate {
+                            let max_prev_node = nodes_iter
+                                .next()
+                                .expect("nodes map shorter than number of accumulators");
+                            info.last_use = info.last_use.max(max_prev_node);
+                        }
                     }
 
                     if let Source::Intermediate(src_id) = src {
                         self.update_use_info(&mut variable_info, src_id, idx, dest);
                     }
                 }
-                // todo: check
                 Constraint::Variable(src) => {
                     if let Source::Intermediate(src_id) = src {
                         let src_var = IntermediateVariable { id: *src_id };
@@ -345,6 +420,9 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
                             });
                         info.last_use = info.last_use.max(idx);
                         info.use_count += 1;
+                    }
+                    if c.need_accumulate {
+                        nodes_iter.next();
                     }
                 }
             }
@@ -474,8 +552,4 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
             }
         }
     }
-}
-
-pub fn dummy_inv<F: Field>(x: SymbolicExpression<F>) -> SymbolicExpression<F> {
-    -(-(-x))
 }

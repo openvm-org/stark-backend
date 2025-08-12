@@ -4,7 +4,38 @@
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
+#ifdef DEBUG
 #include <cstdio>
+
+
+// Helper function to print decoded information
+__host__ __device__ void print_decoded_rule(uint32_t rule_idx, Rule encoded, DecodedRule rule) {
+    printf("Rule[%d]: {%lx, %lx}\n", rule_idx, encoded.high, encoded.low);
+    printf("    Operation: %d\n", rule.op);
+    printf("    Is Constraint: %s\n", rule.is_constraint ? "true" : "false");
+
+    printf(
+        "    X Entry - Type: %d, part: %d, offset: %d, index: %d\n",
+        rule.x.type,
+        rule.x.part,
+        rule.x.offset,
+        rule.x.index
+    );
+
+    printf(
+        "    Y Entry - Type: %d, part: %d, offset: %d, index: %d\n",
+        rule.y.type,
+        rule.y.part,
+        rule.y.offset,
+        rule.y.index
+    );
+
+    printf(
+        "    Z Entry - Type: %d, offset: %d, index: %d\n", rule.z.type, rule.z.offset, rule.z.index
+    );
+}
+
+#endif
 
 __forceinline__ __device__ uint32_t bit_rev(uint32_t x, uint32_t n) {
     return __brev(x) >> (__clz(n) + 1);
@@ -95,54 +126,28 @@ __device__ __forceinline__ FpExt evaluate_source(
     return result;
 }
 
-// Helper function to print decoded information
-__host__ __device__ void print_decoded_rule(uint32_t rule_idx, Rule encoded, DecodedRule rule) {
-    printf("Rule[%d]: {%lx, %lx}\n", rule_idx, encoded.high, encoded.low);
-    printf("    Operation: %d\n", rule.op);
-    printf("    Is Constraint: %s\n", rule.is_constraint ? "true" : "false");
-
-    printf(
-        "    X Entry - Type: %d, part: %d, offset: %d, index: %d\n",
-        rule.x.type,
-        rule.x.part,
-        rule.x.offset,
-        rule.x.index
-    );
-
-    printf(
-        "    Y Entry - Type: %d, part: %d, offset: %d, index: %d\n",
-        rule.y.type,
-        rule.y.part,
-        rule.y.offset,
-        rule.y.index
-    );
-
-    printf(
-        "    Z Entry - Type: %d, offset: %d, index: %d\n", rule.z.type, rule.z.offset, rule.z.index
-    );
-}
-
 // In this kernel we have interemediates stored in global memory.
-__global__ void cukernel_quotient_global(
+template<bool GLOBAL>
+__global__ void cukernel_quotient(
     // output
-    FpExt *d_quotient_values,
+    FpExt * __restrict__ d_quotient_values,
     // LDEs
-    const Fp *d_preprocessed, // preprocessed LDE over Fp
-    const uint64_t *d_main,   // array of partitioned main LDEs over Fp
-    const Fp *d_permutation,  // permutation LDE over FpExt (see comments below)
+    const Fp * __restrict__ d_preprocessed, // preprocessed LDE over Fp
+    const uint64_t * __restrict__ d_main,   // array of partitioned main LDEs over Fp
+    const Fp * __restrict__ d_permutation,  // permutation LDE over FpExt (see comments below)
     // public values, challenges, ...
-    const FpExt *d_exposed,
-    const Fp *d_public,
-    const Fp *d_first,
-    const Fp *d_last,
-    const Fp *d_transition,
-    const Fp *d_inv_zeroifier,
-    const FpExt *d_challenge,
-    const FpExt *d_alpha,
+    const FpExt * __restrict__ d_exposed,
+    const Fp * __restrict__ d_public,
+    const Fp * __restrict__ d_first,
+    const Fp * __restrict__ d_last,
+    const Fp * __restrict__ d_transition,
+    const Fp * __restrict__ d_inv_zeroifier,
+    const FpExt * __restrict__ d_challenge,
+    const FpExt * __restrict__ d_alpha,
     // intermediates
-    const FpExt *d_intermediates,
+    const FpExt * __restrict__ d_intermediates,
     // symbolic constraints (rules)
-    const Rule *d_rules,
+    const Rule * __restrict__ d_rules,
     const uint64_t num_rules,
     const uint64_t quotient_size,
     const uint32_t prep_height,
@@ -156,134 +161,17 @@ __global__ void cukernel_quotient_global(
     uint64_t task_stride = gridDim.x * blockDim.x;
 
     FpExt alpha = *d_alpha;
-    FpExt *intermediates_ptr = (FpExt *)d_intermediates + task_offset;
-    uint64_t intermediate_stride = task_stride;
+    FpExt *intermediates_ptr;
+    uint64_t intermediate_stride;
 
-    for (uint32_t j = 0; j < num_rows_per_tile; j++) {
-        uint64_t index = task_offset + j * task_stride;
-        bool valid = index < quotient_size;
-
-        if (valid) {
-            FpExt accumulator = FpExt(0);
-            for (uint32_t i = 0; i < num_rules; i++) {
-                __syncthreads();
-                Rule rule = d_rules[i];
-                DecodedRule decoded_rule = decode_rule(rule);
-
-                FpExt x = evaluate_source(
-                    decoded_rule.x,
-                    index,
-                    d_preprocessed,
-                    d_main,
-                    d_permutation,
-                    d_exposed,
-                    d_public,
-                    d_challenge,
-                    d_first,
-                    d_last,
-                    d_transition,
-                    intermediates_ptr,
-                    intermediate_stride,
-                    next_step,
-                    quotient_size,
-                    prep_height,
-                    main_height,
-                    perm_height
-                );
-                FpExt y = evaluate_source(
-                    decoded_rule.y,
-                    index,
-                    d_preprocessed,
-                    d_main,
-                    d_permutation,
-                    d_exposed,
-                    d_public,
-                    d_challenge,
-                    d_first,
-                    d_last,
-                    d_transition,
-                    intermediates_ptr,
-                    intermediate_stride,
-                    next_step,
-                    quotient_size,
-                    prep_height,
-                    main_height,
-                    perm_height
-                );
-                FpExt result = {0, 0, 0, 0};
-                switch (decoded_rule.op) {
-                case OP_ADD:
-                    result = x + y;
-                    break;
-                case OP_SUB:
-                    result = x - y;
-                    break;
-                case OP_MUL:
-                    x *= y; // gpu-field/src/baby_bear/cuda/fpext.h #L132
-                    result += x;
-                    break;
-                case OP_NEG:
-                    result = -x;
-                    break;
-                case OP_VAR:
-                    result = x;
-                    break;
-                default:;
-                }
-
-                if (decoded_rule.op != OP_VAR) {
-                    intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
-                }
-
-                if (decoded_rule.is_constraint) {
-                    accumulator *= alpha;
-                    accumulator += result;
-                }
-            }
-
-            accumulator *= d_inv_zeroifier[index];
-            d_quotient_values[index] = accumulator; // accumulator * d_inv_zeroifier[index];
-        }
+    if constexpr (GLOBAL) {
+        intermediates_ptr = (FpExt *)d_intermediates + task_offset;
+        intermediate_stride = task_stride;
+    } else {
+        FpExt intermediates[10];
+        intermediates_ptr = intermediates;
+        intermediate_stride = 1;
     }
-}
-
-// In this kernel we have the intermediates stored in registers.
-__global__ void cukernel_quotient_local(
-    // output
-    FpExt *d_quotient_values,
-    // LDEs
-    const Fp *d_preprocessed, // preprocessed LDE over Fp
-    const uint64_t *d_main,   // array of partitioned main LDEs over Fp
-    const Fp *d_permutation,  // permutation LDE over FpExt (see comments below)
-    // public values, challenges, ...
-    const FpExt *d_exposed,
-    const Fp *d_public,
-    const Fp *d_first,
-    const Fp *d_last,
-    const Fp *d_transition,
-    const Fp *d_inv_zeroifier,
-    const FpExt *d_challenge,
-    const FpExt *d_alpha,
-    // intermediates (just a placeholder)
-    const FpExt *d_intermediates,
-    // params
-    const Rule *d_rules,
-    const uint64_t num_rules,
-    const uint64_t quotient_size,
-    const uint32_t prep_height,
-    const uint32_t main_height,
-    const uint32_t perm_height,
-    const uint64_t qdb_degree,
-    const uint32_t num_rows_per_tile
-) {
-    uint32_t next_step = 1 << qdb_degree;
-    uint64_t task_offset = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t task_stride = gridDim.x * blockDim.x;
-
-    FpExt alpha = *d_alpha;
-    FpExt intermediates[10];
-    FpExt *intermediates_ptr = intermediates;
-    uint64_t intermediate_stride = 1;
 
     for (uint32_t j = 0; j < num_rows_per_tile; j++) {
         uint64_t index = task_offset + j * task_stride;
@@ -354,7 +242,8 @@ __global__ void cukernel_quotient_local(
                 case OP_VAR:
                     result = x;
                     break;
-                default:;
+                default:
+                    assert(false);
                 }
 
                 if (decoded_rule.op != OP_VAR) {
@@ -466,7 +355,7 @@ extern "C" int _cukernel_quotient_local(
     const uint32_t num_rows_per_tile
 ) {
     auto [grid, block] = kernel_launch_params(TASK_SIZE, 256);
-    cukernel_quotient_local<<<grid, block>>>(
+    cukernel_quotient<false><<<grid, block>>>(
         d_quotient_values,
         d_preprocessed,
         d_main,
@@ -516,7 +405,7 @@ extern "C" int _cukernel_quotient_global(
     const uint32_t num_rows_per_tile
 ) {
     auto [grid, block] = kernel_launch_params(TASK_SIZE, 256);
-    cukernel_quotient_global<<<grid, block>>>(
+    cukernel_quotient<true><<<grid, block>>>(
         d_quotient_values,
         d_preprocessed,
         d_main,

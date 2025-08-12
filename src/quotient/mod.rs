@@ -1,6 +1,6 @@
 use itertools::{multiunzip, Itertools};
 use openvm_stark_backend::{
-    air_builders::symbolic::SymbolicExpressionDag,
+    air_builders::symbolic::SymbolicConstraintsDag,
     config::Domain,
     prover::{hal::MatrixDimensions, types::RapView},
 };
@@ -34,12 +34,12 @@ impl QuotientCommitterGpu {
     // domain), which is always larger than trace domain
     #[instrument(name = "compute single RAP quotient values on gpu", level = "debug", skip_all, fields(
         quotient_domain_size = (1usize << view_gpu.log_trace_height) * (quotient_degree as usize),
-        num_constraints = constraints.num_constraints()
+        num_constraints = constraints.constraints.num_constraints()
     ))]
     pub(super) fn single_rap_quotient_values(
         &self,
         device: &GpuDevice,
-        constraints: &SymbolicExpressionDag<F>,
+        constraints: &SymbolicConstraintsDag<F>,
         view_gpu: RapView<DeviceMatrix<F>, F, EF>,
         quotient_degree: u8,
     ) -> SingleQuotientDataGpu {

@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use openvm_stark_backend::{
-    air_builders::symbolic::SymbolicExpressionDag, config::Domain, prover::hal::MatrixDimensions,
+    air_builders::symbolic::SymbolicConstraintsDag, config::Domain, prover::hal::MatrixDimensions,
 };
 use p3_commit::PolynomialSpace;
 use p3_field::PrimeField32;
@@ -21,7 +21,7 @@ use crate::{
     skip_all
 )]
 pub fn compute_single_rap_quotient_values_gpu(
-    constraints: &SymbolicExpressionDag<F>,
+    constraints: &SymbolicConstraintsDag<F>,
     trace_domain: Domain<SC>,
     quotient_domain: Domain<SC>,
     preprocessed_trace_on_quotient_domain: Option<DeviceMatrix<F>>,
@@ -41,7 +41,7 @@ pub fn compute_single_rap_quotient_values_gpu(
         .all(|m| m.height() >= quotient_size));
 
     // constraints
-    let constraints_len = constraints.num_constraints();
+    let constraints_len = constraints.constraints.num_constraints();
     let rules = SymbolicRulesOnGpu::new(constraints.clone());
     let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 

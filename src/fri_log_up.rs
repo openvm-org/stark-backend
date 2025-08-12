@@ -26,10 +26,7 @@ use crate::{
         stream::gpu_metrics_span,
     },
     prelude::*,
-    transpiler::{
-        codec::{encode_inv, Codec},
-        dummy_inv, Constraint, SymbolicRulesOnGpu,
-    },
+    transpiler::{codec::Codec, SymbolicRulesOnGpu},
 };
 
 // Output format that keeps GPU data as GPU data
@@ -171,78 +168,53 @@ impl FriLogUpPhaseGpu {
             .map(|index| SymbolicVariable::<F>::new(Entry::Challenge, index).into())
             .collect_vec();
 
-        // 1. Generate symbolic expressions
-        let mut expressions: Vec<SymbolicExpression<F>> = Vec::new();
+        // 1. Generate interactions message as denom = alpha + sum(beta_i * message_i) + beta_{m} *
+        //    b
+        // We use SymbolicInteraction to store (message = [denom], multiplicity = numerator) pair
+        // symbolically.
+        let mut full_interactions: Vec<SymbolicInteraction<F>> = Vec::new();
         for interaction_indices in interaction_partitions {
-            let sum = interaction_indices
-                .iter()
-                .map(|&interaction_idx| {
-                    let interaction = &all_interactions[interaction_idx];
-                    let b =
-                        SymbolicExpression::from_canonical_u32(interaction.bus_index as u32 + 1);
-                    let betas = symbolic_challenges[alphas_len..].to_vec();
-                    debug_assert!(interaction.message.len() <= betas.len());
-                    let mut fields = interaction.message.iter();
-                    let alpha = symbolic_challenges[0].clone();
-                    let mut denom = alpha + fields.next().unwrap().clone();
-                    for (expr, beta) in fields.zip(betas.iter().skip(1)) {
-                        denom += beta.clone() * expr.clone();
-                    }
-                    denom += betas[interaction.message.len()].clone() * b;
-
-                    let interaction_val = interaction.count.clone();
-
-                    interaction_val * dummy_inv(denom)
-                })
-                .sum();
-            expressions.push(sum);
+            full_interactions.extend(
+                interaction_indices
+                    .iter()
+                    .map(|&interaction_idx| {
+                        let mut interaction: SymbolicInteraction<F> =
+                            all_interactions[interaction_idx].clone();
+                        let b = SymbolicExpression::from_canonical_u32(
+                            interaction.bus_index as u32 + 1,
+                        );
+                        let betas = symbolic_challenges[alphas_len..].to_vec();
+                        debug_assert!(interaction.message.len() <= betas.len());
+                        let mut fields = interaction.message.iter();
+                        let alpha = symbolic_challenges[0].clone();
+                        let mut denom = alpha + fields.next().unwrap().clone();
+                        for (expr, beta) in fields.zip(betas.iter().skip(1)) {
+                            denom += beta.clone() * expr.clone();
+                        }
+                        denom += betas[interaction.message.len()].clone() * b;
+                        interaction.message = vec![denom];
+                        interaction
+                    })
+                    .collect_vec(),
+            );
         }
 
         // 2. Transpile to GPU Rules
+        // We use SymbolicConstraints as a way to encode the symbolic interactions as (denom,
+        // numerator) pairs to transport to GPU.
         let constraints = SymbolicConstraints {
-            constraints: expressions,
-            interactions: vec![],
+            constraints: vec![],
+            interactions: full_interactions,
         };
         let constraints_dag: SymbolicConstraintsDag<F> = constraints.into();
-        let constraints_len = constraints_dag.constraints.num_constraints();
-        let rules = SymbolicRulesOnGpu::new(constraints_dag.constraints);
+        let rules = SymbolicRulesOnGpu::new(constraints_dag.clone());
+        let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
-        let mut encoded_rules = Vec::<u128>::new();
-        let mut i = 0;
-        while i < rules.constraints.len() {
-            let c = &rules.constraints[i];
-            // Detect the triple-negation pattern that represents inversion:
-            // 1. Neg(src1 → dest1)
-            // 2. Neg(dest1 → dest2)
-            // 3. Neg(dest2 → dest3)
-            // Which reduces to Inv(src1 → dest3)
-            if i + 2 < rules.constraints.len() {
-                if let Constraint::Neg(src1, dest1) = &c.constraint {
-                    if let Constraint::Neg(src2, dest2) = &rules.constraints[i + 1].constraint {
-                        if let Constraint::Neg(src3, dest3) = &rules.constraints[i + 2].constraint {
-                            assert_eq!(dest1, src2);
-                            assert_eq!(dest2, src3);
-                            assert_ne!(dest3, src1);
-                            encoded_rules.push(encode_inv(src1, dest3, c.need_accumulate));
-                            i += 3;
-                            continue;
-                        }
-                    }
-                }
-            }
-            // Standard case
-            encoded_rules.push(c.encode());
-            i += 1;
-        }
-
-        tracing::debug!(
-            "[permute] num_constraints[{}] num_rules[{}] num_intermediates[{}]",
-            constraints_len,
-            encoded_rules.len(),
-            rules.num_intermediates,
-        );
-
-        // 4. Call GPU module
+        // 3. Call GPU module
+        let partition_lens = interaction_partitions
+            .iter()
+            .map(|p| p.len() as u32)
+            .collect_vec();
         let perm_width = interaction_partitions.len() + 1;
         let perm_height = height;
         let (device_matrix, sum) = self.permute_trace_gen_gpu(
@@ -253,6 +225,8 @@ impl FriLogUpPhaseGpu {
             &challenges,
             &encoded_rules,
             rules.num_intermediates,
+            &partition_lens,
+            &rules.used_nodes,
         );
 
         (Some(device_matrix), Some(sum))
@@ -269,6 +243,8 @@ impl FriLogUpPhaseGpu {
         challenges: &[EF],
         rules: &[u128],
         num_intermediates: usize,
+        partition_lens: &[u32],
+        used_nodes: &[usize],
     ) -> (DeviceMatrix<F>, EF) {
         assert!(!rules.is_empty(), "No rules provided to permute");
 
@@ -295,6 +271,8 @@ impl FriLogUpPhaseGpu {
         let d_permutation = DeviceMatrix::<F>::with_capacity(permutation_height, permutation_width);
         let d_challenges = challenges.to_device().unwrap();
         let d_rules = rules.to_device().unwrap();
+        let d_partition_lens = partition_lens.to_device().unwrap();
+        let d_used_nodes = used_nodes.to_device().unwrap();
 
         // 3. hal function
         let _ = self.hal_permute_trace_gen(
@@ -308,6 +286,8 @@ impl FriLogUpPhaseGpu {
             num_intermediates,
             permutation_height,
             permutation_width / 4,
+            &d_partition_lens,
+            &d_used_nodes,
         );
         // We can drop preprocessed and main traces now that permutation trace is generated.
         // Note these matrices may be smart pointers so they may not be fully deallocated.
@@ -333,6 +313,8 @@ impl FriLogUpPhaseGpu {
         num_intermediates: usize,
         permutation_height: usize,
         permutation_width_ext: usize,
+        partition_lens: &DeviceBuffer<u32>,
+        used_nodes: &DeviceBuffer<usize>,
     ) -> Result<(), CudaError> {
         let task_size = 65536;
         let tile_per_thread = (permutation_height as u32).div_ceil(task_size as u32);
@@ -347,9 +329,8 @@ impl FriLogUpPhaseGpu {
         };
 
         let d_cumulative_sums = DeviceBuffer::<EF>::with_capacity(permutation_height);
-
         unsafe {
-            permute_trace_gen_global_or_register(
+            calculate_cumulative_sums(
                 is_global,
                 permutation,
                 &d_cumulative_sums,
@@ -358,7 +339,9 @@ impl FriLogUpPhaseGpu {
                 challenges,
                 &d_intermediates,
                 rules,
-                num_rules as u32,
+                used_nodes,
+                partition_lens,
+                partition_lens.len() as u32,
                 permutation_height as u32,
                 permutation_width_ext as u32,
                 tile_per_thread,
