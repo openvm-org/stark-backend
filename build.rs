@@ -60,13 +60,10 @@ fn main() {
     // 2 → Balanced optimization (often same as -O3 for some kernels)
     // 3 → Maximum optimization (usually default for release builds)
     let cuda_opt_level = env::var("CUDA_OPT_LEVEL").unwrap_or("3".to_string());
-    let sppark_root = env::var("DEP_SPPARK_ROOT").expect("sppark dependency not found");
 
-    let mut builder = cc::Build::new();
-    builder
+    let mut common = cc::Build::new();
+    common
         .cuda(true)
-        // Include paths
-        .include("cuda/include")
         // CUDA specific flags
         .flag("--std=c++17")
         .flag("--expt-relaxed-constexpr")
@@ -77,18 +74,20 @@ fn main() {
         .flag(nvcc_parallel_jobs());
 
     if cuda_opt_level == "0" {
-        builder.debug(true);
-        builder.flag("-O0");
+        common.debug(true);
+        common.flag("-O0");
     } else {
-        builder.debug(false);
-        builder.flag(format!("--ptxas-options=-O{}", cuda_opt_level));
+        common.debug(false);
+        common.flag(format!("--ptxas-options=-O{}", cuda_opt_level));
     }
 
     if let Ok(cuda_path) = env::var("CUDA_PATH") {
-        builder.include(format!("{}/include", cuda_path));
+        common.include(format!("{}/include", cuda_path));
     }
 
+    let mut builder = common.clone();
     builder
+        .include("cuda/include")
         .file("cuda/src/matrix.cu")
         .file("cuda/src/lde.cu")
         .file("cuda/src/poseidon2.cu")
@@ -99,39 +98,14 @@ fn main() {
         .file("cuda/src/fri.cu")
         .compile("stark_backend_gpu");
 
-    println!(
-        "SPPARK_ROOT = {}",
-        env::var("DEP_SPPARK_ROOT").unwrap_or("NOT FOUND".to_string())
-    );
-
-    let mut ntt_builder = cc::Build::new();
+    let mut ntt_builder = common.clone();
     ntt_builder
-        .cuda(true)
         .cpp(true)
+        .include("cuda/include")
         .define("FEATURE_BABY_BEAR", None)
-        .file(format!("{}/util/all_gpus.cpp", sppark_root))
+        .include("cuda/supra")
         .file("cuda/src/supra_ntt_api.cu")
-        .include(&sppark_root)
-        .include(format!("{}/util", sppark_root))
-        .include(format!("{}/ntt", sppark_root))
-        .flag("--std=c++17")
-        .flag(format!(
-            "-gencode=arch=compute_{},code=sm_{}",
-            cuda_arch, cuda_arch
-        ));
-
-    if cuda_opt_level == "0" {
-        ntt_builder.debug(true);
-        ntt_builder.flag("-O0");
-    } else {
-        ntt_builder.debug(false);
-        ntt_builder.flag(format!("--ptxas-options=-O{}", cuda_opt_level));
-    }
-    if let Ok(cuda_path) = env::var("CUDA_PATH") {
-        ntt_builder.include(format!("{}/include", cuda_path));
-    }
-
-    ntt_builder.compile("supra_ntt");
+        .compile("supra_ntt");
 
     // Make sure CUDA and our utilities are linked
     println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");

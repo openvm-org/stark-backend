@@ -26,13 +26,12 @@ pub struct GpuDevice {
 #[warn(dead_code)]
 impl GpuDevice {
     pub fn new(config: GpuConfig, rap_phase_seq: Option<FriLogUpPhaseGpu>) -> Self {
-        let id = set_device().unwrap();
         unsafe {
-            sppark_init(id).unwrap();
+            sppark_init().unwrap();
         }
         Self {
             config,
-            id,
+            id: set_device().unwrap(),
             rap_phase_seq,
         }
     }

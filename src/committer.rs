@@ -10,7 +10,7 @@ impl GpuDevice {
         trace: DeviceMatrix<BabyBear>,
     ) -> (Vec<u8>, GpuMerkleTree<LDE>) {
         let log_height: u8 = log2_strict_usize(trace.height()).try_into().unwrap();
-        let lde = LDE::new(self, trace, 0, self.config.shift);
+        let lde = LDE::new(trace, 0, self.config.shift);
         (
             vec![log_height],
             GpuMerkleTree::new(vec![lde], self).unwrap(),
@@ -29,7 +29,7 @@ impl GpuDevice {
             .map(|(trace, shift)| {
                 let height = trace.height();
                 let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
-                let mut lde = LDE::new(self, trace, log_blowup, shift);
+                let mut lde = LDE::new(trace, log_blowup, shift);
                 if !keep_traces {
                     lde.to_coefficient_form();
                 }

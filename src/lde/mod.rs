@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use openvm_stark_backend::prover::hal::MatrixDimensions;
 
-use crate::{base::DeviceMatrix, gpu_device::GpuDevice, prelude::F};
+use crate::{base::DeviceMatrix, prelude::F};
 
 pub(crate) mod ops;
 use ops::*;
@@ -14,7 +14,7 @@ pub trait GpuLde: MatrixDimensions + LdeCommon {
     ///
     /// - `added_bits` determines the blowup factor for LDE computation.
     /// - `shift` determines the coset used for LDE.
-    fn new(device: &GpuDevice, matrix: DeviceMatrix<F>, added_bits: usize, shift: F) -> Self
+    fn new(matrix: DeviceMatrix<F>, added_bits: usize, shift: F) -> Self
     where
         Self: Sized;
 
@@ -64,7 +64,6 @@ pub type GpuLdeOnDemand = GpuLdeImpl<OnDemand>;
 
 #[derive(Clone)]
 pub struct GpuLdeImpl<M: GpuLdeMode> {
-    device_id: u32,
     data: GpuLdeDataType,
     added_bits: usize,
     shift: F,
@@ -101,10 +100,9 @@ impl<M: GpuLdeMode> LdeCommon for GpuLdeImpl<M> {
 }
 
 impl GpuLde for GpuLdeCached {
-    fn new(device: &GpuDevice, matrix: DeviceMatrix<F>, added_bits: usize, shift: F) -> Self {
+    fn new(matrix: DeviceMatrix<F>, added_bits: usize, shift: F) -> Self {
         if added_bits == 0 {
             return Self {
-                device_id: device.id,
                 data: GpuLdeDataType::Lde(matrix),
                 added_bits,
                 shift,
@@ -113,9 +111,8 @@ impl GpuLde for GpuLdeCached {
         }
         let trace_height = matrix.height();
         let lde_height = trace_height << added_bits;
-        let lde = compute_lde_matrix::<true>(matrix, device.id, lde_height, shift);
+        let lde = compute_lde_matrix::<true>(&matrix, lde_height, shift);
         Self {
-            device_id: device.id,
             data: GpuLdeDataType::Lde(lde),
             added_bits,
             shift,
@@ -145,7 +142,7 @@ impl GpuLde for GpuLdeCached {
 }
 
 impl GpuLde for GpuLdeOnDemand {
-    fn new(device: &GpuDevice, matrix: DeviceMatrix<F>, added_bits: usize, shift: F) -> Self {
+    fn new(matrix: DeviceMatrix<F>, added_bits: usize, shift: F) -> Self {
         let data = if added_bits == 0 {
             GpuLdeDataType::Lde(matrix)
         } else {
@@ -155,7 +152,6 @@ impl GpuLde for GpuLdeOnDemand {
             }
         };
         Self {
-            device_id: device.id,
             data,
             added_bits,
             shift,
@@ -172,19 +168,9 @@ impl GpuLde for GpuLdeOnDemand {
 
             GpuLdeDataType::Trace { trace, coef_form } => {
                 if *coef_form {
-                    compute_lde_matrix::<false>(
-                        trace.clone(),
-                        self.device_id,
-                        self.height(),
-                        self.shift,
-                    )
+                    compute_lde_matrix::<false>(trace, self.height(), self.shift)
                 } else {
-                    compute_lde_matrix::<true>(
-                        trace.clone(),
-                        self.device_id,
-                        self.height(),
-                        self.shift,
-                    )
+                    compute_lde_matrix::<true>(trace, self.height(), self.shift)
                 }
             }
         }
@@ -198,7 +184,7 @@ impl GpuLde for GpuLdeOnDemand {
                 if *coef_form {
                     polynomial_evaluate(trace, self.shift, self.height(), row_indices)
                 } else {
-                    let trace = inplace_ifft(trace.clone(), self.device_id);
+                    let trace = inplace_ifft(trace.clone());
                     polynomial_evaluate(&trace, self.shift, self.height(), row_indices)
                 }
             }
@@ -209,7 +195,7 @@ impl GpuLde for GpuLdeOnDemand {
     fn to_coefficient_form(&mut self) {
         if let GpuLdeDataType::Trace { trace, coef_form } = &self.data {
             if !coef_form {
-                let trace = inplace_ifft(trace.clone(), self.device_id);
+                let trace = inplace_ifft(trace.clone());
                 self.data = GpuLdeDataType::Trace {
                     trace,
                     coef_form: true,

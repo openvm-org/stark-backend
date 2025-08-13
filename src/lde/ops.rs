@@ -12,16 +12,16 @@ use crate::{
     prelude::F,
 };
 
-pub(crate) fn inplace_ifft(trace_matrix: DeviceMatrix<F>, device_id: u32) -> DeviceMatrix<F> {
+pub(crate) fn inplace_ifft(trace_matrix: DeviceMatrix<F>) -> DeviceMatrix<F> {
     let width = trace_matrix.width();
     let log_trace_height = log2_strict_usize(trace_matrix.height());
+
     unsafe {
         batch_interpolate_ntt(
             trace_matrix.buffer(),
             log_trace_height as u32,
             0,
             width as u32,
-            device_id,
         )
         .unwrap();
     }
@@ -29,8 +29,7 @@ pub(crate) fn inplace_ifft(trace_matrix: DeviceMatrix<F>, device_id: u32) -> Dev
 }
 
 pub(crate) fn compute_lde_matrix<const FULL: bool>(
-    trace_matrix: DeviceMatrix<F>,
-    device_id: u32,
+    trace_matrix: &DeviceMatrix<F>,
     domain_size: usize,
     shift: F,
 ) -> DeviceMatrix<F> {
@@ -60,7 +59,6 @@ pub(crate) fn compute_lde_matrix<const FULL: bool>(
                 log_trace_height,
                 log_blowup,
                 width as u32,
-                device_id,
             )
             .unwrap();
         }
@@ -76,7 +74,7 @@ pub(crate) fn compute_lde_matrix<const FULL: bool>(
 
         batch_bit_reverse(lde_matrix.buffer(), log_lde_height, lde_size).unwrap();
 
-        batch_ntt(lde_matrix.buffer(), log_lde_height, width as u32, device_id).unwrap();
+        batch_ntt(lde_matrix.buffer(), log_lde_height, width as u32).unwrap();
     }
 
     lde_matrix
