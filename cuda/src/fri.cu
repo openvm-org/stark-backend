@@ -4,6 +4,7 @@
 #include "launcher.cuh"
 
 const uint32_t TILE_WIDTH = 32;
+static const size_t FRI_MAX_THREADS = 256;
 
 __forceinline__ __device__ uint32_t bit_rev(uint32_t x, uint32_t n) {
     return __brev(x) >> (__clz(n) + 1);
@@ -13,11 +14,11 @@ __forceinline__ __device__ uint32_t bit_rev(uint32_t x, uint32_t n) {
 //           + (1/2 - beta/2 g_inv^i) * folded[2*i+1]
 //           + beta^2 *fri_input[i]
 __global__ void cukernel_fri_fold(
-    FpExt *result,
-    FpExt *folded,
-    const FpExt *fri_input,
-    FpExt *d_constants,
-    Fp *g_inv_powers,
+    FpExt * __restrict__ result,
+    FpExt * __restrict__ folded,
+    const FpExt * __restrict__ fri_input,
+    FpExt * __restrict__ d_constants,
+    Fp * __restrict__ g_inv_powers,
     uint64_t N
 ) {
     FpExt half_beta = d_constants[0];   // beta/2
@@ -41,7 +42,12 @@ __global__ void cukernel_fri_fold(
 }
 
 // compute diffs = { (z - shift*g^j) } for j in 0..N
-__global__ void compute_diffs(FpExt *diffs, FpExt *d_z, Fp *d_domain, uint32_t log_n) {
+__global__ void compute_diffs(
+    FpExt * __restrict__ diffs, 
+    FpExt * __restrict__ d_z, 
+    Fp * __restrict__ d_domain, 
+    uint32_t log_n
+) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
 
@@ -59,7 +65,7 @@ __global__ void compute_diffs(FpExt *diffs, FpExt *d_z, Fp *d_domain, uint32_t l
 }
 
 // data[i] = g^i for i in 0..N
-__global__ void powers(Fp *data, Fp *d_g, uint32_t N) {
+__global__ void powers(Fp * __restrict__ data, Fp * __restrict__ d_g, uint32_t N) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
     Fp g = *d_g;
@@ -71,7 +77,7 @@ __global__ void powers(Fp *data, Fp *d_g, uint32_t N) {
     }
 }
 
-__global__ void powers_ext(FpExt *data, FpExt *d_g, uint32_t N) {
+__global__ void powers_ext(FpExt * __restrict__ data, FpExt * __restrict__ d_g, uint32_t N) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
     FpExt g = *d_g;
@@ -83,20 +89,6 @@ __global__ void powers_ext(FpExt *data, FpExt *d_g, uint32_t N) {
     }
 }
 
-__global__ void precompute_diff_powers(
-    FpExt *d_output,
-    const FpExt *diff_invs,
-    const Fp *powers,
-    uint32_t N
-) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t stride = blockDim.x * gridDim.x;
-    for (; idx < N; idx += stride) {
-        if (idx < N) {
-            d_output[idx] = diff_invs[idx] * powers[idx];
-        }
-    }
-}
 
 __global__ void fri_bit_reverse(FpExt *data, uint32_t log_n) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -185,106 +177,6 @@ __global__ void batch_invert(FpExt *data, uint64_t log_n) {
 /// order.
 //////////////////////////////////////////////////////////////////////////////////////////////
 
-// 1. scale_vec(matrix.rows[i], g_powers[i] * diff_invs[i])
-// 2. sum(matrix.rows[i]...matrix.rows[i+TILE_WIDTH])
-// this kernel returns the evaluation of each polynomial m_i(x) at z.
-
-static const uint32_t REDUCTION_THREADS_PER_BLOCK = 256;
-
-/// matrix could have bigger height than domain size
-/// in this case we should do bit_rev twice (first time for domain height,
-/// second time for matrix height)
-__global__ void matrix_scale_rows_then_reduce(
-    FpExt *o_matrix,
-    Fp *matrix,
-    FpExt *diff_invs_dot_g_powers,
-    uint32_t width,
-    uint32_t matrix_height,
-    uint32_t domain_height
-) {
-    uint32_t tid = threadIdx.x;
-    uint64_t row_index = blockIdx.x * blockDim.x + tid;
-    uint64_t col_index = blockIdx.y;
-
-    __shared__ FpExt s_mem[REDUCTION_THREADS_PER_BLOCK];
-    s_mem[threadIdx.x] = FpExt(0);
-
-    FpExt sum = FpExt(0);
-    uint64_t row_stride = gridDim.x * blockDim.x;
-    for (uint32_t i = row_index; i < domain_height; i += row_stride) {
-        if (i < domain_height) {
-            uint32_t br_i = (domain_height == matrix_height)
-                                ? i
-                                : bit_rev(bit_rev(i, domain_height), matrix_height);
-            sum += FpExt(matrix[col_index * matrix_height + br_i]) * diff_invs_dot_g_powers[i];
-        }
-    }
-    s_mem[tid] = sum;
-    __syncthreads();
-
-    for (uint32_t s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            s_mem[tid] += s_mem[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        uint64_t out_height_size = gridDim.x;
-        uint64_t out_height_index = blockIdx.x;
-        o_matrix[col_index * out_height_size + out_height_index] = s_mem[0];
-    }
-}
-
-__global__ void matrix_reduce(
-    FpExt *o_matrix,
-    FpExt *i_matrix,
-    uint32_t width,
-    uint32_t current_height, // the involved height of the matrix, in current round
-    uint32_t buffer_height   // the original height of the matrix
-) {
-    uint32_t tid = threadIdx.x;
-    uint64_t row_index = blockIdx.x * blockDim.x + tid;
-    uint64_t col_index = blockIdx.y;
-
-    __shared__ FpExt s_mem[REDUCTION_THREADS_PER_BLOCK];
-    s_mem[threadIdx.x] = FpExt(0);
-
-    FpExt sum = FpExt(0);
-    uint64_t row_stride = gridDim.x * blockDim.x;
-    for (uint64_t i = row_index; i < current_height; i += row_stride) {
-        if (i < current_height) {
-            sum += i_matrix[col_index * buffer_height + i];
-        }
-    }
-    s_mem[tid] = sum;
-    __syncthreads();
-
-    for (uint32_t s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            s_mem[tid] += s_mem[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        uint64_t out_height_index = blockIdx.x;
-        o_matrix[col_index * buffer_height + out_height_index] = s_mem[0];
-    }
-}
-
-__global__ void matrix_get_first_column(
-    FpExt *o_col,
-    FpExt *i_matrix,
-    uint32_t width,
-    uint32_t height
-) {
-    uint32_t gidx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gidx < width) {
-        o_col[gidx] = i_matrix[gidx * height];
-    }
-}
-
 // the quotient polynomial of [m(z) - \sum alpha^i * m_i(x)] divide by (z - x)is
 // given by its evaluations at coset domain s*H.
 //
@@ -301,12 +193,12 @@ __global__ void matrix_get_first_column(
 // this kernel requires that `acc`, `z_diff_invs` and `m_rlc` have same order.
 // for each row, this kernel computes m_rlc[j] = \sum alpha^i * m_i(s*g^j)
 __global__ void reduce_matrix_quotient_acc(
-    FpExt *quotient_acc,
-    Fp *matrix,
-    FpExt *z_diff_invs,
-    const FpExt *matrix_eval,
-    FpExt *d_alphas,
-    FpExt *d_alphas_offset,
+    FpExt * __restrict__ quotient_acc,
+    Fp * __restrict__ matrix,
+    FpExt * __restrict__ z_diff_invs,
+    const FpExt * __restrict__ matrix_eval,
+    FpExt * __restrict__ d_alphas,
+    FpExt * __restrict__ d_alphas_offset,
     uint32_t width,
     uint32_t height,
     bool is_first
@@ -361,9 +253,132 @@ __global__ void cukernel_split_ext_poly_to_base_col_major_matrix(
     }
 }
 
+// Evaluates a matrix using barycentric interpolation over a coset domain.
+//
+// The domain is split into chunks to handle large matrices that would otherwise
+// exceed GPU limits. Each block processes one chunk of one column. For example,
+// with a 2^24 domain and chunk_size=16384, we get 1024 chunks. Each chunk
+// computes a partial sum for its portion of the domain, and these are later
+// combined in the finalize kernel.
+//
+// The kernel computes: sum_j (matrix[j] * inv_denoms[j] * g^j) for j in chunk
+// where inv_denoms[j] = 1/(z - s*g^j) are precomputed inverse denominators.
+//
+// Matrix can be in natural or bit-reversed order, and inv_denoms can be
+// bit-reversed independently
+template <bool INV_DENOMS_BITREV>
+__global__ void matrix_evaluate_chunked(
+    FpExt * __restrict__ partial_sums,
+    const Fp * __restrict__ matrix,
+    const FpExt * __restrict__ inv_denoms,
+    Fp g,
+    uint32_t height,
+    uint32_t width,
+    uint32_t chunk_size,
+    uint32_t matrix_height
+) {
+    uint32_t chunk_id = blockIdx.x;
+    uint32_t col = blockIdx.y;
+    uint32_t tid = threadIdx.x;
+
+    if (col >= width)
+        return;
+
+    uint32_t chunk_start = chunk_id * chunk_size;
+    uint32_t chunk_range = min(chunk_size, height - chunk_start);
+
+    __shared__ FpExt sdata[FRI_MAX_THREADS];
+
+    FpExt thread_sum = {0, 0, 0, 0};
+    const uint32_t col_offset = col * matrix_height;
+    const bool need_double_bitrev = (height != matrix_height);
+
+    Fp g_power;
+    Fp g_stride = pow(g, blockDim.x);
+    if constexpr (INV_DENOMS_BITREV) {
+        g_power = pow(g, bit_rev(chunk_start + tid, height));
+    } else {
+        g_power = pow(g, chunk_start + tid);
+    }
+
+    for (uint32_t i = tid; i < chunk_range; i += blockDim.x) {
+        uint32_t domain_idx = chunk_start + i;
+        if (domain_idx >= height)
+            break;
+
+        FpExt weight;
+        if constexpr (INV_DENOMS_BITREV) {
+            weight = inv_denoms[bit_rev(domain_idx, height)] * g_power;
+            if (i + blockDim.x < chunk_range) {
+                g_power = pow(g, bit_rev(domain_idx + blockDim.x, height));
+            }
+        } else {
+            weight = inv_denoms[domain_idx] * g_power;
+            g_power *= g_stride;
+        }
+
+        uint32_t mat_idx =
+            need_double_bitrev ? bit_rev(bit_rev(domain_idx, height), matrix_height) : domain_idx;
+
+        uint32_t raw_val = __ldg(reinterpret_cast<const uint32_t*>(&matrix[col_offset + mat_idx]));
+        thread_sum += FpExt(Fp::fromRaw(raw_val)) * weight;
+    }
+
+    sdata[tid] = thread_sum;
+    __syncthreads();
+
+#pragma unroll
+    for (uint32_t s = blockDim.x / 2; s > WARP_SIZE; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // warp unloop
+    if (tid < WARP_SIZE) {
+        if (blockDim.x >= 64) sdata[tid] += sdata[tid + 32];
+        if (blockDim.x >= 32) sdata[tid] += sdata[tid + 16];
+        if (blockDim.x >= 16) sdata[tid] += sdata[tid +  8];
+        if (blockDim.x >=  8) sdata[tid] += sdata[tid +  4];
+        if (blockDim.x >=  4) sdata[tid] += sdata[tid +  2];
+        if (blockDim.x >=  2) sdata[tid] += sdata[tid +  1];
+    }
+
+    if (tid == 0) {
+        partial_sums[chunk_id * width + col] = sdata[0];
+    }
+}
+
+// Finalizes matrix evaluation by combining all chunk partial sums.
+//
+// After the chunked kernel processes the domain in pieces, this kernel sums
+// up all partial results for each column and applies the barycentric scale
+// factor: M(z) / (N * s^{N-1}) where M(z) = z^N - s^N is the zerofier.
+//
+// Each thread handles one column, summing across all chunks.
+__global__ void matrix_evaluate_finalize(
+    FpExt * __restrict__ output,
+    const FpExt * __restrict__ partial_sums,
+    FpExt scale_factor,
+    uint32_t num_chunks,
+    uint32_t width
+) {
+    uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (col >= width)
+        return;
+
+    FpExt sum = {0, 0, 0, 0};
+    for (uint32_t chunk = 0; chunk < num_chunks; chunk++) {
+        sum += partial_sums[chunk * width + col];
+    }
+
+    output[col] = sum * scale_factor;
+}
+
 // END OF gpu-backend/src/cuda/kernels/fri.cu
 
-static const size_t FRI_MAX_THREADS = 256;
 int get_num_sms() {
     static int multiprocessorCount = []() {
         cudaDeviceProp prop;
@@ -409,58 +424,6 @@ extern "C" int _powers_ext(FpExt *data, FpExt *g, uint32_t N) {
     return cudaGetLastError();
 }
 
-extern "C" int _precompute_diff_powers(
-    FpExt *d_output,
-    const FpExt *diff_invs,
-    const Fp *powers,
-    uint32_t N
-) {
-    auto [grid, block] = kernel_launch_params(N, FRI_MAX_THREADS);
-    precompute_diff_powers<<<grid, block>>>(d_output, diff_invs, powers, N);
-    return cudaGetLastError();
-}
-
-extern "C" int _matrix_scale_rows_then_reduce(
-    FpExt *o_matrix,
-    Fp *matrix,
-    FpExt *diff_invs_dot_g_powers,
-    uint32_t width,
-    uint32_t matrix_height,
-    uint32_t domain_height,
-    uint32_t reduce_matrix_height
-) {
-    dim3 grid = dim3(reduce_matrix_height, width);
-    auto block = REDUCTION_THREADS_PER_BLOCK;
-    matrix_scale_rows_then_reduce<<<grid, block>>>(
-        o_matrix, matrix, diff_invs_dot_g_powers, width, matrix_height, domain_height
-    );
-    return cudaGetLastError();
-}
-
-extern "C" int _matrix_reduce(
-    FpExt *o_matrix,
-    FpExt *i_matrix,
-    uint32_t width,
-    uint32_t current_height,
-    uint32_t buffer_height,
-    uint32_t next_round_height
-) {
-    dim3 grid = dim3(next_round_height, width);
-    auto block = REDUCTION_THREADS_PER_BLOCK;
-    matrix_reduce<<<grid, block>>>(o_matrix, i_matrix, width, current_height, buffer_height);
-    return cudaGetLastError();
-}
-
-extern "C" int _matrix_get_first_column(
-    FpExt *o_col,
-    FpExt *i_matrix,
-    uint32_t width,
-    uint32_t height
-) {
-    auto [grid, block] = kernel_launch_params(width, FRI_MAX_THREADS);
-    matrix_get_first_column<<<grid, block>>>(o_col, i_matrix, width, height);
-    return cudaGetLastError();
-}
 
 extern "C" int _reduce_matrix_quotient_acc(
     FpExt *quotient_acc,
@@ -511,5 +474,46 @@ extern "C" int _cukernel_fri_fold(
 ) {
     auto [grid, block] = kernel_launch_params(N, FRI_MAX_THREADS);
     cukernel_fri_fold<<<grid, block>>>(result, folded, fri_input, d_constants, g_invs, N);
+    return cudaGetLastError();
+}
+
+extern "C" int _matrix_evaluate_chunked(
+    FpExt *partial_sums,
+    const Fp *matrix,
+    const FpExt *inv_denoms,
+    Fp g,
+    uint32_t height,
+    uint32_t width,
+    uint32_t chunk_size,
+    uint32_t num_chunks,
+    uint32_t matrix_height,
+    bool inv_denoms_bitrev
+) {
+    dim3 grid(num_chunks, width);
+    dim3 block(FRI_MAX_THREADS);
+
+    if (inv_denoms_bitrev) {
+        matrix_evaluate_chunked<true><<<grid, block>>>(
+            partial_sums, matrix, inv_denoms, g, height, width, chunk_size, matrix_height
+        );
+    } else {
+        matrix_evaluate_chunked<false><<<grid, block>>>(
+            partial_sums, matrix, inv_denoms, g, height, width, chunk_size, matrix_height
+        );
+    }
+    return cudaGetLastError();
+}
+
+extern "C" int _matrix_evaluate_finalize(
+    FpExt *output,
+    const FpExt *partial_sums,
+    FpExt scale_factor,
+    uint32_t num_chunks,
+    uint32_t width
+) {
+    auto [grid, block] = kernel_launch_params(width, FRI_MAX_THREADS);
+    matrix_evaluate_finalize<<<grid, block>>>(
+        output, partial_sums, scale_factor, num_chunks, width
+    );
     return cudaGetLastError();
 }

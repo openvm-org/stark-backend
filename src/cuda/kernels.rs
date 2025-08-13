@@ -1,5 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
 
 use crate::cuda::{
     d_buffer::DeviceBuffer,
@@ -776,39 +777,6 @@ pub mod fri {
         fn _powers(d_data: *mut std::ffi::c_void, d_g: *const std::ffi::c_void, N: u32) -> i32;
         fn _powers_ext(d_data: *mut std::ffi::c_void, d_g: *const std::ffi::c_void, N: u32) -> i32;
 
-        fn _precompute_diff_powers(
-            d_output: *mut std::ffi::c_void,
-            d_diff_invs: *const std::ffi::c_void,
-            d_powers: *const std::ffi::c_void,
-            N: u32,
-        ) -> i32;
-
-        fn _matrix_scale_rows_then_reduce(
-            d_output: *mut std::ffi::c_void,
-            d_matrix: *const std::ffi::c_void,
-            d_diff_invs_dot_g_powers: *const std::ffi::c_void,
-            width: u32,
-            matrix_height: u32,
-            domain_height: u32,
-            reduce_matrix_height: u32,
-        ) -> i32;
-
-        fn _matrix_reduce(
-            d_output: *mut std::ffi::c_void,
-            d_input: *const std::ffi::c_void,
-            width: u32,
-            current_height: u32,
-            buffer_height: u32,
-            next_round_height: u32,
-        ) -> i32;
-
-        fn _matrix_get_first_column(
-            d_output: *mut std::ffi::c_void,
-            d_input: *const std::ffi::c_void,
-            width: u32,
-            height: u32,
-        ) -> i32;
-
         fn _reduce_matrix_quotient_acc(
             d_quotient_acc: *mut std::ffi::c_void,
             d_matrix: *const std::ffi::c_void,
@@ -835,6 +803,27 @@ pub mod fri {
             d_constants: *const std::ffi::c_void,
             g_invs: *const std::ffi::c_void,
             N: u64,
+        ) -> i32;
+
+        fn _matrix_evaluate_chunked(
+            partial_sums: *mut std::ffi::c_void,
+            matrix: *const std::ffi::c_void,
+            inv_denoms: *const std::ffi::c_void,
+            g: crate::prelude::F,
+            height: u32,
+            width: u32,
+            chunk_size: u32,
+            num_chunks: u32,
+            matrix_height: u32,
+            inv_denoms_bitrev: bool,
+        ) -> i32;
+
+        fn _matrix_evaluate_finalize(
+            output: *mut std::ffi::c_void,
+            partial_sums: *const std::ffi::c_void,
+            scale_factor: crate::prelude::EF,
+            num_chunks: u32,
+            width: u32,
         ) -> i32;
     }
 
@@ -887,73 +876,6 @@ pub mod fri {
         CudaError::from_result(_powers_ext(d_data.as_mut_raw_ptr(), d_g.as_raw_ptr(), n))
     }
 
-    pub unsafe fn precompute_diff_powers_kernel<F, EF>(
-        d_output: &DeviceBuffer<EF>,
-        d_diff_invs: &DeviceBuffer<EF>,
-        d_powers: &DeviceBuffer<F>,
-        n: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_precompute_diff_powers(
-            d_output.as_mut_raw_ptr(),
-            d_diff_invs.as_raw_ptr(),
-            d_powers.as_raw_ptr(),
-            n,
-        ))
-    }
-
-    pub unsafe fn scale_and_reduce_kernel<F, EF>(
-        d_output: &DeviceBuffer<EF>,
-        d_matrix: &DeviceBuffer<F>,
-        d_diff_invs_dot_g_powers: &DeviceBuffer<EF>,
-        width: u32,
-        matrix_height: u32,
-        domain_height: u32,
-        reduce_matrix_height: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_matrix_scale_rows_then_reduce(
-            d_output.as_mut_raw_ptr(),
-            d_matrix.as_raw_ptr(),
-            d_diff_invs_dot_g_powers.as_raw_ptr(),
-            width,
-            matrix_height,
-            domain_height,
-            reduce_matrix_height,
-        ))
-    }
-
-    pub unsafe fn round_reduce_kernel<EF>(
-        d_output: &DeviceBuffer<EF>,
-        d_input: &DeviceBuffer<EF>,
-        width: u32,
-        current_height: u32,
-        buffer_height: u32,
-        next_round_height: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_matrix_reduce(
-            d_output.as_mut_raw_ptr(),
-            d_input.as_raw_ptr(),
-            width,
-            current_height,
-            buffer_height,
-            next_round_height,
-        ))
-    }
-
-    pub unsafe fn get_first_col_kernel<EF>(
-        d_output: &DeviceBuffer<EF>,
-        d_input: &DeviceBuffer<EF>,
-        width: u32,
-        height: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_matrix_get_first_column(
-            d_output.as_mut_raw_ptr(),
-            d_input.as_raw_ptr(),
-            width,
-            height,
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn reduce_matrix_quotient_kernel<F, EF>(
         d_quotient_acc: &DeviceBuffer<EF>,
         d_matrix: &DeviceBuffer<F>,
@@ -1007,6 +929,48 @@ pub mod fri {
             d_constants.as_raw_ptr(),
             g_invs.as_raw_ptr(),
             half_folded_len,
+        ))
+    }
+
+    pub unsafe fn matrix_evaluate_chunked_kernel<F, EF>(
+        partial_sums: &DeviceBuffer<EF>,
+        matrix: &DeviceBuffer<F>,
+        inv_denoms: &DeviceBuffer<EF>,
+        g: crate::prelude::F,
+        height: u32,
+        width: u32,
+        chunk_size: u32,
+        num_chunks: u32,
+        matrix_height: u32,
+        inv_denoms_bitrev: bool,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_matrix_evaluate_chunked(
+            partial_sums.as_mut_raw_ptr(),
+            matrix.as_raw_ptr(),
+            inv_denoms.as_raw_ptr(),
+            g,
+            height,
+            width,
+            chunk_size,
+            num_chunks,
+            matrix_height,
+            inv_denoms_bitrev,
+        ))
+    }
+
+    pub unsafe fn matrix_evaluate_finalize_kernel<EF>(
+        output: &DeviceBuffer<EF>,
+        partial_sums: &DeviceBuffer<EF>,
+        scale_factor: crate::prelude::EF,
+        num_chunks: u32,
+        width: u32,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_matrix_evaluate_finalize(
+            output.as_mut_raw_ptr(),
+            partial_sums.as_raw_ptr(),
+            scale_factor,
+            num_chunks,
+            width,
         ))
     }
 }

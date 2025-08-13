@@ -1,10 +1,6 @@
-use core::mem::swap;
-
 use itertools::{izip, Itertools};
 use openvm_stark_backend::prover::hal::MatrixDimensions;
-use p3_field::{
-    scale_vec, ExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField,
-};
+use p3_field::{ExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
 use p3_util::{linear_map::LinearMap, log2_ceil_usize, log2_strict_usize};
 
 use crate::{
@@ -115,120 +111,6 @@ fn get_diff_invs(
         batch_invert_kernel(&d_inv_diffs, log_max_height as u32, invert_task_num).unwrap();
     }
     Ok(DevicePoly::new(bitrev, d_inv_diffs))
-}
-
-/// matrix rows are bit reversed, matrix could have bigger height than domain size
-pub(crate) fn matrix_evaluate(
-    matrix: &DeviceMatrix<F>,
-    z_diff_invs: &DevicePoly<EF, ExtendedLagrangeCoeff>, // (1/(z - s*g^j))
-    z: EF,
-    shift: F,
-    g: F,
-    domain_size: usize,
-) -> Result<Vec<EF>, ()> {
-    let height = domain_size;
-    let width = matrix.width();
-
-    assert!(height == z_diff_invs.len());
-
-    let g_powers = DeviceBuffer::<F>::with_capacity(height);
-    let d_g = [g].to_device().unwrap();
-    let precompute_diff_powers = DeviceBuffer::<EF>::with_capacity(height);
-    unsafe {
-        // TODO: cache g_powers
-        // get g_powers = [g^i] for i in 0..height
-        powers(&g_powers, &d_g, height as u32).unwrap();
-
-        // make sure g_powers has same order as z_diff_invs
-        if z_diff_invs.is_bit_reversed {
-            batch_bit_reverse(&g_powers, log2_ceil_usize(height) as u32, height as u32).unwrap();
-        }
-
-        // 0. pre-compute coefficients for g^i
-        precompute_diff_powers_kernel(
-            &precompute_diff_powers,
-            &z_diff_invs.coeff,
-            &g_powers,
-            height as u32,
-        )
-        .unwrap();
-    }
-
-    // Scroll: DO NOT CHANGE: also hardcoded in `cuda/kernels/fri.cu` with same name
-    const REDUCTION_THREADS_PER_BLOCK: u32 = 256;
-    const REDUCTION_BLOCK_NUM: u32 = 512;
-
-    let threshold = REDUCTION_BLOCK_NUM * REDUCTION_THREADS_PER_BLOCK;
-    let mut reduce_matrix_height = if height < threshold as usize {
-        (height as u32).div_ceil(REDUCTION_THREADS_PER_BLOCK)
-    } else {
-        REDUCTION_BLOCK_NUM // better performance for large matrix height
-    };
-
-    let mut d_r1_matrix = DeviceBuffer::<EF>::with_capacity(width * reduce_matrix_height as usize);
-    let mut d_r2_matrix = DeviceBuffer::<EF>::with_capacity(width * reduce_matrix_height as usize);
-    // 1. scale rows and reduce the input matrix to a intermediate `reduce_matrix` (col-major) for
-    //    convenience, the size of `r2_matrix` is the same as `r1_matrix`
-    unsafe {
-        scale_and_reduce_kernel(
-            &d_r1_matrix,
-            matrix.buffer(),
-            &precompute_diff_powers,
-            width as u32,
-            matrix.height() as u32,
-            height as u32,
-            reduce_matrix_height,
-        )
-        .unwrap();
-    }
-
-    // 2. reduce the intermediate `reduce_matrix` to a single column
-    let buffer_height = reduce_matrix_height;
-    let mut d_out_matrix = &mut d_r2_matrix;
-    let mut d_in_matrix = &mut d_r1_matrix;
-    while reduce_matrix_height > 1 {
-        let next_round_height = reduce_matrix_height.div_ceil(REDUCTION_THREADS_PER_BLOCK);
-        unsafe {
-            round_reduce_kernel(
-                d_out_matrix,
-                d_in_matrix,
-                width.try_into().unwrap(),
-                reduce_matrix_height,
-                buffer_height,
-                next_round_height,
-            )
-            .unwrap();
-        }
-        swap(&mut d_in_matrix, &mut d_out_matrix);
-        reduce_matrix_height = next_round_height;
-    }
-
-    // 3. get the first column of the `reduce_matrix` col-major matrix: need explicit copy to a
-    //    column buffer
-    let d_reduced_cols = DeviceBuffer::<EF>::with_capacity(width);
-    unsafe {
-        get_first_col_kernel(
-            &d_reduced_cols,
-            d_in_matrix,
-            width.try_into().unwrap(),
-            buffer_height,
-        )
-        .unwrap();
-    }
-
-    // 4. copy the result from device to host
-    let sum = d_reduced_cols.to_host().unwrap();
-
-    // 5. post processing
-    let log_height = log2_strict_usize(height);
-    // zerofier = z^N - s^N
-    let zerofier = z.exp_power_of_2(log_height) - shift.exp_power_of_2(log_height);
-    // denominator = N * s^(N-1)
-    let denominator = EF::from_canonical_usize(height) * shift.exp_u64(height as u64 - 1);
-    // M(z) / (N*s^{N-1})
-    let openings = scale_vec(zerofier * denominator.inverse(), sum);
-
-    Ok(openings)
 }
 
 pub(crate) fn reduce_matrix_quotient_acc(
@@ -343,4 +225,62 @@ pub(crate) fn fri_fold(
     }
 
     Ok(DevicePoly::new(folded.is_bit_reversed, d_result))
+}
+
+const TARGET_CHUNK_SIZE: usize = 16384;
+const MAX_CHUNKS: usize = 512;
+
+pub(crate) fn matrix_evaluate(
+    matrix: &DeviceMatrix<F>,
+    inv_denoms: &DevicePoly<EF, ExtendedLagrangeCoeff>,
+    z: EF,
+    shift: F,
+    g: F,
+    domain_height: usize,
+) -> Result<Vec<EF>, ()> {
+    assert_eq!(domain_height, inv_denoms.len());
+
+    // Scale factor: M(z) / (N * s^{N-1})
+    let log_height = log2_strict_usize(domain_height);
+    let zerofier = z.exp_power_of_2(log_height) - shift.exp_power_of_2(log_height);
+    let denominator =
+        EF::from_canonical_usize(domain_height) * shift.exp_u64(domain_height as u64 - 1);
+    let scale_factor = zerofier * denominator.inverse();
+
+    let ideal_chunks = domain_height.div_ceil(TARGET_CHUNK_SIZE);
+    let num_chunks = ideal_chunks.clamp(1, MAX_CHUNKS);
+    let chunk_size = domain_height.div_ceil(num_chunks);
+
+    let partial_sums = DeviceBuffer::<EF>::with_capacity(num_chunks * matrix.width());
+
+    unsafe {
+        matrix_evaluate_chunked_kernel(
+            &partial_sums,
+            matrix.buffer(),
+            &inv_denoms.coeff,
+            g,
+            domain_height as u32,
+            matrix.width() as u32,
+            chunk_size as u32,
+            num_chunks as u32,
+            matrix.height() as u32,
+            inv_denoms.is_bit_reversed,
+        )
+        .unwrap();
+    }
+
+    let output = DeviceBuffer::<EF>::with_capacity(matrix.width());
+
+    unsafe {
+        matrix_evaluate_finalize_kernel(
+            &output,
+            &partial_sums,
+            scale_factor,
+            num_chunks as u32,
+            matrix.width() as u32,
+        )
+        .unwrap();
+    }
+
+    Ok(output.to_host().unwrap())
 }
