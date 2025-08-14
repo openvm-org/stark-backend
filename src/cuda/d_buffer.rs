@@ -17,6 +17,18 @@ pub struct DeviceBuffer<T> {
     len: usize,
 }
 
+/// A struct that packs a pointer with a size in bytes to pass on CUDA.
+/// It holds `*const c_void` for being a universal simple type that can be read by CUDA.
+/// Since it is hard to enforce immutability preservation, it just holds `*const`,
+/// but has two separate constructors for more robustness from the usage perspective.
+/// This is essentially a [DeviceBuffer] but without owning the data.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct DeviceBufferView {
+    pub ptr: *const c_void,
+    pub size: usize,
+}
+
 unsafe impl<T> Send for DeviceBuffer<T> {}
 unsafe impl<T> Sync for DeviceBuffer<T> {}
 
@@ -130,6 +142,13 @@ impl<T> DeviceBuffer<T> {
         self.ptr = ptr::null_mut(); // for safe drop
         self.len = 0;
         res
+    }
+
+    pub fn view(&self) -> DeviceBufferView {
+        DeviceBufferView {
+            ptr: self.ptr as *const c_void,
+            size: self.len * size_of::<T>(),
+        }
     }
 }
 
