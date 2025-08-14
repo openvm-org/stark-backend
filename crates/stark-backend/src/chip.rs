@@ -14,8 +14,6 @@ use crate::prover::{hal::ProverBackend, types::AirProvingContext};
 /// all state is received through records.
 pub trait Chip<R, PB: ProverBackend> {
     /// Generate all necessary context for proving a single AIR.
-    // The lifetime parameter `'b` is a placeholder for the lifetime of any cached trace. It should
-    // not be related to the lifetime of the borrow.
     fn generate_proving_ctx(&self, records: R) -> AirProvingContext<PB>;
 }
 
