@@ -81,7 +81,7 @@ pub struct StarkVerifyingKey<Val, Com> {
     /// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.
     pub symbolic_constraints: SymbolicConstraintsDag<Val>,
-    /// The factor to multiple the trace degree by to get the degree of the quotient polynomial.
+    /// The factor to multiply the trace degree by to get the degree of the quotient polynomial.
     /// Determined from the max constraint degree of the AIR constraints. This is equivalently
     /// the number of chunks the quotient polynomial is split into.
     pub quotient_degree: u8,
