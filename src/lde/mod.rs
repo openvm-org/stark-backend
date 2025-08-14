@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use openvm_stark_backend::prover::hal::MatrixDimensions;
 
 use crate::{base::DeviceMatrix, prelude::F};
@@ -18,17 +16,11 @@ pub trait GpuLde: MatrixDimensions + LdeCommon {
     where
         Self: Sized;
 
-    /// Returns the LDE matrix on specific domain
-    ///
-    /// - Cached: returns precomputed LDE supposed that domain size < height.
-    /// - OnDemand: always computes a fresh copy.
+    /// Returns the LDE matrix if domain size <= lde.height.
     fn take_lde(&self, domain_size: usize) -> DeviceMatrix<F>;
 
     /// Returns the LDE rows for the given indices.
     fn get_lde_rows(&self, row_indices: &[usize]) -> DeviceMatrix<F>;
-
-    /// Converts the trace to coefficient form (Cached does nothing)
-    fn to_coefficient_form(&mut self);
 }
 
 pub trait LdeCommon {
@@ -38,175 +30,59 @@ pub trait LdeCommon {
     fn shift(&self) -> F;
 }
 
-#[derive(Clone, Debug)]
-enum GpuLdeDataType {
-    Trace {
-        trace: DeviceMatrix<F>,
-        coef_form: bool,
-    },
-    Lde(DeviceMatrix<F>),
-}
-
-pub trait GpuLdeMode {}
-
-/// Fully precomputes and stores LDE matrix at construction.
 #[derive(Clone)]
-pub struct Cached;
-/// Computes LDE matrix on each request without storing it.
-#[derive(Clone)]
-pub struct OnDemand;
-
-impl GpuLdeMode for Cached {}
-impl GpuLdeMode for OnDemand {}
-
-pub type GpuLdeCached = GpuLdeImpl<Cached>;
-pub type GpuLdeOnDemand = GpuLdeImpl<OnDemand>;
-
-#[derive(Clone)]
-pub struct GpuLdeImpl<M: GpuLdeMode> {
-    data: GpuLdeDataType,
+pub struct GpuLdeImpl {
+    lde: DeviceMatrix<F>,
     added_bits: usize,
     shift: F,
-    _mode: PhantomData<M>,
 }
 
-impl<M: GpuLdeMode> MatrixDimensions for GpuLdeImpl<M> {
+impl MatrixDimensions for GpuLdeImpl {
     fn height(&self) -> usize {
-        match &self.data {
-            GpuLdeDataType::Lde(lde) => lde.height(),
-            GpuLdeDataType::Trace { trace, .. } => trace.height() << self.added_bits,
-        }
+        self.lde.height()
     }
 
     fn width(&self) -> usize {
-        match &self.data {
-            GpuLdeDataType::Lde(lde) => lde.width(),
-            GpuLdeDataType::Trace { trace, .. } => trace.width(),
-        }
+        self.lde.width()
     }
 }
 
-impl<M: GpuLdeMode> LdeCommon for GpuLdeImpl<M> {
+impl LdeCommon for GpuLdeImpl {
     fn shift(&self) -> F {
         self.shift
     }
 
     fn trace_height(&self) -> usize {
-        match &self.data {
-            GpuLdeDataType::Trace { trace, .. } => trace.height(),
-            GpuLdeDataType::Lde(lde) => lde.height() >> self.added_bits,
-        }
+        self.lde.height() >> self.added_bits
     }
 }
 
-impl GpuLde for GpuLdeCached {
+impl GpuLde for GpuLdeImpl {
     fn new(matrix: DeviceMatrix<F>, added_bits: usize, shift: F) -> Self {
         if added_bits == 0 {
             return Self {
-                data: GpuLdeDataType::Lde(matrix),
+                lde: matrix,
                 added_bits,
                 shift,
-                _mode: PhantomData,
             };
         }
         let trace_height = matrix.height();
         let lde_height = trace_height << added_bits;
-        let lde = compute_lde_matrix::<true>(&matrix, lde_height, shift);
+        let lde = compute_lde_matrix(&matrix, lde_height, shift);
         Self {
-            data: GpuLdeDataType::Lde(lde),
+            lde,
             added_bits,
             shift,
-            _mode: PhantomData,
         }
     }
 
     fn take_lde(&self, domain_size: usize) -> DeviceMatrix<F> {
-        match &self.data {
-            GpuLdeDataType::Lde(lde) => {
-                assert!(lde.height() >= domain_size);
-                lde.clone()
-            }
-            _ => panic!("Cached LDE mode: LDE should have been precomputed"),
-        }
+        assert!(self.height() >= domain_size);
+        self.lde.clone()
     }
 
     fn get_lde_rows(&self, row_indices: &[usize]) -> DeviceMatrix<F> {
         assert!(!row_indices.is_empty());
-        match &self.data {
-            GpuLdeDataType::Lde(lde) => get_rows_from_matrix(lde, row_indices),
-            _ => panic!("Cached LDE mode: LDE should have been precomputed"),
-        }
-    }
-
-    fn to_coefficient_form(&mut self) {}
-}
-
-impl GpuLde for GpuLdeOnDemand {
-    fn new(matrix: DeviceMatrix<F>, added_bits: usize, shift: F) -> Self {
-        let data = if added_bits == 0 {
-            GpuLdeDataType::Lde(matrix)
-        } else {
-            GpuLdeDataType::Trace {
-                trace: matrix,
-                coef_form: false,
-            }
-        };
-        Self {
-            data,
-            added_bits,
-            shift,
-            _mode: PhantomData,
-        }
-    }
-
-    fn take_lde(&self, domain_size: usize) -> DeviceMatrix<F> {
-        match &self.data {
-            GpuLdeDataType::Lde(lde) => {
-                assert!(lde.height() >= domain_size);
-                lde.clone()
-            }
-
-            GpuLdeDataType::Trace { trace, coef_form } => {
-                if *coef_form {
-                    compute_lde_matrix::<false>(trace, self.height(), self.shift)
-                } else {
-                    compute_lde_matrix::<true>(trace, self.height(), self.shift)
-                }
-            }
-        }
-    }
-
-    fn get_lde_rows(&self, row_indices: &[usize]) -> DeviceMatrix<F> {
-        assert!(!row_indices.is_empty());
-        match &self.data {
-            GpuLdeDataType::Lde(lde) => get_rows_from_matrix(lde, row_indices),
-            GpuLdeDataType::Trace { trace, coef_form } => {
-                if *coef_form {
-                    polynomial_evaluate(trace, self.shift, self.height(), row_indices)
-                } else {
-                    let trace = inplace_ifft(trace.clone());
-                    polynomial_evaluate(&trace, self.shift, self.height(), row_indices)
-                }
-            }
-        }
-    }
-
-    // TODO: rename
-    fn to_coefficient_form(&mut self) {
-        if let GpuLdeDataType::Trace { trace, coef_form } = &self.data {
-            if !coef_form {
-                let trace = inplace_ifft(trace.clone());
-                self.data = GpuLdeDataType::Trace {
-                    trace,
-                    coef_form: true,
-                };
-            }
-        }
+        get_rows_from_matrix(&self.lde, row_indices)
     }
 }
-
-#[cfg(feature = "lde-on-demand")]
-pub type GpuLdeDefault = GpuLdeOnDemand;
-
-#[cfg(not(feature = "lde-on-demand"))]
-pub type GpuLdeDefault = GpuLdeCached;

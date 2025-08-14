@@ -165,15 +165,6 @@ pub mod lde {
             out_size: u32,
             in_size: u32,
         ) -> i32;
-
-        fn _batch_polynomial_eval(
-            output: *mut std::ffi::c_void,
-            input: *const std::ffi::c_void,
-            points: *const std::ffi::c_void,
-            num_points: usize,
-            width: usize,
-            log_trace_height: usize,
-        ) -> i32;
     }
 
     pub unsafe fn batch_bit_reverse<T>(
@@ -206,24 +197,6 @@ pub mod lde {
             poly_count,
             out_size,
             in_size,
-        ))
-    }
-
-    pub unsafe fn batch_polynomial_eval<T>(
-        output: &DeviceBuffer<T>,
-        input: &DeviceBuffer<T>,
-        points: &DeviceBuffer<T>,
-        num_points: usize,
-        width: usize,
-        log_trace_height: usize,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_batch_polynomial_eval(
-            output.as_mut_raw_ptr(),
-            input.as_raw_ptr(),
-            points.as_raw_ptr(),
-            num_points,
-            width,
-            log_trace_height,
         ))
     }
 }

@@ -51,7 +51,4 @@ openvm-keccak256-transpiler.workspace = true
 openvm-instructions.workspace = true
 
 [features]
-default = ["lde-cached"]
-lde-cached = []
-lde-on-demand = []
 touchemall = []

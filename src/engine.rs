@@ -1,5 +1,3 @@
-use std::any::type_name;
-
 #[cfg(feature = "touchemall")]
 use openvm_stark_backend::prover::types::AirProvingContext;
 use openvm_stark_backend::{
@@ -26,7 +24,6 @@ use crate::{
     cuda::memory_manager::MemTracker,
     fri_log_up::FriLogUpPhaseGpu,
     gpu_device::{GpuConfig, GpuDevice},
-    lde::GpuLdeDefault,
     prelude::SC,
     prover_backend::GpuBackend,
 };
@@ -77,7 +74,6 @@ impl StarkEngine for GpuBabyBearPoseidon2Engine {
     }
 
     fn prover(&self) -> MultiTraceStarkProverGPU {
-        tracing::info!("LDE mode: {}", type_name::<GpuLdeDefault>());
         MultiTraceStarkProverGPU::new(
             GpuBackend::default(),
             self.device.clone(),

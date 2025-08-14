@@ -22,17 +22,13 @@ impl GpuDevice {
         &self,
         traces_with_shifts: Vec<(DeviceMatrix<BabyBear>, BabyBear)>,
         log_blowup: usize,
-        keep_traces: bool,
     ) -> (Vec<u8>, GpuMerkleTree<LDE>) {
         let (log_trace_heights, ldes): (Vec<u8>, Vec<LDE>) = traces_with_shifts
             .into_iter()
             .map(|(trace, shift)| {
                 let height = trace.height();
                 let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
-                let mut lde = LDE::new(trace, log_blowup, shift);
-                if !keep_traces {
-                    lde.to_coefficient_form();
-                }
+                let lde = LDE::new(trace, log_blowup, shift);
                 (log_height, lde)
             })
             .collect();

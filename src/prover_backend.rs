@@ -26,7 +26,7 @@ use crate::{
     base::DeviceMatrix,
     cuda::{memory_manager::MemTracker, stream::gpu_metrics_span},
     gpu_device::GpuDevice,
-    lde::{GpuLde, GpuLdeDefault},
+    lde::{GpuLde, GpuLdeImpl},
     merkle_tree::GpuMerkleTree,
     opener::OpeningProverGpu,
     prelude::*,
@@ -57,7 +57,7 @@ impl ProverBackend for GpuBackend {
 
 #[derive(Clone)]
 pub struct GpuPcsData {
-    pub data: GpuMerkleTree<GpuLdeDefault>,
+    pub data: GpuMerkleTree<GpuLdeImpl>,
     pub log_trace_heights: Vec<u8>,
 }
 
@@ -80,7 +80,7 @@ impl TraceCommitter<GpuBackend> for GpuDevice {
             .collect_vec();
         // We drop the trace in Lde because `traces` is passed by reference
         let (log_trace_heights, merkle_tree) =
-            self.commit_traces_with_lde(traces_with_shifts, self.config.fri.log_blowup, true);
+            self.commit_traces_with_lde(traces_with_shifts, self.config.fri.log_blowup);
         let root = merkle_tree.root();
         let pcs_data = GpuPcsData {
             data: merkle_tree,
@@ -201,7 +201,6 @@ impl RapPartialProver<GB> for GpuDevice {
                     let (log_trace_heights, merkle_tree) = self.commit_traces_with_lde(
                         flattened_traces_with_shifts,
                         self.config.fri.log_blowup,
-                        false,
                     );
                     let root = merkle_tree.root();
                     let pcs_data = GpuPcsData {
@@ -334,7 +333,7 @@ impl QuotientCommitter<GB> for GpuDevice {
         // Commit to quotient polynomials. One shared commit for all quotient polynomials
         gpu_metrics_span("quotient_poly_commit_time_ms", || {
             let (log_trace_heights, merkle_tree) =
-                self.commit_traces_with_lde(quotient_values, self.config.fri.log_blowup, false);
+                self.commit_traces_with_lde(quotient_values, self.config.fri.log_blowup);
             let root = merkle_tree.root();
             let pcs_data = GpuPcsData {
                 data: merkle_tree,

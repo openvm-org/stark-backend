@@ -64,53 +64,6 @@ __global__ void batch_expand_pad_kernel(
     }
 }
 
-// Returns the result of the polynomial evaluation of the trace at the points in the column-major
-// matrix
-__global__ void batch_polynomial_eval_kernel(
-    Fp *out,
-    const Fp *in,
-    const Fp *points,
-    const uint32_t width,
-    const uint32_t log_trace_height
-) {
-    const uint block_row = blockDim.x;  // min(trace_height, MAX_THREADS)
-    const uint row_local = threadIdx.x; // [0..block_row)
-
-    const uint point_idx = blockIdx.x; // [0..num_points)
-
-    const uint block_col = blockDim.y;  // min(width, MAX_THREADS / block_row / trace_height)
-    const uint col_local = threadIdx.y; // [0..block_col)
-    const uint col = blockIdx.y * block_col + col_local; // [0..width)
-    if (col >= width)
-        return;
-
-    extern __shared__ Fp sh_mem[]; // block_row * block_col capacity
-    Fp *sh_sum_k = sh_mem + (col_local * block_row);
-    {
-        const uint32_t trace_height = 1 << log_trace_height;
-        const Fp *column = in + (col * trace_height);
-        const Fp X = points[point_idx];
-        const Fp X_pow_k = pow(X, block_row);
-        Fp X_k = pow(X, row_local);
-        Fp sum_k = Fp(0);
-#pragma unroll
-        for (auto k = row_local; k < trace_height; k += block_row) {
-            sum_k += X_k * column[k];
-            X_k *= X_pow_k;
-        }
-        sh_sum_k[row_local] = sum_k;
-    }
-
-    // SUM over shared memory
-    for (int step = block_row >> 1; step > 0; step >>= 1) {
-        __syncthreads();
-        if (row_local < step)
-            sh_sum_k[row_local] += sh_sum_k[row_local + step];
-    }
-    if (row_local == 0)
-        out[point_idx * width + col] = sh_sum_k[0];
-}
-
 // LAUNCHERS
 
 extern "C" int _multi_bit_reverse(Fp *io, const uint32_t nBits, const uint32_t count) {
@@ -140,24 +93,5 @@ extern "C" int _batch_expand_pad(
 ) {
     auto [grid, block] = kernel_launch_params(outSize);
     batch_expand_pad_kernel<<<grid, block>>>(out, in, polyCount, outSize, inSize);
-    return cudaGetLastError();
-}
-
-extern "C" int _batch_polynomial_eval(
-    Fp *out,
-    const Fp *in,
-    const Fp *points,
-    const size_t num_points,
-    const size_t width,
-    const size_t log_trace_height
-) {
-    const size_t trace_height = 1u << log_trace_height;
-    auto height_per_block = std::min(MAX_THREADS, trace_height);
-    auto width_per_block = std::min(MAX_THREADS / height_per_block, width);
-    auto block = dim3(height_per_block, width_per_block);
-    auto grid = dim3(num_points, div_ceil(width, width_per_block));
-    batch_polynomial_eval_kernel<<<grid, block, sizeof(Fp) * height_per_block * width_per_block>>>(
-        out, in, points, width, log_trace_height
-    );
     return cudaGetLastError();
 }

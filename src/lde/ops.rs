@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use openvm_stark_backend::prover::hal::MatrixDimensions;
-use p3_field::{FieldAlgebra, PrimeField32, TwoAdicField};
+use p3_field::{FieldAlgebra, PrimeField32};
 use p3_util::log2_strict_usize;
 
 use crate::{
@@ -12,23 +12,7 @@ use crate::{
     prelude::F,
 };
 
-pub(crate) fn inplace_ifft(trace_matrix: DeviceMatrix<F>) -> DeviceMatrix<F> {
-    let width = trace_matrix.width();
-    let log_trace_height = log2_strict_usize(trace_matrix.height());
-
-    unsafe {
-        batch_interpolate_ntt(
-            trace_matrix.buffer(),
-            log_trace_height as u32,
-            0,
-            width as u32,
-        )
-        .unwrap();
-    }
-    trace_matrix
-}
-
-pub(crate) fn compute_lde_matrix<const FULL: bool>(
+pub(crate) fn compute_lde_matrix(
     trace_matrix: &DeviceMatrix<F>,
     domain_size: usize,
     shift: F,
@@ -53,15 +37,15 @@ pub(crate) fn compute_lde_matrix<const FULL: bool>(
             trace_height as u32,
         )
         .unwrap();
-        if FULL {
-            batch_interpolate_ntt(
-                lde_matrix.buffer(),
-                log_trace_height,
-                log_blowup,
-                width as u32,
-            )
-            .unwrap();
-        }
+
+        batch_interpolate_ntt(
+            lde_matrix.buffer(),
+            log_trace_height,
+            log_blowup,
+            width as u32,
+        )
+        .unwrap();
+
         if shift != F::ONE {
             zk_shift(
                 lde_matrix.buffer(),
@@ -99,40 +83,6 @@ pub(crate) fn get_rows_from_matrix(
             lde.width() as u64,
             lde.height() as u64,
             row_indices.len() as u32,
-        )
-        .unwrap();
-    }
-    result
-}
-
-pub(crate) fn polynomial_evaluate(
-    trace: &DeviceMatrix<F>,
-    shift: F,
-    lde_height: usize,
-    row_indices: &[usize],
-) -> DeviceMatrix<F> {
-    let num_points = row_indices.len();
-    let log_trace_height = log2_strict_usize(trace.height());
-    let log_lde_height = log2_strict_usize(lde_height);
-
-    let result = DeviceMatrix::<F>::with_capacity(num_points, trace.width());
-    let d_points = row_indices
-        .iter()
-        .map(|&idx| {
-            let bit_rev_idx = (idx as u64).reverse_bits() >> (64 - log_lde_height);
-            shift * F::two_adic_generator(log_lde_height).exp_u64(bit_rev_idx)
-        })
-        .collect_vec()
-        .to_device()
-        .unwrap();
-    unsafe {
-        batch_polynomial_eval(
-            result.buffer(),
-            trace.buffer(),
-            &d_points,
-            num_points,
-            trace.width(),
-            log_trace_height,
         )
         .unwrap();
     }
