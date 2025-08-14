@@ -1,0 +1,54 @@
+[package]
+name = "stark-backend-gpu"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+bytesize.workspace = true
+derive-new.workspace = true
+tracing.workspace = true
+derivative = "2.2"
+itertools = { version = "0.14.0", default-features = false, features = ["use_std"] }
+rustc-hash = "2.0.0"
+serde = { version = "1.0", default-features = false }
+serde_json = "1.0.113"
+bincode = "2.0.1"
+bincode_derive = "2.0.1"
+lazy_static.workspace = true
+thiserror.workspace = true
+metrics = "0.23.0"
+
+# Stark backend
+openvm-stark-backend.workspace = true
+openvm-stark-sdk.workspace = true
+
+# Plonky3
+p3-field = { workspace = true }
+p3-baby-bear = { workspace = true }
+p3-commit = { workspace = true }
+p3-matrix = { workspace = true }
+p3-util = { workspace = true }
+p3-merkle-tree = { workspace = true }
+p3-symmetric = { workspace = true }
+p3-fri = { workspace = true }
+p3-dft = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
+
+[dev-dependencies]
+clap = { version = "4.4", features = ["derive"] }
+rand = { version = "0.8.5", default-features = false }
+p3-keccak-air = { workspace = true }
+openvm-keccak256-circuit.workspace = true
+openvm-circuit = { workspace = true, features = ["test-utils"] }
+openvm-circuit-primitives.workspace = true
+openvm-keccak256-transpiler.workspace = true
+openvm-instructions.workspace = true
+
+[features]
+touchemall = []
