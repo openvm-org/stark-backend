@@ -12,7 +12,8 @@ use crate::{
 /// Used internally to select RAP phase evaluation function.
 pub(crate) trait InteractionPhaseAirBuilder: InteractionBuilder {
     fn finalize_interactions(&mut self);
-    /// The symbolic interactions **must** correspond to the `InteractionBuilder::all_interactions` function.
+    /// The symbolic interactions **must** correspond to the `InteractionBuilder::all_interactions`
+    /// function.
     fn symbolic_interactions(&self) -> Vec<SymbolicInteraction<<Self as AirBuilder>::F>>;
     /// The maximum constraint degree allowed in a RAP.
     fn max_constraint_degree(&self) -> usize;

@@ -67,7 +67,8 @@ pub trait PermutationAirBuilderWithExposedValues: PermutationAirBuilder {
 pub type AirRef<SC> = Arc<dyn AnyRap<SC>>;
 
 /// RAP trait for all-purpose dynamic dispatch use.
-/// This trait is auto-implemented if you implement `Air` and `BaseAirWithPublicValues` and `PartitionedBaseAir` traits.
+/// This trait is auto-implemented if you implement `Air` and `BaseAirWithPublicValues` and
+/// `PartitionedBaseAir` traits.
 pub trait AnyRap<SC: StarkGenericConfig>:
 Rap<SymbolicRapBuilder<Val<SC>>> // for keygen to extract fixed data about the RAP
     + for<'a> Rap<DebugConstraintBuilder<'a, SC>> // for debugging
@@ -108,7 +109,8 @@ pub fn get_air_name<T>(_rap: &T) -> String {
         // Extract the last segment of the main type
         let main_type = main_part.split("::").last().unwrap_or("");
 
-        // Remove the trailing '>' from the generics part and split by ", " to handle multiple generics
+        // Remove the trailing '>' from the generics part and split by ", " to handle multiple
+        // generics
         let generics: Vec<String> = generics_part
             .trim_end_matches('>')
             .split(", ")

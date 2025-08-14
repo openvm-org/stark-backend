@@ -104,7 +104,8 @@ impl LookupBus {
         // We embed the query multiplicity as {0, 1} in the integers and the lookup table key
         // multiplicity to be {0, -1, ..., -p + 1}. Setting `count_weight = 1` will ensure that the
         // total number of lookups is at most p, which is sufficient to establish lookup multiset is
-        // a subset of the key multiset. See Corollary 3.6 in [docs/Soundess_of_Interactions_via_LogUp.pdf].
+        // a subset of the key multiset. See Corollary 3.6 in
+        // [docs/Soundess_of_Interactions_via_LogUp.pdf].
         builder.push_interaction(self.index, query, enabled, 1);
     }
 
@@ -217,7 +218,8 @@ impl PermutationCheckBus {
 }
 
 pub struct RapPhaseProverData<Challenge> {
-    /// Challenges from the challenger in this phase that determine RAP constraints and exposed values.
+    /// Challenges from the challenger in this phase that determine RAP constraints and exposed
+    /// values.
     pub challenges: Vec<Challenge>,
 
     /// After challenge trace per air computed as a function of `challenges`.
@@ -229,7 +231,8 @@ pub struct RapPhaseProverData<Challenge> {
 
 #[derive(Default)]
 pub struct RapPhaseVerifierData<Challenge> {
-    /// Challenges from the challenger in this phase that determine RAP constraints and exposed values.
+    /// Challenges from the challenger in this phase that determine RAP constraints and exposed
+    /// values.
     pub challenges_per_phase: Vec<Vec<Challenge>>,
 }
 
@@ -332,7 +335,8 @@ pub struct LogUpSecurityParameters {
     /// A bound on the total number of interactions.
     /// Determines a constraint at keygen that is checked by the verifier.
     pub max_interaction_count: u32,
-    /// A bound on the base-2 logarithm of the length of the longest interaction. Checked in keygen.
+    /// A bound on the base-2 logarithm of the length of the longest interaction. Checked in
+    /// keygen.
     pub log_max_message_length: u32,
     /// The number of proof-of-work bits for the LogUp proof-of-work phase.
     pub log_up_pow_bits: usize,

@@ -22,15 +22,16 @@ pub struct VerifierCostParameters {
 }
 
 /// Mmcs batch verification consist of hashing the leaf and then a normal Merkle proof.
-/// We separate the cost of hashing (which requires proper padding to be a crytographic hash) from the cost of
-/// 2-to-1 compression function on the hash digest because in tree proofs the internal layers do not need to use
-/// a compression function with padding.
+/// We separate the cost of hashing (which requires proper padding to be a crytographic hash) from
+/// the cost of 2-to-1 compression function on the hash digest because in tree proofs the internal
+/// layers do not need to use a compression function with padding.
 ///
-/// Currently the estimate ignores the additional details of hashing in matrices of different heights.
+/// Currently the estimate ignores the additional details of hashing in matrices of different
+/// heights.
 #[derive(Clone, Copy, Debug)]
 pub struct MmcsVerifyBatchCostEstimate {
-    /// Hash cost in terms of number of field elments to hash. To convert to true hash cost, it depends on the rate
-    /// of the cryptographic hash.
+    /// Hash cost in terms of number of field elments to hash. To convert to true hash cost, it
+    /// depends on the rate of the cryptographic hash.
     pub num_f_to_hash: usize,
     /// Number of calls of 2-to-1 compression function.
     pub num_compress: usize,
@@ -62,7 +63,8 @@ impl Add for MmcsVerifyBatchCostEstimate {
 pub struct FriOpenInputCostEstimate {
     /// Cost from MMCS batch verification.
     pub mmcs: MmcsVerifyBatchCostEstimate,
-    /// Number of operations of the form $+ \alpha^? \frac{M_j(\zeta) - y_{ij}}{\zeta - z_i}$ in the reduced opening evaluation.
+    /// Number of operations of the form $+ \alpha^? \frac{M_j(\zeta) - y_{ij}}{\zeta - z_i}$ in
+    /// the reduced opening evaluation.
     pub num_ro_eval: usize,
 }
 
@@ -137,7 +139,8 @@ impl Add for FriQueryCostEstimate {
 pub struct FriVerifierCostEstimate {
     pub open_input: FriOpenInputCostEstimate,
     pub query: FriQueryCostEstimate,
-    /// We currently ignore the constraint evaluation cost because it does not scale with number of FRI queries.
+    /// We currently ignore the constraint evaluation cost because it does not scale with number of
+    /// FRI queries.
     pub constraint_eval: PhantomData<usize>,
 }
 

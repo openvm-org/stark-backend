@@ -29,8 +29,8 @@ thread_local! {
 }
 
 /// The debugging will check the main AIR constraints and then separately check LogUp constraints by
-/// checking the actual multiset equalities. Currently it will not debug check any after challenge phase
-/// constraints for implementation simplicity.
+/// checking the actual multiset equalities. Currently it will not debug check any after challenge
+/// phase constraints for implementation simplicity.
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn debug_constraints_and_interactions<SC: StarkGenericConfig>(
@@ -104,7 +104,8 @@ where
     type Var = Val<SC>;
     type M = VerticalPair<RowMajorMatrixView<'a, Val<SC>>, RowMajorMatrixView<'a, Val<SC>>>;
 
-    /// It is difficult to horizontally concatenate matrices when the main trace is partitioned, so we disable this method in that case.
+    /// It is difficult to horizontally concatenate matrices when the main trace is partitioned, so
+    /// we disable this method in that case.
     fn main(&self) -> Self::M {
         if self.partitioned_main.len() == 1 {
             self.partitioned_main[0]

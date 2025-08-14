@@ -32,8 +32,8 @@ impl<SC: StarkGenericConfig> ProofInputForTest<SC> {
     }
     /// Sort AIRs by their trace height in descending order. This should not be used outside
     /// static-verifier because a dynamic verifier should support any AIR order.
-    /// This is related to an implementation detail of FieldMerkleTreeMMCS which is used in most configs.
-    /// Reference: <https://github.com/Plonky3/Plonky3/blob/27b3127dab047e07145c38143379edec2960b3e1/merkle-tree/src/merkle_tree.rs#L53>
+    /// This is related to an implementation detail of FieldMerkleTreeMMCS which is used in most
+    /// configs. Reference: <https://github.com/Plonky3/Plonky3/blob/27b3127dab047e07145c38143379edec2960b3e1/merkle-tree/src/merkle_tree.rs#L53>
     pub fn sort_chips(&mut self) {
         let airs = std::mem::take(&mut self.airs);
         let air_proving_ctxs = std::mem::take(&mut self.per_air);

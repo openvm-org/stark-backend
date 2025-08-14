@@ -7,10 +7,15 @@ use std::{
 
 use crate::prover::{hal::ProverBackend, types::AirProvingContext};
 
-/// A chip is a [ProverBackend]-specific construct used to generate the trace matrix of a specific AIR as a `DeviceMatrix`. A chip may be stateful and store state on either host or device. However the trait is also designed to support a common trace generation pattern where certain "records" (e.g., logs from a VM execution) are ingested to produce the trace matrix.
+/// A chip is a [ProverBackend]-specific object that converts execution logs (also referred to as
+/// records) into a trace matrix.
+///
+/// A chip may be stateful and store state on either host or device, although it is preferred that
+/// all state is received through records.
 pub trait Chip<R, PB: ProverBackend> {
     /// Generate all necessary context for proving a single AIR.
-    // The lifetime parameter `'b` is a placeholder for the lifetime of any cached trace. It should not be related to the lifetime of the borrow.
+    // The lifetime parameter `'b` is a placeholder for the lifetime of any cached trace. It should
+    // not be related to the lifetime of the borrow.
     fn generate_proving_ctx(&self, records: R) -> AirProvingContext<PB>;
 }
 

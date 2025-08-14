@@ -96,7 +96,8 @@ fn instrumented_verifier_comparison(
     }
 }
 
-// Run with `RUSTFLAGS="-Ctarget-cpu=native" cargo t --release -- --ignored --nocapture instrument_cached_trace_verifier`
+// Run with `RUSTFLAGS="-Ctarget-cpu=native" cargo t --release -- --ignored --nocapture
+// instrument_cached_trace_verifier`
 #[test]
 #[ignore = "bench"]
 fn instrument_cached_trace_verifier() -> eyre::Result<()> {

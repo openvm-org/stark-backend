@@ -78,7 +78,8 @@ impl<F: Field> Hash for SymbolicExpression<F> {
 }
 
 // We intentionally do not compare degree_multiple in PartialEq and Eq because degree_multiple is
-// metadata used for optimization/debugging purposes but it does not change the underlying expression.
+// metadata used for optimization/debugging purposes but it does not change the underlying
+// expression.
 impl<F: Field> PartialEq for SymbolicExpression<F> {
     fn eq(&self, other: &Self) -> bool {
         // First check if the variants match

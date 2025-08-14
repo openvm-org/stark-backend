@@ -1,7 +1,8 @@
 //! Abstraction layer for prover implementations of multi-matrix circuits on a single machine.
 //!
-//! Provides a coordinator that implements a full prover by coordinating between host and device, where
-//! the host implementation is common and the device implementation relies on custom-specified device kernels.
+//! Provides a coordinator that implements a full prover by coordinating between host and device,
+//! where the host implementation is common and the device implementation relies on custom-specified
+//! device kernels.
 //!
 //! Currently includes full prover implementations for:
 //! - CPU

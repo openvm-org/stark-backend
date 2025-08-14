@@ -32,7 +32,8 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
         // For each main trace commitment, the prover data and
         // the domain of each matrix, in order
         main: Vec<(&PcsProverData<SC>, Vec<Domain<SC>>)>,
-        // after_challenge[i] has shared commitment prover data for all matrices in that phase, and domains of those matrices, in order
+        // after_challenge[i] has shared commitment prover data for all matrices in that phase, and
+        // domains of those matrices, in order
         after_challenge: Vec<(&PcsProverData<SC>, Vec<Domain<SC>>)>,
         // Quotient poly commitment prover data
         quotient_data: &PcsProverData<SC>,

@@ -15,7 +15,8 @@ impl FriParameters {
     /// Conjectured bits of security.
     /// See ethSTARK paper (<https://eprint.iacr.org/2021/582.pdf>) section 5.10.1 equation (19)
     ///
-    /// `challenge_field_bits` is the number of bits in the challenge field (extension field) of the STARK config.
+    /// `challenge_field_bits` is the number of bits in the challenge field (extension field) of the
+    /// STARK config.
     pub fn get_conjectured_security_bits(&self, challenge_field_bits: usize) -> usize {
         let fri_query_security_bits = self.num_queries * self.log_blowup + self.proof_of_work_bits;
         // The paper says min(fri_field_bits, fri_query_security_bits) - 1 but plonky2 (https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/starky/src/config.rs#L86C1-L87C1) omits the -1
@@ -35,7 +36,8 @@ impl FriParameters {
     }
 
     /// New FRI parameters for testing usage with the specific `log_blowup`.
-    /// If the environment variable `OPENVM_FAST_TEST` is set to "1", then the parameters are **not secure** and meant for fast testing only.
+    /// If the environment variable `OPENVM_FAST_TEST` is set to "1", then the parameters are **not
+    /// secure** and meant for fast testing only.
     ///
     /// In production, use `Self::standard_with_100_bits_conjectured_security` instead.
     pub fn new_for_testing(log_blowup: usize) -> Self {
