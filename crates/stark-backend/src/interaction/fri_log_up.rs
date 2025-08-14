@@ -24,8 +24,8 @@ use crate::{
 
 pub struct FriLogUpPhase<F, Challenge, Challenger> {
     log_up_params: LogUpSecurityParameters,
-    /// When the perm trace is created, the matrix will be allocated with `capacity = trace_length << extra_capacity_bits`.
-    /// This is to avoid resizing for the coset LDE.
+    /// When the perm trace is created, the matrix will be allocated with `capacity = trace_length
+    /// << extra_capacity_bits`. This is to avoid resizing for the coset LDE.
     extra_capacity_bits: usize,
     _marker: PhantomData<(F, Challenge, Challenger)>,
 }
@@ -334,11 +334,12 @@ where
         let height = trace_view.partitioned_main[0].height();
 
         // Note: we could precompute this and include in the proving key, but this should be
-        // a fast scan and only done once per AIR and not per row, so it is more ergonomic to compute
-        // on the fly. If we introduce a more advanced chunking algorithm, then we will need to
-        // cache the chunking information in the proving key.
+        // a fast scan and only done once per AIR and not per row, so it is more ergonomic to
+        // compute on the fly. If we introduce a more advanced chunking algorithm, then we
+        // will need to cache the chunking information in the proving key.
         let perm_width = interaction_partitions.len() + 1;
-        // We allocate extra_capacity_bits now as it will be needed by the coset_lde later in pcs.commit
+        // We allocate extra_capacity_bits now as it will be needed by the coset_lde later in
+        // pcs.commit
         let perm_trace_len = height * perm_width;
         let mut perm_values = Challenge::zero_vec(perm_trace_len << extra_capacity_bits);
         perm_values.truncate(perm_trace_len);
@@ -523,7 +524,8 @@ pub fn eval_fri_log_up_phase<AB>(
         // for the AIR. Let count_degree_i to the degree of `count` in interaction i.
         //
         // By construction, the degree of row_lhs is bounded by 1 + sum_i(max_field_degree_i),
-        // and the degree of row_rhs is bounded by max_i(count_degree_i + sum_{j!=i}(max_field_degree_j))
+        // and the degree of row_rhs is bounded by max_i(count_degree_i +
+        // sum_{j!=i}(max_field_degree_j))
         builder.assert_eq_ext(row_lhs, row_rhs);
 
         phi_0 += perm_local[chunk_idx].into();
@@ -557,8 +559,9 @@ pub fn eval_fri_log_up_phase<AB>(
 ///
 /// Returns [FriLogUpProvingKey] which consists of `interaction_partitions: Vec<Vec<usize>>` where
 /// `num_chunks = interaction_partitions.len()`.
-/// This function guarantees that the `interaction_partitions` forms a (disjoint) partition of the indices `0..interactions.len()`.
-/// For `chunk_idx`, the array `interaction_partitions[chunk_idx]` contains the indices of interactions that are in the `chunk_idx`-th chunk.
+/// This function guarantees that the `interaction_partitions` forms a (disjoint) partition of the
+/// indices `0..interactions.len()`. For `chunk_idx`, the array `interaction_partitions[chunk_idx]`
+/// contains the indices of interactions that are in the `chunk_idx`-th chunk.
 ///
 /// If `max_constraint_degree == 0`, then `num_chunks = interactions.len()` and no chunking is done.
 ///

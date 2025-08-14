@@ -41,17 +41,20 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         mvk: &MultiStarkVerifyingKey<SC>,
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError> {
-        // Note: construction of view panics if any air_id exceeds number of AIRs in provided `MultiStarkVerifyingKey`
+        // Note: construction of view panics if any air_id exceeds number of AIRs in provided
+        // `MultiStarkVerifyingKey`
         let mvk = mvk.view(&proof.get_air_ids());
         self.verify_raps(challenger, &mvk, proof)?;
         Ok(())
     }
 
-    /// Verify general RAPs without checking any relations (e.g., cumulative sum) between exposed values of different RAPs.
+    /// Verify general RAPs without checking any relations (e.g., cumulative sum) between exposed
+    /// values of different RAPs.
     ///
     /// Public values is a global list shared across all AIRs.
     ///
-    /// - `num_challenges_to_sample[i]` is the number of challenges to sample in the trace challenge phase corresponding to `proof.commitments.after_challenge[i]`. This must have length equal
+    /// - `num_challenges_to_sample[i]` is the number of challenges to sample in the trace challenge
+    ///   phase corresponding to `proof.commitments.after_challenge[i]`. This must have length equal
     /// to `proof.commitments.after_challenge`.
     #[instrument(level = "debug", skip_all)]
     pub fn verify_raps(
@@ -153,7 +156,8 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             .collect_vec();
 
         // (T01b): `num_phases < 2`.
-        // Assumption: valid mvk has num_phases consistent between num_challenges_to_sample and exposed_values
+        // Assumption: valid mvk has num_phases consistent between num_challenges_to_sample and
+        // exposed_values
         let num_phases = mvk.num_phases();
         if num_phases != proof.commitments.after_challenge.len() || num_phases > 1 {
             return Err(VerificationError::InvalidProofShape);

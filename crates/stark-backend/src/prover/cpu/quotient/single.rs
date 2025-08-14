@@ -24,15 +24,16 @@ use crate::{
 
 // Starting reference: p3_uni_stark::prover::quotient_values
 // (many changes have been made since then)
-/// Computes evaluation of DEEP quotient polynomial on the quotient domain for a single RAP (single trace matrix).
+/// Computes evaluation of DEEP quotient polynomial on the quotient domain for a single RAP (single
+/// trace matrix).
 ///
 /// Designed to be general enough to support RAP with multiple rounds of challenges.
 ///
 /// **Note**: This function assumes that the
 /// `quotient_domain.split_evals(quotient_degree, quotient_flat)` function from Plonky3 works
 /// as follows (currently true for all known implementations):
-/// The evaluations of the quotient polynomial on the quotient domain (shift of a subgroup) is viewed as a long column of the form
-/// ```ignore
+/// The evaluations of the quotient polynomial on the quotient domain (shift of a subgroup) is
+/// viewed as a long column of the form ```ignore
 /// [q_{0,0}]
 /// [q_{1,0}]
 /// ...
@@ -42,8 +43,8 @@ use crate::{
 /// [q_{quotient_degree - 1, trace_height - 1}]
 /// ```
 /// which is "vertically strided" with stride `quotient_degree`.
-/// We regroup them into evaluations on cosets of the trace domain subgroup as separate base field matrices
-/// ```ignore
+/// We regroup them into evaluations on cosets of the trace domain subgroup as separate base field
+/// matrices ```ignore
 /// [q_{0,0}               ]   [q_{1,0}               ]  ...  [q_{quotient_degree - 1,0}               ]
 /// [q_{0,1}               ]   [q_{1,1}               ]  ...  [q_{quotient_degree - 1,1}               ]
 /// ...
@@ -158,7 +159,9 @@ where
         .into_iter()
         .enumerate()
         .map(|(chunk_idx, chunk_domain)| {
-            // This will be evaluations of the quotient poly on the `chunk_domain`, where `chunk_domain.size() = trace_height`. We reserve extra capacity for the coset lde in the pcs.commit of this chunk.
+            // This will be evaluations of the quotient poly on the `chunk_domain`, where
+            // `chunk_domain.size() = trace_height`. We reserve extra capacity for the coset lde in
+            // the pcs.commit of this chunk.
             let mut chunk = SC::Challenge::zero_vec(trace_height << extra_capacity_bits);
             chunk.truncate(trace_height);
             // We parallel iterate over "fat" rows, which are consecutive rows packed for SIMD.
@@ -170,7 +173,8 @@ where
                 // Pre-allocate vectors
                 let mut row_idx_local = Vec::with_capacity(PackedVal::<SC>::WIDTH);
                 let mut row_idx_next = Vec::with_capacity(PackedVal::<SC>::WIDTH);
-                // SAFETY: we will set these vectors to exactly this length in each inner loop per fat row
+                // SAFETY: we will set these vectors to exactly this length in each inner loop per
+                // fat row
                 #[allow(clippy::uninit_vec)]
                 unsafe {
                     row_idx_local.set_len(PackedVal::<SC>::WIDTH);
@@ -179,8 +183,9 @@ where
 
                 fn new_view_pair<T>(width: usize, needs_next: bool) -> ViewPair<T> {
                     let mut local = Vec::with_capacity(width);
-                    // SAFETY: these vectors will always have a known width (the matrix width), and we
-                    // populate them with the appropriate values in each inner loop per fat row
+                    // SAFETY: these vectors will always have a known width (the matrix width), and
+                    // we populate them with the appropriate values in each
+                    // inner loop per fat row
                     #[allow(clippy::uninit_vec)]
                     unsafe {
                         local.set_len(width);
@@ -210,15 +215,19 @@ where
                         .collect();
                 let mut node_exprs = Vec::with_capacity(constraints.nodes.len());
 
-                // Use chunks instead of chunks_exact in case trace_height is not a multiple of PackedVal::WIDTH
+                // Use chunks instead of chunks_exact in case trace_height is not a multiple of
+                // PackedVal::WIDTH
                 for (local_fat_row_idx, packed_ef_mut) in
                     chunk.chunks_mut(PackedVal::<SC>::WIDTH).enumerate()
                 {
                     let row_idx = start_row_idx + local_fat_row_idx * PackedVal::<SC>::WIDTH;
                     // `packed_ef_mut` is a vertical sub-column, index `offset` of `packed_ef_mut`
-                    // is supposed to be the `chunk_row_idx = row_idx + offset` row of the chunk matrix
-                    // which is the `chunk_idx + chunk_row_idx * quotient_degree`th row of the evaluation of quotient polynomial on the quotient domain
-                    // PERF[jpw]: This may not be cache friendly - would it be better to generate the quotient values in order first and then do some in-place permutation?
+                    // is supposed to be the `chunk_row_idx = row_idx + offset` row of the chunk
+                    // matrix which is the `chunk_idx + chunk_row_idx *
+                    // quotient_degree`th row of the evaluation of quotient polynomial on the
+                    // quotient domain PERF[jpw]: This may not be cache friendly
+                    // - would it be better to generate the quotient values in order first and then
+                    // do some in-place permutation?
                     let quot_row_idx =
                         |offset| (chunk_idx + (row_idx + offset) * quotient_degree) % quotient_size;
 
@@ -315,7 +324,8 @@ where
                     // quotient(x) = constraints(x) / Z_H(x)
                     let quotient: PackedChallenge<SC> = accumulator * inv_zeroifier;
 
-                    // "Transpose" D packed base coefficients into WIDTH scalar extension coefficients.
+                    // "Transpose" D packed base coefficients into WIDTH scalar extension
+                    // coefficients.
                     for (idx_in_packing, ef) in packed_ef_mut.iter_mut().enumerate() {
                         *ef = SC::Challenge::from_base_fn(|coeff_idx| {
                             quotient.as_base_slice()[coeff_idx].as_slice()[idx_in_packing]

@@ -57,8 +57,8 @@ impl<T: Clone, P: Permutation<T>> Permutation<T> for Instrumented<P> {
 
 impl<T: Clone, P: CryptographicPermutation<T>> CryptographicPermutation<T> for Instrumented<P> {}
 
-// Note: this does not currently need to be used if the implemeation is derived from a CryptographicPermutation:
-// we can instrument the permutation itself
+// Note: this does not currently need to be used if the implemeation is derived from a
+// CryptographicPermutation: we can instrument the permutation itself
 impl<T, const N: usize, C: PseudoCompressionFunction<T, N>> PseudoCompressionFunction<T, N>
     for Instrumented<C>
 {

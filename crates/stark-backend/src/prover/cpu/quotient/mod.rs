@@ -37,9 +37,13 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
     /// on the quotient domains of each RAP.
     ///
     /// ## Assumptions
-    /// - `constraints`, `extended_views`, `quotient_degrees` have equal lengths and the length equals number of RAPs.
-    /// - `quotient_degrees` is the factor to **multiply** the trace degree by to get the degree of the quotient polynomial. This should be determined from the constraint degree of the RAP.
-    /// - `extended_views` is a view of the trace polynomials evaluated on the quotient domain, with rows bit reversed to account for the fact that the quotient domain is different for each RAP.
+    /// - `constraints`, `extended_views`, `quotient_degrees` have equal lengths and the length
+    ///   equals number of RAPs.
+    /// - `quotient_degrees` is the factor to **multiply** the trace degree by to get the degree of
+    ///   the quotient polynomial. This should be determined from the constraint degree of the RAP.
+    /// - `extended_views` is a view of the trace polynomials evaluated on the quotient domain, with
+    ///   rows bit reversed to account for the fact that the quotient domain is different for each
+    ///   RAP.
     ///
     /// **Note**: This function assumes that the
     /// `quotient_domain.split_evals(quotient_degree, quotient_flat)` function from Plonky3 works

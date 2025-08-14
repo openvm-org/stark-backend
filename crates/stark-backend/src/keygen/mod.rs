@@ -96,14 +96,16 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             );
             self.max_constraint_degree = air_max_constraint_degree;
         }
-        // First pass: get symbolic constraints and interactions but RAP phase constraints are not final
+        // First pass: get symbolic constraints and interactions but RAP phase constraints are not
+        // final
         let symbolic_constraints_per_air = self
             .partitioned_airs
             .iter()
             .map(|keygen_builder| keygen_builder.get_symbolic_builder(None).constraints())
             .collect_vec();
         // Note: due to the need to go through a trait, there is some duplicate computation
-        // (e.g., FRI logup will calculate the interaction chunking both here and in the second pass below)
+        // (e.g., FRI logup will calculate the interaction chunking both here and in the second pass
+        // below)
         let rap_partial_pk_per_air = self
             .config
             .rap_phase_seq()
@@ -117,7 +119,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
         for pk in pk_per_air.iter() {
             let width = &pk.vk.params.width;
-            tracing::info!("{:<20} | Quotient Deg = {:<2} | Prep Cols = {:<2} | Main Cols = {:<8} | Perm Cols = {:<4} | {:4} Constraints | {:3} Interactions On Buses {:?}",
+            tracing::info!("{:<20} | Quotient Deg = {:<2} | Prep Cols = {:<2} | Main Cols = {:<8} | Perm Cols = {:<4} | {:4} Constraints | {:3} Interactions",
                 pk.air_name,
                 pk.vk.quotient_degree,
                 width.preprocessed.unwrap_or(0),
@@ -125,6 +127,9 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
                 format!("{:?}",width.after_challenge.iter().map(|&x| x * <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D).collect_vec()),
                 pk.vk.symbolic_constraints.constraints.constraint_idx.len(),
                 pk.vk.symbolic_constraints.interactions.len(),
+            );
+            tracing::debug!(
+                "On Buses {:?}",
                 pk.vk
                     .symbolic_constraints
                     .interactions
@@ -132,7 +137,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
                     .map(|i| i.bus_index)
                     .collect_vec()
             );
-            #[cfg(feature = "bench-metrics")]
+            #[cfg(feature = "metrics")]
             {
                 let labels = [("air_name", pk.air_name.clone())];
                 metrics::counter!("quotient_deg", &labels).absolute(pk.vk.quotient_degree as u64);
@@ -148,8 +153,9 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         let base_order = Val::<SC>::order().to_u32_digits()[0];
         let mut count_weight_per_air_per_bus_index = HashMap::new();
 
-        // We compute the a_i's for the constraints of the form a_0 n_0 + ... + a_{k-1} n_{k-1} < a_k,
-        // First the constraints that the total number of interactions on each bus is at most the base field order.
+        // We compute the a_i's for the constraints of the form a_0 n_0 + ... + a_{k-1} n_{k-1} <
+        // a_k, First the constraints that the total number of interactions on each bus is
+        // at most the base field order.
         for (i, constraints_per_air) in symbolic_constraints_per_air.iter().enumerate() {
             for interaction in &constraints_per_air.interactions {
                 // Also make sure that this of interaction is valid given the security params.
@@ -201,12 +207,13 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             trace_height_constraints: trace_height_constraints.clone(),
             log_up_pow_bits: log_up_security_params.log_up_pow_bits,
         };
-        // To protect against weak Fiat-Shamir, we hash the "pre"-verifying key and include it in the
-        // final verifying key. This just needs to commit to the verifying key and does not need to be
-        // verified by the verifier, so we just use bincode to serialize it.
+        // To protect against weak Fiat-Shamir, we hash the "pre"-verifying key and include it in
+        // the final verifying key. This just needs to commit to the verifying key and does
+        // not need to be verified by the verifier, so we just use bincode to serialize it.
         let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
         tracing::info!("pre-vkey: {} bytes", vk_bytes.len());
-        // Purely to get type compatibility and convenience, we hash using pcs.commit as a single row
+        // Purely to get type compatibility and convenience, we hash using pcs.commit as a single
+        // row
         let vk_as_row = RowMajorMatrix::new_row(
             vk_bytes
                 .into_iter()

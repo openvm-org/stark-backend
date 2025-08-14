@@ -1,4 +1,4 @@
-use std::any::type_name;
+use std::{any::type_name, sync::Arc};
 
 use openvm_stark_backend::{
     config::StarkConfig,
@@ -62,28 +62,33 @@ where
         + Clone,
 {
     security_params: SecurityParameters,
-    pub config: GoldilocksPermutationConfig<P>,
+    pub device: CpuDevice<GoldilocksPermutationConfig<P>>,
     pub perm: P,
     pub max_constraint_degree: usize,
 }
 
-impl<P> StarkEngine<GoldilocksPermutationConfig<P>> for GoldilocksPermutationEngine<P>
+impl<P> StarkEngine for GoldilocksPermutationEngine<P>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
         + Clone,
 {
+    type SC = GoldilocksPermutationConfig<P>;
+    type PB = CpuBackend<Self::SC>;
+    type PD = CpuDevice<Self::SC>;
+
     fn config(&self) -> &GoldilocksPermutationConfig<P> {
-        &self.config
+        &self.device.config
     }
 
-    fn prover<'a>(&'a self) -> MultiTraceStarkProver<'a, GoldilocksPermutationConfig<P>>
-    where
-        Self: 'a,
-    {
+    fn device(&self) -> &CpuDevice<GoldilocksPermutationConfig<P>> {
+        &self.device
+    }
+
+    fn prover(&self) -> MultiTraceStarkProver<GoldilocksPermutationConfig<P>> {
         MultiTraceStarkProver::new(
             CpuBackend::default(),
-            CpuDevice::new(self.config(), self.security_params.fri_params.log_blowup),
+            self.device.clone(),
             self.new_challenger(),
         )
     }
@@ -97,8 +102,7 @@ where
     }
 }
 
-impl<P> StarkEngineWithHashInstrumentation<GoldilocksPermutationConfig<Instrumented<P>>>
-    for GoldilocksPermutationEngine<Instrumented<P>>
+impl<P> StarkEngineWithHashInstrumentation for GoldilocksPermutationEngine<Instrumented<P>>
 where
     P: CryptographicPermutation<[Val; WIDTH]>
         + CryptographicPermutation<[PackedVal; WIDTH]>
@@ -151,7 +155,7 @@ where
     let max_constraint_degree = security_params.fri_params.max_constraint_degree();
     let config = config_from_perm(&perm, security_params.clone());
     GoldilocksPermutationEngine {
-        config,
+        device: CpuDevice::new(Arc::new(config), security_params.fri_params.log_blowup),
         perm,
         security_params,
         max_constraint_degree,

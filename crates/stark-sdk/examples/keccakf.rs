@@ -5,7 +5,7 @@ use std::sync::Arc;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
-    prover::types::{AirProofInput, ProofInput},
+    prover::types::{AirProvingContext, ProvingContext},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
 use openvm_stark_sdk::{
@@ -56,11 +56,14 @@ fn main() {
         let trace = info_span!("generate_trace")
             .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
 
-        let proof = engine.prove(
-            &pk,
-            ProofInput::new(vec![(air_id, AirProofInput::simple_no_pis(trace))]),
-        );
-
-        engine.verify(&pk.get_vk(), &proof).unwrap();
+        engine
+            .prove_then_verify(
+                &pk,
+                ProvingContext::new(vec![(
+                    air_id,
+                    AirProvingContext::simple_no_pis(Arc::new(trace)),
+                )]),
+            )
+            .unwrap();
     });
 }

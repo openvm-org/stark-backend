@@ -365,7 +365,9 @@ mod tests {
                         right_idx: 3,
                         degree_multiple: 2
                     },
-                    // Currently topological sort does not detect all subgraph isomorphisms. For example each IsFirstRow and IsLastRow is a new reference so ptr::hash is distinct.
+                    // Currently topological sort does not detect all subgraph isomorphisms. For
+                    // example each IsFirstRow and IsLastRow is a new reference so ptr::hash is
+                    // distinct.
                     SymbolicExpressionNode::Mul {
                         left_idx: 0,
                         right_idx: 1,

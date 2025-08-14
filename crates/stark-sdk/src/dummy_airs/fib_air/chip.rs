@@ -4,13 +4,12 @@ use openvm_stark_backend::{
     config::{StarkGenericConfig, Val},
     p3_field::PrimeField32,
     p3_matrix::Matrix,
-    prover::types::{AirProofInput, AirProofRawInput},
-    rap::AnyRap,
-    Chip, ChipUsageGetter,
+    prover::{cpu::CpuBackend, types::AirProvingContext},
+    AirRef, Chip, ChipUsageGetter,
 };
 
-use super::{air::FibonacciAir, trace::generate_trace_rows};
-use crate::dummy_airs::fib_air::columns::NUM_FIBONACCI_COLS;
+use super::trace::generate_trace_rows;
+use crate::dummy_airs::fib_air::{air::FibonacciAir, columns::NUM_FIBONACCI_COLS};
 
 #[derive(Clone, Debug)]
 pub struct FibonacciChip {
@@ -27,29 +26,22 @@ impl FibonacciChip {
         assert!(n.is_power_of_two());
         Self { a, b, n }
     }
+
+    pub fn air<SC: StarkGenericConfig>(&self) -> AirRef<SC> {
+        Arc::new(FibonacciAir)
+    }
 }
 
-impl<SC: StarkGenericConfig> Chip<SC> for FibonacciChip
+impl<SC: StarkGenericConfig> Chip<(), CpuBackend<SC>> for FibonacciChip
 where
     Val<SC>: PrimeField32,
 {
-    fn air(&self) -> Arc<dyn AnyRap<SC>> {
-        Arc::new(FibonacciAir)
-    }
-
-    fn generate_air_proof_input(self) -> AirProofInput<SC> {
+    fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
         let common_main = generate_trace_rows::<Val<SC>>(self.a, self.b, self.n);
         let a = common_main.get(0, 0);
         let b = common_main.get(0, 1);
         let last_val = common_main.get(self.n - 1, 1);
-        AirProofInput {
-            cached_mains_pdata: vec![],
-            raw: AirProofRawInput {
-                cached_mains: vec![],
-                common_main: Some(generate_trace_rows::<Val<SC>>(self.a, self.b, self.n)),
-                public_values: vec![a, b, last_val],
-            },
-        }
+        AirProvingContext::simple(Arc::new(common_main), vec![a, b, last_val])
     }
 }
 

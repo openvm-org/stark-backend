@@ -64,9 +64,9 @@ nightly-features = [
 mimalloc = ["openvm-stark-backend/mimalloc"]
 jemalloc = ["openvm-stark-backend/jemalloc"]
 jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
-bench-metrics = ["openvm-stark-backend/bench-metrics"]
+metrics = ["openvm-stark-backend/metrics"]
 prometheus = [
-    "bench-metrics",
+    "metrics",
     "dep:metrics-exporter-prometheus",
     "dep:tokio",
     "dep:rustls",

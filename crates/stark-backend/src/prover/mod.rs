@@ -1,12 +1,11 @@
 //! Abstraction layer for prover implementations of multi-matrix circuits on a single machine.
 //!
-//! Provides a coordinator that implements a full prover by coordinating between host and device, where
-//! the host implementation is common and the device implementation relies on custom-specified device kernels.
+//! Provides a coordinator that implements a full prover by coordinating between host and device,
+//! where the host implementation is common and the device implementation relies on custom-specified
+//! device kernels.
 //!
 //! Currently includes full prover implementations for:
 //! - CPU
-
-use cpu::{CpuBackend, CpuDevice};
 
 /// Host prover implementation that uses custom device kernels
 pub mod coordinator;
@@ -39,5 +38,5 @@ pub trait Prover {
     ) -> Self::Proof;
 }
 
-pub type MultiTraceStarkProver<'a, SC> =
-    coordinator::Coordinator<SC, CpuBackend<SC>, CpuDevice<'a, SC>>;
+pub type MultiTraceStarkProver<SC> =
+    coordinator::Coordinator<SC, cpu::CpuBackend<SC>, cpu::CpuDevice<SC>>;

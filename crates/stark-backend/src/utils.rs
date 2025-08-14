@@ -37,7 +37,8 @@ pub fn batch_multiplicative_inverse_allowing_zero<F: Field>(values: Vec<F>) -> V
 /// Assumes that slice length is a multiple of `chunk_size` and parallelization preserves the chunks
 /// so each slice in a thread is still multiple of `chunk_size`.
 ///
-/// The closure `f` takes `(thread_slice, idx)` where `thread_slice` is a sub-slice starting at `v[idx]`.
+/// The closure `f` takes `(thread_slice, idx)` where `thread_slice` is a sub-slice starting at
+/// `v[idx]`.
 // Copied and modified from https://github.com/axiom-crypto/halo2/blob/4e584896b62c981ec7c7dced4a9ca95b82306550/halo2_proofs/src/arithmetic.rs#L157
 pub fn parallelize_chunks<T, F>(v: &mut [T], chunk_size: usize, f: F)
 where

@@ -1,48 +1,62 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 use derivative::Derivative;
+use itertools::Itertools;
 use p3_field::Field;
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_matrix::dense::RowMajorMatrix;
 use serde::{Deserialize, Serialize};
 
 use super::hal::ProverBackend;
 use crate::{
-    config::{Com, PcsProof, PcsProverData, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
+    config::{Com, PcsProof, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
     keygen::types::{LinearConstraint, StarkVerifyingKey},
     proof::{AirProofData, Commitments, OpeningProof, Proof},
 };
 
-/// A view of the proving key after it has been transferred to device.
-pub struct DeviceMultiStarkProvingKey<'a, PB: ProverBackend> {
+/// A view of the proving key after it has been transferred to device. The view is filtered for only
+/// the proving keys corresponding to specific `air_ids`.
+pub struct DeviceMultiStarkProvingKeyView<'a, PB: ProverBackend> {
     pub(super) air_ids: Vec<usize>,
-    pub per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
+    pub per_air: Vec<&'a DeviceStarkProvingKey<PB>>,
     /// Each [LinearConstraint] is indexed by AIR ID.
-    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in `per_air`.
+    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in
+    /// `per_air`.
+    pub trace_height_constraints: &'a [LinearConstraint],
+    pub vk_pre_hash: &'a PB::Commitment,
+}
+
+/// The proving key for a circuit consisting of multiple AIRs, after prover-specific data has been
+/// transferred to device. The host data (e.g., vkey) is owned by this struct.
+#[derive(derive_new::new)]
+pub struct DeviceMultiStarkProvingKey<PB: ProverBackend> {
+    pub per_air: Vec<DeviceStarkProvingKey<PB>>,
+    /// Each [LinearConstraint] is indexed by AIR ID.
+    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in
+    /// `per_air`.
     pub trace_height_constraints: Vec<LinearConstraint>,
     pub vk_pre_hash: PB::Commitment,
 }
 
-impl<'a, PB: ProverBackend> DeviceMultiStarkProvingKey<'a, PB> {
-    pub fn new(
-        air_ids: Vec<usize>,
-        per_air: Vec<DeviceStarkProvingKey<'a, PB>>,
-        trace_height_constraints: Vec<LinearConstraint>,
-        vk_pre_hash: PB::Commitment,
-    ) -> Self {
-        assert_eq!(air_ids.len(), per_air.len());
-        Self {
+impl<PB: ProverBackend> DeviceMultiStarkProvingKey<PB> {
+    pub fn view(&self, air_ids: Vec<usize>) -> DeviceMultiStarkProvingKeyView<'_, PB> {
+        let deduped: Vec<_> = air_ids.iter().dedup().collect();
+        assert_eq!(deduped.len(), air_ids.len(), "Duplicate AIR IDs found");
+        let per_air = air_ids.iter().map(|&id| &self.per_air[id]).collect();
+        DeviceMultiStarkProvingKeyView {
             air_ids,
             per_air,
-            trace_height_constraints,
-            vk_pre_hash,
+            trace_height_constraints: &self.trace_height_constraints,
+            vk_pre_hash: &self.vk_pre_hash,
         }
     }
 }
 
-pub struct DeviceStarkProvingKey<'a, PB: ProverBackend> {
+/// The proving key after prover-specific data has been transferred to device. The host data (e.g.,
+/// vkey) is owned by this struct.
+pub struct DeviceStarkProvingKey<PB: ProverBackend> {
     /// Type name of the AIR, for display purposes only
-    pub air_name: &'a str,
-    pub vk: &'a StarkVerifyingKey<PB::Val, PB::Commitment>,
+    pub air_name: String,
+    pub vk: StarkVerifyingKey<PB::Val, PB::Commitment>,
     /// Prover only data for preprocessed trace
     pub preprocessed_data: Option<SingleCommitPreimage<PB::Matrix, PB::PcsData>>,
     /// Additional configuration or preprocessed data for the RAP phases
@@ -61,20 +75,33 @@ pub struct SingleCommitPreimage<Matrix, PcsData> {
     pub matrix_idx: u32,
 }
 
-#[derive(derive_new::new)]
-pub struct ProvingContext<'a, PB: ProverBackend> {
-    /// (AIR id, AIR input)
-    pub per_air: Vec<(usize, AirProvingContext<'a, PB>)>,
+/// Commitment to a single trace matrix, together with the trace matrix and prover data.
+#[derive(Derivative)]
+#[derivative(Clone(bound = "PB::Matrix: Clone, PB::PcsData: Clone"))]
+pub struct CommittedTraceData<PB: ProverBackend> {
+    pub commitment: PB::Commitment,
+    pub trace: PB::Matrix,
+    pub data: PB::PcsData,
 }
 
-impl<'a, PB: ProverBackend> ProvingContext<'a, PB> {
-    pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<'a, PB>> {
+#[derive(derive_new::new)]
+pub struct ProvingContext<PB: ProverBackend> {
+    /// (AIR id, AIR input)
+    pub per_air: Vec<(usize, AirProvingContext<PB>)>,
+}
+
+impl<PB: ProverBackend> ProvingContext<PB> {
+    pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<PB>> {
         self.per_air.into_iter().map(|(_, x)| x).collect()
+    }
+
+    pub fn air_ids(&self) -> Vec<usize> {
+        self.per_air.iter().map(|(id, _)| *id).collect()
     }
 }
 
-impl<'a, PB: ProverBackend> IntoIterator for ProvingContext<'a, PB> {
-    type Item = (usize, AirProvingContext<'a, PB>);
+impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
+    type Item = (usize, AirProvingContext<PB>);
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -89,21 +116,20 @@ impl<'a, PB: ProverBackend> IntoIterator for ProvingContext<'a, PB> {
 /// Public values: for each AIR, a separate list of public values.
 /// The prover can support global public values that are shared among all AIRs,
 /// but we currently split public values per-AIR for modularity.
-pub struct AirProvingContext<'a, PB: ProverBackend> {
+#[derive(Derivative, derive_new::new)]
+#[derivative(Clone(bound = "PB::Matrix: Clone, PB::PcsData: Clone"))]
+pub struct AirProvingContext<PB: ProverBackend> {
     /// Cached main trace matrices with commitments. One matrix per commitment.
-    #[allow(clippy::type_complexity)]
-    pub cached_mains: Vec<(
-        PB::Commitment,
-        SingleCommitPreimage<PB::Matrix, PB::PcsData>,
-    )>,
+    // Note[jpw]: The cached data should have a lifetime since it may outlive a single proof
+    // invocation. But for now it's easier to assume `cached_mains` are owned, and any sharing
+    // is done via smart pointers.
+    pub cached_mains: Vec<CommittedTraceData<PB>>,
     /// Common main trace matrix
     pub common_main: Option<PB::Matrix>,
     /// Public values
-    // [jpw] This is on host for now because it seems more convenient for the challenger to be on host.
+    // [jpw] This is on host for now because it seems more convenient for the challenger to be on
+    // host.
     pub public_values: Vec<PB::Val>,
-    // Placeholder for lifetime of the cached data. For now it's easier to assume `cached_mains`
-    // are owned, and any sharing is done via smart pointers.
-    pub cached_lifetime: PhantomData<&'a PB::PcsData>,
 }
 
 /// A view of just the AIR, without any preprocessed or after challenge columns.
@@ -131,8 +157,8 @@ pub struct PairView<T, Val> {
 
 /// The full RAP trace consists of horizontal concatenation of multiple matrices of the same height:
 /// - preprocessed trace matrix
-/// - the main trace matrix is horizontally partitioned into multiple matrices,
-///   where each matrix can belong to a separate matrix commitment.
+/// - the main trace matrix is horizontally partitioned into multiple matrices, where each matrix
+///   can belong to a separate matrix commitment.
 /// - after each round of challenges, a trace matrix for trace allowed to use those challenges
 ///
 /// Each of these matrices is allowed to be in a separate commitment.
@@ -223,72 +249,13 @@ where
     }
 }
 
-// ============= Below are common types independent of hardware ============
-
-#[derive(Derivative, derive_new::new)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct ProofInput<SC: StarkGenericConfig> {
-    /// (AIR id, AIR input)
-    pub per_air: Vec<(usize, AirProofInput<SC>)>,
-}
-
-#[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound(
-    serialize = "PcsProverData<SC>: Serialize",
-    deserialize = "PcsProverData<SC>: Deserialize<'de>"
-))]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct CommittedTraceData<SC: StarkGenericConfig> {
-    pub trace: Arc<RowMajorMatrix<Val<SC>>>,
-    pub commitment: Com<SC>,
-    pub pcs_data: Arc<PcsProverData<SC>>,
-}
-
-/// Necessary input for proving a single AIR.
-///
-/// The [Chip](crate::chip::Chip) trait is currently specific to the
-/// CPU backend and in particular to `RowMajorMatrix`. We may extend
-/// to more general [ProverBackend](super::hal::ProverBackend)s, but
-/// currently we use this struct as a common interface.
-#[derive(Derivative)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-pub struct AirProofInput<SC: StarkGenericConfig> {
-    /// Prover data for cached main traces.
-    /// They must either be all provided or they will be regenerated
-    /// from the raw traces.
-    pub cached_mains_pdata: Vec<(Com<SC>, Arc<PcsProverData<SC>>)>,
-    pub raw: AirProofRawInput<Val<SC>>,
-}
-
-/// Raw input for proving a single AIR.
+/// Raw input for proving a single AIR. For DEBUG use only.
 #[derive(Clone, Debug)]
 pub struct AirProofRawInput<F: Field> {
     /// Cached main trace matrices
     pub cached_mains: Vec<Arc<RowMajorMatrix<F>>>,
     /// Common main trace matrix
-    pub common_main: Option<RowMajorMatrix<F>>,
+    pub common_main: Option<Arc<RowMajorMatrix<F>>>,
     /// Public values
     pub public_values: Vec<F>,
-}
-
-impl<F: Field> AirProofRawInput<F> {
-    pub fn height(&self) -> usize {
-        let mut height = None;
-        for m in self.cached_mains.iter() {
-            if let Some(h) = height {
-                assert_eq!(h, m.height());
-            } else {
-                height = Some(m.height());
-            }
-        }
-        let common_h = self.common_main.as_ref().map(|trace| trace.height());
-        if let Some(h) = height {
-            if let Some(common_h) = common_h {
-                assert_eq!(h, common_h);
-            }
-            h
-        } else {
-            common_h.unwrap_or(0)
-        }
-    }
 }

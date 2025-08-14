@@ -39,8 +39,9 @@ impl<T> ViewPair<T> {
     }
 }
 
-/// A struct for quotient polynomial evaluation. This evaluates `WIDTH` rows of the quotient polynomial
-/// simultaneously using SIMD (if target arch allows it) via `PackedVal` and `PackedChallenge` types.
+/// A struct for quotient polynomial evaluation. This evaluates `WIDTH` rows of the quotient
+/// polynomial simultaneously using SIMD (if target arch allows it) via `PackedVal` and
+/// `PackedChallenge` types.
 pub(super) struct ProverConstraintEvaluator<'a, SC: StarkGenericConfig> {
     pub preprocessed: &'a ViewPair<PackedVal<SC>>,
     pub partitioned_main: &'a [ViewPair<PackedVal<SC>>],
@@ -179,13 +180,15 @@ impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
         PackedExpr<SC>: Clone,
     {
         debug_assert!(exprs.capacity() >= nodes.len());
-        // SAFETY: we will set all `exprs` in the loop; this is to make debug assertions happy for `exprs.get_unchecked`.
+        // SAFETY: we will set all `exprs` in the loop; this is to make debug assertions happy for
+        // `exprs.get_unchecked`.
         unsafe {
             exprs.set_len(nodes.len());
         }
         let mut expr_ptr = exprs.as_mut_ptr();
         for node in nodes.iter() {
-            // SAFETY: dereference raw pointer `expr_ptr` because we assume `exprs` has enough capacity.
+            // SAFETY: dereference raw pointer `expr_ptr` because we assume `exprs` has enough
+            // capacity.
             *expr_ptr = match *node {
                 SymbolicExpressionNode::Variable(var) => self.eval_var(var),
                 SymbolicExpressionNode::Constant(c) => self.eval_const(c),
@@ -221,7 +224,8 @@ impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
     /// # Safety
     /// - The `nodes` must already be topologically sorted, so they only reference previous nodes.
     /// - `exprs` should have capacity at least `constraints.nodes.len()`.
-    // Note: this could be split into multiple functions if additional constraints need to be folded in
+    // Note: this could be split into multiple functions if additional constraints need to be folded
+    // in
     pub unsafe fn accumulate(
         &self,
         constraints: &SymbolicExpressionDag<Val<SC>>,
@@ -229,8 +233,8 @@ impl<SC: StarkGenericConfig> ProverConstraintEvaluator<'_, SC> {
         exprs: &mut Vec<PackedExpr<SC>>,
     ) -> PackedChallenge<SC> {
         debug_assert!(alpha_powers.len() >= constraints.constraint_idx.len());
-        // We want alpha powers to have highest power first, because of how accumulator "folding" works
-        // So this will be alpha^{num_constraints - 1}, ..., alpha^0
+        // We want alpha powers to have highest power first, because of how accumulator "folding"
+        // works So this will be alpha^{num_constraints - 1}, ..., alpha^0
         self.eval_nodes_mut(&constraints.nodes, exprs);
         let mut accumulator = PackedChallenge::<SC>::ZERO;
         for (&alpha_pow, &node_idx) in zip(alpha_powers, constraints.constraint_idx.iter().rev()) {

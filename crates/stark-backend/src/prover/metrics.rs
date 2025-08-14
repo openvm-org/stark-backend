@@ -2,10 +2,10 @@ use std::fmt::Display;
 
 use itertools::zip_eq;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{debug, info};
 
-use super::{hal::ProverBackend, types::DeviceMultiStarkProvingKey};
-use crate::keygen::types::TraceWidth;
+use super::hal::ProverBackend;
+use crate::{keygen::types::TraceWidth, prover::types::DeviceMultiStarkProvingKeyView};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceMetrics {
@@ -41,51 +41,6 @@ pub struct TraceCells {
 
 impl Display for TraceMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "total_trace_cells = {} (excluding preprocessed)",
-            format_number_with_underscores(self.total_cells)
-        )?;
-        writeln!(
-            f,
-            "preprocessed_trace_cells = {}",
-            format_number_with_underscores(
-                self.per_air
-                    .iter()
-                    .map(|m| m.cells.preprocessed.unwrap_or(0))
-                    .sum::<usize>()
-            )
-        )?;
-        writeln!(
-            f,
-            "main_trace_cells = {}",
-            format_number_with_underscores(
-                self.per_air
-                    .iter()
-                    .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
-                    .sum::<usize>()
-            )
-        )?;
-        writeln!(
-            f,
-            "perm_trace_cells = {}",
-            format_number_with_underscores(
-                self.per_air
-                    .iter()
-                    .map(|m| m.cells.after_challenge.iter().sum::<usize>())
-                    .sum::<usize>()
-            )
-        )?;
-        writeln!(
-            f,
-            "quotient_poly_cells = {}",
-            format_number_with_underscores(
-                self.per_air
-                    .iter()
-                    .map(|m| m.quotient_poly_cells)
-                    .sum::<usize>()
-            )
-        )?;
         for (i, (weighted_sum, threshold)) in self.trace_height_inequalities.iter().enumerate() {
             writeln!(
                 f,
@@ -116,7 +71,7 @@ impl Display for SingleTraceMetrics {
 
 /// heights are the trace heights for each air
 pub fn trace_metrics<PB: ProverBackend>(
-    mpk: &DeviceMultiStarkProvingKey<PB>,
+    mpk: &DeviceMultiStarkProvingKeyView<PB>,
     log_trace_heights: &[u8],
 ) -> TraceMetrics {
     let heights = log_trace_heights
@@ -140,7 +95,7 @@ pub fn trace_metrics<PB: ProverBackend>(
         .collect::<Vec<_>>();
     let per_air: Vec<_> = zip_eq(&mpk.per_air, heights)
         .map(|(pk, height)| {
-            let air_name = pk.air_name;
+            let air_name = &pk.air_name;
             let mut width = pk.vk.params.width.clone();
             let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
             for w in &mut width.after_challenge {
@@ -174,7 +129,51 @@ pub fn trace_metrics<PB: ProverBackend>(
         total_cells,
         trace_height_inequalities,
     };
-    info!("{}", metrics);
+    info!(
+        "total_trace_cells = {} (excluding preprocessed)",
+        format_number_with_underscores(metrics.total_cells)
+    );
+    info!(
+        "preprocessed_trace_cells = {}",
+        format_number_with_underscores(
+            metrics
+                .per_air
+                .iter()
+                .map(|m| m.cells.preprocessed.unwrap_or(0))
+                .sum::<usize>()
+        )
+    );
+    info!(
+        "main_trace_cells = {}",
+        format_number_with_underscores(
+            metrics
+                .per_air
+                .iter()
+                .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
+                .sum::<usize>()
+        )
+    );
+    info!(
+        "perm_trace_cells = {}",
+        format_number_with_underscores(
+            metrics
+                .per_air
+                .iter()
+                .map(|m| m.cells.after_challenge.iter().sum::<usize>())
+                .sum::<usize>()
+        )
+    );
+    info!(
+        "quotient_poly_cells = {}",
+        format_number_with_underscores(
+            metrics
+                .per_air
+                .iter()
+                .map(|m| m.quotient_poly_cells)
+                .sum::<usize>()
+        )
+    );
+    debug!("{}", metrics);
     metrics
 }
 
@@ -194,7 +193,7 @@ pub fn format_number_with_underscores(n: usize) -> String {
     result.chars().rev().collect()
 }
 
-#[cfg(feature = "bench-metrics")]
+#[cfg(feature = "metrics")]
 mod emit {
     use metrics::counter;
 

@@ -32,6 +32,20 @@ impl TraceWidth {
         }
         ret
     }
+
+    /// Returns the width of the main trace, i.e., the sum of all cached main widths and the common
+    /// main width.
+    pub fn main_width(&self) -> usize {
+        self.cached_mains.iter().sum::<usize>() + self.common_main
+    }
+
+    /// Total width of the trace matrix, including the preprocessed width, main width, and
+    /// after-challenge widths.
+    pub fn total_width(&self, ext_degree: usize) -> usize {
+        self.preprocessed.unwrap_or(0)
+            + self.main_width()
+            + self.after_challenge.iter().sum::<usize>() * ext_degree
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,8 +81,9 @@ pub struct StarkVerifyingKey<Val, Com> {
     /// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.
     pub symbolic_constraints: SymbolicConstraintsDag<Val>,
-    /// The factor to multiple the trace degree by to get the degree of the quotient polynomial. Determined from the max constraint degree of the AIR constraints.
-    /// This is equivalently the number of chunks the quotient polynomial is split into.
+    /// The factor to multiply the trace degree by to get the degree of the quotient polynomial.
+    /// Determined from the max constraint degree of the AIR constraints. This is equivalently
+    /// the number of chunks the quotient polynomial is split into.
     pub quotient_degree: u8,
     pub rap_phase_seq_kind: RapPhaseSeqKind,
 }
@@ -92,7 +107,8 @@ pub struct MultiStarkVerifyingKey<SC: StarkGenericConfig> {
     pub pre_hash: Com<SC>,
 }
 
-/// Everything in [MultiStarkVerifyingKey] except the `pre_hash` used to initialize the Fiat-Shamir transcript.
+/// Everything in [MultiStarkVerifyingKey] except the `pre_hash` used to initialize the Fiat-Shamir
+/// transcript.
 #[derive(Derivative, Serialize, Deserialize)]
 #[derivative(Clone(bound = "Com<SC>: Clone"))]
 #[serde(bound(
@@ -182,6 +198,10 @@ impl<SC: StarkGenericConfig> MultiStarkProvingKey<SC> {
 impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
     pub fn num_challenges_per_phase(&self) -> Vec<usize> {
         self.full_view().num_challenges_per_phase()
+    }
+
+    pub fn main_widths(&self) -> Vec<usize> {
+        self.full_view().main_widths()
     }
 
     pub fn total_widths(&self) -> Vec<usize> {

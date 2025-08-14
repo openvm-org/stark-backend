@@ -29,7 +29,7 @@ use crate::{
     proof::OpeningProof,
     prover::{
         hal::TraceCommitter,
-        types::{PairView, RapSinglePhaseView},
+        types::{CommittedTraceData, DeviceMultiStarkProvingKeyView, PairView, RapSinglePhaseView},
     },
 };
 
@@ -57,9 +57,10 @@ pub struct CpuBackend<SC> {
 /// # Safety
 /// See [`CpuBackend`].
 #[derive(Derivative, derive_new::new)]
-#[derivative(Clone(bound = ""), Copy(bound = ""))]
-pub struct CpuDevice<'a, SC> {
-    config: &'a SC,
+#[derivative(Clone(bound = ""))]
+pub struct CpuDevice<SC> {
+    // Use Arc to get around Clone-ing SC
+    pub config: Arc<SC>,
     /// When committing a matrix, the matrix is cloned into newly allocated memory.
     /// The size of the newly allocated memory will be `matrix.size() << log_blowup_factor`.
     log_blowup_factor: usize,
@@ -84,8 +85,8 @@ impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
 pub struct PcsData<SC: StarkGenericConfig> {
     /// The preimage of a single commitment.
     pub data: Arc<PcsProverData<SC>>,
-    /// A mixed matrix commitment scheme commits to multiple trace matrices within a single commitment.
-    /// This is the ordered list of log2 heights of all committed trace matrices.
+    /// A mixed matrix commitment scheme commits to multiple trace matrices within a single
+    /// commitment. This is the ordered list of log2 heights of all committed trace matrices.
     pub log_trace_heights: Vec<u8>,
 }
 
@@ -98,21 +99,21 @@ impl<T: Send + Sync + Clone> MatrixDimensions for Arc<RowMajorMatrix<T>> {
     }
 }
 
-impl<SC> CpuDevice<'_, SC> {
+impl<SC> CpuDevice<SC> {
     pub fn config(&self) -> &SC {
-        self.config
+        &self.config
     }
 }
 
-impl<SC: StarkGenericConfig> CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> CpuDevice<SC> {
     pub fn pcs(&self) -> &SC::Pcs {
         self.config.pcs()
     }
 }
 
-impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<'_, SC> {}
+impl<SC: StarkGenericConfig> ProverDevice<CpuBackend<SC>> for CpuDevice<SC> {}
 
-impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<SC> {
     fn commit(&self, traces: &[Arc<RowMajorMatrix<Val<SC>>>]) -> (Com<SC>, PcsData<SC>) {
         let log_blowup_factor = self.log_blowup_factor;
         let pcs = self.pcs();
@@ -134,8 +135,10 @@ impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC
                     .unwrap();
                 let mut new_buffer = Vec::with_capacity(new_buffer_size);
                 // SAFETY:
-                // - `trace_slice` is allocated for `trace_slice.len() * size_of::<F>` bytes, obviously
-                // - we just allocated `new_buffer` for at least `trace_slice.len() * size_of::<F>` bytes above (more if there's blowup)
+                // - `trace_slice` is allocated for `trace_slice.len() * size_of::<F>` bytes,
+                //   obviously
+                // - we just allocated `new_buffer` for at least `trace_slice.len() * size_of::<F>`
+                //   bytes above (more if there's blowup)
                 // - both are slices of &[F] so alignment is guaranteed
                 // - `new_buffer` is newly allocated so non-overlapping with `trace_slice`
                 unsafe {
@@ -163,11 +166,11 @@ impl<SC: StarkGenericConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<'_, SC
     }
 }
 
-impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice<SC> {
     fn partially_prove(
         &self,
         challenger: &mut SC::Challenger,
-        mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+        mpk: &DeviceMultiStarkProvingKeyView<CpuBackend<SC>>,
         trace_views: Vec<AirView<Arc<RowMajorMatrix<Val<SC>>>, Val<SC>>>,
     ) -> (
         Option<RapPhaseSeqPartialProof<SC>>,
@@ -279,11 +282,11 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
     }
 }
 
-impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevice<SC> {
     fn eval_and_commit_quotient(
         &self,
         challenger: &mut SC::Challenger,
-        pk_views: &[DeviceStarkProvingKey<CpuBackend<SC>>],
+        pk_views: &[&DeviceStarkProvingKey<CpuBackend<SC>>],
         public_values: &[Vec<Val<SC>>],
         cached_pcs_datas_per_air: &[Vec<PcsData<SC>>],
         common_main_pcs_data: &PcsData<SC>,
@@ -307,7 +310,8 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
                 let trace_domain = pcs.natural_domain_for_degree(1usize << log_trace_height);
                 let quotient_domain = trace_domain
                     .create_disjoint_domain(trace_domain.size() * quotient_degree as usize);
-                // **IMPORTANT**: the return type of `get_evaluations_on_domain` is a matrix view. DO NOT call to_row_major_matrix as this will allocate new memory
+                // **IMPORTANT**: the return type of `get_evaluations_on_domain` is a matrix view.
+                // DO NOT call to_row_major_matrix as this will allocate new memory
                 let preprocessed = pk.preprocessed_data.as_ref().map(|cv| {
                     pcs.get_evaluations_on_domain(
                         &cv.data.data,
@@ -383,13 +387,13 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
     }
 }
 
-impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_, SC> {
+impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<SC> {
     fn open(
         &self,
         challenger: &mut SC::Challenger,
         // For each preprocessed trace commitment, the prover data and
         // the log height of the matrix, in order
-        preprocessed: Vec<PcsData<SC>>,
+        preprocessed: Vec<&PcsData<SC>>,
         // For each main trace commitment, the prover data and
         // the log height of each matrix, in order
         // Note: this is all one challenge phase.
@@ -440,26 +444,18 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<'_
     }
 }
 
-impl<SC> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuBackend<SC>
+impl<SC> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuDevice<SC>
 where
     SC: StarkGenericConfig,
 {
-    fn transport_pk_to_device<'a>(
+    fn transport_pk_to_device(
         &self,
-        mpk: &'a MultiStarkProvingKey<SC>,
-        air_ids: Vec<usize>,
-    ) -> DeviceMultiStarkProvingKey<'a, CpuBackend<SC>>
-    where
-        SC: 'a,
-    {
-        assert!(
-            air_ids.len() <= mpk.per_air.len(),
-            "filtering more AIRs than available"
-        );
-        let per_air = air_ids
+        mpk: &MultiStarkProvingKey<SC>,
+    ) -> DeviceMultiStarkProvingKey<CpuBackend<SC>> {
+        let per_air = mpk
+            .per_air
             .iter()
-            .map(|&air_idx| {
-                let pk = &mpk.per_air[air_idx];
+            .map(|pk| {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|pd| {
                     let pcs_data_view = PcsData {
                         data: pd.data.clone(),
@@ -472,15 +468,14 @@ where
                     }
                 });
                 DeviceStarkProvingKey {
-                    air_name: &pk.air_name,
-                    vk: &pk.vk,
+                    air_name: pk.air_name.clone(),
+                    vk: pk.vk.clone(),
                     preprocessed_data,
                     rap_partial_pk: pk.rap_partial_pk.clone(),
                 }
             })
             .collect();
         DeviceMultiStarkProvingKey::new(
-            air_ids,
             per_air,
             mpk.trace_height_constraints.clone(),
             mpk.vk_pre_hash.clone(),
@@ -493,16 +488,34 @@ where
         matrix.clone()
     }
 
-    fn transport_pcs_data_to_device(&self, data: &PcsData<SC>) -> PcsData<SC> {
-        data.clone()
+    fn transport_committed_trace_to_device(
+        &self,
+        commitment: Com<SC>,
+        trace: &Arc<RowMajorMatrix<Val<SC>>>,
+        prover_data: &Arc<PcsProverData<SC>>,
+    ) -> CommittedTraceData<CpuBackend<SC>> {
+        let log_trace_height: u8 = log2_strict_usize(trace.height()).try_into().unwrap();
+        let data = PcsData::new(prover_data.clone(), vec![log_trace_height]);
+        CommittedTraceData {
+            commitment,
+            trace: trace.clone(),
+            data,
+        }
+    }
+
+    fn transport_matrix_from_device_to_host(
+        &self,
+        matrix: &Arc<RowMajorMatrix<Val<SC>>>,
+    ) -> Arc<RowMajorMatrix<Val<SC>>> {
+        matrix.clone()
     }
 }
 
 // TODO[jpw]: Avoid using this after switching to new plonky3 commit with <https://github.com/Plonky3/Plonky3/pull/796>
 /// # Safety
 /// Assumes that `EF` is `repr(C)` or `repr(transparent)` with internal memory layout `[F; EF::D]`.
-/// This ensures `EF` and `F` have the same alignment and `size_of::<EF>() == size_of::<F>() * EF::D`.
-/// We assume that `EF::as_base_slice` is the same as transmuting `EF` to `[F; EF::D]`.
+/// This ensures `EF` and `F` have the same alignment and `size_of::<EF>() == size_of::<F>() *
+/// EF::D`. We assume that `EF::as_base_slice` is the same as transmuting `EF` to `[F; EF::D]`.
 unsafe fn transmute_to_base<F: Field, EF: ExtensionField<F>>(
     ext_matrix: RowMajorMatrix<EF>,
 ) -> RowMajorMatrix<F> {

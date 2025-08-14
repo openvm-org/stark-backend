@@ -53,11 +53,12 @@ impl<F: Field> SymbolicConstraints<F> {
     }
 
     pub fn get_log_quotient_degree(&self) -> usize {
-        // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller degrees.
+        // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller
+        // degrees.
         let constraint_degree = self.max_constraint_degree().max(2);
 
-        // The quotient's actual degree is approximately (max_constraint_degree - 1) * (trace height),
-        // where subtracting 1 comes from division by the zerofier.
+        // The quotient's actual degree is approximately (max_constraint_degree - 1) * (trace
+        // height), where subtracting 1 comes from division by the zerofier.
         // But we pad it to a power of two so that we can efficiently decompose the quotient.
         log2_ceil_usize(constraint_degree - 1)
     }
@@ -135,7 +136,8 @@ pub struct SymbolicRapBuilder<F> {
 
 impl<F: Field> SymbolicRapBuilder<F> {
     /// - `num_challenges_to_sample`: for each challenge phase, how many challenges to sample
-    /// - `num_exposed_values_after_challenge`: in each challenge phase, how many values to expose to verifier
+    /// - `num_exposed_values_after_challenge`: in each challenge phase, how many values to expose
+    ///   to verifier
     pub(crate) fn new(
         width: &TraceWidth,
         num_public_values: usize,
@@ -276,7 +278,8 @@ impl<F: Field> AirBuilder for SymbolicRapBuilder<F> {
     type Var = SymbolicVariable<Self::F>;
     type M = RowMajorMatrix<Self::Var>;
 
-    /// It is difficult to horizontally concatenate matrices when the main trace is partitioned, so we disable this method in that case.
+    /// It is difficult to horizontally concatenate matrices when the main trace is partitioned, so
+    /// we disable this method in that case.
     fn main(&self) -> Self::M {
         if self.partitioned_main.len() == 1 {
             self.partitioned_main[0].clone()
