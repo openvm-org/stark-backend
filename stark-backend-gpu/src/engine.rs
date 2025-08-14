@@ -11,44 +11,53 @@ use openvm_stark_backend::{
 };
 use openvm_stark_sdk::{
     config::{
-        baby_bear_poseidon2::{BabyBearPoseidon2Config, BabyBearPoseidon2Engine},
+        baby_bear_poseidon2::{config_from_perm, default_perm, BabyBearPoseidon2Config},
+        fri_params::SecurityParameters,
         log_up_params::log_up_security_params_baby_bear_100_bits,
         FriParameters,
     },
     engine::{StarkEngine, StarkFriEngine},
 };
-use p3_baby_bear::BabyBear;
+use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_field::Field;
 
 use crate::{
     cuda::memory_manager::MemTracker,
     fri_log_up::FriLogUpPhaseGpu,
     gpu_device::{GpuConfig, GpuDevice},
-    prelude::SC,
+    prelude::{SC, WIDTH},
     prover_backend::GpuBackend,
 };
 
 pub type MultiTraceStarkProverGPU = Coordinator<SC, GpuBackend, GpuDevice>;
 
 pub struct GpuBabyBearPoseidon2Engine {
-    engine: BabyBearPoseidon2Engine,
     device: GpuDevice,
+    config: BabyBearPoseidon2Config,
+    perm: Poseidon2BabyBear<WIDTH>,
 }
 
 impl StarkFriEngine for GpuBabyBearPoseidon2Engine {
     fn new(fri_params: FriParameters) -> Self {
+        let perm = default_perm();
+        let log_up_params = log_up_security_params_baby_bear_100_bits();
         Self {
-            engine: BabyBearPoseidon2Engine::new(fri_params),
             device: GpuDevice::new(
                 GpuConfig::new(fri_params, BabyBear::GENERATOR),
-                Some(FriLogUpPhaseGpu::new(
-                    log_up_security_params_baby_bear_100_bits(),
-                )),
+                Some(FriLogUpPhaseGpu::new(log_up_params.clone())),
             ),
+            config: config_from_perm(
+                &perm,
+                SecurityParameters {
+                    fri_params,
+                    log_up_params,
+                },
+            ),
+            perm,
         }
     }
     fn fri_params(&self) -> FriParameters {
-        self.engine.fri_params()
+        self.device.config.fri
     }
 }
 
@@ -58,15 +67,15 @@ impl StarkEngine for GpuBabyBearPoseidon2Engine {
     type PD = GpuDevice;
 
     fn config(&self) -> &SC {
-        self.engine.config()
+        &self.config
     }
 
     fn max_constraint_degree(&self) -> Option<usize> {
-        Some(self.engine.max_constraint_degree)
+        Some(self.device.config.fri.max_constraint_degree())
     }
 
     fn new_challenger(&self) -> <SC as StarkGenericConfig>::Challenger {
-        self.engine.new_challenger()
+        <SC as StarkGenericConfig>::Challenger::new(self.perm.clone())
     }
 
     fn device(&self) -> &Self::PD {
