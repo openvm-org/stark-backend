@@ -1,3 +1,14 @@
+/*
+ * Source: https://github.com/risc0/risc0 (ref=b9bfc8ad3547d76e9304b630f2a935bbab01aa9d)
+ * Status: MODIFIED from risc0/sys/kernels/zkp/cuda/fp.h
+ * Imported: 2025-01-25 by @gaxiom
+ * 
+ * LOCAL CHANGES (high level):
+ * - 2025-03-25: add TWO_ADIC_GENERATORS
+ * - 2025-06-02: add neg_one()
+ * - 2025-08-09: gcd inversion optimization
+ */
+
 // Copyright 2024 RISC Zero, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

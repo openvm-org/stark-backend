@@ -1,5 +1,3 @@
-// FROM https://github.com/scroll-tech/plonky3-gpu/blob/openvm-v2/gpu-backend/src/cuda/kernels/quotient.cu
-
 #include "codec.cuh"
 #include "fp.h"
 #include "fpext.h"
@@ -310,8 +308,6 @@ __global__ void cukernel_quotient_selectors(
     }
 }
 
-// END OF FILE gpu-backend/src/cuda/kernels/codec.cu
-
 static const uint64_t TASK_SIZE = 65536;
 
 extern "C" int _cukernel_quotient_selectors(
@@ -331,7 +327,8 @@ extern "C" int _cukernel_quotient_selectors(
     return cudaGetLastError();
 }
 
-extern "C" int _cukernel_quotient_local(
+extern "C" int _cukernel_quotient(
+    bool is_global,
     FpExt *d_quotient_values,
     const Fp *d_preprocessed,
     const uint64_t *d_main,
@@ -355,78 +352,34 @@ extern "C" int _cukernel_quotient_local(
     const uint32_t num_rows_per_tile
 ) {
     auto [grid, block] = kernel_launch_params(TASK_SIZE, 256);
-    cukernel_quotient<false><<<grid, block>>>(
-        d_quotient_values,
-        d_preprocessed,
-        d_main,
-        d_permutation,
-        d_exposed,
-        d_public,
-        d_first,
-        d_last,
-        d_transition,
-        d_inv_zeroifier,
-        d_challenge,
-        d_alpha,
-        d_intermediates,
-        d_rules,
-        num_rules,
-        quotient_size,
-        prep_height,
-        main_height,
-        perm_height,
-        qdb_degree,
-        num_rows_per_tile
-    );
-    return cudaGetLastError();
-}
 
-extern "C" int _cukernel_quotient_global(
-    FpExt *d_quotient_values,
-    const Fp *d_preprocessed,
-    const uint64_t *d_main,
-    const Fp *d_permutation,
-    const FpExt *d_exposed,
-    const Fp *d_public,
-    const Fp *d_first,
-    const Fp *d_last,
-    const Fp *d_transition,
-    const Fp *d_inv_zeroifier,
-    const FpExt *d_challenge,
-    const FpExt *d_alpha,
-    const FpExt *d_intermediates,
-    const Rule *d_rules,
-    const uint64_t num_rules,
-    const uint32_t quotient_size,
-    const uint32_t prep_height,
-    const uint32_t main_height,
-    const uint32_t perm_height,
-    const uint64_t qdb_degree,
-    const uint32_t num_rows_per_tile
-) {
-    auto [grid, block] = kernel_launch_params(TASK_SIZE, 256);
-    cukernel_quotient<true><<<grid, block>>>(
-        d_quotient_values,
-        d_preprocessed,
-        d_main,
-        d_permutation,
-        d_exposed,
-        d_public,
-        d_first,
-        d_last,
-        d_transition,
-        d_inv_zeroifier,
-        d_challenge,
-        d_alpha,
-        d_intermediates,
-        d_rules,
-        num_rules,
-        quotient_size,
-        prep_height,
-        main_height,
-        perm_height,
-        qdb_degree,
+    #define QUOTIENT_ARGUMENTS \
+        d_quotient_values, \
+        d_preprocessed, \
+        d_main, \
+        d_permutation, \
+        d_exposed, \
+        d_public, \
+        d_first, \
+        d_last, \
+        d_transition, \
+        d_inv_zeroifier, \
+        d_challenge, \
+        d_alpha, \
+        d_intermediates, \
+        d_rules, \
+        num_rules, \
+        quotient_size, \
+        prep_height, \
+        main_height, \
+        perm_height, \
+        qdb_degree, \
         num_rows_per_tile
-    );
+
+    if (is_global) {
+        cukernel_quotient<true><<<grid, block>>>(QUOTIENT_ARGUMENTS);
+    } else {
+        cukernel_quotient<false><<<grid, block>>>(QUOTIENT_ARGUMENTS);
+    }
     return cudaGetLastError();
 }

@@ -1,3 +1,12 @@
+/*
+ * Source: https://github.com/risc0/risc0 (ref=093f46925a0366d72df505256d35c54a033ddad0)
+ * Status: MODIFIED from risc0/sys/kernels/zkp/cuda/fpext.h
+ * Imported: 2025-01-25 by @gaxiom
+ * 
+ * LOCAL CHANGES (high level):
+ * - 2025-03-25: add operator-()
+ */
+
 // Copyright 2024 RISC Zero, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

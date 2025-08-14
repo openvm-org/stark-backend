@@ -1,19 +1,3 @@
-// FROM https://github.com/scroll-tech/plonky3-gpu/blob/openvm-v2/gpu-backend/src/cuda/kernels/lde.cu
-
-// Copyright 2024 RISC Zero, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "fp.h"
 #include "launcher.cuh"
 
@@ -32,22 +16,6 @@ __global__ void multi_bit_reverse_kernel(Fp *io, const uint32_t nBits, const uin
             io[idx2] = tmp;
         }
     }
-}
-
-__global__ void rows_bit_reverse_kernel(
-    Fp *out,
-    const Fp *in,
-    const uint32_t nBits,
-    const uint32_t height,
-    const uint32_t width
-) {
-    uint32_t hIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t wIdx = blockIdx.y * blockDim.y + threadIdx.y;
-    uint32_t n = 1 << nBits;
-    if (hIdx >= n || wIdx >= width)
-        return;
-    uint32_t revIdx = __brev(hIdx) >> (32 - nBits);
-    out[wIdx * n + hIdx] = in[wIdx * height + revIdx];
 }
 
 // io[j][i] *= shift^i
@@ -95,7 +63,6 @@ __global__ void batch_expand_pad_kernel(
         }
     }
 }
-// END OF FILE gpu-backend/src/cuda/kernels/lde.cu
 
 // Returns the result of the polynomial evaluation of the trace at the points in the column-major
 // matrix
@@ -143,7 +110,8 @@ __global__ void batch_polynomial_eval_kernel(
     if (row_local == 0)
         out[point_idx * width + col] = sh_sum_k[0];
 }
-// KERNEL LAUNCHERS
+
+// LAUNCHERS
 
 extern "C" int _multi_bit_reverse(Fp *io, const uint32_t nBits, const uint32_t count) {
     auto [grid, block] = kernel_launch_params(count);
@@ -172,19 +140,6 @@ extern "C" int _batch_expand_pad(
 ) {
     auto [grid, block] = kernel_launch_params(outSize);
     batch_expand_pad_kernel<<<grid, block>>>(out, in, polyCount, outSize, inSize);
-    return cudaGetLastError();
-}
-
-extern "C" int _rows_bit_reverse(
-    Fp *out,
-    const Fp *in,
-    const uint32_t nBits,
-    const uint32_t height,
-    const uint32_t width
-) {
-    uint32_t n = 1 << nBits;
-    auto [grid, block] = kernel_launch_2d_params(n, width);
-    rows_bit_reverse_kernel<<<grid, block>>>(out, in, nBits, height, width);
     return cudaGetLastError();
 }
 

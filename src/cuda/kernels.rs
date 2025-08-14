@@ -44,13 +44,6 @@ pub mod matrix {
             matrix_height: u64,
             row_indices_len: u32,
         ) -> i32;
-
-        fn _unpack_matrix(
-            output: *mut std::ffi::c_void,
-            input: *const std::ffi::c_void,
-            input_height: usize,
-            input_width: usize,
-        ) -> i32;
     }
 
     pub unsafe fn matrix_transpose<T>(
@@ -102,20 +95,6 @@ pub mod matrix {
             matrix_width,
             matrix_height,
             row_indices_len,
-        ))
-    }
-
-    pub unsafe fn unpack_matrix<F, EF>(
-        output: &DeviceBuffer<F>,
-        input: &DeviceBuffer<EF>,
-        input_height: usize,
-        input_width: usize,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_unpack_matrix(
-            output.as_mut_raw_ptr(),
-            input.as_raw_ptr(),
-            input_height,
-            input_width,
         ))
     }
 }
@@ -176,14 +155,9 @@ pub mod lde {
 
     extern "C" {
         fn _multi_bit_reverse(io: *mut std::ffi::c_void, n_bits: u32, count: u32) -> i32;
-        fn _rows_bit_reverse(
-            output: *mut std::ffi::c_void,
-            input: *const std::ffi::c_void,
-            n_bits: u32,
-            height: u32,
-            width: u32,
-        ) -> i32;
+
         fn _zk_shift(io: *mut std::ffi::c_void, io_size: u32, log_n: u32, shift: u32) -> i32;
+
         fn _batch_expand_pad(
             output: *mut std::ffi::c_void,
             input: *const std::ffi::c_void,
@@ -191,6 +165,7 @@ pub mod lde {
             out_size: u32,
             in_size: u32,
         ) -> i32;
+
         fn _batch_polynomial_eval(
             output: *mut std::ffi::c_void,
             input: *const std::ffi::c_void,
@@ -207,22 +182,6 @@ pub mod lde {
         count: u32,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_multi_bit_reverse(io.as_mut_raw_ptr(), n_bits, count))
-    }
-
-    pub unsafe fn rows_bit_reverse<T>(
-        output: &DeviceBuffer<T>,
-        input: &DeviceBuffer<T>,
-        n_bits: u32,
-        height: u32,
-        width: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_rows_bit_reverse(
-            output.as_mut_raw_ptr(),
-            input.as_raw_ptr(),
-            n_bits,
-            height,
-            width,
-        ))
     }
 
     pub unsafe fn zk_shift<T>(
@@ -290,8 +249,6 @@ pub mod poseidon2 {
             is_inject: bool,
         ) -> i32;
 
-        fn _babybear_encode_mont_form(inout: *mut std::ffi::c_void, size: u32) -> i32;
-
         fn _query_digest_layers(
             d_digest_matrix: *mut std::ffi::c_void,
             d_layers_ptr: *const u64,
@@ -333,13 +290,6 @@ pub mod poseidon2 {
         ))
     }
 
-    pub unsafe fn babybear_encode_mont_form<T>(
-        inout: &DeviceBuffer<T>,
-        size: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_babybear_encode_mont_form(inout.as_mut_raw_ptr(), size))
-    }
-
     pub unsafe fn query_digest_layers_kernel<T>(
         d_digest_matrix: &DeviceBuffer<T>,
         d_layers_ptr: &DeviceBuffer<u64>,
@@ -372,31 +322,8 @@ pub mod quotient {
             shift: u32,
         ) -> i32;
 
-        fn _cukernel_quotient_local(
-            d_quotient_values: *mut std::ffi::c_void,
-            d_preprocessed: *const std::ffi::c_void,
-            d_main: *const u64,
-            d_permutation: *const std::ffi::c_void,
-            d_exposed: *const std::ffi::c_void,
-            d_public: *const std::ffi::c_void,
-            d_first: *const std::ffi::c_void,
-            d_last: *const std::ffi::c_void,
-            d_transition: *const std::ffi::c_void,
-            d_inv_zeroifier: *const std::ffi::c_void,
-            d_challenge: *const std::ffi::c_void,
-            d_alpha: *const std::ffi::c_void,
-            d_intermediates: *const std::ffi::c_void,
-            d_rules: *const std::ffi::c_void,
-            num_rules: u64,
-            quotient_size: u32,
-            prep_height: u32,
-            main_height: u32,
-            perm_height: u32,
-            qdb_degree: u64,
-            num_rows_per_tile: u32,
-        ) -> i32;
-
-        fn _cukernel_quotient_global(
+        fn _cukernel_quotient(
+            is_global: bool,
             d_quotient_values: *mut std::ffi::c_void,
             d_preprocessed: *const std::ffi::c_void,
             d_main: *const u64,
@@ -442,104 +369,6 @@ pub mod quotient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub unsafe fn quotient_local<F, EF, R>(
-        d_quotient_values: &DeviceBuffer<EF>,
-        d_preprocessed: &DeviceBuffer<F>,
-        d_main: &DeviceBuffer<u64>,
-        d_permutation: &DeviceBuffer<F>,
-        d_exposed: &DeviceBuffer<EF>,
-        d_public: &DeviceBuffer<F>,
-        d_first: &DeviceBuffer<F>,
-        d_last: &DeviceBuffer<F>,
-        d_transition: &DeviceBuffer<F>,
-        d_inv_zeroifier: &DeviceBuffer<F>,
-        d_challenge: &DeviceBuffer<EF>,
-        d_alpha: &DeviceBuffer<EF>,
-        d_intermediates: &DeviceBuffer<EF>,
-        d_rules: &DeviceBuffer<R>,
-        num_rules: u64,
-        quotient_size: u32,
-        prep_height: u32,
-        main_height: u32,
-        perm_height: u32,
-        qdb_degree: u64,
-        num_rows_per_tile: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_cukernel_quotient_local(
-            d_quotient_values.as_mut_raw_ptr(),
-            d_preprocessed.as_raw_ptr(),
-            d_main.as_ptr(),
-            d_permutation.as_raw_ptr(),
-            d_exposed.as_raw_ptr(),
-            d_public.as_raw_ptr(),
-            d_first.as_raw_ptr(),
-            d_last.as_raw_ptr(),
-            d_transition.as_raw_ptr(),
-            d_inv_zeroifier.as_raw_ptr(),
-            d_challenge.as_raw_ptr(),
-            d_alpha.as_raw_ptr(),
-            d_intermediates.as_raw_ptr(),
-            d_rules.as_raw_ptr(),
-            num_rules,
-            quotient_size,
-            prep_height,
-            main_height,
-            perm_height,
-            qdb_degree,
-            num_rows_per_tile,
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn quotient_global<F, EF, R>(
-        d_quotient_values: &DeviceBuffer<EF>,
-        d_preprocessed: &DeviceBuffer<F>,
-        d_main: &DeviceBuffer<u64>,
-        d_permutation: &DeviceBuffer<F>,
-        d_exposed: &DeviceBuffer<EF>,
-        d_public: &DeviceBuffer<F>,
-        d_first: &DeviceBuffer<F>,
-        d_last: &DeviceBuffer<F>,
-        d_transition: &DeviceBuffer<F>,
-        d_inv_zeroifier: &DeviceBuffer<F>,
-        d_challenge: &DeviceBuffer<EF>,
-        d_alpha: &DeviceBuffer<EF>,
-        d_intermediates: &DeviceBuffer<EF>,
-        d_rules: &DeviceBuffer<R>,
-        num_rules: u64,
-        quotient_size: u32,
-        prep_height: u32,
-        main_height: u32,
-        perm_height: u32,
-        qdb_degree: u64,
-        num_rows_per_tile: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_cukernel_quotient_global(
-            d_quotient_values.as_mut_raw_ptr(),
-            d_preprocessed.as_raw_ptr(),
-            d_main.as_ptr(),
-            d_permutation.as_raw_ptr(),
-            d_exposed.as_raw_ptr(),
-            d_public.as_raw_ptr(),
-            d_first.as_raw_ptr(),
-            d_last.as_raw_ptr(),
-            d_transition.as_raw_ptr(),
-            d_inv_zeroifier.as_raw_ptr(),
-            d_challenge.as_raw_ptr(),
-            d_alpha.as_raw_ptr(),
-            d_intermediates.as_raw_ptr(),
-            d_rules.as_raw_ptr(),
-            num_rules,
-            quotient_size,
-            prep_height,
-            main_height,
-            perm_height,
-            qdb_degree,
-            num_rows_per_tile,
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn quotient_global_or_local<F, EF, R>(
         is_global: bool,
         d_quotient_values: &DeviceBuffer<EF>,
@@ -564,55 +393,30 @@ pub mod quotient {
         qdb_degree: u64,
         num_rows_per_tile: u32,
     ) -> Result<(), CudaError> {
-        if is_global {
-            quotient_global(
-                d_quotient_values,
-                d_preprocessed,
-                d_main,
-                d_permutation,
-                d_exposed,
-                d_public,
-                d_first,
-                d_last,
-                d_transition,
-                d_inv_zeroifier,
-                d_challenge,
-                d_alpha,
-                d_intermediates,
-                d_rules,
-                num_rules,
-                quotient_size,
-                prep_height,
-                main_height,
-                perm_height,
-                qdb_degree,
-                num_rows_per_tile,
-            )
-        } else {
-            quotient_local(
-                d_quotient_values,
-                d_preprocessed,
-                d_main,
-                d_permutation,
-                d_exposed,
-                d_public,
-                d_first,
-                d_last,
-                d_transition,
-                d_inv_zeroifier,
-                d_challenge,
-                d_alpha,
-                d_intermediates,
-                d_rules,
-                num_rules,
-                quotient_size,
-                prep_height,
-                main_height,
-                perm_height,
-                qdb_degree,
-                num_rows_per_tile,
-            )
-        }
+        CudaError::from_result(_cukernel_quotient(
+            is_global,
+            d_quotient_values.as_mut_raw_ptr(),
+            d_preprocessed.as_raw_ptr(),
+            d_main.as_ptr(),
+            d_permutation.as_raw_ptr(),
+            d_exposed.as_raw_ptr(),
+            d_public.as_raw_ptr(),
+            d_first.as_raw_ptr(),
+            d_last.as_raw_ptr(),
+            d_transition.as_raw_ptr(),
+            d_inv_zeroifier.as_raw_ptr(),
+            d_challenge.as_raw_ptr(),
+            d_alpha.as_raw_ptr(),
+            d_intermediates.as_raw_ptr(),
+            d_rules.as_raw_ptr(),
+            num_rules,
+            quotient_size,
+            prep_height,
+            main_height,
+            perm_height,
+            qdb_degree,
+            num_rows_per_tile,
+        ))
     }
 }
 
@@ -687,7 +491,7 @@ pub mod permute {
             d_rules: *const std::ffi::c_void,
             d_used_nodes: *const usize,
             d_partition_lens: *const u32,
-            num_partitions: u32,
+            num_partitions: usize,
             permutation_height: u32,
             permutation_width_ext: u32,
             num_rows_per_tile: u32,
@@ -714,7 +518,7 @@ pub mod permute {
         d_rules: &DeviceBuffer<R>,
         d_used_nodes: &DeviceBuffer<usize>,
         d_partition_lens: &DeviceBuffer<u32>,
-        num_partitions: u32,
+        num_partitions: usize,
         permutation_height: u32,
         permutation_width_ext: u32,
         num_rows_per_tile: u32,
@@ -766,7 +570,7 @@ pub mod fri {
             log_max_height: u32,
         ) -> i32;
 
-        fn _fri_bit_reverse(d_diffs: *mut std::ffi::c_void, log_max_height: u32) -> i32;
+        fn _fpext_bit_reverse(d_diffs: *mut std::ffi::c_void, log_max_height: u32) -> i32;
 
         fn _batch_invert(
             d_diffs: *mut std::ffi::c_void,
@@ -841,11 +645,11 @@ pub mod fri {
         ))
     }
 
-    pub unsafe fn bit_rev_kernel<EF>(
+    pub unsafe fn fpext_bit_rev_kernel<EF>(
         d_diffs: &DeviceBuffer<EF>,
         log_max_height: u32,
     ) -> Result<(), CudaError> {
-        CudaError::from_result(_fri_bit_reverse(d_diffs.as_mut_raw_ptr(), log_max_height))
+        CudaError::from_result(_fpext_bit_reverse(d_diffs.as_mut_raw_ptr(), log_max_height))
     }
 
     pub unsafe fn batch_invert_kernel<EF>(

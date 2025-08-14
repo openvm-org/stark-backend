@@ -1,26 +1,10 @@
-// FROM https://github.com/scroll-tech/plonky3-gpu/blob/openvm-v2/gpu-backend/src/cuda/kernels/poseidon2.cu
-
-// Copyright *
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 #include "poseidon2.cuh"
 #include "launcher.cuh"
 
 // all matrices are on natural order, so we need to bit_rev row_idx when write
 __global__ void poseidon2_rows_p3_multi_kernel(
     Fp *out,
-    const uint64_t
-        *matrices_ptr, // matrices[0] is the first matrix, matrices[1] is the second matrix, etc.
+    const uint64_t *matrices_ptr, // matrices[0] is the 1st matrix, matrices[1] is the 2nd matrix, etc.
     const uint64_t *matrices_col,
     const uint64_t *matrices_row,
     uint64_t row_size,
@@ -90,17 +74,6 @@ __global__ void poseidon2_compress_kernel(
     }
 }
 
-__global__ void babybear_encode_mont_form_kernel(Fp *inout, uint32_t size) {
-    uint32_t gid = blockDim.x * blockIdx.x + threadIdx.x;
-    if (gid >= size) {
-        return;
-    }
-
-    for (uint i = 0; i < CELLS_OUT; i++) {
-        inout[gid * CELLS_OUT + i] = Fp(inout[gid * CELLS_OUT + i].get()); // encode
-    }
-}
-
 /*
 query[0][0,...layers-1]
 query[1][0,...layers-1]
@@ -134,7 +107,7 @@ __global__ void cukernel_query_digest_layers(
     d_digest_matrix[output_query_offset + output_layer_offset] = digest_elem;
 }
 
-// END OF FILE gpu-backend/src/cuda/kernels/poseidon2.cu
+// LAUNCHERS
 
 extern "C" int _poseidon2_rows_p3_multi(
     Fp *out,
@@ -159,12 +132,6 @@ extern "C" int _poseidon2_compress(
 ) {
     auto [grid, block] = kernel_launch_params(output_size);
     poseidon2_compress_kernel<<<grid, block>>>(output, input, output_size, is_inject);
-    return cudaGetLastError();
-}
-
-extern "C" int _babybear_encode_mont_form(Fp *inout, uint32_t size) {
-    auto [grid, block] = kernel_launch_params(size);
-    babybear_encode_mont_form_kernel<<<grid, block>>>(inout, size);
     return cudaGetLastError();
 }
 

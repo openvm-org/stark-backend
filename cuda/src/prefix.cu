@@ -1,5 +1,3 @@
-// FROM https://github.com/scroll-tech/plonky3-gpu/blob/fa356768aad31f4cf27d724336bb0323bb9d66eb/gpu-backend/src/cuda/kernels/prefix.cu
-
 #include "fpext.h"
 #include "launcher.cuh"
 
@@ -111,7 +109,7 @@ __global__ void prefix_scan_epilogue_ext(FpExt *d_inout, uint64_t length, uint64
     d_inout[dst_index] = dst + prefix_sum;
 }
 
-// END OF FILE gpu-backend/src/cuda/kernels/prefix.cu
+// LAUNCHERS
 
 extern "C" int _prefix_scan_block_ext(
     FpExt *d_inout,

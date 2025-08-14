@@ -1,8 +1,6 @@
 // A very simple custom codec for constraints wroten in the AIR/RAP frontend language.
 #pragma once
 
-// FROM https://github.com/scroll-tech/plonky3-gpu/blob/openvm-v2/gpu-backend/src/cuda/kernels/codec.h
-
 #include <cstdint>
 
 // Constraint is encoded in 128-bit little-endian, but uin128_t is not supported in CUDA.
@@ -56,9 +54,6 @@ __host__ __device__ __forceinline__ SourceInfo decode_source(uint64_t encoded);
 // decode rule from 128-bit little-endian integer
 __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded);
 
-// END OF FILE codec.h
-// -----------------------------------------------------------------------------
-// FROM https://github.com/scroll-tech/plonky3-gpu/blob/openvm-v2/gpu-backend/src/cuda/kernels/codec.cu
 
 // 0. There are 11 variants of source that can be encoded in 4 bits:
 //
@@ -169,5 +164,3 @@ __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded) {
 
     return rule;
 }
-
-// END OF FILE gpu-backend/src/cuda/kernels/codec.cu

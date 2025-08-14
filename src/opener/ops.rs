@@ -106,7 +106,7 @@ fn get_diff_invs(
     unsafe {
         diffs_kernel(&d_inv_diffs, &d_z, &d_domain, log_max_height as u32).unwrap();
         if bitrev {
-            bit_rev_kernel(&d_inv_diffs, log_max_height as u32).unwrap();
+            fpext_bit_rev_kernel(&d_inv_diffs, log_max_height as u32).unwrap();
         }
         batch_invert_kernel(&d_inv_diffs, log_max_height as u32, invert_task_num).unwrap();
     }

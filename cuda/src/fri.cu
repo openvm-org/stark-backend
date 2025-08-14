@@ -1,5 +1,3 @@
-// FROM https://github.com/scroll-tech/plonky3-gpu/blob/openvm-v2/gpu-backend/src/cuda/kernels/fri.cu
-
 #include "fpext.h"
 #include "launcher.cuh"
 
@@ -89,8 +87,7 @@ __global__ void powers_ext(FpExt * __restrict__ data, FpExt * __restrict__ d_g, 
     }
 }
 
-
-__global__ void fri_bit_reverse(FpExt *data, uint32_t log_n) {
+__global__ void fpext_bit_reverse(FpExt *data, uint32_t log_n) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
     uint32_t N = 1 << log_n;
@@ -377,7 +374,7 @@ __global__ void matrix_evaluate_finalize(
     output[col] = sum * scale_factor;
 }
 
-// END OF gpu-backend/src/cuda/kernels/fri.cu
+// LAUNCHERS
 
 int get_num_sms() {
     static int multiprocessorCount = []() {
@@ -397,10 +394,10 @@ extern "C" int _compute_diffs(FpExt *diffs, FpExt *d_z, Fp *d_domain, uint32_t l
     return cudaGetLastError();
 }
 
-extern "C" int _fri_bit_reverse(FpExt *diffs, uint32_t log_max_height) {
+extern "C" int _fpext_bit_reverse(FpExt *diffs, uint32_t log_max_height) {
     auto block = FRI_MAX_THREADS;
     auto grid = get_num_sms() * 2;
-    fri_bit_reverse<<<grid, block>>>(diffs, log_max_height);
+    fpext_bit_reverse<<<grid, block>>>(diffs, log_max_height);
     return cudaGetLastError();
 }
 
@@ -423,7 +420,6 @@ extern "C" int _powers_ext(FpExt *data, FpExt *g, uint32_t N) {
     powers_ext<<<grid, block>>>(data, g, N);
     return cudaGetLastError();
 }
-
 
 extern "C" int _reduce_matrix_quotient_acc(
     FpExt *quotient_acc,

@@ -64,6 +64,7 @@ fn main() {
     let mut common = cc::Build::new();
     common
         .cuda(true)
+        .include("cuda/include")
         // CUDA specific flags
         .flag("--std=c++17")
         .flag("--expt-relaxed-constexpr")
@@ -87,11 +88,9 @@ fn main() {
 
     let mut builder = common.clone();
     builder
-        .include("cuda/include")
         .file("cuda/src/matrix.cu")
         .file("cuda/src/lde.cu")
         .file("cuda/src/poseidon2.cu")
-        .file("cuda/src/eltwise.cu")
         .file("cuda/src/quotient.cu")
         .file("cuda/src/permute.cu")
         .file("cuda/src/prefix.cu")
@@ -100,9 +99,6 @@ fn main() {
 
     let mut ntt_builder = common.clone();
     ntt_builder
-        .cpp(true)
-        .include("cuda/include")
-        .define("FEATURE_BABY_BEAR", None)
         .include("cuda/supra")
         .file("cuda/src/supra_ntt_api.cu")
         .compile("supra_ntt");

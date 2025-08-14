@@ -212,7 +212,7 @@ __global__ void cukernel_permute_update(
     }
 }
 
-// LAUNCHERS:
+// LAUNCHERS
 
 static const size_t TASK_SIZE = 65536;
 
@@ -234,38 +234,26 @@ extern "C" int _calculate_cumulative_sums(
     const uint32_t num_rows_per_tile
 ) {
     auto [grid, block] = kernel_launch_params(TASK_SIZE, 256);
+
+    #define PERMUTE_ARGUMENTS \
+        d_permutation, \
+        d_cumulative_sums, \
+        d_preprocessed, \
+        d_main, \
+        d_challenges, \
+        d_intermediates, \
+        d_rules, \
+        d_used_nodes, \
+        d_partition_lens, \
+        num_partitions, \
+        permutation_height, \
+        permutation_width_ext, \
+        num_rows_per_tile
+
     if (is_global) {
-        calculate_cumulative_sums<true><<<grid, block>>>(
-            d_permutation,
-            d_cumulative_sums,
-            d_preprocessed,
-            d_main,
-            d_challenges,
-            d_intermediates,
-            d_rules,
-            d_used_nodes,
-            d_partition_lens,
-            num_partitions,
-            permutation_height,
-            permutation_width_ext,
-            num_rows_per_tile
-        );
+        calculate_cumulative_sums<true><<<grid, block>>>(PERMUTE_ARGUMENTS);
     } else {
-        calculate_cumulative_sums<false><<<grid, block>>>(
-            d_permutation,
-            d_cumulative_sums,
-            d_preprocessed,
-            d_main,
-            d_challenges,
-            d_intermediates,
-            d_rules,
-            d_used_nodes,
-            d_partition_lens,
-            num_partitions,
-            permutation_height,
-            permutation_width_ext,
-            num_rows_per_tile
-        );
+        calculate_cumulative_sums<false><<<grid, block>>>(PERMUTE_ARGUMENTS);
     }
     return cudaGetLastError();
 }

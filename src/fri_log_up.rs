@@ -341,7 +341,7 @@ impl FriLogUpPhaseGpu {
                 rules,
                 used_nodes,
                 partition_lens,
-                partition_lens.len() as u32,
+                partition_lens.len(),
                 permutation_height as u32,
                 permutation_width_ext as u32,
                 tile_per_thread,

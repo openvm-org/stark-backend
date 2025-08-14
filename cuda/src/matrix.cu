@@ -1,4 +1,3 @@
-// FROM https://github.com/scroll-tech/plonky3-gpu/blob/openvm-v2/gpu-backend/src/cuda/kernels/transpose.cu
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
@@ -94,25 +93,7 @@ __global__ void cukernel_split_ext_poly_to_multiple_base_matrix(
     d_matrix[matrix_height * 3 + chunk_row] = ext_val.elems[3];
 }
 
-// END OF gpu-backend/src/cuda/kernels/matrix.cu
-
-__global__ void unpack_matrix_kernel(Fp *output, const FpExt *input, size_t rows, size_t cols) {
-    size_t row_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    size_t col_idx = threadIdx.y + blockIdx.y * blockDim.y;
-
-    if (col_idx >= cols || row_idx >= rows)
-        return;
-
-    output += row_idx + col_idx * rows * 4;
-    input += row_idx + col_idx * rows;
-
-    FpExt local_ext = *input;
-
-    output[0 * rows] = local_ext.elems[0];
-    output[1 * rows] = local_ext.elems[1];
-    output[2 * rows] = local_ext.elems[2];
-    output[3 * rows] = local_ext.elems[3];
-}
+// LAUNCHERS
 
 template <typename T>
 int matrix_transpose_impl(T *output, const T *input, size_t col_size, size_t row_size) {
@@ -166,16 +147,5 @@ extern "C" int _matrix_get_rows_fp(
     cukernel_matrix_get_rows_fp<<<grid, block>>>(
         output, input, row_indices, matrix_width, matrix_height
     );
-    return cudaGetLastError();
-}
-
-extern "C" int _unpack_matrix(
-    Fp *output,
-    const FpExt *input,
-    size_t input_height,
-    size_t input_width
-) {
-    auto [grid, block] = kernel_launch_2d_params(input_height, input_width);
-    unpack_matrix_kernel<<<grid, block>>>(output, input, input_height, input_width);
     return cudaGetLastError();
 }
