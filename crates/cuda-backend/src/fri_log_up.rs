@@ -16,15 +16,17 @@ use openvm_stark_backend::{
 };
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra};
 
+use openvm_cuda_common::{
+    copy::{MemCopyD2H, MemCopyH2D},
+    d_buffer::DeviceBuffer,
+    error::CudaError,
+    stream::gpu_metrics_span,
+};
 use crate::{
     base::DeviceMatrix,
-    cuda::{
-        copy::{MemCopyD2H, MemCopyH2D},
-        d_buffer::DeviceBuffer,
-        error::CudaError,
+    cuda::
         kernels::{permute::*, prefix::*},
-        stream::gpu_metrics_span,
-    },
+        
     prelude::*,
     transpiler::{codec::Codec, SymbolicRulesOnGpu},
 };

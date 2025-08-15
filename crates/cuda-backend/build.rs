@@ -99,7 +99,7 @@ fn main() {
 
     let mut ntt_builder = common.clone();
     ntt_builder
-        .include("cuda/supra")
+        .include("cuda/src/supra")
         .file("cuda/src/supra_ntt_api.cu")
         .compile("supra_ntt");
 

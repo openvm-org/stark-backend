@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
-use crate::cuda::{
+use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::{CudaError, KernelError},
 };

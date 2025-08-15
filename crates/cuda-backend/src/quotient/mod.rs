@@ -7,13 +7,15 @@ use openvm_stark_backend::{
 use p3_commit::PolynomialSpace;
 use tracing::instrument;
 
-use self::single::compute_single_rap_quotient_values_gpu;
+use openvm_cuda_common::copy::MemCopyH2D;
 use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
-    cuda::{copy::MemCopyH2D, kernels::matrix::split_ext_poly_to_multiple_base_matrix},
+    cuda::kernels::matrix::split_ext_poly_to_multiple_base_matrix,
     gpu_device::GpuDevice,
     prelude::*,
 };
+
+use self::single::compute_single_rap_quotient_values_gpu;
 
 pub(crate) mod single;
 

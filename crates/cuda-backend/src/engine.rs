@@ -21,8 +21,8 @@ use openvm_stark_sdk::{
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_field::Field;
 
+use openvm_cuda_common::memory_manager::MemTracker;
 use crate::{
-    cuda::memory_manager::MemTracker,
     fri_log_up::FriLogUpPhaseGpu,
     gpu_device::{GpuConfig, GpuDevice},
     prelude::{SC, WIDTH},

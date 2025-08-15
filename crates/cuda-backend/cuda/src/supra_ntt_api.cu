@@ -1,5 +1,5 @@
-#include <ff/baby_bear.hpp>
-#include <ntt/ntt.cuh>
+#include "supra/ff/baby_bear.hpp"
+#include "supra/ntt/ntt.cuh"
 
 extern "C" int _sppark_init() {
     NTTParametersHolder::all();

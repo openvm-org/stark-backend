@@ -3,12 +3,11 @@ use openvm_stark_backend::prover::hal::MatrixDimensions;
 use p3_field::{FieldAlgebra, PrimeField32};
 use p3_util::log2_strict_usize;
 
+use openvm_cuda_common::copy::MemCopyH2D;
 use crate::{
     base::DeviceMatrix,
-    cuda::{
-        copy::MemCopyH2D,
+    cuda::
         kernels::{lde::*, matrix::matrix_get_rows_fp_kernel, ntt::*},
-    },
     prelude::F,
 };
 

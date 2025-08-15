@@ -13,13 +13,12 @@ use openvm_stark_backend::{
 };
 use p3_matrix::dense::RowMajorMatrix;
 
+use openvm_cuda_common::{        copy::{MemCopyD2H, MemCopyH2D},
+d_buffer::DeviceBuffer};
 use crate::{
     base::DeviceMatrix,
-    cuda::{
-        copy::{MemCopyD2H, MemCopyH2D},
-        d_buffer::DeviceBuffer,
+    cuda::
         kernels::matrix::matrix_transpose,
-    },
     gpu_device::GpuDevice,
     prelude::{F, SC},
     prover_backend::GpuBackend,

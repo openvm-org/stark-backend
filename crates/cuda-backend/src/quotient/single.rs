@@ -7,9 +7,10 @@ use p3_field::PrimeField32;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
-    cuda::{copy::MemCopyH2D, d_buffer::DeviceBuffer, kernels::quotient::*},
+    cuda::kernels::quotient::*,
     prelude::*,
     transpiler::{codec::Codec, SymbolicRulesOnGpu},
 };

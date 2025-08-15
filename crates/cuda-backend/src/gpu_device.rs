@@ -5,8 +5,9 @@ use p3_commit::TwoAdicMultiplicativeCoset;
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
 
+use openvm_cuda_common::common::set_device;
 use crate::{
-    cuda::{common::set_device, kernels::ntt::sppark_init},
+    cuda::kernels::ntt::sppark_init,
     fri_log_up::FriLogUpPhaseGpu,
 };
 

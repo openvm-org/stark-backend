@@ -8,7 +8,9 @@ repository = "https://github.com/openvm-org/"
 license = "MIT OR Apache-2.0"
 
 [workspace]
-members = ["crates/stark-backend", "crates/stark-sdk"]
+members = ["crates/stark-backend", "crates/stark-sdk", "crates/cuda-common", "crates/cuda-backend"]
+# Only these build by default
+default-members = ["crates/stark-backend", "crates/stark-sdk"]
 resolver = "2"
 
 # Fastest runtime configuration
@@ -50,6 +52,7 @@ lto = "thin"
 # OpenVM
 openvm-stark-backend = { path = "crates/stark-backend", default-features = false }
 openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
+openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
 
 # Plonky3
 p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }

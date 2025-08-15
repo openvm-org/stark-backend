@@ -6,14 +6,15 @@ use p3_symmetric::Hash;
 use p3_util::{log2_ceil_usize, log2_strict_usize};
 use tracing::debug_span;
 
+use openvm_cuda_common::{
+    copy::{MemCopyD2H, MemCopyH2D},
+    d_buffer::DeviceBuffer,
+    error::CudaError,
+};
 use crate::{
     base::DeviceMatrix,
-    cuda::{
-        copy::{MemCopyD2H, MemCopyH2D},
-        d_buffer::DeviceBuffer,
-        error::CudaError,
+    cuda::
         kernels::poseidon2::*,
-    },
     gpu_device::GpuDevice,
     lde::GpuLde,
     prelude::F,

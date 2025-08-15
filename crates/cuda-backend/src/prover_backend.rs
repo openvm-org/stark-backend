@@ -22,9 +22,12 @@ use p3_commit::PolynomialSpace;
 use p3_util::log2_strict_usize;
 use tracing::{info_span, instrument};
 
+use openvm_cuda_common::{
+    memory_manager::MemTracker,
+    stream::gpu_metrics_span,
+};
 use crate::{
     base::DeviceMatrix,
-    cuda::{memory_manager::MemTracker, stream::gpu_metrics_span},
     gpu_device::GpuDevice,
     lde::{GpuLde, GpuLdeImpl},
     merkle_tree::GpuMerkleTree,
