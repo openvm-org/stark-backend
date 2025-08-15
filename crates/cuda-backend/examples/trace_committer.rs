@@ -1,3 +1,5 @@
+#![cfg(has_cuda)]
+
 use std::sync::Arc;
 
 use clap::Parser;
