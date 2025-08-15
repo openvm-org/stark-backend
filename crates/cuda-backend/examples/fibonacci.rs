@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
 use itertools::zip_eq;
+use openvm_cuda_backend::{
+    engine::GpuBabyBearPoseidon2Engine, prover_backend::GpuBackend, types::SC,
+};
 use openvm_stark_backend::{
     engine::StarkEngine,
     prover::{
@@ -17,9 +20,6 @@ use openvm_stark_sdk::{
 };
 use p3_baby_bear::BabyBear;
 use p3_field::FieldAlgebra;
-use stark_backend_gpu::{
-    engine::GpuBabyBearPoseidon2Engine, prover_backend::GpuBackend, types::SC,
-};
 
 const LOG_BLOWUP: usize = 2;
 const LOG_TRACE_DEGREE: usize = 3;

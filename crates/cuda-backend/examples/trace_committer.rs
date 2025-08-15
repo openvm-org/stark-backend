@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
+use openvm_cuda_backend::gpu_device::{GpuConfig, GpuDevice};
 use openvm_stark_backend::prover::{
     cpu::CpuDevice,
     hal::{DeviceDataTransporter, TraceCommitter},
@@ -17,7 +18,6 @@ use p3_baby_bear::BabyBear;
 use p3_field::Field;
 use p3_matrix::dense::DenseMatrix;
 use rand::Rng;
-use stark_backend_gpu::gpu_device::{GpuConfig, GpuDevice};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]

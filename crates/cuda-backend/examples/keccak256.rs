@@ -8,6 +8,7 @@ use openvm_circuit::arch::{
 use openvm_circuit_primitives::bitwise_op_lookup::{
     BitwiseOperationLookupAir, BitwiseOperationLookupBus, BitwiseOperationLookupChip,
 };
+use openvm_cuda_backend::engine::GpuBabyBearPoseidon2Engine;
 use openvm_instructions::{instruction::Instruction, LocalOpcode};
 use openvm_keccak256_circuit::{KeccakVmAir, KeccakVmExecutor, KeccakVmFiller};
 use openvm_keccak256_transpiler::Rv32KeccakOpcode;
@@ -26,7 +27,6 @@ use openvm_stark_sdk::{
     utils::create_seeded_rng,
 };
 use rand::Rng;
-use stark_backend_gpu::engine::GpuBabyBearPoseidon2Engine;
 
 type F = BabyBear;
 const MAX_INS_CAPACITY: usize = 8192;

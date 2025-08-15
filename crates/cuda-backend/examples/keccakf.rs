@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use openvm_cuda_backend::engine::GpuBabyBearPoseidon2Engine;
 use openvm_stark_backend::{
     engine::StarkEngine,
     p3_air::{Air, AirBuilder, BaseAir},
@@ -18,7 +19,6 @@ use openvm_stark_sdk::{
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::Rng;
-use stark_backend_gpu::engine::GpuBabyBearPoseidon2Engine;
 use tracing::info_span;
 
 struct TestAir(KeccakAir);
