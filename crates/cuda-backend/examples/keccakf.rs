@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+#[cfg(has_cuda)]
 use openvm_cuda_backend::engine::GpuBabyBearPoseidon2Engine;
 use openvm_stark_backend::{
     engine::StarkEngine,

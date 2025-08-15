@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use itertools::zip_eq;
+#[cfg(has_cuda)]
 use openvm_cuda_backend::{
     engine::GpuBabyBearPoseidon2Engine, prover_backend::GpuBackend, types::SC,
 };
