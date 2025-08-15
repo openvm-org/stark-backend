@@ -1,7 +1,8 @@
+#![cfg_attr(not(has_cuda), allow(unused_imports, dead_code))]
+
 use std::sync::Arc;
 
 use itertools::zip_eq;
-#[cfg(has_cuda)]
 use openvm_cuda_backend::{
     engine::GpuBabyBearPoseidon2Engine, prover_backend::GpuBackend, types::SC,
 };

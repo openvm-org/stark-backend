@@ -1,7 +1,8 @@
+#![cfg_attr(not(has_cuda), allow(unused_imports, dead_code))]
+
 use std::sync::Arc;
 
 use clap::Parser;
-#[cfg(has_cuda)]
 use openvm_cuda_backend::gpu_device::{GpuConfig, GpuDevice};
 use openvm_stark_backend::prover::{
     cpu::CpuDevice,

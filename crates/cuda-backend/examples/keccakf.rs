@@ -1,6 +1,7 @@
+#![cfg_attr(not(has_cuda), allow(unused_imports, dead_code))]
+
 use std::sync::Arc;
 
-#[cfg(has_cuda)]
 use openvm_cuda_backend::engine::GpuBabyBearPoseidon2Engine;
 use openvm_stark_backend::{
     engine::StarkEngine,
