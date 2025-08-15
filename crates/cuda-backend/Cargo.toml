@@ -38,7 +38,7 @@ p3-dft = { workspace = true }
 openvm-cuda-builder.workspace = true
 
 [dev-dependencies]
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true }
 rand = { workspace = true }
 p3-keccak-air = { workspace = true }
 

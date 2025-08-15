@@ -167,7 +167,7 @@ impl CudaBuilder {
             .flag(format!("arch=compute_{},code=sm_{}", cuda_arch, cuda_arch));
 
         // Add parallel jobs flag
-        builder.flag(&nvcc_parallel_jobs());
+        builder.flag(nvcc_parallel_jobs());
 
         // Set optimization and debug flags
         if cuda_opt_level == "0" {
@@ -175,7 +175,7 @@ impl CudaBuilder {
         } else {
             builder
                 .debug(false)
-                .flag(&format!("--ptxas-options=-O{}", cuda_opt_level));
+                .flag(format!("--ptxas-options=-O{}", cuda_opt_level));
         }
 
         // Add source files
