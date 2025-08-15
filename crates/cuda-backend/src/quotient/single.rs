@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraintsDag, config::Domain, prover::hal::MatrixDimensions,
 };
@@ -7,7 +8,6 @@ use p3_field::PrimeField32;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
     cuda::kernels::quotient::*,

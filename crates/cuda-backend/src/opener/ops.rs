@@ -1,11 +1,12 @@
 use itertools::{izip, Itertools};
+use openvm_cuda_common::{
+    copy::{MemCopyD2H, MemCopyH2D},
+    d_buffer::DeviceBuffer,
+};
 use openvm_stark_backend::prover::hal::MatrixDimensions;
 use p3_field::{ExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
 use p3_util::{linear_map::LinearMap, log2_ceil_usize, log2_strict_usize};
 
-use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer};
 use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
     cuda::kernels::{fri::*, lde::batch_bit_reverse},

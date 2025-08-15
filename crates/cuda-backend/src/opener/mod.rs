@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fmt::Debug, iter};
 
 use itertools::{izip, Itertools};
+use openvm_cuda_common::{copy::MemCopyD2H, d_buffer::DeviceBuffer, memory_manager::MemTracker};
 use openvm_stark_backend::{
     config::Com,
     p3_challenger::{CanObserve, CanSampleBits, FieldChallenger, GrindingChallenger},
@@ -18,7 +19,6 @@ use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_util::{linear_map::LinearMap, log2_strict_usize, reverse_slice_index_bits};
 use tracing::{debug_span, info_span};
 
-use openvm_cuda_common::{copy::MemCopyD2H, d_buffer::DeviceBuffer, memory_manager::MemTracker};
 use crate::{
     base::{DevicePoly, ExtendedLagrangeCoeff},
     gpu_device::GpuDevice,

@@ -1,4 +1,5 @@
 use itertools::{multiunzip, Itertools};
+use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraintsDag,
     config::Domain,
@@ -7,15 +8,13 @@ use openvm_stark_backend::{
 use p3_commit::PolynomialSpace;
 use tracing::instrument;
 
-use openvm_cuda_common::copy::MemCopyH2D;
+use self::single::compute_single_rap_quotient_values_gpu;
 use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
     cuda::kernels::matrix::split_ext_poly_to_multiple_base_matrix,
     gpu_device::GpuDevice,
     prelude::*,
 };
-
-use self::single::compute_single_rap_quotient_values_gpu;
 
 pub(crate) mod single;
 

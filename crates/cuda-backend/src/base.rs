@@ -1,8 +1,7 @@
 use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
-use openvm_stark_backend::prover::hal::MatrixDimensions;
-
 use openvm_cuda_common::{copy::MemCopyD2H, d_buffer::DeviceBuffer, error::MemCopyError};
+use openvm_stark_backend::prover::hal::MatrixDimensions;
 
 pub struct DeviceMatrix<T> {
     buffer: Arc<DeviceBuffer<T>>,

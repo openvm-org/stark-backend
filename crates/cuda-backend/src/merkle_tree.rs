@@ -1,23 +1,18 @@
 use std::{cmp::Reverse, collections::HashMap, sync::Arc};
 
 use itertools::Itertools;
-use openvm_stark_backend::prover::hal::MatrixDimensions;
-use p3_symmetric::Hash;
-use p3_util::{log2_ceil_usize, log2_strict_usize};
-use tracing::debug_span;
-
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::CudaError,
 };
+use openvm_stark_backend::prover::hal::MatrixDimensions;
+use p3_symmetric::Hash;
+use p3_util::{log2_ceil_usize, log2_strict_usize};
+use tracing::debug_span;
+
 use crate::{
-    base::DeviceMatrix,
-    cuda::
-        kernels::poseidon2::*,
-    gpu_device::GpuDevice,
-    lde::GpuLde,
-    prelude::F,
+    base::DeviceMatrix, cuda::kernels::poseidon2::*, gpu_device::GpuDevice, lde::GpuLde, prelude::F,
 };
 
 const DIGEST_WIDTH: usize = 8;

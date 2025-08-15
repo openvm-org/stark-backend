@@ -1,15 +1,12 @@
 use derivative::Derivative;
+use openvm_cuda_common::common::set_device;
 use openvm_stark_sdk::config::FriParameters;
 use p3_baby_bear::BabyBear;
 use p3_commit::TwoAdicMultiplicativeCoset;
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
 
-use openvm_cuda_common::common::set_device;
-use crate::{
-    cuda::kernels::ntt::sppark_init,
-    fri_log_up::FriLogUpPhaseGpu,
-};
+use crate::{cuda::kernels::ntt::sppark_init, fri_log_up::FriLogUpPhaseGpu};
 
 #[derive(Derivative, derive_new::new, Clone, Copy, Debug)]
 pub struct GpuConfig {

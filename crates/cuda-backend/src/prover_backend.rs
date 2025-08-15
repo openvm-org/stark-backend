@@ -1,6 +1,7 @@
 use std::iter::zip;
 
 use itertools::{izip, zip_eq, Itertools};
+use openvm_cuda_common::{memory_manager::MemTracker, stream::gpu_metrics_span};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints,
     config::{Com, PcsProof, RapPartialProvingKey, RapPhaseSeqPartialProof},
@@ -22,10 +23,6 @@ use p3_commit::PolynomialSpace;
 use p3_util::log2_strict_usize;
 use tracing::{info_span, instrument};
 
-use openvm_cuda_common::{
-    memory_manager::MemTracker,
-    stream::gpu_metrics_span,
-};
 use crate::{
     base::DeviceMatrix,
     gpu_device::GpuDevice,
