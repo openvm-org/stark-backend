@@ -1,4 +1,4 @@
-#![allow(clippy::missing_safety_doc)]
+#![cfg(has_cuda)]
 
 pub mod common;
 pub mod copy;

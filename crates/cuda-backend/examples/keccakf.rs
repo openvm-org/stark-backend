@@ -57,13 +57,13 @@ fn main() {
     let trace = info_span!("generate_trace")
         .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
     let cpu_trace = Arc::new(trace);
+
+    // CPU
+    println!("\nStarting CPU proof");
     let cpu_ctx = ProvingContext::new(vec![(
         air_id,
         AirProvingContext::simple_no_pis(cpu_trace.clone()),
     )]);
-
-    // CPU
-    println!("\nStarting CPU proof");
     let pk = engine.device().transport_pk_to_device(&pk_host);
     let cpu_proof = engine.prove(&pk, cpu_ctx);
     engine.verify(&vk, &cpu_proof).unwrap();

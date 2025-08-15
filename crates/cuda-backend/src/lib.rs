@@ -1,3 +1,5 @@
+#![cfg(has_cuda)]
+
 pub mod base;
 mod committer;
 pub mod cuda;
