@@ -33,4 +33,6 @@ fn main() {
         .include("cuda/include/supra")
         .file("cuda/src/supra_ntt_api.cu")
         .build();
+
+    common.emit_link_directives();
 }

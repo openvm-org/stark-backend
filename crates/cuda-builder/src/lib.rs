@@ -185,14 +185,6 @@ impl CudaBuilder {
 
         // Compile
         builder.compile(&self.library_name);
-
-        // Add link directives
-        for path in &self.link_search_paths {
-            println!("cargo:rustc-link-search=native={}", path);
-        }
-        for lib in &self.link_libraries {
-            println!("cargo:rustc-link-lib={}", lib);
-        }
     }
 
     /// Validate the builder configuration
@@ -219,6 +211,15 @@ impl CudaBuilder {
             if !Path::new(include).exists() {
                 eprintln!("cargo:warning=Include path does not exist: {}", include);
             }
+        }
+    }
+
+    pub fn emit_link_directives(&self) {
+        for path in &self.link_search_paths {
+            println!("cargo:rustc-link-search=native={}", path);
+        }
+        for lib in &self.link_libraries {
+            println!("cargo:rustc-link-lib={}", lib);
         }
     }
 
