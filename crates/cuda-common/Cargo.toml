@@ -1,0 +1,19 @@
+[package]
+name = "openvm-cuda-common"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "CUDA common utils"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tracing.workspace = true
+metrics.workspace = true
+lazy_static.workspace = true
+thiserror.workspace = true
+bytesize = "2.0"
+
+[features]
+touchemall = []
