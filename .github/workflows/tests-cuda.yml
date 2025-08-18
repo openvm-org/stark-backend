@@ -38,6 +38,9 @@ jobs:
           nvidia-smi
           nvidia-smi -L
           nvcc --version
+      - name: Export LD_LIBRARY_PATH
+        run: |
+          echo "LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
 
       - name: Run cuda-common tests
         working-directory: crates/cuda-common
