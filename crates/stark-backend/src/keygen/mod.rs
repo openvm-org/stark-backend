@@ -82,7 +82,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             })
             .max()
             .unwrap();
-        tracing::info!(
+        tracing::debug!(
             "Max constraint (excluding logup constraints) degree across all AIRs: {}",
             air_max_constraint_degree
         );
@@ -90,7 +90,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         {
             // This means the quotient polynomial is already going to be higher degree, so we
             // might as well use it.
-            tracing::info!(
+            tracing::debug!(
                 "Setting max_constraint_degree from {} to {air_max_constraint_degree}",
                 self.max_constraint_degree
             );
@@ -119,7 +119,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
 
         for pk in pk_per_air.iter() {
             let width = &pk.vk.params.width;
-            tracing::info!("{:<20} | Quotient Deg = {:<2} | Prep Cols = {:<2} | Main Cols = {:<8} | Perm Cols = {:<4} | {:4} Constraints | {:3} Interactions",
+            tracing::debug!("{:<20} | Quotient Deg = {:<2} | Prep Cols = {:<2} | Main Cols = {:<8} | Perm Cols = {:<4} | {:4} Constraints | {:3} Interactions",
                 pk.air_name,
                 pk.vk.quotient_degree,
                 width.preprocessed.unwrap_or(0),
@@ -211,7 +211,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         // the final verifying key. This just needs to commit to the verifying key and does
         // not need to be verified by the verifier, so we just use bincode to serialize it.
         let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
-        tracing::info!("pre-vkey: {} bytes", vk_bytes.len());
+        tracing::debug!("pre-vkey: {} bytes", vk_bytes.len());
         // Purely to get type compatibility and convenience, we hash using pcs.commit as a single
         // row
         let vk_as_row = RowMajorMatrix::new_row(
