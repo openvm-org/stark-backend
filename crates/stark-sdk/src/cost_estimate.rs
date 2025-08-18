@@ -22,7 +22,7 @@ pub struct VerifierCostParameters {
 }
 
 /// Mmcs batch verification consist of hashing the leaf and then a normal Merkle proof.
-/// We separate the cost of hashing (which requires proper padding to be a crytographic hash) from
+/// We separate the cost of hashing (which requires proper padding to be a cryptographic hash) from
 /// the cost of 2-to-1 compression function on the hash digest because in tree proofs the internal
 /// layers do not need to use a compression function with padding.
 ///
@@ -30,7 +30,7 @@ pub struct VerifierCostParameters {
 /// heights.
 #[derive(Clone, Copy, Debug)]
 pub struct MmcsVerifyBatchCostEstimate {
-    /// Hash cost in terms of number of field elments to hash. To convert to true hash cost, it
+    /// Hash cost in terms of number of field elements to hash. To convert to true hash cost, it
     /// depends on the rate of the cryptographic hash.
     pub num_f_to_hash: usize,
     /// Number of calls of 2-to-1 compression function.
