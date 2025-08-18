@@ -17,6 +17,15 @@ pub struct CudaBuilder {
 
 impl Default for CudaBuilder {
     fn default() -> Self {
+        let mut link_search_paths = Vec::new();
+        if let Ok(ld_path) = env::var("LD_LIBRARY_PATH") {
+            for path in ld_path.split(':') {
+                if !path.is_empty() {
+                    link_search_paths.push(path.to_string());
+                }
+            }
+        }
+
         Self {
             include_paths: Vec::new(),
             source_files: Vec::new(),
@@ -31,7 +40,7 @@ impl Default for CudaBuilder {
                 "-Xfatbin=-compress-all".to_string(),
             ],
             link_libraries: vec!["cudart".to_string(), "cuda".to_string()],
-            link_search_paths: vec!["/usr/local/cuda/lib64".to_string()],
+            link_search_paths,
         }
     }
 }
