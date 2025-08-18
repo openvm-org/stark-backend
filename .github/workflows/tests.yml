@@ -1,0 +1,84 @@
+name: Stark Backend Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "crates/stark-backend/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stark-backend:
+    name: stark-backend crate tests
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - runner=16cpu-linux-arm64
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+
+      - name: Run tests
+        working-directory: crates/stark-backend
+        run: |
+          cargo nextest run
+
+  cuda-backend:
+    name: cuda-backend crate tests and examples
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - family=g6.xlarge
+      - image=ubuntu24-gpu-x64
+      - extras=s3-cache
+
+    steps:
+      - uses: runs-on/action@v2
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+      - name: Verify GPU setup
+        run: |
+          nvidia-smi
+          nvidia-smi -L
+          nvcc --version
+
+      - name: Run cuda-common tests
+        working-directory: crates/cuda-common
+        run: cargo nextest run
+
+      - name: Run cuda-backend tests
+        working-directory: crates/cuda-backend
+        run: cargo nextest run
+
+      - name: Run cuda-backend examples
+        working-directory: crates/cuda-backend
+        run: |
+          cargo run --release --example trace_committer
+          cargo run --release --example fibonacci
+
+          cargo build --release --example keccakf
+
+          # Profile the example
+          nsys profile --trace=cuda --cuda-memory-usage=true --force-overwrite=true --stats=true -o keccakf.nsys-rep ./target/release/examples/keccakf
+
+      - name: Upload profiling artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keccakf
+          path: ./keccakf.nsys-rep
+          retention-days: 1
