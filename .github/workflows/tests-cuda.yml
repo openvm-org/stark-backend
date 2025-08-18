@@ -1,4 +1,4 @@
-name: Stark Backend Tests
+name: CUDA Tests
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: ["**"]
     paths:
-      - "crates/stark-backend/**"
+      - "crates/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -16,25 +16,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  stark-backend:
-    name: stark-backend crate tests
-    runs-on:
-      - runs-on=${{ github.run_id }}
-      - runner=16cpu-linux-arm64
-
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: taiki-e/install-action@nextest
-
-      - name: Run tests
-        working-directory: crates/stark-backend
-        run: |
-          cargo nextest run
-
   cuda-backend:
     name: cuda-backend crate tests and examples
     runs-on:
@@ -70,15 +51,4 @@ jobs:
         run: |
           cargo run --release --example trace_committer
           cargo run --release --example fibonacci
-
-          cargo build --release --example keccakf
-
-          # Profile the example
-          nsys profile --trace=cuda --cuda-memory-usage=true --force-overwrite=true --stats=true -o keccakf.nsys-rep ./target/release/examples/keccakf
-
-      - name: Upload profiling artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: keccakf
-          path: ./keccakf.nsys-rep
-          retention-days: 1
+          cargo run --release --example keccakf
