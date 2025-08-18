@@ -99,7 +99,7 @@ pub mod matrix {
     }
 }
 
-// relate to supra_ntt_api.cu
+// relate to supra/ntt_api.cu
 pub mod ntt {
     use super::*;
     extern "C" {

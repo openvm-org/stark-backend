@@ -10,28 +10,20 @@ fn main() {
     let common = CudaBuilder::new()
         .include_from_dep("DEP_CUDA_COMMON_INCLUDE")
         .watch("cuda")
-        .watch("src/cuda")
-        .flag("--device-link");
+        .watch("src/cuda");
 
     common
         .clone()
         .library_name("stark_backend_gpu")
-        .files([
-            "cuda/src/matrix.cu",
-            "cuda/src/lde.cu",
-            "cuda/src/poseidon2.cu",
-            "cuda/src/quotient.cu",
-            "cuda/src/permute.cu",
-            "cuda/src/prefix.cu",
-            "cuda/src/fri.cu",
-        ])
+        .files_from_glob("cuda/src/*.cu")
         .build();
 
     common
         .clone()
         .library_name("supra_ntt")
-        .include("cuda/include/supra")
-        .file("cuda/src/supra_ntt_api.cu")
+        .flag("--device-link")
+        .include("cuda/supra/include")
+        .file("cuda/supra/ntt_api.cu")
         .build();
 
     common.emit_link_directives();
