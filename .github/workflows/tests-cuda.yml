@@ -41,13 +41,16 @@ jobs:
 
       - name: Setup CUDA environment  
         run: |
-          find /usr -name "*libcudart*"
-          echo $PATH
-          echo $LD_LIBRARY_PATH
-          echo $LIBRARY_PATH
-          CUDA_ROOT=$(dirname $(dirname $(which nvcc)))
-          echo "LD_LIBRARY_PATH=$CUDA_ROOT/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
-          echo "CUDA detected at: $CUDA_ROOT"
+          # Find the actual CUDA library location
+          CUDART_PATH=$(find /usr/local -name "libcudart.so" | head -1)
+          if [ -n "$CUDART_PATH" ]; then
+            CUDA_LIB_DIR=$(dirname "$CUDART_PATH")
+            echo "CUDA libraries found at: $CUDA_LIB_DIR"
+            echo "LD_LIBRARY_PATH=$CUDA_LIB_DIR${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
+          else
+            echo "CUDA libraries not found!"
+            exit 1
+          fi
 
       - name: Run cuda-common tests
         working-directory: crates/cuda-common
