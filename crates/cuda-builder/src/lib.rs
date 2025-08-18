@@ -82,7 +82,7 @@ impl CudaBuilder {
     /// Add multiple source files matching a glob pattern
     pub fn files_from_glob(mut self, pattern: &str) -> Self {
         for path in glob::glob(pattern).expect("Invalid glob pattern").flatten() {
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "cu") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "cu") {
                 self.source_files.push(path.to_string_lossy().to_string());
             }
         }
