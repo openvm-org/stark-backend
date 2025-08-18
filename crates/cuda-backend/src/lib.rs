@@ -1,6 +1,7 @@
 #![cfg(has_cuda)]
 
 pub mod base;
+pub mod chip;
 mod committer;
 pub mod cuda;
 pub mod fri_log_up;
