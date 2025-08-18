@@ -113,9 +113,10 @@ impl StarkEngine for GpuBabyBearPoseidon2Engine {
 
 #[cfg(feature = "touchemall")]
 pub fn check_trace_validity(proving_ctx: &AirProvingContext<GpuBackend>, name: &str) {
+    use openvm_cuda_common::copy::MemCopyD2H;
     use openvm_stark_backend::prover::hal::MatrixDimensions;
 
-    use crate::{cuda::copy::MemCopyD2H, types::F};
+    use crate::types::F;
 
     let trace = proving_ctx.common_main.as_ref().unwrap();
     let height = trace.height();
