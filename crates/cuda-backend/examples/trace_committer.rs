@@ -1,9 +1,6 @@
-#![cfg_attr(not(has_cuda), allow(unused_imports, dead_code))]
-
 use std::sync::Arc;
 
 use clap::Parser;
-#[cfg(has_cuda)]
 use openvm_cuda_backend::gpu_device::{GpuConfig, GpuDevice};
 use openvm_stark_backend::prover::{
     cpu::CpuDevice,
@@ -38,7 +35,6 @@ struct Args {
     matrix_num: u32,
 }
 
-#[cfg(has_cuda)]
 fn main() {
     let args = Args::parse();
 
@@ -103,10 +99,4 @@ fn main() {
         cpu_time.as_micros() as f64 / gpu_time.as_micros() as f64
     );
     println!("------------------------");
-}
-
-#[cfg(not(has_cuda))]
-fn main() {
-    println!("This example requires CUDA support. Please install CUDA and rebuild.");
-    std::process::exit(1);
 }

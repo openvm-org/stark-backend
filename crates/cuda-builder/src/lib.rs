@@ -141,9 +141,6 @@ impl CudaBuilder {
         // Set up rerun conditions
         self.setup_rerun_conditions();
 
-        // Handle CUDA availability check
-        emit_cuda_cfg_if_available();
-
         // Get or detect CUDA architecture
         let cuda_arch = self.get_cuda_arch();
 
@@ -276,14 +273,6 @@ impl CudaBuilder {
             env::set_var("RUST_BACKTRACE", "full");
             println!("cargo:warning=CUDA_DEBUG=1 → forcing CUDA_OPT_LEVEL=0, CUDA_LAUNCH_BLOCKING=1, CUDA_MEMCHECK=1, RUST_BACKTRACE=full");
         }
-    }
-}
-
-/// Check if CUDA is available and emit cfg flag
-pub fn emit_cuda_cfg_if_available() {
-    println!("cargo::rustc-check-cfg=cfg(has_cuda)");
-    if cuda_available() {
-        println!("cargo:rustc-cfg=has_cuda");
     }
 }
 

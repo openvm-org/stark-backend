@@ -1,5 +1,3 @@
-#![cfg(has_cuda)]
-
 pub mod base;
 pub mod chip;
 mod committer;

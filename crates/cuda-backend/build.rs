@@ -1,10 +1,11 @@
-use openvm_cuda_builder::{cuda_available, emit_cuda_cfg_if_available, CudaBuilder};
+use std::process::exit;
+
+use openvm_cuda_builder::{cuda_available, CudaBuilder};
 
 fn main() {
-    emit_cuda_cfg_if_available();
     if !cuda_available() {
         eprintln!("cargo:warning=CUDA is not available");
-        return;
+        exit(1);
     }
 
     let common = CudaBuilder::new()

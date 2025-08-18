@@ -1,5 +1,3 @@
-#![cfg(has_cuda)]
-
 pub mod common;
 pub mod copy;
 pub mod d_buffer;

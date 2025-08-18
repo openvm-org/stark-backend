@@ -179,7 +179,7 @@ impl<T: Debug> Debug for DeviceBuffer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cuda::copy::MemCopyH2D;
+    use crate::copy::MemCopyH2D;
 
     #[test]
     fn test_device_buffer_float() {

@@ -1,8 +1,5 @@
-#![cfg_attr(not(has_cuda), allow(unused_imports, dead_code))]
-
 use std::sync::Arc;
 
-#[cfg(has_cuda)]
 use openvm_cuda_backend::engine::GpuBabyBearPoseidon2Engine;
 use openvm_stark_backend::{
     engine::StarkEngine,
@@ -43,7 +40,6 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 const LOG_BLOWUP: usize = 2;
 const NUM_PERMUTATIONS: usize = 1 << 10;
 
-#[cfg(has_cuda)]
 fn main() {
     setup_tracing();
     let mut rng = create_seeded_rng();
@@ -82,10 +78,4 @@ fn main() {
     let gpu_ctx = ProvingContext::new(vec![(air_id, AirProvingContext::simple_no_pis(gpu_trace))]);
     let gpu_proof = engine.prove(&pk, gpu_ctx);
     engine.verify(&vk, &gpu_proof).unwrap();
-}
-
-#[cfg(not(has_cuda))]
-fn main() {
-    println!("This example requires CUDA support. Please install CUDA and rebuild.");
-    std::process::exit(1);
 }

@@ -35,6 +35,10 @@ extern "C" {
     ) -> i32;
 }
 
+/// FFI binding for the `cudaMemcpyAsync` function on the default cuda stream.
+///
+/// # Safety
+/// Must follow the rules of the `cudaMemcpyAsync` function from the CUDA runtime API.
 pub unsafe fn cuda_memcpy<const SRC_DEVICE: bool, const DST_DEVICE: bool>(
     dst: *mut c_void,
     src: *const c_void,
@@ -152,7 +156,7 @@ impl<T> MemCopyD2D<T> for DeviceBuffer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cuda::d_buffer::DeviceBuffer;
+    use crate::d_buffer::DeviceBuffer;
 
     #[test]
     fn test_mem_copy() {
