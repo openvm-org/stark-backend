@@ -1,9 +1,6 @@
-#![cfg_attr(not(has_cuda), allow(unused_imports, dead_code))]
-
 use std::sync::Arc;
 
 use itertools::zip_eq;
-#[cfg(has_cuda)]
 use openvm_cuda_backend::{
     engine::GpuBabyBearPoseidon2Engine, prover_backend::GpuBackend, types::SC,
 };
@@ -45,7 +42,6 @@ fn get_fib_number(n: usize) -> u32 {
     b
 }
 
-#[cfg(has_cuda)]
 fn main() {
     setup_tracing();
     println!("test_single_fib_stark");
@@ -89,10 +85,4 @@ fn main() {
     println!("\nStarting GPU proof");
     let gpu_proof = gpu_engine.prove(&pk, gpu_ctx);
     gpu_engine.verify(&vk, &gpu_proof).unwrap();
-}
-
-#[cfg(not(has_cuda))]
-fn main() {
-    println!("This example requires CUDA support. Please install CUDA and rebuild.");
-    std::process::exit(1);
 }
