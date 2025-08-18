@@ -1,8 +1,4 @@
-use std::{
-    env::{self, var},
-    path::Path,
-    process::Command,
-};
+use std::{env, path::Path, process::Command};
 
 /// CUDA builder configuration
 #[derive(Debug, Clone)]
@@ -22,7 +18,7 @@ pub struct CudaBuilder {
 impl Default for CudaBuilder {
     fn default() -> Self {
         let mut link_search_paths = Vec::new();
-        if let Ok(ld_path) = env::var("LD_LIBRARY_PATH") {
+        if let Ok(ld_path) = env::var("PATH") {
             for path in ld_path.split(':') {
                 if !path.is_empty() {
                     link_search_paths.push(path.to_string());
