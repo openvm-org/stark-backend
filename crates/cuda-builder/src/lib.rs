@@ -18,7 +18,7 @@ pub struct CudaBuilder {
 impl Default for CudaBuilder {
     fn default() -> Self {
         let mut link_search_paths = Vec::new();
-        if let Ok(ld_path) = env::var("PATH") {
+        if let Ok(ld_path) = env::var("LD_LIBRARY_PATH") {
             for path in ld_path.split(':') {
                 if !path.is_empty() {
                     link_search_paths.push(path.to_string());

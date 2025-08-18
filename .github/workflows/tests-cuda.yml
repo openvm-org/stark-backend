@@ -39,6 +39,13 @@ jobs:
           nvidia-smi -L
           nvcc --version
 
+      - name: Setup CUDA environment  
+        run: |
+          find /usr -name "libcudart"
+          CUDA_ROOT=$(dirname $(dirname $(which nvcc)))
+          echo "LD_LIBRARY_PATH=$CUDA_ROOT/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
+          echo "CUDA detected at: $CUDA_ROOT"
+
       - name: Run cuda-common tests
         working-directory: crates/cuda-common
         run: cargo nextest run
