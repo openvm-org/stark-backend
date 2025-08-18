@@ -13,6 +13,8 @@ fn main() {
         .watch("cuda")
         .watch("src/cuda");
 
+    common.emit_link_directives();
+
     common
         .clone()
         .library_name("stark_backend_gpu")
@@ -26,6 +28,4 @@ fn main() {
         .include("cuda/supra/include")
         .file("cuda/supra/ntt_api.cu")
         .build();
-
-    common.emit_link_directives();
 }
