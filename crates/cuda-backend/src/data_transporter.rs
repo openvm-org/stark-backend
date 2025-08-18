@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
@@ -15,7 +15,7 @@ use openvm_stark_backend::{
         },
     },
 };
-use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 
 use crate::{
     base::DeviceMatrix,
@@ -125,4 +125,53 @@ pub fn transport_device_matrix_to_host<T: Clone + Send + Sync>(
         .unwrap();
     }
     RowMajorMatrix::<T>::new(matrix_buffer.to_host().unwrap(), matrix.width())
+}
+
+pub fn assert_eq_device_matrix<T: Clone + Send + Sync + PartialEq + Debug>(
+    a: &DeviceMatrix<T>,
+    b: &DeviceMatrix<T>,
+) {
+    assert_eq!(a.height(), b.height());
+    assert_eq!(a.width(), b.width());
+    assert_eq!(a.buffer().len(), b.buffer().len());
+    let a_host = transport_device_matrix_to_host(a);
+    let b_host = transport_device_matrix_to_host(b);
+    for r in 0..a_host.height() {
+        for c in 0..a_host.width() {
+            assert_eq!(
+                a_host.get(r, c),
+                b_host.get(r, c),
+                "Mismatch at row {} column {}",
+                r,
+                c
+            );
+        }
+    }
+}
+
+pub fn assert_eq_host_and_device_matrix<T: Clone + Send + Sync + PartialEq + Debug>(
+    cpu: Arc<RowMajorMatrix<T>>,
+    gpu: &DeviceMatrix<T>,
+) {
+    assert_eq!(gpu.width(), cpu.width());
+    assert_eq!(gpu.height(), cpu.height());
+    let gpu = transport_device_matrix_to_host(gpu);
+    for r in 0..cpu.height() {
+        for c in 0..cpu.width() {
+            assert_eq!(
+                gpu.get(r, c),
+                cpu.get(r, c),
+                "Mismatch at row {} column {}",
+                r,
+                c
+            );
+        }
+    }
+}
+
+// Debug utility to print out a DeviceMatrix as a RowMajorMatrix for comparison
+pub fn print_device_matrix_as_row_major_matrix<T: Clone + Send + Sync + Debug>(
+    gpu_matrix: &DeviceMatrix<T>,
+) {
+    println!("{:?}", transport_device_matrix_to_host(gpu_matrix));
 }
