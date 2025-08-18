@@ -1,9 +1,12 @@
 use std::{env, path::PathBuf, process::exit};
 
-use openvm_cuda_builder::cuda_available;
+use openvm_cuda_builder::{cuda_available, CudaBuilder};
 
 fn main() {
     if cuda_available() {
+        let builder = CudaBuilder::new();
+        builder.emit_link_directives();
+        
         let include_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("include");
         println!("cargo:include={}", include_path.display()); // -> DEP_CUDA_COMMON_INCLUDE
         println!("cargo:rerun-if-changed={}", include_path.display());
