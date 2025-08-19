@@ -18,6 +18,8 @@ jobs:
       - runner=8cpu-linux-arm64
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: v1.1.0
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
