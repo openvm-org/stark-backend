@@ -18,7 +18,8 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}
     runs-on:
       - runs-on=${{ github.run_id }}
-      - runner=8cpu-linux-arm64
+      - family=g6.xlarge
+      - image=ubuntu24-gpu-x64
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust toolchain
@@ -36,8 +37,14 @@ jobs:
           install_s5cmd
 
       - name: Sync static S3 bucket
+        working-directory: target/doc
         env:
           S3_BUCKET: ${{ vars.CRATE_DOCS_S3_BUCKET }}
-        run: |
-          cd target/doc
-          s5cmd sync . s3://${S3_BUCKET%/}/static/
+        run: s5cmd sync . s3://${S3_BUCKET%/}/static/
+
+      - name: Sync tagged version S3 bucket
+        if: github.ref_type == 'tag'
+        working-directory: target/doc
+        env:
+          S3_BUCKET: ${{ vars.CRATE_DOCS_S3_BUCKET }}
+        run: s5cmd sync . s3://${S3_BUCKET%/}/${{ github.ref_name }}/
