@@ -17,24 +17,68 @@ jobs:
       - runs-on=${{ github.run_id }}
       - runner=8cpu-linux-arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
+      - uses: codespell-project/actions-codespell@v2
+        with:
+          skip: Cargo.lock
+          ignore_words_file: .codespellignore
+          path: "crates/"
+
       - name: Run fmt
         run: |
-          cargo fmt --all -- --check
+          rustup install nightly
+          rustup component add --toolchain nightly rustfmt
+          # don't use --all to only format default-members of workspace
+          cargo +nightly fmt -- --check
 
       - name: Run clippy
         run: |
           # list of features generated using:
           # echo -e "\033[1;32mAll unique features across workspace:\033[0m" && cargo metadata --format-version=1 --no-deps | jq -r '.packages[].features | to_entries[] | .key' | sort -u | sed 's/^/• /'
-          cargo clippy --all-targets --all --tests --features "default mimalloc nightly-features parallel" -- -D warnings
-          cargo clippy --all-targets --all --tests --no-default-features --features "jemalloc jemalloc-prof" -- -D warnings
+          # don't include feature=touchemall because that is cuda-only
+          cargo clippy --all-targets --tests --features "default mimalloc nightly-features parallel prometheus" -- -D warnings
+          cargo clippy --all-targets --tests --no-default-features --features "jemalloc jemalloc-prof" -- -D warnings
 
       - name: Cargo audit
         run: |
           cargo install cargo-audit
           cargo audit
+
+  lint-cuda:
+    name: Lint CUDA
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - family=g6.xlarge
+      - image=ubuntu24-gpu-x64
+      - extras=s3-cache
+
+    steps:
+      - uses: runs-on/action@v2
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Verify CUDA setup
+        run: |
+          nvidia-smi
+          nvidia-smi -L
+          nvcc --version
+
+      - name: Run fmt
+        working-directory: crates
+        run: |
+          rustup install nightly
+          rustup component add --toolchain nightly rustfmt
+          cargo +nightly fmt --all -- --check
+
+      - name: Run clippy
+        run: |
+          cargo clippy --all-targets --all --tests --features "default mimalloc nightly-features parallel prometheus touchemall" -- -D warnings
+          cargo clippy --all-targets --all --tests --no-default-features --features "jemalloc jemalloc-prof" -- -D warnings

@@ -1,0 +1,68 @@
+name: CUDA Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "crates/**"
+      - ".github/workflows/tests-cuda.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cuda-backend:
+    name: cuda-backend crate tests and examples
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - family=g6.xlarge
+      - image=ubuntu24-gpu-x64
+      - extras=s3-cache
+
+    steps:
+      - uses: runs-on/action@v2
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+      - name: Verify GPU setup
+        run: |
+          nvidia-smi
+          nvidia-smi -L
+          nvcc --version
+
+      - name: Setup CUDA environment  
+        run: |
+          # Find the actual CUDA library location
+          CUDART_PATH=$(find /usr/local -name "libcudart.so" | head -1)
+          if [ -n "$CUDART_PATH" ]; then
+            CUDA_LIB_DIR=$(dirname "$CUDART_PATH")
+            echo "CUDA libraries found at: $CUDA_LIB_DIR"
+            echo "LD_LIBRARY_PATH=$CUDA_LIB_DIR${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
+          else
+            echo "CUDA libraries not found!"
+            exit 1
+          fi
+
+      - name: Run cuda-common tests
+        working-directory: crates/cuda-common
+        run: cargo nextest run
+
+      - name: Run cuda-backend tests
+        working-directory: crates/cuda-backend
+        run: cargo nextest run
+
+      - name: Run cuda-backend examples
+        working-directory: crates/cuda-backend
+        run: |
+          cargo run --release --example trace_committer
+          cargo run --release --example fibonacci
+          cargo run --release --example keccakf

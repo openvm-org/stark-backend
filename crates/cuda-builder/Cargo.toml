@@ -1,0 +1,10 @@
+[package]
+name = "openvm-cuda-builder"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "A build utility for CUDA projects"
+
+[dependencies]
+cc = { workspace = true, features = ["parallel"] }
+glob.workspace = true
