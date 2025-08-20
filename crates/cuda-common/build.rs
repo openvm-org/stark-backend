@@ -8,7 +8,6 @@ fn main() {
 
         let include_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("include");
         println!("cargo:include={}", include_path.display()); // -> DEP_CUDA_COMMON_INCLUDE
-        println!("cargo:rerun-if-changed={}", include_path.display());
     } else {
         eprintln!("cargo:warning=CUDA is not available");
         exit(1);
