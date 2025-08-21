@@ -4,6 +4,7 @@ use openvm_cuda_builder::{cuda_available, CudaBuilder};
 
 fn main() {
     if cuda_available() {
+        println!("cargo:rerun-if-changed=include");
         CudaBuilder::new().emit_link_directives();
 
         let include_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("include");

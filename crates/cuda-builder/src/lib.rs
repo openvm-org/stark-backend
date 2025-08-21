@@ -68,8 +68,7 @@ impl CudaBuilder {
     /// Add include path from another crate's exported include
     pub fn include_from_dep(mut self, dep_env_var: &str) -> Self {
         if let Ok(path) = env::var(dep_env_var) {
-            self.include_paths.push(path.clone());
-            self.watch_paths.push(path);
+            self.include_paths.push(path);
         }
         self
     }
