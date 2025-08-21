@@ -12,11 +12,11 @@ __forceinline__ __device__ uint32_t bit_rev(uint32_t x, uint32_t n) {
 //           + (1/2 - beta/2 g_inv^i) * folded[2*i+1]
 //           + beta^2 *fri_input[i]
 __global__ void cukernel_fri_fold(
-    FpExt * __restrict__ result,
-    FpExt * __restrict__ folded,
-    const FpExt * __restrict__ fri_input,
-    FpExt * __restrict__ d_constants,
-    Fp * __restrict__ g_inv_powers,
+    FpExt *__restrict__ result,
+    FpExt *__restrict__ folded,
+    const FpExt *__restrict__ fri_input,
+    FpExt *__restrict__ d_constants,
+    Fp *__restrict__ g_inv_powers,
     uint64_t N
 ) {
     FpExt half_beta = d_constants[0];   // beta/2
@@ -41,9 +41,9 @@ __global__ void cukernel_fri_fold(
 
 // compute diffs = { (z - shift*g^j) } for j in 0..N
 __global__ void compute_diffs(
-    FpExt * __restrict__ diffs, 
-    FpExt * __restrict__ d_z, 
-    Fp * __restrict__ d_domain, 
+    FpExt *__restrict__ diffs,
+    FpExt *__restrict__ d_z,
+    Fp *__restrict__ d_domain,
     uint32_t log_n
 ) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -63,7 +63,7 @@ __global__ void compute_diffs(
 }
 
 // data[i] = g^i for i in 0..N
-__global__ void powers(Fp * __restrict__ data, Fp * __restrict__ d_g, uint32_t N) {
+__global__ void powers(Fp *__restrict__ data, Fp *__restrict__ d_g, uint32_t N) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
     Fp g = *d_g;
@@ -75,7 +75,7 @@ __global__ void powers(Fp * __restrict__ data, Fp * __restrict__ d_g, uint32_t N
     }
 }
 
-__global__ void powers_ext(FpExt * __restrict__ data, FpExt * __restrict__ d_g, uint32_t N) {
+__global__ void powers_ext(FpExt *__restrict__ data, FpExt *__restrict__ d_g, uint32_t N) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
     FpExt g = *d_g;
@@ -190,12 +190,12 @@ __global__ void batch_invert(FpExt *data, uint64_t log_n) {
 // this kernel requires that `acc`, `z_diff_invs` and `m_rlc` have same order.
 // for each row, this kernel computes m_rlc[j] = \sum alpha^i * m_i(s*g^j)
 __global__ void reduce_matrix_quotient_acc(
-    FpExt * __restrict__ quotient_acc,
-    Fp * __restrict__ matrix,
-    FpExt * __restrict__ z_diff_invs,
-    const FpExt * __restrict__ matrix_eval,
-    FpExt * __restrict__ d_alphas,
-    FpExt * __restrict__ d_alphas_offset,
+    FpExt *__restrict__ quotient_acc,
+    Fp *__restrict__ matrix,
+    FpExt *__restrict__ z_diff_invs,
+    const FpExt *__restrict__ matrix_eval,
+    FpExt *__restrict__ d_alphas,
+    FpExt *__restrict__ d_alphas_offset,
     uint32_t width,
     uint32_t height,
     bool is_first
@@ -265,9 +265,9 @@ __global__ void cukernel_split_ext_poly_to_base_col_major_matrix(
 // bit-reversed independently
 template <bool INV_DENOMS_BITREV>
 __global__ void matrix_evaluate_chunked(
-    FpExt * __restrict__ partial_sums,
-    const Fp * __restrict__ matrix,
-    const FpExt * __restrict__ inv_denoms,
+    FpExt *__restrict__ partial_sums,
+    const Fp *__restrict__ matrix,
+    const FpExt *__restrict__ inv_denoms,
     Fp g,
     uint32_t height,
     uint32_t width,
@@ -284,7 +284,13 @@ __global__ void matrix_evaluate_chunked(
     uint32_t chunk_start = chunk_id * chunk_size;
     uint32_t chunk_range = min(chunk_size, height - chunk_start);
 
+#ifndef __clang_analyzer__
+    // NOTE: This is what builds, we need to use this for clang-tidy to work
     __shared__ FpExt sdata[FRI_MAX_THREADS];
+#else
+    __shared__ __align__(alignof(FpExt)) unsigned char s_data_int[FRI_MAX_THREADS * sizeof(FpExt)];
+    FpExt *sdata = reinterpret_cast<FpExt *>(s_data_int);
+#endif
 
     FpExt thread_sum = {0, 0, 0, 0};
     const uint32_t col_offset = col * matrix_height;
@@ -317,7 +323,7 @@ __global__ void matrix_evaluate_chunked(
         uint32_t mat_idx =
             need_double_bitrev ? bit_rev(bit_rev(domain_idx, height), matrix_height) : domain_idx;
 
-        uint32_t raw_val = __ldg(reinterpret_cast<const uint32_t*>(&matrix[col_offset + mat_idx]));
+        uint32_t raw_val = __ldg(reinterpret_cast<const uint32_t *>(&matrix[col_offset + mat_idx]));
         thread_sum += FpExt(Fp::fromRaw(raw_val)) * weight;
     }
 
@@ -334,12 +340,18 @@ __global__ void matrix_evaluate_chunked(
 
     // warp unloop
     if (tid < WARP_SIZE) {
-        if (blockDim.x >= 64) sdata[tid] += sdata[tid + 32];
-        if (blockDim.x >= 32) sdata[tid] += sdata[tid + 16];
-        if (blockDim.x >= 16) sdata[tid] += sdata[tid +  8];
-        if (blockDim.x >=  8) sdata[tid] += sdata[tid +  4];
-        if (blockDim.x >=  4) sdata[tid] += sdata[tid +  2];
-        if (blockDim.x >=  2) sdata[tid] += sdata[tid +  1];
+        if (blockDim.x >= 64)
+            sdata[tid] += sdata[tid + 32];
+        if (blockDim.x >= 32)
+            sdata[tid] += sdata[tid + 16];
+        if (blockDim.x >= 16)
+            sdata[tid] += sdata[tid + 8];
+        if (blockDim.x >= 8)
+            sdata[tid] += sdata[tid + 4];
+        if (blockDim.x >= 4)
+            sdata[tid] += sdata[tid + 2];
+        if (blockDim.x >= 2)
+            sdata[tid] += sdata[tid + 1];
     }
 
     if (tid == 0) {
@@ -355,8 +367,8 @@ __global__ void matrix_evaluate_chunked(
 //
 // Each thread handles one column, summing across all chunks.
 __global__ void matrix_evaluate_finalize(
-    FpExt * __restrict__ output,
-    const FpExt * __restrict__ partial_sums,
+    FpExt *__restrict__ output,
+    const FpExt *__restrict__ partial_sums,
     FpExt scale_factor,
     uint32_t num_chunks,
     uint32_t width

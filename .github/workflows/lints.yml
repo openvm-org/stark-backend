@@ -82,3 +82,9 @@ jobs:
         run: |
           cargo clippy --all-targets --all --tests --features "default mimalloc nightly-features parallel prometheus touchemall" -- -D warnings
           cargo clippy --all-targets --all --tests --no-default-features --features "jemalloc jemalloc-prof" -- -D warnings
+
+      - name: Run clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include

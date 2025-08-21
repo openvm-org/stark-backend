@@ -20,3 +20,6 @@ rustc-*
 .zed/
 
 __pycache__/
+
+# Generated config files
+.clangd
