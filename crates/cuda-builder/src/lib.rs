@@ -56,40 +56,44 @@ impl CudaBuilder {
         self.library_name = name.to_string();
         self
     }
+
     /// Add include path
     pub fn include<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.include_paths
-            .push(path.as_ref().to_string_lossy().to_string());
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        self.include_paths.push(path_str.clone());
+        self.watch_paths.push(path_str);
         self
     }
 
     /// Add include path from another crate's exported include
     pub fn include_from_dep(mut self, dep_env_var: &str) -> Self {
         if let Ok(path) = env::var(dep_env_var) {
-            self.include_paths.push(path.clone());
-            self.watch_paths.push(path);
+            self.include_paths.push(path);
         }
         self
     }
 
     /// Add source file
     pub fn file<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.source_files
-            .push(path.as_ref().to_string_lossy().to_string());
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        self.source_files.push(path_str.clone());
+        self.watch_paths.push(path_str);
         self
     }
 
     /// Add multiple source files
     pub fn files<P: AsRef<Path>, I: IntoIterator<Item = P>>(mut self, paths: I) -> Self {
         for path in paths {
-            self.source_files
-                .push(path.as_ref().to_string_lossy().to_string());
+            let path_str = path.as_ref().to_string_lossy().to_string();
+            self.source_files.push(path_str.clone());
+            self.watch_paths.push(path_str);
         }
         self
     }
 
     /// Add multiple source files matching a glob pattern
     pub fn files_from_glob(mut self, pattern: &str) -> Self {
+        self.watch_globs.push(pattern.to_string());
         for path in glob::glob(pattern).expect("Invalid glob pattern").flatten() {
             if path.is_file() && path.extension().is_some_and(|ext| ext == "cu") {
                 self.source_files.push(path.to_string_lossy().to_string());
