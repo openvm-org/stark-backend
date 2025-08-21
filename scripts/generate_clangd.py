@@ -18,7 +18,7 @@ def main():
 
     # Fixed includes (relative to workspace)
     fixed_includes = [
-        os.path.join(workspace_root, "crates/cuda-backend/cuda/src"),
+        os.path.join(workspace_root, "crates/cuda-backend/cuda/include"),
         os.path.join(workspace_root, "crates/cuda-backend/cuda/supra/include"),
         os.path.join(workspace_root, "crates/cuda-common/include"),
     ]
