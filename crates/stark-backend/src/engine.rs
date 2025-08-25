@@ -55,7 +55,7 @@ where
     /// them having the same starting state.
     fn new_challenger(&self) -> <Self::SC as StarkGenericConfig>::Challenger;
 
-    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<Self::SC> {
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<'_, Self::SC> {
         let mut builder = MultiStarkKeygenBuilder::new(self.config());
         if let Some(max_constraint_degree) = self.max_constraint_degree() {
             builder.set_max_constraint_degree(max_constraint_degree);
@@ -67,7 +67,7 @@ where
 
     fn prover(&self) -> Coordinator<Self::SC, Self::PB, Self::PD>;
 
-    fn verifier(&self) -> MultiTraceStarkVerifier<Self::SC> {
+    fn verifier(&self) -> MultiTraceStarkVerifier<'_, Self::SC> {
         MultiTraceStarkVerifier::new(self.config())
     }
 
