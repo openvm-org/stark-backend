@@ -16,7 +16,7 @@ The repository is a Rust workspace which includes non-default member crates `ope
 ## Development with CUDA
 The CUDA crates in this repository should build via `cargo` on machines with [CUDA toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/#package-manager-installation) 12.8 or later installed. In addition to Rust analyzer for linting Rust code, we recommend installing a clangd server linting CUDA code: in VS Code this comes with the C/C++ extension. For the clangd server to work properly, run
 ```bash
-python3 scripts/generate_clangd.python3
+python3 scripts/generate_clangd.py
 ```
 once to generate a local `.clangd` file. This file cannot be committed to the repository as it includes local paths.
 
