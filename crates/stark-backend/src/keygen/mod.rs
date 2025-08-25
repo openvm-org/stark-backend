@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub mod types;
-pub(crate) mod view;
+pub mod view;
 
 struct AirKeygenBuilder<SC: StarkGenericConfig> {
     air: Arc<dyn AnyRap<SC>>,

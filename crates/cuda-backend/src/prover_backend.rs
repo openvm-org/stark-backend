@@ -5,6 +5,7 @@ use openvm_cuda_common::{memory_manager::MemTracker, stream::gpu_metrics_span};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints,
     config::{Com, PcsProof, RapPartialProvingKey, RapPhaseSeqPartialProof},
+    keygen::view::MultiStarkVerifyingKeyView,
     p3_challenger::{DuplexChallenger, FieldChallenger},
     proof::{OpenedValues, OpeningProof},
     prover::{
@@ -31,7 +32,6 @@ use crate::{
     opener::OpeningProverGpu,
     prelude::*,
     quotient::{QuotientCommitterGpu, QuotientDataGpu},
-    view::MultiStarkVerifyingKeyView,
 };
 
 /// Gpu backend implementation for STARK proving system

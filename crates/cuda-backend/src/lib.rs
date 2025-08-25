@@ -9,7 +9,6 @@ mod opener;
 mod quotient;
 mod transpiler;
 pub mod types;
-mod view; // temporary until we have GPU perm trace
 
 pub mod prelude {
     pub use crate::types::prelude::*;
