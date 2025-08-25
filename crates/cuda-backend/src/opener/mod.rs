@@ -31,10 +31,11 @@ use crate::{
 pub(crate) mod ops;
 
 const DIGEST_WIDTH: usize = 8;
+type PackedVal = <F as Field>::Packing;
 type Perm = Poseidon2BabyBear<16>;
 type Hash = PaddingFreeSponge<Perm, WIDTH, 8, DIGEST_WIDTH>;
 type Compress = TruncatedPermutation<Perm, 2, DIGEST_WIDTH, WIDTH>;
-type ValMmcs = MerkleTreeMmcs<F, F, Hash, Compress, DIGEST_WIDTH>;
+type ValMmcs = MerkleTreeMmcs<PackedVal, <F as Field>::Packing, Hash, Compress, DIGEST_WIDTH>;
 type ChallengeMmcs = ExtensionMmcs<F, EF, ValMmcs>;
 
 pub struct OpeningProverGpu {}
