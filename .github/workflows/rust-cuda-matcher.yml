@@ -1,0 +1,75 @@
+name: Rust and CUDA signatures match
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gpu-signatures-match:
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - family=g6.xlarge
+      - image=ubuntu24-gpu-x64
+      - spot=false
+      - extras=s3-cache
+
+    steps:
+      - uses: runs-on/action@v2
+      - uses: actions/checkout@v5
+      - run: | # avoid cross-device link error
+          rustup component remove clippy || true
+          rm -rf ~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+
+      - name: Verify GPU setup
+        run: |
+          nvidia-smi
+          nvidia-smi -L
+          nvcc --version
+
+      - name: Install prerequisites
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cbindgen python3-venv
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install pyelftools
+
+      - name: Run the matcher (cuda-backend)
+        working-directory: crates/cuda-backend
+        run: |
+          source ../../.venv/bin/activate
+
+          echo "Running cbindgen"
+          cbindgen -c ../../scripts/cbindgen.toml . -o rust_abi.hpp
+
+          echo "Running gen_stub.py"
+          python3 ../../scripts/gen_stub.py rust_abi.hpp > rust_stub.cpp
+
+          echo "Running g++"
+          g++ -DCB_TEST -O0 -g -c -fno-eliminate-unused-debug-types rust_stub.cpp -o rust_stub.o
+
+          echo "Running cargo build"
+          CUDA_DEBUG=1 cargo build
+
+          RUST_EXE_PATH="../../target/debug/build"
+          RUST_OUTPUT=$(ls -t $RUST_EXE_PATH | grep backend | head -n 1)
+          echo "The freshest is $RUST_OUTPUT"
+          RUST_OUTPUT_PATH="$RUST_EXE_PATH/$RUST_OUTPUT/out"
+
+          echo "Running abi_cmp.py"
+          LOGLEVEL=warning python3 ../../scripts/abi_cmp.py rust_stub.o $RUST_OUTPUT_PATH

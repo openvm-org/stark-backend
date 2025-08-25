@@ -19,6 +19,7 @@ jobs:
     runs-on:
       - runs-on=${{ github.run_id }}
       - family=g6.xlarge
+      - spot=false
       - image=ubuntu24-gpu-x64
     steps:
       - uses: actions/checkout@v4

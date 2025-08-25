@@ -1,0 +1,15 @@
+language = "C++"
+no_includes = true
+sys_includes = ["cstdint"]
+
+[parse]
+parse_deps = true
+include = ["stark-backend-gpu"]
+
+[defines]
+test = "CB_TEST"
+
+[const]
+# Don’t emit constexpr/static const for consts
+allow_constexpr = false
+allow_static_const = false
