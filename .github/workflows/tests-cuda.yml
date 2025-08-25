@@ -28,6 +28,9 @@ jobs:
     steps:
       - uses: runs-on/action@v2
       - uses: actions/checkout@v5
+      - run: | # avoid cross-device link error
+          rustup component remove clippy || true
+          rm -rf ~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu || true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -39,7 +42,7 @@ jobs:
           nvidia-smi -L
           nvcc --version
 
-      - name: Setup CUDA environment  
+      - name: Setup CUDA environment
         run: |
           # Find the actual CUDA library location
           CUDART_PATH=$(find /usr/local -name "libcudart.so" | head -1)
