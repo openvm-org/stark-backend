@@ -21,7 +21,6 @@ pub struct GpuDevice {
     rap_phase_seq: Option<FriLogUpPhaseGpu>,
 }
 
-#[warn(dead_code)]
 impl GpuDevice {
     pub fn new(config: GpuConfig, rap_phase_seq: Option<FriLogUpPhaseGpu>) -> Self {
         let device_id = set_device().unwrap();
