@@ -63,18 +63,6 @@ impl Codec for Entry {
     }
 }
 
-#[allow(dead_code)]
-pub fn is_in_extension_field(entry: &Entry) -> bool {
-    match entry {
-        Entry::Preprocessed { .. } => false,
-        Entry::Main { .. } => false,
-        Entry::Permutation { .. } => true,
-        Entry::Public => false,
-        Entry::Challenge => true,
-        Entry::Exposed => true,
-    }
-}
-
 // SymbolicVariable is encoded in 32-bit little-endian
 impl<F: Field> Codec for SymbolicVariable<F> {
     type Encoded = u64;

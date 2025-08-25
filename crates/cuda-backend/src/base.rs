@@ -110,18 +110,15 @@ impl<T: Debug> Debug for DeviceMatrix<T> {
 
 /// The following trait and types are borrowed from [halo2](https:://github.com/zcash/halo2).
 /// The basis over which a polynomial is described.
-#[allow(dead_code)]
 pub trait Basis: Copy + Debug + Send + Sync {}
 
 /// The polynomial is defined as coefficients
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
 pub struct Coeff;
 impl Basis for Coeff {}
 
 /// The polynomial is defined as coefficients of Lagrange basis polynomials
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
 pub struct LagrangeCoeff;
 impl Basis for LagrangeCoeff {}
 
@@ -132,7 +129,6 @@ pub struct ExtendedLagrangeCoeff;
 impl Basis for ExtendedLagrangeCoeff {}
 
 pub struct DevicePoly<T, B> {
-    #[allow(dead_code)]
     pub is_bit_reversed: bool,
     pub coeff: DeviceBuffer<T>,
     _marker: PhantomData<B>,
@@ -153,7 +149,6 @@ impl<T, B> DevicePoly<T, B> {
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

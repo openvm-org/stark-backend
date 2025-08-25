@@ -192,7 +192,6 @@ impl SingleQuotientDataGpu {
 /// further flattened to a matrix of base field elements.
 pub struct QuotientChunkGpu {
     /// Chunk of quotient domain, which is a coset of the trace domain
-    #[allow(dead_code)]
     pub domain: Domain<SC>,
     /// Matrix with number of rows equal to trace domain size,
     /// and number of columns equal to extension field degree.
