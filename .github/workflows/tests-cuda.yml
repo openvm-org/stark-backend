@@ -28,13 +28,7 @@ jobs:
     steps:
       - uses: runs-on/action@v2
       - uses: actions/checkout@v5
-      - run: | # avoid cross-device link error
-          rustup component remove clippy || true
-          rm -rf ~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu || true
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: taiki-e/install-action@nextest
       - name: Verify GPU setup
         run: |

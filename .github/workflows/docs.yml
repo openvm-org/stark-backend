@@ -22,11 +22,9 @@ jobs:
       - image=ubuntu24-gpu-x64
     steps:
       - uses: actions/checkout@v4
-      - run: | # avoid cross-device link error
-          rustup component remove clippy || true
-          rm -rf ~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu || true
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
 
       - name: Build documentation
         run: cargo +nightly doc --workspace --no-deps
