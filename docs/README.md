@@ -12,6 +12,7 @@ The repository is a Rust workspace which includes non-default member crates `ope
   "rust-analyzer.check.workspace": false,
 }
 ```
+This tells rust-analyzer to not pass `--workspace` to the `cargo check` command; the linter will still check selected crates.
 
 ## Development with CUDA
 The CUDA crates in this repository should build via `cargo` on machines with [CUDA toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/#package-manager-installation) 12.8 or later installed. In addition to Rust analyzer for linting Rust code, we recommend installing a clangd server linting CUDA code: in VS Code this comes with the C/C++ extension. For the clangd server to work properly, run
