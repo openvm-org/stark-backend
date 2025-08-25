@@ -55,7 +55,7 @@ __global__ void calculate_cumulative_sums(
     const Rule * __restrict__ d_rules,
     const size_t * __restrict__ d_used_nodes,
     const uint32_t * __restrict__ d_partition_lens,
-    const uint32_t num_partitions,
+    const size_t num_partitions,
     const uint32_t permutation_height,
     const uint32_t permutation_width_ext,
     const uint32_t num_rows_per_tile
@@ -228,7 +228,7 @@ extern "C" int _calculate_cumulative_sums(
     const Rule *d_rules,
     const size_t *d_used_nodes,
     const uint32_t *d_partition_lens,
-    const uint32_t num_partitions,
+    const size_t num_partitions,
     const uint32_t permutation_height,
     const uint32_t permutation_width_ext,
     const uint32_t num_rows_per_tile
