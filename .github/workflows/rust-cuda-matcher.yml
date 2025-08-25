@@ -18,7 +18,8 @@ jobs:
     runs-on:
       - runs-on=${{ github.run_id }}
       - family=g6.xlarge
-      - image=gpu-custom
+      - image=ubuntu24-gpu-x64
+      - spot=false
       - extras=s3-cache
 
     steps:
@@ -69,4 +70,3 @@ jobs:
 
           echo "Running abi_cmp.py"
           LOGLEVEL=warning python3 ../../scripts/abi_cmp.py rust_stub.o $RUST_OUTPUT_PATH
-
