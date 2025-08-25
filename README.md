@@ -35,6 +35,5 @@ We would like to thank these teams for sharing their code for open source develo
 - [Plonky3](https://github.com/Plonky3/Plonky3): This codebase is built on top of Plonky3, where we have heavily benefited from their modular design at the polynomial IOP level. We extend Plonky3 by providing higher level interfaces for proving multi-chip circuits.
 - [Valida](https://github.com/valida-xyz/valida): Valida introduced the exceptionally elegant interactions interface for multi-chip communication via logup permutation arguments. We have found this interface quite well thought out and have built upon and extended it.
 - [SP1](https://github.com/succinctlabs/sp1): We learned from SP1's `AirBuilder` designs, and the original design for the `InteractionBuilder` was inspired by them.
-- [Stwo](https://github.com/starkware-libs/stwo): We studied Stwo's performant sumcheck implementations and have begun integrating them into our backend.
 - [Risc0](https://github.com/risc0/risc0): We used some of Risc0's open source CUDA kernels as the starting point for our own CUDA kernels.
 - [Supranational](https://github.com/supranational/sppark): We ported and modified [sppark](https://github.com/supranational/sppark)'s open source NTT CUDA kernels for use in our CUDA backend.
