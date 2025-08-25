@@ -17,10 +17,13 @@ pub struct MultiStarkVerifyingKeyView<'a, Val, Com> {
 
 impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
     /// Returns a view with all airs.
-    pub(crate) fn full_view(&self) -> MultiStarkVerifyingKeyView<Val<SC>, Com<SC>> {
+    pub(crate) fn full_view(&self) -> MultiStarkVerifyingKeyView<'_, Val<SC>, Com<SC>> {
         self.view(&(0..self.inner.per_air.len()).collect_vec())
     }
-    pub(crate) fn view(&self, air_ids: &[usize]) -> MultiStarkVerifyingKeyView<Val<SC>, Com<SC>> {
+    pub(crate) fn view(
+        &self,
+        air_ids: &[usize],
+    ) -> MultiStarkVerifyingKeyView<'_, Val<SC>, Com<SC>> {
         MultiStarkVerifyingKeyView {
             per_air: air_ids.iter().map(|&id| &self.inner.per_air[id]).collect(),
             trace_height_constraints: &self.inner.trace_height_constraints,

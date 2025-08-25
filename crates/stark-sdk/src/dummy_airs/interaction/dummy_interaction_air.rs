@@ -209,7 +209,7 @@ where
             .device
             .as_ref()
             .unwrap()
-            .commit(&[cached_trace.clone()]);
+            .commit(std::slice::from_ref(&cached_trace));
 
         AirProvingContext {
             cached_mains: vec![CommittedTraceData {
