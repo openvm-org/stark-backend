@@ -13,6 +13,11 @@ The backend is designed to be modular and compatible with different proof system
 
 - [`openvm-stark-backend`](crates/stark-backend): General purpose STARK proving system with multi-trace and logup support, built on top of Plonky3.
 - [`openvm-stark-sdk`](crates/stark-sdk): Low-level SDK for use with STARK backend to generate proofs for specific STARK configurations.
+- [`openvm-cuda-builder`](crates/cuda-builder): Build utilities and CUDA detection crate, meant to be imported as a build dependency in crates that use CUDA.
+- [`openvm-cuda-common`](crates/cuda-common): Shared headers (`.cuh/.h` files) and CUDA utilities library.
+- [`openvm-cuda-backend`](crates/cuda-backend): CUDA implementation of a STARK prover backend using all of the previous crates.
+
+Contributors should read [Development without CUDA](./docs/README.md#development-without-cuda) and [Development with CUDA](./docs/README.md#development-with-cuda) for instructions on how to set up their development environments.
 
 ## Status
 
