@@ -204,9 +204,7 @@ public:
                 bool intt, const NTTParameters& params)
       : d_inout(d_ptr), lg_domain_size(lg_dsz), padded_poly_size(padded_poly_size), poly_count(poly_count), is_intt(intt), stage(0),
         ntt_parameters(params)
-    {
-        params.sync();   // [DIFF]: be sure that parameters are built
-    }
+    {}
 
     void step(int iterations)
     {
