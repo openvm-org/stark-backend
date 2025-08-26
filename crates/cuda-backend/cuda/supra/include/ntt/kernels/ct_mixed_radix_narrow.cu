@@ -6,6 +6,7 @@
  * LOCAL CHANGES (high level):
  * - 2025-08-13: support multiple rows in _CT_NTT
  * - 2025-08-13: avoid using sppark's stream_t
+ * - 2025-08-26: no need to sync default stream
  */
 
 // Copyright Supranational LLC

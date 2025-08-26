@@ -8,6 +8,7 @@
  * - 2025-08-13: #if !defined FEATURE_BABY_BEAR -> delete
  * - 2025-08-13: NTTParameters constructor async on custom stream
  * - 2025-08-13: static params holder all_params() -> NTTParametersHolder
+ * - 2025-08-26: NTTParameters constructor on cudaStreamPerThread
  */
 
 // Copyright Supranational LLC
