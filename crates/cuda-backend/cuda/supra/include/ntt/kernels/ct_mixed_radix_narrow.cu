@@ -6,6 +6,7 @@
  * LOCAL CHANGES (high level):
  * - 2025-08-13: support multiple rows in _CT_NTT
  * - 2025-08-13: avoid using sppark's stream_t
+ * - 2025-08-26: no need to sync default stream
  */
 
 // Copyright Supranational LLC
@@ -204,9 +205,7 @@ public:
                 bool intt, const NTTParameters& params)
       : d_inout(d_ptr), lg_domain_size(lg_dsz), padded_poly_size(padded_poly_size), poly_count(poly_count), is_intt(intt), stage(0),
         ntt_parameters(params)
-    {
-        params.sync();   // [DIFF]: be sure that parameters are built
-    }
+    {}
 
     void step(int iterations)
     {
