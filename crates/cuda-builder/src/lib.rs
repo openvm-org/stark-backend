@@ -38,7 +38,7 @@ impl Default for CudaBuilder {
                 "--std=c++17".to_string(),
                 "--expt-relaxed-constexpr".to_string(),
                 "-Xfatbin=-compress-all".to_string(),
-                "--default-stream=per_thread".to_string(),
+                "--default-stream=per-thread".to_string(),
             ],
             link_libraries: vec!["cudart".to_string(), "cuda".to_string()],
             link_search_paths,
