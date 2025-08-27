@@ -4,6 +4,7 @@ use bytesize::ByteSize;
 use lazy_static::lazy_static;
 
 use crate::{
+    common::set_device,
     error::{check, MemoryError},
     stream::{cudaStreamPerThread, cudaStream_t, default_stream_sync},
 };
@@ -12,6 +13,7 @@ use crate::{
 extern "C" {
     fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;
     fn cudaFreeAsync(dev_ptr: *mut c_void, stream: cudaStream_t) -> i32;
+    fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
 }
 
 lazy_static! {
@@ -29,10 +31,19 @@ unsafe impl Sync for MemoryManager {}
 
 impl MemoryManager {
     pub fn new() -> Self {
+        set_device().unwrap();
+        let mut free: usize = 0;
+        let mut total: usize = 0;
+        check(unsafe { cudaMemGetInfo(&mut free, &mut total) }).unwrap();
+        let initial_used = total - free;
+        tracing::info!(
+            "GPU mem initial usage: current={}",
+            ByteSize::b(initial_used as u64)
+        );
         Self {
             allocated_ptrs: HashMap::new(),
-            current_size: 0,
-            max_used_size: 0,
+            current_size: initial_used,
+            max_used_size: initial_used,
         }
     }
 

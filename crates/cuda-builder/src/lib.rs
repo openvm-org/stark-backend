@@ -182,6 +182,9 @@ impl CudaBuilder {
             builder.flag(flag);
         }
 
+        // Add stream per-thread flag
+        builder.flag("--default-stream per-thread");
+
         // Add compute capability flags
         builder
             .flag("-gencode")
