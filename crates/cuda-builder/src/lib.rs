@@ -38,6 +38,7 @@ impl Default for CudaBuilder {
                 "--std=c++17".to_string(),
                 "--expt-relaxed-constexpr".to_string(),
                 "-Xfatbin=-compress-all".to_string(),
+                "--default-stream=per_thread".to_string(),
             ],
             link_libraries: vec!["cudart".to_string(), "cuda".to_string()],
             link_search_paths,
@@ -181,9 +182,6 @@ impl CudaBuilder {
         for flag in &self.custom_flags {
             builder.flag(flag);
         }
-
-        // Add stream per-thread flag
-        builder.flag("--default-stream").flag("per-thread");
 
         // Add compute capability flags
         builder
