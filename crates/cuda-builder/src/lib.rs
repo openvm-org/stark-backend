@@ -183,7 +183,7 @@ impl CudaBuilder {
         }
 
         // Add stream per-thread flag
-        builder.flag("--default-stream per-thread");
+        builder.flag("--default-stream").flag("per-thread");
 
         // Add compute capability flags
         builder

@@ -11,6 +11,7 @@ pub const cudaMemPoolAttrReuseFollowEventDependencies: u32 = 1;
 
 #[link(name = "cudart")]
 extern "C" {
+    fn cudaFree(dev_ptr: *mut c_void) -> i32;
     fn cudaGetDevice(device: *mut i32) -> i32;
     fn cudaDeviceReset() -> i32;
     fn cudaDeviceGetDefaultMemPool(pool: *mut cudaMemPool_t, device: i32) -> i32;
@@ -30,6 +31,10 @@ pub fn get_device() -> Result<i32, CudaError> {
 pub fn set_device() -> Result<(), CudaError> {
     let device = get_device()?;
     unsafe {
+        // 0. Create a context
+        check(cudaFree(std::ptr::null_mut()))?;
+
+        // 1. Get the default memory pool
         let mut pool: cudaMemPool_t = std::ptr::null_mut();
         check(cudaDeviceGetDefaultMemPool(&mut pool, device))?;
 
