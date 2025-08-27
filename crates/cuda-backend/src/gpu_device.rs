@@ -1,5 +1,5 @@
 use derivative::Derivative;
-use openvm_cuda_common::common::set_device;
+use openvm_cuda_common::common::get_device;
 use openvm_stark_sdk::config::FriParameters;
 use p3_baby_bear::BabyBear;
 use p3_commit::TwoAdicMultiplicativeCoset;
@@ -23,13 +23,13 @@ pub struct GpuDevice {
 
 impl GpuDevice {
     pub fn new(config: GpuConfig, rap_phase_seq: Option<FriLogUpPhaseGpu>) -> Self {
-        let device_id = set_device().unwrap();
+        let device_id = get_device().unwrap();
         unsafe {
             sppark_init().unwrap();
         }
         Self {
             config,
-            id: device_id,
+            id: device_id as u32,
             rap_phase_seq,
         }
     }
