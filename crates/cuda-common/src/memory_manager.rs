@@ -4,7 +4,7 @@ use bytesize::ByteSize;
 use lazy_static::lazy_static;
 
 use crate::{
-    common::{set_device, MEMORY_POOL_SIZE},
+    common::set_device,
     error::{check, MemoryError},
     stream::{cudaStreamPerThread, cudaStream_t, default_stream_sync},
 };
@@ -68,9 +68,6 @@ impl MemoryManager {
 
         if let Some(size) = self.allocated_ptrs.remove(&nn) {
             self.current_size -= size;
-            if size >= MEMORY_POOL_SIZE {
-                default_stream_sync().unwrap();
-            }
         } else {
             return Err(MemoryError::UntrackedPointer);
         }
