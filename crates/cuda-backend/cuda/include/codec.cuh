@@ -1,3 +1,9 @@
+/*
+ * Source: https://github.com/scroll-tech/plonky3-gpu (private repo)
+ * Status: BASED ON plonky3-gpu/gpu-backend/src/cuda/kernels/codec.h
+ * Imported: 2025-01-25 by @gaxiom
+ */
+
 // A very simple custom codec for constraints wroten in the AIR/RAP frontend language.
 #pragma once
 

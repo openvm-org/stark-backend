@@ -1,3 +1,9 @@
+/*
+ * Source: https://github.com/scroll-tech/plonky3-gpu (private repo)
+ * Status: BASED ON plonky3-gpu/gpu-backend/src/cuda/kernels/permute.cu
+ * Imported: 2025-01-25 by @gaxiom
+ */
+
 #include "codec.cuh"
 #include "fp.h"
 #include "fpext.h"
