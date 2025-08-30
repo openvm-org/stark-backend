@@ -37,3 +37,4 @@ We would like to thank these teams for sharing their code for open source develo
 - [SP1](https://github.com/succinctlabs/sp1): We learned from SP1's `AirBuilder` designs, and the original design for the `InteractionBuilder` was inspired by them.
 - [Risc0](https://github.com/risc0/risc0): We used some of Risc0's open source CUDA kernels as the starting point for our own CUDA kernels.
 - [Supranational](https://github.com/supranational/sppark): We ported and modified [sppark](https://github.com/supranational/sppark)'s open source NTT CUDA kernels for use in our CUDA backend.
+- [Scroll](https://github.com/scroll-tech/): Members of the Scroll team made foundational contributions to the CUDA backend.
