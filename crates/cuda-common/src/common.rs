@@ -8,7 +8,6 @@ type cudaMemPool_t = *mut c_void;
 pub const cudaMemPoolAttrReleaseThreshold: u32 = 4;
 #[allow(non_upper_case_globals)]
 pub const cudaMemPoolAttrReuseFollowEventDependencies: u32 = 1;
-pub const MEMORY_POOL_SIZE: usize = 512 * 1024 * 1024;
 
 #[link(name = "cudart")]
 extern "C" {
@@ -47,10 +46,11 @@ pub fn set_device() -> Result<(), CudaError> {
         ))?;
 
         // 2. Set release threshold to 512 MB
+        let threshold: usize = 512 * 1024 * 1024;
         check(cudaMemPoolSetAttribute(
             pool,
             cudaMemPoolAttrReleaseThreshold,
-            &MEMORY_POOL_SIZE as *const usize as *const c_void,
+            &threshold as *const usize as *const c_void,
         ))?;
 
         // 3. Optional but safe: assign pool back to device
