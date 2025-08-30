@@ -4,7 +4,7 @@ use bytesize::ByteSize;
 use lazy_static::lazy_static;
 
 use crate::{
-    common::set_device,
+    common::{set_device, MEMORY_POOL_SIZE},
     error::{check, MemoryError},
     stream::{cudaStreamPerThread, cudaStream_t, default_stream_sync},
 };

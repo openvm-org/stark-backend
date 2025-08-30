@@ -11,6 +11,7 @@ extern "C" {
     fn cudaEventCreate(event: *mut cudaEvent_t) -> i32;
     fn cudaEventRecord(event: cudaEvent_t, stream: cudaStream_t) -> i32;
     fn cudaEventSynchronize(event: cudaEvent_t) -> i32;
+    fn cudaEventQuery(event: cudaEvent_t) -> i32;
     fn cudaEventDestroy(event: cudaEvent_t) -> i32;
     fn cudaEventElapsedTime(ms: *mut f32, start: cudaEvent_t, end: cudaEvent_t) -> i32;
 }
@@ -69,6 +70,12 @@ pub fn default_stream_sync() -> Result<(), CudaError> {
     check(unsafe { cudaStreamSynchronize(cudaStreamPerThread) })
 }
 
+pub enum CudaEventStatus {
+    Completed,
+    NotReady,
+    Error(CudaError),
+}
+
 pub struct CudaEvent {
     event: cudaEvent_t,
 }
@@ -98,6 +105,15 @@ impl CudaEvent {
     pub unsafe fn record_and_wait(&self, stream: cudaStream_t) -> Result<(), CudaError> {
         self.record(stream)?;
         check(cudaEventSynchronize(self.event))
+    }
+
+    pub fn status(&self) -> CudaEventStatus {
+        let status = unsafe { cudaEventQuery(self.event) };
+        match status {
+            0 => CudaEventStatus::Completed,  // CUDA_SUCCESS
+            600 => CudaEventStatus::NotReady, // CUDA_ERROR_NOT_READY
+            _ => CudaEventStatus::Error(CudaError::new(status)),
+        }
     }
 }
 

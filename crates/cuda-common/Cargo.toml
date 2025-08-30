@@ -12,6 +12,7 @@ metrics.workspace = true
 lazy_static.workspace = true
 thiserror.workspace = true
 bytesize.workspace = true
+ctor.workspace = true
 
 [build-dependencies]
 openvm-cuda-builder.workspace = true

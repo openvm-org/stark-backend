@@ -78,6 +78,41 @@ pub enum MemoryError {
 
     #[error("Failed to acquire memory manager lock")]
     LockError,
+
+    #[error(
+        "Out of memory in pool (size requested: {requested} bytes, available: {available} bytes)"
+    )]
+    OutOfMemory { requested: usize, available: usize },
+
+    #[error("Memory manager not initialized")]
+    NotInitialized,
+
+    #[error("Failed to initialize CUDA driver API")]
+    InitializationFailed,
+
+    #[error("Failed to reserve virtual address space (requested: {size} bytes)")]
+    VirtualMemoryReserveFailed { size: usize },
+
+    #[error("Failed to allocate physical GPU memory (size: {size} bytes)")]
+    PhysicalAllocationFailed { size: usize },
+
+    #[error("Failed to map physical memory to virtual address space")]
+    MappingFailed,
+
+    #[error("Failed to set memory access permissions")]
+    AccessSetFailed,
+
+    #[error("Invalid pointer: pointer not found in allocation table")]
+    InvalidPointer,
+
+    #[error("Background allocator thread panicked")]
+    BackgroundAllocatorPanicked,
+
+    #[error("Growth request timed out after {timeout_ms}ms")]
+    GrowthTimeout { timeout_ms: u64 },
+
+    #[error("CUDA driver error: {code}")]
+    CudaDriverError { code: i32 },
 }
 
 #[derive(Error, Debug)]
