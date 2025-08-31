@@ -7,11 +7,17 @@ use std::{
 
 use bytesize::ByteSize;
 
-use crate::{error::MemoryError, stream::cudaStreamPerThread};
+use crate::{error::{check, MemoryError}, stream::{cudaStreamPerThread, cudaStream_t}};
 
 mod cuda;
 mod vm_pool;
 use vm_pool::VirtualMemoryPool;
+
+#[link(name = "cudart")]
+extern "C" {
+    fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;
+    fn cudaFreeAsync(dev_ptr: *mut c_void, stream: cudaStream_t) -> i32;
+}
 
 static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
 
@@ -23,8 +29,6 @@ fn init() {
 
 pub struct MemoryManager {
     pool: VirtualMemoryPool,
-
-    // Tracking for compatibility with original interface
     allocated_ptrs: HashMap<NonNull<c_void>, usize>,
     current_size: usize,
     max_used_size: usize,
@@ -47,20 +51,20 @@ impl MemoryManager {
     }
 
     pub fn d_malloc(&mut self, size: usize) -> Result<*mut c_void, MemoryError> {
-        // Try to allocate from pool
-        match self.pool.malloc_internal(size) {
-            Ok(ptr) => {
-                let ptr = ptr as *mut c_void;
-                self.allocated_ptrs
-                    .insert(NonNull::new(ptr).expect("Null pointer from pool"), size);
-                self.current_size += size;
-                if self.current_size > self.max_used_size {
-                    self.max_used_size = self.current_size;
-                }
-                Ok(ptr)
-            }
-            Err(e) => Err(e),
+        self.current_size += size;
+        if self.current_size > self.max_used_size {
+            self.max_used_size = self.current_size;
         }
+
+        if size < self.pool.page_size {
+            let mut ptr: *mut c_void = std::ptr::null_mut();
+            check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) })?;
+            self.allocated_ptrs
+                .insert(NonNull::new(ptr).expect("cudaMalloc returned null"), size);
+            return Ok(ptr);
+        }
+
+        self.pool.malloc_internal(size).map_err(MemoryError::from)
     }
 
     pub unsafe fn d_free(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
@@ -68,12 +72,25 @@ impl MemoryManager {
 
         if let Some(size) = self.allocated_ptrs.remove(&nn) {
             self.current_size -= size;
-            // Free from pool
-            self.pool.free_internal(ptr)?;
-
-            Ok(())
+            check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })?;
         } else {
-            Err(MemoryError::UntrackedPointer)
+            self.pool.free_internal(ptr)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for MemoryManager {
+    fn drop(&mut self) {
+        for &nn in self.allocated_ptrs.keys() {
+            unsafe { d_free(nn.as_ptr()).unwrap() };
+        }
+        if !self.allocated_ptrs.is_empty() {
+            tracing::error!(
+                "Error: {} allocations were automatically freed on MemoryManager drop",
+                self.allocated_ptrs.len()
+            );
         }
     }
 }

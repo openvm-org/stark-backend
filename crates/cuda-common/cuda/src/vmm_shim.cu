@@ -7,7 +7,7 @@ extern "C" {
 
 // Return 0 on success, else CUresult / cudaError_t code
 
-int ax_vmm_check_support(int device_ordinal) {
+int _vmm_check_support(int device_ordinal) {
   CUdevice dev;
   CUresult r = cuDeviceGet(&dev, device_ordinal);
   if (r != CUDA_SUCCESS) return (int)r;
@@ -17,7 +17,7 @@ int ax_vmm_check_support(int device_ordinal) {
   return vmm ? 0 : (int)CUDA_ERROR_NOT_SUPPORTED;
 }
 
-int ax_vmm_min_granularity(int device_ordinal, size_t* out) {
+int _vmm_min_granularity(int device_ordinal, size_t* out) {
   if (!out) return (int)CUDA_ERROR_INVALID_VALUE;
   CUdevice dev;
   CUresult r = cuDeviceGet(&dev, device_ordinal);
@@ -32,16 +32,16 @@ int ax_vmm_min_granularity(int device_ordinal, size_t* out) {
   return (int)cuMemGetAllocationGranularity(out, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED);
 }
 
-int ax_vmm_reserve(size_t size, size_t align, CUdeviceptr* out_va) {
+int _vmm_reserve(size_t size, size_t align, CUdeviceptr* out_va) {
   if (!out_va) return (int)CUDA_ERROR_INVALID_VALUE;
   return (int)cuMemAddressReserve(out_va, size, align, 0, 0);
 }
 
-int ax_vmm_release_va(CUdeviceptr base, size_t size) {
+int _vmm_release_va(CUdeviceptr base, size_t size) {
   return (int)cuMemAddressFree(base, size);
 }
 
-int ax_vmm_create_physical(int device_ordinal, size_t bytes, CUmemGenericAllocationHandle* out_h) {
+int _vmm_create_physical(int device_ordinal, size_t bytes, CUmemGenericAllocationHandle* out_h) {
   if (!out_h) return (int)CUDA_ERROR_INVALID_VALUE;
   CUmemAllocationProp prop{};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -52,11 +52,9 @@ int ax_vmm_create_physical(int device_ordinal, size_t bytes, CUmemGenericAllocat
   return (int)cuMemCreate(out_h, bytes, &prop, 0);
 }
 
-int ax_vmm_map(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h, size_t offset) {
-  return (int)cuMemMap(va, bytes, offset, h, 0);
-}
-
-int ax_vmm_set_access(CUdeviceptr va, size_t bytes, int device_ordinal) {
+int _vmm_map_and_set_access(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h, int device_ordinal) {
+  CUresult r = cuMemMap(va, bytes, 0, h, 0);
+  if (r != CUDA_SUCCESS) return (int)r;
   CUmemAccessDesc acc{};
   acc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   acc.location.id = device_ordinal;
@@ -64,7 +62,7 @@ int ax_vmm_set_access(CUdeviceptr va, size_t bytes, int device_ordinal) {
   return (int)cuMemSetAccess(va, bytes, &acc, 1);
 }
 
-int ax_vmm_unmap_release(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h) {
+int _vmm_unmap_release(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h) {
   CUresult r = cuMemUnmap(va, bytes);
   if (r != CUDA_SUCCESS) return (int)r;
   return (int)cuMemRelease(h);

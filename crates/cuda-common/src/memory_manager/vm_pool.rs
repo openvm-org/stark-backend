@@ -6,6 +6,8 @@ use std::{
     ffi::c_void,
 };
 
+use bytesize::ByteSize;
+
 use super::cuda::*;
 use crate::{common::set_device, error::MemoryError};
 
@@ -49,8 +51,8 @@ pub(super) struct VirtualMemoryPool {
     // Virtual address space
     virtual_base: VirtualPtr,
 
-    // Map for all active tyles
-    physical_map: HashMap<CUdeviceptr, (CUmemGenericAllocationHandle, usize)>,
+    // Map for all active pages
+    physical_map: HashMap<CUdeviceptr, CUmemGenericAllocationHandle>,
 
     // Free regions in virtual space (sorted by address)
     free_regions: BTreeSet<VirtualPtr>,
@@ -58,8 +60,8 @@ pub(super) struct VirtualMemoryPool {
     // Active allocations
     allocations: HashMap<CUdeviceptr, usize>,
 
-    // Granularity (usually 2MB)
-    gran: usize,
+    // Granularity size: (page % 2MB must be 0)
+    pub(super) page_size: usize,
 
     // Device ordinal
     device_id: i32,
@@ -68,9 +70,6 @@ pub(super) struct VirtualMemoryPool {
 unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
-fn align_up(size: usize, alignment: usize) -> usize {
-    ((size + alignment - 1) / alignment) * alignment
-}
 
 impl VirtualMemoryPool {
     fn new() -> Self {
@@ -90,7 +89,7 @@ impl VirtualMemoryPool {
                 physical_map: HashMap::new(),
                 free_regions: BTreeSet::new(),
                 allocations: HashMap::new(),
-                gran,
+                page_size: gran,
                 device_id,
             }
         }
@@ -100,42 +99,37 @@ impl VirtualMemoryPool {
         if memory_size == 0 {
             return Err(MemoryError::InvalidMemorySize { size: memory_size });
         }
-
-        let bytes = align_up(memory_size, self.gran);
+        let pages = memory_size.div_ceil(self.page_size);
         let new_base = self.virtual_base.end_ptr();
 
-        unsafe {
-            // Create new physical memory handle
-            let handle = vmm_create_physical(self.device_id, bytes)?;
-            // Map the new memory to the virtual address space
-            vmm_map(new_base, bytes, handle, 0)?;
-            // Set access permissions
-            vmm_set_access(new_base, bytes, self.device_id)?;
-
-            // Insert the new memory into the physical map
-            for i in 0..bytes / self.gran {
-                let ptr = new_base + (i * self.gran) as u64;
-                self.physical_map.insert(ptr, (handle, i * self.gran));
+        for i in 0..pages {
+            unsafe {
+                // Create new physical memory handle
+                let handle = vmm_create_physical(self.device_id, self.page_size)?;
+                // Map it to virtual address space & set RW permissions
+                vmm_map_and_set_access(new_base + (i * self.page_size) as u64, self.page_size, handle, self.device_id)?;
+                // Insert the new memory into the physical map
+                self.physical_map.insert(new_base + (i * self.page_size) as u64, handle);
             }
         }
 
         // Update virtual base size
-        self.virtual_base.size += bytes;
+        self.virtual_base.size += pages * self.page_size;
         // Insert the new memory into the free regions
         self.free_region_insert(VirtualPtr {
             ptr: new_base,
-            size: bytes,
+            size: pages * self.page_size,
         });
         tracing::info!(
             "Virtual memory created: requested: {}, total: {}",
-            memory_size,
-            self.virtual_base.size
+            ByteSize::b(memory_size as u64),
+            ByteSize::b(self.virtual_base.size as u64)
         );
         Ok(())
     }
 
     pub(super) fn malloc_internal(&mut self, requested: usize) -> Result<*mut c_void, MemoryError> {
-        let aligned_size = align_up(requested, self.gran);
+        let aligned_size = requested.div_ceil(self.page_size) * self.page_size;
         // Try to find best fit free region
         let mut best_region = self
             .free_regions
@@ -145,7 +139,7 @@ impl VirtualMemoryPool {
             .map(|vp| vp.clone());
 
         if !best_region.is_some() {
-            // Try to defragment & alloc more physical memory
+            // Try to defragment or/and alloc more physical memory
             best_region = self.defragment_or_create_new_handle(aligned_size)?;
         }
 
@@ -237,21 +231,21 @@ impl VirtualMemoryPool {
             }
             sum += vp.size;
             self.free_regions.remove(&vp);
-            for i in 0..vp.size / self.gran {
-                let tile = vp.ptr + (i * self.gran) as u64;
+            for i in 0..vp.size / self.page_size {
+                let page = vp.ptr + (i * self.page_size) as u64;
                 // delete this tyle from the physical map
-                let (handle, offset) = self
+                let handle = self
                     .physical_map
-                    .remove(&tile)
+                    .remove(&page)
                     .ok_or(MemoryError::InvalidPointer)?;
                 // map the tyle to the new start
                 unsafe {
-                    vmm_map(new_start, self.gran, handle, offset)?;
+                    vmm_map_and_set_access(new_start, self.page_size, handle, self.device_id)?;
                 }
                 // add this tyle to the physical map
-                self.physical_map.insert(new_start, (handle, offset));
+                self.physical_map.insert(new_start, handle);
                 // move new start to the end of the tyle
-                new_start += self.gran as u64;
+                new_start += self.page_size as u64;
             }
             // create new free region
             let new_free = VirtualPtr {
@@ -259,10 +253,6 @@ impl VirtualMemoryPool {
                 size: vp.size,
             };
             self.free_region_insert(new_free.clone());
-            // set access to the new block
-            unsafe {
-                vmm_set_access(new_free.ptr, new_free.size, self.device_id)?;
-            }
         }
         // update virtual base size
         self.virtual_base.size = (new_start - self.virtual_base.ptr) as usize;
@@ -272,6 +262,16 @@ impl VirtualMemoryPool {
         }
 
         Ok(self.free_regions.last().map(|vp| vp.clone()))
+    }
+}
+
+impl Drop for VirtualMemoryPool {
+    fn drop(&mut self) {
+        tracing::info!("VirtualMemoryPool: GPU memory used total: {}", ByteSize::b((self.physical_map.len() * self.page_size) as u64));
+        self.free_regions.clear();
+        self.physical_map.clear();
+        self.allocations.clear();
+        todo!();
     }
 }
 
