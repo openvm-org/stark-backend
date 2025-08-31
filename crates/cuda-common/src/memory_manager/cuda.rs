@@ -15,18 +15,24 @@ extern "C" {
         bytes: usize,
         out_h: *mut CUmemGenericAllocationHandle,
     ) -> i32;
-    fn ax_vmm_map_set_access(
+    fn ax_vmm_map(
         va: CUdeviceptr,
         bytes: usize,
         h: CUmemGenericAllocationHandle,
-        device_ordinal: i32,
+        offset: usize,
     ) -> i32;
+    fn ax_vmm_set_access(va: CUdeviceptr, bytes: usize, device_ordinal: i32) -> i32;
     fn ax_vmm_unmap_release(va: CUdeviceptr, bytes: usize, h: CUmemGenericAllocationHandle) -> i32;
     fn ax_vmm_error_string(code: i32, out: *mut *const i8) -> i32;
 }
 
-pub(super) unsafe fn vmm_check_support(device_ordinal: i32) -> Result<(), CudaError> {
-    CudaError::from_result(ax_vmm_check_support(device_ordinal))
+pub(super) unsafe fn vmm_check_support(device_ordinal: i32) -> Result<bool, CudaError> {
+    let status = ax_vmm_check_support(device_ordinal);
+    if status == 0 {
+        Ok(true)
+    } else {
+        Err(CudaError::new(status))
+    }
 }
 
 pub(super) unsafe fn vmm_min_granularity(device_ordinal: i32) -> Result<usize, CudaError> {
@@ -54,13 +60,21 @@ pub(super) unsafe fn vmm_create_physical(
     Ok(h)
 }
 
-pub(super) unsafe fn vmm_map_set_access(
+pub(super) unsafe fn vmm_map(
     va: CUdeviceptr,
     bytes: usize,
     h: CUmemGenericAllocationHandle,
+    offset: usize,
+) -> Result<(), CudaError> {
+    CudaError::from_result(ax_vmm_map(va, bytes, h, offset))
+}
+
+pub(super) unsafe fn vmm_set_access(
+    va: CUdeviceptr,
+    bytes: usize,
     device_ordinal: i32,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(ax_vmm_map_set_access(va, bytes, h, device_ordinal))
+    CudaError::from_result(ax_vmm_set_access(va, bytes, device_ordinal))
 }
 
 pub(super) unsafe fn vmm_unmap_release(

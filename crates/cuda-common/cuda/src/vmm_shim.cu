@@ -29,7 +29,7 @@ int ax_vmm_min_granularity(int device_ordinal, size_t* out) {
   prop.location.id = device_ordinal;
   prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_NONE;
 
-  return (int)cuMemGetAllocationGranularity(out, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+  return (int)cuMemGetAllocationGranularity(out, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED);
 }
 
 int ax_vmm_reserve(size_t size, size_t align, CUdeviceptr* out_va) {
@@ -52,10 +52,11 @@ int ax_vmm_create_physical(int device_ordinal, size_t bytes, CUmemGenericAllocat
   return (int)cuMemCreate(out_h, bytes, &prop, 0);
 }
 
-int ax_vmm_map_set_access(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h, int device_ordinal) {
-  CUresult r = cuMemMap(va, bytes, 0, h, 0);
-  if (r != CUDA_SUCCESS) return (int)r;
+int ax_vmm_map(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h, size_t offset) {
+  return (int)cuMemMap(va, bytes, offset, h, 0);
+}
 
+int ax_vmm_set_access(CUdeviceptr va, size_t bytes, int device_ordinal) {
   CUmemAccessDesc acc{};
   acc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   acc.location.id = device_ordinal;

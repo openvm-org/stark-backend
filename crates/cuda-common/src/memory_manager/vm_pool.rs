@@ -1,190 +1,284 @@
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    cmp::{Ordering, Reverse},
+    collections::{BTreeSet, HashMap, HashSet},
     ffi::c_void,
 };
 
 use super::cuda::*;
-use crate::{
-    common::set_device,
-    error::MemoryError,
-    stream::{cudaStream_t, CudaEvent, CudaEventStatus},
-};
+use crate::{common::set_device, error::MemoryError};
 
-const INITIAL_POOL_SIZE: usize = 256 << 20; // 256 MB
+const INITIAL_POOL_SIZE: usize = 1825361100; // 1.7GB 2 << 30; // 2 GB
+const VIRTUAL_POOL_SIZE: usize = 128 << 30; // 128 GB
 
-// Pending free tracking
-struct PendingFree {
+#[derive(Hash, Clone, Debug)]
+struct VirtualPtr {
     ptr: CUdeviceptr,
     size: usize,
-    event: CudaEvent,
 }
 
-unsafe impl Send for PendingFree {}
-unsafe impl Sync for PendingFree {}
+impl VirtualPtr {
+    fn end_ptr(&self) -> CUdeviceptr {
+        self.ptr + self.size as u64
+    }
+}
+
+impl PartialEq for VirtualPtr {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+impl Eq for VirtualPtr {}
+
+impl PartialOrd for VirtualPtr {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VirtualPtr {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.ptr.cmp(&other.ptr)
+    }
+}
 
 // Virtual memory pool implementation
 pub(super) struct VirtualMemoryPool {
     // Virtual address space
-    va_base: CUdeviceptr,
-    va_size: usize,
+    virtual_base: VirtualPtr,
 
-    // Physical memory handles
-    physical_handles: Vec<CUmemGenericAllocationHandle>,
+    // Map for all active tyles
+    physical_map: HashMap<CUdeviceptr, (CUmemGenericAllocationHandle, usize)>,
 
     // Free regions in virtual space (sorted by address)
-    free_regions: BTreeMap<CUdeviceptr, usize>,
+    free_regions: BTreeSet<VirtualPtr>,
 
     // Active allocations
     allocations: HashMap<CUdeviceptr, usize>,
 
-    // Pending frees (async)
-    pending_frees: Vec<PendingFree>,
+    // Granularity (usually 2MB)
+    gran: usize,
+
+    // Device ordinal
+    device_id: i32,
 }
 
 unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
+fn align_up(size: usize, alignment: usize) -> usize {
+    ((size + alignment - 1) / alignment) * alignment
+}
+
 impl VirtualMemoryPool {
-    pub(super) fn new(initial_size: usize) -> Result<Self, MemoryError> {
+    fn new() -> Self {
+        let device_id = set_device().unwrap();
         unsafe {
-            let device_id = set_device()?;
-            vmm_check_support(device_id)?;
+            vmm_check_support(device_id).expect("VMM not supported");
 
-            let gran = vmm_min_granularity(device_id)?;
+            let gran = vmm_min_granularity(device_id).unwrap();
 
-            let va_size = 48usize << 30;
-            let va_base = vmm_reserve(va_size, gran)?;
+            let va_base = vmm_reserve(VIRTUAL_POOL_SIZE, gran).unwrap();
 
-            let initial = (initial_size + gran - 1) / gran * gran;
-            let handle = vmm_create_physical(device_id, initial)?;
-            vmm_map_set_access(va_base, initial, handle, device_id)?;
-
-            let free_regions = {
-                let mut regions = BTreeMap::new();
-                regions.insert(va_base, initial_size);
-                regions
-            };
-            println!("Free regions: {:?}", free_regions);
-
-            Ok(Self {
-                va_base,
-                va_size,
-                physical_handles: vec![handle],
-                free_regions,
+            Self {
+                virtual_base: VirtualPtr {
+                    ptr: va_base,
+                    size: 0,
+                },
+                physical_map: HashMap::new(),
+                free_regions: BTreeSet::new(),
                 allocations: HashMap::new(),
-                pending_frees: Vec::new(),
-            })
+                gran,
+                device_id,
+            }
         }
     }
 
-    pub(super) fn malloc_internal(&mut self, size: usize) -> Result<CUdeviceptr, MemoryError> {
-        // Process any completed frees first
-        self.process_pending_frees();
+    fn create_new_handle(&mut self, memory_size: usize) -> Result<(), MemoryError> {
+        if memory_size == 0 {
+            return Err(MemoryError::InvalidMemorySize { size: memory_size });
+        }
 
-        // Align size to 256 bytes for better performance
-        let aligned_size = (size + 255) & !255;
+        let bytes = align_up(memory_size, self.gran);
+        let new_base = self.virtual_base.end_ptr();
 
-        // Find best fit free region
-        let best_region = self
+        unsafe {
+            // Create new physical memory handle
+            let handle = vmm_create_physical(self.device_id, bytes)?;
+            // Map the new memory to the virtual address space
+            vmm_map(new_base, bytes, handle, 0)?;
+            // Set access permissions
+            vmm_set_access(new_base, bytes, self.device_id)?;
+
+            // Insert the new memory into the physical map
+            for i in 0..bytes / self.gran {
+                let ptr = new_base + (i * self.gran) as u64;
+                self.physical_map.insert(ptr, (handle, i * self.gran));
+            }
+        }
+
+        // Update virtual base size
+        self.virtual_base.size += bytes;
+        // Insert the new memory into the free regions
+        self.free_region_insert(VirtualPtr {
+            ptr: new_base,
+            size: bytes,
+        });
+        tracing::info!(
+            "Virtual memory created: requested: {}, total: {}",
+            memory_size,
+            self.virtual_base.size
+        );
+        Ok(())
+    }
+
+    pub(super) fn malloc_internal(&mut self, requested: usize) -> Result<*mut c_void, MemoryError> {
+        let aligned_size = align_up(requested, self.gran);
+        // Try to find best fit free region
+        let mut best_region = self
             .free_regions
             .iter()
-            .filter(|(_, &size)| size >= aligned_size)
-            .min_by_key(|(_, &size)| size)
-            .map(|(&ptr, &size)| (ptr, size));
+            .filter(|vp| vp.size >= aligned_size)
+            .min_by_key(|vp| vp.size)
+            .map(|vp| vp.clone());
 
-        if let Some((ptr, region_size)) = best_region {
-            self.free_regions.remove(&ptr);
+        if !best_region.is_some() {
+            // Try to defragment & alloc more physical memory
+            best_region = self.defragment_or_create_new_handle(aligned_size)?;
+        }
+
+        if let Some(region) = best_region {
+            self.free_regions.remove(&region);
 
             // If region is larger, return remainder to free list
-            if region_size > aligned_size {
-                self.free_regions
-                    .insert(ptr + aligned_size as u64, region_size - aligned_size);
+            if region.size > aligned_size {
+                self.free_regions.insert(VirtualPtr {
+                    ptr: region.ptr + aligned_size as u64,
+                    size: region.size - aligned_size,
+                });
             }
 
-            self.allocations.insert(ptr, aligned_size);
-            return Ok(ptr);
-        }
-        if !self.pending_frees.is_empty() {
-            self.process_pending_frees();
-            let best_region = self
-                .free_regions
-                .iter()
-                .filter(|(_, &size)| size >= aligned_size)
-                .min_by_key(|(_, &size)| size)
-                .map(|(&ptr, &size)| (ptr, size));
-
-            if let Some((ptr, region_size)) = best_region {
-                self.free_regions.remove(&ptr);
-                if region_size > aligned_size {
-                    self.free_regions
-                        .insert(ptr + aligned_size as u64, region_size - aligned_size);
-                }
-                self.allocations.insert(ptr, aligned_size);
-                return Ok(ptr);
-            }
+            self.allocations.insert(region.ptr, aligned_size);
+            return Ok(region.ptr as *mut c_void);
         }
 
         Err(MemoryError::OutOfMemory {
-            requested: size,
-            available: self.free_regions.values().sum(),
+            requested,
+            available: self.free_regions.iter().map(|vp| vp.size).sum(),
         })
     }
 
-    pub(super) fn free_internal(
-        &mut self,
-        ptr: *mut c_void,
-        stream: cudaStream_t,
-    ) -> Result<(), MemoryError> {
+    pub(super) fn free_internal(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
         let ptr = ptr as CUdeviceptr;
         let size = self
             .allocations
             .remove(&ptr)
             .ok_or(MemoryError::InvalidPointer)?;
 
-        unsafe {
-            // Create event to track when memory is safe to reuse
-            let event = CudaEvent::new()?;
-            event.record(stream)?;
-
-            self.pending_frees.push(PendingFree { ptr, size, event });
-        }
+        self.free_region_insert(VirtualPtr { ptr, size });
 
         Ok(())
     }
 
-    fn process_pending_frees(&mut self) {
-        let mut still_pending = Vec::new();
-
-        for pending in self.pending_frees.drain(..) {
-            match pending.event.status() {
-                CudaEventStatus::Completed => {
-                    // Add to free regions and coalesce if possible
-                    self.free_regions.insert(pending.ptr, pending.size);
-                    let next_ptr = pending.ptr + pending.size as u64;
-                    if let Some(next_size) = self.free_regions.remove(&next_ptr) {
-                        // Merge with next region
-                        *self.free_regions.get_mut(&pending.ptr).unwrap() += next_size;
-                    }
-                }
-                CudaEventStatus::NotReady => {
-                    // Still pending
-                    still_pending.push(pending);
-                }
-                CudaEventStatus::Error(e) => {
-                    // Error - log and continue
-                    tracing::error!("Event query failed: {}", e);
-                }
+    fn free_region_insert(&mut self, region: VirtualPtr) {
+        let mut region = region.clone();
+        // Potential merge with next neighbor
+        if let Some(next) = self.free_regions.range(region.clone()..).next().cloned() {
+            if region.end_ptr() == next.ptr {
+                self.free_regions.remove(&next);
+                region.size += next.size;
             }
         }
+        // Potential merge with previous neighbor
+        if let Some(prev) = self
+            .free_regions
+            .range(..region.clone())
+            .next_back()
+            .cloned()
+        {
+            if prev.end_ptr() == region.ptr {
+                self.free_regions.remove(&prev);
+                region.ptr = prev.ptr;
+                region.size += prev.size;
+            }
+        }
+        self.free_regions.insert(region);
+    }
 
-        self.pending_frees = still_pending;
+    fn defragment_or_create_new_handle(
+        &mut self,
+        requested: usize,
+    ) -> Result<Option<VirtualPtr>, MemoryError> {
+        if self.free_regions.is_empty() {
+            self.create_new_handle(requested)?;
+            return Ok(self.free_regions.last().map(|vp| vp.clone()));
+        }
+
+        let mut to_defrag: Vec<VirtualPtr> = self.free_regions.iter().cloned().collect();
+        let mut sum = 0;
+        // If last free region is at the end of the virtual address space, it will be used for
+        // defragmentation
+        if to_defrag
+            .last()
+            .map_or(false, |vp| vp.end_ptr() == self.virtual_base.end_ptr())
+        {
+            sum = to_defrag.pop().unwrap().size;
+        }
+
+        let mut new_start = self.virtual_base.end_ptr();
+        // Biggest first -> less blocks to defragment
+        to_defrag.sort_by_key(|vp| Reverse(vp.size));
+
+        for vp in to_defrag {
+            if sum >= requested {
+                break;
+            }
+            sum += vp.size;
+            self.free_regions.remove(&vp);
+            for i in 0..vp.size / self.gran {
+                let tile = vp.ptr + (i * self.gran) as u64;
+                // delete this tyle from the physical map
+                let (handle, offset) = self
+                    .physical_map
+                    .remove(&tile)
+                    .ok_or(MemoryError::InvalidPointer)?;
+                // map the tyle to the new start
+                unsafe {
+                    vmm_map(new_start, self.gran, handle, offset)?;
+                }
+                // add this tyle to the physical map
+                self.physical_map.insert(new_start, (handle, offset));
+                // move new start to the end of the tyle
+                new_start += self.gran as u64;
+            }
+            // create new free region
+            let new_free = VirtualPtr {
+                ptr: new_start - vp.size as u64,
+                size: vp.size,
+            };
+            self.free_region_insert(new_free.clone());
+            // set access to the new block
+            unsafe {
+                vmm_set_access(new_free.ptr, new_free.size, self.device_id)?;
+            }
+        }
+        // update virtual base size
+        self.virtual_base.size = (new_start - self.virtual_base.ptr) as usize;
+        // if there is still memory left, create a new handle
+        if sum < requested {
+            self.create_new_handle(requested - sum)?;
+        }
+
+        Ok(self.free_regions.last().map(|vp| vp.clone()))
     }
 }
 
 impl Default for VirtualMemoryPool {
     fn default() -> Self {
-        Self::new(INITIAL_POOL_SIZE).unwrap()
+        let mut pool = Self::new();
+        pool.create_new_handle(INITIAL_POOL_SIZE).unwrap();
+        pool
     }
 }

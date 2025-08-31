@@ -68,8 +68,8 @@ impl MemoryManager {
 
         if let Some(size) = self.allocated_ptrs.remove(&nn) {
             self.current_size -= size;
-            // Free in pool (async with event tracking)
-            self.pool.free_internal(ptr, cudaStreamPerThread)?;
+            // Free from pool
+            self.pool.free_internal(ptr)?;
 
             Ok(())
         } else {

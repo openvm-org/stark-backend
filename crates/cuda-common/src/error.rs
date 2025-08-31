@@ -79,6 +79,9 @@ pub enum MemoryError {
     #[error("Failed to acquire memory manager lock")]
     LockError,
 
+    #[error("Invalid memory size: {size}")]
+    InvalidMemorySize { size: usize },
+
     #[error(
         "Out of memory in pool (size requested: {requested} bytes, available: {available} bytes)"
     )]
@@ -107,9 +110,6 @@ pub enum MemoryError {
 
     #[error("Background allocator thread panicked")]
     BackgroundAllocatorPanicked,
-
-    #[error("Growth request timed out after {timeout_ms}ms")]
-    GrowthTimeout { timeout_ms: u64 },
 
     #[error("CUDA driver error: {code}")]
     CudaDriverError { code: i32 },
