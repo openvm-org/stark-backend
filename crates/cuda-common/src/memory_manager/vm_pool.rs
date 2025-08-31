@@ -2,7 +2,7 @@
 
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     ffi::c_void,
 };
 
@@ -11,10 +11,10 @@ use bytesize::ByteSize;
 use super::cuda::*;
 use crate::{common::set_device, error::MemoryError};
 
-const INITIAL_POOL_SIZE: usize = 1825361100; // 1.7GB 2 << 30; // 2 GB
+const INITIAL_POOL_SIZE: usize = 1717986918 + (14 << 20); // 1.6GB 1 << 30; // 1 GB
 const VIRTUAL_POOL_SIZE: usize = 128 << 30; // 128 GB
 
-#[derive(Hash, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct VirtualPtr {
     ptr: CUdeviceptr,
     size: usize,
@@ -70,7 +70,6 @@ pub(super) struct VirtualMemoryPool {
 unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
-
 impl VirtualMemoryPool {
     fn new() -> Self {
         let device_id = set_device().unwrap();
@@ -107,9 +106,15 @@ impl VirtualMemoryPool {
                 // Create new physical memory handle
                 let handle = vmm_create_physical(self.device_id, self.page_size)?;
                 // Map it to virtual address space & set RW permissions
-                vmm_map_and_set_access(new_base + (i * self.page_size) as u64, self.page_size, handle, self.device_id)?;
+                vmm_map_and_set_access(
+                    new_base + (i * self.page_size) as u64,
+                    self.page_size,
+                    handle,
+                    self.device_id,
+                )?;
                 // Insert the new memory into the physical map
-                self.physical_map.insert(new_base + (i * self.page_size) as u64, handle);
+                self.physical_map
+                    .insert(new_base + (i * self.page_size) as u64, handle);
             }
         }
 
@@ -120,7 +125,7 @@ impl VirtualMemoryPool {
             ptr: new_base,
             size: pages * self.page_size,
         });
-        tracing::info!(
+        println!(
             "Virtual memory created: requested: {}, total: {}",
             ByteSize::b(memory_size as u64),
             ByteSize::b(self.virtual_base.size as u64)
@@ -128,33 +133,37 @@ impl VirtualMemoryPool {
         Ok(())
     }
 
+    /// Allocate memory and return a pointer to the allocated memory
     pub(super) fn malloc_internal(&mut self, requested: usize) -> Result<*mut c_void, MemoryError> {
-        let aligned_size = requested.div_ceil(self.page_size) * self.page_size;
+        assert!(
+            requested != 0 && requested % self.page_size == 0,
+            "Requested size must be a multiple of the page size"
+        );
         // Try to find best fit free region
         let mut best_region = self
             .free_regions
             .iter()
-            .filter(|vp| vp.size >= aligned_size)
+            .filter(|vp| vp.size >= requested)
             .min_by_key(|vp| vp.size)
-            .map(|vp| vp.clone());
+            .cloned();
 
-        if !best_region.is_some() {
+        if best_region.is_none() {
             // Try to defragment or/and alloc more physical memory
-            best_region = self.defragment_or_create_new_handle(aligned_size)?;
+            best_region = self.defragment_or_create_new_handle(requested)?;
         }
 
         if let Some(region) = best_region {
             self.free_regions.remove(&region);
 
             // If region is larger, return remainder to free list
-            if region.size > aligned_size {
+            if region.size > requested {
                 self.free_regions.insert(VirtualPtr {
-                    ptr: region.ptr + aligned_size as u64,
-                    size: region.size - aligned_size,
+                    ptr: region.ptr + requested as u64,
+                    size: region.size - requested,
                 });
             }
 
-            self.allocations.insert(region.ptr, aligned_size);
+            self.allocations.insert(region.ptr, requested);
             return Ok(region.ptr as *mut c_void);
         }
 
@@ -164,7 +173,8 @@ impl VirtualMemoryPool {
         })
     }
 
-    pub(super) fn free_internal(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
+    /// Free a pointer and return the size of the freed memory
+    pub(super) fn free_internal(&mut self, ptr: *mut c_void) -> Result<usize, MemoryError> {
         let ptr = ptr as CUdeviceptr;
         let size = self
             .allocations
@@ -173,7 +183,7 @@ impl VirtualMemoryPool {
 
         self.free_region_insert(VirtualPtr { ptr, size });
 
-        Ok(())
+        Ok(size)
     }
 
     fn free_region_insert(&mut self, region: VirtualPtr) {
@@ -207,7 +217,7 @@ impl VirtualMemoryPool {
     ) -> Result<Option<VirtualPtr>, MemoryError> {
         if self.free_regions.is_empty() {
             self.create_new_handle(requested)?;
-            return Ok(self.free_regions.last().map(|vp| vp.clone()));
+            return Ok(self.free_regions.last().cloned());
         }
 
         let mut to_defrag: Vec<VirtualPtr> = self.free_regions.iter().cloned().collect();
@@ -216,7 +226,7 @@ impl VirtualMemoryPool {
         // defragmentation
         if to_defrag
             .last()
-            .map_or(false, |vp| vp.end_ptr() == self.virtual_base.end_ptr())
+            .is_some_and(|vp| vp.end_ptr() == self.virtual_base.end_ptr())
         {
             sum = to_defrag.pop().unwrap().size;
         }
@@ -261,13 +271,16 @@ impl VirtualMemoryPool {
             self.create_new_handle(requested - sum)?;
         }
 
-        Ok(self.free_regions.last().map(|vp| vp.clone()))
+        Ok(self.free_regions.last().cloned())
     }
 }
 
 impl Drop for VirtualMemoryPool {
     fn drop(&mut self) {
-        tracing::info!("VirtualMemoryPool: GPU memory used total: {}", ByteSize::b((self.physical_map.len() * self.page_size) as u64));
+        tracing::info!(
+            "VirtualMemoryPool: GPU memory used total: {}",
+            ByteSize::b((self.physical_map.len() * self.page_size) as u64)
+        );
         self.free_regions.clear();
         self.physical_map.clear();
         self.allocations.clear();

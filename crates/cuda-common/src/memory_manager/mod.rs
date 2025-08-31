@@ -7,7 +7,10 @@ use std::{
 
 use bytesize::ByteSize;
 
-use crate::{error::{check, MemoryError}, stream::{cudaStreamPerThread, cudaStream_t}};
+use crate::{
+    error::{check, MemoryError},
+    stream::{cudaStreamPerThread, cudaStream_t},
+};
 
 mod cuda;
 mod vm_pool;
@@ -51,22 +54,30 @@ impl MemoryManager {
     }
 
     pub fn d_malloc(&mut self, size: usize) -> Result<*mut c_void, MemoryError> {
-        self.current_size += size;
-        if self.current_size > self.max_used_size {
-            self.max_used_size = self.current_size;
-        }
+        assert!(size != 0, "Requested size must be non-zero");
 
-        if size < self.pool.page_size {
+        let mut tracked_size = size;
+        let ptr = if size < self.pool.page_size {
             let mut ptr: *mut c_void = std::ptr::null_mut();
             check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) })?;
             self.allocated_ptrs
                 .insert(NonNull::new(ptr).expect("cudaMalloc returned null"), size);
-            return Ok(ptr);
-        }
+            Ok(ptr)
+        } else {
+            tracked_size = size.div_ceil(self.pool.page_size) * self.pool.page_size;
+            self.pool.malloc_internal(tracked_size)
+        };
 
-        self.pool.malloc_internal(size).map_err(MemoryError::from)
+        self.current_size += tracked_size;
+        if self.current_size > self.max_used_size {
+            self.max_used_size = self.current_size;
+        }
+        ptr
     }
 
+    /// # Safety
+    /// The pointer `ptr` must be a valid, previously allocated device pointer.
+    /// The caller must ensure that `ptr` is not used after this function is called.
     pub unsafe fn d_free(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 
@@ -74,7 +85,7 @@ impl MemoryManager {
             self.current_size -= size;
             check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })?;
         } else {
-            self.pool.free_internal(ptr)?;
+            self.current_size -= self.pool.free_internal(ptr)?;
         }
 
         Ok(())
@@ -87,7 +98,7 @@ impl Drop for MemoryManager {
             unsafe { d_free(nn.as_ptr()).unwrap() };
         }
         if !self.allocated_ptrs.is_empty() {
-            tracing::error!(
+            println!(
                 "Error: {} allocations were automatically freed on MemoryManager drop",
                 self.allocated_ptrs.len()
             );
@@ -107,6 +118,9 @@ pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
     manager.d_malloc(size)
 }
 
+/// # Safety
+/// The pointer `ptr` must be a valid, previously allocated device pointer.
+/// The caller must ensure that `ptr` is not used after this function is called.
 pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     let manager = MEMORY_MANAGER.get().ok_or(MemoryError::NotInitialized)?;
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
