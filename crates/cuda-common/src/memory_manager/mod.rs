@@ -64,7 +64,7 @@ impl MemoryManager {
                 .insert(NonNull::new(ptr).expect("cudaMalloc returned null"), size);
             Ok(ptr)
         } else {
-            tracked_size = size.div_ceil(self.pool.page_size) * self.pool.page_size;
+            tracked_size = size.next_multiple_of(self.pool.page_size);
             self.pool.malloc_internal(tracked_size)
         };
 
