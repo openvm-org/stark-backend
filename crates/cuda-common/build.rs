@@ -14,9 +14,7 @@ fn main() {
         builder.emit_link_directives();
         builder.build();
 
-        let include_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-            .join("cuda")
-            .join("include");
+        let include_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("include");
         println!("cargo:include={}", include_path.display()); // -> DEP_CUDA_COMMON_INCLUDE
     } else {
         eprintln!("cargo:warning=CUDA is not available");

@@ -127,30 +127,6 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     manager.d_free(ptr)
 }
 
-fn peak_memory_usage() -> usize {
-    MEMORY_MANAGER
-        .get()
-        .and_then(|m| m.lock().ok())
-        .map(|m| m.max_used_size)
-        .unwrap_or(0)
-}
-
-fn current_memory_usage() -> usize {
-    MEMORY_MANAGER
-        .get()
-        .and_then(|m| m.lock().ok())
-        .map(|m| m.current_size)
-        .unwrap_or(0)
-}
-
-fn reset_peak_memory(new_value: usize) {
-    if let Some(manager) = MEMORY_MANAGER.get() {
-        if let Ok(mut manager) = manager.lock() {
-            manager.max_used_size = new_value;
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct MemTracker {
     current: usize,
@@ -159,31 +135,42 @@ pub struct MemTracker {
 
 impl MemTracker {
     pub fn start(label: &'static str) -> Self {
-        Self {
-            current: current_memory_usage(),
-            label,
-        }
+        let current = MEMORY_MANAGER
+            .get()
+            .and_then(|m| m.lock().ok())
+            .map(|m| m.current_size)
+            .unwrap_or(0);
+
+        Self { current, label }
     }
 
     #[inline]
     pub fn tracing_info(&self, msg: impl Into<Option<&'static str>>) {
-        let current = current_memory_usage();
-        let peak = peak_memory_usage();
+        let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
+            tracing::error!("Memory manager not available");
+            return;
+        };
+        let current = manager.current_size;
+        let peak = manager.max_used_size;
         let used = current as isize - self.current as isize;
         let sign = if used >= 0 { "+" } else { "-" };
+        let pool_usage = manager.pool.memory_usage();
         tracing::info!(
-            "GPU mem usage: used={}{}, current={}, peak={} ({})",
+            "GPU mem: used={}{}, current={}, peak={}, in pool={} ({})",
             sign,
             ByteSize::b(used.unsigned_abs() as u64),
             ByteSize::b(current as u64),
             ByteSize::b(peak as u64),
+            ByteSize::b(pool_usage as u64),
             msg.into()
                 .map_or(self.label.to_string(), |m| format!("{}:{}", self.label, m))
         );
     }
 
     pub fn reset_peak(&mut self) {
-        reset_peak_memory(self.current);
+        if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
+            manager.max_used_size = self.current;
+        }
     }
 }
 

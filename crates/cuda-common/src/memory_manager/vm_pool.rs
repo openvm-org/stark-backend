@@ -118,7 +118,7 @@ impl VirtualMemoryPool {
         tracing::info!(
             "VM Pool allocated {} GPU Memory. Total: {}",
             ByteSize::b(total_size as u64),
-            ByteSize::b((self.active_pages.len() * self.page_size) as u64)
+            ByteSize::b((self.memory_usage()) as u64)
         );
         Ok(())
     }
@@ -257,13 +257,17 @@ impl VirtualMemoryPool {
 
         Ok(self.free_regions.iter().next_back().map(|(&p, _)| p))
     }
+
+    pub(super) fn memory_usage(&self) -> usize {
+        self.active_pages.len() * self.page_size
+    }
 }
 
 impl Drop for VirtualMemoryPool {
     fn drop(&mut self) {
         tracing::info!(
             "VirtualMemoryPool: GPU memory used total: {}",
-            ByteSize::b((self.active_pages.len() * self.page_size) as u64)
+            ByteSize::b((self.memory_usage()) as u64)
         );
         unsafe {
             // Unmap and release all pages
