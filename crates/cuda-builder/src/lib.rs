@@ -18,19 +18,9 @@ pub struct CudaBuilder {
 impl Default for CudaBuilder {
     fn default() -> Self {
         let mut link_search_paths = Vec::new();
-        if let Ok(ld_path) = env::var("LD_LIBRARY_PATH") {
-            for path in ld_path.split(':') {
-                if !path.is_empty() {
-                    link_search_paths.push(path.to_string());
-                }
-            }
-        }
-        if let Ok(library_path) = env::var("LIBRARY_PATH") {
-            for path in library_path.split(':') {
-                if !path.is_empty() {
-                    link_search_paths.push(path.to_string());
-                }
-            }
+        link_search_paths.push("/usr/local/cuda/lib64".to_string());
+        if let Ok(cuda_lib_dir) = env::var("CUDA_LIB_DIR") {
+            link_search_paths.push(cuda_lib_dir);
         }
 
         Self {
