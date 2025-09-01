@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use std::{
-    cmp::Reverse,
+    cmp::{max, Reverse},
     collections::{BTreeMap, HashMap},
     ffi::c_void,
 };
@@ -11,7 +11,11 @@ use bytesize::ByteSize;
 use super::cuda::*;
 use crate::{common::set_device, error::MemoryError};
 
-const INITIAL_POOL_SIZE: usize = 1717986918 + (14 << 20); // 1.6GB 1 << 30; // 1 GB
+#[link(name = "cudart")]
+extern "C" {
+    fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
+}
+
 const VIRTUAL_POOL_SIZE: usize = 128 << 30; // 128 GB
 
 /// Virtual memory pool implementation.
@@ -43,24 +47,43 @@ unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
 impl VirtualMemoryPool {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let device_id = set_device().unwrap();
-        unsafe {
-            vmm_check_support(device_id).expect("VMM not supported");
-
-            let gran = vmm_min_granularity(device_id).unwrap();
-
-            let va_base = vmm_reserve(VIRTUAL_POOL_SIZE, gran).unwrap();
-
-            Self {
-                root: va_base,
-                curr_end: va_base,
-                active_pages: HashMap::new(),
-                free_regions: BTreeMap::new(),
-                used_regions: HashMap::new(),
-                page_size: gran,
-                device_id,
+        let (root, page_size) = unsafe {
+            match vmm_check_support(device_id) {
+                Ok(_) => {
+                    let gran = vmm_min_granularity(device_id).unwrap();
+                    let page_size = match std::env::var("VMM_PAGE_SIZE") {
+                        Ok(val) => {
+                            let custom_size: usize =
+                                val.parse().expect("VMM_PAGE_SIZE must be a valid number");
+                            assert!(
+                                custom_size > 0 && custom_size % gran == 0,
+                                "VMM_PAGE_SIZE must be > 0 and multiple of {}",
+                                gran
+                            );
+                            custom_size
+                        }
+                        Err(_) => gran,
+                    };
+                    let va_base = vmm_reserve(VIRTUAL_POOL_SIZE, page_size).unwrap();
+                    (va_base, page_size)
+                }
+                Err(_) => {
+                    tracing::warn!("VMM not supported, falling back to cudaMallocAsync");
+                    (0, usize::MAX)
+                }
             }
+        };
+
+        Self {
+            root,
+            curr_end: root,
+            active_pages: HashMap::new(),
+            free_regions: BTreeMap::new(),
+            used_regions: HashMap::new(),
+            page_size,
+            device_id,
         }
     }
 
@@ -252,7 +275,39 @@ impl Drop for VirtualMemoryPool {
 impl Default for VirtualMemoryPool {
     fn default() -> Self {
         let mut pool = Self::new();
-        pool.create_new_handle(INITIAL_POOL_SIZE).unwrap();
+
+        // Skip allocation if VMM not supported
+        if pool.page_size == usize::MAX {
+            return pool;
+        }
+
+        let initial_pages = match std::env::var("VMM_PAGES") {
+            Ok(val) => {
+                let pages: usize = val.parse().expect("VMM_PAGES must be a valid number");
+                assert!(pages > 0, "VMM_PAGES must be > 0");
+                pages
+            }
+            Err(_) => {
+                // Default: Use 80% of free memory divided by CPU count
+                unsafe {
+                    let mut free = 0usize;
+                    let mut total = 0usize;
+                    cudaMemGetInfo(&mut free, &mut total);
+
+                    let cpu_count = std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1);
+
+                    // Reserve 80% of free memory, divided by CPU threads
+                    // This assumes roughly one GPU process per CPU thread
+                    let per_process = (free * 4 / 5) / cpu_count;
+                    // Convert to pages, minimum 256 pages (512MB at 2MB pages)
+                    max(256, per_process / pool.page_size)
+                }
+            }
+        };
+        pool.create_new_handle(initial_pages * pool.page_size)
+            .unwrap();
         pool
     }
 }
