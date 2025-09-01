@@ -116,7 +116,7 @@ impl VirtualMemoryPool {
         // Insert the new memory into the free regions
         self.free_region_insert(new_base, total_size);
         tracing::info!(
-            "VM Pool allocated {} GPU Memory. Total: {}",
+            "GPU mem: VM Pool allocated: {}, total: {}",
             ByteSize::b(total_size as u64),
             ByteSize::b((self.memory_usage()) as u64)
         );
