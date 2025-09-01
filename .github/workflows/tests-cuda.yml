@@ -40,14 +40,13 @@ jobs:
 
       - name: Setup CUDA environment
         run: |
-          find /usr/local -name "libcuda.so*"
           # Find the actual CUDA library location
           CUDART_PATH=$(find /usr/local -name "libcudart.so" | head -1)
           if [ -n "$CUDART_PATH" ]; then
             CUDA_LIB_DIR=$(dirname "$CUDART_PATH")
             echo "CUDA libraries found at: $CUDA_LIB_DIR"
             echo "LD_LIBRARY_PATH=$CUDA_LIB_DIR${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
-            echo "LIBRARY_PATH=$CUDA_LIB_DIR${LIBRARY_PATH:+:${LIBRARY_PATH}}" >> $GITHUB_ENV
+            echo "LIBRARY_PATH=$CUDA_LIB_DIR/stubs${LIBRARY_PATH:+:${LIBRARY_PATH}}" >> $GITHUB_ENV
           else
             echo "CUDA libraries not found!"
             exit 1
