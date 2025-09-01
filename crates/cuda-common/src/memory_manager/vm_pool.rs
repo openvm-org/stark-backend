@@ -21,7 +21,6 @@ const VIRTUAL_POOL_SIZE: usize = 128 << 30; // 128 GB
 /// Virtual memory pool implementation.
 pub(super) struct VirtualMemoryPool {
     // Virtual address space root
-    #[allow(dead_code)]
     root: CUdeviceptr,
 
     // Current end of active address space
@@ -87,7 +86,7 @@ impl VirtualMemoryPool {
         }
     }
 
-    fn create_new_handle(&mut self, memory_size: usize) -> Result<(), MemoryError> {
+    fn create_new_pages(&mut self, memory_size: usize) -> Result<(), MemoryError> {
         if memory_size == 0 {
             return Err(MemoryError::InvalidMemorySize { size: memory_size });
         }
@@ -126,6 +125,9 @@ impl VirtualMemoryPool {
 
     /// Allocate memory and return a pointer to the allocated memory
     pub(super) fn malloc_internal(&mut self, requested: usize) -> Result<*mut c_void, MemoryError> {
+        if self.curr_end == self.root {
+            return Err(MemoryError::NotInitialized);
+        }
         assert!(
             requested != 0 && requested % self.page_size == 0,
             "Requested size must be a multiple of the page size"
@@ -140,7 +142,7 @@ impl VirtualMemoryPool {
 
         if best_region.is_none() {
             // Try to defragment or/and alloc more physical memory
-            best_region = self.defragment_or_create_new_handle(requested)?;
+            best_region = self.defragment_or_create_new_pages(requested)?;
         }
 
         if let Some(ptr) = best_region {
@@ -164,6 +166,9 @@ impl VirtualMemoryPool {
 
     /// Free a pointer and return the size of the freed memory
     pub(super) fn free_internal(&mut self, ptr: *mut c_void) -> Result<usize, MemoryError> {
+        if self.curr_end == self.root {
+            return Err(MemoryError::NotInitialized);
+        }
         let ptr = ptr as CUdeviceptr;
         let size = self
             .used_regions
@@ -194,12 +199,12 @@ impl VirtualMemoryPool {
         self.free_regions.insert(ptr, size);
     }
 
-    fn defragment_or_create_new_handle(
+    fn defragment_or_create_new_pages(
         &mut self,
         requested: usize,
     ) -> Result<Option<CUdeviceptr>, MemoryError> {
         if self.free_regions.is_empty() {
-            self.create_new_handle(requested)?;
+            self.create_new_pages(requested)?;
             return Ok(self.free_regions.iter().next_back().map(|(&p, _)| p));
         }
 
@@ -247,7 +252,7 @@ impl VirtualMemoryPool {
         self.curr_end = new_start;
         // if there is still memory left, create a new handle
         if sum < requested {
-            self.create_new_handle(requested - sum)?;
+            self.create_new_pages(requested - sum)?;
         }
 
         Ok(self.free_regions.iter().next_back().map(|(&p, _)| p))
@@ -306,7 +311,7 @@ impl Default for VirtualMemoryPool {
                 }
             }
         };
-        pool.create_new_handle(initial_pages * pool.page_size)
+        pool.create_new_pages(initial_pages * pool.page_size)
             .unwrap();
         pool
     }

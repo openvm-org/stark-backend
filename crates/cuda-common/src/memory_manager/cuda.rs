@@ -22,7 +22,6 @@ extern "C" {
         device_ordinal: i32,
     ) -> i32;
     fn _vmm_unmap_release(va: CUdeviceptr, bytes: usize, h: CUmemGenericAllocationHandle) -> i32;
-    fn _vmm_error_string(code: i32, out: *mut *const i8) -> i32;
 }
 
 pub(super) unsafe fn vmm_check_support(device_ordinal: i32) -> Result<bool, CudaError> {
