@@ -11,8 +11,8 @@ fn main() {
             .flag("-Xcompiler=-fPIC")
             .file("cuda/src/vmm_shim.cu");
 
-        builder.emit_link_directives();
         builder.build();
+        builder.emit_link_directives();
 
         let include_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("include");
         println!("cargo:include={}", include_path.display()); // -> DEP_CUDA_COMMON_INCLUDE
