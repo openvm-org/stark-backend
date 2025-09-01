@@ -290,6 +290,7 @@ impl Default for VirtualMemoryPool {
             return pool;
         }
 
+        let mut free_mem = 0usize;
         let initial_pages = match std::env::var("VMM_PAGES") {
             Ok(val) => {
                 let pages: usize = val.parse().expect("VMM_PAGES must be a valid number");
@@ -299,9 +300,8 @@ impl Default for VirtualMemoryPool {
             Err(_) => {
                 // Default: Use 80% of free memory divided by CPU count
                 unsafe {
-                    let mut free = 0usize;
-                    let mut total = 0usize;
-                    cudaMemGetInfo(&mut free, &mut total);
+                    let mut total_mem = 0usize;
+                    cudaMemGetInfo(&mut free_mem, &mut total_mem);
 
                     let cpu_count = std::thread::available_parallelism()
                         .map(|n| n.get())
@@ -309,14 +309,19 @@ impl Default for VirtualMemoryPool {
 
                     // Reserve 80% of free memory, divided by CPU threads
                     // This assumes roughly one GPU process per CPU thread
-                    let per_process = (free * 4 / 5) / cpu_count;
+                    let per_process = (free_mem * 4 / 5) / cpu_count;
                     // Convert to pages, minimum 256 pages (512MB at 2MB pages)
                     max(256, per_process / pool.page_size)
                 }
             }
         };
-        pool.create_new_pages(initial_pages * pool.page_size)
-            .unwrap();
+        let requested = initial_pages * pool.page_size;
+        if let Err(e) = pool.create_new_pages(requested) {
+            panic!(
+                "Failed to allocate initial memory with pages={}, page_size={}. Error:{:?}",
+                initial_pages, pool.page_size, e
+            );
+        }
         pool
     }
 }
