@@ -25,6 +25,13 @@ impl Default for CudaBuilder {
                 }
             }
         }
+        if let Ok(library_path) = env::var("LIBRARY_PATH") {
+            for path in library_path.split(':') {
+                if !path.is_empty() {
+                    link_search_paths.push(path.to_string());
+                }
+            }
+        }
 
         Self {
             include_paths: Vec::new(),
