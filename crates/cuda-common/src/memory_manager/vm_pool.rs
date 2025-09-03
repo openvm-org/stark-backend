@@ -16,7 +16,7 @@ extern "C" {
     fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
 }
 
-const VIRTUAL_POOL_SIZE: usize = 128 << 30; // 128 GB
+const VIRTUAL_POOL_SIZE: usize = 1usize << 40; // 1 TB
 
 /// Virtual memory pool implementation.
 pub(super) struct VirtualMemoryPool {
