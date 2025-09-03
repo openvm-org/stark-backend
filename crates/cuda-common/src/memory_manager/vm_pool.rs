@@ -49,27 +49,27 @@ impl VirtualMemoryPool {
     pub(super) fn new() -> Self {
         let device_id = set_device().unwrap();
         let (root, page_size) = unsafe {
-            match vmm_check_support(device_id) {
+            match vpmm_check_support(device_id) {
                 Ok(_) => {
-                    let gran = vmm_min_granularity(device_id).unwrap();
-                    let page_size = match std::env::var("VMM_PAGE_SIZE") {
+                    let gran = vpmm_min_granularity(device_id).unwrap();
+                    let page_size = match std::env::var("VPMM_PAGE_SIZE") {
                         Ok(val) => {
                             let custom_size: usize =
-                                val.parse().expect("VMM_PAGE_SIZE must be a valid number");
+                                val.parse().expect("VPMM_PAGE_SIZE must be a valid number");
                             assert!(
                                 custom_size > 0 && custom_size % gran == 0,
-                                "VMM_PAGE_SIZE must be > 0 and multiple of {}",
+                                "VPMM_PAGE_SIZE must be > 0 and multiple of {}",
                                 gran
                             );
                             custom_size
                         }
                         Err(_) => gran,
                     };
-                    let va_base = vmm_reserve(VIRTUAL_POOL_SIZE, page_size).unwrap();
+                    let va_base = vpmm_reserve(VIRTUAL_POOL_SIZE, page_size).unwrap();
                     (va_base, page_size)
                 }
                 Err(_) => {
-                    tracing::warn!("VMM not supported, falling back to cudaMallocAsync");
+                    tracing::warn!("vpmm not supported, falling back to cudaMallocAsync");
                     (0, usize::MAX)
                 }
             }
@@ -96,9 +96,9 @@ impl VirtualMemoryPool {
         for i in 0..pages {
             unsafe {
                 // Create new physical memory handle
-                let handle = vmm_create_physical(self.device_id, self.page_size)?;
+                let handle = vpmm_create_physical(self.device_id, self.page_size)?;
                 // Map it to virtual address space & set RW permissions
-                vmm_map_and_set_access(
+                vpmm_map_and_set_access(
                     new_base + (i * self.page_size) as u64,
                     self.page_size,
                     handle,
@@ -219,7 +219,7 @@ impl VirtualMemoryPool {
             sum = to_defrag.pop().unwrap().1;
         }
 
-        let mut new_start = self.curr_end;
+        let mut new_end = self.curr_end;
         // Biggest first -> less blocks to defragment
         to_defrag.sort_by_key(|(_, size)| Reverse(*size));
 
@@ -238,18 +238,18 @@ impl VirtualMemoryPool {
                     .ok_or(MemoryError::InvalidPointer)?;
                 // map the tyle to the new start
                 unsafe {
-                    vmm_map_and_set_access(new_start, self.page_size, handle, self.device_id)?;
+                    vpmm_map_and_set_access(new_end, self.page_size, handle, self.device_id)?;
                 }
                 // add this tyle to the physical map
-                self.active_pages.insert(new_start, handle);
+                self.active_pages.insert(new_end, handle);
                 // move new start to the end of the tyle
-                new_start += self.page_size as u64;
+                new_end += self.page_size as u64;
             }
             // create new free region
-            self.free_region_insert(new_start - size as u64, size);
+            self.free_region_insert(new_end - size as u64, size);
         }
         // update virtual base size
-        self.curr_end = new_start;
+        self.curr_end = new_end;
         // if there is still memory left, create a new handle
         if sum < requested {
             self.create_new_pages(requested - sum)?;
@@ -272,11 +272,11 @@ impl Drop for VirtualMemoryPool {
         unsafe {
             // Unmap and release all pages
             for (&va, &handle) in &self.active_pages {
-                vmm_unmap_release(va, self.page_size, handle).unwrap();
+                vpmm_unmap_release(va, self.page_size, handle).unwrap();
             }
 
             // Free the virtual address reservation
-            vmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
+            vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
         }
     }
 }
@@ -285,7 +285,7 @@ impl Default for VirtualMemoryPool {
     fn default() -> Self {
         let mut pool = Self::new();
 
-        // Skip allocation if VMM not supported
+        // Skip allocation if vpmm not supported
         if pool.page_size == usize::MAX {
             return pool;
         }
@@ -298,10 +298,10 @@ impl Default for VirtualMemoryPool {
         }
 
         // Calculate initial number of pages to allocate
-        let initial_pages = match std::env::var("VMM_PAGES") {
+        let initial_pages = match std::env::var("VPMM_PAGES") {
             Ok(val) => {
-                let pages: usize = val.parse().expect("VMM_PAGES must be a valid number");
-                assert!(pages > 0, "VMM_PAGES must be > 0");
+                let pages: usize = val.parse().expect("VPMM_PAGES must be a valid number");
+                assert!(pages > 0, "VPMM_PAGES must be > 0");
                 pages
             }
             Err(_) => {

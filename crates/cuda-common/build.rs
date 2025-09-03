@@ -9,7 +9,7 @@ fn main() {
         let builder = CudaBuilder::new()
             .library_name("vmm_shim")
             .flag("-Xcompiler=-fPIC")
-            .file("cuda/src/vmm_shim.cu");
+            .file("cuda/src/vpmm_shim.cu");
 
         builder.clone().build();
         builder.emit_link_directives();

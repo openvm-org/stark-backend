@@ -92,9 +92,6 @@ pub enum MemoryError {
 
     #[error("Invalid pointer: pointer not found in allocation table")]
     InvalidPointer,
-
-    #[error("CUDA driver error: {code}")]
-    CudaDriverError { code: i32 },
 }
 
 #[derive(Error, Debug)]
