@@ -1,4 +1,4 @@
-# GPU Memory Manager with Virtual Pool (VPMM) — SPEC
+# GPU Memory Manager with Virtual Pool (VPMM)
 
 ## Introduction
 
@@ -57,7 +57,7 @@ After the sequence, live allocations total **16 GB**. Early steps are identical 
 [+10][...]  >  [10][+1][...]  >  [-10][1][...]
 ```
 
-**VPMM behavior** depends on page availability. For simplicity, assume 1 GB pages and that the first two allocations consumed 11 pages; define `X = PAGES - 11`, where `X ≥ 0`.
+**VPMM behavior** depends on page availability. For simplicity, assume 1 GB pages. First two allocations consumed 11 pages; define `X = PAGES - 11`, `X ≥ 0`.
 
 ### Case A: `X ≥ 11`
 
