@@ -22,7 +22,7 @@ jobs:
           components: rustfmt, clippy
       - uses: codespell-project/actions-codespell@v2
         with:
-          skip: Cargo.lock
+          skip: Cargo.lock, *.md
           ignore_words_file: .codespellignore
           path: "crates/"
 
