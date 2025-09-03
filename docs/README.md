@@ -30,4 +30,5 @@ Lastly, ensure that your shell profile or startup script sets the proper [path v
 PATH=/usr/local/cuda/bin${PATH:+:${PATH}}
 LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 ```
-Note that `/usr/local/cuda` is a symlink for the latest version of CUDA installed.
+Note that `/usr/local/cuda` is a default symlink for the latest version of CUDA installed.
+Use `CUDA_LIB_DIR` environment variable to specify a different CUDA library directory.

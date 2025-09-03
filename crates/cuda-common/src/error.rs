@@ -78,6 +78,20 @@ pub enum MemoryError {
 
     #[error("Failed to acquire memory manager lock")]
     LockError,
+
+    #[error("Invalid memory size: {size}")]
+    InvalidMemorySize { size: usize },
+
+    #[error(
+        "Out of memory in pool (size requested: {requested} bytes, available: {available} bytes)"
+    )]
+    OutOfMemory { requested: usize, available: usize },
+
+    #[error("Memory manager not initialized")]
+    NotInitialized,
+
+    #[error("Invalid pointer: pointer not found in allocation table")]
+    InvalidPointer,
 }
 
 #[derive(Error, Debug)]

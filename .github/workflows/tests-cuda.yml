@@ -40,7 +40,7 @@ jobs:
           if [ -n "$CUDART_PATH" ]; then
             CUDA_LIB_DIR=$(dirname "$CUDART_PATH")
             echo "CUDA libraries found at: $CUDA_LIB_DIR"
-            echo "LD_LIBRARY_PATH=$CUDA_LIB_DIR${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
+            echo "CUDA_LIB_DIR=$CUDA_LIB_DIR" >> $GITHUB_ENV
           else
             echo "CUDA libraries not found!"
             exit 1
