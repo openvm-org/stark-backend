@@ -20,8 +20,7 @@ jobs:
   stark-backend:
     name: stark-backend crate tests
     runs-on:
-      - runs-on=${{ github.run_id }}
-      - runner=16cpu-linux-arm64
+      - runs-on=${{ github.run_id }}/runner=16cpu-linux-arm64
 
     steps:
       - uses: actions/checkout@v5

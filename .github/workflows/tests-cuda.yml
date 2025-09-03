@@ -21,12 +21,7 @@ jobs:
   cuda-backend:
     name: cuda-backend crate tests and examples
     runs-on:
-      - runs-on=${{ github.run_id }}
-      - family=g6.xlarge
-      - image=ubuntu24-gpu-x64
-      - spot=false
-      - extras=s3-cache
-
+      - runs-on=${{ github.run_id }}/runner=test-gpu-nvidia
     steps:
       - uses: runs-on/action@v2
       - uses: actions/checkout@v5
