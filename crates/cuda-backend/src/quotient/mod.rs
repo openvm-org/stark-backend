@@ -46,8 +46,9 @@ impl QuotientCommitterGpu {
     ) -> SingleQuotientDataGpu {
         let log_trace_height = view_gpu.log_trace_height;
         let trace_domain = device.natural_domain_for_degree(1usize << log_trace_height);
+        let quotient_degree = quotient_degree as usize;
         let quotient_domain =
-            trace_domain.create_disjoint_domain(trace_domain.size() * quotient_degree as usize);
+            trace_domain.create_disjoint_domain(trace_domain.size() * quotient_degree);
 
         // run quotient evaluator on GPU
         let (after_challenge_lde_on_quotient_domain, challenges, perm_challenge): (
@@ -81,7 +82,7 @@ impl QuotientCommitterGpu {
         );
 
         SingleQuotientDataGpu {
-            quotient_degree: quotient_degree as usize,
+            quotient_degree,
             quotient_domain,
             quotient_values,
         }

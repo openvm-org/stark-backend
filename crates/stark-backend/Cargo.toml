@@ -23,6 +23,8 @@ serde = { workspace = true, default-features = false, features = [
     "alloc",
     "rc",
 ] }
+eyre = { workspace = true }
+serde_json = { workspace = true }
 derivative.workspace = true
 derive-new.workspace = true
 metrics = { workspace = true, optional = true }
