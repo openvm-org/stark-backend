@@ -125,9 +125,7 @@ impl AirStatisticsGenerator {
     }
 
     pub fn write_json<P: AsRef<Path>>(&self, file_path: P) -> eyre::Result<()> {
-        let json_data = serde_json::to_string_pretty(&self.stats)?;
-        let mut file = File::create(file_path)?;
-        file.write_all(json_data.as_bytes())?;
+        serde_json::to_writer_pretty(File::create(file_path)?, &self.stats)?;
         Ok(())
     }
 
@@ -159,53 +157,7 @@ impl AirStatisticsGenerator {
 
     pub fn print_dag<F: std::fmt::Debug>(dag: &SymbolicExpressionDag<F>) {
         for (idx, node) in dag.nodes.iter().enumerate() {
-            println!("  Node {}: {}", idx, Self::format_node(node));
-        }
-    }
-
-    fn format_node<F: std::fmt::Debug>(node: &SymbolicExpressionNode<F>) -> String {
-        match node {
-            SymbolicExpressionNode::Variable(var) => format!("Variable({:?})", var),
-            SymbolicExpressionNode::IsFirstRow => "IsFirstRow".to_string(),
-            SymbolicExpressionNode::IsLastRow => "IsLastRow".to_string(),
-            SymbolicExpressionNode::IsTransition => "IsTransition".to_string(),
-            SymbolicExpressionNode::Constant(f) => format!("Constant({:?})", f),
-            SymbolicExpressionNode::Add {
-                left_idx,
-                right_idx,
-                degree_multiple,
-            } => {
-                format!(
-                    "Add(Node{} + Node{}, degree_multiple: {})",
-                    left_idx, right_idx, degree_multiple
-                )
-            }
-            SymbolicExpressionNode::Sub {
-                left_idx,
-                right_idx,
-                degree_multiple,
-            } => {
-                format!(
-                    "Sub(Node{} - Node{}, degree_multiple: {})",
-                    left_idx, right_idx, degree_multiple
-                )
-            }
-            SymbolicExpressionNode::Neg {
-                idx,
-                degree_multiple,
-            } => {
-                format!("Neg(-Node{}, degree_multiple: {})", idx, degree_multiple)
-            }
-            SymbolicExpressionNode::Mul {
-                left_idx,
-                right_idx,
-                degree_multiple,
-            } => {
-                format!(
-                    "Mul(Node{} * Node{}, degree_multiple: {})",
-                    left_idx, right_idx, degree_multiple
-                )
-            }
+            println!("  Node {}: {:?}", idx, node);
         }
     }
 }
