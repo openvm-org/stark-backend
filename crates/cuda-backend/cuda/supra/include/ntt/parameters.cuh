@@ -19,12 +19,9 @@
 #define __SPPARK_NTT_PARAMETERS_CUH__
 
 #define MAX_LG_DOMAIN_SIZE 27
-#define LG_WINDOW_SIZE ((MAX_LG_DOMAIN_SIZE + 4) / 5)
-#define WINDOW_SIZE (1 << LG_WINDOW_SIZE)
-#define WINDOW_NUM ((MAX_LG_DOMAIN_SIZE + LG_WINDOW_SIZE - 1) / LG_WINDOW_SIZE)
-
-const fr_t group_gen = fr_t(0x1f);  // primitive_root(0x78000001)
-const fr_t group_gen_inverse = fr_t(0x03def7be);
+#define LG_WINDOW_SIZE ((MAX_LG_DOMAIN_SIZE + 4) / 5) // 6
+#define WINDOW_SIZE (1 << LG_WINDOW_SIZE) // 64
+#define WINDOW_NUM ((MAX_LG_DOMAIN_SIZE + LG_WINDOW_SIZE - 1) / LG_WINDOW_SIZE) // 5
 
 // Values in Montgomery form
 const fr_t forward_roots_of_unity[MAX_LG_DOMAIN_SIZE + 1] = {
@@ -122,10 +119,6 @@ const fr_t domain_size_inverse[MAX_LG_DOMAIN_SIZE + 1] = {
 
 typedef unsigned int index_t;
 
-__device__ __constant__ fr_t forward_radix6_twiddles[32];
-__device__ __constant__ fr_t inverse_radix6_twiddles[32];
-
-
 template<class fr_t> __global__
 void generate_partial_twiddles(fr_t (*roots)[WINDOW_SIZE],
                                const fr_t root_of_unity)
@@ -178,45 +171,6 @@ void generate_all_twiddles(fr_t* d_radixX_twiddles, const fr_t root6,
     d_radixX_twiddles[tid] = root_of_unity^pow;
 }
 
-template<class fr_t> __launch_bounds__(512) __global__
-void generate_radixX_twiddles_X(fr_t* d_radixX_twiddles_X, int n,
-                                const fr_t root_of_unity)
-{
-    if (gridDim.x == 1) {
-        d_radixX_twiddles_X[threadIdx.x] = fr_t::one();
-        d_radixX_twiddles_X += blockDim.x;
-
-        fr_t root0 = root_of_unity^threadIdx.x;
-
-        d_radixX_twiddles_X[threadIdx.x] = root0;
-        d_radixX_twiddles_X += blockDim.x;
-
-        fr_t root1 = root0;
-
-        for (int i = 2; i < n; i++) {
-            root1 *= root0;
-            d_radixX_twiddles_X[threadIdx.x] = root1;
-            d_radixX_twiddles_X += blockDim.x;
-        }
-    } else {
-        fr_t root0 = root_of_unity^(threadIdx.x * gridDim.x);
-
-        unsigned int pow = blockIdx.x * threadIdx.x;
-        unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-        fr_t root1 = root_of_unity^pow;
-
-        d_radixX_twiddles_X[tid] = root1;
-        d_radixX_twiddles_X += gridDim.x * blockDim.x;
-
-        for (int i = gridDim.x; i < n; i += gridDim.x) {
-            root1 *= root0;
-            d_radixX_twiddles_X[tid] = root1;
-            d_radixX_twiddles_X += gridDim.x * blockDim.x;
-        }
-    }
-}
-
 
 class NTTParameters {
 private:
@@ -234,34 +188,27 @@ public:
                                     : forward_roots_of_unity;
 
         const size_t blob_sz = 64 + 128 + 256 + 512 + 32;
-
-        fr_t* radix6_twiddles;
-        CUDA_OK(cudaGetSymbolAddress((void**)&radix6_twiddles,
-            inverse ? inverse_radix6_twiddles : forward_radix6_twiddles));
         
         fr_t* blob;
         CUDA_OK(cudaMallocAsync(&blob, blob_sz * sizeof(fr_t), cudaStreamPerThread));
 
-        twiddles[0] = radix6_twiddles;
         twiddles[1] = blob;                 /* radix7_twiddles */
         twiddles[2] = twiddles[1] + 64;     /* radix8_twiddles */
         twiddles[3] = twiddles[2] + 128;    /* radix9_twiddles */
         twiddles[4] = twiddles[3] + 256;    /* radix10_twiddles */
+        twiddles[0] = twiddles[4] + 512;    /* radix6_twiddles */
 
         generate_all_twiddles<<<blob_sz/32, 32>>>(
             blob, roots[6], roots[7], roots[8], roots[9], roots[10]);
         CUDA_OK(cudaGetLastError());
 
-        /* copy to the constant segment */
-        CUDA_OK(cudaMemcpyAsync(radix6_twiddles, twiddles[4] + 512,
-            32 * sizeof(fr_t), cudaMemcpyDeviceToDevice, cudaStreamPerThread));
+        const size_t partial_sz = 1;//32;//WINDOW_NUM * WINDOW_SIZE;
 
-        const size_t partial_sz = WINDOW_NUM * WINDOW_SIZE;
-
-        CUDA_OK(cudaMallocAsync(&partial_twiddles, 2 * partial_sz * sizeof(fr_t), cudaStreamPerThread));
+        CUDA_OK(cudaMallocAsync(&partial_twiddles, partial_sz * sizeof(fr_t), cudaStreamPerThread));
 
         generate_partial_twiddles<<<WINDOW_SIZE/32, 32>>>(
             partial_twiddles, roots[MAX_LG_DOMAIN_SIZE]);
+        CUDA_OK(cudaDeviceSynchronize());
         CUDA_OK(cudaGetLastError());
     }
     NTTParameters(const NTTParameters&) = delete;

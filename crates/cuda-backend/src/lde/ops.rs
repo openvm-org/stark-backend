@@ -10,7 +10,7 @@ use crate::{
     prelude::F,
 };
 
-pub(crate) fn compute_lde_matrix(
+pub(super) fn compute_lde_matrix(
     trace_matrix: &DeviceMatrix<F>,
     domain_size: usize,
     shift: F,
