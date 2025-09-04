@@ -201,7 +201,7 @@ public:
         twiddles[1] = twiddles[0] + 32;     /* radix7_twiddles */
         twiddles[2] = twiddles[1] + 64;     /* radix8_twiddles */
         twiddles[3] = twiddles[2] + 128;    /* radix9_twiddles */
-        twiddles[4] = twiddles[4] + 256;    /* radix10_twiddles */
+        twiddles[4] = twiddles[3] + 256;    /* radix10_twiddles */
 
         generate_all_twiddles<<<blob_sz/32, 32>>>(
             blob, roots[6], roots[7], roots[8], roots[9], roots[10]);
