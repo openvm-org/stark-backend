@@ -9,6 +9,7 @@
  * - 2025-08-13: NTTParameters constructor async on custom stream
  * - 2025-08-13: static params holder all_params() -> NTTParametersHolder
  * - 2025-08-26: NTTParameters constructor on cudaStreamPerThread
+ * - 2025-09-05: Stop using __constant__ for twiddles[0]
  */
 
 // Copyright Supranational LLC
@@ -122,10 +123,6 @@ const fr_t domain_size_inverse[MAX_LG_DOMAIN_SIZE + 1] = {
 
 typedef unsigned int index_t;
 
-__device__ __constant__ fr_t forward_radix6_twiddles[32];
-__device__ __constant__ fr_t inverse_radix6_twiddles[32];
-
-
 template<class fr_t> __global__
 void generate_partial_twiddles(fr_t (*roots)[WINDOW_SIZE],
                                const fr_t root_of_unity)
@@ -145,78 +142,40 @@ void generate_partial_twiddles(fr_t (*roots)[WINDOW_SIZE],
     }
 }
 
+// [DIFF]: change order to natural one: 7,8,9,10,6 -> 6,7,8,9,10
 template<class fr_t> __global__
-void generate_all_twiddles(fr_t* d_radixX_twiddles, const fr_t root6,
-                                                    const fr_t root7,
-                                                    const fr_t root8,
-                                                    const fr_t root9,
-                                                    const fr_t root10)
+void generate_all_twiddles(fr_t* d_radixX_twiddles, 
+                           const fr_t root6,
+                           const fr_t root7,
+                           const fr_t root8,
+                           const fr_t root9,
+                           const fr_t root10)
 {
     const unsigned int tid = threadIdx.x + blockDim.x * blockIdx.x;
     unsigned int pow = 0;
     fr_t root_of_unity;
 
-    if (tid < 64) {
+    if (tid < 32) {
         pow = tid;
-        root_of_unity = root7;
-    } else if (tid < 64 + 128) {
-        pow = tid - 64;
-        root_of_unity = root8;
-    } else if (tid < 64 + 128 + 256) {
-        pow = tid - 64 - 128;
-        root_of_unity = root9;
-    } else if (tid < 64 + 128 + 256 + 512) {
-        pow = tid - 64 - 128 - 256;
-        root_of_unity = root10;
-    } else if (tid < 64 + 128 + 256 + 512 + 32) {
-        pow = tid - 64 - 128 - 256 - 512;
         root_of_unity = root6;
+    } else if (tid < 32 + 64) {
+        pow = tid - 32;
+        root_of_unity = root7;
+    } else if (tid < 32 + 64 + 128) {
+        pow = tid - 32 - 64;
+        root_of_unity = root8;
+    } else if (tid < 32 + 64 + 128 + 256) {
+        pow = tid - 32 - 64 - 128;
+        root_of_unity = root9;
+    } else if (tid < 32 + 64 + 128 + 256 + 512) {
+        pow = tid - 32 - 64 - 128 - 256;
+        root_of_unity = root10;
     } else {
         assert(false);
     }
 
     d_radixX_twiddles[tid] = root_of_unity^pow;
 }
-
-template<class fr_t> __launch_bounds__(512) __global__
-void generate_radixX_twiddles_X(fr_t* d_radixX_twiddles_X, int n,
-                                const fr_t root_of_unity)
-{
-    if (gridDim.x == 1) {
-        d_radixX_twiddles_X[threadIdx.x] = fr_t::one();
-        d_radixX_twiddles_X += blockDim.x;
-
-        fr_t root0 = root_of_unity^threadIdx.x;
-
-        d_radixX_twiddles_X[threadIdx.x] = root0;
-        d_radixX_twiddles_X += blockDim.x;
-
-        fr_t root1 = root0;
-
-        for (int i = 2; i < n; i++) {
-            root1 *= root0;
-            d_radixX_twiddles_X[threadIdx.x] = root1;
-            d_radixX_twiddles_X += blockDim.x;
-        }
-    } else {
-        fr_t root0 = root_of_unity^(threadIdx.x * gridDim.x);
-
-        unsigned int pow = blockIdx.x * threadIdx.x;
-        unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-        fr_t root1 = root_of_unity^pow;
-
-        d_radixX_twiddles_X[tid] = root1;
-        d_radixX_twiddles_X += gridDim.x * blockDim.x;
-
-        for (int i = gridDim.x; i < n; i += gridDim.x) {
-            root1 *= root0;
-            d_radixX_twiddles_X[tid] = root1;
-            d_radixX_twiddles_X += gridDim.x * blockDim.x;
-        }
-    }
-}
-
 
 class NTTParameters {
 private:
@@ -233,17 +192,13 @@ public:
         const fr_t* roots = inverse ? inverse_roots_of_unity
                                     : forward_roots_of_unity;
 
-        const size_t blob_sz = 64 + 128 + 256 + 512 + 32;
+        const size_t blob_sz = 32 + 64 + 128 + 256 + 512;
 
-        fr_t* radix6_twiddles;
-        CUDA_OK(cudaGetSymbolAddress((void**)&radix6_twiddles,
-            inverse ? inverse_radix6_twiddles : forward_radix6_twiddles));
-        
         fr_t* blob;
         CUDA_OK(cudaMallocAsync(&blob, blob_sz * sizeof(fr_t), cudaStreamPerThread));
 
-        twiddles[0] = radix6_twiddles;
-        twiddles[1] = blob;                 /* radix7_twiddles */
+        twiddles[0] = blob;                 /* radix6_twiddles */
+        twiddles[1] = twiddles[0] + 32;     /* radix7_twiddles */
         twiddles[2] = twiddles[1] + 64;     /* radix8_twiddles */
         twiddles[3] = twiddles[2] + 128;    /* radix9_twiddles */
         twiddles[4] = twiddles[3] + 256;    /* radix10_twiddles */
@@ -252,13 +207,9 @@ public:
             blob, roots[6], roots[7], roots[8], roots[9], roots[10]);
         CUDA_OK(cudaGetLastError());
 
-        /* copy to the constant segment */
-        CUDA_OK(cudaMemcpyAsync(radix6_twiddles, twiddles[4] + 512,
-            32 * sizeof(fr_t), cudaMemcpyDeviceToDevice, cudaStreamPerThread));
-
         const size_t partial_sz = WINDOW_NUM * WINDOW_SIZE;
-
-        CUDA_OK(cudaMallocAsync(&partial_twiddles, 2 * partial_sz * sizeof(fr_t), cudaStreamPerThread));
+        // [DIFF]: fix allocation size for partial_twiddles
+        CUDA_OK(cudaMallocAsync(&partial_twiddles, partial_sz * sizeof(fr_t), cudaStreamPerThread));
 
         generate_partial_twiddles<<<WINDOW_SIZE/32, 32>>>(
             partial_twiddles, roots[MAX_LG_DOMAIN_SIZE]);
@@ -270,7 +221,7 @@ public:
     ~NTTParameters()
     {
         cudaFreeAsync(partial_twiddles, cudaStreamPerThread);
-        cudaFreeAsync(twiddles[1], cudaStreamPerThread);
+        cudaFreeAsync(twiddles[0], cudaStreamPerThread);
     }
 };
 
