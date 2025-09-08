@@ -23,6 +23,7 @@ fn main() {
         .clone()
         .library_name("supra_ntt")
         .flag("--device-link")
+        .flag("-rdc=true")
         .include("cuda/supra/include")
         .file("cuda/supra/ntt_api.cu")
         .build();
