@@ -15,3 +15,5 @@ pub mod engine;
 #[cfg(feature = "metrics")]
 pub mod metrics_tracing;
 pub mod utils;
+
+pub mod verify_fri_bb_pos2;
