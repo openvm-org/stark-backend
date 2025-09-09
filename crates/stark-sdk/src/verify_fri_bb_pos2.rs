@@ -12,6 +12,7 @@ use openvm_stark_backend::{
     },
     p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair},
     p3_util::{log2_strict_usize, reverse_bits_len},
+    proof::Proof,
     verifier::{
         folder::VerifierConstraintFolder,
         GenericVerifierConstraintFolder,
@@ -136,7 +137,6 @@ impl DuplexSponge {
             self.absorb_idx = 0;
             self.sample_idx = CHUNK;
         }
-        self.absorb_idx = (self.absorb_idx + 1) % CHUNK;
     }
 
     pub fn sample(&mut self) -> F {
@@ -280,42 +280,48 @@ pub fn verify_stark(
     // exposed_values
     let num_phases = mvk.num_phases();
     debug_assert!(num_phases <= 1, "Only support one challenge phase");
-    // Check logUp PoW
-    sponge.observe(proof.logup_pow_witness);
-    if sponge.sample_bits(params.log_up_params.log_up_pow_bits) != 0 {
-        return Err(VerificationError::InvalidOpeningArgument(
-            "InvalidLogUpPoW".to_string(),
-        ));
-    }
-
-    let perm_challenges: [EF; 2] = from_fn(|_| sponge.sample_ext());
-
-    let mut sum = EF::ZERO;
-    for i in 0..num_used_airs {
-        if !mvk.per_air[i]
-            .params
-            .num_exposed_values_after_challenge
-            .is_empty()
-        {
-            // The only exposed value is the cumulative sum for that AIR
-            debug_assert_eq!(
-                mvk.per_air[i]
-                    .params
-                    .num_exposed_values_after_challenge
-                    .len(),
-                1
-            );
-            debug_assert_eq!(
-                mvk.per_air[i].params.num_exposed_values_after_challenge[0],
-                1
-            );
-            sponge.observe_ext(proof.per_air[i].log_up_cumulative_sum);
-            sum += proof.per_air[i].log_up_cumulative_sum;
+    let mut logup_sum = EF::ZERO;
+    let perm_challenges: [EF; 2] = if num_phases != 0 {
+        // Check logUp PoW
+        sponge.observe(proof.logup_pow_witness);
+        if sponge.sample_bits(params.log_up_params.log_up_pow_bits) != 0 {
+            return Err(VerificationError::InvalidOpeningArgument(
+                "InvalidLogUpPoW".to_string(),
+            ));
         }
-    }
-    sponge.observe_commit(proof.perm_commitment);
 
-    if sum != EF::ZERO {
+        let challenges = from_fn(|_| sponge.sample_ext());
+
+        for i in 0..num_used_airs {
+            if !mvk.per_air[i]
+                .params
+                .num_exposed_values_after_challenge
+                .is_empty()
+            {
+                // The only exposed value is the cumulative sum for that AIR
+                debug_assert_eq!(
+                    mvk.per_air[i]
+                        .params
+                        .num_exposed_values_after_challenge
+                        .len(),
+                    1
+                );
+                debug_assert_eq!(
+                    mvk.per_air[i].params.num_exposed_values_after_challenge[0],
+                    1
+                );
+                sponge.observe_ext(proof.per_air[i].log_up_cumulative_sum);
+                logup_sum += proof.per_air[i].log_up_cumulative_sum;
+            }
+        }
+        sponge.observe_commit(proof.perm_commitment);
+
+        challenges
+    } else {
+        [EF::ZERO; 2]
+    };
+
+    if logup_sum != EF::ZERO {
         return Err(VerificationError::ChallengePhaseError);
     };
 
@@ -434,7 +440,7 @@ pub fn verify_stark(
     }
     // 3. Then perm commit
     // All AIRs with interactions should have perm trace.
-    if mvk.per_air.iter().any(|vk| vk.has_interaction()) {
+    if num_phases != 0 {
         if commit_idx > proof.opened_values.len() {
             return Err(InvalidProofShape);
         }
@@ -685,10 +691,8 @@ pub fn verify_fri_pcs(
     let betas: Vec<EF> = proof
         .commit_phase_commits
         .iter()
-        .map(|comm| {
-            for i in 0..CHUNK {
-                sponge.observe(comm[i]);
-            }
+        .map(|&comm| {
+            sponge.observe_commit(comm);
             sponge.sample_ext()
         })
         .collect();
@@ -834,6 +838,7 @@ pub fn verify_fri_pcs(
             .into_iter()
             .take(log_global_max_height + 1)
             .enumerate()
+            .skip(params.log_blowup)
             .rev()
             .collect();
 
@@ -1062,4 +1067,98 @@ fn poseidon2_compress(left: [F; CHUNK], right: [F; CHUNK]) -> [F; CHUNK] {
     state[CHUNK..].copy_from_slice(&right);
     poseidon2_perm().permute_mut(&mut state);
     state[..CHUNK].try_into().unwrap()
+}
+
+impl From<Proof<BabyBearPoseidon2Config>> for StarkProof {
+    fn from(mut proof: Proof<BabyBearPoseidon2Config>) -> Self {
+        let common_main_commitment = proof.commitments.main_trace.pop().unwrap().into();
+        let cached_main_commitments = proof
+            .commitments
+            .main_trace
+            .into_iter()
+            .map(|com| com.into())
+            .collect();
+        let perm_commitment = proof
+            .commitments
+            .after_challenge
+            .first()
+            .map(|&com| com.into())
+            .unwrap_or([F::ZERO; CHUNK]);
+        let quotient_commitment = proof.commitments.quotient.into();
+        let p3_fri_proof = proof.opening.proof;
+        let fri_proof = FriProof {
+            commit_phase_commits: p3_fri_proof
+                .commit_phase_commits
+                .into_iter()
+                .map(|com| com.into())
+                .collect(),
+            query_proofs: p3_fri_proof
+                .query_proofs
+                .into_iter()
+                .map(|qp| QueryProof {
+                    input_proof: qp
+                        .input_proof
+                        .into_iter()
+                        .map(|bo| BatchOpening {
+                            opened_values: bo.opened_values,
+                            opening_proof: bo.opening_proof,
+                        })
+                        .collect(),
+                    commit_phase_openings: qp
+                        .commit_phase_openings
+                        .into_iter()
+                        .map(|step| CommitPhaseProofStep {
+                            sibling_value: step.sibling_value,
+                            opening_proof: step.opening_proof,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            final_poly: p3_fri_proof.final_poly[0],
+            pow_witness: p3_fri_proof.pow_witness,
+        };
+
+        let mut opened_values = Vec::new();
+        for prep in proof.opening.values.preprocessed {
+            opened_values.push(vec![vec![prep.local, prep.next]]);
+        }
+        for m in proof.opening.values.main {
+            opened_values.push(m.into_iter().map(|v| vec![v.local, v.next]).collect());
+        }
+        assert!(proof.opening.values.after_challenge.len() <= 1);
+        for perm in proof.opening.values.after_challenge {
+            opened_values.push(perm.into_iter().map(|v| vec![v.local, v.next]).collect());
+        }
+        opened_values.push(proof.opening.values.quotient);
+
+        let per_air = proof
+            .per_air
+            .into_iter()
+            .map(|p| AirProofData {
+                air_id: p.air_id,
+                log_trace_height: log2_strict_usize(p.degree),
+                log_up_cumulative_sum: p
+                    .exposed_values_after_challenge
+                    .first()
+                    .map(|v| v[0])
+                    .unwrap_or_default(),
+                public_values: p.public_values,
+            })
+            .collect();
+
+        Self {
+            cached_main_commitments,
+            common_main_commitment,
+            perm_commitment,
+            quotient_commitment,
+            fri_proof,
+            opened_values,
+            per_air,
+            logup_pow_witness: proof
+                .rap_phase_seq_proof
+                .as_ref()
+                .map(|p| p.logup_pow_witness)
+                .unwrap_or_default(),
+        }
+    }
 }
