@@ -2,12 +2,12 @@ use std::sync::OnceLock;
 
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 
-use crate::{cuda::ntt::*, prelude::F};
+use crate::{cuda::ntt, prelude::F};
 
 const MAX_LG_DOMAIN_SIZE: usize = 27;
 const LG_WINDOW_SIZE: usize = (MAX_LG_DOMAIN_SIZE + 4) / 5;
 const WINDOW_SIZE: usize = 1 << LG_WINDOW_SIZE;
-const WINDOW_NUM: usize = (MAX_LG_DOMAIN_SIZE + LG_WINDOW_SIZE - 1) / LG_WINDOW_SIZE;
+const WINDOW_NUM: usize = MAX_LG_DOMAIN_SIZE.div_ceil(LG_WINDOW_SIZE);
 
 struct NttParameters {
     twiddles: DeviceBuffer<F>,
@@ -83,7 +83,7 @@ impl<'a> NttImpl<'a> {
         let twiddles_offset = (1 << (radix - 6)) << 5;
         unsafe {
             ntt::ct_mixed_radix_narrow(
-                &self.buffer,
+                self.buffer,
                 radix,
                 self.lg_domain_size,
                 self.stage,
@@ -138,6 +138,6 @@ pub(super) fn batch_ntt(
         _impl.step(step + (if rem > 1 { 1 } else { 0 }));
         _impl.step(step + (if rem > 0 { 1 } else { 0 }));
     } else {
-        assert!(false);
+        panic!("log_trace_height > 40");
     }
 }
