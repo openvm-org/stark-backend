@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod dag;
+pub mod statistics;
 pub mod symbolic_expression;
 pub mod symbolic_variable;
 

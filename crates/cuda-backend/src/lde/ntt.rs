@@ -138,6 +138,6 @@ pub(super) fn batch_ntt(
         _impl.step(step + (if rem > 1 { 1 } else { 0 }));
         _impl.step(step + (if rem > 0 { 1 } else { 0 }));
     } else {
-        panic!("log_trace_height > 40");
+        panic!("log_trace_height > 40 not supported");
     }
 }
