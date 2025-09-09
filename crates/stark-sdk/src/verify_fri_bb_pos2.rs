@@ -1,23 +1,29 @@
 //! Single file with full verification algorithm using FRI
 //! for BabyBear, Poseidon2
 #![allow(clippy::needless_range_loop)]
-use std::{array::from_fn, cmp::Reverse, iter::zip, sync::OnceLock};
+use std::{array::from_fn, cmp::Reverse, iter::zip, marker::PhantomData, sync::OnceLock};
 
 use itertools::Itertools;
 use openvm_stark_backend::{
-    keygen::types::MultiStarkVerifyingKey,
+    keygen::{types::MultiStarkVerifyingKey, view::MultiStarkVerifyingKeyView},
     p3_field::{
         extension::BinomialExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra,
         PrimeField32, TwoAdicField,
     },
+    p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair},
     p3_util::{log2_strict_usize, reverse_bits_len},
-    verifier::VerificationError::{self, InvalidProofShape},
+    verifier::{
+        folder::VerifierConstraintFolder,
+        GenericVerifierConstraintFolder,
+        VerificationError::{self, InvalidProofShape},
+    },
 };
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_symmetric::Permutation;
 
 use crate::config::{
     baby_bear_poseidon2::{default_perm, BabyBearPoseidon2Config},
+    fri_params::SecurityParameters,
     FriParameters,
 };
 
@@ -44,7 +50,8 @@ pub struct StarkProof {
 
     // FRI PCS opening proof
     pub fri_proof: FriProof,
-    /// - each round (preprocessed, cached_main[..], common_main, perm, quotient)
+    /// NOTE[jpw]: it is likely still better to separate this by commit type:
+    /// - each commit (preprocessed, cached_main[..], common_main, perm, quotient)
     ///   - each matrix
     ///     - each out-of-domain point to open at
     ///       - evaluation for each column poly at that point, valued in EF
@@ -86,8 +93,8 @@ pub struct CommitPhaseProofStep {
 pub struct AirProofData {
     /// AIR ID in the vkey. For optional AIR handling
     pub air_id: usize,
-    /// height of trace matrix.
-    pub degree: usize,
+    /// log2 of height of trace matrix.
+    pub log_trace_height: usize,
     pub log_up_cumulative_sum: EF,
     // The public values to expose to the verifier
     pub public_values: Vec<F>,
@@ -112,6 +119,15 @@ fn poseidon2_perm() -> &'static Poseidon2BabyBear<WIDTH> {
 }
 
 impl DuplexSponge {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self {
+            state: [F::ZERO; WIDTH],
+            absorb_idx: 0,
+            sample_idx: CHUNK,
+        }
+    }
+
     pub fn observe(&mut self, value: F) {
         self.state[self.absorb_idx] = value;
         self.absorb_idx += 1;
@@ -131,6 +147,12 @@ impl DuplexSponge {
         }
         self.sample_idx -= 1;
         self.state[self.sample_idx]
+    }
+
+    pub fn observe_commit(&mut self, digest: [F; CHUNK]) {
+        for x in digest {
+            self.observe(x);
+        }
     }
 
     pub fn observe_ext(&mut self, value: EF) {
@@ -154,11 +176,463 @@ impl DuplexSponge {
     }
 }
 
-pub fn verify(
-    params: &FriParameters,
-    mvk: &VerifyingKey,
+/// Verifies STARK proof.
+///
+/// The implementation of this function handles verification logic for multiple AIR traces and
+/// reduction of LogUp and DEEP-ALI (quotient polynomials) to FRI PCS opening which is then done via
+/// a single call to [verify_fri_pcs].
+pub fn verify_stark(
+    params: &SecurityParameters,
+    global_vk: &VerifyingKey,
     proof: StarkProof,
 ) -> Result<(), VerificationError> {
+    // Note: construction of view panics if any air_id exceeds number of AIRs in provided
+    // `MultiStarkVerifyingKey`
+    let air_ids = proof.per_air.iter().map(|p| p.air_id).collect_vec();
+    // NOTE: from now on, mvk is a view of only the AIRs used in the proof
+    let mvk = MultiStarkVerifyingKeyView::new(
+        air_ids
+            .iter()
+            .map(|&id| &global_vk.inner.per_air[id])
+            .collect(),
+        &global_vk.inner.trace_height_constraints,
+        global_vk.pre_hash,
+    );
+    let mut sponge = DuplexSponge::new();
+    // Note: this is same as setting initial sponge state and then calling poseidon2_permute once
+    sponge.observe_commit(mvk.pre_hash.into());
+    let num_used_airs = air_ids.len();
+    sponge.observe(F::from_canonical_usize(num_used_airs));
+    for &air_id in &air_ids {
+        sponge.observe(F::from_canonical_usize(air_id));
+    }
+    // Enforce trace height linear inequalities
+    for constraint in mvk.trace_height_constraints {
+        let sum = proof
+            .per_air
+            .iter()
+            .map(|ap| (constraint.coefficients[ap.air_id] as u64) << ap.log_trace_height)
+            .sum::<u64>();
+        if sum >= constraint.threshold as u64 {
+            return Err(VerificationError::InvalidProofShape);
+        }
+    }
+    // (T01a): Check that all `air_id`s are different and contained in `MultiStarkVerifyingKey`
+    {
+        let mut air_ids = air_ids;
+        air_ids.sort();
+        for ids in air_ids.windows(2) {
+            if ids[0] >= ids[1] {
+                return Err(VerificationError::DuplicateAirs);
+            }
+        }
+    }
+
+    let public_values = proof
+        .per_air
+        .iter()
+        .map(|p| p.public_values.clone())
+        .collect_vec();
+    // (T03a): verify shape of public values
+    {
+        // proof.per_air.len() = mvk.per_air.len() by definition of mvk view
+        for (pvs_per_air, vk) in zip(&public_values, &mvk.per_air) {
+            if pvs_per_air.len() != vk.params.num_public_values {
+                return Err(VerificationError::InvalidProofShape);
+            }
+        }
+    }
+    // Challenger must observe public values
+    for pvs in &public_values {
+        for &pv in pvs {
+            sponge.observe(pv);
+        }
+    }
+
+    for preprocessed_commit in mvk.flattened_preprocessed_commits() {
+        sponge.observe_commit(preprocessed_commit.into());
+    }
+
+    // (T04a): validate shapes of `main_trace_commits`:
+    {
+        let num_cached_mains = mvk
+            .per_air
+            .iter()
+            .map(|vk| vk.params.width.cached_mains.len())
+            .sum::<usize>();
+        if proof.cached_main_commitments.len() != num_cached_mains {
+            return Err(VerificationError::InvalidProofShape);
+        }
+    }
+    // Observe main trace commitments
+    for cached_main_com in &proof.cached_main_commitments {
+        sponge.observe_commit(*cached_main_com);
+    }
+    sponge.observe_commit(proof.common_main_commitment);
+    for log_trace_height in proof.per_air.iter().map(|p| p.log_trace_height) {
+        sponge.observe(F::from_canonical_usize(log_trace_height));
+    }
+
+    // ====================== (Partial) Verification of logUp cumulative sums ==============
+    // Partial because the PCS opening is done with FRI verify
+
+    // Assumption: valid mvk has num_phases consistent between num_challenges_to_sample and
+    // exposed_values
+    let num_phases = mvk.num_phases();
+    debug_assert!(num_phases <= 1, "Only support one challenge phase");
+    // Check logUp PoW
+    sponge.observe(proof.logup_pow_witness);
+    if sponge.sample_bits(params.log_up_params.log_up_pow_bits) != 0 {
+        return Err(VerificationError::InvalidOpeningArgument(
+            "InvalidLogUpPoW".to_string(),
+        ));
+    }
+
+    let perm_challenges: [EF; 2] = from_fn(|_| sponge.sample_ext());
+
+    let mut sum = EF::ZERO;
+    for i in 0..num_used_airs {
+        if !mvk.per_air[i]
+            .params
+            .num_exposed_values_after_challenge
+            .is_empty()
+        {
+            // The only exposed value is the cumulative sum for that AIR
+            debug_assert_eq!(
+                mvk.per_air[i]
+                    .params
+                    .num_exposed_values_after_challenge
+                    .len(),
+                1
+            );
+            debug_assert_eq!(
+                mvk.per_air[i].params.num_exposed_values_after_challenge[0],
+                1
+            );
+            sponge.observe_ext(proof.per_air[i].log_up_cumulative_sum);
+            sum += proof.per_air[i].log_up_cumulative_sum;
+        }
+    }
+    sponge.observe_commit(proof.perm_commitment);
+
+    if sum != EF::ZERO {
+        return Err(VerificationError::ChallengePhaseError);
+    };
+
+    // Draw `alpha` challenge
+    let alpha: EF = sponge.sample_ext();
+    tracing::debug!("alpha: {alpha:?}");
+
+    // Observe quotient commitments
+    sponge.observe_commit(proof.quotient_commitment);
+
+    // Draw `zeta` challenge
+    let zeta: EF = sponge.sample_ext();
+    tracing::debug!("zeta: {zeta:?}");
+
+    // Verify all opening proofs
+    let trace_height_and_adj_openings =
+        |log_trace_height: usize, width: usize, zeta: EF, per_ood_point: &[Vec<EF>]| {
+            if log_trace_height > MAX_TWO_ADICITY {
+                return Err(InvalidProofShape);
+            }
+            // Only use this for adjacent openings
+            if per_ood_point.len() != 2
+                || per_ood_point[0].len() != width
+                || per_ood_point[1].len() != width
+            {
+                return Err(InvalidProofShape);
+            }
+            let omega = F::two_adic_generator(log_trace_height);
+            Ok((
+                1usize << log_trace_height,
+                vec![
+                    (zeta, per_ood_point[0].to_vec()),
+                    (zeta * omega, per_ood_point[1].to_vec()),
+                ],
+            ))
+        };
+    // Compute the out-of-domain points and attach to claimed opening values
+    // 1. First the preprocessed trace openings
+    // Assumption: each AIR with preprocessed trace has its own commitment and opening values
+    // T05a: validate `opened_values` shape
+    let mut per_commitment = Vec::new();
+    let mut commit_idx = 0;
+    for i in 0..num_used_airs {
+        // Each preprocessed trace, if it exists, is its own commitment
+        if let Some(com) = mvk.per_air[i].preprocessed_data.as_ref().map(|d| d.commit) {
+            let com: [F; CHUNK] = com.into();
+            if commit_idx > proof.opened_values.len() || proof.opened_values[commit_idx].len() != 1
+            {
+                return Err(InvalidProofShape);
+            }
+            per_commitment.push((
+                com,
+                vec![trace_height_and_adj_openings(
+                    proof.per_air[i].log_trace_height,
+                    mvk.per_air[i].params.width.preprocessed.unwrap_or(0),
+                    zeta,
+                    &proof.opened_values[commit_idx][0],
+                )?],
+            ));
+            commit_idx += 1;
+        }
+    }
+    // 2. Then the main trace openings
+    let mut main_commit_idx = 0;
+    // All commits except the last one are cached main traces.
+    for i in 0..num_used_airs {
+        for &cached_main_width in &mvk.per_air[i].params.width.cached_mains {
+            if main_commit_idx > proof.cached_main_commitments.len() {
+                return Err(InvalidProofShape);
+            }
+            let commit = proof.cached_main_commitments[main_commit_idx];
+            if commit_idx > proof.opened_values.len() || proof.opened_values[commit_idx].len() != 1
+            {
+                return Err(InvalidProofShape);
+            }
+            per_commitment.push((
+                commit,
+                vec![trace_height_and_adj_openings(
+                    proof.per_air[i].log_trace_height,
+                    cached_main_width,
+                    zeta,
+                    &proof.opened_values[commit_idx][0],
+                )?],
+            ));
+            main_commit_idx += 1;
+            commit_idx += 1;
+        }
+    }
+    if main_commit_idx != proof.cached_main_commitments.len() {
+        return Err(InvalidProofShape);
+    }
+    let common_main_commit_idx = main_commit_idx;
+    // In the last commit, each matrix corresponds to an AIR with a common main trace.
+    {
+        if commit_idx > proof.opened_values.len() {
+            return Err(InvalidProofShape);
+        }
+        if proof.opened_values[commit_idx].len() != num_used_airs {
+            return Err(InvalidProofShape);
+        }
+        let commit = proof.common_main_commitment;
+        let mut per_mat = Vec::with_capacity(num_used_airs);
+        for i in 0..num_used_airs {
+            let width = mvk.per_air[i].params.width.common_main;
+            // Currently do not support AIR without common main
+            debug_assert!(width > 0);
+            per_mat.push(trace_height_and_adj_openings(
+                proof.per_air[i].log_trace_height,
+                width,
+                zeta,
+                &proof.opened_values[commit_idx][i],
+            )?);
+        }
+        per_commitment.push((commit, per_mat));
+        commit_idx += 1;
+    }
+    // 3. Then perm commit
+    // All AIRs with interactions should have perm trace.
+    if mvk.per_air.iter().any(|vk| vk.has_interaction()) {
+        if commit_idx > proof.opened_values.len() {
+            return Err(InvalidProofShape);
+        }
+        let commit = proof.perm_commitment;
+        let mut mat_idx = 0;
+        let mut per_mat = Vec::with_capacity(num_used_airs);
+        for i in 0..num_used_airs {
+            if !mvk.per_air[i].has_interaction() {
+                continue;
+            }
+            let width = mvk.per_air[i].params.width.after_challenge[0] * D;
+            per_mat.push(trace_height_and_adj_openings(
+                proof.per_air[i].log_trace_height,
+                width,
+                zeta,
+                &proof.opened_values[commit_idx][mat_idx],
+            )?);
+            mat_idx += 1;
+        }
+        if mat_idx != proof.opened_values[commit_idx].len() {
+            return Err(InvalidProofShape);
+        }
+        per_commitment.push((commit, per_mat));
+        commit_idx += 1;
+    }
+    let quotient_commit_idx = commit_idx;
+    // 4. Finally quotient chunks are all in one commitment, but out-of-domain points to open at
+    //    have shifts
+    if commit_idx + 1 != proof.opened_values.len() {
+        return Err(InvalidProofShape);
+    }
+    {
+        if proof.opened_values[commit_idx].len() != num_used_airs {
+            return Err(InvalidProofShape);
+        }
+        let commit = proof.quotient_commitment;
+        let mut per_mat = Vec::new(); // num_used_airs * (quotient_degree per air) * D
+        for i in 0..num_used_airs {
+            if proof.opened_values[commit_idx][i].len() != mvk.per_air[i].quotient_degree as usize {
+                return Err(InvalidProofShape);
+            }
+            for j in 0..mvk.per_air[i].quotient_degree as usize {
+                if proof.opened_values[commit_idx][i][j].len() != D {
+                    return Err(InvalidProofShape);
+                }
+                per_mat.push((
+                    1usize << proof.per_air[i].log_trace_height,
+                    vec![(zeta, proof.opened_values[commit_idx][i][j].to_vec())],
+                ));
+            }
+        }
+        per_commitment.push((commit, per_mat));
+    }
+
+    verify_fri_pcs(
+        &params.fri_params,
+        per_commitment,
+        proof.fri_proof,
+        &mut sponge,
+    )?;
+
+    commit_idx = 0usize;
+    let mut perm_matrix_idx = 0usize;
+
+    // ================== Verify each RAP's constraints ====================
+    for idx in 0..num_used_airs {
+        let vk = &mvk.per_air[idx];
+        let preprocessed_values = vk.preprocessed_data.is_some().then(|| {
+            let values = &proof.opened_values[commit_idx][0];
+            commit_idx += 1;
+            values
+        });
+        let mut partitioned_main_values = Vec::with_capacity(vk.num_cached_mains() + 1);
+        for _ in 0..vk.num_cached_mains() {
+            partitioned_main_values.push(&proof.opened_values[commit_idx][0]);
+            commit_idx += 1;
+        }
+        partitioned_main_values.push(&proof.opened_values[common_main_commit_idx][idx]);
+        // loop through challenge phases of this single RAP
+        let perm_values = if vk.has_interaction() {
+            let perm_commit_idx = common_main_commit_idx + 1;
+            let values = &proof.opened_values[perm_commit_idx][perm_matrix_idx];
+            perm_matrix_idx += 1;
+            values
+        } else {
+            &vec![vec![]; 2]
+        };
+        let quotient_values = &proof.opened_values[quotient_commit_idx][idx];
+        // ============ verify single RAP constraints =================
+        let log_trace_height = proof.per_air[idx].log_trace_height;
+        let omega = F::two_adic_generator(log_trace_height);
+        let mut shift = F::GENERATOR;
+
+        let quotient_degree = vk.quotient_degree as usize;
+        let mut quotient_domain_shifts = Vec::with_capacity(quotient_degree);
+        for _ in 0..quotient_degree {
+            quotient_domain_shifts.push(shift);
+            shift *= omega;
+        }
+        let zps = (0..quotient_degree)
+            .map(|ch_i| {
+                let mut prod = EF::ONE;
+                for j in 0..quotient_degree {
+                    if j != ch_i {
+                        prod *= (zeta * quotient_domain_shifts[j].inverse())
+                            .exp_power_of_2(log_trace_height)
+                            - EF::ONE;
+                        prod *= (EF::from(
+                            (quotient_domain_shifts[ch_i] * quotient_domain_shifts[j].inverse())
+                                .exp_power_of_2(log_trace_height),
+                        ) - EF::ONE)
+                            .inverse();
+                    }
+                }
+                prod
+            })
+            .collect_vec();
+
+        // quotient poly evaluation at zeta
+        let mut quotient_eval = EF::ZERO;
+        for ch_i in 0..quotient_degree {
+            for e_i in 0..D {
+                quotient_eval += zps[ch_i]
+                    * <EF as FieldExtensionAlgebra<F>>::monomial(e_i)
+                    * quotient_values[ch_i][e_i];
+            }
+        }
+
+        // Lagrange selectors:
+        let z_h = zeta.exp_power_of_2(log_trace_height) - EF::ONE;
+        let is_first_row = z_h / (zeta - EF::ONE);
+        let is_last_row = z_h / (zeta - omega.inverse());
+        let is_transition = zeta - omega.inverse();
+        let inv_zeroifier = z_h.inverse();
+
+        // Evaluation by traversal of constraint DAG: currently going to use existing recursive
+        // traversal
+        let (preprocessed_local, preprocessed_next) = preprocessed_values
+            .as_ref()
+            .map(|values| (values[0].as_slice(), values[1].as_slice()))
+            .unwrap_or((&[], &[]));
+        let preprocessed = VerticalPair::new(
+            RowMajorMatrixView::new_row(preprocessed_local),
+            RowMajorMatrixView::new_row(preprocessed_next),
+        );
+        let partitioned_main: Vec<_> = partitioned_main_values
+            .into_iter()
+            .map(|values| {
+                VerticalPair::new(
+                    RowMajorMatrixView::new_row(&values[0]),
+                    RowMajorMatrixView::new_row(&values[1]),
+                )
+            })
+            .collect();
+        let [perm_local, perm_next] = [0, 1].map(|i| {
+            perm_values[i]
+                .chunks_exact(D)
+                .map(|chunk| {
+                    // some interpolation to go from evaluations of base field poly to evaluation of
+                    // extension field poly
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .map(|(e_i, &c)| <EF as FieldExtensionAlgebra<F>>::monomial(e_i) * c)
+                        .sum()
+                })
+                .collect_vec()
+        });
+        let perm = VerticalPair::new(
+            RowMajorMatrixView::new_row(&perm_local),
+            RowMajorMatrixView::new_row(&perm_next),
+        );
+
+        let mut folder: VerifierConstraintFolder<'_, BabyBearPoseidon2Config> =
+            GenericVerifierConstraintFolder {
+                preprocessed,
+                partitioned_main,
+                after_challenge: vec![perm],
+                is_first_row,
+                is_last_row,
+                is_transition,
+                alpha,
+                accumulator: EF::ZERO,
+                challenges: &[perm_challenges.to_vec()],
+                public_values: &proof.per_air[idx].public_values,
+                exposed_values_after_challenge: &[vec![proof.per_air[idx].log_up_cumulative_sum]],
+                _marker: PhantomData,
+            };
+        folder.eval_constraints(&vk.symbolic_constraints.constraints);
+
+        let folded_constraints = folder.accumulator;
+        // Finally, check that
+        //     folded_constraints(zeta) / Z_H(zeta) = quotient(zeta)
+        if folded_constraints * inv_zeroifier != quotient_eval {
+            return Err(VerificationError::OodEvaluationMismatch);
+        }
+    }
+
     Ok(())
 }
 
