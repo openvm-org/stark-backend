@@ -6,7 +6,7 @@ use p3_commit::TwoAdicMultiplicativeCoset;
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
 
-use crate::{cuda::kernels::ntt::sppark_init, fri_log_up::FriLogUpPhaseGpu};
+use crate::fri_log_up::FriLogUpPhaseGpu;
 
 #[derive(Derivative, derive_new::new, Clone, Copy, Debug)]
 pub struct GpuConfig {
@@ -23,13 +23,9 @@ pub struct GpuDevice {
 
 impl GpuDevice {
     pub fn new(config: GpuConfig, rap_phase_seq: Option<FriLogUpPhaseGpu>) -> Self {
-        let device_id = get_device().unwrap();
-        unsafe {
-            sppark_init().unwrap();
-        }
         Self {
             config,
-            id: device_id as u32,
+            id: get_device().unwrap() as u32,
             rap_phase_seq,
         }
     }

@@ -1,14 +1,11 @@
 /*
  * Source: https://github.com/supranational/sppark (tag=v0.1.12)
- * Status: MODIFIED from sppark/ntt/parameters.cuh
+ * Status: MODIFIED from sppark/ntt/parameters/baby_bear.h
  * Imported: 2025-08-13 by @gaxiom
  * 
  * LOCAL CHANGES (high level):
  * - 2025-08-13: BABY_BEAR_CANONICAL constants copy from sppark/ntt/parameters/baby_bear.h
  * - 2025-08-13: #if !defined FEATURE_BABY_BEAR -> delete
- * - 2025-08-13: NTTParameters constructor async on custom stream
- * - 2025-08-13: static params holder all_params() -> NTTParametersHolder
- * - 2025-08-26: NTTParameters constructor on cudaStreamPerThread
  */
 
 // Copyright Supranational LLC
@@ -18,6 +15,9 @@
 #ifndef __SPPARK_NTT_PARAMETERS_CUH__
 #define __SPPARK_NTT_PARAMETERS_CUH__
 
+#include "ff/baby_bear.hpp"
+
+#define WARP_SIZE 32
 #define MAX_LG_DOMAIN_SIZE 27
 #define LG_WINDOW_SIZE ((MAX_LG_DOMAIN_SIZE + 4) / 5) // 6
 #define WINDOW_SIZE (1 << LG_WINDOW_SIZE) // 64
@@ -119,121 +119,4 @@ const fr_t domain_size_inverse[MAX_LG_DOMAIN_SIZE + 1] = {
 
 typedef unsigned int index_t;
 
-template<class fr_t> __global__
-void generate_partial_twiddles(fr_t (*roots)[WINDOW_SIZE],
-                               const fr_t root_of_unity)
-{
-    const unsigned int tid = threadIdx.x + blockDim.x * blockIdx.x;
-    assert(tid < WINDOW_SIZE);
-    fr_t root;
-
-    root = root_of_unity^tid;
-
-    roots[0][tid] = root;
-
-    for (int off = 1; off < WINDOW_NUM; off++) {
-        for (int i = 0; i < LG_WINDOW_SIZE; i++)
-            root.sqr();
-        roots[off][tid] = root;
-    }
-}
-
-template<class fr_t> __global__
-void generate_all_twiddles(fr_t* d_radixX_twiddles, const fr_t root6,
-                                                    const fr_t root7,
-                                                    const fr_t root8,
-                                                    const fr_t root9,
-                                                    const fr_t root10)
-{
-    const unsigned int tid = threadIdx.x + blockDim.x * blockIdx.x;
-    unsigned int pow = 0;
-    fr_t root_of_unity;
-
-    if (tid < 64) {
-        pow = tid;
-        root_of_unity = root7;
-    } else if (tid < 64 + 128) {
-        pow = tid - 64;
-        root_of_unity = root8;
-    } else if (tid < 64 + 128 + 256) {
-        pow = tid - 64 - 128;
-        root_of_unity = root9;
-    } else if (tid < 64 + 128 + 256 + 512) {
-        pow = tid - 64 - 128 - 256;
-        root_of_unity = root10;
-    } else if (tid < 64 + 128 + 256 + 512 + 32) {
-        pow = tid - 64 - 128 - 256 - 512;
-        root_of_unity = root6;
-    } else {
-        assert(false);
-    }
-
-    d_radixX_twiddles[tid] = root_of_unity^pow;
-}
-
-
-class NTTParameters {
-private:
-     // [DIFF]: const gpu_t& -> cudaStreamPerThread
-    bool inverse;
-public:
-    fr_t (*partial_twiddles)[WINDOW_SIZE];
-    fr_t* twiddles[5];
-
-public:
-    // [DIFF]: avoid !FEATURE_BABY_BEAR branches & use stream
-    NTTParameters(const bool _inverse) : inverse(_inverse)
-    {
-        const fr_t* roots = inverse ? inverse_roots_of_unity
-                                    : forward_roots_of_unity;
-
-        const size_t blob_sz = 64 + 128 + 256 + 512 + 32;
-        
-        fr_t* blob;
-        CUDA_OK(cudaMallocAsync(&blob, blob_sz * sizeof(fr_t), cudaStreamPerThread));
-
-        twiddles[1] = blob;                 /* radix7_twiddles */
-        twiddles[2] = twiddles[1] + 64;     /* radix8_twiddles */
-        twiddles[3] = twiddles[2] + 128;    /* radix9_twiddles */
-        twiddles[4] = twiddles[3] + 256;    /* radix10_twiddles */
-        twiddles[0] = twiddles[4] + 512;    /* radix6_twiddles */
-
-        generate_all_twiddles<<<blob_sz/32, 32>>>(
-            blob, roots[6], roots[7], roots[8], roots[9], roots[10]);
-        CUDA_OK(cudaGetLastError());
-
-        const size_t partial_sz = 1;//32;//WINDOW_NUM * WINDOW_SIZE;
-
-        CUDA_OK(cudaMallocAsync(&partial_twiddles, partial_sz * sizeof(fr_t), cudaStreamPerThread));
-
-        generate_partial_twiddles<<<WINDOW_SIZE/32, 32>>>(
-            partial_twiddles, roots[MAX_LG_DOMAIN_SIZE]);
-        CUDA_OK(cudaDeviceSynchronize());
-        CUDA_OK(cudaGetLastError());
-    }
-    NTTParameters(const NTTParameters&) = delete;
-    NTTParameters(NTTParameters&&) = default;
-
-    ~NTTParameters()
-    {
-        cudaFreeAsync(partial_twiddles, cudaStreamPerThread);
-        cudaFreeAsync(twiddles[1], cudaStreamPerThread);
-    }
-};
-
-// [DIFF]: introducing new class to hold a pair of static params
-class NTTParametersHolder {
-public:
-    NTTParameters forward;
-    NTTParameters inverse;
-
-    NTTParametersHolder()
-        : forward(false), inverse(true) {}
-
-    static const NTTParameters& all(bool inverse = false)
-    {
-        static NTTParametersHolder params;
-        return inverse ? params.inverse : params.forward;
-    }
-};
 #endif /* __SPPARK_NTT_PARAMETERS_CUH__ */

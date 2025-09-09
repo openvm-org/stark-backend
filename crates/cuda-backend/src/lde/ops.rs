@@ -4,9 +4,10 @@ use openvm_stark_backend::prover::hal::MatrixDimensions;
 use p3_field::{FieldAlgebra, PrimeField32};
 use p3_util::log2_strict_usize;
 
+use super::ntt::batch_ntt;
 use crate::{
     base::DeviceMatrix,
-    cuda::kernels::{lde::*, matrix::matrix_get_rows_fp_kernel, ntt::*},
+    cuda::kernels::{lde::*, matrix::matrix_get_rows_fp_kernel},
     prelude::F,
 };
 
@@ -36,13 +37,14 @@ pub(super) fn compute_lde_matrix(
         )
         .unwrap();
 
-        batch_interpolate_ntt(
+        batch_ntt(
             lde_matrix.buffer(),
             log_trace_height,
             log_blowup,
             width as u32,
-        )
-        .unwrap();
+            true,
+            true,
+        );
 
         if shift != F::ONE {
             zk_shift(
@@ -56,7 +58,14 @@ pub(super) fn compute_lde_matrix(
 
         batch_bit_reverse(lde_matrix.buffer(), log_lde_height, lde_size).unwrap();
 
-        batch_ntt(lde_matrix.buffer(), log_lde_height, width as u32).unwrap();
+        batch_ntt(
+            lde_matrix.buffer(),
+            log_lde_height,
+            0,
+            width as u32,
+            false,
+            false,
+        );
     }
 
     lde_matrix

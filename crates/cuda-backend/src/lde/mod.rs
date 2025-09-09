@@ -2,8 +2,9 @@ use openvm_stark_backend::prover::hal::MatrixDimensions;
 
 use crate::{base::DeviceMatrix, prelude::F};
 
-pub(crate) mod ops;
+mod ops;
 use ops::*;
+mod ntt;
 
 /// The top-level LDE abstraction, composed of general matrix access (dimensions),
 /// trace access, and LDE behavior (which varies by mode).
