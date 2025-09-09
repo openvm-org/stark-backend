@@ -1,7 +1,7 @@
 //! Single file with full verification algorithm using FRI
 //! for BabyBear, Poseidon2
-
-use std::{array::from_fn, iter::zip, sync::OnceLock};
+#![allow(clippy::needless_range_loop)]
+use std::{array::from_fn, cmp::Reverse, iter::zip, sync::OnceLock};
 
 use itertools::Itertools;
 use openvm_stark_backend::{
@@ -10,7 +10,7 @@ use openvm_stark_backend::{
         extension::BinomialExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra,
         PrimeField32, TwoAdicField,
     },
-    p3_util::log2_strict_usize,
+    p3_util::{log2_strict_usize, reverse_bits_len},
     verifier::VerificationError::{self, InvalidProofShape},
 };
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
@@ -35,7 +35,7 @@ type EF = BinomialExtensionField<BabyBear, 4>;
 //
 // We specialize to the case with one after-challenge round, which we will call `perm` (i.e.,
 // after_challenge[0] =: perm).
-pub struct Proof {
+pub struct StarkProof {
     // Commitments
     pub cached_main_commitments: Vec<[F; CHUNK]>,
     pub common_main_commitment: [F; CHUNK],
@@ -67,11 +67,11 @@ pub struct FriProof {
 }
 
 pub struct QueryProof {
-    pub input_proof: Vec<BatchOpening<F>>,
+    pub input_proof: Vec<BatchOpening>,
     pub commit_phase_openings: Vec<CommitPhaseProofStep>,
 }
 /// MMCS merkle proof into a single merkle root at a single query index
-pub struct BatchOpening<F> {
+pub struct BatchOpening {
     /// Per matrix, per column
     pub opened_values: Vec<Vec<F>>,
     /// merkle proof
@@ -108,7 +108,7 @@ pub struct DuplexSponge {
 // Fixed Poseidon2 configuration
 static PERM: OnceLock<Poseidon2BabyBear<WIDTH>> = OnceLock::new();
 fn poseidon2_perm() -> &'static Poseidon2BabyBear<WIDTH> {
-    PERM.get_or_init(|| default_perm())
+    PERM.get_or_init(default_perm)
 }
 
 impl DuplexSponge {
@@ -154,11 +154,16 @@ impl DuplexSponge {
     }
 }
 
-pub fn verify(mvk: &VerifyingKey, proof: Proof) -> Result<(), VerificationError> {
+pub fn verify(
+    params: &FriParameters,
+    mvk: &VerifyingKey,
+    proof: StarkProof,
+) -> Result<(), VerificationError> {
     Ok(())
 }
 
 /// Polynomial commitment opening of `rounds` via FRI over BabyBear (2-adic pcs)
+#[allow(clippy::type_complexity)]
 pub fn verify_fri_pcs(
     params: &FriParameters,
     // For each commitment:
@@ -218,12 +223,17 @@ pub fn verify_fri_pcs(
     if 0 != params.log_final_poly_len {
         return Err(InvalidProofShape);
     }
+    // The log of the final domain size.
+    let log_final_height = params.log_blowup; // + params.log_final_poly_len = 0;
 
     // Observe final polynomial (= constant).
     sponge.observe_ext(proof.final_poly);
 
     // Ensure that we have the expected number of FRI query proofs.
     if proof.query_proofs.len() != params.num_queries {
+        return Err(InvalidProofShape);
+    }
+    if proof.commit_phase_commits.len() != log_global_max_height - log_final_height {
         return Err(InvalidProofShape);
     }
 
@@ -236,9 +246,6 @@ pub fn verify_fri_pcs(
             ));
         }
     }
-
-    // The log of the final domain size.
-    let log_final_height = params.log_blowup; // + params.log_final_poly_len = 0;
 
     for QueryProof {
         input_proof,
@@ -291,12 +298,7 @@ pub fn verify_fri_pcs(
                 .map(|&h| index >> (log_global_max_height - log2_strict_usize(h)))
                 .unwrap_or(0);
 
-            verify_batch(
-                *batch_commit,
-                &batch_heights,
-                reduced_index,
-                batch_opening.into(),
-            )?;
+            verify_batch(batch_commit, &batch_heights, reduced_index, batch_opening)?;
 
             // For each matrix in the commitment
             for (mat_opening, (trace_height, per_ood_point)) in
@@ -361,25 +363,97 @@ pub fn verify_fri_pcs(
             .rev()
             .collect();
 
-        let mut domain_index = index; // folding.extra_query_index_bits() = 0;
+        let mut domain_index = index as usize; // folding.extra_query_index_bits() = 0;
 
+        // ================ Verify FRI Query (FRI folding) ======================
         // Starting at the evaluation at `index` of the initial domain,
         // perform FRI folds until the domain size reaches the final domain size.
         // Check after each fold that the pair of sibling evaluations at the current
         // node match the commitment.
-        let folded_eval = verify_query(
-            params,
-            &mut domain_index,
+        let start_index = &mut domain_index;
+
+        let mut ro_iter = ro.into_iter().peekable();
+        let log_max_height = log_global_max_height;
+
+        let mut folded_eval = ro_iter.next().unwrap().1;
+        // We start with evaluations over a domain of size (1 << log_max_height). We fold
+        // using FRI until the domain size reaches (1 << log_final_height).
+        for (log_folded_height, ((&beta, comm), opening)) in zip(
+            (log_final_height..log_max_height).rev(),
             zip(
                 zip(&betas, &proof.commit_phase_commits), /* betas.len() =
                                                            * proof.commit_phase_commits.len() by
                                                            * definition */
                 commit_phase_openings,
             ),
-            ro,
-            log_global_max_height,
-            log_final_height,
-        )?;
+        ) {
+            if log_folded_height != opening.opening_proof.len() {
+                return Err(InvalidProofShape);
+            }
+            // Get the index of the other sibling of the current FRI node.
+            let index_sibling = *start_index ^ 1;
+
+            let mut evals = [folded_eval; 2];
+            evals[index_sibling % 2] = opening.sibling_value;
+            // Verify a normal Merkle proof
+            let mut root =
+                poseidon2_hash_slice(&evals.map(|ef| ef.as_base_slice().to_vec()).concat());
+            // Replace index with the index of the parent FRI node.
+            *start_index >>= 1;
+
+            let mut cur_index = *start_index;
+            for &sibling in &opening.opening_proof {
+                let (left, right) = if cur_index & 1 == 0 {
+                    (root, sibling)
+                } else {
+                    (sibling, root)
+                };
+                root = poseidon2_compress(left, right);
+                cur_index >>= 1;
+            }
+            if root != *comm {
+                return Err(VerificationError::InvalidOpeningArgument(
+                    "CommitPhaseMerkleProofError".to_string(),
+                ));
+            }
+
+            // Fold the pair of sibling nodes to get the evaluation of the parent FRI node.
+            folded_eval = {
+                let log_arity = 1;
+                let [e0, e1] = evals;
+                // If performance critical, make this API stateful to avoid this
+                // This is a bit more math than is necessary, but leaving it here
+                // in case we want higher arity in the future
+                let subgroup_start = F::two_adic_generator(log_folded_height + log_arity)
+                    .exp_u64(reverse_bits_len(*start_index, log_folded_height) as u64);
+                let xs = [
+                    subgroup_start,
+                    subgroup_start * F::two_adic_generator(log_arity),
+                ];
+                // interpolate and evaluate at beta
+                e0 + (beta - xs[0]) * (e1 - e0) / (xs[1] - xs[0]).into()
+            };
+
+            // If there are new polynomials to roll in at the folded height, do so.
+            //
+            // Each element of `ro_iter` is the evaluation of a reduced opening polynomial, which is
+            // itself a random linear combination `f_{i, 0}(x) + alpha f_{i, 1}(x) +
+            // ...`, but when we add it to the current folded polynomial evaluation
+            // claim, we need to multiply by a new random factor since `f_{i, 0}` has no
+            // leading coefficient.
+            //
+            // We use `beta^2` as the random factor since `beta` is already used in the folding.
+            // This increases the query phase error probability by a negligible amount, and does not
+            // change the required number of FRI queries.
+            if let Some((_, ro)) = ro_iter.next_if(|(lh, _)| *lh == log_folded_height) {
+                folded_eval += beta.square() * ro;
+            }
+        }
+
+        // If ro_iter is not empty, we failed to fold in some polynomial evaluations.
+        if ro_iter.next().is_some() {
+            return Err(InvalidProofShape);
+        }
 
         // Assuming all the checks passed, the final check is to ensure that the folded evaluation
         // matches the evaluation of the final polynomial sent by the prover.
@@ -394,4 +468,124 @@ pub fn verify_fri_pcs(
         }
     }
     Ok(())
+}
+
+/// Merkle proof verification for mixed matrix commitment scheme
+/// - for a single `commit`
+/// - `trace_heights` are not sorted and must be non-zero
+///
+/// # Assumptions
+/// - `opened_values.len()` equals `trace_heights.len()` is the number of matrices in the batch.
+/// - all entries of `trace_heights` must be powers of two (hence nonzero)
+fn verify_batch(
+    commit: &[F; CHUNK],
+    trace_heights: &[usize],
+    mut index: u32,
+    BatchOpening {
+        opened_values,
+        opening_proof,
+    }: &BatchOpening,
+) -> Result<(), VerificationError> {
+    // Check that the openings have the correct shape.
+    debug_assert_eq!(trace_heights.len(), opened_values.len());
+
+    let mut heights_tallest_first = trace_heights
+        .iter()
+        .copied()
+        .enumerate()
+        .sorted_by_key(|(_, height)| Reverse(*height))
+        .peekable();
+
+    // Get the initial height padded to a power of two. As heights_tallest_first is sorted,
+    // the initial height will be the maximum height.
+    // Returns an error if either:
+    //              1. proof.len() != log_max_height
+    //              2. heights_tallest_first is empty.
+    let mut curr_height_padded = match heights_tallest_first.peek() {
+        Some((_, height)) => {
+            let max_height = *height;
+            let log_max_height = opening_proof.len();
+            if log_max_height > MAX_TWO_ADICITY && max_height != 1 << log_max_height {
+                return Err(InvalidProofShape);
+            }
+            max_height
+        }
+        None => return Err(InvalidProofShape),
+    };
+
+    // Hash all matrix openings at the current height.
+    let mut root = poseidon2_hash_slice(
+        &heights_tallest_first
+            .peeking_take_while(|(_, height)| *height == curr_height_padded)
+            .map(|(mat_idx, _)| opened_values[mat_idx].to_vec())
+            .concat(),
+    );
+
+    for &sibling in opening_proof {
+        // The last bit of index informs us whether the current node is on the left or right.
+        let (left, right) = if index & 1 == 0 {
+            (root, sibling)
+        } else {
+            (sibling, root)
+        };
+
+        // Combine the current node with the sibling node to get the parent node.
+        root = poseidon2_compress(left, right);
+        index >>= 1;
+        curr_height_padded >>= 1;
+
+        // Check if there are any new matrix rows to inject at the next height.
+        let next_height = heights_tallest_first
+            .peek()
+            .map(|(_, height)| height)
+            .filter(|&h| *h == curr_height_padded)
+            .copied();
+        if let Some(next_height) = next_height {
+            // If there are new matrix rows, hash the rows together and then combine with the
+            // current root.
+            let next_height_openings_digest = poseidon2_hash_slice(
+                &heights_tallest_first
+                    .peeking_take_while(|(_, height)| *height == next_height)
+                    .map(|(i, _)| opened_values[i].to_vec())
+                    .concat(),
+            );
+
+            root = poseidon2_compress(root, next_height_openings_digest);
+        }
+    }
+
+    // The computed root should equal the committed one.
+    if commit == &root {
+        Ok(())
+    } else {
+        Err(VerificationError::InvalidOpeningArgument(
+            "MerkleRootMismatch".to_string(),
+        ))
+    }
+}
+
+fn poseidon2_hash_slice(vals: &[F]) -> [F; CHUNK] {
+    let perm = poseidon2_perm();
+    let mut state = [F::ZERO; WIDTH];
+    let mut i = 0;
+    for &val in vals {
+        state[i] = val;
+        i += 1;
+        if i == CHUNK {
+            perm.permute_mut(&mut state);
+            i = 0;
+        }
+    }
+    if i != 0 {
+        perm.permute_mut(&mut state);
+    }
+    state[..CHUNK].try_into().unwrap()
+}
+
+fn poseidon2_compress(left: [F; CHUNK], right: [F; CHUNK]) -> [F; CHUNK] {
+    let mut state = [F::ZERO; WIDTH];
+    state[..CHUNK].copy_from_slice(&left);
+    state[CHUNK..].copy_from_slice(&right);
+    poseidon2_perm().permute_mut(&mut state);
+    state[..CHUNK].try_into().unwrap()
 }
