@@ -91,4 +91,4 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-tidy-20
-          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --clang-tidy clang-tidy-20 --cuda-path $CUDA_LIB_DIR --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
+          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --clang-tidy clang-tidy-20 --cuda-path $(dirname $(dirname $(dirname "$CUDA_LIB_DIR"))) --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
