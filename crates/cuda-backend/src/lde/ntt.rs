@@ -80,7 +80,7 @@ impl<'a> NttImpl<'a> {
     fn step(&mut self, iterations: u32) {
         assert!(iterations <= 10);
         let radix = if iterations < 6 { 6 } else { iterations };
-        let twiddles_offset = (1 << (radix - 6)) << 5;
+        let twiddles_offset = (1 << (radix - 1)) - 32;
         unsafe {
             ntt::ct_mixed_radix_narrow(
                 self.buffer,
