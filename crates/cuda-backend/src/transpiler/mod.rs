@@ -3,7 +3,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use codec::as_intermediate;
 use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
     symbolic_variable::SymbolicVariable, SymbolicConstraintsDag, SymbolicExpressionNode,
@@ -227,11 +226,6 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct IntermediateVariable {
-    id: usize,
-}
-
 /// Information about an intermediate variable's usage and dependencies
 ///
 /// Tracks the lifecycle and relationships of intermediate variables:
@@ -239,16 +233,12 @@ struct IntermediateVariable {
 /// * `first_use` - Instruction index of first usage
 /// * `last_use` - Instruction index of last usage
 /// * `use_count` - Total number of times the variable is used
-/// * `dependencies` - Set of variables this variable depends on
-/// * `dependents` - Set of variables that depend on this variable
 #[derive(Debug)]
 struct VariableInfo {
     def_point: usize,
     first_use: usize,
     last_use: usize,
     use_count: usize,
-    dependencies: HashSet<IntermediateVariable>,
-    dependents: HashSet<IntermediateVariable>,
 }
 
 /// An allocator that optimizes memory usage by reallocating intermediate variables.
@@ -265,13 +255,12 @@ pub struct IntermediateAllocator<F: Field> {
     /// * Definition point - Where the variable is first defined
     /// * First/Last use points - Lifecycle boundaries
     /// * Usage count - Number of times the variable is used
-    /// * Dependencies/Dependents - Variable dependency relationships
-    variable_info: HashMap<IntermediateVariable, VariableInfo>,
+    variable_info: HashMap<usize, VariableInfo>,
 
     /// Maps original variable IDs to their optimized/reallocated IDs.
     /// Used during the reallocation process to track how variables are reassigned
     /// to minimize the total number of required intermediate slots.
-    variable_mapping: HashMap<IntermediateVariable, IntermediateVariable>,
+    variable_mapping: HashMap<usize, usize>,
 
     /// The minimum number of intermediate slots needed after optimization.
     /// This represents the final length required for the intermediates array.
@@ -345,82 +334,64 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
                 Constraint::Add(src1, src2, dest)
                 | Constraint::Sub(src1, src2, dest)
                 | Constraint::Mul(src1, src2, dest) => {
-                    // we only care about intermediate variables
-                    // an intermediate variable is first defined in the `dest` field
-                    if let Source::Intermediate(dest_id) = dest {
-                        let dest_var = IntermediateVariable { id: *dest_id };
-                        let info =
-                            variable_info
-                                .entry(dest_var.clone())
-                                .or_insert_with(|| VariableInfo {
-                                    def_point: idx,
-                                    first_use: usize::MAX,
-                                    last_use: idx,
-                                    use_count: 0,
-                                    dependencies: HashSet::new(),
-                                    dependents: HashSet::new(),
-                                });
-                        // We need to be sure that previous node will not erase accumulated value
-                        if c.need_accumulate {
-                            let max_prev_node = nodes_iter
-                                .next()
-                                .expect("nodes map shorter than number of accumulators");
-                            info.last_use = info.last_use.max(max_prev_node);
+                    match dest {
+                        Source::Intermediate(dest_id) => {
+                            let info =
+                                variable_info
+                                    .entry(*dest_id)
+                                    .or_insert_with(|| VariableInfo {
+                                        def_point: idx,
+                                        first_use: usize::MAX,
+                                        last_use: idx,
+                                        use_count: 0,
+                                    });
+                            // We need to be sure that previous node will not erase accumulated value
+                            if c.need_accumulate {
+                                let max_prev_node = nodes_iter
+                                    .next()
+                                    .expect("nodes map shorter than number of accumulators");
+                                info.last_use = info.last_use.max(max_prev_node);
+                            }
                         }
+                        _ => panic!("Destination should be an intermediate variable"),
                     }
 
                     // if an intermediate variable is used in the `src`, update its use info
                     if let Source::Intermediate(src1_id) = src1 {
-                        self.update_use_info(&mut variable_info, src1_id, idx, dest);
+                        self.update_use_info(&mut variable_info, src1_id, idx);
                     }
                     if let Source::Intermediate(src2_id) = src2 {
-                        self.update_use_info(&mut variable_info, src2_id, idx, dest);
+                        self.update_use_info(&mut variable_info, src2_id, idx);
                     }
                 }
                 Constraint::Neg(src, dest) => {
-                    if let Source::Intermediate(dest_id) = dest {
-                        let dest_var = IntermediateVariable { id: *dest_id };
-                        let info =
-                            variable_info
-                                .entry(dest_var.clone())
-                                .or_insert_with(|| VariableInfo {
-                                    def_point: idx,
-                                    first_use: usize::MAX,
-                                    last_use: idx,
-                                    use_count: 0,
-                                    dependencies: HashSet::new(),
-                                    dependents: HashSet::new(),
-                                });
-
-                        // We need to be sure that previous node will not erase accumulated value
-                        if c.need_accumulate {
-                            let max_prev_node = nodes_iter
-                                .next()
-                                .expect("nodes map shorter than number of accumulators");
-                            info.last_use = info.last_use.max(max_prev_node);
+                    match dest {
+                        Source::Intermediate(dest_id) => {
+                            let info =
+                                variable_info
+                                    .entry(*dest_id)
+                                    .or_insert_with(|| VariableInfo {
+                                        def_point: idx,
+                                        first_use: usize::MAX,
+                                        last_use: idx,
+                                        use_count: 0,
+                                    });
+                            // We need to be sure that previous node will not erase accumulated value
+                            if c.need_accumulate {
+                                let max_prev_node = nodes_iter
+                                    .next()
+                                    .expect("nodes map shorter than number of accumulators");
+                                info.last_use = info.last_use.max(max_prev_node);
+                            }
                         }
+                        _ => panic!("Destination should be an intermediate variable"),
                     }
 
                     if let Source::Intermediate(src_id) = src {
-                        self.update_use_info(&mut variable_info, src_id, idx, dest);
+                        self.update_use_info(&mut variable_info, src_id, idx);
                     }
                 }
-                Constraint::Variable(src) => {
-                    if let Source::Intermediate(src_id) = src {
-                        let src_var = IntermediateVariable { id: *src_id };
-                        let info = variable_info
-                            .entry(src_var)
-                            .or_insert_with(|| VariableInfo {
-                                def_point: idx,
-                                first_use: idx,
-                                last_use: idx,
-                                use_count: 1,
-                                dependencies: HashSet::new(),
-                                dependents: HashSet::new(),
-                            });
-                        info.last_use = info.last_use.max(idx);
-                        info.use_count += 1;
-                    }
+                Constraint::Variable(_) => {
                     if c.need_accumulate {
                         nodes_iter.next();
                     }
@@ -432,29 +403,18 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
 
     fn update_use_info(
         &self,
-        variable_info: &mut HashMap<IntermediateVariable, VariableInfo>,
+        variable_info: &mut HashMap<usize, VariableInfo>,
         src_id: &usize,
         idx: usize,
-        dest: &Source<F>,
     ) {
-        let src_var = IntermediateVariable { id: *src_id };
-
-        if let Some(info) = variable_info.get_mut(&src_var) {
+        if let Some(info) = variable_info.get_mut(src_id) {
             // update use info
             info.first_use = info.first_use.min(idx);
             info.last_use = info.last_use.max(idx);
             info.use_count += 1;
-
-            // track dependencies
-            let dest_id = as_intermediate(dest).unwrap();
-            let dest_var = IntermediateVariable { id: *dest_id };
-            info.dependents.insert(dest_var.clone());
-            if let Some(dest_info) = variable_info.get_mut(&dest_var) {
-                dest_info.dependencies.insert(src_var);
-            }
         } else {
             panic!(
-                "IntermediateVariable t{} used before definition at instruction {}",
+                "Variable {} used before definition at instruction {}",
                 src_id, idx
             );
         }
@@ -501,9 +461,7 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
 
                 // Record mapping between old and new IDs
                 id_usage.insert(new_id, Some(info.last_use));
-
-                let new_var = IntermediateVariable { id: new_id };
-                self.variable_mapping.insert(var, new_var);
+                self.variable_mapping.insert(var, new_id);
             }
         }
 
@@ -512,19 +470,16 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
     }
 
     fn apply_variable_mapping(&mut self) {
+        let update_source = |source: &mut Source<F>| {
+            if let Source::Intermediate(var_id) = source {
+                if let Some(new_var) = self.variable_mapping.get(var_id) {
+                    *var_id = *new_var;
+                }
+            }
+        };
+
         // Traverse all constraints and replace old variable IDs with newly assigned IDs
         for c in &mut self.constraints {
-            let update_source = |source: &mut Source<F>| {
-                if let Source::Intermediate(var_id) = source {
-                    if let Some(new_var) = self
-                        .variable_mapping
-                        .get(&IntermediateVariable { id: *var_id })
-                    {
-                        *var_id = new_var.id;
-                    }
-                }
-            };
-
             // Handle all constraint types: Add, Sub, Mul, Neg, Variable
             match &mut c.constraint {
                 Constraint::Add(x, y, z) => {

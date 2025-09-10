@@ -144,6 +144,7 @@ impl<F: Field + PrimeField32> Codec for Source<F> {
     }
 }
 
+#[allow(unused)]
 pub fn as_intermediate<F: Field>(source: &Source<F>) -> Option<&usize> {
     match source {
         Source::Intermediate(id) => Some(id),
