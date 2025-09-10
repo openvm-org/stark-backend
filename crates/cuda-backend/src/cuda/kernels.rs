@@ -98,56 +98,6 @@ pub mod matrix {
     }
 }
 
-// relate to supra/ntt_api.cu
-pub mod ntt {
-    use super::*;
-    extern "C" {
-        fn _sppark_init() -> i32;
-
-        fn _batch_NTT(inout: *mut std::ffi::c_void, lg_domain_size: u32, poly_count: u32) -> i32;
-
-        fn _batch_iNTT(
-            inout: *mut std::ffi::c_void,
-            lg_domain_size: u32,
-            lg_blowup: u32,
-            poly_count: u32,
-        ) -> i32;
-    }
-
-    pub unsafe fn sppark_init() -> Result<(), CudaError> {
-        CudaError::from_result(_sppark_init())
-    }
-
-    pub unsafe fn batch_ntt<T>(
-        inout: &DeviceBuffer<T>,
-        lg_domain_size: u32,
-        poly_count: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_batch_NTT(
-            inout.as_mut_raw_ptr(),
-            lg_domain_size,
-            poly_count,
-        ))
-    }
-
-    /// batch inverse NTT on polynomials of degree `2^lg_domain_size` but where polynomials
-    /// are placed in a buffer where each polynomial has `2^{lg_domain_size + lg_blowup}` field
-    /// elements allocated for it.
-    pub unsafe fn batch_interpolate_ntt<T>(
-        inout: &DeviceBuffer<T>,
-        lg_domain_size: u32,
-        lg_blowup: u32,
-        poly_count: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_batch_iNTT(
-            inout.as_mut_raw_ptr(),
-            lg_domain_size,
-            lg_blowup,
-            poly_count,
-        ))
-    }
-}
-
 // relate to lde.cu
 pub mod lde {
     use super::*;

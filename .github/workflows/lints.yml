@@ -76,6 +76,10 @@ jobs:
 
       - name: Run clang-tidy
         run: |
+          set -eux
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm-toolchain.list
           sudo apt-get update
           sudo apt-get install -y clang-tidy
+          clang-tidy --version
           python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
