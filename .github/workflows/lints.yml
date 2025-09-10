@@ -84,4 +84,4 @@ jobs:
           clang --version
           clang -print-resource-dir
           clang-tidy --version
-          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --clang-tidy $CLANG_TIDY_BIN --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
+          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
