@@ -5,8 +5,8 @@ images:
     platform: "linux"
     arch: "x86_64"
     owner: "135269210855"
-    name: "runs-on-v2.2-ubuntu24-gpu-x64-20250731145109"
-    ami: "ami-017d4d69faf854c81"
+    name: "runs-on-v2.2-ubuntu24-gpu-x64-20250908115015"
+    ami: "ami-0b8a760f1af619dd3"
 
 runners:
   # runners for running tests
