@@ -1,18 +1,8 @@
-images:
-  # RunsOn nvidia image with cuda 12.9 installed (latest is cuda 13)
-  # See: https://github.com/runs-on/runner-images-for-aws
-  ubuntu24-gpu-x64-cuda12-9:
-    platform: "linux"
-    arch: "x86_64"
-    owner: "135269210855"
-    name: "runs-on-v2.2-ubuntu24-gpu-x64-20250908115015"
-    ami: "ami-0b8a760f1af619dd3"
-
 runners:
   # runners for running tests
   test-gpu-nvidia:
     family: ["g6", "g5", "g4dn", "g6e"]
-    image: ubuntu24-gpu-x64-cuda12-9
+    image: ubuntu24-gpu-x64
     cpu: [4, 8, 16, 32]
     disk: default
     spot: capacity-optimized
