@@ -62,6 +62,19 @@ jobs:
           nvidia-smi -L
           nvcc --version
 
+      - name: Setup CUDA environment
+        run: |
+          # Find the actual CUDA library location
+          CUDART_PATH=$(find /usr/local -name "libcudart.so" | head -1)
+          if [ -n "$CUDART_PATH" ]; then
+            CUDA_LIB_DIR=$(dirname "$CUDART_PATH")
+            echo "CUDA libraries found at: $CUDA_LIB_DIR"
+            echo "CUDA_LIB_DIR=$CUDA_LIB_DIR" >> $GITHUB_ENV
+          else
+            echo "CUDA libraries not found!"
+            exit 1
+          fi
+
       - name: Run fmt
         working-directory: crates
         run: |
@@ -78,4 +91,4 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-tidy-20
-          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
+          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --clang-tidy clang-tidy-20 --cuda-path $CUDA_LIB_DIR --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
