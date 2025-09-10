@@ -74,33 +74,14 @@ jobs:
           cargo clippy --all-targets --all --tests --features "default mimalloc nightly-features parallel prometheus touchemall" -- -D warnings
           cargo clippy --all-targets --all --tests --no-default-features --features "jemalloc jemalloc-prof" -- -D warnings
 
-      - name: Build clang/clang-tidy from llvm-project (main)
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build build-essential python3 git
-      
-          # Pin to main or a specific commit
-          LLVM_REF=main
-      
-          git clone --depth 1 --branch "$LLVM_REF" https://github.com/llvm/llvm-project.git
-          cmake -S llvm-project/llvm -B /tmp/llvm-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra" \
-            -DLLVM_TARGETS_TO_BUILD="X86" \
-            -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DCLANG_ENABLE_STATIC_ANALYZER=OFF -DCLANG_ENABLE_ARCMT=OFF
-      
-          ninja -C /tmp/llvm-build clang clang-tidy
-      
-          echo "/tmp/llvm-build/bin" >> "$GITHUB_PATH"
-          echo "CLANG_TIDY_BIN=/tmp/llvm-build/bin/clang-tidy" >> "$GITHUB_ENV"
-          echo "CLANG_BIN=/tmp/llvm-build/bin/clang" >> "$GITHUB_ENV"
-      
-          "$CLANG_BIN" --version
-          "$CLANG_BIN" -print-resource-dir
-        
-
       - name: Run clang-tidy
         run: |
+          set -eux
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm-toolchain.list
+          sudo apt-get update
+          sudo apt-get install -y clang clang-tidy
+          clang --version
+          clang -print-resource-dir
+          clang-tidy --version
           python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --clang-tidy $CLANG_TIDY_BIN --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
