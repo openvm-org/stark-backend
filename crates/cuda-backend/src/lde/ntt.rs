@@ -109,6 +109,10 @@ pub(super) fn batch_ntt(
     bit_reverse: bool,
     is_intt: bool,
 ) {
+    if log_trace_height == 0 {
+        return;
+    }
+
     let padded_poly_size = 1 << (log_trace_height + log_blowup);
 
     if bit_reverse {
