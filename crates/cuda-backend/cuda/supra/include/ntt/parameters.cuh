@@ -19,9 +19,9 @@
 
 #define WARP_SIZE 32
 #define MAX_LG_DOMAIN_SIZE 27
-#define LG_WINDOW_SIZE ((MAX_LG_DOMAIN_SIZE + 4) / 5) // 6
-#define WINDOW_SIZE (1 << LG_WINDOW_SIZE) // 64
-#define WINDOW_NUM ((MAX_LG_DOMAIN_SIZE + LG_WINDOW_SIZE - 1) / LG_WINDOW_SIZE) // 5
+#define LG_WINDOW_SIZE ((MAX_LG_DOMAIN_SIZE + 4) / 5)
+#define WINDOW_SIZE (1 << LG_WINDOW_SIZE)
+#define WINDOW_NUM ((MAX_LG_DOMAIN_SIZE + LG_WINDOW_SIZE - 1) / LG_WINDOW_SIZE)
 
 // Values in Montgomery form
 const fr_t forward_roots_of_unity[MAX_LG_DOMAIN_SIZE + 1] = {
