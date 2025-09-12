@@ -3,7 +3,7 @@
 #include "fpext.h"
 #include <cstdint>
 
-const uint32_t NUM_REGISTERS = 8;
+const uint32_t NUM_REGISTERS = 4;
 
 struct ConstraintBuffer {
     FpExt *global_buffer;
@@ -11,10 +11,10 @@ struct ConstraintBuffer {
     FpExt r1;
     FpExt r2;
     FpExt r3;
-    FpExt r4;
-    FpExt r5;
-    FpExt r6;
-    FpExt r7;
+    // FpExt r4;
+    // FpExt r5;
+    // FpExt r6;
+    // FpExt r7;
     // FpExt r8;
     // FpExt r9;
     // FpExt r10;
@@ -38,14 +38,14 @@ struct ConstraintBuffer {
                 return r2;
             case 3:
                 return r3;
-            case 4:
-                return r4;
-            case 5:
-                return r5;
-            case 6:
-                return r6;
-            case 7:
-                return r7;
+                // case 4:
+                //     return r4;
+                // case 5:
+                //     return r5;
+                // case 6:
+                //     return r6;
+                // case 7:
+                //     return r7;
                 //     case 8:
                 //         return r8;
                 //     case 9:
@@ -86,18 +86,18 @@ struct ConstraintBuffer {
             case 3:
                 r3 = value;
                 break;
-            case 4:
-                r4 = value;
-                break;
-            case 5:
-                r5 = value;
-                break;
-            case 6:
-                r6 = value;
-                break;
-            case 7:
-                r7 = value;
-                break;
+                // case 4:
+                //     r4 = value;
+                //     break;
+                // case 5:
+                //     r5 = value;
+                //     break;
+                // case 6:
+                //     r6 = value;
+                //     break;
+                // case 7:
+                //     r7 = value;
+                //     break;
                 //     case 8:
                 //         r8 = value;
                 //         break;
