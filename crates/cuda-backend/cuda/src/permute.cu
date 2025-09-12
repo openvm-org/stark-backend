@@ -5,6 +5,7 @@
  */
 
 #include "codec.cuh"
+#include "constraint_buffer.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
@@ -19,8 +20,9 @@ __host__ __device__ __forceinline__ FpExt permute_entry(
     const Fp *d_preprocessed,
     const uint64_t *d_main, // partitioned main ptr
     const FpExt *d_challenges,
-    const FpExt *d_intermediates,
-    const uint32_t intermediate_stride,
+    const FpExt *global_buffer,
+    const FpExt *register_buffer,
+    const uint32_t task_stride,
     const uint32_t height
 ) {
     FpExt result(0); //{0, 0, 0, 0};
@@ -38,7 +40,7 @@ __host__ __device__ __forceinline__ FpExt permute_entry(
         result = d_challenges[src.index];
         break;
     case SRC_INTERMEDIATE:
-        result = d_intermediates[intermediate_stride * src.index];
+        result = read_from_buffer(global_buffer, register_buffer, src.index, task_stride);
         break;
     case SRC_CONSTANT:
         result = FpExt(Fp(src.index));
@@ -49,7 +51,6 @@ __host__ __device__ __forceinline__ FpExt permute_entry(
     return result;
 }
 
-template<bool GLOBAL>
 __global__ void calculate_cumulative_sums(
     Fp * __restrict__ d_permutation,
     FpExt * __restrict__ d_cumulative_sums,
@@ -69,16 +70,9 @@ __global__ void calculate_cumulative_sums(
     uint32_t task_offset = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t task_stride = gridDim.x * blockDim.x;
     
-    FpExt *intermediates_ptr;
-    uint32_t intermediate_stride;
-    if constexpr (GLOBAL) {
-        intermediates_ptr = (FpExt *)d_intermediates + task_offset;
-        intermediate_stride = task_stride;
-    } else {
-        FpExt intermediates[10];
-        intermediates_ptr = intermediates;
-        intermediate_stride = 1;
-    }
+    FpExt registers[NUM_REGISTERS];
+    FpExt *global_buffer = (FpExt *)d_intermediates + task_offset;
+    FpExt *register_buffer = registers;
 
     for (uint32_t j = 0; j < num_rows_per_tile; j++) {
         uint32_t col_offset = 0;
@@ -107,12 +101,15 @@ __global__ void calculate_cumulative_sums(
                                 d_preprocessed,
                                 d_main,
                                 d_challenges,
-                                intermediates_ptr,
-                                intermediate_stride,
+                                global_buffer,
+                                register_buffer,
+                                task_stride,
                                 permutation_height
                             ); 
-                        } else {  
-                            result = intermediates_ptr[decoded_rule.z.index * intermediate_stride];
+                        } else {
+                            result = read_from_buffer(
+                                global_buffer, register_buffer, decoded_rule.z.index, task_stride
+                            );
                         }
                     } else {
                         for (; rules_evaluated <= node_idx; rules_evaluated++) {
@@ -126,8 +123,9 @@ __global__ void calculate_cumulative_sums(
                                 d_preprocessed,
                                 d_main,
                                 d_challenges,
-                                intermediates_ptr,
-                                intermediate_stride,
+                                global_buffer,
+                                register_buffer,
+                                task_stride,
                                 permutation_height
                             );
                             FpExt y = permute_entry(
@@ -136,8 +134,9 @@ __global__ void calculate_cumulative_sums(
                                 d_preprocessed,
                                 d_main,
                                 d_challenges,
-                                intermediates_ptr,
-                                intermediate_stride,
+                                global_buffer,
+                                register_buffer,
+                                task_stride,
                                 permutation_height
                             );
 
@@ -163,7 +162,9 @@ __global__ void calculate_cumulative_sums(
                             }
 
                             if (decoded_rule.op != OP_VAR) {
-                                intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
+                                write_to_buffer(
+                                    global_buffer, register_buffer, decoded_rule.z.index, task_stride, result
+                                );
                             }
                         }
                     }
@@ -223,7 +224,6 @@ __global__ void cukernel_permute_update(
 static const size_t TASK_SIZE = 65536;
 
 extern "C" int _calculate_cumulative_sums(
-    bool is_global,
     Fp *d_permutation,
     FpExt *d_cumulative_sums,
     const Fp *d_preprocessed,
@@ -256,11 +256,7 @@ extern "C" int _calculate_cumulative_sums(
         permutation_width_ext, \
         num_rows_per_tile
 
-    if (is_global) {
-        calculate_cumulative_sums<true><<<grid, block>>>(PERMUTE_ARGUMENTS);
-    } else {
-        calculate_cumulative_sums<false><<<grid, block>>>(PERMUTE_ARGUMENTS);
-    }
+    calculate_cumulative_sums<<<grid, block>>>(PERMUTE_ARGUMENTS);
     return cudaGetLastError();
 }
 

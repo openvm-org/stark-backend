@@ -13,7 +13,12 @@ use crate::transpiler::{Constraint, ConstraintWithFlag, Source};
 enum ExpressionType {
     Intermediate,
     Variable,
+    PermutationVariable,
     Other,
+}
+
+fn is_variable(expr_type: ExpressionType) -> bool {
+    expr_type == ExpressionType::Variable || expr_type == ExpressionType::PermutationVariable
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -24,8 +29,11 @@ struct ExpressionInfo {
     pub last_use: usize,
     pub use_count: usize,
     pub accumulate: bool,
+    pub buffered: bool,
     pub expr_type: ExpressionType,
 }
+
+const NUMBER_REGISTERS: usize = 16;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct BufferEntry {
@@ -65,6 +73,7 @@ impl<F: Field + PrimeField32> StephenRules<F> {
                 last_use: usize::MAX,
                 use_count: 0,
                 accumulate: false,
+                buffered: false,
                 expr_type: ExpressionType::Other,
             })
             .collect::<Vec<_>>();
@@ -103,7 +112,11 @@ impl<F: Field + PrimeField32> StephenRules<F> {
                     expr_info[*idx].use_count += 1;
                 }
                 SymbolicExpressionNode::Variable(var) => {
-                    expr_info[i].expr_type = ExpressionType::Variable;
+                    expr_info[i].expr_type = if matches!(var.entry, Entry::Permutation { .. }) {
+                        ExpressionType::PermutationVariable
+                    } else {
+                        ExpressionType::Variable
+                    };
                     if cache_vars {
                         match var.entry {
                             Entry::Main { .. }
@@ -149,7 +162,7 @@ impl<F: Field + PrimeField32> StephenRules<F> {
             // it will be read here first (due to the topological ordering). Alternatively, during
             // permutation some accumulated intermediates may need to be stored in the buffer for
             // access later - such values must be marked as used.
-            if (expr_info[idx].expr_type == ExpressionType::Variable && cache_vars) || is_permute {
+            if (is_variable(expr_info[idx].expr_type) && cache_vars) || is_permute {
                 expr_info[idx].first_use = expr_info[idx].first_use.min(idx);
                 expr_info[idx].use_count += 1;
             }
@@ -158,49 +171,123 @@ impl<F: Field + PrimeField32> StephenRules<F> {
         // Expressions don't actually need to be buffered if they're not read/used multiple time.
         // We can use this to reduce the number of buffers needed.
         for expr in expr_info.iter_mut() {
-            if expr.use_count == 0
-                || (expr.use_count == 1 && expr.expr_type == ExpressionType::Variable)
-            {
+            if expr.use_count == 0 || (expr.use_count == 1 && is_variable(expr.expr_type)) {
                 expr.buffer_idx = usize::MAX;
             }
         }
 
-        // Collects all the expressions that need to be buffered and sort them by last use
-        // last use. We then use the classic scheduling algorithm to minimally assign buffer
-        // indices to each expression.
-        let buffer_expr_info = expr_info
+        // Collects all the expressions that need to be buffered and sort them by last use.
+        // We then use the classic scheduling algorithm to minimally assign buffer indices
+        // to each expression. Buffer indices 0 to 15 are reserved for registers, while
+        // buffer indices 16 to 65535 are reserved for the global buffer.
+        let mut buffer_expr_info = expr_info
             .iter()
             .filter(|info| info.buffer_idx != usize::MAX)
             .copied()
+            .sorted_by_key(|info| info.last_use)
+            .collect::<Vec<_>>();
+
+        // We first assign registers 0..15 to variables by repeating the standard weighted
+        // interval scheduling algorithm. This won't produce the fully optimal scheduling,
+        // but this problem is NP-complete which might take a lot of time to complete.
+        {
+            // Weight of each expression that we'll buffer. Our kernel time is dominated by
+            // the number of global reads, so we'll use weight num_uses * num_reads (note
+            // this is 4 for permutation variables and 1 for everything else).
+            let mut weights = buffer_expr_info
+                .iter()
+                .map(|info| {
+                    if info.expr_type == ExpressionType::PermutationVariable {
+                        info.use_count * 4
+                    } else {
+                        info.use_count
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            for register in 0..NUMBER_REGISTERS {
+                // Number of intervals that finish before each expression's store point.
+                let priors = {
+                    let last_uses = buffer_expr_info
+                        .iter()
+                        .map(|info| info.last_use)
+                        .collect::<Vec<_>>();
+                    buffer_expr_info
+                        .iter()
+                        .map(|info| {
+                            let store_point = if is_variable(info.expr_type) {
+                                info.first_use
+                            } else {
+                                info.dag_idx
+                            };
+                            last_uses.partition_point(|&x| x < store_point)
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                // Maximum single-register schedule weight up to each expression, note that
+                // we have extra spot schedule_weights[0] = 0.
+                let mut schedule_weights = vec![0; buffer_expr_info.len() + 1];
+                for i in 1..schedule_weights.len() {
+                    schedule_weights[i] = (weights[i - 1] + schedule_weights[priors[i - 1]])
+                        .max(schedule_weights[i - 1]);
+                }
+
+                let mut i = buffer_expr_info.len();
+                while i != 0 {
+                    if weights[i - 1] + schedule_weights[priors[i - 1]] >= schedule_weights[i - 1] {
+                        expr_info[buffer_expr_info[i - 1].dag_idx].buffer_idx = register;
+                        expr_info[buffer_expr_info[i - 1].dag_idx].buffered = true;
+                        i = priors[i - 1];
+                    } else {
+                        i -= 1;
+                    }
+                }
+
+                (buffer_expr_info, weights) = buffer_expr_info
+                    .iter()
+                    .zip(weights.iter())
+                    .filter(|(info, _)| !expr_info[info.dag_idx].buffered)
+                    .unzip();
+
+                if buffer_expr_info.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        // We can now assign the remaining expressions to global intermediate buffers.
+        buffer_expr_info = buffer_expr_info
+            .into_iter()
             .sorted_by_key(|info| {
-                if info.expr_type == ExpressionType::Variable {
+                if is_variable(info.expr_type) {
                     info.first_use
                 } else {
                     info.dag_idx
                 }
             })
             .collect::<Vec<_>>();
-        let mut buffer = BinaryHeap::<BufferEntry>::new();
 
+        let mut global_buffer = BinaryHeap::<BufferEntry>::new();
         for expr in buffer_expr_info {
             // Variables will be stored to the buffer immediately after their first read, while
             // intermediates will be stored after being computed for the first time.
-            let store_point = if expr.expr_type == ExpressionType::Variable {
+            let store_point = if is_variable(expr.expr_type) {
                 expr.first_use
             } else {
                 expr.dag_idx
             };
 
-            if buffer.is_empty() || (buffer.peek().unwrap().last_use >= store_point) {
-                expr_info[expr.dag_idx].buffer_idx = buffer.len();
-                buffer.push(BufferEntry {
+            if global_buffer.is_empty() || (global_buffer.peek().unwrap().last_use >= store_point) {
+                expr_info[expr.dag_idx].buffer_idx = global_buffer.len() + NUMBER_REGISTERS;
+                global_buffer.push(BufferEntry {
                     buffer_idx: expr_info[expr.dag_idx].buffer_idx,
                     last_use: expr.last_use,
                 });
             } else {
-                let buffer_entry = buffer.pop().unwrap();
+                let buffer_entry = global_buffer.pop().unwrap();
                 expr_info[expr.dag_idx].buffer_idx = buffer_entry.buffer_idx;
-                buffer.push(BufferEntry {
+                global_buffer.push(BufferEntry {
                     buffer_idx: expr_info[expr.dag_idx].buffer_idx,
                     last_use: expr.last_use,
                 });
@@ -300,7 +387,7 @@ impl<F: Field + PrimeField32> StephenRules<F> {
                 .iter()
                 .map(|idx| dag_idx_to_constraint_idx[idx])
                 .collect(),
-            buffer_size: buffer.len(),
+            buffer_size: global_buffer.len(),
         }
     }
 }

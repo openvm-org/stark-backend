@@ -181,18 +181,14 @@ fn quotient_evaluate(
     // qdb_degree
     let qdb_degree = log2_strict_usize(quotient_size) - log2_strict_usize(trace_size);
 
-    let is_global = num_intermediates > 10;
-
-    let mut buffer_size = 1;
-    if is_global {
-        buffer_size = task_size * num_intermediates;
-    }
-
-    let d_intermediates = DeviceBuffer::<EF>::with_capacity(buffer_size);
+    let d_intermediates = if num_intermediates > 0 {
+        DeviceBuffer::<EF>::with_capacity(task_size * num_intermediates)
+    } else {
+        DeviceBuffer::new()
+    };
 
     unsafe {
         quotient_global_or_local(
-            is_global,
             accumulators,
             preprocessed.unwrap_or(&DeviceBuffer::<F>::new()),
             &main_matrices_ptr_buf,

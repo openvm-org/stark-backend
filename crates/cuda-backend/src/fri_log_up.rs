@@ -321,17 +321,15 @@ impl FriLogUpPhaseGpu {
 
         tracing::debug!("permutation_height = {permutation_height}, task_size = {}, tile_per_thread = {} num_rules = {num_rules}", task_size, tile_per_thread);
 
-        let is_global = num_intermediates > 10;
-        let d_intermediates = if is_global {
+        let d_intermediates = if num_intermediates > 0 {
             DeviceBuffer::<EF>::with_capacity(task_size * num_intermediates)
         } else {
-            DeviceBuffer::<EF>::with_capacity(1) // Dummy buffer for register-based version
+            DeviceBuffer::new()
         };
 
         let d_cumulative_sums = DeviceBuffer::<EF>::with_capacity(permutation_height);
         unsafe {
             calculate_cumulative_sums(
-                is_global,
                 permutation,
                 &d_cumulative_sums,
                 preprocessed,

@@ -5,6 +5,7 @@
  */
 
 #include "codec.cuh"
+#include "constraint_buffer.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
@@ -59,8 +60,9 @@ __device__ __forceinline__ FpExt evaluate_source(
     const Fp *d_first,
     const Fp *d_last,
     const Fp *d_transition,
-    FpExt *d_intermediate,
-    const uint64_t intermediate_stride,
+    FpExt *global_buffer,
+    FpExt *register_buffer,
+    const uint64_t task_stride,
     const uint32_t next_step,
     const uint32_t quotient_size,
     const uint32_t prep_height,
@@ -112,7 +114,7 @@ __device__ __forceinline__ FpExt evaluate_source(
         result = d_exposed[src.index];
         break;
     case SRC_INTERMEDIATE:
-        result = d_intermediate[intermediate_stride * src.index];
+        result = read_from_buffer(global_buffer, register_buffer, src.index, task_stride);
         break;
     case SRC_CONSTANT:
         result = FpExt(Fp(src.index));
@@ -132,13 +134,11 @@ __device__ __forceinline__ FpExt evaluate_source(
     }
 
     if (src.type == BUFF_PREPROCESSED || src.type == BUFF_MAIN || src.type == BUFF_PERMUTATION) {
-        d_intermediate[intermediate_stride * src.buffer_idx] = result;
+        write_to_buffer(global_buffer, register_buffer, src.buffer_idx, task_stride, result);
     }
     return result;
 }
 
-// In this kernel we have interemediates stored in global memory.
-template<bool GLOBAL>
 __global__ void cukernel_quotient(
     // output
     FpExt * __restrict__ d_quotient_values,
@@ -172,17 +172,10 @@ __global__ void cukernel_quotient(
     uint64_t task_stride = gridDim.x * blockDim.x;
 
     FpExt alpha = *d_alpha;
-    FpExt *intermediates_ptr;
-    uint64_t intermediate_stride;
+    FpExt registers[NUM_REGISTERS];
 
-    if constexpr (GLOBAL) {
-        intermediates_ptr = (FpExt *)d_intermediates + task_offset;
-        intermediate_stride = task_stride;
-    } else {
-        FpExt intermediates[10];
-        intermediates_ptr = intermediates;
-        intermediate_stride = 1;
-    }
+    FpExt *global_buffer = (FpExt *)d_intermediates + task_offset;
+    FpExt *register_buffer = registers;
 
     for (uint32_t j = 0; j < num_rows_per_tile; j++) {
         uint64_t index = task_offset + j * task_stride;
@@ -207,8 +200,9 @@ __global__ void cukernel_quotient(
                     d_first,
                     d_last,
                     d_transition,
-                    intermediates_ptr,
-                    intermediate_stride,
+                    global_buffer,
+                    register_buffer,
+                    task_stride,
                     next_step,
                     quotient_size,
                     prep_height,
@@ -227,8 +221,9 @@ __global__ void cukernel_quotient(
                     d_first,
                     d_last,
                     d_transition,
-                    intermediates_ptr,
-                    intermediate_stride,
+                    global_buffer,
+                    register_buffer,
+                    task_stride,
                     next_step,
                     quotient_size,
                     prep_height,
@@ -258,7 +253,9 @@ __global__ void cukernel_quotient(
                 }
 
                 if (decoded_rule.op != OP_VAR && decoded_rule.z.type != TERMINAL) {
-                    intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
+                    write_to_buffer(
+                        global_buffer, register_buffer, decoded_rule.z.index, task_stride, result
+                    );
                 }
 
                 if (decoded_rule.is_constraint) {
@@ -341,7 +338,6 @@ extern "C" int _cukernel_quotient_selectors(
 }
 
 extern "C" int _cukernel_quotient(
-    bool is_global,
     FpExt *d_quotient_values,
     const Fp *d_preprocessed,
     const uint64_t *d_main,
@@ -389,10 +385,6 @@ extern "C" int _cukernel_quotient(
         qdb_degree, \
         num_rows_per_tile
 
-    if (is_global) {
-        cukernel_quotient<true><<<grid, block>>>(QUOTIENT_ARGUMENTS);
-    } else {
-        cukernel_quotient<false><<<grid, block>>>(QUOTIENT_ARGUMENTS);
-    }
+    cukernel_quotient<<<grid, block>>>(QUOTIENT_ARGUMENTS);
     return cudaGetLastError();
 }
