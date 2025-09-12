@@ -126,6 +126,12 @@ impl<F: Field + PrimeField32> StephenRules<F> {
                             }
                             _ => {}
                         }
+                    } else if !is_permute {
+                        // During quotient evaluation we should almost all look to cache permutation
+                        // LDE values, as they take 4 reads.
+                        if let Entry::Permutation { .. } = var.entry {
+                            expr_info[i].buffer_idx = i;
+                        }
                     }
                 }
                 _ => {}
@@ -162,7 +168,11 @@ impl<F: Field + PrimeField32> StephenRules<F> {
             // it will be read here first (due to the topological ordering). Alternatively, during
             // permutation some accumulated intermediates may need to be stored in the buffer for
             // access later - such values must be marked as used.
-            if (is_variable(expr_info[idx].expr_type) && cache_vars) || is_permute {
+            let expr_type = expr_info[idx].expr_type;
+            if (is_variable(expr_type) && cache_vars)
+                || matches!(expr_type, ExpressionType::PermutationVariable)
+                || is_permute
+            {
                 expr_info[idx].first_use = expr_info[idx].first_use.min(idx);
                 expr_info[idx].use_count += 1;
             }
@@ -296,7 +306,12 @@ impl<F: Field + PrimeField32> StephenRules<F> {
                 SymbolicExpressionNode::Variable(var) => {
                     if buffer_idx == usize::MAX {
                         Source::Var(*var)
-                    } else if expr_info[idx].first_use == use_idx && cache_vars {
+                    } else if (expr_info[idx].first_use == use_idx && cache_vars)
+                        || (matches!(
+                            expr_info[idx].expr_type,
+                            ExpressionType::PermutationVariable
+                        ) && !is_permute)
+                    {
                         Source::BufferedVar((*var, buffer_idx))
                     } else {
                         Source::Intermediate(buffer_idx)
