@@ -33,7 +33,7 @@ struct ExpressionInfo {
     pub expr_type: ExpressionType,
 }
 
-const NUMBER_REGISTERS: usize = 4;
+const NUMBER_REGISTERS: usize = 2;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct BufferEntry {
