@@ -155,7 +155,17 @@ impl<F: Field + PrimeField32> StephenRules<F> {
             }
         }
 
-        // Collects all the expressions that (potentially) need to be buffered and sort them by
+        // Expressions don't actually need to be buffered if they're not read/used multiple time.
+        // We can use this to reduce the number of buffers needed.
+        for expr in expr_info.iter_mut() {
+            if expr.use_count == 0
+                || (expr.use_count == 1 && expr.expr_type == ExpressionType::Variable)
+            {
+                expr.buffer_idx = usize::MAX;
+            }
+        }
+
+        // Collects all the expressions that need to be buffered and sort them by last use
         // last use. We then use the classic scheduling algorithm to minimally assign buffer
         // indices to each expression.
         let buffer_expr_info = expr_info
@@ -175,12 +185,13 @@ impl<F: Field + PrimeField32> StephenRules<F> {
         for expr in buffer_expr_info {
             // Variables will be stored to the buffer immediately after their first read, while
             // intermediates will be stored after being computed for the first time.
-            let is_var = expr.expr_type == ExpressionType::Variable;
-            let store_point = if is_var { expr.first_use } else { expr.dag_idx };
+            let store_point = if expr.expr_type == ExpressionType::Variable {
+                expr.first_use
+            } else {
+                expr.dag_idx
+            };
 
-            if expr.use_count == 0 || (expr.use_count == 1 && is_var) {
-                expr_info[expr.dag_idx].buffer_idx = usize::MAX;
-            } else if buffer.is_empty() || (buffer.peek().unwrap().last_use >= store_point) {
+            if buffer.is_empty() || (buffer.peek().unwrap().last_use >= store_point) {
                 expr_info[expr.dag_idx].buffer_idx = buffer.len();
                 buffer.push(BufferEntry {
                     buffer_idx: expr_info[expr.dag_idx].buffer_idx,
