@@ -33,7 +33,7 @@ struct ExpressionInfo {
     pub expr_type: ExpressionType,
 }
 
-const NUMBER_REGISTERS: usize = 0;
+const NUMBER_REGISTERS: usize = 8;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct BufferEntry {
@@ -200,57 +200,57 @@ impl<F: Field + PrimeField32> StephenRules<F> {
         // We first assign registers 0..15 to variables by repeating the standard weighted
         // interval scheduling algorithm. This won't produce the fully optimal scheduling,
         // but this problem is NP-complete which might take a lot of time to complete.
-        // for register in 0..NUMBER_REGISTERS {
-        //     // Number of intervals that finish before each expression's store point.
-        //     let priors = {
-        //         let last_uses = buffer_expr_info
-        //             .iter()
-        //             .map(|info| info.last_use)
-        //             .collect::<Vec<_>>();
-        //         buffer_expr_info
-        //             .iter()
-        //             .map(|info| {
-        //                 let store_point = if is_variable(info.expr_type) {
-        //                     info.first_use
-        //                 } else {
-        //                     info.dag_idx
-        //                 };
-        //                 last_uses.partition_point(|&x| x < store_point)
-        //             })
-        //             .collect::<Vec<_>>()
-        //     };
+        for register in 0..NUMBER_REGISTERS {
+            // Number of intervals that finish before each expression's store point.
+            let priors = {
+                let last_uses = buffer_expr_info
+                    .iter()
+                    .map(|info| info.last_use)
+                    .collect::<Vec<_>>();
+                buffer_expr_info
+                    .iter()
+                    .map(|info| {
+                        let store_point = if is_variable(info.expr_type) {
+                            info.first_use
+                        } else {
+                            info.dag_idx
+                        };
+                        last_uses.partition_point(|&x| x < store_point)
+                    })
+                    .collect::<Vec<_>>()
+            };
 
-        //     // Maximum single-register schedule weight up to each expression, note that
-        //     // we have extra spot schedule_weights[0] = 0.
-        //     let mut schedule_weights = vec![0; buffer_expr_info.len() + 1];
-        //     for i in 1..schedule_weights.len() {
-        //         schedule_weights[i] = (buffer_expr_info[i - 1].use_count
-        //             + schedule_weights[priors[i - 1]])
-        //             .max(schedule_weights[i - 1]);
-        //     }
+            // Maximum single-register schedule weight up to each expression, note that
+            // we have extra spot schedule_weights[0] = 0.
+            let mut schedule_weights = vec![0; buffer_expr_info.len() + 1];
+            for i in 1..schedule_weights.len() {
+                schedule_weights[i] = (buffer_expr_info[i - 1].use_count
+                    + schedule_weights[priors[i - 1]])
+                    .max(schedule_weights[i - 1]);
+            }
 
-        //     let mut i = buffer_expr_info.len();
-        //     while i != 0 {
-        //         if buffer_expr_info[i - 1].use_count + schedule_weights[priors[i - 1]]
-        //             >= schedule_weights[i - 1]
-        //         {
-        //             expr_info[buffer_expr_info[i - 1].dag_idx].buffer_idx = register;
-        //             expr_info[buffer_expr_info[i - 1].dag_idx].buffered = true;
-        //             i = priors[i - 1];
-        //         } else {
-        //             i -= 1;
-        //         }
-        //     }
+            let mut i = buffer_expr_info.len();
+            while i != 0 {
+                if buffer_expr_info[i - 1].use_count + schedule_weights[priors[i - 1]]
+                    >= schedule_weights[i - 1]
+                {
+                    expr_info[buffer_expr_info[i - 1].dag_idx].buffer_idx = register;
+                    expr_info[buffer_expr_info[i - 1].dag_idx].buffered = true;
+                    i = priors[i - 1];
+                } else {
+                    i -= 1;
+                }
+            }
 
-        //     buffer_expr_info = buffer_expr_info
-        //         .into_iter()
-        //         .filter(|info| !expr_info[info.dag_idx].buffered)
-        //         .collect::<Vec<_>>();
+            buffer_expr_info = buffer_expr_info
+                .into_iter()
+                .filter(|info| !expr_info[info.dag_idx].buffered)
+                .collect::<Vec<_>>();
 
-        //     if buffer_expr_info.is_empty() {
-        //         break;
-        //     }
-        // }
+            if buffer_expr_info.is_empty() {
+                break;
+            }
+        }
 
         // We can now assign the remaining expressions to global intermediate buffers.
         buffer_expr_info = buffer_expr_info
