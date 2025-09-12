@@ -12,7 +12,6 @@
 #ifdef DEBUG
 #include <cstdio>
 
-
 // Helper function to print decoded information
 __host__ __device__ void print_decoded_rule(uint32_t rule_idx, Rule encoded, DecodedRule rule) {
     printf("Rule[%d]: {%lx, %lx}\n", rule_idx, encoded.high, encoded.low);
@@ -60,9 +59,8 @@ __device__ __forceinline__ FpExt evaluate_source(
     const Fp *d_first,
     const Fp *d_last,
     const Fp *d_transition,
-    FpExt *global_buffer,
-    FpExt *register_buffer,
-    const uint64_t task_stride,
+    ConstraintBuffer &buffer,
+    const uint32_t task_stride,
     const uint32_t next_step,
     const uint32_t quotient_size,
     const uint32_t prep_height,
@@ -114,7 +112,7 @@ __device__ __forceinline__ FpExt evaluate_source(
         result = d_exposed[src.index];
         break;
     case SRC_INTERMEDIATE:
-        result = read_from_buffer(global_buffer, register_buffer, src.index, task_stride);
+        result = buffer.read(src.index, task_stride);
         break;
     case SRC_CONSTANT:
         result = FpExt(Fp(src.index));
@@ -134,31 +132,31 @@ __device__ __forceinline__ FpExt evaluate_source(
     }
 
     if (src.type == BUFF_PREPROCESSED || src.type == BUFF_MAIN || src.type == BUFF_PERMUTATION) {
-        write_to_buffer(global_buffer, register_buffer, src.buffer_idx, task_stride, result);
+        buffer.write(src.buffer_idx, result, task_stride);
     }
     return result;
 }
 
 __global__ void cukernel_quotient(
     // output
-    FpExt * __restrict__ d_quotient_values,
+    FpExt *__restrict__ d_quotient_values,
     // LDEs
-    const Fp * __restrict__ d_preprocessed, // preprocessed LDE over Fp
-    const uint64_t * __restrict__ d_main,   // array of partitioned main LDEs over Fp
-    const Fp * __restrict__ d_permutation,  // permutation LDE over FpExt (see comments below)
+    const Fp *__restrict__ d_preprocessed, // preprocessed LDE over Fp
+    const uint64_t *__restrict__ d_main,   // array of partitioned main LDEs over Fp
+    const Fp *__restrict__ d_permutation,  // permutation LDE over FpExt (see comments below)
     // public values, challenges, ...
-    const FpExt * __restrict__ d_exposed,
-    const Fp * __restrict__ d_public,
-    const Fp * __restrict__ d_first,
-    const Fp * __restrict__ d_last,
-    const Fp * __restrict__ d_transition,
-    const Fp * __restrict__ d_inv_zeroifier,
-    const FpExt * __restrict__ d_challenge,
-    const FpExt * __restrict__ d_alpha,
+    const FpExt *__restrict__ d_exposed,
+    const Fp *__restrict__ d_public,
+    const Fp *__restrict__ d_first,
+    const Fp *__restrict__ d_last,
+    const Fp *__restrict__ d_transition,
+    const Fp *__restrict__ d_inv_zeroifier,
+    const FpExt *__restrict__ d_challenge,
+    const FpExt *__restrict__ d_alpha,
     // intermediates
-    const FpExt * __restrict__ d_intermediates,
+    const FpExt *__restrict__ d_intermediates,
     // symbolic constraints (rules)
-    const Rule * __restrict__ d_rules,
+    const Rule *__restrict__ d_rules,
     const uint64_t num_rules,
     const uint64_t quotient_size,
     const uint32_t prep_height,
@@ -172,10 +170,7 @@ __global__ void cukernel_quotient(
     uint64_t task_stride = gridDim.x * blockDim.x;
 
     FpExt alpha = *d_alpha;
-    FpExt registers[NUM_REGISTERS];
-
-    FpExt *global_buffer = (FpExt *)d_intermediates + task_offset;
-    FpExt *register_buffer = registers;
+    ConstraintBuffer buffer((FpExt *)d_intermediates + task_offset);
 
     for (uint32_t j = 0; j < num_rows_per_tile; j++) {
         uint64_t index = task_offset + j * task_stride;
@@ -200,8 +195,7 @@ __global__ void cukernel_quotient(
                     d_first,
                     d_last,
                     d_transition,
-                    global_buffer,
-                    register_buffer,
+                    buffer,
                     task_stride,
                     next_step,
                     quotient_size,
@@ -221,8 +215,7 @@ __global__ void cukernel_quotient(
                     d_first,
                     d_last,
                     d_transition,
-                    global_buffer,
-                    register_buffer,
+                    buffer,
                     task_stride,
                     next_step,
                     quotient_size,
@@ -253,9 +246,7 @@ __global__ void cukernel_quotient(
                 }
 
                 if (decoded_rule.op != OP_VAR && decoded_rule.z.type != TERMINAL) {
-                    write_to_buffer(
-                        global_buffer, register_buffer, decoded_rule.z.index, task_stride, result
-                    );
+                    buffer.write(decoded_rule.z.index, result, task_stride);
                 }
 
                 if (decoded_rule.is_constraint) {

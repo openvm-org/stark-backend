@@ -14,14 +14,13 @@
 #endif
 
 // read the input operands
-__host__ __device__ __forceinline__ FpExt permute_entry(
+__device__ __forceinline__ FpExt permute_entry(
     const SourceInfo &src,
     uint32_t row_index,
     const Fp *d_preprocessed,
     const uint64_t *d_main, // partitioned main ptr
     const FpExt *d_challenges,
-    const FpExt *global_buffer,
-    const FpExt *register_buffer,
+    ConstraintBuffer &buffer,
     const uint32_t task_stride,
     const uint32_t height
 ) {
@@ -40,7 +39,7 @@ __host__ __device__ __forceinline__ FpExt permute_entry(
         result = d_challenges[src.index];
         break;
     case SRC_INTERMEDIATE:
-        result = read_from_buffer(global_buffer, register_buffer, src.index, task_stride);
+        result = buffer.read(src.index, task_stride);
         break;
     case SRC_CONSTANT:
         result = FpExt(Fp(src.index));
@@ -52,16 +51,16 @@ __host__ __device__ __forceinline__ FpExt permute_entry(
 }
 
 __global__ void calculate_cumulative_sums(
-    Fp * __restrict__ d_permutation,
-    FpExt * __restrict__ d_cumulative_sums,
-    const Fp * __restrict__ d_preprocessed,
-    const uint64_t * __restrict__ d_main, // partitioned main ptr
-    const FpExt * __restrict__ d_challenges,
-    const FpExt * __restrict__ d_intermediates,
+    Fp *__restrict__ d_permutation,
+    FpExt *__restrict__ d_cumulative_sums,
+    const Fp *__restrict__ d_preprocessed,
+    const uint64_t *__restrict__ d_main, // partitioned main ptr
+    const FpExt *__restrict__ d_challenges,
+    const FpExt *__restrict__ d_intermediates,
     // params
-    const Rule * __restrict__ d_rules,
-    const size_t * __restrict__ d_used_nodes,
-    const uint32_t * __restrict__ d_partition_lens,
+    const Rule *__restrict__ d_rules,
+    const size_t *__restrict__ d_used_nodes,
+    const uint32_t *__restrict__ d_partition_lens,
     const size_t num_partitions,
     const uint32_t permutation_height,
     const uint32_t permutation_width_ext,
@@ -69,20 +68,16 @@ __global__ void calculate_cumulative_sums(
 ) {
     uint32_t task_offset = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t task_stride = gridDim.x * blockDim.x;
-    
-    FpExt registers[NUM_REGISTERS];
-    FpExt *global_buffer = (FpExt *)d_intermediates + task_offset;
-    FpExt *register_buffer = registers;
+
+    ConstraintBuffer buffer((FpExt *)d_intermediates + task_offset);
 
     for (uint32_t j = 0; j < num_rows_per_tile; j++) {
-        uint32_t col_offset = 0;
         uint32_t row = task_offset + j * task_stride;
 
         if (row < permutation_height) {
             FpExt cumulative_sums(0);
             uint32_t rules_evaluated = 0;
             uint32_t curr_node_idx = 0;
-            bool is_denom = false;
 
             for (uint32_t partition_idx = 0; partition_idx < num_partitions; partition_idx++) {
                 uint32_t partition_len = 2 * d_partition_lens[partition_idx];
@@ -101,21 +96,18 @@ __global__ void calculate_cumulative_sums(
                                 d_preprocessed,
                                 d_main,
                                 d_challenges,
-                                global_buffer,
-                                register_buffer,
+                                buffer,
                                 task_stride,
                                 permutation_height
-                            ); 
-                        } else {
-                            result = read_from_buffer(
-                                global_buffer, register_buffer, decoded_rule.z.index, task_stride
                             );
+                        } else {
+                            result = buffer.read(decoded_rule.z.index, task_stride);
                         }
                     } else {
                         for (; rules_evaluated <= node_idx; rules_evaluated++) {
                             Rule rule = d_rules[rules_evaluated];
                             DecodedRule decoded_rule = decode_rule(rule);
-                            
+
                             // read input operands
                             FpExt x = permute_entry(
                                 decoded_rule.x,
@@ -123,8 +115,7 @@ __global__ void calculate_cumulative_sums(
                                 d_preprocessed,
                                 d_main,
                                 d_challenges,
-                                global_buffer,
-                                register_buffer,
+                                buffer,
                                 task_stride,
                                 permutation_height
                             );
@@ -134,8 +125,7 @@ __global__ void calculate_cumulative_sums(
                                 d_preprocessed,
                                 d_main,
                                 d_challenges,
-                                global_buffer,
-                                register_buffer,
+                                buffer,
                                 task_stride,
                                 permutation_height
                             );
@@ -162,42 +152,39 @@ __global__ void calculate_cumulative_sums(
                             }
 
                             if (decoded_rule.op != OP_VAR) {
-                                write_to_buffer(
-                                    global_buffer, register_buffer, decoded_rule.z.index, task_stride, result
-                                );
+                                buffer.write(decoded_rule.z.index, result, task_stride);
                             }
                         }
                     }
-                    if (is_denom) {
+                    if ((curr_node_idx & 1) == 1) {
                         local_sum += (numerator * binomial_inversion(result));
                     } else {
                         numerator = result;
                     }
-                    is_denom = !is_denom;
                 }
-                if (col_offset < permutation_width_ext) {
+                if (partition_idx < permutation_width_ext) {
                     cumulative_sums += local_sum;
                 }
                 // write to permutation ext matrix
                 // each ext column is represented by `D` columns over base field
                 uint32_t perm_idx =
-                    col_offset * permutation_height * 4 + row; // D=4: extension field
+                    partition_idx * permutation_height * 4 + row; // D=4: extension field
                 d_permutation[permutation_height * 0 + perm_idx] = local_sum.elems[0];
                 d_permutation[permutation_height * 1 + perm_idx] = local_sum.elems[1];
                 d_permutation[permutation_height * 2 + perm_idx] = local_sum.elems[2];
                 d_permutation[permutation_height * 3 + perm_idx] = local_sum.elems[3];
-
-                col_offset += 1;
             }
             d_cumulative_sums[row] = cumulative_sums;
+        } else {
+            break;
         }
     }
 }
 
 __global__ void cukernel_permute_update(
-    FpExt * __restrict__ d_sum,
-    Fp * __restrict__ d_permutation,
-    FpExt * __restrict__ d_cumulative_sums,
+    FpExt *__restrict__ d_sum,
+    Fp *__restrict__ d_permutation,
+    FpExt *__restrict__ d_cumulative_sums,
     const uint32_t permutation_height,
     const uint32_t permutation_width_ext
 ) {
@@ -259,7 +246,6 @@ extern "C" int _calculate_cumulative_sums(
     calculate_cumulative_sums<<<grid, block>>>(PERMUTE_ARGUMENTS);
     return cudaGetLastError();
 }
-
 
 extern "C" int _permute_update(
     FpExt *d_sum,
