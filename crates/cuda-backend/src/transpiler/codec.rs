@@ -72,6 +72,7 @@ impl<F: Field> Codec for SymbolicVariable<F> {
         let index = self.index as u64;
 
         assert!(entry_code <= 0xffff);
+        assert!(index <= 0xffff);
         // 16-bit entry | 16-bit index
         const ENTRY_SHIFT: u64 = 16;
         entry_code | (index << ENTRY_SHIFT)
@@ -93,6 +94,13 @@ const SOURCE_CONSTANT: u64 = SOURCE_INTERMEDIATE + 1;
 const SOURCE_IS_FIRST: u64 = SOURCE_CONSTANT + 1;
 const SOURCE_IS_LAST: u64 = SOURCE_IS_FIRST + 1;
 const SOURCE_IS_TRANSITION: u64 = SOURCE_IS_LAST + 1;
+const SOURCE_TERMINAL: u64 = SOURCE_IS_TRANSITION + 1;
+
+// To add to PREPROCESSED, MAIN, and PERMUTATION to indicate that the variable is buffered
+const BUFFERED_IDE_OFFSET: u64 = SOURCE_TERMINAL + 1;
+const BUFFERED_PREPROCESSED: u64 = BUFFERED_IDE_OFFSET + PREPROCESSED;
+// const BUFFERED_MAIN: u64 = BUFFERED_IDE_OFFSET + MAIN;
+const BUFFERED_PERMUTATION: u64 = BUFFERED_IDE_OFFSET + PERMUTATION;
 
 // Source is encoded in 48-bit little-endian and the enum discriminant is encoded by least
 // significant 4-bits
@@ -113,12 +121,17 @@ impl<F: Field + PrimeField32> Codec for Source<F> {
                 SOURCE_CONSTANT | ((f_u32 as u64) << CONSTANT_SHIFT)
             }
             Source::Var(v) => v.encode(),
+            Source::BufferedVar((v, idx)) => {
+                // 16-bit entry | 16-bit index | 16-bit buffer index
+                (v.encode() + BUFFERED_IDE_OFFSET) | ((*idx as u64) << 32)
+            }
             Source::Intermediate(idx) => {
                 // 4-bit src | 20-bit index
                 const INTERMEDIATE_SHIFT: u64 = 4;
                 const INTERMEDIATE_MASK: u64 = 0xf_ffff; // 20-bit index
-                6 | (((*idx as u64) & INTERMEDIATE_MASK) << INTERMEDIATE_SHIFT)
+                SOURCE_INTERMEDIATE | (((*idx as u64) & INTERMEDIATE_MASK) << INTERMEDIATE_SHIFT)
             }
+            Source::TerminalIntermediate => SOURCE_TERMINAL,
         }
     }
 
@@ -138,6 +151,12 @@ impl<F: Field + PrimeField32> Codec for Source<F> {
                 const INTERMEDIATE_SHIFT: u64 = 4;
                 const INTERMEDIATE_MASK: u64 = 0xf_ffff; // 20-bit index
                 Source::Intermediate(((encoded >> INTERMEDIATE_SHIFT) & INTERMEDIATE_MASK) as usize)
+            }
+            SOURCE_TERMINAL => Source::TerminalIntermediate,
+            BUFFERED_PREPROCESSED..=BUFFERED_PERMUTATION => {
+                let buffer_idx = ((encoded >> 32) & 0xffff) as usize;
+                let v = SymbolicVariable::decode(encoded & 0xffffffff);
+                Source::BufferedVar((v, buffer_idx))
             }
             _ => unreachable!(),
         }

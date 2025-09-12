@@ -12,7 +12,7 @@ use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
     cuda::kernels::quotient::*,
     prelude::*,
-    transpiler::{codec::Codec, SymbolicRulesOnGpu},
+    transpiler::{codec::Codec, stephen::StephenRules},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -37,19 +37,20 @@ pub fn compute_single_rap_quotient_values_gpu(
 ) -> DevicePoly<EF, ExtendedLagrangeCoeff> {
     // quotient params
     let quotient_size = quotient_domain.size();
+    let trace_size = trace_domain.size();
     assert!(partitioned_main_buffer
         .iter()
         .all(|m| m.height() >= quotient_size));
 
     // constraints
     let constraints_len = constraints.constraints.num_constraints();
-    let rules = SymbolicRulesOnGpu::new(constraints.clone());
+    let rules = StephenRules::new(constraints.clone(), quotient_size != trace_size, false);
     let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
     tracing::debug!(
         constraints = constraints_len,
         encoded = encoded_rules.len(),
-        intermediates = rules.num_intermediates,
+        intermediates = rules.buffer_size,
         "Single RAP quotient: "
     );
 
@@ -62,8 +63,8 @@ pub fn compute_single_rap_quotient_values_gpu(
         challenges,
         perm_challenge,
         &encoded_rules,
-        rules.num_intermediates,
-        trace_domain.size(),
+        rules.buffer_size,
+        trace_size,
         quotient_size,
         quotient_domain.first_point(),
     )

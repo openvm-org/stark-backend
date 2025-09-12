@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 extern crate alloc;
 
 use alloc::vec::Vec;
@@ -11,12 +13,20 @@ use p3_field::{Field, PrimeField32};
 use rustc_hash::FxHashMap;
 use tracing::instrument;
 
+use crate::types::F;
+
 pub(crate) mod codec;
+
+// TODO[stephenh]: If the new rule generation is truly an optimization, we should
+// make it the default.
+pub mod stephen;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Source<F: Field> {
     Intermediate(usize),
+    TerminalIntermediate,
     Var(SymbolicVariable<F>),
+    BufferedVar((SymbolicVariable<F>, usize)),
     IsFirst,
     IsLast,
     IsTransition,
@@ -504,6 +514,141 @@ impl<F: Field + PrimeField32> IntermediateAllocator<F> {
                 Constraint::Variable(x) => {
                     update_source(x);
                 }
+            }
+        }
+    }
+}
+
+pub fn match_constraints(
+    old_rules: Vec<ConstraintWithFlag<F>>,
+    new_rules: Vec<ConstraintWithFlag<F>>,
+) {
+    // Map from write source (z) buffer idx to constraint index i
+    let mut old_write_buffer_to_constraint: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    let mut new_write_buffer_to_constraint: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+
+    for (i, (old, new)) in old_rules.iter().zip(new_rules.iter()).enumerate() {
+        // First, handle write sources (z) and build the mapping
+        match (&old.constraint, &new.constraint) {
+            (Constraint::Add(old_x, old_y, old_z), Constraint::Add(new_x, new_y, new_z))
+            | (Constraint::Sub(old_x, old_y, old_z), Constraint::Sub(new_x, new_y, new_z))
+            | (Constraint::Mul(old_x, old_y, old_z), Constraint::Mul(new_x, new_y, new_z)) => {
+                match (old_x, new_x) {
+                    (Source::Intermediate(old_id), Source::Intermediate(new_id)) => {
+                        assert_eq!(
+                            *old_write_buffer_to_constraint.get(old_id).unwrap(),
+                            *new_write_buffer_to_constraint.get(new_id).unwrap(),
+                            "i: {}, old_id: {}, new_id: {}",
+                            i,
+                            *old_write_buffer_to_constraint.get(old_id).unwrap(),
+                            *new_write_buffer_to_constraint.get(new_id).unwrap()
+                        );
+                    }
+                    (Source::Var(_), Source::Var(_))
+                    | (Source::IsFirst, Source::IsFirst)
+                    | (Source::IsLast, Source::IsLast)
+                    | (Source::IsTransition, Source::IsTransition)
+                    | (Source::Constant(_), Source::Constant(_)) => {
+                        assert_eq!(old_x, new_x);
+                    }
+                    _ => panic!(
+                        "Intermediate read sources must be equal at constraint {}",
+                        i
+                    ),
+                }
+                match (old_y, new_y) {
+                    (Source::Intermediate(old_id), Source::Intermediate(new_id)) => {
+                        assert_eq!(
+                            *old_write_buffer_to_constraint.get(old_id).unwrap(),
+                            *new_write_buffer_to_constraint.get(new_id).unwrap(),
+                            "i: {}, old_id: {}, new_id: {}",
+                            i,
+                            *old_write_buffer_to_constraint.get(old_id).unwrap(),
+                            *new_write_buffer_to_constraint.get(new_id).unwrap()
+                        );
+                    }
+                    (Source::Var(_), Source::Var(_))
+                    | (Source::IsFirst, Source::IsFirst)
+                    | (Source::IsLast, Source::IsLast)
+                    | (Source::IsTransition, Source::IsTransition)
+                    | (Source::Constant(_), Source::Constant(_)) => {
+                        assert_eq!(old_y, new_y);
+                    }
+                    _ => panic!(
+                        "Intermediate read sources must be equal at constraint {}",
+                        i
+                    ),
+                }
+                let old_z_buffer_idx = match old_z {
+                    Source::Intermediate(id) => *id,
+                    _ => panic!(
+                        "Intermediate read sources must be equal at constraint {}",
+                        i
+                    ),
+                };
+                let new_z_buffer_idx = match new_z {
+                    Source::Intermediate(id) => *id,
+                    _ => panic!(
+                        "Intermediate read sources must be equal at constraint {}",
+                        i
+                    ),
+                };
+
+                // Map both old and new write buffer indices to this constraint index
+                old_write_buffer_to_constraint.insert(old_z_buffer_idx, i);
+                new_write_buffer_to_constraint.insert(new_z_buffer_idx, i);
+            }
+            (Constraint::Neg(old_x, old_z), Constraint::Neg(new_x, new_z)) => {
+                match (old_x, new_x) {
+                    (Source::Intermediate(old_id), Source::Intermediate(new_id)) => {
+                        assert_eq!(
+                            *old_write_buffer_to_constraint.get(old_id).unwrap(),
+                            *new_write_buffer_to_constraint.get(new_id).unwrap(),
+                            "i: {}, old_id: {}, new_id: {}",
+                            i,
+                            *old_write_buffer_to_constraint.get(old_id).unwrap(),
+                            *new_write_buffer_to_constraint.get(new_id).unwrap()
+                        );
+                    }
+                    (Source::Var(_), Source::Var(_))
+                    | (Source::IsFirst, Source::IsFirst)
+                    | (Source::IsLast, Source::IsLast)
+                    | (Source::IsTransition, Source::IsTransition)
+                    | (Source::Constant(_), Source::Constant(_)) => {
+                        assert_eq!(old_x, new_x);
+                    }
+                    _ => panic!(
+                        "Intermediate read sources must be equal at constraint {}",
+                        i
+                    ),
+                }
+
+                let old_z_buffer_idx = match old_z {
+                    Source::Intermediate(id) => *id,
+                    _ => panic!(
+                        "Intermediate read sources must be equal at constraint {}",
+                        i
+                    ),
+                };
+                let new_z_buffer_idx = match new_z {
+                    Source::Intermediate(id) => *id,
+                    _ => panic!(
+                        "Intermediate read sources must be equal at constraint {}",
+                        i
+                    ),
+                };
+
+                // Map both old and new write buffer indices to this constraint index
+                old_write_buffer_to_constraint.insert(old_z_buffer_idx, i);
+                new_write_buffer_to_constraint.insert(new_z_buffer_idx, i);
+            }
+            (Constraint::Variable(_), Constraint::Variable(_)) => {
+                // Variable constraint has no write source
+            }
+            _ => {
+                panic!("Constraint types don't match at index {}", i);
             }
         }
     }

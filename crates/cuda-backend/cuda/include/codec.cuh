@@ -32,7 +32,11 @@ typedef enum {
     SRC_CONSTANT,       // 7
     SRC_IS_FIRST,       // 8
     SRC_IS_LAST,        // 9
-    SRC_IS_TRANSITION   // 10
+    SRC_IS_TRANSITION,  // 10
+    TERMINAL,           // 11
+    BUFF_PREPROCESSED,  // 12
+    BUFF_MAIN,          // 13
+    BUFF_PERMUTATION    // 14
 } EntryType;
 
 // Source info
@@ -44,7 +48,8 @@ typedef struct {
     // In most case, the index is less than 8192, so we can just use 13 bits for index.
     // But for the `Constant` variant, the index encodes the constant field element.
     // And the native field that we support is BabyBear whose modulus has 31 bits.
-    uint32_t index; // 32bit col
+    uint32_t index;      // 16-bit col for variables, 20-bit for intermediates, 32-bit for constants
+    uint32_t buffer_idx; // 16-bit buffer index for buffered variables
 } SourceInfo;
 
 typedef struct {
@@ -59,7 +64,6 @@ typedef struct {
 __host__ __device__ __forceinline__ SourceInfo decode_source(uint64_t encoded);
 // decode rule from 128-bit little-endian integer
 __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded);
-
 
 // 0. There are 11 variants of source that can be encoded in 4 bits:
 //
@@ -99,12 +103,13 @@ static const uint64_t ENTRY_PART_SHIFT = 4;
 static const uint64_t ENTRY_PART_MASK = 0xFF; // 8bit
 static const uint64_t ENTRY_OFFSET_SHIFT = 12;
 static const uint64_t ENTRY_OFFSET_MASK = 0xF; // 4bit
-// 48-bit source: 16-bit entry | 32bit index
+// 48-bit source: 16-bit entry | 16-bit index | 16-bit buffer index
 static const uint64_t ENTRY_INDEX_SHIFT = 16;
-static const uint64_t ENTRY_INDEX_MASK = 0xFFFFFFFF; // 32-bit
+static const uint64_t ENTRY_BUFFER_INDEX_SHIFT = 32;
+static const uint64_t ENTRY_INDEX_MASK = 0xFFFF; // 32-bit
 // 24bit Z: 4-bit src | 20-bit index
-static const uint64_t SOURCE_INTERMIDIATE_SHIFT = 4;
-static const uint64_t SOURCE_INTERMIDIATE_MASK = 0xFFFFF;
+static const uint64_t SOURCE_INTERMEDIATE_SHIFT = 4;
+static const uint64_t SOURCE_INTERMEDIATE_MASK = 0xFFFFF;
 // 48bit Constant: 16-bit src | 32-bit base field
 static const uint64_t SOURCE_CONSTANT_SHIFT = 16;
 static const uint64_t SOURCE_CONSTANT_MASK = 0xFFFFFFFF; // 32bit
@@ -130,16 +135,17 @@ static_assert(IS_CONSTRAINT_MASK == one << 63, "IS_CONSTRAINT_MASK must be (1 <<
 __host__ __device__ __forceinline__ SourceInfo decode_source(uint64_t encoded) {
     // common
     SourceInfo src;
-    src.type = (EntryType)(encoded & ENTRY_SRC_MASK);                 // 4-bit
-    src.part = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;       // 8-bit
-    src.offset = (encoded >> ENTRY_OFFSET_SHIFT) & ENTRY_OFFSET_MASK; // 4-bit
-    src.index = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;    // 32-bit
+    src.type = (EntryType)(encoded & ENTRY_SRC_MASK);                          // 4-bit
+    src.part = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;                // 8-bit
+    src.offset = (encoded >> ENTRY_OFFSET_SHIFT) & ENTRY_OFFSET_MASK;          // 4-bit
+    src.index = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;             // 16-bit
+    src.buffer_idx = (encoded >> ENTRY_BUFFER_INDEX_SHIFT) & ENTRY_INDEX_MASK; // 16-bit
 
     if (src.type == SRC_INTERMEDIATE) {
         // 24bit: 4-bit src | 20-bit index
         src.part = 0;
         src.offset = 0;
-        src.index = (encoded >> SOURCE_INTERMIDIATE_SHIFT) & SOURCE_INTERMIDIATE_MASK;
+        src.index = (encoded >> SOURCE_INTERMEDIATE_SHIFT) & SOURCE_INTERMEDIATE_MASK;
     } else if (src.type == SRC_CONSTANT) {
         // 48bit: 16-bit src | 32-bit base field
         src.index = (encoded >> SOURCE_CONSTANT_SHIFT) & SOURCE_CONSTANT_MASK;

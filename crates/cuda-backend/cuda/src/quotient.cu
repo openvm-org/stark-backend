@@ -59,7 +59,7 @@ __device__ __forceinline__ FpExt evaluate_source(
     const Fp *d_first,
     const Fp *d_last,
     const Fp *d_transition,
-    const FpExt *d_intermediate,
+    FpExt *d_intermediate,
     const uint64_t intermediate_stride,
     const uint32_t next_step,
     const uint32_t quotient_size,
@@ -69,7 +69,8 @@ __device__ __forceinline__ FpExt evaluate_source(
 ) {
     FpExt result = FpExt(0);
     switch (src.type) {
-    case ENTRY_PREPROCESSED: {
+    case ENTRY_PREPROCESSED:
+    case BUFF_PREPROCESSED: {
         uint32_t q_row_idx = (q_row + src.offset * next_step) & (quotient_size - 1);
         if (quotient_size != prep_height) {
             q_row_idx = bit_rev(bit_rev(q_row_idx, quotient_size), prep_height);
@@ -77,7 +78,8 @@ __device__ __forceinline__ FpExt evaluate_source(
         result = FpExt(d_preprocessed[prep_height * src.index + q_row_idx]);
         break;
     }
-    case ENTRY_MAIN: {
+    case ENTRY_MAIN:
+    case BUFF_MAIN: {
         uint32_t q_row_idx = (q_row + src.offset * next_step) & (quotient_size - 1);
         if (quotient_size != main_height) {
             q_row_idx = bit_rev(bit_rev(q_row_idx, quotient_size), main_height);
@@ -86,7 +88,8 @@ __device__ __forceinline__ FpExt evaluate_source(
         result = FpExt(d_main_fp[main_height * src.index + q_row_idx]);
         break;
     }
-    case ENTRY_PERMUTATION: {
+    case ENTRY_PERMUTATION:
+    case BUFF_PERMUTATION: {
         uint32_t q_row_idx = (q_row + src.offset * next_step) & (quotient_size - 1);
         if (quotient_size != perm_height) {
             q_row_idx = bit_rev(bit_rev(q_row_idx, quotient_size), perm_height);
@@ -126,6 +129,10 @@ __device__ __forceinline__ FpExt evaluate_source(
     default:
         // Handle error
         ;
+    }
+
+    if (src.type == BUFF_PREPROCESSED || src.type == BUFF_MAIN || src.type == BUFF_PERMUTATION) {
+        d_intermediate[intermediate_stride * src.buffer_idx] = result;
     }
     return result;
 }
@@ -250,7 +257,7 @@ __global__ void cukernel_quotient(
                     assert(false);
                 }
 
-                if (decoded_rule.op != OP_VAR) {
+                if (decoded_rule.op != OP_VAR && decoded_rule.z.type != TERMINAL) {
                     intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
                 }
 
