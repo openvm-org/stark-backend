@@ -5,12 +5,12 @@
  */
 
 #include "codec.cuh"
+#include "constraint_buffer.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
 #ifdef DEBUG
 #include <cstdio>
-
 
 // Helper function to print decoded information
 __host__ __device__ void print_decoded_rule(uint32_t rule_idx, Rule encoded, DecodedRule rule) {
@@ -59,8 +59,8 @@ __device__ __forceinline__ FpExt evaluate_source(
     const Fp *d_first,
     const Fp *d_last,
     const Fp *d_transition,
-    const FpExt *d_intermediate,
-    const uint64_t intermediate_stride,
+    ConstraintBuffer &buffer,
+    const uint32_t task_stride,
     const uint32_t next_step,
     const uint32_t quotient_size,
     const uint32_t prep_height,
@@ -69,7 +69,8 @@ __device__ __forceinline__ FpExt evaluate_source(
 ) {
     FpExt result = FpExt(0);
     switch (src.type) {
-    case ENTRY_PREPROCESSED: {
+    case ENTRY_PREPROCESSED:
+    case BUFF_PREPROCESSED: {
         uint32_t q_row_idx = (q_row + src.offset * next_step) & (quotient_size - 1);
         if (quotient_size != prep_height) {
             q_row_idx = bit_rev(bit_rev(q_row_idx, quotient_size), prep_height);
@@ -77,7 +78,8 @@ __device__ __forceinline__ FpExt evaluate_source(
         result = FpExt(d_preprocessed[prep_height * src.index + q_row_idx]);
         break;
     }
-    case ENTRY_MAIN: {
+    case ENTRY_MAIN:
+    case BUFF_MAIN: {
         uint32_t q_row_idx = (q_row + src.offset * next_step) & (quotient_size - 1);
         if (quotient_size != main_height) {
             q_row_idx = bit_rev(bit_rev(q_row_idx, quotient_size), main_height);
@@ -86,7 +88,8 @@ __device__ __forceinline__ FpExt evaluate_source(
         result = FpExt(d_main_fp[main_height * src.index + q_row_idx]);
         break;
     }
-    case ENTRY_PERMUTATION: {
+    case ENTRY_PERMUTATION:
+    case BUFF_PERMUTATION: {
         uint32_t q_row_idx = (q_row + src.offset * next_step) & (quotient_size - 1);
         if (quotient_size != perm_height) {
             q_row_idx = bit_rev(bit_rev(q_row_idx, quotient_size), perm_height);
@@ -109,7 +112,7 @@ __device__ __forceinline__ FpExt evaluate_source(
         result = d_exposed[src.index];
         break;
     case SRC_INTERMEDIATE:
-        result = d_intermediate[intermediate_stride * src.index];
+        result = buffer.read(src.index, task_stride);
         break;
     case SRC_CONSTANT:
         result = FpExt(Fp(src.index));
@@ -127,31 +130,33 @@ __device__ __forceinline__ FpExt evaluate_source(
         // Handle error
         ;
     }
+
+    if (src.type == BUFF_PREPROCESSED || src.type == BUFF_MAIN || src.type == BUFF_PERMUTATION) {
+        buffer.write(src.buffer_idx, result, task_stride);
+    }
     return result;
 }
 
-// In this kernel we have interemediates stored in global memory.
-template<bool GLOBAL>
 __global__ void cukernel_quotient(
     // output
-    FpExt * __restrict__ d_quotient_values,
+    FpExt *__restrict__ d_quotient_values,
     // LDEs
-    const Fp * __restrict__ d_preprocessed, // preprocessed LDE over Fp
-    const uint64_t * __restrict__ d_main,   // array of partitioned main LDEs over Fp
-    const Fp * __restrict__ d_permutation,  // permutation LDE over FpExt (see comments below)
+    const Fp *__restrict__ d_preprocessed, // preprocessed LDE over Fp
+    const uint64_t *__restrict__ d_main,   // array of partitioned main LDEs over Fp
+    const Fp *__restrict__ d_permutation,  // permutation LDE over FpExt (see comments below)
     // public values, challenges, ...
-    const FpExt * __restrict__ d_exposed,
-    const Fp * __restrict__ d_public,
-    const Fp * __restrict__ d_first,
-    const Fp * __restrict__ d_last,
-    const Fp * __restrict__ d_transition,
-    const Fp * __restrict__ d_inv_zeroifier,
-    const FpExt * __restrict__ d_challenge,
-    const FpExt * __restrict__ d_alpha,
+    const FpExt *__restrict__ d_exposed,
+    const Fp *__restrict__ d_public,
+    const Fp *__restrict__ d_first,
+    const Fp *__restrict__ d_last,
+    const Fp *__restrict__ d_transition,
+    const Fp *__restrict__ d_inv_zeroifier,
+    const FpExt *__restrict__ d_challenge,
+    const FpExt *__restrict__ d_alpha,
     // intermediates
-    const FpExt * __restrict__ d_intermediates,
+    const FpExt *__restrict__ d_intermediates,
     // symbolic constraints (rules)
-    const Rule * __restrict__ d_rules,
+    const Rule *__restrict__ d_rules,
     const uint64_t num_rules,
     const uint64_t quotient_size,
     const uint32_t prep_height,
@@ -165,17 +170,7 @@ __global__ void cukernel_quotient(
     uint64_t task_stride = gridDim.x * blockDim.x;
 
     FpExt alpha = *d_alpha;
-    FpExt *intermediates_ptr;
-    uint64_t intermediate_stride;
-
-    if constexpr (GLOBAL) {
-        intermediates_ptr = (FpExt *)d_intermediates + task_offset;
-        intermediate_stride = task_stride;
-    } else {
-        FpExt intermediates[10];
-        intermediates_ptr = intermediates;
-        intermediate_stride = 1;
-    }
+    ConstraintBuffer buffer((FpExt *)d_intermediates + task_offset);
 
     for (uint32_t j = 0; j < num_rows_per_tile; j++) {
         uint64_t index = task_offset + j * task_stride;
@@ -200,8 +195,8 @@ __global__ void cukernel_quotient(
                     d_first,
                     d_last,
                     d_transition,
-                    intermediates_ptr,
-                    intermediate_stride,
+                    buffer,
+                    task_stride,
                     next_step,
                     quotient_size,
                     prep_height,
@@ -220,8 +215,8 @@ __global__ void cukernel_quotient(
                     d_first,
                     d_last,
                     d_transition,
-                    intermediates_ptr,
-                    intermediate_stride,
+                    buffer,
+                    task_stride,
                     next_step,
                     quotient_size,
                     prep_height,
@@ -250,8 +245,8 @@ __global__ void cukernel_quotient(
                     assert(false);
                 }
 
-                if (decoded_rule.op != OP_VAR) {
-                    intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
+                if (decoded_rule.op != OP_VAR && decoded_rule.z.type != TERMINAL) {
+                    buffer.write(decoded_rule.z.index, result, task_stride);
                 }
 
                 if (decoded_rule.is_constraint) {
@@ -334,7 +329,6 @@ extern "C" int _cukernel_quotient_selectors(
 }
 
 extern "C" int _cukernel_quotient(
-    bool is_global,
     FpExt *d_quotient_values,
     const Fp *d_preprocessed,
     const uint64_t *d_main,
@@ -382,10 +376,6 @@ extern "C" int _cukernel_quotient(
         qdb_degree, \
         num_rows_per_tile
 
-    if (is_global) {
-        cukernel_quotient<true><<<grid, block>>>(QUOTIENT_ARGUMENTS);
-    } else {
-        cukernel_quotient<false><<<grid, block>>>(QUOTIENT_ARGUMENTS);
-    }
+    cukernel_quotient<<<grid, block>>>(QUOTIENT_ARGUMENTS);
     return cudaGetLastError();
 }

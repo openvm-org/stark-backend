@@ -26,7 +26,7 @@ use crate::{
     base::DeviceMatrix,
     cuda::kernels::{permute::*, prefix::*},
     prelude::*,
-    transpiler::{codec::Codec, SymbolicRulesOnGpu},
+    transpiler::{codec::Codec, stephen::StephenRules},
 };
 
 // Output format that keeps GPU data as GPU data
@@ -207,7 +207,7 @@ impl FriLogUpPhaseGpu {
             interactions: full_interactions,
         };
         let constraints_dag: SymbolicConstraintsDag<F> = constraints.into();
-        let rules = SymbolicRulesOnGpu::new(constraints_dag.clone());
+        let rules = StephenRules::new(constraints_dag.clone(), false, true);
         let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
         // 3. Call GPU module
@@ -224,7 +224,7 @@ impl FriLogUpPhaseGpu {
             trace_view.partitioned_main,
             &challenges,
             &encoded_rules,
-            rules.num_intermediates,
+            rules.buffer_size,
             &partition_lens,
             &rules.used_nodes,
         );
@@ -321,17 +321,15 @@ impl FriLogUpPhaseGpu {
 
         tracing::debug!("permutation_height = {permutation_height}, task_size = {}, tile_per_thread = {} num_rules = {num_rules}", task_size, tile_per_thread);
 
-        let is_global = num_intermediates > 10;
-        let d_intermediates = if is_global {
+        let d_intermediates = if num_intermediates > 0 {
             DeviceBuffer::<EF>::with_capacity(task_size * num_intermediates)
         } else {
-            DeviceBuffer::<EF>::with_capacity(1) // Dummy buffer for register-based version
+            DeviceBuffer::new()
         };
 
         let d_cumulative_sums = DeviceBuffer::<EF>::with_capacity(permutation_height);
         unsafe {
             calculate_cumulative_sums(
-                is_global,
                 permutation,
                 &d_cumulative_sums,
                 preprocessed,

@@ -245,7 +245,6 @@ pub mod quotient {
         ) -> i32;
 
         fn _cukernel_quotient(
-            is_global: bool,
             d_quotient_values: *mut std::ffi::c_void,
             d_preprocessed: *const std::ffi::c_void,
             d_main: *const u64,
@@ -292,7 +291,6 @@ pub mod quotient {
 
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn quotient_global_or_local<F, EF, R>(
-        is_global: bool,
         d_quotient_values: &DeviceBuffer<EF>,
         d_preprocessed: &DeviceBuffer<F>,
         d_main: &DeviceBuffer<u64>,
@@ -316,7 +314,6 @@ pub mod quotient {
         num_rows_per_tile: u32,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_cukernel_quotient(
-            is_global,
             d_quotient_values.as_mut_raw_ptr(),
             d_preprocessed.as_raw_ptr(),
             d_main.as_ptr(),
@@ -403,7 +400,6 @@ pub mod permute {
 
     extern "C" {
         fn _calculate_cumulative_sums(
-            is_global: bool,
             d_permutation: *mut std::ffi::c_void,
             d_cumulative_sums: *mut std::ffi::c_void,
             d_preprocessed: *const std::ffi::c_void,
@@ -430,7 +426,6 @@ pub mod permute {
 
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn calculate_cumulative_sums<F, EF, R>(
-        is_global: bool,
         d_permutation: &DeviceBuffer<F>,
         d_cumulative_sums: &DeviceBuffer<EF>,
         d_preprocessed: &DeviceBuffer<F>,
@@ -446,7 +441,6 @@ pub mod permute {
         num_rows_per_tile: u32,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_calculate_cumulative_sums(
-            is_global,
             d_permutation.as_mut_raw_ptr(),
             d_cumulative_sums.as_mut_raw_ptr(),
             d_preprocessed.as_raw_ptr(),
