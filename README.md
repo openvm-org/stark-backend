@@ -3,7 +3,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/openvm-org/stark-backend)
 
 [Contributor Docs](./docs)
-| [Crate Docs](https://docs.openvm.dev/stark-backend)
+| [Rustdocs](https://docs.openvm.dev/docs/stark-backend)
 
 A modular proof system backend for proving and verifying multi-chip circuits with inter-chip communication.
 
