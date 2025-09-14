@@ -65,7 +65,7 @@ class Fp : public bb31_t {
     static constexpr uint32_t INV_2EXP_K = 975175684u;
 
 private:
-    __device__ uint32_t decode() const {
+    __device__ uint32_t val() const {
         return static_cast<uint32_t>(*this);
     }
 
@@ -97,7 +97,7 @@ public:
     __device__ static constexpr Fp neg_one() { return maxVal(); }
 
     /// Convert to a uint32_t
-    __device__ uint32_t asUInt32() const { return decode(); }
+    __device__ uint32_t asUInt32() const { return val(); }
 
     /// Return the raw underlying word
     __device__ uint32_t asRaw() const { return bb31_t::operator*(); }
@@ -116,7 +116,7 @@ public:
 
     /// force set self as a decoded val
     __device__ void set_raw() {
-        bb31_t::operator*() = decode();
+        bb31_t::operator*() = val();
     }
 
     /// keep this fast path for assigning montgomery rvalues
@@ -138,13 +138,13 @@ public:
         return Fp(a).asRaw() == b.asRaw();
     }
 
-    __device__ bool operator<(Fp rhs) const { return decode() < rhs.decode(); }
+    __device__ bool operator<(Fp rhs) const { return val() < rhs.val(); }
 
-    __device__ bool operator<=(Fp rhs) const { return decode() <= rhs.decode(); }
+    __device__ bool operator<=(Fp rhs) const { return val() <= rhs.val(); }
 
-    __device__ bool operator>(Fp rhs) const { return decode() > rhs.decode(); }
+    __device__ bool operator>(Fp rhs) const { return val() > rhs.val(); }
 
-    __device__ bool operator>=(Fp rhs) const { return decode() >= rhs.decode(); }
+    __device__ bool operator>=(Fp rhs) const { return val() >= rhs.val(); }
 
     // Post-inc/dec
     __device__ Fp operator++(int) {
