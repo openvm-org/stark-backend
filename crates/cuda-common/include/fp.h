@@ -70,7 +70,6 @@ private:
     }
 
 public:
-
     /// Inherit constructors from bb31_t
     using bb31_t::bb31_t;
 
@@ -82,13 +81,6 @@ public:
 
     /// Constructor from uint32_t that forces encoding
     __host__ __device__ constexpr Fp(uint32_t v) : bb31_t(static_cast<int>(v)) {}
-
-    /// raw-copy from another Fp (preserves montgomery encoding)
-    __device__ Fp(const Fp& o) : bb31_t(o.asRaw()) {}
-
-    /// “move” is same as copy for this POD-like wrapper
-    __device__ Fp(Fp&& o) noexcept : bb31_t(o.asRaw()) {}
-
 
     /// Construct an Fp from an already-encoded raw value
     __device__ static constexpr Fp fromRaw(uint32_t val) { 
@@ -125,18 +117,6 @@ public:
     /// force set self as a decoded val
     __device__ void set_raw() {
         bb31_t::operator*() = decode();
-    }
-
-    /// copy-assign from Fp (raw word copy)
-    __device__ Fp& operator=(const Fp& rhs) {
-        bb31_t::operator*() = rhs.asRaw();
-        return *this;
-    }
-
-    /// move-assign (same as copy)
-    __device__ Fp& operator=(Fp&& rhs) noexcept {
-        bb31_t::operator*() = rhs.asRaw();
-        return *this;
     }
 
     /// keep this fast path for assigning montgomery rvalues
@@ -240,7 +220,13 @@ public:
 
 /// Raise an value to a power
 __device__ inline Fp pow(Fp x, size_t n) {
-    return Fp(static_cast<bb31_t>(x) ^ static_cast<uint32_t>(n));
+    Fp tot = Fp::one();
+    while (n) {
+        if (n & 1) tot *= x;
+        n >>= 1;
+        if (n) x *= x;
+    }
+    return tot;
 }
 
 /// Helper: gcd-based inversion for 32-bit prime fields with FIELD_BITS <= 32.
@@ -289,7 +275,7 @@ __device__ inline Fp inv(Fp x) {
     return Fp(static_cast<uint32_t>(v_mod)) * Fp(Fp::INV_2EXP_K);
 }
 
-inline __device__ const Fp TWO_ADIC_GENERATORS[Fp::TWO_ADICITY + 1] = {
+constexpr __device__ Fp TWO_ADIC_GENERATORS[Fp::TWO_ADICITY + 1] = {
     Fp(0x1),        // Fp(0x0ffffffeu),
     Fp(0x78000000), // Fp(0x68000003u),
     Fp(0x67055c21), // Fp(0x1c38d511u),
