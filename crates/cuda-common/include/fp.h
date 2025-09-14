@@ -220,13 +220,7 @@ public:
 
 /// Raise an value to a power
 __device__ inline Fp pow(Fp x, size_t n) {
-    Fp tot = Fp::one();
-    while (n) {
-        if (n & 1) tot *= x;
-        n >>= 1;
-        if (n) x *= x;
-    }
-    return tot;
+    return Fp(static_cast<bb31_t>(x) ^ static_cast<uint32_t>(n));
 }
 
 /// Helper: gcd-based inversion for 32-bit prime fields with FIELD_BITS <= 32.
