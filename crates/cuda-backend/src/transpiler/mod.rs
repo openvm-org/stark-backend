@@ -2,6 +2,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use std::{cmp::Ordering, collections::BinaryHeap};
+use tracing::instrument;
 
 use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
@@ -90,6 +91,7 @@ pub struct SymbolicRulesOnGpu<F: Field> {
 }
 
 impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
+    #[instrument(name = "SymbolicRulesOnGpu.new", skip_all, level = "debug")]
     pub fn new(dag: SymbolicConstraintsDag<F>, cache_vars: bool, is_permute: bool) -> Self {
         let mut expr_info = (0..dag.constraints.nodes.len())
             .map(|i| ExpressionInfo {
