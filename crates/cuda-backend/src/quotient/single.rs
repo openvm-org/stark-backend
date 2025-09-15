@@ -12,7 +12,7 @@ use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
     cuda::kernels::quotient::*,
     prelude::*,
-    transpiler::{codec::Codec, stephen::StephenRules},
+    transpiler::{codec::Codec, SymbolicRulesOnGpu},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -62,7 +62,7 @@ pub fn compute_single_rap_quotient_values_gpu(
 
     // constraints
     let constraints_len = constraints.constraints.num_constraints();
-    let rules = StephenRules::new(constraints.clone(), quotient_size != main_height, false);
+    let rules = SymbolicRulesOnGpu::new(constraints.clone(), quotient_size != main_height, false);
     let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
     tracing::debug!(

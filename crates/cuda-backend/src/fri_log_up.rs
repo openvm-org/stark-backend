@@ -26,7 +26,7 @@ use crate::{
     base::DeviceMatrix,
     cuda::kernels::{permute::*, prefix::*},
     prelude::*,
-    transpiler::{codec::Codec, stephen::StephenRules},
+    transpiler::{codec::Codec, SymbolicRulesOnGpu},
 };
 
 // Output format that keeps GPU data as GPU data
@@ -207,7 +207,7 @@ impl FriLogUpPhaseGpu {
             interactions: full_interactions,
         };
         let constraints_dag: SymbolicConstraintsDag<F> = constraints.into();
-        let rules = StephenRules::new(constraints_dag.clone(), false, true);
+        let rules = SymbolicRulesOnGpu::new(constraints_dag.clone(), false, true);
         let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
         // 3. Call GPU module
