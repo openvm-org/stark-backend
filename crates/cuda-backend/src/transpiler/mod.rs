@@ -2,7 +2,6 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use std::{cmp::Ordering, collections::BinaryHeap};
-use tracing::instrument;
 
 use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
@@ -11,6 +10,7 @@ use openvm_stark_backend::air_builders::symbolic::{
 };
 use p3_field::{Field, PrimeField32};
 use rustc_hash::FxHashMap;
+use tracing::instrument;
 
 pub(crate) mod codec;
 
