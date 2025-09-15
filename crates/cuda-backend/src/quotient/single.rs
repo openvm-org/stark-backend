@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::gpu_metrics_span};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraintsDag, config::Domain, prover::hal::MatrixDimensions,
 };
@@ -62,8 +62,15 @@ pub fn compute_single_rap_quotient_values_gpu(
 
     // constraints
     let constraints_len = constraints.constraints.num_constraints();
-    let rules = SymbolicRulesOnGpu::new(constraints.clone(), quotient_size != main_height, false);
-    let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
+    let (rules, encoded_rules) = gpu_metrics_span("um_excuse_me_what", || {
+        let rules =
+            SymbolicRulesOnGpu::new(constraints.clone(), quotient_size != main_height, false);
+        (
+            rules.clone(),
+            rules.constraints.iter().map(|c| c.encode()).collect_vec(),
+        )
+    })
+    .unwrap();
 
     tracing::debug!(
         constraints = constraints_len,

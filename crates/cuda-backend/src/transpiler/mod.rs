@@ -83,7 +83,7 @@ impl PartialOrd for BufferEntry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SymbolicRulesOnGpu<F: Field> {
     pub constraints: Vec<ConstraintWithFlag<F>>,
     pub used_nodes: Vec<usize>,
