@@ -1,8 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::too_many_arguments)]
 
-use tracing::instrument;
-
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::{CudaError, KernelError},
@@ -293,7 +291,6 @@ pub mod quotient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(name = "quotient_global_or_local", level = "info", skip_all)]
     pub unsafe fn quotient_global_or_local<F, EF, R>(
         is_global: bool,
         d_quotient_values: &DeviceBuffer<EF>,
@@ -432,7 +429,6 @@ pub mod permute {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(name = "calculate_cumulative_sums", level = "info", skip_all)]
     pub unsafe fn calculate_cumulative_sums<F, EF, R>(
         is_global: bool,
         d_permutation: &DeviceBuffer<F>,

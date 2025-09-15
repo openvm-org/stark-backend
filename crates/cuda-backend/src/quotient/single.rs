@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::gpu_metrics_span};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraintsDag, config::Domain, prover::hal::MatrixDimensions,
 };
@@ -190,7 +190,7 @@ fn quotient_evaluate(
 
     let d_intermediates = DeviceBuffer::<EF>::with_capacity(buffer_size);
 
-    unsafe {
+    gpu_metrics_span("quotient_global_or_local", || unsafe {
         quotient_global_or_local(
             is_global,
             accumulators,
@@ -216,7 +216,8 @@ fn quotient_evaluate(
             tile_per_thread as u32,
         )
         .unwrap();
-    }
+    })
+    .unwrap();
 }
 
 fn lagrange_selectors_on_coset(
