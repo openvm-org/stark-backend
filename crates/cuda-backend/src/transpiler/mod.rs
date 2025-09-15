@@ -92,12 +92,8 @@ pub struct SymbolicRulesOnGpu<F: Field> {
 
 impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
     #[instrument(name = "SymbolicRulesOnGpu.new", skip_all, level = "debug")]
-    pub fn new(dag: SymbolicConstraintsDag<F>, cache_vars: bool, is_permute: bool) -> Self {
-        let cache_vars = if dag.constraints.nodes.len() < 75 {
-            false
-        } else {
-            cache_vars
-        };
+    pub fn new(dag: SymbolicConstraintsDag<F>, _cache_vars: bool, is_permute: bool) -> Self {
+        let cache_vars = false;
         let mut expr_info = (0..dag.constraints.nodes.len())
             .map(|i| ExpressionInfo {
                 dag_idx: i,
