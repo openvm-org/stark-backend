@@ -186,10 +186,10 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
             // it will be read here first (due to the topological ordering). Alternatively, during
             // permutation some accumulated intermediates may need to be stored in the buffer for
             // access later - such values must be marked as used.
-            if (expr_info[idx].expr_type == ExpressionType::Variable && cache_vars) || is_permute {
-                expr_info[idx].first_use = expr_info[idx].first_use.min(idx);
-                expr_info[idx].use_count += 1;
-            }
+            // if (expr_info[idx].expr_type == ExpressionType::Variable && cache_vars) || is_permute {
+            expr_info[idx].first_use = expr_info[idx].first_use.min(idx);
+            expr_info[idx].use_count += 1;
+            // }
         }
 
         // Expressions don't actually need to be buffered if they're not read/used multiple time.
