@@ -259,7 +259,7 @@ __global__ void cukernel_quotient(
                 }
 
                 if (decoded_rule.buffer_result) {
-                    intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
+                    intermediates_ptr[decoded_rule.z_index * intermediate_stride] = result;
                 }
 
                 if (decoded_rule.is_constraint) {

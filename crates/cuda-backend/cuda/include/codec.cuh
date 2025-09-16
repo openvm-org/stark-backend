@@ -58,7 +58,7 @@ typedef struct {
     OperationType op;   // 6-bit
     SourceInfo x;       // 48-bit
     SourceInfo y;       // 48-bit
-    SourceInfo z;       // 24-bit
+    uint32_t z_index;         // 20-bit index for intermediate buffer
 } DecodedRule;
 
 // decode source from 48-bit little-endian integer
@@ -167,9 +167,9 @@ __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded) {
     uint64_t y_encoded = ((encoded.low >> 48) | ((encoded.high & Y_HIGH_MASK) << Y_HIGH_SHIFT));
     rule.y = decode_source(y_encoded);
 
-    // Extract z (next 24 bits)
+    // Extract z (next 24 bits) - this always be an intermediate
     uint64_t z_encoded = (encoded.high >> Z_LOW_SHIFT) & Z_LOW_MASK;
-    rule.z = decode_source(z_encoded);
+    rule.z_index = (z_encoded >> SOURCE_INTERMEDIATE_SHIFT) & SOURCE_INTERMEDIATE_MASK;
 
     // Extract op (next 6 bits)
     rule.op = (OperationType)((encoded.high >> OP_SHIFT) & OP_MASK);
