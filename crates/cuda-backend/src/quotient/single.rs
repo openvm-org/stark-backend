@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::{
@@ -61,9 +63,11 @@ pub fn compute_single_rap_quotient_values_gpu(
     });
 
     // constraints
+    let start = Instant::now();
     let constraints_len = constraints.constraints.num_constraints();
     let rules = SymbolicRulesOnGpu::new(constraints.clone(), quotient_size != main_height, false);
     let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
+    metrics::gauge!("symbolic_rules_on_gpu_time_ms").set(start.elapsed().as_millis() as f64);
 
     tracing::debug!(
         constraints = constraints_len,
