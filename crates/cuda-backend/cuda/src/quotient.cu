@@ -59,7 +59,7 @@ __device__ __forceinline__ FpExt evaluate_source(
     const Fp *d_first,
     const Fp *d_last,
     const Fp *d_transition,
-    FpExt *d_intermediate,
+    const FpExt *d_intermediate,
     const uint64_t intermediate_stride,
     const uint32_t next_step,
     const uint32_t quotient_size,

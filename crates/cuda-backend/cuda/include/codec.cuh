@@ -49,7 +49,7 @@ typedef struct {
     // But for the `Constant` variant, the index encodes the constant field element.
     // And the native field that we support is BabyBear whose modulus has 31 bits.
     uint32_t index;      // 16-bit col for variables, 20-bit for intermediates, 32-bit for constants
-    uint32_t buffer_idx; // 16-bit buffer index for buffered variables
+    // uint32_t buffer_idx; // 16-bit buffer index for buffered variables
 } SourceInfo;
 
 typedef struct {
@@ -105,8 +105,8 @@ static const uint64_t ENTRY_OFFSET_SHIFT = 12;
 static const uint64_t ENTRY_OFFSET_MASK = 0xF; // 4bit
 // 48-bit source: 16-bit entry | 16-bit index | 16-bit buffer index
 static const uint64_t ENTRY_INDEX_SHIFT = 16;
-static const uint64_t ENTRY_BUFFER_INDEX_SHIFT = 32;
-static const uint64_t ENTRY_INDEX_MASK = 0xFFFF; // 32-bit
+// static const uint64_t ENTRY_BUFFER_INDEX_SHIFT = 32;
+static const uint64_t ENTRY_INDEX_MASK = 0xFFFFFFFF; // 32-bit
 // 24bit Z: 4-bit src | 20-bit index
 static const uint64_t SOURCE_INTERMEDIATE_SHIFT = 4;
 static const uint64_t SOURCE_INTERMEDIATE_MASK = 0xFFFFF;
@@ -139,7 +139,7 @@ __host__ __device__ __forceinline__ SourceInfo decode_source(uint64_t encoded) {
     src.part = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;                // 8-bit
     src.offset = (encoded >> ENTRY_OFFSET_SHIFT) & ENTRY_OFFSET_MASK;          // 4-bit
     src.index = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;             // 16-bit
-    src.buffer_idx = (encoded >> ENTRY_BUFFER_INDEX_SHIFT) & ENTRY_INDEX_MASK; // 16-bit
+    // src.buffer_idx = (encoded >> ENTRY_BUFFER_INDEX_SHIFT) & ENTRY_INDEX_MASK; // 16-bit
 
     if (src.type == SRC_INTERMEDIATE) {
         // 24bit: 4-bit src | 20-bit index
