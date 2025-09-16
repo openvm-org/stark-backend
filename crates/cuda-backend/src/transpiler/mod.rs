@@ -194,13 +194,13 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
 
         // Expressions don't actually need to be buffered if they're not read/used multiple time.
         // We can use this to reduce the number of buffers needed.
-        for expr in expr_info.iter_mut() {
-            if expr.use_count == 0
-                || (expr.use_count == 1 && expr.expr_type == ExpressionType::Variable)
-            {
-                expr.buffer_idx = usize::MAX;
-            }
-        }
+        // for expr in expr_info.iter_mut() {
+        //     if expr.use_count == 0
+        //         || (expr.use_count == 1 && expr.expr_type == ExpressionType::Variable)
+        //     {
+        //         expr.buffer_idx = usize::MAX;
+        //     }
+        // }
 
         // Collects all the expressions that need to be buffered and sort them by last use
         // last use. We then use the classic scheduling algorithm to minimally assign buffer
@@ -254,17 +254,18 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
             .collect::<Vec<_>>();
 
         let mut dag_idx_to_constraint_idx = FxHashMap::default();
-        let dag_idx_to_source = |idx: usize, use_idx: usize| {
+        let dag_idx_to_source = |idx: usize, _use_idx: usize| {
             let buffer_idx = expr_info[idx].buffer_idx;
             match &dag.constraints.nodes[idx] {
                 SymbolicExpressionNode::Variable(var) => {
-                    if buffer_idx == usize::MAX {
-                        Source::Var(*var)
-                    } else if expr_info[idx].first_use == use_idx && cache_vars {
-                        Source::BufferedVar((*var, buffer_idx))
-                    } else {
-                        Source::Intermediate(buffer_idx)
-                    }
+                    // if buffer_idx == usize::MAX {
+                    //     Source::Var(*var)
+                    // } else if expr_info[idx].first_use == use_idx && cache_vars {
+                    //     Source::BufferedVar((*var, buffer_idx))
+                    // } else {
+                    //     Source::Intermediate(buffer_idx)
+                    // }
+                    Source::Var(*var)
                 }
                 SymbolicExpressionNode::IsFirstRow => Source::IsFirst,
                 SymbolicExpressionNode::IsLastRow => Source::IsLast,
@@ -274,11 +275,12 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
                 | SymbolicExpressionNode::Sub { .. }
                 | SymbolicExpressionNode::Mul { .. }
                 | SymbolicExpressionNode::Neg { .. } => {
-                    if buffer_idx == usize::MAX {
-                        Source::TerminalIntermediate
-                    } else {
-                        Source::Intermediate(buffer_idx)
-                    }
+                    // if buffer_idx == usize::MAX {
+                    //     Source::TerminalIntermediate
+                    // } else {
+                    //     Source::Intermediate(buffer_idx)
+                    // }
+                    Source::Intermediate(buffer_idx)
                 }
             }
         };
