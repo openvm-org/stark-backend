@@ -18,7 +18,6 @@ pub enum Source<F: Field> {
     Intermediate(usize),
     TerminalIntermediate,
     Var(SymbolicVariable<F>),
-    BufferedVar((SymbolicVariable<F>, usize)),
     IsFirst,
     IsLast,
     IsTransition,
