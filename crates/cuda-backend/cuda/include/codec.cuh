@@ -48,17 +48,19 @@ typedef struct {
     // In most case, the index is less than 8192, so we can just use 13 bits for index.
     // But for the `Constant` variant, the index encodes the constant field element.
     // And the native field that we support is BabyBear whose modulus has 31 bits.
-    uint32_t index; // 16-bit col for variables, 20-bit for intermediates, 32-bit for constants
-    // uint32_t buffer_idx; // 16-bit buffer index for buffered variables
+    uint32_t index;      // 16-bit col for variables, 20-bit for intermediates, 32-bit for constants
+    uint16_t buffer_idx; // 16-bit buffer index for buffered variables
 } SourceInfo;
 
 typedef struct {
     bool is_constraint; // 1-bit, we need to accumulate the constraint's value if it's true
     bool buffer_result; // 1-bit, true iff we should write the expression result to buffer
-    OperationType op;   // 6-bit
+    bool buffer_x;      // 1-bit, true iff we should write the x operand to buffer
+    bool buffer_y;      // 1-bit, true iff we should write the y operand to buffer
+    OperationType op;   // 4-bit
     SourceInfo x;       // 48-bit
     SourceInfo y;       // 48-bit
-    uint32_t z_index;         // 20-bit index for intermediate buffer
+    uint32_t z_index;   // 20-bit index for intermediate buffer
 } DecodedRule;
 
 // decode source from 48-bit little-endian integer
@@ -106,8 +108,8 @@ static const uint64_t ENTRY_OFFSET_SHIFT = 12;
 static const uint64_t ENTRY_OFFSET_MASK = 0xF; // 4bit
 // 48-bit source: 16-bit entry | 16-bit index | 16-bit buffer index
 static const uint64_t ENTRY_INDEX_SHIFT = 16;
-// static const uint64_t ENTRY_BUFFER_INDEX_SHIFT = 32;
-static const uint64_t ENTRY_INDEX_MASK = 0xFFFFFFFF; // 32-bit
+static const uint64_t ENTRY_BUFFER_INDEX_SHIFT = 32;
+static const uint64_t ENTRY_INDEX_MASK = 0xFFFF; // 16-bit
 // 24bit Z: 4-bit src | 20-bit index
 static const uint64_t SOURCE_INTERMEDIATE_SHIFT = 4;
 static const uint64_t SOURCE_INTERMEDIATE_MASK = 0xFFFFF;
@@ -121,28 +123,32 @@ static const int Y_HIGH_SHIFT = 16;
 static const uint64_t Y_HIGH_MASK = 0xFFFFFFFF; // 32-bit
 static const int Z_LOW_SHIFT = 32;
 static const uint64_t Z_LOW_MASK = 0xFFFFFF; // 24-bit
-static const uint64_t OP_MASK = 0x3F;        // 6-bit
+static const uint64_t OP_MASK = 0xF;         // 4-bit
 static const int OP_SHIFT = 56;
-static const uint64_t INTERMEDIATE_MASK = 0x4000000000000000;  // 126th bit
+static const uint64_t BUFFER_X_MASK = 0x1000000000000000;      // 124th bit
+static const uint64_t BUFFER_Y_MASK = 0x2000000000000000;      // 125th bit
+static const uint64_t BUFFER_RES_MASK = 0x4000000000000000;    // 126th bit
 static const uint64_t IS_CONSTRAINT_MASK = 0x8000000000000000; // 127th bit
 
 const uint64_t one = 1;
 static_assert(LOW_48_BITS_MASK == (one << 48) - 1, "LOW_48_BITS_MASK must be (1 << 48) - 1");
 static_assert(Y_HIGH_MASK == (one << 32) - 1, "Y_HIGH_MASK must be (1 << 32) - 1");
 static_assert(Z_LOW_MASK == (one << 24) - 1, "Z_LOW_MASK must be (1 << 24) - 1");
-static_assert(OP_MASK == (one << 6) - 1, "OP_MASK must be (1 << 6) - 1");
-static_assert(INTERMEDIATE_MASK == one << 62, "INTERMEDIATE_MASK must be (1 << 62)");
+static_assert(OP_MASK == (one << 4) - 1, "OP_MASK must be (1 << 6) - 1");
+static_assert(BUFFER_X_MASK == one << 60, "BUFFER_X_MASK must be (1 << 60)");
+static_assert(BUFFER_Y_MASK == one << 61, "BUFFER_Y_MASK must be (1 << 61)");
+static_assert(BUFFER_RES_MASK == one << 62, "BUFFER_RES_MASK must be (1 << 62)");
 static_assert(IS_CONSTRAINT_MASK == one << 63, "IS_CONSTRAINT_MASK must be (1 << 63)");
 
 // big-endian: 4-bit src | 12-bit col | 31-bit row | 1-bit reserved
 __host__ __device__ __forceinline__ SourceInfo decode_source(uint64_t encoded) {
     // common
     SourceInfo src;
-    src.type = (EntryType)(encoded & ENTRY_SRC_MASK);                 // 4-bit
-    src.part = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;       // 8-bit
-    src.offset = (encoded >> ENTRY_OFFSET_SHIFT) & ENTRY_OFFSET_MASK; // 4-bit
-    src.index = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;    // 16-bit
-    // src.buffer_idx = (encoded >> ENTRY_BUFFER_INDEX_SHIFT) & ENTRY_INDEX_MASK; // 16-bit
+    src.type = (EntryType)(encoded & ENTRY_SRC_MASK);                          // 4-bit
+    src.part = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;                // 8-bit
+    src.offset = (encoded >> ENTRY_OFFSET_SHIFT) & ENTRY_OFFSET_MASK;          // 4-bit
+    src.index = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;             // 16-bit
+    src.buffer_idx = (encoded >> ENTRY_BUFFER_INDEX_SHIFT) & ENTRY_INDEX_MASK; // 16-bit
 
     if (src.type == SRC_INTERMEDIATE) {
         // 24bit: 4-bit src | 20-bit index
@@ -171,11 +177,17 @@ __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded) {
     uint64_t z_encoded = (encoded.high >> Z_LOW_SHIFT) & Z_LOW_MASK;
     rule.z_index = (z_encoded >> SOURCE_INTERMEDIATE_SHIFT) & SOURCE_INTERMEDIATE_MASK;
 
-    // Extract op (next 6 bits)
+    // Extract op (next 4 bits)
     rule.op = (OperationType)((encoded.high >> OP_SHIFT) & OP_MASK);
 
+    // Extract buffer_x (next bit)
+    rule.buffer_x = (encoded.high & BUFFER_X_MASK) != 0;
+
+    // Extract buffer_y (next bit)
+    rule.buffer_y = (encoded.high & BUFFER_Y_MASK) != 0;
+
     // Extract buffer_result (second highest bit)
-    rule.buffer_result = (encoded.high & INTERMEDIATE_MASK) != 0;
+    rule.buffer_result = (encoded.high & BUFFER_RES_MASK) != 0;
 
     // Extract is_constraint (highest bit)
     rule.is_constraint = (encoded.high & IS_CONSTRAINT_MASK) != 0;

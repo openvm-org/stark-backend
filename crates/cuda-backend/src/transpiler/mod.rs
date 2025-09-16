@@ -92,8 +92,7 @@ pub struct SymbolicRulesOnGpu<F: Field> {
 
 impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
     #[instrument(name = "SymbolicRulesOnGpu.new", skip_all, level = "debug")]
-    pub fn new(dag: SymbolicConstraintsDag<F>, _cache_vars: bool, is_permute: bool) -> Self {
-        let cache_vars = false;
+    pub fn new(dag: SymbolicConstraintsDag<F>, cache_vars: bool, is_permute: bool) -> Self {
         let mut expr_info = (0..dag.constraints.nodes.len())
             .map(|i| ExpressionInfo {
                 dag_idx: i,
@@ -254,18 +253,17 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
             .collect::<Vec<_>>();
 
         let mut dag_idx_to_constraint_idx = FxHashMap::default();
-        let dag_idx_to_source = |idx: usize, _use_idx: usize| {
+        let dag_idx_to_source = |idx: usize, use_idx: usize| {
             let buffer_idx = expr_info[idx].buffer_idx;
             match &dag.constraints.nodes[idx] {
                 SymbolicExpressionNode::Variable(var) => {
-                    // if buffer_idx == usize::MAX {
-                    //     Source::Var(*var)
-                    // } else if expr_info[idx].first_use == use_idx && cache_vars {
-                    //     Source::BufferedVar((*var, buffer_idx))
-                    // } else {
-                    //     Source::Intermediate(buffer_idx)
-                    // }
-                    Source::Var(*var)
+                    if buffer_idx == usize::MAX {
+                        Source::Var(*var)
+                    } else if expr_info[idx].first_use == use_idx && cache_vars {
+                        Source::BufferedVar((*var, buffer_idx))
+                    } else {
+                        Source::Intermediate(buffer_idx)
+                    }
                 }
                 SymbolicExpressionNode::IsFirstRow => Source::IsFirst,
                 SymbolicExpressionNode::IsLastRow => Source::IsLast,
