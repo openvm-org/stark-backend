@@ -259,7 +259,7 @@ __global__ void cukernel_quotient(
                     assert(false);
                 }
 
-                if (decoded_rule.op != OP_VAR && decoded_rule.z.type != TERMINAL) {
+                if (decoded_rule.op != OP_VAR) { // && decoded_rule.z.type != TERMINAL) {
                     intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
                 }
 

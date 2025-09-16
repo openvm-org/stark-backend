@@ -33,10 +33,10 @@ typedef enum {
     SRC_IS_FIRST,       // 8
     SRC_IS_LAST,        // 9
     SRC_IS_TRANSITION,  // 10
-    TERMINAL,           // 11
-    BUFF_PREPROCESSED,  // 12
-    BUFF_MAIN,          // 13
-    BUFF_PERMUTATION    // 14
+    // TERMINAL,           // 11
+    // BUFF_PREPROCESSED,  // 12
+    // BUFF_MAIN,          // 13
+    // BUFF_PERMUTATION    // 14
 } EntryType;
 
 // Source info
