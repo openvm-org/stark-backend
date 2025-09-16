@@ -123,7 +123,7 @@ impl<F: Field + PrimeField32> Codec for Source<F> {
             Source::Var(v) => v.encode(),
             Source::BufferedVar((v, idx)) => {
                 // 16-bit entry | 16-bit index | 16-bit buffer index
-                v.encode() | ((*idx as u64) << 32)
+                (v.encode() + BUFFERED_IDE_OFFSET) | ((*idx as u64) << 32)
             }
             Source::Intermediate(idx) => {
                 // 4-bit src | 20-bit index
@@ -186,15 +186,13 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
     // 48-bit x | 48-bit y | 24-bit z | 7-bit op | 1-bit is_constraint
     fn encode(&self) -> u128 {
         let dummy_source = Source::Constant(F::ZERO);
-        let (x, y, z, exp, buffer_res, buffer_x, buffer_y) = match &self.constraint {
+        let (x, y, z, exp, write_buffer) = match &self.constraint {
             Constraint::Add(x, y, z) => (
                 x.encode(),
                 y.encode(),
                 z.encode(),
                 OP_ADD,
                 !matches!(z, Source::TerminalIntermediate),
-                matches!(x, Source::BufferedVar(_)),
-                matches!(y, Source::BufferedVar(_)),
             ),
             Constraint::Sub(x, y, z) => (
                 x.encode(),
@@ -202,8 +200,6 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
                 z.encode(),
                 OP_SUB,
                 !matches!(z, Source::TerminalIntermediate),
-                matches!(x, Source::BufferedVar(_)),
-                matches!(y, Source::BufferedVar(_)),
             ),
             Constraint::Mul(x, y, z) => (
                 x.encode(),
@@ -211,8 +207,6 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
                 z.encode(),
                 OP_MUL,
                 !matches!(z, Source::TerminalIntermediate),
-                matches!(x, Source::BufferedVar(_)),
-                matches!(y, Source::BufferedVar(_)),
             ),
             // since y is not used, we just fill it with F::ZERO
             Constraint::Neg(x, z) => (
@@ -221,16 +215,12 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
                 z.encode(),
                 OP_NEG,
                 !matches!(z, Source::TerminalIntermediate),
-                matches!(x, Source::BufferedVar(_)),
-                false,
             ),
             Constraint::Variable(v) => (
                 v.encode(),
                 dummy_source.encode(),
                 dummy_source.encode(),
                 OP_VAR,
-                false,
-                matches!(v, Source::BufferedVar(_)),
                 false,
             ),
         };
@@ -243,9 +233,7 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
             | ((y as u128) << 48)
             | ((z as u128) << 96)
             | ((exp as u128) << 120)
-            | ((buffer_x as u128) << 124)
-            | ((buffer_y as u128) << 125)
-            | ((buffer_res as u128) << 126)
+            | ((write_buffer as u128) << 126)
             | ((self.need_accumulate as u128) << 127)
     }
 
@@ -254,33 +242,15 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
         let coded_y = (encoded >> 48) & (INPUT_OPERANDS_MASK as u128); // 48bit
         let coded_z = (encoded >> 96) & (OUTPUT_OPERAND_MASK as u128); // 24bit
 
-        let buffer_x = (encoded >> 124) & 1 == 1;
-        let buffer_y = (encoded >> 125) & 1 == 1;
-        let buffer_res = (encoded >> 126) & 1 == 1;
-
-        let x = if buffer_x {
-            let buffer_idx = ((coded_x >> 32) & 0xffff) as usize;
-            let v = SymbolicVariable::decode(coded_x as u64 & 0xffffffff);
-            Source::BufferedVar((v, buffer_idx))
-        } else {
-            Source::decode(coded_x as u64)
-        };
-
-        let y = if buffer_y {
-            let buffer_idx = ((coded_y >> 32) & 0xffff) as usize;
-            let v = SymbolicVariable::decode(coded_y as u64 & 0xffffffff);
-            Source::BufferedVar((v, buffer_idx))
-        } else {
-            Source::decode(coded_y as u64)
-        };
-
-        let z = if buffer_res {
+        let x = Source::decode(coded_x as u64);
+        let y = Source::decode(coded_y as u64);
+        let write_buffer = (encoded >> 126) & 1 == 1;
+        let z = if write_buffer {
             Source::decode(coded_z as u64)
         } else {
             Source::TerminalIntermediate
         };
-
-        let exp = (encoded >> 120) as u8 & 0xF; // 4 bit
+        let exp = (encoded >> 120) as u8 & 0x3F; // 6bit
         let need_accumulate = (encoded >> 127) & 1 == 1;
 
         let constraint = match exp {
