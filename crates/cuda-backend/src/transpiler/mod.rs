@@ -5,8 +5,7 @@ use std::{cmp::Ordering, collections::BinaryHeap};
 
 use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
-    symbolic_variable::{Entry, SymbolicVariable},
-    SymbolicConstraintsDag, SymbolicExpressionNode,
+    symbolic_variable::SymbolicVariable, SymbolicConstraintsDag, SymbolicExpressionNode,
 };
 use p3_field::{Field, PrimeField32};
 use rustc_hash::FxHashMap;
@@ -44,13 +43,6 @@ pub struct ConstraintWithFlag<F: Field> {
     pub need_accumulate: bool,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum ExpressionType {
-    Intermediate,
-    Variable,
-    Other,
-}
-
 #[derive(Debug, Copy, Clone)]
 struct ExpressionInfo {
     pub dag_idx: usize,
@@ -59,7 +51,7 @@ struct ExpressionInfo {
     pub last_use: usize,
     pub use_count: usize,
     pub accumulate: bool,
-    pub expr_type: ExpressionType,
+    pub intermediate: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -92,8 +84,7 @@ pub struct SymbolicRulesOnGpu<F: Field> {
 
 impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
     #[instrument(name = "SymbolicRulesOnGpu.new", skip_all, level = "debug")]
-    pub fn new(dag: SymbolicConstraintsDag<F>, _cache_vars: bool, is_permute: bool) -> Self {
-        let cache_vars = false;
+    pub fn new(dag: SymbolicConstraintsDag<F>, is_permute: bool) -> Self {
         let mut expr_info = (0..dag.constraints.nodes.len())
             .map(|i| ExpressionInfo {
                 dag_idx: i,
@@ -102,7 +93,7 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
                 last_use: usize::MAX,
                 use_count: 0,
                 accumulate: false,
-                expr_type: ExpressionType::Other,
+                intermediate: false,
             })
             .collect::<Vec<_>>();
 
@@ -124,7 +115,7 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
                     ..
                 } => {
                     expr_info[i].buffer_idx = i;
-                    expr_info[i].expr_type = ExpressionType::Intermediate;
+                    expr_info[i].intermediate = true;
                     expr_info[*left_idx].first_use = expr_info[*left_idx].first_use.min(i);
                     expr_info[*left_idx].last_use = i;
                     expr_info[*left_idx].use_count += 1;
@@ -134,23 +125,10 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
                 }
                 SymbolicExpressionNode::Neg { idx, .. } => {
                     expr_info[i].buffer_idx = i;
-                    expr_info[i].expr_type = ExpressionType::Intermediate;
+                    expr_info[i].intermediate = true;
                     expr_info[*idx].first_use = expr_info[*idx].first_use.min(i);
                     expr_info[*idx].last_use = i;
                     expr_info[*idx].use_count += 1;
-                }
-                SymbolicExpressionNode::Variable(var) => {
-                    expr_info[i].expr_type = ExpressionType::Variable;
-                    if cache_vars {
-                        match var.entry {
-                            Entry::Main { .. }
-                            | Entry::Permutation { .. }
-                            | Entry::Preprocessed { .. } => {
-                                expr_info[i].buffer_idx = i;
-                            }
-                            _ => {}
-                        }
-                    }
                 }
                 _ => {}
             }
@@ -181,23 +159,17 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
             } else {
                 expr_info[idx].last_use.max(max_prev_node)
             };
-            // Variables should only be read from the LDE once, and hence should be stored in the
-            // buffer after their first read. If a variable is accumulated, during quotient eval
-            // it will be read here first (due to the topological ordering). Alternatively, during
-            // permutation some accumulated intermediates may need to be stored in the buffer for
+            // During permutation some accumulated intermediates may need to be stored in the
             // access later - such values must be marked as used.
-            if (expr_info[idx].expr_type == ExpressionType::Variable && cache_vars) || is_permute {
+            if is_permute {
                 expr_info[idx].first_use = expr_info[idx].first_use.min(idx);
                 expr_info[idx].use_count += 1;
             }
         }
 
-        // Expressions don't actually need to be buffered if they're not read/used multiple time.
-        // We can use this to reduce the number of buffers needed.
+        // Expressions don't need to be buffered if they're not used later.
         for expr in expr_info.iter_mut() {
-            if expr.use_count == 0
-                || (expr.use_count == 1 && expr.expr_type == ExpressionType::Variable)
-            {
+            if expr.use_count == 0 {
                 expr.buffer_idx = usize::MAX;
             }
         }
@@ -209,29 +181,12 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
             .iter()
             .filter(|info| info.buffer_idx != usize::MAX)
             .copied()
-            .sorted_by_key(|info| {
-                if info.expr_type == ExpressionType::Variable {
-                    info.first_use
-                } else {
-                    info.dag_idx
-                }
-            })
+            .sorted_by_key(|info| info.dag_idx)
             .collect::<Vec<_>>();
         let mut buffer = BinaryHeap::<BufferEntry>::new();
 
         for expr in buffer_expr_info {
-            // Variables will be stored to the buffer immediately after their first read, while
-            // intermediates will be stored after being computed for the first time.
-            let store_point = if expr.expr_type == ExpressionType::Variable {
-                expr.first_use
-            } else {
-                expr.dag_idx
-            };
-
-            if buffer.is_empty()
-                || buffer.peek().unwrap().last_use > store_point
-                || (buffer.peek().unwrap().last_use == store_point && is_permute)
-            {
+            if buffer.is_empty() || buffer.peek().unwrap().last_use >= expr.dag_idx {
                 expr_info[expr.dag_idx].buffer_idx = buffer.len();
                 buffer.push(BufferEntry {
                     buffer_idx: expr_info[expr.dag_idx].buffer_idx,
@@ -252,7 +207,7 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
         // be directly accumulated into the quotient value.
         let constraint_expr_idxs = expr_info
             .iter()
-            .filter(|info| info.accumulate || info.expr_type == ExpressionType::Intermediate)
+            .filter(|info| info.accumulate || info.intermediate)
             .map(|info| info.dag_idx)
             .collect::<Vec<_>>();
 
@@ -260,16 +215,7 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
         let dag_idx_to_source = |idx: usize, _use_idx: usize| {
             let buffer_idx = expr_info[idx].buffer_idx;
             match &dag.constraints.nodes[idx] {
-                SymbolicExpressionNode::Variable(var) => {
-                    // if buffer_idx == usize::MAX {
-                    //     Source::Var(*var)
-                    // } else if expr_info[idx].first_use == use_idx && cache_vars {
-                    //     Source::BufferedVar((*var, buffer_idx))
-                    // } else {
-                    //     Source::Intermediate(buffer_idx)
-                    // }
-                    Source::Var(*var)
-                }
+                SymbolicExpressionNode::Variable(var) => Source::Var(*var),
                 SymbolicExpressionNode::IsFirstRow => Source::IsFirst,
                 SymbolicExpressionNode::IsLastRow => Source::IsLast,
                 SymbolicExpressionNode::IsTransition => Source::IsTransition,
@@ -327,8 +273,6 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
                         dag_idx_to_source(*idx, dag_idx),
                         dag_idx_to_source(dag_idx, dag_idx),
                     ),
-                    // This will always be the first variable read due to topological ordering -
-                    // thus it should always be buffered here.
                     _ => Constraint::Variable(dag_idx_to_source(dag_idx, dag_idx)),
                 };
                 ConstraintWithFlag::new(constraint, expr_info[dag_idx].accumulate)

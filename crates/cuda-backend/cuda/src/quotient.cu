@@ -74,9 +74,6 @@ __device__ __forceinline__ FpExt evaluate_source(
             q_row_idx = bit_rev(bit_rev(q_row_idx, quotient_size), prep_height);
         }
         result = FpExt(d_preprocessed[prep_height * src.index + q_row_idx]);
-        // if (src.type == BUFF_PREPROCESSED) {
-        //     d_intermediate[intermediate_stride * src.buffer_idx] = result;
-        // }
         break;
     }
     case ENTRY_MAIN: {
@@ -86,9 +83,6 @@ __device__ __forceinline__ FpExt evaluate_source(
         }
         Fp *d_main_fp = (Fp *)d_main[src.part];
         result = FpExt(d_main_fp[main_height * src.index + q_row_idx]);
-        // if (src.type == BUFF_MAIN) {
-        //     d_intermediate[intermediate_stride * src.buffer_idx] = result;
-        // }
         break;
     }
     case ENTRY_PERMUTATION: {
@@ -102,9 +96,6 @@ __device__ __forceinline__ FpExt evaluate_source(
         result.elems[1] = d_permutation[perm_height * (4 * src.index + 1) + q_row_idx];
         result.elems[2] = d_permutation[perm_height * (4 * src.index + 2) + q_row_idx];
         result.elems[3] = d_permutation[perm_height * (4 * src.index + 3) + q_row_idx];
-        // if (src.type == BUFF_PERMUTATION) {
-        //     d_intermediate[intermediate_stride * src.buffer_idx] = result;
-        // }
         break;
     }
     case ENTRY_PUBLIC:
