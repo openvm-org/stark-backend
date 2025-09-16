@@ -162,7 +162,7 @@ __global__ void calculate_cumulative_sums(
                                 assert(0);
                             }
 
-                            if (decoded_rule.op != OP_VAR) {
+                            if (decoded_rule.buffer_result) {
                                 intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
                             }
                         }

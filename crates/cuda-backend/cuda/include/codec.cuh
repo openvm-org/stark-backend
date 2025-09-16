@@ -48,13 +48,14 @@ typedef struct {
     // In most case, the index is less than 8192, so we can just use 13 bits for index.
     // But for the `Constant` variant, the index encodes the constant field element.
     // And the native field that we support is BabyBear whose modulus has 31 bits.
-    uint32_t index;      // 16-bit col for variables, 20-bit for intermediates, 32-bit for constants
+    uint32_t index; // 16-bit col for variables, 20-bit for intermediates, 32-bit for constants
     // uint32_t buffer_idx; // 16-bit buffer index for buffered variables
 } SourceInfo;
 
 typedef struct {
     bool is_constraint; // 1-bit, we need to accumulate the constraint's value if it's true
-    OperationType op;   // 7-bit
+    bool buffer_result; // 1-bit, true iff we should write the expression result to buffer
+    OperationType op;   // 6-bit
     SourceInfo x;       // 48-bit
     SourceInfo y;       // 48-bit
     SourceInfo z;       // 24-bit
@@ -120,25 +121,27 @@ static const int Y_HIGH_SHIFT = 16;
 static const uint64_t Y_HIGH_MASK = 0xFFFFFFFF; // 32-bit
 static const int Z_LOW_SHIFT = 32;
 static const uint64_t Z_LOW_MASK = 0xFFFFFF; // 24-bit
-static const uint64_t OP_MASK = 0x7F;        // 7-bit
+static const uint64_t OP_MASK = 0x3F;        // 6-bit
 static const int OP_SHIFT = 56;
+static const uint64_t INTERMEDIATE_MASK = 0x4000000000000000;  // 126th bit
 static const uint64_t IS_CONSTRAINT_MASK = 0x8000000000000000; // 127th bit
 
 const uint64_t one = 1;
 static_assert(LOW_48_BITS_MASK == (one << 48) - 1, "LOW_48_BITS_MASK must be (1 << 48) - 1");
 static_assert(Y_HIGH_MASK == (one << 32) - 1, "Y_HIGH_MASK must be (1 << 32) - 1");
 static_assert(Z_LOW_MASK == (one << 24) - 1, "Z_LOW_MASK must be (1 << 24) - 1");
-static_assert(OP_MASK == (one << 7) - 1, "OP_MASK must be (1 << 7) - 1");
+static_assert(OP_MASK == (one << 6) - 1, "OP_MASK must be (1 << 6) - 1");
+static_assert(INTERMEDIATE_MASK == one << 62, "INTERMEDIATE_MASK must be (1 << 62)");
 static_assert(IS_CONSTRAINT_MASK == one << 63, "IS_CONSTRAINT_MASK must be (1 << 63)");
 
 // big-endian: 4-bit src | 12-bit col | 31-bit row | 1-bit reserved
 __host__ __device__ __forceinline__ SourceInfo decode_source(uint64_t encoded) {
     // common
     SourceInfo src;
-    src.type = (EntryType)(encoded & ENTRY_SRC_MASK);                          // 4-bit
-    src.part = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;                // 8-bit
-    src.offset = (encoded >> ENTRY_OFFSET_SHIFT) & ENTRY_OFFSET_MASK;          // 4-bit
-    src.index = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;             // 16-bit
+    src.type = (EntryType)(encoded & ENTRY_SRC_MASK);                 // 4-bit
+    src.part = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;       // 8-bit
+    src.offset = (encoded >> ENTRY_OFFSET_SHIFT) & ENTRY_OFFSET_MASK; // 4-bit
+    src.index = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;    // 16-bit
     // src.buffer_idx = (encoded >> ENTRY_BUFFER_INDEX_SHIFT) & ENTRY_INDEX_MASK; // 16-bit
 
     if (src.type == SRC_INTERMEDIATE) {
@@ -168,8 +171,11 @@ __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded) {
     uint64_t z_encoded = (encoded.high >> Z_LOW_SHIFT) & Z_LOW_MASK;
     rule.z = decode_source(z_encoded);
 
-    // Extract op (next 7 bits)
+    // Extract op (next 6 bits)
     rule.op = (OperationType)((encoded.high >> OP_SHIFT) & OP_MASK);
+
+    // Extract buffer_result (second highest bit)
+    rule.buffer_result = (encoded.high & INTERMEDIATE_MASK) != 0;
 
     // Extract is_constraint (highest bit)
     rule.is_constraint = (encoded.high & IS_CONSTRAINT_MASK) != 0;
