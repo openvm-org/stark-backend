@@ -185,7 +185,10 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
         let mut buffer = BinaryHeap::<BufferEntry>::new();
 
         for expr in buffer_expr_info {
-            if buffer.is_empty() || buffer.peek().unwrap().last_use >= expr.dag_idx {
+            if buffer.is_empty()
+                || (!is_permute && buffer.peek().unwrap().last_use > expr.dag_idx)
+                || (is_permute && buffer.peek().unwrap().last_use >= expr.dag_idx)
+            {
                 expr_info[expr.dag_idx].buffer_idx = buffer.len();
                 buffer.push(BufferEntry {
                     buffer_idx: expr_info[expr.dag_idx].buffer_idx,
