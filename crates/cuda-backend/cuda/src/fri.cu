@@ -450,7 +450,7 @@ extern "C" int _reduce_matrix_quotient_acc(
     uint32_t height,
     bool is_first
 ) {
-    auto [grid, block] = kernel_launch_params(height, TILE_WIDTH);
+    auto [grid, block] = kernel_launch_params(height, 256);
     reduce_matrix_quotient_acc<<<grid, block>>>(
         quotient_acc,
         matrix,
