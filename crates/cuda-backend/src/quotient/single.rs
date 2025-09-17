@@ -25,11 +25,11 @@ pub fn compute_single_rap_quotient_values_gpu(
     constraints: &SymbolicConstraintsDag<F>,
     trace_domain: Domain<SC>,
     quotient_domain: Domain<SC>,
-    preprocessed_trace_on_quotient_domain: Option<DeviceMatrix<F>>,
-    partitioned_main_buffer: Vec<DeviceMatrix<F>>,
-    after_challenge_buffer: Vec<DeviceMatrix<F>>,
+    preprocessed: Option<DeviceMatrix<F>>,
+    main_ldes: Vec<DeviceMatrix<F>>,
+    mut perm_ldes: Vec<DeviceMatrix<F>>,
     // For each challenge round, the challenges drawn
-    challenges: Vec<Vec<EF>>,
+    mut challenges: Vec<Vec<EF>>,
     alpha: EF,
     public_values: &[F],
     // Values exposed to verifier after challenge round i
@@ -37,61 +37,28 @@ pub fn compute_single_rap_quotient_values_gpu(
 ) -> DevicePoly<EF, ExtendedLagrangeCoeff> {
     // quotient params
     let quotient_size = quotient_domain.size();
-    assert!(partitioned_main_buffer
-        .iter()
-        .all(|m| m.height() >= quotient_size));
+    assert!(main_ldes.iter().all(|m| m.height() >= quotient_size));
 
     // constraints
     let constraints_len = constraints.constraints.num_constraints();
-    let rules = SymbolicRulesOnGpu::new(constraints.clone());
+    let rules = SymbolicRulesOnGpu::new(constraints.clone(), false);
     let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
     tracing::debug!(
         constraints = constraints_len,
         encoded = encoded_rules.len(),
-        intermediates = rules.num_intermediates,
+        intermediates = rules.buffer_size,
         "Single RAP quotient: "
     );
 
-    quotient_evaluate_gpu(
-        preprocessed_trace_on_quotient_domain,
-        partitioned_main_buffer,
-        after_challenge_buffer,
-        public_values,
-        alpha,
-        challenges,
-        perm_challenge,
-        &encoded_rules,
-        rules.num_intermediates,
-        trace_domain.size(),
-        quotient_size,
-        quotient_domain.first_point(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn quotient_evaluate_gpu(
-    preprocessed: Option<DeviceMatrix<F>>,
-    main_ldes: Vec<DeviceMatrix<F>>,
-    mut perm_ldes: Vec<DeviceMatrix<F>>,
-    public_values: &[F],
-    alpha: EF,
-    mut challenges: Vec<Vec<EF>>,
-    exposed_values: &[&[EF]], // exposed_values_after_challenge
-    constraints: &[u128],
-    num_intermediates: usize,
-    trace_size: usize,
-    quotient_size: usize,
-    coset_shift: F,
-) -> DevicePoly<EF, ExtendedLagrangeCoeff> {
-    // Create accumulator buffer
     let mut d_accumulators = DeviceBuffer::<EF>::with_capacity(quotient_size);
-    if constraints.is_empty() {
+    if encoded_rules.is_empty() {
         // Since the constraints are empty, return an empty accumulator
         // You may need a utility to zero the buffer if needed
         return DevicePoly::new(true, d_accumulators);
     }
 
+    let trace_size = trace_domain.size();
     let qdb_degree = log2_strict_usize(quotient_size) - log2_strict_usize(trace_size);
 
     tracing::debug!("num partitioned main LDEs = {}", main_ldes.len());
@@ -119,7 +86,7 @@ fn quotient_evaluate_gpu(
     };
 
     // Copy exposed values to device
-    let d_exposed_values = match exposed_values.first() {
+    let d_exposed_values = match perm_challenge.first() {
         Some(exposed_data) => exposed_data.to_device().unwrap(),
         None => DeviceBuffer::<EF>::with_capacity(64),
     };
@@ -136,9 +103,8 @@ fn quotient_evaluate_gpu(
     let d_alpha = alpha_vec.to_device().unwrap();
 
     // Copy constraints to device
-    let d_rules_customgate = constraints.to_device().unwrap();
+    let d_rules_customgate = encoded_rules.to_device().unwrap();
 
-    // do quotient evaluation
     quotient_evaluate(
         &mut d_accumulators,
         preprocessed.as_ref().map(|lde| lde.buffer()),
@@ -149,14 +115,14 @@ fn quotient_evaluate_gpu(
         d_challenge,
         d_alpha,
         &d_rules_customgate,
-        constraints.len(),
-        num_intermediates,
+        encoded_rules.len(),
+        rules.buffer_size,
         trace_size,
         quotient_size,
         preprocessed.as_ref().map(|lde| lde.height()).unwrap_or(0),
         main_height,
         perm_lde.as_ref().map(|lde| lde.height()).unwrap_or(0),
-        coset_shift,
+        quotient_domain.first_point(),
     );
 
     DevicePoly::new(true, d_accumulators)

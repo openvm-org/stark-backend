@@ -112,7 +112,7 @@ __global__ void calculate_cumulative_sums(
                                 permutation_height
                             ); 
                         } else {  
-                            result = intermediates_ptr[decoded_rule.z.index * intermediate_stride];
+                            result = intermediates_ptr[decoded_rule.z_index * intermediate_stride];
                         }
                     } else {
                         for (; rules_evaluated <= node_idx; rules_evaluated++) {
@@ -162,8 +162,8 @@ __global__ void calculate_cumulative_sums(
                                 assert(0);
                             }
 
-                            if (decoded_rule.op != OP_VAR) {
-                                intermediates_ptr[decoded_rule.z.index * intermediate_stride] = result;
+                            if (decoded_rule.buffer_result) {
+                                intermediates_ptr[decoded_rule.z_index * intermediate_stride] = result;
                             }
                         }
                     }

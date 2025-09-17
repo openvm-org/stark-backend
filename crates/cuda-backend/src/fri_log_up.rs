@@ -207,7 +207,7 @@ impl FriLogUpPhaseGpu {
             interactions: full_interactions,
         };
         let constraints_dag: SymbolicConstraintsDag<F> = constraints.into();
-        let rules = SymbolicRulesOnGpu::new(constraints_dag.clone());
+        let rules = SymbolicRulesOnGpu::new(constraints_dag.clone(), true);
         let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
         // 3. Call GPU module
@@ -224,7 +224,7 @@ impl FriLogUpPhaseGpu {
             trace_view.partitioned_main,
             &challenges,
             &encoded_rules,
-            rules.num_intermediates,
+            rules.buffer_size,
             &partition_lens,
             &rules.used_nodes,
         );
