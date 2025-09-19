@@ -679,7 +679,6 @@ public:
     {   return a ^= p;   }
     inline bb31_4_t operator()(int p)
     {   return *this^p;   }
-# undef inline
 
 public:
     friend inline bool operator==(const bb31_4_t& a, const bb31_4_t& b)
@@ -687,6 +686,7 @@ public:
     friend inline bool operator!=(const bb31_4_t& a, const bb31_4_t& b)
     {   return a.u[0]!=b.u[0] | a.u[1]!=b.u[1] | a.u[2]!=b.u[2] | a.u[3]!=b.u[3];   }
 
+# undef inline
 # if defined(_GLIBCXX_IOSTREAM) || defined(_IOSTREAM_) // non-standard
     friend std::ostream& operator<<(std::ostream& os, const bb31_4_t& a)
     {
