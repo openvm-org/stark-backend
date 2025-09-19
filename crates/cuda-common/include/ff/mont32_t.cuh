@@ -1,7 +1,10 @@
 /*
  * Source: https://github.com/supranational/sppark (tag=v0.1.12)
- * Status: UNMODIFIED COPY from sppark/ff/mont32_t.cuh
+ * Status: MODIFIED from sppark/ff/mont32_t.cuh
  * Imported: 2025-08-13 by @gaxiom
+ *
+ * LOCAL CHANGES (high level):
+ * - 2025-09-19: add clang diagnostic push/pop
  */
 
 // Copyright Supranational LLC
@@ -18,6 +21,11 @@
 # else
 #  define asm asm volatile
 # endif
+
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat"
+#endif
 
 template<const size_t N, const uint32_t MOD, const uint32_t M0,
          const uint32_t RR, const uint32_t ONE>
@@ -443,5 +451,9 @@ public:
     }
 # endif
 };
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 #endif /* __SPPARK_FF_MONT32_T_CUH__ */

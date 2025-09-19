@@ -2,6 +2,10 @@
  * Source: https://github.com/supranational/sppark (tag=v0.1.12)
  * Status: UNMODIFIED COPY from sppark/ff/baby_bear.hpp
  * Imported: 2025-08-13 by @gaxiom
+ *
+ * LOCAL CHANGES (high level):
+ * - 2025-09-19: remove !BABY_BEAR_CANONICAL support
+ * - 2025-09-19: add clang diagnostic push/pop
  */
 
 // Copyright Supranational LLC
@@ -15,6 +19,11 @@
 # include <cassert>
 # include "mont32_t.cuh"
 # define inline __device__ __forceinline__
+
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat"
+#endif
 
 using bb31_base = mont32_t<31, 0x78000001, 0x77ffffff, 0x45dddde3, 0x0ffffffe>;
 
@@ -72,11 +81,7 @@ class __align__(16) bb31_4_t {
 
     static const uint32_t MOD   = 0x78000001;
     static const uint32_t M     = 0x77ffffff;
-#ifdef BABY_BEAR_CANONICAL
     static const uint32_t BETA  = 0x37ffffe9;   // (11<<32)%MOD
-#else                                           // such as RISC Zero
-    static const uint32_t BETA  = 0x40000018;   // (-11<<32)%MOD
-#endif
 
 public:
     static const uint32_t degree = 4;
@@ -695,6 +700,10 @@ public:
     }
 # endif
 };
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 #endif
 #endif
