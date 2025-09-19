@@ -14,12 +14,9 @@ __global__ void prefix_scan_block_ext(FpExt *d_inout, uint64_t length, uint64_t 
     FpExt acc_res = FpExt(0);
     FpExt acc_data[ACC_PER_THREAD];
 
-#ifndef __clang_analyzer__
-    __shared__ FpExt shared_mem[SHARED_DATA];
-#else
+    //__shared__ FpExt shared_mem[SHARED_DATA];
     __shared__ __align__(alignof(FpExt)) unsigned char shared_mem_raw[SHARED_DATA * sizeof(FpExt)];
     FpExt *shared_mem = reinterpret_cast<FpExt *>(shared_mem_raw);
-#endif
 
     uint32_t tile_idx = threadIdx.x;
     uint32_t shared_elem_per_block = blockDim.x;

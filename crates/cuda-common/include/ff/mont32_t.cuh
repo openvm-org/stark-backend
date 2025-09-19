@@ -4,7 +4,7 @@
  * Imported: 2025-08-13 by @gaxiom
  *
  * LOCAL CHANGES (high level):
- * - 2025-09-19: add clang diagnostic push/pop
+ * - 2025-09-19: disable clang-tidy for inline assembly
  */
 
 // Copyright Supranational LLC
@@ -22,10 +22,8 @@
 #  define asm asm volatile
 # endif
 
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wformat"
-#endif
+// Disable clang-tidy for inline assembly in this file
+// NOLINTBEGIN(clang-diagnostic-error)
 
 template<const size_t N, const uint32_t MOD, const uint32_t M0,
          const uint32_t RR, const uint32_t ONE>
@@ -452,8 +450,6 @@ public:
 # endif
 };
 
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
+// NOLINTEND(clang-diagnostic-error)
 
 #endif /* __SPPARK_FF_MONT32_T_CUH__ */

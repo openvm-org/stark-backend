@@ -14,14 +14,13 @@ const size_t TILE_SIZE = 32; // do not change,
 template <typename T>
 __global__ void __launch_bounds__(TILE_SIZE)
     cukernel_matrix_transpose(T *output, const T *input, size_t col_size, size_t row_size) {
-#ifndef __clang_analyzer__
+
     // NOTE: This is what builds, we need to use this for clang-tidy to work
-    __shared__ T s_mem[TILE_SIZE][TILE_SIZE + 1];
-#else
+    // __shared__ T s_mem[TILE_SIZE][TILE_SIZE + 1];
     __shared__ __align__(alignof(T)
     ) unsigned char s_mem_raw[TILE_SIZE * (TILE_SIZE + 1) * sizeof(T)];
     T(*s_mem)[TILE_SIZE + 1] = reinterpret_cast<T(*)[TILE_SIZE + 1]>(s_mem_raw);
-#endif
+
     size_t dim_x = (col_size + TILE_SIZE - 1) / TILE_SIZE;
     size_t bid = blockIdx.x; // (x, 1, 1)
     size_t bid_y = bid / dim_x;

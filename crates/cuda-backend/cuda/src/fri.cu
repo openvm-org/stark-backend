@@ -290,13 +290,10 @@ __global__ void matrix_evaluate_chunked(
     uint32_t chunk_start = chunk_id * chunk_size;
     uint32_t chunk_range = min(chunk_size, height - chunk_start);
 
-#ifndef __clang_analyzer__
     // NOTE: This is what builds, we need to use this for clang-tidy to work
-    __shared__ FpExt sdata[FRI_MAX_THREADS];
-#else
+    // __shared__ FpExt sdata[FRI_MAX_THREADS];
     __shared__ __align__(alignof(FpExt)) unsigned char s_data_int[FRI_MAX_THREADS * sizeof(FpExt)];
     FpExt *sdata = reinterpret_cast<FpExt *>(s_data_int);
-#endif
 
     FpExt thread_sum = {0, 0, 0, 0};
     const uint32_t col_offset = col * matrix_height;
