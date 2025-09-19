@@ -31,6 +31,7 @@
 
 #include <cassert>
 #include <cstdint>
+#define BABY_BEAR_CANONICAL
 #include "ff/baby_bear.hpp"
 
 /// The Fp class is an element of the finite field F_p, where P is the prime number 15*2^27 + 1.

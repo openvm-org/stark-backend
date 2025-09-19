@@ -28,9 +28,6 @@
 /// Defines FpExt, a finite field F_p^4, based on Fp via the irreducible polynomial x^4 - 11.
 
 #include "fp.h"
-#define BABY_BEAR_CANONICAL
-#include "ff/baby_bear.hpp"
-
 
 /// Instances of FpExt are element of a finite field F_p^4.  They are represented as elements of
 /// F_p[X] / (X^4 - 11). Basically, this is a 'big' finite field (about 2^128 elements), which is
