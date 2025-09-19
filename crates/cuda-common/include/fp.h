@@ -118,17 +118,7 @@ public:
     /// force set the value
     __device__ void set(uint32_t input) { bb31_t::operator=(input); }
 
-    /// force set self as a decoded val
-    __device__ void set_raw() {
-        bb31_t::operator*() = val();
-    }
-
-    /// keep this fast path for assigning montgomery rvalues
-    __device__ inline Fp& operator=(const bb31_t& rhs) {
-        bb31_t::operator*() = rhs.operator*();
-        return *this;
-    }
-
+    /// Equality operators
     friend __device__ inline bool operator==(const Fp& a, const Fp& b) {
         return a.asRaw() == b.asRaw();
     }
@@ -142,6 +132,7 @@ public:
         return Fp(a).asRaw() == b.asRaw();
     }
 
+    /// Comparison operators
     __device__ bool operator<(Fp rhs) const { return val() < rhs.val(); }
 
     __device__ bool operator<=(Fp rhs) const { return val() <= rhs.val(); }
