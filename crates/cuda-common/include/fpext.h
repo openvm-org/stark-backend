@@ -48,10 +48,6 @@ struct FpExt {
     /// Initialize from uint32_t
     __device__ explicit FpExt(uint32_t x) : rep(bb31_t{x}) {}
 
-    /// Initialize from any numerical type that forces encoding
-    template <class I, std::enable_if_t<std::is_integral_v<I>, int> = 0>
-    __device__ explicit FpExt(I x) : rep(bb31_t{static_cast<uint32_t>(x)}) {}
-
     /// Convert from Fp to FpExt.
     __device__ explicit FpExt(Fp x) : rep(static_cast<bb31_t>(x)) {}
 
@@ -86,7 +82,7 @@ struct FpExt {
         return result;
     }
 
-    __device__ FpExt operator-(Fp rhs) {
+    __device__ FpExt operator-(Fp rhs) const {
         FpExt result = *this;
         result.elems[0] -= rhs;
         return result;
