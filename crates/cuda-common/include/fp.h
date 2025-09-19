@@ -82,6 +82,13 @@ public:
     /// Constructor from uint32_t that forces encoding
     __host__ __device__ constexpr Fp(uint32_t v) : bb31_t(static_cast<int>(v)) {}
 
+    /// Constructor from size_t that forces encoding
+    __host__ __device__ constexpr Fp(size_t v) : bb31_t(static_cast<int>(v)) {
+#ifdef DEBUG
+        assert(v < INT32_MAX, "size_t is too large to convert to Fp");
+#endif
+    }
+
     /// Construct an Fp from an already-encoded raw value
     __device__ static constexpr Fp fromRaw(uint32_t val) { 
         return Fp(bb31_t(val));
