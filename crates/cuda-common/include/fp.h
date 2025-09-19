@@ -70,24 +70,17 @@ private:
     }
 
 public:
-    /// Inherit constructors from bb31_t
-    using bb31_t::bb31_t;
-
     /// Add default constructor explicitly
     __device__ constexpr Fp() : bb31_t(0) {}
     
     /// Constructor from bb31_t for implicit conversion
-    __device__ constexpr explicit Fp(const bb31_t& b) : bb31_t(b) {}
+    __device__ constexpr Fp(const bb31_t& b) : bb31_t(b) {}
+
+    /// Constructor from bb31_base for implicit conversion
+    __device__ Fp(const bb31_base& b) : bb31_t(b) {}
 
     /// Constructor from uint32_t that forces encoding
     __host__ __device__ constexpr Fp(uint32_t v) : bb31_t(static_cast<int>(v)) {}
-
-    /// Constructor from size_t that forces encoding
-    __host__ __device__ constexpr Fp(size_t v) : bb31_t(static_cast<int>(v)) {
-#ifdef DEBUG
-        assert(v < INT32_MAX, "size_t is too large to convert to Fp");
-#endif
-    }
 
     /// Construct an Fp from an already-encoded raw value
     __device__ static constexpr Fp fromRaw(uint32_t val) { 
@@ -225,11 +218,6 @@ public:
     }
 };
 
-/// Raise an value to a power
-__device__ inline Fp pow(Fp x, uint32_t n) {
-    return Fp(static_cast<bb31_t>(x) ^ n);
-}
-
 /// Helper: gcd-based inversion for 32-bit prime fields with FIELD_BITS <= 32.
 /// Returns v = 2^{2*FIELD_BITS - 2} * a^{-1} mod P where FIELD_BITS = 31 and P is odd prime.
 /// Copied from Plonky3: https://github.com/Plonky3/Plonky3/pull/921
@@ -274,6 +262,20 @@ __device__ inline Fp inv(Fp x) {
     }
 
     return Fp(static_cast<uint32_t>(v_mod)) * Fp(Fp::INV_2EXP_K);
+}
+
+/// Raise an value to a power
+__device__ inline Fp pow_u32(Fp x, uint32_t n) {
+    return Fp(static_cast<bb31_t>(x) ^ n);
+}
+
+template <class N, typename = std::enable_if_t<std::is_integral<N>::value>>
+__device__ inline Fp pow(Fp x, N n) {
+    using U = std::make_unsigned_t<N>;
+    if constexpr (std::is_signed<N>::value) {
+        if (n < 0) return pow_u32(inv(x), static_cast<uint32_t>(U(-n)));
+    }
+    return pow_u32(x, static_cast<uint32_t>(static_cast<U>(n)));
 }
 
 constexpr __device__ Fp TWO_ADIC_GENERATORS[Fp::TWO_ADICITY + 1] = {

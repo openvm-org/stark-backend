@@ -43,7 +43,7 @@ struct FpExt {
     };
     
     /// Default constructor makes the zero elements
-    __device__ FpExt() : rep(0) {}
+    __device__ FpExt() : rep(bb31_t{0u}) {}
 
     /// Initialize from uint32_t
     __device__ explicit FpExt(uint32_t x) : rep(bb31_t{x}) {}
@@ -124,13 +124,6 @@ struct FpExt {
 /// Overload for case where LHS is Fp (RHS case is handled as a method)
 __device__ inline FpExt operator*(Fp a, FpExt b) { return b * a; }
 
-/// Raise an FpExt to a power
-__device__ inline FpExt pow(FpExt x, uint32_t n) {
-    FpExt result;
-    result.rep = x.rep ^ n;
-    return result;
-}
-
 /// Compute the multiplicative inverse of an FpExt.
 __device__ inline FpExt inv(FpExt in) {
     FpExt result;
@@ -157,4 +150,19 @@ __device__ __inline__ FpExt binomial_inversion(const FpExt &in) {
     Fp g = (in.elems[1] * f.elems[3] + in.elems[2] * f.elems[2] + in.elems[3] * f.elems[1]) * W +
            in.elems[0] * f.elems[0];
     return f * FpExt(inv(g));
+}
+
+/// Raise an FpExt to a power
+__device__ inline FpExt pow_u32(FpExt x, uint32_t n) {
+    FpExt r; r.rep = x.rep ^ n;         // bb31_4 exponentiation
+    return r;
+}
+
+template <class N, typename = std::enable_if_t<std::is_integral<N>::value>>
+__device__ inline FpExt pow(FpExt x, N n) {
+    using U = std::make_unsigned_t<N>;
+    if constexpr (std::is_signed<N>::value) {
+        if (n < 0) return pow_u32(inv(x), static_cast<uint32_t>(U(-n)));
+    }
+    return pow_u32(x, static_cast<uint32_t>(static_cast<U>(n)));
 }
