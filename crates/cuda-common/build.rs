@@ -6,7 +6,7 @@ fn main() {
     if cuda_available() {
         println!("cargo:rerun-if-changed=cuda");
         println!("cargo:rerun-if-changed=include");
-        
+
         let builder = CudaBuilder::new()
             .library_name("vmm_shim")
             .flag("-Xcompiler=-fPIC")

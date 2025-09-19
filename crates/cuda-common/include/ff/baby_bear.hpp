@@ -696,8 +696,5 @@ public:
 # endif
 };
 
-typedef bb31_t fr_t;
-typedef bb31_4_t fr4_t;
-
 #endif
 #endif
