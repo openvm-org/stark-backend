@@ -82,6 +82,10 @@ public:
     /// Constructor from uint32_t that forces encoding
     __host__ __device__ constexpr Fp(uint32_t v) : bb31_t(static_cast<int>(v)) {}
 
+    /// Constructor from any numerical type that forces encoding
+    template <class I, std::enable_if_t<std::is_integral_v<I>, int> = 0>
+    __host__ __device__ constexpr Fp(I v) : bb31_t(static_cast<int>(v)) {}
+
     /// Construct an Fp from an already-encoded raw value
     __device__ static constexpr Fp fromRaw(uint32_t val) { 
         return Fp(bb31_t(val));
@@ -218,6 +222,16 @@ public:
     }
 };
 
+/// Raise an value to a power
+__device__ inline Fp pow(Fp x, uint32_t n) {
+    return Fp(static_cast<bb31_t>(x) ^ n);
+}
+
+template <class I, std::enable_if_t<std::is_integral_v<I>, int> = 0>
+__device__ inline Fp pow(Fp x, I n) {
+    return pow(x, static_cast<uint32_t>(n));
+}
+
 /// Helper: gcd-based inversion for 32-bit prime fields with FIELD_BITS <= 32.
 /// Returns v = 2^{2*FIELD_BITS - 2} * a^{-1} mod P where FIELD_BITS = 31 and P is odd prime.
 /// Copied from Plonky3: https://github.com/Plonky3/Plonky3/pull/921
@@ -262,20 +276,6 @@ __device__ inline Fp inv(Fp x) {
     }
 
     return Fp(static_cast<uint32_t>(v_mod)) * Fp(Fp::INV_2EXP_K);
-}
-
-/// Raise an value to a power
-__device__ inline Fp pow_u32(Fp x, uint32_t n) {
-    return Fp(static_cast<bb31_t>(x) ^ n);
-}
-
-template <class N, typename = std::enable_if_t<std::is_integral<N>::value>>
-__device__ inline Fp pow(Fp x, N n) {
-    using U = std::make_unsigned_t<N>;
-    if constexpr (std::is_signed<N>::value) {
-        if (n < 0) return pow_u32(inv(x), static_cast<uint32_t>(U(-n)));
-    }
-    return pow_u32(x, static_cast<uint32_t>(static_cast<U>(n)));
 }
 
 constexpr __device__ Fp TWO_ADIC_GENERATORS[Fp::TWO_ADICITY + 1] = {
