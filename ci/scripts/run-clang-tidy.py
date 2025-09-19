@@ -18,6 +18,7 @@ def run_clang_tidy_single(file: Path, clang_tidy: str, cuda_path: str, cuda_arch
         "-warnings-as-errors='*'",
         "-header-filter='.*'",
         "-extra-arg=-Wno-unknown-cuda-version",
+        "-extra-arg=-Wno-invalid-percent-escape",
         str(file),
         "--",
         "-x",

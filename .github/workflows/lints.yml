@@ -82,8 +82,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-tidy
           clang-tidy --version
-          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src \
-            --include crates/cuda-backend/cuda/include \
-            --include crates/cuda-backend/cuda/supra/include \
-            --include crates/cuda-common/include \
-            -- -Wno-invalid-percent-escape
+          python3 ci/scripts/run-clang-tidy.py crates/cuda-backend/cuda/src --include crates/cuda-backend/cuda/include --include crates/cuda-backend/cuda/supra/include --include crates/cuda-common/include
