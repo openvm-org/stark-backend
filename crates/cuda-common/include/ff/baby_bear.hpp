@@ -19,9 +19,7 @@
 # include <cassert>
 # include "mont32_t.cuh"
 # define inline __device__ __forceinline__
-# ifdef __clang_analyzer__
-#  define asm(...) ({ __builtin_trap(); })
-# endif
+
 using bb31_base = mont32_t<31, 0x78000001, 0x77ffffff, 0x45dddde3, 0x0ffffffe>;
 
 struct bb31_t : public bb31_base {
@@ -102,7 +100,9 @@ public:
         bb31_4_t ret;
 
 # ifdef __CUDA_ARCH__
-#  ifdef __GNUC__
+#  ifdef __clang_analyzer__
+#   define asm(...) ({ __builtin_trap(); })
+#  elif __GNUC__
 #   define asm __asm__ __volatile__
 #  else
 #   define asm asm volatile
