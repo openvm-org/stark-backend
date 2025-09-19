@@ -286,7 +286,7 @@ __global__ void cukernel_quotient_selectors(
 
         // eval
         point_gen = TWO_ADIC_GENERATORS[rate_bits];
-        Fp s_pow_n = pow(base, 1 << log_n);
+        Fp s_pow_n = pow(base, 1u << log_n);
         Fp eval = s_pow_n * pow(point_gen, idx % evals_size) - Fp(1);
 
         // xs
@@ -300,7 +300,7 @@ __global__ void cukernel_quotient_selectors(
 
         // last_row
         point_gen = TWO_ADIC_GENERATORS[log_n];
-        denom = xs - pow(point_gen, (1 << log_n) - 1);
+        denom = xs - pow(point_gen, (1u << log_n) - 1);
         last_row[idx] = eval * inv(denom);
 
         // transition
