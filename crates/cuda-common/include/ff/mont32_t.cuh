@@ -1,10 +1,7 @@
 /*
  * Source: https://github.com/supranational/sppark (tag=v0.1.12)
- * Status: MODIFIED from sppark/ff/mont32_t.cuh
+ * Status: UNMODIFIED COPY from sppark/ff/mont32_t.cuh
  * Imported: 2025-08-13 by @gaxiom
- *
- * LOCAL CHANGES (high level):
- * - 2025-09-19: disable clang-tidy for inline assembly
  */
 
 // Copyright Supranational LLC
@@ -21,9 +18,6 @@
 # else
 #  define asm asm volatile
 # endif
-
-// Disable clang-tidy for inline assembly in this file
-// NOLINTBEGIN(clang-diagnostic-error)
 
 template<const size_t N, const uint32_t MOD, const uint32_t M0,
          const uint32_t RR, const uint32_t ONE>
@@ -449,7 +443,5 @@ public:
     }
 # endif
 };
-
-// NOLINTEND(clang-diagnostic-error)
 
 #endif /* __SPPARK_FF_MONT32_T_CUH__ */

@@ -5,7 +5,6 @@
  *
  * LOCAL CHANGES (high level):
  * - 2025-09-19: remove !BABY_BEAR_CANONICAL support
- * - 2025-09-19: disable clang-tidy for inline assembly
  */
 
 // Copyright Supranational LLC
@@ -19,9 +18,6 @@
 # include <cassert>
 # include "mont32_t.cuh"
 # define inline __device__ __forceinline__
-
-// Disable clang-tidy for inline assembly in this file
-// NOLINTBEGIN(clang-diagnostic-error)
 
 using bb31_base = mont32_t<31, 0x78000001, 0x77ffffff, 0x45dddde3, 0x0ffffffe>;
 
@@ -698,8 +694,6 @@ public:
     }
 # endif
 };
-
-// NOLINTEND(clang-diagnostic-error)
 
 #endif
 #endif
