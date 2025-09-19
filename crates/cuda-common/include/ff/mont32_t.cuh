@@ -13,7 +13,10 @@
 
 # include <cstdint>
 # define inline __device__ __forceinline__
-# ifdef __GNUC__
+# ifdef __clang_analyzer__
+  // Disable asm for static analysis but warn that it's not real behavior
+#  define asm(...) ({ __builtin_trap(); })
+# elif __GNUC__
 #  define asm __asm__ __volatile__
 # else
 #  define asm asm volatile
