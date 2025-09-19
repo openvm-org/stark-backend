@@ -162,3 +162,7 @@ __device__ __inline__ FpExt binomial_inversion(const FpExt &in) {
            in.elems[0] * f.elems[0];
     return f * FpExt(inv(g));
 }
+
+static_assert(sizeof(FpExt) == 16, "FpExt must be 16 bytes");
+static_assert(sizeof(FpExt) == sizeof(bb31_4_t), "FpExt and bb31_4_t sizes must match");
+static_assert(alignof(FpExt) == alignof(bb31_4_t), "FpExt and bb31_4_t align must match");

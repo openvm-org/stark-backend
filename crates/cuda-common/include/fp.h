@@ -299,3 +299,9 @@ constexpr __device__ Fp TWO_ADIC_GENERATORS[Fp::TWO_ADICITY + 1] = {
     Fp(0x3a26eef8), // Fp(0x43f13568u),
     Fp(0x1a427a41)  // Fp(0x57fab6eeu)
 };
+
+static_assert(std::is_trivially_copyable<Fp>::value, "Fp must be POD-ish");
+static_assert(sizeof(Fp) == 4, "Fp must be 4 bytes");
+static_assert(alignof(Fp) == 4, "Fp must be 4-byte aligned");
+static_assert(sizeof(Fp) == sizeof(bb31_t), "Fp and bb31_t sizes must match");
+static_assert(alignof(Fp) == alignof(bb31_t), "Fp and bb31_t align must match");
