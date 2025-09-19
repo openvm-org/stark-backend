@@ -125,9 +125,9 @@ struct FpExt {
 __device__ inline FpExt operator*(Fp a, FpExt b) { return b * a; }
 
 /// Raise an FpExt to a power
-__device__ inline FpExt pow(FpExt x, size_t n) {
+__device__ inline FpExt pow(FpExt x, uint32_t n) {
     FpExt result;
-    result.rep = x.rep ^ static_cast<uint32_t>(n);
+    result.rep = x.rep ^ n;
     return result;
 }
 

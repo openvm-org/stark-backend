@@ -219,8 +219,8 @@ public:
 };
 
 /// Raise an value to a power
-__device__ inline Fp pow(Fp x, size_t n) {
-    return Fp(static_cast<bb31_t>(x) ^ static_cast<uint32_t>(n));
+__device__ inline Fp pow(Fp x, uint32_t n) {
+    return Fp(static_cast<bb31_t>(x) ^ n);
 }
 
 /// Helper: gcd-based inversion for 32-bit prime fields with FIELD_BITS <= 32.
