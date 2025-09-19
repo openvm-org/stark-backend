@@ -99,7 +99,7 @@ public:
     {
         bb31_4_t ret;
 
-# ifdef __CUDA_ARCH__ && !defined(__clang_analyzer__)
+# if defined(__CUDA_ARCH__) && !defined(__clang_analyzer__)
 #  ifdef __GNUC__
 #   define asm __asm__ __volatile__
 #  else
@@ -242,7 +242,7 @@ private:
     {
         bb31_4_t ret;
 
-# ifdef __CUDA_ARCH__ && !defined(__clang_analyzer__)
+# if defined(__CUDA_ARCH__) && !defined(__clang_analyzer__)
 #  ifdef __GNUC__
 #   define asm __asm__ __volatile__
 #  else
