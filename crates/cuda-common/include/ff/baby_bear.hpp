@@ -5,6 +5,7 @@
  *
  * LOCAL CHANGES (high level):
  * - 2025-09-19: remove !BABY_BEAR_CANONICAL support
+ * - 2025-09-19: disable asm for static analysis
  */
 
 // Copyright Supranational LLC
@@ -18,7 +19,9 @@
 # include <cassert>
 # include "mont32_t.cuh"
 # define inline __device__ __forceinline__
-
+# ifdef __clang_analyzer__
+#  define asm(...) ({ __builtin_trap(); })
+# endif
 using bb31_base = mont32_t<31, 0x78000001, 0x77ffffff, 0x45dddde3, 0x0ffffffe>;
 
 struct bb31_t : public bb31_base {
