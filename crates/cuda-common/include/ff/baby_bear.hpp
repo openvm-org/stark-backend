@@ -99,10 +99,8 @@ public:
     {
         bb31_4_t ret;
 
-# ifdef __CUDA_ARCH__
-#  ifdef __clang_analyzer__
-#   define asm(...) ({ __builtin_trap(); })
-#  elif __GNUC__
+# ifdef __CUDA_ARCH__ && !defined(__clang_analyzer__)
+#  ifdef __GNUC__
 #   define asm __asm__ __volatile__
 #  else
 #   define asm asm volatile
@@ -244,7 +242,7 @@ private:
     {
         bb31_4_t ret;
 
-# ifdef __CUDA_ARCH__
+# ifdef __CUDA_ARCH__ && !defined(__clang_analyzer__)
 #  ifdef __GNUC__
 #   define asm __asm__ __volatile__
 #  else
