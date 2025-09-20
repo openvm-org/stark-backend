@@ -46,24 +46,23 @@ static __device__ __constant__ Fp INTERNAL_ROUND_CONSTANTS[13] = {
     605745517
 };
 
-// V = [-2, 1, 2, 1/2, 3, 4, -1/2, -3, -4, 1/2^8, 1/4, 1/8, 1/2^27, -1/2^8, -1/16, -1/2^27]
 static __device__ __constant__ Fp internal_diag16[16] = {
-    -Fp::one().doubled().doubled(),
-    Fp::one(),
-    Fp::one().doubled(),
-    Fp::one().mul_2exp_neg_n(1),
-    Fp::one().doubled() + Fp::one(),
-    Fp::one().doubled().doubled(),
-    -(Fp::one().mul_2exp_neg_n(1)),
-    -(Fp::one().doubled() + Fp::one()),
-    -(Fp::one().doubled().doubled()),
-    Fp::one().mul_2exp_neg_n(8),
-    Fp::one().mul_2exp_neg_n(2),
-    Fp::one().mul_2exp_neg_n(3),
-    Fp::one().mul_2exp_neg_n(27),
-    -(Fp::one().mul_2exp_neg_n(8)),
-    -(Fp::one().mul_2exp_neg_n(4)),
-    -(Fp::one().mul_2exp_neg_n(27)),
+    2013265919, // -2
+    1,
+    2,
+    1006632961, // 1/2
+    3,
+    4,
+    1006632960, // -1/2
+    2013265918, // -3
+    2013265917, // -4
+    2005401601, // 1/2^8
+    1509949441, // 1/4
+    1761607681, // 1/8
+    2013265906, // 1/2^27
+    7864320,    // -1/2^8
+    125829120,  // -1/16
+    15          // -1/2^27
 };
 
 

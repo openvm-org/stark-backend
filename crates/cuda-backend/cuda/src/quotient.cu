@@ -294,8 +294,7 @@ __global__ void cukernel_quotient_selectors(
         Fp xs = base * pow(point_gen, idx);
 
         // first_row
-        point_gen = TWO_ADIC_GENERATORS[log_n];
-        denom = xs - pow(point_gen, 0);
+        denom = xs - Fp::one();
         first_row[idx] = eval * inv(denom);
 
         // last_row

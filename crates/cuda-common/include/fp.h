@@ -7,6 +7,7 @@
  * - 2025-03-25: add TWO_ADIC_GENERATORS
  * - 2025-06-02: add neg_one()
  * - 2025-08-09: gcd inversion optimization
+ * - 2025-09-14: use sppark's bb31_t impl for core arithmetic operations
  */
 
 // Copyright 2024 RISC Zero, Inc.
@@ -30,6 +31,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include "ff/baby_bear.hpp"
 
 /// The Fp class is an element of the finite field F_p, where P is the prime number 15*2^27 + 1.
 /// Put another way, Fp is basically integer arithmetic modulo P.
@@ -47,12 +49,12 @@
 ///
 /// The Fp class wraps all the standard arithmetic operations to make the finite field elements look
 /// basically like ordinary numbers (which they mostly are).
-class Fp {
+class Fp : public bb31_t {
   public:
     /// The value of P, the modulus of Fp.
-    static constexpr uint32_t P = 15 * (uint32_t(1) << 27) + 1;
-    static constexpr uint32_t M = 0x88000001;
-    static constexpr uint32_t R2 = 1172168163;
+    static constexpr uint32_t P = 15 * (uint32_t(1) << 27) + 1; // bb31_t::MOD
+    static constexpr uint32_t M = 0x88000001; // -bb31_t::M0
+    static constexpr uint32_t R2 = 1172168163; // bb31_t::RR
     static constexpr uint32_t MONTY_BITS = 32;
     static constexpr uint32_t MONTY_MASK = 0xffffffff; // uint32_t((uint64_t(1) << MONTY_BITS) - 1);
     static constexpr uint32_t HALF_P_PLUS_1 = (P + 1) >> 1;
@@ -62,53 +64,32 @@ class Fp {
     // INV_2EXP_K = (2^k)^(-1) mod P
     static constexpr uint32_t INV_2EXP_K = 975175684u;
 
-  private:
-    // The actual value, always < P.
-    uint32_t val;
-
-    // We make 'impls' of the core ops which all the other uses call.  This is done to allow for
-    // tweaking of the implementation later, for example switching to montgomery representation or
-    // doing inline assembly or some crazy CUDA stuff.
-
-    // Add two numbers
-    static __device__ constexpr uint32_t add(uint32_t a, uint32_t b) {
-        uint32_t r = a + b;
-        return (r >= P ? r - P : r);
+private:
+    __device__ uint32_t val() const {
+        return static_cast<uint32_t>(*this);
     }
 
-    // Subtract two numbers
-    static __device__ constexpr uint32_t sub(uint32_t a, uint32_t b) {
-        uint32_t r = a - b;
-        return (r > P ? r + P : r);
-    }
+public:
+    /// Add default constructor explicitly
+    __device__ constexpr Fp() : bb31_t(0) {}
+    
+    /// Constructor from bb31_t for explicit conversion
+    __device__ explicit constexpr Fp(const bb31_t& b) : bb31_t(b) {}
 
-    // Multiply two numbers
-    static __device__ constexpr uint32_t mul(uint32_t a, uint32_t b) {
-        uint64_t o64 = uint64_t(a) * uint64_t(b);
-        uint32_t low = -uint32_t(o64);
-        uint32_t red = M * low;
-        o64 += uint64_t(red) * uint64_t(P);
-        uint32_t ret = o64 >> 32;
-        return (ret >= P ? ret - P : ret);
-    }
+    /// Constructor from bb31_base for implicit conversion
+    __device__ Fp(const bb31_base& b) : bb31_t(b) {}
 
-    // Encode / Decode
-    static __device__ constexpr uint32_t encode(uint32_t a) { return mul(R2, a); }
+    /// Constructor from uint32_t that forces encoding
+    __host__ __device__ constexpr Fp(uint32_t v) : bb31_t(static_cast<int>(v)) {}
 
-    static __device__ constexpr uint32_t decode(uint32_t a) { return mul(1, a); }
-
-    // A private constructor that take the 'internal' form.
-    __device__ constexpr Fp(uint32_t val, [[maybe_unused]] bool ignore) : val(val) {}
-
-  public:
-    /// Default constructor, sets value to 0.
-    __device__ constexpr Fp() : val(0) {}
-
-    /// Construct an FP from a uint32_t, wrap if needed
-    __device__ constexpr Fp(uint32_t val) : val(encode(val)) {}
+    /// Constructor from any numerical type that forces encoding
+    template <class I, std::enable_if_t<std::is_integral_v<I>, int> = 0>
+    __host__ __device__ constexpr Fp(I v) : bb31_t(static_cast<int>(v)) {}
 
     /// Construct an Fp from an already-encoded raw value
-    __device__ static constexpr Fp fromRaw(uint32_t val) { return Fp(val, true); }
+    __device__ static constexpr Fp fromRaw(uint32_t val) { 
+        return Fp(bb31_t(val));
+    }
 
     /// Fp with zero value
     __device__ static constexpr Fp zero() { return Fp(0); }
@@ -120,92 +101,74 @@ class Fp {
     __device__ static constexpr Fp neg_one() { return maxVal(); }
 
     /// Convert to a uint32_t
-    __device__ constexpr uint32_t asUInt32() const { return decode(val); }
+    __device__ uint32_t asUInt32() const { return val(); }
 
     /// Return the raw underlying word
-    __device__ constexpr uint32_t asRaw() const { return val; }
+    __device__ uint32_t asRaw() const { return bb31_t::operator*(); }
 
     /// Get the largest value, basically P - 1.
     __device__ static constexpr Fp maxVal() { return P - 1; }
 
     /// Get an 'invalid' Fp value
-    __device__ static constexpr Fp invalid() { return Fp(0xfffffffful, true); }
+    __device__ static constexpr Fp invalid() { return Fp::fromRaw(0xfffffffful); }
 
     /// get value
-    __device__ constexpr uint32_t get() const { return val; }
+    __device__ uint32_t get() const { return asRaw(); }
 
     /// force set the value
-    __device__ constexpr void set(uint32_t input) { val = input; }
+    __device__ void set(uint32_t input) { bb31_t::operator=(input); }
 
-    /// force set self as a decoded val
-    __device__ constexpr void set_raw() { val = decode(val); }
-
-    // Implement all the various overloads
-    __device__ constexpr void operator=(uint32_t rhs) { val = encode(rhs); }
-
-    __device__ constexpr Fp operator+(Fp rhs) const { return Fp(add(val, rhs.val), true); }
-
-    __device__ constexpr Fp operator-() const { return Fp(sub(0, val), true); }
-
-    __device__ constexpr Fp operator-(Fp rhs) const { return Fp(sub(val, rhs.val), true); }
-
-    __device__ constexpr Fp operator*(Fp rhs) const { return Fp(mul(val, rhs.val), true); }
-
-    __device__ constexpr Fp operator+=(Fp rhs) {
-        val = add(val, rhs.val);
-        return *this;
+    /// Equality operators
+    friend __device__ inline bool operator==(const Fp& a, const Fp& b) {
+        return a.asRaw() == b.asRaw();
+    }
+    friend __device__ inline bool operator!=(const Fp& a, const Fp& b) {
+        return a.asRaw() != b.asRaw();
+    }
+    friend __device__ inline bool operator==(const Fp& a, int b) {
+        return a.asRaw() == Fp(b).asRaw();
+    }
+    friend __device__ inline bool operator==(int a, const Fp& b) {
+        return Fp(a).asRaw() == b.asRaw();
     }
 
-    __device__ constexpr Fp operator-=(Fp rhs) {
-        val = sub(val, rhs.val);
-        return *this;
-    }
+    /// Comparison operators
+    __device__ bool operator<(Fp rhs) const { return val() < rhs.val(); }
 
-    __device__ constexpr Fp operator*=(Fp rhs) {
-        val = mul(val, rhs.val);
-        return *this;
-    }
+    __device__ bool operator<=(Fp rhs) const { return val() <= rhs.val(); }
 
-    __device__ constexpr bool operator==(Fp rhs) const { return val == rhs.val; }
+    __device__ bool operator>(Fp rhs) const { return val() > rhs.val(); }
 
-    __device__ constexpr bool operator!=(Fp rhs) const { return val != rhs.val; }
-
-    __device__ constexpr bool operator<(Fp rhs) const { return decode(val) < decode(rhs.val); }
-
-    __device__ constexpr bool operator<=(Fp rhs) const { return decode(val) <= decode(rhs.val); }
-
-    __device__ constexpr bool operator>(Fp rhs) const { return decode(val) > decode(rhs.val); }
-
-    __device__ constexpr bool operator>=(Fp rhs) const { return decode(val) >= decode(rhs.val); }
+    __device__ bool operator>=(Fp rhs) const { return val() >= rhs.val(); }
 
     // Post-inc/dec
-    __device__ constexpr Fp operator++(int) {
+    __device__ Fp operator++(int) {
         Fp r = *this;
-        val = add(val, encode(1));
+        *this += Fp::one();
         return r;
     }
 
-    __device__ constexpr Fp operator--(int) {
+    __device__ Fp operator--(int) {
         Fp r = *this;
-        val = sub(val, encode(1));
+        *this -= Fp::one();
         return r;
     }
 
     // Pre-inc/dec
-    __device__ constexpr Fp operator++() {
-        val = add(val, encode(1));
+    __device__ Fp operator++() {
+        *this += Fp::one();
         return *this;
     }
 
-    __device__ constexpr Fp operator--() {
-        val = sub(val, encode(1));
+    __device__ Fp operator--() {
+        *this -= Fp::one();
         return *this;
     }
 
     /// Given an element x from a 31 bit field F_P compute x/2.
     /// The input must be in [0, P).
     /// The output will also be in [0, P).
-    static __device__ constexpr inline uint32_t halve_u32(uint32_t input) {
+    static __device__ inline uint32_t halve_u32(uint32_t input) {
         uint32_t shr = input >> 1;
         uint32_t lo_bit = input & 1;
         return shr + (lo_bit * HALF_P_PLUS_1); // optimized for cuda
@@ -218,7 +181,7 @@ class Fp {
     }
 
     /// monty_reduce from Plonky3: monty-31/src/utils.rs
-    static __device__ constexpr uint32_t monty_reduce(uint64_t x) {
+    static __device__ uint32_t monty_reduce(uint64_t x) {
         uint64_t t = (x * uint64_t(Fp::M)) & uint64_t(Fp::MONTY_MASK);
         uint64_t u = t * uint64_t(Fp::P);
 
@@ -233,40 +196,37 @@ class Fp {
   public:
     /// Return a new Fp that is double of this value
     /// We use `doubled` here since 'double' is a C++ reserved keyword
-    __device__ constexpr Fp doubled() const { return *this + *this; }
+    __device__ Fp doubled() const { return *this + *this; }
 
     /// Return a new Fp that is half of this value
-    __device__ constexpr Fp halve() const { return Fp::fromRaw(halve_u32(val)); }
+    __device__ Fp halve() const { return Fp::fromRaw(halve_u32(asRaw())); }
 
     /// Multiply the given MontyField31 element by `2^{-n}`.
     ///
     /// This makes use of the fact that, as the monty constant is `2^32`,
     /// the monty form of `2^{-n}` is `2^{32 - n}`. Monty reduction works
     /// provided the input is `< 2^32P` so this works for `0 <= n <= 32`.
-    __device__ constexpr Fp mul_2exp_neg_n(uint32_t n) const {
+    __device__ Fp mul_2exp_neg_n(uint32_t n) const {
         assert(n < 33 && "n must be less than 33");
-        uint64_t value_mul_2exp_neg_n = static_cast<uint64_t>(val) << (32 - n);
+        uint64_t value_mul_2exp_neg_n = static_cast<uint64_t>(asRaw()) << (32 - n);
         return Fp::fromRaw(monty_reduce(value_mul_2exp_neg_n));
     }
 };
 
 /// Raise an value to a power
-__device__ constexpr inline Fp pow(Fp x, size_t n) {
-    Fp tot = 1;
-    while (n != 0) {
-        if (n % 2 == 1) {
-            tot *= x;
-        }
-        n = n / 2;
-        x *= x;
-    }
-    return tot;
+__device__ inline Fp pow(Fp x, uint32_t n) {
+    return Fp(static_cast<bb31_t>(x) ^ n);
+}
+
+template <class I, std::enable_if_t<std::is_integral_v<I>, int> = 0>
+__device__ inline Fp pow(Fp x, I n) {
+    return pow(x, static_cast<uint32_t>(n));
 }
 
 /// Helper: gcd-based inversion for 32-bit prime fields with FIELD_BITS <= 32.
 /// Returns v = 2^{2*FIELD_BITS - 2} * a^{-1} mod P where FIELD_BITS = 31 and P is odd prime.
 /// Copied from Plonky3: https://github.com/Plonky3/Plonky3/pull/921
-static __device__ constexpr inline int64_t gcd_inversion_prime_field_32(uint32_t a, uint32_t b) {
+static __device__ inline int64_t gcd_inversion_prime_field_32(uint32_t a, uint32_t b) {
     int64_t u = 1;
     int64_t v = 0;
     // FIELD_BITS = 31 => iterate 2*FIELD_BITS - 2 = 60 times
@@ -293,7 +253,7 @@ static __device__ constexpr inline int64_t gcd_inversion_prime_field_32(uint32_t
 /// Compute the multiplicative inverse of x, or `1/x` in finite field terms, using a fast
 /// gcd-based algorithm specialized for 31-bit prime P.
 /// For x = 0, returns 0.
-__device__ constexpr inline Fp inv(Fp x) {
+__device__ inline Fp inv(Fp x) {
     if (x.asRaw() == 0u) {
         return Fp::zero();
     }
@@ -339,3 +299,9 @@ constexpr __device__ Fp TWO_ADIC_GENERATORS[Fp::TWO_ADICITY + 1] = {
     Fp(0x3a26eef8), // Fp(0x43f13568u),
     Fp(0x1a427a41)  // Fp(0x57fab6eeu)
 };
+
+static_assert(std::is_trivially_copyable<Fp>::value, "Fp must be POD-ish");
+static_assert(sizeof(Fp) == 4, "Fp must be 4 bytes");
+static_assert(alignof(Fp) == 4, "Fp must be 4-byte aligned");
+static_assert(sizeof(Fp) == sizeof(bb31_t), "Fp and bb31_t sizes must match");
+static_assert(alignof(Fp) == alignof(bb31_t), "Fp and bb31_t align must match");

@@ -2,6 +2,10 @@
  * Source: https://github.com/supranational/sppark (tag=v0.1.12)
  * Status: UNMODIFIED COPY from sppark/ff/baby_bear.hpp
  * Imported: 2025-08-13 by @gaxiom
+ *
+ * LOCAL CHANGES (high level):
+ * - 2025-09-19: remove !BABY_BEAR_CANONICAL support
+ * - 2025-09-19: disable asm for static analysis
  */
 
 // Copyright Supranational LLC
@@ -72,11 +76,7 @@ class __align__(16) bb31_4_t {
 
     static const uint32_t MOD   = 0x78000001;
     static const uint32_t M     = 0x77ffffff;
-#ifdef BABY_BEAR_CANONICAL
     static const uint32_t BETA  = 0x37ffffe9;   // (11<<32)%MOD
-#else                                           // such as RISC Zero
-    static const uint32_t BETA  = 0x40000018;   // (-11<<32)%MOD
-#endif
 
 public:
     static const uint32_t degree = 4;
@@ -99,7 +99,7 @@ public:
     {
         bb31_4_t ret;
 
-# ifdef __CUDA_ARCH__
+# if defined(__CUDA_ARCH__) && !defined(__clang_analyzer__)
 #  ifdef __GNUC__
 #   define asm __asm__ __volatile__
 #  else
@@ -242,7 +242,7 @@ private:
     {
         bb31_4_t ret;
 
-# ifdef __CUDA_ARCH__
+# if defined(__CUDA_ARCH__) && !defined(__clang_analyzer__)
 #  ifdef __GNUC__
 #   define asm __asm__ __volatile__
 #  else
@@ -679,7 +679,6 @@ public:
     {   return a ^= p;   }
     inline bb31_4_t operator()(int p)
     {   return *this^p;   }
-# undef inline
 
 public:
     friend inline bool operator==(const bb31_4_t& a, const bb31_4_t& b)
@@ -687,6 +686,7 @@ public:
     friend inline bool operator!=(const bb31_4_t& a, const bb31_4_t& b)
     {   return a.u[0]!=b.u[0] | a.u[1]!=b.u[1] | a.u[2]!=b.u[2] | a.u[3]!=b.u[3];   }
 
+# undef inline
 # if defined(_GLIBCXX_IOSTREAM) || defined(_IOSTREAM_) // non-standard
     friend std::ostream& operator<<(std::ostream& os, const bb31_4_t& a)
     {
@@ -695,9 +695,6 @@ public:
     }
 # endif
 };
-
-typedef bb31_t fr_t;
-typedef bb31_4_t fr4_t;
 
 #endif
 #endif

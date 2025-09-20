@@ -1,7 +1,10 @@
 /*
  * Source: https://github.com/supranational/sppark (tag=v0.1.12)
- * Status: UNMODIFIED COPY from sppark/ff/mont32_t.cuh
+ * Status: MODIFIED from sppark/ff/mont32_t.cuh
  * Imported: 2025-08-13 by @gaxiom
+ *
+ * LOCAL CHANGES (high level):
+ * - 2025-09-19: disable asm for static analysis
  */
 
 // Copyright Supranational LLC
@@ -13,7 +16,9 @@
 
 # include <cstdint>
 # define inline __device__ __forceinline__
-# ifdef __GNUC__
+# ifdef __clang_analyzer__
+#  define asm(...) ({ __builtin_trap(); })
+# elif __GNUC__
 #  define asm __asm__ __volatile__
 # else
 #  define asm asm volatile

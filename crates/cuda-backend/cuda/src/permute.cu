@@ -13,7 +13,7 @@
 #endif
 
 // read the input operands
-__host__ __device__ __forceinline__ FpExt permute_entry(
+__device__ __forceinline__ FpExt permute_entry(
     const SourceInfo &src,
     uint32_t row_index,
     const Fp *d_preprocessed,

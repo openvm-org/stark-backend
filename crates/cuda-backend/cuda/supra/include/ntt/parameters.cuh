@@ -16,6 +16,7 @@
 #define __SPPARK_NTT_PARAMETERS_CUH__
 
 #include "ff/baby_bear.hpp"
+using fr_t = bb31_t;
 
 #define WARP_SIZE 32
 #define MAX_LG_DOMAIN_SIZE 27
