@@ -128,13 +128,13 @@ pub(crate) fn reduce_matrix_quotient_acc(
 
     // quotient poly q(x) += alpha^(matrix_offset) * m(z)-m_rlc(x) / (z-x)
     let d_alpha_powers = DeviceBuffer::<EF>::with_capacity(matrix.width());
-    let d_alpha = [alpha].to_device().unwrap();
+    // let d_alpha = [alpha].to_device().unwrap();
     let d_m_eval = [m_z].to_device().unwrap();
     let alpha_offset = alpha.exp_u64(matrix_offset as u64);
     let d_alphas_offset = [alpha_offset].to_device().unwrap();
 
     unsafe {
-        powers_ext(&d_alpha_powers, &d_alpha, matrix.width() as u32).unwrap();
+        powers_ext(&d_alpha_powers, alpha, matrix.width() as u32).unwrap();
         reduce_matrix_quotient_kernel(
             &quotient_acc.coeff,
             matrix.buffer(),
@@ -203,10 +203,10 @@ pub(crate) fn fri_fold(
 
     let half_folded_len = folded.len() / 2;
     let g_invs = DeviceBuffer::<F>::with_capacity(half_folded_len);
-    let d_g_inv = [g_inv.as_base().unwrap()].to_device().unwrap();
+    // let d_g_inv = [g_inv.as_base().unwrap()].to_device().unwrap();
     let d_result = DeviceBuffer::<EF>::with_capacity(half_folded_len);
     unsafe {
-        powers(&g_invs, &d_g_inv, half_folded_len as u32).unwrap();
+        powers(&g_invs, g_inv.as_base().unwrap(), half_folded_len as u32).unwrap();
         batch_bit_reverse(
             &g_invs,
             log2_ceil_usize(half_folded_len) as u32,

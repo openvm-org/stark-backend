@@ -69,10 +69,9 @@ __global__ void compute_diffs(
 }
 
 // data[i] = g^i for i in 0..N
-__global__ void powers(Fp *__restrict__ data, Fp *__restrict__ d_g, uint32_t N) {
+__global__ void powers(Fp *__restrict__ data, Fp g, uint32_t N) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
-    Fp g = *d_g;
     Fp g_idx = pow(g, idx);
     Fp g_pow = pow(g, stride);
 
@@ -81,10 +80,9 @@ __global__ void powers(Fp *__restrict__ data, Fp *__restrict__ d_g, uint32_t N) 
     }
 }
 
-__global__ void powers_ext(FpExt *__restrict__ data, FpExt *__restrict__ d_g, uint32_t N) {
+__global__ void powers_ext(FpExt *__restrict__ data, FpExt g, uint32_t N) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
-    FpExt g = *d_g;
     FpExt g_idx = pow(g, idx);
     FpExt g_pow = pow(g, stride);
 
@@ -422,14 +420,14 @@ extern "C" int _batch_invert(FpExt *diffs, uint32_t log_max_height, uint32_t inv
     return CHECK_KERNEL();
 }
 
-extern "C" int _powers(Fp *data, Fp *g, uint32_t N) {
+extern "C" int _powers(Fp *data, Fp g, uint32_t N) {
     auto block = FRI_MAX_THREADS;
     auto grid = get_num_sms() * 2;
     powers<<<grid, block>>>(data, g, N);
     return CHECK_KERNEL();
 }
 
-extern "C" int _powers_ext(FpExt *data, FpExt *g, uint32_t N) {
+extern "C" int _powers_ext(FpExt *data, FpExt g, uint32_t N) {
     auto block = FRI_MAX_THREADS;
     auto grid = get_num_sms() * 2;
     powers_ext<<<grid, block>>>(data, g, N);

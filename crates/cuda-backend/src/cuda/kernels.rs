@@ -500,8 +500,8 @@ pub mod fri {
             invert_task_num: u32,
         ) -> i32;
 
-        fn _powers(d_data: *mut std::ffi::c_void, d_g: *const std::ffi::c_void, N: u32) -> i32;
-        fn _powers_ext(d_data: *mut std::ffi::c_void, d_g: *const std::ffi::c_void, N: u32) -> i32;
+        fn _powers(d_data: *mut std::ffi::c_void, g: crate::prelude::F, N: u32) -> i32;
+        fn _powers_ext(d_data: *mut std::ffi::c_void, g: crate::prelude::EF, N: u32) -> i32;
 
         fn _reduce_matrix_quotient_acc(
             d_quotient_acc: *mut std::ffi::c_void,
@@ -588,18 +588,18 @@ pub mod fri {
 
     pub unsafe fn powers<F>(
         d_data: &DeviceBuffer<F>,
-        d_g: &DeviceBuffer<F>,
+        g: crate::prelude::F,
         n: u32,
     ) -> Result<(), CudaError> {
-        CudaError::from_result(_powers(d_data.as_mut_raw_ptr(), d_g.as_raw_ptr(), n))
+        CudaError::from_result(_powers(d_data.as_mut_raw_ptr(), g, n))
     }
 
     pub unsafe fn powers_ext<EF>(
         d_data: &DeviceBuffer<EF>,
-        d_g: &DeviceBuffer<EF>,
+        g: crate::prelude::EF,
         n: u32,
     ) -> Result<(), CudaError> {
-        CudaError::from_result(_powers_ext(d_data.as_mut_raw_ptr(), d_g.as_raw_ptr(), n))
+        CudaError::from_result(_powers_ext(d_data.as_mut_raw_ptr(), g, n))
     }
 
     pub unsafe fn reduce_matrix_quotient_kernel<F, EF>(
