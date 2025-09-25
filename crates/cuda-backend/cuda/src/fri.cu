@@ -34,8 +34,8 @@ __global__ void cukernel_fri_fold(
         FpExt beta_g_inv = half_beta * g_inv_powers[idx]; // beta/2 * g_inv^i
         FpExt c1 = half_one + beta_g_inv;                 // 1/2 + beta/2 * g_inv^i
         FpExt c2 = half_one - beta_g_inv;                 // 1/2 - beta/2 * g_inv^i
-        FpExt a = folded[2 * idx];
-        FpExt b = folded[2 * idx + 1];
+        FpExt a = folded[idx];
+        FpExt b = folded[idx + N];
         FpExt res = c1 * a;
         res += c2 * b;
         if (fri_input != nullptr) {
@@ -214,7 +214,7 @@ __global__ void reduce_matrix_quotient_acc(
 
     // matrix has a natural order, but all other arrays are bit_reversed
     // so we need to bit_rev when read
-    uint32_t br_row_idx = bit_rev(row_idx, height);
+    uint32_t br_row_idx = row_idx; //bit_rev(row_idx, height);
     for (uint32_t col_idx = 0; col_idx < width; col_idx++) {
         if (col_idx < width) {
             accum += d_alphas[col_idx] * matrix[col_idx * height + br_row_idx];
@@ -223,7 +223,7 @@ __global__ void reduce_matrix_quotient_acc(
 
     FpExt mz = *matrix_eval;
     FpExt alpha_offset = *d_alphas_offset; // alpha^matrix_offset
-    FpExt quotient = alpha_offset * z_diff_invs[row_idx] * (mz - accum);
+    FpExt quotient = alpha_offset * z_diff_invs[br_row_idx] * (mz - accum);
     if (is_first) {
         quotient_acc[row_idx] = quotient;
     } else {
@@ -243,10 +243,10 @@ __global__ void cukernel_split_ext_poly_to_base_col_major_matrix(
     }
 
     // d_poly is bit_reversed, so we need to bit_rev when write to keep the natural order
-    uint32_t br_row_idx = bit_rev(row_idx, matrix_height);
+    uint32_t br_row_idx = row_idx;//bit_rev(row_idx, matrix_height);
     uint32_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
     for (uint32_t col_idx = 0; col_idx < col_num; col_idx++) {
-        FpExt ext_val = d_poly[row_idx * col_num + col_idx];
+        FpExt ext_val = d_poly[col_idx * matrix_height + row_idx];//* col_num + col_idx];
         d_matrix[(col_idx * 4 + 0) * matrix_height + br_row_idx] = ext_val.elems[0];
         d_matrix[(col_idx * 4 + 1) * matrix_height + br_row_idx] = ext_val.elems[1];
         d_matrix[(col_idx * 4 + 2) * matrix_height + br_row_idx] = ext_val.elems[2];

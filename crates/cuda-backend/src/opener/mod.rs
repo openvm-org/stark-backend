@@ -187,7 +187,7 @@ impl OpeningProverGpu {
                 {
                     let log_height = log2_strict_usize(mat.height());
                     let reduced_opening = reduced_openings[log_height].get_or_insert_with(|| {
-                        DevicePoly::new(true, DeviceBuffer::<EF>::with_capacity(mat.height()))
+                        DevicePoly::new(false, DeviceBuffer::<EF>::with_capacity(mat.height()))
                     });
 
                     let mat = mat.take_lde(mat.height());
@@ -205,6 +205,7 @@ impl OpeningProverGpu {
                             num_reduced[log_height] == 0,
                         )
                         .unwrap();
+                        // println!("reduced_opening: {:?}", reduced_opening.coeff);
                         num_reduced[log_height] += mat.width();
                     }
                 }
@@ -346,7 +347,9 @@ fn commit_phase_on_gpu(
     while folded.len() > blowup * final_poly_len {
         // folded is converted to a matrix over base field with width = 8 and height =
         // folded.len()/2
+        println!("folded: {:?}", folded.coeff);
         let folded_as_matrix = fri_ext_poly_to_base_matrix(&folded).unwrap();
+        println!("folded_as_matrix: {:?}", folded_as_matrix);
         let (log_trace_heights, merkle_tree) = device.commit_trace(folded_as_matrix);
         let (commit, prover_data) = (
             merkle_tree.root(),
@@ -374,7 +377,7 @@ fn commit_phase_on_gpu(
     folded_on_host.truncate(final_poly_len);
 
     // folded was bit reversed, now convert it to non-bit reversed form
-    reverse_slice_index_bits(&mut folded_on_host);
+    // reverse_slice_index_bits(&mut folded_on_host);
 
     // TODO: For better performance, we could run the IDFT on only the first half
     //       (or less, depending on `log_blowup`) of `final_poly`.

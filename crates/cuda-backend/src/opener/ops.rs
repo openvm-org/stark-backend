@@ -37,7 +37,7 @@ pub(crate) fn compute_inverse_denominators_on_gpu(
         .into_iter()
         .map(|(z, log_height)| {
             let g = F::two_adic_generator(log_height);
-            let diff_invs = get_diff_invs(z, coset_shift, g, log_height, true).unwrap();
+            let diff_invs = get_diff_invs(z, coset_shift, g, log_height, false).unwrap();
             (z, diff_invs)
         })
         .collect()
@@ -193,7 +193,7 @@ pub(crate) fn fri_fold(
     // as we take advantage of the fact g_inv is a base field element if folded.len() <= 2^27
     assert!(log2_strict_usize(folded.len()) <= 27);
     assert!(g_inv.as_base_slice()[1..].iter().all(F::is_zero)); // g_inv.is_in_basefield()
-    assert!(folded.is_bit_reversed);
+    assert!(!folded.is_bit_reversed);
 
     let half_one = (F::ONE / F::from_canonical_usize(2)).into();
     let half_beta = beta * half_one;
@@ -207,12 +207,12 @@ pub(crate) fn fri_fold(
     let d_result = DeviceBuffer::<EF>::with_capacity(half_folded_len);
     unsafe {
         powers(&g_invs, g_inv.as_base().unwrap(), half_folded_len as u32).unwrap();
-        batch_bit_reverse(
-            &g_invs,
-            log2_ceil_usize(half_folded_len) as u32,
-            half_folded_len as u32,
-        )
-        .unwrap();
+        // batch_bit_reverse(
+        //     &g_invs,
+        //     log2_ceil_usize(half_folded_len) as u32,
+        //     half_folded_len as u32,
+        // )
+        // .unwrap();
         fri_fold_kernel(
             &d_result,
             &folded.coeff,
