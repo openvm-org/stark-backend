@@ -16,7 +16,7 @@ use p3_field::{dot_product, Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicF
 use p3_fri::{BatchOpening, CommitPhaseProofStep, FriProof, QueryProof};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use p3_util::{linear_map::LinearMap, log2_strict_usize, reverse_slice_index_bits};
+use p3_util::{linear_map::LinearMap, log2_strict_usize};
 use tracing::{debug_span, info_span};
 
 use crate::{
@@ -116,7 +116,7 @@ impl OpeningProverGpu {
                                 // for each point and each log height, we will precompute 1/(X - z)
                                 // for subgroup of order 2^log_height.
                                 // TODO: reduce inv_denoms' size
-                                inv_denoms = compute_non_bitrev_inverse_denominators_on_gpu(
+                                inv_denoms = compute_per_height_inverse_denominators(
                                     trace_heights_and_points.as_slice(),
                                     shift,
                                 );
@@ -171,9 +171,9 @@ impl OpeningProverGpu {
         tracing::debug!("alpha sampled in gpu_pcs::open(): {:?}", alpha);
 
         // For each unique opening point z, we will find the largest degree bound
-        // for that point, and precompute 1/(X - z) for the largest subgroup (in bitrev order).
+        // for that point, and precompute 1/(X - z) for the largest subgroup.
         let inv_denoms =
-            compute_inverse_denominators_on_gpu(heights_and_points.as_slice(), F::GENERATOR);
+            compute_max_height_inverse_denominators(heights_and_points.as_slice(), F::GENERATOR);
 
         let mut reduced_openings: [_; 32] = core::array::from_fn(|_| None);
         let mut num_reduced = [0; 32];
@@ -205,7 +205,6 @@ impl OpeningProverGpu {
                             num_reduced[log_height] == 0,
                         )
                         .unwrap();
-                        // println!("reduced_opening: {:?}", reduced_opening.coeff);
                         num_reduced[log_height] += mat.width();
                     }
                 }
@@ -347,9 +346,7 @@ fn commit_phase_on_gpu(
     while folded.len() > blowup * final_poly_len {
         // folded is converted to a matrix over base field with width = 8 and height =
         // folded.len()/2
-        println!("folded: {:?}", folded.coeff);
         let folded_as_matrix = fri_ext_poly_to_base_matrix(&folded).unwrap();
-        println!("folded_as_matrix: {:?}", folded_as_matrix);
         let (log_trace_heights, merkle_tree) = device.commit_trace(folded_as_matrix);
         let (commit, prover_data) = (
             merkle_tree.root(),
@@ -375,9 +372,6 @@ fn commit_phase_on_gpu(
 
     let mut folded_on_host: Vec<EF> = folded.coeff.to_host().unwrap();
     folded_on_host.truncate(final_poly_len);
-
-    // folded was bit reversed, now convert it to non-bit reversed form
-    // reverse_slice_index_bits(&mut folded_on_host);
 
     // TODO: For better performance, we could run the IDFT on only the first half
     //       (or less, depending on `log_blowup`) of `final_poly`.

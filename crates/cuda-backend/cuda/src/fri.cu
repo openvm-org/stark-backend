@@ -14,8 +14,8 @@ __forceinline__ __device__ uint32_t bit_rev(uint32_t x, uint32_t n) {
     return __brev(x) >> (__clz(n) + 1);
 }
 
-// result[i] = (1/2 + beta/2 g_inv^i) * folded[2*i]
-//           + (1/2 - beta/2 g_inv^i) * folded[2*i+1]
+// result[i] = (1/2 + beta/2 g_inv^i) * folded[i]
+//           + (1/2 - beta/2 g_inv^i) * folded[i+N]
 //           + beta^2 *fri_input[i]
 __global__ void cukernel_fri_fold(
     FpExt *__restrict__ result,
@@ -88,20 +88,6 @@ __global__ void powers_ext(FpExt *__restrict__ data, FpExt g, uint32_t N) {
 
     for (; idx < N; idx += stride, g_idx *= g_pow) {
         data[idx] = g_idx;
-    }
-}
-
-__global__ void fpext_bit_reverse(FpExt *data, uint32_t log_n) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t stride = blockDim.x * gridDim.x;
-    uint32_t N = 1 << log_n;
-    for (; idx < N; idx += stride) {
-        uint32_t ridx = bit_rev(idx, N);
-        if (idx < ridx) {
-            FpExt tmp = data[idx];
-            data[idx] = data[ridx];
-            data[ridx] = tmp;
-        }
     }
 }
 
@@ -197,9 +183,9 @@ __global__ void reduce_matrix_quotient_acc(
     FpExt *__restrict__ quotient_acc,
     Fp *__restrict__ matrix,
     FpExt *__restrict__ z_diff_invs,
-    const FpExt *__restrict__ matrix_eval,
+    const FpExt mz,
     FpExt *__restrict__ d_alphas,
-    FpExt *__restrict__ d_alphas_offset,
+    const FpExt alpha_offset,
     uint32_t width,
     uint32_t height,
     bool is_first
@@ -212,18 +198,11 @@ __global__ void reduce_matrix_quotient_acc(
 
     FpExt accum = {0, 0, 0, 0};
 
-    // matrix has a natural order, but all other arrays are bit_reversed
-    // so we need to bit_rev when read
-    uint32_t br_row_idx = row_idx; //bit_rev(row_idx, height);
     for (uint32_t col_idx = 0; col_idx < width; col_idx++) {
-        if (col_idx < width) {
-            accum += d_alphas[col_idx] * matrix[col_idx * height + br_row_idx];
-        }
+        accum += d_alphas[col_idx] * matrix[col_idx * height + row_idx];
     }
 
-    FpExt mz = *matrix_eval;
-    FpExt alpha_offset = *d_alphas_offset; // alpha^matrix_offset
-    FpExt quotient = alpha_offset * z_diff_invs[br_row_idx] * (mz - accum);
+    FpExt quotient = alpha_offset * z_diff_invs[row_idx] * (mz - accum);
     if (is_first) {
         quotient_acc[row_idx] = quotient;
     } else {
@@ -242,15 +221,13 @@ __global__ void cukernel_split_ext_poly_to_base_col_major_matrix(
         return;
     }
 
-    // d_poly is bit_reversed, so we need to bit_rev when write to keep the natural order
-    uint32_t br_row_idx = row_idx;//bit_rev(row_idx, matrix_height);
     uint32_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
     for (uint32_t col_idx = 0; col_idx < col_num; col_idx++) {
-        FpExt ext_val = d_poly[col_idx * matrix_height + row_idx];//* col_num + col_idx];
-        d_matrix[(col_idx * 4 + 0) * matrix_height + br_row_idx] = ext_val.elems[0];
-        d_matrix[(col_idx * 4 + 1) * matrix_height + br_row_idx] = ext_val.elems[1];
-        d_matrix[(col_idx * 4 + 2) * matrix_height + br_row_idx] = ext_val.elems[2];
-        d_matrix[(col_idx * 4 + 3) * matrix_height + br_row_idx] = ext_val.elems[3];
+        FpExt ext_val = d_poly[col_idx * matrix_height + row_idx];
+        d_matrix[(col_idx * 4 + 0) * matrix_height + row_idx] = ext_val.elems[0];
+        d_matrix[(col_idx * 4 + 1) * matrix_height + row_idx] = ext_val.elems[1];
+        d_matrix[(col_idx * 4 + 2) * matrix_height + row_idx] = ext_val.elems[2];
+        d_matrix[(col_idx * 4 + 3) * matrix_height + row_idx] = ext_val.elems[3];
     }
 }
 
@@ -264,10 +241,6 @@ __global__ void cukernel_split_ext_poly_to_base_col_major_matrix(
 //
 // The kernel computes: sum_j (matrix[j] * inv_denoms[j] * g^j) for j in chunk
 // where inv_denoms[j] = 1/(z - s*g^j) are precomputed inverse denominators.
-//
-// Matrix can be in natural or bit-reversed order, and inv_denoms can be
-// bit-reversed independently
-template <bool INV_DENOMS_BITREV>
 __global__ void matrix_evaluate_chunked(
     FpExt *__restrict__ partial_sums,
     const Fp *__restrict__ matrix,
@@ -297,29 +270,16 @@ __global__ void matrix_evaluate_chunked(
     const uint32_t col_offset = col * matrix_height;
     const bool need_double_bitrev = (height != matrix_height);
 
-    Fp g_power;
     Fp g_stride = pow(g, blockDim.x);
-    if constexpr (INV_DENOMS_BITREV) {
-        g_power = pow(g, bit_rev(chunk_start + tid, height));
-    } else {
-        g_power = pow(g, chunk_start + tid);
-    }
+    Fp g_power = pow(g, chunk_start + tid);
 
     for (uint32_t i = tid; i < chunk_range; i += blockDim.x) {
         uint32_t domain_idx = chunk_start + i;
         if (domain_idx >= height)
             break;
 
-        FpExt weight;
-        if constexpr (INV_DENOMS_BITREV) {
-            weight = inv_denoms[bit_rev(domain_idx, height)] * g_power;
-            if (i + blockDim.x < chunk_range) {
-                g_power = pow(g, bit_rev(domain_idx + blockDim.x, height));
-            }
-        } else {
-            weight = inv_denoms[domain_idx] * g_power;
-            g_power *= g_stride;
-        }
+        FpExt weight = inv_denoms[domain_idx] * g_power;
+        g_power *= g_stride;
 
         uint32_t mat_idx =
             need_double_bitrev ? bit_rev(bit_rev(domain_idx, height), matrix_height) : domain_idx;
@@ -407,13 +367,6 @@ extern "C" int _compute_diffs(FpExt *diffs, FpExt *d_z, Fp *d_domain, uint32_t l
     return CHECK_KERNEL();
 }
 
-extern "C" int _fpext_bit_reverse(FpExt *diffs, uint32_t log_max_height) {
-    auto block = FRI_MAX_THREADS;
-    auto grid = get_num_sms() * 2;
-    fpext_bit_reverse<<<grid, block>>>(diffs, log_max_height);
-    return CHECK_KERNEL();
-}
-
 extern "C" int _batch_invert(FpExt *diffs, uint32_t log_max_height, uint32_t invert_task_num) {
     auto [grid, block] = kernel_launch_params(invert_task_num, FRI_MAX_THREADS);
     batch_invert<<<grid, block>>>(diffs, log_max_height);
@@ -438,9 +391,9 @@ extern "C" int _reduce_matrix_quotient_acc(
     FpExt *quotient_acc,
     Fp *matrix,
     FpExt *z_diff_invs,
-    const FpExt *matrix_eval,
+    const FpExt matrix_eval,
     FpExt *d_alphas,
-    FpExt *d_alphas_offset,
+    const FpExt alpha_offset,
     uint32_t width,
     uint32_t height,
     bool is_first
@@ -452,7 +405,7 @@ extern "C" int _reduce_matrix_quotient_acc(
         z_diff_invs,
         matrix_eval,
         d_alphas,
-        d_alphas_offset,
+        alpha_offset,
         width,
         height,
         is_first
@@ -495,21 +448,14 @@ extern "C" int _matrix_evaluate_chunked(
     uint32_t width,
     uint32_t chunk_size,
     uint32_t num_chunks,
-    uint32_t matrix_height,
-    bool inv_denoms_bitrev
+    uint32_t matrix_height
 ) {
     dim3 grid(num_chunks, width);
     dim3 block(FRI_MAX_THREADS);
 
-    if (inv_denoms_bitrev) {
-        matrix_evaluate_chunked<true><<<grid, block>>>(
-            partial_sums, matrix, inv_denoms, g, height, width, chunk_size, matrix_height
-        );
-    } else {
-        matrix_evaluate_chunked<false><<<grid, block>>>(
-            partial_sums, matrix, inv_denoms, g, height, width, chunk_size, matrix_height
-        );
-    }
+    matrix_evaluate_chunked<<<grid, block>>>(
+        partial_sums, matrix, inv_denoms, g, height, width, chunk_size, matrix_height
+    );
     return CHECK_KERNEL();
 }
 

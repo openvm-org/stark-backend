@@ -5,16 +5,16 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::prover::hal::MatrixDimensions;
 use p3_field::{ExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
-use p3_util::{linear_map::LinearMap, log2_ceil_usize, log2_strict_usize};
+use p3_util::{linear_map::LinearMap, log2_strict_usize};
 
 use crate::{
     base::{DeviceMatrix, DevicePoly, ExtendedLagrangeCoeff},
-    cuda::kernels::{fri::*, lde::batch_bit_reverse},
+    cuda::kernels::fri::*,
     prelude::*,
 };
 
-// return a map from point to its inverse denominator of largest height in bit reverse order
-pub(crate) fn compute_inverse_denominators_on_gpu(
+// return a map from point to its inverse denominator of largest height in natural order
+pub(crate) fn compute_max_height_inverse_denominators(
     heights_and_points: &[(Vec<usize>, &Vec<Vec<EF>>)],
     coset_shift: F,
 ) -> LinearMap<EF, DevicePoly<EF, ExtendedLagrangeCoeff>> {
@@ -37,7 +37,7 @@ pub(crate) fn compute_inverse_denominators_on_gpu(
         .into_iter()
         .map(|(z, log_height)| {
             let g = F::two_adic_generator(log_height);
-            let diff_invs = get_diff_invs(z, coset_shift, g, log_height, false).unwrap();
+            let diff_invs = get_diff_invs(z, coset_shift, g, log_height).unwrap();
             (z, diff_invs)
         })
         .collect()
@@ -45,10 +45,10 @@ pub(crate) fn compute_inverse_denominators_on_gpu(
 
 // return a map from point to inverse denominators of different heights in non-bitrev order
 // note this function at most takes twice the memory of
-// `compute_bitrev_inverse_denominators_on_gpu`. if the max log height is 23, then the memory usage
+// `compute_max_height_inverse_denominators`. if the max log height is 23, then the memory usage
 // for one point is 2^23 * 2 * sizeof<EF>. for field like babybear and its deg 4 extension, the
 // memory usage is 2^23 * 2 * 16 = 256MB. #[allow(clippy::type_complexity)]
-pub(crate) fn compute_non_bitrev_inverse_denominators_on_gpu(
+pub(crate) fn compute_per_height_inverse_denominators(
     heights_and_points: &[(Vec<usize>, &Vec<Vec<EF>>)],
     coset_shift: F,
 ) -> LinearMap<EF, Vec<Option<DevicePoly<EF, ExtendedLagrangeCoeff>>>> {
@@ -79,7 +79,7 @@ pub(crate) fn compute_non_bitrev_inverse_denominators_on_gpu(
                     .map(|log_height| {
                         log_height.map(|log_height| {
                             let g = F::two_adic_generator(log_height);
-                            get_diff_invs(z, coset_shift, g, log_height, false).unwrap()
+                            get_diff_invs(z, coset_shift, g, log_height).unwrap()
                         })
                     })
                     .collect_vec(),
@@ -88,14 +88,12 @@ pub(crate) fn compute_non_bitrev_inverse_denominators_on_gpu(
         .collect()
 }
 
-// Returns evaluations of `1 / (z - x)` over coset domain `s*H` and
-// store it in bit reversed order if `bitrev` is true
+// Returns evaluations of `1 / (z - x)` over coset domain `s*H`
 fn get_diff_invs(
     z: EF,
     shift: F,
     g: F,
     log_max_height: usize,
-    bitrev: bool,
 ) -> Result<DevicePoly<EF, ExtendedLagrangeCoeff>, ()> {
     let n_elems = 1 << log_max_height;
     let d_inv_diffs: DeviceBuffer<EF> = DeviceBuffer::<EF>::with_capacity(n_elems);
@@ -105,12 +103,10 @@ fn get_diff_invs(
 
     unsafe {
         diffs_kernel(&d_inv_diffs, &d_z, &d_domain, log_max_height as u32).unwrap();
-        if bitrev {
-            fpext_bit_rev_kernel(&d_inv_diffs, log_max_height as u32).unwrap();
-        }
+
         batch_invert_kernel(&d_inv_diffs, log_max_height as u32, invert_task_num).unwrap();
     }
-    Ok(DevicePoly::new(bitrev, d_inv_diffs))
+    Ok(DevicePoly::new(false, d_inv_diffs))
 }
 
 pub(crate) fn reduce_matrix_quotient_acc(
@@ -122,16 +118,13 @@ pub(crate) fn reduce_matrix_quotient_acc(
     matrix_offset: usize,
     is_first: bool,
 ) -> Result<(), ()> {
-    // TODO: assert quotient_acc and matrix have same order (bitrev or not)
+    // Both quotient_acc and matrix are in natural order
     //  assert matrix is also evaluations on coset domain
     assert_eq!(matrix.height(), quotient_acc.len());
 
     // quotient poly q(x) += alpha^(matrix_offset) * m(z)-m_rlc(x) / (z-x)
     let d_alpha_powers = DeviceBuffer::<EF>::with_capacity(matrix.width());
-    // let d_alpha = [alpha].to_device().unwrap();
-    let d_m_eval = [m_z].to_device().unwrap();
     let alpha_offset = alpha.exp_u64(matrix_offset as u64);
-    let d_alphas_offset = [alpha_offset].to_device().unwrap();
 
     unsafe {
         powers_ext(&d_alpha_powers, alpha, matrix.width() as u32).unwrap();
@@ -139,9 +132,9 @@ pub(crate) fn reduce_matrix_quotient_acc(
             &quotient_acc.coeff,
             matrix.buffer(),
             &z_diff_invs.coeff,
-            &d_m_eval,
+            m_z,
             &d_alpha_powers,
-            &d_alphas_offset,
+            alpha_offset,
             matrix.width().try_into().unwrap(),
             matrix.height().try_into().unwrap(),
             is_first,
@@ -203,16 +196,10 @@ pub(crate) fn fri_fold(
 
     let half_folded_len = folded.len() / 2;
     let g_invs = DeviceBuffer::<F>::with_capacity(half_folded_len);
-    // let d_g_inv = [g_inv.as_base().unwrap()].to_device().unwrap();
     let d_result = DeviceBuffer::<EF>::with_capacity(half_folded_len);
     unsafe {
         powers(&g_invs, g_inv.as_base().unwrap(), half_folded_len as u32).unwrap();
-        // batch_bit_reverse(
-        //     &g_invs,
-        //     log2_ceil_usize(half_folded_len) as u32,
-        //     half_folded_len as u32,
-        // )
-        // .unwrap();
+
         fri_fold_kernel(
             &d_result,
             &folded.coeff,
@@ -264,7 +251,6 @@ pub(crate) fn matrix_evaluate(
             chunk_size as u32,
             num_chunks as u32,
             matrix.height() as u32,
-            inv_denoms.is_bit_reversed,
         )
         .unwrap();
     }
