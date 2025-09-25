@@ -311,17 +311,17 @@ impl CudaBuilder {
             env::set_var("RUST_BACKTRACE", "full");
             env::set_var("CUDA_ENABLE_COREDUMP_ON_EXCEPTION", "1");
             env::set_var("CUDA_DEVICE_WAITS_ON_EXCEPTION", "1");
-            
+
             println!("cargo:warning=CUDA_DEBUG=1 → Enabling comprehensive debugging:");
             println!("cargo:warning=  → CUDA_OPT_LEVEL=0 (no optimization)");
             println!("cargo:warning=  → CUDA_LAUNCH_BLOCKING=1 (synchronous kernels)");
             println!("cargo:warning=  → Line info and device debug symbols enabled");
             println!("cargo:warning=  → CUDA_DEBUG macro defined for preprocessor");
-            
-            builder.flag("-G");                                    // Device debug symbols
-            builder.flag("-Xcompiler=-fno-omit-frame-pointer");    // Better stack traces
-            builder.flag("-Xptxas=-v");                            // Verbose PTX compilation
-            builder.define("CUDA_DEBUG", "1");            // Define CUDA_DEBUG macro
+
+            builder.flag("-G"); // Device debug symbols
+            builder.flag("-Xcompiler=-fno-omit-frame-pointer"); // Better stack traces
+            builder.flag("-Xptxas=-v"); // Verbose PTX compilation
+            builder.define("CUDA_DEBUG", "1"); // Define CUDA_DEBUG macro
         }
     }
 }
