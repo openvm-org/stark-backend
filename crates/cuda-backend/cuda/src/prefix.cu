@@ -127,7 +127,7 @@ extern "C" int _prefix_scan_block_ext(
     uint64_t block_num
 ) {
     prefix_scan_block_ext<<<block_num, SHARED_DATA>>>(d_inout, length, round_stride);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _prefix_scan_block_downsweep_ext(
@@ -142,7 +142,7 @@ extern "C" int _prefix_scan_block_downsweep_ext(
     prefix_scan_block_downsweep_ext<<<block_num, SHARED_DATA>>>(
         d_inout, length, round_stride, element_per_block
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _prefix_scan_epilogue_ext(FpExt *d_inout, uint64_t length) {
@@ -151,5 +151,5 @@ extern "C" int _prefix_scan_epilogue_ext(FpExt *d_inout, uint64_t length) {
     prefix_scan_epilogue_ext<<<epilogue_block_num, SHARED_DATA>>>(
         d_inout, length, element_per_block
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }

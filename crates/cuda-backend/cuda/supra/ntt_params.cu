@@ -10,7 +10,7 @@
  * - 2025-09-10: Delete NTTParameters & add extern "C" launcher
  */
 
-#include <cuda_runtime.h>
+#include "launcher.cuh"
 #include "ntt/parameters.cuh"
 
 __global__ void generate_all_twiddles(fr_t* d_radixX_twiddles, 
@@ -66,12 +66,12 @@ extern "C" int _generate_all_twiddles(fr_t* twiddles, bool inverse) {
 
     generate_all_twiddles<<<blob_sz/32, 32>>>(
             twiddles, roots[6], roots[7], roots[8], roots[9], roots[10]);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _generate_partial_twiddles(fr_t (*partial_twiddles)[WINDOW_SIZE], bool inverse) {
     const fr_t* roots = inverse ? inverse_roots_of_unity : forward_roots_of_unity;
     generate_partial_twiddles<<<WINDOW_SIZE/32, 32>>>(
             partial_twiddles, roots[MAX_LG_DOMAIN_SIZE]);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }

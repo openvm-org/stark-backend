@@ -8,7 +8,7 @@
  * - 2025-09-10: Add extern "C" launcher from sppark/ntt/ntt.cuh
  */
 
-#include <cuda_runtime.h>
+#include "launcher.cuh"
 #include "ntt/ntt.cuh"
 
 // Permutes the data in an array such that data[i] = data[bit_reverse(i)]
@@ -141,5 +141,5 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
                                 (d_out, d_inp, lg_domain_size, padded_poly_size);
     }
 
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
