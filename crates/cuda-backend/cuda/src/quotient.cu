@@ -8,7 +8,7 @@
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
-#ifdef DEBUG
+#ifdef CUDA_DEBUG
 #include <cstdio>
 
 // Helper function to print decoded information
@@ -31,10 +31,6 @@ __host__ __device__ void print_decoded_rule(uint32_t rule_idx, Rule encoded, Dec
         rule.y.part,
         rule.y.offset,
         rule.y.index
-    );
-
-    printf(
-        "    Z Entry - Type: %d, offset: %d, index: %d\n", rule.z.type, rule.z.offset, rule.z.index
     );
 }
 
@@ -328,7 +324,7 @@ extern "C" int _cukernel_quotient_selectors(
     cukernel_quotient_selectors<<<grid, block>>>(
         first_row, last_row, transition, inv_zeroifier, log_n, coset_log_n, shift
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _cukernel_quotient(
@@ -385,5 +381,5 @@ extern "C" int _cukernel_quotient(
     } else {
         cukernel_quotient<false><<<grid, block>>>(QUOTIENT_ARGUMENTS);
     }
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }

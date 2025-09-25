@@ -14,7 +14,7 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-#include <cuda_runtime.h>
+#include "launcher.cuh"
 #include "ntt/ntt.cuh"
 
 template<int z_count, bool coalesced = false, class fr_t>
@@ -237,5 +237,5 @@ extern "C" int _ct_mixed_radix_narrow(
             
     #undef NTT_ARGUMENTS
 
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
