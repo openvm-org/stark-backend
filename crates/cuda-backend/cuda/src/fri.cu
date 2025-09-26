@@ -186,11 +186,12 @@ __global__ void reduce_matrix_quotient_acc(
     const FpExt mz,
     FpExt *__restrict__ d_alphas,
     const FpExt alpha_offset,
-    uint32_t width,
-    uint32_t height,
+    size_t width,
+    size_t height,
+    size_t max_height,
     bool is_first
 ) {
-    uint32_t row_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    auto row_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row_idx >= height) {
         return;
@@ -198,11 +199,12 @@ __global__ void reduce_matrix_quotient_acc(
 
     FpExt accum = {0, 0, 0, 0};
 
-    for (uint32_t col_idx = 0; col_idx < width; col_idx++) {
+    for (auto col_idx = 0; col_idx < width; col_idx++) {
         accum += d_alphas[col_idx] * matrix[col_idx * height + row_idx];
     }
 
-    FpExt quotient = alpha_offset * z_diff_invs[row_idx] * (mz - accum);
+    auto z_diff_idx = height == max_height ? row_idx : bit_rev(bit_rev(row_idx, height), max_height);
+    FpExt quotient = alpha_offset * z_diff_invs[z_diff_idx] * (mz - accum);
     if (is_first) {
         quotient_acc[row_idx] = quotient;
     } else {
@@ -394,8 +396,9 @@ extern "C" int _reduce_matrix_quotient_acc(
     const FpExt matrix_eval,
     FpExt *d_alphas,
     const FpExt alpha_offset,
-    uint32_t width,
-    uint32_t height,
+    size_t width,
+    size_t height,
+    size_t max_height,
     bool is_first
 ) {
     auto [grid, block] = kernel_launch_params(height, TILE_WIDTH);
@@ -408,6 +411,7 @@ extern "C" int _reduce_matrix_quotient_acc(
         alpha_offset,
         width,
         height,
+        max_height,
         is_first
     );
     return CHECK_KERNEL();

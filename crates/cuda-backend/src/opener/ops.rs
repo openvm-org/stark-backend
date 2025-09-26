@@ -135,8 +135,9 @@ pub(crate) fn reduce_matrix_quotient_acc(
             m_z,
             &d_alpha_powers,
             alpha_offset,
-            matrix.width().try_into().unwrap(),
-            matrix.height().try_into().unwrap(),
+            matrix.width(),
+            matrix.height(),
+            z_diff_invs.len(),
             is_first,
         )
         .unwrap();

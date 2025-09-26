@@ -508,8 +508,9 @@ pub mod fri {
             matrix_eval: crate::prelude::EF,
             d_alphas: *const std::ffi::c_void,
             alpha_offset: crate::prelude::EF,
-            width: u32,
-            height: u32,
+            width: usize,
+            height: usize,
+            max_height: usize,
             is_first: bool,
         ) -> i32;
 
@@ -599,8 +600,9 @@ pub mod fri {
         matrix_eval: crate::prelude::EF,
         d_alphas: &DeviceBuffer<EF>,
         alpha_offset: crate::prelude::EF,
-        width: u32,
-        height: u32,
+        width: usize,
+        height: usize,
+        max_height: usize,
         is_first: bool,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_reduce_matrix_quotient_acc(
@@ -612,6 +614,7 @@ pub mod fri {
             alpha_offset,
             width,
             height,
+            max_height,
             is_first,
         ))
     }
