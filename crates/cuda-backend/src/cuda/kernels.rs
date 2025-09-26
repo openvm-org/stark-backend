@@ -492,26 +492,25 @@ pub mod fri {
             log_max_height: u32,
         ) -> i32;
 
-        fn _fpext_bit_reverse(d_diffs: *mut std::ffi::c_void, log_max_height: u32) -> i32;
-
         fn _batch_invert(
             d_diffs: *mut std::ffi::c_void,
             log_max_height: u32,
             invert_task_num: u32,
         ) -> i32;
 
-        fn _powers(d_data: *mut std::ffi::c_void, d_g: *const std::ffi::c_void, N: u32) -> i32;
-        fn _powers_ext(d_data: *mut std::ffi::c_void, d_g: *const std::ffi::c_void, N: u32) -> i32;
+        fn _powers(d_data: *mut std::ffi::c_void, g: crate::prelude::F, N: u32) -> i32;
+        fn _powers_ext(d_data: *mut std::ffi::c_void, g: crate::prelude::EF, N: u32) -> i32;
 
         fn _reduce_matrix_quotient_acc(
             d_quotient_acc: *mut std::ffi::c_void,
             d_matrix: *const std::ffi::c_void,
             d_z_diff_invs: *const std::ffi::c_void,
-            d_matrix_eval: *const std::ffi::c_void,
+            matrix_eval: crate::prelude::EF,
             d_alphas: *const std::ffi::c_void,
-            d_alphas_offset: *const std::ffi::c_void,
-            width: u32,
-            height: u32,
+            alpha_offset: crate::prelude::EF,
+            width: usize,
+            height: usize,
+            max_height: usize,
             is_first: bool,
         ) -> i32;
 
@@ -541,7 +540,6 @@ pub mod fri {
             chunk_size: u32,
             num_chunks: u32,
             matrix_height: u32,
-            inv_denoms_bitrev: bool,
         ) -> i32;
 
         fn _matrix_evaluate_finalize(
@@ -567,13 +565,6 @@ pub mod fri {
         ))
     }
 
-    pub unsafe fn fpext_bit_rev_kernel<EF>(
-        d_diffs: &DeviceBuffer<EF>,
-        log_max_height: u32,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_fpext_bit_reverse(d_diffs.as_mut_raw_ptr(), log_max_height))
-    }
-
     pub unsafe fn batch_invert_kernel<EF>(
         d_diffs: &DeviceBuffer<EF>,
         log_max_height: u32,
@@ -588,40 +579,42 @@ pub mod fri {
 
     pub unsafe fn powers<F>(
         d_data: &DeviceBuffer<F>,
-        d_g: &DeviceBuffer<F>,
+        g: crate::prelude::F,
         n: u32,
     ) -> Result<(), CudaError> {
-        CudaError::from_result(_powers(d_data.as_mut_raw_ptr(), d_g.as_raw_ptr(), n))
+        CudaError::from_result(_powers(d_data.as_mut_raw_ptr(), g, n))
     }
 
     pub unsafe fn powers_ext<EF>(
         d_data: &DeviceBuffer<EF>,
-        d_g: &DeviceBuffer<EF>,
+        g: crate::prelude::EF,
         n: u32,
     ) -> Result<(), CudaError> {
-        CudaError::from_result(_powers_ext(d_data.as_mut_raw_ptr(), d_g.as_raw_ptr(), n))
+        CudaError::from_result(_powers_ext(d_data.as_mut_raw_ptr(), g, n))
     }
 
     pub unsafe fn reduce_matrix_quotient_kernel<F, EF>(
         d_quotient_acc: &DeviceBuffer<EF>,
         d_matrix: &DeviceBuffer<F>,
         d_z_diff_invs: &DeviceBuffer<EF>,
-        d_matrix_eval: &DeviceBuffer<EF>,
+        matrix_eval: crate::prelude::EF,
         d_alphas: &DeviceBuffer<EF>,
-        d_alphas_offset: &DeviceBuffer<EF>,
-        width: u32,
-        height: u32,
+        alpha_offset: crate::prelude::EF,
+        width: usize,
+        height: usize,
+        max_height: usize,
         is_first: bool,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_reduce_matrix_quotient_acc(
             d_quotient_acc.as_mut_raw_ptr(),
             d_matrix.as_raw_ptr(),
             d_z_diff_invs.as_raw_ptr(),
-            d_matrix_eval.as_raw_ptr(),
+            matrix_eval,
             d_alphas.as_raw_ptr(),
-            d_alphas_offset.as_raw_ptr(),
+            alpha_offset,
             width,
             height,
+            max_height,
             is_first,
         ))
     }
@@ -668,7 +661,6 @@ pub mod fri {
         chunk_size: u32,
         num_chunks: u32,
         matrix_height: u32,
-        inv_denoms_bitrev: bool,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_matrix_evaluate_chunked(
             partial_sums.as_mut_raw_ptr(),
@@ -680,7 +672,6 @@ pub mod fri {
             chunk_size,
             num_chunks,
             matrix_height,
-            inv_denoms_bitrev,
         ))
     }
 
