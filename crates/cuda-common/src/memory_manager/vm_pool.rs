@@ -9,7 +9,7 @@ use std::{
 use bytesize::ByteSize;
 
 use super::cuda::*;
-use crate::{common::set_device, error::MemoryError};
+use crate::{common::set_device, error::MemoryError, stream::current_stream_id};
 
 #[link(name = "cudart")]
 extern "C" {
@@ -116,7 +116,8 @@ impl VirtualMemoryPool {
         // Insert the new memory into the free regions
         self.free_region_insert(new_base, total_size);
         tracing::info!(
-            "GPU mem: VM Pool allocated: {}, total: {}",
+            "GPU mem ({}): VM Pool allocated: {}, total: {}",
+            current_stream_id().unwrap(),
             ByteSize::b(total_size as u64),
             ByteSize::b((self.memory_usage()) as u64)
         );
