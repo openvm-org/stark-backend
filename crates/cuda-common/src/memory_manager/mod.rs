@@ -9,7 +9,9 @@ use bytesize::ByteSize;
 
 use crate::{
     error::{check, MemoryError},
-    stream::{cudaStreamPerThread, cudaStream_t, current_stream_id, CudaStreamId},
+    stream::{
+        cudaStreamPerThread, cudaStream_t, current_stream_id, default_stream_sync, CudaStreamId,
+    },
 };
 
 mod cuda;
@@ -95,6 +97,10 @@ impl MemoryManager {
 
         Ok(())
     }
+
+    fn is_empty(&self) -> bool {
+        self.allocated_ptrs.is_empty() && self.pool.is_empty()
+    }
 }
 
 impl Drop for MemoryManager {
@@ -129,10 +135,31 @@ pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
 /// # Safety
 /// The pointer `ptr` must be a valid, previously allocated device pointer.
 /// The caller must ensure that `ptr` is not used after this function is called.
+/// The caller must ensure that the pointer is allocated on the current stream.
 pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     let mm_map = MM_MAP.get().ok_or(MemoryError::NotInitialized)?;
     let mut mm_map = mm_map.lock().map_err(|_| MemoryError::LockError)?;
-    stream_mm_mut(&mut mm_map).d_free(ptr)
+    let stream_id = current_stream_id()?;
+
+    if let Some(mm) = mm_map.get_mut(&stream_id) {
+        mm.d_free(ptr)?;
+        // Auto-cleanup pool if everything is freed
+        if mm.is_empty() {
+            default_stream_sync()?;
+            tracing::info!(
+                "GPU mem ({}): Auto-cleanup pool {}",
+                stream_id,
+                ByteSize::b(mm.pool.memory_usage() as u64)
+            );
+            mm.pool.clear();
+        }
+    } else {
+        panic!(
+            "Attempting to free ptr {:?} on stream {} which has no MemoryManager.",
+            ptr, stream_id
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

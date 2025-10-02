@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use std::{
-    cmp::{max, Reverse},
+    cmp::Reverse,
     collections::{BTreeMap, HashMap},
     ffi::c_void,
 };
@@ -262,20 +262,32 @@ impl VirtualMemoryPool {
     pub(super) fn memory_usage(&self) -> usize {
         self.active_pages.len() * self.page_size
     }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.used_regions.is_empty()
+    }
+
+    pub(super) fn clear(&mut self) {
+        assert!(
+            self.used_regions.is_empty(),
+            "Some allocations are still in use"
+        );
+        unsafe {
+            for (&va, &handle) in &self.active_pages {
+                vpmm_unmap_release(va, self.page_size, handle).unwrap();
+            }
+        }
+        self.active_pages.clear();
+        self.free_regions.clear();
+        self.used_regions.clear();
+        self.curr_end = self.root;
+    }
 }
 
 impl Drop for VirtualMemoryPool {
     fn drop(&mut self) {
-        tracing::info!(
-            "VirtualMemoryPool: GPU memory used total: {}",
-            ByteSize::b((self.memory_usage()) as u64)
-        );
+        self.clear();
         unsafe {
-            // Unmap and release all pages
-            for (&va, &handle) in &self.active_pages {
-                vpmm_unmap_release(va, self.page_size, handle).unwrap();
-            }
-
             // Free the virtual address reservation
             vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
         }
@@ -305,15 +317,7 @@ impl Default for VirtualMemoryPool {
                 assert!(pages > 0, "VPMM_PAGES must be > 0");
                 pages
             }
-            Err(_) => {
-                // Default: Use 80% of free memory divided by CPU count
-                let cpu_count = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(1);
-                let per_process = (free_mem * 4 / 5) / cpu_count;
-                // Convert to pages, minimum 256 pages (512MB at 2MB pages)
-                max(256, per_process / pool.page_size)
-            }
+            Err(_) => 1,
         };
         if let Err(e) = pool.create_new_pages(initial_pages * pool.page_size) {
             panic!(
