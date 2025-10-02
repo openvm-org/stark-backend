@@ -20,11 +20,11 @@ fn ensure_initialized(inverse: bool) {
     };
 
     once.call_once(|| {
+        let partial_twiddles = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity(WINDOW_NUM);
         let twiddles = DeviceBuffer::<F>::with_capacity(32 + 64 + 128 + 256 + 512);
-        let partial = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity(WINDOW_NUM);
         unsafe {
             ntt::generate_all_twiddles(&twiddles, inverse).unwrap();
-            ntt::generate_partial_twiddles(&partial, inverse).unwrap();
+            ntt::generate_partial_twiddles(&partial_twiddles, inverse).unwrap();
         }
     });
 }
