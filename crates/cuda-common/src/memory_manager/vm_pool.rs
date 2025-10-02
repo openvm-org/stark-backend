@@ -127,7 +127,7 @@ impl VirtualMemoryPool {
     /// Allocate memory and return a pointer to the allocated memory
     pub(super) fn malloc_internal(&mut self, requested: usize) -> Result<*mut c_void, MemoryError> {
         if self.curr_end == self.root {
-            return Err(MemoryError::NotInitialized);
+            self.create_new_pages(requested)?;
         }
         assert!(
             requested != 0 && requested % self.page_size == 0,
