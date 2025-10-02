@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{sync::Arc, thread};
 
 use openvm_cuda_backend::engine::GpuBabyBearPoseidon2Engine;
+use openvm_cuda_common::stream::current_stream_id;
 use openvm_stark_backend::{
     engine::StarkEngine,
     p3_air::{Air, AirBuilder, BaseAir},
@@ -18,7 +19,7 @@ use openvm_stark_sdk::{
 };
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
-use rand::Rng;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use tracing::info_span;
 
 struct TestAir(KeccakAir);
@@ -42,40 +43,68 @@ const NUM_PERMUTATIONS: usize = 1 << 10;
 
 fn main() {
     setup_tracing();
-    let mut rng = create_seeded_rng();
+
+    // Allow override via env var NUM_THREADS; default = 4.
+    let num_threads: usize = std::env::var("NUM_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+
+    // ----- CPU keygen once, shared by all threads -----
     let air = TestAir(KeccakAir {});
-
-    let engine = BabyBearPoseidon2Engine::new(
+    let engine_cpu = BabyBearPoseidon2Engine::new(
         FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
     );
-    let mut keygen_builder = engine.keygen_builder();
+
+    let mut keygen_builder = engine_cpu.keygen_builder();
     let air_id = keygen_builder.add_air(Arc::new(air));
-    let pk_host = keygen_builder.generate_pk();
-    let vk = pk_host.get_vk();
+    let pk_host = Arc::new(keygen_builder.generate_pk());
+    let vk = Arc::new(pk_host.get_vk());
 
-    let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
-    let trace = info_span!("generate_trace")
-        .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
-    let cpu_trace = Arc::new(trace);
+    // Base seed to derive per-thread RNGs deterministically but independently.
+    let mut master_rng = create_seeded_rng();
+    let base_seed: u64 = master_rng.gen();
 
-    // CPU
-    println!("\nStarting CPU proof");
-    let cpu_ctx = ProvingContext::new(vec![(
-        air_id,
-        AirProvingContext::simple_no_pis(cpu_trace.clone()),
-    )]);
-    let pk = engine.device().transport_pk_to_device(&pk_host);
-    let cpu_proof = engine.prove(&pk, cpu_ctx);
-    engine.verify(&vk, &cpu_proof).unwrap();
+    // ----- Run N independent proofs in parallel -----
+    thread::scope(|scope| {
+        for t in 0..num_threads {
+            let pk_host = pk_host.clone();
+            let vk = vk.clone();
 
-    // GPU
-    println!("\nStarting GPU proof");
-    let engine = GpuBabyBearPoseidon2Engine::new(
-        FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
-    );
-    let pk = engine.device().transport_pk_to_device(&pk_host);
-    let gpu_trace = engine.device().transport_matrix_to_device(&cpu_trace);
-    let gpu_ctx = ProvingContext::new(vec![(air_id, AirProvingContext::simple_no_pis(gpu_trace))]);
-    let gpu_proof = engine.prove(&pk, gpu_ctx);
-    engine.verify(&vk, &gpu_proof).unwrap();
+            scope.spawn(move || {
+                // Derive a per-thread RNG from a stable base seed + thread index
+                let thread_seed = base_seed ^ ((t as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let mut rng = StdRng::seed_from_u64(thread_seed);
+
+                // Per-thread random inputs + CPU trace
+                let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
+                let trace = info_span!("generate_trace", thread=%t)
+                    .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
+                let cpu_trace = Arc::new(trace);
+
+                // GPU: build a per-thread engine (uses per-thread default stream)
+                println!("[thread {t}] Starting GPU proof");
+                let engine_gpu = GpuBabyBearPoseidon2Engine::new(
+                    FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
+                );
+
+                // Move data to device and prove/verify
+                let pk_dev = engine_gpu.device().transport_pk_to_device(&pk_host);
+                let gpu_trace = engine_gpu.device().transport_matrix_to_device(&cpu_trace);
+                let gpu_ctx = ProvingContext::new(vec![(
+                    air_id,
+                    AirProvingContext::simple_no_pis(gpu_trace),
+                )]);
+
+                let proof = engine_gpu.prove(&pk_dev, gpu_ctx);
+                engine_gpu.verify(&vk, &proof).expect("verification failed");
+                println!(
+                    "[thread {t} - stream {}] Proof verified ✅",
+                    current_stream_id().unwrap()
+                );
+            });
+        }
+    });
+
+    println!("\nAll {num_threads} threads completed.");
 }

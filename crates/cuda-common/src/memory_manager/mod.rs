@@ -186,7 +186,7 @@ impl MemTracker {
         if let Some(mut mm_map) = MM_MAP.get().and_then(|m| m.lock().ok()) {
             let id = current_stream_id().unwrap();
             if let Some(mm) = mm_map.get_mut(&id) {
-                mm.max_used_size = self.current;
+                mm.max_used_size = mm.current_size;
             }
         }
     }
