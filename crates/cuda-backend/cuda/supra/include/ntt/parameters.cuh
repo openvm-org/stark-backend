@@ -6,6 +6,7 @@
  * LOCAL CHANGES (high level):
  * - 2025-08-13: BABY_BEAR_CANONICAL constants copy from sppark/ntt/parameters/baby_bear.h
  * - 2025-08-13: #if !defined FEATURE_BABY_BEAR -> delete
+ * - 2025-10-02: add extern __constant__ twiddles
  */
 
 // Copyright Supranational LLC
@@ -119,5 +120,12 @@ const fr_t domain_size_inverse[MAX_LG_DOMAIN_SIZE + 1] = {
 };
 
 typedef unsigned int index_t;
+
+#define TWIDDLES_SIZE (32 + 64 + 128 + 256 + 512)
+
+extern __constant__ fr_t FORWARD_TWIDDLES[TWIDDLES_SIZE];
+extern __constant__ fr_t INVERSE_TWIDDLES[TWIDDLES_SIZE];
+extern __constant__ fr_t FORWARD_PARTIAL_TWIDDLES[WINDOW_NUM][WINDOW_SIZE];
+extern __constant__ fr_t INVERSE_PARTIAL_TWIDDLES[WINDOW_NUM][WINDOW_SIZE];
 
 #endif /* __SPPARK_NTT_PARAMETERS_CUH__ */

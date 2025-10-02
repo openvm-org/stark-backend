@@ -22,8 +22,6 @@ __launch_bounds__(768, 1) __global__
 void _CT_NTT(const unsigned int radix, const unsigned int lg_domain_size,
              const unsigned int stage, const unsigned int iterations,
              fr_t* d_inout, const unsigned int padded_poly_size,
-             const fr_t (*d_partial_twiddles)[WINDOW_SIZE],
-             const fr_t* d_radix6_twiddles, const fr_t* d_radixX_twiddles,
              bool is_intt, const fr_t d_domain_size_inverse)
 {
 #if (__CUDACC_VER_MAJOR__-0) >= 11
@@ -33,6 +31,11 @@ void _CT_NTT(const unsigned int radix, const unsigned int lg_domain_size,
     __builtin_assume(stage <= lg_domain_size - iterations);
 #endif
     extern __shared__ fr_t shared_exchange[];
+
+    const fr_t (*d_partial_twiddles)[WINDOW_SIZE] = is_intt ? INVERSE_PARTIAL_TWIDDLES : FORWARD_PARTIAL_TWIDDLES;
+    const fr_t* d_radix6_twiddles = is_intt ? INVERSE_TWIDDLES : FORWARD_TWIDDLES;
+    auto twiddles_offset = (1 << (radix - 1)) - 32;
+    const fr_t* d_radixX_twiddles = d_radix6_twiddles + twiddles_offset;
 
     index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
     d_inout += blockIdx.y * padded_poly_size;   // [DIFF]: move in/out ptr to another row
@@ -202,9 +205,6 @@ extern "C" int _ct_mixed_radix_narrow(
     uint32_t iterations,
     uint32_t padded_poly_size,
     uint32_t poly_count,
-    const fr_t (*d_partial_twiddles)[WINDOW_SIZE],
-    const fr_t* d_radix_twiddles,
-    const uint32_t twiddles_offset,
     bool is_intt
 ) {
     index_t num_threads = (index_t)1 << (lg_domain_size - 1);
@@ -218,12 +218,9 @@ extern "C" int _ct_mixed_radix_narrow(
 
     const int Z_COUNT = 256/8/sizeof(fr_t);
     size_t shared_sz = sizeof(fr_t) << (radix - 1);
-    auto d_radixX_twiddles = d_radix_twiddles + twiddles_offset;
 
     #define NTT_ARGUMENTS radix, lg_domain_size, stage, iterations, \
-            d_inout, padded_poly_size, d_partial_twiddles, \
-            d_radix_twiddles, d_radixX_twiddles, \
-            is_intt, domain_size_inverse[lg_domain_size]
+            d_inout, padded_poly_size, is_intt, domain_size_inverse[lg_domain_size]
 
     // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
     if (num_blocks < Z_COUNT)
