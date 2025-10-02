@@ -28,18 +28,18 @@ where
     fn eval(&self, builder: &mut AB) {
         // Constraints for the main trace:
         Air::eval(self, builder);
-        builder.finalize_interactions();
-        if builder.num_interactions() != 0 {
-            match builder.rap_phase_seq_kind() {
-                RapPhaseSeqKind::FriLogUp => {
-                    let symbolic_interactions = builder.symbolic_interactions();
-                    eval_fri_log_up_phase(
-                        builder,
-                        &symbolic_interactions,
-                        builder.max_constraint_degree(),
-                    );
-                }
-            }
-        }
+        // builder.finalize_interactions();
+        // if builder.num_interactions() != 0 {
+        //     match builder.rap_phase_seq_kind() {
+        //         RapPhaseSeqKind::FriLogUp => {
+        //             let symbolic_interactions = builder.symbolic_interactions();
+        //             eval_fri_log_up_phase(
+        //                 builder,
+        //                 &symbolic_interactions,
+        //                 builder.max_constraint_degree(),
+        //             );
+        //         }
+        //     }
+        // }
     }
 }
