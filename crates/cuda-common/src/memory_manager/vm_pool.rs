@@ -280,7 +280,8 @@ impl VirtualMemoryPool {
         self.active_pages.clear();
         self.free_regions.clear();
         self.used_regions.clear();
-        self.curr_end = self.root;
+        // TODO: keep going but need to handle the case when curr_end reaches VIRTUAL_POOL_SIZE
+        // self.curr_end = self.root;
     }
 }
 
