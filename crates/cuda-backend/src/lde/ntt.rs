@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::Once;
 
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 
@@ -9,38 +9,24 @@ const LG_WINDOW_SIZE: usize = (MAX_LG_DOMAIN_SIZE + 4) / 5;
 const WINDOW_SIZE: usize = 1 << LG_WINDOW_SIZE;
 const WINDOW_NUM: usize = MAX_LG_DOMAIN_SIZE.div_ceil(LG_WINDOW_SIZE);
 
-struct NttParameters {
-    twiddles: DeviceBuffer<F>,
-    partial_twiddles: DeviceBuffer<[F; WINDOW_SIZE]>,
-}
+static INIT_FORWARD: Once = Once::new();
+static INIT_INVERSE: Once = Once::new();
 
-impl NttParameters {
-    fn new(inverse: bool) -> Self {
-        let partial_twiddles = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity(WINDOW_NUM);
+fn ensure_initialized(inverse: bool) {
+    let once = if inverse {
+        &INIT_INVERSE
+    } else {
+        &INIT_FORWARD
+    };
+
+    once.call_once(|| {
         let twiddles = DeviceBuffer::<F>::with_capacity(32 + 64 + 128 + 256 + 512);
-
+        let partial = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity(WINDOW_NUM);
         unsafe {
             ntt::generate_all_twiddles(&twiddles, inverse).unwrap();
-            ntt::generate_partial_twiddles(&partial_twiddles, inverse).unwrap();
+            ntt::generate_partial_twiddles(&partial, inverse).unwrap();
         }
-        Self {
-            twiddles,
-            partial_twiddles,
-        }
-    }
-}
-
-static FORWARD: OnceLock<NttParameters> = OnceLock::new();
-static INVERSE: OnceLock<NttParameters> = OnceLock::new();
-
-#[inline]
-fn forward_params() -> &'static NttParameters {
-    FORWARD.get_or_init(|| NttParameters::new(false))
-}
-
-#[inline]
-fn inverse_params() -> &'static NttParameters {
-    INVERSE.get_or_init(|| NttParameters::new(true))
+    });
 }
 
 struct NttImpl<'a> {
@@ -50,7 +36,6 @@ struct NttImpl<'a> {
     poly_count: u32,
     is_intt: bool,
     stage: u32,
-    ntt_parameters: &'static NttParameters,
 }
 
 impl<'a> NttImpl<'a> {
@@ -61,11 +46,7 @@ impl<'a> NttImpl<'a> {
         poly_count: u32,
         is_intt: bool,
     ) -> Self {
-        let ntt_parameters = if is_intt {
-            inverse_params()
-        } else {
-            forward_params()
-        };
+        ensure_initialized(is_intt);
         Self {
             buffer,
             lg_domain_size,
@@ -73,14 +54,12 @@ impl<'a> NttImpl<'a> {
             poly_count,
             is_intt,
             stage: 0,
-            ntt_parameters,
         }
     }
 
     fn step(&mut self, iterations: u32) {
         assert!(iterations <= 10);
         let radix = if iterations < 6 { 6 } else { iterations };
-        let twiddles_offset = (1 << (radix - 1)) - 32;
         unsafe {
             ntt::ct_mixed_radix_narrow(
                 self.buffer,
@@ -90,9 +69,6 @@ impl<'a> NttImpl<'a> {
                 iterations,
                 self.padded_poly_size,
                 self.poly_count,
-                &self.ntt_parameters.partial_twiddles,
-                &self.ntt_parameters.twiddles,
-                twiddles_offset,
                 self.is_intt,
             )
             .unwrap();
