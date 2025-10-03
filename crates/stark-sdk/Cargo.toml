@@ -20,6 +20,7 @@ p3-poseidon = { workspace = true }
 p3-symmetric = { workspace = true }
 p3-blake3 = { workspace = true }
 p3-keccak = { workspace = true }
+
 zkhash = { workspace = true }
 ff = { workspace = true }
 itertools.workspace = true
@@ -30,23 +31,21 @@ rand.workspace = true
 metrics.workspace = true
 serde_json.workspace = true
 static_assertions.workspace = true
-toml = "0.8.14"
-derive_more = "0.99.18"
+toml.workspace = true
+derive_more.workspace = true
 dashmap.workspace = true
-tracing-subscriber = { version = "0.3.17", features = ["std", "env-filter"] }
-tracing-forest = { version = "0.1.6", features = ["ansi", "smallvec"] }
-metrics-tracing-context = "0.16.0"
-metrics-util = "0.17.0"
-metrics-exporter-prometheus = { version = "0.15.3", features = [
-    "push-gateway",
+tracing-subscriber = { workspace = true, features = ["std", "env-filter"] }
+tracing-forest = { workspace = true, features = ["ansi", "smallvec"] }
+metrics-tracing-context.workspace = true
+metrics-util.workspace = true
+metrics-exporter-prometheus = { workspace = true, features = [
+  "push-gateway",
 ], optional = true }
 tokio = { workspace = true, features = [
-    "rt",
-    "rt-multi-thread",
+  "rt",
+  "rt-multi-thread",
 ], optional = true }
-rustls = { version = "0.23", default-features = false, features = [
-    "aws-lc-rs",
-], optional = true }
+rustls = { workspace = true, features = ["aws-lc-rs"], optional = true }
 
 [dev-dependencies]
 p3-keccak-air = { workspace = true }
@@ -55,19 +54,19 @@ p3-keccak-air = { workspace = true }
 default = ["parallel"]
 parallel = ["openvm-stark-backend/parallel"]
 nightly-features = [
-    "p3-dft/nightly-features",
-    "p3-keccak/nightly-features",
-    "p3-poseidon2/nightly-features",
-    "p3-baby-bear/nightly-features",
-    "p3-koala-bear/nightly-features",
+  "p3-dft/nightly-features",
+  "p3-keccak/nightly-features",
+  "p3-poseidon2/nightly-features",
+  "p3-baby-bear/nightly-features",
+  "p3-koala-bear/nightly-features",
 ]
 mimalloc = ["openvm-stark-backend/mimalloc"]
 jemalloc = ["openvm-stark-backend/jemalloc"]
 jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
 metrics = ["openvm-stark-backend/metrics"]
 prometheus = [
-    "metrics",
-    "dep:metrics-exporter-prometheus",
-    "dep:tokio",
-    "dep:rustls",
+  "metrics",
+  "dep:metrics-exporter-prometheus",
+  "dep:tokio",
+  "dep:rustls",
 ]
