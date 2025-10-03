@@ -273,15 +273,15 @@ impl VirtualMemoryPool {
             "Some allocations are still in use"
         );
         unsafe {
-            for (&va, &handle) in &self.active_pages {
-                vpmm_unmap_release(va, self.page_size, handle).unwrap();
+            vpmm_unmap(self.root, (self.curr_end - self.root) as usize).unwrap();
+            for &handle in self.active_pages.values() {
+                vpmm_release(handle).unwrap();
             }
         }
         self.active_pages.clear();
         self.free_regions.clear();
         self.used_regions.clear();
-        // TODO: keep going but need to handle the case when curr_end reaches VIRTUAL_POOL_SIZE
-        // self.curr_end = self.root;
+        self.curr_end = self.root;
     }
 }
 

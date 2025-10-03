@@ -152,7 +152,6 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
                 ByteSize::b(mm.pool.memory_usage() as u64)
             );
             mm.pool.clear();
-            mm.max_used_size = mm.current_size;
         }
     } else {
         panic!(
