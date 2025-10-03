@@ -32,7 +32,7 @@ metrics.workspace = true
 serde_json.workspace = true
 static_assertions.workspace = true
 toml.workspace = true
-derive_more.workspace = true
+derive_more = { workspace = true, features = ["display"] }
 dashmap.workspace = true
 tracing-subscriber = { workspace = true, features = ["std", "env-filter"] }
 tracing-forest = { workspace = true, features = ["ansi", "smallvec"] }
