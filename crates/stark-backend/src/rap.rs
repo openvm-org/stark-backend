@@ -74,7 +74,7 @@ Rap<SymbolicRapBuilder<Val<SC>>> // for keygen to extract fixed data about the R
     + for<'a> Rap<DebugConstraintBuilder<'a, SC>> // for debugging
     + BaseAirWithPublicValues<Val<SC>>
     + PartitionedBaseAir<Val<SC>>
-    // + ColumnsAir<Val<SC>>
+    + ColumnsAir<Val<SC>>
     + Send + Sync
 {
     fn as_any(&self) -> &dyn Any;
@@ -99,7 +99,7 @@ where
         + for<'a> Rap<DebugConstraintBuilder<'a, SC>>
         + BaseAirWithPublicValues<Val<SC>>
         + PartitionedBaseAir<Val<SC>>
-        // + ColumnsAir<Val<SC>>
+        + ColumnsAir<Val<SC>>
         + Send
         + Sync
         + 'static,
