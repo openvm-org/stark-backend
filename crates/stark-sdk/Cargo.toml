@@ -40,7 +40,7 @@ metrics-util = "0.17.0"
 metrics-exporter-prometheus = { version = "0.15.3", features = [
     "push-gateway",
 ], optional = true }
-tokio = { version = "1.43.1", default-features = false, features = [
+tokio = { workspace = true, features = [
     "rt",
     "rt-multi-thread",
 ], optional = true }
