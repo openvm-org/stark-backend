@@ -17,14 +17,6 @@ extern "C" {
     fn cudaEventElapsedTime(ms: *mut f32, start: cudaEvent_t, end: cudaEvent_t) -> i32;
 }
 
-pub type CudaStreamId = u64;
-
-pub fn current_stream_id() -> Result<CudaStreamId, CudaError> {
-    let mut id = 0;
-    check(unsafe { cudaStreamGetId(cudaStreamPerThread, &mut id) })?;
-    Ok(id)
-}
-
 #[allow(non_camel_case_types)]
 pub type cudaStream_t = *mut c_void;
 
@@ -75,7 +67,15 @@ pub type cudaEvent_t = *mut c_void;
 #[allow(non_upper_case_globals)]
 pub const cudaStreamPerThread: cudaStream_t = 0x02 as cudaStream_t;
 
-pub fn default_stream_sync() -> Result<(), CudaError> {
+pub type CudaStreamId = u64;
+
+pub fn current_stream_id() -> Result<CudaStreamId, CudaError> {
+    let mut id = 0;
+    check(unsafe { cudaStreamGetId(cudaStreamPerThread, &mut id) })?;
+    Ok(id)
+}
+
+pub fn current_stream_sync() -> Result<(), CudaError> {
     check(unsafe { cudaStreamSynchronize(cudaStreamPerThread) })
 }
 

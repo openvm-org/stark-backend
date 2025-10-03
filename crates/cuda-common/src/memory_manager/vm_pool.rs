@@ -39,7 +39,7 @@ pub(super) struct VirtualMemoryPool {
     pub(super) page_size: usize,
 
     // Device ordinal
-    device_id: i32,
+    pub(super) device_id: i32,
 }
 
 unsafe impl Send for VirtualMemoryPool {}
@@ -129,7 +129,7 @@ impl VirtualMemoryPool {
         if self.curr_end == self.root {
             self.create_new_pages(requested)?;
         }
-        assert!(
+        debug_assert!(
             requested != 0 && requested % self.page_size == 0,
             "Requested size must be a multiple of the page size"
         );
@@ -273,9 +273,13 @@ impl VirtualMemoryPool {
             "Some allocations are still in use"
         );
         unsafe {
-            vpmm_unmap(self.root, (self.curr_end - self.root) as usize).unwrap();
+            if let Err(e) = vpmm_unmap(self.root, (self.curr_end - self.root) as usize) {
+                tracing::error!("Failed to unmap VA range: {:?}", e);
+            }
             for &handle in self.active_pages.values() {
-                vpmm_release(handle).unwrap();
+                if let Err(e) = vpmm_release(handle) {
+                    tracing::error!("Failed to release handle: {:?}", e);
+                }
             }
         }
         self.active_pages.clear();
@@ -289,7 +293,6 @@ impl Drop for VirtualMemoryPool {
     fn drop(&mut self) {
         self.clear();
         unsafe {
-            // Free the virtual address reservation
             vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
         }
     }
