@@ -59,4 +59,4 @@ jobs:
         run: |
           cargo run --release --example trace_committer
           cargo run --release --example fibonacci
-          cargo run --release --example keccakf
+          NUM_THREADS=3 NUM_TASKS=10 cargo run --release --example keccakf

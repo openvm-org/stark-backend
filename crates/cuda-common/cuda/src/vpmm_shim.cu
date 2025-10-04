@@ -60,9 +60,11 @@ int _vpmm_map_and_set_access(CUdeviceptr va, size_t bytes, CUmemGenericAllocatio
     return (int)cuMemSetAccess(va, bytes, &acc, 1);
 }
 
-int _vpmm_unmap_release(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h) {
-    CUresult r = cuMemUnmap(va, bytes);
-    if (r != CUDA_SUCCESS) return (int)r;
+int _vpmm_unmap(CUdeviceptr va, size_t bytes) {
+    return (int)cuMemUnmap(va, bytes);
+}
+
+int _vpmm_release(CUmemGenericAllocationHandle h) {
     return (int)cuMemRelease(h);
 }
 
