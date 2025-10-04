@@ -61,7 +61,7 @@ fn main() {
         .unwrap_or(num_threads * 4);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_threads)
+        .max_blocking_threads(num_threads)
         .enable_all()
         .build()
         .unwrap();
@@ -82,49 +82,59 @@ fn main() {
         let mut master_rng = create_seeded_rng();
         let base_seed: u64 = master_rng.gen();
 
-        let mut handles = Vec::new();
+        let tasks_per_thread = num_tasks.div_ceil(num_threads);
+        let mut worker_handles = Vec::new();
 
-        for t in 0..num_tasks {
+        for worker_idx in 0..num_threads {
             let pk_host = pk_host.clone();
             let vk = vk.clone();
+            let start_task = worker_idx * tasks_per_thread;
+            let end_task = std::cmp::min(start_task + tasks_per_thread, num_tasks);
 
-            let handle = tokio::task::spawn(async move {
-                let task_seed = base_seed ^ ((t as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                let mut rng = StdRng::seed_from_u64(task_seed);
+            let worker_handle = tokio::task::spawn(async move {
+                for t in start_task..end_task {
+                    let pk_host = pk_host.clone();
+                    let vk = vk.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let task_seed =
+                            base_seed ^ ((t as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                        let mut rng = StdRng::seed_from_u64(task_seed);
 
-                // Per-thread random inputs + CPU trace
-                let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
-                let trace = info_span!("generate_trace", task=%t)
-                    .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
-                let cpu_trace = Arc::new(trace);
+                        let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
+                        let trace = info_span!("generate_trace", task=%t)
+                            .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
+                        let cpu_trace = Arc::new(trace);
 
-                // GPU: build a per-thread engine (uses per-thread default stream)
-                println!("[task {t}] Starting GPU proof");
-                let engine_gpu = GpuBabyBearPoseidon2Engine::new(
-                    FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
-                );
+                        println!("[task {t}] Starting GPU proof");
+                        let engine_gpu = GpuBabyBearPoseidon2Engine::new(
+                            FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
+                        );
 
-                // Move data to device and prove/verify
-                let pk_dev = engine_gpu.device().transport_pk_to_device(&pk_host);
-                let gpu_trace = engine_gpu.device().transport_matrix_to_device(&cpu_trace);
-                let gpu_ctx = ProvingContext::new(vec![(
-                    air_id,
-                    AirProvingContext::simple_no_pis(gpu_trace),
-                )]);
+                        let pk_dev = engine_gpu.device().transport_pk_to_device(&pk_host);
+                        let gpu_trace = engine_gpu.device().transport_matrix_to_device(&cpu_trace);
+                        let gpu_ctx = ProvingContext::new(vec![(
+                            air_id,
+                            AirProvingContext::simple_no_pis(gpu_trace),
+                        )]);
 
-                let proof = engine_gpu.prove(&pk_dev, gpu_ctx);
-                engine_gpu.verify(&vk, &proof).expect("verification failed");
-                println!(
-                    "[task {t} - stream {}] Proof verified ✅",
-                    current_stream_id().unwrap()
-                );
+                        let proof = engine_gpu.prove(&pk_dev, gpu_ctx);
+                        engine_gpu.verify(&vk, &proof).expect("verification failed");
+                        println!(
+                            "[task {t} - stream {}] Proof verified ✅",
+                            current_stream_id().unwrap()
+                        );
+                    })
+                    .await
+                    .expect("task failed");
+                }
             });
-            handles.push(handle);
+            worker_handles.push(worker_handle);
         }
 
-        for handle in handles {
-            handle.await.expect("task failed");
+        for handle in worker_handles {
+            handle.await.expect("worker failed");
         }
+
         println!("\nAll {num_tasks} tasks completed on {num_threads} threads.");
     });
 }
