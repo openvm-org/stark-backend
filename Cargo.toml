@@ -122,6 +122,7 @@ glob = "0.3.2"
 bytesize = "2.0"
 cc = { version = "1.0", default-features = false }
 ctor = "0.5"
+tokio = { version = "1.47.1", default-features = false }
 
 # default-features = false for no_std
 itertools = { version = "0.14.0", default-features = false }
