@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
 use std::{
-    cmp::{max, Reverse},
+    cmp::Reverse,
     collections::{BTreeMap, HashMap},
     ffi::c_void,
 };
@@ -9,7 +9,7 @@ use std::{
 use bytesize::ByteSize;
 
 use super::cuda::*;
-use crate::{common::set_device, error::MemoryError};
+use crate::{common::set_device, error::MemoryError, stream::current_stream_id};
 
 #[link(name = "cudart")]
 extern "C" {
@@ -39,7 +39,7 @@ pub(super) struct VirtualMemoryPool {
     pub(super) page_size: usize,
 
     // Device ordinal
-    device_id: i32,
+    pub(super) device_id: i32,
 }
 
 unsafe impl Send for VirtualMemoryPool {}
@@ -116,7 +116,8 @@ impl VirtualMemoryPool {
         // Insert the new memory into the free regions
         self.free_region_insert(new_base, total_size);
         tracing::info!(
-            "GPU mem: VM Pool allocated: {}, total: {}",
+            "GPU mem ({}): VM Pool allocated: {}, total: {}",
+            current_stream_id().unwrap(),
             ByteSize::b(total_size as u64),
             ByteSize::b((self.memory_usage()) as u64)
         );
@@ -126,9 +127,9 @@ impl VirtualMemoryPool {
     /// Allocate memory and return a pointer to the allocated memory
     pub(super) fn malloc_internal(&mut self, requested: usize) -> Result<*mut c_void, MemoryError> {
         if self.curr_end == self.root {
-            return Err(MemoryError::NotInitialized);
+            self.create_new_pages(requested)?;
         }
-        assert!(
+        debug_assert!(
             requested != 0 && requested % self.page_size == 0,
             "Requested size must be a multiple of the page size"
         );
@@ -261,22 +262,40 @@ impl VirtualMemoryPool {
     pub(super) fn memory_usage(&self) -> usize {
         self.active_pages.len() * self.page_size
     }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.used_regions.is_empty()
+    }
+
+    pub(super) fn clear(&mut self) {
+        assert!(
+            self.used_regions.is_empty(),
+            "Some allocations are still in use"
+        );
+        unsafe {
+            if let Err(e) = vpmm_unmap(self.root, (self.curr_end - self.root) as usize) {
+                tracing::error!("Failed to unmap VA range: {:?}", e);
+            }
+            for &handle in self.active_pages.values() {
+                if let Err(e) = vpmm_release(handle) {
+                    tracing::error!("Failed to release handle: {:?}", e);
+                }
+            }
+        }
+        self.active_pages.clear();
+        self.free_regions.clear();
+        self.used_regions.clear();
+        self.curr_end = self.root;
+    }
 }
 
 impl Drop for VirtualMemoryPool {
     fn drop(&mut self) {
-        tracing::info!(
-            "VirtualMemoryPool: GPU memory used total: {}",
-            ByteSize::b((self.memory_usage()) as u64)
-        );
-        unsafe {
-            // Unmap and release all pages
-            for (&va, &handle) in &self.active_pages {
-                vpmm_unmap_release(va, self.page_size, handle).unwrap();
+        if self.root != self.curr_end {
+            self.clear();
+            unsafe {
+                vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
             }
-
-            // Free the virtual address reservation
-            vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
         }
     }
 }
@@ -290,35 +309,26 @@ impl Default for VirtualMemoryPool {
             return pool;
         }
 
-        // Check how much memory is available
-        let mut free_mem = 0usize;
-        let mut total_mem = 0usize;
-        unsafe {
-            cudaMemGetInfo(&mut free_mem, &mut total_mem);
-        }
-
         // Calculate initial number of pages to allocate
         let initial_pages = match std::env::var("VPMM_PAGES") {
             Ok(val) => {
                 let pages: usize = val.parse().expect("VPMM_PAGES must be a valid number");
-                assert!(pages > 0, "VPMM_PAGES must be > 0");
                 pages
             }
-            Err(_) => {
-                // Default: Use 80% of free memory divided by CPU count
-                let cpu_count = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(1);
-                let per_process = (free_mem * 4 / 5) / cpu_count;
-                // Convert to pages, minimum 256 pages (512MB at 2MB pages)
-                max(256, per_process / pool.page_size)
-            }
+            Err(_) => 0,
         };
-        if let Err(e) = pool.create_new_pages(initial_pages * pool.page_size) {
-            panic!(
-                "Error:{:?}\nPool: pages={}, page_size={}\nMemory: free_mem={}, total_mem={}",
-                e, initial_pages, pool.page_size, free_mem, total_mem
-            );
+        if initial_pages > 0 {
+            if let Err(e) = pool.create_new_pages(initial_pages * pool.page_size) {
+                let mut free_mem = 0usize;
+                let mut total_mem = 0usize;
+                unsafe {
+                    cudaMemGetInfo(&mut free_mem, &mut total_mem);
+                }
+                panic!(
+                    "Error:{:?}\nPool: pages={}, page_size={}\nMemory: free_mem={}, total_mem={}",
+                    e, initial_pages, pool.page_size, free_mem, total_mem
+                );
+            }
         }
         pool
     }

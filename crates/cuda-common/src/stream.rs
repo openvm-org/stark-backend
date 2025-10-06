@@ -4,6 +4,7 @@ use crate::error::{check, CudaError};
 
 #[link(name = "cudart")]
 extern "C" {
+    fn cudaStreamGetId(stream: cudaStream_t, id: *mut CudaStreamId) -> i32;
     fn cudaStreamCreate(stream: *mut cudaStream_t) -> i32;
     fn cudaStreamDestroy(stream: cudaStream_t) -> i32;
     fn cudaStreamSynchronize(stream: cudaStream_t) -> i32;
@@ -66,7 +67,15 @@ pub type cudaEvent_t = *mut c_void;
 #[allow(non_upper_case_globals)]
 pub const cudaStreamPerThread: cudaStream_t = 0x02 as cudaStream_t;
 
-pub fn default_stream_sync() -> Result<(), CudaError> {
+pub type CudaStreamId = u64;
+
+pub fn current_stream_id() -> Result<CudaStreamId, CudaError> {
+    let mut id = 0;
+    check(unsafe { cudaStreamGetId(cudaStreamPerThread, &mut id) })?;
+    Ok(id)
+}
+
+pub fn current_stream_sync() -> Result<(), CudaError> {
     check(unsafe { cudaStreamSynchronize(cudaStreamPerThread) })
 }
 
