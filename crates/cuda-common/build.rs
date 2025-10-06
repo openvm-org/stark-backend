@@ -4,16 +4,8 @@ use openvm_cuda_builder::{cuda_available, CudaBuilder};
 
 fn main() {
     if cuda_available() {
-        println!("cargo:rerun-if-changed=cuda");
         println!("cargo:rerun-if-changed=include");
-
-        let builder = CudaBuilder::new()
-            .library_name("vmm_shim")
-            .flag("-Xcompiler=-fPIC")
-            .file("cuda/src/vpmm_shim.cu");
-
-        builder.clone().build();
-        builder.emit_link_directives();
+        CudaBuilder::new().emit_link_directives();
 
         let include_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("include");
         println!("cargo:include={}", include_path.display()); // -> DEP_CUDA_COMMON_INCLUDE
