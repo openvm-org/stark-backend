@@ -39,7 +39,7 @@ pub(super) struct VirtualMemoryPool {
     pub(super) page_size: usize,
 
     // Device ordinal
-    device_id: i32,
+    pub(super) device_id: i32,
 }
 
 unsafe impl Send for VirtualMemoryPool {}
@@ -129,7 +129,7 @@ impl VirtualMemoryPool {
         if self.curr_end == self.root {
             self.create_new_pages(requested)?;
         }
-        assert!(
+        debug_assert!(
             requested != 0 && requested % self.page_size == 0,
             "Requested size must be a multiple of the page size"
         );
@@ -273,8 +273,13 @@ impl VirtualMemoryPool {
             "Some allocations are still in use"
         );
         unsafe {
-            for (&va, &handle) in &self.active_pages {
-                vpmm_unmap_release(va, self.page_size, handle).unwrap();
+            if let Err(e) = vpmm_unmap(self.root, (self.curr_end - self.root) as usize) {
+                tracing::error!("Failed to unmap VA range: {:?}", e);
+            }
+            for &handle in self.active_pages.values() {
+                if let Err(e) = vpmm_release(handle) {
+                    tracing::error!("Failed to release handle: {:?}", e);
+                }
             }
         }
         self.active_pages.clear();
@@ -286,10 +291,11 @@ impl VirtualMemoryPool {
 
 impl Drop for VirtualMemoryPool {
     fn drop(&mut self) {
-        self.clear();
-        unsafe {
-            // Free the virtual address reservation
-            vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
+        if self.root != self.curr_end {
+            self.clear();
+            unsafe {
+                vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
+            }
         }
     }
 }
@@ -303,27 +309,26 @@ impl Default for VirtualMemoryPool {
             return pool;
         }
 
-        // Check how much memory is available
-        let mut free_mem = 0usize;
-        let mut total_mem = 0usize;
-        unsafe {
-            cudaMemGetInfo(&mut free_mem, &mut total_mem);
-        }
-
         // Calculate initial number of pages to allocate
         let initial_pages = match std::env::var("VPMM_PAGES") {
             Ok(val) => {
                 let pages: usize = val.parse().expect("VPMM_PAGES must be a valid number");
-                assert!(pages > 0, "VPMM_PAGES must be > 0");
                 pages
             }
-            Err(_) => 1,
+            Err(_) => 0,
         };
-        if let Err(e) = pool.create_new_pages(initial_pages * pool.page_size) {
-            panic!(
-                "Error:{:?}\nPool: pages={}, page_size={}\nMemory: free_mem={}, total_mem={}",
-                e, initial_pages, pool.page_size, free_mem, total_mem
-            );
+        if initial_pages > 0 {
+            if let Err(e) = pool.create_new_pages(initial_pages * pool.page_size) {
+                let mut free_mem = 0usize;
+                let mut total_mem = 0usize;
+                unsafe {
+                    cudaMemGetInfo(&mut free_mem, &mut total_mem);
+                }
+                panic!(
+                    "Error:{:?}\nPool: pages={}, page_size={}\nMemory: free_mem={}, total_mem={}",
+                    e, initial_pages, pool.page_size, free_mem, total_mem
+                );
+            }
         }
         pool
     }

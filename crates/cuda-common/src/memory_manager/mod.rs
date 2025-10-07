@@ -10,7 +10,7 @@ use bytesize::ByteSize;
 use crate::{
     error::{check, MemoryError},
     stream::{
-        cudaStreamPerThread, cudaStream_t, current_stream_id, default_stream_sync, CudaStreamId,
+        cudaStreamPerThread, cudaStream_t, current_stream_id, current_stream_sync, CudaStreamId,
     },
 };
 
@@ -22,6 +22,8 @@ use vm_pool::VirtualMemoryPool;
 extern "C" {
     fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;
     fn cudaFreeAsync(dev_ptr: *mut c_void, stream: cudaStream_t) -> i32;
+    fn cudaDeviceGetDefaultMemPool(memPool: *mut *mut c_void, device: i32) -> i32;
+    fn cudaMemPoolTrimTo(pool: *mut c_void, minBytesToKeep: usize) -> i32;
 }
 
 static MM_MAP: OnceLock<Mutex<HashMap<CudaStreamId, MemoryManager>>> = OnceLock::new();
@@ -101,6 +103,15 @@ impl MemoryManager {
     fn is_empty(&self) -> bool {
         self.allocated_ptrs.is_empty() && self.pool.is_empty()
     }
+
+    fn trim_async_pool(&self) {
+        unsafe {
+            let mut pool: *mut c_void = std::ptr::null_mut();
+            if cudaDeviceGetDefaultMemPool(&mut pool, self.pool.device_id) == 0 {
+                cudaMemPoolTrimTo(pool, 0);
+            }
+        }
+    }
 }
 
 impl Drop for MemoryManager {
@@ -117,6 +128,7 @@ impl Drop for MemoryManager {
                 self.allocated_ptrs.len()
             );
         }
+        self.trim_async_pool();
     }
 }
 
@@ -145,13 +157,13 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
         mm.d_free(ptr)?;
         // Auto-cleanup pool if everything is freed
         if mm.is_empty() {
-            default_stream_sync()?;
+            current_stream_sync()?;
             tracing::info!(
                 "GPU mem ({}): Auto-cleanup pool {}",
                 stream_id,
                 ByteSize::b(mm.pool.memory_usage() as u64)
             );
-            mm.pool.clear();
+            mm_map.remove(&stream_id);
         }
     } else {
         panic!(
