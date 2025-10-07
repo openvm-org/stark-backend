@@ -409,34 +409,34 @@ extern "C" int _compute_diffs(FpExt *diffs, FpExt *d_z, Fp *d_domain, uint32_t l
     auto block = FRI_MAX_THREADS;
     auto grid = get_num_sms() * 2;
     compute_diffs<<<grid, block>>>(diffs, d_z, d_domain, log_max_height);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _fpext_bit_reverse(FpExt *diffs, uint32_t log_max_height) {
     auto block = FRI_MAX_THREADS;
     auto grid = get_num_sms() * 2;
     fpext_bit_reverse<<<grid, block>>>(diffs, log_max_height);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _batch_invert(FpExt *diffs, uint32_t log_max_height, uint32_t invert_task_num) {
     auto [grid, block] = kernel_launch_params(invert_task_num, FRI_MAX_THREADS);
     batch_invert<<<grid, block>>>(diffs, log_max_height);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _powers(Fp *data, Fp *g, uint32_t N) {
     auto block = FRI_MAX_THREADS;
     auto grid = get_num_sms() * 2;
     powers<<<grid, block>>>(data, g, N);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _powers_ext(FpExt *data, FpExt *g, uint32_t N) {
     auto block = FRI_MAX_THREADS;
     auto grid = get_num_sms() * 2;
     powers_ext<<<grid, block>>>(data, g, N);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _reduce_matrix_quotient_acc(
@@ -462,7 +462,7 @@ extern "C" int _reduce_matrix_quotient_acc(
         height,
         is_first
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _cukernel_split_ext_poly_to_base_col_major_matrix(
@@ -475,7 +475,7 @@ extern "C" int _cukernel_split_ext_poly_to_base_col_major_matrix(
     cukernel_split_ext_poly_to_base_col_major_matrix<<<grid, block>>>(
         d_matrix, d_poly, poly_len, matrix_height
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _cukernel_fri_fold(
@@ -488,7 +488,7 @@ extern "C" int _cukernel_fri_fold(
 ) {
     auto [grid, block] = kernel_launch_params(N, FRI_MAX_THREADS);
     cukernel_fri_fold<<<grid, block>>>(result, folded, fri_input, d_constants, g_invs, N);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _matrix_evaluate_chunked(
@@ -515,7 +515,7 @@ extern "C" int _matrix_evaluate_chunked(
             partial_sums, matrix, inv_denoms, g, height, width, chunk_size, matrix_height
         );
     }
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _matrix_evaluate_finalize(
@@ -529,5 +529,5 @@ extern "C" int _matrix_evaluate_finalize(
     matrix_evaluate_finalize<<<grid, block>>>(
         output, partial_sums, scale_factor, num_chunks, width
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }

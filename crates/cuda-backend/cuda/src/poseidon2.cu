@@ -127,7 +127,7 @@ extern "C" int _poseidon2_rows_p3_multi(
     poseidon2_rows_p3_multi_kernel<<<grid, block>>>(
         out, matrices_ptr, matrices_col, matrices_row, row_size, matrix_num
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _poseidon2_compress(
@@ -138,7 +138,7 @@ extern "C" int _poseidon2_compress(
 ) {
     auto [grid, block] = kernel_launch_params(output_size);
     poseidon2_compress_kernel<<<grid, block>>>(output, input, output_size, is_inject);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 static const size_t QUERY_DIGEST_THREADS = 128;
@@ -156,5 +156,5 @@ extern "C" int _query_digest_layers(
     cukernel_query_digest_layers<<<grid, block>>>(
         d_digest_matrix, d_layers_ptr, d_indices, num_query, num_layer
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
