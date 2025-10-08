@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cuda_runtime.h>
+#ifdef CUDA_DEBUG
+#include <cstdio>
+#endif
 
 static const size_t MAX_THREADS = 1024;
 static const size_t WARP_SIZE = 32;
@@ -31,3 +34,16 @@ inline std::pair<dim3, dim3> kernel_launch_2d_params(size_t x, size_t y) {
     }                                                       \
 } while(0)
 
+#ifdef CUDA_DEBUG
+    inline int cuda_check_kernel(const char* kernel_name) {
+        cudaError_t err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[ERROR] Kernel '%s' failed: %s\n", 
+                    kernel_name, cudaGetErrorString(err));
+        }
+        return err;
+    }
+#   define CHECK_KERNEL() cuda_check_kernel(__func__)
+#else
+#   define CHECK_KERNEL() cudaGetLastError()
+#endif

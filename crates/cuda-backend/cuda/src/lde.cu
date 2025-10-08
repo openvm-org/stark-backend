@@ -75,7 +75,7 @@ __global__ void batch_expand_pad_kernel(
 extern "C" int _multi_bit_reverse(Fp *io, const uint32_t nBits, const uint32_t count) {
     auto [grid, block] = kernel_launch_params(count);
     multi_bit_reverse_kernel<<<grid, block>>>(io, nBits, count);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _zk_shift(
@@ -87,7 +87,7 @@ extern "C" int _zk_shift(
     const uint32_t n = 1 << log_n;
     auto [grid, block] = kernel_launch_params(n);
     zk_shift_kernel<<<grid, block>>>(io, io_size, log_n, shift);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _batch_expand_pad(
@@ -99,5 +99,5 @@ extern "C" int _batch_expand_pad(
 ) {
     auto [grid, block] = kernel_launch_params(outSize);
     batch_expand_pad_kernel<<<grid, block>>>(out, in, polyCount, outSize, inSize);
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }

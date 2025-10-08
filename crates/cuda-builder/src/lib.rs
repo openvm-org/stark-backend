@@ -158,15 +158,15 @@ impl CudaBuilder {
         // Get or detect CUDA architecture
         let cuda_arch = self.get_cuda_arch();
 
-        // Handle CUDA_DEBUG=1
-        self.handle_debug_shortcuts();
-
-        // Get optimization level
-        let cuda_opt_level = self.get_cuda_opt_level();
-
         // Create cc::Build
         let mut builder = cc::Build::new();
         builder.cuda(true);
+
+        // Handle CUDA_DEBUG=1
+        self.handle_debug_shortcuts(&mut builder);
+
+        // Get optimization level
+        let cuda_opt_level = self.get_cuda_opt_level();
 
         // Add include paths
         for include in &self.include_paths {
@@ -279,13 +279,24 @@ impl CudaBuilder {
         env::var("CUDA_OPT_LEVEL").unwrap_or_else(|_| "3".to_string())
     }
 
-    fn handle_debug_shortcuts(&self) {
+    fn handle_debug_shortcuts(&self, builder: &mut cc::Build) {
         if env::var("CUDA_DEBUG").map(|v| v == "1").unwrap_or(false) {
             env::set_var("CUDA_OPT_LEVEL", "0");
             env::set_var("CUDA_LAUNCH_BLOCKING", "1");
-            env::set_var("CUDA_MEMCHECK", "1");
             env::set_var("RUST_BACKTRACE", "full");
-            println!("cargo:warning=CUDA_DEBUG=1 → forcing CUDA_OPT_LEVEL=0, CUDA_LAUNCH_BLOCKING=1, CUDA_MEMCHECK=1, RUST_BACKTRACE=full");
+            env::set_var("CUDA_ENABLE_COREDUMP_ON_EXCEPTION", "1");
+            env::set_var("CUDA_DEVICE_WAITS_ON_EXCEPTION", "1");
+
+            println!("cargo:warning=CUDA_DEBUG=1 → Enabling comprehensive debugging:");
+            println!("cargo:warning=  → CUDA_OPT_LEVEL=0 (no optimization)");
+            println!("cargo:warning=  → CUDA_LAUNCH_BLOCKING=1 (synchronous kernels)");
+            println!("cargo:warning=  → Line info and device debug symbols enabled");
+            println!("cargo:warning=  → CUDA_DEBUG macro defined for preprocessor");
+
+            builder.flag("-G"); // Device debug symbols
+            builder.flag("-Xcompiler=-fno-omit-frame-pointer"); // Better stack traces
+            builder.flag("-Xptxas=-v"); // Verbose PTX compilation
+            builder.define("CUDA_DEBUG", "1"); // Define CUDA_DEBUG macro
         }
     }
 }

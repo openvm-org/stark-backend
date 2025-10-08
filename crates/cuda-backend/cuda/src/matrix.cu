@@ -118,7 +118,7 @@ int matrix_transpose_impl(T *output, const T *input, size_t col_size, size_t row
 
     cukernel_matrix_transpose<T><<<grid, block>>>(output, input, col_size, row_size);
 
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int matrix_transpose_fp(Fp *output, const Fp *input, size_t col_size, size_t row_size) {
@@ -144,7 +144,7 @@ extern "C" int _split_ext_poly_to_multiple_base_matrix(
     cukernel_split_ext_poly_to_multiple_base_matrix<<<grid, block>>>(
         d_matrix_ptr, d_poly, poly_len, num_chunk
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 extern "C" int _matrix_get_rows_fp(
@@ -160,5 +160,5 @@ extern "C" int _matrix_get_rows_fp(
     cukernel_matrix_get_rows_fp<<<grid, block>>>(
         output, input, row_indices, matrix_width, matrix_height
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }

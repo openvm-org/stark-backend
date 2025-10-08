@@ -8,7 +8,7 @@
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
-#ifdef DEBUG
+#ifdef CUDA_DEBUG
 #include <cstdio>
 #endif
 
@@ -261,7 +261,7 @@ extern "C" int _calculate_cumulative_sums(
     } else {
         calculate_cumulative_sums<false><<<grid, block>>>(PERMUTE_ARGUMENTS);
     }
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
 
 
@@ -276,5 +276,5 @@ extern "C" int _permute_update(
     cukernel_permute_update<<<grid, block>>>(
         d_sum, d_permutation, d_cumulative_sums, permutation_height, permutation_width_ext
     );
-    return cudaGetLastError();
+    return CHECK_KERNEL();
 }
