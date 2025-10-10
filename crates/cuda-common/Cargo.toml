@@ -13,6 +13,7 @@ lazy_static.workspace = true
 thiserror.workspace = true
 bytesize.workspace = true
 ctor.workspace = true
+dashmap.workspace = true
 
 [build-dependencies]
 openvm-cuda-builder.workspace = true
