@@ -113,7 +113,7 @@ Enough free pages remain; VPMM maps without defragmentation ([BestFit policy](#?
 Insufficient contiguous space for `+11`. VPMM [defragments](#?) by remapping the earliest free region to the end of active space and then fulfills the request.
 
 ```
-4.  [-10][1][-X]   >  [-10][1][+4][-(X-4)]        
+4.  [-10][1][-X]   >  [-10][1][+4][-(X-4)]
 5.1 [-10][1][4][-(X-4)] > [*10][1][4][-((X-4)+10)]  (remap + merge = defrag)
 5.2 [*10][1][4][-(X+6)] > [*10][1][4][+11][-(X-5)]  ( X + 6 ≥ 11)
 ```
@@ -144,7 +144,7 @@ Similar to Case C, except `+4` in step 4 cannot fit the third region, so layout 
 // cuda-common/src/memory_manager/mod.rs
 // Global singleton
 struct GlobalMemoryManager {
-    per_stream_memory_managers: Mutex<HashMap<CudaStreamId, MemoryManager>>,
+    per_stream_memory_managers: DashMap<CudaStreamId, MemoryManager>,
     unused_pages: Arc<Mutex<Vec<CUmemGenericAllocationHandle>>>,
     page_size: usize,
     device_id: i32,
@@ -198,7 +198,7 @@ Allocations occur during initialization (preallocation) and on‑demand when the
 * **Synchronous:** The CUDA Driver API performs allocations synchronously.
 * **Granularity:** Allocation is **by page**.
 * **MinUse policy:** When the pool is out of pages, allocate only as many pages as required to satisfy the current request.
-* **Page lifecycle:** 
+* **Page lifecycle:**
   - Pages are created via `cuMemCreate` and added to the global unused pool.
   - When a stream needs pages, they're moved from the global pool to that stream's pool.
   - When a stream's usage hits zero, pages are returned to the global pool.

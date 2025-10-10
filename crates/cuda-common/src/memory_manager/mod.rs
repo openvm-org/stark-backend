@@ -6,6 +6,7 @@ use std::{
 };
 
 use bytesize::ByteSize;
+use dashmap::DashMap;
 
 use crate::{
     common::set_device,
@@ -29,7 +30,7 @@ extern "C" {
 }
 
 struct GlobalMemoryManager {
-    per_stream_memory_managers: Mutex<HashMap<CudaStreamId, MemoryManager>>,
+    per_stream_memory_managers: DashMap<CudaStreamId, MemoryManager>,
     unused_pages: SharedPages,
     page_size: usize,
     device_id: i32,
@@ -42,7 +43,7 @@ impl GlobalMemoryManager {
         let pages =
             create_new_pages(device_id, page_size, get_initial_num_pages(page_size)).unwrap();
         Self {
-            per_stream_memory_managers: Mutex::new(HashMap::new()),
+            per_stream_memory_managers: DashMap::new(),
             unused_pages: Arc::new(Mutex::new(pages)),
             page_size,
             device_id,
@@ -52,14 +53,12 @@ impl GlobalMemoryManager {
 
 impl Drop for GlobalMemoryManager {
     fn drop(&mut self) {
-        if let Ok(mut per_stream_memory_managers) = self.per_stream_memory_managers.lock() {
-            if !per_stream_memory_managers.is_empty() {
-                tracing::warn!(
-                    "Dropping GlobalMemoryManager with {} active stream managers",
-                    per_stream_memory_managers.len()
-                );
-                per_stream_memory_managers.clear();
-            }
+        if !self.per_stream_memory_managers.is_empty() {
+            tracing::warn!(
+                "Dropping GlobalMemoryManager with {} active stream managers",
+                self.per_stream_memory_managers.len()
+            );
+            self.per_stream_memory_managers.clear();
         }
 
         if let Ok(mut pages) = self.unused_pages.lock() {
@@ -215,13 +214,10 @@ impl Drop for MemoryManager {
 
 pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
     let global_mm = GLOBAL_MM.get().unwrap();
-    let mut mm_map = global_mm
-        .per_stream_memory_managers
-        .lock()
-        .map_err(|_| MemoryError::LockError)?;
+    let mm_map = &global_mm.per_stream_memory_managers;
     let stream_id = current_stream_id()?;
 
-    let mm = mm_map.entry(stream_id).or_insert_with(|| {
+    let mut mm = mm_map.entry(stream_id).or_insert_with(|| {
         MemoryManager::new(
             global_mm.device_id,
             global_mm.page_size,
@@ -237,13 +233,10 @@ pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
 /// The caller must ensure that the pointer is allocated on the current stream.
 pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     let global_mm = GLOBAL_MM.get().unwrap();
-    let mut mm_map = global_mm
-        .per_stream_memory_managers
-        .lock()
-        .map_err(|_| MemoryError::LockError)?;
+    let mm_map = &global_mm.per_stream_memory_managers;
     let stream_id = current_stream_id()?;
 
-    if let Some(mm) = mm_map.get_mut(&stream_id) {
+    if let Some(mut mm) = mm_map.get_mut(&stream_id) {
         mm.d_free(ptr)?;
         // Auto-cleanup pool if everything is freed
         if mm.is_empty() {
@@ -269,7 +262,7 @@ impl MemTracker {
     pub fn start(label: &'static str) -> Self {
         let current = GLOBAL_MM
             .get()
-            .and_then(|gmm| gmm.per_stream_memory_managers.lock().ok())
+            .map(|gmm| &gmm.per_stream_memory_managers)
             .and_then(|mm_map| {
                 let id = current_stream_id().unwrap();
                 mm_map.get(&id).map(|mm| mm.current_size)
@@ -281,15 +274,12 @@ impl MemTracker {
 
     #[inline]
     pub fn tracing_info(&self, msg: impl Into<Option<&'static str>>) {
-        let Some(mm_map_guard) = GLOBAL_MM
-            .get()
-            .and_then(|gmm| gmm.per_stream_memory_managers.lock().ok())
-        else {
+        let Some(mm_map) = GLOBAL_MM.get().map(|gmm| &gmm.per_stream_memory_managers) else {
             tracing::error!("Memory manager not available");
             return;
         };
         let id = current_stream_id().unwrap();
-        let (current, peak, pool_usage) = if let Some(mm) = mm_map_guard.get(&id) {
+        let (current, peak, pool_usage) = if let Some(mm) = mm_map.get(&id) {
             (mm.current_size, mm.max_used_size, mm.pool.memory_usage())
         } else {
             (0, 0, 0)
@@ -310,12 +300,9 @@ impl MemTracker {
     }
 
     pub fn reset_peak(&mut self) {
-        if let Some(mut mm_map) = GLOBAL_MM
-            .get()
-            .and_then(|gmm| gmm.per_stream_memory_managers.lock().ok())
-        {
+        if let Some(mut mm_map) = GLOBAL_MM.get().map(|gmm| &gmm.per_stream_memory_managers) {
             let id = current_stream_id().unwrap();
-            if let Some(mm) = mm_map.get_mut(&id) {
+            if let Some(mut mm) = mm_map.get_mut(&id) {
                 mm.max_used_size = mm.current_size;
             }
         }
