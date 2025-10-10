@@ -19,7 +19,6 @@ use openvm_stark_sdk::{
 use p3_baby_bear::BabyBear;
 
 mod cached_lookup;
-mod fib_selector_air;
 mod fib_triples_air;
 pub mod interaction;
 mod partitioned_sum_air;
@@ -73,7 +72,9 @@ fn test_single_fib_triples_stark() {
 
 #[test]
 fn test_single_fib_selector_stark() {
-    use fib_selector_air::{air::FibonacciSelectorAir, trace::generate_trace_rows};
+    use openvm_stark_sdk::dummy_airs::fib_selector_air::{
+        air::FibonacciSelectorAir, trace::generate_trace_rows,
+    };
 
     let log_trace_degree = 3;
 
@@ -98,8 +99,10 @@ fn test_single_fib_selector_stark() {
 
 #[test]
 fn test_double_fib_starks() {
-    use fib_selector_air::air::FibonacciSelectorAir;
-    use openvm_stark_sdk::dummy_airs::{fib_air, fib_air::air::FibonacciAir};
+    use openvm_stark_sdk::dummy_airs::{
+        fib_air, fib_air::air::FibonacciAir, fib_selector_air,
+        fib_selector_air::air::FibonacciSelectorAir,
+    };
 
     let log_n1 = 3;
     let log_n2 = 5;
