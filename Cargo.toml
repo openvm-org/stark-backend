@@ -1,5 +1,5 @@
 [workspace.package]
-version = "1.2.1-rc.4"
+version = "1.2.1-rc.5"
 edition = "2021"
 rust-version = "1.83"
 authors = ["OpenVM contributors"]
@@ -124,7 +124,7 @@ glob = "0.3.2"
 bytesize = "2.0"
 cc = { version = "1.0", default-features = false }
 ctor = "0.5"
-tokio = { version = "1.47.1", default-features = false }
+tokio = { version = "1", default-features = false }
 toml = "0.8.14"
 metrics-tracing-context = "0.16.0"
 metrics-util = "0.17.0"
