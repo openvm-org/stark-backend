@@ -9,12 +9,7 @@ use std::{
 use bytesize::ByteSize;
 
 use super::cuda::*;
-use crate::{common::set_device, error::MemoryError, stream::current_stream_id};
-
-#[link(name = "cudart")]
-extern "C" {
-    fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
-}
+use crate::{error::MemoryError, stream::current_stream_id};
 
 const VIRTUAL_POOL_SIZE: usize = 1usize << 40; // 1 TB
 
@@ -46,36 +41,14 @@ unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
 impl VirtualMemoryPool {
-    pub(super) fn new() -> Self {
-        let device_id = set_device().unwrap();
-        let (root, page_size) = unsafe {
-            match vpmm_check_support(device_id) {
-                Ok(_) => {
-                    let gran = vpmm_min_granularity(device_id).unwrap();
-                    let page_size = match std::env::var("VPMM_PAGE_SIZE") {
-                        Ok(val) => {
-                            let custom_size: usize =
-                                val.parse().expect("VPMM_PAGE_SIZE must be a valid number");
-                            assert!(
-                                custom_size > 0 && custom_size % gran == 0,
-                                "VPMM_PAGE_SIZE must be > 0 and multiple of {}",
-                                gran
-                            );
-                            custom_size
-                        }
-                        Err(_) => gran,
-                    };
-                    let va_base = vpmm_reserve(VIRTUAL_POOL_SIZE, page_size).unwrap();
-                    (va_base, page_size)
-                }
-                Err(_) => {
-                    tracing::warn!("vpmm not supported, falling back to cudaMallocAsync");
-                    (0, usize::MAX)
-                }
-            }
+    pub(super) fn new(device_id: i32, page_size: usize) -> Result<Self, MemoryError> {
+        let root = if page_size == usize::MAX {
+            0
+        } else {
+            unsafe { vpmm_reserve(VIRTUAL_POOL_SIZE, page_size)? }
         };
 
-        Self {
+        Ok(Self {
             root,
             curr_end: root,
             active_pages: HashMap::new(),
@@ -83,51 +56,18 @@ impl VirtualMemoryPool {
             used_regions: HashMap::new(),
             page_size,
             device_id,
-        }
+        })
     }
 
-    fn create_new_pages(&mut self, memory_size: usize) -> Result<(), MemoryError> {
-        if memory_size == 0 {
-            return Err(MemoryError::InvalidMemorySize { size: memory_size });
-        }
-        let pages = memory_size.div_ceil(self.page_size);
-        let new_base = self.curr_end;
-
-        for i in 0..pages {
-            unsafe {
-                // Create new physical memory handle
-                let handle = vpmm_create_physical(self.device_id, self.page_size)?;
-                // Map it to virtual address space & set RW permissions
-                vpmm_map_and_set_access(
-                    new_base + (i * self.page_size) as u64,
-                    self.page_size,
-                    handle,
-                    self.device_id,
-                )?;
-                // Insert the new memory into the physical map
-                self.active_pages
-                    .insert(new_base + (i * self.page_size) as u64, handle);
-            }
-        }
-
-        let total_size = pages * self.page_size;
-        // Update virtual base size
-        self.curr_end += total_size as u64;
-        // Insert the new memory into the free regions
-        self.free_region_insert(new_base, total_size);
-        tracing::info!(
-            "GPU mem ({}): VM Pool allocated: {}, total: {}",
-            current_stream_id().unwrap(),
-            ByteSize::b(total_size as u64),
-            ByteSize::b((self.memory_usage()) as u64)
-        );
-        Ok(())
-    }
-
-    /// Allocate memory and return a pointer to the allocated memory
+    /// Allocates memory from the pool's free regions.
+    /// Attempts defragmentation if no suitable free region exists.
+    /// Returns an error if there's insufficient memory even after defragmentation.
     pub(super) fn malloc_internal(&mut self, requested: usize) -> Result<*mut c_void, MemoryError> {
         if self.curr_end == self.root {
-            self.create_new_pages(requested)?;
+            return Err(MemoryError::OutOfMemory {
+                requested,
+                available: 0,
+            });
         }
         debug_assert!(
             requested != 0 && requested % self.page_size == 0,
@@ -142,8 +82,8 @@ impl VirtualMemoryPool {
             .map(|(&ptr, _)| ptr);
 
         if best_region.is_none() {
-            // Try to defragment or/and alloc more physical memory
-            best_region = self.defragment_or_create_new_pages(requested)?;
+            // Try to defragment memory
+            best_region = self.defragment(requested)?;
         }
 
         if let Some(ptr) = best_region {
@@ -165,11 +105,10 @@ impl VirtualMemoryPool {
         })
     }
 
-    /// Free a pointer and return the size of the freed memory
+    /// Frees a pointer and returns the size of the freed memory.
+    /// Coalesces adjacent free regions.
     pub(super) fn free_internal(&mut self, ptr: *mut c_void) -> Result<usize, MemoryError> {
-        if self.curr_end == self.root {
-            return Err(MemoryError::NotInitialized);
-        }
+        debug_assert!(self.curr_end != self.root, "VM pool is empty");
         let ptr = ptr as CUdeviceptr;
         let size = self
             .used_regions
@@ -200,14 +139,13 @@ impl VirtualMemoryPool {
         self.free_regions.insert(ptr, size);
     }
 
-    fn defragment_or_create_new_pages(
-        &mut self,
-        requested: usize,
-    ) -> Result<Option<CUdeviceptr>, MemoryError> {
-        if self.free_regions.is_empty() {
-            self.create_new_pages(requested)?;
-            return Ok(self.free_regions.iter().next_back().map(|(&p, _)| p));
-        }
+    /// Defragments the pool by consolidating free regions at the end of virtual address space.
+    /// Remaps pages to create one large contiguous free region.
+    fn defragment(&mut self, requested: usize) -> Result<Option<CUdeviceptr>, MemoryError> {
+        debug_assert!(
+            !self.free_regions.is_empty(),
+            "No free regions to defragment"
+        );
 
         let mut to_defrag: Vec<(CUdeviceptr, usize)> =
             self.free_regions.iter().map(|(&p, &s)| (p, s)).collect();
@@ -251,85 +189,184 @@ impl VirtualMemoryPool {
         }
         // update virtual base size
         self.curr_end = new_end;
-        // if there is still memory left, create a new handle
+        // if there is still memory left, return error
         if sum < requested {
-            self.create_new_pages(requested - sum)?;
+            return Err(MemoryError::OutOfMemory {
+                requested,
+                available: sum,
+            });
         }
 
         Ok(self.free_regions.iter().next_back().map(|(&p, _)| p))
     }
 
+    /// Returns the total physical memory currently mapped in this pool (in bytes).
     pub(super) fn memory_usage(&self) -> usize {
         self.active_pages.len() * self.page_size
     }
 
+    /// Returns true if no allocations are currently active in this pool.
     pub(super) fn is_empty(&self) -> bool {
         self.used_regions.is_empty()
     }
 
-    pub(super) fn clear(&mut self) {
-        assert!(
-            self.used_regions.is_empty(),
-            "Some allocations are still in use"
-        );
-        unsafe {
-            if let Err(e) = vpmm_unmap(self.root, (self.curr_end - self.root) as usize) {
-                tracing::error!("Failed to unmap VA range: {:?}", e);
+    /// Returns the number of available pages in this pool.
+    pub(super) fn available_pages(&self) -> usize {
+        self.free_regions.values().sum::<usize>() / self.page_size
+    }
+
+    /// Adds pre-allocated page handles to the pool by mapping them to virtual address space.
+    /// Pages are added as one contiguous free region at the end of the current address space.
+    pub(super) fn add_pages(
+        &mut self,
+        pages: Vec<CUmemGenericAllocationHandle>,
+    ) -> Result<(), MemoryError> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        let new_base = self.curr_end;
+        let num_pages = pages.len();
+
+        for (i, handle) in pages.into_iter().enumerate() {
+            let va = new_base + (i * self.page_size) as u64;
+            unsafe {
+                vpmm_map_and_set_access(va, self.page_size, handle, self.device_id)?;
             }
-            for &handle in self.active_pages.values() {
-                if let Err(e) = vpmm_release(handle) {
-                    tracing::error!("Failed to release handle: {:?}", e);
-                }
+            self.active_pages.insert(va, handle);
+        }
+        let total_size = num_pages * self.page_size;
+        self.curr_end += total_size as u64;
+        self.free_region_insert(new_base, total_size);
+        tracing::debug!(
+            "GPU mem ({}): VM Pool added {} pages, total: {}",
+            current_stream_id().unwrap(),
+            num_pages,
+            ByteSize::b((self.memory_usage()) as u64)
+        );
+        Ok(())
+    }
+
+    /// Resets the pool by unmapping all pages and returning their handles.
+    /// The pool must be empty (no active allocations) before calling this.
+    pub(super) fn reset(&mut self) -> Result<Vec<CUmemGenericAllocationHandle>, MemoryError> {
+        if !self.used_regions.is_empty() {
+            return Err(MemoryError::VirtualPoolInUse {
+                used: self.used_regions.len(),
+            });
+        }
+
+        if self.curr_end != self.root {
+            unsafe {
+                vpmm_unmap(self.root, (self.curr_end - self.root) as usize)?;
             }
         }
-        self.active_pages.clear();
+
+        let pages: Vec<_> = self
+            .active_pages
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+
         self.free_regions.clear();
-        self.used_regions.clear();
         self.curr_end = self.root;
+
+        tracing::debug!(
+            "GPU mem ({}): VM pool reset, returned {} pages",
+            current_stream_id().unwrap(),
+            pages.len()
+        );
+
+        Ok(pages)
     }
 }
 
 impl Drop for VirtualMemoryPool {
     fn drop(&mut self) {
         if self.root != self.curr_end {
-            self.clear();
-            unsafe {
-                vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
+            tracing::warn!(
+                "Dropping VM pool before reset: {} pages in pool",
+                self.active_pages.len()
+            );
+            release_pages(self.reset().unwrap()).unwrap();
+        }
+        unsafe {
+            vpmm_release_va(self.root, VIRTUAL_POOL_SIZE).unwrap();
+        }
+    }
+}
+/// Releases physical memory handles by calling cuMemRelease on each.
+pub(super) fn release_pages(pages: Vec<CUmemGenericAllocationHandle>) -> Result<(), MemoryError> {
+    for handle in pages {
+        unsafe {
+            vpmm_release(handle)?;
+        }
+    }
+    Ok(())
+}
+
+/// Determines the page size for virtual memory management on the specified device.
+/// Returns usize::MAX if VPMM is not supported, indicating fallback to cudaMallocAsync only.
+pub(super) fn get_page_size(device_id: i32) -> Result<usize, MemoryError> {
+    unsafe {
+        match vpmm_check_support(device_id) {
+            Ok(_) => {
+                let gran = vpmm_min_granularity(device_id)?;
+                match std::env::var("VPMM_PAGE_SIZE") {
+                    Ok(val) => {
+                        let custom_size: usize =
+                            val.parse().expect("VPMM_PAGE_SIZE must be a valid number");
+                        assert!(
+                            custom_size > 0 && custom_size % gran == 0,
+                            "VPMM_PAGE_SIZE must be > 0 and multiple of {}",
+                            gran
+                        );
+                        Ok(custom_size)
+                    }
+                    Err(_) => Ok(gran),
+                }
+            }
+            Err(_) => {
+                tracing::warn!("VPMM not supported, falling back to cudaMallocAsync");
+                Ok(usize::MAX)
             }
         }
     }
 }
 
-impl Default for VirtualMemoryPool {
-    fn default() -> Self {
-        let mut pool = Self::new();
-
-        // Skip allocation if vpmm not supported
-        if pool.page_size == usize::MAX {
-            return pool;
-        }
-
-        // Calculate initial number of pages to allocate
-        let initial_pages = match std::env::var("VPMM_PAGES") {
-            Ok(val) => {
-                let pages: usize = val.parse().expect("VPMM_PAGES must be a valid number");
-                pages
-            }
-            Err(_) => 0,
-        };
-        if initial_pages > 0 {
-            if let Err(e) = pool.create_new_pages(initial_pages * pool.page_size) {
-                let mut free_mem = 0usize;
-                let mut total_mem = 0usize;
-                unsafe {
-                    cudaMemGetInfo(&mut free_mem, &mut total_mem);
-                }
-                panic!(
-                    "Error:{:?}\nPool: pages={}, page_size={}\nMemory: free_mem={}, total_mem={}",
-                    e, initial_pages, pool.page_size, free_mem, total_mem
-                );
-            }
-        }
-        pool
+/// Returns the number of pages to pre-allocate based on VPMM_PAGES environment variable.
+/// Returns 0 if not set or if VPMM is not supported.
+pub(super) fn get_initial_num_pages(page_size: usize) -> usize {
+    if page_size == usize::MAX {
+        return 0;
     }
+    match std::env::var("VPMM_PAGES") {
+        Ok(val) => val.parse().expect("VPMM_PAGES must be a valid number"),
+        Err(_) => 0, // Maybe we need some default value here like 50% of free memory
+    }
+}
+
+/// Creates a new set of physical memory handles by calling cuMemCreate for each page.
+/// Returns an empty vector if num_pages is 0 or VPMM is not supported.
+pub(super) fn create_new_pages(
+    device_id: i32,
+    page_size: usize,
+    num_pages: usize,
+) -> Result<Vec<CUmemGenericAllocationHandle>, MemoryError> {
+    if num_pages == 0 || page_size == usize::MAX {
+        return Ok(Vec::new());
+    }
+
+    let mut pages = Vec::with_capacity(num_pages);
+    for _ in 0..num_pages {
+        let handle = unsafe { vpmm_create_physical(device_id, page_size)? };
+        pages.push(handle);
+    }
+
+    tracing::info!(
+        "GPU mem: Allocated {} pages ({})",
+        num_pages,
+        ByteSize::b((num_pages * page_size) as u64)
+    );
+
+    Ok(pages)
 }
