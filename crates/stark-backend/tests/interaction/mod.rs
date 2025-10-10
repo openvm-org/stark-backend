@@ -12,18 +12,17 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{
     any_rap_arc_vec,
     config::{self, baby_bear_poseidon2::BabyBearPoseidon2Engine},
-    dummy_airs::interaction::dummy_interaction_air::DummyInteractionAir,
+    dummy_airs::{
+        fib_selector_air::{air::FibonacciSelectorAir, trace::generate_trace_rows},
+        interaction::dummy_interaction_air::DummyInteractionAir,
+    },
     engine::StarkFriEngine,
 };
 use p3_baby_bear::BabyBear;
 use p3_field::PrimeField32;
 use p3_matrix::dense::RowMajorMatrix;
 
-use crate::{
-    fib_selector_air::{air::FibonacciSelectorAir, trace::generate_trace_rows},
-    get_conditional_fib_number,
-    utils::to_field_vec,
-};
+use crate::{get_conditional_fib_number, utils::to_field_vec};
 
 type Val = BabyBear;
 
