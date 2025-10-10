@@ -87,8 +87,8 @@ pub enum MemoryError {
     )]
     OutOfMemory { requested: usize, available: usize },
 
-    #[error("Memory manager not initialized")]
-    NotInitialized,
+    #[error("Virtual memory pool: {used} regions in use")]
+    VirtualPoolInUse { used: usize },
 
     #[error("Invalid pointer: pointer not found in allocation table")]
     InvalidPointer,
