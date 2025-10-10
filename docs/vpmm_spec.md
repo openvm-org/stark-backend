@@ -34,9 +34,6 @@ The **Virtual Memory Pool Memory Manager (VPMM)** replaces this with a design ba
   * `[*X]`  region marked as **dead** (free but already remapped)
   * `[#X]`  region marked as **new** (free but created by current allocation)
 
-Here's a copiable version:
-
-```markdown
 ## Architecture Overview
 
 The system consists of three layers:
