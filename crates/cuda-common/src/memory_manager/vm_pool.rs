@@ -379,6 +379,15 @@ impl VirtualMemoryPool {
 
             tracing::debug!("All streams to defragment: {:?}", all_streams_to_defrag);
 
+            let total_available: usize =
+                all_streams_to_defrag.iter().map(|(_, size, _)| size).sum();
+            if accumulated_size + total_available < requested {
+                return Err(MemoryError::OutOfMemory {
+                    requested,
+                    available: accumulated_size + total_available,
+                });
+            }
+
             let mut to_defrag = Vec::new();
 
             for (ptr, size, _) in all_streams_to_defrag {
