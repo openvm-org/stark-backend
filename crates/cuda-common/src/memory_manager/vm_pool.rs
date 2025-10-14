@@ -274,9 +274,16 @@ impl VirtualMemoryPool {
             (self.curr_end, 0)
         };
 
-        tracing::info!("Current stream to defrag: {:?}", current_stream_to_defrag);
-
         current_stream_to_defrag.sort_by_key(|(_, _, event_handle)| Reverse(*event_handle));
+
+        tracing::debug!(
+            "Current stream {} trying to defragment from {:?}",
+            stream_id,
+            current_stream_to_defrag
+                .iter()
+                .map(|(_, size, _)| size)
+                .collect::<Vec<_>>()
+        );
 
         let mut to_defrag = Vec::new();
 
@@ -308,7 +315,15 @@ impl VirtualMemoryPool {
             self.free_regions.get_mut(&defrag_start).unwrap().stream_id = stream_id;
         }
 
-        tracing::info!("Other streams to defrag: {:?}", other_streams_to_defrag);
+        tracing::debug!(
+            "Defragmented {} bytes from stream {}, other streams ready to borrow {:?}",
+            accumulated_size,
+            stream_id,
+            other_streams_to_defrag
+                .iter()
+                .map(|(_, size)| size)
+                .collect::<Vec<_>>()
+        );
 
         other_streams_to_defrag.sort_by_key(|(_, size)| Reverse(*size));
 
@@ -344,7 +359,12 @@ impl VirtualMemoryPool {
             allocated_size += self.page_size;
             accumulated_size += self.page_size;
         }
-        tracing::info!("VPMM ({}): Allocated {} to {}", stream_id, allocated_size, allocate_start);
+        tracing::debug!(
+            "VPMM ({}): Allocated {} to {}",
+            stream_id,
+            allocated_size,
+            allocate_start
+        );
         unsafe { vpmm_set_access(allocate_start, allocated_size, self.device_id)? };
         self.free_region_insert(allocate_start, allocated_size, None, stream_id);
 
@@ -356,6 +376,8 @@ impl VirtualMemoryPool {
                 .map(|(addr, r)| (*addr, r.size, r.event.as_raw_handle()))
                 .collect();
             all_streams_to_defrag.sort_by_key(|(_, _, event_handle)| *event_handle);
+
+            tracing::debug!("All streams to defragment: {:?}", all_streams_to_defrag);
 
             let mut to_defrag = Vec::new();
 
@@ -398,7 +420,7 @@ impl VirtualMemoryPool {
                 let region_handle = region.event.as_raw_handle();
                 if event
                     .as_ref()
-                    .map_or(true, |e| region_handle > e.as_raw_handle())
+                    .is_none_or(|e| region_handle > e.as_raw_handle())
                 {
                     event = Some(region.event);
                 }
@@ -460,7 +482,10 @@ impl Default for VirtualMemoryPool {
             }
             Err(_) => 0,
         };
-        if let Err(e) = pool.defragment_or_create_new_pages(initial_pages * pool.page_size, current_stream_id().unwrap()) {
+        if let Err(e) = pool.defragment_or_create_new_pages(
+            initial_pages * pool.page_size,
+            current_stream_id().unwrap(),
+        ) {
             // Check how much memory is available
             let mut free_mem = 0usize;
             let mut total_mem = 0usize;

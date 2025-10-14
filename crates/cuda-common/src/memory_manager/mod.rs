@@ -13,7 +13,6 @@ use crate::{
 };
 
 mod cuda;
-use cuda::print_vpmm_stats;
 mod vm_pool;
 use vm_pool::VirtualMemoryPool;
 
@@ -171,7 +170,6 @@ impl MemTracker {
     }
 
     pub fn reset_peak(&mut self) {
-        print_vpmm_stats();
         if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
             manager.max_used_size = manager.current_size;
         }

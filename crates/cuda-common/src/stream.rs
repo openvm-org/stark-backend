@@ -88,11 +88,11 @@ pub enum CudaEventStatus {
 
 impl PartialEq for CudaEventStatus {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (CudaEventStatus::Completed, CudaEventStatus::Completed) => true,
-            (CudaEventStatus::NotReady, CudaEventStatus::NotReady) => true,
-            _ => false,
-        }
+        matches!(
+            (self, other),
+            (CudaEventStatus::Completed, CudaEventStatus::Completed)
+                | (CudaEventStatus::NotReady, CudaEventStatus::NotReady)
+        )
     }
 }
 
