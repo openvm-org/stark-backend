@@ -62,8 +62,6 @@ impl Drop for CudaStream {
     }
 }
 
-#[allow(non_camel_case_types)]
-pub type cudaEvent_t = *mut c_void;
 #[allow(non_upper_case_globals)]
 pub const cudaStreamPerThread: cudaStream_t = 0x02 as cudaStream_t;
 
@@ -79,12 +77,28 @@ pub fn current_stream_sync() -> Result<(), CudaError> {
     check(unsafe { cudaStreamSynchronize(cudaStreamPerThread) })
 }
 
+#[allow(non_camel_case_types)]
+pub type cudaEvent_t = *mut c_void;
+
 pub enum CudaEventStatus {
     Completed,
     NotReady,
     Error(CudaError),
 }
 
+impl PartialEq for CudaEventStatus {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CudaEventStatus::Completed, CudaEventStatus::Completed) => true,
+            (CudaEventStatus::NotReady, CudaEventStatus::NotReady) => true,
+            _ => false,
+        }
+    }
+}
+
+pub type CudaEventHandle = u64;
+
+#[derive(Debug, Clone)]
 pub struct CudaEvent {
     event: cudaEvent_t,
 }
@@ -109,6 +123,10 @@ impl CudaEvent {
         check(cudaEventRecord(self.event, stream))
     }
 
+    pub fn record_on_this(&self) -> Result<(), CudaError> {
+        check(unsafe { cudaEventRecord(self.event, cudaStreamPerThread) })
+    }
+
     /// # Safety
     /// The caller must ensure that `stream` is a valid stream.
     pub unsafe fn record_and_wait(&self, stream: cudaStream_t) -> Result<(), CudaError> {
@@ -123,6 +141,14 @@ impl CudaEvent {
             600 => CudaEventStatus::NotReady, // CUDA_ERROR_NOT_READY
             _ => CudaEventStatus::Error(CudaError::new(status)),
         }
+    }
+
+    pub fn completed(&self) -> bool {
+        self.status() == CudaEventStatus::Completed
+    }
+
+    pub fn as_raw_handle(&self) -> CudaEventHandle {
+        self.event as CudaEventHandle
     }
 }
 

@@ -58,6 +58,12 @@ impl CudaError {
             Err(Self::new(code))
         }
     }
+
+    /// Returns `true` if the error is cudaErrorMemoryAllocation
+    #[inline]
+    pub fn is_out_of_memory(&self) -> bool {
+        self.code == 2
+    }
 }
 
 #[inline]
