@@ -18,8 +18,8 @@ The **Virtual Memory Pool Memory Manager (VPMM)** replaces this with a design ba
 
 * Eliminate or minimize fragmentation without copying by **remapping pages** in virtual address space.
 * Maintain predictable GPU memory usage aligned with actual live allocations.
+* Support **multi-stream workloads** with cross-stream memory reuse while minimizing synchronization overhead.
 * Provide internal observability of memory usage.
-* Support multi-threaded workloads with per-stream memory managers sharing a global page pool.
 
 ## Concepts & Notation
 
@@ -34,52 +34,14 @@ The **Virtual Memory Pool Memory Manager (VPMM)** replaces this with a design ba
   * `[*X]`  region marked as **dead** (free but already remapped)
   * `[#X]`  region marked as **new** (free but created by current allocation)
 
-## Architecture Overview
-
-The system consists of three layers:
-
-1. **GlobalMemoryManager** - Singleton that owns a shared pool of unused physical pages and coordinates per-stream managers.
-2. **MemoryManager** (per-stream) - Handles allocations for a specific CUDA stream, managing both small buffers and a virtual memory pool.
-3. **VirtualMemoryPool** - Maps physical pages into virtual address space, handles defragmentation.
-
-```
-+--------------------------------------+
-|     GlobalMemoryManager (static)     |
-|  +--------------------------------+  |
-|  |   Unused Pages (Arc<Mutex>)    |  |
-|  |  [Global pool of free pages]   |  |
-|  +--------------------------------+  |
-|           ^              ^           |
-|           |              |           |
-|  +--------+---+   +------+-----+     |
-|  |MemoryMgr   |   |MemoryMgr  |      |
-|  |(Stream 1)  |   |(Stream 2) | ...  |
-|  |  +------+  |   |  +------+ |      |
-|  |  | Pool |  |   |  | Pool | |      |
-|  |  +------+  |   |  +------+ |      |
-|  +------------+   +-----------+      |
-+--------------------------------------+
-```
-
 ## High‑Level Design
 
-1. **Global Initialization:**
-   - Reserve a sufficiently large VA range once per stream manager at initialization.
-   - Pre‑allocate a configurable number of physical pages into the global unused pool.
-
-2. **Per-Stream Operation:**
-   - Each stream gets its own `MemoryManager` with its own `VirtualMemoryPool`.
-   - When a pool needs pages, it takes them from the global unused pool.
-   - If the global pool is empty, new pages are allocated on-demand.
-
-3. **Allocation within a pool:**
-   - **Map** pages contiguously at the **end of active space** for new allocations.
-   - **Find‑or‑defragment**: if no free region fits, **remap** pages from earlier freed regions to the end (no data copy, just page table updates).
-   - **Request more pages**: if still insufficient, take pages from global pool or allocate new ones.
-
-4. **Stream cleanup:**
-   - When a stream's usage hits zero, synchronize the stream and return all pages to the global unused pool.
-   - The per-stream manager is removed, freeing its resources.
+1. **Reserve** a sufficiently large VA range once at initialization.
+2. **Pre‑allocate** a configurable number of physical pages.
+3. **Map** pages contiguously at the **end of active space** for new allocations.
+4. **Find‑or‑defragment**: if no free region fits, **remap** pages from earlier freed regions to the end (no data copy, just page table updates).
+5. **Cross-stream synchronization**: Use CUDA events to track when freed memory becomes safe to reuse across streams.
+6. **Grow**: if still insufficient, **allocate more pages** and map them at the end.
 
 Small allocations (< page size) bypass the pool and use `cudaMallocAsync` for simplicity and backward compatibility.
 
@@ -141,28 +103,16 @@ Similar to Case C, except `+4` in step 4 cannot fit the third region, so layout 
 ## Data Structures
 
 ```rust
-// cuda-common/src/memory_manager/mod.rs
-// Global singleton
-struct GlobalMemoryManager {
-    per_stream_memory_managers: Mutex<HashMap<CudaStreamId, MemoryManager>>,
-    unused_pages: Arc<Mutex<Vec<CUmemGenericAllocationHandle>>>,
-    page_size: usize,
-    device_id: i32,
-}
-
-// Per-stream manager
-struct MemoryManager {
-    pool: VirtualMemoryPool,
-    allocated_ptrs: HashMap<NonNull<c_void>, usize>,  // Small buffers
-    unused_pages: Arc<Mutex<Vec<CUmemGenericAllocationHandle>>>,  // Shared reference
-    current_size: usize,
-    max_used_size: usize,
-}
-
 // cuda-common/src/memory_manager/vm_pool.rs
+struct FreeRegion {
+    size: usize,
+    event: CudaEvent,        // Event marking when this region was freed
+    stream_id: CudaStreamId, // Stream that freed this region
+}
+
 pub(super) struct VirtualMemoryPool {
     device_id: i32,
-    root: CUdeviceptr,           // Virtual address space root
+    root: CUdeviceptr,           // Virtual address space root (shared across streams)
     curr_end: CUdeviceptr,       // Current end of active address space
     pub(super) page_size: usize, // Mapping granularity (multiple of 2MB)
 
@@ -170,7 +120,7 @@ pub(super) struct VirtualMemoryPool {
     active_pages: HashMap<CUdeviceptr, CUmemGenericAllocationHandle>,
 
     // Free regions in virtual space (sorted by address; non-adjacent)
-    free_regions: BTreeMap<CUdeviceptr, usize>,
+    free_regions: BTreeMap<CUdeviceptr, FreeRegion>,
 
     // Active allocations
     used_regions: HashMap<CUdeviceptr, usize>,
@@ -182,13 +132,13 @@ pub(super) struct VirtualMemoryPool {
 * `root` is returned by VA reservation and satisfies: `root ≤ key < curr_end` for all keys in the collections.
 * `active_pages` tracks the **current** mapping address for each page.
 * `free_regions` cover only the **active** VA range and are always coalesced (neighbors merged on free).
-* Pages in `GlobalMemoryManager::unused_pages` are not mapped to any virtual address.
+* Each `FreeRegion` tracks which stream freed it and records a CUDA event for cross-stream synchronization.
 
 ## Initialization
 
-* **VA Reservation:** Each `VirtualMemoryPool` reserves a large VA range at creation. **Current value:** 1 TB (constant).
+* **VA Reservation:** Reserve a large VA range at startup. **Current value:** 32 TB (constant).
 * **Page Size:** Configurable via `VPMM_PAGE_SIZE`. Must be a multiple of CUDA’s minimum allocation granularity (typically 2 MB). Larger pages reduce mapping overhead; all allocations are rounded up to page size.
-* **Initial Pages:** Count is configurable via `VPMM_PAGES`. If set, that many pages are pre-allocated into the global unused pool at startup. More pages improve performance but increase baseline memory footprint.
+* **Initial Pages:** Count is configurable via `VPMM_PAGES`. Defaults to 0 (allocate on-demand). More pages improve performance but increase baseline memory footprint.
 * **Mapping Unit:** All mappings are performed **by page**.
 
 ## Allocation & Growth
@@ -198,51 +148,43 @@ Allocations occur during initialization (preallocation) and on‑demand when the
 * **Synchronous:** The CUDA Driver API performs allocations synchronously.
 * **Granularity:** Allocation is **by page**.
 * **MinUse policy:** When the pool is out of pages, allocate only as many pages as required to satisfy the current request.
-* **Page lifecycle:** 
-  - Pages are created via `cuMemCreate` and added to the global unused pool.
-  - When a stream needs pages, they're moved from the global pool to that stream's pool.
-  - When a stream's usage hits zero, pages are returned to the global pool.
-  - Pages are only released to the OS on program termination.
+* **Lifetime:** Allocated pages are **retained** for the lifetime of the process (not returned to the OS).
 
 ## Defragmentation
 
-Triggered when no free region can satisfy a request.
+Triggered when no free region can satisfy a request. Defragmentation proceeds in phases to minimize cross-stream synchronization:
 
-* **Remapping:** Select a free region and **remap its pages** to the end of active space. The original mapping remains valid during in‑flight use on the stream. After remapping, the original region becomes a **dead zone** and is not reused for new allocations. Note: unmapping may return `cudaErrorInvalidAddress` if attempted prematurely.
-* **Region Selection:** **BiggestFirst** — prefer defragmenting larger regions to minimize the number of defragmented segments.
+* **Phase 2a - Current stream (latest first):** Remap free regions from the requesting stream, prioritizing latest freed regions (newest events) to minimize wasted work.
+* **Phase 2b - Completed other streams:** Opportunistically reuse free regions from other streams whose events have already completed (no wait required).
+* **Phase 2c - Allocate new pages:** If still insufficient, allocate new physical pages.
+* **Phase 2d - Forced wait (oldest first):** As a last resort, wait for the oldest events from other streams and remap those regions.
+
+* **Remapping:** Select free regions and **remap their pages** to the end of active space. The original region becomes a **dead zone** and is not reused.
+* **Event tracking:** Each free region records a CUDA event. Before reusing memory from another stream, VPMM either checks event completion (phase 2b) or waits (phase 2d).
+* **Access permissions:** After remapping, `cuMemSetAccess` is called to grant access to the new VA range.
 
 ## malloc(size) — Allocation Policy
 
-1. **Route by size:**
-   - If `size < page_size`: Use `cudaMallocAsync` (bypass pool).
-   - Otherwise: Round up to page size multiple and use pool.
+**Phase 1: Zero-cost attempts**
+1. **Find on current stream:** Search `free_regions` for a region from the current stream large enough to satisfy the request (**BestFit**: smallest that fits).
+2. **Find completed from other streams:** Search for a completed region (event already done) from other streams.
 
-2. **Pool allocation:**
-   - **Find:** Search `free_regions` for a region large enough (BestFit).
-   - **Defragment:** If none found, remap free regions until a region fits.
-   - **Request pages:** If still insufficient after defragmentation, calculate needed pages.
-   - **Acquire pages:** Lock global unused pool, take needed pages (or allocate new if insufficient).
-   - **Map pages:** Call `pool.add_pages()` to map them to virtual address space.
-   - **Retry allocation:** Now the pool has enough space.
+**Phase 2: Defragmentation (if Phase 1 fails)**
+3. **Defragment current stream:** Remap current stream's free regions (latest first) until enough space.
+4. **Defragment completed from others:** Remap completed regions from other streams (oldest first, but no wait needed).
+5. **Grow:** Allocate new pages and map them after `curr_end`.
+6. **Forced wait:** Wait for oldest events from other streams and remap those regions.
 
 Additional rules:
 
-* **BestFit:** Among multiple fitting free regions, choose the smallest that satisfies the request.
-* **Alignment:** All pool allocations are **rounded up** to page‑size multiples.
+* **Alignment:** All allocations are **rounded up** to page‑size multiples. A page is either entirely free or entirely used.
+* **Small Buffers:** If `size < page_size`, bypass the VM pool and call `cudaMallocAsync` instead (preserves compatibility; setting `VMM_PAGE_SIZE = usize::MAX` effectively disables the pool for typical sizes).
 
 ## free(ptr)
 
-1. **Determine allocation type:**
-   - Check `allocated_ptrs` (small buffers). If found, call `cudaFreeAsync`.
-   - Otherwise, call `pool.free_internal(ptr)`.
-
-2. **Check for stream cleanup:**
-   - If `is_empty()` (both small buffers and pool are empty):
-     - Synchronize the stream (`cudaStreamSynchronize`).
-     - Call `pool.reset()` to unmap all pages and get handles back.
-     - Return handles to global unused pool.
-     - Trim CUDA's async memory pool.
-     - Remove this stream's `MemoryManager` from the global map.
+* Look up `ptr` in `used_regions` to obtain the region size.
+* Record a CUDA event on the current stream to mark when this memory becomes safe to reuse.
+* Mark the region free in `free_regions` with the event and stream ID, and **coalesce** with adjacent free neighbors from the **same stream** (keeping the newest event).
 
 ## Status & Observability
 
@@ -251,13 +193,11 @@ Additional rules:
 * **Total GPU memory used by pages:** `pool.active_pages.len() * pool.page_size`
 * **Active VA extent:** `pool.curr_end - pool.base`
 * **Currently allocated (live) bytes:** `sum(pool.used_regions.values())`
-* **Currently freed (reusable) bytes:** `sum(pool.free_regions.values())`
+* **Currently freed (reusable) bytes:** `sum(pool.free_regions.values().map(|r| r.size))`
 
 ## Asynchrony & Streams
 
-* **Multi-stream support:** Each CUDA stream gets its own `MemoryManager` and `VirtualMemoryPool`.
-* **Page sharing:** Physical pages are shared across streams via the global unused pool.
-* **Thread safety:** All access to `GlobalMemoryManager` and shared pools is protected by mutexes.
-* **Stream isolation:** Allocations and frees on one stream don't block operations on other streams (except during page acquisition from the global pool).
-* **Automatic cleanup:** When a stream's usage drops to zero, its pages are returned to the global pool for reuse by other streams.
-* **Stream synchronization:** Required only when cleaning up an empty stream, ensuring all GPU work is complete before unmapping pages.
+* VPMM supports **multi-stream workloads** using `cudaStreamPerThread`.
+* A single shared `VirtualMemoryPool` serves all streams, using CUDA events to track cross-stream dependencies.
+* Memory freed by one stream can be reused by another stream with minimal synchronization overhead (opportunistic reuse of completed regions, forced waits only as last resort).
+* **Access permissions:** Set via `cuMemSetAccess` after remapping to ensure memory is accessible on the current device.

@@ -96,7 +96,7 @@ impl MemoryManager {
 impl Drop for MemoryManager {
     fn drop(&mut self) {
         let ptrs: Vec<*mut c_void> = self.allocated_ptrs.keys().map(|nn| nn.as_ptr()).collect();
-        for ptr in ptrs {
+        for &ptr in &ptrs {
             unsafe { self.d_free(ptr).unwrap() };
         }
         if !self.allocated_ptrs.is_empty() {
