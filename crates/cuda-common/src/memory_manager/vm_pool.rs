@@ -258,6 +258,8 @@ impl VirtualMemoryPool {
             stream_id
         );
 
+        let mut to_defrag = Vec::new();
+
         // 2.a. Defrag current stream (largest CudaEvent_t as a rough proxy for newest first)
         let mut current_stream_to_defrag: Vec<(CUdeviceptr, usize, CudaEventHandle)> = self
             .free_regions
@@ -277,8 +279,6 @@ impl VirtualMemoryPool {
             (self.curr_end, 0)
         };
 
-        current_stream_to_defrag.sort_by_key(|(_, _, event_handle)| Reverse(*event_handle));
-
         tracing::debug!(
             "Current stream {} trying to defragment from {:?}",
             stream_id,
@@ -288,14 +288,23 @@ impl VirtualMemoryPool {
                 .collect::<Vec<_>>()
         );
 
-        let mut to_defrag = Vec::new();
+        let current_stream_to_defrag_size = current_stream_to_defrag
+            .iter()
+            .map(|(_, size, _)| size)
+            .sum::<usize>();
+        if current_stream_to_defrag_size + accumulated_size < requested {
+            to_defrag.extend(current_stream_to_defrag.iter().map(|(ptr, _, _)| *ptr));
+            accumulated_size += current_stream_to_defrag_size;
+        } else {
+            current_stream_to_defrag.sort_by_key(|(_, _, event_handle)| Reverse(*event_handle));
 
-        for (ptr, size, _) in current_stream_to_defrag {
-            to_defrag.push(ptr);
-            accumulated_size += size;
-            if accumulated_size >= requested {
-                self.remap_regions(to_defrag, stream_id)?;
-                return Ok(Some(defrag_start));
+            for (ptr, size, _) in current_stream_to_defrag {
+                to_defrag.push(ptr);
+                accumulated_size += size;
+                if accumulated_size >= requested {
+                    self.remap_regions(to_defrag, stream_id)?;
+                    return Ok(Some(defrag_start));
+                }
             }
         }
 
@@ -328,14 +337,23 @@ impl VirtualMemoryPool {
                 .collect::<Vec<_>>()
         );
 
-        other_streams_to_defrag.sort_by_key(|(_, size)| Reverse(*size));
+        let other_streams_to_defrag_size = other_streams_to_defrag
+            .iter()
+            .map(|(_, size)| size)
+            .sum::<usize>();
+        if other_streams_to_defrag_size + accumulated_size < requested {
+            to_defrag.extend(other_streams_to_defrag.iter().map(|(ptr, _)| *ptr));
+            accumulated_size += other_streams_to_defrag_size;
+        } else {
+            other_streams_to_defrag.sort_by_key(|(_, size)| Reverse(*size));
 
-        for (ptr, size) in other_streams_to_defrag {
-            to_defrag.push(ptr);
-            accumulated_size += size;
-            if accumulated_size >= requested {
-                self.remap_regions(to_defrag, stream_id)?;
-                return Ok(Some(defrag_start));
+            for (ptr, size) in other_streams_to_defrag {
+                to_defrag.push(ptr);
+                accumulated_size += size;
+                if accumulated_size >= requested {
+                    self.remap_regions(to_defrag, stream_id)?;
+                    return Ok(Some(defrag_start));
+                }
             }
         }
         self.remap_regions(to_defrag, stream_id)?;
