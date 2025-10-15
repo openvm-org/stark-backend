@@ -143,10 +143,10 @@ impl VirtualMemoryPool {
 
     /// Phase 1: Try to find a suitable free region without defragmentation
     /// Returns address if found, None otherwise
-    fn find_best_fit(&self, requested: usize, stream_id: CudaStreamId) -> Option<CUdeviceptr> {
-        let candidates: Vec<(CUdeviceptr, &FreeRegion)> = self
+    fn find_best_fit(&mut self, requested: usize, stream_id: CudaStreamId) -> Option<CUdeviceptr> {
+        let mut candidates: Vec<(CUdeviceptr, &mut FreeRegion)> = self
             .free_regions
-            .iter()
+            .iter_mut()
             .filter(|(_, region)| region.size >= requested)
             .map(|(addr, region)| (*addr, region))
             .collect();
@@ -166,10 +166,13 @@ impl VirtualMemoryPool {
 
         // 1b. Try completed from other streams (smallest completed fit)
         candidates
-            .iter()
+            .iter_mut()
             .filter(|(_, region)| region.event.completed())
             .min_by_key(|(_, region)| region.size)
-            .map(|(addr, _)| *addr)
+            .map(|(addr, region)| {
+                region.stream_id = stream_id;
+                *addr
+            })
     }
 
     /// Frees a pointer and returns the size of the freed memory.
