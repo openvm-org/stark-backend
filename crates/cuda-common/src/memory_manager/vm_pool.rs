@@ -316,6 +316,13 @@ impl VirtualMemoryPool {
         //     self.free_regions.get_mut(&defrag_start).unwrap().stream_id = stream_id;
         // }
 
+        if let Some(region) = self.free_regions.get(&defrag_start) {
+            panic!(
+                "Free region at defrag_start={}, size={}, region.stream_id={}, stream_id={}",
+                defrag_start, region.size, region.stream_id, stream_id
+            );
+        }
+
         tracing::debug!(
             "Defragmented {} bytes from stream {}, other streams ready to borrow {:?}",
             accumulated_size,
