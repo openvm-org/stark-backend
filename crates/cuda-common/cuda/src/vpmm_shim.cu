@@ -50,13 +50,18 @@ int _vpmm_create_physical(int device_ordinal, size_t bytes, CUmemGenericAllocati
     return (int)cuMemCreate(out_h, bytes, &prop, 0);
 }
 
-int _vpmm_map_and_set_access(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h, int device_ordinal) {
-    CUresult r = cuMemMap(va, bytes, 0, h, 0);
-    if (r != CUDA_SUCCESS) return (int)r;
-    CUmemAccessDesc acc{};
-    acc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    acc.location.id = device_ordinal;
-    acc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+int _vpmm_map(CUdeviceptr va, size_t bytes, CUmemGenericAllocationHandle h) {
+    return (int)cuMemMap(va, bytes, 0, h, 0);
+}
+
+int _vpmm_set_access(CUdeviceptr va, size_t bytes, const int device_ordinal) {
+    const CUmemAccessDesc acc = {
+        .location = {
+            .type = CU_MEM_LOCATION_TYPE_DEVICE,
+            .id = device_ordinal
+        },
+        .flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+    };
     return (int)cuMemSetAccess(va, bytes, &acc, 1);
 }
 

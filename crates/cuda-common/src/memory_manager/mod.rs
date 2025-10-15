@@ -9,9 +9,7 @@ use bytesize::ByteSize;
 
 use crate::{
     error::{check, MemoryError},
-    stream::{
-        cudaStreamPerThread, cudaStream_t, current_stream_id, current_stream_sync, CudaStreamId,
-    },
+    stream::{cudaStreamPerThread, cudaStream_t, current_stream_id},
 };
 
 mod cuda;
@@ -22,21 +20,14 @@ use vm_pool::VirtualMemoryPool;
 extern "C" {
     fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;
     fn cudaFreeAsync(dev_ptr: *mut c_void, stream: cudaStream_t) -> i32;
-    fn cudaDeviceGetDefaultMemPool(memPool: *mut *mut c_void, device: i32) -> i32;
-    fn cudaMemPoolTrimTo(pool: *mut c_void, minBytesToKeep: usize) -> i32;
 }
 
-static MM_MAP: OnceLock<Mutex<HashMap<CudaStreamId, MemoryManager>>> = OnceLock::new();
+static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
 
 #[ctor::ctor]
 fn init() {
-    let _ = MM_MAP.set(Mutex::new(HashMap::new()));
-}
-
-#[inline]
-fn stream_mm_mut(map: &mut HashMap<CudaStreamId, MemoryManager>) -> &mut MemoryManager {
-    let key = current_stream_id().unwrap();
-    map.entry(key).or_default()
+    let _ = MEMORY_MANAGER.set(Mutex::new(MemoryManager::new()));
+    tracing::info!("Memory manager initialized at program start");
 }
 
 pub struct MemoryManager {
@@ -62,7 +53,7 @@ impl MemoryManager {
         }
     }
 
-    pub fn d_malloc(&mut self, size: usize) -> Result<*mut c_void, MemoryError> {
+    fn d_malloc(&mut self, size: usize) -> Result<*mut c_void, MemoryError> {
         assert!(size != 0, "Requested size must be non-zero");
 
         let mut tracked_size = size;
@@ -74,7 +65,8 @@ impl MemoryManager {
             Ok(ptr)
         } else {
             tracked_size = size.next_multiple_of(self.pool.page_size);
-            self.pool.malloc_internal(tracked_size)
+            self.pool
+                .malloc_internal(tracked_size, current_stream_id()?)
         };
 
         self.current_size += tracked_size;
@@ -87,48 +79,32 @@ impl MemoryManager {
     /// # Safety
     /// The pointer `ptr` must be a valid, previously allocated device pointer.
     /// The caller must ensure that `ptr` is not used after this function is called.
-    pub unsafe fn d_free(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
+    unsafe fn d_free(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 
         if let Some(size) = self.allocated_ptrs.remove(&nn) {
             self.current_size -= size;
             check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })?;
         } else {
-            self.current_size -= self.pool.free_internal(ptr)?;
+            self.current_size -= self.pool.free_internal(ptr, current_stream_id()?)?;
         }
 
         Ok(())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.allocated_ptrs.is_empty() && self.pool.is_empty()
-    }
-
-    fn trim_async_pool(&self) {
-        unsafe {
-            let mut pool: *mut c_void = std::ptr::null_mut();
-            if cudaDeviceGetDefaultMemPool(&mut pool, self.pool.device_id) == 0 {
-                cudaMemPoolTrimTo(pool, 0);
-            }
-        }
     }
 }
 
 impl Drop for MemoryManager {
     fn drop(&mut self) {
         let ptrs: Vec<*mut c_void> = self.allocated_ptrs.keys().map(|nn| nn.as_ptr()).collect();
-
         for &ptr in &ptrs {
             unsafe { self.d_free(ptr).unwrap() };
         }
-
         if !self.allocated_ptrs.is_empty() {
             println!(
                 "Error: {} allocations were automatically freed on MemoryManager drop",
                 self.allocated_ptrs.len()
             );
         }
-        self.trim_async_pool();
     }
 }
 
@@ -139,39 +115,18 @@ impl Default for MemoryManager {
 }
 
 pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
-    let mm_map = MM_MAP.get().ok_or(MemoryError::NotInitialized)?;
-    let mut mm_map = mm_map.lock().map_err(|_| MemoryError::LockError)?;
-    stream_mm_mut(&mut mm_map).d_malloc(size)
+    let manager = MEMORY_MANAGER.get().unwrap();
+    let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
+    manager.d_malloc(size)
 }
 
 /// # Safety
 /// The pointer `ptr` must be a valid, previously allocated device pointer.
 /// The caller must ensure that `ptr` is not used after this function is called.
-/// The caller must ensure that the pointer is allocated on the current stream.
 pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
-    let mm_map = MM_MAP.get().ok_or(MemoryError::NotInitialized)?;
-    let mut mm_map = mm_map.lock().map_err(|_| MemoryError::LockError)?;
-    let stream_id = current_stream_id()?;
-
-    if let Some(mm) = mm_map.get_mut(&stream_id) {
-        mm.d_free(ptr)?;
-        // Auto-cleanup pool if everything is freed
-        if mm.is_empty() {
-            current_stream_sync()?;
-            tracing::info!(
-                "GPU mem ({}): Auto-cleanup pool {}",
-                stream_id,
-                ByteSize::b(mm.pool.memory_usage() as u64)
-            );
-            mm_map.remove(&stream_id);
-        }
-    } else {
-        panic!(
-            "Attempting to free ptr {:?} on stream {} which has no MemoryManager.",
-            ptr, stream_id
-        );
-    }
-    Ok(())
+    let manager = MEMORY_MANAGER.get().unwrap();
+    let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
+    manager.d_free(ptr)
 }
 
 #[derive(Debug, Clone)]
@@ -182,13 +137,10 @@ pub struct MemTracker {
 
 impl MemTracker {
     pub fn start(label: &'static str) -> Self {
-        let current = MM_MAP
+        let current = MEMORY_MANAGER
             .get()
             .and_then(|m| m.lock().ok())
-            .and_then(|mm_map| {
-                let id = current_stream_id().unwrap();
-                mm_map.get(&id).map(|mm| mm.current_size)
-            })
+            .map(|m| m.current_size)
             .unwrap_or(0);
 
         Self { current, label }
@@ -196,21 +148,17 @@ impl MemTracker {
 
     #[inline]
     pub fn tracing_info(&self, msg: impl Into<Option<&'static str>>) {
-        let Some(mm_map_guard) = MM_MAP.get().and_then(|m| m.lock().ok()) else {
+        let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
             tracing::error!("Memory manager not available");
             return;
         };
-        let id = current_stream_id().unwrap();
-        let (current, peak, pool_usage) = if let Some(mm) = mm_map_guard.get(&id) {
-            (mm.current_size, mm.max_used_size, mm.pool.memory_usage())
-        } else {
-            (0, 0, 0)
-        };
+        let current = manager.current_size;
+        let peak = manager.max_used_size;
         let used = current as isize - self.current as isize;
         let sign = if used >= 0 { "+" } else { "-" };
+        let pool_usage = manager.pool.memory_usage();
         tracing::info!(
-            "GPU mem ({}): used={}{}, current={}, peak={}, in pool={} ({})",
-            id,
+            "GPU mem: used={}{}, current={}, peak={}, in pool={} ({})",
             sign,
             ByteSize::b(used.unsigned_abs() as u64),
             ByteSize::b(current as u64),
@@ -222,11 +170,8 @@ impl MemTracker {
     }
 
     pub fn reset_peak(&mut self) {
-        if let Some(mut mm_map) = MM_MAP.get().and_then(|m| m.lock().ok()) {
-            let id = current_stream_id().unwrap();
-            if let Some(mm) = mm_map.get_mut(&id) {
-                mm.max_used_size = mm.current_size;
-            }
+        if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
+            manager.max_used_size = manager.current_size;
         }
     }
 }

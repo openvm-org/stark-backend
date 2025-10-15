@@ -15,12 +15,8 @@ extern "C" {
         bytes: usize,
         out_h: *mut CUmemGenericAllocationHandle,
     ) -> i32;
-    fn _vpmm_map_and_set_access(
-        va: CUdeviceptr,
-        bytes: usize,
-        h: CUmemGenericAllocationHandle,
-        device_ordinal: i32,
-    ) -> i32;
+    fn _vpmm_map(va: CUdeviceptr, bytes: usize, h: CUmemGenericAllocationHandle) -> i32;
+    fn _vpmm_set_access(va: CUdeviceptr, bytes: usize, device_ordinal: i32) -> i32;
     fn _vpmm_unmap(va: CUdeviceptr, bytes: usize) -> i32;
     fn _vpmm_release(h: CUmemGenericAllocationHandle) -> i32;
 }
@@ -59,13 +55,20 @@ pub(super) unsafe fn vpmm_create_physical(
     Ok(h)
 }
 
-pub(super) unsafe fn vpmm_map_and_set_access(
+pub(super) unsafe fn vpmm_map(
     va: CUdeviceptr,
     bytes: usize,
     h: CUmemGenericAllocationHandle,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_vpmm_map(va, bytes, h))
+}
+
+pub(super) unsafe fn vpmm_set_access(
+    va: CUdeviceptr,
+    bytes: usize,
     device_ordinal: i32,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_vpmm_map_and_set_access(va, bytes, h, device_ordinal))
+    CudaError::from_result(_vpmm_set_access(va, bytes, device_ordinal))
 }
 
 pub(super) unsafe fn vpmm_unmap(va: CUdeviceptr, bytes: usize) -> Result<(), CudaError> {
