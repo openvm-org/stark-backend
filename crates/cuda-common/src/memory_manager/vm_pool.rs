@@ -201,15 +201,6 @@ impl VirtualMemoryPool {
         event: Option<CudaEvent>,
         stream_id: CudaStreamId,
     ) {
-        let mut event = match event {
-            Some(e) => e,
-            None => {
-                let event = CudaEvent::new().unwrap();
-                event.record_on_this().unwrap();
-                event
-            }
-        };
-
         let mut coalesced = false;
 
         // Potential merge with next neighbor
@@ -231,11 +222,14 @@ impl VirtualMemoryPool {
         }
 
         // If we coalesced regions, record a new event to capture the current point in the stream
-        if coalesced {
-            let new_event = CudaEvent::new().unwrap();
-            new_event.record_on_this().unwrap();
-            event = new_event;
-        }
+        let event = match (event, coalesced) {
+            (Some(e), false) => e,
+            _ => {
+                let event = CudaEvent::new().unwrap();
+                event.record_on_this().unwrap();
+                event
+            }
+        };
 
         self.free_regions.insert(
             ptr,
