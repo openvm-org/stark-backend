@@ -210,27 +210,33 @@ impl VirtualMemoryPool {
             }
         };
 
+        let mut coalesced = false;
+
         // Potential merge with next neighbor
         if let Some((&next_ptr, next_region)) = self.free_regions.range(ptr + 1..).next() {
             if ptr + size as u64 == next_ptr && next_region.stream_id == stream_id {
                 let next_region = self.free_regions.remove(&next_ptr).unwrap();
-                if next_region.event.as_raw_handle() > event.as_raw_handle() {
-                    event = next_region.event;
-                }
                 size += next_region.size;
+                coalesced = true;
             }
         }
         // Potential merge with previous neighbor
         if let Some((&prev_ptr, prev_region)) = self.free_regions.range(..ptr).next_back() {
             if prev_ptr + prev_region.size as u64 == ptr && prev_region.stream_id == stream_id {
                 let prev_region = self.free_regions.remove(&prev_ptr).unwrap();
-                if prev_region.event.as_raw_handle() > event.as_raw_handle() {
-                    event = prev_region.event;
-                }
                 ptr = prev_ptr;
                 size += prev_region.size;
+                coalesced = true;
             }
         }
+
+        // If we coalesced regions, record a new event to capture the current point in the stream
+        if coalesced {
+            let new_event = CudaEvent::new().unwrap();
+            new_event.record_on_this().unwrap();
+            event = new_event;
+        }
+
         self.free_regions.insert(
             ptr,
             FreeRegion {
@@ -258,7 +264,7 @@ impl VirtualMemoryPool {
             stream_id
         );
 
-        // 2.a. Defrag current stream (newest first)
+        // 2.a. Defrag current stream (largest CudaEvent_t as a rough proxy for newest first)
         let mut current_stream_to_defrag: Vec<(CUdeviceptr, usize, CudaEventHandle)> = self
             .free_regions
             .iter()
@@ -371,7 +377,8 @@ impl VirtualMemoryPool {
         unsafe { vpmm_set_access(allocate_start, allocated_size, self.device_id)? };
         self.free_region_insert(allocate_start, allocated_size, None, stream_id);
 
-        // 2.d. Try to wait and defragment again (oldest first)
+        // 2.d. Try to wait and defragment again (smallest CudaEvent_t first as a rough proxy for
+        // oldest event)
         if accumulated_size < requested {
             let mut all_streams_to_defrag: Vec<(CUdeviceptr, usize, CudaEventHandle)> = self
                 .free_regions
@@ -421,6 +428,7 @@ impl VirtualMemoryPool {
         if regions.is_empty() {
             return Ok(());
         }
+        let mut coalesced = false;
         let mut event: Option<CudaEvent> = None;
         let new_region_start = self.curr_end;
         for region_addr in regions {
@@ -429,12 +437,10 @@ impl VirtualMemoryPool {
                 .remove(&region_addr)
                 .ok_or(MemoryError::InvalidPointer)?;
             if region.stream_id == stream_id {
-                let region_handle = region.event.as_raw_handle();
-                if event
-                    .as_ref()
-                    .is_none_or(|e| region_handle > e.as_raw_handle())
-                {
+                if event.as_ref().is_none() {
                     event = Some(region.event);
+                } else {
+                    coalesced = true
                 }
             }
             let num_pages = region.size / self.page_size;
@@ -450,6 +456,11 @@ impl VirtualMemoryPool {
             }
         }
         let new_region_size = (self.curr_end - new_region_start) as usize;
+
+        // If we coalesced regions, record a new event to capture the current point in the stream
+        if coalesced {
+            event = None;
+        }
         unsafe { vpmm_set_access(new_region_start, new_region_size, self.device_id)? };
         self.free_region_insert(new_region_start, new_region_size, event, stream_id);
         Ok(())
