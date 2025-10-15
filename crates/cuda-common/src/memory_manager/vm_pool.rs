@@ -271,16 +271,15 @@ impl VirtualMemoryPool {
             .collect();
 
         // If last free region is at the virtual end, use it as base for defragmentation
-        let (mut defrag_start, mut accumulated_size) = (self.curr_end, 0);
-        //     if current_stream_to_defrag
-        //     .last()
-        //     .is_some_and(|(addr, size, _)| *addr + *size as u64 == self.curr_end)
-        // {
-        //     let (addr, size, _) = current_stream_to_defrag.pop().unwrap();
-        //     (addr, size)
-        // } else {
-        //     (self.curr_end, 0)
-        // };
+        let (mut defrag_start, mut accumulated_size) = if current_stream_to_defrag
+            .last()
+            .is_some_and(|(addr, size, _)| *addr + *size as u64 == self.curr_end)
+        {
+            let (addr, size, _) = current_stream_to_defrag.pop().unwrap();
+            (addr, size)
+        } else {
+            (self.curr_end, 0)
+        };
 
         current_stream_to_defrag.sort_by_key(|(_, _, event_handle)| Reverse(*event_handle));
 
@@ -314,19 +313,19 @@ impl VirtualMemoryPool {
             .collect();
 
         // If last free region is at the virtual end, take it and use as base for defragmentation
-        // if accumulated_size == 0
-        //     && other_streams_to_defrag
-        //         .last()
-        //         .is_some_and(|(addr, size)| *addr + *size as u64 == self.curr_end)
-        // {
-        //     (defrag_start, accumulated_size) = other_streams_to_defrag.pop().unwrap();
-        //     self.free_regions.get_mut(&defrag_start).unwrap().stream_id = stream_id;
-        // }
+        if accumulated_size == 0
+            && other_streams_to_defrag
+                .last()
+                .is_some_and(|(addr, size)| *addr + *size as u64 == self.curr_end)
+        {
+            (defrag_start, accumulated_size) = other_streams_to_defrag.pop().unwrap();
+            self.free_regions.get_mut(&defrag_start).unwrap().stream_id = stream_id;
+        }
 
-        if let Some(region) = self.free_regions.get(&defrag_start) {
+        if let Some(region) = self.free_regions.get(&self.curr_end) {
             panic!(
-                "Free region at defrag_start={}, size={}, region.stream_id={}, stream_id={}",
-                defrag_start, region.size, region.stream_id, stream_id
+                "Free region at curr_end={}, size={}, region.stream_id={}, stream_id={}",
+                self.curr_end, region.size, region.stream_id, stream_id
             );
         }
 
