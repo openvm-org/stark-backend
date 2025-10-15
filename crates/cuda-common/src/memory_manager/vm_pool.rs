@@ -245,6 +245,10 @@ impl VirtualMemoryPool {
         requested: usize,
         stream_id: CudaStreamId,
     ) -> Result<Option<CUdeviceptr>, MemoryError> {
+        println!(
+            "Defragging or creating new pages: requested={}, stream_id={}",
+            requested, stream_id
+        );
         if requested == 0 {
             return Ok(None);
         }
