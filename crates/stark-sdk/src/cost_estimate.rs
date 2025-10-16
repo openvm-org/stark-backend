@@ -83,10 +83,7 @@ impl FriOpenInputCostEstimate {
         mmcs.num_compress *= fri_params.num_queries;
         mmcs.num_f_to_hash *= fri_params.num_queries;
         let num_ro_eval = width * num_points * fri_params.num_queries;
-        Self {
-            mmcs: MmcsVerifyBatchCostEstimate::from_dim(width, max_log_height),
-            num_ro_eval,
-        }
+        Self { mmcs, num_ro_eval }
     }
 }
 
