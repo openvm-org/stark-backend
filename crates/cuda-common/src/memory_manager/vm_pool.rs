@@ -397,7 +397,9 @@ impl VirtualMemoryPool {
                 .iter()
                 .map(|(addr, r)| (*addr, r.size, r.event.as_raw_handle()))
                 .collect();
-            // Remove the last free region and check it is the one at the virtual end
+            // Remove the last free region and check it is the one at the virtual end: this free
+            // region is the one just inserted by self.free_region_insert above, so we should not
+            // remap it.
             assert!(all_streams_to_defrag
                 .pop()
                 .is_some_and(|(addr, _, _)| addr == defrag_start));
