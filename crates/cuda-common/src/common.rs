@@ -20,12 +20,12 @@ pub fn get_device() -> Result<i32, CudaError> {
 }
 
 pub fn set_device() -> Result<i32, CudaError> {
-    let device = get_device()?;
+    let mut device = 0;
     unsafe {
         // 1. Create a context
         check(cudaFree(std::ptr::null_mut()))?;
-
         // 2. Set the device
+        check(cudaGetDevice(&mut device))?;
         check(cudaSetDevice(device))?;
     }
     Ok(device)
