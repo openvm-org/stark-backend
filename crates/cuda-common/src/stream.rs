@@ -89,11 +89,35 @@ pub enum CudaEventStatus {
 
 impl PartialEq for CudaEventStatus {
     fn eq(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (CudaEventStatus::Completed, CudaEventStatus::Completed)
-                | (CudaEventStatus::NotReady, CudaEventStatus::NotReady)
-        )
+        use CudaEventStatus::*;
+        matches!((self, other), (Completed, Completed) | (NotReady, NotReady))
+    }
+}
+
+impl Eq for CudaEventStatus {}
+
+impl PartialOrd for CudaEventStatus {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// Completed < NotReady < Error
+impl Ord for CudaEventStatus {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        use CudaEventStatus::*;
+
+        match (self, other) {
+            (Completed, Completed) => Ordering::Equal,
+            (Completed, _) => Ordering::Less,
+            (_, Completed) => Ordering::Greater,
+            (NotReady, NotReady) => Ordering::Equal,
+            (NotReady, Error(_)) => Ordering::Less,
+            (Error(_), NotReady) => Ordering::Greater,
+            (Error(_), Error(_)) => Ordering::Equal,
+        }
     }
 }
 

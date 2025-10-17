@@ -57,9 +57,10 @@ pub(super) struct VirtualMemoryPool {
     free_num: usize,
 
     // Pending events to destroy after "wait for event" is finished
+    // key: free_num as VMPool free state; value: non-completed events from other streams
     pending_events: Arc<Mutex<HashMap<usize, Vec<Arc<CudaEvent>>>>>,
 
-    // Active allocations
+    // Active allocations: (ptr, size)
     used_regions: HashMap<CUdeviceptr, usize>,
 
     // Granularity size: (page % 2MB must be 0)
@@ -321,7 +322,7 @@ impl VirtualMemoryPool {
             }
         }
 
-        // 2.b. Defrag other streams (oldest first)
+        // 2.b. Defrag other streams (completed, oldest first)
         let mut other_streams_to_defrag: Vec<(CUdeviceptr, usize, Arc<CudaEvent>, usize)> = self
             .free_regions
             .iter()
@@ -351,13 +352,13 @@ impl VirtualMemoryPool {
                 .collect::<Vec<_>>()
         );
 
-        other_streams_to_defrag.sort_by_key(|(_, _, _, free_id)| *free_id);
+        other_streams_to_defrag.sort_by_key(|(_, _, event, free_id)| (event.status(), *free_id));
 
         let mut events_to_wait = Vec::new();
         for (ptr, size, event, _) in other_streams_to_defrag {
             if !event.completed() {
-                events_to_wait.push(event.clone());
                 default_stream_wait(&event)?;
+                events_to_wait.push(event);
             }
             to_defrag.push(ptr);
             accumulated_size += size;
