@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     config::{StarkGenericConfig, Val},
     engine::VerificationData,
     p3_matrix::dense::RowMajorMatrix,
-    prover::{hal::DeviceDataTransporter, types::AirProvingContext},
+    prover::{types::AirProvingContext, DeviceDataTransporter},
     verifier::VerificationError,
     AirRef,
 };
