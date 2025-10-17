@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::prover::{hal::ProverBackend, types::AirProvingContext};
+use crate::prover::{types::AirProvingContext, ProverBackend};
 
 /// A chip is a [ProverBackend]-specific object that converts execution logs (also referred to as
 /// records) into a trace matrix.
