@@ -108,6 +108,7 @@ struct FreeRegion {
     size: usize,
     event: CudaEvent,        // Event marking when this region was freed
     stream_id: CudaStreamId, // Stream that freed this region
+    id: usize,               // Creation order for temporal tracking
 }
 
 pub(super) struct VirtualMemoryPool {
@@ -121,6 +122,12 @@ pub(super) struct VirtualMemoryPool {
 
     // Free regions in virtual space (sorted by address; non-adjacent)
     free_regions: BTreeMap<CUdeviceptr, FreeRegion>,
+
+    // Number of free calls (used to assign ids to free regions)
+    free_num: usize,
+
+    // Pending events to destroy after "wait for event" is finished
+    pending_events: Arc<Mutex<HashMap<usize, Vec<Arc<CudaEvent>>>>>,
 
     // Active allocations
     used_regions: HashMap<CUdeviceptr, usize>,
@@ -155,12 +162,12 @@ Allocations occur during initialization (preallocation) and on‑demand when the
 Triggered when no free region can satisfy a request. Defragmentation proceeds in phases to minimize cross-stream synchronization:
 
 * **Phase 2a - Current stream (latest first):** Remap free regions from the requesting stream, prioritizing latest freed regions (newest events) to minimize wasted work.
-* **Phase 2b - Completed other streams:** Opportunistically reuse free regions from other streams whose events have already completed (no wait required).
-* **Phase 2c - Allocate new pages:** If still insufficient, allocate new physical pages.
-* **Phase 2d - Forced wait (oldest first):** As a last resort, wait for the oldest events from other streams and remap those regions.
+* **Phase 2b - Wait on other streams (oldest first):** Wait for the oldest events from other streams first (most likely to have completed) and remap those regions. Uses `cudaStreamWaitEvent` to introduce cross-stream dependencies, with `cudaLaunchHostFunc` to manage event lifetimes asynchronously.
+* **Phase 2c - Allocate new pages:** If still insufficient after waiting on all available regions, allocate new physical pages.
 
 * **Remapping:** Select free regions and **remap their pages** to the end of active space. The original region becomes a **dead zone** and is not reused.
-* **Event tracking:** Each free region records a CUDA event. Before reusing memory from another stream, VPMM either checks event completion (phase 2b) or waits (phase 2d).
+* **Event tracking:** Each free region records a CUDA event. Before reusing memory from another stream, VPMM either checks event completion or waits.
+* **Event lifetime management:** Events are wrapped in `Arc<CudaEvent>` for shared ownership. When waiting on events from other streams, VPMM clones the Arc and stores it in `pending_events` (keyed by `free_num`). After issuing `cudaStreamWaitEvent`, it schedules a `cudaLaunchHostFunc` callback that removes the Arc clones once the stream has processed the wait. This ensures events are not destroyed while GPU streams are waiting on them, avoiding segmentation faults.
 * **Access permissions:** After remapping, `cuMemSetAccess` is called to grant access to the new VA range.
 
 ## malloc(size) — Allocation Policy
@@ -170,10 +177,9 @@ Triggered when no free region can satisfy a request. Defragmentation proceeds in
 2. **Find completed from other streams:** Search for a completed region (event already done) from other streams.
 
 **Phase 2: Defragmentation (if Phase 1 fails)**
-3. **Defragment current stream:** Remap current stream's free regions (latest first) until enough space.
-4. **Defragment completed from others:** Remap completed regions from other streams (oldest first, but no wait needed).
+3. **Defragment current stream:** Remap current stream's free regions (newest first) until enough space.
+4. **Wait on other streams:** Issue `cudaStreamWaitEvent` on events from other streams (oldest first, most likely completed). Use `cudaLaunchHostFunc` to schedule async cleanup of event references.
 5. **Grow:** Allocate new pages and map them after `curr_end`.
-6. **Forced wait:** Wait for oldest events from other streams and remap those regions.
 
 Additional rules:
 
@@ -199,5 +205,5 @@ Additional rules:
 
 * VPMM supports **multi-stream workloads** using `cudaStreamPerThread`.
 * A single shared `VirtualMemoryPool` serves all streams, using CUDA events to track cross-stream dependencies.
-* Memory freed by one stream can be reused by another stream with minimal synchronization overhead (opportunistic reuse of completed regions, forced waits only as last resort).
+* Memory freed by one stream can be reused by another stream with minimal synchronization overhead (opportunistic reuse of completed regions, forced async waits only if needed).
 * **Access permissions:** Set via `cuMemSetAccess` after remapping to ensure memory is accessible on the current device.
