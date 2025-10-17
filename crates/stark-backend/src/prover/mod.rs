@@ -20,6 +20,8 @@ pub mod helper; // [jpw]: maybe this should be moved to sdk
 /// Metrics about trace and other statistics related to prover performance
 pub mod metrics;
 
+pub use hal::*;
+
 /// Trait for STARK/SNARK proving at the highest abstraction level.
 pub trait Prover {
     type ProvingKeyView<'a>
