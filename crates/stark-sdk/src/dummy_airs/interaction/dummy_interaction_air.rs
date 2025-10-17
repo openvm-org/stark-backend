@@ -17,8 +17,8 @@ use openvm_stark_backend::{
     p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::{
         cpu::{CpuBackend, CpuDevice},
-        hal::TraceCommitter,
         types::{AirProvingContext, CommittedTraceData},
+        TraceCommitter,
     },
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
     AirRef, Chip, ChipUsageGetter,
