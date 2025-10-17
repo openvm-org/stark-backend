@@ -266,7 +266,7 @@ impl VirtualMemoryPool {
         }
 
         tracing::debug!(
-            "Defragging or creating new pages: requested={}, stream_id={}",
+            "VPMM: Defragging or creating new pages: requested={}, stream_id={}",
             ByteSize::b(requested as u64),
             stream_id
         );
@@ -293,7 +293,7 @@ impl VirtualMemoryPool {
         };
 
         tracing::debug!(
-            "Current stream {} trying to defragment from {:?}",
+            "VPMM: Current stream {} trying to defragment from {:?}",
             stream_id,
             current_stream_to_defrag
                 .iter()
@@ -342,7 +342,7 @@ impl VirtualMemoryPool {
         }
 
         tracing::debug!(
-            "Defragmented {} bytes from stream {}, other streams ready to borrow {:?}",
+            "VPMM: Defragmented {} bytes from stream {}, other streams ready to borrow {:?}",
             ByteSize::b(accumulated_size as u64),
             stream_id,
             other_streams_to_defrag
@@ -351,41 +351,45 @@ impl VirtualMemoryPool {
                 .collect::<Vec<_>>()
         );
 
-        let other_streams_to_defrag_size = other_streams_to_defrag
-            .iter()
-            .map(|(_, size, _, _)| size)
-            .sum::<usize>();
-        if other_streams_to_defrag_size + accumulated_size < requested {
-            to_defrag.extend(other_streams_to_defrag.iter().map(|(ptr, _, _, _)| *ptr));
-            accumulated_size += other_streams_to_defrag_size;
-        } else {
-            other_streams_to_defrag.sort_by_key(|(_, _, _, free_id)| *free_id);
+        other_streams_to_defrag.sort_by_key(|(_, _, _, free_id)| *free_id);
 
-            let mut events_to_wait = Vec::new();
-            for (ptr, size, event, _) in other_streams_to_defrag {
-                if !event.completed() {
-                    events_to_wait.push(event.clone());
-                    default_stream_wait(&event)?;
-                }
-                to_defrag.push(ptr);
-                accumulated_size += size;
-                if accumulated_size >= requested {
-                    self.remap_regions(to_defrag, stream_id)?;
-                    return Ok(Some(defrag_start));
-                }
+        let mut events_to_wait = Vec::new();
+        for (ptr, size, event, _) in other_streams_to_defrag {
+            if !event.completed() {
+                events_to_wait.push(event.clone());
+                default_stream_wait(&event)?;
             }
+            to_defrag.push(ptr);
+            accumulated_size += size;
+            if accumulated_size >= requested {
+                break;
+            }
+        }
+        if !events_to_wait.is_empty() {
             // Destroy events only when "wait for event" is finished
-            let mut pending = self.pending_events.lock().unwrap();
-            pending.insert(self.free_num, events_to_wait);
+            tracing::debug!(
+                "VPMM: Async call {} events to destroy on stream {}",
+                events_to_wait.len(),
+                stream_id
+            );
+            self.pending_events
+                .lock()
+                .unwrap()
+                .insert(self.free_num, events_to_wait);
             unsafe {
                 cudaLaunchHostFunc(
                     cudaStreamPerThread,
                     Some(pending_events_destroy_callback),
-                    Box::into_raw(Box::new((self.free_num, pending))) as *mut c_void,
+                    Box::into_raw(Box::new((self.free_num, self.pending_events.clone())))
+                        as *mut c_void,
                 )
             };
         }
+
         self.remap_regions(to_defrag, stream_id)?;
+        if accumulated_size >= requested {
+            return Ok(Some(defrag_start));
+        }
 
         // 2.c. Create new pages
         let allocate_start = self.curr_end;
