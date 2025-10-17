@@ -122,7 +122,7 @@ impl<F: Field> SymbolicExpression<F> {
             SymbolicExpression::Variable(v) => v.degree_multiple(),
             SymbolicExpression::IsFirstRow => 1,
             SymbolicExpression::IsLastRow => 1,
-            SymbolicExpression::IsTransition => 0,
+            SymbolicExpression::IsTransition => 1,
             SymbolicExpression::Constant(_) => 0,
             SymbolicExpression::Add {
                 degree_multiple, ..
