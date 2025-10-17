@@ -10,9 +10,8 @@ use crate::{
     proof::{OpeningProof, Proof},
     prover::{
         coordinator::Coordinator,
-        hal::{DeviceDataTransporter, ProverBackend, ProverDevice},
         types::{AirProofRawInput, AirProvingContext, DeviceMultiStarkProvingKey, ProvingContext},
-        Prover,
+        DeviceDataTransporter, Prover, ProverBackend, ProverDevice,
     },
     verifier::{MultiTraceStarkVerifier, VerificationError},
     AirRef,
