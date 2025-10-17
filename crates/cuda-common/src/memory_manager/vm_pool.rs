@@ -260,7 +260,7 @@ impl VirtualMemoryPool {
 
         let mut to_defrag = Vec::new();
 
-        // 2.a. Defrag current stream
+        // 2.a. Defrag current stream (newest first)
         let mut current_stream_to_defrag: Vec<(CUdeviceptr, usize, usize)> = self
             .free_regions
             .iter()
@@ -308,7 +308,7 @@ impl VirtualMemoryPool {
             }
         }
 
-        // 2.b. Defrag other streams (ordered by oldest free region)
+        // 2.b. Defrag other streams (oldest first)
         let mut other_streams_to_defrag: Vec<(CUdeviceptr, usize, CudaEvent, usize)> = self
             .free_regions
             .iter()
@@ -349,7 +349,9 @@ impl VirtualMemoryPool {
             other_streams_to_defrag.sort_by_key(|(_, _, _, free_id)| *free_id);
 
             for (ptr, size, event, _) in other_streams_to_defrag {
-                default_stream_wait(&event)?;
+                if !event.completed() {
+                    default_stream_wait(&event)?;
+                }
                 to_defrag.push(ptr);
                 accumulated_size += size;
                 if accumulated_size >= requested {
