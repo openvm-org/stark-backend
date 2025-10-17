@@ -4,6 +4,7 @@ use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap},
     ffi::c_void,
+    sync::{Arc, Mutex},
 };
 
 use bytesize::ByteSize;
@@ -12,18 +13,26 @@ use super::cuda::*;
 use crate::{
     common::set_device,
     error::MemoryError,
-    stream::{current_stream_id, default_stream_wait, CudaEvent, CudaStreamId},
+    stream::{
+        cudaStreamPerThread, cudaStream_t, current_stream_id, default_stream_wait, CudaEvent,
+        CudaStreamId,
+    },
 };
 
 #[link(name = "cudart")]
 extern "C" {
     fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
+    fn cudaLaunchHostFunc(
+        stream: cudaStream_t,
+        fn_: Option<unsafe extern "C" fn(*mut c_void)>,
+        user_data: *mut c_void,
+    ) -> i32;
 }
 
 #[derive(Debug, Clone)]
 struct FreeRegion {
     size: usize,
-    event: CudaEvent,
+    event: Arc<CudaEvent>,
     stream_id: CudaStreamId,
     id: usize,
 }
@@ -46,6 +55,9 @@ pub(super) struct VirtualMemoryPool {
 
     // Number of free calls (used to assign ids to free regions)
     free_num: usize,
+
+    // Pending events to destroy after "wait for event" is finished
+    pending_events: Arc<Mutex<HashMap<usize, Vec<Arc<CudaEvent>>>>>,
 
     // Active allocations
     used_regions: HashMap<CUdeviceptr, usize>,
@@ -96,6 +108,7 @@ impl VirtualMemoryPool {
             active_pages: HashMap::new(),
             free_regions: BTreeMap::new(),
             free_num: 0,
+            pending_events: Arc::new(Mutex::new(HashMap::new())),
             used_regions: HashMap::new(),
             page_size,
             device_id,
@@ -224,7 +237,7 @@ impl VirtualMemoryPool {
             }
         }
         // Record a new event to capture the current point in the stream
-        let event = CudaEvent::new().unwrap();
+        let event = Arc::new(CudaEvent::new().unwrap());
         event.record_on_this().unwrap();
         // Assign an id to the free region
         let id = self.free_num;
@@ -309,7 +322,7 @@ impl VirtualMemoryPool {
         }
 
         // 2.b. Defrag other streams (oldest first)
-        let mut other_streams_to_defrag: Vec<(CUdeviceptr, usize, CudaEvent, usize)> = self
+        let mut other_streams_to_defrag: Vec<(CUdeviceptr, usize, Arc<CudaEvent>, usize)> = self
             .free_regions
             .iter()
             .filter(|(_, r)| r.stream_id != stream_id)
@@ -348,8 +361,10 @@ impl VirtualMemoryPool {
         } else {
             other_streams_to_defrag.sort_by_key(|(_, _, _, free_id)| *free_id);
 
+            let mut events_to_wait = Vec::new();
             for (ptr, size, event, _) in other_streams_to_defrag {
                 if !event.completed() {
+                    events_to_wait.push(event.clone());
                     default_stream_wait(&event)?;
                 }
                 to_defrag.push(ptr);
@@ -359,6 +374,16 @@ impl VirtualMemoryPool {
                     return Ok(Some(defrag_start));
                 }
             }
+            // Destroy events only when "wait for event" is finished
+            let mut pending = self.pending_events.lock().unwrap();
+            pending.insert(self.free_num, events_to_wait);
+            unsafe {
+                cudaLaunchHostFunc(
+                    cudaStreamPerThread,
+                    Some(pending_events_destroy_callback),
+                    Box::into_raw(Box::new((self.free_num, pending))) as *mut c_void,
+                )
+            };
         }
         self.remap_regions(to_defrag, stream_id)?;
 
@@ -489,4 +514,11 @@ impl Default for VirtualMemoryPool {
         }
         pool
     }
+}
+
+unsafe extern "C" fn pending_events_destroy_callback(data: *mut c_void) {
+    let boxed =
+        Box::from_raw(data as *mut (usize, Arc<Mutex<HashMap<usize, Vec<Arc<CudaEvent>>>>>));
+    let (key, pending) = *boxed;
+    pending.lock().unwrap().remove(&key);
 }

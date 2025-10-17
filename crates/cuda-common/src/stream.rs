@@ -149,7 +149,7 @@ impl CudaEvent {
 
 impl Drop for CudaEvent {
     fn drop(&mut self) {
-        // unsafe { cudaEventDestroy(self.event) };
+        unsafe { cudaEventDestroy(self.event) };
     }
 }
 
