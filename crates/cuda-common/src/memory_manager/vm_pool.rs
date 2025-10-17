@@ -6,11 +6,13 @@ use std::{
     ffi::c_void,
 };
 
+use bytesize::ByteSize;
+
 use super::cuda::*;
 use crate::{
     common::set_device,
     error::MemoryError,
-    stream::{current_stream_id, default_stream_wait, CudaEvent, CudaEventHandle, CudaStreamId},
+    stream::{current_stream_id, default_stream_wait, CudaEvent, CudaStreamId},
 };
 
 #[link(name = "cudart")]
@@ -23,6 +25,7 @@ struct FreeRegion {
     size: usize,
     event: CudaEvent,
     stream_id: CudaStreamId,
+    id: usize,
 }
 
 const VIRTUAL_POOL_SIZE: usize = 1usize << 45; // 32 TB
@@ -40,6 +43,9 @@ pub(super) struct VirtualMemoryPool {
 
     // Free regions in virtual space (sorted by address)
     free_regions: BTreeMap<CUdeviceptr, FreeRegion>,
+
+    // Number of free calls (used to assign ids to free regions)
+    free_num: usize,
 
     // Active allocations
     used_regions: HashMap<CUdeviceptr, usize>,
@@ -89,6 +95,7 @@ impl VirtualMemoryPool {
             curr_end: root,
             active_pages: HashMap::new(),
             free_regions: BTreeMap::new(),
+            free_num: 0,
             used_regions: HashMap::new(),
             page_size,
             device_id,
@@ -127,6 +134,7 @@ impl VirtualMemoryPool {
                         size: region.size - requested,
                         event: region.event,
                         stream_id,
+                        id: region.id,
                     },
                 );
             }
@@ -189,7 +197,7 @@ impl VirtualMemoryPool {
             .remove(&ptr)
             .ok_or(MemoryError::InvalidPointer)?;
 
-        self.free_region_insert(ptr, size, None, stream_id);
+        self.free_region_insert(ptr, size, stream_id);
 
         Ok(size)
     }
@@ -198,38 +206,29 @@ impl VirtualMemoryPool {
         &mut self,
         mut ptr: CUdeviceptr,
         mut size: usize,
-        event: Option<CudaEvent>,
         stream_id: CudaStreamId,
     ) {
-        let mut coalesced = false;
-
         // Potential merge with next neighbor
         if let Some((&next_ptr, next_region)) = self.free_regions.range(ptr + 1..).next() {
-            if ptr + size as u64 == next_ptr && next_region.stream_id == stream_id {
+            if next_region.stream_id == stream_id && ptr + size as u64 == next_ptr {
                 let next_region = self.free_regions.remove(&next_ptr).unwrap();
                 size += next_region.size;
-                coalesced = true;
             }
         }
         // Potential merge with previous neighbor
         if let Some((&prev_ptr, prev_region)) = self.free_regions.range(..ptr).next_back() {
-            if prev_ptr + prev_region.size as u64 == ptr && prev_region.stream_id == stream_id {
+            if prev_region.stream_id == stream_id && prev_ptr + prev_region.size as u64 == ptr {
                 let prev_region = self.free_regions.remove(&prev_ptr).unwrap();
                 ptr = prev_ptr;
                 size += prev_region.size;
-                coalesced = true;
             }
         }
-
-        // If we coalesced regions, record a new event to capture the current point in the stream
-        let event = match (event, coalesced) {
-            (Some(e), false) => e,
-            _ => {
-                let event = CudaEvent::new().unwrap();
-                event.record_on_this().unwrap();
-                event
-            }
-        };
+        // Record a new event to capture the current point in the stream
+        let event = CudaEvent::new().unwrap();
+        event.record_on_this().unwrap();
+        // Assign an id to the free region
+        let id = self.free_num;
+        self.free_num += 1;
 
         self.free_regions.insert(
             ptr,
@@ -237,6 +236,7 @@ impl VirtualMemoryPool {
                 size,
                 event,
                 stream_id,
+                id,
             },
         );
     }
@@ -252,20 +252,20 @@ impl VirtualMemoryPool {
             return Ok(None);
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Defragging or creating new pages: requested={}, stream_id={}",
-            requested,
+            ByteSize::b(requested as u64),
             stream_id
         );
 
         let mut to_defrag = Vec::new();
 
-        // 2.a. Defrag current stream (largest CudaEvent_t as a rough proxy for newest first)
-        let mut current_stream_to_defrag: Vec<(CUdeviceptr, usize, CudaEventHandle)> = self
+        // 2.a. Defrag current stream
+        let mut current_stream_to_defrag: Vec<(CUdeviceptr, usize, usize)> = self
             .free_regions
             .iter()
             .filter(|(_, r)| r.stream_id == stream_id)
-            .map(|(addr, r)| (*addr, r.size, r.event.as_raw_handle()))
+            .map(|(addr, r)| (*addr, r.size, r.id))
             .collect();
 
         // If last free region is at the virtual end, use it as base for defragmentation
@@ -284,7 +284,7 @@ impl VirtualMemoryPool {
             stream_id,
             current_stream_to_defrag
                 .iter()
-                .map(|(_, size, _)| size)
+                .map(|(_, size, _)| ByteSize::b(*size as u64))
                 .collect::<Vec<_>>()
         );
 
@@ -296,7 +296,7 @@ impl VirtualMemoryPool {
             to_defrag.extend(current_stream_to_defrag.iter().map(|(ptr, _, _)| *ptr));
             accumulated_size += current_stream_to_defrag_size;
         } else {
-            current_stream_to_defrag.sort_by_key(|(_, _, event_handle)| Reverse(*event_handle));
+            current_stream_to_defrag.sort_by_key(|(_, _, free_id)| Reverse(*free_id));
 
             for (ptr, size, _) in current_stream_to_defrag {
                 to_defrag.push(ptr);
@@ -308,46 +308,48 @@ impl VirtualMemoryPool {
             }
         }
 
-        // 2.b. Defrag other streams (completed only)
-        let mut other_streams_to_defrag: Vec<(CUdeviceptr, usize)> = self
+        // 2.b. Defrag other streams (ordered by oldest free region)
+        let mut other_streams_to_defrag: Vec<(CUdeviceptr, usize, CudaEvent, usize)> = self
             .free_regions
             .iter()
             .filter(|(_, r)| r.stream_id != stream_id)
-            .filter(|(_, r)| r.event.completed())
-            .map(|(addr, r)| (*addr, r.size))
+            .map(|(addr, r)| (*addr, r.size, r.event.clone(), r.id))
             .collect();
 
         // If last free region is at the virtual end, take it and use as base for defragmentation
         if accumulated_size == 0
             && other_streams_to_defrag
                 .last()
-                .is_some_and(|(addr, size)| *addr + *size as u64 == self.curr_end)
+                .is_some_and(|(addr, size, event, _)| {
+                    event.completed() && *addr + *size as u64 == self.curr_end
+                })
         {
-            (defrag_start, accumulated_size) = other_streams_to_defrag.pop().unwrap();
+            (defrag_start, accumulated_size, _, _) = other_streams_to_defrag.pop().unwrap();
             self.free_regions.get_mut(&defrag_start).unwrap().stream_id = stream_id;
         }
 
         tracing::debug!(
             "Defragmented {} bytes from stream {}, other streams ready to borrow {:?}",
-            accumulated_size,
+            ByteSize::b(accumulated_size as u64),
             stream_id,
             other_streams_to_defrag
                 .iter()
-                .map(|(_, size)| size)
+                .map(|(_, size, event, id)| (ByteSize::b(*size as u64), event.status(), id))
                 .collect::<Vec<_>>()
         );
 
         let other_streams_to_defrag_size = other_streams_to_defrag
             .iter()
-            .map(|(_, size)| size)
+            .map(|(_, size, _, _)| size)
             .sum::<usize>();
         if other_streams_to_defrag_size + accumulated_size < requested {
-            to_defrag.extend(other_streams_to_defrag.iter().map(|(ptr, _)| *ptr));
+            to_defrag.extend(other_streams_to_defrag.iter().map(|(ptr, _, _, _)| *ptr));
             accumulated_size += other_streams_to_defrag_size;
         } else {
-            other_streams_to_defrag.sort_by_key(|(_, size)| Reverse(*size));
+            other_streams_to_defrag.sort_by_key(|(_, _, _, free_id)| *free_id);
 
-            for (ptr, size) in other_streams_to_defrag {
+            for (ptr, size, event, _) in other_streams_to_defrag {
+                default_stream_wait(&event)?;
                 to_defrag.push(ptr);
                 accumulated_size += size;
                 if accumulated_size >= requested {
@@ -358,7 +360,7 @@ impl VirtualMemoryPool {
         }
         self.remap_regions(to_defrag, stream_id)?;
 
-        // 2.c. Create new pages\
+        // 2.c. Create new pages
         let allocate_start = self.curr_end;
         let mut allocated_size = 0;
         while accumulated_size < requested {
@@ -367,7 +369,10 @@ impl VirtualMemoryPool {
                     Ok(handle) => handle,
                     Err(e) => {
                         if e.is_out_of_memory() {
-                            break;
+                            return Err(MemoryError::OutOfMemory {
+                                requested,
+                                available: accumulated_size,
+                            });
                         } else {
                             return Err(MemoryError::from(e));
                         }
@@ -380,61 +385,15 @@ impl VirtualMemoryPool {
             allocated_size += self.page_size;
             accumulated_size += self.page_size;
         }
-        tracing::debug!(
-            "VPMM ({}): Allocated {} to {}",
+        tracing::info!(
+            "GPU mem: VPMM allocated {} bytes on stream {}. Total allocated: {}",
+            ByteSize::b(allocated_size as u64),
             stream_id,
-            allocated_size,
-            allocate_start
+            ByteSize::b(self.memory_usage() as u64)
         );
         unsafe { vpmm_set_access(allocate_start, allocated_size, self.device_id)? };
-        self.free_region_insert(allocate_start, allocated_size, None, stream_id);
+        self.free_region_insert(allocate_start, allocated_size, stream_id);
 
-        // 2.d. Try to wait and defragment again (smallest CudaEvent_t first as a rough proxy for
-        // oldest event)
-        if accumulated_size < requested {
-            let mut all_streams_to_defrag: Vec<(CUdeviceptr, usize, CudaEventHandle)> = self
-                .free_regions
-                .iter()
-                .map(|(addr, r)| (*addr, r.size, r.event.as_raw_handle()))
-                .collect();
-            // Remove the last free region and check it is the one at the virtual end: this free
-            // region is the one just inserted by self.free_region_insert above, so we should not
-            // remap it.
-            assert!(all_streams_to_defrag
-                .pop()
-                .is_some_and(|(addr, _, _)| addr == defrag_start));
-            all_streams_to_defrag.sort_by_key(|(_, _, event_handle)| *event_handle);
-
-            tracing::debug!("All streams to defragment: {:?}", all_streams_to_defrag);
-
-            let total_available: usize =
-                all_streams_to_defrag.iter().map(|(_, size, _)| size).sum();
-            if accumulated_size + total_available < requested {
-                return Err(MemoryError::OutOfMemory {
-                    requested,
-                    available: accumulated_size + total_available,
-                });
-            }
-
-            let mut to_defrag = Vec::new();
-
-            for (ptr, size, _) in all_streams_to_defrag {
-                default_stream_wait(&self.free_regions.get(&ptr).unwrap().event)?;
-                to_defrag.push(ptr);
-                accumulated_size += size;
-                if accumulated_size >= requested {
-                    self.remap_regions(to_defrag, stream_id)?;
-                    return Ok(Some(defrag_start));
-                }
-            }
-            if accumulated_size < requested {
-                return Err(MemoryError::OutOfMemory {
-                    requested,
-                    available: (self.curr_end - defrag_start) as usize,
-                });
-            }
-            self.remap_regions(to_defrag, stream_id)?;
-        }
         Ok(Some(defrag_start))
     }
 
@@ -446,21 +405,13 @@ impl VirtualMemoryPool {
         if regions.is_empty() {
             return Ok(());
         }
-        let mut coalesced = false;
-        let mut event: Option<CudaEvent> = None;
         let new_region_start = self.curr_end;
         for region_addr in regions {
             let region = self
                 .free_regions
                 .remove(&region_addr)
                 .ok_or(MemoryError::InvalidPointer)?;
-            if region.stream_id == stream_id {
-                if event.as_ref().is_none() {
-                    event = Some(region.event);
-                } else {
-                    coalesced = true
-                }
-            }
+
             let num_pages = region.size / self.page_size;
             for i in 0..num_pages {
                 let page = region_addr + (i * self.page_size) as u64;
@@ -475,12 +426,8 @@ impl VirtualMemoryPool {
         }
         let new_region_size = (self.curr_end - new_region_start) as usize;
 
-        // If we coalesced regions, record a new event to capture the current point in the stream
-        if coalesced {
-            event = None;
-        }
         unsafe { vpmm_set_access(new_region_start, new_region_size, self.device_id)? };
-        self.free_region_insert(new_region_start, new_region_size, event, stream_id);
+        self.free_region_insert(new_region_start, new_region_size, stream_id);
         Ok(())
     }
 

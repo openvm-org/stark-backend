@@ -80,6 +80,7 @@ pub fn current_stream_sync() -> Result<(), CudaError> {
 #[allow(non_camel_case_types)]
 pub type cudaEvent_t = *mut c_void;
 
+#[derive(Debug)]
 pub enum CudaEventStatus {
     Completed,
     NotReady,
@@ -95,8 +96,6 @@ impl PartialEq for CudaEventStatus {
         )
     }
 }
-
-pub type CudaEventHandle = u64;
 
 #[derive(Debug, Clone)]
 pub struct CudaEvent {
@@ -146,15 +145,13 @@ impl CudaEvent {
     pub fn completed(&self) -> bool {
         self.status() == CudaEventStatus::Completed
     }
-
-    pub fn as_raw_handle(&self) -> CudaEventHandle {
-        self.event as CudaEventHandle
-    }
 }
 
 impl Drop for CudaEvent {
     fn drop(&mut self) {
-        unsafe { cudaEventDestroy(self.event) };
+        // if self.completed() {
+        //     unsafe { cudaEventDestroy(self.event) };
+        // }
     }
 }
 
