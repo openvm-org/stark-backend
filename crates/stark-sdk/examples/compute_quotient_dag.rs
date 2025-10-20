@@ -11,7 +11,7 @@ use openvm_stark_backend::{
     p3_matrix::Matrix,
     p3_util::log2_strict_usize,
     prover::{cpu::quotient::QuotientCommitter, types::RapView},
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    rap::{BaseAirWithPublicValues, ColumnsAir, PartitionedBaseAir},
 };
 use openvm_stark_sdk::{
     config::{
@@ -31,6 +31,8 @@ const LOG_BLOWUP: usize = 1;
 
 // Newtype to implement extended traits
 struct TestAir(KeccakAir);
+
+impl<F: Field> ColumnsAir<F> for TestAir {}
 
 impl<F: Field> BaseAir<F> for TestAir {
     fn width(&self) -> usize {
