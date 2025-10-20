@@ -1,0 +1,116 @@
+// Replace engine.rs in v1
+// TODO[jpw]: everything is currently assuming fixed types for:
+// - F, EF, Digest, SystemParams
+// We will make these generic in the future
+
+use std::marker::PhantomData;
+
+use openvm_stark_backend::{AirRef, engine::StarkEngine, prover::Prover};
+use openvm_stark_sdk::config::baby_bear_poseidon2::{BabyBearPoseidon2Config, default_engine};
+
+use crate::{
+    keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2, SystemParams},
+    poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
+    proof::*,
+    prover::{
+        CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
+        DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2, ProverBackendV2,
+        ProverDeviceV2, ProvingContextV2,
+    },
+    verifier::{VerifierError, verify},
+};
+
+/// A helper trait to collect the different steps in multi-trace STARK
+/// keygen and proving. Currently this trait is CPU specific.
+pub trait StarkEngineV2
+where
+    <Self::PD as MultiRapProver<Self::PB, Self::TS>>::Artifacts:
+        Into<<Self::PD as OpeningProverV2<Self::PB, Self::TS>>::OpeningPoints>,
+    <Self::PD as MultiRapProver<Self::PB, Self::TS>>::PartialProof:
+        Into<(GkrProof, BatchConstraintProof)>,
+    <Self::PD as OpeningProverV2<Self::PB, Self::TS>>::OpeningProof:
+        Into<(StackingProof, WhirProof)>,
+{
+    type PB: ProverBackendV2<Val = crate::F, Challenge = crate::EF, Commitment = crate::Digest>;
+    type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
+    type TS: FiatShamirTranscript + Default;
+
+    fn config(&self) -> SystemParams;
+    fn device(&self) -> &Self::PD;
+
+    // TODO[jpw]: keygen builder
+
+    fn prover_from_transcript(
+        &self,
+        transcript: Self::TS,
+    ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS>;
+
+    fn prover(&self) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
+        self.prover_from_transcript(Self::TS::default())
+    }
+
+    fn keygen(
+        &self,
+        airs: &[AirRef<BabyBearPoseidon2Config>],
+    ) -> (MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2) {
+        // TODO[jpw]: switch to v2 keygen builder
+        let engine = default_engine();
+        let mut keygen_builder = engine.keygen_builder();
+        engine.set_up_keygen_builder(&mut keygen_builder, airs);
+
+        let pk_v1 = keygen_builder.generate_pk();
+        let pk = MultiStarkProvingKeyV2::from_v1(self.config(), pk_v1);
+        let vk = pk.get_vk();
+        (pk, vk)
+    }
+
+    fn prove(
+        &self,
+        pk: &DeviceMultiStarkProvingKeyV2<Self::PB>,
+        ctx: ProvingContextV2<Self::PB>,
+    ) -> Proof {
+        let mut prover = self.prover();
+        prover.prove(pk, ctx)
+    }
+
+    fn verify(&self, vk: &MultiStarkVerifyingKeyV2, proof: &Proof) -> Result<(), VerifierError> {
+        let mut transcript = Self::TS::default();
+        verify(vk, proof, &mut transcript)
+    }
+}
+
+pub struct BabyBearPoseidon2CpuEngineV2<TS = DuplexSponge> {
+    device: CpuDeviceV2,
+    _transcript: PhantomData<TS>,
+}
+
+impl<TS> BabyBearPoseidon2CpuEngineV2<TS> {
+    pub fn new(params: SystemParams) -> Self {
+        Self {
+            device: CpuDeviceV2::new(params),
+            _transcript: PhantomData,
+        }
+    }
+}
+
+impl<TS> StarkEngineV2 for BabyBearPoseidon2CpuEngineV2<TS>
+where
+    TS: FiatShamirTranscript + Default,
+{
+    type PB = CpuBackendV2;
+    type PD = CpuDeviceV2;
+    type TS = TS;
+
+    fn config(&self) -> SystemParams {
+        self.device.config()
+    }
+    fn device(&self) -> &Self::PD {
+        &self.device
+    }
+    fn prover_from_transcript(
+        &self,
+        transcript: TS,
+    ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
+        CoordinatorV2::new(CpuBackendV2, self.device, transcript)
+    }
+}

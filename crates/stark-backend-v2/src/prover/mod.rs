@@ -1,0 +1,177 @@
+use std::sync::Arc;
+
+use itertools::{Itertools, izip};
+use openvm_stark_backend::prover::{MatrixDimensions, Prover};
+use p3_field::FieldAlgebra;
+use p3_util::log2_strict_usize;
+use tracing::{info, info_span, instrument};
+
+use crate::{
+    Digest, EF, F,
+    poseidon2::sponge::FiatShamirTranscript,
+    proof::{BatchConstraintProof, GkrProof, Proof, StackingProof, TraceVData, WhirProof},
+};
+
+pub mod batch_constraints;
+mod cpu;
+pub mod fractional_sumcheck_gkr;
+mod hal;
+mod matrix;
+pub mod poly;
+pub mod stacked_pcs;
+pub mod stacked_reduction;
+pub mod sumcheck;
+mod types;
+pub mod whir;
+
+pub use cpu::*;
+pub use hal::*;
+pub use matrix::*;
+pub use types::*;
+
+#[derive(derive_new::new)]
+pub struct CoordinatorV2<PB: ProverBackendV2, PD, TS> {
+    pub backend: PB,
+    pub device: PD,
+    pub(crate) transcript: TS,
+}
+
+impl<PB, PD, TS> Prover for CoordinatorV2<PB, PD, TS>
+where
+    // TODO[jpw]: make generic in F, EF, Commitment
+    PB: ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
+    PD: ProverDeviceV2<PB, TS>,
+    PD::Artifacts: Into<PD::OpeningPoints>,
+    PD::PartialProof: Into<(GkrProof, BatchConstraintProof)>,
+    PD::OpeningProof: Into<(StackingProof, WhirProof)>,
+    TS: FiatShamirTranscript,
+{
+    type Proof = Proof;
+    type ProvingKeyView<'a>
+        = &'a DeviceMultiStarkProvingKeyV2<PB>
+    where
+        Self: 'a;
+
+    type ProvingContext<'a>
+        = ProvingContextV2<PB>
+    where
+        Self: 'a;
+
+    /// Specialized prove for InteractiveAirs.
+    /// Handles trace generation of the permutation traces.
+    /// Assumes the main traces have been generated and committed already.
+    ///
+    /// The [DeviceMultiStarkProvingKey] should already be filtered to only include the relevant
+    /// AIR's proving keys.
+    #[instrument(name = "stark_prove_excluding_trace", level = "info", skip_all)]
+    fn prove<'a>(
+        &'a mut self,
+        mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
+        mut ctx: ProvingContextV2<PB>,
+    ) -> Self::Proof {
+        let transcript = &mut self.transcript;
+
+        transcript.observe_commit(mpk.vk_pre_hash);
+
+        let num_airs_present = ctx.per_trace.len();
+        info!(num_airs_present);
+
+        // Stable sort the trace data to be descending in height: this is needed for stacking.
+        ctx.per_trace
+            .sort_by(|a, b| b.1.common_main.height().cmp(&a.1.common_main.height()));
+        // `ctx` should NOT be permuted anymore: the ordering by `trace_idx` is now fixed.
+        let ctx = ctx;
+
+        let (common_main_commit, common_main_pcs_data) =
+            info_span!("main_trace_commit").in_scope(|| {
+                let traces = ctx
+                    .common_main_traces()
+                    .map(|(_, trace)| trace)
+                    .collect_vec();
+                self.device.commit(&traces)
+            });
+
+        let mut trace_vdata: Vec<Option<TraceVData>> = vec![None; mpk.per_air.len()];
+        let mut public_values: Vec<Vec<F>> = vec![Vec::new(); mpk.per_air.len()];
+
+        // Hypercube dimension per trace (present AIR)
+        for (air_id, air_ctx) in &ctx.per_trace {
+            let trace_height = air_ctx.common_main.height();
+            let prism_dim = log2_strict_usize(trace_height);
+            assert!(prism_dim >= mpk.params.l_skip);
+            let n = prism_dim - mpk.params.l_skip;
+
+            trace_vdata[*air_id] = Some(TraceVData {
+                hypercube_dim: n,
+                cached_commitments: air_ctx
+                    .cached_mains
+                    .iter()
+                    .map(|(commit, _)| *commit)
+                    .collect(),
+            });
+            public_values[*air_id] = air_ctx.public_values.clone();
+        }
+
+        // Only observe commits for present AIRs.
+        // Commitments order:
+        // - 1 commitment of all common main traces
+        // - for each air:
+        //   - preprocessed commit if present
+        //   - for each cached main trace
+        //     - 1 commitment
+        transcript.observe_commit(common_main_commit);
+
+        for (trace_vdata, pvs, pk) in izip!(&trace_vdata, &public_values, &mpk.per_air) {
+            if !pk.vk.is_required {
+                transcript.observe(F::from_bool(trace_vdata.is_some()));
+            }
+            if let Some(trace_vdata) = trace_vdata {
+                if let Some((commit, _)) = &pk.preprocessed_data {
+                    transcript.observe_commit(*commit);
+                } else {
+                    transcript.observe(F::from_canonical_usize(trace_vdata.hypercube_dim));
+                }
+                for commit in &trace_vdata.cached_commitments {
+                    transcript.observe_commit(*commit);
+                }
+            }
+            for pv in pvs {
+                transcript.observe(*pv);
+            }
+        }
+
+        // Currently alternates between preprocessed and cached pcs data
+        let pre_cached_pcs_data_per_commit: Vec<_> = ctx
+            .per_trace
+            .iter()
+            .flat_map(|(air_idx, air_ctx)| {
+                mpk.per_air[*air_idx]
+                    .preprocessed_data
+                    .iter()
+                    .chain(&air_ctx.cached_mains)
+                    .map(|(_, pcs_data)| Arc::clone(pcs_data))
+            })
+            .collect();
+
+        let (constraints_proof, r) = self.device.prove_rap_constraints(transcript, mpk, ctx);
+        let opening_proof = self.device.prove_openings(
+            transcript,
+            common_main_pcs_data,
+            pre_cached_pcs_data_per_commit,
+            r.into(),
+        );
+
+        let (gkr_proof, batch_constraint_proof) = constraints_proof.into();
+        let (stacking_proof, whir_proof) = opening_proof.into();
+
+        Proof {
+            public_values,
+            trace_vdata,
+            common_main_commit,
+            gkr_proof,
+            batch_constraint_proof,
+            stacking_proof,
+            whir_proof,
+        }
+    }
+}

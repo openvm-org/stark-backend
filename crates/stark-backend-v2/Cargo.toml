@@ -1,0 +1,43 @@
+[package]
+name = "stark-backend-v2"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "Proof system v2"
+
+[dependencies]
+openvm-stark-backend.workspace = true
+openvm-stark-sdk.workspace = true
+
+p3-air.workspace = true
+p3-baby-bear.workspace = true
+p3-challenger.workspace = true
+p3-dft.workspace = true
+p3-field.workspace = true
+p3-interpolation.workspace = true
+p3-matrix.workspace = true
+p3-maybe-rayon.workspace = true
+p3-poseidon2.workspace = true
+p3-symmetric.workspace = true
+p3-util.workspace = true
+
+itertools.workspace = true
+rayon.workspace = true
+hex-literal.workspace = true
+serde.workspace = true
+derive-new.workspace = true
+tracing.workspace = true
+getset.workspace = true
+cfg-if.workspace = true
+thiserror.workspace = true
+eyre.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+p3-keccak-air.workspace = true
+
+[features]
+default = ["parallel"]
+parallel = ["p3-maybe-rayon/parallel", "openvm-stark-backend/parallel"]
+jemalloc = ["openvm-stark-backend/jemalloc"]
+test-utils = []
