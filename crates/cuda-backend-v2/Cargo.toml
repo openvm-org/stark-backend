@@ -1,0 +1,29 @@
+[package]
+name = "cuda-backend-v2"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "OpenVM CUDA prover backend V2"
+
+[dependencies]
+stark-backend-v2.workspace = true
+
+openvm-cuda-common.workspace = true
+openvm-cuda-backend.workspace = true
+
+itertools.workspace = true
+derive-new.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+# Plonky3
+p3-field = { workspace = true }
+p3-baby-bear = { workspace = true }
+
+[build-dependencies]
+openvm-cuda-builder.workspace = true
+
+[dev-dependencies]
+
+[features]
+touchemall = ["openvm-cuda-common/touchemall"]
