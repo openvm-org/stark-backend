@@ -278,7 +278,7 @@ where
         self.n_global
     }
 
-    fn univariate_sumcheck_polys(
+    fn sumcheck_uni_round0_polys(
         &mut self,
         ctx: &ProvingContextV2<CpuBackendV2>,
         lambda: EF,
