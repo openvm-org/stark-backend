@@ -29,6 +29,10 @@ pub use cpu::LogupZerocheckCpu;
 /// balancing to an _input layer sumcheck_ which may be viewed as a stacking reduction from the GKR
 /// leaf input layer to column evaluations of the trace. The input layer sumcheck is then batched
 /// together with ZeroCheck in one large _batch constraints sumcheck_.
+///
+/// This trait is intended to be implemented on a stateful struct that holds state between the
+/// stages of proving. The constructor is given by [`LogupZerocheckProver::prove_logup_gkr`] and the
+/// trait is generic in `PD` which represents the `ProverDevice`.
 pub trait LogupZerocheckProver<'a, PB: ProverBackendV2, PD, TS>: Sized {
     /// From trace matrices, evaluates the symbolic interactions to get the GKR input layer
     /// evaluations. These are stacked into a single matrix of `(\hat{p}(x), \hat{q}(x))` pairs. It
@@ -59,23 +63,28 @@ pub trait LogupZerocheckProver<'a, PB: ProverBackendV2, PD, TS>: Sized {
     /// used to observe the sum claims `sum_{p,T}, sum_{q,T}`. The `s_0` polynomials could be
     /// returned in either coefficient or evaluation form, but we return them all in coefficient
     /// form for uniformity and debugging since this interpolation is inexpensive.
-    fn univariate_sumcheck_polys(
+    fn sumcheck_uni_round0_polys(
         &mut self,
         ctx: &ProvingContextV2<PB>,
-        lambda: EF,
-    ) -> Vec<UnivariatePoly<EF>>;
+        lambda: PB::Challenge,
+    ) -> Vec<UnivariatePoly<PB::Challenge>>;
 
     /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
     /// Folding _could_ directly mutate inplace the trace matrices in `ctx` as they will not be
     /// needed after this.
-    fn fold_ple_evals(&mut self, ctx: ProvingContextV2<PB>, r_0: EF);
+    fn fold_ple_evals(&mut self, ctx: ProvingContextV2<PB>, r_0: PB::Challenge);
 
     /// Returns length `3 * num_airs_present` polynomials, each evaluated at `1..=s_deg`.
-    fn sumcheck_polys_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>>;
+    fn sumcheck_polys_eval(
+        &mut self,
+        round: usize,
+        r_prev: PB::Challenge,
+    ) -> Vec<Vec<PB::Challenge>>;
 
-    fn fold_mle_evals(&mut self, round: usize, r_round: EF);
+    fn fold_mle_evals(&mut self, round: usize, r_round: PB::Challenge);
 
-    fn into_column_openings(self) -> Vec<Vec<Vec<(EF, EF)>>>;
+    #[allow(clippy::type_complexity)]
+    fn into_column_openings(self) -> Vec<Vec<Vec<(PB::Challenge, PB::Challenge)>>>;
 }
 
 #[instrument(level = "info", skip_all)]
@@ -84,7 +93,7 @@ pub fn prove_zerocheck_and_logup<'a, PB, PD, TS, LZP>(
     transcript: &mut TS,
     mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
     ctx: ProvingContextV2<PB>,
-) -> (GkrProof, BatchConstraintProof, Vec<EF>)
+) -> (GkrProof, BatchConstraintProof, Vec<PB::Challenge>)
 where
     PB: ProverBackendV2<Val = F, Challenge = EF>,
     TS: FiatShamirTranscript,
@@ -141,7 +150,7 @@ where
     let lambda = transcript.sample_ext();
     debug!(%lambda);
 
-    let s_0_polys = prover.univariate_sumcheck_polys(&ctx, lambda);
+    let s_0_polys = prover.sumcheck_uni_round0_polys(&ctx, lambda);
     // logup sum claims (sum_{\hat p}, sum_{\hat q}) per present AIR
     let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = s_0_polys
         [..2 * num_airs_present]
