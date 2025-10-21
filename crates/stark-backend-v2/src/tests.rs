@@ -15,7 +15,7 @@ use crate::{
         AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MultiRapProver,
         ProvingContextV2,
         stacked_pcs::stacked_commit,
-        stacked_reduction::stacked_opening_reduction,
+        stacked_reduction::{StackedReductionCpu, prove_stacked_opening_reduction},
         sumcheck::{sumcheck_multilinear, sumcheck_prismalinear},
     },
     test_utils::{
@@ -214,17 +214,16 @@ fn test_stacked_opening_reduction() -> Result<(), StackedReductionError> {
     let omega_skip = F::two_adic_generator(params.l_skip);
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
 
+    let device = engine.device();
     // We need batch_proof to obtain the column openings
     let ((_, batch_proof), r) =
-        engine
-            .device()
-            .prove_rap_constraints(&mut DuplexSponge::default(), &pk, ctx);
+        device.prove_rap_constraints(&mut DuplexSponge::default(), &pk, ctx);
 
-    let (stacking_proof, _) = stacked_opening_reduction(
+    let (stacking_proof, _) = prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
+        device,
         &mut DuplexSponge::default(),
-        params.l_skip,
         params.n_stack,
-        &[(&common_main_pcs_data.matrix, &common_main_pcs_data.layout)],
+        vec![&common_main_pcs_data],
         &r,
     );
 
@@ -409,7 +408,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
     let mut ctx = fx.generate_proving_ctx();
     ctx.per_trace
         .sort_by(|a, b| b.1.common_main.height().cmp(&a.1.common_main.height()));
-    let l_skip = engine.config().l_skip;
+    let l_skip = engine.device().config().l_skip;
     let mut pvs = vec![vec![]; vk.inner.per_air.len()];
     let (trace_id_to_air_ids, ns): (Vec<_>, Vec<_>) = ctx
         .per_trace
