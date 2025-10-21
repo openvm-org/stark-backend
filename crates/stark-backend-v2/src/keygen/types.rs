@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Digest, F, prover::stacked_pcs::StackedPcsData};
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SystemParams {
     pub l_skip: usize,
     pub n_stack: usize,
