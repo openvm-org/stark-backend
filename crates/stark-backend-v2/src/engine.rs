@@ -35,7 +35,10 @@ where
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
     type TS: FiatShamirTranscript + Default;
 
-    fn config(&self) -> SystemParams;
+    fn config(&self) -> SystemParams {
+        self.device().config()
+    }
+
     fn device(&self) -> &Self::PD;
 
     // TODO[jpw]: keygen builder
@@ -59,7 +62,7 @@ where
         engine.set_up_keygen_builder(&mut keygen_builder, airs);
 
         let pk_v1 = keygen_builder.generate_pk();
-        let pk = MultiStarkProvingKeyV2::from_v1(self.config(), pk_v1);
+        let pk = MultiStarkProvingKeyV2::from_v1(self.device().config(), pk_v1);
         let vk = pk.get_vk();
         (pk, vk)
     }
@@ -101,9 +104,6 @@ where
     type PD = CpuDeviceV2;
     type TS = TS;
 
-    fn config(&self) -> SystemParams {
-        self.device.config()
-    }
     fn device(&self) -> &Self::PD {
         &self.device
     }
