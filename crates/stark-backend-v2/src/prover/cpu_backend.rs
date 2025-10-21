@@ -17,7 +17,7 @@ use crate::{
         ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
         prove_zerocheck_and_logup,
         stacked_pcs::{StackedPcsData, stacked_commit},
-        stacked_reduction::stacked_opening_reduction,
+        stacked_reduction::{StackedReductionCpu, prove_stacked_opening_reduction},
         whir::prove_whir_opening,
     },
 };
@@ -41,7 +41,11 @@ impl ProverBackendV2 for CpuBackendV2 {
     type PcsData = StackedPcsData<F, Digest>;
 }
 
-impl<TS: FiatShamirTranscript> ProverDeviceV2<CpuBackendV2, TS> for CpuDeviceV2 {}
+impl<TS: FiatShamirTranscript> ProverDeviceV2<CpuBackendV2, TS> for CpuDeviceV2 {
+    fn config(&self) -> SystemParams {
+        self.config
+    }
+}
 
 impl TraceCommitterV2<CpuBackendV2> for CpuDeviceV2 {
     fn commit(&self, traces: &[&ColMajorMatrix<F>]) -> (Digest, StackedPcsData<F, Digest>) {
@@ -86,20 +90,20 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2
         r: Vec<EF>,
     ) -> (StackingProof, WhirProof) {
         let params = self.config;
-        let mut stacked_per_commit =
-            vec![(&common_main_pcs_data.matrix, &common_main_pcs_data.layout)];
+        let mut stacked_per_commit = vec![&common_main_pcs_data];
         let mut committed_mats = vec![(&common_main_pcs_data.matrix, &common_main_pcs_data.tree)];
         for data in &pre_cached_pcs_data_per_commit {
-            stacked_per_commit.push((&data.matrix, &data.layout));
+            stacked_per_commit.push(data);
             committed_mats.push((&data.matrix, &data.tree));
         }
-        let (stacking_proof, u_prisma) = stacked_opening_reduction(
-            transcript,
-            params.l_skip,
-            params.n_stack,
-            &stacked_per_commit,
-            &r,
-        );
+        let (stacking_proof, u_prisma) =
+            prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
+                self,
+                transcript,
+                self.config.n_stack,
+                stacked_per_commit,
+                &r,
+            );
 
         let (&u0, u_rest) = u_prisma.split_first().unwrap();
         let u_cube = u0
