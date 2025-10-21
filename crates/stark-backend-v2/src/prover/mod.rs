@@ -69,6 +69,7 @@ where
         mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
         mut ctx: ProvingContextV2<PB>,
     ) -> Self::Proof {
+        assert_eq!(self.device.config(), mpk.params);
         let transcript = &mut self.transcript;
 
         transcript.observe_commit(mpk.vk_pre_hash);
