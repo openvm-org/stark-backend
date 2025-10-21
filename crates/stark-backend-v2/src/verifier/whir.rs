@@ -205,15 +205,16 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
 
     // Here we perform the final WHIR check, which requires us to compute
     //
-    //  sum_{b in H_{m-t}} f(b) (eq(z, alpha || b) + sum_i sum_j gamma_{i,j} eq(pow(z_i),
-    // alpha[ki..] || b)),
+    //  sum_{b in H_{m-t}} f(b) (eq(u, alpha || b) +
+    //                           sum_i sum_j gamma_{i,j} eq(pow(z_i) alpha[ki..] || b)),
     //
     // where || denotes concatenation.
     //
-    // If we let z' = z[..t] and z'' = z[t..], then by factoring we can rewrite the term
+    // If we let u' = u[..t] and u'' = u[t..], then by factoring we can rewrite the term
     //
-    //   sum_{b in H_{m-t}} f(b) eq(z, alpha || b) = eq(z', alpha) sum_{b in H_{m-t}} f(b) eq(z'',
-    // b)                                             = eq(z', alpha) f(z'').
+    //   sum_{b in H_{m-t}} f(b) eq(u, alpha || b) = eq(u', alpha) *
+    //                                               sum_{b in H_{m-t}} f(b) eq(u'', b)
+    //                                             = eq(u', alpha) * f(u'').
     //
     // Similar algebra allows us to control the terms with eq(pow(z_i)). Note that here we actually
     // end up with f(pow(z_i^{2^p})) for some power p, which is a univariate evaluation.
@@ -275,7 +276,7 @@ pub enum VerifyWhirError {
 ///
 /// If `values = [f(x), f(ωx), …, f(ω^{2^k-1}x)]`, then
 /// `binary_k_fold(values, alphas, x)` returns `g_k(x^{2^k})`.
-fn binary_k_fold(mut values: Vec<EF>, alphas: &[EF], x: F) -> EF {
+pub fn binary_k_fold(mut values: Vec<EF>, alphas: &[EF], x: F) -> EF {
     let n = values.len();
     let k = alphas.len();
     debug_assert_eq!(n, 1 << k);
@@ -447,7 +448,10 @@ mod tests {
     }
 
     fn run_whir_fib_test(params: SystemParams) -> Result<(), VerifyWhirError> {
-        use crate::{BabyBearPoseidon2CpuEngineV2, StarkEngineV2, poseidon2::sponge::DuplexSponge, prover::DeviceDataTransporterV2};
+        use crate::{
+            BabyBearPoseidon2CpuEngineV2, StarkEngineV2, poseidon2::sponge::DuplexSponge,
+            prover::DeviceDataTransporterV2,
+        };
         let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
         let fib = FibFixture::new(0, 1, 1 << (params.n_stack + params.l_skip));
         let (pk, _vk) = fib.keygen(&engine);
