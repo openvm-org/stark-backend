@@ -12,10 +12,9 @@ use crate::{
     proof::{BatchConstraintProof, GkrProof, Proof, StackingProof, TraceVData, WhirProof},
 };
 
-pub mod batch_constraints;
-mod cpu;
-pub mod fractional_sumcheck_gkr;
+mod cpu_backend;
 mod hal;
+mod logup_zerocheck;
 mod matrix;
 pub mod poly;
 pub mod stacked_pcs;
@@ -24,8 +23,9 @@ pub mod sumcheck;
 mod types;
 pub mod whir;
 
-pub use cpu::*;
+pub use cpu_backend::*;
 pub use hal::*;
+pub use logup_zerocheck::*;
 pub use matrix::*;
 pub use types::*;
 
@@ -154,6 +154,7 @@ where
             .collect();
 
         let (constraints_proof, r) = self.device.prove_rap_constraints(transcript, mpk, ctx);
+
         let opening_proof = self.device.prove_openings(
             transcript,
             common_main_pcs_data,

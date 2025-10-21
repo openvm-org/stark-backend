@@ -13,9 +13,9 @@ use crate::{
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
         ColMajorMatrix, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2,
-        DeviceStarkProvingKeyV2, MultiRapProver, OpeningProverV2, ProverBackendV2, ProverDeviceV2,
-        ProvingContextV2, TraceCommitterV2,
-        batch_constraints::prove_zerocheck_and_logup,
+        DeviceStarkProvingKeyV2, LogupZerocheckCpu, MultiRapProver, OpeningProverV2,
+        ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
+        prove_zerocheck_and_logup,
         stacked_pcs::{StackedPcsData, stacked_commit},
         stacked_reduction::stacked_opening_reduction,
         whir::prove_whir_opening,
@@ -68,7 +68,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<CpuBackendV2, TS> for CpuDeviceV2 
         ctx: ProvingContextV2<CpuBackendV2>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup(transcript, mpk, &ctx);
+            prove_zerocheck_and_logup::<_, _, TS, LogupZerocheckCpu>(self, transcript, mpk, ctx);
         ((gkr_proof, batch_constraint_proof), r)
     }
 }
