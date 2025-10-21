@@ -11,7 +11,7 @@ use p3_field::{ExtensionField, TwoAdicField};
 
 use crate::prover::{
     AirProvingContextV2, ColMajorMatrixView, CpuBackendV2,
-    batch_constraints::evaluator::{ProverConstraintEvaluator, ViewPair},
+    logup_zerocheck::evaluator::{ProverConstraintEvaluator, ViewPair},
 };
 
 /// For a single AIR
@@ -20,7 +20,7 @@ pub(super) struct EvalHelper<'a, F> {
     pub constraints_dag: &'a SymbolicExpressionDag<F>,
     /// Interactions
     pub interactions: Vec<SymbolicInteraction<F>>,
-    pub public_values: &'a [F],
+    pub public_values: Vec<F>,
     pub preprocessed_trace: Option<ColMajorMatrixView<'a, F>>,
     // TODO: skip rotation if vk dictates it is never used
     pub needs_next: bool,
@@ -146,7 +146,7 @@ impl<'a, F: TwoAdicField> EvalHelper<'a, F> {
     fn evaluator<FF: ExtensionField<F>>(
         &self,
         row_parts: &[Vec<FF>],
-    ) -> ProverConstraintEvaluator<'a, F, FF> {
+    ) -> ProverConstraintEvaluator<'_, F, FF> {
         let sels = &row_parts[0];
         let mut view_pairs = row_parts[1..]
             .chunks_exact(2)
@@ -162,7 +162,7 @@ impl<'a, F: TwoAdicField> EvalHelper<'a, F> {
             is_first_row: sels[0],
             is_transition: sels[1],
             is_last_row: sels[2],
-            public_values: self.public_values,
+            public_values: &self.public_values,
         }
     }
 }
