@@ -12,8 +12,8 @@ use crate::{
     keygen::types::SystemParams,
     poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
     prover::{
-        AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2,
-        batch_constraints::prove_zerocheck_and_logup,
+        AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MultiRapProver,
+        ProvingContextV2,
         stacked_pcs::stacked_commit,
         stacked_reduction::stacked_opening_reduction,
         sumcheck::{sumcheck_multilinear, sumcheck_prismalinear},
@@ -154,8 +154,11 @@ fn test_batch_sumcheck_zero_interactions() -> Result<(), BatchConstraintError> {
     let omega_skip = F::two_adic_generator(params.l_skip);
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
 
-    let (gkr_proof, batch_proof, _) = prove_zerocheck_and_logup(&mut prover_sponge, &pk, &ctx);
     let pvs = vec![ctx.per_trace[0].1.public_values.clone()];
+    let ((gkr_proof, batch_proof), _) =
+        engine
+            .device()
+            .prove_rap_constraints(&mut prover_sponge, &pk, ctx);
     let r = verify_zerocheck_and_logup(
         &mut verifier_sponge,
         &vk.inner,
@@ -212,7 +215,10 @@ fn test_stacked_opening_reduction() -> Result<(), StackedReductionError> {
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
 
     // We need batch_proof to obtain the column openings
-    let (_, batch_proof, r) = prove_zerocheck_and_logup(&mut DuplexSponge::default(), &pk, &ctx);
+    let ((_, batch_proof), r) =
+        engine
+            .device()
+            .prove_rap_constraints(&mut DuplexSponge::default(), &pk, ctx);
 
     let (stacking_proof, _) = stacked_opening_reduction(
         &mut DuplexSponge::default(),
@@ -316,8 +322,10 @@ fn test_single_fib_and_dummy_trace_stark() {
         .collect_vec();
 
     let mut transcript = DuplexSponge::default();
-    let (gkr_proof, batch_proof, _) =
-        prove_zerocheck_and_logup(&mut transcript, &combined_pk, &combined_ctx);
+    let ((gkr_proof, batch_proof), _) =
+        engine
+            .device()
+            .prove_rap_constraints(&mut transcript, &combined_pk, combined_ctx);
     let mut transcript = DuplexSponge::default();
     verify_zerocheck_and_logup(
         &mut transcript,
@@ -376,7 +384,9 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     ctx.per_trace
         .sort_by(|a, b| b.1.common_main.height().cmp(&a.1.common_main.height()));
     let mut transcript = DuplexSponge::default();
-    let (gkr_proof, _, _) = prove_zerocheck_and_logup(&mut transcript, &pk, &ctx);
+    let ((gkr_proof, _), _) = engine
+        .device()
+        .prove_rap_constraints(&mut transcript, &pk, ctx);
 
     let mut transcript = DuplexSponge::default();
     assert!(transcript.check_witness(params.logup_pow_bits, gkr_proof.logup_pow_witness));
@@ -420,7 +430,10 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
         .collect_vec();
 
     let mut transcript = DuplexSponge::default();
-    let (gkr_proof, batch_proof, _) = prove_zerocheck_and_logup(&mut transcript, &pk, &ctx);
+    let ((gkr_proof, batch_proof), _) =
+        engine
+            .device()
+            .prove_rap_constraints(&mut transcript, &pk, ctx);
     let mut transcript = DuplexSponge::default();
     verify_zerocheck_and_logup(
         &mut transcript,
