@@ -230,8 +230,16 @@ where
     assert_eq!(r.len(), n_global + 1);
 
     let column_openings = prover.into_column_openings();
+
+    // Observe common main openings first, and then preprocessed/cached
     for openings in &column_openings {
-        for part in openings {
+        for (claim, claim_rot) in &openings[0] {
+            transcript.observe_ext(*claim);
+            transcript.observe_ext(*claim_rot);
+        }
+    }
+    for openings in &column_openings {
+        for part in openings.iter().skip(1) {
             for (claim, claim_rot) in part {
                 transcript.observe_ext(*claim);
                 transcript.observe_ext(*claim_rot);
