@@ -266,13 +266,22 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     }
     let mut interactions_evals = Vec::new();
     let mut constraints_evals = Vec::new();
+
+    // Observe common main openings first, and then preprocessed/cached
+    for air_openings in column_openings.iter() {
+        for &(claim, claim_rot) in &air_openings[0] {
+            transcript.observe_ext(claim);
+            transcript.observe_ext(claim_rot);
+        }
+    }
+
     for (trace_idx, air_openings) in column_openings.iter().enumerate() {
         let air_idx = trace_id_to_air_id[trace_idx];
         let vk = &mvk.per_air[air_idx];
         let n = n_per_trace[trace_idx];
 
         // claim lengths are checked in proof shape
-        for claims in air_openings {
+        for claims in air_openings.iter().skip(1) {
             for &(claim, claim_rot) in claims.iter() {
                 transcript.observe_ext(claim);
                 transcript.observe_ext(claim_rot);
