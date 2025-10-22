@@ -56,6 +56,9 @@ impl<F: Field> Mle<F> {
         self.coeffs
     }
 
+    /// Evaluate with `O(1)` extra memory via naive algorithm.
+    ///
+    /// Performs `N*log(N)/2` multiplications when `N = x.len()` is a power of two.
     pub fn eval_at_point<F2: Field, EF: ExtensionField<F> + Mul<F2, Output = EF>>(
         &self,
         x: &[F2],
@@ -72,6 +75,28 @@ impl<F: Field> Mle<F> {
             res += term;
         }
         res
+    }
+
+    /// Evaluate with `O(1)` extra memory but consuming `self`.
+    ///
+    /// Performs `N - 1` multiplications for `N = x.len()`.
+    pub fn eval_at_point_inplace<F2>(self, x: &[F2]) -> F
+    where
+        F2: Field,
+        F: ExtensionField<F2>,
+    {
+        let mut buf = self.coeffs;
+        debug_assert_eq!(buf.len(), 1 << x.len());
+        let mut len = 1usize << x.len();
+        // Assumes caller ensured buf[..len] is initialized with the current coefficients.
+        for &xj in x.iter().rev() {
+            len >>= 1;
+            let (left, right) = buf.split_at_mut(len);
+            for (li, &ri) in zip(left.iter_mut(), right.iter()) {
+                *li += ri * xj;
+            }
+        }
+        buf[0]
     }
 
     /// Recursive helper to convert evaluations to coefficients.
