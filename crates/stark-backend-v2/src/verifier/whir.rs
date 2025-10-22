@@ -220,7 +220,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     // end up with f(pow(z_i^{2^p})) for some power p, which is a univariate evaluation.
     let t = k_whir * num_whir_rounds;
     let f = Mle::from_coeffs(final_poly.clone());
-    let mut acc = eval_eq_mle(&alphas[..t], &u[..t]) * f.eval_at_point::<EF, EF>(&u[t..]);
+    let mut acc = eval_eq_mle(&alphas[..t], &u[..t]) * f.eval_at_point_inplace(&u[t..]);
     let mut j = k_whir;
     for i in 0..num_whir_rounds {
         let zis = &zs[i];
