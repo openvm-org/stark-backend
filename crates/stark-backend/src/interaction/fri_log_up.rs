@@ -626,8 +626,7 @@ pub(crate) fn find_interaction_chunks<F: Field>(
             cur_chunk.push(interaction_idx);
             numerator_max_degree = count_degree;
             running_sum_field_degree = field_degree;
-            if max_constraint_degree > 0
-                && max(count_degree, field_degree + 1) > max_constraint_degree
+            if max_constraint_degree > 0 && max(count_degree, field_degree) > max_constraint_degree
             {
                 panic!("Interaction with field_degree={field_degree}, count_degree={count_degree} exceeds max_constraint_degree={max_constraint_degree}");
             }
