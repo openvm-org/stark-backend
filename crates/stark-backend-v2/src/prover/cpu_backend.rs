@@ -18,7 +18,7 @@ use crate::{
         prove_zerocheck_and_logup,
         stacked_pcs::{StackedPcsData, stacked_commit},
         stacked_reduction::{StackedReductionCpu, prove_stacked_opening_reduction},
-        whir::prove_whir_opening,
+        whir::WhirProver,
     },
 };
 
@@ -91,10 +91,8 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2
     ) -> (StackingProof, WhirProof) {
         let params = self.config;
         let mut stacked_per_commit = vec![&common_main_pcs_data];
-        let mut committed_mats = vec![(&common_main_pcs_data.matrix, &common_main_pcs_data.tree)];
         for data in &pre_cached_pcs_data_per_commit {
             stacked_per_commit.push(data);
-            committed_mats.push((&data.matrix, &data.tree));
         }
         let (stacking_proof, u_prisma) =
             prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
@@ -112,15 +110,10 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2
             .chain(u_rest.iter().copied())
             .collect_vec();
 
-        let whir_proof = prove_whir_opening(
+        let whir_proof = self.prove_whir(
             transcript,
-            params.k_whir,
-            params.log_blowup,
-            params.num_whir_queries,
-            params.log_final_poly_len,
-            params.whir_pow_bits,
-            params.l_skip,
-            &committed_mats,
+            common_main_pcs_data,
+            pre_cached_pcs_data_per_commit,
             &u_cube,
         );
         (stacking_proof, whir_proof)
