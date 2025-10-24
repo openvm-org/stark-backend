@@ -191,9 +191,10 @@ mod tests {
     use crate::{
         BabyBearPoseidon2CpuEngineV2,
         keygen::types::SystemParams,
+        poseidon2::sponge::{DuplexSpongeRecorder, TranscriptHistory},
         test_utils::{
-            CachedFixture11, DuplexSpongeRecorder, DuplexSpongeValidator, FibFixture,
-            InteractionsFixture11, PreprocessedFibFixture, TestFixture, test_system_params_small,
+            CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11,
+            PreprocessedFibFixture, TestFixture, test_system_params_small,
         },
         verifier::{VerifierError, verify},
     };
@@ -220,7 +221,7 @@ mod tests {
         let mut recorder = DuplexSpongeRecorder::default();
         let proof = fib.prove_from_transcript(&engine, &pk, &mut recorder);
 
-        let mut validator_sponge = DuplexSpongeValidator::new(recorder.history);
+        let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
         verify(&vk, &proof, &mut validator_sponge)
     }
 
@@ -234,7 +235,7 @@ mod tests {
         let mut recorder = DuplexSpongeRecorder::default();
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
-        let mut validator_sponge = DuplexSpongeValidator::new(recorder.history);
+        let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
         verify(&vk, &proof, &mut validator_sponge)
     }
 
@@ -248,7 +249,7 @@ mod tests {
         let mut recorder = DuplexSpongeRecorder::default();
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
-        let mut validator_sponge = DuplexSpongeValidator::new(recorder.history);
+        let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
         verify(&vk, &proof, &mut validator_sponge)
     }
 
@@ -266,7 +267,7 @@ mod tests {
         let mut recorder = DuplexSpongeRecorder::default();
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
-        let mut validator_sponge = DuplexSpongeValidator::new(recorder.history);
+        let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
         verify(&vk, &proof, &mut validator_sponge)
     }
 }
