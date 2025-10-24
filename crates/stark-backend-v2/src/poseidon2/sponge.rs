@@ -1,4 +1,4 @@
-use core::array::from_fn;
+use core::{array::from_fn, ops::Deref};
 
 use p3_baby_bear::Poseidon2BabyBear;
 use p3_challenger::CanObserve;
@@ -58,6 +58,92 @@ pub trait FiatShamirTranscript: Clone + Send + Sync {
             .expect("failed to find PoW witness");
         assert!(self.check_witness(bits, witness));
         witness
+    }
+}
+
+pub trait TranscriptHistory {
+    fn len(&self) -> usize;
+    fn into_log(self) -> TranscriptLog;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TranscriptLog {
+    values: Vec<F>,
+    is_sample: Vec<bool>,
+}
+
+impl TranscriptLog {
+    pub fn new(values: Vec<F>, is_sample: Vec<bool>) -> Self {
+        debug_assert_eq!(values.len(), is_sample.len());
+        Self { values, is_sample }
+    }
+
+    pub fn values(&self) -> &[F] {
+        &self.values
+    }
+
+    pub fn values_mut(&mut self) -> &mut [F] {
+        &mut self.values
+    }
+
+    pub fn samples(&self) -> &[bool] {
+        &self.is_sample
+    }
+
+    pub fn samples_mut(&mut self) -> &mut [bool] {
+        &mut self.is_sample
+    }
+
+    pub fn push_observe(&mut self, value: F) {
+        self.values.push(value);
+        self.is_sample.push(false);
+    }
+
+    pub fn push_sample(&mut self, value: F) {
+        self.values.push(value);
+        self.is_sample.push(true);
+    }
+
+    pub fn extend_observe(&mut self, values: &[F]) {
+        self.values.extend_from_slice(values);
+        self.is_sample
+            .extend(core::iter::repeat(false).take(values.len()));
+    }
+
+    pub fn extend_sample(&mut self, values: &[F]) {
+        self.values.extend_from_slice(values);
+        self.is_sample
+            .extend(core::iter::repeat(true).take(values.len()));
+    }
+
+    pub fn extend_with_flags(&mut self, values: &[F], sample_flags: &[bool]) {
+        debug_assert_eq!(values.len(), sample_flags.len());
+        self.values.extend_from_slice(values);
+        self.is_sample.extend(sample_flags.iter().copied());
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn into_parts(self) -> (Vec<F>, Vec<bool>) {
+        (self.values, self.is_sample)
+    }
+}
+
+impl Deref for TranscriptLog {
+    type Target = [F];
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
     }
 }
 
@@ -149,6 +235,35 @@ pub fn poseidon2_compress(left: [F; CHUNK], right: [F; CHUNK]) -> [F; CHUNK] {
     state[CHUNK..].copy_from_slice(&right);
     poseidon2_perm().permute_mut(&mut state);
     state[..CHUNK].try_into().unwrap()
+}
+
+#[derive(Default, Clone)]
+pub struct DuplexSpongeRecorder {
+    pub inner: DuplexSponge,
+    pub log: TranscriptLog,
+}
+
+impl FiatShamirTranscript for DuplexSpongeRecorder {
+    fn observe(&mut self, x: F) {
+        <DuplexSponge as FiatShamirTranscript>::observe(&mut self.inner, x);
+        self.log.push_observe(x);
+    }
+
+    fn sample(&mut self) -> F {
+        let x = self.inner.sample();
+        self.log.push_sample(x);
+        x
+    }
+}
+
+impl TranscriptHistory for DuplexSpongeRecorder {
+    fn len(&self) -> usize {
+        self.log.len()
+    }
+
+    fn into_log(self) -> TranscriptLog {
+        self.log
+    }
 }
 
 #[cfg(test)]

@@ -17,7 +17,9 @@ use p3_matrix::dense::RowMajorMatrix;
 use crate::{
     BabyBearPoseidon2CpuEngineV2, F, StarkEngineV2,
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2, SystemParams},
-    poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
+    poseidon2::sponge::{
+        DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory, TranscriptLog,
+    },
     proof::Proof,
     prover::{
         AirProvingContextV2, ColMajorMatrix, CpuBackendV2, DeviceDataTransporterV2,
@@ -321,57 +323,66 @@ pub fn test_engine_small() -> BabyBearPoseidon2CpuEngineV2<DuplexSponge> {
     BabyBearPoseidon2CpuEngineV2::new(test_system_params_small())
 }
 
-#[derive(Default, Clone)]
-pub struct DuplexSpongeRecorder {
-    pub inner: DuplexSponge,
-    pub history: Vec<(F, bool)>,
-}
-
-impl FiatShamirTranscript for DuplexSpongeRecorder {
-    fn observe(&mut self, x: F) {
-        self.inner.observe(x);
-        self.history.push((x, false));
-    }
-
-    fn sample(&mut self) -> F {
-        let x = self.inner.sample();
-        self.history.push((x, true));
-        x
-    }
-}
-
 #[derive(Clone)]
 pub struct DuplexSpongeValidator {
-    pub inner: DuplexSponge,
+    pub inner: DuplexSpongeRecorder,
     pub idx: usize,
-    pub expected: Vec<(F, bool)>,
+    log: TranscriptLog,
 }
 
 impl DuplexSpongeValidator {
-    pub fn new(sponge_record: Vec<(F, bool)>) -> Self {
+    pub fn new(log: TranscriptLog) -> Self {
+        debug_assert_eq!(log.len(), log.samples().len());
         Self {
             inner: Default::default(),
             idx: 0,
-            expected: sponge_record,
+            log,
         }
     }
 }
 
 impl FiatShamirTranscript for DuplexSpongeValidator {
     fn observe(&mut self, x: F) {
-        let (exp_x, is_sample) = self.expected[self.idx];
+        debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
+        assert!(!self.log.samples()[self.idx]);
+        let exp_x = self.log[self.idx];
         assert_eq!(x, exp_x);
-        assert!(!is_sample);
         self.idx += 1;
         self.inner.observe(x);
     }
 
     fn sample(&mut self) -> F {
+        debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
+        assert!(self.log.samples()[self.idx]);
         let x = self.inner.sample();
-        let (exp_x, is_sample) = self.expected[self.idx];
+        let exp_x = self.log[self.idx];
         self.idx += 1;
         assert_eq!(x, exp_x);
-        assert!(is_sample);
         x
+    }
+}
+
+impl TranscriptHistory for DuplexSpongeValidator {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn into_log(self) -> TranscriptLog {
+        debug_assert_eq!(self.inner.len(), self.log.len());
+        debug_assert_eq!(
+            self.inner.len(),
+            self.idx,
+            "transcript replay ended with {} of {} entries consumed",
+            self.idx,
+            self.inner.len()
+        );
+        debug_assert_eq!(
+            self.log.len(),
+            self.idx,
+            "transcript replay ended with {} of {} entries consumed",
+            self.idx,
+            self.log.len()
+        );
+        self.inner.into_log()
     }
 }

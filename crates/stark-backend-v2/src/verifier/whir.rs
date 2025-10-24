@@ -341,12 +341,12 @@ mod tests {
         EF, F,
         keygen::types::SystemParams,
         poly_common::Squarable,
-        poseidon2::sponge::DuplexSponge,
+        poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory},
         prover::{
             ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
             poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening,
         },
-        test_utils::{DuplexSpongeRecorder, DuplexSpongeValidator, FibFixture, TestFixture},
+        test_utils::{DuplexSpongeValidator, FibFixture, TestFixture},
         verifier::whir::{VerifyWhirError, binary_k_fold, verify_whir},
     };
 
@@ -436,7 +436,7 @@ mod tests {
         let stacking_openings =
             stacking_openings_for_matrix(&params, &z_prism, &common_main_pcs_data.matrix);
 
-        let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.history);
+        let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
         verify_whir(
             &mut verifier_sponge,
             &params,
@@ -667,7 +667,7 @@ mod tests {
             .map(|mat| stacking_openings_for_matrix(&params, &z_prism, mat))
             .collect();
 
-        let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.history);
+        let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
         verify_whir(
             &mut verifier_sponge,
             &params,
