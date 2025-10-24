@@ -1,3 +1,5 @@
+use std::{iter::once, sync::Arc};
+
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
@@ -12,20 +14,58 @@ use crate::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
     prover::{
-        ColMajorMatrix,
+        ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
         poly::{Mle, Ple, evals_eq_hypercube},
-        stacked_pcs::MerkleTree,
+        stacked_pcs::{MerkleTree, StackedPcsData},
     },
 };
 
-/// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables, at a
-/// single vector `u \in \Fext^n`.
-///
-/// This means applying WHIR with weight polynomial `\hat{w}(Z, \vec X) = Z * eq(\vec X, u)`.
-///
-/// The matrices in `committed_mats` must all have the same height.
+pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
+    /// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables,
+    /// at a single vector `u \in \Fext^n`.
+    ///
+    /// This means applying WHIR with weight polynomial `\hat{w}(Z, \vec X) = Z * eq(\vec X, u)`.
+    ///
+    /// The matrices in `common_main_pcs_data` and `pre_cached_pcs_data_per_commit` must all have
+    /// the same height.
+    fn prove_whir(
+        &self,
+        transcript: &mut TS,
+        common_main_pcs_data: PB::PcsData,
+        pre_cached_pcs_data_per_commit: Vec<Arc<PB::PcsData>>,
+        u_cube: &[PB::Challenge],
+    ) -> WhirProof;
+}
+
+impl<TS: FiatShamirTranscript> WhirProver<CpuBackendV2, CpuDeviceV2, TS> for CpuDeviceV2 {
+    #[instrument(level = "info", skip_all)]
+    fn prove_whir(
+        &self,
+        transcript: &mut TS,
+        common_main_pcs_data: StackedPcsData<F, Digest>,
+        pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsData<F, Digest>>>,
+        u_cube: &[EF],
+    ) -> WhirProof {
+        let params = self.config();
+        let committed_mats = once(&common_main_pcs_data)
+            .chain(pre_cached_pcs_data_per_commit.iter().map(|d| d.as_ref()))
+            .map(|d| (&d.matrix, &d.tree))
+            .collect_vec();
+        prove_whir_opening(
+            transcript,
+            params.k_whir,
+            params.log_blowup,
+            params.num_whir_queries,
+            params.log_final_poly_len,
+            params.whir_pow_bits,
+            params.l_skip,
+            &committed_mats,
+            u_cube,
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-#[instrument(level = "info", skip_all)]
 pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     transcript: &mut TS,
     k_whir: usize,
