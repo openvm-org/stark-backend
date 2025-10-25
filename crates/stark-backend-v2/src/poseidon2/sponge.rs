@@ -111,13 +111,13 @@ impl TranscriptLog {
     pub fn extend_observe(&mut self, values: &[F]) {
         self.values.extend_from_slice(values);
         self.is_sample
-            .extend(core::iter::repeat(false).take(values.len()));
+            .extend(core::iter::repeat_n(false, values.len()));
     }
 
     pub fn extend_sample(&mut self, values: &[F]) {
         self.values.extend_from_slice(values);
         self.is_sample
-            .extend(core::iter::repeat(true).take(values.len()));
+            .extend(core::iter::repeat_n(true, values.len()));
     }
 
     pub fn extend_with_flags(&mut self, values: &[F], sample_flags: &[bool]) {
