@@ -12,10 +12,10 @@ fn main() {
 
     common.emit_link_directives();
 
-    // common
-    //     .clone()
-    //     .library_name("stark_backend_gpu")
-    //     .include("cuda/include")
-    //     .files_from_glob("cuda/src/*.cu")
-    //     .build();
+    common
+        .clone()
+        .library_name("cuda-backend-v2")
+        .files_from_glob("cuda/src/*.cu")
+        .build();
+
 }
