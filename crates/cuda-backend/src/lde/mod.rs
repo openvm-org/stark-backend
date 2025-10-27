@@ -4,7 +4,7 @@ use crate::{base::DeviceMatrix, prelude::F};
 
 mod ops;
 use ops::*;
-mod ntt;
+pub(super) mod ntt;
 
 /// The top-level LDE abstraction, composed of general matrix access (dimensions),
 /// trace access, and LDE behavior (which varies by mode).
