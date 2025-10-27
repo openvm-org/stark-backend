@@ -24,6 +24,7 @@ p3-baby-bear = { workspace = true }
 openvm-cuda-builder.workspace = true
 
 [dev-dependencies]
+rand.workspace = true
 
 [features]
 touchemall = ["openvm-cuda-common/touchemall"]
