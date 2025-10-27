@@ -77,7 +77,7 @@ impl<'a> NttImpl<'a> {
     }
 }
 
-pub(super) fn batch_ntt(
+pub fn batch_ntt(
     buffer: &DeviceBuffer<F>,
     log_trace_height: u32,
     log_blowup: u32,
