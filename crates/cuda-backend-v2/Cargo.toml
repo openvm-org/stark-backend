@@ -8,6 +8,7 @@ description = "OpenVM CUDA prover backend V2"
 [dependencies]
 stark-backend-v2.workspace = true
 
+openvm-stark-backend.workspace = true
 openvm-cuda-common.workspace = true
 openvm-cuda-backend.workspace = true
 
@@ -15,6 +16,7 @@ itertools.workspace = true
 derive-new.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+getset.workspace = true
 
 # Plonky3
 p3-field = { workspace = true }
@@ -24,7 +26,12 @@ p3-baby-bear = { workspace = true }
 openvm-cuda-builder.workspace = true
 
 [dev-dependencies]
+stark-backend-v2 = { workspace = true, features = ["test-utils"] }
+openvm-stark-sdk.workspace = true
+p3-keccak-air.workspace = true
 rand.workspace = true
+eyre.workspace = true
 
 [features]
+default = ["stark-backend-v2/parallel"] # TODO: remove this once no longer using cpu rayon
 touchemall = ["openvm-cuda-common/touchemall"]
