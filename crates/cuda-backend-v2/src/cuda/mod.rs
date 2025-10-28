@@ -26,14 +26,21 @@ pub mod sumcheck {
             r_val: EF,
         ) -> i32;
 
-        fn _sumcheck_ple_round0(
-            input_matrices: *const usize,
+        fn _reduce_over_x_and_cols(
+            input: *const std::ffi::c_void,
             output: *mut std::ffi::c_void,
-            widths: *const u32,
-            rotations: *const i32,
-            num_matrices: u32,
-            height: u32,
+            num_x: u32,
+            num_cols: u32,
+            large_domain_size: u32,
+        ) -> i32;
+
+        fn _fold_ple_from_coeffs(
+            input_coeffs: *const std::ffi::c_void,
+            output: *mut std::ffi::c_void,
+            num_x: u32,
+            width: u32,
             domain_size: u32,
+            r: EF,
         ) -> i32;
     }
 
@@ -75,23 +82,37 @@ pub mod sumcheck {
         ))
     }
 
-    // pub unsafe fn sumcheck_ple_round0<T>(
-    //     input_matrices: &DeviceBuffer<usize>,
-    //     output: &DeviceBuffer<T>,
-    //     widths: &DeviceBuffer<u32>,
-    //     rotations: &DeviceBuffer<i32>,
-    //     num_matrices: u32,
-    //     height: u32,
-    //     domain_size: u32,
-    // ) -> Result<(), CudaError> {
-    //     CudaError::from_result(_sumcheck_ple_round0(
-    //         input_matrices.as_ptr(),
-    //         output.as_mut_raw_ptr(),
-    //         widths.as_ptr(),
-    //         rotations.as_ptr(),
-    //         num_matrices,
-    //         height,
-    //         domain_size,
-    //     ))
-    // }
+    pub unsafe fn fold_ple_from_coeffs<T, ET>(
+        input_coeffs: &DeviceBuffer<T>, // Base field (F)
+        output: &DeviceBuffer<ET>,      // Extension field (EF)
+        num_x: u32,
+        width: u32,
+        domain_size: u32,
+        r: EF,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_fold_ple_from_coeffs(
+            input_coeffs.as_raw_ptr(),
+            output.as_mut_raw_ptr(),
+            num_x,
+            width,
+            domain_size,
+            r,
+        ))
+    }
+
+    pub unsafe fn reduce_over_x_and_cols<T>(
+        input: &DeviceBuffer<T>,
+        output: &DeviceBuffer<T>,
+        num_x: u32,
+        num_cols: u32,
+        large_domain_size: u32,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_reduce_over_x_and_cols(
+            input.as_raw_ptr(),
+            output.as_mut_raw_ptr(),
+            num_x,
+            num_cols,
+            large_domain_size,
+        ))
+    }
 }
