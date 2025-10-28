@@ -253,6 +253,10 @@ impl<F: TwoAdicField> Ple<F> {
         }
         res
     }
+
+    pub fn into_coeffs(self) -> Vec<F> {
+        self.coeffs
+    }
 }
 
 pub struct MleMatrix<F> {

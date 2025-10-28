@@ -1,3 +1,4 @@
+use getset::{CopyGetters, Getters};
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
@@ -34,12 +35,17 @@ pub struct StackedSlice {
     pub log_height: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Getters, CopyGetters, Serialize, Deserialize)]
 pub struct MerkleTree<F, Digest> {
     /// The matrix that is used to form the leaves of the Merkle tree, which are
     /// in turn hashed into the bottom digest layer.
+    ///
+    /// This is typically the codeword matrix in hash-based PCS.
+    #[getset(get = "pub")]
     pub(crate) backing_matrix: ColMajorMatrix<F>,
+    #[getset(get = "pub")]
     pub(crate) digest_layers: Vec<Vec<Digest>>,
+    #[getset(get_copy = "pub")]
     pub(crate) rows_per_leaf: usize,
 }
 
