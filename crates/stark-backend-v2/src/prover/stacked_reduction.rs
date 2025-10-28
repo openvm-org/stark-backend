@@ -146,7 +146,7 @@ pub struct StackedReductionCpu<'a> {
 
 impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReductionCpu<'a> {
     fn new(
-        device: &'a CpuDeviceV2,
+        device: &CpuDeviceV2,
         stacked_per_commit: Vec<&'a StackedPcsData<F, Digest>>,
         r: &[EF],
         lambda: EF,
