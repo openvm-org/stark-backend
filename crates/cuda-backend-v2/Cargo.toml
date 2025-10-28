@@ -21,6 +21,7 @@ getset.workspace = true
 # Plonky3
 p3-field = { workspace = true }
 p3-baby-bear = { workspace = true }
+p3-util = { workspace = true }
 
 [build-dependencies]
 openvm-cuda-builder.workspace = true
