@@ -2,6 +2,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
 };
+use openvm_stark_backend::p3_util::log2_strict_usize;
 use p3_field::{ExtensionField, Field, FieldExtensionAlgebra};
 use stark_backend_v2::{
     EF, poseidon2::sponge::FiatShamirTranscript, prover::sumcheck::SumcheckCubeProof,
@@ -17,7 +18,7 @@ pub fn sumcheck_multilinear_gpu<F: Field, TS: FiatShamirTranscript>(
 where
     EF: ExtensionField<F>,
 {
-    let n = p3_util::log2_strict_usize(evals.len());
+    let n = log2_strict_usize(evals.len());
     let mut round_polys_eval = Vec::with_capacity(n);
     let mut r = Vec::with_capacity(n);
 
