@@ -77,6 +77,13 @@ impl<'a> NttImpl<'a> {
     }
 }
 
+/// Performs column-wise batch NTT on `buffer`, where `buffer` is assumed to be column-major with
+/// columns of height `2^(log_trace_height + log_blowup)`. The NTT are performed on the first
+/// `2^log_trace_height` elements of each column. If `bit_reverse` is true, then the input columns
+/// are assumed to be ordered in **natural** ordering, and a bit-reversal permutation is applied for
+/// the internal algorithm of the NTT. If `bit_reverse` is false, then the input columns are assumed
+/// to be in bit-reverse ordering. If `is_intt` is true, the inverse NTT is performed; otherwise,
+/// the forward NTT is performed.
 pub fn batch_ntt(
     buffer: &DeviceBuffer<F>,
     log_trace_height: u32,

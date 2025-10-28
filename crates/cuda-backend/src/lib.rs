@@ -10,8 +10,11 @@ mod quotient;
 mod transpiler;
 pub mod types;
 
+pub mod ntt {
+    pub use crate::lde::ntt::batch_ntt;
+}
 pub mod prelude {
-    pub use crate::{lde::ntt::batch_ntt, types::prelude::*};
+    pub use crate::types::prelude::*;
 }
 pub mod data_transporter;
 pub mod engine;
