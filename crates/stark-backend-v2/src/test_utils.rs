@@ -15,7 +15,7 @@ use p3_field::{FieldAlgebra, PrimeField32};
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
-    BabyBearPoseidon2CpuEngineV2, F, StarkEngineV2,
+    BabyBearPoseidon2CpuEngineV2, Digest, F, StarkEngineV2,
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2, SystemParams},
     poseidon2::sponge::{
         DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory, TranscriptLog,
@@ -23,9 +23,40 @@ use crate::{
     proof::Proof,
     prover::{
         AirProvingContextV2, ColMajorMatrix, CpuBackendV2, DeviceDataTransporterV2,
-        ProvingContextV2, stacked_pcs::stacked_commit,
+        ProverBackendV2, ProvingContextV2, stacked_pcs::stacked_commit,
     },
 };
+
+pub fn transport_proving_ctx_to_device<PB, PD>(
+    device: &PD,
+    ctx: &ProvingContextV2<CpuBackendV2>,
+) -> ProvingContextV2<PB>
+where
+    PB: ProverBackendV2<Val = F, Commitment = Digest>,
+    PD: DeviceDataTransporterV2<PB>,
+{
+    let per_trace = ctx
+        .per_trace
+        .iter()
+        .map(|(air_idx, air_ctx)| {
+            let common_main = device.transport_matrix_to_device(&air_ctx.common_main);
+            let cached_mains = air_ctx
+                .cached_mains
+                .iter()
+                .map(|(commit, data)| {
+                    (
+                        *commit,
+                        Arc::new(device.transport_pcs_data_to_device(data.as_ref())),
+                    )
+                })
+                .collect();
+            let air_ctx_gpu =
+                AirProvingContextV2::new(cached_mains, common_main, air_ctx.public_values.clone());
+            (*air_idx, air_ctx_gpu)
+        })
+        .collect();
+    ProvingContextV2::new(per_trace)
+}
 
 fn get_fib_number(n: usize) -> u32 {
     let mut a = 0;
@@ -86,25 +117,7 @@ pub trait TestFixture {
         let ctx = self.generate_proving_ctx();
         let device = engine.device();
         let d_pk = device.transport_pk_to_device(pk);
-        let d_ctx = ProvingContextV2::new(
-            ctx.into_iter()
-                .map(|(air_idx, air_ctx)| {
-                    let d_air_ctx = AirProvingContextV2 {
-                        cached_mains: air_ctx
-                            .cached_mains
-                            .into_iter()
-                            .map(|(commit, data)| {
-                                let d_data = device.transport_pcs_data_to_device(&data);
-                                (commit, Arc::new(d_data))
-                            })
-                            .collect(),
-                        common_main: device.transport_matrix_to_device(&air_ctx.common_main),
-                        public_values: air_ctx.public_values,
-                    };
-                    (air_idx, d_air_ctx)
-                })
-                .collect(),
-        );
+        let d_ctx = transport_proving_ctx_to_device(device, &ctx);
         let mut prover = engine.prover_from_transcript(transcript.clone());
         let proof = prover.prove(&d_pk, d_ctx);
         *transcript = prover.transcript;

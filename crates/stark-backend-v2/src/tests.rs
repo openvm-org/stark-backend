@@ -443,7 +443,6 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
         &trace_id_to_air_ids,
         &ns,
         &omega_pows,
-    )
-    .unwrap();
+    )?;
     Ok(())
 }
