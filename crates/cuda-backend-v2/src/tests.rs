@@ -30,13 +30,16 @@ use stark_backend_v2::{
         fractional_sumcheck_gkr::verify_gkr,
         proof_shape::{ProofShapeError, verify_proof_shape},
         stacked_reduction::{StackedReductionError, verify_stacked_reduction},
-        sumcheck::verify_sumcheck_multilinear,
+        sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify,
     },
 };
 use tracing::{Level, debug};
 
-use crate::{BabyBearPoseidon2GpuEngineV2, sumcheck::sumcheck_multilinear_gpu};
+use crate::{
+    BabyBearPoseidon2GpuEngineV2,
+    sumcheck::{sumcheck_multilinear_gpu, sumcheck_prismalinear_gpu},
+};
 
 pub fn test_gpu_engine_small() -> BabyBearPoseidon2GpuEngineV2 {
     setup_tracing();
@@ -60,6 +63,27 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
     let (proof_gpu, _) = sumcheck_multilinear_gpu(&mut prover_sponge_gpu, &evals);
 
     verify_sumcheck_multilinear::<F, _>(&mut verifier_sponge_gpu, &proof_gpu)
+}
+
+#[test]
+fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
+    let n = 5;
+    let l_skip = 10;
+    let mut rng = StdRng::from_seed([228; 32]);
+
+    let dim = n + l_skip;
+    let num_pts = 1 << dim;
+    assert!((F::ORDER_U32 - 1) % num_pts == 0);
+
+    let evals = (0..num_pts)
+        .map(|_| F::from_canonical_u32(rng.random_range(0..F::ORDER_U32)))
+        .collect::<Vec<_>>();
+
+    let mut prover_sponge = DuplexSponge::default();
+    let mut verifier_sponge = DuplexSponge::default();
+
+    let (proof, _) = sumcheck_prismalinear_gpu(&mut prover_sponge, l_skip, &evals);
+    verify_sumcheck_prismalinear::<F, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
 #[test]

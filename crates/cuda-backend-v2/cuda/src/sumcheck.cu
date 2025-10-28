@@ -1,9 +1,10 @@
 #include "fpext.h"
 #include "launcher.cuh"
-#include <vector>
-#include <iostream>
 
-// Warp-level reduction for FpExt
+namespace plain_sumcheck {
+
+// Warp-level reduction: sums FpExt values across threads in a warp (32 threads)
+// Uses shuffle instructions for efficient communication within a warp
 __device__ FpExt warp_reduce_sum(FpExt val) {
     unsigned mask = __activemask();
 
@@ -18,20 +19,25 @@ __device__ FpExt warp_reduce_sum(FpExt val) {
     return val;
 }
 
-// Block-level reduction for FpExt
+// Block-level reduction: sums FpExt values across all threads in a block
+// Two-stage process: warp-level reduction, then inter-warp reduction
+// Returns result in all threads of first warp (typically only thread 0 uses it)
 __device__ FpExt block_reduce_sum(FpExt val, FpExt* shared) {
     int tid = threadIdx.x;
     int warp_id = tid / 32;
     int lane_id = tid % 32;
-    int num_warps = (blockDim.x + 31) / 32;
-    
+    int num_warps = (blockDim.x + 31) / 32; // Round up for blocks < 32 threads
+
+    // Stage 1: Each warp reduces its values
     val = warp_reduce_sum(val);
     
+    // Lane 0 of each warp writes result to shared memory
     if (lane_id == 0) {
         shared[warp_id] = val;
     }
     __syncthreads();
     
+    // Stage 2: First warp reduces the per-warp results
     FpExt zero = {0, 0, 0, 0};
     if (warp_id == 0) {
         // Only the first warp participates in the second reduction. Within that warp we
@@ -43,15 +49,46 @@ __device__ FpExt block_reduce_sum(FpExt val, FpExt* shared) {
     return val;
 }
 
+// Reduces evaluations over x and column dimensions for PLE round 0
+// Input:  [num_x * num_cols * large_domain_size] - evaluations on large domain
+// Output: [large_domain_size] - summed evaluations
+// Each thread handles one z value, summing over all (x, col) pairs
+// Memory: Column-major layout where each (x,col) is a column of size large_domain_size
+__global__ void reduce_over_x_and_cols_kernel(
+    const Fp* input,         // [num_x * num_cols * large_domain_size]
+    Fp* output,              // [large_domain_size]
+    uint32_t num_x,
+    uint32_t num_cols,
+    uint32_t large_domain_size
+) {
+    // Each thread handles one z value
+    int z = blockIdx.x * blockDim.x + threadIdx.x;
+    if (z >= large_domain_size) return;
+    
+    Fp sum = Fp::zero();
+    
+    // Sum input[(x * num_cols + col) * large_domain_size + z] over all (x, col)
+    for (uint32_t x = 0; x < num_x; x++) {
+        for (uint32_t col = 0; col < num_cols; col++) {
+            // Column-major layout: [x * num_cols + col][z]
+            uint32_t offset = (x * num_cols + col) * large_domain_size;
+            sum = sum + input[offset + z];
+        }
+    }
+    
+    output[z] = sum;
+}
 
-// NOTE: This kernel currently implements identity W function: W(evals) = evals[0][0]
-// For more complex use cases with custom W functions, the main modification would be
-// in the accumulation section where we compute `local_sums`. Instead of directly
-// accumulating eval_X, we would:
-// 1. Collect all matrix evaluations at (X, y) into a buffer
-// 2. Call W function to combine them: W(X, y, all_evals) -> [FpExt; WD]
-// 3. Accumulate the result into local_sums
-// The map-reduce structure and reduction logic would remain unchanged.
+// Computes univariate polynomial evaluations for MLE sumcheck round
+// For each X ∈ {1, ..., d}, computes: s(X) = Σ_{y ∈ H_{n-1}} f̂(X, y)
+// where f̂(X, y) is obtained by linear interpolation: f(0,y) + X*(f(1,y) - f(0,y))
+//
+// Memory layout: Column-major matrices with height = 2^n
+// - For each y: reads indices [2*y, 2*y+1] (even/odd pairs)
+// - Outputs partial sums per block, final reduction done in separate kernel
+//
+// Template parameter WD: Number of output polynomials (typically 1)
+// NOTE: This implements identity W function. For custom W, modify accumulation section.
 template<int WD>
 __global__ void sumcheck_mle_round_kernel(
     const uintptr_t* input_matrices,
@@ -123,7 +160,9 @@ __global__ void sumcheck_mle_round_kernel(
     }
 }
 
-// Final reduction kernel: combines block sums into final result
+// Final reduction: combines partial block sums into final result
+// Grid dimension: d * WD blocks (one per output value)
+// Each block reduces num_blocks partial sums for its assigned output
 template<int WD>
 __global__ void reduce_blocks_sumcheck(
     const FpExt* block_sums,  // [num_blocks][d * WD]
@@ -142,7 +181,7 @@ __global__ void reduce_blocks_sumcheck(
     
     FpExt sum = {0, 0, 0, 0};
     
-    // Sum all num_blocks partial sums for this output index
+    // Each thread accumulates subset of blocks
     for (int block_id = tid; block_id < num_blocks; block_id += blockDim.x) {
         sum += block_sums[block_id * d * WD + out_idx];
     }
@@ -155,6 +194,11 @@ __global__ void reduce_blocks_sumcheck(
     }
 }
 
+// Folds MLE evaluations using challenge r: output[y] = input[2*y] + r*(input[2*y+1] - input[2*y])
+// Memory: Column-major layout, each column folded independently
+// - Input:  height = 2^n per column
+// - Output: height = 2^(n-1) per column
+// Grid: (blocks for height/2, num_matrices) to parallelize over both dimensions
 // [TODO] Check is it valid that all matrices have the same height?
 __global__ void fold_mle_kernel(
     const uintptr_t* input_matrices,   // Array of input matrix pointers
@@ -194,6 +238,47 @@ __global__ void fold_mle_kernel(
     }
 }
 
+// Evaluates univariate polynomials at challenge point r using Horner's method
+// Input: Polynomial coefficients (from iDFT in round 0) in natural order
+// Output: Evaluations in extension field
+//
+// Memory layout: Column-major with domain_size coefficients per polynomial
+// - input_coeffs[(x * width + col) * domain_size + i] = coefficient c_i for polynomial (x, col)
+// - Evaluates: c_0 + c_1*r + c_2*r^2 + ... using Horner's method
+//
+// Why this works: During PLE round 0, we performed iDFT with bit_reverse=true,
+// converting evaluations to coefficients in natural order. We reuse those
+// coefficients here instead of re-interpolating from evaluations (more efficient).
+__global__ void fold_ple_from_coeffs_kernel(
+    const Fp* input_coeffs,    // [num_x * width * domain_size] after iDFT
+    FpExt* output,             // [num_x * width]
+    uint32_t num_x,
+    uint32_t width,
+    uint32_t domain_size,     // 2^l_skip
+    FpExt r_val
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_polys = num_x * width;
+    
+    if (idx >= total_polys) return;
+    
+    // Coefficients for this (x, col) are at offset idx * domain_size
+    const Fp* coeffs = input_coeffs + idx * domain_size;
+    
+    // Horner's method: evaluate polynomial at r
+    FpExt result = FpExt(Fp(coeffs[domain_size - 1]));
+    for (int i = domain_size - 2; i >= 0; i--) {
+        result = result * r_val + FpExt(Fp(coeffs[i]));
+    }
+    
+    output[idx] = result;
+}
+
+// ============================================================================
+// LAUNCHERS
+// ============================================================================
+
+
 extern "C" int _fold_mle(
     const uintptr_t* input_matrices,
     const uintptr_t* output_matrices,
@@ -208,7 +293,46 @@ extern "C" int _fold_mle(
     return CHECK_KERNEL();
 }
 
+extern "C" int _fold_ple_from_coeffs(
+    const Fp* input_coeffs,
+    FpExt* output,
+    const uint32_t num_x,
+    const uint32_t width,
+    const uint32_t domain_size,
+    const FpExt r_val
+) {
+    int total_polys = num_x * width;
+    auto [grid, block] = kernel_launch_params(total_polys);
+    
+    fold_ple_from_coeffs_kernel<<<grid, block>>>(
+        input_coeffs,
+        output,
+        num_x,
+        width,
+        domain_size,
+        r_val
+    );
+    
+    return CHECK_KERNEL();
+}
 
+extern "C" int _reduce_over_x_and_cols(
+    const Fp* input,
+    Fp* output,
+    uint32_t num_x,
+    uint32_t num_cols,
+    uint32_t large_domain_size
+) {
+    auto [grid, block] = kernel_launch_params(large_domain_size);
+    reduce_over_x_and_cols_kernel<<<grid, block>>>(
+        input,
+        output,
+        num_x,
+        num_cols,
+        large_domain_size
+    );
+    return CHECK_KERNEL();
+}
 
 // WD = 1
 extern "C" int _sumcheck_mle_round(
@@ -252,3 +376,5 @@ extern "C" int _sumcheck_mle_round(
 
     return CHECK_KERNEL();
 }
+
+} // namespace plain_sumcheck
