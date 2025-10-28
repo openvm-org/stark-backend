@@ -404,6 +404,7 @@ mod tests {
             )
         };
 
+        let mut commits = vec![common_main_commit];
         let mut committed_mats = vec![(&common_main_pcs_data.matrix, &common_main_pcs_data.tree)];
         for (air_id, air_ctx) in &ctx.per_trace {
             let pcs_datas = pk.per_air[*air_id]
@@ -412,6 +413,7 @@ mod tests {
                 .chain(&air_ctx.cached_mains);
             for (_, data) in pcs_datas {
                 committed_mats.push((&data.matrix, &data.tree));
+                commits.push(data.commit());
             }
         }
 
@@ -433,16 +435,18 @@ mod tests {
             &z_cube,
         );
 
-        let stacking_openings =
-            stacking_openings_for_matrix(&params, &z_prism, &common_main_pcs_data.matrix);
+        let stacking_openings = committed_mats
+            .iter()
+            .map(|(matrix, _)| stacking_openings_for_matrix(&params, &z_prism, matrix))
+            .collect_vec();
 
         let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
         verify_whir(
             &mut verifier_sponge,
             &params,
             &proof,
-            &[stacking_openings],
-            &[common_main_commit],
+            &stacking_openings,
+            &commits,
             &z_cube,
         )
     }
