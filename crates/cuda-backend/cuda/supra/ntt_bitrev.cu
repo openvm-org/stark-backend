@@ -148,7 +148,7 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
     const uint32_t max_y = max_grid_dim_y();
     const uint64_t total_polys = poly_count;
     const uint64_t max_y_64 = max_y == 0 ? 1 : static_cast<uint64_t>(max_y);
-    uint32_t grid_z = static_cast<uint32_t>((total_polys + max_y_64 - 1) / max_y_64);
+    uint32_t grid_z = (total_polys + max_y_64 - 1) / max_y_64;
     if (grid_z == 0)
         grid_z = 1;
     uint64_t grid_y_64 = (total_polys + grid_z - 1) / grid_z;
@@ -161,10 +161,10 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
         bit_rev_permutation<<<dim3(1u, grid_y, grid_z), domain_size>>>
                             (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else if (domain_size < bsize * Z_COUNT)
-        bit_rev_permutation<<<dim3(static_cast<unsigned int>(domain_size / WARP_SIZE), grid_y, grid_z), WARP_SIZE>>>
+        bit_rev_permutation<<<dim3(domain_size / WARP_SIZE, grid_y, grid_z), WARP_SIZE>>>
                             (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else if (Z_COUNT > WARP_SIZE || lg_domain_size <= 32)
-        bit_rev_permutation_z<Z_COUNT><<<dim3(static_cast<unsigned int>(domain_size / Z_COUNT / bsize), grid_y, grid_z), bsize,
+        bit_rev_permutation_z<Z_COUNT><<<dim3(domain_size / Z_COUNT / bsize, grid_y, grid_z), bsize,
                                             bsize * Z_COUNT * sizeof(fr_t)>>>
                             (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else {
@@ -175,7 +175,7 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
         int sm_count;
         cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
 
-        bit_rev_permutation_z<Z_COUNT><<<dim3(static_cast<unsigned int>(sm_count * 2), grid_y, grid_z), 192,
+        bit_rev_permutation_z<Z_COUNT><<<dim3(sm_count * 2, grid_y, grid_z), 192,
                                             192 * Z_COUNT * sizeof(fr_t)>>>
                                 (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     }

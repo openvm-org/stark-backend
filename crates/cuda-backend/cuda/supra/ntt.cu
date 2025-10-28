@@ -246,7 +246,7 @@ extern "C" int _ct_mixed_radix_narrow(
     const uint32_t max_y = max_grid_dim_y();
     const uint64_t total_polys = poly_count;
     const uint64_t max_y_64 = max_y == 0 ? 1 : static_cast<uint64_t>(max_y);
-    uint32_t grid_z = static_cast<uint32_t>((total_polys + max_y_64 - 1) / max_y_64);
+    uint32_t grid_z = (total_polys + max_y_64 - 1) / max_y_64;
     if (grid_z == 0)
         grid_z = 1;
     uint64_t grid_y_64 = (total_polys + grid_z - 1) / grid_z;
@@ -259,11 +259,11 @@ extern "C" int _ct_mixed_radix_narrow(
 
     // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
     if (num_blocks < Z_COUNT)
-        _CT_NTT<1><<<dim3(static_cast<unsigned int>(num_blocks), grid_y, grid_z), block_size, shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<1><<<dim3(num_blocks, grid_y, grid_z), block_size, shared_sz>>>(NTT_ARGUMENTS);
     else if (stage == 0 || lg_domain_size < 12)
-        _CT_NTT<Z_COUNT><<<dim3(static_cast<unsigned int>(num_blocks/Z_COUNT), grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<Z_COUNT><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
     else if (lg_domain_size < MAX_LG_DOMAIN_SIZE)
-        _CT_NTT<Z_COUNT, true><<<dim3(static_cast<unsigned int>(num_blocks/Z_COUNT), grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<Z_COUNT, true><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
     else
         assert(lg_domain_size < MAX_LG_DOMAIN_SIZE);
             
