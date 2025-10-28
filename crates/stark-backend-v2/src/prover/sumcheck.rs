@@ -413,6 +413,8 @@ where
             sumcheck_round_poly_evals(n - round, 1, &[current_evals.as_view()], |_x, _y, evals| {
                 [evals[0][0]]
             });
+
+        println!("CPU s: {:?}", s);
         assert_eq!(s.len(), 1);
         transcript.observe_ext(s[0]);
         round_polys_eval.push(s);
