@@ -55,7 +55,7 @@ void _CT_NTT(const unsigned int radix, const unsigned int lg_domain_size,
     const fr_t* d_radixX_twiddles = d_radix6_twiddles + twiddles_offset;
 
     index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
-    const uint32_t poly_idx = blockIdx.y + blockIdx.z * gridDim.y;
+    const uint32_t poly_idx = blockIdx.y + blockIdx.z * gridDim.y; // [DIFF]: use gridDim.y to calculate poly_idx
     if (poly_idx >= poly_count)
         return;
     d_inout += static_cast<size_t>(poly_idx) * padded_poly_size;   // [DIFF]: move in/out ptr to another row
@@ -242,6 +242,7 @@ extern "C" int _ct_mixed_radix_narrow(
     const int Z_COUNT = 256/8/sizeof(fr_t);
     size_t shared_sz = sizeof(fr_t) << (radix - 1);
 
+    // [DIFF]: calculate grid_z from poly_count
     const uint32_t max_y = max_grid_dim_y();
     const uint64_t total_polys = poly_count;
     const uint64_t max_y_64 = max_y == 0 ? 1 : static_cast<uint64_t>(max_y);

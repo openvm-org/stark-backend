@@ -33,7 +33,7 @@ __launch_bounds__(1024) __global__
 void bit_rev_permutation(fr_t* d_out, const fr_t *d_in, uint32_t lg_domain_size,
                          uint32_t padded_poly_size, uint32_t poly_count)
 {
-    const uint32_t poly_idx = blockIdx.y + blockIdx.z * gridDim.y;
+    const uint32_t poly_idx = blockIdx.y + blockIdx.z * gridDim.y; // [DIFF]: use gridDim.y to calculate poly_idx
     if (poly_idx >= poly_count)
         return;
     d_out += static_cast<size_t>(poly_idx) * padded_poly_size; // [DIFF]: move out ptr to another row
@@ -144,6 +144,7 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
     if (poly_count == 0)
         return cudaSuccess;
 
+    // [DIFF]: calculate grid_y and grid_z from poly_count
     const uint32_t max_y = max_grid_dim_y();
     const uint64_t total_polys = poly_count;
     const uint64_t max_y_64 = max_y == 0 ? 1 : static_cast<uint64_t>(max_y);
