@@ -1,8 +1,19 @@
 mod cuda;
-mod prover_backend;
+mod device;
+mod engine;
+mod gpu_backend;
+pub mod logup_zerocheck;
+pub mod merkle_tree;
+pub mod stacked_pcs;
+pub mod stacked_reduction;
 mod sumcheck;
+pub mod whir;
+
+pub use device::*;
+pub use engine::*;
+pub use gpu_backend::*;
 
 #[cfg(test)]
 mod tests;
 
-pub use prover_backend::GpuBackendV2;
+pub use stark_backend_v2::{D_EF, DIGEST_SIZE, Digest, EF, F}; // re-export in preparation for generic F in stark-backend
