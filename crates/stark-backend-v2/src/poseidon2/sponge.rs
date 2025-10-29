@@ -266,6 +266,63 @@ impl TranscriptHistory for DuplexSpongeRecorder {
     }
 }
 
+/// Read-only transcript that replays a recorded log.
+#[derive(Clone, Debug)]
+pub struct ReadOnlyTranscript<'a> {
+    log: &'a TranscriptLog,
+    position: usize,
+}
+
+impl<'a> ReadOnlyTranscript<'a> {
+    pub fn new(log: &'a TranscriptLog, start_idx: usize) -> Self {
+        debug_assert!(start_idx <= log.len(), "start index out of bounds");
+        Self {
+            log,
+            position: start_idx,
+        }
+    }
+}
+
+impl<'a> FiatShamirTranscript for ReadOnlyTranscript<'a> {
+    #[inline]
+    fn observe(&mut self, value: F) {
+        debug_assert!(
+            !self.log.samples()[self.position],
+            "expected observe at {}",
+            self.position
+        );
+        debug_assert_eq!(
+            self.log.values()[self.position],
+            value,
+            "value mismatch at {}",
+            self.position
+        );
+        self.position += 1;
+    }
+
+    #[inline]
+    fn sample(&mut self) -> F {
+        debug_assert!(
+            self.log.samples()[self.position],
+            "expected sample at {}",
+            self.position
+        );
+        let value = self.log.values()[self.position];
+        self.position += 1;
+        value
+    }
+}
+
+impl<'a> TranscriptHistory for ReadOnlyTranscript<'a> {
+    fn len(&self) -> usize {
+        self.position
+    }
+
+    fn into_log(self) -> TranscriptLog {
+        self.log.clone()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use openvm_stark_sdk::config::baby_bear_poseidon2::Challenger;
@@ -275,7 +332,10 @@ mod test {
 
     use crate::poseidon2::{
         poseidon2_perm,
-        sponge::{DuplexSponge, FiatShamirTranscript},
+        sponge::{
+            DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, ReadOnlyTranscript,
+            TranscriptHistory,
+        },
     };
 
     #[test]
@@ -297,5 +357,58 @@ mod test {
                 FiatShamirTranscript::observe(&mut sponge, BabyBear::from_canonical_usize(j));
             }
         }
+    }
+
+    #[test]
+    fn test_read_only_transcript() {
+        // Record a sequence of operations
+        let mut recorder = DuplexSpongeRecorder::default();
+        recorder.observe(BabyBear::from_canonical_u32(42));
+        recorder.observe(BabyBear::from_canonical_u32(100));
+        let s1 = recorder.sample();
+        recorder.observe(BabyBear::from_canonical_u32(200));
+        let s2 = recorder.sample();
+        let s3 = recorder.sample();
+
+        let log = recorder.into_log();
+
+        // Replay from start
+        let mut replay = ReadOnlyTranscript::new(&log, 0);
+        replay.observe(BabyBear::from_canonical_u32(42));
+        replay.observe(BabyBear::from_canonical_u32(100));
+        assert_eq!(replay.sample(), s1);
+        replay.observe(BabyBear::from_canonical_u32(200));
+        assert_eq!(replay.sample(), s2);
+        assert_eq!(replay.sample(), s3);
+        assert_eq!(replay.len(), 6);
+
+        // Replay from middle
+        let mut replay2 = ReadOnlyTranscript::new(&log, 2);
+        assert_eq!(replay2.sample(), s1);
+        replay2.observe(BabyBear::from_canonical_u32(200));
+        assert_eq!(replay2.sample(), s2);
+        assert_eq!(replay2.len(), 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected observe at 0")]
+    fn test_read_only_transcript_wrong_operation() {
+        let mut recorder = DuplexSpongeRecorder::default();
+        let _ = recorder.sample();
+        let log = recorder.into_log();
+
+        let mut replay = ReadOnlyTranscript::new(&log, 0);
+        replay.observe(BabyBear::from_canonical_u32(42)); // Should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "value mismatch at 0")]
+    fn test_read_only_transcript_wrong_value() {
+        let mut recorder = DuplexSpongeRecorder::default();
+        recorder.observe(BabyBear::from_canonical_u32(42));
+        let log = recorder.into_log();
+
+        let mut replay = ReadOnlyTranscript::new(&log, 0);
+        replay.observe(BabyBear::from_canonical_u32(99)); // Should panic
     }
 }
