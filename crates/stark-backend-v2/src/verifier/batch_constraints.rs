@@ -74,9 +74,12 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         column_openings,
     } = batch_proof;
 
+    // 1. Check GKR witness
     if !transcript.check_witness(mvk.params.logup_pow_bits, gkr_proof.logup_pow_witness) {
         return Err(BatchConstraintError::InvalidLogupPowWitness);
     }
+
+    // 2. Sample alpha and beta, receive xi, sample lambda
     let alpha_logup = transcript.sample_ext();
     let beta_logup = transcript.sample_ext();
     debug!(%alpha_logup, %beta_logup);
@@ -111,14 +114,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     let lambda = transcript.sample_ext();
     debug!(%lambda);
 
-    let max_num_constraints = mvk
-        .per_air
-        .iter()
-        .map(|vk| vk.symbolic_constraints.constraints.constraint_idx.len())
-        .max()
-        .unwrap_or(0);
-    let lambda_pows = lambda.powers().take(max_num_constraints).collect_vec();
-
+    // 3. Observe everything from numerator_per_air and denominator_per_air, compute its sum
     for (&sum_claim_p, &sum_claim_q) in zip(numerator_term_per_air, denominator_term_per_air) {
         p_xi_claim -= sum_claim_p;
         q_xi_claim -= sum_claim_q;
@@ -132,6 +128,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         return Err(BatchConstraintError::GkrDenominatorMismatch { claim: q_xi_claim });
     }
 
+    // 4. Sample mu, compute the mu-hash of interleave of numerator_per_air and denominator_per_air
     let mu = transcript.sample_ext();
     debug!(%mu);
 
@@ -143,6 +140,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         sum_claim += sum_claim_q * cur_mu_pow;
         cur_mu_pow *= mu;
     }
+
+    // 5. Univariate sumcheck round
     for &coeff in univariate_round_coeffs {
         transcript.observe_ext(coeff);
     }
@@ -171,6 +170,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     let mut cur_sum = s_0.eval_at_point(r_0);
     let mut rs = vec![r_0];
 
+    // 6. Multilinear sumcheck rounds
     #[allow(clippy::needless_range_loop)]
     for round in 0..n_global {
         debug!(sumcheck_round = round, sum_claim = %cur_sum, "batch_constraint_sumcheck");
@@ -208,6 +208,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         rs.push(r);
     }
 
+    // 7. Compute `eq_3b_per_trace`
     let interactions_meta = (0..n_per_trace.len())
         .map(|trace_idx| {
             (
@@ -246,6 +247,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         })
         .collect_vec();
 
+    // 8. Compute `eq_ns` and `eq_sharp_ns`
     let mut eq_ns = vec![EF::ONE; n_global + 1];
     let mut eq_sharp_ns = vec![EF::ONE; n_global + 1];
     eq_ns[0] = eval_eq_uni(l_skip, xi[0], r_0);
@@ -264,6 +266,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         eq_sharp_ns[i] *= r_rev_prod;
         r_rev_prod *= rs[i];
     }
+
+    // 9. Compute the interaction/constraint evals and their hash
     let mut interactions_evals = Vec::new();
     let mut constraints_evals = Vec::new();
 
@@ -308,8 +312,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
 
         let constraints = &vk.symbolic_constraints.constraints;
         let nodes = evaluator.eval_nodes(&constraints.nodes);
-        let expr = zip(&lambda_pows, &constraints.constraint_idx)
-            .map(|(&lambda_pow, idx)| nodes[*idx] * lambda_pow)
+        let expr = zip(lambda.powers(), &constraints.constraint_idx)
+            .map(|(lambda_pow, idx)| nodes[*idx] * lambda_pow)
             .sum::<EF>();
         debug!(%trace_idx, %expr, %air_idx, "constraints_eval");
         let eq_xi_r = eq_ns[n];
