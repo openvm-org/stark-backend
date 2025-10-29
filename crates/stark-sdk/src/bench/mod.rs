@@ -33,7 +33,7 @@ pub fn run_with_metric_collection<R>(
     #[cfg(feature = "metrics")]
     let subscriber = subscriber.with(TimingMetricsLayer::new());
     // Prepare tracing.
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    let _ = tracing::subscriber::set_global_default(subscriber);
 
     // Prepare metrics.
     let recorder = DebuggingRecorder::new();
