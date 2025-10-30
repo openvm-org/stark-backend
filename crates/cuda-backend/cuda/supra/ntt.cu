@@ -14,6 +14,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cstdint>
+
 #include "launcher.cuh"
 #include "ntt/ntt.cuh"
 
@@ -22,7 +24,8 @@ __launch_bounds__(768, 1) __global__
 void _CT_NTT(const unsigned int radix, const unsigned int lg_domain_size,
              const unsigned int stage, const unsigned int iterations,
              fr_t* d_inout, const unsigned int padded_poly_size,
-             bool is_intt, const fr_t d_domain_size_inverse)
+             const uint32_t poly_count, bool is_intt,
+             const fr_t d_domain_size_inverse)
 {
 #if (__CUDACC_VER_MAJOR__-0) >= 11
     __builtin_assume(lg_domain_size <= MAX_LG_DOMAIN_SIZE);
@@ -38,7 +41,10 @@ void _CT_NTT(const unsigned int radix, const unsigned int lg_domain_size,
     const fr_t* d_radixX_twiddles = d_radix6_twiddles + twiddles_offset;
 
     index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
-    d_inout += blockIdx.y * padded_poly_size;   // [DIFF]: move in/out ptr to another row
+    const uint32_t poly_idx = blockIdx.y + blockIdx.z * gridDim.y; // [DIFF]: use gridDim.y to calculate poly_idx
+    if (poly_idx >= poly_count)
+        return;
+    d_inout += static_cast<size_t>(poly_idx) * padded_poly_size;   // [DIFF]: move in/out ptr to another row
 
     const index_t diff_mask = (1 << (iterations - 1)) - 1;
     const index_t inp_mask = ((index_t)1 << stage) - 1;
@@ -211,6 +217,9 @@ extern "C" int _ct_mixed_radix_narrow(
     index_t block_size = 1 << (radix - 1);
     index_t num_blocks;
 
+    if (poly_count == 0)
+        return cudaSuccess;
+
     block_size = (num_threads <= block_size) ? num_threads : block_size;
     num_blocks = (num_threads + block_size - 1) / block_size;
 
@@ -219,16 +228,21 @@ extern "C" int _ct_mixed_radix_narrow(
     const int Z_COUNT = 256/8/sizeof(fr_t);
     size_t shared_sz = sizeof(fr_t) << (radix - 1);
 
+    // [DIFF]: calculate grid_y, grid_z from poly_count
+    const uint32_t MAX_Y = 65535;
+    uint32_t grid_y = poly_count < MAX_Y ? poly_count : MAX_Y;
+    uint32_t grid_z = (poly_count + grid_y - 1) / grid_y;
+
     #define NTT_ARGUMENTS radix, lg_domain_size, stage, iterations, \
-            d_inout, padded_poly_size, is_intt, domain_size_inverse[lg_domain_size]
+            d_inout, padded_poly_size, poly_count, is_intt, domain_size_inverse[lg_domain_size]
 
     // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
     if (num_blocks < Z_COUNT)
-        _CT_NTT<1><<<dim3(num_blocks, poly_count), block_size, shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<1><<<dim3(num_blocks, grid_y, grid_z), block_size, shared_sz>>>(NTT_ARGUMENTS);
     else if (stage == 0 || lg_domain_size < 12)
-        _CT_NTT<Z_COUNT><<<dim3(num_blocks/Z_COUNT, poly_count), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<Z_COUNT><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
     else if (lg_domain_size < MAX_LG_DOMAIN_SIZE)
-        _CT_NTT<Z_COUNT, true><<<dim3(num_blocks/Z_COUNT, poly_count), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<Z_COUNT, true><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
     else
         assert(lg_domain_size < MAX_LG_DOMAIN_SIZE);
             
