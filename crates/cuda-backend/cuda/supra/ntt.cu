@@ -19,20 +19,6 @@
 #include "launcher.cuh"
 #include "ntt/ntt.cuh"
 
-namespace {
-uint32_t max_grid_dim_y() {
-    int device = 0;
-    if (cudaGetDevice(&device) != cudaSuccess)
-        return 65535u;
-
-    int attr = 0;
-    if (cudaDeviceGetAttribute(&attr, cudaDevAttrMaxGridDimY, device) != cudaSuccess)
-        return 65535u;
-
-    return attr > 0 ? static_cast<uint32_t>(attr) : 65535u;
-}
-} // namespace
-
 template<int z_count, bool coalesced = false, class fr_t>
 __launch_bounds__(768, 1) __global__
 void _CT_NTT(const unsigned int radix, const unsigned int lg_domain_size,
@@ -242,17 +228,10 @@ extern "C" int _ct_mixed_radix_narrow(
     const int Z_COUNT = 256/8/sizeof(fr_t);
     size_t shared_sz = sizeof(fr_t) << (radix - 1);
 
-    // [DIFF]: calculate grid_z from poly_count
-    const uint32_t max_y = max_grid_dim_y();
-    const uint64_t total_polys = poly_count;
-    const uint64_t max_y_64 = max_y == 0 ? 1 : static_cast<uint64_t>(max_y);
-    uint32_t grid_z = (total_polys + max_y_64 - 1) / max_y_64;
-    if (grid_z == 0)
-        grid_z = 1;
-    uint64_t grid_y_64 = (total_polys + grid_z - 1) / grid_z;
-    uint32_t grid_y = static_cast<uint32_t>(grid_y_64);
-    if (grid_y > max_y)
-        grid_y = max_y == 0 ? 1 : max_y;
+    // [DIFF]: calculate grid_y, grid_z from poly_count
+    const uint32_t MAX_Y = 65535;
+    uint32_t grid_y = poly_count < MAX_Y ? poly_count : MAX_Y;
+    uint32_t grid_z = (poly_count + grid_y - 1) / grid_y;
 
     #define NTT_ARGUMENTS radix, lg_domain_size, stage, iterations, \
             d_inout, padded_poly_size, poly_count, is_intt, domain_size_inverse[lg_domain_size]

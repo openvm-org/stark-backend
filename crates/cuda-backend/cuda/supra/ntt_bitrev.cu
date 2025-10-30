@@ -13,20 +13,6 @@
 #include "launcher.cuh"
 #include "ntt/ntt.cuh"
 
-namespace {
-uint32_t max_grid_dim_y() {
-    int device = 0;
-    if (cudaGetDevice(&device) != cudaSuccess)
-        return 65535u;
-
-    int attr = 0;
-    if (cudaDeviceGetAttribute(&attr, cudaDevAttrMaxGridDimY, device) != cudaSuccess)
-        return 65535u;
-
-    return attr > 0 ? static_cast<uint32_t>(attr) : 65535u;
-}
-} // namespace
-
 // Permutes the data in an array such that data[i] = data[bit_reverse(i)]
 // and data[bit_reverse(i)] = data[i]
 __launch_bounds__(1024) __global__
@@ -144,17 +130,10 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
     if (poly_count == 0)
         return cudaSuccess;
 
-    // [DIFF]: calculate grid_y and grid_z from poly_count
-    const uint32_t max_y = max_grid_dim_y();
-    const uint64_t total_polys = poly_count;
-    const uint64_t max_y_64 = max_y == 0 ? 1 : static_cast<uint64_t>(max_y);
-    uint32_t grid_z = (total_polys + max_y_64 - 1) / max_y_64;
-    if (grid_z == 0)
-        grid_z = 1;
-    uint64_t grid_y_64 = (total_polys + grid_z - 1) / grid_z;
-    uint32_t grid_y = static_cast<uint32_t>(grid_y_64);
-    if (grid_y > max_y)
-        grid_y = max_y == 0 ? 1 : max_y;
+    // [DIFF]: calculate grid_y, grid_z from poly_count
+    const uint32_t MAX_Y = 65535;
+    uint32_t grid_y = poly_count < MAX_Y ? poly_count : MAX_Y;
+    uint32_t grid_z = (poly_count + grid_y - 1) / grid_y;
 
     // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
     if (domain_size <= 1024)
