@@ -8,16 +8,22 @@
  * - 2025-09-10: Add extern "C" launcher from sppark/ntt/ntt.cuh
  */
 
+#include <cstdint>
+
 #include "launcher.cuh"
 #include "ntt/ntt.cuh"
 
 // Permutes the data in an array such that data[i] = data[bit_reverse(i)]
 // and data[bit_reverse(i)] = data[i]
 __launch_bounds__(1024) __global__
-void bit_rev_permutation(fr_t* d_out, const fr_t *d_in, uint32_t lg_domain_size, uint32_t padded_poly_size)
+void bit_rev_permutation(fr_t* d_out, const fr_t *d_in, uint32_t lg_domain_size,
+                         uint32_t padded_poly_size, uint32_t poly_count)
 {
-    d_out += blockIdx.y * padded_poly_size; // [DIFF]: move out ptr to another row
-    d_in += blockIdx.y * padded_poly_size;  // [DIFF]: move in ptr to another row
+    const uint32_t poly_idx = blockIdx.y + blockIdx.z * gridDim.y; // [DIFF]: use gridDim.y to calculate poly_idx
+    if (poly_idx >= poly_count)
+        return;
+    d_out += static_cast<size_t>(poly_idx) * padded_poly_size; // [DIFF]: move out ptr to another row
+    d_in += static_cast<size_t>(poly_idx) * padded_poly_size;  // [DIFF]: move in ptr to another row
 
     if (gridDim.x == 1 && blockDim.x == (1 << lg_domain_size)) {
         uint32_t idx = threadIdx.x;
@@ -45,10 +51,14 @@ void bit_rev_permutation(fr_t* d_out, const fr_t *d_in, uint32_t lg_domain_size,
 
 template<unsigned int Z_COUNT>
 __launch_bounds__(192, 2) __global__
-void bit_rev_permutation_z(fr_t* out, const fr_t* in, uint32_t lg_domain_size, uint32_t padded_poly_size)
+void bit_rev_permutation_z(fr_t* out, const fr_t* in, uint32_t lg_domain_size,
+                           uint32_t padded_poly_size, uint32_t poly_count)
 {
-    out += blockIdx.y * padded_poly_size;   // [DIFF]: move out ptr to another row
-    in += blockIdx.y * padded_poly_size;    // [DIFF]: move in ptr to another row
+    const uint32_t poly_idx = blockIdx.y + blockIdx.z * gridDim.y;
+    if (poly_idx >= poly_count)
+        return;
+    out += static_cast<size_t>(poly_idx) * padded_poly_size;   // [DIFF]: move out ptr to another row
+    in += static_cast<size_t>(poly_idx) * padded_poly_size;    // [DIFF]: move in ptr to another row
 
     const uint32_t LG_Z_COUNT = 31 - __clz(Z_COUNT); // [DIFF]: use __clz to get lg2
 
@@ -117,17 +127,25 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
     const uint32_t Z_COUNT = 256 / sizeof(fr_t);
     const uint32_t bsize = Z_COUNT > WARP_SIZE ? Z_COUNT : WARP_SIZE;
 
+    if (poly_count == 0)
+        return cudaSuccess;
+
+    // [DIFF]: calculate grid_y, grid_z from poly_count
+    const uint32_t MAX_Y = 65535;
+    uint32_t grid_y = poly_count < MAX_Y ? poly_count : MAX_Y;
+    uint32_t grid_z = (poly_count + grid_y - 1) / grid_y;
+
     // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
     if (domain_size <= 1024)
-        bit_rev_permutation<<<dim3(1, poly_count), domain_size>>>
-                            (d_out, d_inp, lg_domain_size, padded_poly_size);
+        bit_rev_permutation<<<dim3(1u, grid_y, grid_z), domain_size>>>
+                            (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else if (domain_size < bsize * Z_COUNT)
-        bit_rev_permutation<<<dim3(domain_size / WARP_SIZE, poly_count), WARP_SIZE>>>
-                            (d_out, d_inp, lg_domain_size, padded_poly_size);
+        bit_rev_permutation<<<dim3(domain_size / WARP_SIZE, grid_y, grid_z), WARP_SIZE>>>
+                            (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else if (Z_COUNT > WARP_SIZE || lg_domain_size <= 32)
-        bit_rev_permutation_z<Z_COUNT><<<dim3(domain_size / Z_COUNT / bsize, poly_count), bsize,
+        bit_rev_permutation_z<Z_COUNT><<<dim3(domain_size / Z_COUNT / bsize, grid_y, grid_z), bsize,
                                             bsize * Z_COUNT * sizeof(fr_t)>>>
-                            (d_out, d_inp, lg_domain_size, padded_poly_size);
+                            (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else {
         // Those GPUs that can reserve 96KB of shared memory can
         // schedule 2 blocks to each SM...
@@ -136,9 +154,9 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
         int sm_count;
         cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
 
-        bit_rev_permutation_z<Z_COUNT><<<dim3(sm_count * 2, poly_count), 192,
+        bit_rev_permutation_z<Z_COUNT><<<dim3(sm_count * 2, grid_y, grid_z), 192,
                                             192 * Z_COUNT * sizeof(fr_t)>>>
-                                (d_out, d_inp, lg_domain_size, padded_poly_size);
+                                (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     }
 
     return CHECK_KERNEL();
