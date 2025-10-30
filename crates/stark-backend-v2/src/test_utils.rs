@@ -58,9 +58,7 @@ where
     ProvingContextV2::new(per_trace)
 }
 
-fn get_fib_number(n: usize) -> u32 {
-    let mut a = 0;
-    let mut b = 1;
+fn get_fib_number(mut a: u32, mut b: u32, n: usize) -> u32 {
     for _ in 0..n - 1 {
         let c = (a + b) % BabyBear::ORDER_U32;
         a = b;
@@ -69,9 +67,7 @@ fn get_fib_number(n: usize) -> u32 {
     b
 }
 
-fn get_conditional_fib_number(sels: &[bool]) -> u32 {
-    let mut a = 0;
-    let mut b = 1;
+fn get_conditional_fib_number(mut a: u32, mut b: u32, sels: &[bool]) -> u32 {
     for &s in sels[0..sels.len() - 1].iter() {
         if s {
             let c = (a + b) % BabyBear::ORDER_U32;
@@ -139,7 +135,7 @@ impl TestFixture for FibFixture {
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
         use dummy_airs::fib_air::trace::generate_trace_rows;
         let trace = generate_trace_rows(self.a, self.b, self.n);
-        let f_n = get_fib_number(self.n);
+        let f_n = get_fib_number(self.a, self.b, self.n);
         let pis = [self.a, self.b, f_n].map(BabyBear::from_canonical_u32);
         let trace = ColMajorMatrix::from_row_major(&trace);
 
@@ -307,7 +303,7 @@ impl TestFixture for PreprocessedFibFixture {
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
         use openvm_stark_sdk::dummy_airs::fib_selector_air::trace::generate_trace_rows;
         let trace = generate_trace_rows(self.a, self.b, &self.sels);
-        let f_n = get_conditional_fib_number(&self.sels);
+        let f_n = get_conditional_fib_number(self.a, self.b, &self.sels);
         let pis = [self.a, self.b, f_n].map(BabyBear::from_canonical_u32);
 
         let single_ctx =
