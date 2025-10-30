@@ -25,6 +25,18 @@ pub struct SystemParams {
     pub whir_pow_bits: usize,
 }
 
+impl SystemParams {
+    #[inline]
+    pub fn num_whir_rounds(&self) -> usize {
+        (self.n_stack + self.l_skip - self.log_final_poly_len) / self.k_whir
+    }
+
+    #[inline]
+    pub fn num_whir_sumcheck_rounds(&self) -> usize {
+        self.n_stack + self.l_skip - self.log_final_poly_len
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]
 pub struct StarkVerifyingParamsV2 {
