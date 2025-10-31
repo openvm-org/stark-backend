@@ -97,12 +97,12 @@ where
     }
 
     fn name(&self) -> String {
-        get_air_name(self)
+        get_air_name::<T>()
     }
 }
 
 /// Automatically derives the AIR name from the type name for pretty display purposes.
-pub fn get_air_name<T>(_rap: &T) -> String {
+pub fn get_air_name<T>() -> String {
     let full_name = type_name::<T>().to_string();
     // Split the input by the first '<' to separate the main type from its generics
     if let Some((main_part, generics_part)) = full_name.split_once('<') {
