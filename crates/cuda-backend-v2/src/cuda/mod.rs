@@ -3,6 +3,8 @@
 use openvm_cuda_backend::prelude::EF;
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 
+pub mod poly;
+
 pub mod sumcheck {
     use super::*;
 
