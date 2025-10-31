@@ -19,6 +19,7 @@ pub struct TraceMetrics {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SingleTraceMetrics {
     pub air_name: String,
+    pub air_id: usize,
     pub height: usize,
     /// The after challenge width is adjusted to be in terms of **base field** elements.
     pub width: TraceWidth,
@@ -93,8 +94,8 @@ pub fn trace_metrics<PB: ProverBackend>(
             (weighted_sum, trace_height_constraint.threshold as usize)
         })
         .collect::<Vec<_>>();
-    let per_air: Vec<_> = zip_eq(&mpk.per_air, heights)
-        .map(|(pk, height)| {
+    let per_air: Vec<_> = zip_eq(mpk.air_ids.iter().copied(), zip_eq(&mpk.per_air, heights))
+        .map(|(air_id, (pk, height))| {
             let air_name = &pk.air_name;
             let mut width = pk.vk.params.width.clone();
             let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
@@ -115,6 +116,7 @@ pub fn trace_metrics<PB: ProverBackend>(
                 .sum::<usize>();
             SingleTraceMetrics {
                 air_name: air_name.to_string(),
+                air_id,
                 height,
                 width,
                 cells,
@@ -216,7 +218,10 @@ mod emit {
 
     impl SingleTraceMetrics {
         pub fn emit(&self) {
-            let labels = [("air_name", self.air_name.clone())];
+            let labels = [
+                ("air_name", self.air_name.clone()),
+                ("air_id", self.air_id.to_string()),
+            ];
             counter!("rows", &labels).absolute(self.height as u64);
             counter!("cells", &labels).absolute(self.total_cells as u64);
             counter!("prep_cols", &labels).absolute(self.width.preprocessed.unwrap_or(0) as u64);
