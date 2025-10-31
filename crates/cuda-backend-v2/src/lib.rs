@@ -1,6 +1,7 @@
 mod cuda;
 mod device;
 mod engine;
+mod error;
 mod gpu_backend;
 pub mod logup_zerocheck;
 pub mod merkle_tree;
@@ -11,6 +12,7 @@ pub mod whir;
 
 pub use device::*;
 pub use engine::*;
+pub use error::*;
 pub use gpu_backend::*;
 
 #[cfg(test)]
