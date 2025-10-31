@@ -1,20 +1,21 @@
 use std::{ffi::c_void, sync::Arc};
 
 use itertools::Itertools;
-use openvm_cuda_backend::{base::DeviceMatrix, ntt::batch_ntt};
+use openvm_cuda_backend::{
+    base::DeviceMatrix, cuda::kernels::lde::batch_expand_pad, ntt::batch_ntt,
+};
 use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
+    copy::{MemCopyD2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
-    error::MemCopyError,
 };
-use openvm_stark_backend::{
-    p3_maybe_rayon::prelude::*, p3_util::log2_strict_usize, prover::MatrixDimensions,
-};
-use p3_field::{Field, FieldAlgebra};
-use stark_backend_v2::prover::{ColMajorMatrix, poly::Ple, stacked_pcs::StackedLayout};
+use openvm_stark_backend::{p3_util::log2_strict_usize, prover::MatrixDimensions};
+use p3_field::Field;
+use stark_backend_v2::prover::stacked_pcs::StackedLayout;
 use tracing::instrument;
 
-use crate::{Digest, F, merkle_tree::MerkleTreeGpu};
+use crate::{
+    Digest, F, ProverError, cuda::poly::ple_interpolate_stage, merkle_tree::MerkleTreeGpu,
+};
 
 #[derive(derive_new::new)]
 pub struct StackedPcsDataGpu<F, Digest> {
@@ -34,9 +35,9 @@ pub fn stacked_commit(
     log_blowup: usize,
     k_whir: usize,
     traces: &[&DeviceMatrix<F>],
-) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), MemCopyError> {
+) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
     let (q_trace, layout) = stacked_matrix(l_skip, n_stack, traces)?;
-    let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace);
+    let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace)?;
     let tree = MerkleTreeGpu::new(rs_matrix, 1 << k_whir);
     let root = tree.root();
     let data = StackedPcsDataGpu::new(layout, q_trace, tree);
@@ -51,7 +52,7 @@ pub fn stacked_matrix<F: Field>(
     l_skip: usize,
     n_stack: usize,
     traces: &[&DeviceMatrix<F>],
-) -> Result<(DeviceMatrix<F>, StackedLayout), MemCopyError> {
+) -> Result<(DeviceMatrix<F>, StackedLayout), ProverError> {
     let sorted_meta = traces
         .iter()
         .enumerate()
@@ -69,7 +70,7 @@ pub fn stacked_matrix<F: Field>(
     let width = total_cells.div_ceil(height);
 
     let q_buf = DeviceBuffer::<F>::with_capacity(width.checked_mul(height).unwrap());
-    q_buf.fill_zero().map_err(MemCopyError::Cuda)?;
+    q_buf.fill_zero()?;
     for (mat_idx, j, s) in &mut layout.sorted_cols {
         let start = s.col_idx * height + s.row_idx;
         let trace = traces[*mat_idx];
@@ -98,24 +99,45 @@ pub fn rs_code_matrix(
     l_skip: usize,
     log_blowup: usize,
     eval_matrix: &DeviceMatrix<F>,
-) -> DeviceMatrix<F> {
+) -> Result<DeviceMatrix<F>, ProverError> {
     let height = eval_matrix.height();
+    debug_assert!(height >= (1 << l_skip));
     let width = eval_matrix.width();
     let codeword_height = height.checked_shl(log_blowup as u32).unwrap();
-    // TODO[CUDA]: add kernel
-    let eval_matrix = ColMajorMatrix::<F>::new(eval_matrix.buffer().to_host().unwrap(), width);
-    let coeff_form: Vec<_> = eval_matrix
-        .values
-        .par_chunks_exact(height)
-        .flat_map(|column_evals| {
-            let ple = Ple::from_evaluations(l_skip, column_evals);
-            let mut coeffs = ple.into_coeffs();
-            coeffs.resize(codeword_height, F::ZERO);
-            coeffs
-        })
-        .collect::<Vec<_>>();
-    debug_assert_eq!(coeff_form.len(), codeword_height * width);
-    let codewords = coeff_form.to_device().unwrap();
+    // D2D copy so we can do in-place Ple::from_evals
+    let mut ple_coeffs = eval_matrix.buffer().device_copy()?;
+    // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column: (width
+    // cols) * (height / 2^l_skip chunks per col). Use natural ordering.
+    let num_uni_poly = (width * (height >> l_skip)) as u32;
+    batch_ntt(&ple_coeffs, l_skip as u32, 0, num_uni_poly, true, true);
+    let n = log2_strict_usize(height) - l_skip;
+    let total_len = ple_coeffs.len();
+    debug_assert_eq!(total_len, height * width);
+    // Go through coordinates X_1, ..., X_n and interpolate each one from s(0), s(1) -> s(0) +
+    // (s(1) - s(0)) X_i
+    for i in 0..n {
+        let step = 1u32 << (l_skip + i);
+        let span = step << 1;
+        debug_assert_eq!(height % (span as usize), 0);
+        // SAFETY: `ple_coeffs` is properly initialized and step is in bounds.
+        unsafe {
+            ple_interpolate_stage(&mut ple_coeffs, step)?;
+        }
+    }
+    let codewords = DeviceBuffer::<F>::with_capacity(codeword_height * width);
+    // The following two kernels together perform coset NTT for `width` polys from `height ->
+    // codeword_height` size domains. SAFETY: `codewords` is allocated for `width` polys of
+    // `codeword_height` each, and we expand from `ple_coeffs` which is `width` polys of `height`
+    // each.
+    unsafe {
+        batch_expand_pad(
+            &codewords,
+            &ple_coeffs,
+            width as u32,
+            codeword_height as u32,
+            height as u32,
+        )?;
+    }
     // Compute RS codeword on a prismalinear polynomial in coefficient form:
     // We use that the coefficients are in a basis that exactly corresponds to the standard
     // monomial univariate basis. Hence RS codeword is just cosetDFT on the
@@ -128,7 +150,11 @@ pub fn rs_code_matrix(
         true,
         false,
     );
-    DeviceMatrix::new(Arc::new(codewords), codeword_height, width)
+    Ok(DeviceMatrix::new(
+        Arc::new(codewords),
+        codeword_height,
+        width,
+    ))
 }
 
 #[cfg(test)]
