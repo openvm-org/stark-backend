@@ -72,7 +72,6 @@ impl<F> ColMajorMatrix<F> {
         }
     }
 
-    // PERF[jpw]: currently this is not in-place transpose
     pub fn from_row_major(mat: &RowMajorMatrix<F>) -> Self
     where
         F: Field,
