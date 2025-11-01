@@ -306,7 +306,7 @@ pub fn binary_k_fold(mut values: Vec<EF>, alphas: &[EF], x: F) -> EF {
     values[0]
 }
 
-fn merkle_verify(
+pub fn merkle_verify(
     root: Digest,
     mut idx: u32,
     leaf_hash: Digest,
