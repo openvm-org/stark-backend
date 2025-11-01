@@ -11,7 +11,7 @@ use p3_field::{Field, PrimeField32};
 use rustc_hash::FxHashMap;
 use tracing::instrument;
 
-pub(crate) mod codec;
+pub mod codec;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Source<F: Field> {
