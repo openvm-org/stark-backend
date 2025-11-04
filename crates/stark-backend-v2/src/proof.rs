@@ -109,10 +109,10 @@ pub struct WhirProof {
     /// For each WHIR round, the PoW witness.
     pub whir_pow_witnesses: Vec<F>,
     /// For the initial round: per commited matrix, per in-domain query.
-    pub initial_round_opened_rows: Vec<Vec<Vec<F>>>,
+    pub initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>>,
     pub initial_round_merkle_proofs: Vec<Vec<MerkleProof>>,
     /// Per non-initial round, per in-domain-query.
-    pub codeword_opened_rows: Vec<Vec<Vec<EF>>>,
+    pub codeword_opened_values: Vec<Vec<Vec<EF>>>,
     pub codeword_merkle_proofs: Vec<Vec<MerkleProof>>,
     /// Coefficients of the polynomial after the final round.
     pub final_poly: Vec<EF>,

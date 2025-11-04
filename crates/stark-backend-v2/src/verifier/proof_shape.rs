@@ -241,6 +241,15 @@ pub enum WhirProofShapeError {
         actual: usize,
     },
     #[error(
+        "Initial round opened row {row_idx} for commit {commit_idx} should have width {expected}, but it has width {actual}"
+    )]
+    InvalidInitialRoundOpenedRowWidth {
+        row_idx: usize,
+        commit_idx: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error(
         "Initial round merkle proof {opened_idx} for commit {commit_idx} should have depth {expected}, but it has depth {actual}"
     )]
     InvalidInitialRoundMerkleProofDepth {
@@ -268,7 +277,7 @@ pub enum WhirProofShapeError {
     #[error(
         "Round {round} opened row {opened_idx} should have length {expected}, but it has length {actual}"
     )]
-    InvalidCodewordOpenedRowK {
+    InvalidCodewordOpenedValues {
         round: usize,
         opened_idx: usize,
         expected: usize,
@@ -618,10 +627,10 @@ pub fn verify_proof_shape(
                 actual: whir_proof.initial_round_merkle_proofs.len(),
             },
         );
-    } else if whir_proof.codeword_opened_rows.len() != num_whir_rounds - 1 {
+    } else if whir_proof.codeword_opened_values.len() != num_whir_rounds - 1 {
         return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidCodewordOpenedRows {
             expected: num_whir_rounds - 1,
-            actual: whir_proof.codeword_opened_rows.len(),
+            actual: whir_proof.codeword_opened_values.len(),
         });
     } else if whir_proof.codeword_merkle_proofs.len() != num_whir_rounds - 1 {
         return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidCodewordMerkleProofs {
@@ -659,16 +668,28 @@ pub fn verify_proof_shape(
             );
         }
         let width = stacking_proof.stacking_openings[commit_idx].len();
-        for (opened_idx, row) in opened_rows.iter().enumerate() {
-            if row.len() != width << mvk.params.k_whir {
+        for (opened_idx, rows) in opened_rows.iter().enumerate() {
+            if rows.len() != 1 << mvk.params.k_whir {
                 return ProofShapeError::invalid_whir(
                     WhirProofShapeError::InvalidInitialRoundOpenedRowK {
                         opened_idx,
                         commit_idx,
                         expected: 1 << mvk.params.k_whir,
-                        actual: row.len(),
+                        actual: rows.len(),
                     },
                 );
+            }
+            for (row_idx, row) in rows.iter().enumerate() {
+                if row.len() != width {
+                    return ProofShapeError::invalid_whir(
+                        WhirProofShapeError::InvalidInitialRoundOpenedRowWidth {
+                            row_idx,
+                            commit_idx,
+                            expected: width,
+                            actual: row.len(),
+                        },
+                    );
+                }
             }
         }
 
@@ -688,20 +709,20 @@ pub fn verify_proof_shape(
         }
     }
 
-    for (round_minus_one, (opened_rows, merkle_proofs)) in whir_proof
-        .codeword_opened_rows
+    for (round_minus_one, (opened_values_per_query, merkle_proofs)) in whir_proof
+        .codeword_opened_values
         .iter()
         .zip(&whir_proof.codeword_merkle_proofs)
         .take(num_whir_rounds - 1)
         .enumerate()
     {
         let round = round_minus_one + 1;
-        if opened_rows.len() != mvk.params.num_whir_queries {
+        if opened_values_per_query.len() != mvk.params.num_whir_queries {
             return ProofShapeError::invalid_whir(
                 WhirProofShapeError::InvalidCodewordOpenedRowsQueries {
                     round,
                     expected: mvk.params.num_whir_queries,
-                    actual: opened_rows.len(),
+                    actual: opened_values_per_query.len(),
                 },
             );
         } else if merkle_proofs.len() != mvk.params.num_whir_queries {
@@ -714,14 +735,14 @@ pub fn verify_proof_shape(
             );
         }
 
-        for (opened_idx, row) in opened_rows.iter().enumerate() {
-            if row.len() != 1 << mvk.params.k_whir {
+        for (opened_idx, opened_values) in opened_values_per_query.iter().enumerate() {
+            if opened_values.len() != 1 << mvk.params.k_whir {
                 return ProofShapeError::invalid_whir(
-                    WhirProofShapeError::InvalidCodewordOpenedRowK {
+                    WhirProofShapeError::InvalidCodewordOpenedValues {
                         round,
                         opened_idx,
                         expected: 1 << mvk.params.k_whir,
-                        actual: row.len(),
+                        actual: opened_values.len(),
                     },
                 );
             }
