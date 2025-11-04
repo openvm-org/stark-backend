@@ -12,6 +12,9 @@ extern "C" {
     fn cudaMemsetAsync(dst: *mut c_void, value: i32, count: usize, stream: cudaStream_t) -> i32;
 }
 
+/// Struct that owns a buffer allocated on GPU device. The struct only holds the raw pointer and
+/// length, but this struct has a `Drop` implementation which frees the associated device memory.
+#[repr(C)]
 pub struct DeviceBuffer<T> {
     ptr: *mut T,
     len: usize,

@@ -148,6 +148,22 @@ pub mod lde {
             in_size,
         ))
     }
+
+    pub unsafe fn raw_batch_expand_pad<T>(
+        output: *mut T,
+        input: *const T,
+        poly_count: u32,
+        out_size: u32,
+        in_size: u32,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_batch_expand_pad(
+            output as *mut std::ffi::c_void,
+            input as *const std::ffi::c_void,
+            poly_count,
+            out_size,
+            in_size,
+        ))
+    }
 }
 
 // relate to poseidon2.cu
