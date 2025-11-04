@@ -13,7 +13,7 @@ pub struct MerkleTreeGpu<F, Digest> {
     /// in turn hashed into the bottom digest layer.
     pub(crate) backing_matrix: DeviceMatrix<F>,
     pub(crate) digest_layers: Vec<DeviceBuffer<Digest>>,
-    pub(crate) rows_per_leaf: usize,
+    pub(crate) rows_per_query: usize,
 }
 
 impl<F, Digest> MerkleTreeGpu<F, Digest> {
@@ -26,11 +26,11 @@ impl<F, Digest> MerkleTreeGpu<F, Digest> {
 
 impl MerkleTreeGpu<F, Digest> {
     #[instrument(name = "merkle_tree", skip_all)]
-    pub fn new(matrix: DeviceMatrix<F>, rows_per_leaf: usize) -> Self {
+    pub fn new(matrix: DeviceMatrix<F>, rows_per_query: usize) -> Self {
         // TODO[CUDA]: add kernel
         let tree = MerkleTree::<F, Digest>::new(
             transport_matrix_d2h_col_major(&matrix).unwrap(),
-            rows_per_leaf,
+            rows_per_query,
         );
         let digest_layers = tree
             .digest_layers()
@@ -40,7 +40,7 @@ impl MerkleTreeGpu<F, Digest> {
         Self {
             backing_matrix: matrix,
             digest_layers,
-            rows_per_leaf,
+            rows_per_query,
         }
     }
 }
