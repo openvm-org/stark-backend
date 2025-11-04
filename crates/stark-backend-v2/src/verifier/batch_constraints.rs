@@ -18,7 +18,6 @@ use crate::{
     poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni},
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
-    prover::stacked_pcs::StackedLayout,
     verifier::{
         evaluator::VerifierConstraintEvaluator,
         fractional_sumcheck_gkr::{GkrVerificationError, verify_gkr},
@@ -209,19 +208,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     }
 
     // 7. Compute `eq_3b_per_trace`
-    let interactions_meta = (0..n_per_trace.len())
-        .map(|trace_idx| {
-            (
-                trace_idx,
-                mvk.per_air[trace_id_to_air_id[trace_idx]]
-                    .symbolic_constraints
-                    .interactions
-                    .len(),
-                l_skip + n_per_trace[trace_idx],
-            )
-        })
-        .collect_vec();
-    let interactions_layout = StackedLayout::new(l_skip + n_logup, interactions_meta);
+    let mut stacked_idx = 0usize;
     let eq_3b_per_trace = (0..n_per_trace.len())
         .map(|trace_idx| {
             let air_idx = trace_id_to_air_id[trace_idx];
@@ -231,15 +218,18 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             }
             let n = n_per_trace[trace_idx];
             let mut b_vec = vec![F::ZERO; n_logup - n];
-            // CLEAN[AG]: I copypasted this from prover
             (0..interactions.len())
-                .map(|i| {
-                    let stacked_idx = interactions_layout.get(trace_idx, i).unwrap().row_idx;
+                .map(|_| {
+                    debug_assert!(stacked_idx < 1 << (l_skip + n_logup));
                     debug_assert!(stacked_idx.trailing_zeros() as usize >= l_skip + n);
                     let mut b_int = stacked_idx >> (l_skip + n);
                     for b in &mut b_vec {
                         *b = F::from_bool(b_int & 1 == 1);
                         b_int >>= 1;
+                    }
+                    stacked_idx += 1 << (l_skip + n);
+                    if stacked_idx == 1 << (l_skip + n_logup) {
+                        stacked_idx = 0;
                     }
                     eval_eq_mle(&xi[l_skip + n..l_skip + n_logup], &b_vec)
                 })
