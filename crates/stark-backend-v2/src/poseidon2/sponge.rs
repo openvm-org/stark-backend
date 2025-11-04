@@ -237,6 +237,18 @@ pub fn poseidon2_compress(left: [F; CHUNK], right: [F; CHUNK]) -> [F; CHUNK] {
     state[..CHUNK].try_into().unwrap()
 }
 
+pub fn poseidon2_tree_compress(mut hashes: Vec<Digest>) -> Digest {
+    debug_assert!(hashes.len().is_power_of_two());
+    while hashes.len() > 1 {
+        let mut next = Vec::with_capacity(hashes.len() / 2);
+        for pair in hashes.chunks_exact(2) {
+            next.push(poseidon2_compress(pair[0], pair[1]));
+        }
+        hashes = next;
+    }
+    hashes.pop().unwrap()
+}
+
 #[derive(Default, Clone)]
 pub struct DuplexSpongeRecorder {
     pub inner: DuplexSponge,
