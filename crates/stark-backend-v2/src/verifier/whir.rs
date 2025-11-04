@@ -9,7 +9,9 @@ use crate::{
     Digest, EF, F,
     keygen::types::SystemParams,
     poly_common::{Squarable, eval_eq_mle, horner_eval, interpolate_quadratic_at_012},
-    poseidon2::sponge::{FiatShamirTranscript, poseidon2_compress, poseidon2_hash_slice},
+    poseidon2::sponge::{
+        FiatShamirTranscript, poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress,
+    },
     proof::WhirProof,
     prover::poly::Mle,
 };
@@ -44,7 +46,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
         ood_values,
         initial_round_opened_rows,
         initial_round_merkle_proofs,
-        codeword_opened_rows,
+        codeword_opened_values,
         codeword_merkle_proofs,
         whir_pow_witnesses,
         final_poly,
@@ -146,29 +148,37 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
                     initial_round_merkle_proofs
                 ) {
                     let opened_rows = &opened_rows_per_query[query_idx];
+                    let leaf_hashes = opened_rows
+                        .iter()
+                        .map(|opened_row| poseidon2_hash_slice(opened_row))
+                        .collect_vec();
+                    let query_digest = poseidon2_tree_compress(leaf_hashes);
                     let merkle_proof = &merkle_proofs[query_idx];
-                    let leaf = poseidon2_hash_slice(opened_rows);
-                    merkle_verify(commit, index, leaf, merkle_proof)?;
+                    merkle_verify(commit, index, query_digest, merkle_proof)?;
 
                     for c in 0..width {
                         let mu_pow = mu_pow_iter.next().unwrap(); // ok; mu_pows has total_width length
                         for j in 0..(1 << k_whir) {
-                            codeword_vals[j] += *mu_pow * opened_rows[j * width + c];
+                            codeword_vals[j] += *mu_pow * opened_rows[j][c];
                         }
                     }
                 }
                 binary_k_fold(codeword_vals, &alphas_round, zi_root)
             } else {
-                let opened_rows = codeword_opened_rows[whir_round - 1][query_idx].clone();
-                let leaf_preimage = opened_rows
-                    .iter()
-                    .flat_map(|ef| ef.as_base_slice())
-                    .copied()
-                    .collect_vec();
+                let opened_values = codeword_opened_values[whir_round - 1][query_idx].clone();
                 let merkle_proof = &codeword_merkle_proofs[whir_round - 1][query_idx];
-                let leaf = poseidon2_hash_slice(&leaf_preimage);
-                merkle_verify(codeword_commits[whir_round - 1], index, leaf, merkle_proof)?;
-                binary_k_fold(opened_rows, &alphas_round, zi_root)
+                let leaf_hashes = opened_values
+                    .iter()
+                    .map(|opened_value| poseidon2_hash_slice(opened_value.as_base_slice()))
+                    .collect_vec();
+                let query_digest = poseidon2_tree_compress(leaf_hashes);
+                merkle_verify(
+                    codeword_commits[whir_round - 1],
+                    index,
+                    query_digest,
+                    merkle_proof,
+                )?;
+                binary_k_fold(opened_values, &alphas_round, zi_root)
             };
             zs_round.push(zi);
             ys_round.push(yi);
