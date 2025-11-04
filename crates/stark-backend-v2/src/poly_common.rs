@@ -66,6 +66,29 @@ where
     for (&omega_pow, eq_xi_eval) in omega_skip_pows.iter().zip(eq_xi_evals) {
         res += eval_eq_uni(l_skip, z, omega_pow.into()) * eq_xi_eval;
     }
+    #[cfg(debug_assertions)]
+    {
+        let coeffs = (0..(1 << l_skip))
+            .map(|k| {
+                let mut c = EF::ONE;
+                #[allow(clippy::needless_range_loop)]
+                for i in 0..l_skip {
+                    let idx = (k << i) % (1 << l_skip);
+                    c *= EF::ONE - xi_1[i]
+                        + xi_1[i] * omega_skip_pows[((1 << l_skip) - idx) % (1 << l_skip)];
+                }
+                c
+            })
+            .collect_vec();
+        let mut rpow = EF::ONE;
+        let mut other = EF::ZERO;
+        for c in coeffs {
+            other += rpow * c;
+            rpow *= z;
+        }
+        other *= EF::TWO.inverse().exp_u64(l_skip as u64);
+        debug_assert_eq!(other, res);
+    }
     res
 }
 
