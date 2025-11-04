@@ -46,7 +46,7 @@ pub struct MerkleTree<F, Digest> {
     #[getset(get = "pub")]
     pub(crate) digest_layers: Vec<Vec<Digest>>,
     #[getset(get_copy = "pub")]
-    pub(crate) rows_per_leaf: usize,
+    pub(crate) rows_per_query: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize, derive_new::new)]
@@ -209,9 +209,36 @@ pub fn rs_code_matrix<F: TwoAdicField + Ord>(
     ColMajorMatrix::new(codewords, eval_matrix.width())
 }
 
+impl<F, Digest> MerkleTree<F, Digest> {
+    pub fn query_stride(&self) -> usize {
+        self.digest_layers[0].len()
+    }
+
+    pub fn proof_depth(&self) -> usize {
+        self.digest_layers.len() - 1
+    }
+}
+
 impl<F, Digest: Clone> MerkleTree<F, Digest> {
     pub fn root(&self) -> Digest {
         self.digest_layers.last().unwrap()[0].clone()
+    }
+
+    pub fn query_merkle_proof(&self, query_idx: usize) -> Vec<Digest> {
+        let stride = self.query_stride();
+        assert!(
+            query_idx < stride,
+            "query_idx {query_idx} out of bounds for query_stride {stride}"
+        );
+
+        let mut idx = query_idx;
+        let mut proof = Vec::with_capacity(self.proof_depth());
+        for layer in self.digest_layers.iter().take(self.proof_depth()) {
+            let sibling = layer[idx ^ 1].clone();
+            proof.push(sibling);
+            idx >>= 1;
+        }
+        proof
     }
 }
 
@@ -221,7 +248,7 @@ mod poseidon2_merkle_tree {
     use super::*;
     use crate::{
         Digest, F,
-        poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice},
+        poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress},
     };
 
     impl<EF> MerkleTree<EF, Digest>
@@ -229,22 +256,37 @@ mod poseidon2_merkle_tree {
         EF: ExtensionField<F>,
     {
         #[instrument(name = "merkle_tree", skip_all)]
-        pub fn new(matrix: ColMajorMatrix<EF>, rows_per_leaf: usize) -> Self {
+        pub fn new(matrix: ColMajorMatrix<EF>, rows_per_query: usize) -> Self {
             let height = matrix.height();
             assert!(height > 0);
-            let layer_len = height.div_ceil(rows_per_leaf).next_power_of_two();
-            let layer: Vec<_> = (0..layer_len)
+            assert!(rows_per_query.is_power_of_two());
+            let num_leaves = height.next_power_of_two();
+            assert!(
+                rows_per_query <= num_leaves,
+                "rows_per_query ({rows_per_query}) must not exceed the number of Merkle leaves ({num_leaves})"
+            );
+            let row_hashes: Vec<_> = (0..num_leaves)
                 .into_par_iter()
-                .map(|i| {
-                    // hash rows_per_leaf rows of `matrix` together. Currently we hash row-wise but
-                    // this can be changed
-                    let hash_input = Self::leaf_iter(&matrix, i, rows_per_leaf)
-                        .flat_map(|x| x.as_base_slice().to_vec())
-                        .collect_vec();
+                .map(|r| {
+                    let hash_input: Vec<F> = Self::row_iter(&matrix, r)
+                        .flat_map(|ef| ef.as_base_slice().to_vec())
+                        .collect();
                     poseidon2_hash_slice(&hash_input)
                 })
                 .collect();
-            let mut digest_layers = vec![layer];
+
+            let query_stride = num_leaves / rows_per_query;
+            let query_digest_layer: Vec<Digest> = (0..query_stride)
+                .into_par_iter()
+                .map(|q| {
+                    let sub_row_hashes = (0..rows_per_query)
+                        .map(|t| row_hashes[q + t * query_stride])
+                        .collect_vec();
+                    poseidon2_tree_compress(sub_row_hashes)
+                })
+                .collect();
+
+            let mut digest_layers = vec![query_digest_layer];
             while digest_layers.last().unwrap().len() > 1 {
                 let prev_layer = digest_layers.last().unwrap();
                 let layer: Vec<_> = prev_layer
@@ -253,37 +295,45 @@ mod poseidon2_merkle_tree {
                     .collect();
                 digest_layers.push(layer);
             }
+
             Self {
                 backing_matrix: matrix,
                 digest_layers,
-                rows_per_leaf,
+                rows_per_query,
             }
         }
 
-        /// Returns the preimage of the leaf of the Merkle tree at the given `index`.
-        ///
-        /// A leaf preimage is a strided set of `rows_per_leaf` rows of the backing
-        /// matrix, concatenated row-wise. This corresponds to the data needed
-        /// to perform a k-Fold evaluation.
-        pub fn get_leaf_preimage(&self, index: usize) -> Vec<EF> {
-            Self::leaf_iter(&self.backing_matrix, index, self.rows_per_leaf).collect()
+        /// Returns the ordered set of opened rows for the given query index.
+        /// The rows are { query_idx + t * query_stride() } for t in 0..rows_per_query.
+        pub fn get_opened_rows(&self, index: usize) -> Vec<Vec<EF>> {
+            let query_stride = self.query_stride();
+            assert!(
+                index < query_stride,
+                "index {index} out of bounds for query_stride {query_stride}"
+            );
+
+            let rows_per_query = self.rows_per_query;
+            let width = self.backing_matrix.width();
+            let mut preimage = Vec::with_capacity(rows_per_query);
+            for row_offset in 0..rows_per_query {
+                let row_idx = row_offset * query_stride + index;
+                let row = Self::row_iter(&self.backing_matrix, row_idx).collect_vec();
+                debug_assert_eq!(
+                    row.len(),
+                    width,
+                    "row width mismatch: expected {width}, got {}",
+                    row.len()
+                );
+                preimage.push(row);
+            }
+            preimage
         }
 
-        fn leaf_iter<'a>(
+        fn row_iter<'a>(
             matrix: &'a ColMajorMatrix<EF>,
             index: usize,
-            rows_per_leaf: usize,
         ) -> impl Iterator<Item = EF> + 'a {
-            let width = matrix.width();
-            let layer_len = matrix.height().div_ceil(rows_per_leaf).next_power_of_two();
-            debug_assert!(index <= layer_len);
-
-            (0..rows_per_leaf * width).map(move |j| {
-                let c = j % width;
-                let r = j / width;
-                let row_idx = r * layer_len + index;
-                matrix.get(row_idx, c).copied().unwrap_or(EF::ZERO)
-            })
+            (0..matrix.width()).map(move |c| matrix.get(index, c).copied().unwrap_or(EF::ZERO))
         }
     }
 }
