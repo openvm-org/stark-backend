@@ -119,9 +119,9 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     let mut codeword_commits = vec![];
     let mut ood_values = vec![];
     // per commitment, per whir query, per column
-    let mut initial_round_opened_rows: Vec<Vec<Vec<F>>> = vec![vec![]; committed_mats.len()];
+    let mut initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>> = vec![vec![]; committed_mats.len()];
     let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof>> = vec![vec![]; committed_mats.len()];
-    let mut codeword_opened_rows: Vec<Vec<Vec<EF>>> = vec![];
+    let mut codeword_opened_values: Vec<Vec<Vec<EF>>> = vec![];
     let mut codeword_merkle_proofs: Vec<Vec<MerkleProof>> = vec![];
     let mut whir_pow_witnesses = vec![];
     let mut rs_tree = None;
@@ -218,7 +218,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
         }
         let mut zs = Vec::with_capacity(num_whir_queries);
         if !is_last_round {
-            codeword_opened_rows.push(vec![]);
+            codeword_opened_values.push(vec![]);
             codeword_merkle_proofs.push(vec![]);
         }
         for (query_idx, index) in query_indices.into_iter().enumerate() {
@@ -228,7 +228,6 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
             zs.push(z_i);
 
             let depth = log_rs_domain_size.saturating_sub(k_whir);
-            let mut merkle_idx = index;
             // Row openings are different between first WHIR round (width > 1) and other rounds
             // (width = 1):
             // NOTE: merkle proof is deterministic from the index and merkle root, so the opened_row
@@ -239,30 +238,26 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
                     debug_assert_eq!(initial_round_merkle_proofs[com_idx].len(), query_idx);
                     let tree = &committed_mats[com_idx].1;
                     assert_eq!(tree.backing_matrix.height(), 1 << log_rs_domain_size);
-                    let opened_rows = tree.get_leaf_preimage(index);
+                    let opened_rows = tree.get_opened_rows(index);
                     initial_round_opened_rows[com_idx].push(opened_rows);
-                    initial_round_merkle_proofs[com_idx].push(vec![]);
-                }
-                for layer in 0..depth {
-                    for (com_idx, (_, tree)) in committed_mats.iter().enumerate() {
-                        let node = tree.digest_layers[layer][merkle_idx ^ 1];
-                        initial_round_merkle_proofs[com_idx][query_idx].push(node);
-                    }
-                    merkle_idx >>= 1;
+                    debug_assert_eq!(tree.proof_depth(), depth);
+                    let proof = tree.query_merkle_proof(index);
+                    debug_assert_eq!(proof.len(), depth);
+                    initial_round_merkle_proofs[com_idx].push(proof);
                 }
             } else {
                 let tree: &MerkleTree<EF, Digest> = rs_tree.as_ref().unwrap();
                 assert_eq!(tree.backing_matrix.width(), 1);
-                let opened_rows = tree.get_leaf_preimage(index);
-                codeword_opened_rows[whir_round - 1].push(opened_rows);
-                assert_eq!(tree.digest_layers.len(), depth + 1);
-                let mut merkle_proof = vec![];
-                for layer in 0..depth {
-                    let node = tree.digest_layers[layer][merkle_idx ^ 1];
-                    merkle_proof.push(node);
-                    merkle_idx >>= 1;
-                }
-                codeword_merkle_proofs[whir_round - 1].push(merkle_proof);
+                let opened_rows = tree
+                    .get_opened_rows(index)
+                    .into_iter()
+                    .flatten()
+                    .collect_vec();
+                codeword_opened_values[whir_round - 1].push(opened_rows);
+                debug_assert_eq!(tree.proof_depth(), depth);
+                let proof = tree.query_merkle_proof(index);
+                debug_assert_eq!(proof.len(), depth);
+                codeword_merkle_proofs[whir_round - 1].push(proof);
             }
         }
         rs_tree = g_tree;
@@ -291,7 +286,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
         whir_pow_witnesses,
         initial_round_opened_rows,
         initial_round_merkle_proofs,
-        codeword_opened_rows,
+        codeword_opened_values,
         codeword_merkle_proofs,
         final_poly: final_poly.unwrap(),
     }
