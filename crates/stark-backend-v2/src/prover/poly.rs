@@ -148,6 +148,20 @@ pub fn evals_eq_hypercube<F: Field>(x: &[F]) -> Vec<F> {
     out
 }
 
+/// Given vector `x` in `F^n`, returns a concatenation of `evals_eq_hypercube(x[..n])` for all valid `n` in order.
+/// Also, the order of masks is of different endianness.
+pub fn evals_eq_hypercubes<'a, F: Field>(n: usize, x: impl IntoIterator<Item = &'a F>) -> Vec<F> {
+    let mut out = F::zero_vec((2 << n) - 1);
+    out[0] = F::ONE;
+    for (i, &x_i) in x.into_iter().enumerate() {
+        for y in 0..(1 << i) {
+            out[(1 << (i + 1)) - 1 + (2 * y + 1)] = out[(1 << i) - 1 + y] * x_i;
+            out[(1 << (i + 1)) - 1 + (2 * y)] = out[(1 << i) - 1 + y] * (F::ONE - x_i);
+        }
+    }
+    out
+}
+
 /// Given vector `(z,x)` in `F^{n+1}`, populates `out` with `eq_{l_skip,n}(x, y)` for `y` on
 /// hyperprism `D_n`.
 pub fn evals_eq_hyperprism<F: TwoAdicField, EF: ExtensionField<F>>(
