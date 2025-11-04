@@ -217,14 +217,14 @@ pub fn transport_merkle_tree_to_device<F, Digest>(
     Ok(MerkleTreeGpu {
         backing_matrix,
         digest_layers,
-        rows_per_leaf: tree.rows_per_leaf(),
+        rows_per_query: tree.rows_per_query(),
     })
 }
 
 // TODO[CUDA]: delete after gpu implementation complete
 pub fn transport_merkle_tree_to_host(tree: &MerkleTreeGpu<F, Digest>) -> MerkleTree<F, Digest> {
     let backing_matrix = transport_matrix_d2h_col_major(&tree.backing_matrix).unwrap();
-    MerkleTree::<F, Digest>::new(backing_matrix, tree.rows_per_leaf)
+    MerkleTree::<F, Digest>::new(backing_matrix, tree.rows_per_query)
 }
 
 // TODO[CUDA]: delete after gpu implementation complete
