@@ -7,7 +7,7 @@ use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
     SymbolicConstraints, symbolic_expression::SymbolicEvaluator,
 };
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra, batch_multiplicative_inverse};
+use p3_field::{FieldAlgebra, batch_multiplicative_inverse};
 use p3_util::log2_ceil_u64;
 use thiserror::Error;
 use tracing::{debug, instrument};
@@ -197,7 +197,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         cur_sum = (0..=s_deg)
             .map(|i| {
                 *batch_s_evals[i]
-                    * EF::from_base(pref_product[i] * suf_product[s_deg - i])
+                    * pref_product[i]
+                    * suf_product[s_deg - i]
                     * invfact[i]
                     * invfact[s_deg - i]
             })
