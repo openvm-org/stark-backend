@@ -229,12 +229,22 @@ pub fn poseidon2_hash_slice(vals: &[F]) -> [F; CHUNK] {
     state[..CHUNK].try_into().unwrap()
 }
 
-pub fn poseidon2_compress(left: [F; CHUNK], right: [F; CHUNK]) -> [F; CHUNK] {
+pub fn poseidon2_compress_with_capacity(
+    left: [F; CHUNK],
+    right: [F; CHUNK],
+) -> ([F; CHUNK], [F; CHUNK]) {
     let mut state = [F::ZERO; WIDTH];
     state[..CHUNK].copy_from_slice(&left);
     state[CHUNK..].copy_from_slice(&right);
     poseidon2_perm().permute_mut(&mut state);
-    state[..CHUNK].try_into().unwrap()
+    (
+        state[..CHUNK].try_into().unwrap(),
+        state[CHUNK..].try_into().unwrap(),
+    )
+}
+
+pub fn poseidon2_compress(left: [F; CHUNK], right: [F; CHUNK]) -> [F; CHUNK] {
+    poseidon2_compress_with_capacity(left, right).0
 }
 
 pub fn poseidon2_tree_compress(mut hashes: Vec<Digest>) -> Digest {
