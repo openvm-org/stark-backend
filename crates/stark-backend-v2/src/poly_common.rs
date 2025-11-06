@@ -48,6 +48,18 @@ pub fn eval_eq_uni_at_one<F: Field>(l_skip: usize, x: F) -> F {
     res * F::ONE.halve().exp_u64(l_skip as u64)
 }
 
+pub fn eval_in_uni<F: Field>(l_skip: usize, n: isize, z: F) -> F {
+    debug_assert!(n >= -(l_skip as isize));
+    if n.is_negative() {
+        eval_eq_uni_at_one(
+            n.unsigned_abs(),
+            z.exp_power_of_2(l_skip.wrapping_add_signed(n)),
+        )
+    } else {
+        return F::ONE;
+    }
+}
+
 pub fn eval_eq_prism<F: Field>(l_skip: usize, x: &[F], y: &[F]) -> F {
     eval_eq_uni(l_skip, x[0], y[0]) * eval_eq_mle(&x[1..], &y[1..])
 }
@@ -133,6 +145,10 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
 
     pub fn coeffs(&self) -> &[F] {
         &self.0
+    }
+
+    pub fn coeffs_mut(&mut self) -> &mut [F] {
+        &mut self.0
     }
 
     pub fn eval_at_point<EF: ExtensionField<F>>(&self, x: EF) -> EF {
@@ -600,5 +616,17 @@ mod tests {
         let x = F::from_canonical_u32(3);
         let s = x.exp_powers_of_2().take(3).collect_vec();
         assert_eq!(s, vec![x, x * x, x * x * x * x],);
+    }
+
+    #[test]
+    fn test_eval_in_uni() {
+        let l = 3;
+        let n = -2;
+        let u_0 = F::from_canonical_u32(12345);
+        let ind = eval_in_uni(l, n, u_0);
+        let expected = (u_0.exp_power_of_2(l) - F::ONE)
+            * (u_0.exp_power_of_2(l.wrapping_add_signed(n)) - F::ONE).inverse()
+            * F::from_canonical_usize(1 << n.unsigned_abs()).inverse();
+        assert_eq!(ind, expected);
     }
 }

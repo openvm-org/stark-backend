@@ -1,4 +1,4 @@
-use core::{cmp::Reverse, iter::zip};
+use core::cmp::Reverse;
 
 use itertools::{Itertools, izip};
 use p3_field::{FieldAlgebra, TwoAdicField};
@@ -68,6 +68,7 @@ pub fn verify<TS: FiatShamirTranscript>(
         trace_height_constraints,
         max_constraint_degree: _,
     } = &mvk;
+    let l_skip = params.l_skip;
 
     let num_airs = per_air.len();
 
@@ -77,21 +78,19 @@ pub fn verify<TS: FiatShamirTranscript>(
             trace_vdata[air_id].is_none(),
             trace_vdata[air_id]
                 .as_ref()
-                .map(|vdata| Reverse(vdata.hypercube_dim)),
+                .map(|vdata| Reverse(vdata.log_height)),
         )
     });
     let num_traces = trace_vdata.iter().flatten().collect_vec().len();
     trace_id_to_air_id.truncate(num_traces);
 
-    let n_per_trace: Vec<usize> = trace_id_to_air_id
-        .iter()
-        .map(|&air_id| trace_vdata[air_id].as_ref().unwrap().hypercube_dim)
-        .collect();
-
     for constraint in trace_height_constraints {
-        let sum = zip(trace_id_to_air_id.iter(), n_per_trace.iter())
-            .map(|(&air_id, n)| {
-                (1 << (n + params.l_skip)) as u64 * constraint.coefficients[air_id] as u64
+        let sum = trace_id_to_air_id
+            .iter()
+            .map(|&air_id| {
+                let log_height = trace_vdata[air_id].as_ref().unwrap().log_height;
+                // Proof shape will check n <= n_stack is in bounds
+                (1 << log_height.max(l_skip)) as u64 * constraint.coefficients[air_id] as u64
             })
             .sum::<u64>();
         if sum >= constraint.threshold as u64 {
@@ -99,8 +98,8 @@ pub fn verify<TS: FiatShamirTranscript>(
         }
     }
 
-    let omega_skip = F::two_adic_generator(params.l_skip);
-    let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
+    let omega_skip = F::two_adic_generator(l_skip);
+    let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
 
     // Preamble
     transcript.observe_commit(*mvk_pre_hash);
@@ -116,7 +115,7 @@ pub fn verify<TS: FiatShamirTranscript>(
             if let Some(pdata) = avk.preprocessed_data.as_ref() {
                 transcript.observe_commit(pdata.commit);
             } else {
-                transcript.observe(F::from_canonical_usize(trace_vdata.hypercube_dim));
+                transcript.observe(F::from_canonical_usize(trace_vdata.log_height));
             }
             debug_assert_eq!(
                 avk.params.width.cached_mains.len(),
@@ -134,6 +133,10 @@ pub fn verify<TS: FiatShamirTranscript>(
 
     let layouts = verify_proof_shape(mvk, proof)?;
 
+    let n_per_trace: Vec<isize> = trace_id_to_air_id
+        .iter()
+        .map(|&air_id| trace_vdata[air_id].as_ref().unwrap().log_height as isize - l_skip as isize)
+        .collect();
     let r = verify_zerocheck_and_logup(
         transcript,
         mvk,
@@ -149,7 +152,7 @@ pub fn verify<TS: FiatShamirTranscript>(
         transcript,
         stacking_proof,
         &layouts,
-        params.l_skip,
+        l_skip,
         params.n_stack,
         &proof.batch_constraint_proof.column_openings,
         &r,
@@ -159,7 +162,7 @@ pub fn verify<TS: FiatShamirTranscript>(
     let (&u0, u_rest) = u_prism.split_first().unwrap();
     let u_cube = u0
         .exp_powers_of_2()
-        .take(params.l_skip)
+        .take(l_skip)
         .chain(u_rest.iter().copied())
         .collect_vec();
 
@@ -186,6 +189,7 @@ pub fn verify<TS: FiatShamirTranscript>(
 #[cfg(test)]
 mod tests {
     use openvm_stark_sdk::config::setup_tracing_with_log_level;
+    use test_case::test_case;
     use tracing::Level;
 
     use crate::{
@@ -199,21 +203,26 @@ mod tests {
         verifier::{VerifierError, verify},
     };
 
-    #[test]
-    fn test_fib_air_roundtrip() -> Result<(), VerifierError> {
-        setup_tracing_with_log_level(Level::INFO);
+    #[test_case(2, 10)]
+    #[test_case(2, 1; "where log_trace_degree=1 less than l_skip=2")]
+    #[test_case(2, 0; "where log_trace_degree=0 less than l_skip=2")]
+    #[test_case(3, 2; "where log_trace_degree=2 less than l_skip=3")]
+    fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError> {
+        setup_tracing_with_log_level(Level::DEBUG);
 
+        let n_stack = 8;
+        let k_whir = 4;
+        let log_final_poly_len = (l_skip + n_stack) % k_whir;
         let params = SystemParams {
-            l_skip: 2,
-            n_stack: 8,
+            l_skip,
+            n_stack,
             log_blowup: 1,
-            k_whir: 4,
+            k_whir,
             num_whir_queries: 100,
-            log_final_poly_len: 2,
+            log_final_poly_len,
             logup_pow_bits: 1,
             whir_pow_bits: 1,
         };
-        let log_trace_degree = params.l_skip + params.n_stack;
         let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
 
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
@@ -225,9 +234,14 @@ mod tests {
         verify(&vk, &proof, &mut validator_sponge)
     }
 
-    #[test]
-    fn test_dummy_interactions_roundtrip() -> Result<(), VerifierError> {
-        let params = test_system_params_small();
+    #[test_case(2, 8, 3)]
+    #[test_case(5, 5, 4)]
+    fn test_dummy_interactions_roundtrip(
+        l_skip: usize,
+        n_stack: usize,
+        k_whir: usize,
+    ) -> Result<(), VerifierError> {
+        let params = test_system_params_small(l_skip, n_stack, k_whir);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
         let fx = InteractionsFixture11;
         let (pk, vk) = fx.keygen(&engine);
@@ -239,9 +253,16 @@ mod tests {
         verify(&vk, &proof, &mut validator_sponge)
     }
 
-    #[test]
-    fn test_cached_trace_roundtrip() -> Result<(), VerifierError> {
-        let params = test_system_params_small();
+    #[test_case(2, 8, 3)]
+    #[test_case(5, 5, 4)]
+    #[test_case(5, 8, 3)]
+    fn test_cached_trace_roundtrip(
+        l_skip: usize,
+        n_stack: usize,
+        k_whir: usize,
+    ) -> Result<(), VerifierError> {
+        setup_tracing_with_log_level(Level::DEBUG);
+        let params = test_system_params_small(l_skip, n_stack, k_whir);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
         let fx = CachedFixture11::new(params);
         let (pk, vk) = fx.keygen(&engine);
@@ -253,10 +274,15 @@ mod tests {
         verify(&vk, &proof, &mut validator_sponge)
     }
 
-    #[test]
-    fn test_preprocessed_trace_roundtrip() -> Result<(), VerifierError> {
+    #[test_case(2, 8, 3)]
+    #[test_case(5, 5, 4)]
+    fn test_preprocessed_trace_roundtrip(
+        l_skip: usize,
+        n_stack: usize,
+        k_whir: usize,
+    ) -> Result<(), VerifierError> {
         use itertools::Itertools;
-        let params = test_system_params_small();
+        let params = test_system_params_small(l_skip, n_stack, k_whir);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
         let log_trace_degree = 8;
         let height = 1 << log_trace_degree;

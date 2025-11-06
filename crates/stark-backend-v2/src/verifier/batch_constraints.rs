@@ -7,13 +7,12 @@ use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
     SymbolicConstraints, symbolic_expression::SymbolicEvaluator,
 };
-use p3_field::{FieldAlgebra, batch_multiplicative_inverse};
-use p3_util::log2_ceil_u64;
+use p3_field::{Field, FieldAlgebra, batch_multiplicative_inverse};
 use thiserror::Error;
 use tracing::{debug, instrument};
 
 use crate::{
-    EF, F,
+    EF, F, calculate_n_logup,
     keygen::types::MultiStarkVerifyingKey0V2,
     poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni},
     poseidon2::sponge::FiatShamirTranscript,
@@ -60,7 +59,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     gkr_proof: &GkrProof,
     batch_proof: &BatchConstraintProof,
     trace_id_to_air_id: &[usize],
-    n_per_trace: &[usize],
+    n_per_trace: &[isize],
     omega_skip_pows: &[F],
 ) -> Result<Vec<EF>, BatchConstraintError> {
     let l_skip = mvk.params.l_skip;
@@ -82,24 +81,25 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     let alpha_logup = transcript.sample_ext();
     let beta_logup = transcript.sample_ext();
     debug!(%alpha_logup, %beta_logup);
-    let total_interaction_wt = zip(trace_id_to_air_id, n_per_trace)
+    let total_interactions = zip(trace_id_to_air_id, n_per_trace)
         .map(|(&air_idx, &n)| {
+            let n_lift = n.max(0) as usize;
             let num_interactions = mvk.per_air[air_idx].symbolic_constraints.interactions.len();
-            (num_interactions as u64) << n
+            (num_interactions as u64) << (l_skip + n_lift)
         })
         .sum::<u64>();
-    let n_logup: usize = log2_ceil_u64(total_interaction_wt).try_into().unwrap();
+    let n_logup: usize = calculate_n_logup(l_skip, total_interactions);
     debug!(%n_logup);
 
     let mut xi = Vec::new();
     let mut p_xi_claim = EF::ZERO;
     let mut q_xi_claim = alpha_logup;
-    if total_interaction_wt > 0 {
+    if total_interactions > 0 {
         (p_xi_claim, q_xi_claim, xi) = verify_gkr(gkr_proof, transcript, l_skip + n_logup)?;
         debug_assert_eq!(xi.len(), l_skip + n_logup);
     }
 
-    let mut n_global = n_per_trace.iter().copied().max().unwrap();
+    let mut n_global = n_per_trace.iter().copied().max().unwrap().max(0) as usize;
     if n_global < n_logup {
         n_global = n_logup;
     } else {
@@ -210,29 +210,31 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
 
     // 7. Compute `eq_3b_per_trace`
     let mut stacked_idx = 0usize;
-    let eq_3b_per_trace = (0..n_per_trace.len())
-        .map(|trace_idx| {
+    let eq_3b_per_trace = n_per_trace
+        .iter()
+        .enumerate()
+        .map(|(trace_idx, &n)| {
             let air_idx = trace_id_to_air_id[trace_idx];
             let interactions = &mvk.per_air[air_idx].symbolic_constraints.interactions;
             if interactions.is_empty() {
                 return vec![];
             }
-            let n = n_per_trace[trace_idx];
-            let mut b_vec = vec![F::ZERO; n_logup - n];
+            let n_lift = n.max(0) as usize;
+            let mut b_vec = vec![F::ZERO; n_logup - n_lift];
             (0..interactions.len())
                 .map(|_| {
                     debug_assert!(stacked_idx < 1 << (l_skip + n_logup));
-                    debug_assert!(stacked_idx.trailing_zeros() as usize >= l_skip + n);
-                    let mut b_int = stacked_idx >> (l_skip + n);
+                    debug_assert!(stacked_idx.trailing_zeros() as usize >= l_skip + n_lift);
+                    let mut b_int = stacked_idx >> (l_skip + n_lift);
                     for b in &mut b_vec {
                         *b = F::from_bool(b_int & 1 == 1);
                         b_int >>= 1;
                     }
-                    stacked_idx += 1 << (l_skip + n);
+                    stacked_idx += 1 << (l_skip + n_lift);
                     if stacked_idx == 1 << (l_skip + n_logup) {
                         stacked_idx = 0;
                     }
-                    eval_eq_mle(&xi[l_skip + n..l_skip + n_logup], &b_vec)
+                    eval_eq_mle(&xi[l_skip + n_lift..l_skip + n_logup], &b_vec)
                 })
                 .collect_vec()
         })
@@ -274,6 +276,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         let air_idx = trace_id_to_air_id[trace_idx];
         let vk = &mvk.per_air[air_idx];
         let n = n_per_trace[trace_idx];
+        let n_lift = n.max(0) as usize;
 
         // claim lengths are checked in proof shape
         for claims in air_openings.iter().skip(1) {
@@ -293,12 +296,23 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             .collect();
         partitioned_main.push(common_main);
 
+        // We are evaluating the lift, which is the same as evaluating the original with domain
+        // D^{(2^{n})}
+        let (l, rs_n, norm_factor) = if n.is_negative() {
+            (
+                l_skip.wrapping_add_signed(n),
+                &[rs[0].exp_power_of_2(-n as usize)] as &[_],
+                F::from_canonical_usize(1 << n.unsigned_abs()).inverse(),
+            )
+        } else {
+            (l_skip, &rs[..=(n as usize)], F::ONE)
+        };
         let evaluator = VerifierConstraintEvaluator::<F, EF>::new(
             preprocessed,
             &partitioned_main,
             &public_values[air_idx],
-            &rs[..=n],
-            l_skip,
+            rs_n,
+            l,
         );
 
         let constraints = &vk.symbolic_constraints.constraints;
@@ -307,7 +321,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             .map(|(lambda_pow, idx)| nodes[*idx] * lambda_pow)
             .sum::<EF>();
         debug!(%trace_idx, %expr, %air_idx, "constraints_eval");
-        let eq_xi_r = eq_ns[n];
+        let eq_xi_r = eq_ns[n_lift];
         debug!(%trace_idx, %eq_xi_r);
         constraints_evals.push(eq_xi_r * expr);
 
@@ -336,8 +350,9 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             num += eq_3b * *n;
             denom += eq_3b * *d;
         }
-        interactions_evals.push(num * eq_sharp_ns[n_per_trace[trace_idx]]);
-        interactions_evals.push(denom * eq_sharp_ns[n_per_trace[trace_idx]]);
+        debug!(%trace_idx, %num, %denom, %air_idx, "interactions_eval");
+        interactions_evals.push(num * norm_factor * eq_sharp_ns[n_lift]);
+        interactions_evals.push(denom * eq_sharp_ns[n_lift]);
     }
     let evaluated_claim = interactions_evals
         .iter()

@@ -10,7 +10,7 @@ use openvm_stark_backend::{
 use p3_field::{ExtensionField, TwoAdicField};
 
 use crate::prover::{
-    AirProvingContextV2, ColMajorMatrixView, CpuBackendV2,
+    AirProvingContextV2, CpuBackendV2, StridedColMajorMatrixView,
     logup_zerocheck::evaluator::{ProverConstraintEvaluator, ViewPair},
 };
 
@@ -21,7 +21,7 @@ pub(super) struct EvalHelper<'a, F> {
     /// Interactions
     pub interactions: Vec<SymbolicInteraction<F>>,
     pub public_values: Vec<F>,
-    pub preprocessed_trace: Option<ColMajorMatrixView<'a, F>>,
+    pub preprocessed_trace: Option<StridedColMajorMatrixView<'a, F>>,
     // TODO: skip rotation if vk dictates it is never used
     pub needs_next: bool,
 }
@@ -37,7 +37,7 @@ impl<'a> EvalHelper<'a, crate::F> {
     pub fn view_mats(
         &self,
         ctx: &'a AirProvingContextV2<CpuBackendV2>,
-    ) -> Vec<(ColMajorMatrixView<'a, crate::F>, bool)> {
+    ) -> Vec<(StridedColMajorMatrixView<'a, crate::F>, bool)> {
         let mut mats = Vec::with_capacity(
             2 * (usize::from(self.has_preprocessed()) + 1 + ctx.cached_mains.len()),
         );
@@ -47,12 +47,12 @@ impl<'a> EvalHelper<'a, crate::F> {
         }
         for (_, data) in ctx.cached_mains.iter() {
             let layout = &data.layout;
-            let trace_view = layout.mat_view(0, data.matrix.as_view());
+            let trace_view = layout.mat_view(0, &data.matrix);
             mats.push((trace_view, false));
             mats.push((trace_view, true));
         }
-        mats.push((ctx.common_main.as_view(), false));
-        mats.push((ctx.common_main.as_view(), true));
+        mats.push((ctx.common_main.as_view().into(), false));
+        mats.push((ctx.common_main.as_view().into(), true));
         mats
     }
 }

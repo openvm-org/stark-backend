@@ -10,7 +10,7 @@ use tracing::{debug, instrument};
 
 use crate::{
     Digest, EF, F,
-    poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one},
+    poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni},
     poseidon2::sponge::FiatShamirTranscript,
     proof::StackingProof,
     prover::{
@@ -171,14 +171,14 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
         let mut eq_r_per_lht: HashMap<usize, ColMajorMatrix<EF>> = HashMap::new();
         let mut last_height = 0;
         for (i, (_, s)) in trace_views.iter().enumerate() {
-            let n = s.log_height - l_skip;
-            if i == 0 || s.log_height != last_height {
+            let n_lift = s.log_height().saturating_sub(l_skip);
+            if i == 0 || s.log_height() != last_height {
                 ht_diff_idxs.push(i);
-                last_height = s.log_height;
+                last_height = s.log_height();
             }
             eq_r_per_lht
-                .entry(s.log_height)
-                .or_insert_with(|| ColMajorMatrix::new(evals_eq_hypercube(&r[1..1 + n]), 1));
+                .entry(s.log_height())
+                .or_insert_with(|| ColMajorMatrix::new(evals_eq_hypercube(&r[1..1 + n_lift]), 1));
         }
         ht_diff_idxs.push(trace_views.len());
 
@@ -203,23 +203,22 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
 
     fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<EF> {
         let l_skip = self.l_skip;
-        let r_0 = self.r_0;
         let omega_skip = self.omega_skip;
         // +1 from eq term
         let s_0_deg = sumcheck_round0_deg(l_skip, 2);
         // We want to compute algebraic batching, via \lambda,
         // for each (T, j) pair of (trace, column) of the univariate polynomials
         // ```text
-        // Z -> sum_{x in H_{n_stack}} q(Z,x) eq((Z,x[..n_T]), r[..1+n_T]) eq(x[n_T..], b_{T,j})
-        // Z -> sum_{x in H_{n_stack}} q(Z,x) \kappa_\rot((Z,x[..n_T]), r[..1+n_T]) eq(x[n_T..], b_{T,j})
+        // Z -> sum_{x in H_{n_stack}} q(Z,x) in_{D,n_T}(Z) eq_{D_{n_T}}((Z,x[..\tilde n_T]), r[..1+\tilde n_T]) eq(x[\tilde n_T..], b_{T,j})
+        // Z -> sum_{x in H_{n_stack}} q(Z,x) in_{D,n_T}(Z) \kappa_{\rot, D_{n_T}}((Z,x[..\tilde n_T]), r[..1+\tilde n_T]) eq(x[\tilde n_T..], b_{T,j})
         // ```
         // where `b_{T,j}` is length `n_stack - n_T` binary encoding of `StackedSlice.row_idx >>
         // (l_skip
         // + n_T)`. Note that since x is in the hypercube, by definition of `eq` the above
         // simplifies to
         // ```text
-        // Z -> sum_{x in H_{n_T}} q(Z,x,b_{T,j}) eq(Z,r_0) eq(x[..n_T], r[1..1+n_T])
-        // Z -> sum_{x in H_{n_T}} q(Z,x,b_{T,j}) \kappa_rot((Z, x[..n_T]), (r_0, r[1..1+n_T]))
+        // Z -> sum_{x in H_{n_T}} q(Z,x,b_{T,j}) (in_{D,n_T}(Z) eq(Z,r_0)) eq(x[..\tilde n_T], r[1..1+\tilde n_T])
+        // Z -> sum_{x in H_{n_T}} q(Z,x,b_{T,j}) in_{D,n_T}(Z) \kappa_rot((Z, x[..n_T]), (r_0, r[1..1+n_T]))
         // ```
         // where we also simplified the other `eq` term.
         // We further simplify the second using equation
@@ -234,27 +233,41 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
             .par_windows(2)
             .flat_map(|window| {
                 let t_window = &self.trace_views[window[0]..window[1]];
-                let log_height = t_window[0].1.log_height;
-                let n = log_height - l_skip;
+                let log_height = t_window[0].1.log_height();
+                let n = log_height as isize - l_skip as isize;
+                let n_lift = n.max(0) as usize;
                 let eq_rs = self.eq_r_per_lht.get(&log_height).unwrap().column(0);
-                debug_assert_eq!(eq_rs.len(), 1 << n);
+                debug_assert_eq!(eq_rs.len(), 1 << n_lift);
                 // Prepare the q subslice eval views
-                let t_cols = t_window
+                let q_t_cols = t_window
                     .iter()
                     .map(|(com_idx, s)| {
-                        debug_assert_eq!(s.log_height, log_height);
+                        debug_assert_eq!(s.log_height(), log_height);
                         let q = &self.stacked_per_commit[*com_idx].matrix;
-                        let t_col =
-                            &q.column(s.col_idx)[s.row_idx..s.row_idx + (1 << s.log_height)];
-                        (ColMajorMatrixView::new(t_col, 1), false)
+                        let q_t_col = &q.column(s.col_idx)[s.row_idx..s.row_idx + s.len(l_skip)];
+                        // NOTE: even if s.stride(l_skip) != 1, we use the full non-strided column
+                        // subslice. The sumcheck will not depend on the values outside of the
+                        // stride because of the `in_{D, n_T}` indicator below.
+                        (ColMajorMatrixView::new(q_t_col, 1).into(), false)
                     })
                     .collect_vec();
-                sumcheck_uni_round0_poly(l_skip, n, 2, &t_cols, |z, x, evals| {
+                sumcheck_uni_round0_poly(l_skip, n_lift, 2, &q_t_cols, |z, x, evals| {
                     let eq_cube = eq_rs[x];
-                    let eq_uni_r0 = eval_eq_uni(l_skip, z.into(), r_0);
-                    let eq_uni_r0_rot = eval_eq_uni(l_skip, z.into(), r_0 * omega_skip);
+                    let (l, omega, r_uni) = if n.is_negative() {
+                        (
+                            l_skip.wrapping_add_signed(n),
+                            omega_skip.exp_power_of_2(-n as usize),
+                            self.r_0.exp_power_of_2(-n as usize),
+                        )
+                    } else {
+                        (l_skip, omega_skip, self.r_0)
+                    };
+                    let ind = eval_in_uni(l_skip, n, z);
+                    let eq_uni_r0 = eval_eq_uni(l, z.into(), r_uni);
+                    let eq_uni_r0_rot = eval_eq_uni(l, z.into(), r_uni * omega);
+                    // eq_uni_1, k_rot_cube are only used when n > 0
                     let eq_uni_1 = eval_eq_uni_at_one(l_skip, z);
-                    let k_rot_cube = eq_rs[rot_prev(x, n)];
+                    let k_rot_cube = eq_rs[rot_prev(x, n_lift)];
 
                     let eq = eq_uni_r0 * eq_cube;
                     let k_rot =
@@ -265,8 +278,8 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                     )
                     .fold([EF::ZERO; 2], |mut acc, (lambdas, eval)| {
                         let q = eval[0];
-                        acc[0] += lambdas[0] * eq * q;
-                        acc[1] += lambdas[1] * k_rot * q;
+                        acc[0] += lambdas[0] * eq * q * ind;
+                        acc[1] += lambdas[1] * k_rot * q * ind;
                         acc
                     })
                 })
@@ -285,7 +298,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
         self.q_evals = self
             .stacked_per_commit
             .iter()
-            .map(|d| fold_ple_evals(l_skip, d.matrix.as_view(), false, u_0))
+            .map(|d| fold_ple_evals(l_skip, d.matrix.as_view().into(), false, u_0))
             .collect_vec();
         // fold PLEs into MLEs for \eq and \kappa_\rot, using u_0
         let eq_uni_u0r0 = eval_eq_uni(l_skip, u_0, r_0);
@@ -295,24 +308,34 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
         self.k_rot_r_per_lht = self
             .eq_r_per_lht
             .par_iter_mut()
-            .map(|(lht, mat)| {
-                let n = *lht - l_skip;
-                debug_assert_eq!(mat.values.len(), 1 << n);
+            .map(|(&log_height, mat)| {
+                let n = log_height as isize - l_skip as isize;
+                let n_lift = n.max(0) as usize;
+                debug_assert_eq!(mat.values.len(), 1 << n_lift);
+                let ind = eval_in_uni(l_skip, n, u_0);
+                let (eq_uni, eq_uni_rot) = if n.is_negative() {
+                    let omega = omega_skip.exp_power_of_2(-n as usize);
+                    let r = r_0.exp_power_of_2(-n as usize);
+                    let l = l_skip.wrapping_add_signed(n);
+                    (eval_eq_uni(l, u_0, r), eval_eq_uni(l, u_0, r * omega))
+                } else {
+                    (eq_uni_u0r0, eq_uni_u0r0_rot)
+                };
                 // folded \kappa_\rot evals
-                let evals: Vec<_> = (0..1 << n)
+                let evals: Vec<_> = (0..1 << n_lift)
                     .into_par_iter()
                     .map(|x| {
                         let eq_cube = unsafe { *mat.get_unchecked(x, 0) };
-                        let k_rot_cube = unsafe { *mat.get_unchecked(rot_prev(x, n), 0) };
-                        eq_uni_u0r0_rot * eq_cube
-                            + self.eq_const * eq_uni_u01 * (k_rot_cube - eq_cube)
+                        let k_rot_cube = unsafe { *mat.get_unchecked(rot_prev(x, n_lift), 0) };
+                        ind * (eq_uni_rot * eq_cube
+                            + self.eq_const * eq_uni_u01 * (k_rot_cube - eq_cube))
                     })
                     .collect();
                 // update \eq with the univariate factor:
                 mat.values.par_iter_mut().for_each(|v| {
-                    *v *= eq_uni_u0r0;
+                    *v *= ind * eq_uni;
                 });
-                (*lht, ColMajorMatrix::new(evals, 1))
+                (log_height, ColMajorMatrix::new(evals, 1))
             })
             .collect();
     }
@@ -330,7 +353,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
         // if `round <= n_T`. Otherwise we compute
         // ```
         // X -> sum_{y in H_{n_stack-round}} q(u[..round],X,y) eq((u[..1+n_T], r[..1+n_T]) eq((u[1+n_T..round],X,y[round..]), b_{T,j})
-        //      = q(u[..round], Z, b_{T,j}[round-n_T..]) eq((u[..1+n_T], r[..1+n_T]) eq((u[1+n_T..round],X), b_{T,j}[..round-n_T])
+        //      = q(u[..round], X, b_{T,j}[round-n_T..]) eq((u[..1+n_T], r[..1+n_T]) eq((u[1+n_T..round],X), b_{T,j}[..round-n_T])
         // X -> sum_{y in H_{n_stack-round}} q(u[..round],X,y) \kappa_\rot(u[..1+n_T], r[..1+n_T]) eq((u[1+n_T..round],X,y[round..]), b_{T,j})
         // ```
         let s_evals: Vec<_> = self
@@ -338,23 +361,26 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
             .par_windows(2)
             .flat_map(|window| {
                 let t_views = &self.trace_views[window[0]..window[1]];
-                let log_height = t_views[0].1.log_height;
-                let n = log_height - l_skip; // n_T
-                let hypercube_dim = n.saturating_sub(round);
+                let log_height = t_views[0].1.log_height();
+                let n_lift = log_height.saturating_sub(l_skip); // \tilde{n}_T
+                let hypercube_dim = n_lift.saturating_sub(round);
                 let eq_rs = self.eq_r_per_lht.get(&log_height).unwrap().column(0);
                 let k_rot_rs = self.k_rot_r_per_lht.get(&log_height).unwrap().column(0);
-                debug_assert_eq!(eq_rs.len(), 1 << n.saturating_sub(round - 1));
-                debug_assert_eq!(k_rot_rs.len(), 1 << n.saturating_sub(round - 1));
+                debug_assert_eq!(eq_rs.len(), 1 << n_lift.saturating_sub(round - 1));
+                debug_assert_eq!(k_rot_rs.len(), 1 << n_lift.saturating_sub(round - 1));
                 // Prepare the q subslice eval views
                 let t_cols = t_views
                     .iter()
                     .map(|(com_idx, s)| {
-                        debug_assert_eq!(s.log_height, log_height);
+                        debug_assert_eq!(s.log_height(), log_height);
+                        // q(u[..round], X, b_{T,j}[round-\tilde n_T..])
+                        // q_evals has been folded already
                         let q = &self.q_evals[*com_idx];
-                        let row_start = if round <= n {
+                        let row_start = if round <= n_lift {
+                            // round >= 1 so n_lift >= 1
                             (s.row_idx >> log_height) << (hypercube_dim + 1)
                         } else {
-                            (s.row_idx >> (log_height + round - n)) << 1
+                            (s.row_idx >> (l_skip + round)) << 1
                         };
                         let t_col =
                             &q.column(s.col_idx)[row_start..row_start + (2 << hypercube_dim)];
@@ -369,7 +395,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                             let t_idx = window[0] + i;
                             let q = eval[0];
                             let mut eq_ub = self.eq_ub_per_trace[t_idx];
-                            let (eq, k_rot) = if round > n {
+                            let (eq, k_rot) = if round > n_lift {
                                 // Extra contribution of eq(X, b_{T,j}[round-n_T-1])
                                 let b =
                                     (self.trace_views[t_idx].1.row_idx >> (l_skip + round - 1)) & 1;
@@ -406,8 +432,8 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
             .map(|(lht, mat)| (lht, fold_mle_evals(mat, u_round)))
             .collect();
         for ((_, s), eq_ub) in zip(&self.trace_views, &mut self.eq_ub_per_trace) {
-            let n = s.log_height - l_skip;
-            if round > n {
+            let n_lift = s.log_height().saturating_sub(l_skip);
+            if round > n_lift {
                 // Folding above did nothing, and we update the eq(u[1+n_T..=round],
                 // b_{T,j}[..=round-n_T-1]) value
                 let b = (s.row_idx >> (l_skip + round - 1)) & 1;
