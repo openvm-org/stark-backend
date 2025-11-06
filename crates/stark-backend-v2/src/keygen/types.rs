@@ -55,7 +55,7 @@ pub struct VerifierSinglePreprocessedData<Digest> {
     pub commit: Digest,
     /// The hypercube dimension of the preprocessed data _before stacking_ (log_height -
     /// vk.l_skip).
-    pub hypercube_dim: usize,
+    pub hypercube_dim: isize,
     /// The width of the data after stacking.
     pub stacking_width: usize,
 }

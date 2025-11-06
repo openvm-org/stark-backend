@@ -42,11 +42,21 @@ pub struct ColMajorMatrixView<'a, F> {
     height: usize,
 }
 
+/// Vertically strided column-major matrix view.
+#[derive(Clone, Copy, Debug)]
+pub struct StridedColMajorMatrixView<'a, F> {
+    values: &'a [F],
+    width: usize,
+    height: usize,
+    /// Row stride
+    stride: usize,
+}
+
 impl<F> ColMajorMatrix<F> {
     pub fn new(values: Vec<F>, width: usize) -> Self {
         assert_eq!(values.len() % width, 0);
         let height = values.len() / width;
-        assert!(height == 0 || height.is_power_of_two());
+        assert!(height.is_power_of_two());
         Self {
             values,
             width,
@@ -119,7 +129,7 @@ impl<'a, F> ColMajorMatrixView<'a, F> {
     pub fn new(values: &'a [F], width: usize) -> Self {
         assert_eq!(values.len() % width, 0);
         let height = values.len() / width;
-        assert!(height == 0 || height.is_power_of_two());
+        debug_assert!(height == 0 || height.is_power_of_two());
         Self {
             values,
             width,
@@ -153,6 +163,47 @@ impl<F> MatrixView<F> for ColMajorMatrixView<'_, F> {
         debug_assert!(row_idx < self.height);
         self.values
             .get_unchecked(col_maj_idx(row_idx, col_idx, self.height))
+    }
+}
+
+impl<'a, F> StridedColMajorMatrixView<'a, F> {
+    pub fn new(values: &'a [F], width: usize, stride: usize) -> Self {
+        assert_eq!(values.len() % (width * stride), 0);
+        let height = values.len() / (width * stride);
+        debug_assert!(height == 0 || height.is_power_of_two());
+        Self {
+            values,
+            width,
+            height,
+            stride,
+        }
+    }
+}
+
+impl<F> MatrixDimensions for StridedColMajorMatrixView<'_, F> {
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+}
+
+impl<F> MatrixView<F> for StridedColMajorMatrixView<'_, F> {
+    unsafe fn get_unchecked(&self, row_idx: usize, col_idx: usize) -> &F {
+        debug_assert!(col_idx < self.width);
+        debug_assert!(row_idx < self.height);
+        self.values.get_unchecked(col_maj_idx(
+            row_idx * self.stride,
+            col_idx,
+            self.height * self.stride,
+        ))
+    }
+}
+
+impl<'a, F> From<ColMajorMatrixView<'a, F>> for StridedColMajorMatrixView<'a, F> {
+    fn from(mat: ColMajorMatrixView<'a, F>) -> Self {
+        Self::new(mat.values, mat.width, 1)
     }
 }
 

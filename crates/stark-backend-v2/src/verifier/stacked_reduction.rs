@@ -8,7 +8,7 @@ use tracing::{debug, instrument};
 use crate::{
     EF, F,
     poly_common::{
-        eval_eq_mle, eval_eq_prism, eval_rot_kernel_prism, horner_eval,
+        eval_eq_mle, eval_eq_prism, eval_in_uni, eval_rot_kernel_prism, horner_eval,
         interpolate_quadratic_at_012,
     },
     poseidon2::sponge::FiatShamirTranscript,
@@ -159,15 +159,26 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
         .zip(q_coeffs.iter_mut())
         .for_each(|(layout, coeffs)| {
             layout.sorted_cols.iter().for_each(|&(_, _, s)| {
-                let n = s.log_height - l_skip;
-                let b = (l_skip + n..l_skip + n_stack)
+                let n = s.log_height() as isize - l_skip as isize;
+                let n_lift = n.max(0) as usize;
+                let b = (l_skip + n_lift..l_skip + n_stack)
                     .map(|j| F::from_bool((s.row_idx >> j) & 1 == 1))
                     .collect_vec();
-                let eq_mle = eval_eq_mle(&u[n + 1..], &b);
-                let eq_prism = eval_eq_prism(l_skip, &u[..=n], &r[..=n]);
-                let rot_kernel_prism = eval_rot_kernel_prism(l_skip, &u[..=n], &r[..=n]);
+                let eq_mle = eval_eq_mle(&u[n_lift + 1..], &b);
+                let ind = eval_in_uni(l_skip, n, u[0]);
+                let (l, rs_n) = if n.is_negative() {
+                    (
+                        l_skip.wrapping_add_signed(n),
+                        &[r[0].exp_power_of_2(-n as usize)] as &[_],
+                    )
+                } else {
+                    (l_skip, &r[..=n_lift])
+                };
+                let eq_prism = eval_eq_prism(l, &u[..=n_lift], rs_n);
+                let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
                 coeffs[s.col_idx] += eq_mle
-                    * (lambda_powers[j] * eq_prism + lambda_powers[j + 1] * rot_kernel_prism);
+                    * (lambda_powers[j] * eq_prism + lambda_powers[j + 1] * rot_kernel_prism)
+                    * ind;
                 j += 2;
             });
         });
@@ -266,20 +277,14 @@ mod tests {
             .take(1 << L_SKIP)
             .collect_vec();
 
-        let slice = StackedSlice {
-            col_idx: 0,
-            row_idx: 0,
-            log_height: L_SKIP + N_STACK,
-        };
-        let layout = StackedLayout {
-            sorted_cols: vec![(0, 0, slice)],
-        };
+        let slice = StackedSlice::new(0, 0, L_SKIP + N_STACK);
+        let layout = StackedLayout::from_raw_parts(L_SKIP, vec![(0, 0, slice)]);
 
         let q = generate_random_linear_q(&mut rng);
         let r = (0..=N_STACK)
             .map(|_| EF::from_canonical_u32(rng.random_range(0..F::ORDER_U32)))
             .collect_vec();
-        let n = slice.log_height - L_SKIP;
+        let n = slice.log_height() - L_SKIP;
         let b = (L_SKIP + n..L_SKIP + N_STACK)
             .map(|j| F::from_bool((slice.row_idx >> j) & 1 == 1))
             .collect_vec();

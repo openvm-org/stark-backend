@@ -18,7 +18,7 @@ use crate::{
     EF,
     poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
-    prover::{ColMajorMatrix, ColMajorMatrixView, MatrixView},
+    prover::{ColMajorMatrix, ColMajorMatrixView, MatrixView, StridedColMajorMatrixView},
 };
 
 /// The univariate skip round 0: we want to compute the univariate polynomial `s(Z) = sum_{x \in
@@ -38,12 +38,16 @@ use crate::{
 /// be interpolated using `d * (2^{l_skip} - 1) + 1` points.
 ///
 /// This function returns `s` in **coefficient** form.
+///
+/// If `n > 0`, then all `mats` should have the same height equal to `2^{l_skip + n}`.
+/// If `n = 0`, then all `mats` should have height `<= 2^{l_skip}` and they will be univariate
+/// lifted to height `2^l_skip`.
 #[instrument(level = "trace", skip_all)]
 pub fn sumcheck_uni_round0_poly<F, EF, FN, const WD: usize>(
     l_skip: usize,
     n: usize,
     d: usize,
-    mats: &[(ColMajorMatrixView<F>, bool)],
+    mats: &[(StridedColMajorMatrixView<F>, bool)],
     w: FN,
 ) -> [UnivariatePoly<EF>; WD]
 where
@@ -56,7 +60,20 @@ where
         ) -> [EF; WD]
         + Sync,
 {
-    let height = 1 << (l_skip + n);
+    #[cfg(debug_assertions)]
+    if n > 0 {
+        for (m, _) in mats.iter() {
+            assert_eq!(m.height(), 1 << (l_skip + n));
+        }
+    } else {
+        for (m, _) in mats.iter() {
+            assert!(
+                m.height() <= 1 << l_skip,
+                "mat height {} > 2^{l_skip}",
+                m.height()
+            );
+        }
+    }
     let s_deg = sumcheck_round0_deg(l_skip, d);
     let log_domain_size = log2_ceil_usize(s_deg + 1);
     let omega = F::two_adic_generator(log_domain_size);
@@ -79,11 +96,14 @@ where
         let mats_at_zs = mats
             .iter()
             .map(|(mat, is_rot)| {
-                debug_assert_eq!(mat.height(), height);
+                let height = mat.height();
                 let offset = usize::from(*is_rot);
                 (0..mat.width())
                     .map(|col_idx| {
-                        // SAFETY: col_idx < width and we assume mat.height() == height
+                        // SAFETY: col_idx < width
+                        // Note that the % height is necessary even when `offset = 0` because we may
+                        // have `height < 2^{l_skip + n}` in the case where we are taking the lifts
+                        // of `mats`
                         let col_x = ((x << l_skip)..(x + 1) << l_skip)
                             .map(|i| unsafe { *mat.get_unchecked((i + offset) % height, col_idx) })
                             .collect_vec();
@@ -148,10 +168,13 @@ pub const fn sumcheck_round0_deg(l_skip: usize, d: usize) -> usize {
 /// `mat` is a matrix of the evaluations on hyperprism D_n of a prismalinear extensions of the
 /// columns. We "fold" it by evaluating the prismalinear polynomials at `r` in the univariate
 /// variable `Z`.
+///
+/// If `n < 0`, then we evaluate `mat` at `r^{-n}`, which is equivalent to folding the lift of
+/// `mat`.
 #[instrument(level = "trace", skip_all)]
 pub fn fold_ple_evals<F, EF>(
     l_skip: usize,
-    mat: ColMajorMatrixView<F>,
+    mat: StridedColMajorMatrixView<F>,
     is_rot: bool,
     r: EF,
 ) -> ColMajorMatrix<EF>
@@ -160,7 +183,7 @@ where
     EF: ExtensionField<F> + TwoAdicField,
 {
     let height = mat.height();
-    debug_assert!(height >= 1 << l_skip);
+    let lifted_height = height.max(1 << l_skip);
     let width = mat.width();
 
     let omega = F::two_adic_generator(l_skip);
@@ -172,21 +195,24 @@ where
     let inv_denoms = batch_multiplicative_inverse(&denoms);
 
     let offset = usize::from(is_rot);
-    let values = mat
-        .values
-        .par_chunks_exact(height)
-        .flat_map(|t| {
-            (0..height >> l_skip).into_par_iter().map(|x| {
-                let uni_evals = (0..1 << l_skip)
-                    .map(|z| t[((x << l_skip) + z + offset) % height])
-                    .collect_vec();
-                interpolate_coset(
-                    &RowMajorMatrix::new_col(uni_evals),
-                    F::ONE,
-                    r,
-                    Some(&inv_denoms),
-                )[0]
-            })
+    let new_height = lifted_height >> l_skip;
+    let values = (0..width * new_height)
+        .into_par_iter()
+        .map(|idx| {
+            // `values` needs to be column-major
+            let x = idx % new_height;
+            let j = idx / new_height;
+            // SAFETY: j < width and we mod by height so row_idx < height
+            // Note that the `% height` is also necessary to handle lifting of `mats`
+            let uni_evals = (0..1 << l_skip)
+                .map(|z| unsafe { *mat.get_unchecked(((x << l_skip) + z + offset) % height, j) })
+                .collect_vec();
+            interpolate_coset(
+                &RowMajorMatrix::new_col(uni_evals),
+                F::ONE,
+                r,
+                Some(&inv_denoms),
+            )[0]
         })
         .collect::<Vec<_>>();
     ColMajorMatrix::new(values, width)
@@ -203,7 +229,7 @@ where
     EF: ExtensionField<F> + TwoAdicField,
 {
     mats.into_par_iter()
-        .map(|mat| fold_ple_evals(l_skip, mat.as_view(), is_rot, r))
+        .map(|mat| fold_ple_evals(l_skip, mat.as_view().into(), is_rot, r))
         .collect()
 }
 
@@ -482,7 +508,7 @@ where
         l_skip,
         n,
         1,
-        &[(current_evals.as_view(), false)],
+        &[(current_evals.as_view().into(), false)],
         |_z, _x, evals| [evals[0][0]],
     );
     let s_0_ext = UnivariatePoly::new(
@@ -504,7 +530,7 @@ where
     // hypercube. For each x in the hypercube, we have evaluations f(z, x) for z in the
     // univariate skip domain D. We interpolate these to get a univariate polynomial and evaluate
     // at r_0.
-    let mut current_evals = fold_ple_evals(l_skip, current_evals.as_view(), false, r_0);
+    let mut current_evals = fold_ple_evals(l_skip, current_evals.as_view().into(), false, r_0);
     debug_assert_eq!(current_evals.height(), 1 << n);
 
     // Sumcheck rounds:

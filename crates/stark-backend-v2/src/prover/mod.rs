@@ -98,12 +98,10 @@ where
         // Hypercube dimension per trace (present AIR)
         for (air_id, air_ctx) in &ctx.per_trace {
             let trace_height = air_ctx.common_main.height();
-            let prism_dim = log2_strict_usize(trace_height);
-            assert!(prism_dim >= mpk.params.l_skip);
-            let n = prism_dim - mpk.params.l_skip;
+            let log_height = log2_strict_usize(trace_height);
 
             trace_vdata[*air_id] = Some(TraceVData {
-                hypercube_dim: n,
+                log_height,
                 cached_commitments: air_ctx
                     .cached_mains
                     .iter()
@@ -130,7 +128,7 @@ where
                 if let Some((commit, _)) = &pk.preprocessed_data {
                     transcript.observe_commit(*commit);
                 } else {
-                    transcript.observe(F::from_canonical_usize(trace_vdata.hypercube_dim));
+                    transcript.observe(F::from_canonical_usize(trace_vdata.log_height));
                 }
                 for commit in &trace_vdata.cached_commitments {
                     transcript.observe_commit(*commit);
