@@ -313,23 +313,28 @@ impl TestFixture for PreprocessedFibFixture {
 }
 
 /// Trace heights cannot exceed 2^10 when using these system params.
-pub fn test_system_params_small() -> SystemParams {
+pub fn test_system_params_small(l_skip: usize, n_stack: usize, k_whir: usize) -> SystemParams {
+    let log_final_poly_len = (n_stack + l_skip) % k_whir;
     // Use all different numbers
     SystemParams {
-        l_skip: 2,
-        n_stack: 8,
+        l_skip,
+        n_stack,
         log_blowup: 1,
-        k_whir: 3,
+        k_whir,
         num_whir_queries: 5,
-        log_final_poly_len: 1,
+        log_final_poly_len,
         logup_pow_bits: 1,
         whir_pow_bits: 1,
     }
 }
 
+pub fn default_test_params_small() -> SystemParams {
+    test_system_params_small(2, 8, 3)
+}
+
 pub fn test_engine_small() -> BabyBearPoseidon2CpuEngineV2<DuplexSponge> {
     setup_tracing();
-    BabyBearPoseidon2CpuEngineV2::new(test_system_params_small())
+    BabyBearPoseidon2CpuEngineV2::new(default_test_params_small())
 }
 
 #[derive(Clone)]
