@@ -1,9 +1,11 @@
+use std::cmp::max;
+
 use itertools::{Itertools, izip};
-use p3_util::log2_ceil_u64;
 use thiserror::Error;
 
 use crate::{
-    keygen::types::MultiStarkVerifyingKey0V2, proof::Proof, prover::stacked_pcs::StackedLayout,
+    calculate_n_logup, keygen::types::MultiStarkVerifyingKey0V2, proof::Proof,
+    prover::stacked_pcs::StackedLayout,
 };
 
 #[derive(Debug, Error)]
@@ -60,10 +62,11 @@ pub enum ProofShapeVDataError {
         expected: usize,
         actual: usize,
     },
-    #[error("AIR {air_idx} should have hypercube_dim <= {max}, but has {actual}")]
-    HypercubeDimOutOfBounds {
+    #[error("AIR {air_idx} should have log_height <= {}, but has {actual} (l_skip = {l_skip}, n_stack = {n_stack}", l_skip + n_stack)]
+    LogHeightOutOfBounds {
         air_idx: usize,
-        max: usize,
+        l_skip: usize,
+        n_stack: usize,
         actual: usize,
     },
     #[error("AIR {air_idx} should have {expected} public values, but has {actual}")]
@@ -300,6 +303,7 @@ pub fn verify_proof_shape(
 ) -> Result<Vec<StackedLayout>, ProofShapeError> {
     // TRACE HEIGHTS AND PUBLIC VALUES
     let num_airs = mvk.per_air.len();
+    let l_skip = mvk.params.l_skip;
 
     if proof.trace_vdata.len() != num_airs {
         return ProofShapeError::invalid_vdata(ProofShapeVDataError::InvalidVDataLength {
@@ -336,12 +340,13 @@ pub fn verify_proof_shape(
                         actual: vdata.cached_commitments.len(),
                     },
                 );
-            } else if vdata.hypercube_dim > mvk.params.n_stack {
+            } else if vdata.log_height > l_skip + mvk.params.n_stack {
                 return ProofShapeError::invalid_vdata(
-                    ProofShapeVDataError::HypercubeDimOutOfBounds {
+                    ProofShapeVDataError::LogHeightOutOfBounds {
                         air_idx,
-                        max: mvk.params.n_stack,
-                        actual: vdata.hypercube_dim,
+                        l_skip,
+                        n_stack: mvk.params.n_stack,
+                        actual: vdata.log_height,
                     },
                 );
             } else if vk.params.num_public_values != pvs.len() {
@@ -359,20 +364,20 @@ pub fn verify_proof_shape(
         .iter()
         .zip(&proof.trace_vdata)
         .filter_map(|(vk, vdata)| vdata.as_ref().map(|vdata| (vk, vdata)))
-        .sorted_by_key(|(_, vdata)| vdata.hypercube_dim)
+        .sorted_by_key(|(_, vdata)| vdata.log_height)
         .rev()
         .collect_vec();
     let num_airs = per_trace.len();
 
     // GKR PROOF SHAPE
-    let total_interactions_wt = per_trace.iter().fold(0u64, |acc, (vk, vdata)| {
-        acc + ((vk.num_interactions() * (1 << vdata.hypercube_dim)) as u64)
+    let total_interactions = per_trace.iter().fold(0u64, |acc, (vk, vdata)| {
+        acc + ((vk.num_interactions() as u64) << max(vdata.log_height, l_skip))
     });
-    let n_logup = log2_ceil_u64(total_interactions_wt) as usize;
-    let num_gkr_rounds = if total_interactions_wt == 0 {
+    let n_logup = calculate_n_logup(l_skip, total_interactions);
+    let num_gkr_rounds = if total_interactions == 0 {
         0
     } else {
-        mvk.params.l_skip + n_logup
+        l_skip + n_logup
     };
 
     if proof.gkr_proof.claims_per_layer.len() != num_gkr_rounds {
@@ -400,9 +405,9 @@ pub fn verify_proof_shape(
     // BATCH CONSTRAINTS PROOF SHAPE
     let batch_proof = &proof.batch_constraint_proof;
 
-    let n_global = n_logup.max(per_trace[0].1.hypercube_dim);
+    let n_global = n_logup.max(per_trace[0].1.log_height.saturating_sub(l_skip));
 
-    let s_0_deg = (mvk.max_constraint_degree + 1) * ((1 << mvk.params.l_skip) - 1);
+    let s_0_deg = (mvk.max_constraint_degree + 1) * ((1 << l_skip) - 1);
     if batch_proof.numerator_term_per_air.len() != num_airs {
         return ProofShapeError::invalid_batch_constraint(
             BatchProofShapeError::InvalidNumeratorTerms {
@@ -508,7 +513,7 @@ pub fn verify_proof_shape(
     // STACKING PROOF SHAPE
     let stacking_proof = &proof.stacking_proof;
 
-    let s_0_deg = 2 * ((1 << mvk.params.l_skip) - 1);
+    let s_0_deg = 2 * ((1 << l_skip) - 1);
     if stacking_proof.univariate_round_coeffs.len() != s_0_deg + 1 {
         return ProofShapeError::invalid_stacking(
             StackingProofShapeError::InvalidUnivariateRoundCoeffs {
@@ -526,17 +531,12 @@ pub fn verify_proof_shape(
     }
 
     let common_main_layout = StackedLayout::new(
-        mvk.params.n_stack + mvk.params.l_skip,
+        l_skip,
+        mvk.params.n_stack + l_skip,
         per_trace
             .iter()
             .enumerate()
-            .map(|(i, (vk, vdata))| {
-                (
-                    i,
-                    vk.params.width.common_main,
-                    vdata.hypercube_dim + mvk.params.l_skip,
-                )
-            })
+            .map(|(i, (vk, vdata))| (i, vk.params.width.common_main, vdata.log_height))
             .collect_vec(),
     );
 
@@ -549,10 +549,10 @@ pub fn verify_proof_shape(
                 .iter()
                 .chain(&vk.params.width.cached_mains)
                 .copied()
-                .map(|width| (0usize, width, vdata.hypercube_dim + mvk.params.l_skip))
+                .map(|width| (0usize, width, vdata.log_height))
                 .collect_vec()
         })
-        .map(|sorted| StackedLayout::new(mvk.params.n_stack + mvk.params.l_skip, vec![sorted]))
+        .map(|sorted| StackedLayout::new(l_skip, mvk.params.n_stack + l_skip, vec![sorted]))
         .collect_vec();
 
     let layouts = [common_main_layout]
@@ -588,7 +588,7 @@ pub fn verify_proof_shape(
     // WHIR PROOF SHAPE
     let whir_proof = &proof.whir_proof;
 
-    let log_stacked_height = mvk.params.n_stack + mvk.params.l_skip;
+    let log_stacked_height = mvk.params.n_stack + l_skip;
     debug_assert_eq!(
         (log_stacked_height - mvk.params.log_final_poly_len) % mvk.params.k_whir,
         0
