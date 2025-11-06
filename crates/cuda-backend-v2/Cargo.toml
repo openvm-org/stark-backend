@@ -32,6 +32,7 @@ openvm-stark-sdk.workspace = true
 p3-keccak-air.workspace = true
 rand.workspace = true
 eyre.workspace = true
+test-case.workspace = true
 
 [features]
 default = ["stark-backend-v2/parallel"] # TODO: remove this once no longer using cpu rayon
