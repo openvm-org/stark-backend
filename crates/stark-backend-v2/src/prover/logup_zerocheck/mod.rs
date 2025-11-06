@@ -3,11 +3,11 @@
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::FieldAlgebra;
-use p3_util::{log2_ceil_u64, log2_strict_usize};
+use p3_util::log2_strict_usize;
 use tracing::{debug, instrument};
 
 use crate::{
-    EF, F,
+    EF, F, calculate_n_logup,
     poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
@@ -105,7 +105,7 @@ where
 
     // Gather interactions metadata, including interactions stacked layout which depends on trace
     // heights
-    let mut total_interaction_wt = 0u64;
+    let mut total_interactions = 0u64;
     let interactions_meta: Vec<_> = ctx
         .per_trace
         .iter()
@@ -116,14 +116,17 @@ where
             let num_interactions = pk.vk.symbolic_constraints.interactions.len();
             let height = air_ctx.common_main.height();
             let log_height = log2_strict_usize(height);
-            total_interaction_wt += (num_interactions as u64) << (log_height - l_skip);
-            (trace_idx, num_interactions, log_height)
+            let log_lifted_height = log_height.max(l_skip);
+            total_interactions += (num_interactions as u64) << log_lifted_height;
+            (trace_idx, num_interactions, log_lifted_height)
         })
         .collect();
     // Implicitly, the width of this stacking should be 1
-    let n_logup = log2_ceil_u64(total_interaction_wt) as usize;
+    let n_logup = calculate_n_logup(l_skip, total_interactions);
     debug!(%n_logup);
-    let interactions_layout = StackedLayout::new(l_skip + n_logup, interactions_meta);
+    // There's no stride threshold for `interactions_layout` because there's no univariate skip for
+    // GKR
+    let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
 
     // Grind to increase soundness of random sampling for LogUp
     let logup_pow_witness = transcript.grind(mpk.params.logup_pow_bits);
