@@ -1,8 +1,10 @@
-use std::{ffi::c_void, sync::Arc};
+use std::{cmp::max, ffi::c_void, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::{
-    base::DeviceMatrix, cuda::kernels::lde::batch_expand_pad, ntt::batch_ntt,
+    base::DeviceMatrix,
+    cuda::kernels::lde::{batch_expand_pad, raw_batch_expand_pad},
+    ntt::batch_ntt,
 };
 use openvm_cuda_common::{
     copy::{MemCopyD2D, cuda_memcpy},
@@ -58,14 +60,16 @@ pub fn stacked_matrix<F: Field>(
         .enumerate()
         .map(|(idx, trace)| {
             // height cannot be zero:
-            let prism_dim = log2_strict_usize(trace.height());
-            let n = prism_dim.checked_sub(l_skip).expect("log_height < l_skip");
-            (idx, trace.width(), l_skip + n)
+            let log_height = log2_strict_usize(trace.height());
+            (idx, trace.width(), log_height)
         })
         .collect_vec();
     debug_assert!(sorted_meta.is_sorted_by(|a, b| a.2 >= b.2));
-    let mut layout = StackedLayout::new(l_skip + n_stack, sorted_meta);
-    let total_cells: usize = traces.iter().map(|t| t.height() * t.width()).sum();
+    let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
+    let total_cells: usize = traces
+        .iter()
+        .map(|t| max(t.height() * t.width(), 1 << l_skip))
+        .sum();
     let height = 1usize << (l_skip + n_stack);
     let width = total_cells.div_ceil(height);
 
@@ -74,18 +78,35 @@ pub fn stacked_matrix<F: Field>(
     for (mat_idx, j, s) in &mut layout.sorted_cols {
         let start = s.col_idx * height + s.row_idx;
         let trace = traces[*mat_idx];
-        let t_ht = trace.height();
-        debug_assert_eq!(t_ht, 1 << s.log_height);
-        // SAFETY: matrix buffers are allocated correctly with respect to dimensions
-        unsafe {
-            let src = trace.buffer().as_ptr().add(*j * t_ht);
-            let dst = q_buf.as_mut_ptr().add(start);
-            // D2D memcpy
-            cuda_memcpy::<true, true>(
-                dst as *mut c_void,
-                src as *const c_void,
-                t_ht * size_of::<F>(),
-            )?;
+        let s_len = s.len(l_skip);
+        debug_assert_eq!(trace.height(), 1 << s.log_height());
+        if s.log_height() >= l_skip {
+            debug_assert_eq!(trace.height(), s_len);
+            // SAFETY: matrix buffers are allocated correctly with respect to dimensions
+            // - `trace.height() = s_len` since `log_height >= l_skip`
+            // - `q_buf` has enough capacity by definition of stacked `layout`
+            unsafe {
+                let src = trace.buffer().as_ptr().add(*j * s_len);
+                let dst = q_buf.as_mut_ptr().add(start);
+                // D2D memcpy
+                cuda_memcpy::<true, true>(
+                    dst as *mut c_void,
+                    src as *const c_void,
+                    s_len * size_of::<F>(),
+                )?;
+            }
+        } else {
+            let stride = s.stride(l_skip);
+            debug_assert_eq!(stride * trace.height(), s_len);
+            // SAFETY: matrix buffers are allocated correctly
+            // - `q_buf` has enough capacity by definition of stacked `layout`
+            // - we abuse `batch_expand_pad` with `poly_count = trace.height()` to create a strided
+            //   column of length `s_len = stride * trace.height()`
+            unsafe {
+                let src = trace.buffer().as_ptr().add(*j * trace.height());
+                let dst = q_buf.as_mut_ptr().add(start);
+                raw_batch_expand_pad(dst, src, trace.height() as u32, stride as u32, 1)?;
+            }
         }
     }
     Ok((DeviceMatrix::new(Arc::new(q_buf), height, width), layout))
@@ -209,5 +230,53 @@ mod tests {
             .map(F::from_canonical_u32),
         );
         assert_eq!(stacked_h_mat.values, expected);
+    }
+
+    #[test]
+    fn test_stacked_matrix_manual_strided_0() {
+        let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
+            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+        let mats = columns
+            .into_iter()
+            .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
+            .collect_vec();
+        let mat_refs = mats.iter().collect_vec();
+        let (stacked_mat, _layout) = stacked_matrix(2, 0, &mat_refs).unwrap();
+        assert_eq!(stacked_mat.height(), 4);
+        assert_eq!(stacked_mat.width(), 3);
+        let stacked_h_mat = transport_matrix_d2h_col_major(&stacked_mat).unwrap();
+        assert_eq!(
+            stacked_h_mat.values,
+            [1, 2, 3, 4, 5, 0, 6, 0, 7, 0, 0, 0]
+                .map(F::from_canonical_u32)
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn test_stacked_matrix_manual_strided_1() {
+        let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
+            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+        let mats = columns
+            .into_iter()
+            .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
+            .collect_vec();
+        let mat_refs = mats.iter().collect_vec();
+        let (stacked_mat, _layout) = stacked_matrix(3, 0, &mat_refs).unwrap();
+        assert_eq!(stacked_mat.height(), 8);
+        assert_eq!(stacked_mat.width(), 3);
+        let stacked_h_mat = transport_matrix_d2h_col_major(&stacked_mat).unwrap();
+        assert_eq!(
+            stacked_h_mat.values,
+            [
+                [1, 0, 2, 0, 3, 0, 4, 0],
+                [5, 0, 0, 0, 6, 0, 0, 0],
+                [7, 0, 0, 0, 0, 0, 0, 0]
+            ]
+            .into_iter()
+            .flatten()
+            .map(F::from_canonical_u32)
+            .collect_vec()
+        );
     }
 }
