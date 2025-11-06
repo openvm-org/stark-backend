@@ -35,6 +35,7 @@ eyre.workspace = true
 [dev-dependencies]
 rand.workspace = true
 p3-keccak-air.workspace = true
+test-case.workspace = true
 
 [features]
 default = ["parallel"]
