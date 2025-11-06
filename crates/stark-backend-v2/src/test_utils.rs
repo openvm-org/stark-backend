@@ -312,9 +312,19 @@ impl TestFixture for PreprocessedFibFixture {
     }
 }
 
-/// Trace heights cannot exceed 2^10 when using these system params.
+/// Trace heights cannot exceed 2^{l_skip + n_stack} when using these system params.
 pub fn test_system_params_small(l_skip: usize, n_stack: usize, k_whir: usize) -> SystemParams {
     let log_final_poly_len = (n_stack + l_skip) % k_whir;
+    test_system_params_small_with_poly_len(l_skip, n_stack, k_whir, log_final_poly_len)
+}
+
+pub fn test_system_params_small_with_poly_len(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+    log_final_poly_len: usize,
+) -> SystemParams {
+    assert!(log_final_poly_len < l_skip + n_stack);
     // Use all different numbers
     SystemParams {
         l_skip,
