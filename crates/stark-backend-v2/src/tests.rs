@@ -5,6 +5,7 @@ use p3_field::{FieldAlgebra, PrimeField32, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_strict_usize;
 use rand::{Rng, SeedableRng, rngs::StdRng};
+use test_case::test_case;
 use tracing::{Level, debug};
 
 use crate::{
@@ -127,24 +128,27 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
     Ok(())
 }
 
-#[test]
-fn test_batch_sumcheck_zero_interactions() -> Result<(), BatchConstraintError> {
+#[test_case(4)]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_batch_sumcheck_zero_interactions(
+    log_trace_degree: usize,
+) -> Result<(), BatchConstraintError> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_engine_small();
     let params = engine.config();
-    let log_trace_degree = 4;
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, vk) = fib.keygen(&engine);
     let pk = engine.device().transport_pk_to_device(&pk);
     let ctx = fib.generate_proving_ctx();
 
-    let mut n_per_air: Vec<usize> = Vec::with_capacity(ctx.per_trace.len());
+    let mut n_per_air: Vec<isize> = Vec::with_capacity(ctx.per_trace.len());
     for (_, trace) in ctx.common_main_traces() {
         let trace_height = trace.height();
         let prism_dim = log2_strict_usize(trace_height);
-        assert!(prism_dim >= params.l_skip);
-        let n = prism_dim - params.l_skip;
+        let n = prism_dim as isize - params.l_skip as isize;
         n_per_air.push(n);
     }
 
@@ -169,18 +173,20 @@ fn test_batch_sumcheck_zero_interactions() -> Result<(), BatchConstraintError> {
         &n_per_air,
         &omega_skip_pows,
     )?;
-    assert_eq!(r.len(), log_trace_degree - params.l_skip + 1);
+    assert_eq!(r.len(), log_trace_degree.saturating_sub(params.l_skip) + 1);
     Ok(())
 }
 
-#[test]
-fn test_stacked_opening_reduction() -> Result<(), StackedReductionError> {
+#[test_case(9)]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), StackedReductionError> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_engine_small();
     let params = engine.config();
 
-    let log_trace_degree = 9;
     let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, _vk) = fib.keygen(&engine);
@@ -201,15 +207,6 @@ fn test_stacked_opening_reduction() -> Result<(), StackedReductionError> {
                 .collect_vec(),
         )
     };
-
-    let mut ns: Vec<usize> = Vec::with_capacity(ctx.per_trace.len());
-    for (_, trace) in ctx.common_main_traces() {
-        let trace_height = trace.height();
-        let prism_dim = log2_strict_usize(trace_height);
-        assert!(prism_dim >= params.l_skip);
-        let n = prism_dim - params.l_skip;
-        ns.push(n);
-    }
 
     let omega_skip = F::two_adic_generator(params.l_skip);
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
@@ -243,21 +240,23 @@ fn test_stacked_opening_reduction() -> Result<(), StackedReductionError> {
     Ok(())
 }
 
-#[test]
-fn test_single_fib_and_dummy_trace_stark() {
+#[test_case(3)]
+#[test_case(2 ; "when fib log_height equals l_skip")]
+#[test_case(1 ; "when fib log_height less than l_skip")]
+#[test_case(0 ; "when fib log_height is zero")]
+fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
     setup_tracing();
 
     // 1. Create parameters
-    let log_trace_degree = 3;
     let engine = test_engine_small();
 
     // 2. Create interactions fixture with larger trace - generate custom traces
-    let height = 2 * (1 << log_trace_degree);
+    let sender_height = 2 * (1 << 3);
     let sender_trace = RowMajorMatrix::new(
         [0, 1, 3, 5, 7, 4, 546, 889]
             .into_iter()
             .cycle()
-            .take(2 * height)
+            .take(2 * sender_height)
             .map(F::from_canonical_usize)
             .collect(),
         2,
@@ -266,13 +265,14 @@ fn test_single_fib_and_dummy_trace_stark() {
         [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 1, 889, 0, 456]
             .into_iter()
             .cycle()
-            .take(4 * height)
+            .take(4 * sender_height)
             .map(F::from_canonical_usize)
             .collect(),
         2,
     );
 
     // 3. Create fibonacci fixture with small trace
+    let height = 2 * (1 << log_trace_degree);
     let fib = FibFixture::new(0, 1, height);
 
     // 4. Generate AIRs and proving keys
@@ -311,7 +311,7 @@ fn test_single_fib_and_dummy_trace_stark() {
             pvs[*air_idx] = air_ctx.public_values.clone();
             (
                 *air_idx,
-                log2_strict_usize(air_ctx.common_main.height()) - l_skip,
+                log2_strict_usize(air_ctx.common_main.height()) as isize - l_skip as isize,
             )
         })
         .multiunzip();
@@ -358,11 +358,13 @@ fn test_single_cached_trace_stark() {
     engine.verify(&vk, &proof).unwrap();
 }
 
-#[test]
-fn test_single_preprocessed_trace_stark() {
+#[test_case(3)]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_single_preprocessed_trace_stark(log_trace_degree: usize) {
     setup_tracing();
     let engine = test_engine_small();
-    let log_trace_degree = 3;
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
     let fx = PreprocessedFibFixture::new(0, 1, sels);
@@ -417,7 +419,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
             pvs[*air_idx] = air_ctx.public_values.clone();
             (
                 *air_idx,
-                log2_strict_usize(air_ctx.common_main.height()) - l_skip,
+                log2_strict_usize(air_ctx.common_main.height()) as isize - l_skip as isize,
             )
         })
         .multiunzip();

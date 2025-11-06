@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     parizip,
     prover::MatrixDimensions,
 };
-use p3_field::{FieldAlgebra, TwoAdicField};
+use p3_field::{Field, FieldAlgebra, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::debug;
@@ -23,7 +23,7 @@ use crate::{
     poseidon2::sponge::FiatShamirTranscript,
     prover::{
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, DeviceMultiStarkProvingKeyV2,
-        LogupZerocheckProver, ProvingContextV2,
+        LogupZerocheckProver, MatrixView, ProvingContextV2,
         fractional_sumcheck_gkr::{Frac, FracSumcheckProof, fractional_sumcheck},
         logup_zerocheck::EvalHelper,
         poly::evals_eq_hypercube,
@@ -51,7 +51,7 @@ pub struct LogupZerocheckCpu<'a> {
     eval_helpers: Vec<EvalHelper<'a, F>>,
     /// Max constraint degree across constraints and interactions
     pub constraint_degree: usize,
-    pub n_per_trace: Vec<usize>,
+    pub n_per_trace: Vec<isize>,
     max_num_constraints: usize,
     s_deg: usize,
 
@@ -113,11 +113,11 @@ where
             .take(max_interaction_length + 1)
             .collect_vec();
 
-        let n_per_trace = ctx
+        let n_per_trace: Vec<isize> = ctx
             .common_main_traces()
-            .map(|(_, t)| log2_strict_usize(t.height()) - l_skip)
+            .map(|(_, t)| log2_strict_usize(t.height()) as isize - l_skip as isize)
             .collect_vec();
-        let n_max = n_per_trace.iter().copied().max().unwrap_or(0);
+        let n_max: usize = n_per_trace.iter().copied().max().unwrap_or(0).max(0) as usize;
 
         let eval_helpers: Vec<EvalHelper<F>> = ctx
             .per_trace
@@ -129,12 +129,12 @@ where
                 let preprocessed_trace = pk
                     .preprocessed_data
                     .as_ref()
-                    .map(|(_, d)| d.layout.mat_view(0, d.matrix.as_view()));
+                    .map(|(_, d)| d.layout.mat_view(0, &d.matrix));
                 let partitioned_main_trace = air_ctx
                     .cached_mains
                     .iter()
-                    .map(|(_, d)| d.layout.mat_view(0, d.matrix.as_view()))
-                    .chain(iter::once(air_ctx.common_main.as_view()))
+                    .map(|(_, d)| d.layout.mat_view(0, &d.matrix))
+                    .chain(iter::once(air_ctx.common_main.as_view().into()))
                     .collect_vec();
                 // Scan constraints to see if we need `next` row and also check index bounds
                 // so we don't need to check them per row.
@@ -188,6 +188,7 @@ where
             vec![]
         } else {
             // Per trace, a row major matrix of interaction evaluations
+            // NOTE: these are the evaluations _without_ lifting
             // PERF[jpw]: we should write directly to the stacked `evals` in memory below
             let unstacked_interaction_evals = eval_helpers
                 .par_iter()
@@ -208,8 +209,11 @@ where
                             for (mat, is_rot) in &mats {
                                 let offset = usize::from(*is_rot);
                                 row_parts.push(
-                                    mat.columns()
-                                        .map(|col| col[(i + offset) % height])
+                                    // SAFETY: %height ensures we never go out of bounds
+                                    (0..mat.width())
+                                        .map(|j| unsafe {
+                                            *mat.get_unchecked((i + offset) % height, j)
+                                        })
                                         .collect_vec(),
                                 );
                             }
@@ -220,11 +224,28 @@ where
                 .collect::<Vec<_>>();
             let mut evals = vec![Frac::default(); 1 << (l_skip + n_logup)];
             for (trace_idx, interaction_idx, s) in interactions_layout.sorted_cols.iter().copied() {
-                assert_eq!(s.col_idx, 0);
-                for (i, evals_at_z) in unstacked_interaction_evals[trace_idx].iter().enumerate() {
-                    let (numer, denom) = evals_at_z[interaction_idx];
-                    evals[s.row_idx + i] = Frac::new(numer.into(), denom);
-                }
+                let pq_evals = &unstacked_interaction_evals[trace_idx];
+                let height = pq_evals.len();
+                debug_assert_eq!(s.col_idx, 0);
+                // the interactions layout has internal striding threshold=0
+                debug_assert_eq!(1 << s.log_height(), s.len(0));
+                debug_assert_eq!(s.len(0) % height, 0);
+                let norm_factor_denom = s.len(0) / height;
+                let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+                // We need to fill `evals` with the logup evaluations on the lifted trace, which is
+                // the same as cyclic repeating of the unlifted evaluations
+                evals[s.row_idx..s.row_idx + s.len(0)]
+                    .chunks_exact_mut(height)
+                    .for_each(|evals| {
+                        evals
+                            .par_iter_mut()
+                            .zip(pq_evals)
+                            .for_each(|(pq_eval, evals_at_z)| {
+                                let (mut numer, denom) = evals_at_z[interaction_idx];
+                                numer *= norm_factor;
+                                *pq_eval = Frac::new(numer.into(), denom);
+                            });
+                    });
             }
             // Prevent division by zero:
             evals.par_iter_mut().for_each(|frac| frac.q += alpha_logup);
@@ -297,55 +318,67 @@ where
             .par_iter()
             .zip(&self.n_per_trace)
             .enumerate()
-            .map(|(trace_idx, (helper, n))| {
+            .map(|(trace_idx, (helper, &n))| {
+                // Everything for logup is done with respect to lifted traces
+                // Note: `n_lift = \tilde{n}` from the paper
+                let n_lift = n.max(0) as usize;
                 if helper.interactions.is_empty() {
                     return vec![];
                 }
-                let mut b_vec = vec![F::ZERO; n_logup - n];
+                let mut b_vec = vec![F::ZERO; n_logup - n_lift];
                 (0..helper.interactions.len())
                     .map(|i| {
                         // PERF[jpw]: interactions_layout.get is linear
                         let stacked_idx =
                             self.interactions_layout.get(trace_idx, i).unwrap().row_idx;
-                        debug_assert!(stacked_idx.trailing_zeros() as usize >= n + l_skip);
-                        let mut b_int = stacked_idx >> (l_skip + n);
+                        debug_assert!(stacked_idx.trailing_zeros() as usize >= n_lift + l_skip);
+                        let mut b_int = stacked_idx >> (l_skip + n_lift);
                         for b in &mut b_vec {
                             *b = F::from_bool(b_int & 1 == 1);
                             b_int >>= 1;
                         }
-                        eval_eq_mle(&xi[l_skip + n..l_skip + n_logup], &b_vec)
+                        eval_eq_mle(&xi[l_skip + n_lift..l_skip + n_logup], &b_vec)
                     })
                     .collect_vec()
             })
             .collect::<Vec<_>>();
 
         // PERF[jpw]: make Hashmap from unique n -> eq_n(xi, -)
-        // NOTE: this is evaluations of `x -> eq_{H_n}(x, \xi[l_skip..l_skip + n])` on hypercube
-        // `H_n`. We store the univariate component eq_D separately as an optimization.
+        // NOTE: this is evaluations of `x -> eq_{H_{\tilde n}}(x, \xi[l_skip..l_skip + \tilde n])`
+        // on hypercube `H_{\tilde n}`. We store the univariate component eq_D separately as
+        // an optimization.
         self.eq_xi_per_trace = self
             .n_per_trace
             .par_iter()
             .map(|&n| {
+                let n_lift = n.max(0) as usize;
                 // PERF[jpw]: might be able to share computations between eq_xi, eq_sharp
                 // computations the eq(xi, -) evaluations on hyperprism for
                 // zerocheck
-                let eq_xi = evals_eq_hypercube(&xi[l_skip..l_skip + n]);
+                let eq_xi = evals_eq_hypercube(&xi[l_skip..l_skip + n_lift]);
                 ColMajorMatrix::new(eq_xi, 1)
             })
             .collect();
 
-        // For each trace, create selectors as a 3-column matrix of [is_first, is_transition,
-        // is_last] PERF[jpw]: I think it's better to not save these and just interpolate
-        // directly using the formulas for selectors
+        // For each trace, create selectors as a 3-column matrix of _the lifts of_ [is_first,
+        // is_transition, is_last]
+        //
+        // PERF[jpw]: I think it's better to not save these and just
+        // interpolate directly using the formulas for selectors
         self.sels_per_trace_base = self
             .n_per_trace
             .iter()
             .map(|&n| {
-                let height = 1 << (l_skip + n);
-                let mut mat = F::zero_vec(3 * height);
-                mat[0] = F::ONE;
-                mat[height..2 * height - 1].fill(F::ONE);
-                *mat.last_mut().unwrap() = F::ONE;
+                let log_height = l_skip.checked_add_signed(n).unwrap();
+                let height = 1 << log_height;
+                let lifted_height = height.max(1 << l_skip);
+                let mut mat = F::zero_vec(3 * lifted_height);
+                mat[lifted_height..2 * lifted_height].fill(F::ONE);
+                for i in (0..lifted_height).step_by(height) {
+                    mat[i] = F::ONE; // is_first
+                    mat[lifted_height + i + height - 1] = F::ZERO; // is_transition
+                    mat[2 * lifted_height + i + height - 1] = F::ONE; // is_last
+                }
                 ColMajorMatrix::new(mat, 3)
             })
             .collect_vec();
@@ -361,16 +394,16 @@ where
             .enumerate()
             .map(|(trace_idx, helper)| {
                 let trace_ctx = &ctx.per_trace[trace_idx].1;
-                let n = log2_strict_usize(trace_ctx.height()) - l_skip;
+                let n_lift = log2_strict_usize(trace_ctx.height()).saturating_sub(l_skip);
                 let mats = &helper.view_mats(trace_ctx);
                 let eq_xi = self.eq_xi_per_trace[trace_idx].column(0);
                 let sels = self.sels_per_trace_base[trace_idx].as_view();
-                let mut parts = vec![(sels, false)];
+                let mut parts = vec![(sels.into(), false)];
                 parts.extend_from_slice(mats);
 
                 // degree is constraint_degree + 1 due to eq term
                 let [s_0] =
-                    sumcheck_uni_round0_poly(l_skip, n, s_deg, &parts, |z, x, row_parts| {
+                    sumcheck_uni_round0_poly(l_skip, n_lift, s_deg, &parts, |z, x, row_parts| {
                         // PERF[jpw]: we are limited by the closure interface but `eq_uni` should be
                         // cached
                         let eq = eval_eq_uni(l_skip, xi[0], z.into()) * eq_xi[x];
@@ -403,23 +436,31 @@ where
                     return [(); 2].map(|_| UnivariatePoly::new(vec![EF::ZERO; s_0_deg + 1]));
                 }
                 let trace_ctx = &ctx.per_trace[trace_idx].1;
-                let n = log2_strict_usize(trace_ctx.height()) - l_skip;
+                let log_height = log2_strict_usize(trace_ctx.height());
+                let n_lift = log_height.saturating_sub(l_skip);
                 let mats = &helper.view_mats(trace_ctx);
                 let eq_xi = self.eq_xi_per_trace[trace_idx].column(0);
                 let eq_3bs = &self.eq_3b_per_trace[trace_idx];
                 let sels = self.sels_per_trace_base[trace_idx].as_view();
-                let mut parts = vec![(sels, false)];
+                let mut parts = vec![(sels.into(), false)];
                 parts.extend_from_slice(mats);
+                let norm_factor_denom = 1 << l_skip.saturating_sub(log_height);
+                let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
 
                 // degree is constraint_degree + 1 due to eq term
-                sumcheck_uni_round0_poly(l_skip, n, s_deg, &parts, |z, x, row_parts| {
-                    let eq_sharp =
-                        eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into())
-                            * eq_xi[x];
-                    let [numer, denom] =
-                        helper.acc_interactions(row_parts, &self.beta_pows, eq_3bs);
-                    [eq_sharp * numer, eq_sharp * denom]
-                })
+                let [mut numer, denom] =
+                    sumcheck_uni_round0_poly(l_skip, n_lift, s_deg, &parts, |z, x, row_parts| {
+                        let eq_sharp =
+                            eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into())
+                                * eq_xi[x];
+                        let [numer, denom] =
+                            helper.acc_interactions(row_parts, &self.beta_pows, eq_3bs);
+                        [eq_sharp * numer, eq_sharp * denom]
+                    });
+                for p in numer.coeffs_mut() {
+                    *p *= norm_factor;
+                }
+                [numer, denom]
             })
             .collect::<Vec<_>>();
 
@@ -478,8 +519,9 @@ where
             &self.eq_xi_per_trace
         )
         .map(|(helper, tilde_eval, &n, mats, sels, eq_xi)| {
-            if round > n {
-                if round == n + 1 {
+            let n_lift = n.max(0) as usize;
+            if round > n_lift {
+                if round == n_lift + 1 {
                     // Evaluate \hat{f}(\vec r_n)
                     let parts = iter::once(sels)
                         .chain(mats)
@@ -500,7 +542,7 @@ where
                     .map(|m| m.as_view())
                     .collect_vec();
                 let [s] = sumcheck_round_poly_evals(
-                    n - (round - 1),
+                    n_lift - (round - 1),
                     s_deg,
                     &parts,
                     |_x, _y, row_parts| {
@@ -528,9 +570,11 @@ where
             if helper.interactions.is_empty() {
                 return [vec![EF::ZERO; s_deg], vec![EF::ZERO; s_deg]];
             }
-
-            if round > n {
-                if round == n + 1 {
+            let n_lift = n.max(0) as usize;
+            let norm_factor_denom = 1 << (-n).max(0);
+            let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+            if round > n_lift {
+                if round == n_lift + 1 {
                     // Evaluate \hat{f}(\vec r_n)
                     let parts = iter::once(sels)
                         .chain(mats)
@@ -540,6 +584,7 @@ where
                     *tilde_eval = helper
                         .acc_interactions(&parts, &self.beta_pows, eq_3bs)
                         .map(|x| eq * x);
+                    tilde_eval[0] *= norm_factor;
                 } else {
                     for x in tilde_eval.iter_mut() {
                         *x *= r_prev;
@@ -556,12 +601,21 @@ where
                     .chain(mats)
                     .map(|m| m.as_view())
                     .collect_vec();
-                sumcheck_round_poly_evals(n - (round - 1), s_deg, &parts, |_x, _y, row_parts| {
-                    let eq_sharp = row_parts[0][0];
-                    helper
-                        .acc_interactions(&row_parts[1..], &self.beta_pows, eq_3bs)
-                        .map(|eval| eq_sharp * eval)
-                })
+                let [mut numer, denom] = sumcheck_round_poly_evals(
+                    n_lift - (round - 1),
+                    s_deg,
+                    &parts,
+                    |_x, _y, row_parts| {
+                        let eq_sharp = row_parts[0][0];
+                        helper
+                            .acc_interactions(&row_parts[1..], &self.beta_pows, eq_3bs)
+                            .map(|eval| eq_sharp * eval)
+                    },
+                );
+                for p in &mut numer {
+                    *p *= norm_factor;
+                }
+                [numer, denom]
             }
         })
         .collect();
@@ -577,6 +631,51 @@ where
         self.sels_per_trace = batch_fold_mle_evals(take(&mut self.sels_per_trace), r_round);
         self.eq_xi_per_trace = batch_fold_mle_evals(take(&mut self.eq_xi_per_trace), r_round);
         self.eq_sharp_per_trace = batch_fold_mle_evals(take(&mut self.eq_sharp_per_trace), r_round);
+
+        #[allow(unused_variables)]
+        #[cfg(debug_assertions)]
+        if tracing::enabled!(tracing::Level::DEBUG) && _round == self.n_global {
+            use itertools::izip;
+
+            for (trace_idx, (helper, &n, mats, sels, eq_xi)) in izip!(
+                &self.eval_helpers,
+                &self.n_per_trace,
+                &self.mat_evals_per_trace,
+                &self.sels_per_trace,
+                &self.eq_xi_per_trace
+            )
+            .enumerate()
+            {
+                let parts = iter::once(sels)
+                    .chain(mats)
+                    .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
+                    .collect_vec();
+                let expr = helper.acc_constraints(&parts, &self.lambda_pows);
+                debug!(%trace_idx, %expr, "constraints_eval");
+            }
+
+            for (trace_idx, (helper, &n, mats, sels, eq_sharp, eq_3bs)) in izip!(
+                &self.eval_helpers,
+                &self.n_per_trace,
+                &self.mat_evals_per_trace,
+                &self.sels_per_trace,
+                &self.eq_sharp_per_trace,
+                &self.eq_3b_per_trace
+            )
+            .enumerate()
+            {
+                if helper.interactions.is_empty() {
+                    continue;
+                }
+                let parts = iter::once(sels)
+                    .chain(mats)
+                    .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
+                    .collect_vec();
+                let [num, denom] = helper.acc_interactions(&parts, &self.beta_pows, eq_3bs);
+
+                debug!(%trace_idx, %num, %denom, "interactions_eval");
+            }
+        }
     }
 
     fn into_column_openings(mut self) -> Vec<Vec<Vec<(EF, EF)>>> {

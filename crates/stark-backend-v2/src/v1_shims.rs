@@ -59,7 +59,7 @@ impl StarkProvingKeyV2 {
             );
             preprocessed_vdata = Some(VerifierSinglePreprocessedData {
                 commit,
-                hypercube_dim: log2_strict_usize(trace.height()) - params.l_skip,
+                hypercube_dim: log2_strict_usize(trace.height()) as isize - params.l_skip as isize,
                 stacking_width: data.matrix.width(),
             });
             Arc::new(data)
