@@ -21,7 +21,7 @@ use stark_backend_v2::{
     },
     test_utils::{
         CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11,
-        PreprocessedFibFixture, TestFixture, test_system_params_small,
+        PreprocessedFibFixture, TestFixture, default_test_params_small, test_system_params_small,
         transport_proving_ctx_to_device,
     },
     verifier::{
@@ -34,6 +34,7 @@ use stark_backend_v2::{
         verify,
     },
 };
+use test_case::test_case;
 use tracing::{Level, debug};
 
 use crate::{
@@ -43,7 +44,7 @@ use crate::{
 
 pub fn test_gpu_engine_small() -> BabyBearPoseidon2GpuEngineV2 {
     setup_tracing();
-    BabyBearPoseidon2GpuEngineV2::new(test_system_params_small())
+    BabyBearPoseidon2GpuEngineV2::new(default_test_params_small())
 }
 
 #[test]
@@ -156,12 +157,11 @@ fn test_batch_sumcheck_zero_interactions() -> Result<(), BatchConstraintError> {
     let pk = device.transport_pk_to_device(&pk);
     let ctx = transport_proving_ctx_to_device(device, &fib.generate_proving_ctx());
 
-    let mut n_per_air: Vec<usize> = Vec::with_capacity(ctx.per_trace.len());
+    let mut n_per_air: Vec<isize> = Vec::with_capacity(ctx.per_trace.len());
     for (_, trace) in ctx.common_main_traces() {
         let trace_height = trace.height();
-        let prism_dim = log2_strict_usize(trace_height);
-        assert!(prism_dim >= params.l_skip);
-        let n = prism_dim - params.l_skip;
+        let log_height = log2_strict_usize(trace_height);
+        let n = log_height as isize - params.l_skip as isize;
         n_per_air.push(n);
     }
 
@@ -329,7 +329,7 @@ fn test_single_fib_and_dummy_trace_stark() {
             pvs[*air_idx] = air_ctx.public_values.clone();
             (
                 *air_idx,
-                log2_strict_usize(air_ctx.common_main.height()) - l_skip,
+                log2_strict_usize(air_ctx.common_main.height()) as isize - l_skip as isize,
             )
         })
         .multiunzip();
@@ -383,9 +383,14 @@ fn test_fib_air_roundtrip() -> Result<(), VerifierError> {
     verify(&vk, &proof, &mut validator_sponge)
 }
 
-#[test]
-fn test_dummy_interactions_roundtrip() -> Result<(), VerifierError> {
-    let params = test_system_params_small();
+#[test_case(2, 8, 3)]
+#[test_case(5, 5, 4)]
+fn test_dummy_interactions_roundtrip(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+) -> Result<(), VerifierError> {
+    let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = BabyBearPoseidon2GpuEngineV2::new(params);
     let fx = InteractionsFixture11;
     let (pk, vk) = fx.keygen(&engine);
@@ -397,9 +402,14 @@ fn test_dummy_interactions_roundtrip() -> Result<(), VerifierError> {
     verify(&vk, &proof, &mut validator_sponge)
 }
 
-#[test]
-fn test_cached_trace_roundtrip() -> Result<(), VerifierError> {
-    let params = test_system_params_small();
+#[test_case(2, 8, 3)]
+#[test_case(5, 5, 4)]
+fn test_cached_trace_roundtrip(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+) -> Result<(), VerifierError> {
+    let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = BabyBearPoseidon2GpuEngineV2::new(params);
     let fx = CachedFixture11::new(params);
     let (pk, vk) = fx.keygen(&engine);
@@ -411,10 +421,14 @@ fn test_cached_trace_roundtrip() -> Result<(), VerifierError> {
     verify(&vk, &proof, &mut validator_sponge)
 }
 
-#[test]
-fn test_preprocessed_trace_roundtrip() -> Result<(), VerifierError> {
-    use itertools::Itertools;
-    let params = test_system_params_small();
+#[test_case(2, 8, 3)]
+#[test_case(5, 5, 4)]
+fn test_preprocessed_trace_roundtrip(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+) -> Result<(), VerifierError> {
+    let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = BabyBearPoseidon2CpuEngineV2::new(params);
     let log_trace_degree = 8;
     let height = 1 << log_trace_degree;
@@ -507,7 +521,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
             pvs[*air_idx] = air_ctx.public_values.clone();
             (
                 *air_idx,
-                log2_strict_usize(air_ctx.common_main.height()) - l_skip,
+                log2_strict_usize(air_ctx.common_main.height()) as isize - l_skip as isize,
             )
         })
         .multiunzip();
