@@ -10,16 +10,23 @@ use tracing::instrument;
 
 use crate::{
     Digest, F,
-    prover::{ColMajorMatrix, ColMajorMatrixView, MatrixView, col_maj_idx, poly::Ple},
+    prover::{ColMajorMatrix, MatrixView, StridedColMajorMatrixView, col_maj_idx, poly::Ple},
 };
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct StackedLayout {
+    /// The minimum log2 height of a stacked slice. When stacking columns with smaller height, the
+    /// column is expanded to `2^l_skip` by striding.
+    l_skip: usize,
     /// The columns of the unstacked matrices in sorted order. Each entry `(matrix index, column
     /// index, coordinate)` contains the pointer `(matrix index, column index)` to a column of the
     /// unstacked collection of matrices as well as `coordinate` which is a pointer to where the
     /// column starts in the stacked matrix.
-    pub sorted_cols: Vec<(usize, usize, StackedSlice)>,
+    pub sorted_cols: Vec<(
+        usize, /* unstacked matrix index */
+        usize, /* unstacked column index */
+        StackedSlice,
+    )>,
 }
 
 impl StackedLayout {
@@ -28,11 +35,38 @@ impl StackedLayout {
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+/// Pointer to the location of a sub-column within the stacked matrix.
+/// This struct contains length information, but information from [StackedLayout] (namely `l_skip`)
+/// is needed to determine if this is a strided slice or not.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, CopyGetters, derive_new::new)]
 pub struct StackedSlice {
     pub col_idx: usize,
     pub row_idx: usize,
-    pub log_height: usize,
+    /// The true log height. If `>= l_skip`, no striding. Otherwise striding by `2^{l_skip -
+    /// log_height}`.
+    #[getset(get_copy = "pub")]
+    log_height: usize,
+}
+
+impl StackedSlice {
+    #[inline(always)]
+    pub fn len(&self, l_skip: usize) -> usize {
+        Self::_len(self.log_height, l_skip)
+    }
+
+    #[inline(always)]
+    pub fn stride(&self, l_skip: usize) -> usize {
+        1 << l_skip.saturating_sub(self.log_height)
+    }
+
+    #[inline(always)]
+    fn _len(log_height: usize, l_skip: usize) -> usize {
+        if l_skip <= log_height {
+            1 << log_height
+        } else {
+            1 << l_skip
+        }
+    }
 }
 
 #[derive(Clone, Debug, Getters, CopyGetters, Serialize, Deserialize)]
@@ -84,9 +118,23 @@ pub fn stacked_commit(
 }
 
 impl StackedLayout {
-    /// `sorted` is Vec of `(matrix index, width, log_height)` that must already be
+    /// Computes the layout of greedily stacking columns with dimension metadata given by `sorted`
+    /// into a stacked matrix.
+    /// - `l_skip` is a threshold log2 height: if a column has height less than `2^l_skip`, it is
+    ///   stacked as a column of height `2^l_skip` with stride `2^{l_skip - log_height}`.
+    /// - `log_stacked_height` is the log2 height of the stacked matrix.
+    /// - `sorted` is Vec of `(matrix index, width, log_height)` that must already be
     /// **sorted** in descending order of `log_height`.
-    pub fn new(log_stacked_height: usize, sorted: Vec<(usize, usize, usize)>) -> Self {
+    pub fn new(
+        l_skip: usize,
+        log_stacked_height: usize,
+        sorted: Vec<(
+            usize, /* matrix index */
+            usize, /* width */
+            usize, /* log_height */
+        )>,
+    ) -> Self {
+        debug_assert!(l_skip <= log_stacked_height);
         debug_assert!(sorted.is_sorted_by(|a, b| a.2 >= b.2));
         let mut sorted_cols = Vec::new();
         let mut col_idx = 0;
@@ -100,7 +148,8 @@ impl StackedLayout {
                 "log_height={log_ht} > log_stacked_height={log_stacked_height}"
             );
             for j in 0..width {
-                if row_idx + (1 << log_ht) > (1 << log_stacked_height) {
+                let slice_len = StackedSlice::_len(log_ht, l_skip);
+                if row_idx + slice_len > (1 << log_stacked_height) {
                     assert_eq!(row_idx, 1 << log_stacked_height);
                     col_idx += 1;
                     row_idx = 0;
@@ -111,10 +160,21 @@ impl StackedLayout {
                     log_height: log_ht,
                 };
                 sorted_cols.push((mat_idx, j, slice));
-                row_idx += 1 << log_ht;
+                row_idx += slice_len;
             }
         }
-        Self { sorted_cols }
+        Self {
+            l_skip,
+            sorted_cols,
+        }
+    }
+
+    /// Raw unsafe constructor
+    pub fn from_raw_parts(l_skip: usize, sorted_cols: Vec<(usize, usize, StackedSlice)>) -> Self {
+        Self {
+            l_skip,
+            sorted_cols,
+        }
     }
 
     /// `(mat_idx, col_idx)` should be indexing into the unstacked collection of matrices.
@@ -126,14 +186,14 @@ impl StackedLayout {
             .map(|(_, _, coord)| coord)
     }
 
-    /// Due to the definition of stacking, in a column major matrix the columns of the unstacked
-    /// matrix will always be contiguous in memory within the stacked matrix, so we can return the
-    /// sub-view.
+    /// Due to the definition of stacking, in a column major matrix the lifted columns of the
+    /// unstacked matrix will always be contiguous in memory within the stacked matrix, so we
+    /// can return the sub-view.
     pub fn mat_view<'a>(
         &self,
         unstacked_mat_idx: usize,
-        stacked_matrix: ColMajorMatrixView<'a, F>,
-    ) -> ColMajorMatrixView<'a, F> {
+        stacked_matrix: &'a ColMajorMatrix<F>,
+    ) -> StridedColMajorMatrixView<'a, F> {
         let col_slices = self
             .sorted_cols
             .iter()
@@ -141,9 +201,14 @@ impl StackedLayout {
             .collect_vec();
         let width = col_slices.len();
         let s = &col_slices[0].2;
-        let height = 1 << s.log_height;
+        let lifted_height = s.len(self.l_skip);
+        let stride = s.stride(self.l_skip);
         let start = col_maj_idx(s.row_idx, s.col_idx, stacked_matrix.height());
-        ColMajorMatrixView::new(&stacked_matrix.values[start..start + height * width], width)
+        StridedColMajorMatrixView::new(
+            &stacked_matrix.values[start..start + lifted_height * width],
+            width,
+            stride,
+        )
     }
 }
 
@@ -159,13 +224,12 @@ pub fn stacked_matrix<F: Field>(
         .enumerate()
         .map(|(idx, trace)| {
             // height cannot be zero:
-            let prism_dim = log2_strict_usize(trace.height());
-            let n = prism_dim.checked_sub(l_skip).expect("log_height < l_skip");
-            (idx, trace.width(), l_skip + n)
+            let log_height = log2_strict_usize(trace.height());
+            (idx, trace.width(), log_height)
         })
         .collect_vec();
-    let mut layout = StackedLayout::new(l_skip + n_stack, sorted_meta);
-    let total_cells: usize = traces.iter().map(|t| t.values.len()).sum();
+    let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
+    let total_cells: usize = traces.iter().map(|t| t.values.len().max(1 << l_skip)).sum();
     let height = 1usize << (l_skip + n_stack);
     let width = total_cells.div_ceil(height);
 
@@ -174,7 +238,15 @@ pub fn stacked_matrix<F: Field>(
         let start = s.col_idx * height + s.row_idx;
         let t_col = traces[*mat_idx].column(*j);
         debug_assert_eq!(t_col.len(), 1 << s.log_height);
-        q_mat[start..start + t_col.len()].copy_from_slice(t_col);
+        if s.log_height >= l_skip {
+            q_mat[start..start + t_col.len()].copy_from_slice(t_col);
+        } else {
+            // t_col height is smaller than 2^l_skip, so we stride
+            let stride = s.stride(l_skip);
+            for (i, val) in t_col.iter().enumerate() {
+                q_mat[start + i * stride] = *val;
+            }
+        }
     }
     (ColMajorMatrix::new(q_mat, width), layout)
 }
@@ -335,5 +407,78 @@ mod poseidon2_merkle_tree {
         ) -> impl Iterator<Item = EF> + 'a {
             (0..matrix.width()).map(move |c| matrix.get(index, c).copied().unwrap_or(EF::ZERO))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use itertools::Itertools;
+    use p3_field::FieldAlgebra;
+
+    use super::*;
+    use crate::{F, prover::ColMajorMatrix};
+
+    #[test]
+    fn test_stacked_matrix_manual_0() {
+        let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
+            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+        let mats = columns
+            .into_iter()
+            .map(|c| ColMajorMatrix::new(c, 1))
+            .collect_vec();
+        let mat_refs = mats.iter().collect_vec();
+        let (stacked_mat, _layout) = stacked_matrix(0, 2, &mat_refs);
+        assert_eq!(stacked_mat.height(), 4);
+        assert_eq!(stacked_mat.width(), 2);
+        assert_eq!(
+            stacked_mat.values,
+            [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_canonical_u32).to_vec()
+        );
+    }
+
+    #[test]
+    fn test_stacked_matrix_manual_strided_0() {
+        let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
+            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+        let mats = columns
+            .into_iter()
+            .map(|c| ColMajorMatrix::new(c, 1))
+            .collect_vec();
+        let mat_refs = mats.iter().collect_vec();
+        let (stacked_mat, _layout) = stacked_matrix(2, 0, &mat_refs);
+        assert_eq!(stacked_mat.height(), 4);
+        assert_eq!(stacked_mat.width(), 3);
+        assert_eq!(
+            stacked_mat.values,
+            [1, 2, 3, 4, 5, 0, 6, 0, 7, 0, 0, 0]
+                .map(F::from_canonical_u32)
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn test_stacked_matrix_manual_strided_1() {
+        let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
+            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+        let mats = columns
+            .into_iter()
+            .map(|c| ColMajorMatrix::new(c, 1))
+            .collect_vec();
+        let mat_refs = mats.iter().collect_vec();
+        let (stacked_mat, _layout) = stacked_matrix(3, 0, &mat_refs);
+        assert_eq!(stacked_mat.height(), 8);
+        assert_eq!(stacked_mat.width(), 3);
+        assert_eq!(
+            stacked_mat.values,
+            [
+                [1, 0, 2, 0, 3, 0, 4, 0],
+                [5, 0, 0, 0, 6, 0, 0, 0],
+                [7, 0, 0, 0, 0, 0, 0, 0]
+            ]
+            .into_iter()
+            .flatten()
+            .map(F::from_canonical_u32)
+            .collect_vec()
+        );
     }
 }

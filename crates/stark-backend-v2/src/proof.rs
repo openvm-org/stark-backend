@@ -24,11 +24,12 @@ pub struct Proof {
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct TraceVData {
-    /// The base-2 logarithm of the height of the trace.
+    /// The base 2 logarithm of the trace height. This should be a nonnegative integer and is
+    /// allowed to be `< l_skip`.
     ///
     /// If the corresponding AIR has a preprocessed trace, this must match the
     /// value in the vkey.
-    pub hypercube_dim: usize,
+    pub log_height: usize,
     /// The cached commitments used.
     ///
     /// The length must match the value in the vkey.
