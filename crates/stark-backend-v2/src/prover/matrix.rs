@@ -178,6 +178,36 @@ impl<'a, F> StridedColMajorMatrixView<'a, F> {
             stride,
         }
     }
+
+    pub fn to_matrix(&self) -> ColMajorMatrix<F>
+    where
+        F: Field,
+    {
+        let values: Vec<_> = (0..self.width * self.height)
+            .into_par_iter()
+            .map(|i| {
+                let r = i % self.height;
+                let c = i / self.height;
+                unsafe { *self.get_unchecked(r, c) }
+            })
+            .collect();
+        ColMajorMatrix::new(values, self.width)
+    }
+
+    pub fn to_row_major_matrix(&self) -> RowMajorMatrix<F>
+    where
+        F: Field,
+    {
+        let values: Vec<_> = (0..self.width * self.height)
+            .into_par_iter()
+            .map(|i| {
+                let r = i / self.width;
+                let c = i % self.width;
+                unsafe { *self.get_unchecked(r, c) }
+            })
+            .collect();
+        RowMajorMatrix::new(values, self.width)
+    }
 }
 
 impl<F> MatrixDimensions for StridedColMajorMatrixView<'_, F> {

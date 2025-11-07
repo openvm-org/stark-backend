@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum VerifierError {
     #[error("Trace heights are too large")]
     TraceHeightsTooLarge,
@@ -193,8 +193,7 @@ mod tests {
     use tracing::Level;
 
     use crate::{
-        BabyBearPoseidon2CpuEngineV2,
-        keygen::types::SystemParams,
+        BabyBearPoseidon2CpuEngineV2, SystemParams,
         poseidon2::sponge::{DuplexSpongeRecorder, TranscriptHistory},
         test_utils::{
             CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11,

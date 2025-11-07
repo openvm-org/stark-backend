@@ -17,7 +17,8 @@ use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use stark_backend_v2::{
-    keygen::types::{MultiStarkProvingKeyV2, SystemParams},
+    SystemParams,
+    keygen::types::MultiStarkProvingKeyV2,
     poseidon2::sponge::DuplexSponge,
     prover::{
         AirProvingContextV2, CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
