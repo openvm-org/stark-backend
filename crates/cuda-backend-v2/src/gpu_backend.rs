@@ -8,14 +8,16 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::prover::hal::MatrixDimensions;
 use stark_backend_v2::{
-    keygen::types::{MultiStarkProvingKeyV2, SystemParams},
+    SystemParams,
+    keygen::types::MultiStarkProvingKeyV2,
     poly_common::Squarable,
     poseidon2::sponge::FiatShamirTranscript,
     proof::*,
     prover::{
-        ColMajorMatrix, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2,
-        DeviceStarkProvingKeyV2, MultiRapProver, OpeningProverV2, ProverBackendV2, ProverDeviceV2,
-        ProvingContextV2, TraceCommitterV2, prove_zerocheck_and_logup,
+        ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2, DeviceDataTransporterV2,
+        DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MultiRapProver, OpeningProverV2,
+        ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
+        prove_zerocheck_and_logup,
         stacked_pcs::{MerkleTree, StackedPcsData},
         stacked_reduction::prove_stacked_opening_reduction,
         whir::WhirProver,
@@ -137,7 +139,11 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
                     // Sanity check. Not a strong assert because we transport the merkle tree
                     // instead of recomputing it above.
                     assert_eq!(d_data.tree.root(), d.commit());
-                    (d.commit(), Arc::new(d_data))
+                    CommittedTraceDataV2 {
+                        commitment: d.commit(),
+                        data: Arc::new(d_data),
+                        height: d.mat_view(0).height(),
+                    }
                 });
 
                 DeviceStarkProvingKeyV2 {
@@ -183,6 +189,13 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
     fn transport_matrix_from_device_to_host(&self, matrix: &DeviceMatrix<F>) -> ColMajorMatrix<F> {
         transport_matrix_d2h_col_major(matrix).unwrap()
     }
+
+    fn transport_pcs_data_from_device_to_host(
+        &self,
+        pcs_data: &StackedPcsDataGpu<F, Digest>,
+    ) -> StackedPcsData<F, Digest> {
+        transport_stacked_pcs_data_to_host(pcs_data)
+    }
 }
 
 pub fn transport_matrix_h2d_col_major<T>(
@@ -221,13 +234,11 @@ pub fn transport_merkle_tree_to_device<F, Digest>(
     })
 }
 
-// TODO[CUDA]: delete after gpu implementation complete
 pub fn transport_merkle_tree_to_host(tree: &MerkleTreeGpu<F, Digest>) -> MerkleTree<F, Digest> {
     let backing_matrix = transport_matrix_d2h_col_major(&tree.backing_matrix).unwrap();
     MerkleTree::<F, Digest>::new(backing_matrix, tree.rows_per_query)
 }
 
-// TODO[CUDA]: delete after gpu implementation complete
 pub fn transport_stacked_pcs_data_to_host(
     pcs_data: &StackedPcsDataGpu<F, Digest>,
 ) -> StackedPcsData<F, Digest> {
@@ -236,4 +247,17 @@ pub fn transport_stacked_pcs_data_to_host(
     let tree = transport_merkle_tree_to_host(&pcs_data.tree);
 
     StackedPcsData::new(layout, matrix, tree)
+}
+
+pub fn transport_committed_trace_data_to_host(
+    data: &CommittedTraceDataV2<GpuBackendV2>,
+) -> CommittedTraceDataV2<CpuBackendV2> {
+    let commitment = data.commitment;
+    let height = data.height;
+    let pcs_data = transport_stacked_pcs_data_to_host(&data.data);
+    CommittedTraceDataV2 {
+        commitment,
+        data: Arc::new(pcs_data),
+        height,
+    }
 }
