@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use openvm_stark_backend::{AirRef, prover::Prover};
+use openvm_stark_backend::{
+    AirRef,
+    prover::{MatrixDimensions, Prover},
+};
 pub use openvm_stark_sdk::dummy_airs::fib_air::air::FibonacciAir;
 use openvm_stark_sdk::{
     any_rap_arc_vec,
@@ -15,15 +18,15 @@ use p3_field::{FieldAlgebra, PrimeField32};
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
-    BabyBearPoseidon2CpuEngineV2, Digest, F, StarkEngineV2,
-    keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2, SystemParams},
+    BabyBearPoseidon2CpuEngineV2, Digest, F, StarkEngineV2, SystemParams,
+    keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
     poseidon2::sponge::{
         DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory, TranscriptLog,
     },
     proof::Proof,
     prover::{
-        AirProvingContextV2, ColMajorMatrix, CpuBackendV2, DeviceDataTransporterV2,
-        ProverBackendV2, ProvingContextV2, stacked_pcs::stacked_commit,
+        AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
+        DeviceDataTransporterV2, ProverBackendV2, ProvingContextV2, stacked_pcs::stacked_commit,
     },
 };
 
@@ -43,11 +46,15 @@ where
             let cached_mains = air_ctx
                 .cached_mains
                 .iter()
-                .map(|(commit, data)| {
-                    (
-                        *commit,
-                        Arc::new(device.transport_pcs_data_to_device(data.as_ref())),
-                    )
+                .map(|cd| {
+                    debug_assert_eq!(cd.height, cd.data.mat_view(0).height());
+                    let data = cd.data.as_ref();
+                    let d_data = device.transport_pcs_data_to_device(data);
+                    CommittedTraceDataV2 {
+                        commitment: cd.commitment,
+                        data: Arc::new(d_data),
+                        height: cd.height,
+                    }
                 })
                 .collect();
             let air_ctx_gpu =
@@ -274,8 +281,14 @@ impl TestFixture for CachedFixture11 {
                     params.k_whir,
                     &[&cached],
                 );
+                assert_eq!(common.height(), cached.height());
+                let cached_data = CommittedTraceDataV2 {
+                    commitment: commit,
+                    data: Arc::new(data),
+                    height: cached.height(),
+                };
                 AirProvingContextV2 {
-                    cached_mains: vec![(commit, Arc::new(data))],
+                    cached_mains: vec![cached_data],
                     common_main: common,
                     public_values: vec![],
                 }
@@ -309,6 +322,17 @@ impl TestFixture for PreprocessedFibFixture {
         let single_ctx =
             AirProvingContextV2::simple(ColMajorMatrix::from_row_major(&trace), pis.to_vec());
         ProvingContextV2::new(vec![(0, single_ctx)])
+    }
+}
+
+impl SystemParams {
+    /// Parameters for testing traces of height up to `2^log_trace_height` with **toy security
+    /// parameters** for faster testing.
+    ///
+    /// **These parameters should not be used in production!**
+    pub fn new_for_testing(log_trace_height: usize) -> Self {
+        let l_skip = 4;
+        test_system_params_small(4, log_trace_height - l_skip, 4)
     }
 }
 
