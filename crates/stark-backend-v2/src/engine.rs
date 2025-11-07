@@ -5,20 +5,29 @@
 
 use std::marker::PhantomData;
 
-use openvm_stark_backend::{AirRef, engine::StarkEngine, prover::Prover};
+use openvm_stark_backend::{
+    AirRef, config::StarkGenericConfig, engine::StarkEngine, prover::Prover,
+};
 use openvm_stark_sdk::config::baby_bear_poseidon2::{BabyBearPoseidon2Config, default_engine};
 
 use crate::{
-    keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2, SystemParams},
+    SystemParams,
+    keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
     poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
     proof::*,
     prover::{
-        CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
+        AirProvingContextV2, CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
         DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2, ProverBackendV2,
         ProverDeviceV2, ProvingContextV2,
     },
     verifier::{VerifierError, verify},
 };
+
+/// Data for verifying a Stark proof.
+pub struct VerificationDataV2 {
+    pub vk: MultiStarkVerifyingKeyV2,
+    pub proof: Proof,
+}
 
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving. Currently this trait is CPU specific.
@@ -31,6 +40,11 @@ where
     <Self::PD as OpeningProverV2<Self::PB, Self::TS>>::OpeningProof:
         Into<(StackingProof, WhirProof)>,
 {
+    type SC: StarkGenericConfig<
+            Pcs = <BabyBearPoseidon2Config as StarkGenericConfig>::Pcs,
+            Challenge = <BabyBearPoseidon2Config as StarkGenericConfig>::Challenge,
+            Challenger = <BabyBearPoseidon2Config as StarkGenericConfig>::Challenger,
+        >;
     type PB: ProverBackendV2<Val = crate::F, Challenge = crate::EF, Commitment = crate::Digest>;
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
     type TS: FiatShamirTranscript + Default;
@@ -80,6 +94,22 @@ where
         let mut transcript = Self::TS::default();
         verify(vk, proof, &mut transcript)
     }
+
+    /// Runs a single end-to-end test for a given set of chips and traces partitions.
+    /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
+    fn run_test(
+        &self,
+        airs: Vec<AirRef<BabyBearPoseidon2Config>>,
+        ctxs: Vec<AirProvingContextV2<Self::PB>>,
+    ) -> Result<VerificationDataV2, VerifierError> {
+        let (pk, vk) = self.keygen(&airs);
+        let device = self.prover().device;
+        let d_pk = device.transport_pk_to_device(&pk);
+        let ctx = ProvingContextV2::new(ctxs.into_iter().enumerate().collect());
+        let proof = self.prove(&d_pk, ctx);
+        self.verify(&vk, &proof)?;
+        Ok(VerificationDataV2 { vk, proof })
+    }
 }
 
 pub struct BabyBearPoseidon2CpuEngineV2<TS = DuplexSponge> {
@@ -100,6 +130,7 @@ impl<TS> StarkEngineV2 for BabyBearPoseidon2CpuEngineV2<TS>
 where
     TS: FiatShamirTranscript + Default,
 {
+    type SC = BabyBearPoseidon2Config;
     type PB = CpuBackendV2;
     type PD = CpuDeviceV2;
     type TS = TS;
@@ -112,5 +143,19 @@ where
         transcript: TS,
     ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
         CoordinatorV2::new(CpuBackendV2, self.device, transcript)
+    }
+}
+
+// TODO[jpw]: move to stark-sdk
+pub trait StarkWhirEngine: StarkEngineV2 {
+    fn new(params: SystemParams) -> Self;
+}
+
+impl<TS> StarkWhirEngine for BabyBearPoseidon2CpuEngineV2<TS>
+where
+    TS: FiatShamirTranscript + Default,
+{
+    fn new(params: SystemParams) -> Self {
+        Self::new(params)
     }
 }

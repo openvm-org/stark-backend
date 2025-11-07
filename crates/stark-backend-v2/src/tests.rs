@@ -9,8 +9,7 @@ use test_case::test_case;
 use tracing::{Level, debug};
 
 use crate::{
-    BabyBearPoseidon2CpuEngineV2, F, StarkEngineV2,
-    keygen::types::SystemParams,
+    BabyBearPoseidon2CpuEngineV2, F, StarkEngineV2, SystemParams,
     poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
     prover::{
         AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MultiRapProver,

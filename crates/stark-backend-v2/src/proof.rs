@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Digest, EF, F};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof {
     /// The commitment to the data in common_main.
     pub common_main_commit: Digest,
@@ -22,7 +22,7 @@ pub struct Proof {
     pub whir_proof: WhirProof,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TraceVData {
     /// The base 2 logarithm of the trace height. This should be a nonnegative integer and is
     /// allowed to be `< l_skip`.

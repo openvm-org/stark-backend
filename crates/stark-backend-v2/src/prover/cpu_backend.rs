@@ -4,17 +4,18 @@ use std::sync::Arc;
 
 use getset::CopyGetters;
 use itertools::Itertools;
+use openvm_stark_backend::prover::MatrixDimensions;
 
 use crate::{
-    D_EF, Digest, EF, F,
-    keygen::types::{MultiStarkProvingKeyV2, SystemParams},
+    D_EF, Digest, EF, F, SystemParams,
+    keygen::types::MultiStarkProvingKeyV2,
     poly_common::Squarable,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
-        ColMajorMatrix, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2,
-        DeviceStarkProvingKeyV2, LogupZerocheckCpu, MultiRapProver, OpeningProverV2,
-        ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
+        ColMajorMatrix, CommittedTraceDataV2, DeviceDataTransporterV2,
+        DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, LogupZerocheckCpu, MultiRapProver,
+        OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
         prove_zerocheck_and_logup,
         stacked_pcs::{StackedPcsData, stacked_commit},
         stacked_reduction::{StackedReductionCpu, prove_stacked_opening_reduction},
@@ -129,10 +130,12 @@ impl DeviceDataTransporterV2<CpuBackendV2> for CpuDeviceV2 {
             .per_air
             .iter()
             .map(|pk| {
-                let preprocessed_data = pk
-                    .preprocessed_data
-                    .as_ref()
-                    .map(|d| (d.commit(), d.clone()));
+                let preprocessed_data =
+                    pk.preprocessed_data.as_ref().map(|d| CommittedTraceDataV2 {
+                        commitment: d.commit(),
+                        data: d.clone(),
+                        height: d.mat_view(0).height(),
+                    });
                 DeviceStarkProvingKeyV2 {
                     air_name: pk.air_name.clone(),
                     vk: pk.vk.clone(),
@@ -165,5 +168,12 @@ impl DeviceDataTransporterV2<CpuBackendV2> for CpuDeviceV2 {
         matrix: &ColMajorMatrix<F>,
     ) -> ColMajorMatrix<F> {
         matrix.clone()
+    }
+
+    fn transport_pcs_data_from_device_to_host(
+        &self,
+        pcs_data: &StackedPcsData<F, Digest>,
+    ) -> StackedPcsData<F, Digest> {
+        pcs_data.clone()
     }
 }
