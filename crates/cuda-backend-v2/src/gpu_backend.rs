@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::base::DeviceMatrix;
@@ -15,8 +15,8 @@ use stark_backend_v2::{
     proof::*,
     prover::{
         ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2, DeviceDataTransporterV2,
-        DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MultiRapProver, OpeningProverV2,
-        ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
+        DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MatrixView, MultiRapProver,
+        OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
         prove_zerocheck_and_logup,
         stacked_pcs::{MerkleTree, StackedPcsData},
         stacked_reduction::prove_stacked_opening_reduction,
@@ -259,5 +259,54 @@ pub fn transport_committed_trace_data_to_host(
         commitment,
         data: Arc::new(pcs_data),
         height,
+    }
+}
+
+pub fn assert_eq_host_and_device_matrix_col_maj<T: Clone + Send + Sync + PartialEq + Debug>(
+    cpu: &ColMajorMatrix<T>,
+    gpu: &DeviceMatrix<T>,
+) {
+    assert_eq!(gpu.width(), cpu.width());
+    assert_eq!(gpu.height(), cpu.height());
+    let gpu = gpu.to_host().unwrap();
+    for r in 0..cpu.height() {
+        for c in 0..cpu.width() {
+            assert_eq!(
+                gpu[c * cpu.height() + r],
+                *cpu.get(r, c).unwrap(),
+                "Mismatch at row {} column {}",
+                r,
+                c
+            );
+        }
+    }
+}
+
+mod v1_shims {
+    use openvm_cuda_backend::{base::DeviceMatrix, prover_backend::GpuBackend};
+    use stark_backend_v2::{SystemParams, v1_shims::V1Compat};
+
+    use crate::{F, GpuBackendV2, stacked_pcs::stacked_commit};
+
+    impl V1Compat for GpuBackendV2 {
+        type V1 = GpuBackend;
+
+        fn convert_trace(matrix: DeviceMatrix<F>) -> DeviceMatrix<F> {
+            matrix
+        }
+
+        fn convert_pcs_data(
+            params: SystemParams,
+            matrix: DeviceMatrix<F>,
+        ) -> (Self::Commitment, Self::PcsData) {
+            stacked_commit(
+                params.l_skip,
+                params.n_stack,
+                params.log_blowup,
+                params.k_whir,
+                &[&matrix],
+            )
+            .unwrap()
+        }
     }
 }
