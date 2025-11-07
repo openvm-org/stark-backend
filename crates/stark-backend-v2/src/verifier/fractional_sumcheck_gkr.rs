@@ -9,7 +9,7 @@ use crate::{
     proof::{GkrLayerClaims, GkrProof},
 };
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum GkrVerificationError {
     #[error("Zero-round proof: q0_claim should be 1, got {actual}")]
     InvalidZeroRoundValue { actual: EF },

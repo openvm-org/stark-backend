@@ -1,4 +1,4 @@
-use std::cmp::max;
+use std::cmp::{Reverse, max};
 
 use itertools::{Itertools, izip};
 use thiserror::Error;
@@ -8,7 +8,7 @@ use crate::{
     prover::stacked_pcs::StackedLayout,
 };
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProofShapeError {
     #[error("Invalid VData: {0}")]
     InvalidVData(ProofShapeVDataError),
@@ -44,7 +44,7 @@ impl ProofShapeError {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProofShapeVDataError {
     #[error("Proof trace_vdata length ({len}) does not match number of AIRs ({num_airs})")]
     InvalidVDataLength { len: usize, num_airs: usize },
@@ -77,7 +77,7 @@ pub enum ProofShapeVDataError {
     },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum GkrProofShapeError {
     #[error("claims_per_layer should have num_gkr_rounds = {expected} claims, but it has {actual}")]
     InvalidClaimsPerLayer { expected: usize, actual: usize },
@@ -95,7 +95,7 @@ pub enum GkrProofShapeError {
     },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum BatchProofShapeError {
     #[error("numerator_term_per_air should have num_airs = {expected} terms, but it has {actual}")]
     InvalidNumeratorTerms { expected: usize, actual: usize },
@@ -158,7 +158,7 @@ pub enum BatchProofShapeError {
     },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum StackingProofShapeError {
     #[error(
         "univariate_round_coeffs should have 2 * ((1 << mvk.params.l_skip) - 1) + 1 = {expected} coefficients, but it has {actual}"
@@ -182,7 +182,7 @@ pub enum StackingProofShapeError {
     },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum WhirProofShapeError {
     #[error(
         "whir_sumcheck_polys should have log_stacked_height = {expected} polynomials, but it has {actual}"
@@ -363,14 +363,14 @@ pub fn verify_proof_shape(
         .per_air
         .iter()
         .zip(&proof.trace_vdata)
-        .filter_map(|(vk, vdata)| vdata.as_ref().map(|vdata| (vk, vdata)))
-        .sorted_by_key(|(_, vdata)| vdata.log_height)
-        .rev()
+        .enumerate()
+        .filter_map(|(air_idx, (vk, vdata))| vdata.as_ref().map(|vdata| (air_idx, vk, vdata)))
+        .sorted_by_key(|(_, _, vdata)| Reverse(vdata.log_height))
         .collect_vec();
-    let num_airs = per_trace.len();
+    let num_airs_present = per_trace.len();
 
     // GKR PROOF SHAPE
-    let total_interactions = per_trace.iter().fold(0u64, |acc, (vk, vdata)| {
+    let total_interactions = per_trace.iter().fold(0u64, |acc, (_, vk, vdata)| {
         acc + ((vk.num_interactions() as u64) << max(vdata.log_height, l_skip))
     });
     let n_logup = calculate_n_logup(l_skip, total_interactions);
@@ -405,20 +405,20 @@ pub fn verify_proof_shape(
     // BATCH CONSTRAINTS PROOF SHAPE
     let batch_proof = &proof.batch_constraint_proof;
 
-    let n_global = n_logup.max(per_trace[0].1.log_height.saturating_sub(l_skip));
+    let n_global = n_logup.max(per_trace[0].2.log_height.saturating_sub(l_skip));
 
     let s_0_deg = (mvk.max_constraint_degree + 1) * ((1 << l_skip) - 1);
-    if batch_proof.numerator_term_per_air.len() != num_airs {
+    if batch_proof.numerator_term_per_air.len() != num_airs_present {
         return ProofShapeError::invalid_batch_constraint(
             BatchProofShapeError::InvalidNumeratorTerms {
-                expected: num_airs,
+                expected: num_airs_present,
                 actual: batch_proof.numerator_term_per_air.len(),
             },
         );
-    } else if batch_proof.denominator_term_per_air.len() != num_airs {
+    } else if batch_proof.denominator_term_per_air.len() != num_airs_present {
         return ProofShapeError::invalid_batch_constraint(
             BatchProofShapeError::InvalidDenominatorTerms {
-                expected: num_airs,
+                expected: num_airs_present,
                 actual: batch_proof.denominator_term_per_air.len(),
             },
         );
@@ -436,10 +436,10 @@ pub fn verify_proof_shape(
                 actual: batch_proof.sumcheck_round_polys.len(),
             },
         );
-    } else if batch_proof.column_openings.len() != num_airs {
+    } else if batch_proof.column_openings.len() != num_airs_present {
         return ProofShapeError::invalid_batch_constraint(
             BatchProofShapeError::InvalidColumnOpeningsAirs {
-                expected: num_airs,
+                expected: num_airs_present,
                 actual: batch_proof.column_openings.len(),
             },
         );
@@ -457,12 +457,7 @@ pub fn verify_proof_shape(
         }
     }
 
-    for (air_idx, (part_openings, vk)) in batch_proof
-        .column_openings
-        .iter()
-        .zip(&mvk.per_air)
-        .enumerate()
-    {
+    for (part_openings, &(air_idx, vk, _)) in batch_proof.column_openings.iter().zip(&per_trace) {
         if part_openings.len() != vk.num_parts() {
             return ProofShapeError::invalid_batch_constraint(
                 BatchProofShapeError::InvalidColumnOpeningsPerAir {
@@ -536,13 +531,15 @@ pub fn verify_proof_shape(
         per_trace
             .iter()
             .enumerate()
-            .map(|(i, (vk, vdata))| (i, vk.params.width.common_main, vdata.log_height))
+            .map(|(trace_idx, (_, vk, vdata))| {
+                (trace_idx, vk.params.width.common_main, vdata.log_height)
+            })
             .collect_vec(),
     );
 
     let other_layouts = per_trace
         .iter()
-        .flat_map(|(vk, vdata)| {
+        .flat_map(|(_, vk, vdata)| {
             vk.params
                 .width
                 .preprocessed
