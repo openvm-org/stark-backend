@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use openvm_cuda_backend::prelude::SC;
 use stark_backend_v2::{
-    StarkEngineV2, SystemParams,
+    StarkEngineV2, StarkWhirEngine, SystemParams,
     poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
     prover::CoordinatorV2,
 };
@@ -40,5 +40,14 @@ where
         transcript: TS,
     ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
         CoordinatorV2::new(GpuBackendV2, self.device, transcript)
+    }
+}
+
+impl<TS> StarkWhirEngine for BabyBearPoseidon2GpuEngineV2<TS>
+where
+    TS: FiatShamirTranscript + Default,
+{
+    fn new(params: SystemParams) -> Self {
+        Self::new(params)
     }
 }
