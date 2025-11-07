@@ -31,6 +31,7 @@ getset.workspace = true
 cfg-if.workspace = true
 thiserror.workspace = true
 eyre.workspace = true
+derivative.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
