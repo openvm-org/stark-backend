@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::marker::PhantomData;
 
 use stark_backend_v2::{
     poly_common::UnivariatePoly,
@@ -6,15 +6,13 @@ use stark_backend_v2::{
     prover::{
         AirProvingContextV2, CpuBackendV2, CpuDeviceV2, DeviceMultiStarkProvingKeyV2,
         DeviceStarkProvingKeyV2, LogupZerocheckCpu, LogupZerocheckProver, ProvingContextV2,
-        fractional_sumcheck_gkr::FracSumcheckProof,
-        stacked_pcs::{StackedLayout, StackedPcsData},
+        fractional_sumcheck_gkr::FracSumcheckProof, stacked_pcs::StackedLayout,
     },
 };
 
 use crate::{
-    Digest, EF, F, GpuBackendV2, GpuDeviceV2,
-    gpu_backend::{transport_matrix_d2h_col_major, transport_stacked_pcs_data_to_host},
-    stacked_pcs::StackedPcsDataGpu,
+    EF, GpuBackendV2, GpuDeviceV2, gpu_backend::transport_matrix_d2h_col_major,
+    transport_committed_trace_data_to_host,
 };
 
 pub struct LogupZerocheckGpu<'a> {
@@ -104,10 +102,10 @@ fn transport_device_pk_to_host(
         .per_air
         .iter()
         .map(|air_pk| {
-            let preprocessed_data = air_pk.preprocessed_data.as_ref().map(|(commit, data)| {
-                let host = transport_pcs_arc_to_host(data);
-                (*commit, host)
-            });
+            let preprocessed_data = air_pk
+                .preprocessed_data
+                .as_ref()
+                .map(transport_committed_trace_data_to_host);
             DeviceStarkProvingKeyV2 {
                 air_name: air_pk.air_name.clone(),
                 vk: air_pk.vk.clone(),
@@ -142,15 +140,9 @@ fn transport_air_context_to_host(
     let cached_mains = air_ctx
         .cached_mains
         .iter()
-        .map(|(commit, data)| (*commit, transport_pcs_arc_to_host(data)))
+        .map(transport_committed_trace_data_to_host)
         .collect();
     let common_main = transport_matrix_d2h_col_major(&air_ctx.common_main).unwrap();
     let public_values = air_ctx.public_values.clone();
     AirProvingContextV2::new(cached_mains, common_main, public_values)
-}
-
-fn transport_pcs_arc_to_host(
-    data: &Arc<StackedPcsDataGpu<F, Digest>>,
-) -> Arc<StackedPcsData<F, Digest>> {
-    Arc::new(transport_stacked_pcs_data_to_host(data.as_ref()))
 }
