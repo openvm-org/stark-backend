@@ -3,13 +3,23 @@ use std::sync::Arc;
 use openvm_stark_backend::{keygen::types::LinearConstraint, prover::MatrixDimensions};
 
 use crate::{
-    Digest,
-    keygen::types::{
-        MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2, SystemParams,
-    },
+    Digest, SystemParams,
+    keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2},
     proof::TraceVData,
     prover::ProverBackendV2,
 };
+
+/// The committed trace data for a single trace matrix. This type is used to store prover data for
+/// both preprocessed trace and cached trace.
+#[derive(Clone)]
+pub struct CommittedTraceDataV2<PB: ProverBackendV2> {
+    /// The polynomial commitment.
+    pub commitment: PB::Commitment,
+    /// The PCS data for a single committed trace matrix.
+    pub data: Arc<PB::PcsData>,
+    /// The trace height of the trace matrix committed to.
+    pub height: usize,
+}
 
 /// The proving key for a circuit consisting of multiple AIRs, after prover-specific data has been
 /// transferred to device. The host data (e.g., vkey) is owned by this struct.
@@ -32,7 +42,7 @@ pub struct DeviceStarkProvingKeyV2<PB: ProverBackendV2> {
     pub air_name: String,
     pub vk: StarkVerifyingKeyV2<PB::Val, PB::Commitment>,
     /// Prover only data for preprocessed trace
-    pub preprocessed_data: Option<(PB::Commitment, Arc<PB::PcsData>)>,
+    pub preprocessed_data: Option<CommittedTraceDataV2<PB>>,
 }
 
 #[derive(derive_new::new)]
@@ -51,7 +61,7 @@ pub struct AirProvingContextV2<PB: ProverBackendV2> {
     /// The `PcsData` is kept inside an `Arc` to emphasize that this data is cached and may be
     /// shared between multiple proving contexts. In particular, it is not typically safe to mutate
     /// the data during a proving job.
-    pub cached_mains: Vec<(PB::Commitment, Arc<PB::PcsData>)>,
+    pub cached_mains: Vec<CommittedTraceDataV2<PB>>,
     /// Common main trace matrix
     pub common_main: PB::Matrix,
     /// Public values

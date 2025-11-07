@@ -45,9 +45,8 @@ impl<'a> EvalHelper<'a, crate::F> {
             mats.push((mat, false));
             mats.push((mat, true));
         }
-        for (_, data) in ctx.cached_mains.iter() {
-            let layout = &data.layout;
-            let trace_view = layout.mat_view(0, &data.matrix);
+        for cd in ctx.cached_mains.iter() {
+            let trace_view = cd.data.mat_view(0);
             mats.push((trace_view, false));
             mats.push((trace_view, true));
         }

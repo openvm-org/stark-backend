@@ -6,8 +6,7 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    Digest, EF, F,
-    keygen::types::SystemParams,
+    Digest, EF, F, SystemParams,
     poly_common::{Squarable, eval_eq_mle, horner_eval, interpolate_quadratic_at_012},
     poseidon2::sponge::{
         FiatShamirTranscript, poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress,
@@ -259,7 +258,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     ensure(acc == claim, VerifyWhirError::FinalPolyConstraint)
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum VerifyWhirError {
     #[error("final polynomial has wrong degree")]
     FinalPolyDegree,
@@ -347,9 +346,9 @@ mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use tracing::Level;
 
+    use super::*;
     use crate::{
         EF, F,
-        keygen::types::SystemParams,
         poly_common::Squarable,
         poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory},
         prover::{
@@ -421,7 +420,8 @@ mod tests {
                 .preprocessed_data
                 .iter()
                 .chain(&air_ctx.cached_mains);
-            for (_, data) in pcs_datas {
+            for cd in pcs_datas {
+                let data = &cd.data;
                 committed_mats.push((&data.matrix, &data.tree));
                 commits.push(data.commit());
             }

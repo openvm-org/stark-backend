@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use openvm_stark_backend::{
+    Chip,
     keygen::types::{MultiStarkProvingKey, StarkProvingKey},
     prover::{
         MatrixDimensions,
@@ -12,12 +13,13 @@ use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
 use p3_util::log2_strict_usize;
 
 use crate::{
+    ChipV2, SystemParams,
     keygen::types::{
         MultiStarkProvingKeyV2, StarkProvingKeyV2, StarkVerifyingKeyV2, StarkVerifyingParamsV2,
-        SystemParams, VerifierSinglePreprocessedData,
+        VerifierSinglePreprocessedData,
     },
     prover::{
-        AirProvingContextV2, ColMajorMatrix, CpuBackendV2, ProvingContextV2,
+        AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2, ProvingContextV2,
         stacked_pcs::stacked_commit,
     },
 };
@@ -93,6 +95,15 @@ impl ProvingContextV2<CpuBackendV2> {
             .collect();
         Self { per_trace: per_air }
     }
+
+    pub fn from_v1_no_cached(ctx: ProvingContext<CpuBackend<SC>>) -> Self {
+        let per_air = ctx
+            .per_air
+            .into_iter()
+            .map(|(air_id, air_ctx)| (air_id, AirProvingContextV2::from_v1_no_cached(air_ctx)))
+            .collect();
+        Self { per_trace: per_air }
+    }
 }
 
 impl AirProvingContextV2<CpuBackendV2> {
@@ -104,14 +115,18 @@ impl AirProvingContextV2<CpuBackendV2> {
             .iter()
             .map(|d| {
                 let trace = ColMajorMatrix::from_row_major(&d.trace);
-                let (commit, data) = stacked_commit(
+                let (commitment, data) = stacked_commit(
                     params.l_skip,
                     params.n_stack,
                     params.log_blowup,
                     params.k_whir,
                     &[&trace],
                 );
-                (commit, Arc::new(data))
+                CommittedTraceDataV2 {
+                    commitment,
+                    data: Arc::new(data),
+                    height: trace.height(),
+                }
             })
             .collect();
         Self {
@@ -119,5 +134,26 @@ impl AirProvingContextV2<CpuBackendV2> {
             common_main,
             public_values: ctx.public_values,
         }
+    }
+
+    pub fn from_v1_no_cached(ctx: AirProvingContext<CpuBackend<SC>>) -> Self {
+        let common_main =
+            ColMajorMatrix::from_row_major(&ctx.common_main.expect("must have common main"));
+        assert!(ctx.cached_mains.is_empty());
+        Self {
+            cached_mains: vec![],
+            common_main,
+            public_values: ctx.public_values,
+        }
+    }
+}
+
+impl<C, R> ChipV2<R, CpuBackendV2> for C
+where
+    C: Chip<R, CpuBackend<SC>>,
+{
+    fn generate_proving_ctx(&self, records: R) -> AirProvingContextV2<CpuBackendV2> {
+        let v1_ctx = self.generate_proving_ctx(records);
+        AirProvingContextV2::from_v1_no_cached(v1_ctx)
     }
 }

@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum BatchConstraintError {
     #[error("Invalid logup_pow_witness")]
     InvalidLogupPowWitness,

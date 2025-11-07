@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use itertools::{Itertools, izip};
 use openvm_stark_backend::prover::{MatrixDimensions, Prover};
 use p3_field::FieldAlgebra;
@@ -105,7 +103,7 @@ where
                 cached_commitments: air_ctx
                     .cached_mains
                     .iter()
-                    .map(|(commit, _)| *commit)
+                    .map(|cd| cd.commitment)
                     .collect(),
             });
             public_values[*air_id] = air_ctx.public_values.clone();
@@ -125,8 +123,8 @@ where
                 transcript.observe(F::from_bool(trace_vdata.is_some()));
             }
             if let Some(trace_vdata) = trace_vdata {
-                if let Some((commit, _)) = &pk.preprocessed_data {
-                    transcript.observe_commit(*commit);
+                if let Some(cd) = &pk.preprocessed_data {
+                    transcript.observe_commit(cd.commitment);
                 } else {
                     transcript.observe(F::from_canonical_usize(trace_vdata.log_height));
                 }
@@ -148,7 +146,7 @@ where
                     .preprocessed_data
                     .iter()
                     .chain(&air_ctx.cached_mains)
-                    .map(|(_, pcs_data)| Arc::clone(pcs_data))
+                    .map(|cd| cd.data.clone())
             })
             .collect();
 

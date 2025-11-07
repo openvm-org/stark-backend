@@ -126,14 +126,12 @@ where
                 let pk = &pk.per_air[*air_idx];
                 let constraints = &pk.vk.symbolic_constraints.constraints;
                 let public_values = air_ctx.public_values.clone();
-                let preprocessed_trace = pk
-                    .preprocessed_data
-                    .as_ref()
-                    .map(|(_, d)| d.layout.mat_view(0, &d.matrix));
+                let preprocessed_trace =
+                    pk.preprocessed_data.as_ref().map(|cd| cd.data.mat_view(0));
                 let partitioned_main_trace = air_ctx
                     .cached_mains
                     .iter()
-                    .map(|(_, d)| d.layout.mat_view(0, &d.matrix))
+                    .map(|cd| cd.data.mat_view(0))
                     .chain(iter::once(air_ctx.common_main.as_view().into()))
                     .collect_vec();
                 // Scan constraints to see if we need `next` row and also check index bounds

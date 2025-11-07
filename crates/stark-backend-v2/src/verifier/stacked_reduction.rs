@@ -16,7 +16,7 @@ use crate::{
     prover::stacked_pcs::StackedLayout,
 };
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum StackedReductionError {
     #[error("s_0 does not match s_0 polynomial evaluation sum: {s_0} != {s_0_sum_eval}")]
     S0Mismatch { s_0: EF, s_0_sum_eval: EF },
