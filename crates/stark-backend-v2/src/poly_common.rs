@@ -56,7 +56,7 @@ pub fn eval_in_uni<F: Field>(l_skip: usize, n: isize, z: F) -> F {
             z.exp_power_of_2(l_skip.wrapping_add_signed(n)),
         )
     } else {
-        return F::ONE;
+        F::ONE
     }
 }
 
