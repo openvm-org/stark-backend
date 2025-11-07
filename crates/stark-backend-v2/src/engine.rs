@@ -24,6 +24,7 @@ use crate::{
 };
 
 /// Data for verifying a Stark proof.
+#[derive(Debug)]
 pub struct VerificationDataV2 {
     pub vk: MultiStarkVerifyingKeyV2,
     pub proof: Proof,
