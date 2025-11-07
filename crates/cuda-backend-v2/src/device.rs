@@ -1,6 +1,6 @@
 use getset::CopyGetters;
 use openvm_cuda_common::common::get_device;
-use stark_backend_v2::keygen::types::SystemParams;
+use stark_backend_v2::SystemParams;
 
 #[derive(Clone, Copy, CopyGetters)]
 pub struct GpuDeviceV2 {
