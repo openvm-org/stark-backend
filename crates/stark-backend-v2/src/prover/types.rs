@@ -1,5 +1,6 @@
 use std::{cmp::Reverse, sync::Arc};
 
+use derivative::Derivative;
 use openvm_stark_backend::{keygen::types::LinearConstraint, prover::MatrixDimensions};
 
 use crate::{
@@ -11,7 +12,8 @@ use crate::{
 
 /// The committed trace data for a single trace matrix. This type is used to store prover data for
 /// both preprocessed trace and cached trace.
-#[derive(Clone)]
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
 pub struct CommittedTraceDataV2<PB: ProverBackendV2> {
     /// The polynomial commitment.
     pub commitment: PB::Commitment,
