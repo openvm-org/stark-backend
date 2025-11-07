@@ -37,8 +37,8 @@ mod tests {
     use p3_field::FieldAlgebra;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use stark_backend_v2::{
-        BabyBearPoseidon2CpuEngineV2, EF, F,
-        keygen::types::{MultiStarkProvingKeyV2, SystemParams},
+        BabyBearPoseidon2CpuEngineV2, EF, F, SystemParams,
+        keygen::types::MultiStarkProvingKeyV2,
         poly_common::Squarable,
         poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory},
         prover::{
@@ -122,7 +122,7 @@ mod tests {
             let pcs_datas = pk.per_air[air_id]
                 .preprocessed_data
                 .iter()
-                .chain(air_ctx.cached_mains.iter().map(|(_, d)| d));
+                .chain(air_ctx.cached_mains.iter().map(|cd| &cd.data));
             for data in pcs_datas {
                 commits.push(data.commit());
                 stacking_openings.push(stacking_openings_for_matrix(

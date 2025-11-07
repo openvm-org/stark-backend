@@ -8,8 +8,7 @@ use openvm_stark_sdk::config::{setup_tracing, setup_tracing_with_log_level};
 use p3_field::{FieldAlgebra, PrimeField32, TwoAdicField};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use stark_backend_v2::{
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2,
-    keygen::types::SystemParams,
+    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams,
     poseidon2::sponge::{
         DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory,
     },
