@@ -25,7 +25,7 @@ pub struct StarkVerifyingParamsV2 {
 /// Verifier data for preprocessed trace for a single AIR.
 ///
 /// Currently assumes each AIR has it's own preprocessed commitment
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifierSinglePreprocessedData<Digest> {
     /// Commitment to the preprocessed trace.
     pub commit: Digest,
@@ -37,7 +37,7 @@ pub struct VerifierSinglePreprocessedData<Digest> {
 }
 
 /// Verifying key for a single STARK (corresponding to single AIR matrix)
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]
 pub struct StarkVerifyingKeyV2<F, Digest> {
     /// Preprocessed trace data, if any
@@ -57,7 +57,7 @@ pub struct StarkVerifyingKeyV2<F, Digest> {
 ///
 /// This struct contains the necessary data for the verifier to verify proofs generated for
 /// multiple AIRs using a single verifying key.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MultiStarkVerifyingKeyV2 {
     /// All parts of the verifying key needed by the verifier, except
     /// the `pre_hash` used to initialize the Fiat-Shamir transcript.
@@ -69,7 +69,7 @@ pub struct MultiStarkVerifyingKeyV2 {
 
 /// Everything in [MultiStarkVerifyingKey] except the `pre_hash` used to initialize the Fiat-Shamir
 /// transcript.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MultiStarkVerifyingKey0V2 {
     pub params: SystemParams,
     pub per_air: Vec<StarkVerifyingKeyV2<F, Digest>>,
