@@ -79,6 +79,7 @@ pub fn verify<TS: FiatShamirTranscript>(
             trace_vdata[air_id]
                 .as_ref()
                 .map(|vdata| Reverse(vdata.log_height)),
+            air_id,
         )
     });
     let num_traces = trace_vdata.iter().flatten().collect_vec().len();
