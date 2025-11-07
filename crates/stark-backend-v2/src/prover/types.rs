@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{cmp::Reverse, sync::Arc};
 
 use openvm_stark_backend::{keygen::types::LinearConstraint, prover::MatrixDimensions};
 
@@ -120,6 +120,20 @@ impl<PB: ProverBackendV2> ProvingContextV2<PB> {
         self.per_trace
             .iter()
             .map(|(air_idx, air_ctx)| (*air_idx, &air_ctx.common_main))
+    }
+
+    // Returns `self` with the trace data sorted to be descending in height for column stacking. For
+    // equal heights, traces are sorted in ascending order of AIR index.
+    pub fn into_sorted(mut self) -> Self {
+        self.sort_for_stacking();
+        self
+    }
+
+    // Stable sort the trace data to be descending in height: this is needed for stacking. For
+    // equal heights, sort in ascending order of AIR index.
+    pub fn sort_for_stacking(&mut self) {
+        self.per_trace
+            .sort_by_key(|(air_idx, air_ctx)| (Reverse(air_ctx.common_main.height()), *air_idx));
     }
 }
 
