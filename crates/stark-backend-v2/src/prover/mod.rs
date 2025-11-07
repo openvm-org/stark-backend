@@ -65,21 +65,17 @@ where
     fn prove<'a>(
         &'a mut self,
         mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
-        mut ctx: ProvingContextV2<PB>,
+        unsorted_ctx: ProvingContextV2<PB>,
     ) -> Self::Proof {
         assert_eq!(self.device.config(), mpk.params);
         let transcript = &mut self.transcript;
-
         transcript.observe_commit(mpk.vk_pre_hash);
+
+        let ctx = unsorted_ctx.into_sorted();
+        // `ctx` should NOT be permuted anymore: the ordering by `trace_idx` is now fixed.
 
         let num_airs_present = ctx.per_trace.len();
         info!(num_airs_present);
-
-        // Stable sort the trace data to be descending in height: this is needed for stacking.
-        ctx.per_trace
-            .sort_by(|a, b| b.1.common_main.height().cmp(&a.1.common_main.height()));
-        // `ctx` should NOT be permuted anymore: the ordering by `trace_idx` is now fixed.
-        let ctx = ctx;
 
         let (common_main_commit, common_main_pcs_data) =
             info_span!("main_trace_commit").in_scope(|| {
