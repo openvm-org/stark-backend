@@ -192,8 +192,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
     let pk = engine.device().transport_pk_to_device(&pk);
     let mut ctx = fib.generate_proving_ctx();
 
-    ctx.per_trace
-        .sort_by(|a, b| b.1.common_main.height().cmp(&a.1.common_main.height()));
+    ctx.sort_for_stacking();
 
     let (_, common_main_pcs_data) = {
         stacked_commit(
@@ -298,8 +297,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
 
     // 6. Update air_ids in fib context and combine contexts
     per_trace.push((per_trace.len(), fib_ctx));
-    per_trace.sort_by(|a, b| b.1.common_main.height().cmp(&a.1.common_main.height()));
-    let combined_ctx = ProvingContextV2::new(per_trace);
+    let combined_ctx = ProvingContextV2::new(per_trace).into_sorted();
 
     let l_skip = engine.config().l_skip;
     let mut pvs = vec![vec![]; 3];
@@ -380,9 +378,7 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let fx = InteractionsFixture11;
     let (pk, _vk) = fx.keygen(&engine);
     let pk = engine.device().transport_pk_to_device(&pk);
-    let mut ctx = fx.generate_proving_ctx();
-    ctx.per_trace
-        .sort_by(|a, b| b.1.common_main.height().cmp(&a.1.common_main.height()));
+    let ctx = fx.generate_proving_ctx().into_sorted();
     let mut transcript = DuplexSponge::default();
     let ((gkr_proof, _), _) = engine
         .device()
@@ -406,9 +402,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
     let fx = InteractionsFixture11;
     let (pk, vk) = fx.keygen(&engine);
     let pk = engine.device().transport_pk_to_device(&pk);
-    let mut ctx = fx.generate_proving_ctx();
-    ctx.per_trace
-        .sort_by(|a, b| b.1.common_main.height().cmp(&a.1.common_main.height()));
+    let ctx = fx.generate_proving_ctx().into_sorted();
     let l_skip = engine.device().config().l_skip;
     let mut pvs = vec![vec![]; vk.inner.per_air.len()];
     let (trace_id_to_air_ids, ns): (Vec<_>, Vec<_>) = ctx
