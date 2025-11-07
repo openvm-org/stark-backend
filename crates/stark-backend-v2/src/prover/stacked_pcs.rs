@@ -99,6 +99,10 @@ impl<F, Digest: Clone> StackedPcsData<F, Digest> {
     pub fn commit(&self) -> Digest {
         self.tree.root()
     }
+
+    pub fn mat_view<'a>(&'a self, unstacked_mat_idx: usize) -> StridedColMajorMatrixView<'a, F> {
+        self.layout.mat_view(unstacked_mat_idx, &self.matrix)
+    }
 }
 
 #[instrument(level = "info", skip_all)]
@@ -123,8 +127,8 @@ impl StackedLayout {
     /// - `l_skip` is a threshold log2 height: if a column has height less than `2^l_skip`, it is
     ///   stacked as a column of height `2^l_skip` with stride `2^{l_skip - log_height}`.
     /// - `log_stacked_height` is the log2 height of the stacked matrix.
-    /// - `sorted` is Vec of `(matrix index, width, log_height)` that must already be
-    /// **sorted** in descending order of `log_height`.
+    /// - `sorted` is Vec of `(matrix index, width, log_height)` that must already be **sorted** in
+    ///   descending order of `log_height`.
     pub fn new(
         l_skip: usize,
         log_stacked_height: usize,
@@ -189,7 +193,7 @@ impl StackedLayout {
     /// Due to the definition of stacking, in a column major matrix the lifted columns of the
     /// unstacked matrix will always be contiguous in memory within the stacked matrix, so we
     /// can return the sub-view.
-    pub fn mat_view<'a>(
+    pub fn mat_view<'a, F>(
         &self,
         unstacked_mat_idx: usize,
         stacked_matrix: &'a ColMajorMatrix<F>,
