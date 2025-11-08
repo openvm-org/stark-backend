@@ -405,7 +405,7 @@ pub fn verify_proof_shape(
     // BATCH CONSTRAINTS PROOF SHAPE
     let batch_proof = &proof.batch_constraint_proof;
 
-    let n_global = n_logup.max(per_trace[0].2.log_height.saturating_sub(l_skip));
+    let n_max = per_trace[0].2.log_height.saturating_sub(l_skip);
 
     let s_0_deg = (mvk.max_constraint_degree + 1) * ((1 << l_skip) - 1);
     if batch_proof.numerator_term_per_air.len() != num_airs_present {
@@ -429,10 +429,10 @@ pub fn verify_proof_shape(
                 actual: batch_proof.univariate_round_coeffs.len(),
             },
         );
-    } else if batch_proof.sumcheck_round_polys.len() != n_global {
+    } else if batch_proof.sumcheck_round_polys.len() != n_max {
         return ProofShapeError::invalid_batch_constraint(
             BatchProofShapeError::InvalidSumcheckRoundPolys {
-                expected: n_global,
+                expected: n_max,
                 actual: batch_proof.sumcheck_round_polys.len(),
             },
         );
