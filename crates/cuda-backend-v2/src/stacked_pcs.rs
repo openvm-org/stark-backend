@@ -40,7 +40,7 @@ pub fn stacked_commit(
 ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
     let (q_trace, layout) = stacked_matrix(l_skip, n_stack, traces)?;
     let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace)?;
-    let tree = MerkleTreeGpu::new(rs_matrix, 1 << k_whir);
+    let tree = MerkleTreeGpu::new(rs_matrix, 1 << k_whir)?;
     let root = tree.root();
     let data = StackedPcsDataGpu::new(layout, q_trace, tree);
     Ok((root, data))
