@@ -324,7 +324,7 @@ mod poseidon2_merkle_tree {
     use super::*;
     use crate::{
         Digest, F,
-        poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress},
+        poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice},
     };
 
     impl<EF> MerkleTree<EF, Digest>
@@ -352,15 +352,22 @@ mod poseidon2_merkle_tree {
                 .collect();
 
             let query_stride = num_leaves / rows_per_query;
-            let query_digest_layer: Vec<Digest> = (0..query_stride)
-                .into_par_iter()
-                .map(|q| {
-                    let sub_row_hashes = (0..rows_per_query)
-                        .map(|t| row_hashes[q + t * query_stride])
-                        .collect_vec();
-                    poseidon2_tree_compress(sub_row_hashes)
-                })
-                .collect();
+            let mut query_digest_layer = row_hashes;
+            // For the first log2(rows_per_query) layers, we hash in `query_stride` pairs and don't
+            // need to store the digest layers
+            for _ in 0..log2_strict_usize(rows_per_query) {
+                let prev_layer = query_digest_layer;
+                query_digest_layer = (0..prev_layer.len() / 2)
+                    .into_par_iter()
+                    .map(|i| {
+                        let x = i / query_stride;
+                        let y = i % query_stride;
+                        let left = prev_layer[2 * x * query_stride + y];
+                        let right = prev_layer[(2 * x + 1) * query_stride + y];
+                        poseidon2_compress(left, right)
+                    })
+                    .collect();
+            }
 
             let mut digest_layers = vec![query_digest_layer];
             while digest_layers.last().unwrap().len() > 1 {
