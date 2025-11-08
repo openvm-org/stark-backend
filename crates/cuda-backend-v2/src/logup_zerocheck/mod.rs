@@ -64,10 +64,6 @@ where
         )
     }
 
-    fn n_global(&self) -> usize {
-        LogupZerocheckProver::<_, _, TS>::n_global(&self.cpu)
-    }
-
     fn sumcheck_uni_round0_polys(
         &mut self,
         ctx: &ProvingContextV2<GpuBackendV2>,
