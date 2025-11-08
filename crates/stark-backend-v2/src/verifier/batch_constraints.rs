@@ -99,15 +99,12 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         debug_assert_eq!(xi.len(), l_skip + n_logup);
     }
 
-    let mut n_global = n_per_trace.iter().copied().max().unwrap().max(0) as usize;
-    if n_global < n_logup {
-        n_global = n_logup;
-    } else {
-        while xi.len() != l_skip + n_global {
-            xi.push(transcript.sample_ext());
-        }
+    let n_max = n_per_trace.iter().copied().max().unwrap().max(0) as usize;
+    let n_global = n_max.max(n_logup);
+    while xi.len() != l_skip + n_global {
+        xi.push(transcript.sample_ext());
     }
-    debug!(%n_global);
+    debug!(%n_max);
     debug!(?xi);
 
     let lambda = transcript.sample_ext();
@@ -171,7 +168,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
 
     // 6. Multilinear sumcheck rounds
     #[allow(clippy::needless_range_loop)]
-    for round in 0..n_global {
+    for round in 0..n_max {
         debug!(sumcheck_round = round, sum_claim = %cur_sum, "batch_constraint_sumcheck");
         let batch_s_evals = &sumcheck_round_polys[round];
         for &eval in batch_s_evals.iter() {
@@ -241,20 +238,20 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         .collect_vec();
 
     // 8. Compute `eq_ns` and `eq_sharp_ns`
-    let mut eq_ns = vec![EF::ONE; n_global + 1];
-    let mut eq_sharp_ns = vec![EF::ONE; n_global + 1];
+    let mut eq_ns = vec![EF::ONE; n_max + 1];
+    let mut eq_sharp_ns = vec![EF::ONE; n_max + 1];
     eq_ns[0] = eval_eq_uni(l_skip, xi[0], r_0);
     eq_sharp_ns[0] = eval_eq_sharp_uni(omega_skip_pows, &xi[..l_skip], r_0);
-    debug_assert_eq!(rs.len(), n_global + 1);
+    debug_assert_eq!(rs.len(), n_max + 1);
     for (i, r) in rs.iter().enumerate().skip(1) {
         let eq_mle = eval_eq_mle(&[xi[l_skip + i - 1]], slice::from_ref(r));
         eq_ns[i] = eq_ns[i - 1] * eq_mle;
         eq_sharp_ns[i] = eq_sharp_ns[i - 1] * eq_mle;
     }
-    let mut r_rev_prod = rs[n_global];
+    let mut r_rev_prod = rs[n_max];
     // Product with r_i's to account for \hat{f} vs \tilde{f} for different n's in front-loaded
     // batch sumcheck.
-    for i in (0..n_global).rev() {
+    for i in (0..n_max).rev() {
         eq_ns[i] *= r_rev_prod;
         eq_sharp_ns[i] *= r_rev_prod;
         r_rev_prod *= rs[i];

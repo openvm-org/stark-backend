@@ -55,8 +55,6 @@ pub trait LogupZerocheckProver<'a, PB: ProverBackendV2, PD, TS>: Sized {
         beta_logup: PB::Challenge,
     ) -> (Self, FracSumcheckProof<PB::Challenge>);
 
-    fn n_global(&self) -> usize;
-
     /// Returns the `s_0` polynomials in coefficient form. There should be exactly `num_airs_present
     /// \* 3` polynomials, in the order `(s_0)_{p,T}, (s_0)_{q,T}, (s_0)_{zerocheck,T}` per trace
     /// `T`. This is computed _before_ sampling batching randomness `mu` because the result is
@@ -103,6 +101,8 @@ where
     let constraint_degree = mpk.max_constraint_degree;
     let num_airs_present = ctx.per_trace.len();
 
+    // Traces are sorted
+    let n_max = log2_strict_usize(ctx.per_trace[0].1.common_main.height()).saturating_sub(l_skip);
     // Gather interactions metadata, including interactions stacked layout which depends on trace
     // heights
     let mut total_interactions = 0u64;
@@ -146,9 +146,8 @@ where
     );
 
     // begin batch sumcheck
-    let n_global = prover.n_global();
-    let mut sumcheck_round_polys = Vec::with_capacity(n_global);
-    let mut r = Vec::with_capacity(n_global + 1);
+    let mut sumcheck_round_polys = Vec::with_capacity(n_max);
+    let mut r = Vec::with_capacity(n_max + 1);
     // batching randomness
     let lambda = transcript.sample_ext();
     debug!(%lambda);
@@ -207,7 +206,7 @@ where
     // evaluation at `0` because the verifier can infer it from the previous round's
     // `s_{round-1}(r)` claim. The degree is constraint_degree + 1, where + 1 is from eq term
     debug!(%s_deg);
-    for round in 1..=n_global {
+    for round in 1..=n_max {
         let s_round_evals = prover.sumcheck_polys_eval(round, r[round - 1]);
 
         let batch_s_evals = (0..s_deg)
@@ -230,7 +229,7 @@ where
 
         prover.fold_mle_evals(round, r_round);
     }
-    assert_eq!(r.len(), n_global + 1);
+    assert_eq!(r.len(), n_max + 1);
 
     let column_openings = prover.into_column_openings();
 

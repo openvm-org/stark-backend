@@ -42,7 +42,6 @@ pub struct LogupZerocheckCpu<'a> {
     pub l_skip: usize,
     pub n_logup: usize,
     pub n_max: usize,
-    n_global: usize,
 
     pub omega_skip: F,
     pub omega_skip_pows: Vec<F>,
@@ -117,7 +116,7 @@ where
             .common_main_traces()
             .map(|(_, t)| log2_strict_usize(t.height()) as isize - l_skip as isize)
             .collect_vec();
-        let n_max: usize = n_per_trace.iter().copied().max().unwrap_or(0).max(0) as usize;
+        let n_max: usize = n_per_trace[0].max(0) as usize;
 
         let eval_helpers: Vec<EvalHelper<F>> = ctx
             .per_trace
@@ -270,7 +269,6 @@ where
             l_skip,
             n_logup,
             n_max,
-            n_global,
             omega_skip,
             omega_skip_pows,
             interactions_layout,
@@ -291,10 +289,6 @@ where
             logup_tilde_evals,
         };
         (prover, frac_sum_proof)
-    }
-
-    fn n_global(&self) -> usize {
-        self.n_global
     }
 
     fn sumcheck_uni_round0_polys(
@@ -632,7 +626,7 @@ where
 
         #[allow(unused_variables)]
         #[cfg(debug_assertions)]
-        if tracing::enabled!(tracing::Level::DEBUG) && _round == self.n_global {
+        if tracing::enabled!(tracing::Level::DEBUG) && _round == self.n_max {
             use itertools::izip;
 
             for (trace_idx, (helper, &n, mats, sels, eq_xi)) in izip!(
