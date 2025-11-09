@@ -14,7 +14,7 @@ use crate::{
 
 mod cuda;
 mod vm_pool;
-use vm_pool::VirtualMemoryPool;
+use vm_pool::{PoolAllocResult, VirtualMemoryPool, VmPoolGrowPlan};
 
 #[link(name = "cudart")]
 extern "C" {
@@ -37,6 +37,11 @@ pub struct MemoryManager {
     max_used_size: usize,
 }
 
+enum AllocationAction {
+    Ready(*mut c_void),
+    NeedsGrowth(VmPoolGrowPlan),
+}
+
 unsafe impl Send for MemoryManager {}
 unsafe impl Sync for MemoryManager {}
 
@@ -53,27 +58,36 @@ impl MemoryManager {
         }
     }
 
-    fn d_malloc(&mut self, size: usize) -> Result<*mut c_void, MemoryError> {
+    fn try_allocate(&mut self, size: usize) -> Result<AllocationAction, MemoryError> {
         assert!(size != 0, "Requested size must be non-zero");
 
-        let mut tracked_size = size;
-        let ptr = if size < self.pool.page_size {
+        if size < self.pool.page_size {
             let mut ptr: *mut c_void = std::ptr::null_mut();
             check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) })?;
             self.allocated_ptrs
                 .insert(NonNull::new(ptr).expect("cudaMalloc returned null"), size);
-            Ok(ptr)
-        } else {
-            tracked_size = size.next_multiple_of(self.pool.page_size);
-            self.pool
-                .malloc_internal(tracked_size, current_stream_id()?)
-        };
+            self.bump_usage(size);
+            return Ok(AllocationAction::Ready(ptr));
+        }
 
+        let tracked_size = size.next_multiple_of(self.pool.page_size);
+        match self
+            .pool
+            .malloc_internal(tracked_size, current_stream_id()?)?
+        {
+            PoolAllocResult::Allocated(ptr) => {
+                self.bump_usage(tracked_size);
+                Ok(AllocationAction::Ready(ptr))
+            }
+            PoolAllocResult::NeedsGrowth(plan) => Ok(AllocationAction::NeedsGrowth(plan)),
+        }
+    }
+
+    fn bump_usage(&mut self, tracked_size: usize) {
         self.current_size += tracked_size;
         if self.current_size > self.max_used_size {
             self.max_used_size = self.current_size;
         }
-        ptr
     }
 
     /// # Safety
@@ -116,8 +130,22 @@ impl Default for MemoryManager {
 
 pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
     let manager = MEMORY_MANAGER.get().unwrap();
-    let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
-    manager.d_malloc(size)
+
+    loop {
+        let action = {
+            let mut guard = manager.lock().map_err(|_| MemoryError::LockError)?;
+            guard.try_allocate(size)?
+        };
+
+        match action {
+            AllocationAction::Ready(ptr) => return Ok(ptr),
+            AllocationAction::NeedsGrowth(plan) => {
+                let handles = plan.execute()?;
+                let mut guard = manager.lock().map_err(|_| MemoryError::LockError)?;
+                guard.pool.complete_growth(&plan, handles)?;
+            }
+        }
+    }
 }
 
 /// # Safety

@@ -70,6 +70,69 @@ pub(super) struct VirtualMemoryPool {
     pub(super) device_id: i32,
 }
 
+#[derive(Debug)]
+pub(super) enum PoolAllocResult {
+    Allocated(*mut c_void),
+    NeedsGrowth(VmPoolGrowPlan),
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct VmPoolGrowPlan {
+    start: CUdeviceptr,
+    num_pages: usize,
+    page_size: usize,
+    device_id: i32,
+    stream_id: CudaStreamId,
+}
+
+#[derive(Debug)]
+enum DefragResult {
+    Satisfied(CUdeviceptr),
+    NeedMore(usize),
+}
+
+impl VmPoolGrowPlan {
+    fn total_size(&self) -> usize {
+        self.num_pages * self.page_size
+    }
+
+    pub fn execute(&self) -> Result<Vec<CUmemGenericAllocationHandle>, MemoryError> {
+        let mut handles = Vec::with_capacity(self.num_pages);
+        for page_idx in 0..self.num_pages {
+            let addr = self.start + (page_idx * self.page_size) as u64;
+            let handle = unsafe { vpmm_create_physical(self.device_id, self.page_size)? };
+            if let Err(err) = unsafe { vpmm_map(addr, self.page_size, handle) } {
+                unsafe {
+                    let _ = vpmm_release(handle);
+                }
+                self.rollback(page_idx, &handles);
+                return Err(MemoryError::from(err));
+            }
+            handles.push(handle);
+        }
+
+        if let Err(err) = unsafe { vpmm_set_access(self.start, self.total_size(), self.device_id) }
+        {
+            self.rollback(handles.len(), &handles);
+            return Err(MemoryError::from(err));
+        }
+
+        Ok(handles)
+    }
+
+    fn rollback(&self, mapped_pages: usize, handles: &[CUmemGenericAllocationHandle]) {
+        for page_idx in (0..mapped_pages).rev() {
+            let addr = self.start + (page_idx * self.page_size) as u64;
+            unsafe {
+                let _ = vpmm_unmap(addr, self.page_size);
+                if let Some(handle) = handles.get(page_idx) {
+                    let _ = vpmm_release(*handle);
+                }
+            }
+        }
+    }
+}
+
 unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
@@ -123,44 +186,25 @@ impl VirtualMemoryPool {
         &mut self,
         requested: usize,
         stream_id: CudaStreamId,
-    ) -> Result<*mut c_void, MemoryError> {
+    ) -> Result<PoolAllocResult, MemoryError> {
         debug_assert!(
             requested != 0 && requested % self.page_size == 0,
             "Requested size must be a multiple of the page size"
         );
-        // Phase 1: Zero-cost attempts
-        let mut best_region = self.find_best_fit(requested, stream_id);
-
-        if best_region.is_none() {
-            // Phase 2: Defragmentation
-            best_region = self.defragment_or_create_new_pages(requested, stream_id)?;
+        if let Some(ptr) = self.find_best_fit(requested, stream_id) {
+            self.consume_region(ptr, requested, stream_id);
+            return Ok(PoolAllocResult::Allocated(ptr as *mut c_void));
         }
 
-        if let Some(ptr) = best_region {
-            let region = self.free_regions.remove(&ptr).unwrap();
-            debug_assert_eq!(region.stream_id, stream_id);
-
-            // If region is larger, return remainder to free list
-            if region.size > requested {
-                self.free_regions.insert(
-                    ptr + requested as u64,
-                    FreeRegion {
-                        size: region.size - requested,
-                        event: region.event,
-                        stream_id,
-                        id: region.id,
-                    },
-                );
+        match self.defragment(requested, stream_id)? {
+            DefragResult::Satisfied(ptr) => {
+                self.consume_region(ptr, requested, stream_id);
+                Ok(PoolAllocResult::Allocated(ptr as *mut c_void))
             }
-
-            self.used_regions.insert(ptr, requested);
-            return Ok(ptr as *mut c_void);
+            DefragResult::NeedMore(missing) => Ok(PoolAllocResult::NeedsGrowth(
+                self.plan_growth(missing, stream_id),
+            )),
         }
-
-        Err(MemoryError::OutOfMemory {
-            requested,
-            available: self.free_regions.values().map(|r| r.size).sum(),
-        })
     }
 
     /// Phase 1: Try to find a suitable free region without defragmentation
@@ -195,6 +239,25 @@ impl VirtualMemoryPool {
                 region.stream_id = stream_id;
                 *addr
             })
+    }
+
+    fn consume_region(&mut self, ptr: CUdeviceptr, requested: usize, stream_id: CudaStreamId) {
+        let region = self.free_regions.remove(&ptr).unwrap();
+        debug_assert_eq!(region.stream_id, stream_id);
+
+        if region.size > requested {
+            self.free_regions.insert(
+                ptr + requested as u64,
+                FreeRegion {
+                    size: region.size - requested,
+                    event: region.event,
+                    stream_id,
+                    id: region.id,
+                },
+            );
+        }
+
+        self.used_regions.insert(ptr, requested);
     }
 
     /// Frees a pointer and returns the size of the freed memory.
@@ -255,17 +318,49 @@ impl VirtualMemoryPool {
         );
     }
 
+    fn plan_growth(&mut self, missing: usize, stream_id: CudaStreamId) -> VmPoolGrowPlan {
+        debug_assert!(missing > 0);
+        let num_pages = (missing + self.page_size - 1) / self.page_size;
+        let start = self.curr_end;
+        self.curr_end += (num_pages * self.page_size) as u64;
+
+        VmPoolGrowPlan {
+            start,
+            num_pages,
+            page_size: self.page_size,
+            device_id: self.device_id,
+            stream_id,
+        }
+    }
+
+    pub(super) fn complete_growth(
+        &mut self,
+        plan: &VmPoolGrowPlan,
+        handles: Vec<CUmemGenericAllocationHandle>,
+    ) -> Result<(), MemoryError> {
+        debug_assert_eq!(handles.len(), plan.num_pages);
+        let mut addr = plan.start;
+        for handle in handles {
+            self.active_pages.insert(addr, handle);
+            addr += self.page_size as u64;
+        }
+        self.free_region_insert(plan.start, plan.total_size(), plan.stream_id);
+        tracing::info!(
+            "GPU mem: VPMM allocated {} bytes on stream {}. Total allocated: {}",
+            ByteSize::b(plan.total_size() as u64),
+            plan.stream_id,
+            ByteSize::b(self.memory_usage() as u64)
+        );
+        Ok(())
+    }
+
     /// Defragments the pool by consolidating free regions at the end of virtual address space.
     /// Remaps pages to create one large contiguous free region.
-    fn defragment_or_create_new_pages(
+    fn defragment(
         &mut self,
         requested: usize,
         stream_id: CudaStreamId,
-    ) -> Result<Option<CUdeviceptr>, MemoryError> {
-        if requested == 0 {
-            return Ok(None);
-        }
-
+    ) -> Result<DefragResult, MemoryError> {
         tracing::debug!(
             "VPMM: Defragging or creating new pages: requested={}, stream_id={}",
             ByteSize::b(requested as u64),
@@ -389,44 +484,11 @@ impl VirtualMemoryPool {
 
         self.remap_regions(to_defrag, stream_id)?;
         if accumulated_size >= requested {
-            return Ok(Some(defrag_start));
+            return Ok(DefragResult::Satisfied(defrag_start));
         }
 
-        // 2.c. Create new pages
-        let allocate_start = self.curr_end;
-        let mut allocated_size = 0;
-        while accumulated_size < requested {
-            let handle = unsafe {
-                match vpmm_create_physical(self.device_id, self.page_size) {
-                    Ok(handle) => handle,
-                    Err(e) => {
-                        if e.is_out_of_memory() {
-                            return Err(MemoryError::OutOfMemory {
-                                requested,
-                                available: accumulated_size,
-                            });
-                        } else {
-                            return Err(MemoryError::from(e));
-                        }
-                    }
-                }
-            };
-            unsafe { vpmm_map(self.curr_end, self.page_size, handle)? };
-            self.active_pages.insert(self.curr_end, handle);
-            self.curr_end += self.page_size as u64;
-            allocated_size += self.page_size;
-            accumulated_size += self.page_size;
-        }
-        tracing::info!(
-            "GPU mem: VPMM allocated {} bytes on stream {}. Total allocated: {}",
-            ByteSize::b(allocated_size as u64),
-            stream_id,
-            ByteSize::b(self.memory_usage() as u64)
-        );
-        unsafe { vpmm_set_access(allocate_start, allocated_size, self.device_id)? };
-        self.free_region_insert(allocate_start, allocated_size, stream_id);
-
-        Ok(Some(defrag_start))
+        let missing = requested - accumulated_size;
+        Ok(DefragResult::NeedMore(missing))
     }
 
     fn remap_regions(
@@ -502,20 +564,23 @@ impl Default for VirtualMemoryPool {
             }
             Err(_) => 0,
         };
-        if let Err(e) = pool.defragment_or_create_new_pages(
-            initial_pages * pool.page_size,
-            current_stream_id().unwrap(),
-        ) {
-            // Check how much memory is available
-            let mut free_mem = 0usize;
-            let mut total_mem = 0usize;
-            unsafe {
-                cudaMemGetInfo(&mut free_mem, &mut total_mem);
+        if initial_pages > 0 {
+            let stream_id = current_stream_id().unwrap();
+            let plan = pool.plan_growth(initial_pages * pool.page_size, stream_id);
+            if let Err(e) = (|| {
+                let handles = plan.execute()?;
+                pool.complete_growth(&plan, handles)
+            })() {
+                let mut free_mem = 0usize;
+                let mut total_mem = 0usize;
+                unsafe {
+                    cudaMemGetInfo(&mut free_mem, &mut total_mem);
+                }
+                panic!(
+                    "Error:{:?}\nPool: pages={}, page_size={}\nMemory: free_mem={}, total_mem={}",
+                    e, initial_pages, pool.page_size, free_mem, total_mem
+                );
             }
-            panic!(
-                "Error:{:?}\nPool: pages={}, page_size={}\nMemory: free_mem={}, total_mem={}",
-                e, initial_pages, pool.page_size, free_mem, total_mem
-            );
         }
         pool
     }
