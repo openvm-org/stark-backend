@@ -386,6 +386,21 @@ mod poseidon2_merkle_tree {
             }
         }
 
+        /// # Safety
+        /// - Caller must ensure that `digest_layers` are correctly constructed Merkle hashes for
+        ///   the Merkle tree.
+        pub unsafe fn from_raw_parts(
+            backing_matrix: ColMajorMatrix<EF>,
+            digest_layers: Vec<Vec<Digest>>,
+            rows_per_query: usize,
+        ) -> Self {
+            Self {
+                backing_matrix,
+                digest_layers,
+                rows_per_query,
+            }
+        }
+
         /// Returns the ordered set of opened rows for the given query index.
         /// The rows are { query_idx + t * query_stride() } for t in 0..rows_per_query.
         pub fn get_opened_rows(&self, index: usize) -> Vec<Vec<EF>> {
