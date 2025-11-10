@@ -14,10 +14,10 @@ use stark_backend_v2::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::*,
     prover::{
-        ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2, DeviceDataTransporterV2,
-        DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MatrixView, MultiRapProver,
-        OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
-        prove_zerocheck_and_logup,
+        AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
+        DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MatrixView,
+        MultiRapProver, OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2,
+        TraceCommitterV2, prove_zerocheck_and_logup,
         stacked_pcs::{MerkleTree, StackedPcsData},
         stacked_reduction::prove_stacked_opening_reduction,
         whir::WhirProver,
@@ -270,6 +270,21 @@ pub fn transport_committed_trace_data_to_host(
         commitment,
         data: Arc::new(pcs_data),
         height,
+    }
+}
+
+pub fn transport_air_proving_ctx_to_device(
+    cpu_ctx: AirProvingContextV2<CpuBackendV2>,
+) -> AirProvingContextV2<GpuBackendV2> {
+    assert!(
+        cpu_ctx.cached_mains.is_empty(),
+        "CPU to GPU transfer of cached traces not supported"
+    );
+    let trace = transport_matrix_h2d_col_major(&cpu_ctx.common_main).unwrap();
+    AirProvingContextV2 {
+        cached_mains: vec![],
+        common_main: trace,
+        public_values: cpu_ctx.public_values,
     }
 }
 
