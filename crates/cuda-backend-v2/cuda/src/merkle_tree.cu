@@ -1,4 +1,5 @@
 #include "fp.h"
+#include "fpext.h"
 #include "launcher.cuh"
 #include "poseidon2.cuh"
 #include <cstddef>
@@ -42,6 +43,45 @@ __global__ void poseidon2_row_hashes_kernel(
     }
 }
 
+__global__ void poseidon2_row_hashes_ext_kernel(
+    digest_t *out,
+    const FpExt *matrix,
+    size_t width,
+    size_t height
+) {
+    uint32_t row = blockDim.x * blockIdx.x + threadIdx.x;
+    if (row >= height) {
+        return;
+    }
+
+    size_t used = 0;
+    Fp cells[CELLS];
+    for (int i = 0; i < CELLS; i++) {
+        cells[i] = Fp(0);
+    }
+
+    for (int col = 0; col < width; col++) {
+#pragma unroll
+        // Extension field degree is 4
+        for (int i = 0; i < 4; i++) {
+            cells[used++] = matrix[col * height + row].elems[i];
+        }
+        if (used == CELLS_RATE) {
+            poseidon2::poseidon2_mix(cells);
+            used = 0;
+        }
+    }
+
+    if (used != 0) {
+        poseidon2::poseidon2_mix(cells);
+    }
+
+    for (int i = 0; i < CELLS_OUT; i++) {
+        out[row].cells[i] = cells[i];
+    }
+}
+static_assert(CELLS_RATE % 4 == 0, "CELLS_RATE must be multiple of FpExt degree (4)");
+
 // Striding keeps memory coalesced with two cache lines within a warp
 __global__ void poseidon2_strided_compress_layer_kernel(
     digest_t *output,
@@ -74,6 +114,17 @@ __global__ void poseidon2_strided_compress_layer_kernel(
 extern "C" int _poseidon2_row_hashes(digest_t *out, const Fp *matrix, size_t width, size_t height) {
     auto [grid, block] = kernel_launch_params(height);
     poseidon2_row_hashes_kernel<<<grid, block>>>(out, matrix, width, height);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _poseidon2_row_hashes_ext(
+    digest_t *out,
+    const FpExt *matrix,
+    size_t width,
+    size_t height
+) {
+    auto [grid, block] = kernel_launch_params(height);
+    poseidon2_row_hashes_ext_kernel<<<grid, block>>>(out, matrix, width, height);
     return CHECK_KERNEL();
 }
 
