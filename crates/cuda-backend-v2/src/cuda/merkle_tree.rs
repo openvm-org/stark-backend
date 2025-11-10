@@ -1,27 +1,32 @@
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 
-use crate::{Digest, F};
+use crate::{Digest, EF, F};
 
 extern "C" {
     fn _poseidon2_row_hashes(
-        out: *mut std::ffi::c_void,
-        matrix: *const std::ffi::c_void,
+        out: *mut Digest,
+        matrix: *const F,
         width: usize,
         height: usize,
     ) -> i32;
 
-    // TODO EF version
+    fn _poseidon2_row_hashes_ext(
+        out: *mut Digest,
+        matrix: *const EF,
+        width: usize,
+        height: usize,
+    ) -> i32;
 
     fn _poseidon2_strided_compress_layer(
-        output: *mut std::ffi::c_void,
-        prev_layer: *const std::ffi::c_void,
+        output: *mut Digest,
+        prev_layer: *const Digest,
         output_size: usize,
         stride: usize,
     ) -> i32;
 
     fn _poseidon2_adjacent_compress_layer(
-        output: *mut std::ffi::c_void,
-        prev_layer: *const std::ffi::c_void,
+        output: *mut Digest,
+        prev_layer: *const Digest,
         output_size: usize,
     ) -> i32;
 }
@@ -42,8 +47,34 @@ pub unsafe fn poseidon2_row_hashes(
     debug_assert!(matrix.len() >= width * height);
     debug_assert!(out.len() >= height);
     CudaError::from_result(_poseidon2_row_hashes(
-        out.as_mut_raw_ptr(),
-        matrix.as_raw_ptr(),
+        out.as_mut_ptr(),
+        matrix.as_ptr(),
+        width,
+        height,
+    ))
+}
+
+/// Computes row hashes of `matrix` of dimensions `width` x `height` using Poseidon2 and writes the
+/// digests to `out`. Memory layout expects `matrix` to be column major in `EF`, and `out` is buffer
+/// of `Digest`. Digests are written in order of rows.
+///
+/// Note: `matrix` column major in `EF` means that `EF::D` base field elements are contiguous in
+/// memory.
+///
+/// # Safety
+/// - `out` must have length `>= height` in `Digest` elements.
+/// - `out` and `matrix` must be non-overlapping.
+pub unsafe fn poseidon2_row_hashes_ext(
+    out: &mut DeviceBuffer<Digest>,
+    matrix: &DeviceBuffer<EF>,
+    width: usize,
+    height: usize,
+) -> Result<(), CudaError> {
+    debug_assert!(matrix.len() >= width * height);
+    debug_assert!(out.len() >= height);
+    CudaError::from_result(_poseidon2_row_hashes_ext(
+        out.as_mut_ptr(),
+        matrix.as_ptr(),
         width,
         height,
     ))
@@ -68,8 +99,8 @@ pub unsafe fn poseidon2_strided_compress_layer(
     debug_assert!(output.len() >= output_size);
     debug_assert!(prev_layer.len() >= output_size * 2);
     CudaError::from_result(_poseidon2_strided_compress_layer(
-        output.as_mut_raw_ptr(),
-        prev_layer.as_raw_ptr(),
+        output.as_mut_ptr(),
+        prev_layer.as_ptr(),
         output_size,
         stride,
     ))
@@ -90,8 +121,8 @@ pub unsafe fn poseidon2_adjacent_compress_layer(
     debug_assert!(output.len() >= output_size);
     debug_assert!(prev_layer.len() >= output_size * 2);
     CudaError::from_result(_poseidon2_adjacent_compress_layer(
-        output.as_mut_raw_ptr(),
-        prev_layer.as_raw_ptr(),
+        output.as_mut_ptr(),
+        prev_layer.as_ptr(),
         output_size,
     ))
 }

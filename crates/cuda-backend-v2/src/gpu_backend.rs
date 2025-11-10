@@ -28,6 +28,7 @@ use crate::{
     D_EF, Digest, EF, F, GpuDeviceV2,
     logup_zerocheck::LogupZerocheckGpu,
     merkle_tree::MerkleTreeGpu,
+    poly::PleMatrix,
     stacked_pcs::{StackedPcsDataGpu, stacked_commit},
     stacked_reduction::StackedReductionGpu,
 };
@@ -176,7 +177,8 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
             matrix,
             tree,
         } = pcs_data;
-        let d_matrix = self.transport_matrix_to_device(matrix);
+        let d_matrix_evals = self.transport_matrix_to_device(matrix);
+        let d_matrix = PleMatrix::from_evals(self.config.l_skip, d_matrix_evals).unwrap();
         let d_tree = transport_merkle_tree_to_device(tree).unwrap();
 
         StackedPcsDataGpu {
@@ -236,14 +238,23 @@ pub fn transport_merkle_tree_to_device<F, Digest>(
 
 pub fn transport_merkle_tree_to_host(tree: &MerkleTreeGpu<F, Digest>) -> MerkleTree<F, Digest> {
     let backing_matrix = transport_matrix_d2h_col_major(&tree.backing_matrix).unwrap();
-    MerkleTree::<F, Digest>::new(backing_matrix, tree.rows_per_query)
+    let digest_layers = tree
+        .digest_layers
+        .iter()
+        .map(|layer| layer.to_host().unwrap())
+        .collect_vec();
+    // Safety: assuming the tree is properly constructed on device, the layers are correct after D2H
+    // transfer.
+    unsafe {
+        MerkleTree::<F, Digest>::from_raw_parts(backing_matrix, digest_layers, tree.rows_per_query)
+    }
 }
 
 pub fn transport_stacked_pcs_data_to_host(
     pcs_data: &StackedPcsDataGpu<F, Digest>,
 ) -> StackedPcsData<F, Digest> {
     let layout = pcs_data.layout.clone();
-    let matrix = transport_matrix_d2h_col_major(&pcs_data.matrix).unwrap();
+    let matrix = transport_matrix_d2h_col_major(&pcs_data.matrix.evals).unwrap();
     let tree = transport_merkle_tree_to_host(&pcs_data.tree);
 
     StackedPcsData::new(layout, matrix, tree)
