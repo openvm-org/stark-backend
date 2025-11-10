@@ -23,6 +23,7 @@ use crate::cuda::sumcheck::{
 /// - Round 1 (odd):  reads buffer_b, writes buffer_a
 /// - Final result in buffer determined by parity of n
 /// - Memory footprint: ~1.5 * evals.len() * sizeof(EF)
+#[allow(dead_code)]
 pub fn sumcheck_multilinear_gpu<F: Field, TS: FiatShamirTranscript>(
     transcript: &mut TS,
     evals: &[F],
@@ -148,6 +149,7 @@ where
 /// - Memory footprint: if evals.len() = 2^(l_skip +n), then 2 * evals.len() * sizeof(F) + 1.5 * 2^n
 ///   * sizeof(EF)
 /// NOTE: batch_ntt expects a concrete type BabyBear, so I removed generic type parameters for now
+#[allow(dead_code)]
 pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
     transcript: &mut TS,
     l_skip: usize,

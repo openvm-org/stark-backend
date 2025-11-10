@@ -1,3 +1,4 @@
+/// Rust bindings for CUDA kernels
 mod cuda;
 mod device;
 mod engine;
@@ -5,6 +6,7 @@ mod error;
 mod gpu_backend;
 pub mod logup_zerocheck;
 pub mod merkle_tree;
+pub mod poly;
 pub mod stacked_pcs;
 pub mod stacked_reduction;
 mod sumcheck;

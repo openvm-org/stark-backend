@@ -16,7 +16,8 @@ use stark_backend_v2::prover::stacked_pcs::StackedLayout;
 use tracing::instrument;
 
 use crate::{
-    Digest, F, ProverError, cuda::poly::ple_interpolate_stage, merkle_tree::MerkleTreeGpu,
+    Digest, F, ProverError, cuda::poly::mle_interpolate_stage, merkle_tree::MerkleTreeGpu,
+    poly::PleMatrix,
 };
 
 #[derive(derive_new::new)]
@@ -24,7 +25,7 @@ pub struct StackedPcsDataGpu<F, Digest> {
     /// Layout of the unstacked collection of matrices within the stacked matrix.
     pub layout: StackedLayout,
     /// The stacked matrix with height `2^{l_skip + n_stack}`.
-    pub matrix: DeviceMatrix<F>,
+    pub matrix: PleMatrix<F>,
     /// Merkle tree of the Reed-Solomon codewords of the stacked matrix.
     /// Depends on `k_whir` parameter.
     pub tree: MerkleTreeGpu<F, Digest>,
@@ -39,10 +40,11 @@ pub fn stacked_commit(
     traces: &[&DeviceMatrix<F>],
 ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
     let (q_trace, layout) = stacked_matrix(l_skip, n_stack, traces)?;
-    let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace)?;
-    let tree = MerkleTreeGpu::new(rs_matrix, 1 << k_whir)?;
+    let q_matrix = PleMatrix::from_evals(l_skip, q_trace)?;
+    let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_matrix)?;
+    let tree = MerkleTreeGpu::<F, Digest>::new(rs_matrix, 1 << k_whir)?;
     let root = tree.root();
-    let data = StackedPcsDataGpu::new(layout, q_trace, tree);
+    let data = StackedPcsDataGpu::new(layout, q_matrix, tree);
     Ok((root, data))
 }
 
@@ -119,18 +121,15 @@ pub fn stacked_matrix<F: Field>(
 pub fn rs_code_matrix(
     l_skip: usize,
     log_blowup: usize,
-    eval_matrix: &DeviceMatrix<F>,
+    matrix: &PleMatrix<F>,
 ) -> Result<DeviceMatrix<F>, ProverError> {
-    let height = eval_matrix.height();
+    let height = matrix.height();
     debug_assert!(height >= (1 << l_skip));
-    let width = eval_matrix.width();
+    let width = matrix.width();
     let codeword_height = height.checked_shl(log_blowup as u32).unwrap();
-    // D2D copy so we can do in-place Ple::from_evals
-    let mut ple_coeffs = eval_matrix.buffer().device_copy()?;
-    // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column: (width
-    // cols) * (height / 2^l_skip chunks per col). Use natural ordering.
-    let num_uni_poly = (width * (height >> l_skip)) as u32;
-    batch_ntt(&ple_coeffs, l_skip as u32, 0, num_uni_poly, true, true);
+    // PERF[jpw]: this D2D copy can be avoided if we first batch_expand_pad and then handle the
+    // padding in mle_interpolate_stag
+    let mut ple_coeffs = matrix.mixed.device_copy()?;
     let n = log2_strict_usize(height) - l_skip;
     let total_len = ple_coeffs.len();
     debug_assert_eq!(total_len, height * width);
@@ -142,7 +141,7 @@ pub fn rs_code_matrix(
         debug_assert_eq!(height % (span as usize), 0);
         // SAFETY: `ple_coeffs` is properly initialized and step is in bounds.
         unsafe {
-            ple_interpolate_stage(&mut ple_coeffs, step)?;
+            mle_interpolate_stage(&mut ple_coeffs, step, true)?;
         }
     }
     let codewords = DeviceBuffer::<F>::with_capacity(codeword_height * width);

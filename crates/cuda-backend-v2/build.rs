@@ -8,7 +8,9 @@ fn main() {
         exit(1);
     }
 
-    let common = CudaBuilder::new().include_from_dep("DEP_CUDA_COMMON_INCLUDE");
+    let common = CudaBuilder::new()
+        .include_from_dep("DEP_CUDA_COMMON_INCLUDE")
+        .include("cuda/include");
 
     common.emit_link_directives();
 
