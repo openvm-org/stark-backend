@@ -228,9 +228,6 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
                         b_int >>= 1;
                     }
                     stacked_idx += 1 << (l_skip + n_lift);
-                    if stacked_idx == 1 << (l_skip + n_logup) {
-                        stacked_idx = 0;
-                    }
                     eval_eq_mle(&xi[l_skip + n_lift..l_skip + n_logup], &b_vec)
                 })
                 .collect_vec()
