@@ -139,17 +139,19 @@ pub fn evals_eq_hypercube<F: Field>(x: &[F]) -> Vec<F> {
     let mut out = F::zero_vec(1 << n);
     out[0] = F::ONE;
     for (i, &x_i) in x.iter().enumerate() {
-        for y in (0..(1 << i)).rev() {
-            // Don't overwrite in y = 0 case
-            out[y | (1 << i)] = out[y] * x_i;
-            out[y] *= F::ONE - x_i;
-        }
+        let (los, his) = out[..2 << i].split_at_mut(1 << i);
+        los.par_iter_mut()
+            .zip(his.par_iter_mut())
+            .for_each(|(lo, hi)| {
+                *hi = *lo * x_i;
+                *lo *= F::ONE - x_i;
+            })
     }
     out
 }
 
-/// Given vector `x` in `F^n`, returns a concatenation of `evals_eq_hypercube(x[..n])` for all valid `n` in order.
-/// Also, the order of masks is of different endianness.
+/// Given vector `x` in `F^n`, returns a concatenation of `evals_eq_hypercube(x[..n])` for all valid
+/// `n` in order. Also, the order of masks is of different endianness.
 pub fn evals_eq_hypercubes<'a, F: Field>(n: usize, x: impl IntoIterator<Item = &'a F>) -> Vec<F> {
     let mut out = F::zero_vec((2 << n) - 1);
     out[0] = F::ONE;
