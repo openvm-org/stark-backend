@@ -1,53 +1,8 @@
 #include "fpext.h"
 #include "launcher.cuh"
+#include "sumcheck.cuh"
 
 namespace plain_sumcheck {
-
-// Warp-level reduction: sums FpExt values across threads in a warp (32 threads)
-// Uses shuffle instructions for efficient communication within a warp
-__device__ FpExt warp_reduce_sum(FpExt val) {
-    unsigned mask = __activemask();
-
-    for (int offset = 16; offset > 0; offset /= 2) {
-        FpExt other;
-        other.elems[0] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[0].asRaw(), offset));
-        other.elems[1] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[1].asRaw(), offset));
-        other.elems[2] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[2].asRaw(), offset));
-        other.elems[3] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[3].asRaw(), offset));
-        val = val + other;
-    }
-    return val;
-}
-
-// Block-level reduction: sums FpExt values across all threads in a block
-// Two-stage process: warp-level reduction, then inter-warp reduction
-// Returns result in all threads of first warp (typically only thread 0 uses it)
-__device__ FpExt block_reduce_sum(FpExt val, FpExt* shared) {
-    int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int lane_id = tid % 32;
-    int num_warps = (blockDim.x + 31) / 32; // Round up for blocks < 32 threads
-
-    // Stage 1: Each warp reduces its values
-    val = warp_reduce_sum(val);
-    
-    // Lane 0 of each warp writes result to shared memory
-    if (lane_id == 0) {
-        shared[warp_id] = val;
-    }
-    __syncthreads();
-    
-    // Stage 2: First warp reduces the per-warp results
-    FpExt zero = {0, 0, 0, 0};
-    if (warp_id == 0) {
-        // Only the first warp participates in the second reduction. Within that warp we
-        // reuse the lane id to index the number of warps stored in shared memory.
-        FpExt warp_val = (lane_id < num_warps) ? shared[lane_id] : zero;
-        val = warp_reduce_sum(warp_val);
-    }
-    
-    return val;
-}
 
 // Reduces evaluations over x and column dimensions for PLE round 0
 // Input:  [num_x * num_cols * large_domain_size] - evaluations on large domain
@@ -150,7 +105,7 @@ __global__ void sumcheck_mle_round_kernel(
     for (int x_int = 0; x_int < d; x_int++) {
         for (int wd = 0; wd < WD; wd++) {
             int idx = x_int * WD + wd;
-            FpExt reduced = block_reduce_sum(local_sums[idx], shared);
+            FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
             
             if (threadIdx.x == 0) {
                 block_sums[blockIdx.x * d * WD + idx] = reduced;
@@ -187,7 +142,7 @@ __global__ void reduce_blocks_sumcheck(
     }
     
     // Block-level reduction
-    sum = block_reduce_sum(sum, shared);
+    sum = sumcheck::block_reduce_sum(sum, shared);
     
     if (tid == 0) {
         output[out_idx] = sum;

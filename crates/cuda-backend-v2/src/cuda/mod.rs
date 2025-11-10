@@ -1,10 +1,12 @@
 #![allow(clippy::missing_safety_doc)]
 
-use openvm_cuda_backend::prelude::EF;
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+
+use crate::EF;
 
 pub mod merkle_tree;
 pub mod poly;
+pub mod whir;
 
 pub mod sumcheck {
     use super::*;
