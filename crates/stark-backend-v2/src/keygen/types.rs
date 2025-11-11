@@ -6,9 +6,13 @@
 use std::sync::Arc;
 
 use openvm_stark_backend::{
-    air_builders::symbolic::SymbolicConstraintsDag,
+    air_builders::symbolic::{
+        SymbolicConstraintsDag, SymbolicExpressionNode,
+        symbolic_variable::{Entry, SymbolicVariable},
+    },
     keygen::types::{LinearConstraint, TraceWidth},
 };
+use p3_field::Field;
 use serde::{Deserialize, Serialize};
 
 use crate::{Digest, F, SystemParams, prover::stacked_pcs::StackedPcsData};
@@ -51,6 +55,8 @@ pub struct StarkVerifyingKeyV2<F, Digest> {
     pub max_constraint_degree: u8,
     /// True means this AIR must have non-empty trace.
     pub is_required: bool,
+    /// Symbolic variables referenced unreferenced by the AIR.
+    pub unused_variables: Vec<SymbolicVariable<F>>,
 }
 
 /// Common verifying key for multiple AIRs.
@@ -119,6 +125,17 @@ impl<Val, Com> StarkVerifyingKeyV2<Val, Com> {
     pub fn num_interactions(&self) -> usize {
         self.symbolic_constraints.interactions.len()
     }
+
+    /// Converts from a main part index (as used by the constraint DAG) to the
+    /// commitment part indexing scheme that includes preprocessed trace.
+    pub fn dag_main_part_index_to_commit_index(&self, index: usize) -> usize {
+        // In the dag, common main is the final part index.
+        if index == self.num_cached_mains() {
+            0
+        } else {
+            index + 1 + self.preprocessed_data.is_some() as usize
+        }
+    }
 }
 
 impl MultiStarkProvingKeyV2 {
@@ -137,4 +154,56 @@ impl MultiStarkProvingKeyV2 {
             max_constraint_degree: self.max_constraint_degree,
         }
     }
+}
+
+pub(crate) fn find_unused_vars<F: Field>(
+    constraints: &SymbolicConstraintsDag<F>,
+    width: &TraceWidth,
+) -> Vec<SymbolicVariable<F>> {
+    let preprocessed_width = width.preprocessed.unwrap_or(0);
+    let mut preprocessed_present = vec![vec![false; 2]; preprocessed_width];
+
+    let mut main_present = vec![];
+    for width in width.main_widths() {
+        main_present.push(vec![vec![false; 2]; width]);
+    }
+
+    for node in &constraints.constraints.nodes {
+        let SymbolicExpressionNode::Variable(var) = node else {
+            continue;
+        };
+
+        match var.entry {
+            Entry::Preprocessed { offset } => {
+                preprocessed_present[var.index][offset] = true;
+            }
+            Entry::Main { part_index, offset } => {
+                main_present[part_index][var.index][offset] = true;
+            }
+            Entry::Public => {}
+            Entry::Challenge | Entry::Exposed | Entry::Permutation { .. } => unreachable!(),
+        }
+    }
+
+    let mut missing = vec![];
+    for (index, presents) in preprocessed_present.iter().enumerate() {
+        for (offset, present) in presents.iter().enumerate() {
+            if !present {
+                missing.push(SymbolicVariable::new(Entry::Preprocessed { offset }, index));
+            }
+        }
+    }
+    for (part_index, present_per_part) in main_present.iter().enumerate() {
+        for (index, presents) in present_per_part.iter().enumerate() {
+            for (offset, present) in presents.iter().enumerate() {
+                if !present {
+                    missing.push(SymbolicVariable::new(
+                        Entry::Main { part_index, offset },
+                        index,
+                    ));
+                }
+            }
+        }
+    }
+    missing
 }
