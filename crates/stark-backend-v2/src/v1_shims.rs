@@ -17,7 +17,7 @@ use crate::{
     ChipV2, F, SystemParams,
     keygen::types::{
         MultiStarkProvingKeyV2, StarkProvingKeyV2, StarkVerifyingKeyV2, StarkVerifyingParamsV2,
-        VerifierSinglePreprocessedData,
+        VerifierSinglePreprocessedData, find_unused_vars,
     },
     prover::{
         AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2, ProverBackendV2,
@@ -72,12 +72,14 @@ impl StarkProvingKeyV2 {
             num_public_values: pk.vk.params.num_public_values,
         };
         let symbolic_constraints = pk.vk.symbolic_constraints;
+        let unused_variables = find_unused_vars(&symbolic_constraints, &vparams.width);
         let vk = StarkVerifyingKeyV2 {
             preprocessed_data: preprocessed_vdata,
             params: vparams,
             symbolic_constraints,
             max_constraint_degree: pk.vk.quotient_degree + 1,
             is_required: false, // no AIRs are required in v1
+            unused_variables,
         };
         Self {
             air_name: pk.air_name,
