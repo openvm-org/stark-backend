@@ -1,4 +1,8 @@
-use openvm_cuda_common::{copy::MemCopyD2H, d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{
+    copy::MemCopyD2H,
+    d_buffer::DeviceBuffer,
+    error::{CudaError, check},
+};
 
 use crate::{D_EF, EF, F, ProverError};
 
@@ -29,6 +33,13 @@ extern "C" {
 
     fn _eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32) -> i32;
 
+    fn _eq_hypercube_nonoverlapping_stage_ext(
+        out: *mut EF,
+        input: *const EF,
+        x_i: EF,
+        step: u32,
+    ) -> i32;
+
     // `x` must be **device** buffer
     fn _batch_eq_hypercube_stage(
         out: *mut F,
@@ -44,6 +55,8 @@ extern "C" {
     // `out` must be device ptr
     fn _eval_poly_ext_at_point(base_coeffs: *const F, coeff_len: usize, x: EF, out: *mut EF)
     -> i32;
+
+    fn _vector_scalar_multiply_ext(vec: *mut EF, scalar: EF, length: u32) -> i32;
 }
 
 /// Does in-place interpolation on `buffer` from eval to coeff form in one coordinate, assuming the
@@ -62,7 +75,7 @@ pub unsafe fn mle_interpolate_stage(
     step: u32,
     is_eval_to_coeff: bool,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_mle_interpolate_stage(
+    check(_mle_interpolate_stage(
         buffer.as_mut_ptr(),
         buffer.len(),
         step,
@@ -76,7 +89,7 @@ pub unsafe fn mle_interpolate_stage_ext(
     step: u32,
     is_eval_to_coeff: bool,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_mle_interpolate_stage_ext(
+    check(_mle_interpolate_stage_ext(
         buffer.as_mut_ptr(),
         buffer.len(),
         step,
@@ -101,7 +114,7 @@ pub unsafe fn algebraic_batch_matrices(
     height: usize,
     num_mats: usize,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_algebraic_batch_matrices(
+    check(_algebraic_batch_matrices(
         output.as_mut_ptr(),
         mat_ptrs.as_ptr(),
         mu_powers.as_ptr(),
@@ -122,7 +135,31 @@ pub unsafe fn algebraic_batch_matrices(
 /// # Safety
 /// - `out` is **device** pointer with length `>= 2 * step`.
 pub unsafe fn eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32) -> Result<(), CudaError> {
-    CudaError::from_result(_eq_hypercube_stage_ext(out, x_i, step))
+    check(_eq_hypercube_stage_ext(out, x_i, step))
+}
+
+/// Performs an update of:
+/// ```text
+/// out[i + step] = input[i] * x_i
+/// out[i] = input[i] * (1 - x_i)
+/// ```
+/// for `i` in `0..step`.
+///
+/// # Safety
+/// - `out` is **device** pointer with length `>= 2 * step`.
+/// - `input` is **device** pointer with length `>= step`.
+/// - It is expected that `out` and `input` do not overlap in device memory. This kernel should
+///   still work properly if `out = input`, but in that case one should use [eq_hypercube_stage_ext]
+///   instead.
+pub unsafe fn eq_hypercube_nonoverlapping_stage_ext(
+    out: *mut EF,
+    input: *const EF,
+    x_i: EF,
+    step: u32,
+) -> Result<(), CudaError> {
+    check(_eq_hypercube_nonoverlapping_stage_ext(
+        out, input, x_i, step,
+    ))
 }
 
 /// Same as `eq_hypercube_stage`, over base field, but computes `eq` evals in batch for multiple
@@ -140,7 +177,7 @@ pub unsafe fn batch_eq_hypercube_stage(
     let width = x.len() as u32;
     debug_assert!(step < height);
     debug_assert!(out.len() <= (width * height) as usize);
-    CudaError::from_result(_batch_eq_hypercube_stage(
+    check(_batch_eq_hypercube_stage(
         out.as_mut_ptr(),
         x.as_ptr(),
         step,
@@ -156,7 +193,7 @@ pub unsafe fn batch_eq_hypercube_stage(
 #[allow(dead_code)]
 pub unsafe fn eval_poly_at_point(coeffs: &DeviceBuffer<F>, x: F) -> Result<F, ProverError> {
     let d_out = DeviceBuffer::<F>::with_capacity(1);
-    CudaError::from_result(_eval_poly_at_point(
+    check(_eval_poly_at_point(
         coeffs.as_ptr(),
         coeffs.len(),
         x,
@@ -178,7 +215,7 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
 ) -> Result<EF, ProverError> {
     debug_assert!(base_coeffs.len() >= coeff_len * D_EF);
     let d_out = DeviceBuffer::<EF>::with_capacity(1);
-    CudaError::from_result(_eval_poly_ext_at_point(
+    check(_eval_poly_ext_at_point(
         base_coeffs.as_ptr(),
         coeff_len,
         x,
@@ -186,4 +223,16 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
     ))?;
     let out = d_out.to_host()?;
     Ok(out[0])
+}
+
+/// Scalar multiplication of a vector in-place by `scalar.
+pub fn vector_scalar_multiply_ext(vec: &mut DeviceBuffer<EF>, scalar: EF) -> Result<(), CudaError> {
+    // SAFETY: `vec` is allocated for `vec.len()` so scalar multiplication is safe.
+    unsafe {
+        check(_vector_scalar_multiply_ext(
+            vec.as_mut_ptr(),
+            scalar,
+            vec.len() as u32,
+        ))
+    }
 }
