@@ -12,7 +12,7 @@
 namespace {
 
 constexpr uint32_t UNI_THREADS = 32;
-constexpr uint32_t CUBE_THREADS = 32;
+constexpr uint32_t CUBE_THREADS = 16;
 constexpr uint32_t MAX_GRID_DIM = 65535u;
 constexpr int S_DEG = 2;
 
