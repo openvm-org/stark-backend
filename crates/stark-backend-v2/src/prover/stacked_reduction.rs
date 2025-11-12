@@ -286,7 +286,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
             })
             .collect();
         let s_0_coeffs = (0..=s_0_deg)
-            .map(|i| s_0_polys.iter().map(|evals| evals.0[i]).sum::<EF>())
+            .map(|i| s_0_polys.iter().map(|evals| evals.coeffs()[i]).sum::<EF>())
             .collect_vec();
         UnivariatePoly::new(s_0_coeffs)
     }
