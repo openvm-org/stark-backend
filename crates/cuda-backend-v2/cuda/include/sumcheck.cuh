@@ -57,7 +57,7 @@ static __device__ inline FpExt block_reduce_sum(FpExt val, FpExt *shared) {
 //
 // The number of blocks is constant and determined by template parameter D.
 template <int D>
-__global__ void final_reduce_block_sums(
+static __global__ void static_final_reduce_block_sums(
     const FpExt *block_sums, // [num_blocks][D]
     FpExt *output,           // [D]
     uint32_t num_blocks
@@ -77,6 +77,36 @@ __global__ void final_reduce_block_sums(
     // Each thread accumulates subset of blocks
     for (int block_id = tid; block_id < num_blocks; block_id += blockDim.x) {
         sum += block_sums[block_id * D + out_idx];
+    }
+
+    // Block-level reduction
+    sum = block_reduce_sum(sum, shared);
+
+    if (tid == 0) {
+        output[out_idx] = sum;
+    }
+}
+
+// gridDim.x must be set to equal `d`
+static __global__ void final_reduce_block_sums(
+    const FpExt *block_sums, // [num_blocks][d]
+    FpExt *output,           // [d]
+    uint32_t num_blocks
+) {
+    extern __shared__ char smem[];
+    FpExt *shared = (FpExt *)smem;
+
+    int tid = threadIdx.x;
+
+    // blockIdx.x selects which of the D outputs we're computing
+    int out_idx = blockIdx.x;
+    int d = gridDim.x;
+
+    FpExt sum = {0, 0, 0, 0};
+
+    // Each thread accumulates subset of blocks
+    for (int block_id = tid; block_id < num_blocks; block_id += blockDim.x) {
+        sum += block_sums[block_id * d + out_idx];
     }
 
     // Block-level reduction

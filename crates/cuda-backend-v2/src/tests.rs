@@ -189,14 +189,16 @@ fn test_batch_sumcheck_zero_interactions() -> Result<(), BatchConstraintError> {
     Ok(())
 }
 
-#[test]
-fn test_stacked_opening_reduction() -> Result<(), StackedReductionError> {
+#[test_case(9)]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), StackedReductionError> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_gpu_engine_small();
     let params = engine.config();
 
-    let log_trace_degree = 9;
     let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, _vk) = fib.keygen(&engine);
@@ -216,15 +218,6 @@ fn test_stacked_opening_reduction() -> Result<(), StackedReductionError> {
                 .collect_vec(),
         )
     };
-
-    let mut ns: Vec<usize> = Vec::with_capacity(ctx.per_trace.len());
-    for (_, trace) in ctx.common_main_traces() {
-        let trace_height = trace.height();
-        let prism_dim = log2_strict_usize(trace_height);
-        assert!(prism_dim >= params.l_skip);
-        let n = prism_dim - params.l_skip;
-        ns.push(n);
-    }
 
     let omega_skip = F::two_adic_generator(params.l_skip);
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();

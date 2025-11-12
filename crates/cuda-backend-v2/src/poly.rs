@@ -1,3 +1,4 @@
+use getset::Getters;
 use openvm_cuda_backend::{base::DeviceMatrix, ntt::batch_ntt};
 use openvm_cuda_common::{
     copy::{MemCopyD2D, MemCopyH2D},
@@ -8,7 +9,10 @@ use p3_field::FieldAlgebra;
 
 use crate::{
     EF, F, ProverError,
-    cuda::poly::{eq_hypercube_stage_ext, mle_interpolate_stage, mle_interpolate_stage_ext},
+    cuda::poly::{
+        eq_hypercube_nonoverlapping_stage_ext, eq_hypercube_stage_ext, mle_interpolate_stage,
+        mle_interpolate_stage_ext,
+    },
 };
 
 pub struct PleMatrix<F> {
@@ -101,9 +105,64 @@ pub unsafe fn evals_eq_hypercube(out: &mut DeviceBuffer<EF>, xs: &[EF]) -> Resul
     // Use memcpy instead of memset since EF will be in Montgomery form.
     [EF::ONE].copy_to(out)?;
 
-    for i in 0..n {
+    for (i, &x_i) in xs.iter().enumerate() {
         let step = 1 << i;
-        eq_hypercube_stage_ext(out.as_mut_ptr(), xs[i], step)?;
+        eq_hypercube_stage_ext(out.as_mut_ptr(), x_i, step)?;
     }
     Ok(())
+}
+
+/// For a fixed `x` in `F^max_n`, stores the evaluations of `eq_n(x[..n], -)` on hypercube `H_n` for
+/// `n = 0..=max_n`. The evaluations are stored contiguously in a single buffer of length `2^(max_n
+/// + 1)`. We define `eq_0 = 1` always.
+#[derive(Getters)]
+pub struct EqEvalSegments<F> {
+    /// Index 0 should never to read, but it will be initialized to zero.
+    #[getset(get = "pub")]
+    pub(crate) buffer: DeviceBuffer<F>,
+    #[getset(get_copy = "pub")]
+    max_n: usize,
+}
+
+impl<F> EqEvalSegments<F> {
+    /// Returns start pointer for buffer of length `2^n` corresponding to evaluations of `eq(x[..n],
+    /// -)` on `H_n`.
+    pub fn get_ptr(&self, n: usize) -> *const F {
+        assert!(n <= self.max_n);
+        // SAFETY: `buffer` has length `2^{max_n + 1}`
+        unsafe { self.buffer.as_ptr().add(1 << n) }
+    }
+
+    /// # Safety
+    /// Caller must ensure that `buffer` has length `2^{max_n + 1}` and is properly initialized.
+    pub unsafe fn from_raw_parts(buffer: DeviceBuffer<F>, max_n: usize) -> Self {
+        Self { buffer, max_n }
+    }
+}
+
+// Currently only implement kernels for EF.
+impl EqEvalSegments<EF> {
+    /// Creates a new `EqEvalSegments` instance with `max_n = x.len()`.
+    pub fn new(x: &[EF]) -> Result<Self, ProverError> {
+        let max_n = x.len();
+        let mut buffer = DeviceBuffer::with_capacity(2 << max_n);
+        // Index 0 should never to be used, but we initialize it to zero.
+        // Index 1 is set to eq_0 = 1 for initial state
+        [EF::ZERO, EF::ONE].copy_to(&mut buffer)?;
+        // At step i, we populate `eq_{i+1}` starting at offset `2^{i+1}`
+        for (i, &x_i) in x.iter().enumerate() {
+            let step = 1 << i;
+            // SAFETY:
+            // - `buffer` has length `2^{max_n + 1}`
+            // - `2 * 2^{i+1} <= 2^{max_n + 1}` ensures everything is in bounds
+            unsafe {
+                // The `eq_{i+1}` segment starts at offset `2^{i+1}`
+                let dst = buffer.as_mut_ptr().add(2 * step);
+                // The `eq_i` segment starts at offset `2^i`
+                let src = buffer.as_ptr().add(step);
+                eq_hypercube_nonoverlapping_stage_ext(dst, src, x_i, step as u32)?;
+            }
+        }
+        Ok(Self { buffer, max_n })
+    }
 }

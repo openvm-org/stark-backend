@@ -96,8 +96,24 @@ __global__ void eq_hypercube_stage_ext_kernel(FpExt *out, FpExt x_i, uint32_t st
     size_t y = blockIdx.x * blockDim.x + threadIdx.x;
     if (y >= step)
         return;
-    out[y | step] = out[y] * x_i;
-    out[y] *= (FpExt(Fp(1)) - x_i);
+    FpExt hi = out[y] * x_i;
+    out[y | step] = hi;
+    out[y] -= hi; // out[y] = out[y] * (FpExt(Fp(1)) - x_i), saves a multiplication
+}
+
+// Same as eq_hypercube_stage_ext_kernel but does not modify in-place
+__global__ void eq_hypercube_nonoverlapping_stage_ext_kernel(
+    FpExt *out,
+    const FpExt *in,
+    FpExt x_i,
+    uint32_t step
+) {
+    size_t y = blockIdx.x * blockDim.x + threadIdx.x;
+    if (y >= step)
+        return;
+    FpExt hi = in[y] * x_i;
+    out[y | step] = hi;
+    out[y] = in[y] - hi; // save a multiplication
 }
 
 // out is `height x width` column-major matrix of evaluations of eq(x[j], -) on hypercube for j in 0..width
@@ -119,7 +135,18 @@ __global__ void batch_eq_hypercube_stage_kernel(
     out[lo_idx] *= (Fp(1) - x_i);
 }
 
+template <typename Field>
+__global__ void vector_scalar_multiply_kernel(Field *vec, Field scalar, uint32_t length) {
+    size_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tidx >= length)
+        return;
+
+    vec[tidx] *= scalar;
+}
+
+// ============================================================================
 // LAUNCHERS
+// ============================================================================
 
 template <typename Field, bool EvalToCoeff>
 int launch_mle_interpolate_stage(Field *buffer, size_t buffer_len, uint32_t step) {
@@ -184,6 +211,18 @@ extern "C" int _eq_hypercube_stage_ext(FpExt *out, FpExt x_i, uint32_t step) {
     eq_hypercube_stage_ext_kernel<<<grid, block>>>(out, x_i, step);
     return CHECK_KERNEL();
 }
+
+extern "C" int _eq_hypercube_nonoverlapping_stage_ext(
+    FpExt *out,
+    const FpExt *in,
+    FpExt x_i,
+    uint32_t step
+) {
+    auto [grid, block] = kernel_launch_params(step);
+    eq_hypercube_nonoverlapping_stage_ext_kernel<<<grid, block>>>(out, in, x_i, step);
+    return CHECK_KERNEL();
+}
+
 extern "C" int _batch_eq_hypercube_stage(
     Fp *out,
     Fp *x,
@@ -215,5 +254,11 @@ extern "C" int _eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, Fp
     dim3 grid(1);
     dim3 block(32);
     eval_poly_ext_at_point_kernel<<<grid, block>>>(coeffs, len, x, out);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _vector_scalar_multiply_ext(FpExt *vec, FpExt scalar, uint32_t length) {
+    auto [grid, block] = kernel_launch_params(length);
+    vector_scalar_multiply_kernel<FpExt><<<grid, block>>>(vec, scalar, length);
     return CHECK_KERNEL();
 }
