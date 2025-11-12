@@ -6,10 +6,12 @@ use crate::EF;
 
 pub mod merkle_tree;
 pub mod poly;
+pub mod stacked_reduction;
 pub mod whir;
 
 pub mod sumcheck {
     use super::*;
+    use crate::poly::EqEvalSegments;
 
     extern "C" {
         fn _sumcheck_mle_round(
@@ -47,6 +49,9 @@ pub mod sumcheck {
             domain_size: u32,
             r: EF,
         ) -> i32;
+
+        fn _triangular_fold_mle(output: *mut EF, input: *const EF, r: EF, output_max_n: u32)
+        -> i32;
     }
 
     pub unsafe fn sumcheck_mle_round<T>(
@@ -118,6 +123,27 @@ pub mod sumcheck {
             num_x,
             num_cols,
             large_domain_size,
+        ))
+    }
+
+    /// Folds the segments of `input` onto `output` using random element `r`.
+    ///
+    /// # Safety
+    /// - `output` must have max `n` equal to `output_max_n`, for total length `2 * 2^output_max_n`.
+    /// - `input` must have length `2 * 2^{output_max_n + 1}`.
+    pub unsafe fn triangular_fold_mle(
+        output: &mut EqEvalSegments<EF>,
+        input: &EqEvalSegments<EF>,
+        r: EF,
+        output_max_n: usize,
+    ) -> Result<(), CudaError> {
+        debug_assert_eq!(output.buffer.len(), 2 << output_max_n);
+        debug_assert_eq!(input.buffer.len(), 4 << output_max_n);
+        CudaError::from_result(_triangular_fold_mle(
+            output.buffer.as_mut_ptr(),
+            input.buffer.as_ptr(),
+            r,
+            output_max_n as u32,
         ))
     }
 }

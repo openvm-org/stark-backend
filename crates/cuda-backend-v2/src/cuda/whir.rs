@@ -6,6 +6,8 @@ use openvm_cuda_common::{
 use crate::{EF, F};
 
 extern "C" {
+    pub fn _whir_sumcheck_required_temp_buffer_size(height: u32) -> u32;
+
     fn _whir_sumcheck_mle_round(
         f_evals: *const EF,
         w_evals: *const EF,
@@ -22,13 +24,6 @@ extern "C" {
         num_queries: u32,
         height: u32,
     ) -> i32;
-}
-
-pub(crate) fn get_num_blocks(height: usize) -> usize {
-    // NOTE: change this if _whir_sumcheck_mle_round kernel launcher configuration changes
-    const THREADS_PER_BLOCK: usize = 1024;
-    let block = height.min(THREADS_PER_BLOCK);
-    height.div_ceil(block)
 }
 
 /// Performs a sumcheck round in WHIR on the evaluations of `f` and `w` on the hypercube.
@@ -50,7 +45,15 @@ pub unsafe fn whir_sumcheck_mle_round(
 ) -> Result<(), CudaError> {
     debug_assert!(f_evals.len() >= height as usize);
     debug_assert!(w_evals.len() >= height as usize);
-    debug_assert!(tmp_block_sums.len() >= 2 * get_num_blocks((height / 2) as usize));
+    #[cfg(debug_assertions)]
+    {
+        let len = tmp_block_sums.len();
+        let required = unsafe { _whir_sumcheck_required_temp_buffer_size(height) };
+        assert!(
+            len >= required as usize,
+            "tmp_block_sums len={len} < required={required}"
+        );
+    }
     check(_whir_sumcheck_mle_round(
         f_evals.as_ptr(),
         w_evals.as_ptr(),
