@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use itertools::Itertools;
 use openvm_stark_backend::{
     AirRef,
     prover::{MatrixDimensions, Prover},
@@ -85,11 +86,26 @@ fn get_conditional_fib_number(mut a: u32, mut b: u32, sels: &[bool]) -> u32 {
     b
 }
 
-#[derive(derive_new::new)]
 pub struct FibFixture {
     pub a: u32,
     pub b: u32,
     pub n: usize,
+    pub num_airs: usize,
+}
+
+impl FibFixture {
+    pub fn new(a: u32, b: u32, n: usize) -> Self {
+        FibFixture {
+            a,
+            b,
+            n,
+            num_airs: 1,
+        }
+    }
+
+    pub fn new_with_num_airs(a: u32, b: u32, n: usize, num_airs: usize) -> Self {
+        FibFixture { a, b, n, num_airs }
+    }
 }
 
 /// Trait for object responsible for generating the collection of AIRs and trace matrices for a
@@ -136,7 +152,7 @@ pub trait TestFixture {
 
 impl TestFixture for FibFixture {
     fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
-        vec![Arc::new(FibonacciAir)]
+        vec![Arc::new(FibonacciAir); self.num_airs]
     }
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
@@ -146,8 +162,11 @@ impl TestFixture for FibFixture {
         let pis = [self.a, self.b, f_n].map(BabyBear::from_canonical_u32);
         let trace = ColMajorMatrix::from_row_major(&trace);
 
-        let single_ctx = AirProvingContextV2::simple(trace, pis.to_vec());
-        ProvingContextV2::new(vec![(0, single_ctx)])
+        ProvingContextV2::new(
+            (0..self.num_airs)
+                .map(|i| (i, AirProvingContextV2::simple(trace.clone(), pis.to_vec())))
+                .collect_vec(),
+        )
     }
 }
 
