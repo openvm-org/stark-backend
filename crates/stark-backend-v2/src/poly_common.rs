@@ -147,7 +147,7 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         &self.0
     }
 
-    pub fn coeffs_mut(&mut self) -> &mut [F] {
+    pub fn coeffs_mut(&mut self) -> &mut Vec<F> {
         &mut self.0
     }
 
