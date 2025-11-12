@@ -1,6 +1,7 @@
 #include "fpext.h"
 #include "launcher.cuh"
 #include "sumcheck.cuh"
+#include <cstdint>
 
 namespace plain_sumcheck {
 
@@ -229,6 +230,27 @@ __global__ void fold_ple_from_coeffs_kernel(
     output[idx] = result;
 }
 
+// output should be segment tree of size 2 * 2^{output_max_n},
+// input should be segment tree of size 2 * 2^{output_max_n + 1}
+// We fold each segment of input and write to corresponding segment of output
+// The input[1] is ignored.
+__global__ void triangular_fold_mle_kernel(
+    FpExt* output,
+    const FpExt* input,
+    FpExt r
+) {
+    uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t n = blockIdx.y;
+    uint32_t out_num_x = 1 << n;
+    uint32_t in_num_x = 2 * out_num_x;
+
+    if (x >= out_num_x)
+        return;
+    FpExt t0 = input[in_num_x + (x<<1)];
+    FpExt t1 = input[in_num_x + (x<<1) + 1];
+    output[out_num_x + x] = t0 + (t1 - t0) * r;
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -329,6 +351,20 @@ extern "C" int _sumcheck_mle_round(
         d
     );
 
+    return CHECK_KERNEL();
+}
+
+extern "C" int _triangular_fold_mle(
+    FpExt* output,
+    const FpExt* input,
+    FpExt r,
+    uint32_t output_max_n
+) {
+    auto [grid, block] = kernel_launch_params(1 << output_max_n);
+    grid.y = output_max_n + 1;
+    
+    triangular_fold_mle_kernel<<<grid, block>>>(output, input, r);
+    
     return CHECK_KERNEL();
 }
 

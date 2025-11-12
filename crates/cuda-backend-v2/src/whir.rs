@@ -28,7 +28,9 @@ use crate::{
             eval_poly_ext_at_point_from_base, mle_interpolate_stage_ext,
         },
         sumcheck::fold_mle,
-        whir::{w_evals_accumulate, whir_sumcheck_mle_round},
+        whir::{
+            _whir_sumcheck_required_temp_buffer_size, w_evals_accumulate, whir_sumcheck_mle_round,
+        },
     },
     merkle_tree::MerkleTreeGpu,
     poly::{evals_eq_hypercube, mle_evals_to_coeffs_inplace},
@@ -183,11 +185,12 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
             );
             debug_assert!(w_evals.len() >= f_height);
             let output_height = f_height / 2;
-            let tmp_buffer_capacity = crate::cuda::whir::get_num_blocks(output_height) * 2; // s_deg = 2
+            let tmp_buffer_capacity =
+                unsafe { _whir_sumcheck_required_temp_buffer_size(f_height as u32) };
             // PERF[jpw]: memory management could be optimized to re-use buffers
             // Currently not ping-ponging buffers to free memory earlier
             let mut new_f_evals =
-                DeviceBuffer::<EF>::with_capacity(output_height.max(tmp_buffer_capacity));
+                DeviceBuffer::<EF>::with_capacity(output_height.max(tmp_buffer_capacity as usize));
             // SAFETY:
             // - `d_s_evals` has length 2
             // - We use `new_f_evals` as the temp buffer, which needs length >=
