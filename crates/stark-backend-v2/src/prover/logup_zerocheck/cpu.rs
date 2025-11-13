@@ -23,7 +23,7 @@ use crate::{
     poseidon2::sponge::FiatShamirTranscript,
     prover::{
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, DeviceMultiStarkProvingKeyV2,
-        LogupZerocheckProver, MatrixView, ProvingContextV2,
+        LogupZerocheckProver, MatrixView, ProverBackendV2, ProvingContextV2,
         fractional_sumcheck_gkr::{Frac, FracSumcheckProof, fractional_sumcheck},
         logup_zerocheck::EvalHelper,
         poly::evals_eq_hypercube,
@@ -58,14 +58,14 @@ pub struct LogupZerocheckCpu<'a> {
     pub xi: Vec<EF>,
     lambda_pows: Vec<EF>,
 
-    eq_xi_per_trace: Vec<ColMajorMatrix<EF>>,
-    eq_sharp_per_trace: Vec<ColMajorMatrix<EF>>,
+    pub eq_xi_per_trace: Vec<ColMajorMatrix<EF>>,
+    pub eq_sharp_per_trace: Vec<ColMajorMatrix<EF>>,
     eq_3b_per_trace: Vec<Vec<EF>>,
     // TODO[jpw]: delete these
     sels_per_trace_base: Vec<ColMajorMatrix<F>>,
     // After univariate round 0:
-    mat_evals_per_trace: Vec<Vec<ColMajorMatrix<EF>>>,
-    sels_per_trace: Vec<ColMajorMatrix<EF>>,
+    pub mat_evals_per_trace: Vec<Vec<ColMajorMatrix<EF>>>,
+    pub sels_per_trace: Vec<ColMajorMatrix<EF>>,
     // Stores \hat{f}(\vec r_n) * r_{n+1} .. r_{round-1} for polys f that are "done" in the batch
     // sumcheck
     zerocheck_tilde_evals: Vec<EF>,
@@ -81,6 +81,7 @@ where
         transcript: &mut TS,
         pk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
         ctx: &ProvingContextV2<CpuBackendV2>,
+        _common_main_data: &'a <CpuBackendV2 as ProverBackendV2>::PcsData,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: EF,
@@ -374,6 +375,7 @@ where
                 ColMajorMatrix::new(mat, 3)
             })
             .collect_vec();
+
         // PERF[jpw]: see Gruen, Section 3.2 and 4 on some ways to reduce the degree of the
         // univariate polynomial. We know s_0 is supposed to vanish on univariate skip
         // domain `D` of size `2^{l_skip}`. Hence `s_0 = Z_D * s'_0(Z)` where `Z_D =
