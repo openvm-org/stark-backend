@@ -49,6 +49,7 @@ pub trait LogupZerocheckProver<'a, PB: ProverBackendV2, PD, TS>: Sized {
         transcript: &mut TS,
         pk: &'a DeviceMultiStarkProvingKeyV2<PB>,
         ctx: &ProvingContextV2<PB>,
+        common_main_pcs_data: &'a PB::PcsData,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: PB::Challenge,
@@ -91,6 +92,7 @@ pub fn prove_zerocheck_and_logup<'a, PB, PD, TS, LZP>(
     transcript: &mut TS,
     mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
     ctx: ProvingContextV2<PB>,
+    common_main_pcs_data: &'a PB::PcsData,
 ) -> (GkrProof, BatchConstraintProof, Vec<PB::Challenge>)
 where
     PB: ProverBackendV2<Val = F, Challenge = EF>,
@@ -139,6 +141,7 @@ where
         transcript,
         mpk,
         &ctx,
+        common_main_pcs_data,
         n_logup,
         interactions_layout,
         alpha_logup,

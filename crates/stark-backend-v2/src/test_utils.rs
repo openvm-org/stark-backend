@@ -27,7 +27,8 @@ use crate::{
     proof::Proof,
     prover::{
         AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
-        DeviceDataTransporterV2, ProverBackendV2, ProvingContextV2, stacked_pcs::stacked_commit,
+        DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver, ProverBackendV2,
+        ProvingContextV2, TraceCommitterV2, stacked_pcs::stacked_commit,
     },
 };
 
@@ -64,6 +65,25 @@ where
         })
         .collect();
     ProvingContextV2::new(per_trace)
+}
+
+pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
+    engine: &E,
+    transcript: &mut E::TS,
+    pk: &DeviceMultiStarkProvingKeyV2<E::PB>,
+    ctx: ProvingContextV2<E::PB>,
+) -> (
+    <E::PD as MultiRapProver<E::PB, E::TS>>::PartialProof,
+    <E::PD as MultiRapProver<E::PB, E::TS>>::Artifacts,
+) {
+    let (_, common_main_pcs_data) = engine.device().commit(
+        &ctx.common_main_traces()
+            .map(|(_, trace)| trace)
+            .collect_vec(),
+    );
+    engine
+        .device()
+        .prove_rap_constraints(transcript, pk, ctx, &common_main_pcs_data)
 }
 
 fn get_fib_number(mut a: u32, mut b: u32, n: usize) -> u32 {
