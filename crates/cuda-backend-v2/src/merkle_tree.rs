@@ -60,7 +60,7 @@ impl MerkleTreeGpu<F, Digest> {
         let mut row_hashes = DeviceBuffer::<Digest>::with_capacity(height);
         // SAFETY: row_hashes properly allocated
         unsafe {
-            poseidon2_row_hashes(&mut row_hashes, &matrix.buffer(), matrix.width(), height)?;
+            poseidon2_row_hashes(&mut row_hashes, matrix.buffer(), matrix.width(), height)?;
         }
 
         let query_stride = height / rows_per_query;
@@ -289,7 +289,7 @@ impl MerkleTreeGpu<EF, Digest> {
         let mut row_hashes = DeviceBuffer::<Digest>::with_capacity(height);
         // SAFETY: row_hashes properly allocated
         unsafe {
-            poseidon2_row_hashes_ext(&mut row_hashes, &matrix.buffer(), matrix.width(), height)?;
+            poseidon2_row_hashes_ext(&mut row_hashes, matrix.buffer(), matrix.width(), height)?;
         }
 
         // === Below this line is same as for MerkleTreeGpu<F, Digest> ===

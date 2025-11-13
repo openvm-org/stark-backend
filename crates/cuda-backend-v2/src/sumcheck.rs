@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use openvm_cuda_backend::{cuda::kernels::lde::batch_expand_pad, ntt::batch_ntt, prelude::*};
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
@@ -148,6 +149,7 @@ where
 /// - d_evals gets modified by iDFT in round 0, then reused for fold_ple
 /// - Memory footprint: if evals.len() = 2^(l_skip +n), then 2 * evals.len() * sizeof(F) + 1.5 * 2^n
 ///   * sizeof(EF)
+///
 /// NOTE: batch_ntt expects a concrete type BabyBear, so I removed generic type parameters for now
 #[allow(dead_code)]
 pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
