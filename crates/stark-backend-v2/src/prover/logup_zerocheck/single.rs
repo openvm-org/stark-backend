@@ -15,7 +15,7 @@ use crate::prover::{
 };
 
 /// For a single AIR
-pub(super) struct EvalHelper<'a, F> {
+pub struct EvalHelper<'a, F> {
     /// AIR constraints
     pub constraints_dag: &'a SymbolicExpressionDag<F>,
     /// Interactions
