@@ -8,6 +8,7 @@ description = "Proof system v2"
 [dependencies]
 openvm-stark-backend.workspace = true
 openvm-stark-sdk.workspace = true
+codec-derive.workspace = true
 
 p3-air.workspace = true
 p3-baby-bear.workspace = true

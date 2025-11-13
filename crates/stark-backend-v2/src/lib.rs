@@ -6,6 +6,7 @@ use p3_field::extension::BinomialExtensionField;
 use p3_util::log2_ceil_u64;
 
 mod chip;
+pub mod codec;
 mod config;
 mod engine;
 pub mod keygen;
