@@ -146,7 +146,9 @@ where
             })
             .collect();
 
-        let (constraints_proof, r) = self.device.prove_rap_constraints(transcript, mpk, ctx);
+        let (constraints_proof, r) =
+            self.device
+                .prove_rap_constraints(transcript, mpk, ctx, &common_main_pcs_data);
 
         let opening_proof = self.device.prove_openings(
             transcript,
