@@ -20,7 +20,7 @@ use crate::{
     },
     test_utils::{
         CachedFixture11, FibFixture, InteractionsFixture11, PreprocessedFibFixture, TestFixture,
-        test_engine_small,
+        prove_up_to_batch_constraints, test_engine_small,
     },
     verifier::{
         batch_constraints::{BatchConstraintError, verify_zerocheck_and_logup},
@@ -159,9 +159,8 @@ fn test_batch_sumcheck_zero_interactions(
 
     let pvs = vec![ctx.per_trace[0].1.public_values.clone()];
     let ((gkr_proof, batch_proof), _) =
-        engine
-            .device()
-            .prove_rap_constraints(&mut prover_sponge, &pk, ctx);
+        prove_up_to_batch_constraints(&engine, &mut prover_sponge, &pk, ctx);
+
     let r = verify_zerocheck_and_logup(
         &mut verifier_sponge,
         &vk.inner,
@@ -211,8 +210,12 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
 
     let device = engine.device();
     // We need batch_proof to obtain the column openings
-    let ((_, batch_proof), r) =
-        device.prove_rap_constraints(&mut DuplexSponge::default(), &pk, ctx);
+    let ((_, batch_proof), r) = device.prove_rap_constraints(
+        &mut DuplexSponge::default(),
+        &pk,
+        ctx,
+        &common_main_pcs_data,
+    );
 
     let (stacking_proof, _) = prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
         device,
@@ -237,7 +240,6 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
     assert_eq!(u_prism.len(), params.n_stack + 1);
     Ok(())
 }
-
 #[test_case(3)]
 #[test_case(2 ; "when fib log_height equals l_skip")]
 #[test_case(1 ; "when fib log_height less than l_skip")]
@@ -299,41 +301,8 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
     per_trace.push((per_trace.len(), fib_ctx));
     let combined_ctx = ProvingContextV2::new(per_trace).into_sorted();
 
-    let l_skip = engine.config().l_skip;
-    let mut pvs = vec![vec![]; 3];
-    let (trace_id_to_air_ids, ns): (Vec<_>, Vec<_>) = combined_ctx
-        .per_trace
-        .iter()
-        .map(|(air_idx, air_ctx)| {
-            pvs[*air_idx] = air_ctx.public_values.clone();
-            (
-                *air_idx,
-                log2_strict_usize(air_ctx.common_main.height()) as isize - l_skip as isize,
-            )
-        })
-        .multiunzip();
-    let omega_pows = F::two_adic_generator(l_skip)
-        .powers()
-        .take(1 << l_skip)
-        .collect_vec();
-
-    let mut transcript = DuplexSponge::default();
-    let ((gkr_proof, batch_proof), _) =
-        engine
-            .device()
-            .prove_rap_constraints(&mut transcript, &combined_pk, combined_ctx);
-    let mut transcript = DuplexSponge::default();
-    verify_zerocheck_and_logup(
-        &mut transcript,
-        &combined_pk.get_vk().inner,
-        &pvs,
-        &gkr_proof,
-        &batch_proof,
-        &trace_id_to_air_ids,
-        &ns,
-        &omega_pows,
-    )
-    .unwrap();
+    let proof = engine.prove(&combined_pk, combined_ctx);
+    engine.verify(&combined_pk.get_vk(), &proof).unwrap();
 }
 
 #[test]
@@ -380,9 +349,7 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let pk = engine.device().transport_pk_to_device(&pk);
     let ctx = fx.generate_proving_ctx().into_sorted();
     let mut transcript = DuplexSponge::default();
-    let ((gkr_proof, _), _) = engine
-        .device()
-        .prove_rap_constraints(&mut transcript, &pk, ctx);
+    let ((gkr_proof, _), _) = prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
 
     let mut transcript = DuplexSponge::default();
     assert!(transcript.check_witness(params.logup_pow_bits, gkr_proof.logup_pow_witness));
@@ -425,9 +392,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
 
     let mut transcript = DuplexSponge::default();
     let ((gkr_proof, batch_proof), _) =
-        engine
-            .device()
-            .prove_rap_constraints(&mut transcript, &pk, ctx);
+        prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
     let mut transcript = DuplexSponge::default();
     verify_zerocheck_and_logup(
         &mut transcript,
