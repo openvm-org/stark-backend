@@ -13,10 +13,11 @@ use crate::{
     prover::{ColMajorMatrix, MatrixView, StridedColMajorMatrixView, col_maj_idx, poly::Ple},
 };
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, CopyGetters)]
 pub struct StackedLayout {
     /// The minimum log2 height of a stacked slice. When stacking columns with smaller height, the
     /// column is expanded to `2^l_skip` by striding.
+    #[getset(get_copy = "pub")]
     l_skip: usize,
     /// The columns of the unstacked matrices in sorted order. Each entry `(matrix index, column
     /// index, coordinate)` contains the pointer `(matrix index, column index)` to a column of the

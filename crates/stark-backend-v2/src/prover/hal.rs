@@ -83,6 +83,7 @@ pub trait MultiRapProver<PB: ProverBackendV2, TS> {
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKeyV2<PB>,
         ctx: ProvingContextV2<PB>,
+        common_main_pcs_data: &PB::PcsData,
     ) -> (Self::PartialProof, Self::Artifacts);
 }
 
