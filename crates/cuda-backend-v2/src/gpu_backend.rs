@@ -76,9 +76,16 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
         ctx: ProvingContextV2<GpuBackendV2>,
+        common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup::<_, _, TS, LogupZerocheckGpu>(self, transcript, mpk, ctx);
+            prove_zerocheck_and_logup::<_, _, TS, LogupZerocheckGpu>(
+                self,
+                transcript,
+                mpk,
+                ctx,
+                common_main_pcs_data,
+            );
         ((gkr_proof, batch_constraint_proof), r)
     }
 }

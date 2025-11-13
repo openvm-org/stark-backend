@@ -21,8 +21,8 @@ getset.workspace = true
 # Plonky3
 p3-field = { workspace = true }
 p3-baby-bear = { workspace = true }
+p3-dft = { workspace = true }
 p3-util = { workspace = true }
-p3-dft = { workspace = true } # TODO: remove
 
 [build-dependencies]
 openvm-cuda-builder.workspace = true

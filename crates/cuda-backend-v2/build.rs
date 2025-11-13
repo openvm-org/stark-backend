@@ -17,6 +17,8 @@ fn main() {
     common
         .clone()
         .library_name("cuda-backend-v2")
-        .files_from_glob("cuda/src/*.cu")
+        .watch("cuda")
+        .include("cuda/include")
+        .files_from_glob("cuda/src/**/*.cu")
         .build();
 }
