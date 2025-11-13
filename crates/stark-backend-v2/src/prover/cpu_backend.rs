@@ -71,9 +71,16 @@ impl<TS: FiatShamirTranscript> MultiRapProver<CpuBackendV2, TS> for CpuDeviceV2 
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
         ctx: ProvingContextV2<CpuBackendV2>,
+        common_main_pcs_data: &StackedPcsData<F, Digest>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup::<_, _, TS, LogupZerocheckCpu>(self, transcript, mpk, ctx);
+            prove_zerocheck_and_logup::<_, _, TS, LogupZerocheckCpu>(
+                self,
+                transcript,
+                mpk,
+                ctx,
+                common_main_pcs_data,
+            );
         ((gkr_proof, batch_constraint_proof), r)
     }
 }
