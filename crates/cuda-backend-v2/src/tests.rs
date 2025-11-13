@@ -20,8 +20,8 @@ use stark_backend_v2::{
     },
     test_utils::{
         CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11,
-        PreprocessedFibFixture, TestFixture, default_test_params_small, test_system_params_small,
-        transport_proving_ctx_to_device,
+        PreprocessedFibFixture, TestFixture, default_test_params_small,
+        prove_up_to_batch_constraints, test_system_params_small, transport_proving_ctx_to_device,
     },
     verifier::{
         VerifierError,
@@ -143,13 +143,17 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
     Ok(())
 }
 
-#[test]
-fn test_batch_sumcheck_zero_interactions() -> Result<(), BatchConstraintError> {
+#[test_case(4)]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_batch_sumcheck_zero_interactions(
+    log_trace_degree: usize,
+) -> Result<(), BatchConstraintError> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_gpu_engine_small();
     let params = engine.config();
-    let log_trace_degree = 4;
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, vk) = fib.keygen(&engine);
     let device = engine.device();
@@ -172,9 +176,7 @@ fn test_batch_sumcheck_zero_interactions() -> Result<(), BatchConstraintError> {
 
     let pvs = vec![ctx.per_trace[0].1.public_values.clone()];
     let ((gkr_proof, batch_proof), _) =
-        engine
-            .device()
-            .prove_rap_constraints(&mut prover_sponge, &pk, ctx);
+        prove_up_to_batch_constraints(&engine, &mut prover_sponge, &pk, ctx);
     let r = verify_zerocheck_and_logup(
         &mut verifier_sponge,
         &vk.inner,
@@ -185,7 +187,7 @@ fn test_batch_sumcheck_zero_interactions() -> Result<(), BatchConstraintError> {
         &n_per_air,
         &omega_skip_pows,
     )?;
-    assert_eq!(r.len(), log_trace_degree - params.l_skip + 1);
+    assert_eq!(r.len(), log_trace_degree.saturating_sub(params.l_skip) + 1);
     Ok(())
 }
 
@@ -224,8 +226,12 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
 
     let device = engine.device();
     // We need batch_proof to obtain the column openings
-    let ((_, batch_proof), r) =
-        device.prove_rap_constraints(&mut DuplexSponge::default(), &pk, ctx);
+    let ((_, batch_proof), r) = device.prove_rap_constraints(
+        &mut DuplexSponge::default(),
+        &pk,
+        ctx,
+        &common_main_pcs_data,
+    );
 
     let (stacking_proof, _) = prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
         device,
@@ -251,21 +257,23 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
     Ok(())
 }
 
-#[test]
-fn test_single_fib_and_dummy_trace_stark() {
+#[test_case(3)]
+#[test_case(2 ; "when fib log_height equals l_skip")]
+#[test_case(1 ; "when fib log_height less than l_skip")]
+#[test_case(0 ; "when fib log_height is zero")]
+fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
     setup_tracing();
 
     // 1. Create parameters
-    let log_trace_degree = 3;
     let engine = test_gpu_engine_small();
 
     // 2. Create interactions fixture with larger trace - generate custom traces
-    let height = 2 * (1 << log_trace_degree);
+    let sender_height = 2 * (1 << 3);
     let sender_trace = RowMajorMatrix::new(
         [0, 1, 3, 5, 7, 4, 546, 889]
             .into_iter()
             .cycle()
-            .take(2 * height)
+            .take(2 * sender_height)
             .map(F::from_canonical_usize)
             .collect(),
         2,
@@ -274,13 +282,14 @@ fn test_single_fib_and_dummy_trace_stark() {
         [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 1, 889, 0, 456]
             .into_iter()
             .cycle()
-            .take(4 * height)
+            .take(4 * sender_height)
             .map(F::from_canonical_usize)
             .collect(),
         2,
     );
 
     // 3. Create fibonacci fixture with small trace
+    let height = 2 * (1 << log_trace_degree);
     let fib = FibFixture::new(0, 1, height);
 
     // 4. Generate AIRs and proving keys
@@ -312,58 +321,30 @@ fn test_single_fib_and_dummy_trace_stark() {
         &ProvingContextV2::new(per_trace).into_sorted(),
     );
 
-    let l_skip = engine.config().l_skip;
-    let mut pvs = vec![vec![]; 3];
-    let (trace_id_to_air_ids, ns): (Vec<_>, Vec<_>) = combined_ctx
-        .per_trace
-        .iter()
-        .map(|(air_idx, air_ctx)| {
-            pvs[*air_idx] = air_ctx.public_values.clone();
-            (
-                *air_idx,
-                log2_strict_usize(air_ctx.common_main.height()) as isize - l_skip as isize,
-            )
-        })
-        .multiunzip();
-    let omega_pows = F::two_adic_generator(l_skip)
-        .powers()
-        .take(1 << l_skip)
-        .collect_vec();
-
-    let mut transcript = DuplexSponge::default();
-    let ((gkr_proof, batch_proof), _) =
-        engine
-            .device()
-            .prove_rap_constraints(&mut transcript, &combined_pk, combined_ctx);
-    let mut transcript = DuplexSponge::default();
-    verify_zerocheck_and_logup(
-        &mut transcript,
-        &combined_pk.get_vk().inner,
-        &pvs,
-        &gkr_proof,
-        &batch_proof,
-        &trace_id_to_air_ids,
-        &ns,
-        &omega_pows,
-    )
-    .unwrap();
+    let proof = engine.prove(&combined_pk, combined_ctx);
+    engine.verify(&combined_pk.get_vk(), &proof).unwrap();
 }
 
-#[test]
-fn test_fib_air_roundtrip() -> Result<(), VerifierError> {
+#[test_case(2, 10)]
+#[test_case(2, 1; "where log_trace_degree=1 less than l_skip=2")]
+#[test_case(2, 0; "where log_trace_degree=0 less than l_skip=2")]
+#[test_case(3, 2; "where log_trace_degree=2 less than l_skip=3")]
+fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError> {
     setup_tracing_with_log_level(Level::INFO);
 
+    let n_stack = 8;
+    let k_whir = 4;
+    let log_final_poly_len = (l_skip + n_stack) % k_whir;
     let params = SystemParams {
-        l_skip: 2,
-        n_stack: 8,
+        l_skip,
+        n_stack,
         log_blowup: 1,
-        k_whir: 4,
+        k_whir,
         num_whir_queries: 100,
-        log_final_poly_len: 2,
+        log_final_poly_len,
         logup_pow_bits: 1,
         whir_pow_bits: 1,
     };
-    let log_trace_degree = params.l_skip + params.n_stack;
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
 
     let engine = BabyBearPoseidon2GpuEngineV2::new(params);
@@ -396,6 +377,7 @@ fn test_dummy_interactions_roundtrip(
 
 #[test_case(2, 8, 3)]
 #[test_case(5, 5, 4)]
+#[test_case(5, 8, 3)]
 fn test_cached_trace_roundtrip(
     l_skip: usize,
     n_stack: usize,
@@ -454,11 +436,13 @@ fn test_single_cached_trace_stark() {
     engine.verify(&vk, &proof).unwrap();
 }
 
-#[test]
-fn test_single_preprocessed_trace_stark() {
+#[test_case(3)]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_single_preprocessed_trace_stark(log_trace_degree: usize) {
     setup_tracing();
     let engine = test_gpu_engine_small();
-    let log_trace_degree = 3;
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
     let fx = PreprocessedFibFixture::new(0, 1, sels);
@@ -478,7 +462,7 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let pk = device.transport_pk_to_device(&pk);
     let ctx = transport_proving_ctx_to_device(device, &fx.generate_proving_ctx()).into_sorted();
     let mut transcript = DuplexSponge::default();
-    let ((gkr_proof, _), _) = device.prove_rap_constraints(&mut transcript, &pk, ctx);
+    let ((gkr_proof, _), _) = prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
 
     let mut transcript = DuplexSponge::default();
     assert!(transcript.check_witness(params.logup_pow_bits, gkr_proof.logup_pow_witness));
@@ -521,7 +505,8 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
         .collect_vec();
 
     let mut transcript = DuplexSponge::default();
-    let ((gkr_proof, batch_proof), _) = device.prove_rap_constraints(&mut transcript, &pk, ctx);
+    let ((gkr_proof, batch_proof), _) =
+        prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
     let mut transcript = DuplexSponge::default();
     verify_zerocheck_and_logup(
         &mut transcript,

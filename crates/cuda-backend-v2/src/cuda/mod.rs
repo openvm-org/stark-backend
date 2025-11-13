@@ -1,9 +1,13 @@
+#![allow(dead_code)]
 #![allow(clippy::missing_safety_doc)]
 
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use stark_backend_v2::prover::fractional_sumcheck_gkr::Frac;
 
-use crate::EF;
+use crate::{EF, F};
 
+pub mod logup_zerocheck;
+pub mod matrix;
 pub mod merkle_tree;
 pub mod poly;
 pub mod stacked_reduction;
