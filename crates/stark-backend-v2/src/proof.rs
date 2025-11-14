@@ -115,6 +115,7 @@ pub struct WhirProof {
     /// For each WHIR round, the PoW witness.
     pub whir_pow_witnesses: Vec<F>,
     /// For the initial round: per commited matrix, per in-domain query.
+    // num_commits x num_queries x (1 << k) x stacking_width[i]
     pub initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>>,
     pub initial_round_merkle_proofs: Vec<Vec<MerkleProof>>,
     /// Per non-initial round, per in-domain-query.
