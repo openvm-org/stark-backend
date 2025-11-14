@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use itertools::Itertools;
 use openvm_stark_backend::{
@@ -111,6 +111,7 @@ pub struct FibFixture {
     pub b: u32,
     pub n: usize,
     pub num_airs: usize,
+    pub empty_air_indices: Vec<usize>,
 }
 
 impl FibFixture {
@@ -120,11 +121,23 @@ impl FibFixture {
             b,
             n,
             num_airs: 1,
+            empty_air_indices: vec![],
         }
     }
 
     pub fn new_with_num_airs(a: u32, b: u32, n: usize, num_airs: usize) -> Self {
-        FibFixture { a, b, n, num_airs }
+        FibFixture {
+            a,
+            b,
+            n,
+            num_airs,
+            empty_air_indices: vec![],
+        }
+    }
+
+    pub fn with_empty_air_indices(mut self, empty_air_indices: impl Into<Vec<usize>>) -> Self {
+        self.empty_air_indices = empty_air_indices.into();
+        self
     }
 }
 
@@ -177,14 +190,23 @@ impl TestFixture for FibFixture {
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
         use dummy_airs::fib_air::trace::generate_trace_rows;
-        let trace = generate_trace_rows(self.a, self.b, self.n);
         let f_n = get_fib_number(self.a, self.b, self.n);
         let pis = [self.a, self.b, f_n].map(BabyBear::from_canonical_u32);
-        let trace = ColMajorMatrix::from_row_major(&trace);
 
         ProvingContextV2::new(
             (0..self.num_airs)
-                .map(|i| (i, AirProvingContextV2::simple(trace.clone(), pis.to_vec())))
+                .filter(|i| !self.empty_air_indices.contains(i))
+                .map(|i| {
+                    (
+                        i,
+                        AirProvingContextV2::simple(
+                            ColMajorMatrix::from_row_major(&generate_trace_rows::<F>(
+                                self.a, self.b, self.n,
+                            )),
+                            pis.to_vec(),
+                        ),
+                    )
+                })
                 .collect_vec(),
         )
     }
