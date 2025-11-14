@@ -413,6 +413,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "expected observe at 0")]
     fn test_read_only_transcript_wrong_operation() {
         let mut recorder = DuplexSpongeRecorder::default();
@@ -424,6 +425,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "value mismatch at 0")]
     fn test_read_only_transcript_wrong_value() {
         let mut recorder = DuplexSpongeRecorder::default();
