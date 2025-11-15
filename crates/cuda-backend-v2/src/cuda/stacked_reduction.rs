@@ -122,6 +122,7 @@ extern "C" {
 ///   [`_stacked_reduction_r0_required_temp_buffer_size(domain_size, num_x,
 ///   thread_window_stride)`](_stacked_reduction_r0_required_temp_buffer_size).
 /// - `output` should have length `>= 2^log_domain_size`.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_round0(
     q_upsampled_ptr: &DeviceBuffer<*const F>,
     eq_r_ns: &EqEvalSegments<EF>,
@@ -214,6 +215,7 @@ pub unsafe fn initialize_k_rot_from_eq_segments(
 ///   - `lambda_pows` must be initialized for at least `2 * window_len` elements (for rotations).
 /// - `unstacked_cols` pointers must be within bounds of `q_evals`.
 /// - `output` must have length at least `s_deg = 2`.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_mle_round(
     q_evals: &DeviceBuffer<*const EF>,
     eq_r_ns: &EqEvalSegments<EF>,
@@ -254,6 +256,7 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate(
     q_evals: &DeviceBuffer<*const EF>,
     eq_ub_ptr: &DeviceBuffer<EF>,

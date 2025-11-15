@@ -245,7 +245,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
                 unsafe {
                     batch_expand_pad(
                         &upsampled,
-                        &q_mixed,
+                        q_mixed,
                         num_polys,
                         domain_size as u32,
                         1 << l_skip,
@@ -348,7 +348,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
                     &self.eq_r_ns,
                     unstacked_cols_ptr,
                     lambda_pows_ptr,
-                    &z_packets,
+                    z_packets,
                     &mut block_sums,
                     &mut d_s0_evals,
                     upsampled_height,
@@ -400,7 +400,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
                 let folded_evals = DeviceBuffer::with_capacity(coeffs.len() >> l_skip);
                 unsafe {
                     fold_ple_from_coeffs(
-                        &coeffs,
+                        coeffs,
                         &folded_evals,
                         num_x,
                         width as u32,

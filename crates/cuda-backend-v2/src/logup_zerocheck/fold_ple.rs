@@ -12,19 +12,20 @@ use crate::{
 };
 
 /// Folds PLE evaluations by interpolating univariate polynomials on coset D and evaluating at r_0.
-/// Returns both original (offset=0) and rotated (offset=1) folded matrices.
-/// If `rotate` is false, only offset=0 is computed and the second matrix is a dummy.
+/// Returns a single matrix. When `rotate` is true, returns a doubled-width matrix:
+/// Layout: [orig_col0...orig_colN, rot_col0...rot_colN] (width * 2 columns)
+/// When `rotate` is false, returns a single-width matrix (width columns).
 pub fn fold_ple_evals_gpu(
     l_skip: usize,
     mat: &DeviceMatrix<F>,
     r_0: EF,
     rotate: bool,
-) -> Result<(DeviceMatrix<EF>, DeviceMatrix<EF>), FoldPleError> {
+) -> Result<DeviceMatrix<EF>, FoldPleError> {
     let height = mat.height();
     let width = mat.width();
 
     if height == 0 || width == 0 {
-        return Ok((DeviceMatrix::dummy(), DeviceMatrix::dummy()));
+        return Ok(DeviceMatrix::dummy());
     }
 
     let min_height = 1usize << l_skip;
@@ -74,20 +75,17 @@ pub fn fold_ple_evals_gpu(
         .to_device()
         .map_err(FoldPleError::Copy)?;
 
-    // Allocate outputs
-    let d_output_orig = DeviceBuffer::<EF>::with_capacity(new_height * width);
-    let d_output_rot = if rotate {
-        DeviceBuffer::<EF>::with_capacity(new_height * width)
-    } else {
-        DeviceBuffer::<EF>::new() // Dummy buffer when rotate=false
-    };
+    // Allocate output buffer
+    // When rotate=true: width * 2 columns (original + rotated)
+    // When rotate=false: width columns (original only)
+    let output_width = if rotate { width * 2 } else { width };
+    let d_output = DeviceBuffer::<EF>::with_capacity(new_height * output_width);
 
     // Launch kernel
     unsafe {
         fold_ple_from_evals(
             mat.buffer(),
-            &d_output_orig,
-            &d_output_rot,
+            &d_output,
             &d_numerators,
             &d_inv_lagrange_denoms,
             height as u32,
@@ -99,13 +97,10 @@ pub fn fold_ple_evals_gpu(
         )?;
     }
 
-    Ok((
-        DeviceMatrix::new(Arc::new(d_output_orig), new_height, width),
-        if rotate {
-            DeviceMatrix::new(Arc::new(d_output_rot), new_height, width)
-        } else {
-            DeviceMatrix::dummy()
-        },
+    Ok(DeviceMatrix::new(
+        Arc::new(d_output),
+        new_height,
+        output_width,
     ))
 }
 
