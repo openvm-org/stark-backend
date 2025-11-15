@@ -1,40 +1,41 @@
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
 #include "codec.cuh"
+#include "dag_entry.cuh"
 #include "fp.h"
 #include "fpext.h"
-#include "frac_ext.cuh"
 #include "launcher.cuh"
-#include "dag_entry.cuh"
+#include "matrix.cuh"
 
 using namespace logup_round0;
 
 // Device function equivalent to helper.acc_constraints without eq_* parts
 // This computes the constraint sum: sum(lambda_i * constraint_i) for all constraints
-template<bool GLOBAL>
+template <bool GLOBAL>
 __device__ __forceinline__ FpExt acc_constraints(
     uint32_t row,
-    const Fp * __restrict__ d_selectors,
-    const MainMatrixPtrs * __restrict__ d_main,
+    const Fp *__restrict__ d_selectors,
+    const MainMatrixPtrs<Fp> *__restrict__ d_main,
     uint32_t height,
     uint32_t selectors_width,
-    const Fp * __restrict__ d_preprocessed,
+    const Fp *__restrict__ d_preprocessed,
     uint32_t preprocessed_width,
-    const FpExt * __restrict__ d_eq_z,
-    const FpExt * __restrict__ d_eq_x,
-    const Fp * __restrict__ d_public,
+    const FpExt *__restrict__ d_eq_z,
+    const FpExt *__restrict__ d_eq_x,
+    const Fp *__restrict__ d_public,
     uint32_t public_len,
-    const FpExt * __restrict__ d_lambda_pows,
-    const uint32_t * __restrict__ d_lambda_indices,
-    const Rule * __restrict__ d_rules,
+    const FpExt *__restrict__ d_lambda_pows,
+    const uint32_t *__restrict__ d_lambda_indices,
+    const Rule *__restrict__ d_rules,
     size_t rules_len,
-    const size_t * __restrict__ d_used_nodes,
+    const size_t *__restrict__ d_used_nodes,
     size_t used_nodes_len,
     size_t lambda_len,
     uint32_t buffer_size,
-    FpExt * __restrict__ inter_buffer,
-    FpExt * __restrict__ local_buffer,
+    FpExt *__restrict__ inter_buffer,
+    FpExt *__restrict__ local_buffer,
     uint32_t buffer_stride,
     uint32_t large_domain
 ) {
@@ -151,13 +152,11 @@ __device__ __forceinline__ FpExt acc_constraints(
         }
 
         if (decoded.is_constraint) {
-            while (lambda_idx < lambda_len
-                && lambda_idx < used_nodes_len
-                && d_used_nodes[lambda_idx] == node)
-            {
+            while (lambda_idx < lambda_len && lambda_idx < used_nodes_len &&
+                   d_used_nodes[lambda_idx] == node) {
                 uint32_t mapped_idx = d_lambda_indices != nullptr
-                    ? d_lambda_indices[lambda_idx]
-                    : static_cast<uint32_t>(lambda_idx);
+                                          ? d_lambda_indices[lambda_idx]
+                                          : static_cast<uint32_t>(lambda_idx);
                 FpExt lambda = d_lambda_pows[mapped_idx];
                 lambda_idx++;
                 constraint_sum += lambda * result;
@@ -168,28 +167,28 @@ __device__ __forceinline__ FpExt acc_constraints(
     return constraint_sum;
 }
 
-template<bool GLOBAL>
+template <bool GLOBAL>
 __global__ void evaluate_constraints_kernel(
-    FpExt * __restrict__ d_output,
-    const Fp * __restrict__ d_selectors,
+    FpExt *__restrict__ d_output,
+    const Fp *__restrict__ d_selectors,
     uint32_t selectors_width,
-    const MainMatrixPtrs * __restrict__ d_main,
+    const MainMatrixPtrs<Fp> *__restrict__ d_main,
     uint32_t main_count,
-    const Fp * __restrict__ d_preprocessed,
+    const Fp *__restrict__ d_preprocessed,
     uint32_t preprocessed_width,
-    const FpExt * __restrict__ d_eq_z,
-    const FpExt * __restrict__ d_eq_x,
-    const FpExt * __restrict__ d_lambda_pows,
-    const uint32_t * __restrict__ d_lambda_indices,
-    const Fp * __restrict__ d_public,
+    const FpExt *__restrict__ d_eq_z,
+    const FpExt *__restrict__ d_eq_x,
+    const FpExt *__restrict__ d_lambda_pows,
+    const uint32_t *__restrict__ d_lambda_indices,
+    const Fp *__restrict__ d_public,
     uint32_t public_len,
-    const Rule * __restrict__ d_rules,
+    const Rule *__restrict__ d_rules,
     size_t rules_len,
-    const size_t * __restrict__ d_used_nodes,
+    const size_t *__restrict__ d_used_nodes,
     size_t used_nodes_len,
     size_t lambda_len,
     uint32_t buffer_size,
-    FpExt * __restrict__ d_intermediates,
+    FpExt *__restrict__ d_intermediates,
     uint32_t large_domain,
     uint32_t num_x,
     uint32_t num_rows_per_tile,
@@ -267,8 +266,8 @@ __global__ void evaluate_constraints_kernel(
 }
 
 __global__ void aggregate_constraints_kernel(
-    const FpExt * __restrict__ d_output,
-    FpExt * __restrict__ d_sums,
+    const FpExt *__restrict__ d_output,
+    FpExt *__restrict__ d_sums,
     uint32_t large_domain,
     uint32_t num_x
 ) {
@@ -285,8 +284,8 @@ __global__ void aggregate_constraints_kernel(
 }
 
 __global__ void extract_component_kernel(
-    const FpExt * __restrict__ input,
-    Fp * __restrict__ output,
+    const FpExt *__restrict__ input,
+    Fp *__restrict__ output,
     uint32_t len,
     uint32_t component
 ) {
@@ -298,8 +297,8 @@ __global__ void extract_component_kernel(
 }
 
 __global__ void assign_component_kernel(
-    const Fp * __restrict__ input,
-    FpExt * __restrict__ output,
+    const Fp *__restrict__ input,
+    FpExt *__restrict__ output,
     uint32_t len,
     uint32_t component
 ) {
@@ -316,7 +315,7 @@ extern "C" int _zerocheck_eval_constraints(
     FpExt *output,
     const Fp *selectors,
     uint32_t selectors_width,
-    const MainMatrixPtrs *partitioned_main,
+    const MainMatrixPtrs<Fp> *partitioned_main,
     uint32_t main_count,
     const Fp *preprocessed,
     uint32_t preprocessed_width,
@@ -338,14 +337,15 @@ extern "C" int _zerocheck_eval_constraints(
     uint32_t num_rows_per_tile,
     uint32_t skip_stride
 ) {
-    auto [grid, block] = kernel_launch_params(large_domain * num_x, 256);
+    auto count = constraint_evaluation::get_launcher_count(buffer_size, large_domain * num_x);
+    auto [grid, block] = kernel_launch_params(count, 256);
 #ifdef CUDA_DEBUG
     if (std::getenv("LOGUP_GPU_SINGLE_THREAD") != nullptr) {
         grid = dim3(1, 1, 1);
         block = dim3(1, 1, 1);
     }
 #endif
-    if (buffer_size > 16) {
+    if (buffer_size > constraint_evaluation::BUFFER_THRESHOLD) {
         evaluate_constraints_kernel<true><<<grid, block>>>(
             output,
             selectors,
@@ -414,12 +414,7 @@ extern "C" int _accumulate_constraints(
     }
 
     auto [grid, block] = kernel_launch_params(large_domain, 256);
-    aggregate_constraints_kernel<<<grid, block>>>(
-        output,
-        sums,
-        large_domain,
-        num_x
-    );
+    aggregate_constraints_kernel<<<grid, block>>>(output, sums, large_domain, num_x);
     return CHECK_KERNEL();
 }
 
@@ -430,30 +425,12 @@ extern "C" int _extract_component(
     uint32_t component
 ) {
     auto [grid, block] = kernel_launch_params(len, 256);
-    extract_component_kernel<<<grid, block>>>(
-        input,
-        output,
-        len,
-        component
-    );
+    extract_component_kernel<<<grid, block>>>(input, output, len, component);
     return CHECK_KERNEL();
 }
 
-extern "C" int _assign_component(
-    const Fp *input,
-    FpExt *output,
-    uint32_t len,
-    uint32_t component
-) {
+extern "C" int _assign_component(const Fp *input, FpExt *output, uint32_t len, uint32_t component) {
     auto [grid, block] = kernel_launch_params(len, 256);
-    assign_component_kernel<<<grid, block>>>(
-        input,
-        output,
-        len,
-        component
-    );
+    assign_component_kernel<<<grid, block>>>(input, output, len, component);
     return CHECK_KERNEL();
 }
-
-
-
