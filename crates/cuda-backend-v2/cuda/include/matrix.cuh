@@ -2,8 +2,9 @@
 
 #include "fp.h"
 
+template<typename T>
 struct MainMatrixPtrs {
-    const Fp *data;
+    const T *data;
     uint32_t air_width;
 };
 
