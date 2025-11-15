@@ -136,15 +136,20 @@ impl<F: Field + PrimeField32> SymbolicRulesOnGpu<F> {
         // This should be a list of constraint indices, but we initialize it to be a list of DAG
         // node indices for now. We'll remap each entry later on.
         let used_nodes = if dag.constraints.constraint_idx.is_empty() {
-            // This branch is used only for encoding SymbolicInteractions for use during perm
-            // trace generation. The `message` is always a single expression for the denominator.
-            dag.interactions
-                .iter()
-                .flat_map(|i| {
-                    assert_eq!(i.message.len(), 1);
-                    [i.count, *i.message.first().unwrap()]
-                })
-                .collect::<Vec<_>>()
+            if is_permute {
+                // This branch is used only for encoding SymbolicInteractions for use during perm
+                // trace generation. The `message` is always a single expression for the
+                // denominator.
+                dag.interactions
+                    .iter()
+                    .flat_map(|i| {
+                        assert_eq!(i.message.len(), 1);
+                        [i.count, *i.message.first().unwrap()]
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            }
         } else {
             dag.constraints.constraint_idx.clone()
         };
