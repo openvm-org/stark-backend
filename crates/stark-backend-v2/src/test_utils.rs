@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use itertools::Itertools;
 use openvm_stark_backend::{
@@ -185,7 +185,8 @@ pub trait TestFixture {
 
 impl TestFixture for FibFixture {
     fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
-        vec![Arc::new(FibonacciAir); self.num_airs]
+        let air = Arc::new(FibonacciAir);
+        vec![air; self.num_airs]
     }
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {

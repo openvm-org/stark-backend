@@ -1,12 +1,12 @@
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PrimeField32};
 use std::{
     array::from_fn,
     io::{self, Cursor, Read, Result, Write},
 };
 
-use crate::{D_EF, EF, F};
-
 pub use codec_derive::{Decode, Encode};
+use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PrimeField32};
+
+use crate::{D_EF, EF, F};
 
 /// Hardware and language independent encoding.
 /// Uses the Writer pattern for more efficient encoding without intermediate buffers.
@@ -38,7 +38,7 @@ pub trait Decode: Sized {
 
 impl Encode for bool {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write(&[*self as u8])?;
+        writer.write_all(&[*self as u8])?;
         Ok(())
     }
 }
