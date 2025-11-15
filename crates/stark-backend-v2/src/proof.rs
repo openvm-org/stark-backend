@@ -149,10 +149,8 @@ impl Encode for Proof {
             }
             ret.encode(writer)?;
         }
-        for vdata in &self.trace_vdata {
-            if let Some(vdata) = vdata {
-                vdata.encode(writer)?;
-            }
+        for vdata in self.trace_vdata.iter().flatten() {
+            vdata.encode(writer)?;
         }
 
         self.public_values.encode(writer)?;
@@ -450,7 +448,6 @@ mod tests {
     use itertools::Itertools;
 
     use super::*;
-
     use crate::{
         BabyBearPoseidon2CpuEngineV2, SystemParams,
         poseidon2::sponge::DuplexSpongeRecorder,
