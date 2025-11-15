@@ -144,8 +144,9 @@ __global__ void extract_claims_kernel(const FpExt *data, size_t stride, FpExt *o
 template<bool ROTATE>
 __global__ void fold_ple_from_evals_kernel(
     const Fp* input_matrix,      // [height * width] column-major
-    FpExt* output_matrix_0,      // [new_height * width] column-major, offset=0
-    FpExt* output_matrix_1,      // [new_height * width] column-major, offset=1 (can be null if rotate=false)
+    FpExt* output_matrix,         // [new_height * output_width] column-major
+                                   // If ROTATE: output_width = width * 2, layout: [orig_cols, rot_cols]
+                                   // If !ROTATE: output_width = width
     const FpExt* numerators,    // [domain_size] Π_{j≠i} (r_0 - omega^j)
     const FpExt* inv_lagrange_denoms,  // [domain_size] 1/(Π_{j≠i} (omega^i - omega^j))
     uint32_t height,
@@ -160,7 +161,6 @@ __global__ void fold_ple_from_evals_kernel(
     
     int x = idx % new_height;
     int col = idx / new_height;
-    int output_idx = col * new_height + x;
     
     // Compute offset 0 (always needed)
     FpExt result_0(Fp::zero());
@@ -174,7 +174,9 @@ __global__ void fold_ple_from_evals_kernel(
         result_0 = result_0 + FpExt(eval_0) * numerators[z] * inv_lagrange_denoms[z];
     }
     
-    output_matrix_0[output_idx] = result_0;
+    // Write original columns: output_matrix[col * new_height + x]
+    int output_idx_original = col * new_height + x;
+    output_matrix[output_idx_original] = result_0;
     
     // Compute offset 1 only if rotate=true
     if constexpr (ROTATE) {
@@ -186,7 +188,10 @@ __global__ void fold_ple_from_evals_kernel(
             Fp eval_1 = input_matrix[input_idx_1];
             result_1 = result_1 + FpExt(eval_1) * numerators[z] * inv_lagrange_denoms[z];
         }
-        output_matrix_1[output_idx] = result_1;
+        // Write rotated columns: output_matrix[(width + col) * new_height + x]
+        // Layout: [orig_col0...orig_col{width-1}, rot_col0...rot_col{width-1}]
+        int output_idx_rotated = (width + col) * new_height + x;
+        output_matrix[output_idx_rotated] = result_1;
     }
 }
 
@@ -211,9 +216,51 @@ __global__ void compute_eq_sharp_kernel(
     eq_sharp[idx] = original_eq_xi * eq_sharp_r0;
 }
 
+__global__ void interpolate_columns_kernel(
+    FpExt *interpolated,
+    const uintptr_t *columns,
+    uint32_t s_deg,
+    uint32_t num_y,
+    uint32_t num_columns
+) {
+    int y = threadIdx.x + blockIdx.x * blockDim.x;
+    if (y >= num_y) return;
+
+    int col_idx = threadIdx.y + blockIdx.y * blockDim.y;
+    if (col_idx >= num_columns) return;
+
+    auto column = reinterpret_cast<const FpExt*>(columns[col_idx]);
+    auto t0 = column[y << 1];
+    auto t1 = column[(y << 1) | 1];
+    auto this_interpolated = interpolated + col_idx * s_deg * num_y;
+
+    for (int x = 0; x < s_deg; x++) {
+        this_interpolated[y * s_deg + x] = t0 + (t1 - t0) * FpExt(Fp(x + 1u));
+    }
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
+
+extern "C" int _interpolate_columns(
+    FpExt *interpolated,
+    const uintptr_t *columns,
+    size_t s_deg,
+    size_t num_y,
+    size_t num_columns
+) {
+    auto [grid, block] = kernel_launch_2d_params(num_y, num_columns);
+
+    interpolate_columns_kernel<<<grid, block>>>(
+        interpolated,
+        columns,
+        s_deg,
+        num_y,
+        num_columns
+    );
+    return CHECK_KERNEL();
+}
 
 extern "C" int _frac_build_segment_tree(FracExt *tree, size_t total_leaves) {
     if (total_leaves == 0) {
@@ -303,8 +350,7 @@ extern "C" int _frac_extract_claims(const FpExt *data, size_t stride, FpExt *out
 
 extern "C" int _fold_ple_from_evals(
     const Fp* input_matrix,
-    FpExt* output_matrix_0,
-    FpExt* output_matrix_1,
+    FpExt* output_matrix,  // Single buffer: [orig_cols, rot_cols] when rotate=true
     const FpExt* numerators,
     const FpExt* inv_lagrange_denoms,
     uint32_t height,
@@ -320,8 +366,7 @@ extern "C" int _fold_ple_from_evals(
     if (rotate) {
         fold_ple_from_evals_kernel<true><<<grid, block>>>(
             input_matrix,
-            output_matrix_0,
-            output_matrix_1,
+            output_matrix,
             numerators,
             inv_lagrange_denoms,
             height,
@@ -333,8 +378,7 @@ extern "C" int _fold_ple_from_evals(
     } else {
         fold_ple_from_evals_kernel<false><<<grid, block>>>(
             input_matrix,
-            output_matrix_0,
-            output_matrix_1,
+            output_matrix,
             numerators,
             inv_lagrange_denoms,
             height,

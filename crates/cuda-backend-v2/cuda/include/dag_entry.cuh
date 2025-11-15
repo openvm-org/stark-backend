@@ -4,6 +4,25 @@
 #include "fp.h"
 #include "fpext.h"
 #include "matrix.cuh"
+#include <cstdint>
+
+namespace constraint_evaluation {
+inline constexpr uint32_t BUFFER_THRESHOLD = 16;
+inline constexpr uint32_t TASK_SIZE = 65536;
+
+inline uint32_t get_launcher_count(uint32_t buffer_size, uint32_t height) {
+    return buffer_size > BUFFER_THRESHOLD ? TASK_SIZE : height;
+}
+} // namespace constraint_evaluation
+
+namespace interaction_evaluation {
+inline constexpr uint32_t BUFFER_THRESHOLD = 10;
+inline constexpr uint32_t TASK_SIZE = 65536;
+
+inline uint32_t get_launcher_count(uint32_t buffer_size, uint32_t height) {
+    return buffer_size > BUFFER_THRESHOLD ? TASK_SIZE : height;
+}
+} // namespace interaction_evaluation
 
 namespace logup_round0 {
 
@@ -11,20 +30,20 @@ __device__ __forceinline__ FpExt evaluate_dag_entry(
     const SourceInfo &src,
     uint32_t row_index,
     const Fp *d_selectors,
-    const MainMatrixPtrs * __restrict__ d_main,
+    const MainMatrixPtrs<Fp> *__restrict__ d_main,
     uint32_t height,
     uint32_t selectors_width,
-    const Fp * __restrict__ d_preprocessed,
+    const Fp *__restrict__ d_preprocessed,
     uint32_t preprocessed_width,
     const FpExt *d_eq_z,
     const FpExt *d_eq_x,
-    const Fp * __restrict__ d_public,
+    const Fp *__restrict__ d_public,
     uint32_t public_len,
     const FpExt *inter_buffer,
     uint32_t buffer_stride,
     uint32_t buffer_size,
     uint32_t large_domain,
-    const FpExt *d_challenges = nullptr  // Optional: for ENTRY_CHALLENGE in interactions
+    const FpExt *d_challenges = nullptr // Optional: for ENTRY_CHALLENGE in interactions
 ) {
     (void)large_domain;
     switch (src.type) {
@@ -92,4 +111,3 @@ __device__ __forceinline__ FpExt evaluate_dag_entry(
 }
 
 } // namespace logup_round0
-

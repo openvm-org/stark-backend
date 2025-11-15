@@ -9,7 +9,6 @@ use crate::{EF, F};
 pub struct Round0Buffers {
     pub selectors_base: Vec<DeviceMatrix<F>>,
     pub eq_xi: Vec<DeviceMatrix<EF>>,
-    pub public_values: Vec<DeviceBuffer<F>>,
 }
 
 #[derive(Default)]

@@ -18,7 +18,7 @@ template <bool GLOBAL>
 __device__ __forceinline__ void acc_interactions(
     uint32_t row,
     const Fp *__restrict__ d_selectors,
-    const MainMatrixPtrs *__restrict__ d_main,
+    const MainMatrixPtrs<Fp> *__restrict__ d_main,
     uint32_t height,
     uint32_t selectors_width,
     const Fp *__restrict__ d_preprocessed,
@@ -410,7 +410,7 @@ __global__ void evaluate_interactions_round0_kernel(
     FpExt *__restrict__ d_output_denom,
     const Fp *__restrict__ d_selectors,
     uint32_t selectors_width,
-    const MainMatrixPtrs *__restrict__ d_main,
+    const MainMatrixPtrs<Fp> *__restrict__ d_main,
     uint32_t main_count,
     const Fp *__restrict__ d_preprocessed,
     uint32_t preprocessed_width,
@@ -434,7 +434,7 @@ __global__ void evaluate_interactions_round0_kernel(
     uint32_t task_offset = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t task_stride = gridDim.x * blockDim.x;
 
-    FpExt local_buffer[16];
+    FpExt local_buffer[10];
     FpExt *inter_buffer;
     uint32_t buffer_stride;
     if constexpr (GLOBAL) {
@@ -528,8 +528,6 @@ __global__ void frac_vector_scalar_multiply_kernel(
     frac_vec[tidx].first *= scalar;
 }
 
-static const size_t TASK_SIZE = 65536;
-
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -548,7 +546,7 @@ extern "C" int _zerocheck_eval_interactions_gkr(
     uint32_t permutation_height,
     uint32_t num_rows_per_tile
 ) {
-    auto [grid, block] = kernel_launch_params(TASK_SIZE, 256);
+    auto [grid, block] = kernel_launch_params(interaction_evaluation::TASK_SIZE, 256);
     if (is_global) {
         evaluate_interactions_gkr_kernel<true><<<grid, block>>>(
             d_output,
@@ -592,7 +590,7 @@ extern "C" int _zerocheck_eval_interactions_round0(
     FpExt *output_denom,
     const Fp *selectors,
     uint32_t selectors_width,
-    const MainMatrixPtrs *partitioned_main,
+    const MainMatrixPtrs<Fp> *partitioned_main,
     uint32_t main_count,
     const Fp *preprocessed,
     uint32_t preprocessed_width,
@@ -613,14 +611,15 @@ extern "C" int _zerocheck_eval_interactions_round0(
     uint32_t skip_stride,
     const FpExt *challenges
 ) {
-    auto [grid, block] = kernel_launch_params(large_domain * num_x, 256);
+    auto count = interaction_evaluation::get_launcher_count(buffer_size, large_domain * num_x);
+    auto [grid, block] = kernel_launch_params(count, 256);
 #ifdef CUDA_DEBUG
     if (std::getenv("LOGUP_GPU_SINGLE_THREAD") != nullptr) {
         grid = dim3(1, 1, 1);
         block = dim3(1, 1, 1);
     }
 #endif
-    if (buffer_size > 16) {
+    if (buffer_size > interaction_evaluation::BUFFER_THRESHOLD) {
         evaluate_interactions_round0_kernel<true><<<grid, block>>>(
             output_numer,
             output_denom,

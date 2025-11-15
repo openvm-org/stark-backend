@@ -92,13 +92,22 @@ pub fn compute_constraint_expr_indices<F: Field + PrimeField32>(
     }
 
     let used_nodes = if dag.constraints.constraint_idx.is_empty() {
-        dag.interactions
-            .iter()
-            .flat_map(|interaction| {
-                assert_eq!(interaction.message.len(), 1);
-                [interaction.count, interaction.message[0]]
-            })
-            .collect::<Vec<_>>()
+        if is_permute {
+            // TODO[jpw]: revisit this:
+            // This branch is used only for encoding SymbolicInteractions for use during perm
+            // trace generation. The `message` is always a single expression for the
+            // denominator.
+            dag.interactions
+                .iter()
+                .flat_map(|interaction| {
+                    assert_eq!(interaction.message.len(), 1);
+                    [interaction.count, interaction.message[0]]
+                })
+                .collect::<Vec<_>>()
+        } else {
+            // There are no non-interaction constraints
+            vec![]
+        }
     } else {
         dag.constraints.constraint_idx.clone()
     };
