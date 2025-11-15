@@ -1,5 +1,7 @@
 #include "fp.h"
 #include "launcher.cuh"
+#include <algorithm>
+#include <cassert>
 #include <cstdint>
 
 // out has width equal to `2 * width`
@@ -74,6 +76,29 @@ __global__ void collapse_and_lift_strided_matrix_kernel(
     out[col * lifted_height + row] = in[col * lifted_height + (row % height) * stride];
 }
 
+// `out` is `padded_height x width` column-major matrix.
+// `in` is `height x width` column-major matrix.
+//
+// This kernel is for use when `width` is large (~2^20) while `height` is small (<2^10)
+__global__ void batch_expand_pad_wide_kernel(
+    Fp *__restrict__ out,
+    const Fp *__restrict__ in,
+    const uint32_t width,
+    const uint32_t padded_height,
+    const uint32_t height
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t col = blockIdx.y + blockIdx.z * gridDim.y;
+    if (col >= width) {
+        return;
+    }
+    if (row < height) {
+        out[col * padded_height + row] = in[col * height + row];
+    } else if (row < padded_height) {
+        out[col * padded_height + row] = Fp(0);
+    }
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -119,5 +144,21 @@ extern "C" int _collapse_and_lift_strided_matrix(
     collapse_and_lift_strided_matrix_kernel<<<grid, block>>>(
         out, in, width, lifted_height, height, stride
     );
+    return CHECK_KERNEL();
+}
+
+extern "C" int _batch_expand_pad_wide(
+    Fp *out,
+    const Fp *in,
+    const uint32_t width,
+    const uint32_t padded_height,
+    const uint32_t height
+) {
+    constexpr uint32_t MAX_GRID_DIM = 65535u;
+    auto [grid, block] = kernel_launch_params(padded_height);
+    grid.y = std::min(width, MAX_GRID_DIM);
+    grid.z = (width + grid.y - 1) / grid.y;
+    assert(grid.z <= MAX_GRID_DIM);
+    batch_expand_pad_wide_kernel<<<grid, block>>>(out, in, width, padded_height, height);
     return CHECK_KERNEL();
 }
