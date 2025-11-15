@@ -313,7 +313,7 @@ extern "C" int _frac_compute_round(
         return err == cudaSuccess ? 0 : err;
     }
 
-    size_t threads = std::min<size_t>(std::max<size_t>(half, WARP_SIZE), MAX_THREADS);
+    size_t threads = std::min<size_t>(std::max<size_t>(half, WARP_SIZE), 512);
     auto [grid, block] = kernel_launch_params(threads, threads);
     size_t num_warps = std::max<size_t>(1, (block.x + WARP_SIZE - 1) / WARP_SIZE);
     size_t shmem_bytes = num_warps * sizeof(FpExt);

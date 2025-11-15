@@ -324,6 +324,10 @@ mod v1_shims {
     impl V1Compat for GpuBackendV2 {
         type V1 = GpuBackend;
 
+        fn dummy_matrix() -> DeviceMatrix<F> {
+            DeviceMatrix::dummy()
+        }
+
         fn convert_trace(matrix: DeviceMatrix<F>) -> DeviceMatrix<F> {
             matrix
         }
