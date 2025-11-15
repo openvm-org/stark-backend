@@ -135,7 +135,7 @@ pub fn evaluate_interactions_gpu(
         for committed in &air_ctx.cached_mains {
             partitioned_main.push(unstack_matrix(committed.data.as_ref(), 0)?.0);
         }
-        partitioned_main.push(unstack_matrix(&common_main_pcs_data, meta.trace_idx)?.0);
+        partitioned_main.push(unstack_matrix(common_main_pcs_data, meta.trace_idx)?.0);
 
         let all_interactions = &meta.interactions;
         let max_fields_len = all_interactions

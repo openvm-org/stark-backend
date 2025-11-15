@@ -57,7 +57,7 @@ struct TraceRound0Matrices {
 struct Round0TraceInput<'a> {
     selectors_large: DeviceMatrix<F>,
     trace_mats: TraceRound0Matrices,
-    main_ptrs: DeviceBuffer<MainMatrixPtrs>,
+    main_ptrs: DeviceBuffer<MainMatrixPtrs<F>>,
     eq_x: DeviceMatrix<EF>,
     lambda_indices: DeviceBuffer<u32>,
     rules: DeviceBuffer<u128>,
@@ -73,6 +73,7 @@ fn prepare_round0_trace_inputs<'a>(
     ctx: &ProvingContextV2<GpuBackendV2>,
     common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     buffers: &'a Round0Buffers,
+    public_values: &'a [DeviceBuffer<F>],
 ) -> Result<Vec<Option<Round0TraceInput<'a>>>, Round0PrepError> {
     let mut inputs = Vec::with_capacity(ctx.per_trace.len());
 
@@ -145,7 +146,7 @@ fn prepare_round0_trace_inputs<'a>(
         let d_main_ptrs = partition_ptrs_host.to_device()?;
 
         let eq_x = buffers.eq_xi[trace_idx].clone();
-        let public_values = &buffers.public_values[trace_idx];
+        let public_values = &public_values[trace_idx];
 
         inputs.push(Some(Round0TraceInput {
             selectors_large,
@@ -172,6 +173,7 @@ pub fn evaluate_round0_constraints_gpu(
     ctx: &ProvingContextV2<GpuBackendV2>,
     common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     buffers: &Round0Buffers,
+    public_values: &[DeviceBuffer<F>],
     xi: &[EF],
     lambda_pows: &DeviceBuffer<EF>,
 ) -> Result<Vec<DeviceBuffer<EF>>, Round0EvalError> {
@@ -192,8 +194,15 @@ pub fn evaluate_round0_constraints_gpu(
     let d_eq_z = eq_z_host.to_device()?;
 
     let skip_stride = (large_domain >> l_skip) as u32;
-    let trace_inputs =
-        prepare_round0_trace_inputs(l_skip, s_deg, pk, ctx, common_main_pcs_data, buffers)?;
+    let trace_inputs = prepare_round0_trace_inputs(
+        l_skip,
+        s_deg,
+        pk,
+        ctx,
+        common_main_pcs_data,
+        buffers,
+        public_values,
+    )?;
 
     let mut sums = Vec::with_capacity(num_traces);
 
@@ -248,6 +257,7 @@ pub fn evaluate_round0_constraints_gpu(
                 input.public_values,
                 &input.rules,
                 &input.used_nodes,
+                input.buffer_size,
                 intermediates.as_ref(),
                 large_domain as u32,
                 num_x as u32,
@@ -277,6 +287,7 @@ pub fn evaluate_round0_interactions_gpu(
     ctx: &ProvingContextV2<GpuBackendV2>,
     common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     buffers: &Round0Buffers,
+    public_values: &[DeviceBuffer<F>],
     xi: &[EF],
     omega_skip_pows: &[F],
     beta_pows: &[EF],
@@ -301,8 +312,15 @@ pub fn evaluate_round0_interactions_gpu(
     let d_eq_sharp_z = eq_sharp_z_host.to_device()?;
 
     let skip_stride = (large_domain >> l_skip) as u32;
-    let trace_inputs =
-        prepare_round0_trace_inputs(l_skip, s_deg, pk, ctx, common_main_pcs_data, buffers)?;
+    let trace_inputs = prepare_round0_trace_inputs(
+        l_skip,
+        s_deg,
+        pk,
+        ctx,
+        common_main_pcs_data,
+        buffers,
+        public_values,
+    )?;
 
     let mut sums_numer = Vec::with_capacity(num_traces);
     let mut sums_denom = Vec::with_capacity(num_traces);
@@ -414,6 +432,7 @@ pub fn evaluate_round0_interactions_gpu(
                 input.public_values,
                 &d_rules,
                 &d_used_nodes,
+                rules.buffer_size.try_into().unwrap(),
                 intermediates.as_ref(),
                 large_domain as u32,
                 num_x as u32,
@@ -497,7 +516,6 @@ fn upsample_matrix(
 ) -> Result<DeviceMatrix<F>, Round0PrepError> {
     let lifted_height = matrix.height();
     let width = matrix.width();
-    println!("unstack width: {}", width);
     let log_lifted_height = log2_strict_usize(lifted_height);
     assert!(
         log_lifted_height >= l_skip,
@@ -588,7 +606,7 @@ fn upsample_matrix(
     ))
 }
 
-fn collect_partition_ptrs(mats: &TraceRound0Matrices) -> Vec<MainMatrixPtrs> {
+fn collect_partition_ptrs(mats: &TraceRound0Matrices) -> Vec<MainMatrixPtrs<F>> {
     let mut ptrs = Vec::new();
     for matrix in &mats.cached {
         debug_assert_eq!(
