@@ -28,6 +28,14 @@ extern "C" {
         height: u32,
         stride: u32,
     ) -> i32;
+
+    fn _batch_expand_pad_wide(
+        out: *mut F,
+        input: *const F,
+        width: u32,
+        padded_height: u32,
+        height: u32,
+    ) -> i32;
 }
 
 /// Copies a `domain_size × width` matrix into a `padded_size × (2 * width)` matrix,
@@ -101,5 +109,29 @@ pub unsafe fn collapse_and_lift_strided_matrix(
 ) -> Result<(), CudaError> {
     CudaError::from_result(_collapse_and_lift_strided_matrix(
         output, input, width, height, stride,
+    ))
+}
+
+/// Expands a `height × width` column-major matrix to a `padded_height × width` column-major matrix
+/// by padding with zeros. This kernel is intended for use when `width` is large (~2^20), so each
+/// column is handled by a different block.
+///
+/// # Safety
+/// - `output` must be a pointer to `DeviceBuffer<F>` with length at least `padded_height * width`.
+/// - `input` must be a pointer to `DeviceBuffer<F>` with length at least `height * width`.
+pub unsafe fn batch_expand_pad_wide(
+    out: *mut F,
+    input: *const F,
+    width: u32,
+    padded_height: u32,
+    height: u32,
+) -> Result<(), CudaError> {
+    debug_assert!(padded_height > height);
+    CudaError::from_result(_batch_expand_pad_wide(
+        out,
+        input,
+        width,
+        padded_height,
+        height,
     ))
 }
