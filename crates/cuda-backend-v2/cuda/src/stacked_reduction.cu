@@ -41,43 +41,6 @@ __device__ __forceinline__ uint32_t rot_prev(uint32_t x_int, uint32_t cube_size)
 
 __device__ __forceinline__ Fp eq1(Fp x, Fp y) { return Fp::one() - x - y + Fp(2) * x * y; }
 
-// Evaluate the `W` polynomial on PLE evaluations on the expanded domain, where `W` is specific to the stacked reduction.
-__device__ __forceinline__ FpExt stacked_reduction_round0_eval(
-    const Fp *q_upsampled,
-    const FpExt *eq_r_ns,
-    UnstackedSlice unstacked_slice,
-    const FpExt *lambda_pows,
-    const Round0UniPacket *z_packets,
-    uint32_t upsampled_height,
-    uint32_t log_domain_size,
-    uint32_t l_skip,
-    uint32_t window_idx,
-    uint32_t num_x,
-    uint32_t z_int,
-    uint32_t x_int
-) {
-    uint32_t col_idx = unstacked_slice.stacked_col_idx;
-    // ASSUME: unstacked_slice.stacked_row_idx % (2^l_skip) == 0
-    uint32_t row_start = unstacked_slice.stacked_row_idx << (log_domain_size - l_skip);
-
-    FpExt eq_cube = get_eq_cube(eq_r_ns, num_x, x_int);
-    FpExt k_rot_cube = get_eq_cube(eq_r_ns, num_x, rot_prev(x_int, num_x));
-
-    uint32_t row_idx = row_start + (x_int << log_domain_size) + z_int;
-
-    FpExt eq_uni = z_packets[z_int].eq_uni;
-    FpExt k_rot_0 = z_packets[z_int].k_rot_0;
-    FpExt k_rot_1 = z_packets[z_int].k_rot_1;
-
-    FpExt eq = eq_uni * eq_cube;
-    FpExt k_rot = k_rot_0 * eq_cube + k_rot_1 * (k_rot_cube - eq_cube);
-
-    uint32_t upsampled_idx = col_idx * upsampled_height + row_idx;
-    Fp q = q_upsampled[upsampled_idx];
-
-    return (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) * q;
-}
-
 // Each block covers a tile of z-values (threadIdx.x) and collaborates across threadIdx.y
 // to sum over x for a single (window_idx, z_int) pair. Blocks stride over window_idx via gridDim.y.
 //
@@ -109,27 +72,36 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
     FpExt local_sum = FpExt(0);
     uint32_t window_idx_base = blockIdx.z;
     uint32_t x_int_base = blockIdx.y * blockDim.y + threadIdx.y;
-    // We sum over window at a stride, where stride = gridDim.z is tuned based on compute / memory
-    for (uint32_t window_idx = window_idx_base; window_idx < window_len; window_idx += gridDim.z) {
-        UnstackedSlice unstacked_slice = unstacked_cols[window_idx];
-        const Fp *q_upsampled = q_upsampled_ptr[unstacked_slice.commit_idx];
+    // We divide the hypercube (`num_x` points) across the grid y-dimension
+    for (uint32_t x_int = x_int_base; x_int < num_x; x_int += blockDim.y * gridDim.y) {
+        FpExt eq_cube = get_eq_cube(eq_r_ns, num_x, x_int);
+        FpExt k_rot_cube = get_eq_cube(eq_r_ns, num_x, rot_prev(x_int, num_x));
 
-        // We divide the hypercube (`num_x` points) across the grid y-dimension
-        for (uint32_t x_int = x_int_base; x_int < num_x; x_int += blockDim.y * gridDim.y) {
-            local_sum += stacked_reduction_round0_eval(
-                q_upsampled,
-                eq_r_ns,
-                unstacked_slice,
-                lambda_pows,
-                z_packets,
-                upsampled_height,
-                log_domain_size,
-                l_skip,
-                window_idx,
-                num_x,
-                z_int,
-                x_int
-            );
+        FpExt eq_uni = z_packets[z_int].eq_uni;
+        FpExt k_rot_0 = z_packets[z_int].k_rot_0;
+        FpExt k_rot_1 = z_packets[z_int].k_rot_1;
+
+        FpExt eq = eq_uni * eq_cube;
+        FpExt k_rot = k_rot_0 * eq_cube + k_rot_1 * (k_rot_cube - eq_cube);
+
+        // We sum over window at a stride, where stride = gridDim.z is tuned based on compute / memory
+        for (uint32_t window_idx = window_idx_base; window_idx < window_len;
+             window_idx += gridDim.z) {
+            UnstackedSlice unstacked_slice = unstacked_cols[window_idx];
+            const Fp *q_upsampled = q_upsampled_ptr[unstacked_slice.commit_idx];
+
+            uint32_t col_idx = unstacked_slice.stacked_col_idx;
+            // ASSUME: unstacked_slice.stacked_row_idx % (2^l_skip) == 0
+            uint32_t row_start = unstacked_slice.stacked_row_idx << (log_domain_size - l_skip);
+
+            uint32_t row_idx = row_start + (x_int << log_domain_size) + z_int;
+
+            uint32_t upsampled_idx = col_idx * upsampled_height + row_idx;
+            Fp q = q_upsampled[upsampled_idx];
+
+            auto eval =
+                (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) * q;
+            local_sum += eval;
         }
     }
 

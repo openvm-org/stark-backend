@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use openvm_cuda_backend::{cuda::kernels::lde::batch_expand_pad, ntt::batch_ntt, prelude::*};
+use openvm_cuda_backend::{ntt::batch_ntt, prelude::*};
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -13,8 +13,9 @@ use stark_backend_v2::{
 };
 use tracing::debug;
 
-use crate::cuda::sumcheck::{
-    fold_mle, fold_ple_from_coeffs, reduce_over_x_and_cols, sumcheck_mle_round,
+use crate::cuda::{
+    matrix::batch_expand_pad_wide,
+    sumcheck::{fold_mle, fold_ple_from_coeffs, reduce_over_x_and_cols, sumcheck_mle_round},
 };
 
 /// GPU implementation of multilinear sumcheck
@@ -211,9 +212,9 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
 
         // Step 2: Copy and pad each column to large domain size
         unsafe {
-            batch_expand_pad(
-                &d_coeffs_large,
-                &d_coeffs,
+            batch_expand_pad_wide(
+                d_coeffs_large.as_mut_ptr(),
+                d_coeffs.as_ptr(),
                 (num_x * width) as u32,
                 large_domain_size as u32,
                 domain_size as u32,

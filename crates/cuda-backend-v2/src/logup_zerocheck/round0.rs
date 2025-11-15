@@ -3,7 +3,6 @@ use std::{collections::HashMap, sync::Arc};
 use itertools::Itertools;
 use openvm_cuda_backend::{
     base::DeviceMatrix,
-    cuda::kernels::lde::{batch_expand_pad, raw_batch_expand_pad},
     ntt::batch_ntt,
     transpiler::{SymbolicRulesOnGpu, codec::Codec},
 };
@@ -39,7 +38,7 @@ use crate::{
             MainMatrixPtrs, accumulate_constraints, zerocheck_eval_constraints,
             zerocheck_eval_interactions_round0,
         },
-        matrix::{batch_rotate_lift_and_pad, batch_rotate_pad},
+        matrix::{batch_expand_pad_wide, batch_rotate_lift_and_pad, batch_rotate_pad},
     },
     stacked_pcs::StackedPcsDataGpu,
 };
@@ -552,7 +551,7 @@ fn upsample_matrix(
                 debug_assert_eq!(lifted_height, 1 << l_skip);
                 debug_assert_eq!(lifted_height % height, 0);
                 debug_assert_eq!(num_x, 1);
-                raw_batch_expand_pad(
+                batch_expand_pad_wide(
                     upsampled.as_mut_ptr(),
                     matrix.buffer().as_ptr(),
                     width as u32,
@@ -571,9 +570,9 @@ fn upsample_matrix(
                 )?;
             }
         } else {
-            batch_expand_pad(
-                &upsampled,
-                matrix.buffer(),
+            batch_expand_pad_wide(
+                upsampled.as_mut_ptr(),
+                matrix.buffer().as_ptr(),
                 domain_poly_count as u32,
                 large_domain_size as u32,
                 domain_size as u32,
