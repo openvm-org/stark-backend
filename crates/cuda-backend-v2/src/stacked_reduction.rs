@@ -1,7 +1,7 @@
 use std::{array::from_fn, ffi::c_void, iter::zip};
 
 use itertools::Itertools;
-use openvm_cuda_backend::{cuda::kernels::lde::batch_expand_pad, ntt::batch_ntt};
+use openvm_cuda_backend::ntt::batch_ntt;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
@@ -20,6 +20,7 @@ use tracing::instrument;
 use crate::{
     Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
     cuda::{
+        matrix::batch_expand_pad_wide,
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
             _stacked_reduction_mle_required_temp_buffer_size,
@@ -115,7 +116,7 @@ impl<'a> StackedReductionGpu<'a> {
 }
 
 impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReductionGpu<'a> {
-    #[instrument("StackedReductionGpu::new", skip_all)]
+    #[instrument("StackedReductionGpu::new", level = "debug", skip_all)]
     fn new(
         device: &'a GpuDeviceV2,
         stacked_per_commit: Vec<&'a StackedPcsDataGpu<F, Digest>>,
@@ -208,7 +209,12 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
         }
     }
 
-    #[instrument("stacked_reduction_sumcheck", skip_all, fields(round = 0))]
+    #[instrument(
+        "stacked_reduction_sumcheck",
+        level = "debug",
+        skip_all,
+        fields(round = 0)
+    )]
     fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<EF> {
         let l_skip = self.l_skip;
         let omega_skip = self.omega_skip;
@@ -243,9 +249,9 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
                 debug_assert_eq!(len % (1 << l_skip), 0);
                 let num_polys = (len >> l_skip) as u32;
                 unsafe {
-                    batch_expand_pad(
-                        &upsampled,
-                        q_mixed,
+                    batch_expand_pad_wide(
+                        upsampled.as_mut_ptr(),
+                        q_mixed.as_ptr(),
                         num_polys,
                         domain_size as u32,
                         1 << l_skip,
@@ -381,7 +387,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
         s_0
     }
 
-    #[instrument("stacked_reduction_fold_ple", skip_all)]
+    #[instrument("stacked_reduction_fold_ple", level = "debug", skip_all)]
     fn fold_ple_evals(&mut self, u_0: EF) {
         let l_skip = self.l_skip;
         let n_stack = self.n_stack;
