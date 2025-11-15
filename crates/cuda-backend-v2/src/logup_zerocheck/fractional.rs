@@ -143,7 +143,8 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
 
         let mut pq_buffer = DeviceBuffer::<EF>::with_capacity(4 * eval_size);
         unsafe {
-            frac_prepare_round(tree, segment_start, eval_size, &pq_buffer)?;
+            frac_prepare_round(tree, segment_start, eval_size, &pq_buffer)
+                .map_err(FractionalSumcheckError::PrepareRound)?;
         }
 
         let eq_host = evals_eq_hypercube(&xi_prev);
@@ -159,7 +160,8 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
 
         for _sum_round in 0..round {
             unsafe {
-                frac_compute_round(&eq_buffer, &pq_buffer, stride, lambda, &sum_evals_device)?;
+                frac_compute_round(&eq_buffer, &pq_buffer, stride, lambda, &sum_evals_device)
+                    .map_err(FractionalSumcheckError::ComputeRound)?;
             }
             let s_vec = sum_evals_device.to_host()?;
             let s_evals: [EF; 3] = s_vec
@@ -176,8 +178,10 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
             let next_eq = DeviceBuffer::<EF>::with_capacity(stride >> 1);
             let next_pq = DeviceBuffer::<EF>::with_capacity(4 * (stride >> 1));
             unsafe {
-                frac_fold_columns(&eq_buffer, stride, 1, r_round, &next_eq)?;
-                frac_fold_columns(&pq_buffer, stride, 4, r_round, &next_pq)?;
+                frac_fold_columns(&eq_buffer, stride, 1, r_round, &next_eq)
+                    .map_err(FractionalSumcheckError::FoldColumns)?;
+                frac_fold_columns(&pq_buffer, stride, 4, r_round, &next_pq)
+                    .map_err(FractionalSumcheckError::FoldColumns)?;
             }
             eq_buffer = next_eq;
             pq_buffer = next_pq;
@@ -186,7 +190,8 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
 
         let claim_device = DeviceBuffer::<EF>::with_capacity(4);
         unsafe {
-            frac_extract_claims(&pq_buffer, stride, &claim_device)?;
+            frac_extract_claims(&pq_buffer, stride, &claim_device)
+                .map_err(FractionalSumcheckError::ExtractClaims)?;
         }
         let claim_vec = claim_device.to_host()?;
         let claim_values: [EF; 4] = claim_vec
