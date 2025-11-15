@@ -73,6 +73,7 @@ fn prepare_round0_trace_inputs<'a>(
     common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     buffers: &'a Round0Buffers,
     public_values: &'a [DeviceBuffer<F>],
+    for_interactions: bool,
 ) -> Result<Vec<Option<Round0TraceInput<'a>>>, Round0PrepError> {
     let mut inputs = Vec::with_capacity(ctx.per_trace.len());
 
@@ -84,8 +85,10 @@ fn prepare_round0_trace_inputs<'a>(
     {
         let per_air = &pk.per_air[*air_idx];
         let constraints = SymbolicConstraints::from(&per_air.vk.symbolic_constraints);
-        // Skip only if both constraints and interactions are empty
-        if constraints.constraints.is_empty() && constraints.interactions.is_empty() {
+        // Skip if there's no constraints of the type (non-interaction vs interaction) we care about
+        if (!for_interactions && constraints.constraints.is_empty())
+            || (for_interactions && constraints.interactions.is_empty())
+        {
             inputs.push(None);
             continue;
         }
@@ -121,8 +124,9 @@ fn prepare_round0_trace_inputs<'a>(
             .enumerate()
             .map(|(idx, dag_idx)| (*dag_idx, idx))
             .collect();
-        let constraint_dag_indices = compute_constraint_expr_indices(&constraints_dag, false);
-        let rules = SymbolicRulesOnGpu::new(constraints_dag, false);
+        let constraint_dag_indices =
+            compute_constraint_expr_indices(&constraints_dag, for_interactions);
+        let rules = SymbolicRulesOnGpu::new(constraints_dag, for_interactions);
 
         let lambda_indices_host: Vec<u32> = rules
             .used_nodes
@@ -201,6 +205,7 @@ pub fn evaluate_round0_constraints_gpu(
         common_main_pcs_data,
         buffers,
         public_values,
+        false,
     )?;
 
     let mut sums = Vec::with_capacity(num_traces);
@@ -319,6 +324,7 @@ pub fn evaluate_round0_interactions_gpu(
         common_main_pcs_data,
         buffers,
         public_values,
+        true,
     )?;
 
     let mut sums_numer = Vec::with_capacity(num_traces);

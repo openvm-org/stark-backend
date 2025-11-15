@@ -41,8 +41,14 @@ pub enum FractionalSegmentTreeError {
 
 #[derive(Debug, Error)]
 pub enum FractionalSumcheckError {
-    #[error("cuda error: {0}")]
-    Cuda(#[from] CudaError),
+    #[error("frac_prepare_round cuda error: {0}")]
+    PrepareRound(CudaError),
+    #[error("frac_compute_round cuda error: {0}")]
+    ComputeRound(CudaError),
+    #[error("frac_fold_columns cuda error: {0}")]
+    FoldColumns(CudaError),
+    #[error("frac_extract_claims cuda error: {0}")]
+    ExtractClaims(CudaError),
     #[error("memcpy error: {0}")]
     Copy(#[from] MemCopyError),
 }
