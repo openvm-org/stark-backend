@@ -1,4 +1,4 @@
-use std::{cmp::max, sync::Arc};
+use std::{cmp::max, iter, sync::Arc};
 
 use itertools::{Itertools, izip};
 use openvm_cuda_backend::base::DeviceMatrix;
@@ -6,15 +6,14 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
 };
-use openvm_stark_backend::prover::MatrixDimensions;
+use openvm_stark_backend::{air_builders::symbolic::SymbolicConstraints, prover::MatrixDimensions};
 use p3_field::{Field, FieldAlgebra, TwoAdicField};
 use p3_util::log2_strict_usize;
 use stark_backend_v2::{
     poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni},
     poseidon2::sponge::FiatShamirTranscript,
     prover::{
-        AirProvingContextV2, CpuBackendV2, CpuDeviceV2, DeviceMultiStarkProvingKeyV2,
-        DeviceStarkProvingKeyV2, LogupZerocheckCpu, LogupZerocheckProver, ProvingContextV2,
+        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, LogupZerocheckProver, ProvingContextV2,
         fractional_sumcheck_gkr::FracSumcheckProof, poly::evals_eq_hypercube,
         stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
     },
@@ -23,7 +22,11 @@ use tracing::debug;
 
 use crate::{
     Digest, EF, F, GpuBackendV2, GpuDeviceV2,
-    gpu_backend::{transport_committed_trace_data_to_host, transport_matrix_d2h_col_major},
+    cuda::{
+        logup_zerocheck::{MainMatrixPtrs, interpolate_columns_gpu},
+        sumcheck::fold_mle,
+    },
+    gpu_backend::transport_matrix_d2h_col_major,
     stacked_pcs::StackedPcsDataGpu,
 };
 
@@ -33,6 +36,7 @@ mod fold_ple;
 mod fractional;
 mod interactions;
 mod matrix_utils;
+mod mle_round;
 mod round0;
 mod state;
 
@@ -41,6 +45,7 @@ use fold_ple::{compute_eq_sharp_gpu, fold_ple_evals_gpu};
 use fractional::{fractional_sumcheck_gpu, initialize_segment_tree};
 use interactions::{collect_trace_interactions, evaluate_interactions_gpu};
 use matrix_utils::unstack_matrix_round0;
+use mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu};
 use round0::{evaluate_round0_constraints_gpu, evaluate_round0_interactions_gpu};
 use state::{FractionalGkrState, Round0Buffers};
 
@@ -74,7 +79,9 @@ pub struct LogupZerocheckGpu<'a> {
     // After univariate round 0:
     mat_evals_per_trace: Vec<Vec<DeviceMatrix<EF>>>,
     sels_per_trace: Vec<DeviceMatrix<EF>>,
-
+    // Store public_values per trace (similar to CPU's EvalHelper)
+    public_values_per_trace: Vec<DeviceBuffer<F>>,
+    air_indices_per_trace: Vec<usize>,
     zerocheck_tilde_evals: Vec<EF>,
     logup_tilde_evals: Vec<[EF; 2]>,
 
@@ -83,7 +90,6 @@ pub struct LogupZerocheckGpu<'a> {
     pk: &'a DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     device: &'a GpuDeviceV2,
     common_main_pcs_data: &'a StackedPcsDataGpu<F, Digest>,
-    cpu_fallback: CpuFallback<'a>,
 }
 
 impl<'a, TS> LogupZerocheckProver<'a, GpuBackendV2, GpuDeviceV2, TS> for LogupZerocheckGpu<'a>
@@ -152,11 +158,6 @@ where
             ..Default::default()
         };
 
-        // CPU fallback: transport inputs and reuse the CPU implementation for now.
-        let cpu_pk = transport_device_pk_to_host(pk);
-        let cpu_device = CpuDeviceV2::new(device.config());
-        let cpu_ctx = transport_proving_context_ref_to_host(ctx);
-
         let total_leaves = 1 << (l_skip + n_logup);
         let leaves = if has_interactions {
             evaluate_interactions_gpu(
@@ -176,8 +177,6 @@ where
         initialize_segment_tree(&mut fractional_state, leaves)
             .expect("failed to build fractional segment tree on device");
 
-        let mut transcript_shadow = transcript.clone();
-
         let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(transcript, &fractional_state, true)
             .expect("failed to run fractional sumcheck on GPU");
 
@@ -187,49 +186,6 @@ where
             xi.push(transcript.sample_ext());
         }
         debug!(?xi);
-
-        // TODO: delete after done with gpu
-        let (cpu_prover, cpu_frac_proof) = LogupZerocheckCpu::prove_logup_gkr(
-            unsafe { &*(&cpu_device as *const _) },
-            &mut transcript_shadow,
-            unsafe { &*(&cpu_pk as *const _) },
-            &cpu_ctx,
-            unsafe { &*(std::ptr::dangling() as *const _) }, // UNSAFE: CPU doesn't use this ptr
-            n_logup,
-            interactions_layout.clone(),
-            alpha_logup,
-            beta_logup,
-        );
-
-        debug_assert_eq!(frac_sum_proof.fractional_sum, cpu_frac_proof.fractional_sum);
-        debug_assert_eq!(
-            frac_sum_proof.claims_per_layer.len(),
-            cpu_frac_proof.claims_per_layer.len()
-        );
-        debug_assert_eq!(
-            frac_sum_proof.sumcheck_polys.len(),
-            cpu_frac_proof.sumcheck_polys.len()
-        );
-        for (gpu_claim, cpu_claim) in frac_sum_proof
-            .claims_per_layer
-            .iter()
-            .zip(cpu_frac_proof.claims_per_layer.iter())
-        {
-            debug_assert_eq!(gpu_claim.p_xi_0, cpu_claim.p_xi_0);
-            debug_assert_eq!(gpu_claim.q_xi_0, cpu_claim.q_xi_0);
-            debug_assert_eq!(gpu_claim.p_xi_1, cpu_claim.p_xi_1);
-            debug_assert_eq!(gpu_claim.q_xi_1, cpu_claim.q_xi_1);
-        }
-        for (gpu_layer, cpu_layer) in frac_sum_proof
-            .sumcheck_polys
-            .iter()
-            .zip(cpu_frac_proof.sumcheck_polys.iter())
-        {
-            debug_assert_eq!(gpu_layer.len(), cpu_layer.len());
-            for (gpu_round, cpu_round) in gpu_layer.iter().zip(cpu_layer.iter()) {
-                debug_assert_eq!(gpu_round, cpu_round);
-            }
-        }
 
         let prover = Self {
             alpha_logup,
@@ -253,13 +209,31 @@ where
             sels_per_trace_base: vec![],
             mat_evals_per_trace: vec![],
             sels_per_trace: vec![],
+            public_values_per_trace: ctx
+                .per_trace
+                .iter()
+                .map(|(_, air_ctx)| {
+                    if air_ctx.public_values.is_empty() {
+                        DeviceBuffer::new()
+                    } else {
+                        air_ctx
+                            .public_values
+                            .to_device()
+                            .expect("failed to copy public values to device")
+                    }
+                })
+                .collect_vec(),
+            air_indices_per_trace: ctx
+                .per_trace
+                .iter()
+                .map(|(air_idx, _)| *air_idx)
+                .collect_vec(),
             zerocheck_tilde_evals: vec![EF::ZERO; num_airs_present],
             logup_tilde_evals: vec![[EF::ZERO; 2]; num_airs_present],
             fractional_state,
             pk,
             device,
             common_main_pcs_data,
-            cpu_fallback: CpuFallback::new(cpu_prover, cpu_device, cpu_pk),
         };
 
         (prover, frac_sum_proof)
@@ -366,20 +340,6 @@ where
         let buffers = Round0Buffers {
             selectors_base: self.sels_per_trace_base.clone(),
             eq_xi: self.eq_xi_per_trace.clone(),
-            public_values: ctx
-                .per_trace
-                .iter()
-                .map(|(_, air_ctx)| {
-                    if air_ctx.public_values.is_empty() {
-                        DeviceBuffer::new()
-                    } else {
-                        air_ctx
-                            .public_values
-                            .to_device()
-                            .expect("failed to copy public values to device")
-                    }
-                })
-                .collect_vec(),
         };
 
         let sum_buffers = evaluate_round0_constraints_gpu(
@@ -390,6 +350,7 @@ where
             ctx,
             self.common_main_pcs_data,
             &buffers,
+            &self.public_values_per_trace,
             &self.xi,
             self.lambda_pows
                 .as_ref()
@@ -424,6 +385,7 @@ where
                 ctx,
                 self.common_main_pcs_data,
                 &buffers,
+                &self.public_values_per_trace,
                 &self.xi,
                 &self.omega_skip_pows,
                 &self.beta_pows,
@@ -470,12 +432,7 @@ where
             logup_polys
         };
 
-        // TODO: remove this after GPU-ising all
-        let cpu_polys = self
-            .cpu_fallback
-            .sumcheck_uni_round0_polys::<TS>(ctx, lambda);
-
-        logup_polys
+        let gpu_polys: Vec<UnivariatePoly<EF>> = logup_polys
             .into_iter()
             .chain(zerocheck_polys)
             .map(|mut poly| {
@@ -487,7 +444,9 @@ where
                 poly.coeffs_mut().truncate(s_0_deg + 1);
                 poly
             })
-            .collect()
+            .collect();
+
+        gpu_polys
     }
 
     fn fold_ple_evals(&mut self, ctx: ProvingContextV2<GpuBackendV2>, r_0: EF) {
@@ -505,25 +464,24 @@ where
                 if let Some(preprocessed_data) = &air_pk.preprocessed_data {
                     let (mat, _) = unstack_matrix_round0(preprocessed_data.data.as_ref(), 0)
                         .expect("failed to unstack preprocessed");
-                    let (folded_0, folded_1) = fold_ple_evals_gpu(l_skip, &mat, r_0, true)
+                    let folded = fold_ple_evals_gpu(l_skip, &mat, r_0, true)
                         .expect("failed to fold PLE on GPU");
-                    results.extend([folded_0, folded_1]);
+                    results.push(folded);
                 }
 
                 // Cached mains
                 for cached_data in &air_ctx.cached_mains {
                     let (mat, _) = unstack_matrix_round0(cached_data.data.as_ref(), 0)
                         .expect("failed to unstack cached");
-                    let (folded_0, folded_1) = fold_ple_evals_gpu(l_skip, &mat, r_0, true)
+                    let folded = fold_ple_evals_gpu(l_skip, &mat, r_0, true)
                         .expect("failed to fold PLE on GPU");
-                    results.extend([folded_0, folded_1]);
+                    results.push(folded);
                 }
 
                 // Common main
-                let (folded_0, folded_1) =
-                    fold_ple_evals_gpu(l_skip, &air_ctx.common_main, r_0, true)
-                        .expect("failed to fold PLE on GPU");
-                results.extend([folded_0, folded_1]);
+                let folded = fold_ple_evals_gpu(l_skip, &air_ctx.common_main, r_0, true)
+                    .expect("failed to fold PLE on GPU");
+                results.push(folded);
 
                 results
             })
@@ -535,7 +493,6 @@ where
             .map(|mat| {
                 fold_ple_evals_gpu(l_skip, &mat, r_0, false)
                     .expect("failed to fold selectors on GPU")
-                    .0 // Only use the first result (offset=0)
             })
             .collect();
 
@@ -554,211 +511,544 @@ where
                     .expect("failed to multiply eq_xi and compute eq_sharp on GPU")
             })
             .collect();
-
-        // CPU fallback for comparison. TODO: remove this after GPU-ising all
-        self.cpu_fallback.fold_ple_evals::<TS>(ctx, r_0);
-
-        // Compare GPU vs CPU results for mat_evals_per_trace
-        let gpu_host: Vec<Vec<Vec<EF>>> = self
-            .mat_evals_per_trace
-            .iter()
-            .map(|trace_mats| {
-                trace_mats
-                    .iter()
-                    .map(|mat| {
-                        transport_matrix_d2h_col_major(mat)
-                            .expect("failed to copy GPU matrix to host")
-                            .values
-                    })
-                    .collect()
-            })
-            .collect();
-        let cpu_host: Vec<Vec<Vec<EF>>> = self
-            .cpu_fallback
-            .prover
-            .mat_evals_per_trace
-            .iter()
-            .map(|trace_mats| trace_mats.iter().map(|mat| mat.values.clone()).collect())
-            .collect();
-        assert_eq!(gpu_host, cpu_host);
-
-        // Compare GPU vs CPU results for sels_per_trace
-        let gpu_sels: Vec<Vec<EF>> = self
-            .sels_per_trace
-            .iter()
-            .map(|mat| {
-                transport_matrix_d2h_col_major(mat)
-                    .expect("failed to copy GPU matrix to host")
-                    .values
-            })
-            .collect();
-        let cpu_sels: Vec<Vec<EF>> = self
-            .cpu_fallback
-            .prover
-            .sels_per_trace
-            .iter()
-            .map(|mat| mat.values.clone())
-            .collect();
-        assert_eq!(gpu_sels, cpu_sels);
-
-        // Compare GPU vs CPU results for eq_xi_per_trace
-        let gpu_eq_xi: Vec<Vec<EF>> = self
-            .eq_xi_per_trace
-            .iter()
-            .map(|mat| {
-                transport_matrix_d2h_col_major(mat)
-                    .expect("failed to copy GPU matrix to host")
-                    .values
-            })
-            .collect();
-        let cpu_eq_xi: Vec<Vec<EF>> = self
-            .cpu_fallback
-            .prover
-            .eq_xi_per_trace
-            .iter()
-            .map(|mat| mat.values.clone())
-            .collect();
-        assert_eq!(gpu_eq_xi, cpu_eq_xi);
-
-        // Compare GPU vs CPU results for eq_sharp_per_trace
-        let gpu_eq_sharp: Vec<Vec<EF>> = self
-            .eq_sharp_per_trace
-            .iter()
-            .map(|mat| {
-                transport_matrix_d2h_col_major(mat)
-                    .expect("failed to copy GPU matrix to host")
-                    .values
-            })
-            .collect();
-        let cpu_eq_sharp: Vec<Vec<EF>> = self
-            .cpu_fallback
-            .prover
-            .eq_sharp_per_trace
-            .iter()
-            .map(|mat| mat.values.clone())
-            .collect();
-        assert_eq!(gpu_eq_sharp, cpu_eq_sharp);
     }
 
     fn sumcheck_polys_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
-        self.cpu_fallback.sumcheck_polys_eval::<TS>(round, r_prev)
-    }
+        let s_deg = self.s_deg;
+        let lambda_pows = self.lambda_pows.as_ref().expect("lambda_pows must be set");
 
-    fn fold_mle_evals(&mut self, round: usize, r_round: EF) {
-        self.cpu_fallback.fold_mle_evals::<TS>(round, r_round);
-    }
-
-    fn into_column_openings(self) -> Vec<Vec<Vec<(EF, EF)>>> {
-        self.cpu_fallback.into_column_openings::<TS>()
-    }
-}
-
-struct CpuFallback<'a> {
-    prover: LogupZerocheckCpu<'a>,
-    _device: CpuDeviceV2,
-    _pk: DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-}
-
-impl<'a> CpuFallback<'a> {
-    fn new(
-        prover: LogupZerocheckCpu<'a>,
-        device: CpuDeviceV2,
-        pk: DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-    ) -> Self {
-        Self {
-            prover,
-            _device: device,
-            _pk: pk,
-        }
-    }
-
-    fn sumcheck_uni_round0_polys<TS: FiatShamirTranscript>(
-        &mut self,
-        ctx: &ProvingContextV2<GpuBackendV2>,
-        lambda: EF,
-    ) -> Vec<UnivariatePoly<EF>> {
-        let cpu_ctx = transport_proving_context_ref_to_host(ctx);
-        LogupZerocheckProver::<_, _, TS>::sumcheck_uni_round0_polys(
-            &mut self.prover,
-            &cpu_ctx,
-            lambda,
+        let mut s_logup_evals = Vec::new();
+        let mut s_zerocheck_evals = Vec::new();
+        // Process zerocheck and logup together per trace
+        izip!(
+            self.n_per_trace.iter(),
+            self.zerocheck_tilde_evals.iter_mut(),
+            self.logup_tilde_evals.iter_mut(),
+            self.mat_evals_per_trace.iter(),
+            self.sels_per_trace.iter(),
+            self.eq_xi_per_trace.iter(),
+            self.eq_sharp_per_trace.iter(),
+            self.eq_3b_per_trace.iter(),
+            self.public_values_per_trace.iter(),
+            self.air_indices_per_trace.iter()
         )
+        .for_each(
+            |(
+                &n,
+                zc_tilde_eval,
+                logup_tilde_eval,
+                mats,
+                sels,
+                eq_xi,
+                eq_sharp,
+                eq_3bs,
+                public_vals,
+                &air_idx,
+            )| {
+                let mut results = vec![vec![EF::ZERO; s_deg]; 3]; // logup numer, logup denom, zerocheck
+
+                let constraints_dag = &self.pk.per_air[air_idx].vk.symbolic_constraints;
+                let constraints = SymbolicConstraints::from(constraints_dag);
+                let has_constraints = !constraints.constraints.is_empty();
+                let has_interactions = !constraints.interactions.is_empty();
+
+                if has_interactions || has_constraints {
+                    let n_lift = n.max(0) as usize;
+                    let norm_factor_denom = 1 << (-n).max(0);
+                    let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+                    let has_preprocessed = self.pk.per_air[air_idx].preprocessed_data.is_some();
+
+                    if round > n_lift {
+                        // Case A.1 round == n_lift + 1
+                        if round == n_lift + 1 {
+                            let (prep_ptr, first_main_idx) = if has_preprocessed {
+                                (
+                                    MainMatrixPtrs {
+                                        data: mats[0].buffer().as_ptr(),
+                                        air_width: mats[0].width() as u32 / 2,
+                                    },
+                                    1,
+                                )
+                            } else {
+                                (
+                                    MainMatrixPtrs {
+                                        data: std::ptr::null(),
+                                        air_width: 0,
+                                    },
+                                    0,
+                                )
+                            };
+                            let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
+                                .iter()
+                                .map(|m| MainMatrixPtrs {
+                                    data: m.buffer().as_ptr(),
+                                    air_width: m.width() as u32 / 2,
+                                })
+                                .collect_vec();
+                            if has_constraints {
+                                let zc_evals = evaluate_mle_constraints_gpu(
+                                    eq_xi.buffer().as_ptr(),
+                                    sels.buffer().as_ptr(),
+                                    prep_ptr,
+                                    &main_ptrs,
+                                    public_vals,
+                                    lambda_pows,
+                                    constraints_dag,
+                                    1,
+                                    1,
+                                );
+                                assert_eq!(zc_evals.len(), 1);
+                                *zc_tilde_eval = zc_evals[0];
+                            }
+                            if has_interactions {
+                                let [logup_numer_evals, logup_denom_evals] =
+                                    evaluate_mle_interactions_gpu(
+                                        eq_sharp.buffer().as_ptr(),
+                                        sels.buffer().as_ptr(),
+                                        prep_ptr,
+                                        &main_ptrs,
+                                        public_vals,
+                                        &self.beta_pows,
+                                        eq_3bs,
+                                        constraints_dag,
+                                        1,
+                                        1,
+                                    );
+                                assert_eq!(logup_numer_evals.len(), 1);
+                                assert_eq!(logup_denom_evals.len(), 1);
+                                logup_tilde_eval[0] = logup_numer_evals[0] * norm_factor;
+                                logup_tilde_eval[1] = logup_denom_evals[0];
+                            }
+                        } else {
+                            // Case A.2 round > n_lift + 1
+                            if has_constraints {
+                                *zc_tilde_eval *= r_prev;
+                            }
+                            if has_interactions {
+                                for x in logup_tilde_eval.iter_mut() {
+                                    *x *= r_prev;
+                                }
+                            }
+                        }
+                        if has_constraints {
+                            results[2] = (1..=s_deg)
+                                .map(|x| *zc_tilde_eval * F::from_canonical_usize(x))
+                                .collect();
+                        }
+                        if has_interactions {
+                            let [numer, denom] = logup_tilde_eval.map(|tilde_eval| {
+                                (1..=s_deg)
+                                    .map(|x| tilde_eval * F::from_canonical_usize(x))
+                                    .collect()
+                            });
+                            results[0] = numer;
+                            results[1] = denom;
+                        }
+                    } else {
+                        // Case B: round <= n_lift
+                        let n = n_lift.saturating_sub(round - 1);
+                        let height = 1 << n;
+                        let mut columns: Vec<usize> = Vec::new();
+                        if has_constraints {
+                            debug_assert_eq!(eq_xi.height(), height);
+                            debug_assert_eq!(eq_xi.width(), 1);
+                            columns.push(eq_xi.buffer().as_ptr() as usize);
+                        }
+                        if has_interactions {
+                            debug_assert_eq!(eq_sharp.height(), height);
+                            debug_assert_eq!(eq_sharp.width(), 1);
+                            columns.push(eq_sharp.buffer().as_ptr() as usize);
+                        }
+                        columns.extend(
+                            iter::once(sels)
+                                .chain(mats.iter())
+                                .flat_map(|m| {
+                                    assert_eq!(m.height(), height);
+                                    (0..m.width()).map(|col| {
+                                        m.buffer().as_ptr().wrapping_add(col * m.height()) as usize
+                                    })
+                                })
+                                .collect_vec(),
+                        );
+                        let num_columns = columns.len();
+                        let num_y = height / 2;
+                        let interpolated =
+                            DeviceMatrix::<EF>::with_capacity(s_deg * num_y, num_columns);
+                        let d_columns = columns
+                            .to_device()
+                            .expect("failed to copy column ptrs to device");
+                        unsafe {
+                            interpolate_columns_gpu(
+                                interpolated.buffer(),
+                                &d_columns,
+                                s_deg,
+                                num_y,
+                            )
+                            .expect("failed to interpolate columns on GPU");
+                        }
+                        // interpolated columns layout:
+                        // [eq_xi (x1), eq_sharp (x1), sels (x3), prep? (x1), main[i] (x1)]
+
+                        // EVALUATION:
+                        let interpolated_height = interpolated.height();
+                        let mats_widths: Vec<usize> = mats.iter().map(|m| m.width() / 2).collect();
+                        let mut widths_so_far = 0;
+                        let eq_xi_ptr = if has_constraints {
+                            let ptr = interpolated
+                                .buffer()
+                                .as_ptr()
+                                .wrapping_add(widths_so_far * interpolated_height);
+                            widths_so_far += 1;
+                            ptr
+                        } else {
+                            std::ptr::null()
+                        };
+                        let eq_sharp_ptr = if has_interactions {
+                            let ptr = interpolated
+                                .buffer()
+                                .as_ptr()
+                                .wrapping_add(widths_so_far * interpolated_height);
+                            widths_so_far += 1;
+                            ptr
+                        } else {
+                            std::ptr::null()
+                        };
+                        let sels_ptr = interpolated
+                            .buffer()
+                            .as_ptr()
+                            .wrapping_add(widths_so_far * interpolated_height);
+                        widths_so_far += 3;
+                        let (prep_ptr, first_main_idx) = if has_preprocessed {
+                            (
+                                MainMatrixPtrs {
+                                    data: interpolated
+                                        .buffer()
+                                        .as_ptr()
+                                        .wrapping_add(widths_so_far * interpolated_height),
+                                    air_width: mats_widths[0] as u32,
+                                },
+                                1,
+                            )
+                        } else {
+                            (
+                                MainMatrixPtrs {
+                                    data: std::ptr::null(),
+                                    air_width: 0,
+                                },
+                                0,
+                            )
+                        };
+                        widths_so_far += 2 * prep_ptr.air_width as usize;
+                        let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats_widths[first_main_idx..]
+                            .iter()
+                            .map(|m_width| {
+                                let main_ptr = MainMatrixPtrs {
+                                    data: interpolated
+                                        .buffer()
+                                        .as_ptr()
+                                        .wrapping_add(widths_so_far * interpolated_height),
+                                    air_width: *m_width as u32,
+                                };
+                                widths_so_far += m_width * 2;
+                                main_ptr
+                            })
+                            .collect_vec();
+                        debug_assert_eq!(widths_so_far, interpolated.width());
+                        if has_constraints {
+                            results[2] = evaluate_mle_constraints_gpu(
+                                eq_xi_ptr,
+                                sels_ptr,
+                                prep_ptr,
+                                &main_ptrs,
+                                public_vals,
+                                lambda_pows,
+                                constraints_dag,
+                                interpolated_height,
+                                s_deg,
+                            );
+                        }
+                        if has_interactions {
+                            let [numer_evals, denom_evals] = evaluate_mle_interactions_gpu(
+                                eq_sharp_ptr,
+                                sels_ptr,
+                                prep_ptr,
+                                &main_ptrs,
+                                public_vals,
+                                &self.beta_pows,
+                                eq_3bs,
+                                constraints_dag,
+                                interpolated_height,
+                                s_deg,
+                            );
+
+                            // Apply normalization to numer only (same as CPU)
+                            let mut numer_normalized = numer_evals;
+                            for p in numer_normalized.iter_mut() {
+                                *p *= norm_factor;
+                            }
+                            results[0] = numer_normalized;
+                            results[1] = denom_evals;
+                        }
+                    }
+                }
+                s_logup_evals.push(results[0].clone());
+                s_logup_evals.push(results[1].clone());
+                s_zerocheck_evals.push(results[2].clone());
+            },
+        );
+
+        s_logup_evals.into_iter().chain(s_zerocheck_evals).collect()
     }
 
-    fn fold_ple_evals<TS: FiatShamirTranscript>(
-        &mut self,
-        ctx: ProvingContextV2<GpuBackendV2>,
-        r_0: EF,
-    ) {
-        let cpu_ctx = transport_proving_context_ref_to_host(&ctx);
-        LogupZerocheckProver::<_, _, TS>::fold_ple_evals(&mut self.prover, cpu_ctx, r_0);
+    fn fold_mle_evals(&mut self, _round: usize, r_round: EF) {
+        // Fold mat_evals_per_trace: Vec<Vec<DeviceMatrix<EF>>>
+        self.mat_evals_per_trace = std::mem::take(&mut self.mat_evals_per_trace)
+            .into_iter()
+            .map(|mats| {
+                if mats.is_empty() {
+                    return mats;
+                }
+                let height = mats[0].height();
+                if height <= 1 {
+                    return mats;
+                }
+                let output_height = height >> 1;
+
+                // Prepare input/output pointers and widths
+                let num_matrices = mats.len() as u32;
+                let input_ptrs: Vec<usize> =
+                    mats.iter().map(|m| m.buffer().as_ptr() as usize).collect();
+                let widths: Vec<u32> = mats.iter().map(|m| m.width() as u32).collect();
+
+                // Allocate output matrices (preserve doubled-width structure)
+                let output_mats: Vec<DeviceMatrix<EF>> = mats
+                    .iter()
+                    .map(|m| DeviceMatrix::with_capacity(output_height, m.width()))
+                    .collect();
+                let output_ptrs: Vec<usize> = output_mats
+                    .iter()
+                    .map(|m| m.buffer().as_ptr() as usize)
+                    .collect();
+
+                // Copy to device buffers
+                let d_input_ptrs = input_ptrs
+                    .to_device()
+                    .expect("failed to copy input ptrs to device");
+                let d_output_ptrs = output_ptrs
+                    .to_device()
+                    .expect("failed to copy output ptrs to device");
+                let d_widths = widths.to_device().expect("failed to copy widths to device");
+
+                // Launch fold_mle kernel
+                unsafe {
+                    fold_mle(
+                        &d_input_ptrs,
+                        &d_output_ptrs,
+                        &d_widths,
+                        num_matrices,
+                        output_height as u32,
+                        r_round,
+                    )
+                    .expect("failed to fold MLE matrices on GPU");
+                }
+
+                output_mats
+            })
+            .collect();
+
+        // Fold sels_per_trace: Vec<DeviceMatrix<EF>>
+        self.sels_per_trace = std::mem::take(&mut self.sels_per_trace)
+            .into_iter()
+            .map(|mat| {
+                let height = mat.height();
+                if height <= 1 {
+                    return mat;
+                }
+                let output_height = height >> 1;
+                let width = mat.width();
+
+                let input_ptr = mat.buffer().as_ptr() as usize;
+                let output_mat = DeviceMatrix::with_capacity(output_height, width);
+                let output_ptr = output_mat.buffer().as_ptr() as usize;
+
+                let d_input_ptrs = [input_ptr]
+                    .to_device()
+                    .expect("failed to copy input ptr to device");
+                let d_output_ptrs = [output_ptr]
+                    .to_device()
+                    .expect("failed to copy output ptr to device");
+                let d_widths = [width as u32]
+                    .to_device()
+                    .expect("failed to copy width to device");
+
+                unsafe {
+                    fold_mle(
+                        &d_input_ptrs,
+                        &d_output_ptrs,
+                        &d_widths,
+                        1,
+                        output_height as u32,
+                        r_round,
+                    )
+                    .expect("failed to fold MLE selectors on GPU");
+                }
+
+                output_mat
+            })
+            .collect();
+
+        // Fold eq_xi_per_trace: Vec<DeviceMatrix<EF>>
+        self.eq_xi_per_trace = std::mem::take(&mut self.eq_xi_per_trace)
+            .into_iter()
+            .map(|mat| {
+                let height = mat.height();
+                if height <= 1 {
+                    return mat;
+                }
+                let output_height = height >> 1;
+                let width = mat.width();
+
+                let input_ptr = mat.buffer().as_ptr() as usize;
+                let output_mat = DeviceMatrix::with_capacity(output_height, width);
+                let output_ptr = output_mat.buffer().as_ptr() as usize;
+
+                let d_input_ptrs = [input_ptr]
+                    .to_device()
+                    .expect("failed to copy input ptr to device");
+                let d_output_ptrs = [output_ptr]
+                    .to_device()
+                    .expect("failed to copy output ptr to device");
+                let d_widths = [width as u32]
+                    .to_device()
+                    .expect("failed to copy width to device");
+
+                unsafe {
+                    fold_mle(
+                        &d_input_ptrs,
+                        &d_output_ptrs,
+                        &d_widths,
+                        1,
+                        output_height as u32,
+                        r_round,
+                    )
+                    .expect("failed to fold MLE eq_xi on GPU");
+                }
+
+                output_mat
+            })
+            .collect();
+
+        // Fold eq_sharp_per_trace: Vec<DeviceMatrix<EF>>
+        self.eq_sharp_per_trace = std::mem::take(&mut self.eq_sharp_per_trace)
+            .into_iter()
+            .map(|mat| {
+                let height = mat.height();
+                if height <= 1 {
+                    return mat;
+                }
+                let output_height = height >> 1;
+                let width = mat.width();
+
+                let input_ptr = mat.buffer().as_ptr() as usize;
+                let output_mat = DeviceMatrix::with_capacity(output_height, width);
+                let output_ptr = output_mat.buffer().as_ptr() as usize;
+
+                let d_input_ptrs = [input_ptr]
+                    .to_device()
+                    .expect("failed to copy input ptr to device");
+                let d_output_ptrs = [output_ptr]
+                    .to_device()
+                    .expect("failed to copy output ptr to device");
+                let d_widths = [width as u32]
+                    .to_device()
+                    .expect("failed to copy width to device");
+
+                unsafe {
+                    fold_mle(
+                        &d_input_ptrs,
+                        &d_output_ptrs,
+                        &d_widths,
+                        1,
+                        output_height as u32,
+                        r_round,
+                    )
+                    .expect("failed to fold MLE eq_sharp on GPU");
+                }
+
+                output_mat
+            })
+            .collect();
     }
 
-    fn sumcheck_polys_eval<TS: FiatShamirTranscript>(
-        &mut self,
-        round: usize,
-        r_prev: EF,
-    ) -> Vec<Vec<EF>> {
-        LogupZerocheckProver::<_, _, TS>::sumcheck_polys_eval(&mut self.prover, round, r_prev)
+    fn into_column_openings(mut self) -> Vec<Vec<Vec<(EF, EF)>>> {
+        let num_airs_present = self.mat_evals_per_trace.len();
+        let mut column_openings = Vec::with_capacity(num_airs_present);
+
+        // At the end, we've folded all MLEs so they only have one row equal to evaluation at `\vec
+        // r`.
+        for mat_evals in std::mem::take(&mut self.mat_evals_per_trace) {
+            // GPU matrices are doubled-width (original + rotated), so we need to split them
+            // First, copy all matrices to host and split them
+            let mut split_mats: Vec<ColMajorMatrix<EF>> = mat_evals
+                .into_iter()
+                .flat_map(|mat| {
+                    let mat_host = transport_matrix_d2h_col_major(&mat)
+                        .expect("failed to copy GPU matrix to host");
+                    let width = mat_host.width();
+                    let height = mat_host.height();
+                    debug_assert_eq!(height, 1, "Matrices should have height=1 after folding");
+                    debug_assert_eq!(
+                        width % 2,
+                        0,
+                        "GPU matrices should have doubled width (original + rotated)"
+                    );
+                    let air_width = width / 2;
+
+                    // Split doubled-width matrix into original and rotated parts
+                    let values = &mat_host.values;
+                    let orig: Vec<EF> = (0..air_width)
+                        .map(|col| values[col * height]) // height=1, so values[col]
+                        .collect();
+                    let rot: Vec<EF> = (air_width..width)
+                        .map(|col| values[col * height]) // height=1, so values[col]
+                        .collect();
+
+                    vec![
+                        ColMajorMatrix::new(orig, air_width),
+                        ColMajorMatrix::new(rot, air_width),
+                    ]
+                })
+                .collect();
+
+            // Order of mats after splitting is:
+            // - preprocessed (if has_preprocessed),
+            // - preprocessed_rot (if has_preprocessed),
+            // - cached(0), cached(0)_rot, ...
+            // - common_main
+            // - common_main_rot
+            // For column openings, we pop common_main, common_main_rot and put it at the front
+            assert_eq!(
+                split_mats.len() % 2,
+                0,
+                "Should have even number of matrices after splitting"
+            );
+            let common_main_rot = split_mats.pop().unwrap();
+            let common_main = split_mats.pop().unwrap();
+
+            let openings_of_air = iter::once(&[common_main, common_main_rot] as &[_])
+                .chain(split_mats.chunks_exact(2))
+                .map(|pair| {
+                    std::iter::zip(pair[0].columns(), pair[1].columns())
+                        .map(|(claim, claim_rot)| {
+                            assert_eq!(claim.len(), 1);
+                            assert_eq!(claim_rot.len(), 1);
+                            (claim[0], claim_rot[0])
+                        })
+                        .collect_vec()
+                })
+                .collect_vec();
+            column_openings.push(openings_of_air);
+        }
+        column_openings
     }
-
-    fn fold_mle_evals<TS: FiatShamirTranscript>(&mut self, round: usize, r_round: EF) {
-        LogupZerocheckProver::<_, _, TS>::fold_mle_evals(&mut self.prover, round, r_round);
-    }
-
-    fn into_column_openings<TS: FiatShamirTranscript>(self) -> Vec<Vec<Vec<(EF, EF)>>> {
-        LogupZerocheckProver::<_, _, TS>::into_column_openings(self.prover)
-    }
-}
-
-fn transport_device_pk_to_host(
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-) -> DeviceMultiStarkProvingKeyV2<CpuBackendV2> {
-    let per_air = pk
-        .per_air
-        .iter()
-        .map(|air_pk| {
-            let preprocessed_data = air_pk
-                .preprocessed_data
-                .as_ref()
-                .map(transport_committed_trace_data_to_host);
-            DeviceStarkProvingKeyV2 {
-                air_name: air_pk.air_name.clone(),
-                vk: air_pk.vk.clone(),
-                preprocessed_data,
-            }
-        })
-        .collect();
-
-    DeviceMultiStarkProvingKeyV2::new(
-        per_air,
-        pk.trace_height_constraints.clone(),
-        pk.max_constraint_degree,
-        pk.params,
-        pk.vk_pre_hash,
-    )
-}
-
-pub(crate) fn transport_proving_context_ref_to_host(
-    ctx: &ProvingContextV2<GpuBackendV2>,
-) -> ProvingContextV2<CpuBackendV2> {
-    let per_trace = ctx
-        .per_trace
-        .iter()
-        .map(|(air_idx, air_ctx)| (*air_idx, transport_air_context_to_host(air_ctx)))
-        .collect();
-    ProvingContextV2::new(per_trace)
-}
-
-fn transport_air_context_to_host(
-    air_ctx: &AirProvingContextV2<GpuBackendV2>,
-) -> AirProvingContextV2<CpuBackendV2> {
-    let cached_mains = air_ctx
-        .cached_mains
-        .iter()
-        .map(transport_committed_trace_data_to_host)
-        .collect();
-    let common_main = transport_matrix_d2h_col_major(&air_ctx.common_main).unwrap();
-    let public_values = air_ctx.public_values.clone();
-    AirProvingContextV2::new(cached_mains, common_main, public_values)
 }
