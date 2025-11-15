@@ -2,21 +2,20 @@ use std::{cmp::max, ffi::c_void, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::{
-    base::DeviceMatrix,
-    cuda::kernels::lde::{batch_expand_pad, raw_batch_expand_pad},
-    ntt::batch_ntt,
+    base::DeviceMatrix, cuda::kernels::lde::batch_expand_pad, ntt::batch_ntt,
 };
 use openvm_cuda_common::{
     copy::{MemCopyD2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
 };
 use openvm_stark_backend::{p3_util::log2_strict_usize, prover::MatrixDimensions};
-use p3_field::Field;
 use stark_backend_v2::prover::stacked_pcs::StackedLayout;
 use tracing::instrument;
 
 use crate::{
-    Digest, F, ProverError, cuda::poly::mle_interpolate_stage, merkle_tree::MerkleTreeGpu,
+    Digest, F, ProverError,
+    cuda::{matrix::batch_expand_pad_wide, poly::mle_interpolate_stage},
+    merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
 };
 
@@ -52,7 +51,7 @@ pub fn stacked_commit(
 ///
 /// This function is generic in `F` and only relies on CUDA memory operations.
 #[instrument(skip_all)]
-pub fn stacked_matrix<F: Field>(
+pub fn stacked_matrix(
     l_skip: usize,
     n_stack: usize,
     traces: &[&DeviceMatrix<F>],
@@ -107,7 +106,7 @@ pub fn stacked_matrix<F: Field>(
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * trace.height());
                 let dst = q_buf.as_mut_ptr().add(start);
-                raw_batch_expand_pad(dst, src, trace.height() as u32, stride as u32, 1)?;
+                batch_expand_pad_wide(dst, src, trace.height() as u32, stride as u32, 1)?;
             }
         }
     }
