@@ -64,6 +64,14 @@ impl<F> ColMajorMatrix<F> {
         }
     }
 
+    pub(crate) fn dummy() -> Self {
+        Self {
+            values: vec![],
+            width: 0,
+            height: 0,
+        }
+    }
+
     pub fn column(&self, col_idx: usize) -> &[F] {
         let start = col_idx * self.height;
         let end = start + self.height;

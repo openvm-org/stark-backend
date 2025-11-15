@@ -92,6 +92,7 @@ impl StarkProvingKeyV2 {
 pub trait V1Compat: ProverBackendV2 {
     type V1: ProverBackend<Val = <Self as ProverBackendV2>::Val>;
 
+    fn dummy_matrix() -> Self::Matrix;
     fn convert_trace(matrix: <Self::V1 as ProverBackend>::Matrix) -> Self::Matrix;
 
     fn convert_pcs_data(
@@ -106,6 +107,7 @@ impl<PB: V1Compat> ProvingContextV2<PB> {
             .per_air
             .into_iter()
             .map(|(air_idx, air_ctx)| (air_idx, AirProvingContextV2::from_v1(params, air_ctx)))
+            .filter(|(_, air_ctx)| air_ctx.height() > 0)
             .collect();
         Self::new(per_trace)
     }
@@ -122,8 +124,10 @@ impl<PB: V1Compat> ProvingContextV2<PB> {
 
 impl<PB: V1Compat> AirProvingContextV2<PB> {
     pub fn from_v1(params: SystemParams, ctx: AirProvingContext<PB::V1>) -> Self {
-        let common_main =
-            <PB as V1Compat>::convert_trace(ctx.common_main.expect("must have common main"));
+        let common_main = ctx
+            .common_main
+            .map(<PB as V1Compat>::convert_trace)
+            .unwrap_or_else(|| <PB as V1Compat>::dummy_matrix());
         let cached_mains = ctx
             .cached_mains
             .into_iter()
@@ -146,8 +150,10 @@ impl<PB: V1Compat> AirProvingContextV2<PB> {
 
     pub fn from_v1_no_cached(ctx: AirProvingContext<PB::V1>) -> Self {
         assert!(ctx.cached_mains.is_empty());
-        let common_main =
-            <PB as V1Compat>::convert_trace(ctx.common_main.expect("must have common main"));
+        let common_main = ctx
+            .common_main
+            .map(<PB as V1Compat>::convert_trace)
+            .unwrap_or_else(|| <PB as V1Compat>::dummy_matrix());
         Self {
             cached_mains: vec![],
             common_main,
@@ -168,6 +174,10 @@ where
 
 impl V1Compat for CpuBackendV2 {
     type V1 = CpuBackend<SC>;
+
+    fn dummy_matrix() -> Self::Matrix {
+        ColMajorMatrix::dummy()
+    }
 
     fn convert_trace(matrix: Arc<RowMajorMatrix<F>>) -> Self::Matrix {
         ColMajorMatrix::from_row_major(&matrix)
