@@ -76,6 +76,10 @@ impl<T> DeviceMatrix<T> {
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(&self.buffer)
     }
+
+    pub fn as_view(&self) -> DeviceMatrixView<T> {
+        DeviceMatrixView::new(self.buffer.as_ptr(), self.height, self.width)
+    }
 }
 
 impl<T> MatrixDimensions for DeviceMatrix<T> {
@@ -105,6 +109,38 @@ impl<T: Debug> Debug for DeviceMatrix<T> {
             self.width(),
             self.buffer()
         )
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DeviceMatrixView<T> {
+    ptr: *const T,
+    height: usize,
+    width: usize,
+}
+
+unsafe impl<T> Send for DeviceMatrixView<T> {}
+unsafe impl<T> Sync for DeviceMatrixView<T> {}
+
+impl<T> DeviceMatrixView<T> {
+    pub fn new(ptr: *const T, height: usize, width: usize) -> Self {
+        Self { ptr, height, width }
+    }
+
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr
+    }
+}
+
+impl<T> MatrixDimensions for DeviceMatrixView<T> {
+    #[inline]
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    #[inline]
+    fn width(&self) -> usize {
+        self.width
     }
 }
 
