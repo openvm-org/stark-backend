@@ -157,6 +157,12 @@ impl CudaEvent {
         check(cudaEventSynchronize(self.event))
     }
 
+    /// # Safety
+    /// See `cudaEventSynchronize` API documentation.
+    pub unsafe fn synchronize(&self) -> Result<(), CudaError> {
+        check(cudaEventSynchronize(self.event))
+    }
+
     pub fn status(&self) -> CudaEventStatus {
         let status = unsafe { cudaEventQuery(self.event) };
         match status {

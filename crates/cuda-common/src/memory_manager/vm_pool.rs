@@ -443,7 +443,11 @@ impl VirtualMemoryPool {
                 .free_regions
                 .remove(&region_addr)
                 .ok_or(MemoryError::InvalidPointer)?;
-
+            // SAFETY:
+            // - synchronize the last event associated with the region before remapping pages
+            unsafe {
+                region.event.synchronize()?;
+            }
             let num_pages = region.size / self.page_size;
             for i in 0..num_pages {
                 let page = region_addr + (i * self.page_size) as u64;
