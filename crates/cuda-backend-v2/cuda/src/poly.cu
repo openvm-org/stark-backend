@@ -1,6 +1,7 @@
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector_types.h>
@@ -57,6 +58,28 @@ __global__ void mle_interpolate_stage_kernel(Field *buffer, size_t total_pairs, 
     uint32_t offset = pair_idx % step;
     size_t base = chunk * span + offset;
     size_t second = base + step;
+    if (EvalToCoeff) {
+        buffer[second] -= buffer[base];
+    } else {
+        buffer[second] += buffer[base];
+    }
+}
+
+template <typename Field, bool EvalToCoeff>
+__global__ void mle_interpolate_stage_2d_kernel(
+    Field *buffer,
+    uint32_t padded_height,
+    uint32_t span,
+    uint32_t step
+) {
+    uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t col = blockIdx.y;
+
+    auto chunk = tidx / step;
+    auto offset = tidx % step;
+    uint32_t base = col * padded_height + chunk * span + offset;
+    uint32_t second = base + step;
+
     if (EvalToCoeff) {
         buffer[second] -= buffer[base];
     } else {
@@ -187,6 +210,41 @@ extern "C" int _mle_interpolate_stage_ext(
         return launch_mle_interpolate_stage<FpExt, true>(buffer, buffer_len, step);
     } else {
         return launch_mle_interpolate_stage<FpExt, false>(buffer, buffer_len, step);
+    }
+}
+
+template <typename Field, bool EvalToCoeff>
+int launch_mle_interpolate_stage_2d(
+    Field *buffer,
+    uint16_t width,
+    uint32_t height,
+    uint32_t padded_height,
+    uint32_t step
+) {
+    auto span = step * 2;
+    auto [grid, block] = kernel_launch_params(height >> 1);
+    grid.y = width;
+    mle_interpolate_stage_2d_kernel<Field, EvalToCoeff>
+        <<<grid, block>>>(buffer, padded_height, span, step);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _mle_interpolate_stage_2d(
+    Fp *buffer,
+    uint16_t width,
+    uint32_t height,
+    uint32_t padded_height,
+    uint32_t step,
+    bool is_eval_to_coeff
+) {
+    if (is_eval_to_coeff) {
+        return launch_mle_interpolate_stage_2d<Fp, true>(
+            buffer, width, height, padded_height, step
+        );
+    } else {
+        return launch_mle_interpolate_stage_2d<Fp, false>(
+            buffer, width, height, padded_height, step
+        );
     }
 }
 
