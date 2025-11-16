@@ -14,7 +14,7 @@ use tracing::instrument;
 
 use crate::{
     Digest, F, ProverError,
-    cuda::{matrix::batch_expand_pad_wide, poly::mle_interpolate_stage},
+    cuda::{matrix::batch_expand_pad_wide, poly::mle_interpolate_stage_2d},
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
 };
@@ -38,8 +38,7 @@ pub fn stacked_commit(
     k_whir: usize,
     traces: &[&DeviceMatrix<F>],
 ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
-    let (q_trace, layout) = stacked_matrix(l_skip, n_stack, traces)?;
-    let q_matrix = PleMatrix::from_evals(l_skip, q_trace)?;
+    let (q_matrix, layout) = stacked_matrix(l_skip, n_stack, traces)?;
     let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_matrix)?;
     let tree = MerkleTreeGpu::<F, Digest>::new(rs_matrix, 1 << k_whir)?;
     let root = tree.root();
@@ -55,7 +54,7 @@ pub fn stacked_matrix(
     l_skip: usize,
     n_stack: usize,
     traces: &[&DeviceMatrix<F>],
-) -> Result<(DeviceMatrix<F>, StackedLayout), ProverError> {
+) -> Result<(PleMatrix<F>, StackedLayout), ProverError> {
     let sorted_meta = traces
         .iter()
         .enumerate()
@@ -74,8 +73,8 @@ pub fn stacked_matrix(
     let height = 1usize << (l_skip + n_stack);
     let width = total_cells.div_ceil(height);
 
-    let q_buf = DeviceBuffer::<F>::with_capacity(width.checked_mul(height).unwrap());
-    q_buf.fill_zero()?;
+    let q_evals = DeviceBuffer::<F>::with_capacity(width.checked_mul(height).unwrap());
+    q_evals.fill_zero()?;
     for (mat_idx, j, s) in &mut layout.sorted_cols {
         let start = s.col_idx * height + s.row_idx;
         let trace = traces[*mat_idx];
@@ -88,7 +87,7 @@ pub fn stacked_matrix(
             // - `q_buf` has enough capacity by definition of stacked `layout`
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * s_len);
-                let dst = q_buf.as_mut_ptr().add(start);
+                let dst = q_evals.as_mut_ptr().add(start);
                 // D2D memcpy
                 cuda_memcpy::<true, true>(
                     dst as *mut c_void,
@@ -105,12 +104,29 @@ pub fn stacked_matrix(
             //   column of length `s_len = stride * trace.height()`
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * trace.height());
-                let dst = q_buf.as_mut_ptr().add(start);
+                let dst = q_evals.as_mut_ptr().add(start);
                 batch_expand_pad_wide(dst, src, trace.height() as u32, stride as u32, 1)?;
             }
         }
     }
-    Ok((DeviceMatrix::new(Arc::new(q_buf), height, width), layout))
+    // TODO: remove this once we delete evals in PleMatirx
+    let q_mixed = q_evals.device_copy()?;
+    if l_skip > 0 {
+        // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk of the full
+        // `s_len` slice: Use natural ordering.
+        batch_ntt(
+            &q_mixed,
+            l_skip as u32,
+            0,
+            (q_mixed.len() >> l_skip) as u32,
+            true,
+            true,
+        );
+    }
+    Ok((
+        PleMatrix::new(DeviceMatrix::new(Arc::new(q_evals), height, width), q_mixed),
+        layout,
+    ))
 }
 
 /// Computes the Reed-Solomon codeword of each column vector of `eval_matrix` where the rate is
@@ -126,36 +142,37 @@ pub fn rs_code_matrix(
     debug_assert!(height >= (1 << l_skip));
     let width = matrix.width();
     let codeword_height = height.checked_shl(log_blowup as u32).unwrap();
-    // PERF[jpw]: this D2D copy can be avoided if we first batch_expand_pad and then handle the
-    // padding in mle_interpolate_stag
-    let mut ple_coeffs = matrix.mixed.device_copy()?;
-    let n = log2_strict_usize(height) - l_skip;
-    let total_len = ple_coeffs.len();
-    debug_assert_eq!(total_len, height * width);
-    // Go through coordinates X_1, ..., X_n and interpolate each one from s(0), s(1) -> s(0) +
-    // (s(1) - s(0)) X_i
-    for i in 0..n {
-        let step = 1u32 << (l_skip + i);
-        let span = step << 1;
-        debug_assert_eq!(height % (span as usize), 0);
-        // SAFETY: `ple_coeffs` is properly initialized and step is in bounds.
-        unsafe {
-            mle_interpolate_stage(&mut ple_coeffs, step, true)?;
-        }
-    }
     let codewords = DeviceBuffer::<F>::with_capacity(codeword_height * width);
-    // The following two kernels together perform coset NTT for `width` polys from `height ->
-    // codeword_height` size domains. SAFETY: `codewords` is allocated for `width` polys of
-    // `codeword_height` each, and we expand from `ple_coeffs` which is `width` polys of `height`
-    // each.
+    // The following three kernels together perform MLE interpolation followed by coset NTT for
+    // `width` polys from `height -> codeword_height` size domains.
+
+    // SAFETY: `codewords` is allocated for `width` polys of `codeword_height` each, and we expand
+    // from `matrix.mxied` which is `width` polys of `height` each.
     unsafe {
         batch_expand_pad(
             &codewords,
-            &ple_coeffs,
+            &matrix.mixed,
             width as u32,
             codeword_height as u32,
             height as u32,
         )?;
+    }
+    let n = log2_strict_usize(height) - l_skip;
+    // Go through coordinates X_1, ..., X_n and interpolate each one from s(0), s(1) -> s(0) +
+    // (s(1) - s(0)) X_i
+    for i in 0..n {
+        let step = 1u32 << (l_skip + i);
+        // SAFETY: `codewords` is properly initialized and step is in bounds.
+        unsafe {
+            mle_interpolate_stage_2d(
+                codewords.as_mut_ptr(),
+                width.try_into().unwrap(),
+                height as u32,
+                codeword_height as u32,
+                step,
+                true, // MLE evaluation-to-coefficient
+            )?;
+        }
     }
     // Compute RS codeword on a prismalinear polynomial in coefficient form:
     // We use that the coefficients are in a basis that exactly corresponds to the standard
@@ -197,10 +214,12 @@ mod tests {
             .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
+        let l_skip = 0;
         let (stacked_mat, _layout) = stacked_matrix(0, 2, &mat_refs).unwrap();
         assert_eq!(stacked_mat.height(), 4);
         assert_eq!(stacked_mat.width(), 2);
-        let stacked_h_mat = transport_matrix_d2h_col_major(&stacked_mat).unwrap();
+        let stacked_h_mat =
+            transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
         assert_eq!(
             stacked_h_mat.values,
             [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_canonical_u32).to_vec()
@@ -218,7 +237,8 @@ mod tests {
             stacked_matrix(l_skip, n_stack, &[&rcv_trace, &send_trace]).unwrap();
         assert_eq!(stacked_mat.height(), 1 << (l_skip + n_stack));
         assert_eq!(stacked_mat.width(), 1);
-        let stacked_h_mat = transport_matrix_d2h_col_major(&stacked_mat).unwrap();
+        let stacked_h_mat =
+            transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
         let mut expected = vec![F::ZERO; 1 << (l_skip + n_stack)];
         expected[..24].copy_from_slice(
             &[
@@ -239,10 +259,12 @@ mod tests {
             .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
-        let (stacked_mat, _layout) = stacked_matrix(2, 0, &mat_refs).unwrap();
+        let l_skip = 2;
+        let (stacked_mat, _layout) = stacked_matrix(l_skip, 0, &mat_refs).unwrap();
         assert_eq!(stacked_mat.height(), 4);
         assert_eq!(stacked_mat.width(), 3);
-        let stacked_h_mat = transport_matrix_d2h_col_major(&stacked_mat).unwrap();
+        let stacked_h_mat =
+            transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
         assert_eq!(
             stacked_h_mat.values,
             [1, 2, 3, 4, 5, 0, 6, 0, 7, 0, 0, 0]
@@ -260,10 +282,12 @@ mod tests {
             .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
-        let (stacked_mat, _layout) = stacked_matrix(3, 0, &mat_refs).unwrap();
+        let l_skip = 3;
+        let (stacked_mat, _layout) = stacked_matrix(l_skip, 0, &mat_refs).unwrap();
         assert_eq!(stacked_mat.height(), 8);
         assert_eq!(stacked_mat.width(), 3);
-        let stacked_h_mat = transport_matrix_d2h_col_major(&stacked_mat).unwrap();
+        let stacked_h_mat =
+            transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
         assert_eq!(
             stacked_h_mat.values,
             [
