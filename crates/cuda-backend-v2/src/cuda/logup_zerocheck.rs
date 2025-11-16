@@ -9,7 +9,9 @@ pub struct MainMatrixPtrs<T> {
     pub data: *const T,
     pub air_width: u32,
 }
+
 extern "C" {
+    // gkr.cu
     fn _frac_build_segment_tree(tree: *mut std::ffi::c_void, total_leaves: usize) -> i32;
     fn _frac_prepare_round(
         tree: *const std::ffi::c_void,
@@ -36,6 +38,10 @@ extern "C" {
         stride: usize,
         out_device: *mut std::ffi::c_void,
     ) -> i32;
+    fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
+    fn _frac_vector_scalar_multiply_ext_fp(frac_vec: *mut Frac<EF>, scalar: F, length: u32) -> i32;
+
+    // utils.cu
     fn _fold_ple_from_evals(
         input_matrix: *const std::ffi::c_void,
         output_matrix: *mut std::ffi::c_void, /* Single buffer: [orig_cols, rot_cols] when
@@ -49,6 +55,13 @@ extern "C" {
         new_height: u32,
         rotate: bool,
     ) -> i32;
+    fn _interpolate_columns(
+        interpolated: *mut std::ffi::c_void,
+        columns: *const usize,
+        s_deg: usize,
+        num_y: usize,
+        num_columns: usize,
+    ) -> i32;
     fn _compute_eq_sharp(
         eq_xi: *mut std::ffi::c_void,
         eq_sharp: *mut std::ffi::c_void,
@@ -56,7 +69,9 @@ extern "C" {
         eq_sharp_r0: EF,
         count: u32,
     ) -> i32;
-    fn _zerocheck_eval_interactions_gkr(
+
+    // interactions.cu
+    fn _logup_gkr_input_eval(
         is_global: bool,
         output: *mut std::ffi::c_void,
         preprocessed: *const std::ffi::c_void,
@@ -70,7 +85,34 @@ extern "C" {
         height: u32,
         num_rows_per_tile: u32,
     ) -> i32;
-    fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
+    fn _batch_constraints_eval_interactions_round0(
+        output_numer: *mut std::ffi::c_void,
+        output_denom: *mut std::ffi::c_void,
+        selectors: *const std::ffi::c_void,
+        selectors_width: u32,
+        partitioned_main: *const MainMatrixPtrs<F>,
+        main_count: u32,
+        preprocessed: *const F,
+        preprocessed_width: u32,
+        eq_z: *const std::ffi::c_void,
+        eq_x: *const std::ffi::c_void,
+        eq_3b: *const std::ffi::c_void,
+        public_values: *const std::ffi::c_void,
+        public_len: u32,
+        rules: *const std::ffi::c_void,
+        rules_len: usize,
+        used_nodes: *const usize,
+        used_nodes_len: usize,
+        buffer_size: u32,
+        intermediates: *mut std::ffi::c_void,
+        large_domain: u32,
+        num_x: u32,
+        num_rows_per_tile: u32,
+        skip_stride: u32,
+        challenges: *const std::ffi::c_void,
+    ) -> i32;
+
+    // constraints.cu
     fn _zerocheck_eval_constraints(
         output: *mut std::ffi::c_void,
         selectors: *const std::ffi::c_void,
@@ -97,6 +139,26 @@ extern "C" {
         num_rows_per_tile: u32,
         skip_stride: u32,
     ) -> i32;
+    fn _accumulate_constraints(
+        output: *const std::ffi::c_void,
+        sums: *mut std::ffi::c_void,
+        large_domain: u32,
+        num_x: u32,
+    ) -> i32;
+    fn _extract_component(
+        input: *const std::ffi::c_void,
+        output: *mut std::ffi::c_void,
+        len: u32,
+        component_idx: u32,
+    ) -> i32;
+    fn _assign_component(
+        input: *const std::ffi::c_void,
+        output: *mut std::ffi::c_void,
+        len: u32,
+        component_idx: u32,
+    ) -> i32;
+
+    // mle.cu
     fn _zerocheck_eval_mle(
         output: *mut std::ffi::c_void,
         eq_xi: *const EF,
@@ -118,7 +180,7 @@ extern "C" {
         num_x: u32,
         num_rows_per_tile: u32,
     ) -> i32;
-    fn _zerocheck_eval_mle_interactions(
+    fn _batch_constraints_eval_mle_interactions(
         output_numer: *mut std::ffi::c_void,
         output_denom: *mut std::ffi::c_void,
         eq_sharp: *const EF,
@@ -150,58 +212,6 @@ extern "C" {
         block_sums: *const std::ffi::c_void,
         s_deg: u32,
         num_blocks: u32,
-    ) -> i32;
-    fn _zerocheck_eval_interactions_round0(
-        output_numer: *mut std::ffi::c_void,
-        output_denom: *mut std::ffi::c_void,
-        selectors: *const std::ffi::c_void,
-        selectors_width: u32,
-        partitioned_main: *const MainMatrixPtrs<F>,
-        main_count: u32,
-        preprocessed: *const F,
-        preprocessed_width: u32,
-        eq_z: *const std::ffi::c_void,
-        eq_x: *const std::ffi::c_void,
-        eq_3b: *const std::ffi::c_void,
-        public_values: *const std::ffi::c_void,
-        public_len: u32,
-        rules: *const std::ffi::c_void,
-        rules_len: usize,
-        used_nodes: *const usize,
-        used_nodes_len: usize,
-        buffer_size: u32,
-        intermediates: *mut std::ffi::c_void,
-        large_domain: u32,
-        num_x: u32,
-        num_rows_per_tile: u32,
-        skip_stride: u32,
-        challenges: *const std::ffi::c_void,
-    ) -> i32;
-    fn _accumulate_constraints(
-        output: *const std::ffi::c_void,
-        sums: *mut std::ffi::c_void,
-        large_domain: u32,
-        num_x: u32,
-    ) -> i32;
-    fn _extract_component(
-        input: *const std::ffi::c_void,
-        output: *mut std::ffi::c_void,
-        len: u32,
-        component_idx: u32,
-    ) -> i32;
-    fn _assign_component(
-        input: *const std::ffi::c_void,
-        output: *mut std::ffi::c_void,
-        len: u32,
-        component_idx: u32,
-    ) -> i32;
-    fn _frac_vector_scalar_multiply_ext_fp(frac_vec: *mut Frac<EF>, scalar: F, length: u32) -> i32;
-    fn _interpolate_columns(
-        interpolated: *mut std::ffi::c_void,
-        columns: *const usize,
-        s_deg: usize,
-        num_y: usize,
-        num_columns: usize,
     ) -> i32;
 }
 
@@ -331,7 +341,7 @@ pub unsafe fn compute_eq_sharp(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn zerocheck_eval_interactions_gkr(
+pub unsafe fn logup_gkr_input_eval(
     is_global: bool,
     output: &DeviceBuffer<Frac<EF>>,
     preprocessed: &DeviceBuffer<F>,
@@ -345,7 +355,7 @@ pub unsafe fn zerocheck_eval_interactions_gkr(
     height: u32,
     num_rows_per_tile: u32,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_zerocheck_eval_interactions_gkr(
+    CudaError::from_result(_logup_gkr_input_eval(
         is_global,
         output.as_mut_raw_ptr(),
         preprocessed.as_raw_ptr(),
@@ -468,7 +478,7 @@ pub unsafe fn zerocheck_eval_mle(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn zerocheck_eval_mle_interactions(
+pub unsafe fn batch_constraints_eval_mle_interactions(
     output_numer: &DeviceBuffer<EF>,
     output_denom: &DeviceBuffer<EF>,
     eq_sharp: *const EF,
@@ -489,7 +499,7 @@ pub unsafe fn zerocheck_eval_mle_interactions(
     let intermediates_ptr = intermediates
         .map(|buf| buf.as_mut_raw_ptr())
         .unwrap_or(std::ptr::null_mut());
-    CudaError::from_result(_zerocheck_eval_mle_interactions(
+    CudaError::from_result(_batch_constraints_eval_mle_interactions(
         output_numer.as_mut_raw_ptr(),
         output_denom.as_mut_raw_ptr(),
         eq_sharp,
@@ -541,7 +551,7 @@ pub unsafe fn reduce_hypercube_final(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn zerocheck_eval_interactions_round0(
+pub unsafe fn batch_constraints_eval_interactions_round0(
     output_numer: &DeviceBuffer<EF>,
     output_denom: &DeviceBuffer<EF>,
     selectors: &DeviceMatrix<F>,
@@ -567,7 +577,7 @@ pub unsafe fn zerocheck_eval_interactions_round0(
     let intermediates_ptr = intermediates
         .map(|buf| buf.as_mut_raw_ptr())
         .unwrap_or(std::ptr::null_mut());
-    CudaError::from_result(_zerocheck_eval_interactions_round0(
+    CudaError::from_result(_batch_constraints_eval_interactions_round0(
         output_numer.as_mut_raw_ptr(),
         output_denom.as_mut_raw_ptr(),
         selectors.buffer().as_raw_ptr(),
