@@ -614,7 +614,7 @@ extern "C" int _zerocheck_eval_mle(
     return CHECK_KERNEL();
 }
 
-extern "C" int _zerocheck_eval_mle_interactions(
+extern "C" int _batch_constraints_eval_mle_interactions(
     FpExt *output_numer,
     FpExt *output_denom,
     const FpExt *eq_sharp,

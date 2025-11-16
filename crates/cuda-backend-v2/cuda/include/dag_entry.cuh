@@ -24,7 +24,7 @@ inline uint32_t get_launcher_count(uint32_t buffer_size, uint32_t height) {
 }
 } // namespace interaction_evaluation
 
-namespace logup_round0 {
+namespace symbolic_dag {
 
 __device__ __forceinline__ FpExt evaluate_dag_entry(
     const SourceInfo &src,
@@ -110,4 +110,4 @@ __device__ __forceinline__ FpExt evaluate_dag_entry(
     return FpExt(Fp::zero());
 }
 
-} // namespace logup_round0
+} // namespace symbolic_dag
