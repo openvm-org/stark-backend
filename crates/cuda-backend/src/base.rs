@@ -79,7 +79,7 @@ impl<T> DeviceMatrix<T> {
 
     pub fn as_view<'a>(&'a self) -> DeviceMatrixView<'a, T> {
         // SAFETY: buffer is borrowed for lifetime 'a of the view
-        unsafe { DeviceMatrixView::new(self.buffer.as_ptr(), self.height, self.width) }
+        unsafe { DeviceMatrixView::from_raw_parts(self.buffer.as_ptr(), self.height, self.width) }
     }
 }
 
