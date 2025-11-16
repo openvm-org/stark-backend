@@ -26,7 +26,7 @@ use super::{errors::InteractionGpuError, matrix_utils::unstack_matrix, state::Fr
 use crate::{
     Digest, EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
-        frac_add_alpha, frac_vector_scalar_multiply_ext_fp, zerocheck_eval_interactions_gkr,
+        frac_add_alpha, frac_vector_scalar_multiply_ext_fp, logup_gkr_input_eval,
     },
     stacked_pcs::StackedPcsDataGpu,
 };
@@ -217,7 +217,7 @@ pub fn evaluate_interactions_gpu(
             DeviceBuffer::<Frac<EF>>::with_capacity(lifted_height * symbolic_interactions.len());
 
         unsafe {
-            zerocheck_eval_interactions_gkr(
+            logup_gkr_input_eval(
                 is_global,
                 &trace_output,
                 d_preprocessed,

@@ -9,7 +9,7 @@
 #include "launcher.cuh"
 #include "matrix.cuh"
 
-using namespace logup_round0;
+using namespace symbolic_dag;
 
 // Device function equivalent to helper.acc_constraints without eq_* parts
 // This computes the constraint sum: sum(lambda_i * constraint_i) for all constraints
@@ -168,7 +168,7 @@ __device__ __forceinline__ FpExt acc_constraints(
 }
 
 template <bool GLOBAL>
-__global__ void evaluate_constraints_kernel(
+__global__ void zerocheck_evaluate_constraints_kernel(
     FpExt *__restrict__ d_output,
     const Fp *__restrict__ d_selectors,
     uint32_t selectors_width,
@@ -346,7 +346,7 @@ extern "C" int _zerocheck_eval_constraints(
     }
 #endif
     if (buffer_size > constraint_evaluation::BUFFER_THRESHOLD) {
-        evaluate_constraints_kernel<true><<<grid, block>>>(
+        zerocheck_evaluate_constraints_kernel<true><<<grid, block>>>(
             output,
             selectors,
             selectors_width,
@@ -373,7 +373,7 @@ extern "C" int _zerocheck_eval_constraints(
             skip_stride
         );
     } else {
-        evaluate_constraints_kernel<false><<<grid, block>>>(
+        zerocheck_evaluate_constraints_kernel<false><<<grid, block>>>(
             output,
             selectors,
             selectors_width,
