@@ -35,8 +35,8 @@ use crate::{
     Digest, EF, F, GpuBackendV2,
     cuda::{
         logup_zerocheck::{
-            MainMatrixPtrs, accumulate_constraints, zerocheck_eval_constraints,
-            zerocheck_eval_interactions_round0,
+            MainMatrixPtrs, accumulate_constraints, batch_constraints_eval_interactions_round0,
+            zerocheck_eval_constraints,
         },
         matrix::{batch_expand_pad_wide, batch_rotate_lift_and_pad, batch_rotate_pad},
     },
@@ -425,7 +425,7 @@ pub fn evaluate_round0_interactions_gpu(
         let output_denom = DeviceBuffer::<EF>::with_capacity(height);
 
         unsafe {
-            zerocheck_eval_interactions_round0(
+            batch_constraints_eval_interactions_round0(
                 &output_numer,
                 &output_denom,
                 &input.selectors_large,

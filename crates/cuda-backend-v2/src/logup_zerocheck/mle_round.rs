@@ -17,8 +17,8 @@ use super::dag_scheduling::compute_constraint_expr_indices;
 use crate::{
     EF, F,
     cuda::logup_zerocheck::{
-        MainMatrixPtrs, reduce_hypercube_blocks, reduce_hypercube_final, zerocheck_eval_mle,
-        zerocheck_eval_mle_interactions,
+        MainMatrixPtrs, batch_constraints_eval_mle_interactions, reduce_hypercube_blocks,
+        reduce_hypercube_final, zerocheck_eval_mle,
     },
 };
 
@@ -255,7 +255,7 @@ pub fn evaluate_mle_interactions_gpu(
 
     // Launch interaction evaluation kernel
     unsafe {
-        zerocheck_eval_mle_interactions(
+        batch_constraints_eval_mle_interactions(
             &evaluated_numer,
             &evaluated_denom,
             eq_sharp_ptr,
