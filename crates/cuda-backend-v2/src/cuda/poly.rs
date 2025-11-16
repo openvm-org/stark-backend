@@ -21,6 +21,15 @@ extern "C" {
         is_eval_to_coeff: bool,
     ) -> i32;
 
+    fn _mle_interpolate_stage_2d(
+        buffer: *mut F,
+        width: u16,
+        height: u32,
+        padded_height: u32,
+        step: u32,
+        is_eval_to_coeff: bool,
+    ) -> i32;
+
     fn _algebraic_batch_matrices(
         output: *mut EF,
         mats: *const *const F,
@@ -92,6 +101,33 @@ pub unsafe fn mle_interpolate_stage_ext(
     check(_mle_interpolate_stage_ext(
         buffer.as_mut_ptr(),
         buffer.len(),
+        step,
+        is_eval_to_coeff,
+    ))
+}
+
+/// Same as [mle_interpolate_stage] but `buffer` is now a `padded_height x width` column-major
+/// matrix, and we only perform the interpolation on the first `height` rows.
+///
+/// # Safety
+/// - `width` must fit in a `u16` for the CUDA grid dimension.
+/// - `buffer` must have length `>= padded_height * width`.
+/// - `padded_height` must be a multiple of `step * 2`.
+pub unsafe fn mle_interpolate_stage_2d(
+    buffer: *mut F,
+    width: u16,
+    height: u32,
+    padded_height: u32,
+    step: u32,
+    is_eval_to_coeff: bool,
+) -> Result<(), CudaError> {
+    debug_assert!(height <= padded_height);
+    debug_assert_eq!(padded_height % (step * 2), 0);
+    check(_mle_interpolate_stage_2d(
+        buffer,
+        width,
+        height,
+        padded_height,
         step,
         is_eval_to_coeff,
     ))

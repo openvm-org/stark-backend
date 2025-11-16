@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use getset::Getters;
 use openvm_cuda_backend::{base::DeviceMatrix, ntt::batch_ntt};
 use openvm_cuda_common::{
@@ -15,6 +17,7 @@ use crate::{
     },
 };
 
+#[derive(derive_new::new)]
 pub struct PleMatrix<F> {
     /// Evaluations on hyperprism D_n.
     pub evals: DeviceMatrix<F>,
@@ -40,12 +43,27 @@ impl PleMatrix<F> {
         let height = evals.height();
         // D2D copy so we can do in-place iNTT
         let mixed = evals.buffer().device_copy()?;
-        // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column: (width
-        // cols) * (height / 2^l_skip chunks per col). Use natural ordering.
-        let num_uni_poly = (width * (height >> l_skip)) as u32;
-        batch_ntt(&mixed, l_skip as u32, 0, num_uni_poly, true, true);
-
+        if l_skip > 0 {
+            // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column:
+            // (width cols) * (height / 2^l_skip chunks per col). Use natural ordering.
+            let num_uni_poly = (width * (height >> l_skip)) as u32;
+            batch_ntt(&mixed, l_skip as u32, 0, num_uni_poly, true, true);
+        }
         Ok(Self { evals, mixed })
+    }
+
+    pub fn to_evals(&self, l_skip: usize) -> Result<DeviceMatrix<F>, ProverError> {
+        let width = self.width();
+        let height = self.height();
+        // D2D copy so we can do in-place NTT
+        let evals = self.mixed.device_copy()?;
+        if l_skip > 0 {
+            // For univariate coordinate, perform NTT for each 2^l_skip chunk per column: (width
+            // cols) * (height / 2^l_skip chunks per col). Use natural ordering.
+            let num_uni_poly = (width * (height >> l_skip)) as u32;
+            batch_ntt(&evals, l_skip as u32, 0, num_uni_poly, true, false);
+        }
+        Ok(DeviceMatrix::new(Arc::new(evals), height, width))
     }
 }
 
