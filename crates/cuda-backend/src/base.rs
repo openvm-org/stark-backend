@@ -122,8 +122,8 @@ pub struct DeviceMatrixView<'a, T> {
     _ptr_lifetime: PhantomData<&'a T>,
 }
 
-unsafe impl<T> Send for DeviceMatrixView<T> {}
-unsafe impl<T> Sync for DeviceMatrixView<T> {}
+unsafe impl<'a, T> Send for DeviceMatrixView<'a, T> {}
+unsafe impl<'a, T> Sync for DeviceMatrixView<'a, T> {}
 
 impl<'a, T> DeviceMatrixView<'a, T> {
     /// # Safety
@@ -143,7 +143,7 @@ impl<'a, T> DeviceMatrixView<'a, T> {
     }
 }
 
-impl<T> MatrixDimensions for DeviceMatrixView<T> {
+impl<'a, T> MatrixDimensions for DeviceMatrixView<'a, T> {
     #[inline]
     fn height(&self) -> usize {
         self.height
