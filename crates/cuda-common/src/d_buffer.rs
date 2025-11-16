@@ -45,6 +45,16 @@ impl<T> DeviceBuffer<T> {
         }
     }
 
+    /// # Safety
+    /// - The caller must ensure that the pointer `ptr` is valid for `len` elements of type `T` in
+    ///   device memory.
+    /// - Dropping the constructed buffer will attempt to free the memory. As such, `ptr` must
+    ///   either have been allocated by the internal memory manager (VPMM) or the caller must use
+    ///   `ManuallyDrop` to prevent double-free.
+    pub unsafe fn from_raw_parts(ptr: *mut T, len: usize) -> Self {
+        DeviceBuffer { ptr, len }
+    }
+
     /// Allocate device memory for `len` elements of type `T`.
     pub fn with_capacity(len: usize) -> Self {
         tracing::debug!(
