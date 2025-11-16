@@ -7,9 +7,8 @@
 #include "matrix.cuh"
 #include <cstddef>
 #include <cstdint>
-#include <utility>
 
-using namespace logup_round0;
+using namespace symbolic_dag;
 
 // Device function equivalent to helper.eval_interactions without eq_* parts
 // This computes the interaction numerator and denominator sums (weighted by eq_3b)
@@ -508,31 +507,11 @@ __global__ void evaluate_interactions_round0_kernel(
     }
 }
 
-__global__ void add_alpha_kernel(FracExt *data, size_t len, FpExt alpha) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < len) {
-        data[idx].q = data[idx].q + alpha;
-    }
-}
-
-template <typename F, typename EF>
-__global__ void frac_vector_scalar_multiply_kernel(
-    std::pair<EF, EF> *frac_vec,
-    F scalar,
-    uint32_t length
-) {
-    size_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tidx >= length)
-        return;
-
-    frac_vec[tidx].first *= scalar;
-}
-
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
 
-extern "C" int _zerocheck_eval_interactions_gkr(
+extern "C" int _logup_gkr_input_eval(
     bool is_global,
     FracExt *d_output,
     const Fp *d_preprocessed,
@@ -579,13 +558,7 @@ extern "C" int _zerocheck_eval_interactions_gkr(
     return CHECK_KERNEL();
 }
 
-extern "C" int _frac_add_alpha(FracExt *data, size_t len, FpExt alpha) {
-    auto [grid, block] = kernel_launch_params(len);
-    add_alpha_kernel<<<grid, block>>>(data, len, alpha);
-    return CHECK_KERNEL();
-}
-
-extern "C" int _zerocheck_eval_interactions_round0(
+extern "C" int _batch_constraints_eval_interactions_round0(
     FpExt *output_numer,
     FpExt *output_denom,
     const Fp *selectors,
@@ -674,12 +647,5 @@ extern "C" int _zerocheck_eval_interactions_round0(
             challenges
         );
     }
-    return CHECK_KERNEL();
-}
-
-extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar, uint32_t length) {
-    auto [grid, block] = kernel_launch_params(length);
-    frac_vector_scalar_multiply_kernel<Fp, FpExt>
-        <<<grid, block>>>(reinterpret_cast<std::pair<FpExt, FpExt> *>(frac_vec), scalar, length);
     return CHECK_KERNEL();
 }
