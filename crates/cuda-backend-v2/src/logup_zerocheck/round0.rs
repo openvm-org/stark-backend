@@ -305,7 +305,8 @@ pub fn evaluate_round0_interactions_gpu(
     let d_used_nodes = rules.used_nodes.to_device()?;
 
     let num_x = input.eq_x.height();
-    let height = input.selectors_large.height();
+    let padded_height = input.selectors_large.height();
+    debug_assert_eq!(padded_height, large_domain * num_x);
 
     let intermediates = if rules.buffer_size > 0 {
         let capacity = if rules.buffer_size > 10 {
@@ -319,12 +320,12 @@ pub fn evaluate_round0_interactions_gpu(
     };
 
     let num_rows_per_tile = {
-        let h = height as u32;
+        let h = padded_height as u32;
         h.div_ceil(TASK_SIZE).max(1)
     };
 
-    let output_numer = DeviceBuffer::<EF>::with_capacity(height);
-    let output_denom = DeviceBuffer::<EF>::with_capacity(height);
+    let output_numer = DeviceBuffer::<EF>::with_capacity(padded_height);
+    let output_denom = DeviceBuffer::<EF>::with_capacity(padded_height);
 
     unsafe {
         batch_constraints_eval_interactions_round0(

@@ -4,6 +4,7 @@
 #include "fp.h"
 #include "fpext.h"
 #include "matrix.cuh"
+#include <cassert>
 #include <cstdint>
 
 namespace constraint_evaluation {
@@ -34,7 +35,7 @@ __device__ __forceinline__ FpExt evaluate_dag_entry(
     uint32_t height,
     uint32_t selectors_width,
     const Fp *__restrict__ d_preprocessed,
-    uint32_t preprocessed_width,
+    uint32_t preprocessed_air_width,
     const FpExt *d_eq_z,
     const FpExt *d_eq_x,
     const Fp *__restrict__ d_public,
@@ -51,7 +52,7 @@ __device__ __forceinline__ FpExt evaluate_dag_entry(
         if (d_preprocessed == nullptr) {
             return FpExt(Fp::zero());
         }
-        const auto stride = height * preprocessed_width / 2;
+        const auto stride = height * preprocessed_air_width;
         const Fp *matrix = d_preprocessed + stride * src.offset;
         return FpExt(matrix[height * src.index + row_index]);
     }
@@ -62,10 +63,8 @@ __device__ __forceinline__ FpExt evaluate_dag_entry(
         return FpExt(matrix[height * src.index + row_index]);
     }
     case ENTRY_CHALLENGE:
-        if (d_challenges != nullptr && src.index < 10) { // reasonable limit
-            return d_challenges[src.index];
-        }
-        return FpExt(Fp::zero());
+        assert(d_challenges != nullptr);
+        return d_challenges[src.index];
     case ENTRY_PERMUTATION:
     case ENTRY_EXPOSED:
         return FpExt(Fp::zero());
