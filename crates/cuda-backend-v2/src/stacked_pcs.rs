@@ -2,12 +2,11 @@ use std::{cmp::max, ffi::c_void, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::{
-    base::DeviceMatrix, cuda::kernels::lde::batch_expand_pad, ntt::batch_ntt,
+    base::{DeviceMatrix, DeviceMatrixView},
+    cuda::kernels::lde::batch_expand_pad,
+    ntt::batch_ntt,
 };
-use openvm_cuda_common::{
-    copy::{MemCopyD2D, cuda_memcpy},
-    d_buffer::DeviceBuffer,
-};
+use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer};
 use openvm_stark_backend::{p3_util::log2_strict_usize, prover::MatrixDimensions};
 use stark_backend_v2::prover::stacked_pcs::StackedLayout;
 use tracing::instrument;
@@ -109,22 +108,8 @@ pub fn stacked_matrix(
             }
         }
     }
-    // TODO: remove this once we delete evals in PleMatirx
-    let q_mixed = q_evals.device_copy()?;
-    if l_skip > 0 {
-        // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk of the full
-        // `s_len` slice: Use natural ordering.
-        batch_ntt(
-            &q_mixed,
-            l_skip as u32,
-            0,
-            (q_mixed.len() >> l_skip) as u32,
-            true,
-            true,
-        );
-    }
     Ok((
-        PleMatrix::new(DeviceMatrix::new(Arc::new(q_evals), height, width), q_mixed),
+        PleMatrix::from_evals(l_skip, q_evals, height, width),
         layout,
     ))
 }
@@ -191,6 +176,31 @@ pub fn rs_code_matrix(
         codeword_height,
         width,
     ))
+}
+
+impl<F, Digest> StackedPcsDataGpu<F, Digest> {
+    /// Returns a view of the specified unstacked matrix in mixed form.
+    ///
+    /// # Notes
+    /// - `width` must be the width of the unstacked matrix.
+    /// - The unstacked matrix may be strided - this must be handled by the caller.
+    pub fn mixed_view<'a>(&'a self, mat_idx: usize, width: usize) -> DeviceMatrixView<'a, F> {
+        debug_assert_eq!(self.layout.width_of(mat_idx), width);
+        let s = self
+            .layout
+            .get(mat_idx, 0)
+            .unwrap_or_else(|| panic!("Invalid matrix index: {mat_idx}"));
+        let l_skip = self.layout.l_skip();
+        let lifted_height = s.len(l_skip);
+        let offset = s.col_idx * self.matrix.height() + s.row_idx;
+        // SAFETY:
+        // - by definition of stacked layout and stacked matrix, `ptr` is valid and allocated for
+        //   `lifted_height * width` elements.
+        unsafe {
+            let ptr = self.matrix.mixed.as_ptr().add(offset);
+            DeviceMatrixView::from_raw_parts(ptr, lifted_height, width)
+        }
+    }
 }
 
 #[cfg(test)]

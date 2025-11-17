@@ -17,39 +17,41 @@ use crate::{
     },
 };
 
-#[derive(derive_new::new)]
+#[derive(derive_new::new, Getters)]
 pub struct PleMatrix<F> {
-    /// Evaluations on hyperprism D_n.
-    pub evals: DeviceMatrix<F>,
     /// Stores the coefficient form of the univariate polynomial `f(Z, \vect x)` for each `\vect x
     /// in H_n`. Buffer size is the same as `evals`.
-    pub mixed: DeviceBuffer<F>,
+    #[getset(get = "pub")]
+    pub(crate) mixed: DeviceBuffer<F>,
+    height: usize,
+    width: usize,
 }
 
-impl MatrixDimensions for PleMatrix<F> {
+impl<F> MatrixDimensions for PleMatrix<F> {
     fn width(&self) -> usize {
-        self.evals.width()
+        self.width
     }
 
     fn height(&self) -> usize {
-        self.evals.height()
+        self.height
     }
 }
 
 impl PleMatrix<F> {
     /// Creates a `PleMatrix`. This doubles the VRAM footprint to cache the `mixed` buffer.
-    pub fn from_evals(l_skip: usize, evals: DeviceMatrix<F>) -> Result<Self, ProverError> {
-        let width = evals.width();
-        let height = evals.height();
-        // D2D copy so we can do in-place iNTT
-        let mixed = evals.buffer().device_copy()?;
+    pub fn from_evals(l_skip: usize, evals: DeviceBuffer<F>, height: usize, width: usize) -> Self {
+        let mixed = evals;
         if l_skip > 0 {
             // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column:
             // (width cols) * (height / 2^l_skip chunks per col). Use natural ordering.
             let num_uni_poly = (width * (height >> l_skip)) as u32;
             batch_ntt(&mixed, l_skip as u32, 0, num_uni_poly, true, true);
         }
-        Ok(Self { evals, mixed })
+        Self {
+            mixed,
+            height,
+            width,
+        }
     }
 
     pub fn to_evals(&self, l_skip: usize) -> Result<DeviceMatrix<F>, ProverError> {

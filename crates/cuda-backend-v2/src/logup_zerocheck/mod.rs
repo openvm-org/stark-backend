@@ -27,15 +27,17 @@ use crate::{
         sumcheck::fold_mle,
     },
     gpu_backend::transport_matrix_d2h_col_major,
+    logup_zerocheck::fold_ple::fold_ple_mixed_rotate,
     stacked_pcs::StackedPcsDataGpu,
 };
 
 mod dag_scheduling;
 mod errors;
 mod fold_ple;
+/// Fraction sumcheck via GKR
 mod fractional;
-mod interactions;
-mod matrix_utils;
+/// Logup interaction evaluations for GKR input
+mod gkr_input;
 mod mle_round;
 mod round0;
 mod state;
@@ -43,8 +45,7 @@ mod state;
 pub use errors::*;
 use fold_ple::{compute_eq_sharp_gpu, fold_ple_evals_gpu};
 use fractional::{fractional_sumcheck_gpu, initialize_segment_tree};
-use interactions::{collect_trace_interactions, evaluate_interactions_gpu};
-use matrix_utils::unstack_matrix_round0;
+use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu};
 use round0::{evaluate_round0_constraints_gpu, evaluate_round0_interactions_gpu};
 use state::{FractionalGkrState, Round0Buffers};
@@ -152,7 +153,7 @@ where
         let has_interactions = !interactions_layout.sorted_cols.is_empty();
 
         // Collect interaction metadata for GPU execution (evaluations still run on CPU for now).
-        let trace_interactions = collect_trace_interactions(pk, ctx, &interactions_layout, l_skip);
+        let trace_interactions = collect_trace_interactions(pk, ctx, &interactions_layout);
         let mut fractional_state = FractionalGkrState {
             trace_interactions,
             ..Default::default()
@@ -160,11 +161,11 @@ where
 
         let total_leaves = 1 << (l_skip + n_logup);
         let leaves = if has_interactions {
-            evaluate_interactions_gpu(
-                &fractional_state,
+            log_gkr_input_evals(
+                &mut fractional_state,
                 pk,
                 ctx,
-                common_main_pcs_data,
+                l_skip,
                 alpha_logup,
                 &beta_pows,
                 total_leaves,
@@ -453,34 +454,55 @@ where
         let l_skip = self.l_skip;
 
         // GPU folding for mat_evals_per_trace
+        // We drop (free) old traces from ctx as we go
         self.mat_evals_per_trace = ctx
             .per_trace
-            .iter()
-            .map(|(air_idx, air_ctx)| {
-                let air_pk = &self.pk.per_air[*air_idx];
-                let mut results = Vec::new();
+            .into_iter()
+            .enumerate()
+            .map(|(trace_idx, (air_idx, air_ctx))| {
+                let air_pk = &self.pk.per_air[air_idx];
+                let mut results: Vec<DeviceMatrix<EF>> = Vec::new();
 
                 // Preprocessed (if exists)
-                if let Some(preprocessed_data) = &air_pk.preprocessed_data {
-                    let (mat, _) = unstack_matrix_round0(preprocessed_data.data.as_ref(), 0)
-                        .expect("failed to unstack preprocessed");
-                    let folded = fold_ple_evals_gpu(l_skip, &mat, r_0, true)
-                        .expect("failed to fold PLE on GPU");
+                if let Some(committed) = &air_pk.preprocessed_data {
+                    let trace = &committed.trace;
+                    let width = trace.width();
+                    let folded = fold_ple_mixed_rotate(
+                        l_skip,
+                        trace,
+                        committed.data.mixed_view(0, width),
+                        r_0,
+                    )
+                    .unwrap();
                     results.push(folded);
                 }
 
                 // Cached mains
-                for cached_data in &air_ctx.cached_mains {
-                    let (mat, _) = unstack_matrix_round0(cached_data.data.as_ref(), 0)
-                        .expect("failed to unstack cached");
-                    let folded = fold_ple_evals_gpu(l_skip, &mat, r_0, true)
-                        .expect("failed to fold PLE on GPU");
+                for committed in air_ctx.cached_mains {
+                    let trace = committed.trace;
+                    let width = trace.width();
+                    let folded = fold_ple_mixed_rotate(
+                        l_skip,
+                        &trace,
+                        committed.data.mixed_view(0, width),
+                        r_0,
+                    )
+                    .unwrap();
+                    drop(trace);
                     results.push(folded);
                 }
 
                 // Common main
-                let folded = fold_ple_evals_gpu(l_skip, &air_ctx.common_main, r_0, true)
-                    .expect("failed to fold PLE on GPU");
+                let trace = air_ctx.common_main;
+                let width = trace.width();
+                let folded = fold_ple_mixed_rotate(
+                    l_skip,
+                    &trace,
+                    self.common_main_pcs_data.mixed_view(trace_idx, width),
+                    r_0,
+                )
+                .unwrap();
+                drop(trace);
                 results.push(folded);
 
                 results
@@ -491,8 +513,14 @@ where
         self.sels_per_trace = std::mem::take(&mut self.sels_per_trace_base)
             .into_iter()
             .map(|mat| {
-                fold_ple_evals_gpu(l_skip, &mat, r_0, false)
-                    .expect("failed to fold selectors on GPU")
+                let num_x = mat.height() >> l_skip;
+                let width = mat.width();
+                debug_assert_ne!(num_x, 0);
+                let folded_buf = DeviceBuffer::<EF>::with_capacity(num_x * width);
+                unsafe {
+                    fold_ple_evals_gpu(l_skip, &mat, folded_buf.as_mut_ptr(), r_0, false).unwrap()
+                };
+                DeviceMatrix::new(Arc::new(folded_buf), num_x, width)
             })
             .collect();
 

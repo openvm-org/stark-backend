@@ -1,4 +1,4 @@
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::error::CudaError;
 
 use crate::F;
 
@@ -12,16 +12,15 @@ extern "C" {
         padded_size: u32,
     ) -> i32;
 
-    fn _batch_rotate_lift_and_pad(
-        out: *mut F,
-        input: *const F,
+    fn _lift_padded_matrix_evals(
+        matrix: *mut F,
         width: u32,
         height: u32,
         lifted_height: u32,
         padded_height: u32,
     ) -> i32;
 
-    fn _collapse_and_lift_strided_matrix(
+    fn _collapse_strided_matrix(
         out: *mut F,
         input: *const F,
         width: u32,
@@ -38,23 +37,30 @@ extern "C" {
     ) -> i32;
 }
 
-/// Copies a `domain_size × width` matrix into a `padded_size × (2 * width)` matrix,
-/// duplicating each column with a one-step rotation applied to the second copy.
+/// This kernel has the effect of rotating `input` column-wise as a `height x width` matrix, where
+/// `height = domain_size * num_x` **and then** batch expanding it as `width * num_x` vectors of
+/// length `domain_size` by zero padding to vectors of length `padded_size`. The output is written
+/// to `output`. This kernel zeros all padding entries.
 ///
 /// # Safety
-/// - `output` must have capacity for `padded_size * 2 * width` elements.
-/// - `input` must have at least `domain_size * width` elements.
+/// - `output` must be a pointer to DeviceBuffer with capacity for `padded_size * width * num_x`
+///   elements.
+/// - `input` must be a pointer to DeviceBuffer with at least `domain_size * width * num_x`
+///   elements.
+/// - Must have `width * num_x < (u16::MAX)^2` due to grid dimension restrictions.
 pub unsafe fn batch_rotate_pad(
-    output: &DeviceBuffer<F>,
-    input: &DeviceBuffer<F>,
+    output: *mut F,
+    input: *const F,
     width: u32,
     num_x: u32,
     domain_size: u32,
     padded_size: u32,
 ) -> Result<(), CudaError> {
+    debug_assert!(domain_size <= padded_size);
+    debug_assert!(width.checked_mul(num_x).unwrap() < u16::MAX as u32 * u16::MAX as u32);
     CudaError::from_result(_batch_rotate_pad(
-        output.as_mut_ptr(),
-        input.as_ptr(),
+        output,
+        input,
         width,
         num_x,
         domain_size,
@@ -62,30 +68,25 @@ pub unsafe fn batch_rotate_pad(
     ))
 }
 
-/// This is a weird kernel for a specific purpose and may be deleted later.
-/// `input` is a `width x lifted_height` matrix that is **assumed** to be the lifting of a `width x
-/// height` matrix (so it is vertically repeating every `height` rows). This kernel will rotate the
-/// **unlifted** matrix, lift it back to `width x lifted_height`, and then zero-expand each column
-/// to `width x padded_height`.
+/// This lifts `matrix` inplace, where `matrix` is already vertically padded.
+/// - `matrix` is a `padded_height x width` matrix.
 ///
-/// NOTE: unlike `batch_rotate_pad_kernel`, this kernel does not do plain expand without rotate.
+/// This kernel cyclically repeats the first `height` rows of the matrix vertically for
+/// `lifted_height` rows. The rows `lifted_height..padded_height` are left untouched.
 ///
 /// # Safety
-/// - `output` is a pointer to a device buffer with length at least `width * padded_height`.
-/// - `input` is a pointer to a device buffer with length at least `width * lifted_height` and the
-///   device buffer corresponds to a lifting of a `width x height` matrix.
-/// - `height` divides `lifted_height`, `lifted_height` divides `padded_height`
-pub unsafe fn batch_rotate_lift_and_pad(
-    output: *mut F,
-    input: *const F,
+/// - `matrix` is a pointer to a device buffer with length at least `width * padded_height`.
+/// - `height <= lifted_height <= padded_height`
+pub unsafe fn lift_padded_matrix_evals(
+    matrix: *mut F,
     width: u32,
     height: u32,
     lifted_height: u32,
     padded_height: u32,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_batch_rotate_lift_and_pad(
-        output,
-        input,
+    debug_assert!(height <= lifted_height && lifted_height <= padded_height);
+    CudaError::from_result(_lift_padded_matrix_evals(
+        matrix,
         width,
         height,
         lifted_height,
@@ -94,20 +95,19 @@ pub unsafe fn batch_rotate_lift_and_pad(
 }
 
 /// Let `lifted_height = height * stride`. Collapses a `lifted_height × width` matrix to a `height x
-/// width` by taking vertical row `stride`, and then cyclically repeats vertically to "lift" again
-/// to a `lifted_height x width` matrix.
+/// width` by taking vertical row `stride`.
 ///
 /// # Safety
-/// - `output` must be a pointer to `DeviceBuffer<F>` with length at least `lifted_height * width`.
+/// - `output` must be a pointer to `DeviceBuffer<F>` with length at least `height * width`.
 /// - `input` must be a pointer to `DeviceBuffer<F>` with length at least `lifted_height * width`.
-pub unsafe fn collapse_and_lift_strided_matrix(
+pub unsafe fn collapse_strided_matrix(
     output: *mut F,
     input: *const F,
     width: u32,
     height: u32,
     stride: u32,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_collapse_and_lift_strided_matrix(
+    CudaError::from_result(_collapse_strided_matrix(
         output, input, width, height, stride,
     ))
 }
