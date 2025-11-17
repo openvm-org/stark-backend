@@ -19,7 +19,7 @@ use p3_field::{FieldAlgebra, PrimeField32};
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
-    BabyBearPoseidon2CpuEngineV2, Digest, F, StarkEngineV2, SystemParams,
+    BabyBearPoseidon2CpuEngineV2, F, StarkEngineV2, SystemParams,
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
     poseidon2::sponge::{
         DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory, TranscriptLog,
@@ -27,45 +27,10 @@ use crate::{
     proof::Proof,
     prover::{
         AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
-        DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver, ProverBackendV2,
-        ProvingContextV2, TraceCommitterV2, stacked_pcs::stacked_commit,
+        DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver, ProvingContextV2,
+        TraceCommitterV2, stacked_pcs::stacked_commit,
     },
 };
-
-pub fn transport_proving_ctx_to_device<PB, PD>(
-    device: &PD,
-    ctx: &ProvingContextV2<CpuBackendV2>,
-) -> ProvingContextV2<PB>
-where
-    PB: ProverBackendV2<Val = F, Commitment = Digest>,
-    PD: DeviceDataTransporterV2<PB>,
-{
-    let per_trace = ctx
-        .per_trace
-        .iter()
-        .map(|(air_idx, air_ctx)| {
-            let common_main = device.transport_matrix_to_device(&air_ctx.common_main);
-            let cached_mains = air_ctx
-                .cached_mains
-                .iter()
-                .map(|cd| {
-                    debug_assert_eq!(cd.height, cd.data.mat_view(0).height());
-                    let data = cd.data.as_ref();
-                    let d_data = device.transport_pcs_data_to_device(data);
-                    CommittedTraceDataV2 {
-                        commitment: cd.commitment,
-                        data: Arc::new(d_data),
-                        height: cd.height,
-                    }
-                })
-                .collect();
-            let air_ctx_gpu =
-                AirProvingContextV2::new(cached_mains, common_main, air_ctx.public_values.clone());
-            (*air_idx, air_ctx_gpu)
-        })
-        .collect();
-    ProvingContextV2::new(per_trace)
-}
 
 pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
     engine: &E,
@@ -169,7 +134,7 @@ pub trait TestFixture {
         let ctx = self.generate_proving_ctx();
         let device = engine.device();
         let d_pk = device.transport_pk_to_device(pk);
-        let d_ctx = transport_proving_ctx_to_device(device, &ctx);
+        let d_ctx = device.transport_proving_ctx_to_device(&ctx);
         let mut prover = engine.prover_from_transcript(transcript.clone());
         let proof = prover.prove(&d_pk, d_ctx);
         *transcript = prover.transcript;
@@ -346,8 +311,8 @@ impl TestFixture for CachedFixture11 {
                 assert_eq!(common.height(), cached.height());
                 let cached_data = CommittedTraceDataV2 {
                     commitment: commit,
+                    trace: cached,
                     data: Arc::new(data),
-                    height: cached.height(),
                 };
                 AirProvingContextV2 {
                     cached_mains: vec![cached_data],
