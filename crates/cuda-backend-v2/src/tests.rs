@@ -21,7 +21,7 @@ use stark_backend_v2::{
     test_utils::{
         CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11,
         PreprocessedFibFixture, TestFixture, default_test_params_small,
-        prove_up_to_batch_constraints, test_system_params_small, transport_proving_ctx_to_device,
+        prove_up_to_batch_constraints, test_system_params_small,
     },
     verifier::{
         VerifierError,
@@ -158,7 +158,7 @@ fn test_batch_sumcheck_zero_interactions(
     let (pk, vk) = fib.keygen(&engine);
     let device = engine.device();
     let pk = device.transport_pk_to_device(&pk);
-    let ctx = transport_proving_ctx_to_device(device, &fib.generate_proving_ctx());
+    let ctx = device.transport_proving_ctx_to_device(&fib.generate_proving_ctx());
 
     let mut n_per_air: Vec<isize> = Vec::with_capacity(ctx.per_trace.len());
     for (_, trace) in ctx.common_main_traces() {
@@ -316,10 +316,10 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
 
     // 6. Update air_ids in fib context and combine contexts
     per_trace.push((per_trace.len(), fib_ctx));
-    let combined_ctx = transport_proving_ctx_to_device(
-        engine.device(),
-        &ProvingContextV2::new(per_trace).into_sorted(),
-    );
+    let combined_ctx = engine
+        .device()
+        .transport_proving_ctx_to_device(&ProvingContextV2::new(per_trace))
+        .into_sorted();
 
     let proof = engine.prove(&combined_pk, combined_ctx);
     engine.verify(&combined_pk.get_vk(), &proof).unwrap();
@@ -460,7 +460,9 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let fx = InteractionsFixture11;
     let (pk, _vk) = fx.keygen(&engine);
     let pk = device.transport_pk_to_device(&pk);
-    let ctx = transport_proving_ctx_to_device(device, &fx.generate_proving_ctx()).into_sorted();
+    let ctx = device
+        .transport_proving_ctx_to_device(&fx.generate_proving_ctx())
+        .into_sorted();
     let mut transcript = DuplexSponge::default();
     let ((gkr_proof, _), _) = prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
 
@@ -483,7 +485,9 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
     let fx = InteractionsFixture11;
     let (pk, vk) = fx.keygen(&engine);
     let pk = device.transport_pk_to_device(&pk);
-    let ctx = transport_proving_ctx_to_device(device, &fx.generate_proving_ctx()).into_sorted();
+    let ctx = device
+        .transport_proving_ctx_to_device(&fx.generate_proving_ctx())
+        .into_sorted();
     let l_skip = device.config().l_skip;
     let mut pvs = vec![vec![]; vk.inner.per_air.len()];
     let (trace_id_to_air_ids, ns): (Vec<_>, Vec<_>) = ctx

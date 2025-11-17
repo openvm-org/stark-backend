@@ -14,6 +14,8 @@ pub mod stacked_reduction;
 pub mod whir;
 
 pub mod sumcheck {
+    use std::ffi::c_void;
+
     use super::*;
     use crate::poly::EqEvalSegments;
 
@@ -96,17 +98,17 @@ pub mod sumcheck {
         ))
     }
 
-    pub unsafe fn fold_ple_from_coeffs<T, ET>(
-        input_coeffs: &DeviceBuffer<T>, // Base field (F)
-        output: &DeviceBuffer<ET>,      // Extension field (EF)
+    pub unsafe fn fold_ple_from_coeffs(
+        input_coeffs: *const F, // Base field (F)
+        output: *mut EF,        // Extension field (EF)
         num_x: u32,
         width: u32,
         domain_size: u32,
         r: EF,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_fold_ple_from_coeffs(
-            input_coeffs.as_raw_ptr(),
-            output.as_mut_raw_ptr(),
+            input_coeffs as *const c_void,
+            output as *mut c_void,
             num_x,
             width,
             domain_size,

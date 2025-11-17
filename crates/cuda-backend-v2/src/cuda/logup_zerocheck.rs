@@ -1,3 +1,5 @@
+use std::ffi::c_void;
+
 use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_stark_backend::prover::MatrixDimensions;
 
@@ -44,13 +46,11 @@ extern "C" {
     // utils.cu
     fn _fold_ple_from_evals(
         input_matrix: *const std::ffi::c_void,
-        output_matrix: *mut std::ffi::c_void, /* Single buffer: [orig_cols, rot_cols] when
-                                               * rotate=true */
+        output_matrix: *mut std::ffi::c_void,
         numerators: *const std::ffi::c_void,
         inv_lagrange_denoms: *const std::ffi::c_void,
         height: u32,
         width: u32,
-        domain_size: u32,
         l_skip: u32,
         new_height: u32,
         rotate: bool,
@@ -301,24 +301,22 @@ pub unsafe fn frac_extract_claims(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn fold_ple_from_evals(
     input_matrix: &DeviceBuffer<F>,
-    output_matrix: &DeviceBuffer<EF>, // Single buffer: [orig_cols, rot_cols] when rotate=true
+    output_matrix: *mut EF,
     numerators: &DeviceBuffer<EF>,
     inv_lagrange_denoms: &DeviceBuffer<EF>,
     height: u32,
     width: u32,
-    domain_size: u32,
     l_skip: u32,
     new_height: u32,
     rotate: bool,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_fold_ple_from_evals(
         input_matrix.as_raw_ptr(),
-        output_matrix.as_mut_raw_ptr(),
+        output_matrix as *mut c_void,
         numerators.as_raw_ptr(),
         inv_lagrange_denoms.as_raw_ptr(),
         height,
         width,
-        domain_size,
         l_skip,
         new_height,
         rotate,

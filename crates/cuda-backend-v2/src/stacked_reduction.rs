@@ -406,8 +406,8 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
                 let folded_evals = DeviceBuffer::with_capacity(coeffs.len() >> l_skip);
                 unsafe {
                     fold_ple_from_coeffs(
-                        coeffs,
-                        &folded_evals,
+                        coeffs.as_ptr(),
+                        folded_evals.as_mut_ptr(),
                         num_x,
                         width as u32,
                         1 << l_skip,
