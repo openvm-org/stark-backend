@@ -1,8 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{cmp::min, collections::HashMap, mem::ManuallyDrop, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::{
-    base::DeviceMatrix,
+    base::{DeviceMatrix, DeviceMatrixView},
     ntt::batch_ntt,
     transpiler::{SymbolicRulesOnGpu, codec::Codec},
 };
@@ -20,7 +20,7 @@ use p3_util::{log2_ceil_usize, log2_strict_usize};
 use stark_backend_v2::{
     poly_common::{eval_eq_sharp_uni, eval_eq_uni},
     prover::{
-        CommittedTraceDataV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
+        AirProvingContextV2, CommittedTraceDataV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
         sumcheck::sumcheck_round0_deg,
     },
 };
@@ -28,7 +28,6 @@ use stark_backend_v2::{
 use super::{
     dag_scheduling::compute_constraint_expr_indices,
     errors::{Round0EvalError, Round0PrepError},
-    matrix_utils::unstack_matrix_round0,
     state::Round0Buffers,
 };
 use crate::{
@@ -38,13 +37,14 @@ use crate::{
             MainMatrixPtrs, accumulate_constraints, batch_constraints_eval_interactions_round0,
             zerocheck_eval_constraints,
         },
-        matrix::{batch_expand_pad_wide, batch_rotate_lift_and_pad, batch_rotate_pad},
+        matrix::{batch_expand_pad_wide, batch_rotate_pad, lift_padded_matrix_evals},
     },
     stacked_pcs::StackedPcsDataGpu,
 };
 
 const TASK_SIZE: u32 = 65_536;
 
+/// For a single AIR, includes rotation data
 #[derive(Default, Debug)]
 struct TraceRound0Matrices {
     preprocessed: Option<DeviceMatrix<F>>,
@@ -93,22 +93,49 @@ fn prepare_round0_trace_inputs<'a>(
             continue;
         }
 
-        let selectors_large = upsample_matrix(
-            l_skip,
-            s_deg,
-            selectors_base,
-            selectors_base.height(), // selectors_base is already lifted
-            false,
-        )?;
+        // TODO: follow stacked_reduction strategy where univariate variable is evaluated directly
+        let s0_deg = sumcheck_round0_deg(l_skip, s_deg);
+        let log_large_domain = log2_ceil_usize(s0_deg + 1);
+        let selectors_base_buf = selectors_base.buffer();
+        let selectors_large_buf =
+            DeviceBuffer::with_capacity(selectors_base_buf.len() << (log_large_domain - l_skip));
+        let num_poly = (selectors_base_buf.len() >> l_skip) as u32;
+        unsafe {
+            batch_expand_pad_wide(
+                selectors_large_buf.as_mut_ptr(),
+                selectors_base_buf.as_ptr(),
+                num_poly,
+                1 << log_large_domain,
+                1 << l_skip,
+            )?;
+            batch_ntt(
+                &selectors_large_buf,
+                l_skip as u32,
+                (log_large_domain - l_skip) as u32,
+                num_poly,
+                true,
+                true,
+            );
+            batch_ntt(
+                &selectors_large_buf,
+                log_large_domain as u32,
+                0,
+                num_poly,
+                true,
+                false,
+            );
+        }
+        let selectors_large = DeviceMatrix::new(
+            Arc::new(selectors_large_buf),
+            selectors_base.height() << (log_large_domain - l_skip),
+            selectors_base.width(),
+        );
         let trace_mats = prepare_trace_round0_matrices(
             l_skip,
             s_deg,
             trace_idx,
-            per_air
-                .preprocessed_data
-                .as_ref()
-                .map(|committed| committed.data.as_ref()),
-            &air_ctx.cached_mains,
+            per_air.preprocessed_data.as_ref(),
+            air_ctx,
             common_main_pcs_data,
         )?;
         debug_assert_eq!(
@@ -476,132 +503,186 @@ fn prepare_trace_round0_matrices(
     l_skip: usize,
     s_deg: usize,
     trace_idx: usize,
-    preprocessed: Option<&StackedPcsDataGpu<F, Digest>>,
-    cached_mains: &[CommittedTraceDataV2<GpuBackendV2>],
+    preprocessed: Option<&CommittedTraceDataV2<GpuBackendV2>>,
+    air_ctx: &AirProvingContextV2<GpuBackendV2>,
     common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
 ) -> Result<TraceRound0Matrices, Round0PrepError> {
     let mut mats = TraceRound0Matrices::default();
 
-    if let Some(data) = preprocessed {
-        debug_assert_eq!(data.layout.l_skip(), l_skip);
-        let (pre_unstacked, height) = unstack_matrix_round0(data, 0)?;
+    if let Some(committed) = preprocessed {
+        debug_assert_eq!(committed.data.layout.l_skip(), l_skip);
+        let trace = &committed.trace;
+        let width = trace.width();
         mats.preprocessed = Some(upsample_matrix(
             l_skip,
             s_deg,
-            &pre_unstacked,
-            height,
+            trace,
+            committed.data.mixed_view(0, width),
             true,
         )?);
     }
-
-    mats.cached = cached_mains
+    mats.cached = air_ctx
+        .cached_mains
         .iter()
         .map(|committed| {
             debug_assert_eq!(committed.data.layout.l_skip(), l_skip);
-            let (unstacked, height) = unstack_matrix_round0(committed.data.as_ref(), 0)?;
-            upsample_matrix(l_skip, s_deg, &unstacked, height, true)
+            let trace = &committed.trace;
+            let width = trace.width();
+            upsample_matrix(
+                l_skip,
+                s_deg,
+                trace,
+                committed.data.mixed_view(0, width),
+                true,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let (common_main, height) = unstack_matrix_round0(common_main_pcs_data, trace_idx)?;
-    mats.common = Some(upsample_matrix(l_skip, s_deg, &common_main, height, true)?);
+    let common_main = &air_ctx.common_main;
+    let width = common_main.width();
+    mats.common = Some(upsample_matrix(
+        l_skip,
+        s_deg,
+        common_main,
+        common_main_pcs_data.mixed_view(trace_idx, width),
+        true,
+    )?);
 
     Ok(mats)
 }
 
-/// Currently this function is only called after `unstack_matrix_round0`. As a consequence we assume
-/// that `matrix.height()` is the lifted height and if this matrix is the lifted matrix when
-/// `lifted_height != height`.
-fn upsample_matrix(
+/// `trace_evals` is always the honest trace matrix of evaluations. Its height is not lifted.
+/// `mixed` is a view of the mixed-interpolation (aka coefficient in Z-, eval in X_i's) form of the
+/// _strided_ trace (which does **not** equal lifted trace). Its height is the lifted height.
+///
+/// Returns matrix of either width `trace_evals.width` if `rotate` is false, or width
+/// `trace_evals.width * 2` if `rotate` is true. In the latter case, the second half of the matrix
+/// is the upsamping of the lift of the rotation of the trace evaluations (note the order!).
+pub fn upsample_matrix(
     l_skip: usize,
     s_deg: usize,
-    matrix: &DeviceMatrix<F>,
-    height: usize,
+    trace_evals: &DeviceMatrix<F>,
+    mixed: DeviceMatrixView<F>,
     rotate: bool,
 ) -> Result<DeviceMatrix<F>, Round0PrepError> {
-    let lifted_height = matrix.height();
-    let width = matrix.width();
+    debug_assert_eq!(trace_evals.width(), mixed.width());
+    let height = trace_evals.height();
+    let lifted_height = mixed.height();
+    let width = trace_evals.width();
     let log_lifted_height = log2_strict_usize(lifted_height);
-    assert!(
+    debug_assert!(
         log_lifted_height >= l_skip,
         "log_height ({log_lifted_height}) < l_skip ({l_skip})"
     );
+    debug_assert!(
+        height == lifted_height || (height < lifted_height && log_lifted_height == l_skip)
+    );
     let n_lift = log_lifted_height - l_skip;
     let num_x = 1 << n_lift;
-    let domain_size = 1 << l_skip;
+    let domain_size = min(1 << l_skip, height);
     let domain_poly_count = num_x * width;
     let variants = if rotate { 2 } else { 1 };
-    let total_poly_count = domain_poly_count * variants;
+    let total_poly_count = num_x * width * variants;
 
-    let s0_deg = stark_backend_v2::prover::sumcheck::sumcheck_round0_deg(l_skip, s_deg);
+    let s0_deg = sumcheck_round0_deg(l_skip, s_deg);
     let log_large_domain = log2_ceil_usize(s0_deg + 1);
     let large_domain_size = 1 << log_large_domain;
 
     let upsampled = DeviceBuffer::<F>::with_capacity(large_domain_size * total_poly_count);
-    upsampled.fill_zero()?;
+    // upsampled.fill_zero()?;
 
     unsafe {
-        if rotate {
-            if height == lifted_height {
-                // IMPORTANT: in the case n < 0, you must rotate _and then_ lift (which is different
-                // from lift and then rotate)
-                batch_rotate_pad(
-                    &upsampled,
-                    matrix.buffer(),
-                    width as u32,
-                    num_x as u32,
-                    domain_size as u32,
-                    large_domain_size as u32,
-                )?;
-            } else {
-                debug_assert_eq!(lifted_height, 1 << l_skip);
-                debug_assert_eq!(lifted_height % height, 0);
-                debug_assert_eq!(num_x, 1);
-                batch_expand_pad_wide(
-                    upsampled.as_mut_ptr(),
-                    matrix.buffer().as_ptr(),
-                    width as u32,
-                    large_domain_size as u32,
-                    domain_size as u32,
-                )?;
-                batch_rotate_lift_and_pad(
-                    upsampled
-                        .as_mut_ptr()
-                        .add(large_domain_size * domain_poly_count),
-                    matrix.buffer().as_ptr(),
-                    width as u32,
-                    height as u32,
-                    domain_size as u32,
-                    large_domain_size as u32,
-                )?;
-            }
-        } else {
+        // 1. Handle the non-rotated part. If height == lifted_height, we can use the already
+        //    computed mixed form.
+        if height == lifted_height {
             batch_expand_pad_wide(
                 upsampled.as_mut_ptr(),
-                matrix.buffer().as_ptr(),
+                mixed.as_ptr(),
                 domain_poly_count as u32,
                 large_domain_size as u32,
                 domain_size as u32,
             )?;
+        } else {
+            debug_assert_eq!(num_x, 1);
+            debug_assert_eq!(lifted_height, 1 << l_skip);
+            // In this case the mixed form is strided but not lifted, so we lift and perform iNTT to
+            // get coefficient form. We will expand directly into the large_domain
+            batch_expand_pad_wide(
+                upsampled.as_mut_ptr(),
+                trace_evals.buffer().as_ptr(),
+                width as u32,
+                large_domain_size as u32,
+                domain_size as u32,
+            )?;
+            lift_padded_matrix_evals(
+                upsampled.as_mut_ptr(),
+                width as u32,
+                height as u32,
+                1 << l_skip,
+                large_domain_size as u32,
+            )?;
+            // iNTT to get coefficient form
+            batch_ntt(
+                &upsampled,
+                l_skip as u32,
+                (log_large_domain - l_skip) as u32,
+                width as u32,
+                true,
+                true,
+            );
+        }
+
+        if rotate {
+            // SAFETY: when `rotate = true`, we've allocated `upsampled` for twice the width.
+            let dst = upsampled
+                .as_mut_ptr()
+                .add(large_domain_size * domain_poly_count);
+            // Rotation always needs to use the evaluation form, and NOT the mixed form. Rotation
+            // should also be done before lifting.
+            batch_rotate_pad(
+                dst,
+                trace_evals.buffer().as_ptr(),
+                width as u32,
+                num_x as u32,
+                domain_size as u32,
+                large_domain_size as u32,
+            )?;
+            if height != lifted_height {
+                lift_padded_matrix_evals(
+                    dst,
+                    width as u32,
+                    height as u32,
+                    1 << l_skip,
+                    large_domain_size as u32,
+                )?;
+            }
+            // NOTE: this is a workaround to pass the raw `dst` pointer to the `batch_ntt` function.
+            // We use ManuallyDrop so dropping does not free the underlying memory.
+            let upsampled_rot = ManuallyDrop::new(DeviceBuffer::from_raw_parts(
+                dst,
+                large_domain_size * domain_poly_count,
+            ));
+            // iNTT to get coefficient form
+            batch_ntt(
+                &upsampled_rot,
+                l_skip as u32,
+                (log_large_domain - l_skip) as u32,
+                domain_poly_count as u32,
+                true,
+                true,
+            );
         }
     }
-
-    batch_ntt(
-        &upsampled,
-        l_skip as u32,
-        (log_large_domain - l_skip) as u32,
-        total_poly_count as u32,
-        true,
-        true,
-    );
-
+    // At this point, we have total_poly_count univariate polynomials in coefficient form, each of
+    // degree `< 2^l_skip` but padded with 0 coefficients to have `large_domain_size` coefficients.
+    // We perform batch NTT to get evaluations on the larger domain.
     batch_ntt(
         &upsampled,
         log_large_domain as u32,
         0,
         total_poly_count as u32,
         true,
-        false,
+        false, // forward NTT
     );
 
     Ok(DeviceMatrix::new(

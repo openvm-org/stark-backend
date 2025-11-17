@@ -93,8 +93,6 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
             .chain(other_pcs_data.iter().map(|d| &d.matrix))
             .map(|mat| (mat.mixed.as_ptr(), mat.width() as u32))
             .unzip();
-        debug_assert_eq!(common_main.evals.strong_count(), 1);
-        drop(common_main.evals);
         let common_main_mixed = ManuallyDrop::new(common_main.mixed);
         let mut mu_idxs = Vec::with_capacity(num_commits);
         let mut total_width = 0u32;

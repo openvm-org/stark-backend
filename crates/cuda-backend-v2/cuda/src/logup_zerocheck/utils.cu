@@ -11,7 +11,7 @@ namespace {
 
 // Folds PLE evaluations by interpolating univariate polynomials on coset D and evaluating at r_0
 // Input: column-major matrix [height * width] of evaluations
-// Output: two column-major matrices [new_height * width] of folded evaluations (original and rotated)
+// Output: column-major matrix [new_height * width] of folded evaluations (original OR rotated)
 // For each (x, col), collects 2^l_skip evaluations on coset D and interpolates for both offsets
 template <bool ROTATE>
 __global__ void fold_ple_from_evals_kernel(
@@ -35,24 +35,24 @@ __global__ void fold_ple_from_evals_kernel(
     int x = idx % new_height;
     int col = idx / new_height;
 
-    // Compute offset 0 (always needed)
-    FpExt result_0(Fp::zero());
+    if constexpr (!ROTATE) {
+        // Compute offset 0 if rotate=false
+        FpExt result_0(Fp::zero());
 
-    for (int z = 0; z < domain_size; z++) {
-        // Offset 0: ((x << l_skip) + z + 0) % height
-        int row_idx_0 = ((x << l_skip) + z) % height;
-        int input_idx_0 = col * height + row_idx_0;
-        Fp eval_0 = input_matrix[input_idx_0];
-        // Lagrange interpolation: eval * numerators[z] * inv_lagrange_denoms[z]
-        result_0 = result_0 + FpExt(eval_0) * numerators[z] * inv_lagrange_denoms[z];
-    }
+        for (int z = 0; z < domain_size; z++) {
+            // Offset 0: ((x << l_skip) + z + 0) % height
+            int row_idx_0 = ((x << l_skip) + z) % height;
+            int input_idx_0 = col * height + row_idx_0;
+            Fp eval_0 = input_matrix[input_idx_0];
+            // Lagrange interpolation: eval * numerators[z] * inv_lagrange_denoms[z]
+            result_0 = result_0 + FpExt(eval_0) * numerators[z] * inv_lagrange_denoms[z];
+        }
 
-    // Write original columns: output_matrix[col * new_height + x]
-    int output_idx_original = col * new_height + x;
-    output_matrix[output_idx_original] = result_0;
-
-    // Compute offset 1 only if rotate=true
-    if constexpr (ROTATE) {
+        // Write original columns: output_matrix[col * new_height + x]
+        int output_idx_original = col * new_height + x;
+        output_matrix[output_idx_original] = result_0;
+    } else {
+        // Compute offset 1 if rotate=true
         FpExt result_1(Fp::zero());
         for (int z = 0; z < domain_size; z++) {
             // Offset 1: ((x << l_skip) + z + 1) % height
@@ -63,7 +63,7 @@ __global__ void fold_ple_from_evals_kernel(
         }
         // Write rotated columns: output_matrix[(width + col) * new_height + x]
         // Layout: [orig_col0...orig_col{width-1}, rot_col0...rot_col{width-1}]
-        int output_idx_rotated = (width + col) * new_height + x;
+        int output_idx_rotated = col * new_height + x;
         output_matrix[output_idx_rotated] = result_1;
     }
 }
@@ -120,12 +120,11 @@ __global__ void interpolate_columns_kernel(
 // ============================================================================
 extern "C" int _fold_ple_from_evals(
     const Fp *input_matrix,
-    FpExt *output_matrix, // Single buffer: [orig_cols, rot_cols] when rotate=true
+    FpExt *output_matrix,
     const FpExt *numerators,
     const FpExt *inv_lagrange_denoms,
     uint32_t height,
     uint32_t width,
-    uint32_t domain_size,
     uint32_t l_skip,
     uint32_t new_height,
     bool rotate
@@ -141,7 +140,7 @@ extern "C" int _fold_ple_from_evals(
             inv_lagrange_denoms,
             height,
             width,
-            domain_size,
+            1 << l_skip,
             l_skip,
             new_height
         );
@@ -153,7 +152,7 @@ extern "C" int _fold_ple_from_evals(
             inv_lagrange_denoms,
             height,
             width,
-            domain_size,
+            1 << l_skip,
             l_skip,
             new_height
         );
