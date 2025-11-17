@@ -1,3 +1,4 @@
+use getset::CopyGetters;
 use openvm_stark_backend::{
     p3_matrix::{Matrix, dense::RowMajorMatrix},
     prover::MatrixDimensions,
@@ -43,12 +44,14 @@ pub struct ColMajorMatrixView<'a, F> {
 }
 
 /// Vertically strided column-major matrix view.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, CopyGetters)]
 pub struct StridedColMajorMatrixView<'a, F> {
+    #[getset(get_copy = "pub")]
     values: &'a [F],
     width: usize,
     height: usize,
     /// Row stride
+    #[getset(get_copy = "pub")]
     stride: usize,
 }
 
