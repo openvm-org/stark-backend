@@ -136,6 +136,7 @@ pub fn eval_eq_rot_cube<F: Field>(x: &[F], y: &[F]) -> (F, F) {
 
 // Source: https://github.com/starkware-libs/stwo/blob/dev/crates/stwo/src/prover/lookups/utils.rs#L12
 /// Univariate polynomial in coefficient form.
+#[derive(Clone, Debug)]
 pub struct UnivariatePoly<F>(pub(crate) Vec<F>);
 
 impl<F: TwoAdicField> UnivariatePoly<F> {
