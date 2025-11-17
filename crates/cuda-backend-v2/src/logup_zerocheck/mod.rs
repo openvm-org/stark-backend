@@ -1,4 +1,8 @@
-use std::{cmp::max, iter, sync::Arc};
+use std::{
+    cmp::max,
+    iter::{self},
+    sync::Arc,
+};
 
 use itertools::{Itertools, izip};
 use openvm_cuda_backend::base::DeviceMatrix;
@@ -8,7 +12,7 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::{air_builders::symbolic::SymbolicConstraints, prover::MatrixDimensions};
 use p3_field::{Field, FieldAlgebra, TwoAdicField};
-use p3_util::log2_strict_usize;
+use p3_util::{log2_ceil_usize, log2_strict_usize};
 use stark_backend_v2::{
     poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni},
     poseidon2::sponge::FiatShamirTranscript,
@@ -27,7 +31,7 @@ use crate::{
         sumcheck::fold_mle,
     },
     gpu_backend::transport_matrix_d2h_col_major,
-    logup_zerocheck::fold_ple::fold_ple_mixed_rotate,
+    logup_zerocheck::{fold_ple::fold_ple_mixed_rotate, round0::prepare_round0_trace_input},
     stacked_pcs::StackedPcsDataGpu,
 };
 
@@ -258,6 +262,8 @@ where
         });
         let s_deg = self.s_deg;
         let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
+        let num_present_airs = ctx.per_trace.len();
+        debug_assert_eq!(num_present_airs, self.n_per_trace.len());
 
         self.eq_3b_per_trace = self
             .fractional_state
@@ -343,83 +349,91 @@ where
             eq_xi: self.eq_xi_per_trace.clone(),
         };
 
-        let sum_buffers = evaluate_round0_constraints_gpu(
-            self.l_skip,
-            self.s_deg,
+        // All (numer, denom) pairs per present AIR for logup, followed by 1 zerocheck poly per
+        // present AIR
+        let mut batch_polys =
+            vec![UnivariatePoly::new(vec![EF::ZERO; s_0_deg + 1]); 3 * num_present_airs];
+        let log_large_domain = log2_ceil_usize(s_0_deg + 1);
+        let large_domain = 1 << log_large_domain;
+        assert!(!xi.is_empty(), "xi vector must not be empty");
+        let omega = F::two_adic_generator(log_large_domain);
+        let eq_z_host: Vec<EF> = omega
+            .powers()
+            .take(large_domain)
+            .map(|z| eval_eq_uni(l_skip, xi[0], z.into()))
+            .collect();
+        let d_eq_z = eq_z_host.to_device().unwrap();
+        // Precompute eq_sharp_z (using eq_sharp instead of eq_z)
+        let eq_sharp_z_host: Vec<EF> = omega
+            .powers()
+            .take(large_domain)
+            .map(|z| eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into()))
+            .collect();
+        let d_eq_sharp_z = eq_sharp_z_host.to_device().unwrap();
+        // Loop through one AIR at a time; it is more efficient to do everything for one AIR
+        // together
+        let d_lambda_pows = self
+            .lambda_pows
+            .as_ref()
+            .expect("lambda powers must be set before round-0 evaluation");
+
+        for (trace_idx, ((air_idx, air_ctx), n, selectors_base, eq_x, eq_3b)) in izip!(
+            &ctx.per_trace,
             &self.n_per_trace,
-            self.pk,
-            ctx,
-            self.common_main_pcs_data,
-            &buffers,
-            &self.public_values_per_trace,
-            &self.xi,
-            self.lambda_pows
-                .as_ref()
-                .expect("lambda powers must be set before round-0 evaluation"),
+            &buffers.selectors_base,
+            &buffers.eq_xi,
+            &self.eq_3b_per_trace,
         )
-        .expect("failed to evaluate round-0 constraints on device");
-
-        let zerocheck_polys = sum_buffers
-            .iter()
-            .map(|sum_buffer| {
-                if sum_buffer.is_empty() {
-                    UnivariatePoly::new(vec![EF::ZERO; s_0_deg + 1])
-                } else {
-                    let host_sums = sum_buffer
-                        .to_host()
-                        .expect("failed to copy aggregated constraint sums back to host");
-                    UnivariatePoly::from_evals_idft(&host_sums)
-                }
-            })
-            .collect_vec();
-
-        let logup_polys = if self.eq_3b_per_trace.iter().all(|eq_3b| eq_3b.is_empty()) {
-            (0..zerocheck_polys.len() * 2)
-                .map(|_| UnivariatePoly::new(vec![EF::ZERO; s_0_deg + 1]))
-                .collect_vec()
-        } else {
-            let (sums_numer, sums_denom) = evaluate_round0_interactions_gpu(
-                self.l_skip,
-                self.s_deg,
-                &self.n_per_trace,
-                self.pk,
-                ctx,
-                self.common_main_pcs_data,
-                &buffers,
+        .enumerate()
+        {
+            let single_pk = &self.pk.per_air[*air_idx];
+            let trace_input = prepare_round0_trace_input(
+                l_skip,
+                log_large_domain,
+                single_pk,
+                air_ctx,
+                &self.common_main_pcs_data,
+                selectors_base,
+                eq_x.clone(),
                 &self.public_values_per_trace,
-                &self.xi,
-                &self.omega_skip_pows,
+                trace_idx,
+            )
+            .unwrap();
+
+            let sum_buffer = evaluate_round0_constraints_gpu(
+                l_skip,
+                large_domain,
+                single_pk,
+                &trace_input,
+                d_lambda_pows,
+                &d_eq_z,
+            )
+            .expect("failed to evaluate round-0 constraints on device");
+            if !sum_buffer.is_empty() {
+                let host_sums = sum_buffer
+                    .to_host()
+                    .expect("failed to copy aggregated constraint sums back to host");
+                batch_polys[2 * num_present_airs + trace_idx] =
+                    UnivariatePoly::from_evals_idft(&host_sums);
+            }
+
+            let (sum_numer, sum_denom) = evaluate_round0_interactions_gpu(
+                l_skip,
+                large_domain,
+                single_pk,
+                &trace_input,
+                &d_eq_sharp_z,
+                eq_3b,
                 &self.beta_pows,
-                &self.eq_3b_per_trace,
             )
             .expect("failed to evaluate round-0 interactions on device");
-
-            // Convert to polynomials: each trace has 2 polynomials (numer, denom)
-            // Ensure we have the same number of traces as CPU expects
-            assert_eq!(
-                sums_numer.len(),
-                ctx.per_trace.len(),
-                "Mismatch in number of traces"
-            );
-            debug_assert_eq!(sums_numer.len(), self.n_per_trace.len());
-            let mut logup_polys = Vec::with_capacity(sums_numer.len() * 2);
-            for (sum_numer, sum_denom, n) in izip!(sums_numer, sums_denom, &self.n_per_trace) {
-                let mut numer_poly = if sum_numer.is_empty() {
-                    UnivariatePoly::new(vec![EF::ZERO; s_0_deg + 1])
-                } else {
-                    let host_sums = sum_numer
+            if !sum_numer.is_empty() && !sum_denom.is_empty() {
+                let [mut numer_poly, denom_poly] = [sum_numer, sum_denom].map(|sum| {
+                    let evals = sum
                         .to_host()
-                        .expect("failed to copy interaction numer sums back to host");
-                    UnivariatePoly::from_evals_idft(&host_sums)
-                };
-                let denom_poly = if sum_denom.is_empty() {
-                    UnivariatePoly::new(vec![EF::ZERO; s_0_deg + 1])
-                } else {
-                    let host_sums = sum_denom
-                        .to_host()
-                        .expect("failed to copy interaction denom sums back to host");
-                    UnivariatePoly::from_evals_idft(&host_sums)
-                };
+                        .expect("failed to copy interaction sums back to host");
+                    UnivariatePoly::from_evals_idft(&evals)
+                });
                 if n.is_negative() {
                     // normalize for lifting
                     let norm_factor = F::from_canonical_u32(1 << n.unsigned_abs()).inverse();
@@ -427,15 +441,13 @@ where
                         *s *= norm_factor;
                     }
                 }
-                logup_polys.push(numer_poly);
-                logup_polys.push(denom_poly);
+                batch_polys[2 * trace_idx] = numer_poly;
+                batch_polys[2 * trace_idx + 1] = denom_poly;
             }
-            logup_polys
-        };
+        }
 
-        let gpu_polys: Vec<UnivariatePoly<EF>> = logup_polys
+        let gpu_polys: Vec<UnivariatePoly<EF>> = batch_polys
             .into_iter()
-            .chain(zerocheck_polys)
             .map(|mut poly| {
                 debug_assert!(
                     poly.coeffs()[s_0_deg + 1..]
