@@ -22,7 +22,7 @@ use stark_backend_v2::{
         stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
     },
 };
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::{
     Digest, EF, F, GpuBackendV2, GpuDeviceV2,
@@ -103,6 +103,7 @@ where
 {
     // TODO: modify trait so we can drop common main buffers in `ctx`: they are extraneous given
     // `common_main_pcs_data`
+    #[instrument(skip_all)]
     fn prove_logup_gkr(
         device: &'a GpuDeviceV2,
         transcript: &mut TS,
@@ -184,6 +185,9 @@ where
 
         let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(transcript, &fractional_state, true)
             .expect("failed to run fractional sumcheck on GPU");
+        // Drop segment tree buffers
+        fractional_state.input_evals.take();
+        fractional_state.segment_tree.take();
 
         let n_global = max(n_max, n_logup);
         debug!(%n_global);
@@ -244,6 +248,11 @@ where
         (prover, frac_sum_proof)
     }
 
+    #[instrument(
+        name = "LogupZerocheck::sumcheck_uni_round0_polys",
+        level = "debug",
+        skip_all
+    )]
     fn sumcheck_uni_round0_polys(
         &mut self,
         ctx: &ProvingContextV2<GpuBackendV2>,
@@ -462,6 +471,7 @@ where
         gpu_polys
     }
 
+    #[instrument(name = "LogupZerocheck::fold_ple_evals", level = "debug", skip_all)]
     fn fold_ple_evals(&mut self, ctx: ProvingContextV2<GpuBackendV2>, r_0: EF) {
         let l_skip = self.l_skip;
 
@@ -553,6 +563,11 @@ where
             .collect();
     }
 
+    #[instrument(
+        name = "LogupZerocheck::sumcheck_polys_eval",
+        level = "debug",
+        skip_all
+    )]
     fn sumcheck_polys_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
         let s_deg = self.s_deg;
         let lambda_pows = self.lambda_pows.as_ref().expect("lambda_pows must be set");
@@ -840,6 +855,7 @@ where
         s_logup_evals.into_iter().chain(s_zerocheck_evals).collect()
     }
 
+    #[instrument(name = "LogupZerocheck::fold_mle_evals", level = "debug", skip_all)]
     fn fold_mle_evals(&mut self, _round: usize, r_round: EF) {
         // Fold mat_evals_per_trace: Vec<Vec<DeviceMatrix<EF>>>
         self.mat_evals_per_trace = std::mem::take(&mut self.mat_evals_per_trace)
@@ -1020,6 +1036,11 @@ where
             .collect();
     }
 
+    #[instrument(
+        name = "LogupZerocheck::into_column_openings",
+        level = "debug",
+        skip_all
+    )]
     fn into_column_openings(mut self) -> Vec<Vec<Vec<(EF, EF)>>> {
         let num_airs_present = self.mat_evals_per_trace.len();
         let mut column_openings = Vec::with_capacity(num_airs_present);

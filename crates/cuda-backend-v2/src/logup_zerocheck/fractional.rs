@@ -14,6 +14,7 @@ use stark_backend_v2::{
         poly::evals_eq_hypercube,
     },
 };
+use tracing::instrument;
 
 use super::{
     errors::{FractionalSegmentTreeError, FractionalSumcheckError},
@@ -79,6 +80,7 @@ fn copy_frac_from_device(
     Ok([host[0].p, host[0].q])
 }
 
+#[instrument(skip_all)]
 pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
     transcript: &mut TS,
     state: &FractionalGkrState,
