@@ -45,7 +45,7 @@ pub fn evaluate_mle_constraints_gpu(
         .enumerate()
         .map(|(idx, dag_idx)| (*dag_idx, idx))
         .collect();
-    let constraint_dag_indices = compute_constraint_expr_indices(symbolic_constraints, false);
+    let constraint_dag_indices = compute_constraint_expr_indices(symbolic_constraints);
     let rules = SymbolicRulesOnGpu::new(symbolic_constraints.clone(), false);
 
     let lambda_indices_host: Vec<u32> = rules
