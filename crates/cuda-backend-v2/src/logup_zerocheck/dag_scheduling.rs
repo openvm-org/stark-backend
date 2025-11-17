@@ -40,7 +40,6 @@ impl PartialOrd for ScheduleBufferEntry {
 
 pub fn compute_constraint_expr_indices<F: Field + PrimeField32>(
     dag: &SymbolicConstraintsDag<F>,
-    is_permute: bool,
 ) -> Vec<usize> {
     let mut expr_info = (0..dag.constraints.nodes.len())
         .map(|i| ScheduleExpressionInfo {
@@ -91,29 +90,10 @@ pub fn compute_constraint_expr_indices<F: Field + PrimeField32>(
         }
     }
 
-    let used_nodes = if dag.constraints.constraint_idx.is_empty() {
-        if is_permute {
-            // TODO[jpw]: revisit this:
-            // This branch is used only for encoding SymbolicInteractions for use during perm
-            // trace generation. The `message` is always a single expression for the
-            // denominator.
-            dag.interactions
-                .iter()
-                .flat_map(|interaction| {
-                    assert_eq!(interaction.message.len(), 1);
-                    [interaction.count, interaction.message[0]]
-                })
-                .collect::<Vec<_>>()
-        } else {
-            // There are no non-interaction constraints
-            vec![]
-        }
-    } else {
-        dag.constraints.constraint_idx.clone()
-    };
+    let used_nodes = &dag.constraints.constraint_idx;
 
     let mut max_prev_node = 0;
-    for &idx in &used_nodes {
+    for &idx in used_nodes {
         max_prev_node = max_prev_node.max(idx);
         expr_info[idx].accumulate = true;
         expr_info[idx].last_use = if expr_info[idx].last_use == usize::MAX {
@@ -121,10 +101,6 @@ pub fn compute_constraint_expr_indices<F: Field + PrimeField32>(
         } else {
             expr_info[idx].last_use.max(max_prev_node)
         };
-        if is_permute {
-            expr_info[idx].first_use = expr_info[idx].first_use.min(idx);
-            expr_info[idx].use_count += 1;
-        }
     }
 
     for expr in expr_info.iter_mut() {
@@ -142,10 +118,7 @@ pub fn compute_constraint_expr_indices<F: Field + PrimeField32>(
 
     let mut buffer = BinaryHeap::<ScheduleBufferEntry>::new();
     for expr in buffer_expr_info {
-        if buffer.is_empty()
-            || (!is_permute && buffer.peek().unwrap().last_use > expr.dag_idx)
-            || (is_permute && buffer.peek().unwrap().last_use >= expr.dag_idx)
-        {
+        if buffer.is_empty() || (buffer.peek().unwrap().last_use > expr.dag_idx) {
             expr_info[expr.dag_idx].buffer_idx = buffer.len();
             buffer.push(ScheduleBufferEntry {
                 buffer_idx: expr_info[expr.dag_idx].buffer_idx,
