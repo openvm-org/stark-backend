@@ -89,16 +89,16 @@ impl StarkProvingKeyV2 {
     }
 }
 
-pub trait V1Compat: ProverBackendV2 {
+pub trait V1Compat: ProverBackendV2 + Sized {
     type V1: ProverBackend<Val = <Self as ProverBackendV2>::Val>;
 
     fn dummy_matrix() -> Self::Matrix;
     fn convert_trace(matrix: <Self::V1 as ProverBackend>::Matrix) -> Self::Matrix;
 
-    fn convert_pcs_data(
+    fn convert_committed_trace(
         params: SystemParams,
         matrix: <Self::V1 as ProverBackend>::Matrix,
-    ) -> (Self::Commitment, Self::PcsData);
+    ) -> CommittedTraceDataV2<Self>;
 }
 
 impl<PB: V1Compat> ProvingContextV2<PB> {
@@ -131,15 +131,7 @@ impl<PB: V1Compat> AirProvingContextV2<PB> {
         let cached_mains = ctx
             .cached_mains
             .into_iter()
-            .map(|d| {
-                let height = d.trace.height();
-                let (commitment, data) = <PB as V1Compat>::convert_pcs_data(params, d.trace);
-                CommittedTraceDataV2 {
-                    commitment,
-                    data: Arc::new(data),
-                    height,
-                }
-            })
+            .map(|d| <PB as V1Compat>::convert_committed_trace(params, d.trace))
             .collect();
         Self {
             cached_mains,
@@ -183,17 +175,23 @@ impl V1Compat for CpuBackendV2 {
         ColMajorMatrix::from_row_major(&matrix)
     }
 
-    fn convert_pcs_data(
+    fn convert_committed_trace(
         params: SystemParams,
         matrix: Arc<RowMajorMatrix<F>>,
-    ) -> (Self::Commitment, Self::PcsData) {
+    ) -> CommittedTraceDataV2<CpuBackendV2> {
         let trace = ColMajorMatrix::from_row_major(&matrix);
-        stacked_commit(
+        let (commitment, data) = stacked_commit(
             params.l_skip,
             params.n_stack,
             params.log_blowup,
             params.k_whir,
             &[&trace],
-        )
+        );
+
+        CommittedTraceDataV2 {
+            commitment,
+            trace,
+            data: Arc::new(data),
+        }
     }
 }
