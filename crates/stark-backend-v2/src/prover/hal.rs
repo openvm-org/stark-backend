@@ -15,7 +15,8 @@ use crate::{
     SystemParams,
     keygen::types::MultiStarkProvingKeyV2,
     prover::{
-        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, ProvingContextV2, stacked_pcs::StackedPcsData,
+        AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
+        DeviceMultiStarkProvingKeyV2, ProvingContextV2, stacked_pcs::StackedPcsData,
     },
 };
 
@@ -126,6 +127,55 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
         &self,
         pcs_data: &StackedPcsData<PB::Val, PB::Commitment>,
     ) -> PB::PcsData;
+
+    fn transport_committed_trace_data_to_device(
+        &self,
+        committed_trace: &CommittedTraceDataV2<CpuBackendV2>,
+    ) -> CommittedTraceDataV2<PB>
+    where
+        PB: ProverBackendV2<Val = crate::F, Commitment = crate::Digest>,
+    {
+        let trace = self.transport_matrix_to_device(&committed_trace.trace);
+        let data = self.transport_pcs_data_to_device(committed_trace.data.as_ref());
+
+        CommittedTraceDataV2 {
+            commitment: committed_trace.commitment,
+            trace,
+            data: Arc::new(data),
+        }
+    }
+
+    fn transport_proving_ctx_to_device(
+        &self,
+        ctx: &ProvingContextV2<CpuBackendV2>,
+    ) -> ProvingContextV2<PB>
+    where
+        PB: ProverBackendV2<Val = crate::F, Commitment = crate::Digest>,
+    {
+        let per_trace = ctx
+            .per_trace
+            .iter()
+            .map(|(air_idx, air_ctx)| {
+                let common_main = self.transport_matrix_to_device(&air_ctx.common_main);
+                let cached_mains = air_ctx
+                    .cached_mains
+                    .iter()
+                    .map(|cd| self.transport_committed_trace_data_to_device(cd))
+                    .collect();
+                let air_ctx_gpu = AirProvingContextV2::new(
+                    cached_mains,
+                    common_main,
+                    air_ctx.public_values.clone(),
+                );
+                (*air_idx, air_ctx_gpu)
+            })
+            .collect();
+        ProvingContextV2::new(per_trace)
+    }
+
+    // ==================================================================================
+    // Device-to-Host methods below should only be used for testing / debugging purposes.
+    // ==================================================================================
 
     /// Transport a device matrix to host. This should only be used for testing / debugging
     /// purposes.
