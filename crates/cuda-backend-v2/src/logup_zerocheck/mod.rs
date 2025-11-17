@@ -291,15 +291,13 @@ where
                             .get(trace_idx, interaction_idx)
                             .unwrap()
                             .row_idx;
-                        let mut b_int = stacked_idx >> (self.l_skip + n_lift);
+                        let mut b_int = stacked_idx >> (l_skip + n_lift);
                         for bit in &mut b_vec {
                             *bit = F::from_bool(b_int & 1 == 1);
                             b_int >>= 1;
                         }
-                        let weight = eval_eq_mle(
-                            &self.xi[self.l_skip + n_lift..self.l_skip + self.n_logup],
-                            &b_vec,
-                        );
+                        let weight =
+                            eval_eq_mle(&self.xi[l_skip + n_lift..l_skip + n_logup], &b_vec);
                         weights.push(weight);
                     }
                     if !weights.is_empty() {
@@ -455,20 +453,16 @@ where
             }
         }
 
-        let gpu_polys: Vec<UnivariatePoly<EF>> = batch_polys
-            .into_iter()
-            .map(|mut poly| {
-                debug_assert!(
-                    poly.coeffs()[s_0_deg + 1..]
-                        .iter()
-                        .all(|&coeff| coeff == EF::ZERO)
-                );
-                poly.coeffs_mut().truncate(s_0_deg + 1);
-                poly
-            })
-            .collect();
+        for poly in &mut batch_polys {
+            debug_assert!(
+                poly.coeffs()[s_0_deg + 1..]
+                    .iter()
+                    .all(|&coeff| coeff == EF::ZERO)
+            );
+            poly.coeffs_mut().truncate(s_0_deg + 1);
+        }
 
-        gpu_polys
+        batch_polys
     }
 
     #[instrument(name = "LogupZerocheck::fold_ple_evals", level = "debug", skip_all)]
