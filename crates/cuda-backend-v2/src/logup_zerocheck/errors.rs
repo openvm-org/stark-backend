@@ -72,3 +72,10 @@ pub enum FoldPleError {
     #[error("invalid matrix dimensions")]
     InvalidDimensions,
 }
+
+#[derive(Debug, Error)]
+pub enum UnstackMatrixError {
+    #[error("matrix idx={mat_idx} not found")]
+    MatrixNotFound { mat_idx: usize },
+}
+
