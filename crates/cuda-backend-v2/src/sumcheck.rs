@@ -278,9 +278,9 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
 
     let d_folded = DeviceBuffer::<EF>::with_capacity(num_x);
     unsafe {
-        fold_ple_from_coeffs::<F, EF>(
-            &d_coeffs, // Original input (base field, but modified by iDFT)
-            &d_folded, // Output in extension field
+        fold_ple_from_coeffs(
+            d_coeffs.as_ptr(),     // Original input (base field, but modified by iDFT)
+            d_folded.as_mut_ptr(), // Output in extension field
             num_x as u32,
             width as u32,
             domain_size as u32,

@@ -2,7 +2,7 @@ use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use stark_backend_v2::prover::fractional_sumcheck_gkr::Frac;
 
-use super::interactions::TraceInteractionMeta;
+use super::gkr_input::TraceInteractionMeta;
 use crate::{EF, F};
 
 #[derive(Default)]

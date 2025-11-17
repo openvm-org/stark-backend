@@ -1,4 +1,4 @@
-use std::{cmp::max, ffi::c_void};
+use std::ffi::c_void;
 
 use itertools::Itertools;
 use openvm_cuda_backend::transpiler::{SymbolicRulesOnGpu, codec::Codec};
@@ -22,13 +22,12 @@ use stark_backend_v2::prover::{
     stacked_pcs::{StackedLayout, StackedSlice},
 };
 
-use super::{errors::InteractionGpuError, matrix_utils::unstack_matrix, state::FractionalGkrState};
+use super::{errors::InteractionGpuError, state::FractionalGkrState};
 use crate::{
-    Digest, EF, F, GpuBackendV2,
+    EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
         frac_add_alpha, frac_vector_scalar_multiply_ext_fp, logup_gkr_input_eval,
     },
-    stacked_pcs::StackedPcsDataGpu,
 };
 
 const TASK_SIZE: u32 = 65536;
@@ -38,17 +37,15 @@ const TASK_SIZE: u32 = 65536;
 pub struct TraceInteractionMeta {
     pub trace_idx: usize,
     pub air_idx: usize,
-    // TODO: delete this, can extract from ctx?
-    pub lifted_height: usize,
     pub interactions: Vec<SymbolicInteraction<F>>,
     pub layout_slices: Vec<StackedSlice>,
 }
 
+// TODO[jpw]: revisit if this function is needed / precompute the symbolic interactions
 pub fn collect_trace_interactions(
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     ctx: &ProvingContextV2<GpuBackendV2>,
     layout: &StackedLayout,
-    l_skip: usize,
 ) -> Vec<Option<TraceInteractionMeta>> {
     // Pre-group layout slices by trace to avoid repeated scans later.
     let mut slices_by_trace: Vec<Vec<(usize, StackedSlice)>> =
@@ -62,7 +59,7 @@ pub fn collect_trace_interactions(
     ctx.per_trace
         .iter()
         .enumerate()
-        .map(|(trace_idx, (air_idx, air_ctx))| {
+        .map(|(trace_idx, (air_idx, _))| {
             let symbolic_constraints =
                 SymbolicConstraints::from(&pk.per_air[*air_idx].vk.symbolic_constraints);
             let interactions: Vec<SymbolicInteraction<F>> = symbolic_constraints.interactions;
@@ -91,12 +88,9 @@ pub fn collect_trace_interactions(
                 })
                 .collect_vec();
 
-            let height = air_ctx.common_main.height();
-            let lifted_height = max(height, 1 << l_skip);
             Some(TraceInteractionMeta {
                 trace_idx,
                 air_idx: *air_idx,
-                lifted_height,
                 interactions,
                 layout_slices,
             })
@@ -104,11 +98,12 @@ pub fn collect_trace_interactions(
         .collect()
 }
 
-pub fn evaluate_interactions_gpu(
-    state: &FractionalGkrState,
+/// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
+pub fn log_gkr_input_evals(
+    state: &mut FractionalGkrState,
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     ctx: &ProvingContextV2<GpuBackendV2>,
-    common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
+    l_skip: usize,
     alpha_logup: EF,
     beta_pows: &[EF],
     total_leaves: usize,
@@ -128,14 +123,13 @@ pub fn evaluate_interactions_gpu(
         let preprocessed_matrix = pk_air
             .preprocessed_data
             .as_ref()
-            .map(|committed| unstack_matrix(committed.data.as_ref(), 0))
-            .transpose()?;
+            .map(|committed| &committed.trace);
 
-        let mut partitioned_main = Vec::new();
+        let mut partitioned_main = Vec::with_capacity(air_ctx.cached_mains.len() + 1);
         for committed in &air_ctx.cached_mains {
-            partitioned_main.push(unstack_matrix(committed.data.as_ref(), 0)?.0);
+            partitioned_main.push(&committed.trace);
         }
-        partitioned_main.push(unstack_matrix(common_main_pcs_data, meta.trace_idx)?.0);
+        partitioned_main.push(&air_ctx.common_main);
 
         let all_interactions = &meta.interactions;
         let max_fields_len = all_interactions
@@ -156,6 +150,7 @@ pub fn evaluate_interactions_gpu(
             .map(|index| SymbolicVariable::<F>::new(Entry::Challenge, index).into())
             .collect();
 
+        // TODO(cleanup): move this to utility function
         let mut full_interactions = Vec::new();
         for (interaction_idx, interaction) in all_interactions.iter().enumerate() {
             let mut interaction = interaction.clone();
@@ -192,11 +187,11 @@ pub fn evaluate_interactions_gpu(
 
         let d_preprocessed = preprocessed_matrix
             .as_ref()
-            .map(|m| m.0.buffer())
+            .map(|m| m.buffer())
             .unwrap_or(&null_preprocessed);
 
-        let lifted_height = partitioned_main[0].height();
-        debug_assert_eq!(meta.lifted_height, lifted_height);
+        let height = air_ctx.height();
+        debug_assert_eq!(height, partitioned_main[0].height());
         let partition_ptrs = partitioned_main
             .iter()
             .map(|m| m.buffer().as_ptr() as u64)
@@ -204,6 +199,7 @@ pub fn evaluate_interactions_gpu(
         let d_partition_ptrs = partition_ptrs.to_device()?;
 
         let buffer_size = rules.buffer_size;
+        // TODO[jpw]: remove magic 10
         let is_global = buffer_size > 10;
         let intermediates = if is_global {
             DeviceBuffer::<EF>::with_capacity((TASK_SIZE as usize) * buffer_size)
@@ -211,10 +207,10 @@ pub fn evaluate_interactions_gpu(
             DeviceBuffer::<EF>::with_capacity(1)
         };
 
-        let num_rows_per_tile = lifted_height.div_ceil(TASK_SIZE as usize).max(1);
+        let num_rows_per_tile = height.div_ceil(TASK_SIZE as usize).max(1);
 
         let trace_output =
-            DeviceBuffer::<Frac<EF>>::with_capacity(lifted_height * symbolic_interactions.len());
+            DeviceBuffer::<Frac<EF>>::with_capacity(height * symbolic_interactions.len());
 
         unsafe {
             logup_gkr_input_eval(
@@ -228,12 +224,13 @@ pub fn evaluate_interactions_gpu(
                 &d_used_nodes,
                 &d_partition_lens,
                 symbolic_interactions.len(),
-                lifted_height as u32,
+                height as u32,
                 num_rows_per_tile as u32,
             )?;
         }
-        let height = air_ctx.height();
-        if lifted_height != height {
+        let mut lifted_height = height;
+        if height < (1 << l_skip) {
+            lifted_height = 1 << l_skip;
             debug_assert_eq!(lifted_height % height, 0);
             let norm_factor_denom = lifted_height / height;
             let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
@@ -256,12 +253,14 @@ pub fn evaluate_interactions_gpu(
             debug_assert_eq!(slice.len(0), lifted_height);
             let dst_offset = slice.row_idx;
 
-            unsafe {
-                cuda_memcpy::<true, true>(
-                    leaves.as_mut_ptr().add(dst_offset) as *mut c_void,
-                    trace_output.as_ptr().add(local_idx * lifted_height) as *const c_void,
-                    lifted_height * size_of::<Frac<EF>>(),
-                )?;
+            for leaf_offset in (0..lifted_height).step_by(height) {
+                unsafe {
+                    cuda_memcpy::<true, true>(
+                        leaves.as_mut_ptr().add(dst_offset + leaf_offset) as *mut c_void,
+                        trace_output.as_ptr().add(local_idx * height) as *const c_void,
+                        height * size_of::<Frac<EF>>(),
+                    )?;
+                }
             }
         }
     }
