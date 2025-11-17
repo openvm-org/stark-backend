@@ -30,12 +30,6 @@ pub struct StackedLayout {
     )>,
 }
 
-impl StackedLayout {
-    pub fn unstacked_slices_iter(&self) -> impl Iterator<Item = &StackedSlice> {
-        self.sorted_cols.iter().map(|(_, _, s)| s)
-    }
-}
-
 /// Pointer to the location of a sub-column within the stacked matrix.
 /// This struct contains length information, but information from [StackedLayout] (namely `l_skip`)
 /// is needed to determine if this is a strided slice or not.
@@ -88,7 +82,7 @@ pub struct MerkleTree<F, Digest> {
 pub struct StackedPcsData<F, Digest> {
     /// Layout of the unstacked collection of matrices within the stacked matrix.
     pub layout: StackedLayout,
-    /// The stacked matrix with height `2^{l_skip + n_stack}`.
+    /// The stacked matrix of evaluations with height `2^{l_skip + n_stack}`.
     pub matrix: ColMajorMatrix<F>,
     /// Merkle tree of the Reed-Solomon codewords of the stacked matrix.
     /// Depends on `k_whir` parameter.
@@ -182,6 +176,10 @@ impl StackedLayout {
         }
     }
 
+    pub fn unstacked_slices_iter(&self) -> impl Iterator<Item = &StackedSlice> {
+        self.sorted_cols.iter().map(|(_, _, s)| s)
+    }
+
     /// `(mat_idx, col_idx)` should be indexing into the unstacked collection of matrices.
     pub fn get(&self, mat_idx: usize, col_idx: usize) -> Option<&StackedSlice> {
         // TODO[jpw]: re-organize StackedLayout so this is O(1)
@@ -189,6 +187,14 @@ impl StackedLayout {
             .iter()
             .find(|&&(m, j, _)| m == mat_idx && j == col_idx)
             .map(|(_, _, coord)| coord)
+    }
+
+    pub fn width_of(&self, mat_idx: usize) -> usize {
+        // TODO[jpw]: re-organize StackedLayout so this is O(1)
+        self.sorted_cols
+            .iter()
+            .filter(|(m, _, _)| *m == mat_idx)
+            .count()
     }
 
     /// Due to the definition of stacking, in a column major matrix the lifted columns of the

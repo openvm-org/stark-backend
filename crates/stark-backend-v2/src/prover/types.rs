@@ -13,14 +13,14 @@ use crate::{
 /// The committed trace data for a single trace matrix. This type is used to store prover data for
 /// both preprocessed trace and cached trace.
 #[derive(Derivative)]
-#[derivative(Clone(bound = ""))]
+#[derivative(Clone(bound = "PB::Matrix: Clone"))]
 pub struct CommittedTraceDataV2<PB: ProverBackendV2> {
     /// The polynomial commitment.
     pub commitment: PB::Commitment,
+    /// The trace matrix, unstacked, in evaluation form.
+    pub trace: PB::Matrix,
     /// The PCS data for a single committed trace matrix.
     pub data: Arc<PB::PcsData>,
-    /// The trace height of the trace matrix committed to.
-    pub height: usize,
 }
 
 /// The proving key for a circuit consisting of multiple AIRs, after prover-specific data has been
@@ -87,6 +87,13 @@ pub struct HostProof<PB: ProverBackendV2, ConstraintsProof, OpeningProof> {
     pub constraints_proof: ConstraintsProof,
     /// Opening proof for multiple polynomials over mixed sized domains
     pub opening_proof: OpeningProof,
+}
+
+impl<PB: ProverBackendV2> CommittedTraceDataV2<PB> {
+    #[inline(always)]
+    pub fn height(&self) -> usize {
+        self.trace.height()
+    }
 }
 
 impl<PB> DeviceMultiStarkProvingKeyV2<PB>

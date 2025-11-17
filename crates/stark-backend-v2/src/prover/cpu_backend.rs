@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use getset::CopyGetters;
 use itertools::Itertools;
-use openvm_stark_backend::prover::MatrixDimensions;
 
 use crate::{
     D_EF, Digest, EF, F, SystemParams,
@@ -137,12 +136,14 @@ impl DeviceDataTransporterV2<CpuBackendV2> for CpuDeviceV2 {
             .per_air
             .iter()
             .map(|pk| {
-                let preprocessed_data =
-                    pk.preprocessed_data.as_ref().map(|d| CommittedTraceDataV2 {
+                let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
+                    let trace = d.mat_view(0).to_matrix();
+                    CommittedTraceDataV2 {
                         commitment: d.commit(),
+                        trace,
                         data: d.clone(),
-                        height: d.mat_view(0).height(),
-                    });
+                    }
+                });
                 DeviceStarkProvingKeyV2 {
                     air_name: pk.air_name.clone(),
                     vk: pk.vk.clone(),
