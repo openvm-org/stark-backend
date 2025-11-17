@@ -93,7 +93,7 @@ extern "C" {
         partitioned_main: *const MainMatrixPtrs<F>,
         main_count: u32,
         preprocessed: *const F,
-        preprocessed_width: u32,
+        preprocessed_air_width: u32,
         eq_z: *const std::ffi::c_void,
         eq_x: *const std::ffi::c_void,
         eq_3b: *const std::ffi::c_void,
@@ -120,7 +120,7 @@ extern "C" {
         partitioned_main: *const MainMatrixPtrs<F>,
         main_count: u32,
         preprocessed: *const F,
-        preprocessed_width: u32,
+        preprocessed_air_width: u32,
         eq_z: *const std::ffi::c_void,
         eq_x: *const std::ffi::c_void,
         lambda_pows: *const std::ffi::c_void,
@@ -398,7 +398,10 @@ pub unsafe fn zerocheck_eval_constraints(
     skip_stride: u32,
 ) -> Result<(), CudaError> {
     let (pre_ptr, pre_width) = preprocessed
-        .map(|matrix| (matrix.buffer().as_ptr(), matrix.width() as u32))
+        .map(|matrix| {
+            debug_assert_eq!(matrix.width() % 2, 0);
+            (matrix.buffer().as_ptr(), matrix.width() as u32 / 2)
+        })
         .unwrap_or((std::ptr::null(), 0));
     let intermediates_ptr = intermediates
         .map(|buf| buf.as_mut_raw_ptr())
@@ -548,6 +551,9 @@ pub unsafe fn reduce_hypercube_final(
     ))
 }
 
+/// # Note
+/// - all preprocessed, main_ptrs are assumed to be twice the width of the matrix and includes
+///   rotation as second copy
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn batch_constraints_eval_interactions_round0(
     output_numer: &DeviceBuffer<EF>,
@@ -569,8 +575,11 @@ pub unsafe fn batch_constraints_eval_interactions_round0(
     skip_stride: u32,
     challenges: &DeviceBuffer<EF>,
 ) -> Result<(), CudaError> {
-    let (pre_ptr, pre_width) = preprocessed
-        .map(|matrix| (matrix.buffer().as_ptr(), matrix.width() as u32))
+    let (pre_ptr, pre_air_width) = preprocessed
+        .map(|matrix| {
+            debug_assert_eq!(matrix.width() % 2, 0);
+            (matrix.buffer().as_ptr(), matrix.width() as u32 / 2)
+        })
         .unwrap_or((std::ptr::null(), 0));
     let intermediates_ptr = intermediates
         .map(|buf| buf.as_mut_raw_ptr())
@@ -583,7 +592,7 @@ pub unsafe fn batch_constraints_eval_interactions_round0(
         main_ptrs.as_ptr(),
         main_ptrs.len() as u32,
         pre_ptr,
-        pre_width,
+        pre_air_width,
         eq_sharp_z.as_raw_ptr(),
         eq_x.buffer().as_raw_ptr(),
         eq_3b.as_raw_ptr(),
