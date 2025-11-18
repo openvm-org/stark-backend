@@ -235,12 +235,14 @@ pub fn evaluate_round0_constraints_gpu(
 
 /// Evaluate interaction constraints (excluding plain AIR constraints) for a single AIR, given
 /// prepared trace input.
+///
+/// `constraints` includes interaction expressions for the AIR.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn evaluate_round0_interactions_gpu(
     l_skip: usize,
     large_domain: usize,
-    pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
+    constraints: &SymbolicConstraints<F>,
     input: &Round0TraceInput,
     eq_sharp_z: &DeviceBuffer<EF>,
     eq_3b: &DeviceBuffer<EF>,
@@ -253,9 +255,6 @@ pub fn evaluate_round0_interactions_gpu(
     if eq_3b.is_empty() {
         return Ok((DeviceBuffer::new(), DeviceBuffer::new()));
     }
-
-    // Get constraints for this trace to access interactions
-    let constraints = SymbolicConstraints::from(&pk.vk.symbolic_constraints);
 
     // Create symbolic challenges for beta
     let max_fields_len = constraints
