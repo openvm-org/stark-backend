@@ -1,11 +1,8 @@
-use std::ffi::c_void;
+use std::cmp::max;
 
 use itertools::Itertools;
 use openvm_cuda_backend::transpiler::{SymbolicRulesOnGpu, codec::Codec};
-use openvm_cuda_common::{
-    copy::{MemCopyH2D, cuda_memcpy},
-    d_buffer::DeviceBuffer,
-};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::{
     air_builders::symbolic::{
         SymbolicConstraints, SymbolicConstraintsDag,
@@ -22,11 +19,12 @@ use stark_backend_v2::prover::{
     stacked_pcs::{StackedLayout, StackedSlice},
 };
 
-use super::{errors::InteractionGpuError, state::FractionalGkrState};
+use super::errors::InteractionGpuError;
 use crate::{
     EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
-        frac_add_alpha, frac_vector_scalar_multiply_ext_fp, logup_gkr_input_eval,
+        frac_add_alpha, frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
+        logup_gkr_input_eval,
     },
 };
 
@@ -100,7 +98,7 @@ pub fn collect_trace_interactions(
 
 /// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
 pub fn log_gkr_input_evals(
-    state: &mut FractionalGkrState,
+    trace_interactions: &[Option<TraceInteractionMeta>],
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     ctx: &ProvingContextV2<GpuBackendV2>,
     l_skip: usize,
@@ -108,7 +106,7 @@ pub fn log_gkr_input_evals(
     beta_pows: &[EF],
     total_leaves: usize,
 ) -> Result<DeviceBuffer<Frac<EF>>, InteractionGpuError> {
-    if state.trace_interactions.iter().all(|meta| meta.is_none()) {
+    if trace_interactions.iter().all(|meta| meta.is_none()) {
         return Ok(DeviceBuffer::new());
     }
 
@@ -116,7 +114,7 @@ pub fn log_gkr_input_evals(
     leaves.fill_zero()?;
     let null_preprocessed = DeviceBuffer::<F>::new();
 
-    for meta in state.trace_interactions.iter().flatten() {
+    for meta in trace_interactions.iter().flatten() {
         let air_ctx = &ctx.per_trace[meta.trace_idx].1;
         let pk_air = &pk.per_air[meta.air_idx];
 
@@ -131,8 +129,8 @@ pub fn log_gkr_input_evals(
         }
         partitioned_main.push(&air_ctx.common_main);
 
-        let all_interactions = &meta.interactions;
-        let max_fields_len = all_interactions
+        let interactions = &meta.interactions;
+        let max_fields_len = interactions
             .iter()
             .map(|interaction| interaction.message.len())
             .max()
@@ -150,9 +148,11 @@ pub fn log_gkr_input_evals(
             .map(|index| SymbolicVariable::<F>::new(Entry::Challenge, index).into())
             .collect();
 
-        // TODO(cleanup): move this to utility function
-        let mut full_interactions = Vec::new();
-        for (interaction_idx, interaction) in all_interactions.iter().enumerate() {
+        // TODO[jpw]: this is a weird way to express the logup denominator with beta_pows
+        // symbolically Revisit if it's possible to do it more directly
+        let num_interactions = interactions.len();
+        let mut frac_expressions = Vec::with_capacity(num_interactions);
+        for interaction in interactions.iter() {
             let mut interaction = interaction.clone();
             let b = SymbolicExpression::from_canonical_u32(interaction.bus_index as u32 + 1);
             let betas = symbolic_challenges[1..].to_vec();
@@ -162,23 +162,18 @@ pub fn log_gkr_input_evals(
             }
             denom += betas[interaction.message.len()].clone() * b;
             interaction.message = vec![denom];
-            full_interactions.push((interaction_idx, interaction));
+            frac_expressions.push(interaction);
         }
-
-        let symbolic_interactions: Vec<SymbolicInteraction<F>> = full_interactions
-            .iter()
-            .map(|(_, interaction)| interaction.clone())
-            .collect();
 
         let constraints = SymbolicConstraints {
             constraints: vec![],
-            interactions: symbolic_interactions.clone(),
+            interactions: frac_expressions,
         };
         let constraints_dag: SymbolicConstraintsDag<F> = constraints.into();
         let rules = SymbolicRulesOnGpu::new(constraints_dag, true);
         let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
-        let partition_lens = vec![1u32; symbolic_interactions.len()];
+        let partition_lens = vec![1u32; num_interactions];
 
         let d_rules = encoded_rules.to_device()?;
         let d_used_nodes = rules.used_nodes.to_device()?;
@@ -209,13 +204,27 @@ pub fn log_gkr_input_evals(
 
         let num_rows_per_tile = height.div_ceil(TASK_SIZE as usize).max(1);
 
-        let trace_output =
-            DeviceBuffer::<Frac<EF>>::with_capacity(height * symbolic_interactions.len());
+        let mut tmp_buffer = DeviceBuffer::new();
+        let slice = meta.layout_slices.first().unwrap();
+        if slice.col_idx != 0 {
+            return Err(InteractionGpuError::Layout);
+        }
+        let dst_offset = slice.row_idx;
+        let lifted_height = max(height, 1 << l_skip);
+        debug_assert_eq!(slice.len(l_skip), lifted_height);
+        // SAFETY: by definition of interactions stacked layout, `leaves` has enough capacity
+        let leaves_ptr = unsafe { leaves.as_mut_ptr().add(dst_offset) };
 
+        let trace_output = if height != lifted_height {
+            tmp_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(height * num_interactions);
+            tmp_buffer.as_mut_ptr()
+        } else {
+            leaves_ptr
+        };
         unsafe {
             logup_gkr_input_eval(
                 is_global,
-                &trace_output,
+                trace_output,
                 d_preprocessed,
                 &d_partition_ptrs,
                 &d_challenges,
@@ -223,44 +232,32 @@ pub fn log_gkr_input_evals(
                 &d_rules,
                 &d_used_nodes,
                 &d_partition_lens,
-                symbolic_interactions.len(),
+                num_interactions,
                 height as u32,
                 num_rows_per_tile as u32,
             )?;
         }
-        let mut lifted_height = height;
-        if height < (1 << l_skip) {
-            lifted_height = 1 << l_skip;
+        if height != lifted_height {
             debug_assert_eq!(lifted_height % height, 0);
+            debug_assert!(!tmp_buffer.is_empty());
             let norm_factor_denom = lifted_height / height;
             let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
-            // SAFETY: scaling within buffer length
             unsafe {
+                // SAFETY: scaling within buffer length
                 frac_vector_scalar_multiply_ext_fp(
-                    trace_output.as_mut_ptr(),
+                    tmp_buffer.as_mut_ptr(),
                     norm_factor,
-                    trace_output.len() as u32,
+                    tmp_buffer.len() as u32,
                 )?;
-            }
-        }
-
-        // TODO[jpw]: this can be a single memcpy or better to avoid memcpy entirely
-        for (local_idx, (orig_idx, _)) in full_interactions.iter().enumerate() {
-            let slice = meta.layout_slices[*orig_idx];
-            if slice.col_idx != 0 {
-                return Err(InteractionGpuError::Layout);
-            }
-            debug_assert_eq!(slice.len(0), lifted_height);
-            let dst_offset = slice.row_idx;
-
-            for leaf_offset in (0..lifted_height).step_by(height) {
-                unsafe {
-                    cuda_memcpy::<true, true>(
-                        leaves.as_mut_ptr().add(dst_offset + leaf_offset) as *mut c_void,
-                        trace_output.as_ptr().add(local_idx * height) as *const c_void,
-                        height * size_of::<Frac<EF>>(),
-                    )?;
-                }
+                // SAFETY: stacked interaction layout is defined with respect to lifted height so
+                // lifting (i.e., vertically repeating) stays within bounds
+                frac_matrix_vertically_repeat(
+                    leaves_ptr,
+                    tmp_buffer.as_ptr(),
+                    num_interactions as u32,
+                    lifted_height as u32,
+                    height as u32,
+                )?;
             }
         }
     }

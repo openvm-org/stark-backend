@@ -18,8 +18,9 @@ use openvm_stark_backend::{
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
 use stark_backend_v2::prover::{
-    AirProvingContextV2, CommittedTraceDataV2,DeviceStarkProvingKeyV2,
+    AirProvingContextV2, CommittedTraceDataV2, DeviceStarkProvingKeyV2,
 };
+use tracing::debug;
 
 use super::{
     dag_scheduling::compute_constraint_expr_indices,
@@ -177,9 +178,12 @@ pub fn evaluate_round0_constraints_gpu(
     let d_used_nodes = rules.used_nodes.to_device()?;
 
     let num_x = input.eq_x.height();
-    let height = input.selectors_large.height();
-    debug_assert_eq!(num_x * large_domain, height);
-    debug_assert_eq!(input.trace_mats.common.as_ref().unwrap().height(), height);
+    let large_height = input.selectors_large.height();
+    debug_assert_eq!(num_x * large_domain, large_height);
+    debug_assert_eq!(
+        input.trace_mats.common.as_ref().unwrap().height(),
+        large_height
+    );
 
     let intermediates = if rules.buffer_size > 0 {
         let capacity = if rules.buffer_size > 16 {
@@ -187,17 +191,18 @@ pub fn evaluate_round0_constraints_gpu(
         } else {
             rules.buffer_size
         };
+        debug!("zerocheck:intermediates_capacity={capacity}");
         Some(DeviceBuffer::<EF>::with_capacity(capacity))
     } else {
         None
     };
 
     let num_rows_per_tile = {
-        let h = height as u32;
+        let h = large_height as u32;
         h.div_ceil(TASK_SIZE).max(1)
     };
 
-    let output = DeviceBuffer::<EF>::with_capacity(height);
+    let output = DeviceBuffer::<EF>::with_capacity(large_height);
 
     unsafe {
         zerocheck_eval_constraints(
