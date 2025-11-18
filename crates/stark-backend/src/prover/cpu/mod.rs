@@ -1,7 +1,7 @@
 use std::{iter::zip, marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::Arc};
 
 use derivative::Derivative;
-use itertools::{izip, zip_eq, Itertools};
+use itertools::{izip, Itertools};
 use opener::OpeningProver;
 use p3_challenger::{FieldChallenger, GrindingChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
@@ -198,7 +198,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
                 public_values: v.public_values,
             })
             .collect_vec();
-        let (rap_phase_seq_proof, rap_phase_seq_data) = self
+        let (rap_phase_seq_proof, _rap_phase_seq_data) = self
             .config()
             .rap_phase_seq()
             .partially_prove(
@@ -209,9 +209,9 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             )
             .map_or((None, None), |(p, d)| (Some(p), Some(d)));
 
-        let mvk_view = mpk.vk_view();
+        // let mvk_view = mpk.vk_view();
 
-        let mut perm_matrix_idx = 0usize;
+        // let mut perm_matrix_idx = 0usize;
         /*let rap_views_per_phase;
         let perm_trace_per_air =
         if let Some(phase_data) = rap_phase_seq_data {
