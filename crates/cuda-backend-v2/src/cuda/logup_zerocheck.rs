@@ -405,7 +405,7 @@ pub unsafe fn zerocheck_eval_constraints(
     output: &DeviceBuffer<EF>,
     selectors: &DeviceMatrix<F>,
     main_ptrs: &DeviceBuffer<MainMatrixPtrs<F>>,
-    preprocessed: Option<&DeviceMatrix<F>>,
+    preprocessed: MainMatrixPtrs<F>,
     eq_z: &DeviceBuffer<EF>,
     eq_x: &DeviceMatrix<EF>,
     lambda_pows: &DeviceBuffer<EF>,
@@ -420,12 +420,6 @@ pub unsafe fn zerocheck_eval_constraints(
     num_rows_per_tile: u32,
     skip_stride: u32,
 ) -> Result<(), CudaError> {
-    let (pre_ptr, pre_width) = preprocessed
-        .map(|matrix| {
-            debug_assert_eq!(matrix.width() % 2, 0);
-            (matrix.buffer().as_ptr(), matrix.width() as u32 / 2)
-        })
-        .unwrap_or((std::ptr::null(), 0));
     let intermediates_ptr = intermediates
         .map(|buf| buf.as_mut_raw_ptr())
         .unwrap_or(std::ptr::null_mut());
@@ -435,8 +429,8 @@ pub unsafe fn zerocheck_eval_constraints(
         selectors.width() as u32,
         main_ptrs.as_ptr(),
         main_ptrs.len() as u32,
-        pre_ptr,
-        pre_width,
+        preprocessed.data,
+        preprocessed.air_width,
         eq_z.as_raw_ptr(),
         eq_x.buffer().as_raw_ptr(),
         lambda_pows.as_raw_ptr(),
@@ -583,7 +577,7 @@ pub unsafe fn batch_constraints_eval_interactions_round0(
     output_denom: &DeviceBuffer<EF>,
     selectors: &DeviceMatrix<F>,
     main_ptrs: &DeviceBuffer<MainMatrixPtrs<F>>,
-    preprocessed: Option<&DeviceMatrix<F>>,
+    preprocessed: MainMatrixPtrs<F>,
     eq_sharp_z: &DeviceBuffer<EF>,
     eq_x: &DeviceMatrix<EF>,
     eq_3b: &DeviceBuffer<EF>,
@@ -598,12 +592,6 @@ pub unsafe fn batch_constraints_eval_interactions_round0(
     skip_stride: u32,
     challenges: &DeviceBuffer<EF>,
 ) -> Result<(), CudaError> {
-    let (pre_ptr, pre_air_width) = preprocessed
-        .map(|matrix| {
-            debug_assert_eq!(matrix.width() % 2, 0);
-            (matrix.buffer().as_ptr(), matrix.width() as u32 / 2)
-        })
-        .unwrap_or((std::ptr::null(), 0));
     let intermediates_ptr = intermediates
         .map(|buf| buf.as_mut_raw_ptr())
         .unwrap_or(std::ptr::null_mut());
@@ -614,8 +602,8 @@ pub unsafe fn batch_constraints_eval_interactions_round0(
         selectors.width() as u32,
         main_ptrs.as_ptr(),
         main_ptrs.len() as u32,
-        pre_ptr,
-        pre_air_width,
+        preprocessed.data,
+        preprocessed.air_width,
         eq_sharp_z.as_raw_ptr(),
         eq_x.buffer().as_raw_ptr(),
         eq_3b.as_raw_ptr(),
