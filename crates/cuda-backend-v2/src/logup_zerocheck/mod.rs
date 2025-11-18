@@ -267,8 +267,7 @@ where
         } else {
             DeviceBuffer::new()
         });
-        let s_deg = self.s_deg;
-        let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
+        let global_s0_deg = sumcheck_round0_deg(l_skip, self.s_deg);
         let num_present_airs = ctx.per_trace.len();
         debug_assert_eq!(num_present_airs, self.n_per_trace.len());
 
@@ -356,31 +355,14 @@ where
         // All (numer, denom) pairs per present AIR for logup, followed by 1 zerocheck poly per
         // present AIR
         let mut batch_polys =
-            vec![UnivariatePoly::new(vec![EF::ZERO; s_0_deg + 1]); 3 * num_present_airs];
-        let log_large_domain = log2_ceil_usize(s_0_deg + 1);
-        let large_domain = 1 << log_large_domain;
-        assert!(!xi.is_empty(), "xi vector must not be empty");
-        let omega = F::two_adic_generator(log_large_domain);
-        let eq_z_host: Vec<EF> = omega
-            .powers()
-            .take(large_domain)
-            .map(|z| eval_eq_uni(l_skip, xi[0], z.into()))
-            .collect();
-        let d_eq_z = eq_z_host.to_device().unwrap();
-        // Precompute eq_sharp_z (using eq_sharp instead of eq_z)
-        let eq_sharp_z_host: Vec<EF> = omega
-            .powers()
-            .take(large_domain)
-            .map(|z| eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into()))
-            .collect();
-        let d_eq_sharp_z = eq_sharp_z_host.to_device().unwrap();
-        // Loop through one AIR at a time; it is more efficient to do everything for one AIR
-        // together
+            vec![UnivariatePoly::new(vec![EF::ZERO; global_s0_deg + 1]); 3 * num_present_airs];
         let d_lambda_pows = self
             .lambda_pows
             .as_ref()
             .expect("lambda powers must be set before round-0 evaluation");
 
+        // Loop through one AIR at a time; it is more efficient to do everything for one AIR
+        // together
         for (trace_idx, ((air_idx, air_ctx), n, selectors_base, eq_x, eq_3b)) in izip!(
             &ctx.per_trace,
             &self.n_per_trace,
@@ -393,6 +375,45 @@ where
             debug!("starting batch constraints for air_idx={air_idx} (trace_idx={trace_idx})");
             self.mem.tracing_info("after trace input");
             let single_pk = &self.pk.per_air[*air_idx];
+            // Includes both plain AIR constraints and symbolic interactions
+            let single_air_constraints =
+                SymbolicConstraints::from(&single_pk.vk.symbolic_constraints);
+            let local_constraint_deg = iter::empty()
+                .chain(&single_air_constraints.constraints)
+                .chain(
+                    single_air_constraints
+                        .interactions
+                        .iter()
+                        .flat_map(|i| iter::once(&i.count).chain(&i.message)),
+                )
+                .map(|expr| expr.degree_multiple())
+                .max()
+                .unwrap_or(0);
+            let local_s_deg = local_constraint_deg + 1;
+            assert!(
+                local_s_deg <= self.s_deg,
+                "Max constraint degree ({local_constraint_deg}) of AIR {air_idx} exceeds the global maximum {}",
+                self.s_deg - 1
+            );
+            let local_s0_deg = sumcheck_round0_deg(l_skip, local_s_deg);
+            let log_large_domain = log2_ceil_usize(local_s0_deg + 1);
+            let large_domain = 1 << log_large_domain;
+            assert!(!xi.is_empty(), "xi vector must not be empty");
+            let omega = F::two_adic_generator(log_large_domain);
+            let eq_z_host: Vec<EF> = omega
+                .powers()
+                .take(large_domain)
+                .map(|z| eval_eq_uni(l_skip, xi[0], z.into()))
+                .collect();
+            let d_eq_z = eq_z_host.to_device().unwrap();
+            // Precompute eq_sharp_z (using eq_sharp instead of eq_z)
+            let eq_sharp_z_host: Vec<EF> = omega
+                .powers()
+                .take(large_domain)
+                .map(|z| eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into()))
+                .collect();
+            let d_eq_sharp_z = eq_sharp_z_host.to_device().unwrap();
+
             let trace_input = prepare_round0_trace_input(
                 l_skip,
                 log_large_domain,
@@ -428,7 +449,7 @@ where
             let (sum_numer, sum_denom) = evaluate_round0_interactions_gpu(
                 l_skip,
                 large_domain,
-                single_pk,
+                &single_air_constraints,
                 &trace_input,
                 &d_eq_sharp_z,
                 eq_3b,
@@ -458,12 +479,15 @@ where
             .tracing_info("after_batch_constraints_sumcheck_round0");
 
         for poly in &mut batch_polys {
-            debug_assert!(
-                poly.coeffs()[s_0_deg + 1..]
-                    .iter()
-                    .all(|&coeff| coeff == EF::ZERO)
-            );
-            poly.coeffs_mut().truncate(s_0_deg + 1);
+            #[cfg(debug_assertions)]
+            if poly.coeffs().len() > global_s0_deg + 1 {
+                assert!(
+                    poly.coeffs()[global_s0_deg + 1..]
+                        .iter()
+                        .all(|&coeff| coeff == EF::ZERO)
+                );
+            }
+            poly.coeffs_mut().resize(global_s0_deg + 1, EF::ZERO);
         }
 
         batch_polys
