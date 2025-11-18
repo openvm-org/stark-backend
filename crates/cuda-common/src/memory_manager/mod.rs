@@ -9,7 +9,9 @@ use bytesize::ByteSize;
 
 use crate::{
     error::{check, MemoryError},
-    stream::{cudaStreamPerThread, cudaStream_t, current_stream_id},
+    stream::{
+        cudaStreamPerThread, cudaStream_t, current_stream_id, current_stream_sync, CudaStreamId,
+    },
 };
 
 mod cuda;
@@ -20,6 +22,12 @@ use vm_pool::VirtualMemoryPool;
 extern "C" {
     fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;
     fn cudaFreeAsync(dev_ptr: *mut c_void, stream: cudaStream_t) -> i32;
+    #[allow(dead_code)]
+    fn cudaGetDevice(device: *mut i32) -> i32;
+    #[allow(dead_code)]
+    fn cudaDeviceGetDefaultMemPool(pool: *mut *mut c_void, device: i32) -> i32;
+    #[allow(dead_code)]
+    fn cudaMemPoolTrimTo(pool: *mut c_void, bytes_to_keep: usize) -> i32;
 }
 
 static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
@@ -32,7 +40,7 @@ fn init() {
 
 pub struct MemoryManager {
     pool: VirtualMemoryPool,
-    allocated_ptrs: HashMap<NonNull<c_void>, usize>,
+    allocated_ptrs: HashMap<NonNull<c_void>, (usize, CudaStreamId)>,
     current_size: usize,
     max_used_size: usize,
 }
@@ -58,10 +66,13 @@ impl MemoryManager {
 
         let mut tracked_size = size;
         let ptr = if size < self.pool.page_size {
+            let alloc_stream_id = current_stream_id()?;
             let mut ptr: *mut c_void = std::ptr::null_mut();
             check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) })?;
-            self.allocated_ptrs
-                .insert(NonNull::new(ptr).expect("cudaMalloc returned null"), size);
+            self.allocated_ptrs.insert(
+                NonNull::new(ptr).expect("cudaMalloc returned null"),
+                (size, alloc_stream_id),
+            );
             Ok(ptr)
         } else {
             tracked_size = size.next_multiple_of(self.pool.page_size);
@@ -82,9 +93,31 @@ impl MemoryManager {
     unsafe fn d_free(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 
-        if let Some(size) = self.allocated_ptrs.remove(&nn) {
+        if let Some((size, alloc_stream_id)) = self.allocated_ptrs.remove(&nn) {
+            let free_stream_id = current_stream_id()?;
+
+            if alloc_stream_id != free_stream_id {
+                tracing::warn!(
+                    "Cross-stream free detected: ptr={:p}, size={}, allocated on stream {}, freed on stream {}",
+                    ptr,
+                    ByteSize::b(size as u64),
+                    alloc_stream_id,
+                    free_stream_id
+                );
+
+                check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })?;
+                current_stream_sync().map_err(MemoryError::from)?;
+                // Force release memory from pool
+                let mut device = 0;
+                check(unsafe { cudaGetDevice(&mut device) })?;
+                let mut pool: *mut c_void = std::ptr::null_mut();
+                check(unsafe { cudaDeviceGetDefaultMemPool(&mut pool, device) })?;
+                check(unsafe { cudaMemPoolTrimTo(pool, 0) })?;
+            } else {
+                check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })?;
+            }
+
             self.current_size -= size;
-            check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })?;
         } else {
             self.current_size -= self.pool.free_internal(ptr, current_stream_id()?)?;
         }
