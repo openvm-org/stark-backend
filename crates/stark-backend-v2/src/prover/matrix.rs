@@ -100,11 +100,12 @@ impl<F> ColMajorMatrix<F> {
         let mut values = F::zero_vec(mat.values.len());
         let width = mat.width;
         let height = mat.height();
-        for r in 0..height {
-            for c in 0..width {
-                values[c * height + r] = mat.get(r, c);
-            }
-        }
+        values.par_iter_mut().enumerate().for_each(|(idx, value)| {
+            let r = idx % height;
+            let c = idx / height;
+            // SAFETY: index is in bounds for row-major matrix
+            *value = unsafe { *mat.values.get_unchecked(r * width + c) };
+        });
         Self {
             values,
             width,
