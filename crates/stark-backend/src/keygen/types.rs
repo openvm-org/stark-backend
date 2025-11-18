@@ -85,6 +85,7 @@ pub struct StarkVerifyingKey<Val, Com> {
     /// Determined from the max constraint degree of the AIR constraints. This is equivalently
     /// the number of chunks the quotient polynomial is split into.
     pub quotient_degree: u8,
+    pub max_constraint_degree: u8,
     pub rap_phase_seq_kind: RapPhaseSeqKind,
 }
 
