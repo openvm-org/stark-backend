@@ -310,11 +310,14 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             ..
         } = self;
 
+        let max_constraint_degree: u8 =
+            u8::try_from(symbolic_constraints.max_constraint_degree()).unwrap();
         let vk: StarkVerifyingKey<Val<SC>, Com<SC>> = StarkVerifyingKey {
             preprocessed_data: prep_verifier_data,
             params,
             symbolic_constraints: symbolic_constraints.into(),
             quotient_degree,
+            max_constraint_degree,
             rap_phase_seq_kind: self.rap_phase_seq_kind,
         };
         StarkProvingKey {
