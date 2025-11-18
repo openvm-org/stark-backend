@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
+    copy::{MemCopyD2H, cuda_memcpy},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
@@ -10,10 +10,7 @@ use p3_util::log2_strict_usize;
 use stark_backend_v2::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::GkrLayerClaims,
-    prover::{
-        fractional_sumcheck_gkr::{Frac, FracSumcheckProof},
-        poly::evals_eq_hypercube,
-    },
+    prover::fractional_sumcheck_gkr::{Frac, FracSumcheckProof},
 };
 use tracing::{debug_span, instrument};
 
@@ -23,6 +20,7 @@ use crate::{
     cuda::logup_zerocheck::{
         fold_frac_ext_columns, frac_build_tree_layer, frac_compute_round, frac_fold_columns,
     },
+    poly::evals_eq_hypercube,
 };
 
 #[instrument(skip_all)]
@@ -120,9 +118,15 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
             input_evals.take().unwrap()
         };
 
-        let eq_host = evals_eq_hypercube(&xi_prev);
-        let eq_buffer = eq_host.to_device()?;
-        let mut eq_buffer = eq_buffer;
+        let mut eq_buffer = DeviceBuffer::<EF>::with_capacity(1 << xi_prev.len());
+        unsafe {
+            evals_eq_hypercube(&mut eq_buffer, &xi_prev).map_err(|e| match e {
+                crate::ProverError::Cuda(cuda_err) => {
+                    FractionalSumcheckError::EvalEqHypercube(cuda_err)
+                }
+                crate::ProverError::MemCopy(mem_err) => FractionalSumcheckError::Copy(mem_err),
+            })?;
+        }
 
         let mut round_polys_eval = Vec::with_capacity(round);
         let mut r_vec = Vec::with_capacity(round);
