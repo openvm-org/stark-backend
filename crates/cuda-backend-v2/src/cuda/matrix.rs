@@ -117,7 +117,7 @@ pub unsafe fn collapse_strided_matrix(
 /// column is handled by a different block.
 ///
 /// # Safety
-/// - `output` must be a pointer to `DeviceBuffer<F>` with length at least `padded_height * width`.
+/// - `out` must be a pointer to `DeviceBuffer<F>` with length at least `padded_height * width`.
 /// - `input` must be a pointer to `DeviceBuffer<F>` with length at least `height * width`.
 pub unsafe fn batch_expand_pad_wide(
     out: *mut F,

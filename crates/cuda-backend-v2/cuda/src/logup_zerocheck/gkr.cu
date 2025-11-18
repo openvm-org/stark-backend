@@ -1,3 +1,4 @@
+#include "fp.h"
 #include "fpext.h"
 #include "frac_ext.cuh"
 #include "launcher.cuh"
@@ -15,44 +16,27 @@ namespace fractional_sumcheck_gkr {
 // ============================================================================
 // KERNELS
 // ============================================================================
-__global__ void build_level_kernel(FracExt *tree, size_t level_start, size_t count) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= count) {
-        return;
-    }
-
-    size_t node = level_start + idx;
-    FracExt left = tree[node << 1];
-    FracExt right = tree[(node << 1) + 1];
-    tree[node] = frac_add(left, right);
-}
-
-__global__ void prepare_round_kernel(
-    const FracExt *tree,
-    size_t segment_start,
-    size_t eval_size,
-    FpExt *pq_out
+__global__ void frac_build_tree_layer_kernel(
+    FracExt *__restrict__ out_layer,
+    const FracExt *__restrict__ in_layer,
+    size_t out_layer_size
 ) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= eval_size) {
+    if (idx >= out_layer_size) {
         return;
     }
 
-    const FracExt left = tree[segment_start + (idx << 1)];
-    const FracExt right = tree[segment_start + (idx << 1) + 1];
-
-    pq_out[idx] = left.p;
-    pq_out[eval_size + idx] = left.q;
-    pq_out[(eval_size << 1) + idx] = right.p;
-    pq_out[(eval_size * 3) + idx] = right.q;
+    FracExt left = in_layer[idx << 1];
+    FracExt right = in_layer[(idx << 1) + 1];
+    out_layer[idx] = frac_add(left, right);
 }
 
 __global__ void compute_round_kernel(
-    const FpExt *eq_xi,
-    const FpExt *pq,
+    const FpExt *__restrict__ eq_xi,
+    const FracExt *__restrict__ pq,
     size_t stride,
     FpExt lambda,
-    FpExt *out
+    FpExt *__restrict__ out
 ) {
     extern __shared__ FpExt shared[];
     const size_t half = stride >> 1;
@@ -67,22 +51,31 @@ __global__ void compute_round_kernel(
         FpExt eq_odd = eq_xi[even + 1];
         FpExt eq_diff = eq_odd - eq_even;
 
-        FpExt p0_even = pq[even];
-        FpExt p0_odd = pq[even + 1];
+        // \hat p_j({0 or 1}, {even or odd}, ..y)
+        // The {even=0, odd=1} evaluations are used to interpolate at xs
+        auto pq0_even = pq[even << 1];
+        FpExt p0_even = pq0_even.p;
+        FpExt q0_even = pq0_even.q;
+
+        auto pq1_even = pq[(even << 1) + 1];
+        FpExt p1_even = pq1_even.p;
+        FpExt q1_even = pq1_even.q;
+
+        size_t odd = even + 1;
+        auto pq0_odd = pq[odd << 1];
+        FpExt p0_odd = pq0_odd.p;
+        FpExt q0_odd = pq0_odd.q;
+
+        auto pq1_odd = pq[(odd << 1) + 1];
+        FpExt p1_odd = pq1_odd.p;
+        FpExt q1_odd = pq1_odd.q;
+
         FpExt p0_diff = p0_odd - p0_even;
-
-        FpExt q0_even = pq[stride + even];
-        FpExt q0_odd = pq[stride + even + 1];
         FpExt q0_diff = q0_odd - q0_even;
-
-        FpExt p1_even = pq[(stride << 1) + even];
-        FpExt p1_odd = pq[(stride << 1) + even + 1];
         FpExt p1_diff = p1_odd - p1_even;
-
-        FpExt q1_even = pq[(stride * 3) + even];
-        FpExt q1_odd = pq[(stride * 3) + even + 1];
         FpExt q1_diff = q1_odd - q1_even;
 
+#pragma unroll
         for (int i = 0; i < 3; ++i) {
             FpExt eq_val = eq_even + xs[i] * eq_diff;
             FpExt p_j0 = p0_even + xs[i] * p0_diff;
@@ -130,6 +123,37 @@ __global__ void fold_columns_kernel(
     output[out_offset] = t0 + r * (t1 - t0);
 }
 
+// Caution: we think of `input, output` as row-major matrices in FracExt
+__global__ void fold_frac_ext_columns_kernel(
+    const FracExt *__restrict__ input,
+    size_t in_stride,
+    size_t out_stride,
+    size_t width,
+    FpExt r,
+    FracExt *__restrict__ output
+) {
+    size_t total = out_stride * width;
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) {
+        return;
+    }
+
+    size_t row = idx / width;
+    size_t col = idx % width;
+
+    size_t in_offset = (row << 1) * width + col;
+    size_t out_offset = row * width + col;
+
+    FracExt t0 = input[in_offset];
+    FracExt t1 = input[in_offset + width];
+    FracExt dt;
+    // vector difference
+    dt.p = t1.p - t0.p;
+    dt.q = t1.q - t0.q;
+    output[out_offset].p = t0.p + r * dt.p;
+    output[out_offset].q = t0.q + r * dt.q;
+}
+
 __global__ void extract_claims_kernel(const FpExt *data, size_t stride, FpExt *out) {
     if (threadIdx.x != 0) {
         return;
@@ -164,47 +188,23 @@ __global__ void frac_vector_scalar_multiply_kernel(
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
-extern "C" int _frac_build_segment_tree(FracExt *tree, size_t total_leaves) {
-    if (total_leaves == 0) {
-        return 0;
-    }
-
-    size_t level_start = total_leaves;
-    size_t nodes_in_level = total_leaves;
-
-    while (nodes_in_level > 1) {
-        level_start >>= 1;
-        nodes_in_level >>= 1;
-
-        auto [grid, block] = kernel_launch_params(nodes_in_level);
-        build_level_kernel<<<grid, block>>>(tree, level_start, nodes_in_level);
-        int err = CHECK_KERNEL();
-        if (err != 0) {
-            return err;
-        }
-    }
-
-    return 0;
-}
-
-extern "C" int _frac_prepare_round(
-    const FracExt *tree,
-    size_t segment_start,
-    size_t eval_size,
-    FpExt *pq_out
+extern "C" int _frac_build_tree_layer(
+    FracExt *out_layer,
+    const FracExt *in_layer,
+    size_t out_layer_size
 ) {
-    if (eval_size == 0) {
+    if (out_layer_size == 0) {
         return 0;
     }
 
-    auto [grid, block] = kernel_launch_params(eval_size);
-    prepare_round_kernel<<<grid, block>>>(tree, segment_start, eval_size, pq_out);
+    auto [grid, block] = kernel_launch_params(out_layer_size);
+    frac_build_tree_layer_kernel<<<grid, block>>>(out_layer, in_layer, out_layer_size);
     return CHECK_KERNEL();
 }
 
 extern "C" int _frac_compute_round(
     const FpExt *eq_xi,
-    const FpExt *pq,
+    const FracExt *pq,
     size_t stride,
     FpExt lambda,
     FpExt *out_device
@@ -236,6 +236,22 @@ extern "C" int _frac_fold_columns(
     size_t half = in_stride >> 1;
     auto [grid, block] = kernel_launch_params(half * width);
     fold_columns_kernel<<<grid, block>>>(input, in_stride, width, r, output);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _frac_fold_frac_ext_columns(
+    const FracExt *__restrict__ input,
+    size_t in_stride,
+    size_t width,
+    FpExt r,
+    FracExt *__restrict__ output
+) {
+    if (in_stride <= 1) {
+        return 0;
+    }
+    size_t half = in_stride >> 1;
+    auto [grid, block] = kernel_launch_params(half * width);
+    fold_frac_ext_columns_kernel<<<grid, block>>>(input, in_stride, half, width, r, output);
     return CHECK_KERNEL();
 }
 

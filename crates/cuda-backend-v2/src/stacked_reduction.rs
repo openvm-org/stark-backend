@@ -5,6 +5,7 @@ use openvm_cuda_backend::ntt::batch_ntt;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
+    memory_manager::MemTracker,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::{FieldAlgebra, TwoAdicField};
@@ -72,6 +73,8 @@ pub struct StackedReductionGpu<'a> {
     k_rot_ns: EqEvalSegments<EF>,
     /// Stores eq(u[1+n_T..round-1], b_{T,j}[..round-n_T-1])
     eq_ub_per_trace: Vec<EF>,
+
+    mem: MemTracker,
 }
 
 /// Pointer with length to location in a big device buffer. The device buffer is identified by
@@ -123,6 +126,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
         r: &[EF],
         lambda: EF,
     ) -> Self {
+        let mem = MemTracker::start("stacked_reduction");
         let l_skip = device.config.l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
         let n_stack = device.config.n_stack;
@@ -206,6 +210,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
             // SAFETY: This is unused in round 0 and will be initialized properly after round 0.
             k_rot_ns: unsafe { EqEvalSegments::from_raw_parts(DeviceBuffer::new(), 0) },
             eq_ub_per_trace,
+            mem,
         }
     }
 
@@ -383,6 +388,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
         let mut s_0 = UnivariatePoly::from_evals_idft(&s_0_evals);
         debug_assert!(s_0.coeffs()[s_0_deg + 1..].iter().all(|c| *c == EF::ZERO));
         s_0.coeffs_mut().truncate(s_0_deg + 1);
+        self.mem.tracing_info("stacked_reduction_sumcheck round 0");
 
         s_0
     }
@@ -570,6 +576,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
                 s_evals_batch.push(evals);
             }
         }
+
         from_fn(|i| s_evals_batch.iter().map(|evals| evals[i]).sum::<EF>())
     }
 
