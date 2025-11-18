@@ -1,8 +1,11 @@
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
+#include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 namespace {
 // ============================================================================
@@ -115,9 +118,28 @@ __global__ void interpolate_columns_kernel(
     }
 }
 
+__global__ void frac_matrix_vertically_repeat_kernel(
+    std::pair<FpExt, FpExt> *__restrict__ out,
+    const std::pair<FpExt, FpExt> *__restrict__ in,
+    const uint32_t width,
+    const uint32_t lifted_height,
+    const uint32_t height
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t col = blockIdx.y + blockIdx.z * gridDim.y;
+    if (col >= width) {
+        return;
+    }
+    out[col * lifted_height + row].first = in[col * height + (row % height)].first;
+    out[col * lifted_height + row].second = in[col * height + (row % height)].second;
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
+
+constexpr uint32_t MAX_GRID_DIM = 65535u;
+
 extern "C" int _fold_ple_from_evals(
     const Fp *input_matrix,
     FpExt *output_matrix,
@@ -184,6 +206,21 @@ extern "C" int _compute_eq_sharp(
         return 0;
     auto [grid, block] = kernel_launch_params(count);
     compute_eq_sharp_kernel<<<grid, block>>>(eq_xi, eq_sharp, eq_r0, eq_sharp_r0, count);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _frac_matrix_vertically_repeat(
+    std::pair<FpExt, FpExt> *out,
+    const std::pair<FpExt, FpExt> *in,
+    const uint32_t width,
+    const uint32_t lifted_height,
+    const uint32_t height
+) {
+    auto [grid, block] = kernel_launch_params(lifted_height);
+    grid.y = std::min(width, MAX_GRID_DIM);
+    grid.z = (width + grid.y - 1) / grid.y;
+    assert(grid.z <= MAX_GRID_DIM);
+    frac_matrix_vertically_repeat_kernel<<<grid, block>>>(out, in, width, lifted_height, height);
     return CHECK_KERNEL();
 }
 

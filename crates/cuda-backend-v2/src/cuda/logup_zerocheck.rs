@@ -14,19 +14,17 @@ pub struct MainMatrixPtrs<T> {
 
 extern "C" {
     // gkr.cu
-    fn _frac_build_segment_tree(tree: *mut std::ffi::c_void, total_leaves: usize) -> i32;
-    fn _frac_prepare_round(
-        tree: *const std::ffi::c_void,
-        segment_start: usize,
-        eval_size: usize,
-        pq_out: *mut std::ffi::c_void,
+    fn _frac_build_tree_layer(
+        out_layer: *mut Frac<EF>,
+        in_layer: *const Frac<EF>,
+        out_layer_size: usize,
     ) -> i32;
     fn _frac_compute_round(
-        eq_xi: *const std::ffi::c_void,
-        pq: *const std::ffi::c_void,
+        eq_xi: *const EF,
+        pq: *const Frac<EF>,
         stride: usize,
         lambda: EF,
-        out_device: *mut std::ffi::c_void,
+        out_device: *mut EF,
     ) -> i32;
     fn _frac_fold_columns(
         input: *const std::ffi::c_void,
@@ -34,6 +32,13 @@ extern "C" {
         width: usize,
         r: EF,
         output: *mut std::ffi::c_void,
+    ) -> i32;
+    fn _frac_fold_frac_ext_columns(
+        input: *const Frac<EF>,
+        stride: usize,
+        width: usize,
+        r: EF,
+        output: *mut Frac<EF>,
     ) -> i32;
     fn _frac_extract_claims(
         data: *const std::ffi::c_void,
@@ -68,6 +73,13 @@ extern "C" {
         eq_r0: EF,
         eq_sharp_r0: EF,
         count: u32,
+    ) -> i32;
+    fn _frac_matrix_vertically_repeat(
+        out: *mut Frac<EF>,
+        input: *const Frac<EF>,
+        width: u32,
+        lifted_height: u32,
+        height: u32,
     ) -> i32;
 
     // interactions.cu
@@ -230,43 +242,33 @@ pub unsafe fn interpolate_columns_gpu(
     ))
 }
 
-pub unsafe fn frac_build_segment_tree(
-    tree: &DeviceBuffer<Frac<EF>>,
-    total_leaves: usize,
+pub unsafe fn frac_build_tree_layer(
+    out_layer: &mut DeviceBuffer<Frac<EF>>,
+    in_layer: &DeviceBuffer<Frac<EF>>,
+    out_layer_size: usize,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_build_segment_tree(
-        tree.as_mut_raw_ptr(),
-        total_leaves,
-    ))
-}
-
-pub unsafe fn frac_prepare_round(
-    tree: &DeviceBuffer<Frac<EF>>,
-    segment_start: usize,
-    eval_size: usize,
-    pq_out: &DeviceBuffer<EF>,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_prepare_round(
-        tree.as_raw_ptr(),
-        segment_start,
-        eval_size,
-        pq_out.as_mut_raw_ptr(),
+    debug_assert!(out_layer.len() >= out_layer_size);
+    debug_assert!(in_layer.len() >= 2 * out_layer_size);
+    CudaError::from_result(_frac_build_tree_layer(
+        out_layer.as_mut_ptr(),
+        in_layer.as_ptr(),
+        out_layer_size,
     ))
 }
 
 pub unsafe fn frac_compute_round(
     eq_xi: &DeviceBuffer<EF>,
-    pq: &DeviceBuffer<EF>,
+    pq: &DeviceBuffer<Frac<EF>>,
     stride: usize,
     lambda: EF,
-    out_device: &DeviceBuffer<EF>,
+    out_device: &mut DeviceBuffer<EF>,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_frac_compute_round(
-        eq_xi.as_raw_ptr(),
-        pq.as_raw_ptr(),
+        eq_xi.as_ptr(),
+        pq.as_ptr(),
         stride,
         lambda,
-        out_device.as_mut_raw_ptr(),
+        out_device.as_mut_ptr(),
     ))
 }
 
@@ -283,6 +285,24 @@ pub unsafe fn frac_fold_columns(
         width,
         r,
         output.as_mut_raw_ptr(),
+    ))
+}
+
+/// Folds matrix of `Frac<EF>` but treats `input` and `output` as **row-major** matrices in
+/// `Frac<EF>`. The numerator and denominator are folded pair-wise.
+pub unsafe fn fold_frac_ext_columns(
+    input: &DeviceBuffer<Frac<EF>>,
+    stride: usize,
+    width: usize,
+    r: EF,
+    output: &mut DeviceBuffer<Frac<EF>>,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_frac_fold_frac_ext_columns(
+        input.as_ptr(),
+        stride,
+        width,
+        r,
+        output.as_mut_ptr(),
     ))
 }
 
@@ -338,10 +358,13 @@ pub unsafe fn compute_eq_sharp(
     ))
 }
 
+/// # Safety
+/// - `output` must be a pointer to a device buffer with capacity at least `num_partitions *
+///   height`.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn logup_gkr_input_eval(
     is_global: bool,
-    output: &DeviceBuffer<Frac<EF>>,
+    output: *mut Frac<EF>,
     preprocessed: &DeviceBuffer<F>,
     partitioned_main: &DeviceBuffer<u64>,
     challenges: &DeviceBuffer<EF>,
@@ -355,7 +378,7 @@ pub unsafe fn logup_gkr_input_eval(
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_gkr_input_eval(
         is_global,
-        output.as_mut_raw_ptr(),
+        output as *mut c_void,
         preprocessed.as_raw_ptr(),
         partitioned_main.as_ptr(),
         challenges.as_raw_ptr(),
@@ -661,5 +684,28 @@ pub unsafe fn frac_vector_scalar_multiply_ext_fp(
 ) -> Result<(), CudaError> {
     CudaError::from_result(_frac_vector_scalar_multiply_ext_fp(
         frac_vec, scalar, length,
+    ))
+}
+
+/// Vertically repeats the rows of `input` and writes them to `out`. Both matrices are column-major.
+///
+/// # Safety
+/// - `out` must be a pointer to `DeviceBuffer<F>` with length at least `lifted_height * width`.
+/// - `input` must be a pointer to `DeviceBuffer<F>` with length at least `height * width`.
+/// - `out` and `input` must not overlap.
+pub unsafe fn frac_matrix_vertically_repeat(
+    out: *mut Frac<EF>,
+    input: *const Frac<EF>,
+    width: u32,
+    lifted_height: u32,
+    height: u32,
+) -> Result<(), CudaError> {
+    debug_assert!(lifted_height > height);
+    CudaError::from_result(_frac_matrix_vertically_repeat(
+        out,
+        input,
+        width,
+        lifted_height,
+        height,
     ))
 }
