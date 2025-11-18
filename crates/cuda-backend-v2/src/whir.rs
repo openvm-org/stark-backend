@@ -9,6 +9,7 @@ use openvm_cuda_backend::{
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
+    memory_manager::MemTracker,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
@@ -64,6 +65,7 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     other_pcs_data: Vec<Arc<StackedPcsDataGpu<F, Digest>>>,
     u: &[EF],
 ) -> Result<WhirProof, ProverError> {
+    let mem = MemTracker::start("prove_whir_opening");
     let params = device.config();
     let k_whir = params.k_whir;
     let log_blowup = params.log_blowup;
@@ -169,6 +171,7 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     let d_widths = [1u32, 1u32].to_device()?;
     let mut d_s_evals = DeviceBuffer::<EF>::with_capacity(2);
 
+    mem.tracing_info("before_whir_rounds");
     for whir_round in 0..num_whir_rounds {
         let is_last_round = whir_round == num_whir_rounds - 1;
         // Run k_whir rounds of sumcheck on `sum_{x in H_m} \hat{w}(\hat{f}(x), x)`
@@ -355,6 +358,8 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
                         .collect()
                 })
                 .collect();
+            drop(common_main_tree);
+            mem.tracing_info("after_initial_whir_round");
         } else {
             let tree: &MerkleTreeGpu<F, Digest> = rs_tree.as_ref().unwrap();
             codeword_merkle_proofs[whir_round - 1] =

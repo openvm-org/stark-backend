@@ -9,6 +9,7 @@ use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
+    memory_manager::MemTracker,
 };
 use openvm_stark_backend::{air_builders::symbolic::SymbolicConstraints, prover::MatrixDimensions};
 use p3_field::{Field, FieldAlgebra, TwoAdicField};
@@ -31,7 +32,10 @@ use crate::{
         sumcheck::fold_mle,
     },
     gpu_backend::transport_matrix_d2h_col_major,
-    logup_zerocheck::{fold_ple::fold_ple_mixed_rotate, round0::prepare_round0_trace_input},
+    logup_zerocheck::{
+        fold_ple::fold_ple_mixed_rotate, gkr_input::TraceInteractionMeta,
+        round0::prepare_round0_trace_input,
+    },
     stacked_pcs::StackedPcsDataGpu,
 };
 
@@ -48,11 +52,11 @@ mod state;
 
 pub use errors::*;
 use fold_ple::{compute_eq_sharp_gpu, fold_ple_evals_gpu};
-use fractional::{fractional_sumcheck_gpu, initialize_segment_tree};
+use fractional::fractional_sumcheck_gpu;
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu};
 use round0::{evaluate_round0_constraints_gpu, evaluate_round0_interactions_gpu};
-use state::{FractionalGkrState, Round0Buffers};
+use state::Round0Buffers;
 
 #[allow(dead_code)]
 pub struct LogupZerocheckGpu<'a> {
@@ -90,11 +94,13 @@ pub struct LogupZerocheckGpu<'a> {
     zerocheck_tilde_evals: Vec<EF>,
     logup_tilde_evals: Vec<[EF; 2]>,
 
-    fractional_state: FractionalGkrState, //?
+    trace_interactions: Vec<Option<TraceInteractionMeta>>,
     // round0: Round0Buffers,
     pk: &'a DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     device: &'a GpuDeviceV2,
     common_main_pcs_data: &'a StackedPcsDataGpu<F, Digest>,
+
+    mem: MemTracker,
 }
 
 impl<'a, TS> LogupZerocheckProver<'a, GpuBackendV2, GpuDeviceV2, TS> for LogupZerocheckGpu<'a>
@@ -115,6 +121,7 @@ where
         alpha_logup: EF,
         beta_logup: EF,
     ) -> (Self, FracSumcheckProof<EF>) {
+        let mem = MemTracker::start("logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
@@ -159,15 +166,11 @@ where
 
         // Collect interaction metadata for GPU execution (evaluations still run on CPU for now).
         let trace_interactions = collect_trace_interactions(pk, ctx, &interactions_layout);
-        let mut fractional_state = FractionalGkrState {
-            trace_interactions,
-            ..Default::default()
-        };
 
         let total_leaves = 1 << (l_skip + n_logup);
-        let leaves = if has_interactions {
+        let input_evals = if has_interactions {
             log_gkr_input_evals(
-                &mut fractional_state,
+                &trace_interactions,
                 pk,
                 ctx,
                 l_skip,
@@ -180,14 +183,8 @@ where
             DeviceBuffer::new()
         };
 
-        initialize_segment_tree(&mut fractional_state, leaves)
-            .expect("failed to build fractional segment tree on device");
-
-        let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(transcript, &fractional_state, true)
+        let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(transcript, input_evals, true, &mem)
             .expect("failed to run fractional sumcheck on GPU");
-        // Drop segment tree buffers
-        fractional_state.input_evals.take();
-        fractional_state.segment_tree.take();
 
         let n_global = max(n_max, n_logup);
         debug!(%n_global);
@@ -239,10 +236,11 @@ where
                 .collect_vec(),
             zerocheck_tilde_evals: vec![EF::ZERO; num_airs_present],
             logup_tilde_evals: vec![[EF::ZERO; 2]; num_airs_present],
-            fractional_state,
+            trace_interactions,
             pk,
             device,
             common_main_pcs_data,
+            mem,
         };
 
         (prover, frac_sum_proof)
@@ -275,7 +273,6 @@ where
         debug_assert_eq!(num_present_airs, self.n_per_trace.len());
 
         self.eq_3b_per_trace = self
-            .fractional_state
             .trace_interactions
             .iter()
             .enumerate()
@@ -393,6 +390,8 @@ where
         )
         .enumerate()
         {
+            debug!("starting batch constraints for air_idx={air_idx} (trace_idx={trace_idx})");
+            self.mem.tracing_info("after trace input");
             let single_pk = &self.pk.per_air[*air_idx];
             let trace_input = prepare_round0_trace_input(
                 l_skip,
@@ -406,6 +405,7 @@ where
                 trace_idx,
             )
             .unwrap();
+            self.mem.tracing_info("after_trace_input");
 
             let sum_buffer = evaluate_round0_constraints_gpu(
                 l_skip,
@@ -423,6 +423,7 @@ where
                 batch_polys[2 * num_present_airs + trace_idx] =
                     UnivariatePoly::from_evals_idft(&host_sums);
             }
+            self.mem.tracing_info("after_zerocheck");
 
             let (sum_numer, sum_denom) = evaluate_round0_interactions_gpu(
                 l_skip,
@@ -451,7 +452,10 @@ where
                 batch_polys[2 * trace_idx] = numer_poly;
                 batch_polys[2 * trace_idx + 1] = denom_poly;
             }
+            self.mem.tracing_info("after_logup");
         }
+        self.mem
+            .tracing_info("after_batch_constraints_sumcheck_round0");
 
         for poly in &mut batch_polys {
             debug_assert!(
@@ -555,12 +559,14 @@ where
                     .expect("failed to multiply eq_xi and compute eq_sharp on GPU")
             })
             .collect();
+        self.mem.tracing_info("after_fold_ple_evals");
     }
 
     #[instrument(
         name = "LogupZerocheck::sumcheck_polys_eval",
         level = "debug",
-        skip_all
+        skip_all,
+        fields(round = round)
     )]
     fn sumcheck_polys_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
         let s_deg = self.s_deg;
@@ -845,11 +851,13 @@ where
                 s_zerocheck_evals.push(results[2].clone());
             },
         );
+        self.mem
+            .tracing_info("after_batch_constraints_sumcheck_mle_round");
 
         s_logup_evals.into_iter().chain(s_zerocheck_evals).collect()
     }
 
-    #[instrument(name = "LogupZerocheck::fold_mle_evals", level = "debug", skip_all)]
+    #[instrument(name = "LogupZerocheck::fold_mle_evals", level = "debug", skip_all, fields(round = _round))]
     fn fold_mle_evals(&mut self, _round: usize, r_round: EF) {
         // Fold mat_evals_per_trace: Vec<Vec<DeviceMatrix<EF>>>
         self.mat_evals_per_trace = std::mem::take(&mut self.mat_evals_per_trace)
