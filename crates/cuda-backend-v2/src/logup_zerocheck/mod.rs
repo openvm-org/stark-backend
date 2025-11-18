@@ -19,8 +19,8 @@ use stark_backend_v2::{
     poseidon2::sponge::FiatShamirTranscript,
     prover::{
         ColMajorMatrix, DeviceMultiStarkProvingKeyV2, LogupZerocheckProver, ProvingContextV2,
-        fractional_sumcheck_gkr::FracSumcheckProof, poly::evals_eq_hypercube,
-        stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
+        fractional_sumcheck_gkr::FracSumcheckProof, stacked_pcs::StackedLayout,
+        sumcheck::sumcheck_round0_deg,
     },
 };
 use tracing::{debug, instrument};
@@ -36,6 +36,7 @@ use crate::{
         fold_ple::fold_ple_mixed_rotate, gkr_input::TraceInteractionMeta,
         round0::prepare_round0_trace_input,
     },
+    poly::evals_eq_hypercube,
     stacked_pcs::StackedPcsDataGpu,
 };
 
@@ -314,15 +315,12 @@ where
             .iter()
             .map(|&n| {
                 let n_lift = n.max(0) as usize;
-                let h_eq_xi = evals_eq_hypercube(&xi[l_skip..l_skip + n_lift]);
-                if !h_eq_xi.is_empty() {
-                    let d_eq_xi = h_eq_xi
-                        .to_device()
-                        .expect("failed to copy eq_xi_per_trace to device");
-                    DeviceMatrix::new(Arc::new(d_eq_xi), h_eq_xi.len(), 1)
-                } else {
-                    DeviceMatrix::dummy()
+                let mut d_eq_xi = DeviceBuffer::<EF>::with_capacity(1 << n_lift);
+                unsafe {
+                    evals_eq_hypercube(&mut d_eq_xi, &xi[l_skip..l_skip + n_lift])
+                        .expect("failed to compute eq_xi_per_trace on device");
                 }
+                DeviceMatrix::new(Arc::new(d_eq_xi), 1 << n_lift, 1)
             })
             .collect_vec();
 
@@ -419,7 +417,7 @@ where
                 log_large_domain,
                 single_pk,
                 air_ctx,
-                &self.common_main_pcs_data,
+                self.common_main_pcs_data,
                 selectors_base,
                 eq_x.clone(),
                 &self.public_values_per_trace,
