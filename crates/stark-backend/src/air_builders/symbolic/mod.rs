@@ -1,5 +1,7 @@
 // Originally copied from uni-stark/src/symbolic_builder.rs to allow A: ?Sized
 
+use std::iter;
+
 use itertools::Itertools;
 use p3_air::{
     AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder, PermutationAirBuilder,
@@ -15,10 +17,7 @@ use self::{
 };
 use super::PartitionedAirBuilder;
 use crate::{
-    interaction::{
-        fri_log_up::find_interaction_chunks, rap::InteractionPhaseAirBuilder, Interaction,
-        InteractionBuilder, RapPhaseSeqKind, SymbolicInteraction,
-    },
+    interaction::{Interaction, InteractionBuilder, SymbolicInteraction},
     keygen::types::{StarkVerifyingParams, TraceWidth},
     rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
 };
@@ -50,7 +49,16 @@ pub struct SymbolicConstraints<F> {
 
 impl<F: Field> SymbolicConstraints<F> {
     pub fn max_constraint_degree(&self) -> usize {
-        Iterator::max(self.constraints.iter().map(|c| c.degree_multiple())).unwrap_or(0)
+        iter::empty()
+            .chain(&self.constraints)
+            .chain(
+                self.interactions
+                    .iter()
+                    .flat_map(|i| iter::once(&i.count).chain(&i.message)),
+            )
+            .map(|expr| expr.degree_multiple())
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn get_log_quotient_degree(&self) -> usize {
@@ -97,8 +105,6 @@ pub fn get_symbolic_builder<F, R>(
     width: &TraceWidth,
     num_challenges_to_sample: &[usize],
     num_exposed_values_after_challenge: &[usize],
-    rap_phase_seq_kind: RapPhaseSeqKind,
-    max_constraint_degree: usize,
 ) -> SymbolicRapBuilder<F>
 where
     F: Field,
@@ -109,8 +115,6 @@ where
         rap.num_public_values(),
         num_challenges_to_sample,
         num_exposed_values_after_challenge,
-        rap_phase_seq_kind,
-        max_constraint_degree,
     );
     Rap::eval(rap, &mut builder);
     builder
@@ -127,12 +131,7 @@ pub struct SymbolicRapBuilder<F> {
     exposed_values_after_challenge: Vec<Vec<SymbolicVariable<F>>>,
     constraints: Vec<SymbolicExpression<F>>,
     interactions: Vec<SymbolicInteraction<F>>,
-    max_constraint_degree: usize,
-    rap_phase_seq_kind: RapPhaseSeqKind,
     trace_width: TraceWidth,
-
-    /// Caching for FRI logup to avoid recomputation during keygen
-    interaction_partitions: Option<Vec<Vec<usize>>>,
 }
 
 impl<F: Field> SymbolicRapBuilder<F> {
@@ -144,8 +143,6 @@ impl<F: Field> SymbolicRapBuilder<F> {
         num_public_values: usize,
         num_challenges_to_sample: &[usize],
         num_exposed_values_after_challenge: &[usize],
-        rap_phase_seq_kind: RapPhaseSeqKind,
-        max_constraint_degree: usize,
     ) -> Self {
         let preprocessed_width = width.preprocessed.unwrap_or(0);
         let prep_values = [0, 1]
@@ -186,10 +183,7 @@ impl<F: Field> SymbolicRapBuilder<F> {
             exposed_values_after_challenge,
             constraints: vec![],
             interactions: vec![],
-            max_constraint_degree,
-            rap_phase_seq_kind,
             trace_width: width.clone(),
-            interaction_partitions: None,
         }
     }
 
@@ -389,49 +383,6 @@ impl<F: Field> InteractionBuilder for SymbolicRapBuilder<F> {
 
     fn all_interactions(&self) -> &[Interaction<Self::Expr>] {
         &self.interactions
-    }
-}
-
-impl<F: Field> InteractionPhaseAirBuilder for SymbolicRapBuilder<F> {
-    fn finalize_interactions(&mut self) {
-        let num_interactions = self.num_interactions();
-        if num_interactions != 0 {
-            assert!(
-                self.after_challenge.is_empty(),
-                "after_challenge width should be auto-populated by the InteractionBuilder"
-            );
-            assert!(self.challenges.is_empty());
-            assert!(self.exposed_values_after_challenge.is_empty());
-
-            if self.rap_phase_seq_kind == RapPhaseSeqKind::FriLogUp {
-                let interaction_partitions =
-                    find_interaction_chunks(&self.interactions, self.max_constraint_degree)
-                        .interaction_partitions();
-                let num_chunks = interaction_partitions.len();
-                self.interaction_partitions.replace(interaction_partitions);
-                let perm_width = num_chunks + 1;
-                self.after_challenge = Self::new_after_challenge(&[perm_width]);
-            }
-
-            let phases_shapes = self.rap_phase_seq_kind.shape();
-            let phase_shape = phases_shapes.first().unwrap();
-
-            self.challenges = Self::new_challenges(&[phase_shape.num_challenges]);
-            self.exposed_values_after_challenge =
-                Self::new_exposed_values_after_challenge(&[phase_shape.num_exposed_values]);
-        }
-    }
-
-    fn max_constraint_degree(&self) -> usize {
-        self.max_constraint_degree
-    }
-
-    fn rap_phase_seq_kind(&self) -> RapPhaseSeqKind {
-        self.rap_phase_seq_kind
-    }
-
-    fn symbolic_interactions(&self) -> Vec<SymbolicInteraction<F>> {
-        self.interactions.clone()
     }
 }
 
