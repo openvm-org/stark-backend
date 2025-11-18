@@ -1,4 +1,4 @@
-use std::{cmp::min, collections::HashMap, mem::ManuallyDrop, sync::Arc};
+use std::{cmp::min, collections::HashMap, iter::zip, mem::ManuallyDrop, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::{
@@ -9,7 +9,7 @@ use openvm_cuda_backend::{
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::{
     air_builders::symbolic::{
-        SymbolicConstraints, SymbolicConstraintsDag,
+        SymbolicConstraints, SymbolicConstraintsDag, SymbolicExpressionDag, SymbolicExpressionNode,
         symbolic_expression::SymbolicExpression,
         symbolic_variable::{Entry, SymbolicVariable},
     },
@@ -40,12 +40,13 @@ use crate::{
 
 const TASK_SIZE: u32 = 65_536;
 
-/// For a single AIR, includes rotation data
-#[derive(Default, Debug)]
+/// For a single AIR.
+/// Each matrix comes with boolean `needs_rotation` for whether width is doubled.
+#[derive(Debug)]
 struct TraceRound0Matrices {
-    preprocessed: Option<DeviceMatrix<F>>,
-    cached: Vec<DeviceMatrix<F>>,
-    common: Option<DeviceMatrix<F>>,
+    preprocessed: Option<(DeviceMatrix<F>, bool)>,
+    cached: Vec<(DeviceMatrix<F>, bool)>,
+    common: (DeviceMatrix<F>, bool),
 }
 
 #[derive(Debug)]
@@ -108,15 +109,13 @@ pub(crate) fn prepare_round0_trace_input<'a>(
     let trace_mats = prepare_trace_round0_matrices(
         l_skip,
         log_large_domain,
+        &pk.vk.symbolic_constraints.constraints,
         pk.preprocessed_data.as_ref(),
         air_ctx,
         common_main_pcs_data,
         trace_idx,
     )?;
-    debug_assert_eq!(
-        selectors_large.height(),
-        trace_mats.common.as_ref().unwrap().height()
-    );
+    debug_assert_eq!(selectors_large.height(), trace_mats.common.0.height());
 
     let partition_ptrs_host = collect_partition_ptrs(&trace_mats);
     let d_main_ptrs = partition_ptrs_host.to_device()?;
@@ -180,10 +179,7 @@ pub fn evaluate_round0_constraints_gpu(
     let num_x = input.eq_x.height();
     let large_height = input.selectors_large.height();
     debug_assert_eq!(num_x * large_domain, large_height);
-    debug_assert_eq!(
-        input.trace_mats.common.as_ref().unwrap().height(),
-        large_height
-    );
+    debug_assert_eq!(input.trace_mats.common.0.height(), large_height);
 
     let intermediates = if rules.buffer_size > 0 {
         let capacity = if rules.buffer_size > 16 {
@@ -209,7 +205,7 @@ pub fn evaluate_round0_constraints_gpu(
             &output,
             &input.selectors_large,
             &input.main_ptrs,
-            input.trace_mats.preprocessed.as_ref(),
+            input.trace_mats.preprocessed_ptr(),
             eq_z,
             &input.eq_x,
             lambda_pows,
@@ -337,7 +333,7 @@ pub fn evaluate_round0_interactions_gpu(
             &output_denom,
             &input.selectors_large,
             &input.main_ptrs,
-            input.trace_mats.preprocessed.as_ref(),
+            input.trace_mats.preprocessed_ptr(),
             eq_sharp_z,
             &input.eq_x,
             eq_3b,
@@ -374,56 +370,83 @@ pub fn evaluate_round0_interactions_gpu(
 }
 
 // For a single present AIR.
+// `constraints_dag` includes nodes for plain AIR constraints and interaction expressions.
 fn prepare_trace_round0_matrices(
     l_skip: usize,
     log_large_domain: usize,
+    constraints_dag: &SymbolicExpressionDag<F>,
     preprocessed: Option<&CommittedTraceDataV2<GpuBackendV2>>,
     air_ctx: &AirProvingContextV2<GpuBackendV2>,
     common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     trace_idx: usize,
 ) -> Result<TraceRound0Matrices, Round0PrepError> {
-    let mut mats = TraceRound0Matrices::default();
+    let mut preprocessed_rot = false;
+    let mut parts_main_rot = vec![false; air_ctx.cached_mains.len() + 1];
+    for node in &constraints_dag.nodes {
+        if let SymbolicExpressionNode::Variable(var) = node {
+            match var.entry {
+                Entry::Preprocessed { offset } => {
+                    preprocessed_rot = preprocessed_rot || offset > 0;
+                }
+                Entry::Main { offset, part_index } => {
+                    parts_main_rot[part_index] = parts_main_rot[part_index] || offset > 0;
+                }
+                _ => {}
+            }
+        }
+    }
+    let common_main_rot = parts_main_rot.pop().unwrap();
+    let cached_mains_rot = parts_main_rot;
 
-    if let Some(committed) = preprocessed {
+    let preprocessed_up = if let Some(committed) = preprocessed {
         debug_assert_eq!(committed.data.layout.l_skip(), l_skip);
         let trace = &committed.trace;
         let width = trace.width();
-        mats.preprocessed = Some(upsample_matrix(
+        let upsampled = upsample_matrix(
             l_skip,
             log_large_domain,
             trace,
             committed.data.mixed_view(0, width),
-            true,
-        )?);
-    }
-    mats.cached = air_ctx
-        .cached_mains
-        .iter()
-        .map(|committed| {
+            preprocessed_rot,
+        )?;
+        Some((upsampled, preprocessed_rot))
+    } else {
+        None
+    };
+    let cached = zip(&air_ctx.cached_mains, cached_mains_rot)
+        .map(|(committed, needs_rot)| -> Result<_, Round0PrepError> {
             debug_assert_eq!(committed.data.layout.l_skip(), l_skip);
             let trace = &committed.trace;
             let width = trace.width();
-            upsample_matrix(
+            let upsampled = upsample_matrix(
                 l_skip,
                 log_large_domain,
                 trace,
                 committed.data.mixed_view(0, width),
-                true,
-            )
+                needs_rot,
+            )?;
+            Ok((upsampled, needs_rot))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     let common_main = &air_ctx.common_main;
     let width = common_main.width();
-    mats.common = Some(upsample_matrix(
-        l_skip,
-        log_large_domain,
-        common_main,
-        common_main_pcs_data.mixed_view(trace_idx, width),
-        true,
-    )?);
+    let common = (
+        upsample_matrix(
+            l_skip,
+            log_large_domain,
+            common_main,
+            common_main_pcs_data.mixed_view(trace_idx, width),
+            common_main_rot,
+        )?,
+        common_main_rot,
+    );
 
-    Ok(mats)
+    Ok(TraceRound0Matrices {
+        preprocessed: preprocessed_up,
+        cached,
+        common,
+    })
 }
 
 /// `trace_evals` is always the honest trace matrix of evaluations. Its height is not lifted.
@@ -567,27 +590,38 @@ pub fn upsample_matrix(
 
 fn collect_partition_ptrs(mats: &TraceRound0Matrices) -> Vec<MainMatrixPtrs<F>> {
     let mut ptrs = Vec::new();
-    for matrix in &mats.cached {
-        debug_assert_eq!(
-            matrix.width() % 2,
-            0,
-            "rotated cached main should have even width"
-        );
+    for (matrix, needs_rot) in &mats.cached {
+        let multiplier = if *needs_rot { 2 } else { 1 };
+        debug_assert_eq!(matrix.width() % multiplier, 0);
         ptrs.push(MainMatrixPtrs {
             data: matrix.buffer().as_ptr(),
-            air_width: (matrix.width() / 2) as u32,
+            air_width: (matrix.width() / multiplier) as u32,
         });
     }
-    if let Some(common) = &mats.common {
-        debug_assert_eq!(
-            common.width() % 2,
-            0,
-            "rotated common main should have even width"
-        );
-        ptrs.push(MainMatrixPtrs {
-            data: common.buffer().as_ptr(),
-            air_width: (common.width() / 2) as u32,
-        });
-    }
+    let (common, needs_rot) = &mats.common;
+    let multiplier = if *needs_rot { 2 } else { 1 };
+    debug_assert_eq!(common.width() % multiplier, 0);
+    ptrs.push(MainMatrixPtrs {
+        data: common.buffer().as_ptr(),
+        air_width: (common.width() / multiplier) as u32,
+    });
     ptrs
+}
+
+impl TraceRound0Matrices {
+    pub fn preprocessed_ptr(&self) -> MainMatrixPtrs<F> {
+        if let Some((matrix, needs_rot)) = &self.preprocessed {
+            let multiplier = if *needs_rot { 2 } else { 1 };
+            debug_assert_eq!(matrix.width() % multiplier, 0);
+            MainMatrixPtrs {
+                data: matrix.buffer().as_ptr(),
+                air_width: (matrix.width() / multiplier) as u32,
+            }
+        } else {
+            MainMatrixPtrs {
+                data: std::ptr::null(),
+                air_width: 0,
+            }
+        }
+    }
 }
