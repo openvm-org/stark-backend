@@ -289,7 +289,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
 
     fn get_symbolic_builder(
         &self,
-        max_constraint_degree: Option<usize>,
+        _max_constraint_degree: Option<usize>,
     ) -> SymbolicRapBuilder<Val<SC>> {
         let width = TraceWidth {
             preprocessed: self.prep_keygen_data.width(),
@@ -297,14 +297,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             common_main: self.air.common_main_width(),
             after_challenge: vec![],
         };
-        get_symbolic_builder(
-            self.air.as_ref(),
-            &width,
-            &[],
-            &[],
-            SC::RapPhaseSeq::ID,
-            max_constraint_degree.unwrap_or(0),
-        )
+        get_symbolic_builder(self.air.as_ref(), &width, &[], &[])
     }
 }
 
