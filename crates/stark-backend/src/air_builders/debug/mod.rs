@@ -10,10 +10,7 @@ use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use super::{symbolic::SymbolicConstraints, PartitionedAirBuilder, ViewPair};
 use crate::{
     config::{StarkGenericConfig, Val},
-    interaction::{
-        rap::InteractionPhaseAirBuilder, Interaction, InteractionBuilder, RapPhaseSeqKind,
-        SymbolicInteraction,
-    },
+    interaction::{Interaction, InteractionBuilder, RapPhaseSeqKind},
     keygen::types::StarkProvingKey,
     rap::{AnyRap, PermutationAirBuilderWithExposedValues},
 };
@@ -277,22 +274,5 @@ where
 
     fn all_interactions(&self) -> &[Interaction<Self::Expr>] {
         &[]
-    }
-}
-
-// No-op
-impl<SC: StarkGenericConfig> InteractionPhaseAirBuilder for DebugConstraintBuilder<'_, SC> {
-    fn finalize_interactions(&mut self) {}
-
-    fn max_constraint_degree(&self) -> usize {
-        0
-    }
-
-    fn rap_phase_seq_kind(&self) -> RapPhaseSeqKind {
-        self.rap_phase_seq_kind
-    }
-
-    fn symbolic_interactions(&self) -> Vec<SymbolicInteraction<Val<SC>>> {
-        vec![]
     }
 }
