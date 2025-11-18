@@ -122,9 +122,6 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
             }
         })
         .collect();
-    // Note[jpw]: there could be few nodes created after `constraint_idx` is built
-    // from `interactions` even though constraints already contain all interactions.
-    // This should be marginal and is not optimized for now.
     let constraints = SymbolicExpressionDag {
         nodes,
         constraint_idx,
