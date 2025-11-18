@@ -41,6 +41,8 @@ pub enum FractionalSumcheckError {
     FoldColumns(CudaError),
     #[error("frac_extract_claims cuda error: {0}")]
     ExtractClaims(CudaError),
+    #[error("evals_eq_hypercube cuda error: {0}")]
+    EvalEqHypercube(CudaError),
     #[error("memcpy error: {0}")]
     Copy(#[from] MemCopyError),
 }
