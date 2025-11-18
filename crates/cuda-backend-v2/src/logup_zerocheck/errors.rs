@@ -32,17 +32,9 @@ impl From<Round0PrepError> for Round0EvalError {
 }
 
 #[derive(Debug, Error)]
-pub enum FractionalSegmentTreeError {
-    #[error("cuda error: {0}")]
-    Cuda(#[from] CudaError),
-    #[error("memcpy error: {0}")]
-    Copy(#[from] MemCopyError),
-}
-
-#[derive(Debug, Error)]
 pub enum FractionalSumcheckError {
-    #[error("frac_prepare_round cuda error: {0}")]
-    PrepareRound(CudaError),
+    #[error("segment tree cuda error: {0}")]
+    SegmentTree(CudaError),
     #[error("frac_compute_round cuda error: {0}")]
     ComputeRound(CudaError),
     #[error("frac_fold_columns cuda error: {0}")]
@@ -78,4 +70,3 @@ pub enum UnstackMatrixError {
     #[error("matrix idx={mat_idx} not found")]
     MatrixNotFound { mat_idx: usize },
 }
-

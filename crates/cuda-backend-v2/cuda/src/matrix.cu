@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <utility>
 
 // `in` has width equal to `width` and height `domain_size * num_x`.
 // `out` has width equal to `width` and height `padded_size * num_x`.
