@@ -134,7 +134,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
 
 /// `expr_to_idx` is a cache so that the `Arc<_>` references within symbolic expressions get
 /// mapped to the same node ID if their underlying references are the same.
-fn topological_sort_symbolic_expr<'a, F: Field>(
+pub fn topological_sort_symbolic_expr<'a, F: Field>(
     expr: &'a SymbolicExpression<F>,
     expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, usize>,
     nodes: &mut Vec<SymbolicExpressionNode<F>>,
