@@ -9,7 +9,8 @@ use crate::{
 
 #[link(name = "cudart")]
 extern "C" {
-    fn cudaMemsetAsync(dst: *mut c_void, value: i32, count: usize, stream: cudaStream_t) -> i32;
+    pub fn cudaMemsetAsync(dst: *mut c_void, value: i32, count: usize, stream: cudaStream_t)
+        -> i32;
 }
 
 /// Struct that owns a buffer allocated on GPU device. The struct only holds the raw pointer and
