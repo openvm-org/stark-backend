@@ -15,27 +15,13 @@ using namespace symbolic_dag;
 // The eq_* multiplication is done separately in the kernel
 template <bool GLOBAL>
 __device__ __forceinline__ void acc_interactions(
-    uint32_t row,
-    const Fp *__restrict__ d_selectors,
-    const MainMatrixPtrs<Fp> *__restrict__ d_main,
-    uint32_t height,
-    uint32_t selectors_width,
-    const Fp *__restrict__ d_preprocessed,
-    uint32_t preprocessed_air_width,
-    const FpExt *__restrict__ d_eq_z,
-    const FpExt *__restrict__ d_eq_x,
-    const Fp *__restrict__ d_public,
-    uint32_t public_len,
+    const DagEvaluationContext &eval_ctx,
     const FpExt *__restrict__ d_eq_3b,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
     const size_t *__restrict__ d_used_nodes,
     size_t used_nodes_len,
-    uint32_t buffer_size,
-    FpExt *__restrict__ inter_buffer,
     FpExt *__restrict__ local_buffer,
-    uint32_t buffer_stride,
-    uint32_t large_domain,
     const FpExt *__restrict__ d_challenges,
     FpExt &numer_sum,
     FpExt &denom_sum
@@ -43,7 +29,6 @@ __device__ __forceinline__ void acc_interactions(
     // Track how many rules we've evaluated so far
     size_t rules_evaluated = 0;
     FpExt temp_numer(Fp::zero());
-
     // Iterate through used_nodes (alternates: numer, denom, numer, denom, ...)
     for (size_t used_idx = 0; used_idx < used_nodes_len; ++used_idx) {
         size_t node_idx = d_used_nodes[used_idx];
@@ -54,28 +39,10 @@ __device__ __forceinline__ void acc_interactions(
             Rule rule = d_rules[node_idx];
             DecodedRule decoded = decode_rule(rule);
             if (decoded.op == OP_VAR) {
-                result = evaluate_dag_entry(
-                    decoded.x,
-                    row,
-                    d_selectors,
-                    d_main,
-                    height,
-                    selectors_width,
-                    d_preprocessed,
-                    preprocessed_air_width,
-                    d_eq_z,
-                    d_eq_x,
-                    d_public,
-                    public_len,
-                    inter_buffer,
-                    buffer_stride,
-                    buffer_size,
-                    large_domain,
-                    d_challenges
-                );
-            } else if (buffer_size > 0 && decoded.buffer_result) {
+                result = evaluate_dag_entry(decoded.x, eval_ctx, d_challenges);
+            } else if (eval_ctx.buffer_size > 0 && decoded.buffer_result) {
                 if constexpr (GLOBAL) {
-                    result = inter_buffer[decoded.z_index * buffer_stride];
+                    result = eval_ctx.inter_buffer[decoded.z_index * eval_ctx.buffer_stride];
                 } else {
                     result = local_buffer[decoded.z_index];
                 }
@@ -86,93 +53,21 @@ __device__ __forceinline__ void acc_interactions(
                 Rule rule = d_rules[rules_evaluated];
                 DecodedRule decoded = decode_rule(rule);
 
-                FpExt x_val = evaluate_dag_entry(
-                    decoded.x,
-                    row,
-                    d_selectors,
-                    d_main,
-                    height,
-                    selectors_width,
-                    d_preprocessed,
-                    preprocessed_air_width,
-                    d_eq_z,
-                    d_eq_x,
-                    d_public,
-                    public_len,
-                    inter_buffer,
-                    buffer_stride,
-                    buffer_size,
-                    large_domain,
-                    d_challenges
-                );
+                FpExt x_val = evaluate_dag_entry(decoded.x, eval_ctx, d_challenges);
                 FpExt node_result;
                 switch (decoded.op) {
                 case OP_ADD: {
-                    FpExt y_val = evaluate_dag_entry(
-                        decoded.y,
-                        row,
-                        d_selectors,
-                        d_main,
-                        height,
-                        selectors_width,
-                        d_preprocessed,
-                        preprocessed_air_width,
-                        d_eq_z,
-                        d_eq_x,
-                        d_public,
-                        public_len,
-                        inter_buffer,
-                        buffer_stride,
-                        buffer_size,
-                        large_domain,
-                        d_challenges
-                    );
+                    FpExt y_val = evaluate_dag_entry(decoded.y, eval_ctx, d_challenges);
                     node_result = x_val + y_val;
                     break;
                 }
                 case OP_SUB: {
-                    FpExt y_val = evaluate_dag_entry(
-                        decoded.y,
-                        row,
-                        d_selectors,
-                        d_main,
-                        height,
-                        selectors_width,
-                        d_preprocessed,
-                        preprocessed_air_width,
-                        d_eq_z,
-                        d_eq_x,
-                        d_public,
-                        public_len,
-                        inter_buffer,
-                        buffer_stride,
-                        buffer_size,
-                        large_domain,
-                        d_challenges
-                    );
+                    FpExt y_val = evaluate_dag_entry(decoded.y, eval_ctx, d_challenges);
                     node_result = x_val - y_val;
                     break;
                 }
                 case OP_MUL: {
-                    FpExt y_val = evaluate_dag_entry(
-                        decoded.y,
-                        row,
-                        d_selectors,
-                        d_main,
-                        height,
-                        selectors_width,
-                        d_preprocessed,
-                        preprocessed_air_width,
-                        d_eq_z,
-                        d_eq_x,
-                        d_public,
-                        public_len,
-                        inter_buffer,
-                        buffer_stride,
-                        buffer_size,
-                        large_domain,
-                        d_challenges
-                    );
+                    FpExt y_val = evaluate_dag_entry(decoded.y, eval_ctx, d_challenges);
                     node_result = x_val * y_val;
                     break;
                 }
@@ -190,9 +85,10 @@ __device__ __forceinline__ void acc_interactions(
                     break;
                 }
 
-                if (decoded.buffer_result && buffer_size > 0) {
+                if (decoded.buffer_result && eval_ctx.buffer_size > 0) {
                     if constexpr (GLOBAL) {
-                        inter_buffer[decoded.z_index * buffer_stride] = node_result;
+                        eval_ctx.inter_buffer[decoded.z_index * eval_ctx.buffer_stride] =
+                            node_result;
                     } else {
                         local_buffer[decoded.z_index] = node_result;
                     }
@@ -473,8 +369,7 @@ __global__ void evaluate_interactions_round0_kernel(
         FpExt numer_sum(Fp::zero());
         FpExt denom_sum(Fp::zero());
 
-        // Compute interaction sums (without eq_* multiplication)
-        acc_interactions<GLOBAL>(
+        DagEvaluationContext eval_ctx{
             row,
             d_selectors,
             d_main,
@@ -486,16 +381,21 @@ __global__ void evaluate_interactions_round0_kernel(
             d_eq_x,
             d_public,
             public_len,
+            inter_buffer,
+            buffer_stride,
+            buffer_size,
+            large_domain
+        };
+
+        // Compute interaction sums (without eq_* multiplication)
+        acc_interactions<GLOBAL>(
+            eval_ctx,
             d_eq_3b,
             d_rules,
             rules_len,
             d_used_nodes,
             used_nodes_len,
-            buffer_size,
-            inter_buffer,
             local_buffer,
-            buffer_stride,
-            large_domain,
             d_challenges,
             numer_sum,
             denom_sum

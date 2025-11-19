@@ -15,17 +15,7 @@ using namespace symbolic_dag;
 // This computes the constraint sum: sum(lambda_i * constraint_i) for all constraints
 template <bool GLOBAL>
 __device__ __forceinline__ FpExt acc_constraints(
-    uint32_t row,
-    const Fp *__restrict__ d_selectors,
-    const MainMatrixPtrs<Fp> *__restrict__ d_main,
-    uint32_t height,
-    uint32_t selectors_width,
-    const Fp *__restrict__ d_preprocessed,
-    uint32_t preprocessed_air_width,
-    const FpExt *__restrict__ d_eq_z,
-    const FpExt *__restrict__ d_eq_x,
-    const Fp *__restrict__ d_public,
-    uint32_t public_len,
+    const DagEvaluationContext &eval_ctx,
     const FpExt *__restrict__ d_lambda_pows,
     const uint32_t *__restrict__ d_lambda_indices,
     const Rule *__restrict__ d_rules,
@@ -33,11 +23,7 @@ __device__ __forceinline__ FpExt acc_constraints(
     const size_t *__restrict__ d_used_nodes,
     size_t used_nodes_len,
     size_t lambda_len,
-    uint32_t buffer_size,
-    FpExt *__restrict__ inter_buffer,
-    FpExt *__restrict__ local_buffer,
-    uint32_t buffer_stride,
-    uint32_t large_domain
+    FpExt *__restrict__ local_buffer
 ) {
     size_t lambda_idx = 0;
     FpExt constraint_sum(Fp::zero());
@@ -46,89 +32,21 @@ __device__ __forceinline__ FpExt acc_constraints(
         Rule rule = d_rules[node];
         DecodedRule decoded = decode_rule(rule);
 
-        FpExt x_val = evaluate_dag_entry(
-            decoded.x,
-            row,
-            d_selectors,
-            d_main,
-            height,
-            selectors_width,
-            d_preprocessed,
-            preprocessed_air_width,
-            d_eq_z,
-            d_eq_x,
-            d_public,
-            public_len,
-            inter_buffer,
-            buffer_stride,
-            buffer_size,
-            large_domain
-        );
+        FpExt x_val = evaluate_dag_entry(decoded.x, eval_ctx);
         FpExt result;
         switch (decoded.op) {
         case OP_ADD: {
-            FpExt y_val = evaluate_dag_entry(
-                decoded.y,
-                row,
-                d_selectors,
-                d_main,
-                height,
-                selectors_width,
-                d_preprocessed,
-                preprocessed_air_width,
-                d_eq_z,
-                d_eq_x,
-                d_public,
-                public_len,
-                inter_buffer,
-                buffer_stride,
-                buffer_size,
-                large_domain
-            );
+            FpExt y_val = evaluate_dag_entry(decoded.y, eval_ctx);
             result = x_val + y_val;
             break;
         }
         case OP_SUB: {
-            FpExt y_val = evaluate_dag_entry(
-                decoded.y,
-                row,
-                d_selectors,
-                d_main,
-                height,
-                selectors_width,
-                d_preprocessed,
-                preprocessed_air_width,
-                d_eq_z,
-                d_eq_x,
-                d_public,
-                public_len,
-                inter_buffer,
-                buffer_stride,
-                buffer_size,
-                large_domain
-            );
+            FpExt y_val = evaluate_dag_entry(decoded.y, eval_ctx);
             result = x_val - y_val;
             break;
         }
         case OP_MUL: {
-            FpExt y_val = evaluate_dag_entry(
-                decoded.y,
-                row,
-                d_selectors,
-                d_main,
-                height,
-                selectors_width,
-                d_preprocessed,
-                preprocessed_air_width,
-                d_eq_z,
-                d_eq_x,
-                d_public,
-                public_len,
-                inter_buffer,
-                buffer_stride,
-                buffer_size,
-                large_domain
-            );
+            FpExt y_val = evaluate_dag_entry(decoded.y, eval_ctx);
             result = x_val * y_val;
             break;
         }
@@ -143,9 +61,9 @@ __device__ __forceinline__ FpExt acc_constraints(
             break;
         }
 
-        if (decoded.buffer_result && buffer_size > 0) {
+        if (decoded.buffer_result && eval_ctx.buffer_size > 0) {
             if constexpr (GLOBAL) {
-                inter_buffer[decoded.z_index * buffer_stride] = result;
+                eval_ctx.inter_buffer[decoded.z_index * eval_ctx.buffer_stride] = result;
             } else {
                 local_buffer[decoded.z_index] = result;
             }
@@ -234,7 +152,7 @@ __global__ void zerocheck_evaluate_constraints_kernel(
 
         FpExt eq_val = d_eq_z[z_idx] * d_eq_x[x_idx];
 
-        FpExt constraint_sum = acc_constraints<GLOBAL>(
+        DagEvaluationContext eval_ctx{
             row,
             d_selectors,
             d_main,
@@ -246,6 +164,14 @@ __global__ void zerocheck_evaluate_constraints_kernel(
             d_eq_x,
             d_public,
             public_len,
+            inter_buffer,
+            buffer_stride,
+            buffer_size,
+            large_domain
+        };
+
+        FpExt constraint_sum = acc_constraints<GLOBAL>(
+            eval_ctx,
             d_lambda_pows,
             d_lambda_indices,
             d_rules,
@@ -253,11 +179,7 @@ __global__ void zerocheck_evaluate_constraints_kernel(
             d_used_nodes,
             used_nodes_len,
             lambda_len,
-            buffer_size,
-            inter_buffer,
-            local_buffer,
-            buffer_stride,
-            large_domain
+            local_buffer
         );
 
         FpExt final_val = constraint_sum * eq_val;
