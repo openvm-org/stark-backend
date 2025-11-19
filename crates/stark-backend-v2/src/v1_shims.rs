@@ -1,28 +1,28 @@
 use std::sync::Arc;
 
 use openvm_stark_backend::{
-    Chip,
     keygen::types::{MultiStarkProvingKey, StarkProvingKey},
     prover::{
-        MatrixDimensions, ProverBackend,
         cpu::CpuBackend,
         types::{AirProvingContext, ProvingContext},
+        MatrixDimensions, ProverBackend,
     },
+    Chip,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_strict_usize;
 
 use crate::{
-    ChipV2, F, SystemParams,
     keygen::types::{
-        MultiStarkProvingKeyV2, StarkProvingKeyV2, StarkVerifyingKeyV2, StarkVerifyingParamsV2,
-        VerifierSinglePreprocessedData, find_unused_vars,
+        find_unused_vars, MultiStarkProvingKeyV2, StarkProvingKeyV2, StarkVerifyingKeyV2,
+        StarkVerifyingParamsV2, VerifierSinglePreprocessedData,
     },
     prover::{
-        AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2, ProverBackendV2,
-        ProvingContextV2, stacked_pcs::stacked_commit,
+        stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
+        CpuBackendV2, ProverBackendV2, ProvingContextV2,
     },
+    ChipV2, SystemParams, F,
 };
 
 type SC = BabyBearPoseidon2Config;
@@ -77,7 +77,7 @@ impl StarkProvingKeyV2 {
             preprocessed_data: preprocessed_vdata,
             params: vparams,
             symbolic_constraints,
-            max_constraint_degree: pk.vk.quotient_degree + 1,
+            max_constraint_degree: pk.vk.max_constraint_degree,
             is_required: false, // no AIRs are required in v1
             unused_variables,
         };
