@@ -2,16 +2,21 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use openvm_stark_backend::{
-    AirRef,
+    interaction::BusIndex,
     prover::{MatrixDimensions, Prover},
+    AirRef,
 };
 pub use openvm_stark_sdk::dummy_airs::fib_air::air::FibonacciAir;
 use openvm_stark_sdk::{
     any_rap_arc_vec,
     config::{baby_bear_poseidon2::BabyBearPoseidon2Config, setup_tracing},
     dummy_airs::{
-        self, fib_selector_air::air::FibonacciSelectorAir,
-        interaction::dummy_interaction_air::DummyInteractionAir,
+        self,
+        fib_selector_air::air::FibonacciSelectorAir,
+        interaction::{
+            dummy_interaction_air::DummyInteractionAir,
+            self_interaction_air::{SelfInteractionAir, SelfInteractionChip},
+        },
     },
 };
 use p3_baby_bear::BabyBear;
@@ -19,17 +24,17 @@ use p3_field::{FieldAlgebra, PrimeField32};
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
-    BabyBearPoseidon2CpuEngineV2, F, StarkEngineV2, SystemParams,
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
     poseidon2::sponge::{
         DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory, TranscriptLog,
     },
     proof::Proof,
     prover::{
-        AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
-        DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver, ProvingContextV2,
-        TraceCommitterV2, stacked_pcs::stacked_commit,
+        stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
+        CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver,
+        ProvingContextV2, TraceCommitterV2,
     },
+    BabyBearPoseidon2CpuEngineV2, ChipV2, StarkEngineV2, SystemParams, F,
 };
 
 pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
@@ -71,41 +76,6 @@ fn get_conditional_fib_number(mut a: u32, mut b: u32, sels: &[bool]) -> u32 {
     b
 }
 
-pub struct FibFixture {
-    pub a: u32,
-    pub b: u32,
-    pub n: usize,
-    pub num_airs: usize,
-    pub empty_air_indices: Vec<usize>,
-}
-
-impl FibFixture {
-    pub fn new(a: u32, b: u32, n: usize) -> Self {
-        FibFixture {
-            a,
-            b,
-            n,
-            num_airs: 1,
-            empty_air_indices: vec![],
-        }
-    }
-
-    pub fn new_with_num_airs(a: u32, b: u32, n: usize, num_airs: usize) -> Self {
-        FibFixture {
-            a,
-            b,
-            n,
-            num_airs,
-            empty_air_indices: vec![],
-        }
-    }
-
-    pub fn with_empty_air_indices(mut self, empty_air_indices: impl Into<Vec<usize>>) -> Self {
-        self.empty_air_indices = empty_air_indices.into();
-        self
-    }
-}
-
 /// Trait for object responsible for generating the collection of AIRs and trace matrices for a
 /// single test case.
 pub trait TestFixture {
@@ -145,6 +115,41 @@ pub trait TestFixture {
         let (pk, vk) = self.keygen(engine);
         let proof = self.prove(engine, &pk);
         (vk, proof)
+    }
+}
+
+pub struct FibFixture {
+    pub a: u32,
+    pub b: u32,
+    pub n: usize,
+    pub num_airs: usize,
+    pub empty_air_indices: Vec<usize>,
+}
+
+impl FibFixture {
+    pub fn new(a: u32, b: u32, n: usize) -> Self {
+        FibFixture {
+            a,
+            b,
+            n,
+            num_airs: 1,
+            empty_air_indices: vec![],
+        }
+    }
+
+    pub fn new_with_num_airs(a: u32, b: u32, n: usize, num_airs: usize) -> Self {
+        FibFixture {
+            a,
+            b,
+            n,
+            num_airs,
+            empty_air_indices: vec![],
+        }
+    }
+
+    pub fn with_empty_air_indices(mut self, empty_air_indices: impl Into<Vec<usize>>) -> Self {
+        self.empty_air_indices = empty_air_indices.into();
+        self
     }
 }
 
@@ -349,6 +354,120 @@ impl TestFixture for PreprocessedFibFixture {
         let single_ctx =
             AirProvingContextV2::simple(ColMajorMatrix::from_row_major(&trace), pis.to_vec());
         ProvingContextV2::new(vec![(0, single_ctx)])
+    }
+}
+
+#[derive(derive_new::new)]
+pub struct SelfInteractionFixture {
+    pub widths: Vec<usize>,
+    pub log_height: usize,
+    pub bus_index: BusIndex,
+}
+
+impl TestFixture for SelfInteractionFixture {
+    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+        self.widths
+            .iter()
+            .map(|&width| {
+                Arc::new(SelfInteractionAir {
+                    width,
+                    bus_index: self.bus_index,
+                }) as AirRef<BabyBearPoseidon2Config>
+            })
+            .collect_vec()
+    }
+
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
+        let per_trace = self
+            .widths
+            .iter()
+            .map(|&width| {
+                let chip = SelfInteractionChip {
+                    width,
+                    log_height: self.log_height,
+                };
+                chip.generate_proving_ctx(())
+            })
+            .enumerate()
+            .collect_vec();
+        ProvingContextV2 { per_trace }
+    }
+}
+
+pub struct MixtureFixture {
+    pub fxs: Vec<MixtureFixtureEnum>,
+}
+
+pub enum MixtureFixtureEnum {
+    FibFixture(FibFixture),
+    InteractionsFixture11(InteractionsFixture11),
+    CachedFixture11(CachedFixture11),
+    PreprocessedFibFixture(PreprocessedFibFixture),
+    SelfInteractionFixture(SelfInteractionFixture),
+}
+
+impl MixtureFixtureEnum {
+    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+        use crate::test_utils::MixtureFixtureEnum::*;
+        match self {
+            FibFixture(fx) => fx.airs(),
+            InteractionsFixture11(fx) => fx.airs(),
+            CachedFixture11(fx) => fx.airs(),
+            PreprocessedFibFixture(fx) => fx.airs(),
+            SelfInteractionFixture(fx) => fx.airs(),
+        }
+    }
+
+    fn generate_air_proving_ctxs(&self) -> Vec<AirProvingContextV2<CpuBackendV2>> {
+        use crate::test_utils::MixtureFixtureEnum::*;
+        let ctx = match self {
+            FibFixture(fx) => fx.generate_proving_ctx(),
+            InteractionsFixture11(fx) => fx.generate_proving_ctx(),
+            CachedFixture11(fx) => fx.generate_proving_ctx(),
+            PreprocessedFibFixture(fx) => fx.generate_proving_ctx(),
+            SelfInteractionFixture(fx) => fx.generate_proving_ctx(),
+        };
+        ctx.per_trace
+            .into_iter()
+            .map(|(_, air_ctx)| air_ctx)
+            .collect_vec()
+    }
+}
+
+impl MixtureFixture {
+    pub fn new(fxs: Vec<MixtureFixtureEnum>) -> Self {
+        Self { fxs }
+    }
+
+    pub fn standard(log_height: usize, params: SystemParams) -> Self {
+        let height = 1usize << log_height;
+        let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
+        let widths = vec![4, 7, 8, 8, 10, 100];
+        Self::new(vec![
+            MixtureFixtureEnum::FibFixture(FibFixture::new(8, 8, height)),
+            MixtureFixtureEnum::InteractionsFixture11(InteractionsFixture11),
+            MixtureFixtureEnum::CachedFixture11(CachedFixture11::new(params)),
+            MixtureFixtureEnum::PreprocessedFibFixture(PreprocessedFibFixture::new(7, 3, sels)),
+            MixtureFixtureEnum::SelfInteractionFixture(SelfInteractionFixture::new(
+                widths, log_height, 5,
+            )),
+        ])
+    }
+}
+
+impl TestFixture for MixtureFixture {
+    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+        self.fxs.iter().flat_map(|fx| fx.airs()).collect_vec()
+    }
+
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
+        let per_trace = self
+            .fxs
+            .iter()
+            .flat_map(|fx| fx.generate_air_proving_ctxs())
+            .enumerate()
+            .collect_vec();
+        ProvingContextV2 { per_trace }
     }
 }
 
