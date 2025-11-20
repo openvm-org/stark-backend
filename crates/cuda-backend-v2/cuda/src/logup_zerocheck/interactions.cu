@@ -167,7 +167,8 @@ __device__ __forceinline__ FpExt evaluate_dag_entry_gkr(
 
 template <bool GLOBAL>
 __global__ void evaluate_interactions_gkr_kernel(
-    FracExt *__restrict__ d_output,
+    Fp *__restrict__ d_numerators,
+    FpExt *__restrict__ d_denominators,
     const Fp *__restrict__ d_preprocessed,
     const uint64_t *__restrict__ d_main,
     const FpExt *__restrict__ d_challenges,
@@ -285,8 +286,11 @@ __global__ void evaluate_interactions_gkr_kernel(
                         denom = result;
                         size_t interaction_idx = col_offset + (i >> 1);
                         size_t out_idx = interaction_idx * permutation_height + row;
-                        d_output[out_idx].p = numerator;
-                        d_output[out_idx].q = denom;
+                        // Numerator is computed as FpExt through DAG evaluation
+                        // For logup, the numerator (count) should be in the base field
+                        // Extract the base field component (first element of extension field)
+                        d_numerators[out_idx] = numerator.elems[0];
+                        d_denominators[out_idx] = denom;
                     } else {
                         numerator = result;
                     }
@@ -413,7 +417,8 @@ __global__ void evaluate_interactions_round0_kernel(
 
 extern "C" int _logup_gkr_input_eval(
     bool is_global,
-    FracExt *d_output,
+    Fp *d_numerators,
+    FpExt *d_denominators,
     const Fp *d_preprocessed,
     const uint64_t *d_main,
     const FpExt *d_challenges,
@@ -428,7 +433,8 @@ extern "C" int _logup_gkr_input_eval(
     auto [grid, block] = kernel_launch_params(interaction_evaluation::TASK_SIZE, 256);
     if (is_global) {
         evaluate_interactions_gkr_kernel<true><<<grid, block>>>(
-            d_output,
+            d_numerators,
+            d_denominators,
             d_preprocessed,
             d_main,
             d_challenges,
@@ -442,7 +448,8 @@ extern "C" int _logup_gkr_input_eval(
         );
     } else {
         evaluate_interactions_gkr_kernel<false><<<grid, block>>>(
-            d_output,
+            d_numerators,
+            d_denominators,
             d_preprocessed,
             d_main,
             d_challenges,

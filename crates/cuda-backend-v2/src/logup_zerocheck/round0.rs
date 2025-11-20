@@ -59,6 +59,7 @@ pub(crate) struct Round0TraceInput<'a> {
 }
 
 /// For single AIR
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_round0_trace_input<'a>(
     l_skip: usize,
     log_large_domain: usize,
