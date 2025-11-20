@@ -3,8 +3,8 @@ use std::io::{Error, Read, Result, Write};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    codec::{decode_into_vec, encode_iter, Decode, Encode},
     Digest, EF, F,
-    codec::{Decode, Encode, decode_into_vec, encode_iter},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,12 +449,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        BabyBearPoseidon2CpuEngineV2, SystemParams,
         poseidon2::sponge::DuplexSpongeRecorder,
         test_utils::{
-            CachedFixture11, FibFixture, InteractionsFixture11, PreprocessedFibFixture,
-            TestFixture, test_system_params_small,
+            test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
+            PreprocessedFibFixture, TestFixture,
         },
+        BabyBearPoseidon2CpuEngineV2, SystemParams,
     };
 
     fn test_proof_encode_decode<Fx: TestFixture>(fx: Fx, params: SystemParams) -> Result<()> {

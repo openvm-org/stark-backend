@@ -3,9 +3,9 @@ use p3_util::log2_strict_usize;
 use tracing::debug;
 
 use crate::{
-    EF,
     poseidon2::sponge::FiatShamirTranscript,
     prover::sumcheck::{SumcheckCubeProof, SumcheckPrismProof},
+    EF,
 };
 
 pub fn verify_sumcheck_multilinear<F: Field, TS: FiatShamirTranscript>(
