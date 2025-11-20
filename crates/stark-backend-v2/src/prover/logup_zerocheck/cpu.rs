@@ -381,7 +381,7 @@ where
         // domain `D` of size `2^{l_skip}`. Hence `s_0 = Z_D * s'_0(Z)` where `Z_D =
         // \prod_{z in D} (Z - z)` where `s'_0` has degree `d * (2^{l_skip} - 1) - 1`. We
         // can evaluate s'_0 on a coset and then perform coset iDFT to get `s'_0`
-        // coefficients. We need to use a coset to ensure disjointness from `D`.
+        // coefficients. We need to use a coset to ensure disjointedness from `D`.
         let s_0_zerochecks = self
             .eval_helpers
             .par_iter()
