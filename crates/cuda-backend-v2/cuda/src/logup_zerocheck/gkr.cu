@@ -31,6 +31,33 @@ __global__ void frac_build_tree_layer_kernel(
     out_layer[idx] = frac_add(left, right);
 }
 
+// Build tree layer from separate (F, EF) buffers to FracExt output
+// This converts (F, EF) to (EF, EF) after first tree layer
+__global__ void frac_build_tree_layer_mixed_kernel(
+    FracExt *__restrict__ out_layer,
+    const Fp *__restrict__ in_numerators,
+    const FpExt *__restrict__ in_denominators,
+    size_t out_layer_size
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= out_layer_size) {
+        return;
+    }
+
+    size_t left_idx = idx << 1;
+    size_t right_idx = (idx << 1) + 1;
+    
+    Fp p_left = in_numerators[left_idx];
+    FpExt q_left = in_denominators[left_idx];
+    Fp p_right = in_numerators[right_idx];
+    FpExt q_right = in_denominators[right_idx];
+    
+    FracExt out;
+    out.p = q_right * p_left + q_left * p_right;
+    out.q = q_left * q_right;
+    out_layer[idx] = out;
+}
+
 __global__ void compute_round_kernel(
     const FpExt *__restrict__ eq_xi,
     const FracExt *__restrict__ pq,
@@ -172,6 +199,14 @@ __global__ void add_alpha_kernel(FracExt *data, size_t len, FpExt alpha) {
     }
 }
 
+// Add alpha to denominators (only affects denominators buffer)
+__global__ void add_alpha_mixed_kernel(FpExt *denominators, size_t len, FpExt alpha) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < len) {
+        denominators[idx] = denominators[idx] + alpha;
+    }
+}
+
 template <typename F, typename EF>
 __global__ void frac_vector_scalar_multiply_kernel(
     std::pair<EF, EF> *frac_vec,
@@ -183,6 +218,34 @@ __global__ void frac_vector_scalar_multiply_kernel(
         return;
 
     frac_vec[tidx].first *= scalar;
+}
+
+// Multiply numerators (base field) by scalar
+__global__ void frac_vector_scalar_multiply_mixed_kernel(
+    Fp *numerators,
+    Fp scalar,
+    uint32_t length
+) {
+    size_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tidx >= length)
+        return;
+
+    numerators[tidx] *= scalar;
+}
+
+// Convert separate (F, EF) buffers to FracExt (for last round processing)
+__global__ void frac_mixed_to_ext_kernel(
+    FracExt *__restrict__ out,
+    const Fp *__restrict__ numerators,
+    const FpExt *__restrict__ denominators,
+    size_t length
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= length) {
+        return;
+    }
+    out[idx].p = FpExt(numerators[idx]);
+    out[idx].q = denominators[idx];
 }
 
 // ============================================================================
@@ -270,6 +333,47 @@ extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar,
     auto [grid, block] = kernel_launch_params(length);
     frac_vector_scalar_multiply_kernel<Fp, FpExt>
         <<<grid, block>>>(reinterpret_cast<std::pair<FpExt, FpExt> *>(frac_vec), scalar, length);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _frac_build_tree_layer_mixed(
+    FracExt *out_layer,
+    const Fp *in_numerators,
+    const FpExt *in_denominators,
+    size_t out_layer_size
+) {
+    if (out_layer_size == 0) {
+        return 0;
+    }
+
+    auto [grid, block] = kernel_launch_params(out_layer_size);
+    frac_build_tree_layer_mixed_kernel<<<grid, block>>>(out_layer, in_numerators, in_denominators, out_layer_size);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _frac_add_alpha_mixed(FpExt *denominators, size_t len, FpExt alpha) {
+    auto [grid, block] = kernel_launch_params(len);
+    add_alpha_mixed_kernel<<<grid, block>>>(denominators, len, alpha);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _frac_vector_scalar_multiply_mixed(Fp *numerators, Fp scalar, uint32_t length) {
+    auto [grid, block] = kernel_launch_params(length);
+    frac_vector_scalar_multiply_mixed_kernel<<<grid, block>>>(numerators, scalar, length);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _frac_mixed_to_ext(
+    FracExt *out,
+    const Fp *numerators,
+    const FpExt *denominators,
+    size_t length
+) {
+    if (length == 0) {
+        return 0;
+    }
+    auto [grid, block] = kernel_launch_params(length);
+    frac_mixed_to_ext_kernel<<<grid, block>>>(out, numerators, denominators, length);
     return CHECK_KERNEL();
 }
 } // namespace fractional_sumcheck_gkr
