@@ -9,15 +9,15 @@
 use std::sync::Arc;
 
 use openvm_stark_backend::prover::MatrixDimensions;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
-    SystemParams,
     keygen::types::MultiStarkProvingKeyV2,
     prover::{
-        AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
-        DeviceMultiStarkProvingKeyV2, ProvingContextV2, stacked_pcs::StackedPcsData,
+        stacked_pcs::StackedPcsData, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
+        CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
     },
+    SystemParams,
 };
 
 /// Associated types needed by the prover, in the form of buffers and views,

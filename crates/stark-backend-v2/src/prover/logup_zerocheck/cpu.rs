@@ -7,7 +7,7 @@ use std::{
 use itertools::Itertools;
 use openvm_stark_backend::{
     air_builders::symbolic::{
-        SymbolicConstraints, SymbolicExpressionNode, symbolic_variable::Entry,
+        symbolic_variable::Entry, SymbolicConstraints, SymbolicExpressionNode,
     },
     parizip,
     prover::MatrixDimensions,
@@ -18,21 +18,21 @@ use p3_util::log2_strict_usize;
 use tracing::debug;
 
 use crate::{
-    EF, F,
-    poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni},
+    poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
     poseidon2::sponge::FiatShamirTranscript,
     prover::{
-        ColMajorMatrix, CpuBackendV2, CpuDeviceV2, DeviceMultiStarkProvingKeyV2,
-        LogupZerocheckProver, MatrixView, ProverBackendV2, ProvingContextV2,
-        fractional_sumcheck_gkr::{Frac, FracSumcheckProof, fractional_sumcheck},
+        fractional_sumcheck_gkr::{fractional_sumcheck, Frac, FracSumcheckProof},
         logup_zerocheck::EvalHelper,
         poly::evals_eq_hypercube,
         stacked_pcs::StackedLayout,
         sumcheck::{
-            batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round_poly_evals,
-            sumcheck_round0_deg, sumcheck_uni_round0_poly,
+            batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round0_deg,
+            sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
+        ColMajorMatrix, CpuBackendV2, CpuDeviceV2, DeviceMultiStarkProvingKeyV2,
+        LogupZerocheckProver, MatrixView, ProverBackendV2, ProvingContextV2,
     },
+    EF, F,
 };
 
 pub struct LogupZerocheckCpu<'a> {
