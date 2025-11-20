@@ -6,6 +6,7 @@
  * LOCAL CHANGES (high level):
  * - 2025-09-19: remove !BABY_BEAR_CANONICAL support
  * - 2025-09-19: disable asm for static analysis
+ * - 2025-11-19: removed __align__(16) from bb31_4_t
  */
 
 // Copyright Supranational LLC
@@ -71,7 +72,7 @@ struct bb31_t : public bb31_base {
     }
 };
 
-class bb31_4_t {
+class bb31_4_t { // DIFF: removed __align__(16)
     union { bb31_t c[4]; uint32_t u[4]; };
 
     static const uint32_t MOD   = 0x78000001;
