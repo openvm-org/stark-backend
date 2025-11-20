@@ -43,7 +43,7 @@ jobs:
 
       - name: Cargo audit
         run: |
-          cargo install cargo-audit
+          cargo install --locked cargo-audit
           cargo audit
 
   lint-cuda:
