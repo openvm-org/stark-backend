@@ -134,6 +134,28 @@ __global__ void frac_matrix_vertically_repeat_kernel(
     out[col * lifted_height + row].second = in[col * height + (row % height)].second;
 }
 
+// Vertically repeat separate (F, EF) buffers (for GKR input optimization)
+__global__ void frac_matrix_vertically_repeat_mixed_kernel(
+    Fp *__restrict__ out_numerators,
+    FpExt *__restrict__ out_denominators,
+    const Fp *__restrict__ in_numerators,
+    const FpExt *__restrict__ in_denominators,
+    const uint32_t width,
+    const uint32_t lifted_height,
+    const uint32_t height
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t col = blockIdx.y + blockIdx.z * gridDim.y;
+    if (col >= width) {
+        return;
+    }
+    uint32_t src_row = row % height;
+    size_t src_idx = col * height + src_row;
+    size_t dst_idx = col * lifted_height + row;
+    out_numerators[dst_idx] = in_numerators[src_idx];
+    out_denominators[dst_idx] = in_denominators[src_idx];
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -221,6 +243,23 @@ extern "C" int _frac_matrix_vertically_repeat(
     grid.z = (width + grid.y - 1) / grid.y;
     assert(grid.z <= MAX_GRID_DIM);
     frac_matrix_vertically_repeat_kernel<<<grid, block>>>(out, in, width, lifted_height, height);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _frac_matrix_vertically_repeat_mixed(
+    Fp *out_numerators,
+    FpExt *out_denominators,
+    const Fp *in_numerators,
+    const FpExt *in_denominators,
+    const uint32_t width,
+    const uint32_t lifted_height,
+    const uint32_t height
+) {
+    auto [grid, block] = kernel_launch_params(lifted_height);
+    grid.y = std::min(width, MAX_GRID_DIM);
+    grid.z = (width + grid.y - 1) / grid.y;
+    assert(grid.z <= MAX_GRID_DIM);
+    frac_matrix_vertically_repeat_mixed_kernel<<<grid, block>>>(out_numerators, out_denominators, in_numerators, in_denominators, width, lifted_height, height);
     return CHECK_KERNEL();
 }
 

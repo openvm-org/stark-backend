@@ -169,7 +169,7 @@ where
         let trace_interactions = collect_trace_interactions(pk, ctx, &interactions_layout);
 
         let total_leaves = 1 << (l_skip + n_logup);
-        let input_evals = if has_interactions {
+        let (input_numerators, input_denominators) = if has_interactions {
             log_gkr_input_evals(
                 &trace_interactions,
                 pk,
@@ -181,11 +181,12 @@ where
             )
             .expect("failed to evaluate interactions on device")
         } else {
-            DeviceBuffer::new()
+            (DeviceBuffer::new(), DeviceBuffer::new())
         };
 
-        let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(transcript, input_evals, true, &mem)
-            .expect("failed to run fractional sumcheck on GPU");
+        let (frac_sum_proof, mut xi) =
+            fractional_sumcheck_gpu(transcript, input_numerators, input_denominators, true, &mem)
+                .expect("failed to run fractional sumcheck on GPU");
 
         let n_global = max(n_max, n_logup);
         debug!(%n_global);
