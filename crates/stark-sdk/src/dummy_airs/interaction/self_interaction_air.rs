@@ -1,0 +1,70 @@
+use std::sync::Arc;
+
+use itertools::Itertools;
+use openvm_stark_backend::{
+    config::{StarkGenericConfig, Val},
+    interaction::{BusIndex, InteractionBuilder},
+    p3_air::{Air, AirBuilder, BaseAir},
+    p3_field::{FieldAlgebra, PrimeField32},
+    p3_matrix::{dense::RowMajorMatrix, Matrix},
+    prover::{cpu::CpuBackend, types::AirProvingContext},
+    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    Chip,
+};
+
+#[derive(Debug, Clone, Copy)]
+pub struct SelfInteractionAir {
+    pub width: usize,
+    pub bus_index: BusIndex,
+}
+
+impl<F> BaseAir<F> for SelfInteractionAir {
+    fn width(&self) -> usize {
+        self.width
+    }
+}
+impl<F> BaseAirWithPublicValues<F> for SelfInteractionAir {}
+impl<F> PartitionedBaseAir<F> for SelfInteractionAir {}
+
+impl<AB: AirBuilder + InteractionBuilder> Air<AB> for SelfInteractionAir
+where
+    AB::F: PrimeField32,
+{
+    fn eval(&self, builder: &mut AB) {
+        let main = builder.main();
+
+        let (local, next) = (main.row_slice(0), main.row_slice(1));
+        let mut local: Vec<<AB as AirBuilder>::Expr> =
+            (*local).into_iter().map(|v| (*v).into()).collect_vec();
+        let mut next: Vec<<AB as AirBuilder>::Expr> =
+            (*next).into_iter().map(|v| (*v).into()).collect_vec();
+
+        builder.push_interaction(self.bus_index, local.clone(), AB::Expr::ONE, 1);
+        builder.push_interaction(self.bus_index, next.clone(), AB::Expr::NEG_ONE, 1);
+
+        local.reverse();
+        next.reverse();
+
+        builder.push_interaction(self.bus_index, local, AB::Expr::TWO, 2);
+        builder.push_interaction(self.bus_index, next, AB::Expr::NEG_ONE * AB::Expr::TWO, 2);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SelfInteractionChip {
+    pub width: usize,
+    pub log_height: usize,
+}
+
+impl<SC: StarkGenericConfig> Chip<(), CpuBackend<SC>> for SelfInteractionChip {
+    fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
+        assert!(self.width > 0);
+        let mut trace = vec![Val::<SC>::ZERO; (1 << self.log_height) * self.width];
+        for (row_idx, chunk) in trace.chunks_mut(self.width).enumerate() {
+            for i in 0..self.width {
+                chunk[i] = Val::<SC>::from_canonical_usize((row_idx + i) % self.width);
+            }
+        }
+        AirProvingContext::simple_no_pis(Arc::new(RowMajorMatrix::new(trace, self.width)))
+    }
+}
