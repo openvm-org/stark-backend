@@ -47,6 +47,20 @@ extern "C" {
     ) -> i32;
     fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
     fn _frac_vector_scalar_multiply_ext_fp(frac_vec: *mut Frac<EF>, scalar: F, length: u32) -> i32;
+    fn _frac_build_tree_layer_mixed(
+        out_layer: *mut Frac<EF>,
+        in_numerators: *const F,
+        in_denominators: *const EF,
+        out_layer_size: usize,
+    ) -> i32;
+    fn _frac_add_alpha_mixed(denominators: *mut EF, len: usize, alpha: EF) -> i32;
+    fn _frac_vector_scalar_multiply_mixed(numerators: *mut F, scalar: F, length: u32) -> i32;
+    fn _frac_mixed_to_ext(
+        out: *mut Frac<EF>,
+        numerators: *const F,
+        denominators: *const EF,
+        length: usize,
+    ) -> i32;
 
     // utils.cu
     fn _fold_ple_from_evals(
@@ -81,11 +95,21 @@ extern "C" {
         lifted_height: u32,
         height: u32,
     ) -> i32;
+    fn _frac_matrix_vertically_repeat_mixed(
+        out_numerators: *mut F,
+        out_denominators: *mut EF,
+        in_numerators: *const F,
+        in_denominators: *const EF,
+        width: u32,
+        lifted_height: u32,
+        height: u32,
+    ) -> i32;
 
     // interactions.cu
     fn _logup_gkr_input_eval(
         is_global: bool,
-        output: *mut std::ffi::c_void,
+        numerators: *mut F,
+        denominators: *mut EF,
         preprocessed: *const std::ffi::c_void,
         partitioned_main: *const u64,
         challenges: *const std::ffi::c_void,
@@ -256,6 +280,23 @@ pub unsafe fn frac_build_tree_layer(
     ))
 }
 
+pub unsafe fn frac_build_tree_layer_mixed(
+    out_layer: &mut DeviceBuffer<Frac<EF>>,
+    in_numerators: &DeviceBuffer<F>,
+    in_denominators: &DeviceBuffer<EF>,
+    out_layer_size: usize,
+) -> Result<(), CudaError> {
+    debug_assert!(out_layer.len() >= out_layer_size);
+    debug_assert!(in_numerators.len() >= 2 * out_layer_size);
+    debug_assert!(in_denominators.len() >= 2 * out_layer_size);
+    CudaError::from_result(_frac_build_tree_layer_mixed(
+        out_layer.as_mut_ptr(),
+        in_numerators.as_ptr(),
+        in_denominators.as_ptr(),
+        out_layer_size,
+    ))
+}
+
 pub unsafe fn frac_compute_round(
     eq_xi: &DeviceBuffer<EF>,
     pq: &DeviceBuffer<Frac<EF>>,
@@ -364,7 +405,8 @@ pub unsafe fn compute_eq_sharp(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn logup_gkr_input_eval(
     is_global: bool,
-    output: *mut Frac<EF>,
+    numerators: *mut F,
+    denominators: *mut EF,
     preprocessed: &DeviceBuffer<F>,
     partitioned_main: &DeviceBuffer<u64>,
     challenges: &DeviceBuffer<EF>,
@@ -378,7 +420,8 @@ pub unsafe fn logup_gkr_input_eval(
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_gkr_input_eval(
         is_global,
-        output as *mut c_void,
+        numerators,
+        denominators,
         preprocessed.as_raw_ptr(),
         partitioned_main.as_ptr(),
         challenges.as_raw_ptr(),
@@ -394,6 +437,17 @@ pub unsafe fn logup_gkr_input_eval(
 
 pub unsafe fn frac_add_alpha(data: &DeviceBuffer<Frac<EF>>, alpha: EF) -> Result<(), CudaError> {
     CudaError::from_result(_frac_add_alpha(data.as_mut_raw_ptr(), data.len(), alpha))
+}
+
+pub unsafe fn frac_add_alpha_mixed(
+    denominators: &DeviceBuffer<EF>,
+    alpha: EF,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_frac_add_alpha_mixed(
+        denominators.as_mut_ptr(),
+        denominators.len(),
+        alpha,
+    ))
 }
 
 /// # Safety
@@ -675,6 +729,37 @@ pub unsafe fn frac_vector_scalar_multiply_ext_fp(
     ))
 }
 
+pub unsafe fn frac_vector_scalar_multiply_mixed(
+    numerators: *mut F,
+    scalar: F,
+    length: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_frac_vector_scalar_multiply_mixed(
+        numerators, scalar, length,
+    ))
+}
+
+/// Convert separate (F, EF) buffers to Frac<EF> directly on GPU
+/// # Safety
+/// - `out` must have capacity >= `length`
+/// - `numerators` and `denominators` must have length >= `length`
+pub unsafe fn frac_mixed_to_ext(
+    out: &mut DeviceBuffer<Frac<EF>>,
+    numerators: &DeviceBuffer<F>,
+    denominators: &DeviceBuffer<EF>,
+    length: usize,
+) -> Result<(), CudaError> {
+    debug_assert!(out.len() >= length);
+    debug_assert!(numerators.len() >= length);
+    debug_assert!(denominators.len() >= length);
+    CudaError::from_result(_frac_mixed_to_ext(
+        out.as_mut_ptr(),
+        numerators.as_ptr(),
+        denominators.as_ptr(),
+        length,
+    ))
+}
+
 /// Vertically repeats the rows of `input` and writes them to `out`. Both matrices are column-major.
 ///
 /// # Safety
@@ -692,6 +777,27 @@ pub unsafe fn frac_matrix_vertically_repeat(
     CudaError::from_result(_frac_matrix_vertically_repeat(
         out,
         input,
+        width,
+        lifted_height,
+        height,
+    ))
+}
+
+pub unsafe fn frac_matrix_vertically_repeat_mixed(
+    out_numerators: *mut F,
+    out_denominators: *mut EF,
+    in_numerators: *const F,
+    in_denominators: *const EF,
+    width: u32,
+    lifted_height: u32,
+    height: u32,
+) -> Result<(), CudaError> {
+    debug_assert!(lifted_height > height);
+    CudaError::from_result(_frac_matrix_vertically_repeat_mixed(
+        out_numerators,
+        out_denominators,
+        in_numerators,
+        in_denominators,
         width,
         lifted_height,
         height,
