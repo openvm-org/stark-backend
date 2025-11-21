@@ -417,7 +417,7 @@ impl VirtualMemoryPool {
             allocated_size += self.page_size;
             accumulated_size += self.page_size;
         }
-        tracing::info!(
+        tracing::debug!(
             "GPU mem: VPMM allocated {} bytes on stream {}. Total allocated: {}",
             ByteSize::b(allocated_size as u64),
             stream_id,
