@@ -179,16 +179,22 @@ impl MemTracker {
         let peak = manager.max_used_size;
         let pool = manager.pool.memory_usage();
 
+        // Global metrics (absolute values at this point in time)
         metrics::gauge!("gpu_mem.current_bytes").set(current as f64);
         metrics::gauge!("gpu_mem.peak_bytes").set(peak as f64);
         metrics::gauge!("gpu_mem.pool_bytes").set(pool as f64);
 
+        // Per-module metrics
+        // delta_bytes: net change in memory from module start to end (can be negative if freed more
+        // than allocated)
         let delta = current as isize - self.start_current as isize;
-        let module_peak_increase = peak.saturating_sub(self.start_peak);
+        // start_bytes: memory usage when this module started
+        // end_bytes: memory usage when this module ended (same as current)
 
         metrics::gauge!("gpu_mem.module.delta_bytes", "module" => self.label).set(delta as f64);
-        metrics::gauge!("gpu_mem.module.peak_bytes", "module" => self.label)
-            .set(module_peak_increase as f64);
+        metrics::gauge!("gpu_mem.module.start_bytes", "module" => self.label)
+            .set(self.start_current as f64);
+        metrics::gauge!("gpu_mem.module.end_bytes", "module" => self.label).set(current as f64);
     }
 
     pub fn reset_global_peak() {
