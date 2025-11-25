@@ -118,7 +118,17 @@ impl Default for MemoryManager {
 pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
     let manager = MEMORY_MANAGER.get().unwrap();
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
-    manager.d_malloc(size)
+    let result = manager.d_malloc(size);
+
+    // Emit allocation metric with current tracing span as label
+    if result.is_ok() {
+        let span = tracing::Span::current();
+        let label = span.metadata().map(|m| m.name()).unwrap_or("unknown");
+        metrics::counter!("gpu_mem.alloc_bytes", "span" => label.to_string())
+            .increment(size as u64);
+    }
+
+    result
 }
 
 /// # Safety
@@ -127,7 +137,27 @@ pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
 pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     let manager = MEMORY_MANAGER.get().unwrap();
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
-    manager.d_free(ptr)
+
+    // Get size before freeing for metrics
+    let size = manager
+        .allocated_ptrs
+        .get(&NonNull::new(ptr).ok_or(MemoryError::NullPointer)?)
+        .copied()
+        .or_else(|| manager.pool.get_allocation_size(ptr as u64));
+
+    let result = manager.d_free(ptr);
+
+    // Emit deallocation metric with current tracing span as label
+    if result.is_ok() {
+        if let Some(size) = size {
+            let span = tracing::Span::current();
+            let label = span.metadata().map(|m| m.name()).unwrap_or("unknown");
+            metrics::counter!("gpu_mem.free_bytes", "span" => label.to_string())
+                .increment(size as u64);
+        }
+    }
+
+    result
 }
 
 /// Returns (used, total) GPU memory in bytes from CUDA runtime.
@@ -198,7 +228,7 @@ impl MemTracker {
             .set(self.start_current as f64);
         metrics::gauge!("gpu_mem.cuda_used_bytes", "module" => self.label).set(cuda_used as f64);
 
-        // Global metrics (emitted every time, last value wins)
+        // Global metrics
         metrics::gauge!("gpu_mem.peak_bytes").set(peak as f64);
         metrics::gauge!("gpu_mem.pool_bytes").set(pool as f64);
         metrics::gauge!("gpu_mem.cuda_total_bytes").set(cuda_total as f64);
