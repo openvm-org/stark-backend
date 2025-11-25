@@ -129,21 +129,76 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     manager.d_free(ptr)
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MemSnapshot {
+    pub current: usize,
+    pub peak: usize,
+    pub pool: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct MemTracker {
-    current: usize,
+    start_current: usize,
+    start_peak: usize,
     label: &'static str,
 }
 
 impl MemTracker {
     pub fn start(label: &'static str) -> Self {
-        let current = MEMORY_MANAGER
+        let (current, peak) = MEMORY_MANAGER
             .get()
             .and_then(|m| m.lock().ok())
-            .map(|m| m.current_size)
-            .unwrap_or(0);
+            .map(|m| (m.current_size, m.max_used_size))
+            .unwrap_or((0, 0));
 
-        Self { current, label }
+        Self {
+            start_current: current,
+            start_peak: peak,
+            label,
+        }
+    }
+
+    pub fn snapshot() -> MemSnapshot {
+        MEMORY_MANAGER
+            .get()
+            .and_then(|m| m.lock().ok())
+            .map(|m| MemSnapshot {
+                current: m.current_size,
+                peak: m.max_used_size,
+                pool: m.pool.memory_usage(),
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn emit_metrics(&self) {
+        let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
+            return;
+        };
+
+        let current = manager.current_size;
+        let peak = manager.max_used_size;
+        let pool = manager.pool.memory_usage();
+
+        metrics::gauge!("gpu_mem.current_bytes").set(current as f64);
+        metrics::gauge!("gpu_mem.peak_bytes").set(peak as f64);
+        metrics::gauge!("gpu_mem.pool_bytes").set(pool as f64);
+
+        let delta = current as isize - self.start_current as isize;
+        let module_peak_increase = peak.saturating_sub(self.start_peak);
+
+        metrics::gauge!("gpu_mem.module.delta_bytes", "module" => self.label).set(delta as f64);
+        metrics::gauge!("gpu_mem.module.peak_bytes", "module" => self.label)
+            .set(module_peak_increase as f64);
+    }
+
+    pub fn reset_global_peak() {
+        if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
+            manager.max_used_size = manager.current_size;
+        }
+    }
+
+    pub fn reset_peak(&mut self) {
+        Self::reset_global_peak();
     }
 
     #[inline]
@@ -154,7 +209,7 @@ impl MemTracker {
         };
         let current = manager.current_size;
         let peak = manager.max_used_size;
-        let used = current as isize - self.current as isize;
+        let used = current as isize - self.start_current as isize;
         let sign = if used >= 0 { "+" } else { "-" };
         let pool_usage = manager.pool.memory_usage();
         tracing::info!(
@@ -167,12 +222,6 @@ impl MemTracker {
             msg.into()
                 .map_or(self.label.to_string(), |m| format!("{}:{}", self.label, m))
         );
-    }
-
-    pub fn reset_peak(&mut self) {
-        if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
-            manager.max_used_size = manager.current_size;
-        }
     }
 }
 
