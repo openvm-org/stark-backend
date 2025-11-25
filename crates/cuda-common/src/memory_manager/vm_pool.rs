@@ -93,6 +93,10 @@ impl VirtualMemoryPool {
                         }
                         Err(_) => gran,
                     };
+                    assert!(
+                        VIRTUAL_POOL_SIZE % page_size == 0,
+                        "Virtual pool size must be a multiple of page size"
+                    );
                     let va_base = vpmm_reserve(VIRTUAL_POOL_SIZE, page_size).unwrap();
                     (va_base, page_size)
                 }
