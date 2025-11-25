@@ -26,11 +26,17 @@ impl FriParameters {
     }
 
     pub fn standard_fast() -> Self {
-        standard_fri_params_with_100_bits_conjectured_security(1)
+        standard_fri_params_with_100_bits_security(1)
     }
 
+    #[deprecated(note = "use standard_with_100_bits_security instead")]
     pub fn standard_with_100_bits_conjectured_security(log_blowup: usize) -> Self {
+        #[allow(deprecated)]
         standard_fri_params_with_100_bits_conjectured_security(log_blowup)
+    }
+
+    pub fn standard_with_100_bits_security(log_blowup: usize) -> Self {
+        standard_fri_params_with_100_bits_security(log_blowup)
     }
 
     pub fn max_constraint_degree(&self) -> usize {
@@ -41,7 +47,7 @@ impl FriParameters {
     /// If the environment variable `OPENVM_FAST_TEST` is set to "1", then the parameters are **not
     /// secure** and meant for fast testing only.
     ///
-    /// In production, use `Self::standard_with_100_bits_conjectured_security` instead.
+    /// In production, use `Self::standard_with_100_bits_security` instead.
     pub fn new_for_testing(log_blowup: usize) -> Self {
         if let Ok("1") = std::env::var("OPENVM_FAST_TEST").as_deref() {
             Self {
@@ -52,15 +58,61 @@ impl FriParameters {
                 query_proof_of_work_bits: 0,
             }
         } else {
-            Self::standard_with_100_bits_conjectured_security(log_blowup)
+            Self::standard_with_100_bits_security(log_blowup)
         }
     }
+}
+
+/// Pre-defined FRI parameters with 100 bits of provable security, meaning we do
+/// not rely on any conjectures about Reed–Solomon codes (e.g., about proximity
+/// gaps) or the ethSTARK Toy Problem Conjecture.
+///
+/// The value `num_queries` is chosen so that the verifier accepts a δ-far
+/// codeword for δ = (1 - 2**(-log_blowup)) with probability at most 2^{-80}.
+/// I.e., we target the unique-decoding radius. We require 20 PoW bits
+/// just before the query phase begins to boost the soundness to 100 bits.
+///
+/// Assumes that:
+/// - the challenge field has size at least 2^123
+/// - for `log_blowup = 1`, multi-FRI will be run with at most width 30000 at any level
+/// - for `log_blowup > 1`, multi-FRI will be run with at most width 2000 at any level
+pub fn standard_fri_params_with_100_bits_security(log_blowup: usize) -> FriParameters {
+    let fri_params = match log_blowup {
+        1 => FriParameters {
+            log_blowup,
+            log_final_poly_len: 0,
+            num_queries: 193,
+            proof_of_work_bits: 20,
+        },
+        2 => FriParameters {
+            log_blowup,
+            log_final_poly_len: 0,
+            num_queries: 118,
+            proof_of_work_bits: 20,
+        },
+        3 => FriParameters {
+            log_blowup,
+            log_final_poly_len: 0,
+            num_queries: 97,
+            proof_of_work_bits: 20,
+        },
+        4 => FriParameters {
+            log_blowup,
+            log_final_poly_len: 0,
+            num_queries: 88,
+            proof_of_work_bits: 20,
+        },
+        _ => todo!("No standard FRI params defined for log blowup {log_blowup}",),
+    };
+    tracing::debug!("FRI parameters | log_blowup: {log_blowup:<2} | num_queries: {:<2} | proof_of_work_bits: {:<2}", fri_params.num_queries, fri_params.proof_of_work_bits);
+    fri_params
 }
 
 /// Pre-defined FRI parameters with 100 bits of conjectured security.
 /// Security bits calculated following ethSTARK (<https://eprint.iacr.org/2021/582.pdf>) 5.10.1 eq (19)
 ///
 /// Assumes that the challenge field used as more than 100 bits.
+#[deprecated(note = "use standard_fri_params_with_100_bits_security instead")]
 pub fn standard_fri_params_with_100_bits_conjectured_security(log_blowup: usize) -> FriParameters {
     let fri_params = match log_blowup {
         // plonky2 standard fast config uses num_queries=84: https://github.com/0xPolygonZero/plonky2/blob/41dc325e61ab8d4c0491e68e667c35a4e8173ffa/starky/src/config.rs#L49
@@ -116,7 +168,7 @@ impl SecurityParameters {
     }
     pub fn standard_100_bits_with_fri_log_blowup(log_blowup: usize) -> Self {
         Self {
-            fri_params: FriParameters::standard_with_100_bits_conjectured_security(log_blowup),
+            fri_params: FriParameters::standard_with_100_bits_security(log_blowup),
             log_up_params: log_up_security_params_baby_bear_100_bits(),
         }
     }

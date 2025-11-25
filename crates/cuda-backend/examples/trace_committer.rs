@@ -77,7 +77,7 @@ fn main() {
     let gpu_time = std::time::Instant::now();
     let gpu_device = GpuDevice::new(
         GpuConfig::new(
-            FriParameters::standard_with_100_bits_conjectured_security(log_blowup),
+            FriParameters::standard_with_100_bits_security(log_blowup),
             shift,
         ),
         None,

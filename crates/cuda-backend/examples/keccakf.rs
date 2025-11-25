@@ -69,7 +69,7 @@ fn main() {
         // ----- CPU keygen once, shared by all threads -----
         let air = TestAir(KeccakAir {});
         let engine_cpu = BabyBearPoseidon2Engine::new(
-            FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
+            FriParameters::standard_with_100_bits_security(LOG_BLOWUP),
         );
 
         let mut keygen_builder = engine_cpu.keygen_builder();
@@ -108,7 +108,7 @@ fn main() {
 
                         println!("[task {t}] Starting GPU proof");
                         let engine_gpu = GpuBabyBearPoseidon2Engine::new(
-                            FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
+                            FriParameters::standard_with_100_bits_security(LOG_BLOWUP),
                         );
 
                         let pk_dev = engine_gpu.device().transport_pk_to_device(&pk_host);
