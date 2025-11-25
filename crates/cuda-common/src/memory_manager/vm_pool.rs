@@ -37,7 +37,7 @@ struct FreeRegion {
     id: usize,
 }
 
-const VIRTUAL_POOL_SIZE: usize = 1usize << 45; // 32 TB
+const VIRTUAL_POOL_SIZE: usize = 8usize << 40; // 8 TB
 
 /// Virtual memory pool implementation.
 pub(super) struct VirtualMemoryPool {
@@ -133,7 +133,9 @@ impl VirtualMemoryPool {
 
         if best_region.is_none() {
             // Phase 2: Defragmentation
-            best_region = self.defragment_or_create_new_pages(requested, stream_id)?;
+            best_region = self
+                .defragment_or_create_new_pages(requested, stream_id)
+                .expect("Failed to defragment or create new pages in virtual memory pool");
         }
 
         if let Some(ptr) = best_region {
@@ -209,7 +211,8 @@ impl VirtualMemoryPool {
         let size = self
             .used_regions
             .remove(&ptr)
-            .ok_or(MemoryError::InvalidPointer)?;
+            .ok_or(MemoryError::InvalidPointer)
+            .expect("Pointer not found in used_regions - invalid pointer freed");
 
         self.free_region_insert(ptr, size, stream_id);
 
@@ -316,7 +319,8 @@ impl VirtualMemoryPool {
                 to_defrag.push(ptr);
                 accumulated_size += size;
                 if accumulated_size >= requested {
-                    self.remap_regions(to_defrag, stream_id)?;
+                    self.remap_regions(to_defrag, stream_id)
+                        .expect("Failed to remap regions during defragmentation");
                     return Ok(Some(defrag_start));
                 }
             }
@@ -357,7 +361,8 @@ impl VirtualMemoryPool {
         let mut events_to_wait = Vec::new();
         for (ptr, size, event, _) in other_streams_to_defrag {
             if !event.completed() {
-                default_stream_wait(&event)?;
+                default_stream_wait(&event)
+                    .expect("Failed to wait for CUDA event from another stream");
                 events_to_wait.push(event);
             }
             to_defrag.push(ptr);
@@ -387,7 +392,8 @@ impl VirtualMemoryPool {
             };
         }
 
-        self.remap_regions(to_defrag, stream_id)?;
+        self.remap_regions(to_defrag, stream_id)
+            .expect("Failed to remap regions after waiting for events");
         if accumulated_size >= requested {
             return Ok(Some(defrag_start));
         }
@@ -411,7 +417,10 @@ impl VirtualMemoryPool {
                     }
                 }
             };
-            unsafe { vpmm_map(self.curr_end, self.page_size, handle)? };
+            unsafe {
+                vpmm_map(self.curr_end, self.page_size, handle)
+                    .expect("Failed to map physical memory page to virtual address");
+            }
             self.active_pages.insert(self.curr_end, handle);
             self.curr_end += self.page_size as u64;
             allocated_size += self.page_size;
@@ -423,7 +432,11 @@ impl VirtualMemoryPool {
             stream_id,
             ByteSize::b(self.memory_usage() as u64)
         );
-        unsafe { vpmm_set_access(allocate_start, allocated_size, self.device_id)? };
+        unsafe {
+            vpmm_set_access(allocate_start, allocated_size, self.device_id).expect(
+                "Failed to set access permissions for newly allocated virtual memory region",
+            );
+        }
         self.free_region_insert(allocate_start, allocated_size, stream_id);
 
         Ok(Some(defrag_start))
@@ -442,7 +455,8 @@ impl VirtualMemoryPool {
             let region = self
                 .free_regions
                 .remove(&region_addr)
-                .ok_or(MemoryError::InvalidPointer)?;
+                .ok_or(MemoryError::InvalidPointer)
+                .expect("Free region not found during remapping - invalid region address");
 
             let num_pages = region.size / self.page_size;
             for i in 0..num_pages {
@@ -450,15 +464,22 @@ impl VirtualMemoryPool {
                 let handle = self
                     .active_pages
                     .remove(&page)
-                    .ok_or(MemoryError::InvalidPointer)?;
-                unsafe { vpmm_map(self.curr_end, self.page_size, handle)? };
+                    .ok_or(MemoryError::InvalidPointer)
+                    .expect("Active page not found during remapping - page handle missing");
+                unsafe {
+                    vpmm_map(self.curr_end, self.page_size, handle)
+                        .expect("Failed to remap physical memory page to new virtual address");
+                }
                 self.active_pages.insert(self.curr_end, handle);
                 self.curr_end += self.page_size as u64;
             }
         }
         let new_region_size = (self.curr_end - new_region_start) as usize;
 
-        unsafe { vpmm_set_access(new_region_start, new_region_size, self.device_id)? };
+        unsafe {
+            vpmm_set_access(new_region_start, new_region_size, self.device_id)
+                .expect("Failed to set access permissions for remapped virtual memory region");
+        }
         self.free_region_insert(new_region_start, new_region_size, stream_id);
         Ok(())
     }

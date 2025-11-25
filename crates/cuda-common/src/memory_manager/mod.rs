@@ -59,14 +59,18 @@ impl MemoryManager {
         let mut tracked_size = size;
         let ptr = if size < self.pool.page_size {
             let mut ptr: *mut c_void = std::ptr::null_mut();
-            check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) })?;
+            check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) })
+                .expect("Failed to allocate small memory block via cudaMallocAsync");
             self.allocated_ptrs
                 .insert(NonNull::new(ptr).expect("cudaMalloc returned null"), size);
             Ok(ptr)
         } else {
             tracked_size = size.next_multiple_of(self.pool.page_size);
-            self.pool
-                .malloc_internal(tracked_size, current_stream_id()?)
+            self.pool.malloc_internal(
+                tracked_size,
+                current_stream_id()
+                    .expect("Failed to get current CUDA stream ID for large allocation"),
+            )
         };
 
         self.current_size += tracked_size;
@@ -80,13 +84,24 @@ impl MemoryManager {
     /// The pointer `ptr` must be a valid, previously allocated device pointer.
     /// The caller must ensure that `ptr` is not used after this function is called.
     unsafe fn d_free(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
-        let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
+        let nn = NonNull::new(ptr)
+            .ok_or(MemoryError::NullPointer)
+            .expect("Attempted to free null pointer");
 
         if let Some(size) = self.allocated_ptrs.remove(&nn) {
             self.current_size -= size;
-            check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })?;
+            check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })
+                .expect("Failed to free small memory block via cudaFreeAsync");
         } else {
-            self.current_size -= self.pool.free_internal(ptr, current_stream_id()?)?;
+            self.current_size -= self
+                .pool
+                .free_internal(
+                    ptr,
+                    current_stream_id().expect(
+                        "Failed to get current CUDA stream ID for freeing large allocation",
+                    ),
+                )
+                .expect("Failed to free large memory block from virtual memory pool");
         }
 
         Ok(())
