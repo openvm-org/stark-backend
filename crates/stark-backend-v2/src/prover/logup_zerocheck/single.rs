@@ -56,7 +56,7 @@ impl<'a> EvalHelper<'a, crate::F> {
     }
 }
 
-impl<'a, F: TwoAdicField> EvalHelper<'a, F> {
+impl<F: TwoAdicField> EvalHelper<'_, F> {
     pub fn has_preprocessed(&self) -> bool {
         self.preprocessed_trace.is_some()
     }
