@@ -463,11 +463,6 @@ impl VirtualMemoryPool {
         Ok(())
     }
 
-    /// Returns the total physical memory currently mapped in this pool (in bytes).
-    pub(super) fn get_allocation_size(&self, ptr: u64) -> Option<usize> {
-        self.used_regions.get(&ptr).copied()
-    }
-
     pub(super) fn memory_usage(&self) -> usize {
         self.active_pages.len() * self.page_size
     }

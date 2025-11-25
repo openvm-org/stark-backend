@@ -154,11 +154,11 @@ pub struct MemTracker {
 
 impl MemTracker {
     pub fn start(label: &'static str) -> Self {
-        let (current, peak) = MEMORY_MANAGER
+        let current = MEMORY_MANAGER
             .get()
             .and_then(|m| m.lock().ok())
-            .map(|m| (m.current_size, m.max_used_size))
-            .unwrap_or((0, 0));
+            .map(|m| m.current_size)
+            .unwrap_or_default();
 
         Self {
             start_current: current,
@@ -203,16 +203,6 @@ impl MemTracker {
         metrics::gauge!("gpu_mem.cuda_total_bytes").set(cuda_total as f64);
     }
 
-    pub fn reset_global_peak() {
-        if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
-            manager.max_used_size = manager.current_size;
-        }
-    }
-
-    pub fn reset_peak(&mut self) {
-        Self::reset_global_peak();
-    }
-
     #[inline]
     pub fn tracing_info(&self, msg: impl Into<Option<&'static str>>) {
         let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
@@ -234,6 +224,12 @@ impl MemTracker {
             msg.into()
                 .map_or(self.label.to_string(), |m| format!("{}:{}", self.label, m))
         );
+    }
+
+    pub fn reset_peak(&mut self) {
+        if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
+            manager.max_used_size = manager.current_size;
+        }
     }
 }
 
