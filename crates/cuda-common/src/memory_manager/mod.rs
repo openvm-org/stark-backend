@@ -20,6 +20,7 @@ use vm_pool::VirtualMemoryPool;
 extern "C" {
     fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;
     fn cudaFreeAsync(dev_ptr: *mut c_void, stream: cudaStream_t) -> i32;
+    fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
 }
 
 static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
@@ -129,6 +130,15 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     manager.d_free(ptr)
 }
 
+/// Returns (used, total) GPU memory in bytes from CUDA runtime.
+/// This is the ground truth from the driver, useful for sanity checking.
+pub fn cuda_mem_info() -> (usize, usize) {
+    let mut free = 0usize;
+    let mut total = 0usize;
+    unsafe { cudaMemGetInfo(&mut free, &mut total) };
+    (total.saturating_sub(free), total)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MemSnapshot {
     pub current: usize,
@@ -178,23 +188,22 @@ impl MemTracker {
         let current = manager.current_size;
         let peak = manager.max_used_size;
         let pool = manager.pool.memory_usage();
-
-        // Global metrics (absolute values at this point in time)
-        metrics::gauge!("gpu_mem.current_bytes").set(current as f64);
-        metrics::gauge!("gpu_mem.peak_bytes").set(peak as f64);
-        metrics::gauge!("gpu_mem.pool_bytes").set(pool as f64);
+        let (cuda_used, cuda_total) = cuda_mem_info();
 
         // Per-module metrics
-        // delta_bytes: net change in memory from module start to end (can be negative if freed more
-        // than allocated)
         let delta = current as isize - self.start_current as isize;
-        // start_bytes: memory usage when this module started
-        // end_bytes: memory usage when this module ended (same as current)
 
-        metrics::gauge!("gpu_mem.module.delta_bytes", "module" => self.label).set(delta as f64);
-        metrics::gauge!("gpu_mem.module.start_bytes", "module" => self.label)
+        // Tracked by our memory manager
+        metrics::gauge!("gpu_mem.current_bytes", "module" => self.label).set(current as f64);
+        metrics::gauge!("gpu_mem.peak_bytes", "module" => self.label).set(peak as f64);
+        metrics::gauge!("gpu_mem.pool_bytes", "module" => self.label).set(pool as f64);
+        metrics::gauge!("gpu_mem.delta_bytes", "module" => self.label).set(delta as f64);
+        metrics::gauge!("gpu_mem.start_bytes", "module" => self.label)
             .set(self.start_current as f64);
-        metrics::gauge!("gpu_mem.module.end_bytes", "module" => self.label).set(current as f64);
+
+        // Ground truth from CUDA runtime (for sanity checking)
+        metrics::gauge!("gpu_mem.cuda_used_bytes", "module" => self.label).set(cuda_used as f64);
+        metrics::gauge!("gpu_mem.cuda_total_bytes", "module" => self.label).set(cuda_total as f64);
     }
 
     pub fn reset_global_peak() {
