@@ -126,6 +126,13 @@ pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
         let label = span.metadata().map(|m| m.name()).unwrap_or("unknown");
         metrics::counter!("gpu_mem.alloc_bytes", "span" => label.to_string())
             .increment(size as u64);
+        metrics::gauge!("gpu_mem.total_bytes", "span" => label.to_string())
+            .set(manager.current_size as f64);
+        // Record peak memory if this allocation caused a new high
+        if manager.current_size == manager.max_used_size {
+            metrics::gauge!("gpu_mem.max_total_bytes", "span" => label.to_string())
+                .set(manager.current_size as f64);
+        }
     }
 
     result
@@ -154,6 +161,8 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
             let label = span.metadata().map(|m| m.name()).unwrap_or("unknown");
             metrics::counter!("gpu_mem.free_bytes", "span" => label.to_string())
                 .increment(size as u64);
+            metrics::gauge!("gpu_mem.total_bytes", "span" => label.to_string())
+                .set(manager.current_size as f64);
         }
     }
 
