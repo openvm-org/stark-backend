@@ -2,8 +2,13 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     ptr::NonNull,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
 };
+
+static METRICS_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use bytesize::ByteSize;
 
@@ -149,19 +154,21 @@ pub struct MemSnapshot {
 #[derive(Debug, Clone)]
 pub struct MemTracker {
     start_current: usize,
+    start_peak: usize,
     label: &'static str,
 }
 
 impl MemTracker {
     pub fn start(label: &'static str) -> Self {
-        let current = MEMORY_MANAGER
+        let (current, peak) = MEMORY_MANAGER
             .get()
             .and_then(|m| m.lock().ok())
-            .map(|m| m.current_size)
+            .map(|m| (m.current_size, m.max_used_size))
             .unwrap_or_default();
 
         Self {
             start_current: current,
+            start_peak: peak,
             label,
         }
     }
@@ -183,17 +190,23 @@ impl MemTracker {
             return;
         };
 
+        let seq = METRICS_SEQ.fetch_add(1, Ordering::Relaxed);
         let current = manager.current_size;
         let peak = manager.max_used_size;
         let pool = manager.pool.memory_usage();
         let delta = current as isize - self.start_current as isize;
+        // Peak reached during this module's execution
+        let module_peak = peak.saturating_sub(self.start_peak);
         let (cuda_used, cuda_total) = cuda_mem_info();
 
         // Per-module metrics
+        metrics::gauge!("gpu_mem.seq", "module" => self.label).set(seq as f64);
         metrics::gauge!("gpu_mem.current_bytes", "module" => self.label).set(current as f64);
         metrics::gauge!("gpu_mem.delta_bytes", "module" => self.label).set(delta as f64);
         metrics::gauge!("gpu_mem.start_bytes", "module" => self.label)
             .set(self.start_current as f64);
+        metrics::gauge!("gpu_mem.module_peak_bytes", "module" => self.label)
+            .set(module_peak as f64);
         // Actual cuda used memory for sanity checking
         metrics::gauge!("gpu_mem.cuda_used_bytes", "module" => self.label).set(cuda_used as f64);
 
