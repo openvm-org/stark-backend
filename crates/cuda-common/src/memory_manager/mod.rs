@@ -188,22 +188,20 @@ impl MemTracker {
         let current = manager.current_size;
         let peak = manager.max_used_size;
         let pool = manager.pool.memory_usage();
+        let delta = current as isize - self.start_current as isize;
         let (cuda_used, cuda_total) = cuda_mem_info();
 
         // Per-module metrics
-        let delta = current as isize - self.start_current as isize;
-
-        // Tracked by our memory manager
         metrics::gauge!("gpu_mem.current_bytes", "module" => self.label).set(current as f64);
-        metrics::gauge!("gpu_mem.peak_bytes", "module" => self.label).set(peak as f64);
-        metrics::gauge!("gpu_mem.pool_bytes", "module" => self.label).set(pool as f64);
         metrics::gauge!("gpu_mem.delta_bytes", "module" => self.label).set(delta as f64);
         metrics::gauge!("gpu_mem.start_bytes", "module" => self.label)
             .set(self.start_current as f64);
-
-        // Ground truth from CUDA runtime (for sanity checking)
         metrics::gauge!("gpu_mem.cuda_used_bytes", "module" => self.label).set(cuda_used as f64);
-        metrics::gauge!("gpu_mem.cuda_total_bytes", "module" => self.label).set(cuda_total as f64);
+
+        // Global metrics (emitted every time, last value wins)
+        metrics::gauge!("gpu_mem.peak_bytes").set(peak as f64);
+        metrics::gauge!("gpu_mem.pool_bytes").set(pool as f64);
+        metrics::gauge!("gpu_mem.cuda_total_bytes").set(cuda_total as f64);
     }
 
     pub fn reset_global_peak() {
