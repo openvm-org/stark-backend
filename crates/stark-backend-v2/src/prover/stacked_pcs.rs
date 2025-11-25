@@ -95,7 +95,7 @@ impl<F, Digest: Clone> StackedPcsData<F, Digest> {
         self.tree.root()
     }
 
-    pub fn mat_view<'a>(&'a self, unstacked_mat_idx: usize) -> StridedColMajorMatrixView<'a, F> {
+    pub fn mat_view(&self, unstacked_mat_idx: usize) -> StridedColMajorMatrixView<'_, F> {
         self.layout.mat_view(unstacked_mat_idx, &self.matrix)
     }
 }
@@ -434,10 +434,7 @@ mod poseidon2_merkle_tree {
             preimage
         }
 
-        fn row_iter<'a>(
-            matrix: &'a ColMajorMatrix<EF>,
-            index: usize,
-        ) -> impl Iterator<Item = EF> + 'a {
+        fn row_iter(matrix: &ColMajorMatrix<EF>, index: usize) -> impl Iterator<Item = EF> + '_ {
             (0..matrix.width()).map(move |c| matrix.get(index, c).copied().unwrap_or(EF::ZERO))
         }
     }

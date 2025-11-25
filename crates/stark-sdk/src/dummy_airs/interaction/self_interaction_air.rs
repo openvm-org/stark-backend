@@ -35,9 +35,9 @@ where
 
         let (local, next) = (main.row_slice(0), main.row_slice(1));
         let mut local: Vec<<AB as AirBuilder>::Expr> =
-            (*local).into_iter().map(|v| (*v).into()).collect_vec();
+            (*local).iter().map(|v| (*v).into()).collect_vec();
         let mut next: Vec<<AB as AirBuilder>::Expr> =
-            (*next).into_iter().map(|v| (*v).into()).collect_vec();
+            (*next).iter().map(|v| (*v).into()).collect_vec();
 
         builder.push_interaction(self.bus_index, local.clone(), AB::Expr::ONE, 1);
         builder.push_interaction(self.bus_index, next.clone(), AB::Expr::NEG_ONE, 1);
@@ -61,8 +61,8 @@ impl<SC: StarkGenericConfig> Chip<(), CpuBackend<SC>> for SelfInteractionChip {
         assert!(self.width > 0);
         let mut trace = vec![Val::<SC>::ZERO; (1 << self.log_height) * self.width];
         for (row_idx, chunk) in trace.chunks_mut(self.width).enumerate() {
-            for i in 0..self.width {
-                chunk[i] = Val::<SC>::from_canonical_usize((row_idx + i) % self.width);
+            for (i, val) in chunk.iter_mut().enumerate() {
+                *val = Val::<SC>::from_canonical_usize((row_idx + i) % self.width);
             }
         }
         AirProvingContext::simple_no_pis(Arc::new(RowMajorMatrix::new(trace, self.width)))

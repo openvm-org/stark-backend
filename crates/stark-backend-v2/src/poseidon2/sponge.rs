@@ -305,7 +305,7 @@ impl<'a> ReadOnlyTranscript<'a> {
     }
 }
 
-impl<'a> FiatShamirTranscript for ReadOnlyTranscript<'a> {
+impl FiatShamirTranscript for ReadOnlyTranscript<'_> {
     #[inline]
     fn observe(&mut self, value: F) {
         debug_assert!(
@@ -335,7 +335,7 @@ impl<'a> FiatShamirTranscript for ReadOnlyTranscript<'a> {
     }
 }
 
-impl<'a> TranscriptHistory for ReadOnlyTranscript<'a> {
+impl TranscriptHistory for ReadOnlyTranscript<'_> {
     fn len(&self) -> usize {
         self.position
     }
