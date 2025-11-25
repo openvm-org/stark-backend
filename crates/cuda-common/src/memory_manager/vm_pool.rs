@@ -475,6 +475,12 @@ impl VirtualMemoryPool {
             }
         }
         let new_region_size = (self.curr_end - new_region_start) as usize;
+        tracing::debug!(
+            "VPMM: Remapped regions: new_region_start={:?}, size={} (remaining: {})",
+            new_region_start,
+            new_region_size,
+            ByteSize::b((self.root + VIRTUAL_POOL_SIZE - self.curr_end) as u64)
+        );
 
         unsafe {
             vpmm_set_access(new_region_start, new_region_size, self.device_id)
