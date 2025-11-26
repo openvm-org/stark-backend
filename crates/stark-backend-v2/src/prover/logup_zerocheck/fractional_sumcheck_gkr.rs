@@ -5,14 +5,14 @@ use p3_util::log2_strict_usize;
 use tracing::{debug, instrument};
 
 use crate::{
-    EF,
     poseidon2::sponge::FiatShamirTranscript,
     proof::GkrLayerClaims,
     prover::{
-        ColMajorMatrix,
         poly::evals_eq_hypercube,
         sumcheck::{fold_mle_evals, sumcheck_round_poly_evals},
+        ColMajorMatrix,
     },
+    EF,
 };
 
 /// Proof for fractional sumcheck protocol

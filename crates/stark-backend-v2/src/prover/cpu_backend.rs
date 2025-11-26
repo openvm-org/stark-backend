@@ -6,20 +6,20 @@ use getset::CopyGetters;
 use itertools::Itertools;
 
 use crate::{
-    D_EF, Digest, EF, F, SystemParams,
     keygen::types::MultiStarkProvingKeyV2,
     poly_common::Squarable,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
+        prove_zerocheck_and_logup,
+        stacked_pcs::{stacked_commit, StackedPcsData},
+        stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
+        whir::WhirProver,
         ColMajorMatrix, CommittedTraceDataV2, DeviceDataTransporterV2,
         DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, LogupZerocheckCpu, MultiRapProver,
         OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
-        prove_zerocheck_and_logup,
-        stacked_pcs::{StackedPcsData, stacked_commit},
-        stacked_reduction::{StackedReductionCpu, prove_stacked_opening_reduction},
-        whir::WhirProver,
     },
+    Digest, SystemParams, D_EF, EF, F,
 };
 
 #[derive(Clone, Copy)]
