@@ -12,9 +12,7 @@ use super::cuda::*;
 use crate::{
     common::set_device,
     error::MemoryError,
-    stream::{
-        current_stream_id, current_stream_sync, CudaEvent, CudaStreamId,
-    },
+    stream::{current_stream_id, current_stream_sync, CudaEvent, CudaStreamId},
 };
 
 #[link(name = "cudart")]
@@ -341,11 +339,13 @@ impl VirtualMemoryPool {
         );
 
         // Find a best fit unmapped region
-        let dst = self.take_unmapped_region(requested).expect("Failed to take unmapped region");
-        
+        let dst = self
+            .take_unmapped_region(requested)
+            .expect("Failed to take unmapped region");
+
         // Allocate new pages if we don't have enough free regions
         let mut allocated_dst = dst;
-        let allocate_size = if total_free_size < requested { requested - total_free_size } else { 0 };
+        let allocate_size = requested.saturating_sub(total_free_size);
         while allocated_dst < dst + allocate_size as u64 {
             let handle = unsafe {
                 match vpmm_create_physical(self.device_id, self.page_size) {
@@ -354,7 +354,7 @@ impl VirtualMemoryPool {
                         if e.is_out_of_memory() {
                             return Err(MemoryError::OutOfMemory {
                                 requested: allocate_size,
-                                available: (allocated_dst - dst) as usize ,
+                                available: (allocated_dst - dst) as usize,
                             });
                         } else {
                             return Err(MemoryError::from(e));
@@ -366,7 +366,7 @@ impl VirtualMemoryPool {
                 vpmm_map(allocated_dst, self.page_size, handle)
                     .expect("Failed to map physical memory page to virtual address");
             }
-            self.active_pages.insert(  allocated_dst, handle);
+            self.active_pages.insert(allocated_dst, handle);
             allocated_dst += self.page_size as u64;
         }
         if allocate_size > 0 {
@@ -390,17 +390,18 @@ impl VirtualMemoryPool {
 
         // Defragment free regions from oldest to newest
         let mut to_defrag: Vec<(CUdeviceptr, usize)> = Vec::new();
-        let mut oldest_free_regions: Vec<_> = self.free_regions.iter().map(|(addr, region)| (region.id, *addr)).collect();
+        let mut oldest_free_regions: Vec<_> = self
+            .free_regions
+            .iter()
+            .map(|(addr, region)| (region.id, *addr))
+            .collect();
         oldest_free_regions.sort_by_key(|(id, _)| *id);
         for (_, addr) in oldest_free_regions {
             if remaining == 0 {
                 break;
             }
 
-            let region = self
-                .free_regions
-                .remove(&addr)
-                .unwrap();
+            let region = self.free_regions.remove(&addr).unwrap();
             region
                 .event
                 .synchronize()
