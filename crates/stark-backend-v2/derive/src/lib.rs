@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Fields, parse_macro_input};
+use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 fn codec_crate_root() -> proc_macro2::TokenStream {
     match proc_macro_crate::crate_name("stark-backend-v2") {
