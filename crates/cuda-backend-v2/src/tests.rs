@@ -330,7 +330,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
 #[test_case(2, 0; "where log_trace_degree=0 less than l_skip=2")]
 #[test_case(3, 2; "where log_trace_degree=2 less than l_skip=3")]
 fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError> {
-    setup_tracing_with_log_level(Level::INFO);
+    setup_tracing_with_log_level(Level::DEBUG);
 
     let n_stack = 8;
     let k_whir = 4;
