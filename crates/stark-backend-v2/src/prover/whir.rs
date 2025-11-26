@@ -9,15 +9,15 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    Digest, EF, F,
     poly_common::Squarable,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
     prover::{
-        ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
-        poly::{Mle, Ple, evals_eq_hypercube},
+        poly::{evals_eq_hypercube, Mle, Ple},
         stacked_pcs::{MerkleTree, StackedPcsData},
+        ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
+    Digest, EF, F,
 };
 
 pub trait WhirProver<PB: ProverBackendV2, PD, TS> {

@@ -3,10 +3,10 @@ use thiserror::Error;
 use tracing::debug;
 
 use crate::{
-    EF,
     poly_common::{eval_eq_mle, interpolate_cubic_at_0123, interpolate_linear_at_01},
     poseidon2::sponge::FiatShamirTranscript,
     proof::{GkrLayerClaims, GkrProof},
+    EF,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -250,10 +250,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        F,
         poseidon2::sponge::DuplexSponge,
         proof::{GkrLayerClaims, GkrProof},
-        prover::fractional_sumcheck_gkr::{Frac, fractional_sumcheck},
+        prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
+        F,
     };
 
     #[test]

@@ -7,15 +7,15 @@ use std::sync::Arc;
 
 use openvm_stark_backend::{
     air_builders::symbolic::{
-        SymbolicConstraintsDag, SymbolicExpressionNode,
         symbolic_variable::{Entry, SymbolicVariable},
+        SymbolicConstraintsDag, SymbolicExpressionNode,
     },
     keygen::types::{LinearConstraint, TraceWidth},
 };
 use p3_field::Field;
 use serde::{Deserialize, Serialize};
 
-use crate::{Digest, F, SystemParams, prover::stacked_pcs::StackedPcsData};
+use crate::{prover::stacked_pcs::StackedPcsData, Digest, SystemParams, F};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]

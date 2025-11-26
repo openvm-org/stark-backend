@@ -1,6 +1,6 @@
 use getset::CopyGetters;
 use openvm_stark_backend::{
-    p3_matrix::{Matrix, dense::RowMajorMatrix},
+    p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::MatrixDimensions,
 };
 use p3_field::Field;

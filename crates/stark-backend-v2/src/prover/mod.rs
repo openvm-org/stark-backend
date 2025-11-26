@@ -1,13 +1,13 @@
-use itertools::{Itertools, izip};
+use itertools::{izip, Itertools};
 use openvm_stark_backend::prover::{MatrixDimensions, Prover};
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
 use tracing::{info, info_span, instrument};
 
 use crate::{
-    Digest, EF, F,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof, Proof, StackingProof, TraceVData, WhirProof},
+    Digest, EF, F,
 };
 
 mod cpu_backend;
