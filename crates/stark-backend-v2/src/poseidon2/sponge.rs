@@ -7,8 +7,8 @@ use p3_maybe_rayon::prelude::*;
 use p3_symmetric::Permutation;
 use tracing::instrument;
 
-use super::{CHUNK, WIDTH, poseidon2_perm};
-use crate::{D_EF, Digest, EF, F};
+use super::{poseidon2_perm, CHUNK, WIDTH};
+use crate::{Digest, D_EF, EF, F};
 
 pub trait FiatShamirTranscript: Clone + Send + Sync {
     fn observe(&mut self, value: F);
@@ -305,7 +305,7 @@ impl<'a> ReadOnlyTranscript<'a> {
     }
 }
 
-impl<'a> FiatShamirTranscript for ReadOnlyTranscript<'a> {
+impl FiatShamirTranscript for ReadOnlyTranscript<'_> {
     #[inline]
     fn observe(&mut self, value: F) {
         debug_assert!(
@@ -335,7 +335,7 @@ impl<'a> FiatShamirTranscript for ReadOnlyTranscript<'a> {
     }
 }
 
-impl<'a> TranscriptHistory for ReadOnlyTranscript<'a> {
+impl TranscriptHistory for ReadOnlyTranscript<'_> {
     fn len(&self) -> usize {
         self.position
     }
