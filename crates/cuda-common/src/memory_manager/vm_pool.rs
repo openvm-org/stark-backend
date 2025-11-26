@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::c_void,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use bytesize::ByteSize;
@@ -267,6 +267,8 @@ impl VirtualMemoryPool {
         );
     }
 
+    
+    /// Return the base address of a virtual hole large enough for `requested` bytes.
     fn take_unmapped_region(&mut self, requested: usize) -> Result<CUdeviceptr, MemoryError> {
         debug_assert!(requested != 0);
         debug_assert_eq!(requested % self.page_size, 0);
@@ -296,6 +298,7 @@ impl VirtualMemoryPool {
         Ok(addr)
     }
 
+    /// Insert a hole back into the unmapped set, coalescing with neighbors.
     fn insert_unmapped_region(&mut self, mut addr: CUdeviceptr, mut size: usize) {
         if size == 0 {
             return;
@@ -319,8 +322,8 @@ impl VirtualMemoryPool {
         self.unmapped_regions.insert(addr, size);
     }
 
-    /// Defragments the pool by consolidating free regions at the end of virtual address space.
-    /// Remaps pages to create one large contiguous free region.
+    /// Defragments the pool by reusing existing holes and, if needed, reserving more VA space.
+    /// Moves just enough pages to satisfy `requested`, keeping the remainder of each region in place.
     fn defragment_or_create_new_pages(
         &mut self,
         requested: usize,
@@ -388,7 +391,7 @@ impl VirtualMemoryPool {
             return Ok(Some(dst));
         }
 
-        // Defragment free regions from oldest to newest
+        // Pull free regions (oldest first) until we've gathered enough pages.
         let mut to_defrag: Vec<(CUdeviceptr, usize)> = Vec::new();
         let mut oldest_free_regions: Vec<_> = self
             .free_regions
@@ -412,7 +415,7 @@ impl VirtualMemoryPool {
             remaining -= take;
 
             if region.size > take {
-                // stash the leftover right away
+                // Return the unused tail to the free list so it stays available.
                 let leftover_addr = addr + take as u64;
                 let leftover_size = region.size - take;
                 self.free_region_insert(leftover_addr, leftover_size, region.stream_id);
@@ -423,6 +426,8 @@ impl VirtualMemoryPool {
         Ok(Some(dst))
     }
 
+    /// Remap a list of regions to a new base address.
+    /// The regions already dropped from free regions
     fn remap_regions(
         &mut self,
         regions: Vec<(CUdeviceptr, usize)>,
@@ -537,9 +542,51 @@ impl Default for VirtualMemoryPool {
 }
 
 #[allow(unused)]
-unsafe extern "C" fn pending_events_destroy_callback(data: *mut c_void) {
-    let boxed =
-        Box::from_raw(data as *mut (usize, Arc<Mutex<HashMap<usize, Vec<Arc<CudaEvent>>>>>));
-    let (key, pending) = *boxed;
-    pending.lock().unwrap().remove(&key);
+impl std::fmt::Debug for VirtualMemoryPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "VMPool (VA_SIZE={}, PAGE_SIZE={})",
+            ByteSize::b(self.va_size as u64),
+            ByteSize::b(self.page_size as u64)
+        )?;
+
+        let reserved = self.roots.len() * self.va_size;
+        let allocated = self.memory_usage();
+        let free_bytes: usize = self.free_regions.values().map(|r| r.size).sum();
+        let malloc_bytes: usize = self.malloc_regions.values().sum();
+        let unmapped_bytes: usize = self.unmapped_regions.values().sum();
+
+        writeln!(
+            f,
+            "Total: reserved={}, allocated={}, free={}, malloc={}, unmapped={}",
+            ByteSize::b(reserved as u64),
+            ByteSize::b(allocated as u64),
+            ByteSize::b(free_bytes as u64),
+            ByteSize::b(malloc_bytes as u64),
+            ByteSize::b(unmapped_bytes as u64)
+        )?;
+
+        let mut regions: Vec<(CUdeviceptr, usize, String)> = Vec::new();
+        for (addr, region) in &self.free_regions {
+            regions.push((
+                *addr,
+                region.size,
+                format!("free (s {})", region.stream_id),
+            ));
+        }
+        for (addr, size) in &self.malloc_regions {
+            regions.push((*addr, *size, "malloc".to_string()));
+        }
+        for (addr, size) in &self.unmapped_regions {
+            regions.push((*addr, *size, "unmapped".to_string()));
+        }
+        regions.sort_by_key(|(addr, _, _)| *addr);
+
+        write!(f, "Regions: ")?;
+         for (_, size, label) in regions.iter() {
+             write!(f, "[{} {}]", label, ByteSize::b(*size as u64))?;
+        }
+        Ok(())
+    }
 }
