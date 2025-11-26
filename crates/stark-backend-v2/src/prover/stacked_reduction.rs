@@ -9,19 +9,19 @@ use p3_maybe_rayon::prelude::*;
 use tracing::{debug, instrument};
 
 use crate::{
-    Digest, EF, F,
-    poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni},
+    poly_common::{eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, UnivariatePoly},
     poseidon2::sponge::FiatShamirTranscript,
     proof::StackingProof,
     prover::{
-        ColMajorMatrix, ColMajorMatrixView, CpuBackendV2, CpuDeviceV2, MatrixView, ProverBackendV2,
         poly::evals_eq_hypercube,
         stacked_pcs::{StackedPcsData, StackedSlice},
         sumcheck::{
-            batch_fold_mle_evals, fold_mle_evals, fold_ple_evals, sumcheck_round_poly_evals,
-            sumcheck_round0_deg, sumcheck_uni_round0_poly,
+            batch_fold_mle_evals, fold_mle_evals, fold_ple_evals, sumcheck_round0_deg,
+            sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
+        ColMajorMatrix, ColMajorMatrixView, CpuBackendV2, CpuDeviceV2, MatrixView, ProverBackendV2,
     },
+    Digest, EF, F,
 };
 
 /// Helper trait for proving the reduction of column opening claims and column rotation opening
@@ -456,5 +456,9 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
 /// `x_int` is the integer representation of point on H_n.
 fn rot_prev(x_int: usize, n: usize) -> usize {
     debug_assert!(x_int < (1 << n));
-    if x_int == 0 { (1 << n) - 1 } else { x_int - 1 }
+    if x_int == 0 {
+        (1 << n) - 1
+    } else {
+        x_int - 1
+    }
 }

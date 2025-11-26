@@ -1,6 +1,6 @@
-use std::cmp::{Reverse, max};
+use std::cmp::{max, Reverse};
 
-use itertools::{Itertools, izip};
+use itertools::{izip, Itertools};
 use thiserror::Error;
 
 use crate::{
@@ -79,7 +79,9 @@ pub enum ProofShapeVDataError {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum GkrProofShapeError {
-    #[error("claims_per_layer should have num_gkr_rounds = {expected} claims, but it has {actual}")]
+    #[error(
+        "claims_per_layer should have num_gkr_rounds = {expected} claims, but it has {actual}"
+    )]
     InvalidClaimsPerLayer { expected: usize, actual: usize },
     #[error(
         "sumcheck_polys should have num_gkr_rounds.saturating_sub(1) = {expected} polynomials, but it has {actual}"
