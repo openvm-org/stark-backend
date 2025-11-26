@@ -11,6 +11,8 @@
 
 using namespace symbolic_dag;
 
+namespace zerocheck_round0_upsampled {
+
 // Device function equivalent to helper.acc_constraints without eq_* parts
 // This computes the constraint sum: sum(lambda_i * constraint_i) for all constraints
 template <bool GLOBAL>
@@ -356,3 +358,5 @@ extern "C" int _assign_component(const Fp *input, FpExt *output, uint32_t len, u
     assign_component_kernel<<<grid, block>>>(input, output, len, component);
     return CHECK_KERNEL();
 }
+
+} // namespace zerocheck_round0_upsampled
