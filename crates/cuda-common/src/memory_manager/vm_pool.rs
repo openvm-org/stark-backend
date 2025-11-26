@@ -400,7 +400,8 @@ impl VirtualMemoryPool {
         let mut oldest_free_regions: Vec<_> = self
             .free_regions
             .iter()
-            .map(|(addr, region)| (region.id, *addr))
+            .filter(|(&addr, _)| allocate_size == 0 || addr != returned_ptr)
+            .map(|(&addr, region)| (region.id, addr))
             .collect();
         oldest_free_regions.sort_by_key(|(id, _)| *id);
         for (_, addr) in oldest_free_regions {
