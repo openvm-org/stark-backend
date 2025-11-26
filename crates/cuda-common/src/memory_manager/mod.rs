@@ -2,13 +2,9 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     ptr::NonNull,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
-    },
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
-
-static METRICS_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use bytesize::ByteSize;
 
@@ -25,7 +21,6 @@ use vm_pool::VirtualMemoryPool;
 extern "C" {
     fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;
     fn cudaFreeAsync(dev_ptr: *mut c_void, stream: cudaStream_t) -> i32;
-    fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
 }
 
 static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
@@ -135,54 +130,21 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     manager.d_free(ptr)
 }
 
-/// Returns (used, total) GPU memory in bytes from CUDA runtime.
-/// This is the ground truth from the driver, useful for sanity checking.
-pub fn cuda_mem_info() -> (usize, usize) {
-    let mut free = 0usize;
-    let mut total = 0usize;
-    unsafe { cudaMemGetInfo(&mut free, &mut total) };
-    (total.saturating_sub(free), total)
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct MemSnapshot {
-    pub current: usize,
-    pub peak: usize,
-    pub pool: usize,
-}
-
 #[derive(Debug, Clone)]
 pub struct MemTracker {
-    start_current: usize,
-    start_peak: usize,
+    current: usize,
     label: &'static str,
 }
 
 impl MemTracker {
     pub fn start(label: &'static str) -> Self {
-        let (current, peak) = MEMORY_MANAGER
+        let current = MEMORY_MANAGER
             .get()
             .and_then(|m| m.lock().ok())
-            .map(|m| (m.current_size, m.max_used_size))
+            .map(|m| m.current_size)
             .unwrap_or_default();
 
-        Self {
-            start_current: current,
-            start_peak: peak,
-            label,
-        }
-    }
-
-    pub fn snapshot() -> MemSnapshot {
-        MEMORY_MANAGER
-            .get()
-            .and_then(|m| m.lock().ok())
-            .map(|m| MemSnapshot {
-                current: m.current_size,
-                peak: m.max_used_size,
-                pool: m.pool.memory_usage(),
-            })
-            .unwrap_or_default()
+        Self { current, label }
     }
 
     pub fn emit_metrics(&self) {
@@ -190,30 +152,19 @@ impl MemTracker {
             return;
         };
 
-        let seq = METRICS_SEQ.fetch_add(1, Ordering::Relaxed);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            * 1000.0;
         let current = manager.current_size;
         let peak = manager.max_used_size;
-        let pool = manager.pool.memory_usage();
-        let delta = current as isize - self.start_current as isize;
-        // Peak reached during this module's execution
-        let module_peak = peak.saturating_sub(self.start_peak);
-        let (cuda_used, cuda_total) = cuda_mem_info();
+        let delta = current as isize - self.current as isize;
 
-        // Per-module metrics
-        metrics::gauge!("gpu_mem.seq", "module" => self.label).set(seq as f64);
+        metrics::gauge!("gpu_mem.timestamp_ms", "module" => self.label).set(ts);
         metrics::gauge!("gpu_mem.current_bytes", "module" => self.label).set(current as f64);
         metrics::gauge!("gpu_mem.delta_bytes", "module" => self.label).set(delta as f64);
-        metrics::gauge!("gpu_mem.start_bytes", "module" => self.label)
-            .set(self.start_current as f64);
-        metrics::gauge!("gpu_mem.module_peak_bytes", "module" => self.label)
-            .set(module_peak as f64);
-        // Actual cuda used memory for sanity checking
-        metrics::gauge!("gpu_mem.cuda_used_bytes", "module" => self.label).set(cuda_used as f64);
-
-        // Global metrics
-        metrics::gauge!("gpu_mem.peak_bytes").set(peak as f64);
-        metrics::gauge!("gpu_mem.pool_bytes").set(pool as f64);
-        metrics::gauge!("gpu_mem.cuda_total_bytes").set(cuda_total as f64);
+        metrics::gauge!("gpu_mem.peak_bytes", "module" => self.label).set(peak as f64);
     }
 
     #[inline]
@@ -224,7 +175,7 @@ impl MemTracker {
         };
         let current = manager.current_size;
         let peak = manager.max_used_size;
-        let used = current as isize - self.start_current as isize;
+        let used = current as isize - self.current as isize;
         let sign = if used >= 0 { "+" } else { "-" };
         let pool_usage = manager.pool.memory_usage();
         tracing::info!(

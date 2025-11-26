@@ -71,7 +71,7 @@ struct bb31_t : public bb31_base {
     }
 };
 
-class bb31_4_t {
+class __align__(16) bb31_4_t {
     union { bb31_t c[4]; uint32_t u[4]; };
 
     static const uint32_t MOD   = 0x78000001;
