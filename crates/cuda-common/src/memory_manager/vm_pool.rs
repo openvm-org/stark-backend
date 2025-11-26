@@ -27,7 +27,7 @@ extern "C" {
 const DEFAULT_VA_SIZE: usize = 8 << 40; // 8 TB
 
 /// Configuration for the Virtual Memory Pool.
-/// 
+///
 /// Use `VpmmConfig::from_env()` to load from environment variables,
 /// or construct directly for testing.
 #[derive(Debug, Clone)]
@@ -198,10 +198,9 @@ impl VirtualMemoryPool {
         // Preallocate pages if requested (skip if VPMM not supported)
         if config.initial_pages > 0 && page_size != usize::MAX {
             let alloc_size = config.initial_pages * page_size;
-            if let Err(e) = pool.defragment_or_create_new_pages(
-                alloc_size,
-                current_stream_id().unwrap(),
-            ) {
+            if let Err(e) =
+                pool.defragment_or_create_new_pages(alloc_size, current_stream_id().unwrap())
+            {
                 let mut free_mem = 0usize;
                 let mut total_mem = 0usize;
                 unsafe {
@@ -455,7 +454,9 @@ impl VirtualMemoryPool {
                     Err(e) => {
                         tracing::error!(
                             "vpmm_create_physical failed: device={}, page_size={}: {:?}",
-                            self.device_id, self.page_size, e
+                            self.device_id,
+                            self.page_size,
+                            e
                         );
                         if e.is_out_of_memory() {
                             return Err(MemoryError::OutOfMemory {
@@ -472,7 +473,10 @@ impl VirtualMemoryPool {
                 vpmm_map(allocated_dst, self.page_size, handle).map_err(|e| {
                     tracing::error!(
                         "vpmm_map failed: addr={:#x}, page_size={}, handle={}: {:?}",
-                        allocated_dst, self.page_size, handle, e
+                        allocated_dst,
+                        self.page_size,
+                        handle,
+                        e
                     );
                     MemoryError::from(e)
                 })?;
@@ -491,7 +495,10 @@ impl VirtualMemoryPool {
                 vpmm_set_access(dst, allocate_size, self.device_id).map_err(|e| {
                     tracing::error!(
                         "vpmm_set_access failed: addr={:#x}, size={}, device={}: {:?}",
-                        dst, allocate_size, self.device_id, e
+                        dst,
+                        allocate_size,
+                        self.device_id,
+                        e
                     );
                     MemoryError::from(e)
                 })?;
@@ -522,7 +529,10 @@ impl VirtualMemoryPool {
                 break;
             }
 
-            let region = self.free_regions.remove(&addr).expect("BUG: free region disappeared");
+            let region = self
+                .free_regions
+                .remove(&addr)
+                .expect("BUG: free region disappeared");
             region.event.synchronize().map_err(|e| {
                 tracing::error!("Event synchronize failed during defrag: {:?}", e);
                 MemoryError::from(e)
@@ -576,7 +586,9 @@ impl VirtualMemoryPool {
                 vpmm_unmap(region_addr, region_size).map_err(|e| {
                     tracing::error!(
                         "vpmm_unmap failed: addr={:#x}, size={}: {:?}",
-                        region_addr, region_size, e
+                        region_addr,
+                        region_size,
+                        e
                     );
                     MemoryError::from(e)
                 })?;
@@ -595,7 +607,10 @@ impl VirtualMemoryPool {
                     vpmm_map(curr_dst, self.page_size, handle).map_err(|e| {
                         tracing::error!(
                             "vpmm_map (remap) failed: dst={:#x}, page_size={}, handle={}: {:?}",
-                            curr_dst, self.page_size, handle, e
+                            curr_dst,
+                            self.page_size,
+                            handle,
+                            e
                         );
                         MemoryError::from(e)
                     })?;
@@ -612,7 +627,10 @@ impl VirtualMemoryPool {
             vpmm_set_access(dst, bytes_to_remap, self.device_id).map_err(|e| {
                 tracing::error!(
                     "vpmm_set_access (remap) failed: addr={:#x}, size={}, device={}: {:?}",
-                    dst, bytes_to_remap, self.device_id, e
+                    dst,
+                    bytes_to_remap,
+                    self.device_id,
+                    e
                 );
                 MemoryError::from(e)
             })?;
