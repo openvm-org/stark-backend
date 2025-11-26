@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
+    prover::{col_maj_idx, poly::Ple, ColMajorMatrix, MatrixView, StridedColMajorMatrixView},
     Digest, F,
-    prover::{ColMajorMatrix, MatrixView, StridedColMajorMatrixView, col_maj_idx, poly::Ple},
 };
 
 #[derive(Clone, Serialize, Deserialize, Debug, CopyGetters)]
@@ -95,7 +95,7 @@ impl<F, Digest: Clone> StackedPcsData<F, Digest> {
         self.tree.root()
     }
 
-    pub fn mat_view<'a>(&'a self, unstacked_mat_idx: usize) -> StridedColMajorMatrixView<'a, F> {
+    pub fn mat_view(&self, unstacked_mat_idx: usize) -> StridedColMajorMatrixView<'_, F> {
         self.layout.mat_view(unstacked_mat_idx, &self.matrix)
     }
 }
@@ -240,7 +240,10 @@ pub fn stacked_matrix<F: Field>(
         })
         .collect_vec();
     let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
-    let total_cells: usize = traces.iter().map(|t| t.values.len().max(1 << l_skip)).sum();
+    let total_cells: usize = traces
+        .iter()
+        .map(|t| t.height().max(1 << l_skip) * t.width())
+        .sum();
     let height = 1usize << (l_skip + n_stack);
     let width = total_cells.div_ceil(height);
 
@@ -330,8 +333,8 @@ mod poseidon2_merkle_tree {
 
     use super::*;
     use crate::{
-        Digest, F,
         poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice},
+        Digest, F,
     };
 
     impl<EF> MerkleTree<EF, Digest>
@@ -434,10 +437,7 @@ mod poseidon2_merkle_tree {
             preimage
         }
 
-        fn row_iter<'a>(
-            matrix: &'a ColMajorMatrix<EF>,
-            index: usize,
-        ) -> impl Iterator<Item = EF> + 'a {
+        fn row_iter(matrix: &ColMajorMatrix<EF>, index: usize) -> impl Iterator<Item = EF> + '_ {
             (0..matrix.width()).map(move |c| matrix.get(index, c).copied().unwrap_or(EF::ZERO))
         }
     }
@@ -449,7 +449,7 @@ mod tests {
     use p3_field::FieldAlgebra;
 
     use super::*;
-    use crate::{F, prover::ColMajorMatrix};
+    use crate::{prover::ColMajorMatrix, F};
 
     #[test]
     fn test_stacked_matrix_manual_0() {
