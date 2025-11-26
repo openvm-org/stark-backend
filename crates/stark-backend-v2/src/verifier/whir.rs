@@ -1,23 +1,27 @@
 use core::iter::zip;
 
-use itertools::{Itertools, izip};
+use itertools::{izip, Itertools};
 use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
 use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    Digest, EF, F, SystemParams,
-    poly_common::{Squarable, eval_eq_mle, horner_eval, interpolate_quadratic_at_012},
+    poly_common::{eval_eq_mle, horner_eval, interpolate_quadratic_at_012, Squarable},
     poseidon2::sponge::{
-        FiatShamirTranscript, poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress,
+        poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress, FiatShamirTranscript,
     },
     proof::WhirProof,
     prover::poly::Mle,
+    Digest, SystemParams, EF, F,
 };
 
 #[inline]
 fn ensure(cond: bool, err: VerifyWhirError) -> Result<(), VerifyWhirError> {
-    if cond { Ok(()) } else { Err(err) }
+    if cond {
+        Ok(())
+    } else {
+        Err(err)
+    }
 }
 
 /// Verify a WHIR proof.
@@ -343,20 +347,20 @@ mod tests {
     use openvm_stark_backend::prover::MatrixDimensions;
     use openvm_stark_sdk::config::setup_tracing_with_log_level;
     use p3_field::{Field, FieldAlgebra, TwoAdicField};
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use tracing::Level;
 
     use super::*;
     use crate::{
-        EF, F,
         poly_common::Squarable,
         poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory},
         prover::{
-            ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
-            poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening,
+            poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening, ColMajorMatrix,
+            CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
         },
         test_utils::{DuplexSpongeValidator, FibFixture, TestFixture},
-        verifier::whir::{VerifyWhirError, binary_k_fold, verify_whir},
+        verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
+        EF, F,
     };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
@@ -463,8 +467,8 @@ mod tests {
 
     fn run_whir_fib_test(params: SystemParams) -> Result<(), VerifyWhirError> {
         use crate::{
-            BabyBearPoseidon2CpuEngineV2, StarkEngineV2, poseidon2::sponge::DuplexSponge,
-            prover::DeviceDataTransporterV2,
+            poseidon2::sponge::DuplexSponge, prover::DeviceDataTransporterV2,
+            BabyBearPoseidon2CpuEngineV2, StarkEngineV2,
         };
         let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
         let fib = FibFixture::new(0, 1, 1 << (params.n_stack + params.l_skip));

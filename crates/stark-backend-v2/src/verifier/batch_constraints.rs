@@ -5,22 +5,23 @@ use std::{
 
 use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicConstraints, symbolic_expression::SymbolicEvaluator,
+    symbolic_expression::SymbolicEvaluator, SymbolicConstraints,
 };
-use p3_field::{Field, FieldAlgebra, batch_multiplicative_inverse};
+use p3_field::{batch_multiplicative_inverse, Field, FieldAlgebra};
 use thiserror::Error;
 use tracing::{debug, instrument};
 
 use crate::{
-    EF, F, calculate_n_logup,
+    calculate_n_logup,
     keygen::types::MultiStarkVerifyingKey0V2,
-    poly_common::{UnivariatePoly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni},
+    poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
     verifier::{
         evaluator::VerifierConstraintEvaluator,
-        fractional_sumcheck_gkr::{GkrVerificationError, verify_gkr},
+        fractional_sumcheck_gkr::{verify_gkr, GkrVerificationError},
     },
+    EF, F,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]

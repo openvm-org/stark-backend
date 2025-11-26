@@ -77,7 +77,7 @@ impl<T> DeviceMatrix<T> {
         Arc::strong_count(&self.buffer)
     }
 
-    pub fn as_view<'a>(&'a self) -> DeviceMatrixView<'a, T> {
+    pub fn as_view(&self) -> DeviceMatrixView<'_, T> {
         // SAFETY: buffer is borrowed for lifetime 'a of the view
         unsafe { DeviceMatrixView::from_raw_parts(self.buffer.as_ptr(), self.height, self.width) }
     }
@@ -122,10 +122,10 @@ pub struct DeviceMatrixView<'a, T> {
     _ptr_lifetime: PhantomData<&'a T>,
 }
 
-unsafe impl<'a, T> Send for DeviceMatrixView<'a, T> {}
-unsafe impl<'a, T> Sync for DeviceMatrixView<'a, T> {}
+unsafe impl<T> Send for DeviceMatrixView<'_, T> {}
+unsafe impl<T> Sync for DeviceMatrixView<'_, T> {}
 
-impl<'a, T> DeviceMatrixView<'a, T> {
+impl<T> DeviceMatrixView<'_, T> {
     /// # Safety
     /// - The pointer must be valid for the lifetime of the view.
     /// - The pointer must have memory allocated for the following `height * width` elements of `T`.
@@ -143,7 +143,7 @@ impl<'a, T> DeviceMatrixView<'a, T> {
     }
 }
 
-impl<'a, T> MatrixDimensions for DeviceMatrixView<'a, T> {
+impl<T> MatrixDimensions for DeviceMatrixView<'_, T> {
     #[inline]
     fn height(&self) -> usize {
         self.height
