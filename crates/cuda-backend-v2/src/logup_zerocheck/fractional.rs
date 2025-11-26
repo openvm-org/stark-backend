@@ -77,7 +77,12 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
     let root_layer = tree.pop().unwrap();
     let root = copy_frac_from_device(&root_layer, 0)?;
     if assert_zero {
-        debug_assert_eq!(root.p, EF::ZERO);
+        if root.p != EF::ZERO {
+            return Err(FractionalSumcheckError::NonzeroRootSum {
+                p: root.p,
+                q: root.q,
+            });
+        }
     } else {
         transcript.observe_ext(root.p);
     }
