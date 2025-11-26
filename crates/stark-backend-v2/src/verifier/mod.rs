@@ -1,21 +1,21 @@
 use core::cmp::Reverse;
 
-use itertools::{Itertools, izip};
+use itertools::{izip, Itertools};
 use p3_field::{FieldAlgebra, TwoAdicField};
 use thiserror::Error;
 
 use crate::{
-    F,
     keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2},
     poly_common::Squarable,
     poseidon2::sponge::FiatShamirTranscript,
     proof::Proof,
     verifier::{
-        batch_constraints::{BatchConstraintError, verify_zerocheck_and_logup},
-        proof_shape::{ProofShapeError, verify_proof_shape},
-        stacked_reduction::{StackedReductionError, verify_stacked_reduction},
-        whir::{VerifyWhirError, verify_whir},
+        batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
+        proof_shape::{verify_proof_shape, ProofShapeError},
+        stacked_reduction::{verify_stacked_reduction, StackedReductionError},
+        whir::{verify_whir, VerifyWhirError},
     },
+    F,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -194,13 +194,13 @@ mod tests {
     use tracing::Level;
 
     use crate::{
-        BabyBearPoseidon2CpuEngineV2, SystemParams,
         poseidon2::sponge::{DuplexSpongeRecorder, TranscriptHistory},
         test_utils::{
-            CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11,
-            PreprocessedFibFixture, TestFixture, test_system_params_small,
+            test_system_params_small, CachedFixture11, DuplexSpongeValidator, FibFixture,
+            InteractionsFixture11, PreprocessedFibFixture, TestFixture,
         },
-        verifier::{VerifierError, verify},
+        verifier::{verify, VerifierError},
+        BabyBearPoseidon2CpuEngineV2, SystemParams,
     };
 
     #[test_case(2, 10)]

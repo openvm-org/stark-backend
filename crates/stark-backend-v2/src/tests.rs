@@ -4,31 +4,32 @@ use openvm_stark_sdk::config::{setup_tracing, setup_tracing_with_log_level};
 use p3_field::{FieldAlgebra, PrimeField32, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_strict_usize;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use test_case::test_case;
-use tracing::{Level, debug};
+use tracing::{debug, Level};
 
 use crate::{
-    BabyBearPoseidon2CpuEngineV2, F, StarkEngineV2, SystemParams,
     poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
     prover::{
+        stacked_pcs::stacked_commit,
+        stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
+        sumcheck::{sumcheck_multilinear, sumcheck_prismalinear},
         AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MultiRapProver,
         ProvingContextV2,
-        stacked_pcs::stacked_commit,
-        stacked_reduction::{StackedReductionCpu, prove_stacked_opening_reduction},
-        sumcheck::{sumcheck_multilinear, sumcheck_prismalinear},
     },
     test_utils::{
-        CachedFixture11, FibFixture, InteractionsFixture11, PreprocessedFibFixture, TestFixture,
-        prove_up_to_batch_constraints, test_engine_small,
+        prove_up_to_batch_constraints, test_engine_small, test_system_params_small,
+        CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture, PreprocessedFibFixture,
+        SelfInteractionFixture, TestFixture,
     },
     verifier::{
-        batch_constraints::{BatchConstraintError, verify_zerocheck_and_logup},
+        batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
         fractional_sumcheck_gkr::verify_gkr,
-        proof_shape::{ProofShapeError, verify_proof_shape},
-        stacked_reduction::{StackedReductionError, verify_stacked_reduction},
+        proof_shape::{verify_proof_shape, ProofShapeError},
+        stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
     },
+    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, F,
 };
 
 #[test]
@@ -324,7 +325,8 @@ fn test_single_cached_trace_stark() {
     engine.verify(&vk, &proof).unwrap();
 }
 
-#[test_case(3)]
+#[test_case(10 ; "when log_height equals n_stack l_skip")]
+#[test_case(3 ; "when log_height greater than l_skip")]
 #[test_case(2 ; "when log_height equals l_skip")]
 #[test_case(1 ; "when log_height less than l_skip")]
 #[test_case(0 ; "when log_height is zero")]
@@ -334,6 +336,36 @@ fn test_single_preprocessed_trace_stark(log_trace_degree: usize) {
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
     let fx = PreprocessedFibFixture::new(0, 1, sels);
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test_case(10 ; "when log_height equals n_stack l_skip")]
+#[test_case(3 ; "when log_height greater than l_skip")]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_multi_interaction_traces_stark(log_trace_degree: usize) {
+    setup_tracing();
+    let engine = test_engine_small();
+    let fx = SelfInteractionFixture {
+        widths: vec![4, 7, 8, 8, 10, 100],
+        log_height: log_trace_degree,
+        bus_index: 4,
+    };
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test_case(10 ; "when log_height equals n_stack l_skip")]
+#[test_case(3 ; "when log_height greater than l_skip")]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_mixture_traces_stark(log_trace_degree: usize) {
+    setup_tracing();
+    let engine = test_engine_small();
+    let fx = MixtureFixture::standard(log_trace_degree, engine.config());
     let (vk, proof) = fx.keygen_and_prove(&engine);
     engine.verify(&vk, &proof).unwrap();
 }
@@ -405,4 +437,18 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
         &omega_pows,
     )?;
     Ok(())
+}
+
+#[test]
+fn test_matrix_stacking_overflow() {
+    setup_tracing();
+    let params = test_system_params_small(3, 5, 3);
+    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let fx = SelfInteractionFixture {
+        widths: vec![4, 7, 8, 8, 10],
+        log_height: 1,
+        bus_index: 4,
+    };
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
 }

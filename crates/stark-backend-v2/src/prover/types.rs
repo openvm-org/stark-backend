@@ -4,10 +4,10 @@ use derivative::Derivative;
 use openvm_stark_backend::{keygen::types::LinearConstraint, prover::MatrixDimensions};
 
 use crate::{
-    Digest, SystemParams,
     keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2},
     proof::TraceVData,
     prover::ProverBackendV2,
+    Digest, SystemParams,
 };
 
 /// The committed trace data for a single trace matrix. This type is used to store prover data for

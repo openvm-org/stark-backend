@@ -6,7 +6,6 @@ use thiserror::Error;
 use tracing::{debug, instrument};
 
 use crate::{
-    EF, F,
     poly_common::{
         eval_eq_mle, eval_eq_prism, eval_in_uni, eval_rot_kernel_prism, horner_eval,
         interpolate_quadratic_at_012,
@@ -14,6 +13,7 @@ use crate::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::StackingProof,
     prover::stacked_pcs::StackedLayout,
+    EF, F,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -209,7 +209,7 @@ mod tests {
     use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
     use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PrimeField32, TwoAdicField};
     use p3_util::log2_ceil_usize;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
     use crate::{poseidon2::sponge::DuplexSponge, prover::stacked_pcs::StackedSlice};

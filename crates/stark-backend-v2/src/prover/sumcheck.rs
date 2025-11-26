@@ -5,8 +5,8 @@ use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
 use p3_field::{
-    ExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField,
-    batch_multiplicative_inverse,
+    batch_multiplicative_inverse, ExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra,
+    TwoAdicField,
 };
 use p3_interpolation::interpolate_coset;
 use p3_matrix::dense::RowMajorMatrix;
@@ -15,10 +15,10 @@ use p3_util::{log2_ceil_usize, log2_strict_usize};
 use tracing::{debug, instrument, trace};
 
 use crate::{
-    EF,
     poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
     prover::{ColMajorMatrix, ColMajorMatrixView, MatrixView, StridedColMajorMatrixView},
+    EF,
 };
 
 /// The univariate skip round 0: we want to compute the univariate polynomial `s(Z) = sum_{x \in
