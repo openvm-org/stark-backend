@@ -267,7 +267,6 @@ impl VirtualMemoryPool {
         );
     }
 
-    
     /// Return the base address of a virtual hole large enough for `requested` bytes.
     fn take_unmapped_region(&mut self, requested: usize) -> Result<CUdeviceptr, MemoryError> {
         debug_assert!(requested != 0);
@@ -323,7 +322,7 @@ impl VirtualMemoryPool {
     }
 
     /// Defragments the pool by reusing existing holes and, if needed, reserving more VA space.
-    /// Moves just enough pages to satisfy `requested`, keeping the remainder of each region in place.
+    /// Moves just enough pages to satisfy `requested`, keeping the remainder in place.
     fn defragment_or_create_new_pages(
         &mut self,
         requested: usize,
@@ -569,11 +568,7 @@ impl std::fmt::Debug for VirtualMemoryPool {
 
         let mut regions: Vec<(CUdeviceptr, usize, String)> = Vec::new();
         for (addr, region) in &self.free_regions {
-            regions.push((
-                *addr,
-                region.size,
-                format!("free (s {})", region.stream_id),
-            ));
+            regions.push((*addr, region.size, format!("free (s {})", region.stream_id)));
         }
         for (addr, size) in &self.malloc_regions {
             regions.push((*addr, *size, "malloc".to_string()));
@@ -584,8 +579,8 @@ impl std::fmt::Debug for VirtualMemoryPool {
         regions.sort_by_key(|(addr, _, _)| *addr);
 
         write!(f, "Regions: ")?;
-         for (_, size, label) in regions.iter() {
-             write!(f, "[{} {}]", label, ByteSize::b(*size as u64))?;
+        for (_, size, label) in regions.iter() {
+            write!(f, "[{} {}]", label, ByteSize::b(*size as u64))?;
         }
         Ok(())
     }
