@@ -37,6 +37,9 @@ pub struct MemoryManager {
     max_used_size: usize,
 }
 
+/// # Safety
+/// `MemoryManager` is not internally synchronized. These impls are safe because
+/// the singleton instance is wrapped in `Mutex` via `MEMORY_MANAGER`.
 unsafe impl Send for MemoryManager {}
 unsafe impl Sync for MemoryManager {}
 
@@ -59,49 +62,46 @@ impl MemoryManager {
         let mut tracked_size = size;
         let ptr = if size < self.pool.page_size {
             let mut ptr: *mut c_void = std::ptr::null_mut();
-            check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) })
-                .expect("Failed to allocate small memory block via cudaMallocAsync");
-            self.allocated_ptrs
-                .insert(NonNull::new(ptr).expect("cudaMalloc returned null"), size);
-            Ok(ptr)
+            check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) }).map_err(
+                |e| {
+                    tracing::error!("cudaMallocAsync failed: size={}: {:?}", size, e);
+                    MemoryError::from(e)
+                },
+            )?;
+            self.allocated_ptrs.insert(
+                NonNull::new(ptr).expect("BUG: cudaMallocAsync returned null"),
+                size,
+            );
+            ptr
         } else {
             tracked_size = size.next_multiple_of(self.pool.page_size);
-            self.pool.malloc_internal(
-                tracked_size,
-                current_stream_id()
-                    .expect("Failed to get current CUDA stream ID for large allocation"),
-            )
+            let stream_id = current_stream_id()?;
+            self.pool.malloc_internal(tracked_size, stream_id)?
         };
 
         self.current_size += tracked_size;
         if self.current_size > self.max_used_size {
             self.max_used_size = self.current_size;
         }
-        ptr
+        Ok(ptr)
     }
 
     /// # Safety
     /// The pointer `ptr` must be a valid, previously allocated device pointer.
     /// The caller must ensure that `ptr` is not used after this function is called.
     unsafe fn d_free(&mut self, ptr: *mut c_void) -> Result<(), MemoryError> {
-        let nn = NonNull::new(ptr)
-            .ok_or(MemoryError::NullPointer)
-            .expect("Attempted to free null pointer");
+        let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 
         if let Some(size) = self.allocated_ptrs.remove(&nn) {
             self.current_size -= size;
-            check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) })
-                .expect("Failed to free small memory block via cudaFreeAsync");
+            check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) }).map_err(|e| {
+                tracing::error!("cudaFreeAsync failed: ptr={:p}: {:?}", ptr, e);
+                MemoryError::from(e)
+            })?;
         } else {
-            self.current_size -= self
-                .pool
-                .free_internal(
-                    ptr,
-                    current_stream_id().expect(
-                        "Failed to get current CUDA stream ID for freeing large allocation",
-                    ),
-                )
-                .expect("Failed to free large memory block from virtual memory pool");
+            let stream_id = current_stream_id()?;
+            let freed_size = self.pool.free_internal(ptr, stream_id)?;
+            self.current_size -= freed_size;
         }
 
         Ok(())
@@ -112,13 +112,9 @@ impl Drop for MemoryManager {
     fn drop(&mut self) {
         let ptrs: Vec<*mut c_void> = self.allocated_ptrs.keys().map(|nn| nn.as_ptr()).collect();
         for &ptr in &ptrs {
-            unsafe { self.d_free(ptr).unwrap() };
-        }
-        if !self.allocated_ptrs.is_empty() {
-            println!(
-                "Error: {} allocations were automatically freed on MemoryManager drop",
-                self.allocated_ptrs.len()
-            );
+            if let Err(e) = unsafe { self.d_free(ptr) } {
+                eprintln!("MemoryManager drop: failed to free {:p}: {:?}", ptr, e);
+            }
         }
     }
 }
