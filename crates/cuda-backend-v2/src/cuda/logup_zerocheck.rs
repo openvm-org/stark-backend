@@ -148,6 +148,38 @@ extern "C" {
         challenges: *const std::ffi::c_void,
     ) -> i32;
 
+    // interactions_bary.cu
+    pub fn _logup_r0_temp_sums_buffer_size(buffer_size: u32, large_domain: u32, num_x: u32) -> u32;
+    pub fn _logup_r0_intermediates_buffer_size(
+        buffer_size: u32,
+        large_domain: u32,
+        num_x: u32,
+    ) -> u32;
+    fn _logup_bary_eval_interactions_round0(
+        tmp_sums_buffer: *mut Frac<EF>,
+        output: *mut Frac<EF>,
+        selectors_cube: *const F,
+        preprocessed: *const F,
+        main_parts: *const *const F,
+        omega_skip_pows: *const F,
+        inv_lagrange_denoms: *const F,
+        eq_sharp_uni: *const EF,
+        eq_cube: *const EF,
+        public_values: *const F,
+        numer_weights: *const EF,
+        denom_weights: *const EF,
+        denom_sum_init: EF,
+        d_rules: *const std::ffi::c_void,
+        rules_len: usize,
+        buffer_size: u32,
+        d_intermediates: *mut F,
+        large_domain: u32,
+        skip_domain: u32,
+        num_x: u32,
+        height: u32,
+        expansion_factor: u32,
+    ) -> i32;
+
     // constraints.cu
     fn _zerocheck_eval_constraints(
         output: *mut std::ffi::c_void,
@@ -192,6 +224,51 @@ extern "C" {
         output: *mut std::ffi::c_void,
         len: u32,
         component_idx: u32,
+    ) -> i32;
+
+    // constraints_bary.cu
+    pub fn _zerocheck_r0_temp_sums_buffer_size(
+        buffer_size: u32,
+        large_domain: u32,
+        num_x: u32,
+    ) -> u32;
+    pub fn _zerocheck_r0_intermediates_buffer_size(
+        buffer_size: u32,
+        large_domain: u32,
+        num_x: u32,
+    ) -> u32;
+    fn _zerocheck_bary_eval_constraints(
+        tmp_sums_buffer: *mut EF,
+        output: *mut EF,
+        selectors_cube: *const F,
+        preprocessed: *const F,
+        main_parts: *const *const F,
+        omega_skip_pows: *const F,
+        inv_lagrange_denoms: *const F,
+        eq_uni: *const EF,
+        eq_cube: *const EF,
+        d_lambda_pows: *const EF,
+        d_lambda_indices: *const u32,
+        public_values: *const F,
+        d_rules: *const std::ffi::c_void,
+        rules_len: usize,
+        d_used_nodes: *const usize,
+        used_nodes_len: usize,
+        lambda_len: usize,
+        buffer_size: u32,
+        d_intermediates: *mut F,
+        large_domain: u32,
+        skip_domain: u32,
+        num_x: u32,
+        height: u32,
+        expansion_factor: u32,
+    ) -> i32;
+    fn _fold_selectors_round0(
+        out: *mut EF,
+        input: *const F,
+        is_first: EF,
+        is_last: EF,
+        num_x: u32,
     ) -> i32;
 
     // mle.cu
@@ -505,6 +582,119 @@ pub unsafe fn zerocheck_eval_constraints(
     ))
 }
 
+/// # Safety
+/// - `buffer_size` does not refer to the capacity of `intermediates`. It refers to "how many DAG
+///   nodes per row need to be buffered". The capacity is a multiple of `buffer_size` which is
+///   runtime calculated based on `buffer_size`.
+/// - `eq_cube` must be a pointer to device buffer with at least `num_x` elements representing
+///   evaluations on hypercube.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn zerocheck_bary_eval_constraints(
+    tmp_sums_buffer: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    selectors_cube: &DeviceBuffer<F>,
+    preprocessed: *const F,
+    main_ptrs: &DeviceBuffer<*const F>,
+    omega_skip_pows: &DeviceBuffer<F>,
+    inv_lagrange_denoms: &DeviceBuffer<F>,
+    eq_uni: &DeviceBuffer<EF>,
+    eq_cube: *const EF,
+    lambda_pows: &DeviceBuffer<EF>,
+    lambda_indices: &DeviceBuffer<u32>,
+    public_values: &DeviceBuffer<F>,
+    rules: &DeviceBuffer<u128>,
+    used_nodes: &DeviceBuffer<usize>,
+    buffer_size: u32,
+    intermediates: &mut DeviceBuffer<F>,
+    large_domain: u32,
+    skip_domain: u32,
+    num_x: u32,
+    height: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_zerocheck_bary_eval_constraints(
+        tmp_sums_buffer.as_mut_ptr(),
+        output.as_mut_ptr(),
+        selectors_cube.as_ptr(),
+        preprocessed,
+        main_ptrs.as_ptr(),
+        omega_skip_pows.as_ptr(),
+        inv_lagrange_denoms.as_ptr(),
+        eq_uni.as_ptr(),
+        eq_cube,
+        lambda_pows.as_ptr(),
+        lambda_indices.as_ptr(),
+        public_values.as_ptr(),
+        rules.as_raw_ptr(),
+        rules.len(),
+        used_nodes.as_ptr(),
+        used_nodes.len(),
+        lambda_pows.len(),
+        buffer_size,
+        intermediates.as_mut_ptr(),
+        large_domain,
+        skip_domain,
+        num_x,
+        height,
+        large_domain.next_power_of_two() / skip_domain,
+    ))
+}
+
+/// # Safety
+/// - `buffer_size` does not refer to the capacity of `intermediates`. It refers to "how many DAG
+///   nodes per row need to be buffered". The capacity is a multiple of `buffer_size` which is
+///   runtime calculated based on `buffer_size`.
+/// - `eq_cube` must be a pointer to device buffer with at least `num_x` elements representing
+///   evaluations on hypercube.
+/// - `output` will not be written to by this function. Only `tmp_sums_buffer` is written.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn logup_bary_eval_interactions_round0(
+    tmp_sums_buffer: &mut DeviceBuffer<Frac<EF>>,
+    output: &mut DeviceBuffer<Frac<EF>>,
+    selectors_cube: &DeviceBuffer<F>,
+    preprocessed: *const F,
+    main_ptrs: &DeviceBuffer<*const F>,
+    omega_skip_pows: &DeviceBuffer<F>,
+    inv_lagrange_denoms: &DeviceBuffer<F>,
+    eq_sharp_uni: &DeviceBuffer<EF>,
+    eq_cube: *const EF,
+    public_values: &DeviceBuffer<F>,
+    numer_weights: &DeviceBuffer<EF>,
+    denom_weights: &DeviceBuffer<EF>,
+    denom_sum_init: EF,
+    rules: &DeviceBuffer<u128>,
+    buffer_size: u32,
+    intermediates: &mut DeviceBuffer<F>,
+    large_domain: u32,
+    skip_domain: u32,
+    num_x: u32,
+    height: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_logup_bary_eval_interactions_round0(
+        tmp_sums_buffer.as_mut_ptr(),
+        output.as_mut_ptr(),
+        selectors_cube.as_ptr(),
+        preprocessed,
+        main_ptrs.as_ptr(),
+        omega_skip_pows.as_ptr(),
+        inv_lagrange_denoms.as_ptr(),
+        eq_sharp_uni.as_ptr(),
+        eq_cube,
+        public_values.as_ptr(),
+        numer_weights.as_ptr(),
+        denom_weights.as_ptr(),
+        denom_sum_init,
+        rules.as_raw_ptr(),
+        rules.len(),
+        buffer_size,
+        intermediates.as_mut_ptr(),
+        large_domain,
+        skip_domain,
+        num_x,
+        height,
+        large_domain.next_power_of_two() / skip_domain,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn zerocheck_eval_mle(
     output: &DeviceBuffer<EF>,
@@ -801,5 +991,24 @@ pub unsafe fn frac_matrix_vertically_repeat_mixed(
         width,
         lifted_height,
         height,
+    ))
+}
+
+/// Create folded selectors around round 0 from hypercube evaluations and univariate factors.
+///
+/// Note: `is_transition` is not a product of univariate and hypercube factors.
+pub unsafe fn fold_selectors_round0(
+    out: *mut EF,
+    input: *const F,
+    is_first: EF,
+    is_last: EF,
+    num_x: usize,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_fold_selectors_round0(
+        out,
+        input,
+        is_first,
+        is_last,
+        num_x as u32,
     ))
 }

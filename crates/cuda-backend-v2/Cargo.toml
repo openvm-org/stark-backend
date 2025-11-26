@@ -17,6 +17,7 @@ derive-new.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 getset.workspace = true
+rustc-hash.workspace = true
 
 # Plonky3
 p3-field = { workspace = true }

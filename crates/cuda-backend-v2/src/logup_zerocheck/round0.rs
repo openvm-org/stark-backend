@@ -1,3 +1,4 @@
+#![allow(dead_code)] // Temporary: keeping upsampling implementation
 use std::{cmp::min, collections::HashMap, iter::zip, mem::ManuallyDrop, sync::Arc};
 
 use itertools::Itertools;
@@ -10,15 +11,16 @@ use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::{
     air_builders::symbolic::{
         SymbolicConstraints, SymbolicConstraintsDag, SymbolicExpressionDag, SymbolicExpressionNode,
-        symbolic_expression::SymbolicExpression,
-        symbolic_variable::{Entry, SymbolicVariable},
+        symbolic_variable::Entry, topological_sort_symbolic_expr,
     },
     prover::MatrixDimensions,
 };
 use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
+use rustc_hash::FxHashMap;
 use stark_backend_v2::prover::{
     AirProvingContextV2, CommittedTraceDataV2, DeviceStarkProvingKeyV2,
+    fractional_sumcheck_gkr::Frac,
 };
 use tracing::debug;
 
@@ -30,8 +32,9 @@ use crate::{
     Digest, EF, F, GpuBackendV2,
     cuda::{
         logup_zerocheck::{
-            MainMatrixPtrs, accumulate_constraints, batch_constraints_eval_interactions_round0,
-            zerocheck_eval_constraints,
+            _logup_r0_intermediates_buffer_size, _logup_r0_temp_sums_buffer_size,
+            _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
+            MainMatrixPtrs, logup_bary_eval_interactions_round0, zerocheck_bary_eval_constraints,
         },
         matrix::{batch_expand_pad_wide, batch_rotate_pad, lift_padded_matrix_evals},
     },
@@ -135,20 +138,25 @@ pub(crate) fn prepare_round0_trace_input<'a>(
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_round0_constraints_gpu(
-    l_skip: usize,
-    large_domain: usize,
     pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
-    input: &Round0TraceInput,
+    selectors_cube: &DeviceBuffer<F>,
+    main_parts: &DeviceBuffer<*const F>,
+    public_values: &DeviceBuffer<F>,
+    omega_skip_pows: &DeviceBuffer<F>,
+    inv_lagrange_denoms: &DeviceBuffer<F>,
+    eq_uni: &DeviceBuffer<EF>,
+    eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
-    eq_z: &DeviceBuffer<EF>,
+    large_domain: u32,
+    skip_domain: u32,
+    num_x: u32,
+    height: u32,
 ) -> Result<DeviceBuffer<EF>, Round0EvalError> {
     let constraints_dag = &pk.vk.symbolic_constraints;
     if constraints_dag.constraints.constraint_idx.is_empty() {
         // No plain AIR constraints, return empty buffer
         return Ok(DeviceBuffer::new());
     }
-
-    let skip_stride = (large_domain >> l_skip) as u32;
 
     let lambda_index_map: HashMap<usize, usize> = constraints_dag
         .constraints
@@ -177,57 +185,67 @@ pub fn evaluate_round0_constraints_gpu(
     let d_rules = encoded_rules.to_device()?;
     let d_used_nodes = rules.used_nodes.to_device()?;
 
-    let num_x = input.eq_x.height();
-    let large_height = input.selectors_large.height();
-    debug_assert_eq!(num_x * large_domain, large_height);
-    debug_assert_eq!(input.trace_mats.common.0.height(), large_height);
-
-    let intermediates = if rules.buffer_size > 0 {
-        let capacity = if rules.buffer_size > 16 {
-            (TASK_SIZE as usize) * rules.buffer_size
-        } else {
-            rules.buffer_size
-        };
-        debug!("zerocheck:intermediates_capacity={capacity}");
-        Some(DeviceBuffer::<EF>::with_capacity(capacity))
+    let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
+    let intermed_capacity =
+        unsafe { _zerocheck_r0_intermediates_buffer_size(buffer_size, large_domain, num_x) };
+    let mut intermediates = if intermed_capacity > 0 {
+        debug!("zerocheck:intermediates_capacity={intermed_capacity}");
+        DeviceBuffer::<F>::with_capacity(intermed_capacity as usize)
     } else {
-        None
+        DeviceBuffer::<F>::new()
     };
 
-    let num_rows_per_tile = {
-        let h = large_height as u32;
-        h.div_ceil(TASK_SIZE).max(1)
-    };
+    let tmp_sums_buffer_capacity =
+        unsafe { _zerocheck_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x) };
+    debug!("zerocheck:tmp_sums_buffer_capacity={tmp_sums_buffer_capacity}");
+    let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(tmp_sums_buffer_capacity as usize);
 
-    let output = DeviceBuffer::<EF>::with_capacity(large_height);
+    let preprocessed_ptr = pk
+        .preprocessed_data
+        .as_ref()
+        .map(|cd| cd.trace.buffer().as_ptr())
+        .unwrap_or(std::ptr::null());
 
+    let mut s_evals = DeviceBuffer::<EF>::with_capacity(large_domain as usize);
+    // SAFETY:
+    // - No bounds checks are done in this kernel. It fully assumes that the Rules are trusted and
+    //   all nodes are valid.
     unsafe {
-        zerocheck_eval_constraints(
-            &output,
-            &input.selectors_large,
-            &input.main_ptrs,
-            input.trace_mats.preprocessed_ptr(),
-            eq_z,
-            &input.eq_x,
+        zerocheck_bary_eval_constraints(
+            &mut temp_sums_buffer,
+            &mut s_evals,
+            selectors_cube,
+            preprocessed_ptr,
+            main_parts,
+            omega_skip_pows,
+            inv_lagrange_denoms,
+            eq_uni,
+            eq_cube,
             lambda_pows,
             &d_lambda_indices,
-            input.public_values,
+            public_values,
             &d_rules,
             &d_used_nodes,
-            rules.buffer_size.try_into().unwrap(),
-            intermediates.as_ref(),
-            large_domain as u32,
-            num_x as u32,
-            num_rows_per_tile,
-            skip_stride,
+            buffer_size,
+            &mut intermediates,
+            large_domain,
+            skip_domain,
+            num_x,
+            height,
         )?;
     }
 
-    let sums_device = DeviceBuffer::<EF>::with_capacity(large_domain);
-    unsafe {
-        accumulate_constraints(&output, &sums_device, large_domain as u32, num_x as u32)?;
-    }
-    Ok(sums_device)
+    Ok(s_evals)
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InteractionNode {
+    // Interaction index
+    pub idx: u32,
+    // 0 means numerator (count)
+    // id > 0 means denominator term to multiply by beta_pows[id], i.e., id - 1 is message index
+    pub beta_idx: u32,
 }
 
 /// Evaluate interaction constraints (excluding plain AIR constraints) for a single AIR, given
@@ -237,137 +255,142 @@ pub fn evaluate_round0_constraints_gpu(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn evaluate_round0_interactions_gpu(
-    l_skip: usize,
-    large_domain: usize,
-    constraints: &SymbolicConstraints<F>,
-    input: &Round0TraceInput,
-    eq_sharp_z: &DeviceBuffer<EF>,
-    eq_3b: &DeviceBuffer<EF>,
+    pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
+    symbolic: &SymbolicConstraints<F>,
+    selectors_cube: &DeviceBuffer<F>,
+    main_parts: &DeviceBuffer<*const F>,
+    public_values: &DeviceBuffer<F>,
+    omega_skip_pows: &DeviceBuffer<F>,
+    inv_lagrange_denoms: &DeviceBuffer<F>,
+    eq_sharp_uni: &DeviceBuffer<EF>,
+    eq_cube: *const EF,
     beta_pows: &[EF],
-) -> Result<(DeviceBuffer<EF>, DeviceBuffer<EF>), Round0EvalError> {
-    let skip_stride = (large_domain >> l_skip) as u32;
-
+    eq_3bs: &[EF],
+    large_domain: u32,
+    skip_domain: u32,
+    num_x: u32,
+    height: u32,
+) -> Result<DeviceBuffer<Frac<EF>>, Round0EvalError> {
     // Check if this trace has interactions
-    // eq_3b_per_trace is non-empty only for traces with interactions
-    if eq_3b.is_empty() {
-        return Ok((DeviceBuffer::new(), DeviceBuffer::new()));
+    if eq_3bs.is_empty() {
+        return Ok(DeviceBuffer::new());
     }
 
-    // Create symbolic challenges for beta
-    let max_fields_len = constraints
-        .interactions
-        .iter()
-        .map(|interaction| interaction.message.len())
-        .max()
-        .unwrap_or(0);
+    // We create a new "interactions DAG" where the new .constraints are the interaction [count,
+    // message_0, message_1, ..] expressions themselves, while the .interactions are empty
+    // We track the indices with InteractionNode
 
-    // Prepare challenges: [unused_alpha, beta_0, beta_1, ..., beta_{max_fields_len}]
-    // Challenge index 0 is unused (would be alpha), indices 1..=max_fields_len+1 are betas
-    // symbolic_challenges uses 0..=max_fields_len+1 to cover all beta indices
-    let mut challenges_vec = vec![EF::ZERO]; // index 0 unused
-    if max_fields_len < beta_pows.len() {
-        challenges_vec.extend_from_slice(&beta_pows[..=max_fields_len]);
-    } else {
-        challenges_vec.extend_from_slice(beta_pows);
-        challenges_vec.extend(vec![EF::ZERO; max_fields_len + 1 - beta_pows.len()]);
-    }
-    let d_challenges = challenges_vec.to_device()?;
-
-    // Create symbolic challenges: indices 0..=max_fields_len+1 (0 unused, 1..=max_fields_len+1
-    // for betas)
-    let symbolic_challenges: Vec<SymbolicExpression<F>> = (0..=max_fields_len + 1)
-        .map(|index| SymbolicVariable::<F>::new(Entry::Challenge, index).into())
-        .collect();
-
-    let mut transformed_interactions = Vec::new();
-    for interaction in &constraints.interactions {
-        let mut interaction = interaction.clone();
-        let b = SymbolicExpression::from_canonical_u32(interaction.bus_index as u32 + 1);
-        let betas = symbolic_challenges[1..].to_vec();
-        let mut denom = SymbolicExpression::from_canonical_u32(0);
-        for (j, expr) in interaction.message.iter().enumerate() {
-            denom += betas[j].clone() * expr.clone();
+    // Copied from build_symbolic_constraints_dag to handle sorting of constraints
+    // TODO: rework this for interaction chunking
+    let (rules, d_numer_weights, d_denom_weights, denom_sum_init) = {
+        let mut expr_to_idx = FxHashMap::default();
+        let mut nodes = Vec::new();
+        let mut sorted_used_dag_idxs = Vec::new();
+        for interaction in &symbolic.interactions {
+            let count =
+                topological_sort_symbolic_expr(&interaction.count, &mut expr_to_idx, &mut nodes);
+            sorted_used_dag_idxs.push(count);
+            sorted_used_dag_idxs.extend(interaction.message.iter().map(|field_expr| {
+                topological_sort_symbolic_expr(field_expr, &mut expr_to_idx, &mut nodes)
+            }));
         }
-        denom += betas[interaction.message.len()].clone() * b;
-        interaction.message = vec![denom];
-        transformed_interactions.push(interaction);
-    }
+        sorted_used_dag_idxs.sort();
+        // TODO: SymbolicRulesOnGpu::new already has this
+        let dag_idx_to_used_idx = FxHashMap::from_iter(
+            sorted_used_dag_idxs
+                .iter()
+                .enumerate()
+                .map(|(used_idx, dag_idx)| (*dag_idx, used_idx)),
+        );
+        let constraints = SymbolicExpressionDag {
+            nodes,
+            constraint_idx: sorted_used_dag_idxs,
+        };
+        let interactions_dag = SymbolicConstraintsDag {
+            constraints,
+            interactions: vec![],
+        };
+        let rules = SymbolicRulesOnGpu::new(interactions_dag, false);
+        let mut numer_weights = vec![EF::ZERO; rules.constraints.len()];
+        let mut denom_weights = vec![EF::ZERO; rules.constraints.len()];
+        let mut denom_sum_init = EF::ZERO;
+        for (interaction_idx, interaction) in symbolic.interactions.iter().enumerate() {
+            // CAUTION: an expression node could be used in multiple interactions, and might even be
+            // used as `count` in one, but message field in another. We only care about their
+            // weighted sum with eq_3b, so we compute the weights ahead of time.
+            let count_dag_idx = expr_to_idx[&interaction.count];
+            let count_used_idx = dag_idx_to_used_idx[&count_dag_idx];
+            let count_rule_idx = rules.used_nodes[count_used_idx];
+            numer_weights[count_rule_idx] += eq_3bs[interaction_idx];
+            denom_sum_init += eq_3bs[interaction_idx]
+                * beta_pows[interaction.message.len()]
+                * F::from_canonical_u32(interaction.bus_index as u32 + 1);
 
-    // Build interaction DAG with transformed interactions
-    let constraints_dag: SymbolicConstraintsDag<F> = SymbolicConstraints {
-        constraints: vec![],
-        interactions: transformed_interactions,
-    }
-    .into();
-    let rules = SymbolicRulesOnGpu::new(constraints_dag, true);
+            for (message_idx, message) in interaction.message.iter().enumerate() {
+                let message_dag_idx = expr_to_idx[message];
+                let message_used_idx = dag_idx_to_used_idx[&message_dag_idx];
+                let message_rule_idx = rules.used_nodes[message_used_idx];
+                denom_weights[message_rule_idx] += eq_3bs[interaction_idx] * beta_pows[message_idx];
+            }
+        }
+        let d_numer_weights = numer_weights.to_device()?;
+        let d_denom_weights = denom_weights.to_device()?;
+        (rules, d_numer_weights, d_denom_weights, denom_sum_init)
+    };
 
     let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
     let d_rules = encoded_rules.to_device()?;
-    let d_used_nodes = rules.used_nodes.to_device()?;
 
-    let num_x = input.eq_x.height();
-    let padded_height = input.selectors_large.height();
-    debug_assert_eq!(padded_height, large_domain * num_x);
-
-    let intermediates = if rules.buffer_size > 0 {
-        let capacity = if rules.buffer_size > 10 {
-            (TASK_SIZE as usize) * rules.buffer_size
-        } else {
-            rules.buffer_size
-        };
-        Some(DeviceBuffer::<EF>::with_capacity(capacity))
+    let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
+    let intermed_capacity =
+        unsafe { _logup_r0_intermediates_buffer_size(buffer_size, large_domain, num_x) };
+    let mut intermediates = if intermed_capacity > 0 {
+        debug!("logup_r0:intermediates_capacity={intermed_capacity}");
+        DeviceBuffer::<F>::with_capacity(intermed_capacity as usize)
     } else {
-        None
+        DeviceBuffer::<F>::new()
     };
 
-    let num_rows_per_tile = {
-        let h = padded_height as u32;
-        h.div_ceil(TASK_SIZE).max(1)
-    };
+    let tmp_sums_buffer_capacity =
+        unsafe { _logup_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x) };
+    debug!("logup_r0:tmp_sums_buffer_capacity={tmp_sums_buffer_capacity}");
+    let mut temp_sums_buffer =
+        DeviceBuffer::<Frac<EF>>::with_capacity(tmp_sums_buffer_capacity as usize);
 
-    let output_numer = DeviceBuffer::<EF>::with_capacity(padded_height);
-    let output_denom = DeviceBuffer::<EF>::with_capacity(padded_height);
+    let preprocessed_ptr = pk
+        .preprocessed_data
+        .as_ref()
+        .map(|cd| cd.trace.buffer().as_ptr())
+        .unwrap_or(std::ptr::null());
+
+    let mut s_evals = DeviceBuffer::<Frac<EF>>::with_capacity(large_domain as usize);
 
     unsafe {
-        batch_constraints_eval_interactions_round0(
-            &output_numer,
-            &output_denom,
-            &input.selectors_large,
-            &input.main_ptrs,
-            input.trace_mats.preprocessed_ptr(),
-            eq_sharp_z,
-            &input.eq_x,
-            eq_3b,
-            input.public_values,
+        logup_bary_eval_interactions_round0(
+            &mut temp_sums_buffer,
+            &mut s_evals,
+            selectors_cube,
+            preprocessed_ptr,
+            main_parts,
+            omega_skip_pows,
+            inv_lagrange_denoms,
+            eq_sharp_uni,
+            eq_cube,
+            public_values,
+            &d_numer_weights,
+            &d_denom_weights,
+            denom_sum_init,
             &d_rules,
-            &d_used_nodes,
-            rules.buffer_size.try_into().unwrap(),
-            intermediates.as_ref(),
-            large_domain as u32,
-            num_x as u32,
-            num_rows_per_tile,
-            skip_stride,
-            &d_challenges,
+            buffer_size,
+            &mut intermediates,
+            large_domain,
+            skip_domain,
+            num_x,
+            height,
         )?;
     }
 
-    let sums_numer_device = DeviceBuffer::<EF>::with_capacity(large_domain);
-    let sums_denom_device = DeviceBuffer::<EF>::with_capacity(large_domain);
-    unsafe {
-        accumulate_constraints(
-            &output_numer,
-            &sums_numer_device,
-            large_domain as u32,
-            num_x as u32,
-        )?;
-        accumulate_constraints(
-            &output_denom,
-            &sums_denom_device,
-            large_domain as u32,
-            num_x as u32,
-        )?;
-    }
-    Ok((sums_numer_device, sums_denom_device))
+    Ok(s_evals)
 }
 
 // For a single present AIR.
