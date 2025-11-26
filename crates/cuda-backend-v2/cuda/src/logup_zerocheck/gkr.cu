@@ -46,12 +46,12 @@ __global__ void frac_build_tree_layer_mixed_kernel(
 
     size_t left_idx = idx << 1;
     size_t right_idx = (idx << 1) + 1;
-    
+
     Fp p_left = in_numerators[left_idx];
     FpExt q_left = in_denominators[left_idx];
     Fp p_right = in_numerators[right_idx];
     FpExt q_right = in_denominators[right_idx];
-    
+
     FracExt out;
     out.p = q_right * p_left + q_left * p_right;
     out.q = q_left * q_right;
@@ -278,7 +278,7 @@ extern "C" int _frac_compute_round(
         return err == cudaSuccess ? 0 : err;
     }
 
-    size_t threads = std::min<size_t>(std::max<size_t>(half, WARP_SIZE), 512);
+    size_t threads = std::min<size_t>(std::max<size_t>(half, WARP_SIZE), 256);
     auto [grid, block] = kernel_launch_params(threads, threads);
     size_t num_warps = std::max<size_t>(1, (block.x + WARP_SIZE - 1) / WARP_SIZE);
     size_t shmem_bytes = num_warps * sizeof(FpExt);
