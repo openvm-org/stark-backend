@@ -3,8 +3,8 @@ use std::io::{Error, Read, Result, Write};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    codec::{decode_into_vec, encode_iter, Decode, Encode},
     Digest, EF, F,
-    codec::{Decode, Encode, decode_into_vec, encode_iter},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +114,7 @@ pub struct WhirProof {
     pub ood_values: Vec<EF>,
     /// For each WHIR round, the PoW witness.
     pub whir_pow_witnesses: Vec<F>,
-    /// For the initial round: per commited matrix, per in-domain query.
+    /// For the initial round: per committed matrix, per in-domain query.
     // num_commits x num_queries x (1 << k) x stacking_width[i]
     pub initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>>,
     pub initial_round_merkle_proofs: Vec<Vec<MerkleProof>>,
@@ -449,12 +449,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        BabyBearPoseidon2CpuEngineV2, SystemParams,
         poseidon2::sponge::DuplexSpongeRecorder,
         test_utils::{
-            CachedFixture11, FibFixture, InteractionsFixture11, PreprocessedFibFixture,
-            TestFixture, test_system_params_small,
+            test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
+            PreprocessedFibFixture, TestFixture,
         },
+        BabyBearPoseidon2CpuEngineV2, SystemParams,
     };
 
     fn test_proof_encode_decode<Fx: TestFixture>(fx: Fx, params: SystemParams) -> Result<()> {

@@ -6,7 +6,7 @@ use eyre::eyre;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
-    prover::{Prover, types::AirProvingContext},
+    prover::{types::AirProvingContext, Prover},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
 use openvm_stark_sdk::{
@@ -15,9 +15,8 @@ use openvm_stark_sdk::{
 };
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use stark_backend_v2::{
-    SystemParams,
     keygen::types::MultiStarkProvingKeyV2,
     poseidon2::sponge::DuplexSponge,
     prover::{
@@ -25,6 +24,7 @@ use stark_backend_v2::{
         ProvingContextV2,
     },
     verifier::verify,
+    SystemParams,
 };
 use tracing::info_span;
 

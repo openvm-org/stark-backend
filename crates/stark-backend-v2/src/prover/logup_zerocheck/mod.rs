@@ -7,15 +7,16 @@ use p3_util::log2_strict_usize;
 use tracing::{debug, instrument};
 
 use crate::{
-    EF, F, calculate_n_logup,
+    calculate_n_logup,
     poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
     prover::{
-        DeviceMultiStarkProvingKeyV2, ProverBackendV2, ProvingContextV2,
         fractional_sumcheck_gkr::FracSumcheckProof, logup_zerocheck::single::EvalHelper,
-        stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
+        stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKeyV2,
+        ProverBackendV2, ProvingContextV2,
     },
+    EF, F,
 };
 
 mod cpu;
