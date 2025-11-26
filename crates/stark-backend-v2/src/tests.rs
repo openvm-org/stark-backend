@@ -18,9 +18,9 @@ use crate::{
         ProvingContextV2,
     },
     test_utils::{
-        prove_up_to_batch_constraints, test_engine_small, CachedFixture11, FibFixture,
-        InteractionsFixture11, MixtureFixture, PreprocessedFibFixture, SelfInteractionFixture,
-        TestFixture,
+        prove_up_to_batch_constraints, test_engine_small, test_system_params_small,
+        CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture, PreprocessedFibFixture,
+        SelfInteractionFixture, TestFixture,
     },
     verifier::{
         batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
@@ -437,4 +437,18 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
         &omega_pows,
     )?;
     Ok(())
+}
+
+#[test]
+fn test_matrix_stacking_overflow() {
+    setup_tracing();
+    let params = test_system_params_small(3, 5, 3);
+    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let fx = SelfInteractionFixture {
+        widths: vec![4, 7, 8, 8, 10],
+        log_height: 1,
+        bus_index: 4,
+    };
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
 }

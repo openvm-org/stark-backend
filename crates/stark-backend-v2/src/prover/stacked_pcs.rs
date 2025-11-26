@@ -240,7 +240,10 @@ pub fn stacked_matrix<F: Field>(
         })
         .collect_vec();
     let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
-    let total_cells: usize = traces.iter().map(|t| t.values.len().max(1 << l_skip)).sum();
+    let total_cells: usize = traces
+        .iter()
+        .map(|t| t.height().max(1 << l_skip) * t.width())
+        .sum();
     let height = 1usize << (l_skip + n_stack);
     let width = total_cells.div_ceil(height);
 
