@@ -92,7 +92,7 @@ impl VirtualMemoryPool {
                         "Virtual pool size must be a multiple of page size"
                     );
                     let va_base = vpmm_reserve(va_size, page_size).unwrap();
-                    tracing::info!(
+                    tracing::debug!(
                         "VPMM: Reserved virtual address space {} with page size {}",
                         ByteSize::b(va_size as u64),
                         ByteSize::b(page_size as u64)
@@ -146,7 +146,10 @@ impl VirtualMemoryPool {
         }
 
         if let Some(ptr) = best_region {
-            let region = self.free_regions.remove(&ptr).unwrap();
+            let region = self
+                .free_regions
+                .remove(&ptr)
+                .expect("Incorrect free region address");
             debug_assert_eq!(region.stream_id, stream_id);
 
             // If region is larger, return remainder to free list
@@ -223,7 +226,7 @@ impl VirtualMemoryPool {
             .ok_or(MemoryError::InvalidPointer)
             .expect("Pointer not found in malloc_regions - invalid pointer freed");
 
-        self.free_region_insert(ptr, size, stream_id);
+        let _ = self.free_region_insert(ptr, size, stream_id);
 
         Ok(size)
     }
@@ -233,7 +236,7 @@ impl VirtualMemoryPool {
         mut ptr: CUdeviceptr,
         mut size: usize,
         stream_id: CudaStreamId,
-    ) {
+    ) -> CUdeviceptr {
         // Potential merge with next neighbor
         if let Some((&next_ptr, next_region)) = self.free_regions.range(ptr + 1..).next() {
             if next_region.stream_id == stream_id && ptr + size as u64 == next_ptr {
@@ -265,6 +268,7 @@ impl VirtualMemoryPool {
                 id,
             },
         );
+        ptr
     }
 
     /// Return the base address of a virtual hole large enough for `requested` bytes.
@@ -344,6 +348,7 @@ impl VirtualMemoryPool {
         let dst = self
             .take_unmapped_region(requested)
             .expect("Failed to take unmapped region");
+        let mut returned_ptr = dst;
 
         // Allocate new pages if we don't have enough free regions
         let mut allocated_dst = dst;
@@ -383,11 +388,11 @@ impl VirtualMemoryPool {
                     "Failed to set access permissions for newly allocated virtual memory region",
                 );
             }
-            self.free_region_insert(dst, allocate_size, stream_id);
+            returned_ptr = self.free_region_insert(dst, allocate_size, stream_id);
         }
         let mut remaining = requested - allocate_size;
         if remaining == 0 {
-            return Ok(Some(dst));
+            return Ok(Some(returned_ptr));
         }
 
         // Pull free regions (oldest first) until we've gathered enough pages.
@@ -417,12 +422,14 @@ impl VirtualMemoryPool {
                 // Return the unused tail to the free list so it stays available.
                 let leftover_addr = addr + take as u64;
                 let leftover_size = region.size - take;
-                self.free_region_insert(leftover_addr, leftover_size, region.stream_id);
+                let _ = self.free_region_insert(leftover_addr, leftover_size, region.stream_id);
             }
         }
-        self.remap_regions(to_defrag, allocated_dst, stream_id)?;
-
-        Ok(Some(dst))
+        Ok(Some(std::cmp::min(
+            returned_ptr,
+            self.remap_regions(to_defrag, allocated_dst, stream_id)
+                .unwrap(),
+        )))
     }
 
     /// Remap a list of regions to a new base address.
@@ -432,9 +439,9 @@ impl VirtualMemoryPool {
         regions: Vec<(CUdeviceptr, usize)>,
         dst: CUdeviceptr,
         stream_id: CudaStreamId,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<CUdeviceptr, MemoryError> {
         if regions.is_empty() {
-            return Ok(());
+            return Ok(dst);
         }
 
         let bytes_to_remap = regions.iter().map(|(_, size)| *size).sum::<usize>();
@@ -476,8 +483,7 @@ impl VirtualMemoryPool {
             vpmm_set_access(dst, bytes_to_remap, self.device_id)
                 .expect("Failed to set access permissions for remapped virtual memory region");
         }
-        self.free_region_insert(dst, bytes_to_remap, stream_id);
-        Ok(())
+        Ok(self.free_region_insert(dst, bytes_to_remap, stream_id))
     }
 
     /// Returns the total physical memory currently mapped in this pool (in bytes).
