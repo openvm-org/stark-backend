@@ -20,6 +20,74 @@ extern "C" {
     fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
 }
 
+// ============================================================================
+// Configuration
+// ============================================================================
+
+const DEFAULT_VA_SIZE: usize = 8 << 40; // 8 TB
+
+/// Configuration for the Virtual Memory Pool.
+/// 
+/// Use `VpmmConfig::from_env()` to load from environment variables,
+/// or construct directly for testing.
+#[derive(Debug, Clone)]
+pub(super) struct VpmmConfig {
+    /// Page size override. If `None`, uses CUDA's minimum granularity for the device.
+    pub page_size: Option<usize>,
+    /// Virtual address space size per reserved chunk (default: 8 TB).
+    pub va_size: usize,
+    /// Number of pages to preallocate at startup (default: 0).
+    pub initial_pages: usize,
+}
+
+impl Default for VpmmConfig {
+    fn default() -> Self {
+        Self {
+            page_size: None,
+            va_size: DEFAULT_VA_SIZE,
+            initial_pages: 0,
+        }
+    }
+}
+
+impl VpmmConfig {
+    /// Load configuration from environment variables:
+    /// - `VPMM_PAGE_SIZE`: Page size in bytes (must be multiple of CUDA granularity)
+    /// - `VPMM_VA_SIZE`: Virtual address space size per chunk (default: 8 TB)
+    /// - `VPMM_PAGES`: Number of pages to preallocate (default: 0)
+    pub fn from_env() -> Self {
+        let page_size = std::env::var("VPMM_PAGE_SIZE").ok().map(|val| {
+            let size: usize = val.parse().expect("VPMM_PAGE_SIZE must be a valid number");
+            assert!(size > 0, "VPMM_PAGE_SIZE must be > 0");
+            size
+        });
+
+        let va_size = match std::env::var("VPMM_VA_SIZE") {
+            Ok(val) => {
+                let size: usize = val.parse().expect("VPMM_VA_SIZE must be a valid number");
+                assert!(size > 0, "VPMM_VA_SIZE must be > 0");
+                size
+            }
+            Err(_) => DEFAULT_VA_SIZE,
+        };
+
+        let initial_pages = match std::env::var("VPMM_PAGES") {
+            Ok(val) => val.parse().expect("VPMM_PAGES must be a valid number"),
+            Err(_) => 0,
+        };
+
+        Self {
+            page_size,
+            va_size,
+            initial_pages,
+        }
+    }
+}
+
+// ============================================================================
+// Pool Implementation
+// ============================================================================
+
 #[derive(Debug, Clone)]
 struct FreeRegion {
     size: usize,
@@ -27,8 +95,6 @@ struct FreeRegion {
     stream_id: CudaStreamId,
     id: usize,
 }
-
-const DEFAULT_VA_SIZE: usize = 8usize << 40; // 8 TB
 
 /// Virtual memory pool implementation.
 pub(super) struct VirtualMemoryPool {
@@ -67,33 +133,37 @@ unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
 impl VirtualMemoryPool {
-    fn new() -> Self {
+    fn new(config: VpmmConfig) -> Self {
         let device_id = set_device().unwrap();
+
+        // Check VPMM support and resolve page_size
         let (root, page_size, va_size) = unsafe {
             match vpmm_check_support(device_id) {
                 Ok(_) => {
-                    let gran = vpmm_min_granularity(device_id).unwrap();
-                    let page_size = match std::env::var("VPMM_PAGE_SIZE") {
-                        Ok(val) => {
-                            let custom_size: usize =
-                                val.parse().expect("VPMM_PAGE_SIZE must be a valid number");
+                    let granularity = vpmm_min_granularity(device_id).unwrap();
+
+                    // Resolve page_size: use config override or device granularity
+                    let page_size = match config.page_size {
+                        Some(size) => {
                             assert!(
-                                custom_size > 0 && custom_size % gran == 0,
+                                size > 0 && size % granularity == 0,
                                 "VPMM_PAGE_SIZE must be > 0 and multiple of {}",
-                                gran
+                                granularity
                             );
-                            custom_size
+                            size
                         }
-                        Err(_) => gran,
+                        None => granularity,
                     };
-                    let va_size = match std::env::var("VPMM_VA_SIZE") {
-                        Ok(val) => val.parse().expect("VPMM_VA_SIZE must be a valid number"),
-                        Err(_) => DEFAULT_VA_SIZE,
-                    };
+
+                    // Validate va_size
+                    let va_size = config.va_size;
                     assert!(
                         va_size > 0 && va_size % page_size == 0,
-                        "Virtual pool size must be a multiple of page size"
+                        "VPMM_VA_SIZE must be > 0 and multiple of page size ({})",
+                        page_size
                     );
+
+                    // Reserve initial VA chunk
                     let va_base = vpmm_reserve(va_size, page_size).unwrap();
                     tracing::debug!(
                         "VPMM: Reserved virtual address space {} with page size {}",
@@ -109,7 +179,7 @@ impl VirtualMemoryPool {
             }
         };
 
-        Self {
+        let mut pool = Self {
             roots: vec![root],
             active_pages: HashMap::new(),
             free_regions: BTreeMap::new(),
@@ -123,7 +193,34 @@ impl VirtualMemoryPool {
             page_size,
             va_size,
             device_id,
+        };
+
+        // Preallocate pages if requested (skip if VPMM not supported)
+        if config.initial_pages > 0 && page_size != usize::MAX {
+            let alloc_size = config.initial_pages * page_size;
+            if let Err(e) = pool.defragment_or_create_new_pages(
+                alloc_size,
+                current_stream_id().unwrap(),
+            ) {
+                let mut free_mem = 0usize;
+                let mut total_mem = 0usize;
+                unsafe {
+                    cudaMemGetInfo(&mut free_mem, &mut total_mem);
+                }
+                panic!(
+                    "VPMM preallocation failed: {:?}\n\
+                     Config: pages={}, page_size={}\n\
+                     GPU Memory: free={}, total={}",
+                    e,
+                    config.initial_pages,
+                    ByteSize::b(page_size as u64),
+                    ByteSize::b(free_mem as u64),
+                    ByteSize::b(total_mem as u64)
+                );
+            }
         }
+
+        pool
     }
 
     /// Allocates memory from the pool's free regions.
@@ -549,37 +646,7 @@ impl Drop for VirtualMemoryPool {
 
 impl Default for VirtualMemoryPool {
     fn default() -> Self {
-        let mut pool = Self::new();
-
-        // Skip allocation if vpmm not supported
-        if pool.page_size == usize::MAX {
-            return pool;
-        }
-
-        // Calculate initial number of pages to allocate
-        let initial_pages = match std::env::var("VPMM_PAGES") {
-            Ok(val) => {
-                let pages: usize = val.parse().expect("VPMM_PAGES must be a valid number");
-                pages
-            }
-            Err(_) => 0,
-        };
-        if let Err(e) = pool.defragment_or_create_new_pages(
-            initial_pages * pool.page_size,
-            current_stream_id().unwrap(),
-        ) {
-            // Check how much memory is available
-            let mut free_mem = 0usize;
-            let mut total_mem = 0usize;
-            unsafe {
-                cudaMemGetInfo(&mut free_mem, &mut total_mem);
-            }
-            panic!(
-                "Error:{:?}\nPool: pages={}, page_size={}\nMemory: free_mem={}, total_mem={}",
-                e, initial_pages, pool.page_size, free_mem, total_mem
-            );
-        }
-        pool
+        Self::new(VpmmConfig::from_env())
     }
 }
 
