@@ -150,13 +150,11 @@ pub unsafe fn fold_ple_evals_gpu(
 /// Multiply eq_xi by eq_r0 in-place and compute eq_sharp = original_eq_xi * eq_sharp_r0
 /// This combines both operations in a single kernel call for efficiency
 pub fn compute_eq_sharp_gpu(
-    eq_xi: &mut DeviceMatrix<EF>,
+    eq_xis: &mut DeviceBuffer<EF>,
     eq_r0: EF,
     eq_sharp_r0: EF,
-) -> Result<DeviceMatrix<EF>, FoldPleError> {
-    let height = eq_xi.height();
-    let width = eq_xi.width();
-    let count = height * width;
+) -> Result<DeviceBuffer<EF>, FoldPleError> {
+    let count = eq_xis.len();
 
     // Allocate output buffer for eq_sharp
     let eq_sharp_buffer = DeviceBuffer::<EF>::with_capacity(count);
@@ -165,8 +163,8 @@ pub fn compute_eq_sharp_gpu(
     // SAFETY: We have exclusive access to eq_xi via &mut DeviceMatrix, so mutating its buffer is
     // safe
     unsafe {
-        compute_eq_sharp_ffi(eq_xi.buffer(), &eq_sharp_buffer, eq_r0, eq_sharp_r0)?;
+        compute_eq_sharp_ffi(eq_xis, &eq_sharp_buffer, eq_r0, eq_sharp_r0)?;
     }
 
-    Ok(DeviceMatrix::new(Arc::new(eq_sharp_buffer), height, width))
+    Ok(eq_sharp_buffer)
 }

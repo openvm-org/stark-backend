@@ -1,6 +1,8 @@
 use openvm_cuda_common::error::{CudaError, MemCopyError};
 use thiserror::Error;
 
+use crate::EF;
+
 #[derive(Debug, Error)]
 pub enum Round0PrepError {
     #[error("cuda error: {0}")]
@@ -33,6 +35,8 @@ impl From<Round0PrepError> for Round0EvalError {
 
 #[derive(Debug, Error)]
 pub enum FractionalSumcheckError {
+    #[error("nonzero root sum: p={p}, q={q}")]
+    NonzeroRootSum { p: EF, q: EF },
     #[error("segment tree cuda error: {0}")]
     SegmentTree(CudaError),
     #[error("frac_compute_round cuda error: {0}")]

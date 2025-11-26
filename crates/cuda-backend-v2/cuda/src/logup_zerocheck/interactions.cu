@@ -10,6 +10,8 @@
 
 using namespace symbolic_dag;
 
+namespace logup_gkr_interaction_evaluations {
+
 // Device function equivalent to helper.eval_interactions without eq_* parts
 // This computes the interaction numerator and denominator sums (weighted by eq_3b)
 // The eq_* multiplication is done separately in the kernel
@@ -430,7 +432,8 @@ extern "C" int _logup_gkr_input_eval(
     uint32_t permutation_height,
     uint32_t num_rows_per_tile
 ) {
-    auto [grid, block] = kernel_launch_params(interaction_evaluation::TASK_SIZE, 256);
+    auto count = is_global ? interaction_evaluation::TASK_SIZE : permutation_height;
+    auto [grid, block] = kernel_launch_params(count, 256);
     if (is_global) {
         evaluate_interactions_gkr_kernel<true><<<grid, block>>>(
             d_numerators,
@@ -556,3 +559,5 @@ extern "C" int _batch_constraints_eval_interactions_round0(
     }
     return CHECK_KERNEL();
 }
+
+} // namespace logup_gkr_interaction_evaluations
