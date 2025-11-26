@@ -6,12 +6,11 @@
 use std::marker::PhantomData;
 
 use openvm_stark_backend::{
-    AirRef, config::StarkGenericConfig, engine::StarkEngine, prover::Prover,
+    config::StarkGenericConfig, engine::StarkEngine, prover::Prover, AirRef,
 };
-use openvm_stark_sdk::config::baby_bear_poseidon2::{BabyBearPoseidon2Config, default_engine};
+use openvm_stark_sdk::config::baby_bear_poseidon2::{default_engine, BabyBearPoseidon2Config};
 
 use crate::{
-    SystemParams,
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
     poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
     proof::*,
@@ -20,7 +19,8 @@ use crate::{
         DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2, ProverBackendV2,
         ProverDeviceV2, ProvingContextV2,
     },
-    verifier::{VerifierError, verify},
+    verifier::{verify, VerifierError},
+    SystemParams,
 };
 
 /// Data for verifying a Stark proof.
@@ -42,10 +42,10 @@ where
         Into<(StackingProof, WhirProof)>,
 {
     type SC: StarkGenericConfig<
-            Pcs = <BabyBearPoseidon2Config as StarkGenericConfig>::Pcs,
-            Challenge = <BabyBearPoseidon2Config as StarkGenericConfig>::Challenge,
-            Challenger = <BabyBearPoseidon2Config as StarkGenericConfig>::Challenger,
-        >;
+        Pcs = <BabyBearPoseidon2Config as StarkGenericConfig>::Pcs,
+        Challenge = <BabyBearPoseidon2Config as StarkGenericConfig>::Challenge,
+        Challenger = <BabyBearPoseidon2Config as StarkGenericConfig>::Challenger,
+    >;
     type PB: ProverBackendV2<Val = crate::F, Challenge = crate::EF, Commitment = crate::Digest>;
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
     type TS: FiatShamirTranscript + Default;
