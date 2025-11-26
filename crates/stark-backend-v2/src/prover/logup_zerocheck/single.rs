@@ -4,14 +4,14 @@ use std::iter::zip;
 
 use itertools::Itertools;
 use openvm_stark_backend::{
-    air_builders::symbolic::{SymbolicExpressionDag, symbolic_expression::SymbolicEvaluator},
+    air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicExpressionDag},
     interaction::SymbolicInteraction,
 };
 use p3_field::{ExtensionField, TwoAdicField};
 
 use crate::prover::{
-    AirProvingContextV2, CpuBackendV2, StridedColMajorMatrixView,
     logup_zerocheck::evaluator::{ProverConstraintEvaluator, ViewPair},
+    AirProvingContextV2, CpuBackendV2, StridedColMajorMatrixView,
 };
 
 /// For a single AIR
@@ -56,7 +56,7 @@ impl<'a> EvalHelper<'a, crate::F> {
     }
 }
 
-impl<'a, F: TwoAdicField> EvalHelper<'a, F> {
+impl<F: TwoAdicField> EvalHelper<'_, F> {
     pub fn has_preprocessed(&self) -> bool {
         self.preprocessed_trace.is_some()
     }
