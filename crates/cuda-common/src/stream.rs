@@ -150,6 +150,10 @@ impl CudaEvent {
         check(unsafe { cudaEventRecord(self.event, cudaStreamPerThread) })
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaError> {
+        check(unsafe { cudaEventSynchronize(self.event) })
+    }
+
     /// # Safety
     /// The caller must ensure that `stream` is a valid stream.
     pub unsafe fn record_and_wait(&self, stream: cudaStream_t) -> Result<(), CudaError> {
