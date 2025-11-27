@@ -16,6 +16,9 @@ mod cuda;
 mod vm_pool;
 use vm_pool::VirtualMemoryPool;
 
+#[cfg(test)]
+mod tests;
+
 #[link(name = "cudart")]
 extern "C" {
     fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;

@@ -99,7 +99,7 @@ struct FreeRegion {
 /// Virtual memory pool implementation.
 pub(super) struct VirtualMemoryPool {
     // Virtual address space roots
-    roots: Vec<CUdeviceptr>,
+    pub(super) roots: Vec<CUdeviceptr>,
 
     // Map for all active pages
     active_pages: HashMap<CUdeviceptr, CUmemGenericAllocationHandle>,
@@ -133,7 +133,7 @@ unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
 impl VirtualMemoryPool {
-    fn new(config: VpmmConfig) -> Self {
+    pub(super) fn new(config: VpmmConfig) -> Self {
         let device_id = set_device().unwrap();
 
         // Check VPMM support and resolve page_size
