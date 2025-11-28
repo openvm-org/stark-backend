@@ -156,6 +156,10 @@ impl MemTracker {
     }
 
     pub fn emit_metrics(&self) {
+        self.emit_metrics_with_label(self.label);
+    }
+
+    pub fn emit_metrics_with_label(&self, label: &'static str) {
         let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
             return;
         };
@@ -166,14 +170,11 @@ impl MemTracker {
             .as_secs_f64()
             * 1000.0;
         let tracked = manager.current_size;
-        let delta = tracked as isize - self.current as isize;
         let reserved = manager.pool.memory_usage();
-        metrics::gauge!("gpu_mem.timestamp_ms", "module" => self.label).set(ts);
-        metrics::gauge!("gpu_mem.delta_bytes", "module" => self.label).set(delta as f64);
-        metrics::gauge!("gpu_mem.tracked_bytes", "module" => self.label).set(tracked as f64);
-        metrics::gauge!("gpu_mem.reserved_bytes", "module" => self.label).set(reserved as f64);
-        metrics::gauge!("gpu_mem.device_bytes", "module" => self.label)
-            .set(device_memory_used() as f64);
+        metrics::gauge!("gpu_mem.timestamp_ms", "module" => label).set(ts);
+        metrics::gauge!("gpu_mem.tracked_bytes", "module" => label).set(tracked as f64);
+        metrics::gauge!("gpu_mem.reserved_bytes", "module" => label).set(reserved as f64);
+        metrics::gauge!("gpu_mem.device_bytes", "module" => label).set(device_memory_used() as f64);
     }
 
     #[inline]
