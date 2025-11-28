@@ -3,6 +3,7 @@ use std::{
     ffi::c_void,
     ptr::NonNull,
     sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bytesize::ByteSize;
@@ -23,9 +24,17 @@ mod tests;
 extern "C" {
     fn cudaMallocAsync(dev_ptr: *mut *mut c_void, size: usize, stream: cudaStream_t) -> i32;
     fn cudaFreeAsync(dev_ptr: *mut c_void, stream: cudaStream_t) -> i32;
+    fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> i32;
 }
 
 static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
+
+fn device_memory_used() -> usize {
+    let mut free = 0usize;
+    let mut total = 0usize;
+    unsafe { cudaMemGetInfo(&mut free, &mut total) };
+    total - free
+}
 
 #[ctor::ctor]
 fn init() {
@@ -156,9 +165,30 @@ impl MemTracker {
             .get()
             .and_then(|m| m.lock().ok())
             .map(|m| m.current_size)
-            .unwrap_or(0);
+            .unwrap_or_default();
 
         Self { current, label }
+    }
+
+    pub fn emit_metrics(&self) {
+        let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
+            return;
+        };
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            * 1000.0;
+        let tracked = manager.current_size;
+        let delta = tracked as isize - self.current as isize;
+        let reserved = manager.pool.memory_usage();
+        metrics::gauge!("gpu_mem.timestamp_ms", "module" => self.label).set(ts);
+        metrics::gauge!("gpu_mem.delta_bytes", "module" => self.label).set(delta as f64);
+        metrics::gauge!("gpu_mem.tracked_bytes", "module" => self.label).set(tracked as f64);
+        metrics::gauge!("gpu_mem.reserved_bytes", "module" => self.label).set(reserved as f64);
+        metrics::gauge!("gpu_mem.device_bytes", "module" => self.label)
+            .set(device_memory_used() as f64);
     }
 
     #[inline]
