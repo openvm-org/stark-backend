@@ -170,10 +170,8 @@ impl MemTracker {
             .as_secs_f64()
             * 1000.0;
         let tracked = manager.current_size;
-        let delta = tracked as isize - self.current as isize;
         let reserved = manager.pool.memory_usage();
         metrics::gauge!("gpu_mem.timestamp_ms", "module" => label).set(ts);
-        metrics::gauge!("gpu_mem.delta_bytes", "module" => label).set(delta as f64);
         metrics::gauge!("gpu_mem.tracked_bytes", "module" => label).set(tracked as f64);
         metrics::gauge!("gpu_mem.reserved_bytes", "module" => label).set(reserved as f64);
         metrics::gauge!("gpu_mem.device_bytes", "module" => label).set(device_memory_used() as f64);
