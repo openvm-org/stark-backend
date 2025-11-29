@@ -9,7 +9,10 @@ use openvm_stark_backend::{
 pub use openvm_stark_sdk::dummy_airs::fib_air::air::FibonacciAir;
 use openvm_stark_sdk::{
     any_rap_arc_vec,
-    config::{baby_bear_poseidon2::BabyBearPoseidon2Config, setup_tracing},
+    config::{
+        baby_bear_poseidon2::BabyBearPoseidon2Config,
+        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
+    },
     dummy_airs::{
         self,
         fib_selector_air::air::FibonacciSelectorAir,
@@ -504,8 +507,9 @@ pub fn test_system_params_small_with_poly_len(
         k_whir,
         num_whir_queries: 5,
         log_final_poly_len,
-        logup_pow_bits: 1,
+        logup: log_up_security_params_baby_bear_100_bits(),
         whir_pow_bits: 1,
+        max_constraint_degree: 3,
     }
 }
 

@@ -345,9 +345,12 @@ pub fn merkle_verify(
 mod tests {
     use itertools::Itertools;
     use openvm_stark_backend::prover::MatrixDimensions;
-    use openvm_stark_sdk::config::setup_tracing_with_log_level;
+    use openvm_stark_sdk::config::{
+        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
+    };
     use p3_field::{Field, FieldAlgebra, TwoAdicField};
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use test_case::test_case;
     use tracing::Level;
 
     use super::*;
@@ -478,104 +481,30 @@ mod tests {
         run_whir_test(params, pk, &ctx)
     }
 
-    #[test]
-    fn test_whir_single_fib_nstack_0() -> Result<(), VerifyWhirError> {
+    #[test_case(0, 1, 1, 0)]
+    #[test_case(2, 1, 1, 2)]
+    #[test_case(2, 1, 2, 0)]
+    #[test_case(2, 1, 3, 1)]
+    #[test_case(2, 1, 4, 0)]
+    #[test_case(2, 2, 4, 0)]
+    fn test_whir_single_fib(
+        n_stack: usize,
+        log_blowup: usize,
+        k_whir: usize,
+        log_final_poly_len: usize,
+    ) -> Result<(), VerifyWhirError> {
         setup_tracing_with_log_level(Level::DEBUG);
 
         let params = SystemParams {
             l_skip: 2,
-            n_stack: 0,
-            log_blowup: 1,
-            k_whir: 1,
+            n_stack,
+            log_blowup,
+            k_whir,
             num_whir_queries: 5,
-            log_final_poly_len: 0,
-            logup_pow_bits: 1,
+            log_final_poly_len,
+            logup: log_up_security_params_baby_bear_100_bits(),
             whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_nstack_2() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 1,
-            num_whir_queries: 5,
-            log_final_poly_len: 2,
-            logup_pow_bits: 1,
-            whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_kwhir_2() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 2,
-            num_whir_queries: 5,
-            log_final_poly_len: 0,
-            logup_pow_bits: 1,
-            whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_kwhir_3() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 3,
-            num_whir_queries: 5,
-            log_final_poly_len: 1,
-            logup_pow_bits: 1,
-            whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_kwhir_4() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 4,
-            num_whir_queries: 5,
-            log_final_poly_len: 0,
-            logup_pow_bits: 1,
-            whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_log_blowup_2() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 4,
-            num_whir_queries: 5,
-            log_final_poly_len: 0,
-            logup_pow_bits: 2,
-            whir_pow_bits: 0,
+            max_constraint_degree: 3,
         };
         run_whir_fib_test(params)
     }
@@ -630,8 +559,9 @@ mod tests {
             k_whir: 2,
             num_whir_queries: 6,
             log_final_poly_len: 2,
-            logup_pow_bits: 1,
+            logup: log_up_security_params_baby_bear_100_bits(),
             whir_pow_bits: 1,
+            max_constraint_degree: 3,
         };
 
         let n_rows = 1 << (params.n_stack + params.l_skip);
@@ -709,8 +639,9 @@ mod tests {
             k_whir: 2,
             num_whir_queries: 6,
             log_final_poly_len: 4,
-            logup_pow_bits: 1,
+            logup: log_up_security_params_baby_bear_100_bits(),
             whir_pow_bits: 1,
+            max_constraint_degree: 3,
         };
 
         let n_rows = 1 << (params.n_stack + params.l_skip);
