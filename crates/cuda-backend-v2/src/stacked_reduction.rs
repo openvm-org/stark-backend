@@ -126,7 +126,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
         r: &[EF],
         lambda: EF,
     ) -> Self {
-        let mem = MemTracker::start("stacked_reduction");
+        let mem = MemTracker::start("prover.stacked_reduction");
         let l_skip = device.config.l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
         let n_stack = device.config.n_stack;
