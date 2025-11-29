@@ -169,7 +169,7 @@ __device__ __forceinline__ FpExt evaluate_dag_entry_gkr(
 
 template <bool GLOBAL>
 __global__ void evaluate_interactions_gkr_kernel(
-    Fp *__restrict__ d_numerators,
+    FpExt *__restrict__ d_numerators,
     FpExt *__restrict__ d_denominators,
     const Fp *__restrict__ d_preprocessed,
     const uint64_t *__restrict__ d_main,
@@ -291,7 +291,7 @@ __global__ void evaluate_interactions_gkr_kernel(
                         // Numerator is computed as FpExt through DAG evaluation
                         // For logup, the numerator (count) should be in the base field
                         // Extract the base field component (first element of extension field)
-                        d_numerators[out_idx] = numerator.elems[0];
+                        d_numerators[out_idx] = FpExt(numerator.elems[0]);
                         d_denominators[out_idx] = denom;
                     } else {
                         numerator = result;
@@ -419,7 +419,7 @@ __global__ void evaluate_interactions_round0_kernel(
 
 extern "C" int _logup_gkr_input_eval(
     bool is_global,
-    Fp *d_numerators,
+    FpExt *d_numerators,
     FpExt *d_denominators,
     const Fp *d_preprocessed,
     const uint64_t *d_main,

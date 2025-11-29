@@ -22,8 +22,8 @@ use super::errors::InteractionGpuError;
 use crate::{
     EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
-        frac_add_alpha_mixed, frac_matrix_vertically_repeat_mixed,
-        frac_vector_scalar_multiply_mixed, logup_gkr_input_eval,
+        frac_add_alpha_mixed, frac_matrix_vertically_repeat_ext, frac_vector_scalar_multiply_ext,
+        logup_gkr_input_eval,
     },
 };
 
@@ -105,12 +105,12 @@ pub fn log_gkr_input_evals(
     alpha_logup: EF,
     beta_pows: &[EF],
     total_leaves: usize,
-) -> Result<(DeviceBuffer<F>, DeviceBuffer<EF>), InteractionGpuError> {
+) -> Result<(DeviceBuffer<EF>, DeviceBuffer<EF>), InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
         return Ok((DeviceBuffer::new(), DeviceBuffer::new()));
     }
 
-    let leaves_numerators = DeviceBuffer::<F>::with_capacity(total_leaves);
+    let leaves_numerators = DeviceBuffer::<EF>::with_capacity(total_leaves);
     let leaves_denominators = DeviceBuffer::<EF>::with_capacity(total_leaves);
     leaves_numerators.fill_zero()?;
     leaves_denominators.fill_zero()?;
@@ -220,8 +220,8 @@ pub fn log_gkr_input_evals(
         let leaves_denom_ptr = unsafe { leaves_denominators.as_mut_ptr().add(dst_offset) };
 
         let (trace_output_num, trace_output_denom) = if height != lifted_height {
-            tmp_numerators = DeviceBuffer::<F>::with_capacity(height * num_interactions);
-            tmp_denominators = DeviceBuffer::<EF>::with_capacity(height * num_interactions);
+            tmp_numerators = DeviceBuffer::with_capacity(height * num_interactions);
+            tmp_denominators = DeviceBuffer::with_capacity(height * num_interactions);
             (tmp_numerators.as_mut_ptr(), tmp_denominators.as_mut_ptr())
         } else {
             (leaves_num_ptr, leaves_denom_ptr)
@@ -250,14 +250,14 @@ pub fn log_gkr_input_evals(
             let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
             unsafe {
                 // SAFETY: scaling within buffer length
-                frac_vector_scalar_multiply_mixed(
+                frac_vector_scalar_multiply_ext(
                     tmp_numerators.as_mut_ptr(),
                     norm_factor,
                     tmp_numerators.len() as u32,
                 )?;
                 // SAFETY: stacked interaction layout is defined with respect to lifted height so
                 // lifting (i.e., vertically repeating) stays within bounds
-                frac_matrix_vertically_repeat_mixed(
+                frac_matrix_vertically_repeat_ext(
                     leaves_num_ptr,
                     leaves_denom_ptr,
                     tmp_numerators.as_ptr(),
