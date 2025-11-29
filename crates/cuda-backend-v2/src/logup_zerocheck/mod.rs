@@ -126,7 +126,7 @@ where
         alpha_logup: EF,
         beta_logup: EF,
     ) -> (Self, FracSumcheckProof<EF>) {
-        let mem = MemTracker::start("prover.logup_zerocheck_prover");
+        let mut mem = MemTracker::start("prover.logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
@@ -173,6 +173,8 @@ where
         let trace_interactions = collect_trace_interactions(pk, ctx, &interactions_layout);
 
         let total_leaves = 1 << (l_skip + n_logup);
+        mem.emit_metrics_with_label("prover.before_gkr_input_evals");
+        mem.reset_peak();
         let (input_numerators, input_denominators) = if has_interactions {
             log_gkr_input_evals(
                 &trace_interactions,
@@ -187,10 +189,16 @@ where
         } else {
             (DeviceBuffer::new(), DeviceBuffer::new())
         };
+        mem.emit_metrics_with_label("prover.gkr_input_evals");
 
-        let (frac_sum_proof, mut xi) =
-            fractional_sumcheck_gpu(transcript, input_numerators, input_denominators, true, &mem)
-                .expect("failed to run fractional sumcheck on GPU");
+        let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(
+            transcript,
+            input_numerators,
+            input_denominators,
+            true,
+            &mut mem,
+        )
+        .expect("failed to run fractional sumcheck on GPU");
 
         let n_global = max(n_max, n_logup);
         debug!(%n_global);
@@ -267,7 +275,7 @@ where
         lambda: EF,
     ) -> Vec<UnivariatePoly<EF>> {
         self.mem
-            .emit_metrics_with_label("prover.before_batch_constraints_sumcheck");
+            .emit_metrics_with_label("prover.batch_constraints.before_round0");
         self.mem.reset_peak();
         let n_logup = self.n_logup;
         let l_skip = self.l_skip;
@@ -462,6 +470,7 @@ where
                 batch_polys[2 * num_present_airs + trace_idx] =
                     UnivariatePoly::from_evals(&host_sums);
             }
+            // TODO: allow logging the air name (needs non-static string)
             self.mem.tracing_info("after_zerocheck");
 
             let sum = evaluate_round0_interactions_gpu(
@@ -500,9 +509,11 @@ where
                 batch_polys[2 * trace_idx] = numer_poly;
                 batch_polys[2 * trace_idx + 1] = denom_poly;
             }
+            self.mem
+                .tracing_info("after_batch_constraints_sumcheck_round0");
         }
         self.mem
-            .tracing_info("after_batch_constraints_sumcheck_round0");
+            .emit_metrics_with_label("prover.batch_constraints.round0");
 
         for poly in &mut batch_polys {
             #[cfg(debug_assertions)]
@@ -629,7 +640,8 @@ where
             )
         };
         self.mem.tracing_info("after_fold_ple_evals");
-        self.mem.emit_metrics();
+        self.mem
+            .emit_metrics_with_label("prover.batch_constraints.fold_ple_evals");
     }
 
     #[instrument(

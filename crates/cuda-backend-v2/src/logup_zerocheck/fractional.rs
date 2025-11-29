@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra};
+use p3_field::FieldAlgebra;
 use p3_util::log2_strict_usize;
 use stark_backend_v2::{
     poseidon2::sponge::FiatShamirTranscript,
@@ -16,10 +16,9 @@ use tracing::{debug_span, instrument};
 
 use super::errors::FractionalSumcheckError;
 use crate::{
-    EF, F,
+    EF,
     cuda::logup_zerocheck::{
-        fold_frac_ext_columns, frac_build_tree_layer, frac_build_tree_layer_mixed,
-        frac_compute_round, frac_fold_columns, frac_mixed_to_ext,
+        fold_ef_columns, frac_build_tree_layer, frac_compute_round, frac_fold_columns,
     },
     poly::evals_eq_hypercube,
 };
@@ -27,12 +26,14 @@ use crate::{
 #[instrument(skip_all)]
 pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
     transcript: &mut TS,
-    input_numerators: DeviceBuffer<F>,
-    input_denominators: DeviceBuffer<EF>,
+    numerators: DeviceBuffer<EF>,
+    denominators: DeviceBuffer<EF>,
     assert_zero: bool,
-    mem: &MemTracker,
+    mem: &mut MemTracker,
 ) -> Result<(FracSumcheckProof<EF>, Vec<EF>), FractionalSumcheckError> {
-    if input_numerators.is_empty() {
+    let mut numerators = numerators;
+    let mut denominators = denominators;
+    if numerators.is_empty() {
         return Ok((
             FracSumcheckProof {
                 fractional_sum: (EF::ZERO, EF::ONE),
@@ -42,42 +43,43 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
             vec![],
         ));
     };
-    let total_leaves = input_numerators.len();
-    debug_assert_eq!(input_numerators.len(), input_denominators.len());
+    let total_leaves = numerators.len();
+    debug_assert_eq!(numerators.len(), denominators.len());
     // total_rounds = l_skip + n_logup
     let total_rounds = log2_strict_usize(total_leaves);
     assert!(total_rounds > 0, "n_logup > 0 when there are interactions");
     // Build segment tree.
-    // - We keep layers as separate buffers so we can drop them earlier
+    // - We only maintain the current layer
     // - Input layer uses separate F and EF buffers to save memory
     // - First tree layer converts (F, EF) to FracExt (EF, EF)
-    let mut tree = Vec::with_capacity(total_rounds);
-    let mut out_layer = DeviceBuffer::<Frac<EF>>::with_capacity(total_leaves / 2);
-    unsafe {
-        frac_build_tree_layer_mixed(
-            &mut out_layer,
-            &input_numerators,
-            &input_denominators,
-            total_leaves / 2,
-        )
-        .map_err(FractionalSumcheckError::SegmentTree)?;
-    }
-    tree.push(out_layer);
-    mem.emit_metrics_with_label("frac_sumcheck.first_tree_layer");
-    for i in (0..total_rounds - 1).rev() {
-        let input_layer = tree.last().unwrap();
-        debug_assert_eq!(input_layer.len(), 1 << (i + 1));
-        let mut out_layer = DeviceBuffer::<Frac<EF>>::with_capacity(input_layer.len() / 2);
+    for i in 0..total_rounds {
         unsafe {
-            frac_build_tree_layer(&mut out_layer, input_layer, input_layer.len() / 2)
-                .map_err(FractionalSumcheckError::SegmentTree)?;
+            frac_build_tree_layer(
+                &mut numerators,
+                &mut denominators,
+                total_leaves,
+                1 << i,
+                false,
+            )
+            .map_err(FractionalSumcheckError::SegmentTree)?;
         }
-        tree.push(out_layer);
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
     mem.tracing_info("fractional_sumcheck_gkr: after building segment tree");
-    let root_layer = tree.pop().unwrap();
-    let root = copy_frac_from_device(&root_layer, 0)?;
+    let root = Frac {
+        p: copy_from_device(&numerators, 0)?,
+        q: copy_from_device(&denominators, 0)?,
+    };
+    unsafe {
+        frac_build_tree_layer(
+            &mut numerators,
+            &mut denominators,
+            total_leaves,
+            total_leaves / 2,
+            true,
+        )
+        .map_err(FractionalSumcheckError::SegmentTree)?;
+    }
     if assert_zero {
         if root.p != EF::ZERO {
             return Err(FractionalSumcheckError::NonzeroRootSum {
@@ -93,30 +95,13 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
     let mut claims_per_layer = Vec::with_capacity(total_rounds);
     let mut sumcheck_polys = Vec::with_capacity(total_rounds);
 
-    let (first_left, first_right) = if total_rounds == 1 {
-        // For total_rounds == 1, numerators are base field F
-        // Convert to EF for claims structure (same as CPU version)
-        let left_num = copy_from_device(&input_numerators, 0)?;
-        let left_denom = copy_from_device(&input_denominators, 0)?;
-        let right_num = copy_from_device(&input_numerators, 1)?;
-        let right_denom = copy_from_device(&input_denominators, 1)?;
-
-        (
-            Frac::<EF> {
-                p: EF::from_base(left_num),
-                q: left_denom,
-            },
-            Frac::<EF> {
-                p: EF::from_base(right_num),
-                q: right_denom,
-            },
-        )
-    } else {
-        let layer = tree.pop().unwrap();
-        (
-            copy_frac_from_device(&layer, 0)?,
-            copy_frac_from_device(&layer, 1)?,
-        )
+    let first_left = Frac {
+        p: copy_from_device(&numerators, 0)?,
+        q: copy_from_device(&denominators, 0)?,
+    };
+    let first_right = Frac {
+        p: copy_from_device(&numerators, total_leaves / 2)?,
+        q: copy_from_device(&denominators, total_leaves / 2)?,
     };
     claims_per_layer.push(GkrLayerClaims {
         p_xi_0: first_left.p,
@@ -135,28 +120,21 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
     let mu_1 = transcript.sample_ext();
     let mut xi_prev = vec![mu_1];
     let mut d_sum_evals = DeviceBuffer::<EF>::with_capacity(3);
-    // Keep input buffers for the last round (they're not consumed by tree building)
-    let input_numerators_opt = Some(input_numerators);
-    let input_denominators_opt = Some(input_denominators);
 
     for round in 1..total_rounds {
         let gkr_round_span = debug_span!("GKR round {round}").entered();
-        let eval_size = 1 << round;
 
-        let mut pq_buffer = if round != total_rounds - 1 {
-            tree.pop().unwrap()
-        } else {
-            // Last round: convert separate (F, EF) buffers to Frac<EF> directly on GPU
-            // Note: input buffers are not consumed by tree building, so they're still available
-            let num_buf = input_numerators_opt.as_ref().unwrap();
-            let denom_buf = input_denominators_opt.as_ref().unwrap();
-            let mut converted = DeviceBuffer::<Frac<EF>>::with_capacity(num_buf.len());
-            unsafe {
-                frac_mixed_to_ext(&mut converted, num_buf, denom_buf, num_buf.len())
-                    .map_err(FractionalSumcheckError::SegmentTree)?;
-            }
-            converted
-        };
+        let layer_step = 1 << (total_rounds - round - 1);
+        unsafe {
+            frac_build_tree_layer(
+                &mut numerators,
+                &mut denominators,
+                total_leaves,
+                layer_step,
+                true,
+            )
+            .map_err(FractionalSumcheckError::SegmentTree)?;
+        }
 
         let mut eq_buffer = DeviceBuffer::<EF>::with_capacity(1 << xi_prev.len());
         unsafe {
@@ -170,14 +148,24 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
 
         let mut round_polys_eval = Vec::with_capacity(round);
         let mut r_vec = Vec::with_capacity(round);
-        let mut stride = eval_size;
+        let mut stride = 1 << round;
 
         let lambda = transcript.sample_ext();
 
-        for _sum_round in 0..round {
+        for sum_round in 0..round {
+            let step = 1 << sum_round;
             unsafe {
-                frac_compute_round(&eq_buffer, &pq_buffer, stride, lambda, &mut d_sum_evals)
-                    .map_err(FractionalSumcheckError::ComputeRound)?;
+                frac_compute_round(
+                    &eq_buffer,
+                    &mut numerators,
+                    &mut denominators,
+                    stride,
+                    step,
+                    layer_step,
+                    lambda,
+                    &mut d_sum_evals,
+                )
+                .map_err(FractionalSumcheckError::ComputeRound)?;
             }
             let s_vec = d_sum_evals.to_host()?;
             let s_evals: [EF; 3] = s_vec
@@ -191,20 +179,42 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
             let r_round = transcript.sample_ext();
             r_vec.push(r_round);
 
-            let next_eq = DeviceBuffer::<EF>::with_capacity(stride >> 1);
-            let mut next_pq = DeviceBuffer::<Frac<EF>>::with_capacity(stride);
             unsafe {
-                frac_fold_columns(&eq_buffer, stride, 1, r_round, &next_eq)
+                frac_fold_columns(&mut eq_buffer, stride, step, r_round)
                     .map_err(FractionalSumcheckError::FoldColumns)?;
-                fold_frac_ext_columns(&pq_buffer, stride, 2, r_round, &mut next_pq)
+                fold_ef_columns(&mut numerators, stride, layer_step * step, r_round, false)
+                    .map_err(FractionalSumcheckError::FoldColumns)?;
+                fold_ef_columns(&mut denominators, stride, layer_step * step, r_round, false)
                     .map_err(FractionalSumcheckError::FoldColumns)?;
             }
-            eq_buffer = next_eq;
-            pq_buffer = next_pq;
             stride >>= 1;
         }
-        debug_assert_eq!(pq_buffer.len(), 2);
-        let pq_host = pq_buffer.to_host().map_err(FractionalSumcheckError::Copy)?;
+        let pq_host = [
+            Frac {
+                p: copy_from_device(&numerators, 0)?,
+                q: copy_from_device(&denominators, 0)?,
+            },
+            Frac {
+                p: copy_from_device(&numerators, total_leaves / 2)?,
+                q: copy_from_device(&denominators, total_leaves / 2)?,
+            },
+        ];
+        for pq_revert_round in (0..round).rev() {
+            let step = layer_step << pq_revert_round;
+            stride <<= 1;
+            unsafe {
+                fold_ef_columns(&mut numerators, stride, step, r_vec[pq_revert_round], true)
+                    .map_err(FractionalSumcheckError::FoldColumns)?;
+                fold_ef_columns(
+                    &mut denominators,
+                    stride,
+                    step,
+                    r_vec[pq_revert_round],
+                    true,
+                )
+                .map_err(FractionalSumcheckError::FoldColumns)?;
+            }
+        }
 
         claims_per_layer.push(GkrLayerClaims {
             p_xi_0: pq_host[0].p,
@@ -234,22 +244,6 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
         },
         xi_prev,
     ))
-}
-
-fn copy_frac_from_device(
-    buf: &DeviceBuffer<Frac<EF>>,
-    index: usize,
-) -> Result<Frac<EF>, FractionalSumcheckError> {
-    let scratch = DeviceBuffer::<Frac<EF>>::with_capacity(1);
-    unsafe {
-        cuda_memcpy::<true, true>(
-            scratch.as_mut_raw_ptr(),
-            buf.as_ptr().add(index) as *const std::ffi::c_void,
-            std::mem::size_of::<Frac<EF>>(),
-        )?;
-    }
-    let host = scratch.to_host()?;
-    Ok(host[0])
 }
 
 fn copy_from_device<T: Copy>(

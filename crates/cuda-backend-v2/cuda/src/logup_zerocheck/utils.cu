@@ -136,9 +136,9 @@ __global__ void frac_matrix_vertically_repeat_kernel(
 
 // Vertically repeat separate (F, EF) buffers (for GKR input optimization)
 __global__ void frac_matrix_vertically_repeat_mixed_kernel(
-    Fp *__restrict__ out_numerators,
+    FpExt *__restrict__ out_numerators,
     FpExt *__restrict__ out_denominators,
-    const Fp *__restrict__ in_numerators,
+    const FpExt *__restrict__ in_numerators,
     const FpExt *__restrict__ in_denominators,
     const uint32_t width,
     const uint32_t lifted_height,
@@ -246,10 +246,10 @@ extern "C" int _frac_matrix_vertically_repeat(
     return CHECK_KERNEL();
 }
 
-extern "C" int _frac_matrix_vertically_repeat_mixed(
-    Fp *out_numerators,
+extern "C" int _frac_matrix_vertically_repeat_ext(
+    FpExt *out_numerators,
     FpExt *out_denominators,
-    const Fp *in_numerators,
+    const FpExt *in_numerators,
     const FpExt *in_denominators,
     const uint32_t width,
     const uint32_t lifted_height,
