@@ -63,6 +63,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
         .map_err(FractionalSumcheckError::SegmentTree)?;
     }
     tree.push(out_layer);
+    mem.emit_metrics_with_label("frac_sumcheck.first_tree_layer");
     for i in (0..total_rounds - 1).rev() {
         let input_layer = tree.last().unwrap();
         debug_assert_eq!(input_layer.len(), 1 << (i + 1));
@@ -73,6 +74,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
         }
         tree.push(out_layer);
     }
+    mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
     mem.tracing_info("fractional_sumcheck_gkr: after building segment tree");
     let root_layer = tree.pop().unwrap();
     let root = copy_frac_from_device(&root_layer, 0)?;
@@ -221,6 +223,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
         sumcheck_polys.push(round_polys_eval);
         gkr_round_span.exit();
     }
+    mem.emit_metrics_with_label("frac_sumcheck.gkr_rounds");
     mem.tracing_info("after_fractional_sumcheck_gkr");
 
     Ok((
