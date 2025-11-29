@@ -6,7 +6,7 @@ use openvm_cuda_backend::{
     cuda::kernels::lde::batch_expand_pad,
     ntt::batch_ntt,
 };
-use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer};
+use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer, memory_manager::MemTracker};
 use openvm_stark_backend::{p3_util::log2_strict_usize, prover::MatrixDimensions};
 use stark_backend_v2::prover::stacked_pcs::StackedLayout;
 use tracing::instrument;
@@ -37,11 +37,13 @@ pub fn stacked_commit(
     k_whir: usize,
     traces: &[&DeviceMatrix<F>],
 ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
+    let mem = MemTracker::start_and_reset_peak("prover.stacked_commit");
     let (q_matrix, layout) = stacked_matrix(l_skip, n_stack, traces)?;
     let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_matrix)?;
     let tree = MerkleTreeGpu::<F, Digest>::new(rs_matrix, 1 << k_whir)?;
     let root = tree.root();
     let data = StackedPcsDataGpu::new(layout, q_matrix, tree);
+    mem.emit_metrics();
     Ok((root, data))
 }
 
@@ -54,6 +56,7 @@ pub fn stacked_matrix(
     n_stack: usize,
     traces: &[&DeviceMatrix<F>],
 ) -> Result<(PleMatrix<F>, StackedLayout), ProverError> {
+    let mem = MemTracker::start("prover.stacked_matrix");
     let sorted_meta = traces
         .iter()
         .enumerate()
@@ -108,6 +111,7 @@ pub fn stacked_matrix(
             }
         }
     }
+    mem.emit_metrics();
     Ok((
         PleMatrix::from_evals(l_skip, q_evals, height, width),
         layout,
@@ -123,6 +127,7 @@ pub fn rs_code_matrix(
     log_blowup: usize,
     matrix: &PleMatrix<F>,
 ) -> Result<DeviceMatrix<F>, ProverError> {
+    let mem = MemTracker::start("prover.rs_code_matrix");
     let height = matrix.height();
     debug_assert!(height >= (1 << l_skip));
     let width = matrix.width();
@@ -171,6 +176,7 @@ pub fn rs_code_matrix(
         true,
         false,
     );
+    mem.emit_metrics();
     Ok(DeviceMatrix::new(
         Arc::new(codewords),
         codeword_height,
