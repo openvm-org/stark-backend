@@ -26,7 +26,7 @@ extern "C" {
 
 static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
 
-fn device_memory_used() -> usize {
+pub fn device_memory_used() -> usize {
     let mut free = 0usize;
     let mut total = 0usize;
     unsafe { cudaMemGetInfo(&mut free, &mut total) };
@@ -155,6 +155,12 @@ impl MemTracker {
         Self { current, label }
     }
 
+    pub fn start_and_reset_peak(label: &'static str) -> Self {
+        let mut mem = Self::start(label);
+        mem.reset_peak();
+        mem
+    }
+
     pub fn emit_metrics(&self) {
         self.emit_metrics_with_label(self.label);
     }
@@ -169,12 +175,15 @@ impl MemTracker {
             .unwrap()
             .as_secs_f64()
             * 1000.0;
-        let tracked = manager.current_size;
+        let current = manager.current_size;
+        // local_peak is local maximum memory size, as observed by the manager, since the last
+        // reset_peak call
+        let local_peak = manager.max_used_size;
         let reserved = manager.pool.memory_usage();
         metrics::gauge!("gpu_mem.timestamp_ms", "module" => label).set(ts);
-        metrics::gauge!("gpu_mem.tracked_bytes", "module" => label).set(tracked as f64);
+        metrics::gauge!("gpu_mem.current_bytes", "module" => label).set(current as f64);
+        metrics::gauge!("gpu_mem.local_peak_bytes", "module" => label).set(local_peak as f64);
         metrics::gauge!("gpu_mem.reserved_bytes", "module" => label).set(reserved as f64);
-        metrics::gauge!("gpu_mem.device_bytes", "module" => label).set(device_memory_used() as f64);
     }
 
     #[inline]
