@@ -65,7 +65,7 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     other_pcs_data: Vec<Arc<StackedPcsDataGpu<F, Digest>>>,
     u: &[EF],
 ) -> Result<WhirProof, ProverError> {
-    let mem = MemTracker::start("prove_whir_opening");
+    let mem = MemTracker::start("prover.prove_whir_opening");
     let params = device.config();
     let k_whir = params.k_whir;
     let log_blowup = params.log_blowup;
@@ -457,6 +457,7 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
         log_rs_domain_size -= 1;
     }
 
+    mem.emit_metrics();
     Ok(WhirProof {
         whir_sumcheck_polys,
         codeword_commits,

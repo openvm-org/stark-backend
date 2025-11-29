@@ -114,8 +114,6 @@ impl<'a, TS> LogupZerocheckProver<'a, GpuBackendV2, GpuDeviceV2, TS> for LogupZe
 where
     TS: FiatShamirTranscript,
 {
-    // TODO: modify trait so we can drop common main buffers in `ctx`: they are extraneous given
-    // `common_main_pcs_data`
     #[instrument(skip_all)]
     fn prove_logup_gkr(
         device: &'a GpuDeviceV2,
@@ -128,7 +126,7 @@ where
         alpha_logup: EF,
         beta_logup: EF,
     ) -> (Self, FracSumcheckProof<EF>) {
-        let mem = MemTracker::start("logup_zerocheck_prover");
+        let mem = MemTracker::start("prover.logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
@@ -268,6 +266,9 @@ where
         ctx: &ProvingContextV2<GpuBackendV2>,
         lambda: EF,
     ) -> Vec<UnivariatePoly<EF>> {
+        self.mem
+            .emit_metrics_with_label("prover.before_batch_constraints_sumcheck");
+        self.mem.reset_peak();
         let n_logup = self.n_logup;
         let l_skip = self.l_skip;
         let xi = &self.xi;
@@ -628,6 +629,7 @@ where
             )
         };
         self.mem.tracing_info("after_fold_ple_evals");
+        self.mem.emit_metrics();
     }
 
     #[instrument(

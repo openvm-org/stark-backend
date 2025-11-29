@@ -6,6 +6,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
     error::MemCopyError,
+    memory_manager::MemTracker,
     stream::current_stream_sync,
 };
 use openvm_stark_backend::prover::hal::MatrixDimensions;
@@ -57,14 +58,15 @@ impl<TS: FiatShamirTranscript> ProverDeviceV2<GpuBackendV2, TS> for GpuDeviceV2 
 
 impl TraceCommitterV2<GpuBackendV2> for GpuDeviceV2 {
     fn commit(&self, traces: &[&DeviceMatrix<F>]) -> (Digest, StackedPcsDataGpu<F, Digest>) {
-        stacked_commit(
+        let result = stacked_commit(
             self.config.l_skip,
             self.config.n_stack,
             self.config.log_blowup,
             self.config.k_whir,
             traces,
         )
-        .unwrap()
+        .unwrap();
+        result
     }
 }
 
@@ -81,6 +83,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
         ctx: ProvingContextV2<GpuBackendV2>,
         common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
+        let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
         let (gkr_proof, batch_constraint_proof, r) =
             prove_zerocheck_and_logup::<_, _, TS, LogupZerocheckGpu>(
                 self,
@@ -89,6 +92,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
                 ctx,
                 common_main_pcs_data,
             );
+        mem.emit_metrics();
         ((gkr_proof, batch_constraint_proof), r)
     }
 }
@@ -105,6 +109,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
         pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsDataGpu<F, Digest>>>,
         r: Vec<EF>,
     ) -> (StackingProof, WhirProof) {
+        let mem = MemTracker::start_and_reset_peak("prover.openings");
         let params = self.config;
         let mut stacked_per_commit = vec![&common_main_pcs_data];
         for data in &pre_cached_pcs_data_per_commit {
@@ -132,6 +137,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
             pre_cached_pcs_data_per_commit,
             &u_cube,
         );
+        mem.emit_metrics();
         (stacking_proof, whir_proof)
     }
 }

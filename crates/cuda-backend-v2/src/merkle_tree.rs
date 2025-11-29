@@ -9,6 +9,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::CudaError,
+    memory_manager::MemTracker,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
@@ -50,6 +51,7 @@ impl<F, Digest> MerkleTreeGpu<F, Digest> {
 impl MerkleTreeGpu<F, Digest> {
     #[instrument(name = "merkle_tree", skip_all)]
     pub fn new(matrix: DeviceMatrix<F>, rows_per_query: usize) -> Result<Self, CudaError> {
+        let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
         assert!(height.is_power_of_two());
         let k = log2_strict_usize(rows_per_query);
@@ -103,6 +105,7 @@ impl MerkleTreeGpu<F, Digest> {
             digest_layers.push(layer);
         }
 
+        mem.emit_metrics();
         Ok(Self {
             backing_matrix: matrix,
             digest_layers,
