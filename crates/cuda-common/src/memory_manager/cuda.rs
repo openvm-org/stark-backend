@@ -21,13 +21,8 @@ extern "C" {
     fn _vpmm_release(h: CUmemGenericAllocationHandle) -> i32;
 }
 
-pub(super) unsafe fn vpmm_check_support(device_ordinal: i32) -> Result<bool, CudaError> {
-    let status = _vpmm_check_support(device_ordinal);
-    if status == 0 {
-        Ok(true)
-    } else {
-        Err(CudaError::new(status))
-    }
+pub(super) unsafe fn vpmm_check_support(device_ordinal: i32) -> Result<(), CudaError> {
+    CudaError::from_result(_vpmm_check_support(device_ordinal))
 }
 
 pub(super) unsafe fn vpmm_min_granularity(device_ordinal: i32) -> Result<usize, CudaError> {

@@ -95,6 +95,9 @@ pub enum MemoryError {
 
     #[error("Invalid pointer: pointer not found in allocation table")]
     InvalidPointer,
+
+    #[error("Failed to reserve virtual address space (bytes: {size}, page size: {page_size})")]
+    ReserveFailed { size: usize, page_size: usize },
 }
 
 #[derive(Error, Debug)]
