@@ -505,6 +505,11 @@ impl VirtualMemoryPool {
             }
             allocated_ptr = self.free_region_insert(dst, allocate_size, stream_id);
         }
+        // At this point, allocated_ptr is either
+        // - CUdeviceptr::MAX if no allocations occurred
+        // - or some pointer `<= dst` for the start of a free region (with VA-mapping) of at least
+        //   `requested` bytes. The case `allocated_ptr < dst` happens if `free_region_insert`
+        //   merged the allocated region with a previous free region.
         let mut remaining = requested - allocate_size;
         if remaining == 0 {
             debug_assert_ne!(
