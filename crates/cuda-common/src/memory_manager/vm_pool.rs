@@ -239,7 +239,7 @@ impl VirtualMemoryPool {
 
         if best_region.is_none() {
             // Phase 2: Defragmentation
-            best_region = self.defragment_or_create_new_pages(requested, stream_id)?.0;
+            best_region = self.defragment_or_create_new_pages(requested, stream_id)?;
         }
 
         if let Some(ptr) = best_region {
@@ -310,6 +310,10 @@ impl VirtualMemoryPool {
 
     /// Frees a pointer and returns the size of the freed memory.
     /// Coalesces adjacent free regions.
+    ///
+    /// # Assumptions
+    /// No CUDA streams will use the malloc region starting at `ptr` after the newly recorded event
+    /// on `stream_id` at this point in time.
     pub(super) fn free_internal(
         &mut self,
         ptr: *mut c_void,
@@ -497,7 +501,7 @@ impl VirtualMemoryPool {
             self.active_pages.insert(allocated_dst, handle);
             allocated_dst += self.page_size as u64;
         }
-        debug_assert_eq!(allocated_dst, dst + allocated_size as u64);
+        debug_assert_eq!(allocated_dst, dst + allocate_size as u64);
         if allocate_size > 0 {
             tracing::debug!(
                 "VPMM: Allocated {} bytes on stream {}. Total allocated: {}",
@@ -517,10 +521,10 @@ impl VirtualMemoryPool {
                     MemoryError::from(e)
                 })?;
             }
-            (allocated_ptr, merged_allocate_size) =
-                self.free_region_insert(dst, allocate_size, stream_id);
-            debug_assert!(merged_allocate_size >= allocate_size);
-            allocate_size = merged_allocate_size;
+            let (merged_ptr, merged_size) = self.free_region_insert(dst, allocate_size, stream_id);
+            debug_assert!(merged_size >= allocate_size);
+            allocated_ptr = merged_ptr;
+            allocate_size = merged_size;
         }
         // At this point, allocated_ptr is either
         // - CUdeviceptr::MAX if no allocations occurred
@@ -577,7 +581,7 @@ impl VirtualMemoryPool {
             }
         }
         let remapped_ptr = self.remap_regions(to_defrag, allocated_dst, stream_id)?;
-        // Take the minimum in case allocated_ptr is CUdeviceptr::MAX when allocated_size = 0
+        // Take the minimum in case allocated_ptr is CUdeviceptr::MAX when allocate_size = 0
         let result = std::cmp::min(allocated_ptr, remapped_ptr);
         debug_assert!(allocate_size == 0 || allocated_ptr == remapped_ptr);
         debug_assert_ne!(
