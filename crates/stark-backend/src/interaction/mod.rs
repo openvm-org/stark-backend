@@ -329,7 +329,7 @@ pub trait RapPhaseSeq<F, Challenge, Challenger> {
 type PairTraceView<'a, F> = PairView<Arc<RowMajorMatrix<F>>, F>;
 
 /// Parameters to ensure sufficient soundness of the LogUp part of the protocol.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct LogUpSecurityParameters {
     /// A bound on the total number of interactions.
@@ -339,7 +339,7 @@ pub struct LogUpSecurityParameters {
     /// keygen.
     pub log_max_message_length: u32,
     /// The number of proof-of-work bits for the LogUp proof-of-work phase.
-    pub log_up_pow_bits: usize,
+    pub pow_bits: usize,
 }
 
 impl LogUpSecurityParameters {
@@ -350,7 +350,7 @@ impl LogUpSecurityParameters {
         log_order
             - log2_ceil_usize(2 * self.max_interaction_count as usize) as u32  // multiply by two to account for the poles as well
             - self.log_max_message_length
-            + u32::try_from(self.log_up_pow_bits).unwrap()
+            + u32::try_from(self.pow_bits).unwrap()
     }
     pub fn max_message_length(&self) -> usize {
         2usize
