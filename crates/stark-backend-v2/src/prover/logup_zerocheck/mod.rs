@@ -132,7 +132,7 @@ where
     let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
 
     // Grind to increase soundness of random sampling for LogUp
-    let logup_pow_witness = transcript.grind(mpk.params.logup_pow_bits);
+    let logup_pow_witness = transcript.grind(mpk.params.logup.pow_bits);
     let alpha_logup = transcript.sample_ext();
     let beta_logup = transcript.sample_ext();
     debug!(%alpha_logup, %beta_logup);
