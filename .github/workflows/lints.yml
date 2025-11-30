@@ -56,6 +56,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
+      - uses: ./.github/actions/rust-cache-cuda
       - name: Verify CUDA setup
         run: |
           nvidia-smi
