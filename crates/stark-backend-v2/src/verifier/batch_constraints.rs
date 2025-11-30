@@ -74,7 +74,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     } = batch_proof;
 
     // 1. Check GKR witness
-    if !transcript.check_witness(mvk.params.logup_pow_bits, gkr_proof.logup_pow_witness) {
+    if !transcript.check_witness(mvk.params.logup.pow_bits, gkr_proof.logup_pow_witness) {
         return Err(BatchConstraintError::InvalidLogupPowWitness);
     }
 
@@ -143,12 +143,12 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         transcript.observe_ext(coeff);
     }
 
-    let s_deg = mvk.max_constraint_degree + 1;
+    let s_deg = mvk.params.max_constraint_degree + 1;
     let r_0 = transcript.sample_ext();
     debug!(round = 0, r_round = %r_0);
     assert_eq!(
         univariate_round_coeffs.len(),
-        (mvk.max_constraint_degree + 1) * ((1 << l_skip) - 1) + 1
+        (mvk.max_constraint_degree() + 1) * ((1 << l_skip) - 1) + 1
     );
     let s_0 = UnivariatePoly::new(univariate_round_coeffs.clone());
     let sum_univ_domain_s_0 = s_0
