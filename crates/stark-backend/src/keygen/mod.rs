@@ -258,6 +258,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
         let air_name = self.air.name();
 
         let symbolic_builder = self.get_symbolic_builder(Some(max_constraint_degree));
+        #[allow(deprecated)]
         let params = symbolic_builder.params();
         let symbolic_constraints = symbolic_builder.constraints();
         let log_quotient_degree = symbolic_constraints.get_log_quotient_degree();
