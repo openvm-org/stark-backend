@@ -64,7 +64,7 @@ impl FriLogUpPhaseGpu {
             return None;
         }
 
-        let logup_pow_witness = challenger.grind(self.log_up_params.log_up_pow_bits);
+        let logup_pow_witness = challenger.grind(self.log_up_params.pow_bits);
         let challenges: [EF; STARK_LU_NUM_CHALLENGES] =
             array::from_fn(|_| challenger.sample_ext_element::<EF>());
 

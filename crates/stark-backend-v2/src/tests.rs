@@ -1,6 +1,9 @@
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
-use openvm_stark_sdk::config::{setup_tracing, setup_tracing_with_log_level};
+use openvm_stark_sdk::config::{
+    log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
+    setup_tracing_with_log_level,
+};
 use p3_field::{FieldAlgebra, PrimeField32, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_strict_usize;
@@ -118,8 +121,9 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
             k_whir,
             num_whir_queries,
             log_final_poly_len,
-            logup_pow_bits: 1,
             whir_pow_bits: 1,
+            logup: log_up_security_params_baby_bear_100_bits(),
+            max_constraint_degree: 3,
         };
         let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
         let (vk, proof) = InteractionsFixture11.keygen_and_prove(&engine);
@@ -384,7 +388,7 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let ((gkr_proof, _), _) = prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
 
     let mut transcript = DuplexSponge::default();
-    assert!(transcript.check_witness(params.logup_pow_bits, gkr_proof.logup_pow_witness));
+    assert!(transcript.check_witness(params.logup.pow_bits, gkr_proof.logup_pow_witness));
     let _alpha = transcript.sample_ext();
     let _beta = transcript.sample_ext();
     let total_rounds = gkr_proof.claims_per_layer.len();
