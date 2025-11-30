@@ -378,6 +378,9 @@ impl VirtualMemoryPool {
     }
 
     /// Return the base address of a virtual hole large enough for `requested` bytes.
+    ///
+    /// The returned region is not inside `free_region` or `unmapped_region` map and must be
+    /// properly handled.
     fn take_unmapped_region(&mut self, requested: usize) -> Result<CUdeviceptr, MemoryError> {
         debug_assert!(requested != 0);
         debug_assert_eq!(requested % self.page_size, 0);
