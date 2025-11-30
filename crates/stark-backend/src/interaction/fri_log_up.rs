@@ -1,4 +1,4 @@
-use std::{array, borrow::Borrow, cmp::max, iter::zip, marker::PhantomData, mem};
+use std::{array, borrow::Borrow, iter::zip, marker::PhantomData};
 
 use itertools::Itertools;
 use p3_air::ExtensionBuilder;
@@ -14,8 +14,8 @@ use super::{LogUpSecurityParameters, PairTraceView, SymbolicInteraction};
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
     interaction::{
-        trace::Evaluator, utils::generate_betas, InteractionBuilder, RapPhaseProverData,
-        RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
+        find_interaction_chunks, trace::Evaluator, utils::generate_betas, InteractionBuilder,
+        InteractionChunks, RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
     },
     parizip,
     rap::PermutationAirBuilderWithExposedValues,
@@ -56,16 +56,14 @@ pub struct FriLogUpPartialProof<Witness> {
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
-pub struct FriLogUpProvingKey {
-    interaction_partitions: Vec<Vec<usize>>,
-}
+pub struct FriLogUpProvingKey(InteractionChunks);
 
 impl FriLogUpProvingKey {
-    pub fn interaction_partitions(self) -> Vec<Vec<usize>> {
-        self.interaction_partitions
+    pub fn interaction_partitions(&self) -> &[Vec<usize>] {
+        self.0.indices_by_chunk()
     }
     pub fn num_chunks(&self) -> usize {
-        self.interaction_partitions.len()
+        self.0.num_chunks()
     }
 }
 
@@ -93,7 +91,10 @@ where
         symbolic_constraints_per_air
             .iter()
             .map(|constraints| {
-                find_interaction_chunks(&constraints.interactions, max_constraint_degree)
+                FriLogUpProvingKey(find_interaction_chunks(
+                    &constraints.interactions,
+                    max_constraint_degree,
+                ))
             })
             .collect()
     }
@@ -259,7 +260,7 @@ where
                     &constraints.interactions,
                     trace_view,
                     challenges,
-                    &params.interaction_partitions,
+                    params.interaction_partitions(),
                     extra_capacity_bits,
                 )
             })
@@ -464,10 +465,8 @@ pub fn eval_fri_log_up_phase<AB>(
     let perm_next: &[AB::VarEF] = (*perm_next).borrow();
 
     let all_interactions = builder.all_interactions().to_vec();
-    let FriLogUpProvingKey {
-        interaction_partitions,
-    } = find_interaction_chunks(symbolic_interactions, max_constraint_degree);
-    let num_chunks = interaction_partitions.len();
+    let interaction_chunks = find_interaction_chunks(symbolic_interactions, max_constraint_degree);
+    let num_chunks = interaction_chunks.num_chunks();
     debug_assert_eq!(num_chunks + 1, perm_local.len());
 
     let phi_local = *perm_local.last().unwrap();
@@ -480,7 +479,7 @@ pub fn eval_fri_log_up_phase<AB>(
     let mut phi_rhs = AB::ExprEF::ZERO;
     let mut phi_0 = AB::ExprEF::ZERO;
 
-    for (chunk_idx, part) in interaction_partitions.iter().enumerate() {
+    for (chunk_idx, part) in interaction_chunks.indices_by_chunk().iter().enumerate() {
         let denoms_per_chunk = part
             .iter()
             .map(|&interaction_idx| {
@@ -537,103 +536,4 @@ pub fn eval_fri_log_up_phase<AB>(
     builder
         .when_last_row()
         .assert_eq_ext(*perm_local.last().unwrap(), cumulative_sum);
-}
-
-/// We can chunk interactions, where the degree of the dominating logup constraint is bounded by
-///
-/// logup_degree = max(
-///     1 + sum_i(max_field_degree_i),
-///     max_i(count_degree_i + sum_{j!=i}(max_field_degree_j))
-/// )
-/// where i,j refer to interactions in the chunk.
-///
-/// More details about this can be found in the function [eval_fri_log_up_phase].
-///
-/// We pack interactions into chunks while making sure the constraint
-/// degree does not exceed `max_constraint_degree` (if possible).
-/// `max_constraint_degree` is the maximum constraint degree across all AIRs.
-/// Interactions may be reordered in the process.
-///
-/// Returns [FriLogUpProvingKey] which consists of `interaction_partitions: Vec<Vec<usize>>` where
-/// `num_chunks = interaction_partitions.len()`.
-/// This function guarantees that the `interaction_partitions` forms a (disjoint) partition of the
-/// indices `0..interactions.len()`. For `chunk_idx`, the array `interaction_partitions[chunk_idx]`
-/// contains the indices of interactions that are in the `chunk_idx`-th chunk.
-///
-/// If `max_constraint_degree == 0`, then `num_chunks = interactions.len()` and no chunking is done.
-///
-/// ## Note
-/// This function is only intended for use in preprocessing, and is not used in proving.
-///
-/// ## Panics
-/// If `max_constraint_degree > 0` and there are interactions that cannot fit in a singleton chunk.
-pub(crate) fn find_interaction_chunks<F: Field>(
-    interactions: &[SymbolicInteraction<F>],
-    max_constraint_degree: usize,
-) -> FriLogUpProvingKey {
-    if interactions.is_empty() {
-        return FriLogUpProvingKey::default();
-    }
-    // First, we sort interaction indices by ascending max field degree
-    let max_field_degree = |i: usize| {
-        interactions[i]
-            .message
-            .iter()
-            .map(|f| f.degree_multiple())
-            .max()
-            .unwrap_or(0)
-    };
-    let mut interaction_idxs = (0..interactions.len()).collect_vec();
-    interaction_idxs.sort_by(|&i, &j| {
-        let field_cmp = max_field_degree(i).cmp(&max_field_degree(j));
-        if field_cmp == std::cmp::Ordering::Equal {
-            interactions[i]
-                .count
-                .degree_multiple()
-                .cmp(&interactions[j].count.degree_multiple())
-        } else {
-            field_cmp
-        }
-    });
-    // Now we greedily pack
-    let mut running_sum_field_degree = 0;
-    let mut numerator_max_degree = 0;
-    let mut interaction_partitions = vec![];
-    let mut cur_chunk = vec![];
-    for interaction_idx in interaction_idxs {
-        let field_degree = max_field_degree(interaction_idx);
-        let count_degree = interactions[interaction_idx].count.degree_multiple();
-        // Can we add this interaction to the current chunk?
-        let new_num_max_degree = max(
-            numerator_max_degree + field_degree,
-            count_degree + running_sum_field_degree,
-        );
-        let new_denom_degree = running_sum_field_degree + field_degree;
-        if max(new_num_max_degree, new_denom_degree + 1) <= max_constraint_degree {
-            // include in current chunk
-            cur_chunk.push(interaction_idx);
-            numerator_max_degree = new_num_max_degree;
-            running_sum_field_degree += field_degree;
-        } else {
-            // seal current chunk + start new chunk
-            if !cur_chunk.is_empty() {
-                // if i == 0, that means the interaction exceeds the max_constraint_degree
-                interaction_partitions.push(mem::take(&mut cur_chunk));
-            }
-            cur_chunk.push(interaction_idx);
-            numerator_max_degree = count_degree;
-            running_sum_field_degree = field_degree;
-            if max_constraint_degree > 0 && max(count_degree, field_degree) > max_constraint_degree
-            {
-                panic!("Interaction with field_degree={field_degree}, count_degree={count_degree} exceeds max_constraint_degree={max_constraint_degree}");
-            }
-        }
-    }
-    // the last interaction is in a chunk that has not been sealed
-    assert!(!cur_chunk.is_empty());
-    interaction_partitions.push(cur_chunk);
-
-    FriLogUpProvingKey {
-        interaction_partitions,
-    }
 }

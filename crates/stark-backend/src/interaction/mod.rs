@@ -13,12 +13,15 @@ use crate::{
     prover::types::PairView,
 };
 
+mod chunk;
 /// Interaction debugging tools
 pub mod debug;
 pub mod fri_log_up;
 pub mod rap;
 pub mod trace;
 mod utils;
+
+pub use chunk::*;
 
 // Must be a type smaller than u32 to make BusIndex p - 1 unrepresentable.
 pub type BusIndex = u16;
