@@ -20,9 +20,9 @@ jobs:
       - runs-on=${{ github.run_id }}/runner=test-gpu-nvidia
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: nightly
+      - uses: dtolnay/rust-toolchain@nightly
+        env:
+          RUSTUP_PERMIT_COPY_RENAME: "1"
 
       - name: Build documentation
         run: cargo +nightly doc --workspace --no-deps
