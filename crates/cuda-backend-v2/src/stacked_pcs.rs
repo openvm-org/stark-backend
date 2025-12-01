@@ -70,7 +70,7 @@ pub fn stacked_matrix(
     let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
     let total_cells: usize = traces
         .iter()
-        .map(|t| max(t.height() * t.width(), 1 << l_skip))
+        .map(|t| max(t.height(), 1 << l_skip) * t.width())
         .sum();
     let height = 1usize << (l_skip + n_stack);
     let width = total_cells.div_ceil(height);

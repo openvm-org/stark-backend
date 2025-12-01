@@ -22,8 +22,8 @@ use stark_backend_v2::{
         stacked_reduction::{StackedReductionCpu, prove_stacked_opening_reduction},
     },
     test_utils::{
-        CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11,
-        PreprocessedFibFixture, TestFixture, default_test_params_small,
+        CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11, MixtureFixture,
+        PreprocessedFibFixture, SelfInteractionFixture, TestFixture, default_test_params_small,
         prove_up_to_batch_constraints, test_system_params_small,
     },
     verifier::{
@@ -441,7 +441,8 @@ fn test_single_cached_trace_stark() {
     engine.verify(&vk, &proof).unwrap();
 }
 
-#[test_case(3)]
+#[test_case(10 ; "when log_height equals n_stack l_skip")]
+#[test_case(3 ; "when log_height greater than l_skip")]
 #[test_case(2 ; "when log_height equals l_skip")]
 #[test_case(1 ; "when log_height less than l_skip")]
 #[test_case(0 ; "when log_height is zero")]
@@ -451,6 +452,36 @@ fn test_single_preprocessed_trace_stark(log_trace_degree: usize) {
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
     let fx = PreprocessedFibFixture::new(0, 1, sels);
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test_case(10 ; "when log_height equals n_stack l_skip")]
+#[test_case(3 ; "when log_height greater than l_skip")]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_multi_interaction_traces_stark(log_trace_degree: usize) {
+    setup_tracing();
+    let engine = test_gpu_engine_small();
+    let fx = SelfInteractionFixture {
+        widths: vec![4, 7, 8, 8, 10, 100],
+        log_height: log_trace_degree,
+        bus_index: 4,
+    };
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test_case(10 ; "when log_height equals n_stack l_skip")]
+#[test_case(3 ; "when log_height greater than l_skip")]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
+fn test_mixture_traces_stark(log_trace_degree: usize) {
+    setup_tracing();
+    let engine = test_gpu_engine_small();
+    let fx = MixtureFixture::standard(log_trace_degree, engine.config());
     let (vk, proof) = fx.keygen_and_prove(&engine);
     engine.verify(&vk, &proof).unwrap();
 }
@@ -528,4 +559,18 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
         &omega_pows,
     )?;
     Ok(())
+}
+
+#[test]
+fn test_matrix_stacking_overflow() {
+    setup_tracing();
+    let params = test_system_params_small(3, 5, 3);
+    let engine = BabyBearPoseidon2GpuEngineV2::<DuplexSponge>::new(params);
+    let fx = SelfInteractionFixture {
+        widths: vec![4, 7, 8, 8, 10],
+        log_height: 1,
+        bus_index: 4,
+    };
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
 }
