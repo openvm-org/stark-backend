@@ -180,11 +180,4 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
     /// Transport a device matrix to host. This should only be used for testing / debugging
     /// purposes.
     fn transport_matrix_from_device_to_host(&self, matrix: &PB::Matrix) -> ColMajorMatrix<PB::Val>;
-
-    /// Transport a device pcs data to host. This should only be used for testing / debugging
-    /// purposes.
-    fn transport_pcs_data_from_device_to_host(
-        &self,
-        pcs_data: &PB::PcsData,
-    ) -> StackedPcsData<PB::Val, PB::Commitment>;
 }
