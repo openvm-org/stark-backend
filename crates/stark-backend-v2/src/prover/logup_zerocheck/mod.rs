@@ -72,7 +72,7 @@ pub trait LogupZerocheckProver<'a, PB: ProverBackendV2, PD, TS>: Sized {
     /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
     /// Folding _could_ directly mutate inplace the trace matrices in `ctx` as they will not be
     /// needed after this.
-    fn fold_ple_evals(&mut self, ctx: ProvingContextV2<PB>, r_0: PB::Challenge);
+    fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<PB>, r_0: PB::Challenge);
 
     /// Returns length `3 * num_airs_present` polynomials, each evaluated at `1..=s_deg`.
     fn sumcheck_polys_eval(
@@ -92,7 +92,7 @@ pub fn prove_zerocheck_and_logup<'a, PB, PD, TS, LZP>(
     device: &'a PD,
     transcript: &mut TS,
     mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
-    ctx: ProvingContextV2<PB>,
+    ctx: &ProvingContextV2<PB>,
     common_main_pcs_data: &'a PB::PcsData,
 ) -> (GkrProof, BatchConstraintProof, Vec<PB::Challenge>)
 where
@@ -141,7 +141,7 @@ where
         device,
         transcript,
         mpk,
-        &ctx,
+        ctx,
         common_main_pcs_data,
         n_logup,
         interactions_layout,
@@ -156,7 +156,7 @@ where
     let lambda = transcript.sample_ext();
     debug!(%lambda);
 
-    let s_0_polys = prover.sumcheck_uni_round0_polys(&ctx, lambda);
+    let s_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
     // logup sum claims (sum_{\hat p}, sum_{\hat q}) per present AIR
     let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = s_0_polys
         [..2 * num_airs_present]
