@@ -177,11 +177,4 @@ impl DeviceDataTransporterV2<CpuBackendV2> for CpuDeviceV2 {
     ) -> ColMajorMatrix<F> {
         matrix.clone()
     }
-
-    fn transport_pcs_data_from_device_to_host(
-        &self,
-        pcs_data: &StackedPcsData<F, Digest>,
-    ) -> StackedPcsData<F, Digest> {
-        pcs_data.clone()
-    }
 }
