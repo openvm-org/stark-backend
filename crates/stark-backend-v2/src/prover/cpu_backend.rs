@@ -69,7 +69,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<CpuBackendV2, TS> for CpuDeviceV2 
         &self,
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-        ctx: ProvingContextV2<CpuBackendV2>,
+        ctx: &ProvingContextV2<CpuBackendV2>,
         common_main_pcs_data: &StackedPcsData<F, Digest>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let (gkr_proof, batch_constraint_proof, r) =
@@ -92,6 +92,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2
     fn prove_openings(
         &self,
         transcript: &mut TS,
+        _ctx: ProvingContextV2<CpuBackendV2>,
         common_main_pcs_data: StackedPcsData<F, Digest>,
         pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsData<F, Digest>>>,
         r: Vec<EF>,

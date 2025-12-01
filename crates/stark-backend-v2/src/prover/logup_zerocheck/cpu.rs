@@ -461,7 +461,7 @@ where
         s_0_logups.into_iter().chain(s_0_zerochecks).collect()
     }
 
-    fn fold_ple_evals(&mut self, ctx: ProvingContextV2<CpuBackendV2>, r_0: EF) {
+    fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<CpuBackendV2>, r_0: EF) {
         let l_skip = self.l_skip;
         // "Fold" all PLE evaluations by interpolating and evaluating at `r_0`.
         // NOTE: after this folding, \hat{T} and \hat{T_{rot}} will be treated as completely
@@ -469,9 +469,9 @@ where
         self.mat_evals_per_trace = self
             .eval_helpers
             .par_iter()
-            .zip(ctx.per_trace.into_par_iter())
+            .zip(ctx.per_trace.par_iter())
             .map(|(helper, (_, trace_ctx))| {
-                let mats = helper.view_mats(&trace_ctx);
+                let mats = helper.view_mats(trace_ctx);
                 mats.into_par_iter()
                     .map(|(mat, is_rot)| fold_ple_evals(l_skip, mat, is_rot, r_0))
                     .collect::<Vec<_>>()
