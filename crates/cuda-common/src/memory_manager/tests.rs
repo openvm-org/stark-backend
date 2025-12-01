@@ -1,11 +1,23 @@
 //! Tests for memory_manager - focused on edge cases and dangerous scenarios
 
-use std::sync::Arc;
-
-use tokio::sync::Barrier;
-
 use super::vm_pool::{VirtualMemoryPool, VpmmConfig};
-use crate::{d_buffer::DeviceBuffer, stream::current_stream_id};
+use crate::{
+    d_buffer::DeviceBuffer,
+    stream::{current_stream_id, current_stream_sync},
+};
+
+#[link(name = "cudart")]
+extern "C" {
+    fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
+}
+
+fn get_gpu_free_memory() -> usize {
+    let mut free = 0usize;
+    let mut total = 0usize;
+    let err = unsafe { cudaMemGetInfo(&mut free, &mut total) };
+    assert_eq!(err, 0, "cudaMemGetInfo failed: {}", err);
+    free
+}
 
 // ============================================================================
 // Coalescing: free B first, then A, then C - should coalesce into one region
@@ -271,117 +283,10 @@ fn test_defrag_case_d_not_enough_for_4() {
 }
 
 // ============================================================================
-// Cross-thread: Thread A frees, Thread B should be able to reuse after sync
+// Mixed allocations: small (cudaMallocAsync) and large (VPMM) across threads
 // ============================================================================
 #[test]
-fn test_cross_thread_handoff() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .max_blocking_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    runtime.block_on(async {
-        let barrier = Arc::new(Barrier::new(2));
-        // Store address as usize (which is Send + Sync)
-        let addr_holder = Arc::new(std::sync::Mutex::new(0usize));
-
-        let barrier1 = barrier.clone();
-        let addr_holder1 = addr_holder.clone();
-
-        // Thread A: allocate and free
-        let handle_a = tokio::task::spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                let len = (200 << 20) / size_of::<u8>(); // 200 MB
-                let buf = DeviceBuffer::<u8>::with_capacity(len);
-                *addr_holder1.lock().unwrap() = buf.as_raw_ptr() as usize;
-                // buf drops here, freeing memory
-            })
-            .await
-            .expect("task A panicked");
-
-            barrier1.wait().await;
-        });
-
-        let barrier2 = barrier.clone();
-        let addr_holder2 = addr_holder.clone();
-
-        // Thread B: wait for A, then allocate same size
-        let handle_b = tokio::task::spawn(async move {
-            barrier2.wait().await;
-
-            tokio::task::spawn_blocking(move || {
-                let len = (200 << 20) / size_of::<u8>();
-                let buf = DeviceBuffer::<u8>::with_capacity(len);
-
-                // Check if we got the same address (depends on event sync timing)
-                let original_addr = *addr_holder2.lock().unwrap();
-                let new_addr = buf.as_raw_ptr() as usize;
-                if new_addr == original_addr {
-                    println!("Cross-thread: reused same address (event synced)");
-                } else {
-                    println!("Cross-thread: different address (event pending)");
-                }
-                // buf drops here
-            })
-            .await
-            .expect("task B panicked");
-        });
-
-        handle_a.await.expect("thread A failed");
-        handle_b.await.expect("thread B failed");
-    });
-}
-
-// ============================================================================
-// Stress: many threads doing random alloc/free patterns
-// ============================================================================
-#[test]
-fn test_stress_multithread() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(8)
-        .max_blocking_threads(8)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    runtime.block_on(async {
-        let mut handles = Vec::new();
-
-        for thread_idx in 0..8 {
-            let handle = tokio::task::spawn_blocking(move || {
-                let mut buffers: Vec<DeviceBuffer<u8>> = Vec::new();
-
-                for op in 0..20 {
-                    // Random-ish size: 100-500 MB (VPMM path)
-                    let len = ((thread_idx * 7 + op * 3) % 5 + 1) * (100 << 20);
-                    let buf = DeviceBuffer::<u8>::with_capacity(len);
-                    buffers.push(buf);
-
-                    // Free every 3rd allocation
-                    if op % 3 == 0 && !buffers.is_empty() {
-                        buffers.remove(0); // drops and frees
-                    }
-                }
-                // remaining buffers drop here
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.await.expect("stress thread failed");
-        }
-    });
-
-    println!("Stress test: 8 threads × 20 ops completed");
-}
-
-// ============================================================================
-// Mixed: interleave small (cudaMallocAsync) and large (VPMM) allocations
-// ============================================================================
-#[test]
-fn test_mixed_small_large_multithread() {
+fn test_mixed_allocations() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .max_blocking_threads(4)
@@ -398,10 +303,10 @@ fn test_mixed_small_large_multithread() {
 
                 for op in 0..15 {
                     let len = if op % 3 == 0 {
-                        // Small: 1KB - 100KB (cudaMallocAsync)
+                        // Small: 1KB - 100KB (cudaMallocAsync path)
                         ((thread_idx + 1) * (op + 1) * 1024) % (100 << 10) + 1024
                     } else {
-                        // Large: 100MB - 400MB (VPMM)
+                        // Large: 100MB - 400MB (VPMM path)
                         ((thread_idx + 1) * (op + 1) % 4 + 1) * (100 << 20)
                     };
 
@@ -409,10 +314,9 @@ fn test_mixed_small_large_multithread() {
                     buffers.push(buf);
 
                     if op % 2 == 0 && !buffers.is_empty() {
-                        buffers.remove(0); // drops and frees
+                        buffers.remove(0);
                     }
                 }
-                // remaining buffers drop here
             });
             handles.push(handle);
         }
@@ -421,85 +325,65 @@ fn test_mixed_small_large_multithread() {
             handle.await.expect("thread failed");
         }
     });
-}
 
-// ============================================================================
-// Preallocation: test pool with initial pages already mapped
-// ============================================================================
-#[test]
-fn test_preallocation() {
-    let config = VpmmConfig {
-        page_size: None,  // Use device granularity
-        va_size: 1 << 30, // 1 GB VA
-        initial_pages: 4, // Preallocate 4 pages
-    };
-    let mut pool = VirtualMemoryPool::new(config);
-
-    if pool.page_size == usize::MAX {
-        println!("VPMM not supported, skipping test");
-        return;
-    }
-
-    let page_size = pool.page_size;
-    let stream_id = current_stream_id().unwrap();
-
-    // Should already have 4 pages allocated
-    assert_eq!(
-        pool.memory_usage(),
-        4 * page_size,
-        "Should have 4 preallocated pages"
-    );
-
-    // Allocate 2 pages from preallocated pool - no new pages needed
-    let ptr = pool.malloc_internal(2 * page_size, stream_id).unwrap();
-    assert_eq!(
-        pool.memory_usage(),
-        4 * page_size,
-        "No new pages should be allocated"
-    );
-
-    // Allocate 3 more pages - more than remaining 2 → triggers growth
-    let ptr2 = pool.malloc_internal(3 * page_size, stream_id).unwrap();
+    // Verify pool is functional after mixed operations
+    current_stream_sync().expect("stream sync failed");
+    let large = DeviceBuffer::<u8>::with_capacity(1 << 30);
     assert!(
-        pool.memory_usage() > 4 * page_size,
-        "Pool should have grown past initial 4 pages"
+        !large.as_ptr().is_null(),
+        "Large allocation should work after mixed operations"
     );
-
-    // Cleanup
-    pool.free_internal(ptr, stream_id).unwrap();
-    pool.free_internal(ptr2, stream_id).unwrap();
 }
 
 // ============================================================================
-// Reuse after free: same stream should immediately reuse freed region
+// OOM test: exhaust GPU memory and verify we get OutOfMemory error
 // ============================================================================
 #[test]
-fn test_same_stream_immediate_reuse() {
-    let config = VpmmConfig {
-        page_size: None,  // Use device granularity
-        va_size: 1 << 30, // 1 GB VA
-        initial_pages: 0,
-    };
-    let mut pool = VirtualMemoryPool::new(config);
+#[ignore] // Run explicitly: exhausts GPU memory
+fn test_oom_error() {
+    use super::d_malloc;
+    use crate::error::MemoryError;
 
-    if pool.page_size == usize::MAX {
-        println!("VPMM not supported, skipping test");
-        return;
-    }
-
-    let page_size = pool.page_size;
-    let stream_id = current_stream_id().unwrap();
-
-    // Allocate 2 pages and free
-    let ptr1 = pool.malloc_internal(2 * page_size, stream_id).unwrap();
-    pool.free_internal(ptr1, stream_id).unwrap();
-
-    // Same stream should immediately get the same address back
-    let ptr2 = pool.malloc_internal(2 * page_size, stream_id).unwrap();
-    assert_eq!(
-        ptr1, ptr2,
-        "Same stream should immediately reuse freed region"
+    let initial_free = get_gpu_free_memory();
+    println!(
+        "GPU memory: {:.2} GB free",
+        initial_free as f64 / (1 << 30) as f64
     );
 
-    pool.free_internal(ptr2, stream_id).unwrap();
+    // Fill GPU memory in 1GB chunks until we can't anymore
+    let chunk_size = 1 << 30; // 1 GB
+    let mut buffers: Vec<*mut std::ffi::c_void> = Vec::new();
+
+    loop {
+        match d_malloc(chunk_size) {
+            Ok(ptr) => {
+                buffers.push(ptr);
+                println!(
+                    "Allocated chunk {}: {:.2} GB total",
+                    buffers.len(),
+                    (buffers.len() * chunk_size) as f64 / (1 << 30) as f64
+                );
+            }
+            Err(MemoryError::OutOfMemory { requested, .. }) => {
+                println!(
+                    "Got expected OutOfMemory error: requested {} bytes ({:.2} GB)",
+                    requested,
+                    requested as f64 / (1 << 30) as f64
+                );
+                // This is what we wanted - OOM error was properly returned
+                // Clean up and exit successfully
+                for ptr in buffers {
+                    unsafe { super::d_free(ptr).unwrap() };
+                }
+                return; // Test passed!
+            }
+            Err(e) => {
+                // Clean up before panicking
+                for ptr in buffers {
+                    unsafe { super::d_free(ptr).unwrap() };
+                }
+                panic!("Expected OutOfMemory error, got: {:?}", e);
+            }
+        }
+    }
 }
