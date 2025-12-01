@@ -531,17 +531,16 @@ where
     }
 
     #[instrument(name = "LogupZerocheck::fold_ple_evals", level = "debug", skip_all)]
-    fn fold_ple_evals(&mut self, ctx: ProvingContextV2<GpuBackendV2>, r_0: EF) {
+    fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<GpuBackendV2>, r_0: EF) {
         let l_skip = self.l_skip;
 
         // GPU folding for mat_evals_per_trace
-        // We drop (free) old traces from ctx as we go
         self.mat_evals_per_trace = ctx
             .per_trace
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(trace_idx, (air_idx, air_ctx))| {
-                let air_pk = &self.pk.per_air[air_idx];
+                let air_pk = &self.pk.per_air[*air_idx];
                 let mut results: Vec<DeviceMatrix<EF>> = Vec::new();
 
                 // Preprocessed (if exists)
@@ -559,31 +558,29 @@ where
                 }
 
                 // Cached mains
-                for committed in air_ctx.cached_mains {
-                    let trace = committed.trace;
+                for committed in &air_ctx.cached_mains {
+                    let trace = &committed.trace;
                     let width = trace.width();
                     let folded = fold_ple_mixed_rotate(
                         l_skip,
-                        &trace,
+                        trace,
                         committed.data.mixed_view(0, width),
                         r_0,
                     )
                     .unwrap();
-                    drop(trace);
                     results.push(folded);
                 }
 
                 // Common main
-                let trace = air_ctx.common_main;
+                let trace = &air_ctx.common_main;
                 let width = trace.width();
                 let folded = fold_ple_mixed_rotate(
                     l_skip,
-                    &trace,
+                    trace,
                     self.common_main_pcs_data.mixed_view(trace_idx, width),
                     r_0,
                 )
                 .unwrap();
-                drop(trace);
                 results.push(folded);
 
                 results

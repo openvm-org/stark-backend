@@ -2,29 +2,24 @@
 
 use std::sync::Arc;
 
-use cuda_backend_v2::{GpuBackendV2, GpuDeviceV2};
+use cuda_backend_v2::{BabyBearPoseidon2GpuEngineV2, GpuDeviceV2};
 use eyre::eyre;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
-    prover::Prover,
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
 use openvm_stark_sdk::{
-    bench::run_with_metric_collection, config::baby_bear_poseidon2::default_engine,
-    openvm_stark_backend::engine::StarkEngine,
+    bench::run_with_metric_collection,
+    config::log_up_params::log_up_security_params_baby_bear_100_bits,
 };
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use stark_backend_v2::{
-    SystemParams,
-    keygen::types::MultiStarkProvingKeyV2,
+    StarkEngineV2, SystemParams,
     poseidon2::sponge::DuplexSponge,
-    prover::{
-        AirProvingContextV2, ColMajorMatrix, CoordinatorV2, DeviceDataTransporterV2,
-        ProvingContextV2,
-    },
+    prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
     verifier::verify,
 };
 use tracing::info_span;
@@ -60,19 +55,18 @@ fn main() -> eyre::Result<()> {
         k_whir,
         num_whir_queries: 100,
         log_final_poly_len,
-        logup_pow_bits: 16,
+        logup: log_up_security_params_baby_bear_100_bits(),
         whir_pow_bits: 16,
+        max_constraint_degree: 3,
     };
 
     run_with_metric_collection("OUTPUT_PATH", || -> eyre::Result<()> {
         let mut rng = StdRng::seed_from_u64(42);
         let air = TestAir(KeccakAir {});
 
-        let engine = default_engine();
-        let mut keygen_builder = engine.keygen_builder();
-        let air_id = keygen_builder.add_air(Arc::new(air));
-        let pk_v1 = keygen_builder.generate_pk();
-        let pk = MultiStarkProvingKeyV2::from_v1(params, pk_v1);
+        let engine = BabyBearPoseidon2GpuEngineV2::<DuplexSponge>::new(params);
+        let (pk, vk) = engine.keygen(&[Arc::new(air)]);
+        let air_idx = 0;
 
         let inputs = (0..NUM_PERMUTATIONS)
             .map(|_| rng.random())
@@ -84,10 +78,9 @@ fn main() -> eyre::Result<()> {
 
         let air_ctx = AirProvingContextV2::simple_no_pis(d_trace);
         let d_pk = device.transport_pk_to_device(&pk);
-        let mut prover = CoordinatorV2::new(GpuBackendV2, device, DuplexSponge::default());
-        let proof = prover.prove(&d_pk, ProvingContextV2::new(vec![(air_id, air_ctx)]));
+        let proof = engine.prove(&d_pk, ProvingContextV2::new(vec![(air_idx, air_ctx)]));
 
-        verify(&pk.get_vk(), &proof, &mut DuplexSponge::default())
+        verify(&vk, &proof, &mut DuplexSponge::default())
             .map_err(|e| eyre!("Proof failed to verify: {e}"))
     })
 }
