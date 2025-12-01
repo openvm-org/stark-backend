@@ -25,7 +25,9 @@ jobs:
     steps:
       - uses: runs-on/action@v2
       - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
+        env:
+          RUSTUP_PERMIT_COPY_RENAME: "1"
       - uses: ./.github/actions/rust-cache-cuda
       - uses: taiki-e/install-action@nextest
       - name: Verify GPU setup
