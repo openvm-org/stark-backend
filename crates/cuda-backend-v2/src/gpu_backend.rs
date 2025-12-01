@@ -80,7 +80,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
         &self,
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-        ctx: ProvingContextV2<GpuBackendV2>,
+        ctx: &ProvingContextV2<GpuBackendV2>,
         common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
@@ -105,6 +105,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
     fn prove_openings(
         &self,
         transcript: &mut TS,
+        _ctx: ProvingContextV2<GpuBackendV2>,
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
         pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsDataGpu<F, Digest>>>,
         r: Vec<EF>,
@@ -188,13 +189,6 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
 
     fn transport_matrix_from_device_to_host(&self, matrix: &DeviceMatrix<F>) -> ColMajorMatrix<F> {
         transport_matrix_d2h_col_major(matrix).unwrap()
-    }
-
-    fn transport_pcs_data_from_device_to_host(
-        &self,
-        pcs_data: &StackedPcsDataGpu<F, Digest>,
-    ) -> StackedPcsData<F, Digest> {
-        transport_stacked_pcs_data_to_host(pcs_data)
     }
 }
 
