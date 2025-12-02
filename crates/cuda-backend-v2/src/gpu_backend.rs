@@ -22,19 +22,18 @@ use stark_backend_v2::{
         MultiRapProver, OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2,
         TraceCommitterV2, prove_zerocheck_and_logup,
         stacked_pcs::{MerkleTree, StackedPcsData},
-        stacked_reduction::prove_stacked_opening_reduction,
-        whir::WhirProver,
     },
 };
 
 use crate::{
-    D_EF, Digest, EF, F, GpuDeviceV2, ProverError,
+    D_EF, Digest, EF, F, GpuDeviceV2, GpuProverConfig, ProverError,
     cuda::matrix::collapse_strided_matrix,
     logup_zerocheck::LogupZerocheckGpu,
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
     stacked_pcs::{StackedPcsDataGpu, stacked_commit},
-    stacked_reduction::StackedReductionGpu,
+    stacked_reduction::prove_stacked_opening_reduction_gpu,
+    whir::prove_whir_opening_gpu,
 };
 
 #[derive(Clone, Copy)]
@@ -52,21 +51,21 @@ impl ProverBackendV2 for GpuBackendV2 {
 
 impl<TS: FiatShamirTranscript> ProverDeviceV2<GpuBackendV2, TS> for GpuDeviceV2 {
     fn config(&self) -> SystemParams {
-        self.config
+        self.config()
     }
 }
 
 impl TraceCommitterV2<GpuBackendV2> for GpuDeviceV2 {
     fn commit(&self, traces: &[&DeviceMatrix<F>]) -> (Digest, StackedPcsDataGpu<F, Digest>) {
-        let result = stacked_commit(
+        stacked_commit(
             self.config.l_skip,
             self.config.n_stack,
             self.config.log_blowup,
             self.config.k_whir,
             traces,
+            self.prover_config.cache_stacked_matrix,
         )
-        .unwrap();
-        result
+        .unwrap()
     }
 }
 
@@ -105,25 +104,22 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
     fn prove_openings(
         &self,
         transcript: &mut TS,
-        _ctx: ProvingContextV2<GpuBackendV2>,
+        mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        ctx: ProvingContextV2<GpuBackendV2>,
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
-        pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsDataGpu<F, Digest>>>,
         r: Vec<EF>,
     ) -> (StackingProof, WhirProof) {
         let mem = MemTracker::start_and_reset_peak("prover.openings");
         let params = self.config;
-        let mut stacked_per_commit = vec![&common_main_pcs_data];
-        for data in &pre_cached_pcs_data_per_commit {
-            stacked_per_commit.push(data);
-        }
-        let (stacking_proof, u_prisma) =
-            prove_stacked_opening_reduction::<_, _, _, StackedReductionGpu>(
-                self,
-                transcript,
-                self.config.n_stack,
-                stacked_per_commit,
-                &r,
-            );
+        let (stacking_proof, u_prisma, stacked_per_commit) = prove_stacked_opening_reduction_gpu(
+            self,
+            transcript,
+            mpk,
+            ctx,
+            common_main_pcs_data,
+            &r,
+        )
+        .unwrap();
 
         let (&u0, u_rest) = u_prisma.split_first().unwrap();
         let u_cube = u0
@@ -132,12 +128,8 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
             .chain(u_rest.iter().copied())
             .collect_vec();
 
-        let whir_proof = self.prove_whir(
-            transcript,
-            common_main_pcs_data,
-            pre_cached_pcs_data_per_commit,
-            &u_cube,
-        );
+        let whir_proof =
+            prove_whir_opening_gpu(&params, transcript, stacked_per_commit, &u_cube).unwrap();
         mem.emit_metrics();
         (stacking_proof, whir_proof)
     }
@@ -152,10 +144,9 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
             .per_air
             .iter()
             .map(|pk| {
-                let preprocessed_data = pk
-                    .preprocessed_data
-                    .as_ref()
-                    .map(|d| transport_and_unstack_single_data_h2d(d.as_ref()).unwrap());
+                let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
+                    transport_and_unstack_single_data_h2d(d.as_ref(), &self.prover_config).unwrap()
+                });
 
                 DeviceStarkProvingKeyV2 {
                     air_name: pk.air_name.clone(),
@@ -184,7 +175,7 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
         &self,
         pcs_data: &StackedPcsData<F, Digest>,
     ) -> StackedPcsDataGpu<F, Digest> {
-        transport_pcs_data_h2d(pcs_data).unwrap()
+        transport_pcs_data_h2d(pcs_data, &self.prover_config).unwrap()
     }
 
     fn transport_matrix_from_device_to_host(&self, matrix: &DeviceMatrix<F>) -> ColMajorMatrix<F> {
@@ -209,6 +200,7 @@ pub fn transport_matrix_h2d_col_major<T>(
 /// return `CommittedTraceDataV2<F, Digest>`.
 pub fn transport_and_unstack_single_data_h2d(
     d: &StackedPcsData<F, Digest>,
+    prover_config: &GpuProverConfig,
 ) -> Result<CommittedTraceDataV2<GpuBackendV2>, ProverError> {
     debug_assert!(
         d.layout
@@ -258,7 +250,9 @@ pub fn transport_and_unstack_single_data_h2d(
         drop(strided_trace);
         buf
     };
-    let d_matrix = PleMatrix::from_evals(l_skip, d_matrix_evals, stacked_height, stacked_width);
+    let d_matrix = prover_config
+        .cache_stacked_matrix
+        .then(|| PleMatrix::from_evals(l_skip, d_matrix_evals, stacked_height, stacked_width));
     let d_tree = transport_merkle_tree_h2d(&d.tree)?;
     let d_data = StackedPcsDataGpu {
         layout: d.layout.clone(),
@@ -294,6 +288,7 @@ pub fn transport_merkle_tree_h2d<F, Digest>(
 
 pub fn transport_pcs_data_h2d(
     pcs_data: &StackedPcsData<F, Digest>,
+    prover_config: &GpuProverConfig,
 ) -> Result<StackedPcsDataGpu<F, Digest>, ProverError> {
     let StackedPcsData {
         layout,
@@ -303,7 +298,9 @@ pub fn transport_pcs_data_h2d(
     let width = matrix.width();
     let height = matrix.height();
     let d_matrix_evals = matrix.values.to_device()?;
-    let d_matrix = PleMatrix::from_evals(layout.l_skip(), d_matrix_evals, height, width);
+    let d_matrix = prover_config
+        .cache_stacked_matrix
+        .then(|| PleMatrix::from_evals(layout.l_skip(), d_matrix_evals, height, width));
     let d_tree = transport_merkle_tree_h2d(tree)?;
 
     Ok(StackedPcsDataGpu {
@@ -347,18 +344,6 @@ pub fn transport_merkle_tree_to_host(tree: &MerkleTreeGpu<F, Digest>) -> MerkleT
     unsafe {
         MerkleTree::<F, Digest>::from_raw_parts(backing_matrix, digest_layers, tree.rows_per_query)
     }
-}
-
-pub fn transport_stacked_pcs_data_to_host(
-    pcs_data: &StackedPcsDataGpu<F, Digest>,
-) -> StackedPcsData<F, Digest> {
-    let layout = pcs_data.layout.clone();
-    let matrix =
-        transport_matrix_d2h_col_major(&pcs_data.matrix.to_evals(layout.l_skip()).unwrap())
-            .unwrap();
-    let tree = transport_merkle_tree_to_host(&pcs_data.tree);
-
-    StackedPcsData::new(layout, matrix, tree)
 }
 
 pub fn assert_eq_host_and_device_matrix_col_maj<T: Clone + Send + Sync + PartialEq + Debug>(
@@ -410,6 +395,7 @@ mod v1_shims {
                 params.log_blowup,
                 params.k_whir,
                 &[&matrix],
+                false,
             )
             .unwrap();
             CommittedTraceDataV2 {

@@ -60,7 +60,6 @@ use fold_ple::compute_eq_sharp_gpu;
 use fractional::fractional_sumcheck_gpu;
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu};
-pub use round0::InteractionNode;
 use round0::evaluate_round0_constraints_gpu;
 
 #[allow(dead_code)]
@@ -538,49 +537,27 @@ where
         self.mat_evals_per_trace = ctx
             .per_trace
             .iter()
-            .enumerate()
-            .map(|(trace_idx, (air_idx, air_ctx))| {
+            .map(|(air_idx, air_ctx)| {
                 let air_pk = &self.pk.per_air[*air_idx];
                 let mut results: Vec<DeviceMatrix<EF>> = Vec::new();
 
                 // Preprocessed (if exists)
                 if let Some(committed) = &air_pk.preprocessed_data {
                     let trace = &committed.trace;
-                    let width = trace.width();
-                    let folded = fold_ple_mixed_rotate(
-                        l_skip,
-                        trace,
-                        committed.data.mixed_view(0, width),
-                        r_0,
-                    )
-                    .unwrap();
+                    let folded = fold_ple_mixed_rotate(l_skip, trace, r_0).unwrap();
                     results.push(folded);
                 }
 
                 // Cached mains
                 for committed in &air_ctx.cached_mains {
                     let trace = &committed.trace;
-                    let width = trace.width();
-                    let folded = fold_ple_mixed_rotate(
-                        l_skip,
-                        trace,
-                        committed.data.mixed_view(0, width),
-                        r_0,
-                    )
-                    .unwrap();
+                    let folded = fold_ple_mixed_rotate(l_skip, trace, r_0).unwrap();
                     results.push(folded);
                 }
 
                 // Common main
                 let trace = &air_ctx.common_main;
-                let width = trace.width();
-                let folded = fold_ple_mixed_rotate(
-                    l_skip,
-                    trace,
-                    self.common_main_pcs_data.mixed_view(trace_idx, width),
-                    r_0,
-                )
-                .unwrap();
+                let folded = fold_ple_mixed_rotate(l_skip, trace, r_0).unwrap();
                 results.push(folded);
 
                 results
