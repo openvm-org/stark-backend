@@ -137,13 +137,9 @@ where
             self.device
                 .prove_rap_constraints(transcript, mpk, &ctx, &common_main_pcs_data);
 
-        let opening_proof = self.device.prove_openings(
-            transcript,
-            mpk,
-            ctx,
-            common_main_pcs_data,
-            r.into(),
-        );
+        let opening_proof =
+            self.device
+                .prove_openings(transcript, mpk, ctx, common_main_pcs_data, r.into());
 
         let (gkr_proof, batch_constraint_proof) = constraints_proof.into();
         let (stacking_proof, whir_proof) = opening_proof.into();
