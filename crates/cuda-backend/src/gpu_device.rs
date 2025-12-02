@@ -3,7 +3,7 @@ use openvm_cuda_common::common::get_device;
 use openvm_stark_sdk::config::FriParameters;
 use p3_baby_bear::BabyBear;
 use p3_commit::TwoAdicMultiplicativeCoset;
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 
 use crate::fri_log_up::FriLogUpPhaseGpu;

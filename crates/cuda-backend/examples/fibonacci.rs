@@ -19,7 +19,7 @@ use openvm_stark_sdk::{
     engine::StarkFriEngine,
 };
 use p3_baby_bear::BabyBear;
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 
 const LOG_BLOWUP: usize = 2;
 const LOG_TRACE_DEGREE: usize = 3;

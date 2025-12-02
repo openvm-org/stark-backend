@@ -1,5 +1,4 @@
 use openvm_stark_backend::{
-    p3_field::FieldAlgebra,
     prover::{hal::DeviceDataTransporter, types::ProvingContext},
     utils::disable_debug_builder,
     Chip,
@@ -17,6 +16,7 @@ use openvm_stark_sdk::{
     utils,
 };
 use p3_baby_bear::BabyBear;
+use p3_field::PrimeCharacteristicRing;
 
 mod cached_lookup;
 mod fib_selector_air;
@@ -36,9 +36,7 @@ fn test_single_fib_stark() {
     let n = 1usize << log_trace_degree;
 
     type Val = BabyBear;
-    let pis = [a, b, get_fib_number(n)]
-        .map(BabyBear::from_canonical_u32)
-        .to_vec();
+    let pis = [a, b, get_fib_number(n)].map(BabyBear::from_u32).to_vec();
     let air = FibonacciAir;
 
     let trace = generate_trace_rows::<Val>(a, b, n);
@@ -60,7 +58,7 @@ fn test_single_fib_triples_stark() {
 
     type Val = BabyBear;
     let pis = [a, b, get_fib_number(n + 1)]
-        .map(BabyBear::from_canonical_u32)
+        .map(BabyBear::from_u32)
         .to_vec();
 
     let air = FibonacciAir;
@@ -85,7 +83,7 @@ fn test_single_fib_selector_stark() {
     type Val = BabyBear;
     let sels: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
     let pis = [a, b, get_conditional_fib_number(&sels)]
-        .map(BabyBear::from_canonical_u32)
+        .map(BabyBear::from_u32)
         .to_vec();
 
     let air = FibonacciSelectorAir::new(sels, false);
@@ -112,11 +110,9 @@ fn test_double_fib_starks() {
 
     type Val = BabyBear;
     let sels: Vec<bool> = (0..n2).map(|i| i % 2 == 0).collect(); // Evens
-    let pis1 = [a, b, get_fib_number(n1)]
-        .map(BabyBear::from_canonical_u32)
-        .to_vec();
+    let pis1 = [a, b, get_fib_number(n1)].map(BabyBear::from_u32).to_vec();
     let pis2 = [a, b, get_conditional_fib_number(&sels)]
-        .map(BabyBear::from_canonical_u32)
+        .map(BabyBear::from_u32)
         .to_vec();
 
     let air1 = FibonacciAir;

@@ -12,7 +12,7 @@ use ops::*;
 use p3_baby_bear::Poseidon2BabyBear;
 use p3_commit::{ExtensionMmcs, OpenedValues};
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
-use p3_field::{dot_product, Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
+use p3_field::{dot_product, Field, PrimeCharacteristicRing, BasedVectorSpace, TwoAdicField};
 use p3_fri::{BatchOpening, CommitPhaseProofStep, FriProof, QueryProof};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
@@ -167,7 +167,7 @@ impl OpeningProverGpu {
         drop(inv_denoms);
 
         // Batch combination challenge
-        let alpha: EF = challenger.sample_ext_element();
+        let alpha: EF = challenger.sample_algebra_element();
         tracing::debug!("alpha sampled in gpu_pcs::open(): {:?}", alpha);
 
         // For each unique opening point z, we will find the largest degree bound
@@ -194,7 +194,7 @@ impl OpeningProverGpu {
 
                     for (z, openings) in points_for_mat.iter().zip(openings_for_mat.iter()) {
                         let inv_denom = inv_denoms.get(z).unwrap();
-                        let m_z = dot_product(alpha.powers(), openings.iter().copied());
+                        let m_z = dot_product(alpha.powers(), openings.iter().expect("matrix index out of bounds").copied());
                         reduce_matrix_quotient_acc(
                             reduced_opening,
                             &mat,
@@ -361,7 +361,7 @@ fn commit_phase_on_gpu(
         data.push(prover_data);
 
         let log_folded_len = log2_strict_usize(folded.len());
-        let beta: EF = challenger.sample_ext_element();
+        let beta: EF = challenger.sample_algebra_element();
         tracing::debug!("beta at gpu pcs (layer = {}): {:?}", log_folded_len, beta);
 
         let fri_input = inputs_iter.next_if(|v| v.len() == folded.len() / 2);

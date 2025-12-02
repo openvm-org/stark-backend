@@ -9,11 +9,7 @@ pub fn generate_trace_rows<F: PrimeField32>(a: u32, b: u32, n: usize) -> RowMajo
 
     let c = a + b;
 
-    let mut rows = vec![vec![
-        F::from_canonical_u32(a),
-        F::from_canonical_u32(b),
-        F::from_canonical_u32(c),
-    ]];
+    let mut rows = vec![vec![F::from_u32(a), F::from_u32(b), F::from_u32(c)]];
 
     for i in 1..n {
         rows.push(vec![

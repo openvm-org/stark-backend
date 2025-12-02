@@ -160,7 +160,7 @@ pub fn assert_eq_host_and_device_matrix<T: Clone + Send + Sync + PartialEq + Deb
         for c in 0..cpu.width() {
             assert_eq!(
                 gpu[c * cpu.height() + r],
-                cpu.get(r, c),
+                cpu.get(r, c).expect("matrix index out of bounds"),
                 "Mismatch at row {} column {}",
                 r,
                 c
