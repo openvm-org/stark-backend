@@ -43,98 +43,6 @@ use crate::{
 
 const TASK_SIZE: u32 = 65_536;
 
-/// For a single AIR.
-/// Each matrix comes with boolean `needs_rotation` for whether width is doubled.
-#[derive(Debug)]
-struct TraceRound0Matrices {
-    preprocessed: Option<(DeviceMatrix<F>, bool)>,
-    cached: Vec<(DeviceMatrix<F>, bool)>,
-    common: (DeviceMatrix<F>, bool),
-}
-
-#[derive(Debug)]
-pub(crate) struct Round0TraceInput<'a> {
-    selectors_large: DeviceMatrix<F>,
-    trace_mats: TraceRound0Matrices,
-    main_ptrs: DeviceBuffer<MainMatrixPtrs<F>>,
-    eq_x: DeviceMatrix<EF>,
-    public_values: &'a DeviceBuffer<F>,
-}
-
-/// For single AIR
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_round0_trace_input<'a>(
-    l_skip: usize,
-    log_large_domain: usize,
-    pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
-    air_ctx: &AirProvingContextV2<GpuBackendV2>,
-    common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
-    selectors_base: &DeviceMatrix<F>,
-    eq_x: DeviceMatrix<EF>,
-    public_values: &'a [DeviceBuffer<F>],
-    trace_idx: usize,
-) -> Result<Round0TraceInput<'a>, Round0PrepError> {
-    // TODO: follow stacked_reduction strategy where univariate variable of sel is evaluated
-    // directly
-    let selectors_base_buf = selectors_base.buffer();
-    let selectors_large_buf =
-        DeviceBuffer::with_capacity(selectors_base_buf.len() << (log_large_domain - l_skip));
-    let num_poly = (selectors_base_buf.len() >> l_skip) as u32;
-    unsafe {
-        batch_expand_pad_wide(
-            selectors_large_buf.as_mut_ptr(),
-            selectors_base_buf.as_ptr(),
-            num_poly,
-            1 << log_large_domain,
-            1 << l_skip,
-        )?;
-        batch_ntt(
-            &selectors_large_buf,
-            l_skip as u32,
-            (log_large_domain - l_skip) as u32,
-            num_poly,
-            true,
-            true,
-        );
-        batch_ntt(
-            &selectors_large_buf,
-            log_large_domain as u32,
-            0,
-            num_poly,
-            true,
-            false,
-        );
-    }
-    let selectors_large = DeviceMatrix::new(
-        Arc::new(selectors_large_buf),
-        selectors_base.height() << (log_large_domain - l_skip),
-        selectors_base.width(),
-    );
-    let trace_mats = prepare_trace_round0_matrices(
-        l_skip,
-        log_large_domain,
-        &pk.vk.symbolic_constraints.constraints,
-        pk.preprocessed_data.as_ref(),
-        air_ctx,
-        common_main_pcs_data,
-        trace_idx,
-    )?;
-    debug_assert_eq!(selectors_large.height(), trace_mats.common.0.height());
-
-    let partition_ptrs_host = collect_partition_ptrs(&trace_mats);
-    let d_main_ptrs = partition_ptrs_host.to_device()?;
-
-    let public_values = &public_values[trace_idx];
-
-    Ok(Round0TraceInput {
-        selectors_large,
-        trace_mats,
-        main_ptrs: d_main_ptrs,
-        eq_x,
-        public_values,
-    })
-}
-
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_round0_constraints_gpu(
@@ -236,16 +144,6 @@ pub fn evaluate_round0_constraints_gpu(
     }
 
     Ok(s_evals)
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct InteractionNode {
-    // Interaction index
-    pub idx: u32,
-    // 0 means numerator (count)
-    // id > 0 means denominator term to multiply by beta_pows[id], i.e., id - 1 is message index
-    pub beta_idx: u32,
 }
 
 /// Evaluate interaction constraints (excluding plain AIR constraints) for a single AIR, given
@@ -393,8 +291,104 @@ pub fn evaluate_round0_interactions_gpu(
     Ok(s_evals)
 }
 
+// ============= Below is currently unused code ================
+
+/// For a single AIR.
+/// Each matrix comes with boolean `needs_rotation` for whether width is doubled.
+#[derive(Debug)]
+struct TraceRound0Matrices {
+    preprocessed: Option<(DeviceMatrix<F>, bool)>,
+    cached: Vec<(DeviceMatrix<F>, bool)>,
+    common: (DeviceMatrix<F>, bool),
+}
+
+#[derive(Debug)]
+pub(crate) struct Round0TraceInput<'a> {
+    selectors_large: DeviceMatrix<F>,
+    trace_mats: TraceRound0Matrices,
+    main_ptrs: DeviceBuffer<MainMatrixPtrs<F>>,
+    eq_x: DeviceMatrix<EF>,
+    public_values: &'a DeviceBuffer<F>,
+}
+
+/// For single AIR
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_round0_trace_input<'a>(
+    l_skip: usize,
+    log_large_domain: usize,
+    pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
+    air_ctx: &AirProvingContextV2<GpuBackendV2>,
+    common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
+    selectors_base: &DeviceMatrix<F>,
+    eq_x: DeviceMatrix<EF>,
+    public_values: &'a [DeviceBuffer<F>],
+    trace_idx: usize,
+) -> Result<Round0TraceInput<'a>, Round0PrepError> {
+    // TODO: follow stacked_reduction strategy where univariate variable of sel is evaluated
+    // directly
+    let selectors_base_buf = selectors_base.buffer();
+    let selectors_large_buf =
+        DeviceBuffer::with_capacity(selectors_base_buf.len() << (log_large_domain - l_skip));
+    let num_poly = (selectors_base_buf.len() >> l_skip) as u32;
+    unsafe {
+        batch_expand_pad_wide(
+            selectors_large_buf.as_mut_ptr(),
+            selectors_base_buf.as_ptr(),
+            num_poly,
+            1 << log_large_domain,
+            1 << l_skip,
+        )?;
+        batch_ntt(
+            &selectors_large_buf,
+            l_skip as u32,
+            (log_large_domain - l_skip) as u32,
+            num_poly,
+            true,
+            true,
+        );
+        batch_ntt(
+            &selectors_large_buf,
+            log_large_domain as u32,
+            0,
+            num_poly,
+            true,
+            false,
+        );
+    }
+    let selectors_large = DeviceMatrix::new(
+        Arc::new(selectors_large_buf),
+        selectors_base.height() << (log_large_domain - l_skip),
+        selectors_base.width(),
+    );
+    let trace_mats = prepare_trace_round0_matrices(
+        l_skip,
+        log_large_domain,
+        &pk.vk.symbolic_constraints.constraints,
+        pk.preprocessed_data.as_ref(),
+        air_ctx,
+        common_main_pcs_data,
+        trace_idx,
+    )?;
+    debug_assert_eq!(selectors_large.height(), trace_mats.common.0.height());
+
+    let partition_ptrs_host = collect_partition_ptrs(&trace_mats);
+    let d_main_ptrs = partition_ptrs_host.to_device()?;
+
+    let public_values = &public_values[trace_idx];
+
+    Ok(Round0TraceInput {
+        selectors_large,
+        trace_mats,
+        main_ptrs: d_main_ptrs,
+        eq_x,
+        public_values,
+    })
+}
+
 // For a single present AIR.
 // `constraints_dag` includes nodes for plain AIR constraints and interaction expressions.
+//
+/// This function only works if StackedPcsDataGpu contains the `PleMatrix` with mixed forms.
 fn prepare_trace_round0_matrices(
     l_skip: usize,
     log_large_domain: usize,
@@ -430,7 +424,10 @@ fn prepare_trace_round0_matrices(
             l_skip,
             log_large_domain,
             trace,
-            committed.data.mixed_view(0, width),
+            committed
+                .data
+                .mixed_view(0, width)
+                .expect("mixed form must exist"),
             preprocessed_rot,
         )?;
         Some((upsampled, preprocessed_rot))
@@ -446,7 +443,10 @@ fn prepare_trace_round0_matrices(
                 l_skip,
                 log_large_domain,
                 trace,
-                committed.data.mixed_view(0, width),
+                committed
+                    .data
+                    .mixed_view(0, width)
+                    .expect("mixed form must exist"),
                 needs_rot,
             )?;
             Ok((upsampled, needs_rot))
@@ -460,7 +460,9 @@ fn prepare_trace_round0_matrices(
             l_skip,
             log_large_domain,
             common_main,
-            common_main_pcs_data.mixed_view(trace_idx, width),
+            common_main_pcs_data
+                .mixed_view(trace_idx, width)
+                .expect("mixed form must exist"),
             common_main_rot,
         )?,
         common_main_rot,
