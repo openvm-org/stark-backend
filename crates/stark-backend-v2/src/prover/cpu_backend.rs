@@ -1,7 +1,5 @@
 //! CPU [ProverBackend] trait implementation.
 
-use std::sync::Arc;
-
 use getset::CopyGetters;
 use itertools::Itertools;
 
@@ -92,12 +90,26 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2
     fn prove_openings(
         &self,
         transcript: &mut TS,
-        _ctx: ProvingContextV2<CpuBackendV2>,
+        mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
+        ctx: ProvingContextV2<CpuBackendV2>,
         common_main_pcs_data: StackedPcsData<F, Digest>,
-        pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsData<F, Digest>>>,
         r: Vec<EF>,
     ) -> (StackingProof, WhirProof) {
         let params = self.config;
+
+        // Currently alternates between preprocessed and cached pcs data
+        let pre_cached_pcs_data_per_commit: Vec<_> = ctx
+            .per_trace
+            .iter()
+            .flat_map(|(air_idx, air_ctx)| {
+                mpk.per_air[*air_idx]
+                    .preprocessed_data
+                    .iter()
+                    .chain(&air_ctx.cached_mains)
+                    .map(|cd| cd.data.clone())
+            })
+            .collect();
+
         let mut stacked_per_commit = vec![&common_main_pcs_data];
         for data in &pre_cached_pcs_data_per_commit {
             stacked_per_commit.push(data);
