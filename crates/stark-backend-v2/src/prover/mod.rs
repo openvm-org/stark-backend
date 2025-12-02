@@ -4,6 +4,8 @@ use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 use tracing::{info, info_span, instrument};
 
+#[cfg(feature = "metrics")]
+use crate::prover::metrics::trace_metrics;
 use crate::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof, Proof, StackingProof, TraceVData, WhirProof},
@@ -14,6 +16,7 @@ mod cpu_backend;
 mod hal;
 mod logup_zerocheck;
 mod matrix;
+pub mod metrics;
 pub mod poly;
 pub mod stacked_pcs;
 pub mod stacked_reduction;
@@ -104,6 +107,8 @@ where
             });
             public_values[*air_id] = air_ctx.public_values.clone();
         }
+        #[cfg(feature = "metrics")]
+        trace_metrics(mpk, &trace_vdata);
 
         // Only observe commits for present AIRs.
         // Commitments order:
