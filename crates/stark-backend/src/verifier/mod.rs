@@ -3,7 +3,7 @@ use std::iter::zip;
 use itertools::{izip, zip_eq, Itertools};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
@@ -66,9 +66,9 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         challenger.observe(mvk.pre_hash.clone());
         let air_ids = proof.get_air_ids();
         let num_airs = air_ids.len();
-        challenger.observe(Val::<SC>::from_canonical_usize(num_airs));
+        challenger.observe(Val::<SC>::from_usize(num_airs));
         for &air_id in &air_ids {
-            challenger.observe(Val::<SC>::from_canonical_usize(air_id));
+            challenger.observe(Val::<SC>::from_usize(air_id));
         }
         // Enforce trace height linear inequalities
         for constraint in mvk.trace_height_constraints {
@@ -129,7 +129,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             &proof
                 .per_air
                 .iter()
-                .map(|ap| Val::<SC>::from_canonical_usize(log2_strict_usize(ap.degree)))
+                .map(|ap| Val::<SC>::from_usize(log2_strict_usize(ap.degree)))
                 .collect_vec(),
         );
 
@@ -184,14 +184,14 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             rap_phase_seq_result.map_err(|_| VerificationError::ChallengePhaseError);
 
         // Draw `alpha` challenge
-        let alpha: SC::Challenge = challenger.sample_ext_element();
+        let alpha: SC::Challenge = challenger.sample_algebra_element();
         tracing::debug!("alpha: {alpha:?}");
 
         // Observe quotient commitments
         challenger.observe(proof.commitments.quotient.clone());
 
         // Draw `zeta` challenge
-        let zeta: SC::Challenge = challenger.sample_ext_element();
+        let zeta: SC::Challenge = challenger.sample_algebra_element();
         tracing::debug!("zeta: {zeta:?}");
 
         let pcs = self.config.pcs();
@@ -296,7 +296,7 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
             rounds.push((commit.clone(), domains_and_openings));
         }
 
-        let ext_degree = <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D;
+        let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
         // 3. Then after_challenge trace openings, at most 1 phase for now.
         // All AIRs with interactions should an after challenge trace.
         let mut after_challenge_vk_domain_per_air = zip_eq(&mvk.per_air, &domains)
