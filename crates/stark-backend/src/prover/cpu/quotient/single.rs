@@ -33,7 +33,8 @@ use crate::{
 /// `quotient_domain.split_evals(quotient_degree, quotient_flat)` function from Plonky3 works
 /// as follows (currently true for all known implementations):
 /// The evaluations of the quotient polynomial on the quotient domain (shift of a subgroup) is
-/// viewed as a long column of the form ```ignore
+/// viewed as a long column of the form
+/// ```text
 /// [q_{0,0}]
 /// [q_{1,0}]
 /// ...
@@ -44,7 +45,8 @@ use crate::{
 /// ```
 /// which is "vertically strided" with stride `quotient_degree`.
 /// We regroup them into evaluations on cosets of the trace domain subgroup as separate base field
-/// matrices ```ignore
+/// matrices
+/// ```text
 /// [q_{0,0}               ]   [q_{1,0}               ]  ...  [q_{quotient_degree - 1,0}               ]
 /// [q_{0,1}               ]   [q_{1,1}               ]  ...  [q_{quotient_degree - 1,1}               ]
 /// ...
