@@ -56,7 +56,7 @@ fn main() {
 
     let mut rng = create_seeded_rng();
     let trace = (0..elements)
-        .map(|_| BabyBear::new(rng.gen()))
+        .map(|_| BabyBear::new(rng.random()))
         .collect::<Vec<_>>();
     let matrix = Arc::new(DenseMatrix::new(trace.clone(), width.try_into().unwrap()));
     let trace_vec = vec![matrix.clone(); matrix_num.try_into().unwrap()];

@@ -38,9 +38,11 @@ where
 {
     fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
         let common_main = generate_trace_rows::<Val<SC>>(self.a, self.b, self.n);
-        let a = common_main.get(0, 0);
-        let b = common_main.get(0, 1);
-        let last_val = common_main.get(self.n - 1, 1);
+        let a = common_main.get(0, 0).expect("matrix index out of bounds");
+        let b = common_main.get(0, 1).expect("matrix index out of bounds");
+        let last_val = common_main
+            .get(self.n - 1, 1)
+            .expect("matrix index out of bounds");
         AirProvingContext::simple(Arc::new(common_main), vec![a, b, last_val])
     }
 }

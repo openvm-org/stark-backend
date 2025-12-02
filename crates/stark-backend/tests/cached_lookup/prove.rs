@@ -106,8 +106,8 @@ pub fn generate_random_trace(
     (0..height)
         .map(|_| {
             (
-                rng.gen_range(0..1000),
-                (0..field_width).map(|_| rng.gen()).collect(),
+                rng.random_range(0..1000),
+                (0..field_width).map(|_| rng.random()).collect(),
             )
         })
         .collect()

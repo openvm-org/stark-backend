@@ -3,7 +3,7 @@ use std::{
     ops::{AddAssign, MulAssign},
 };
 
-use p3_field::{ExtensionField, Field, FieldAlgebra};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
 use p3_matrix::Matrix;
 
 use crate::{
@@ -49,7 +49,7 @@ impl<F, EF, PubVar, Var, Expr> GenericVerifierConstraintFolder<'_, F, EF, PubVar
 where
     F: Field,
     EF: ExtensionField<F>,
-    Expr: FieldAlgebra + From<F> + MulAssign<Var> + AddAssign<Var> + Send + Sync,
+    Expr: PrimeCharacteristicRing + From<F> + MulAssign<Var> + AddAssign<Var> + Send + Sync,
     Var: Into<Expr> + Copy + Send + Sync,
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
@@ -76,7 +76,7 @@ impl<F, EF, PubVar, Var, Expr> SymbolicEvaluator<F, Expr>
 where
     F: Field,
     EF: ExtensionField<F>,
-    Expr: FieldAlgebra + From<F> + Send + Sync,
+    Expr: PrimeCharacteristicRing + From<F> + Send + Sync,
     Var: Into<Expr> + Copy + Send + Sync,
     PubVar: Into<Expr> + Copy + Send + Sync,
 {
@@ -95,16 +95,22 @@ where
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> Expr {
         let index = symbolic_var.index;
         match symbolic_var.entry {
-            Entry::Preprocessed { offset } => self.preprocessed.get(offset, index).into(),
-            Entry::Main { part_index, offset } => {
-                self.partitioned_main[part_index].get(offset, index).into()
-            }
+            Entry::Preprocessed { offset } => self
+                .preprocessed
+                .get(offset, index)
+                .expect("matrix index out of bounds")
+                .into(),
+            Entry::Main { part_index, offset } => self.partitioned_main[part_index]
+                .get(offset, index)
+                .expect("matrix index out of bounds")
+                .into(),
             Entry::Public => self.public_values[index].into(),
             Entry::Permutation { offset } => self
                 .after_challenge
                 .first()
                 .expect("Challenge phase not supported")
                 .get(offset, index)
+                .expect("matrix index out of bounds")
                 .into(),
             Entry::Challenge => self
                 .challenges

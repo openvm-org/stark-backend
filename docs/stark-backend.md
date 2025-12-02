@@ -128,7 +128,7 @@ self.challenger.observe_slice(
     &log_trace_height_per_air
         .iter()
         .copied()
-        .map(Val::<SC>::from_canonical_u8)
+        .map(Val::<SC>::from_u8)
         .collect_vec(),
 );
 ```
@@ -233,4 +233,3 @@ The verifying key (often represented by the type `StarkVerifyingKey`, and then
 
 - **Quotient Degree and Challenge Phase Information:**  
   This tells the verifier what degree to expect for the quotient polynomial and the challenge phase related information.
-

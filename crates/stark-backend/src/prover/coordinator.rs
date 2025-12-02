@@ -2,7 +2,7 @@ use std::{iter, marker::PhantomData};
 
 use itertools::{izip, Itertools};
 use p3_challenger::CanObserve;
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 use tracing::{info, info_span, instrument};
 
@@ -85,8 +85,7 @@ where
         self.challenger.observe(mpk.vk_pre_hash.clone());
 
         let num_air = ctx.per_air.len();
-        self.challenger
-            .observe(Val::<SC>::from_canonical_usize(num_air));
+        self.challenger.observe(Val::<SC>::from_usize(num_air));
         info!(num_air);
         #[allow(clippy::type_complexity)]
         let (cached_commits_per_air, cached_views_per_air, common_main_per_air, pvs_per_air): (
@@ -97,7 +96,7 @@ where
         ) = ctx
             .into_iter()
             .map(|(air_id, ctx)| {
-                self.challenger.observe(Val::<SC>::from_canonical_usize(air_id));
+                self.challenger.observe(Val::<SC>::from_usize(air_id));
                 let (cached_commits, cached_views): (Vec<_>, Vec<_>) =
                     ctx.cached_mains.into_iter().map(|cm| (cm.commitment, (cm.trace, cm.data))).unzip();
                 (
@@ -172,7 +171,7 @@ where
             &log_trace_height_per_air
                 .iter()
                 .copied()
-                .map(Val::<SC>::from_canonical_u8)
+                .map(|h| Val::<SC>::from_usize(h as usize))
                 .collect_vec(),
         );
 

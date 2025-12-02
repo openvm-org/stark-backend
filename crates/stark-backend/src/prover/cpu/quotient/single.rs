@@ -4,7 +4,7 @@ use std::{
 };
 
 use p3_commit::PolynomialSpace;
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PackedValue};
+use p3_field::{BasedVectorSpace, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
@@ -96,7 +96,7 @@ where
     let quotient_degree = 1 << qdb;
     debug_assert_eq!(quotient_size, trace_height * quotient_degree);
 
-    let ext_degree = SC::Challenge::D;
+    let ext_degree = SC::Challenge::DIMENSION;
 
     // Scan constraints to see if we need `next` row and also check index bounds
     // so we don't need to check them per row.
@@ -246,8 +246,8 @@ where
                         PackedVal::<SC>::from_fn(|offset| sels.is_last_row[quot_row_idx(offset)]);
                     let is_transition =
                         PackedVal::<SC>::from_fn(|offset| sels.is_transition[quot_row_idx(offset)]);
-                    let inv_zeroifier =
-                        PackedVal::<SC>::from_fn(|offset| sels.inv_zeroifier[quot_row_idx(offset)]);
+                    let inv_vanishing =
+                        PackedVal::<SC>::from_fn(|offset| sels.inv_vanishing[quot_row_idx(offset)]);
 
                     // Vertically pack rows of each matrix,
                     // skipping `next` if above scan showed no constraints need it:
@@ -262,6 +262,7 @@ where
                                         .as_ref()
                                         .unwrap_unchecked()
                                         .get(*wrapped_idx.get_unchecked(offset), col)
+                                        .expect("matrix index out of bounds")
                                 });
                             }
                         }
@@ -279,6 +280,7 @@ where
                                 for (col, row_elt) in row_buf.iter_mut().enumerate() {
                                     *row_elt = PackedVal::<SC>::from_fn(|offset| {
                                         lde.get(unsafe { *wrapped_idx.get_unchecked(offset) }, col)
+                                            .expect("matrix index out of bounds")
                                     });
                                 }
                             }
@@ -296,14 +298,16 @@ where
                         ] {
                             if let Some(row_buf) = row_buf {
                                 for (col, row_elt) in row_buf.iter_mut().enumerate() {
-                                    *row_elt = PackedChallenge::<SC>::from_base_fn(|i| {
-                                        PackedVal::<SC>::from_fn(|offset| {
-                                            lde.get(
-                                                unsafe { *wrapped_idx.get_unchecked(offset) },
-                                                col * ext_degree + i,
-                                            )
-                                        })
-                                    });
+                                    *row_elt =
+                                        PackedChallenge::<SC>::from_basis_coefficients_fn(|i| {
+                                            PackedVal::<SC>::from_fn(|offset| {
+                                                lde.get(
+                                                    unsafe { *wrapped_idx.get_unchecked(offset) },
+                                                    col * ext_degree + i,
+                                                )
+                                                .expect("matrix index out of bounds")
+                                            })
+                                        });
                                 }
                             }
                         }
@@ -324,20 +328,21 @@ where
                     let accumulator =
                         unsafe { evaluator.accumulate(constraints, alpha_powers, &mut node_exprs) };
                     // quotient(x) = constraints(x) / Z_H(x)
-                    let quotient: PackedChallenge<SC> = accumulator * inv_zeroifier;
+                    let quotient: PackedChallenge<SC> = accumulator * inv_vanishing;
 
                     // "Transpose" D packed base coefficients into WIDTH scalar extension
                     // coefficients.
                     for (idx_in_packing, ef) in packed_ef_mut.iter_mut().enumerate() {
-                        *ef = SC::Challenge::from_base_fn(|coeff_idx| {
-                            quotient.as_base_slice()[coeff_idx].as_slice()[idx_in_packing]
+                        *ef = SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
+                            quotient.as_basis_coefficients_slice()[coeff_idx].as_slice()
+                                [idx_in_packing]
                         });
                     }
                 }
             });
             // Flatten from extension field elements to base field elements
             // SAFETY: `Challenge` is assumed to be extension field of `F`
-            // with memory layout `[F; Challenge::D]`
+            // with memory layout `[F; Challenge::DIMENSION]`
             let matrix = unsafe { transmute_to_base(RowMajorMatrix::new_col(chunk)) };
             QuotientChunk {
                 domain: chunk_domain,

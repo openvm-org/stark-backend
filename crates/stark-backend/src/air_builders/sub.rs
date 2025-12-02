@@ -1,21 +1,18 @@
 // Copied from sp1/core under MIT license
 
-use std::{
-    iter::{Skip, Take},
-    ops::{Deref, Range},
-};
+use std::ops::{Deref, Range};
 
 use p3_air::{AirBuilder, BaseAir};
 use p3_matrix::Matrix;
 
 /// A submatrix of a matrix.  The matrix will contain a subset of the columns of `self.inner`.
-pub struct SubMatrixRowSlices<M: Matrix<T>, T: Send + Sync> {
+pub struct SubMatrixRowSlices<M: Matrix<T>, T: Clone + Send + Sync> {
     inner: M,
     column_range: Range<usize>,
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<M: Matrix<T>, T: Send + Sync> SubMatrixRowSlices<M, T> {
+impl<M: Matrix<T>, T: Clone + Send + Sync> SubMatrixRowSlices<M, T> {
     pub const fn new(inner: M, column_range: Range<usize>) -> Self {
         Self {
             inner,
@@ -26,23 +23,40 @@ impl<M: Matrix<T>, T: Send + Sync> SubMatrixRowSlices<M, T> {
 }
 
 /// Implement `Matrix` for `SubMatrixRowSlices`.
-impl<M: Matrix<T>, T: Send + Sync> Matrix<T> for SubMatrixRowSlices<M, T> {
-    type Row<'a>
-        = Skip<Take<M::Row<'a>>>
-    where
-        Self: 'a;
-
+impl<M: Matrix<T>, T: Clone + Send + Sync> Matrix<T> for SubMatrixRowSlices<M, T> {
     #[inline]
-    fn row(&self, r: usize) -> Self::Row<'_> {
-        self.inner
-            .row(r)
-            .take(self.column_range.end)
-            .skip(self.column_range.start)
+    fn get(&self, r: usize, c: usize) -> Option<T> {
+        let c = self.column_range.start + c;
+        if c >= self.column_range.end {
+            return None;
+        }
+        self.inner.get(r, c)
     }
 
     #[inline]
-    fn row_slice(&self, r: usize) -> impl Deref<Target = [T]> {
-        self.row(r).collect::<Vec<_>>()
+    unsafe fn row_subseq_unchecked(
+        &self,
+        r: usize,
+        start: usize,
+        end: usize,
+    ) -> impl IntoIterator<Item = T, IntoIter = impl Iterator<Item = T> + Send + Sync> {
+        let global_start = self.column_range.start + start;
+        let global_end = self.column_range.start + end;
+        self.inner
+            .row_unchecked(r)
+            .into_iter()
+            .skip(global_start)
+            .take(global_end - global_start)
+    }
+
+    #[inline]
+    fn row_slice(&self, r: usize) -> Option<impl Deref<Target = [T]>> {
+        self.inner.row(r).map(|row| {
+            row.into_iter()
+                .skip(self.column_range.start)
+                .take(self.width())
+                .collect::<Vec<_>>()
+        })
     }
 
     #[inline]

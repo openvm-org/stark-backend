@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-use p3_field::{Field, FieldAlgebra};
+use p3_field::{Algebra, Field, PrimeCharacteristicRing};
 use serde::{Deserialize, Serialize};
 
 use super::{dag::SymbolicExpressionNode, symbolic_variable::SymbolicVariable};
@@ -152,8 +152,8 @@ impl<F: Field> From<F> for SymbolicExpression<F> {
     }
 }
 
-impl<F: Field> FieldAlgebra for SymbolicExpression<F> {
-    type F = F;
+impl<F: Field> PrimeCharacteristicRing for SymbolicExpression<F> {
+    type PrimeSubfield = F::PrimeSubfield;
 
     const ZERO: Self = Self::Constant(F::ZERO);
     const ONE: Self = Self::Constant(F::ONE);
@@ -161,40 +161,8 @@ impl<F: Field> FieldAlgebra for SymbolicExpression<F> {
     const NEG_ONE: Self = Self::Constant(F::NEG_ONE);
 
     #[inline]
-    fn from_f(f: Self::F) -> Self {
-        f.into()
-    }
-
-    fn from_bool(b: bool) -> Self {
-        Self::Constant(F::from_bool(b))
-    }
-
-    fn from_canonical_u8(n: u8) -> Self {
-        Self::Constant(F::from_canonical_u8(n))
-    }
-
-    fn from_canonical_u16(n: u16) -> Self {
-        Self::Constant(F::from_canonical_u16(n))
-    }
-
-    fn from_canonical_u32(n: u32) -> Self {
-        Self::Constant(F::from_canonical_u32(n))
-    }
-
-    fn from_canonical_u64(n: u64) -> Self {
-        Self::Constant(F::from_canonical_u64(n))
-    }
-
-    fn from_canonical_usize(n: usize) -> Self {
-        Self::Constant(F::from_canonical_usize(n))
-    }
-
-    fn from_wrapped_u32(n: u32) -> Self {
-        Self::Constant(F::from_wrapped_u32(n))
-    }
-
-    fn from_wrapped_u64(n: u64) -> Self {
-        Self::Constant(F::from_wrapped_u64(n))
+    fn from_prime_subfield(f: Self::PrimeSubfield) -> Self {
+        F::from_prime_subfield(f).into()
     }
 }
 
@@ -222,6 +190,12 @@ impl<F: Field> Add<F> for SymbolicExpression<F> {
 impl<F: Field> AddAssign for SymbolicExpression<F> {
     fn add_assign(&mut self, rhs: Self) {
         *self = self.clone() + rhs;
+    }
+}
+
+impl<F: Field> AddAssign<SymbolicVariable<F>> for SymbolicExpression<F> {
+    fn add_assign(&mut self, rhs: SymbolicVariable<F>) {
+        *self += SymbolicExpression::from(rhs);
     }
 }
 
@@ -276,6 +250,12 @@ impl<F: Field> SubAssign<F> for SymbolicExpression<F> {
     }
 }
 
+impl<F: Field> SubAssign<SymbolicVariable<F>> for SymbolicExpression<F> {
+    fn sub_assign(&mut self, rhs: SymbolicVariable<F>) {
+        *self -= SymbolicExpression::from(rhs);
+    }
+}
+
 impl<F: Field> Neg for SymbolicExpression<F> {
     type Output = Self;
 
@@ -322,6 +302,12 @@ impl<F: Field> MulAssign<F> for SymbolicExpression<F> {
     }
 }
 
+impl<F: Field> MulAssign<SymbolicVariable<F>> for SymbolicExpression<F> {
+    fn mul_assign(&mut self, rhs: SymbolicVariable<F>) {
+        *self *= SymbolicExpression::from(rhs);
+    }
+}
+
 impl<F: Field> Product for SymbolicExpression<F> {
     fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.reduce(|x, y| x * y).unwrap_or(Self::ONE)
@@ -333,6 +319,9 @@ impl<F: Field> Product<F> for SymbolicExpression<F> {
         iter.map(|x| Self::from(x)).product()
     }
 }
+
+impl<F: Field> Algebra<F> for SymbolicExpression<F> {}
+impl<F: Field> Algebra<SymbolicVariable<F>> for SymbolicExpression<F> {}
 
 pub trait SymbolicEvaluator<F, E>
 where
