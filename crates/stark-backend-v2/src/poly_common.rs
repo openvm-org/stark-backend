@@ -152,6 +152,10 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         &mut self.0
     }
 
+    pub fn into_coeffs(self) -> Vec<F> {
+        self.0
+    }
+
     pub fn eval_at_point<EF: ExtensionField<F>>(&self, x: EF) -> EF {
         horner_eval(&self.0, x)
     }

@@ -105,9 +105,9 @@ pub trait OpeningProverV2<PB: ProverBackendV2, TS> {
     fn prove_openings(
         &self,
         transcript: &mut TS,
+        mpk: &DeviceMultiStarkProvingKeyV2<PB>,
         ctx: ProvingContextV2<PB>,
         common_main_pcs_data: PB::PcsData,
-        pre_cached_pcs_data_per_commit: Vec<Arc<PB::PcsData>>,
         points: Self::OpeningPoints,
     ) -> Self::OpeningProof;
 }
