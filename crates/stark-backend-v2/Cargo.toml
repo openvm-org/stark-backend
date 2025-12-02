@@ -42,7 +42,7 @@ p3-keccak-air.workspace = true
 test-case.workspace = true
 
 [features]
-default = ["parallel"]
+default = ["parallel", "metrics"]
 parallel = ["p3-maybe-rayon/parallel", "openvm-stark-backend/parallel"]
 jemalloc = ["openvm-stark-backend/jemalloc"]
 metrics = ["dep:metrics", "openvm-stark-backend/metrics"]
