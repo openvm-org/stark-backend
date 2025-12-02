@@ -23,7 +23,12 @@ pub struct StackedPcsDataGpu<F, Digest> {
     /// Layout of the unstacked collection of matrices within the stacked matrix.
     pub layout: StackedLayout,
     /// The stacked matrix with height `2^{l_skip + n_stack}`.
-    pub matrix: PleMatrix<F>,
+    /// This cached depending on the prover configuration:
+    /// - Caching increases the peak GPU memory but avoids a recomputation during stacked
+    ///   reduction.
+    /// - Not caching means the stacked matrix computation is recomputed during stacked reduction,
+    ///   but lowers the peak GPU memory.
+    pub matrix: Option<PleMatrix<F>>,
     /// Merkle tree of the Reed-Solomon codewords of the stacked matrix.
     /// Depends on `k_whir` parameter.
     pub tree: MerkleTreeGpu<F, Digest>,
@@ -36,13 +41,14 @@ pub fn stacked_commit(
     log_blowup: usize,
     k_whir: usize,
     traces: &[&DeviceMatrix<F>],
+    cache_stacked_matrix: bool,
 ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
     let mem = MemTracker::start_and_reset_peak("prover.stacked_commit");
     let (q_matrix, layout) = stacked_matrix(l_skip, n_stack, traces)?;
-    let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_matrix)?;
+    let (rs_matrix, opt_q_matrix) = rs_code_matrix(l_skip, log_blowup, q_matrix, cache_stacked_matrix)?;
     let tree = MerkleTreeGpu::<F, Digest>::new(rs_matrix, 1 << k_whir)?;
     let root = tree.root();
-    let data = StackedPcsDataGpu::new(layout, q_matrix, tree);
+    let data = StackedPcsDataGpu::new(layout, opt_q_matrix, tree);
     mem.emit_metrics();
     Ok((root, data))
 }
@@ -67,17 +73,38 @@ pub fn stacked_matrix(
         })
         .collect_vec();
     debug_assert!(sorted_meta.is_sorted_by(|a, b| a.2 >= b.2));
-    let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
+    let layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
+    let matrix = stack_traces(n_stack, &layout, traces)?;
+    mem.emit_metrics();
+    Ok((matrix, layout))
+}
+
+pub(crate) fn stack_traces(
+    n_stack: usize,
+    layout: &StackedLayout,
+    traces: &[&DeviceMatrix<F>],
+) -> Result<PleMatrix<F>, ProverError> {
+    let l_skip = layout.l_skip();
     let total_cells: usize = traces
         .iter()
         .map(|t| max(t.height(), 1 << l_skip) * t.width())
         .sum();
     let height = 1usize << (l_skip + n_stack);
     let width = total_cells.div_ceil(height);
+    assert_ne!(total_cells, 0);
+    debug_assert_eq!(
+        width,
+        layout
+            .unstacked_slices_iter()
+            .map(|s| s.col_idx)
+            .max()
+            .unwrap_or(0)
+            + 1
+    );
 
     let q_evals = DeviceBuffer::<F>::with_capacity(width.checked_mul(height).unwrap());
     q_evals.fill_zero()?;
-    for (mat_idx, j, s) in &mut layout.sorted_cols {
+    for (mat_idx, j, s) in &layout.sorted_cols {
         let start = s.col_idx * height + s.row_idx;
         let trace = traces[*mat_idx];
         let s_len = s.len(l_skip);
@@ -111,11 +138,7 @@ pub fn stacked_matrix(
             }
         }
     }
-    mem.emit_metrics();
-    Ok((
-        PleMatrix::from_evals(l_skip, q_evals, height, width),
-        layout,
-    ))
+    Ok(PleMatrix::from_evals(l_skip, q_evals, height, width))
 }
 
 /// Computes the Reed-Solomon codeword of each column vector of `eval_matrix` where the rate is
@@ -125,8 +148,9 @@ pub fn stacked_matrix(
 pub fn rs_code_matrix(
     l_skip: usize,
     log_blowup: usize,
-    matrix: &PleMatrix<F>,
-) -> Result<DeviceMatrix<F>, ProverError> {
+    matrix: PleMatrix<F>,
+    cache_matrix: bool,
+) -> Result<(DeviceMatrix<F>, Option<PleMatrix<F>>), ProverError> {
     let mem = MemTracker::start("prover.rs_code_matrix");
     let height = matrix.height();
     debug_assert!(height >= (1 << l_skip));
@@ -147,6 +171,8 @@ pub fn rs_code_matrix(
             height as u32,
         )?;
     }
+    // If not caching matrix, drop `matrix` now to save memory.
+    let opt_matrix = cache_matrix.then_some(matrix);
     let n = log2_strict_usize(height) - l_skip;
     // Go through coordinates X_1, ..., X_n and interpolate each one from s(0), s(1) -> s(0) +
     // (s(1) - s(0)) X_i
@@ -176,35 +202,50 @@ pub fn rs_code_matrix(
         true,
         false,
     );
+    let code_matrix = DeviceMatrix::new(
+            Arc::new(codewords),
+            codeword_height,
+            width,
+        );
     mem.emit_metrics();
-    Ok(DeviceMatrix::new(
-        Arc::new(codewords),
-        codeword_height,
-        width,
-    ))
+
+    Ok((code_matrix, opt_matrix))
 }
 
 impl<F, Digest> StackedPcsDataGpu<F, Digest> {
+    /// Width of the stacked matrix.
+    pub fn width(&self) -> usize {
+        self.tree.backing_matrix.width()
+    }
+
     /// Returns a view of the specified unstacked matrix in mixed form.
     ///
     /// # Notes
     /// - `width` must be the width of the unstacked matrix.
     /// - The unstacked matrix may be strided - this must be handled by the caller.
-    pub fn mixed_view<'a>(&'a self, mat_idx: usize, width: usize) -> DeviceMatrixView<'a, F> {
-        debug_assert_eq!(self.layout.width_of(mat_idx), width);
-        let s = self
-            .layout
-            .get(mat_idx, 0)
-            .unwrap_or_else(|| panic!("Invalid matrix index: {mat_idx}"));
-        let l_skip = self.layout.l_skip();
-        let lifted_height = s.len(l_skip);
-        let offset = s.col_idx * self.matrix.height() + s.row_idx;
-        // SAFETY:
-        // - by definition of stacked layout and stacked matrix, `ptr` is valid and allocated for
-        //   `lifted_height * width` elements.
-        unsafe {
-            let ptr = self.matrix.mixed.as_ptr().add(offset);
-            DeviceMatrixView::from_raw_parts(ptr, lifted_height, width)
+    pub fn mixed_view<'a>(
+        &'a self,
+        mat_idx: usize,
+        width: usize,
+    ) -> Option<DeviceMatrixView<'a, F>> {
+        if let Some(matrix) = self.matrix.as_ref() {
+            debug_assert_eq!(self.layout.width_of(mat_idx), width);
+            let s = self
+                .layout
+                .get(mat_idx, 0)
+                .unwrap_or_else(|| panic!("Invalid matrix index: {mat_idx}"));
+            let l_skip = self.layout.l_skip();
+            let lifted_height = s.len(l_skip);
+            let offset = s.col_idx * matrix.height() + s.row_idx;
+            // SAFETY:
+            // - by definition of stacked layout and stacked matrix, `ptr` is valid and allocated
+            //   for `lifted_height * width` elements.
+            unsafe {
+                let ptr = matrix.mixed.as_ptr().add(offset);
+                Some(DeviceMatrixView::from_raw_parts(ptr, lifted_height, width))
+            }
+        } else {
+            None
         }
     }
 }

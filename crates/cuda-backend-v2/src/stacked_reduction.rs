@@ -1,7 +1,7 @@
-use std::{array::from_fn, ffi::c_void, iter::zip};
+use std::{array::from_fn, ffi::c_void, iter::zip, sync::Arc};
 
 use itertools::Itertools;
-use openvm_cuda_backend::ntt::batch_ntt;
+use openvm_cuda_backend::{base::DeviceMatrix, ntt::batch_ntt};
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
@@ -14,9 +14,14 @@ use stark_backend_v2::{
     poly_common::{
         Squarable, UnivariatePoly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni,
     },
-    prover::{stacked_reduction::StackedReductionProver, sumcheck::sumcheck_round0_deg},
+    poseidon2::sponge::FiatShamirTranscript,
+    proof::StackingProof,
+    prover::{
+        DeviceMultiStarkProvingKeyV2, ProvingContextV2, stacked_pcs::StackedLayout,
+        sumcheck::sumcheck_round0_deg,
+    },
 };
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use crate::{
     Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
@@ -31,11 +36,11 @@ use crate::{
         },
         sumcheck::{fold_mle, fold_ple_from_coeffs, triangular_fold_mle},
     },
-    poly::EqEvalSegments,
-    stacked_pcs::StackedPcsDataGpu,
+    poly::{EqEvalSegments, PleMatrix},
+    stacked_pcs::{StackedPcsDataGpu, stack_traces},
 };
 
-pub struct StackedReductionGpu<'a> {
+pub struct StackedReductionGpu {
     l_skip: usize,
     omega_skip: F,
     n_stack: usize,
@@ -44,7 +49,7 @@ pub struct StackedReductionGpu<'a> {
     d_lambda_pows: DeviceBuffer<EF>,
     eq_const: EF,
 
-    stacked_per_commit: Vec<&'a StackedPcsDataGpu<F, Digest>>,
+    pub(crate) stacked_per_commit: Vec<StackedPcsData2>,
     d_q_widths: DeviceBuffer<u32>,
 
     unstacked_cols: Vec<UnstackedSlice>,
@@ -77,6 +82,51 @@ pub struct StackedReductionGpu<'a> {
     mem: MemTracker,
 }
 
+/// A struct for holding stacked pcs data. Since `StackedPcsDataGpu` may not contain `matrix` if
+/// prover configuration does not cache it, we generate the matrix from traces and store in
+/// `stacked_matrix`. It will be guaranateed that either `inner.matrix` or `stacked_matrix` is
+/// present.
+pub struct StackedPcsData2 {
+    pub(crate) inner: Arc<StackedPcsDataGpu<F, Digest>>,
+    pub(crate) stacked_matrix: Option<PleMatrix<F>>,
+}
+
+impl StackedPcsData2 {
+    /// # Safety
+    /// `traces` must be the traces that were committed to in `pcs_data`.
+    pub unsafe fn from_raw(
+        n_stack: usize,
+        pcs_data: Arc<StackedPcsDataGpu<F, Digest>>,
+        traces: &[&DeviceMatrix<F>],
+    ) -> Result<Self, ProverError> {
+        if pcs_data.matrix.is_some() {
+            Ok(Self {
+                inner: pcs_data,
+                stacked_matrix: None,
+            })
+        } else {
+            let layout = &pcs_data.layout;
+            let matrix = stack_traces(n_stack, layout, traces)?;
+            Ok(Self {
+                inner: pcs_data,
+                stacked_matrix: Some(matrix),
+            })
+        }
+    }
+
+    pub fn layout(&self) -> &StackedLayout {
+        &self.inner.layout
+    }
+
+    pub fn matrix(&self) -> &PleMatrix<F> {
+        self.inner
+            .matrix
+            .as_ref()
+            .or(self.stacked_matrix.as_ref())
+            .unwrap()
+    }
+}
+
 /// Pointer with length to location in a big device buffer. The device buffer is identified by
 /// `commit_idx`. Due to pecuarlities with `l_skip`, the length of the slice is defined as
 /// `max(2^log_height, 2^l_skip)`. In other words, this is a pointer to the slice
@@ -103,7 +153,7 @@ pub(crate) struct Round0UniPacket {
     k_rot_1: EF, // to multiply by k_rot_cube - eq_cube
 }
 
-impl<'a> StackedReductionGpu<'a> {
+impl StackedReductionGpu {
     fn log_stacked_height(&self, round: usize) -> usize {
         self.n_stack - (round - 1)
     }
@@ -118,32 +168,131 @@ impl<'a> StackedReductionGpu<'a> {
     }
 }
 
-impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReductionGpu<'a> {
-    #[instrument("StackedReductionGpu::new", level = "debug", skip_all)]
+/// Batch sumcheck to reduce trace openings, including rotations, to stacked matrix opening.
+///
+/// The `stacked_matrix, stacked_layout` should be the result of stacking the `traces` with
+/// parameters `l_skip` and `n_stack`.
+#[instrument(name = "prove_stacked_opening_reduction", level = "info", skip_all)]
+pub fn prove_stacked_opening_reduction_gpu<TS>(
+    device: &GpuDeviceV2,
+    transcript: &mut TS,
+    mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    ctx: ProvingContextV2<GpuBackendV2>,
+    common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
+    r: &[EF],
+) -> Result<(StackingProof, Vec<EF>, Vec<StackedPcsData2>), ProverError>
+where
+    TS: FiatShamirTranscript,
+{
+    let n_stack = device.config.n_stack;
+    // Batching randomness
+    let lambda = transcript.sample_ext();
+
+    let mut prover = StackedReductionGpu::new(mpk, ctx, common_main_pcs_data, r, lambda)?;
+    let s_0 = prover.batch_sumcheck_uni_round0_poly();
+    for &coeff in s_0.coeffs() {
+        transcript.observe_ext(coeff);
+    }
+
+    let mut u_vec = Vec::with_capacity(n_stack + 1);
+    let u_0 = transcript.sample_ext();
+    u_vec.push(u_0);
+    debug!(round = 0, u_round = %u_0);
+
+    prover.fold_ple_evals(u_0);
+    // end round 0
+
+    let mut sumcheck_round_polys = Vec::with_capacity(n_stack);
+
+    #[allow(clippy::needless_range_loop)]
+    for round in 1..=n_stack {
+        let batch_s_evals = prover.batch_sumcheck_poly_eval(round, u_vec[round - 1]);
+
+        for &eval in &batch_s_evals {
+            transcript.observe_ext(eval);
+        }
+        sumcheck_round_polys.push(batch_s_evals);
+
+        let u_round = transcript.sample_ext();
+        u_vec.push(u_round);
+        debug!(%round, %u_round);
+
+        prover.fold_mle_evals(round, u_round);
+    }
+    let stacking_openings = prover.get_stacked_openings();
+    for claims_for_com in &stacking_openings {
+        for &claim in claims_for_com {
+            transcript.observe_ext(claim);
+        }
+    }
+    let proof = StackingProof {
+        univariate_round_coeffs: s_0.into_coeffs(),
+        sumcheck_round_polys,
+        stacking_openings,
+    };
+    Ok((proof, u_vec, prover.stacked_per_commit))
+}
+
+impl StackedReductionGpu {
+    #[instrument("stacked_reduction_new", level = "debug", skip_all)]
     fn new(
-        device: &'a GpuDeviceV2,
-        stacked_per_commit: Vec<&'a StackedPcsDataGpu<F, Digest>>,
+        mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        mut ctx: ProvingContextV2<GpuBackendV2>,
+        common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
         r: &[EF],
         lambda: EF,
-    ) -> Self {
-        let mem = MemTracker::start("prover.stacked_reduction");
-        let l_skip = device.config.l_skip;
+    ) -> Result<Self, ProverError> {
+        let mem = MemTracker::start("prover.stacked_reduction_new");
+        let l_skip = mpk.params.l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
-        let n_stack = device.config.n_stack;
+        let n_stack = mpk.params.n_stack;
+
+        // PERF[jpw]: stack the traces all at once. To save memory, we could either stack and drop
+        // traces as we go or even at commit time only store the stacked matrix and drop the traces
+        // much earlier.
+        let common_main_traces = ctx
+            .per_trace
+            .iter()
+            .map(|(_, air_ctx)| &air_ctx.common_main)
+            .collect_vec();
+        // SAFETY: common_main_traces commits to common_main_pcs_data
+        let common_main_stacked = unsafe {
+            StackedPcsData2::from_raw(n_stack, Arc::new(common_main_pcs_data), &common_main_traces)?
+        };
+        let mut stacked_per_commit = vec![common_main_stacked];
+        // Drop all traces
+        for (_, air_ctx) in &mut ctx.per_trace {
+            air_ctx.common_main = DeviceMatrix::dummy();
+        }
+        for (air_idx, air_ctx) in ctx.per_trace {
+            for committed in mpk.per_air[air_idx]
+                .preprocessed_data
+                .iter()
+                .chain(air_ctx.cached_mains.iter())
+            {
+                // SAFETY: committed.trace commits to committed.data
+                let stacked = unsafe {
+                    StackedPcsData2::from_raw(n_stack, committed.data.clone(), &[&committed.trace])?
+                };
+                stacked_per_commit.push(stacked);
+            }
+        }
+        // ctx is dropped as this point
+
         debug_assert!(
             stacked_per_commit
                 .iter()
-                .all(|d| d.matrix.height() == 1 << (l_skip + n_stack))
+                .all(|d| d.matrix().height() == 1 << (l_skip + n_stack))
         );
         let widths = stacked_per_commit
             .iter()
-            .map(|d| d.matrix.width() as u32)
+            .map(|d| d.matrix().width() as u32)
             .collect_vec();
         let d_q_widths = widths.to_device().unwrap();
 
         let total_num_col_openings = stacked_per_commit
             .iter()
-            .map(|d| d.layout.sorted_cols.len() * 2) // 2 for [plain, rotated]
+            .map(|d| d.layout().sorted_cols.len() * 2) // 2 for [plain, rotated]
             .sum();
         let lambda_pows = lambda.powers().take(total_num_col_openings).collect_vec();
         let d_lambda_pows = lambda_pows.to_device().unwrap();
@@ -152,7 +301,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
             .iter()
             .enumerate()
             .flat_map(|(com_idx, d)| {
-                d.layout
+                d.layout()
                     .unstacked_slices_iter()
                     .map(move |s| UnstackedSlice {
                         commit_idx: com_idx as u32,
@@ -180,7 +329,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
             n_max,
             stacked_per_commit
                 .iter()
-                .map(|d| d.layout.sorted_cols[0].2.log_height())
+                .map(|d| d.layout().sorted_cols[0].2.log_height())
                 .max()
                 .unwrap_or(0)
                 .saturating_sub(l_skip)
@@ -190,7 +339,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
         let eq_const = eval_eq_uni_at_one(l_skip, r[0] * omega_skip);
         let eq_ub_per_trace = vec![EF::ONE; unstacked_cols.len()];
 
-        Self {
+        Ok(Self {
             l_skip,
             omega_skip,
             n_stack,
@@ -211,7 +360,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
             k_rot_ns: unsafe { EqEvalSegments::from_raw_parts(DeviceBuffer::new(), 0) },
             eq_ub_per_trace,
             mem,
-        }
+        })
     }
 
     #[instrument(
@@ -240,7 +389,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
             .stacked_per_commit
             .iter()
             .map(|pcs_data| {
-                let q_mixed = &pcs_data.matrix.mixed;
+                let q_mixed = &pcs_data.matrix().mixed;
                 let len = q_mixed.len();
                 let upsampled = DeviceBuffer::with_capacity(len << log_expansion);
                 // SAFETY:
@@ -274,7 +423,7 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
             })
             .collect::<Result<Vec<_>, ProverError>>()
             .unwrap();
-        let upsampled_height = self.stacked_per_commit[0].matrix.height() << log_expansion;
+        let upsampled_height = self.stacked_per_commit[0].matrix().height() << log_expansion;
         let q_upsampled_ptrs = q_upsampled_evals.iter().map(|q| q.as_ptr()).collect_vec();
         let d_q_upsampled_ptrs = q_upsampled_ptrs.to_device().unwrap();
 
@@ -405,9 +554,9 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
             .stacked_per_commit
             .iter()
             .map(|d| {
-                let coeffs = &d.matrix.mixed;
+                let coeffs = &d.matrix().mixed;
                 let num_x = 1 << n_stack;
-                let width = d.matrix.width();
+                let width = d.matrix().width();
                 debug_assert_eq!(coeffs.len(), width << (l_skip + n_stack));
                 let folded_evals = DeviceBuffer::with_capacity(coeffs.len() >> l_skip);
                 unsafe {
@@ -660,11 +809,8 @@ impl<'a> StackedReductionProver<'a, GpuBackendV2, GpuDeviceV2> for StackedReduct
         }
     }
 
-    #[instrument("stacked_reduction_into_stacked_openings", skip_all)]
-    fn into_stacked_openings(self) -> Vec<Vec<EF>> {
-        self.q_evals
-            .into_iter()
-            .map(|q| q.to_host().unwrap())
-            .collect()
+    #[instrument(level = "debug", skip_all)]
+    fn get_stacked_openings(&self) -> Vec<Vec<EF>> {
+        self.q_evals.iter().map(|q| q.to_host().unwrap()).collect()
     }
 }

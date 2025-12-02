@@ -1,4 +1,4 @@
-use std::{ffi::c_void, iter::once, mem::ManuallyDrop, sync::Arc};
+use std::{ffi::c_void, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::{
@@ -15,14 +15,14 @@ use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::{FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
 use p3_util::log2_strict_usize;
 use stark_backend_v2::{
+    SystemParams,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
-    prover::whir::WhirProver,
 };
 use tracing::instrument;
 
 use crate::{
-    D_EF, Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
+    D_EF, Digest, EF, F, ProverError,
     cuda::{
         poly::{
             algebraic_batch_matrices, batch_eq_hypercube_stage, eq_hypercube_stage_ext,
@@ -35,38 +35,17 @@ use crate::{
     },
     merkle_tree::MerkleTreeGpu,
     poly::{evals_eq_hypercube, mle_evals_to_coeffs_inplace},
-    stacked_pcs::StackedPcsDataGpu,
+    stacked_reduction::StackedPcsData2,
 };
 
-impl<TS: FiatShamirTranscript> WhirProver<GpuBackendV2, GpuDeviceV2, TS> for GpuDeviceV2 {
-    #[instrument(level = "info", skip_all)]
-    fn prove_whir(
-        &self,
-        transcript: &mut TS,
-        common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
-        pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsDataGpu<F, Digest>>>,
-        u_cube: &[EF],
-    ) -> WhirProof {
-        prove_whir_opening_gpu(
-            self,
-            transcript,
-            common_main_pcs_data,
-            pre_cached_pcs_data_per_commit,
-            u_cube,
-        )
-        .unwrap()
-    }
-}
-
-fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
-    device: &GpuDeviceV2,
+#[instrument(name = "prove_whir", level = "info", skip_all)]
+pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
+    params: &SystemParams,
     transcript: &mut TS,
-    common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
-    other_pcs_data: Vec<Arc<StackedPcsDataGpu<F, Digest>>>,
+    mut stacked_per_commit: Vec<StackedPcsData2>,
     u: &[EF],
 ) -> Result<WhirProof, ProverError> {
     let mem = MemTracker::start("prover.prove_whir_opening");
-    let params = device.config();
     let k_whir = params.k_whir;
     let log_blowup = params.log_blowup;
     let num_whir_queries = params.num_whir_queries;
@@ -74,8 +53,12 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     let whir_pow_bits = params.whir_pow_bits;
     let l_skip = params.l_skip;
 
-    let height = common_main_pcs_data.matrix.height();
-    debug_assert!(other_pcs_data.iter().all(|d| d.matrix.height() == height));
+    let height = stacked_per_commit[0].matrix().height();
+    debug_assert!(
+        stacked_per_commit
+            .iter()
+            .all(|d| d.matrix().height() == height)
+    );
     let mut m = log2_strict_usize(height);
     assert_eq!(m, u.len());
     debug_assert!(m >= l_skip);
@@ -83,19 +66,20 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     // Sample randomness for algebraic batching.
     // We batch the codewords for \hat{q}_j together _before_ applying WHIR.
     let mu = transcript.sample_ext();
-    let num_commits = other_pcs_data.len() + 1;
+    let num_commits = stacked_per_commit.len();
 
     // The evaluations of `\hat{f}` in the current WHIR round on the hypercube `H_m`.
     let mut f_evals = DeviceBuffer::<EF>::with_capacity(height);
     // We algebraically batch all matrices together so we only need to interpolate one column vector
     {
-        let common_main = common_main_pcs_data.matrix;
         // We only need the mixed PLE buffer for each backing matrix.
-        let (mat_ptrs, widths): (Vec<_>, Vec<_>) = once(&common_main)
-            .chain(other_pcs_data.iter().map(|d| &d.matrix))
-            .map(|mat| (mat.mixed.as_ptr(), mat.width() as u32))
+        let (mat_ptrs, widths): (Vec<_>, Vec<_>) = stacked_per_commit
+            .iter()
+            .map(|stacked| {
+                let mat = stacked.matrix();
+                (mat.mixed.as_ptr(), mat.width() as u32)
+            })
             .unzip();
-        let common_main_mixed = ManuallyDrop::new(common_main.mixed);
         let mut mu_idxs = Vec::with_capacity(num_commits);
         let mut total_width = 0u32;
         for &width in &widths {
@@ -123,7 +107,11 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
                 num_commits,
             )?;
         }
-        let _ = ManuallyDrop::into_inner(common_main_mixed);
+        // Free common main stacked matrix -- it is the only one that is owned
+        let common_main_pcs_data =
+            Arc::get_mut(&mut stacked_per_commit[0].inner).expect("common_main_pcs_data is owned");
+        common_main_pcs_data.matrix.take();
+        stacked_per_commit[0].stacked_matrix.take();
     } // common_main_pcs_data.matrix has now been freed
 
     // `f_evals` is currently the 2^l_skip coefficients of `f(Z, \vect x)` for each `\vect x in H_{m
@@ -138,9 +126,6 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
             mle_interpolate_stage_ext(&mut f_evals, step, false)?;
         }
     }
-
-    // We will drop `common_main_tree` after whir round 0
-    let mut common_main_tree = Some(common_main_pcs_data.tree);
 
     debug_assert_eq!((m - log_final_poly_len) % k_whir, 0);
     let num_whir_rounds = (m - log_final_poly_len) / k_whir;
@@ -172,6 +157,7 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     let mut d_s_evals = DeviceBuffer::<EF>::with_capacity(2);
 
     mem.tracing_info("before_whir_rounds");
+    // We will drop `stacked_per_commit` and hence `common_main_pcs_data` after whir round 0.
     for whir_round in 0..num_whir_rounds {
         let is_last_round = whir_round == num_whir_rounds - 1;
         // Run k_whir rounds of sumcheck on `sum_{x in H_m} \hat{w}(\hat{f}(x), x)`
@@ -337,9 +323,9 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
             codeword_merkle_proofs.push(vec![]);
         }
         if whir_round == 0 {
-            let common_main_tree = common_main_tree.take().unwrap();
-            let trees = once(&common_main_tree)
-                .chain(other_pcs_data.iter().map(|d| &d.tree))
+            let trees = stacked_per_commit
+                .iter()
+                .map(|d| &d.inner.tree)
                 .collect::<Vec<_>>();
             // Get merkle proofs for in-domain samples necessary to evaluate Fold(f, \vec
             // \alpha)(z_i)
@@ -358,7 +344,12 @@ fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
                         .collect()
                 })
                 .collect();
-            drop(common_main_tree);
+            debug_assert_eq!(
+                Arc::strong_count(&stacked_per_commit[0].inner),
+                1,
+                "common_main_pcs_data should be owned"
+            );
+            stacked_per_commit.clear(); // this drops common_main_pcs_data
             mem.tracing_info("after_initial_whir_round");
         } else {
             let tree: &MerkleTreeGpu<F, Digest> = rs_tree.as_ref().unwrap();
@@ -488,7 +479,7 @@ mod tests {
         poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory},
         prover::{
             ColMajorMatrix, CpuBackendV2, DeviceDataTransporterV2, ProvingContextV2, poly::Ple,
-            stacked_pcs::stacked_commit, whir::WhirProver,
+            stacked_pcs::stacked_commit,
         },
         test_utils::{DuplexSpongeValidator, FibFixture, TestFixture},
         verifier::whir::{VerifyWhirError, verify_whir},
@@ -496,7 +487,7 @@ mod tests {
     use test_case::test_case;
     use tracing::Level;
 
-    use crate::GpuDeviceV2;
+    use crate::{GpuDeviceV2, stacked_reduction::StackedPcsData2, whir::prove_whir_opening_gpu};
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
         let z_prism: Vec<_> = (0..params.n_stack + 1)
@@ -538,7 +529,8 @@ mod tests {
         pk: MultiStarkProvingKeyV2,
         ctx: ProvingContextV2<CpuBackendV2>,
     ) -> Result<(), VerifyWhirError> {
-        let device = GpuDeviceV2::new(params);
+        let mut device = GpuDeviceV2::new(params);
+        device.prover_config.cache_stacked_matrix = true; // easier to transfer D2H, we will switch it back before the prover runs
         let mut rng = StdRng::seed_from_u64(0);
         let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
 
@@ -555,7 +547,8 @@ mod tests {
                 &traces,
             )
         };
-        let d_common_main_pcs_data = device.transport_pcs_data_to_device(&common_main_pcs_data);
+        let mut d_common_main_pcs_data = device.transport_pcs_data_to_device(&common_main_pcs_data);
+        let d_common_main_stacked_mat = d_common_main_pcs_data.matrix.take();
 
         let mut stacking_openings = vec![stacking_openings_for_matrix(
             &params,
@@ -563,7 +556,10 @@ mod tests {
             &common_main_pcs_data.matrix,
         )];
         let mut commits = vec![common_main_commit];
-        let mut pre_cached_pcs_data_per_commit = Vec::new();
+        let mut stacked_per_commit = vec![StackedPcsData2 {
+            inner: Arc::new(d_common_main_pcs_data),
+            stacked_matrix: d_common_main_stacked_mat,
+        }];
         for (air_id, air_ctx) in ctx.per_trace {
             let pcs_datas = pk.per_air[air_id]
                 .preprocessed_data
@@ -576,19 +572,20 @@ mod tests {
                     &z_prism,
                     &data.matrix,
                 ));
-                let d_data = device.transport_pcs_data_to_device(data);
-                pre_cached_pcs_data_per_commit.push(Arc::new(d_data));
+                let mut d_data = device.transport_pcs_data_to_device(data);
+                let d_stacked_mat = d_data.matrix.take();
+                stacked_per_commit.push(StackedPcsData2 {
+                    inner: Arc::new(d_data),
+                    stacked_matrix: d_stacked_mat,
+                });
             }
         }
 
         let mut prover_sponge = DuplexSpongeRecorder::default();
 
-        let proof = device.prove_whir(
-            &mut prover_sponge,
-            d_common_main_pcs_data,
-            pre_cached_pcs_data_per_commit,
-            &z_cube,
-        );
+        let proof =
+            prove_whir_opening_gpu(&params, &mut prover_sponge, stacked_per_commit, &z_cube)
+                .unwrap();
 
         let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
         verify_whir(

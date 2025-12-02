@@ -1,6 +1,6 @@
 use std::{cmp::max, sync::Arc};
 
-use openvm_cuda_backend::base::{DeviceMatrix, DeviceMatrixView};
+use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::{FieldAlgebra, TwoAdicField};
@@ -8,10 +8,7 @@ use p3_field::{FieldAlgebra, TwoAdicField};
 use super::errors::FoldPleError;
 use crate::{
     EF, F,
-    cuda::{
-        logup_zerocheck::{compute_eq_sharp as compute_eq_sharp_ffi, fold_ple_from_evals},
-        sumcheck::fold_ple_from_coeffs,
-    },
+    cuda::logup_zerocheck::{compute_eq_sharp as compute_eq_sharp_ffi, fold_ple_from_evals},
 };
 
 /// Folds plain using mixed coefficients, folds rotation from evals.
@@ -20,36 +17,17 @@ use crate::{
 pub fn fold_ple_mixed_rotate(
     l_skip: usize,
     trace_evals: &DeviceMatrix<F>,
-    mixed: DeviceMatrixView<'_, F>,
     r_0: EF,
 ) -> Result<DeviceMatrix<EF>, FoldPleError> {
     let width = trace_evals.width();
     let height = trace_evals.height();
     let num_x = max(height >> l_skip, 1);
     let folded_buf = DeviceBuffer::<EF>::with_capacity(num_x * width * 2);
-    debug_assert_eq!(mixed.width(), width);
-    debug_assert_eq!(mixed.height(), num_x << l_skip);
     // SAFETY:
     // - We allocated `folded_buf` for `num_x * width * 2` elements.
-    // - `mixed` is `(num_x * 2^l_skip) x width` matrix
     // - `trace_evals` is `height x width` unlighted matrix
     unsafe {
-        if height >= (1 << l_skip) {
-            // This means stride = 1 so we can fold the plain part from mixed coefficients
-            fold_ple_from_coeffs(
-                mixed.as_ptr(),
-                folded_buf.as_mut_ptr(),
-                num_x as u32,
-                width as u32,
-                1 << l_skip,
-                r_0,
-            )?;
-        } else {
-            debug_assert_eq!(num_x, 1);
-            // Otherwise there is striding, so we can't use mixed form
-            // Fold directly from plain evaluations
-            fold_ple_evals_gpu(l_skip, trace_evals, folded_buf.as_mut_ptr(), r_0, false)?;
-        }
+        fold_ple_evals_gpu(l_skip, trace_evals, folded_buf.as_mut_ptr(), r_0, false)?;
 
         // Fold the rotation from evals
         fold_ple_evals_gpu(
