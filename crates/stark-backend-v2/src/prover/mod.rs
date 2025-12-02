@@ -133,30 +133,13 @@ where
             }
         }
 
-        // Currently alternates between preprocessed and cached pcs data
-        let pre_cached_pcs_data_per_commit: Vec<_> = ctx
-            .per_trace
-            .iter()
-            .flat_map(|(air_idx, air_ctx)| {
-                mpk.per_air[*air_idx]
-                    .preprocessed_data
-                    .iter()
-                    .chain(&air_ctx.cached_mains)
-                    .map(|cd| cd.data.clone())
-            })
-            .collect();
-
         let (constraints_proof, r) =
             self.device
                 .prove_rap_constraints(transcript, mpk, &ctx, &common_main_pcs_data);
 
-        let opening_proof = self.device.prove_openings(
-            transcript,
-            ctx,
-            common_main_pcs_data,
-            pre_cached_pcs_data_per_commit,
-            r.into(),
-        );
+        let opening_proof =
+            self.device
+                .prove_openings(transcript, mpk, ctx, common_main_pcs_data, r.into());
 
         let (gkr_proof, batch_constraint_proof) = constraints_proof.into();
         let (stacking_proof, whir_proof) = opening_proof.into();
