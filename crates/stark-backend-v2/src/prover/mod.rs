@@ -64,7 +64,12 @@ where
     ///
     /// The [DeviceMultiStarkProvingKey] should already be filtered to only include the relevant
     /// AIR's proving keys.
-    #[instrument(name = "stark_prove_excluding_trace", level = "info", skip_all)]
+    #[instrument(
+        name = "stark_prove_excluding_trace",
+        level = "info",
+        skip_all,
+        fields(phase = "prover")
+    )]
     fn prove<'a>(
         &'a mut self,
         mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
@@ -81,7 +86,7 @@ where
         info!(num_airs_present);
 
         let (common_main_commit, common_main_pcs_data) =
-            info_span!("main_trace_commit").in_scope(|| {
+            info_span!("main_trace_commit", phase = "prover").in_scope(|| {
                 let traces = ctx
                     .common_main_traces()
                     .map(|(_, trace)| trace)
