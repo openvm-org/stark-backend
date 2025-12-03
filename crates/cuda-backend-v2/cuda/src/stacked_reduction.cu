@@ -64,52 +64,52 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
     FpExt *shared = reinterpret_cast<FpExt *>(smem);
 
     uint32_t z_int = blockIdx.x * blockDim.x + threadIdx.x;
-    if (z_int >= domain_size) {
-        return;
-    }
-
-    // Map phase: compute local sum by striding over window and hypercube
-    FpExt local_sum = FpExt(0);
+    bool const active_thread = (z_int < domain_size);
     uint32_t window_idx_base = blockIdx.z;
-    uint32_t x_int_base = blockIdx.y * blockDim.y + threadIdx.y;
-    // We divide the hypercube (`num_x` points) across the grid y-dimension
-    for (uint32_t x_int = x_int_base; x_int < num_x; x_int += blockDim.y * gridDim.y) {
-        FpExt eq_cube = get_eq_cube(eq_r_ns, num_x, x_int);
-        FpExt k_rot_cube = get_eq_cube(eq_r_ns, num_x, rot_prev(x_int, num_x));
 
-        FpExt eq_uni = z_packets[z_int].eq_uni;
-        FpExt k_rot_0 = z_packets[z_int].k_rot_0;
-        FpExt k_rot_1 = z_packets[z_int].k_rot_1;
+    if (active_thread) {
+        // Map phase: compute local sum by striding over window and hypercube
+        FpExt local_sum = FpExt(0);
+        uint32_t x_int_base = blockIdx.y * blockDim.y + threadIdx.y;
+        // We divide the hypercube (`num_x` points) across the grid y-dimension
+        for (uint32_t x_int = x_int_base; x_int < num_x; x_int += blockDim.y * gridDim.y) {
+            FpExt eq_cube = get_eq_cube(eq_r_ns, num_x, x_int);
+            FpExt k_rot_cube = get_eq_cube(eq_r_ns, num_x, rot_prev(x_int, num_x));
 
-        FpExt eq = eq_uni * eq_cube;
-        FpExt k_rot = k_rot_0 * eq_cube + k_rot_1 * (k_rot_cube - eq_cube);
+            FpExt eq_uni = z_packets[z_int].eq_uni;
+            FpExt k_rot_0 = z_packets[z_int].k_rot_0;
+            FpExt k_rot_1 = z_packets[z_int].k_rot_1;
 
-        // We sum over window at a stride, where stride = gridDim.z is tuned based on compute / memory
-        for (uint32_t window_idx = window_idx_base; window_idx < window_len;
-             window_idx += gridDim.z) {
-            UnstackedSlice unstacked_slice = unstacked_cols[window_idx];
-            const Fp *q_upsampled = q_upsampled_ptr[unstacked_slice.commit_idx];
+            FpExt eq = eq_uni * eq_cube;
+            FpExt k_rot = k_rot_0 * eq_cube + k_rot_1 * (k_rot_cube - eq_cube);
 
-            uint32_t col_idx = unstacked_slice.stacked_col_idx;
-            // ASSUME: unstacked_slice.stacked_row_idx % (2^l_skip) == 0
-            uint32_t row_start = unstacked_slice.stacked_row_idx << (log_domain_size - l_skip);
+            // We sum over window at a stride, where stride = gridDim.z is tuned based on compute / memory
+            for (uint32_t window_idx = window_idx_base; window_idx < window_len;
+                window_idx += gridDim.z) {
+                UnstackedSlice unstacked_slice = unstacked_cols[window_idx];
+                const Fp *q_upsampled = q_upsampled_ptr[unstacked_slice.commit_idx];
 
-            uint32_t row_idx = row_start + (x_int << log_domain_size) + z_int;
+                uint32_t col_idx = unstacked_slice.stacked_col_idx;
+                // ASSUME: unstacked_slice.stacked_row_idx % (2^l_skip) == 0
+                uint32_t row_start = unstacked_slice.stacked_row_idx << (log_domain_size - l_skip);
 
-            uint32_t upsampled_idx = col_idx * upsampled_height + row_idx;
-            Fp q = q_upsampled[upsampled_idx];
+                uint32_t row_idx = row_start + (x_int << log_domain_size) + z_int;
 
-            auto eval =
-                (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) * q;
-            local_sum += eval;
+                uint32_t upsampled_idx = col_idx * upsampled_height + row_idx;
+                Fp q = q_upsampled[upsampled_idx];
+
+                auto eval =
+                    (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) * q;
+                local_sum += eval;
+            }
         }
-    }
 
-    // Reduce phase: reduce all threadIdx.y in the same block, keeping z_int independent
-    shared[threadIdx.y * blockDim.x + threadIdx.x] = local_sum;
+        // Reduce phase: reduce all threadIdx.y in the same block, keeping z_int independent
+        shared[threadIdx.y * blockDim.x + threadIdx.x] = local_sum;
+    }
     __syncthreads();
 
-    if (threadIdx.y == 0) {
+    if (active_thread && threadIdx.y == 0) {
         FpExt tile_sum = shared[threadIdx.x];
         for (int lane = 1; lane < blockDim.y; ++lane) {
             tile_sum += shared[lane * blockDim.x + threadIdx.x];
@@ -165,49 +165,53 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
 
     uint32_t window_idx_base = blockIdx.y;
     uint32_t y_int = blockIdx.x * blockDim.x + threadIdx.x;
-    if (y_int >= num_y)
-        return;
-    uint32_t num_evals = num_y * 2;
+    bool const active_thread = (y_int < num_y);
 
-    // We sum over window at a stride, where stride = gridDim.y is tuned based on compute / memory
-    // Currently assumes blockDim.y = 1
-    for (uint32_t window_idx = window_idx_base; window_idx < window_len; window_idx += gridDim.y) {
-        UnstackedSlice s = unstacked_cols[window_idx];
-        const FpExt *q = q_evals[s.commit_idx];
+    if (active_thread) {
+        uint32_t num_evals = num_y * 2;
 
-        auto log_height = s.log_height;
-        auto col_idx = s.stacked_col_idx;
-        auto row_start = (s.stacked_row_idx >> log_height) * num_evals;
-        auto q_offset = col_idx * q_height + row_start;
+        // We sum over window at a stride, where stride = gridDim.y is tuned based on compute / memory
+        // Currently assumes blockDim.y = 1
+        for (uint32_t window_idx = window_idx_base; window_idx < window_len; window_idx += gridDim.y) {
+            UnstackedSlice s = unstacked_cols[window_idx];
+            const FpExt *q = q_evals[s.commit_idx];
 
-        auto q_0 = q[q_offset + (y_int << 1)];
-        auto q_1 = q[q_offset + (y_int << 1) + 1];
-        auto q_c1 = q_1 - q_0;
+            auto log_height = s.log_height;
+            auto col_idx = s.stacked_col_idx;
+            auto row_start = (s.stacked_row_idx >> log_height) * num_evals;
+            auto q_offset = col_idx * q_height + row_start;
 
-        auto eq_0 = get_eq_cube(eq_r_ns, num_evals, y_int << 1);
-        auto eq_1 = get_eq_cube(eq_r_ns, num_evals, (y_int << 1) | 1);
-        auto eq_c1 = eq_1 - eq_0;
-        auto k_rot_0 = get_eq_cube(k_rot_ns, num_evals, y_int << 1);
-        auto k_rot_1 = get_eq_cube(k_rot_ns, num_evals, (y_int << 1) | 1);
-        auto k_rot_c1 = k_rot_1 - k_rot_0;
+            auto q_0 = q[q_offset + (y_int << 1)];
+            auto q_1 = q[q_offset + (y_int << 1) + 1];
+            auto q_c1 = q_1 - q_0;
 
-        for (int x_int = 1; x_int <= S_DEG; ++x_int) {
-            Fp x = Fp(x_int);
-            auto q_x = q_0 + q_c1 * x;
-            auto eq = eq_0 + eq_c1 * x;
-            auto k_rot = k_rot_0 + k_rot_c1 * x;
+            auto eq_0 = get_eq_cube(eq_r_ns, num_evals, y_int << 1);
+            auto eq_1 = get_eq_cube(eq_r_ns, num_evals, (y_int << 1) | 1);
+            auto eq_c1 = eq_1 - eq_0;
+            auto k_rot_0 = get_eq_cube(k_rot_ns, num_evals, y_int << 1);
+            auto k_rot_1 = get_eq_cube(k_rot_ns, num_evals, (y_int << 1) | 1);
+            auto k_rot_c1 = k_rot_1 - k_rot_0;
 
-            local_sums[x_int - 1] +=
-                (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) * q_x;
+            for (int x_int = 1; x_int <= S_DEG; ++x_int) {
+                Fp x = Fp(x_int);
+                auto q_x = q_0 + q_c1 * x;
+                auto eq = eq_0 + eq_c1 * x;
+                auto k_rot = k_rot_0 + k_rot_c1 * x;
+
+                local_sums[x_int - 1] +=
+                    (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) * q_x;
+            }
         }
     }
 
     // Reduce phase: for each x_int
     for (int idx = 0; idx < S_DEG; idx++) {
-        FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
+        if (active_thread) {
+            FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
 
-        if (threadIdx.x == 0) {
-            block_sums[(window_idx_base * gridDim.x + blockIdx.x) * S_DEG + idx] = reduced;
+            if (threadIdx.x == 0) {
+                block_sums[(window_idx_base * gridDim.x + blockIdx.x) * S_DEG + idx] = reduced;
+            }
         }
         __syncthreads(); // Needed before reusing shared memory
     }
