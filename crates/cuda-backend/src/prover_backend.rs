@@ -280,7 +280,8 @@ impl QuotientCommitter<GB> for GpuDevice {
                         let extended_matrix =
                             pcs_data.data.leaves[matrix_idx].take_lde(quotient_domain.size());
                         Some(RapSinglePhaseView {
-                            inner: Some(extended_matrix), challenges: rap_view.challenges.clone().expect("matrix index out of bounds"),
+                            inner: Some(extended_matrix),
+                            challenges: rap_view.challenges.clone(),
                             exposed_values: rap_view.exposed_values.clone(),
                         })
                     })
@@ -325,7 +326,7 @@ impl QuotientCommitter<GB> for GpuDevice {
         let quotient_values = quotient_data
             .split()
             .into_iter()
-            .map(|q| (q.chunk, self.config.shift / q.domain.shift))
+            .map(|q| (q.chunk, self.config.shift / q.domain.shift()))
             .collect_vec();
         mem.tracing_info("before commit");
 

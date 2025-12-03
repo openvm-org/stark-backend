@@ -165,9 +165,7 @@ where
 
 pub struct UniStarkConfig<SC>(pub SC);
 
-impl<SC: p3_uni_stark::StarkGenericConfig> p3_uni_stark::StarkGenericConfig
-    for UniStarkConfig<SC>
-{
+impl<SC: p3_uni_stark::StarkGenericConfig> p3_uni_stark::StarkGenericConfig for UniStarkConfig<SC> {
     type Pcs = <SC as p3_uni_stark::StarkGenericConfig>::Pcs;
 
     type Challenge = <SC as p3_uni_stark::StarkGenericConfig>::Challenge;

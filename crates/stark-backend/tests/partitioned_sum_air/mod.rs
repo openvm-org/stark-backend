@@ -44,7 +44,7 @@ fn prove_and_verify_sum_air(x: Vec<Val>, ys: Vec<Vec<Val>>) -> Result<(), Verifi
 
     let prover = engine.prover();
     // Demonstrate y is cached
-    let (y_com, y_data) = prover.device.commit(&[y_trace.clone()]);
+    let (y_com, y_data) = prover.device.commit(std::slice::from_ref(&y_trace));
     // Load x normally
     let air_ctx = AirProvingContext {
         cached_mains: vec![CommittedTraceData {

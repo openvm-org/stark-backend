@@ -41,7 +41,10 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for FibonacciAir {
 
         when_first_row.assert_eq(local.left.clone(), a);
         when_first_row.assert_eq(local.middle.clone(), b);
-        when_first_row.assert_eq(local.right.clone(), local.left.clone() + local.middle.clone());
+        when_first_row.assert_eq(
+            local.right.clone(),
+            local.left.clone() + local.middle.clone(),
+        );
 
         let mut when_transition = builder.when_transition();
 
@@ -57,8 +60,6 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for FibonacciAir {
             next.right.clone(),
         );
 
-        builder
-            .when_last_row()
-            .assert_eq(local.right.clone(), x);
+        builder.when_last_row().assert_eq(local.right.clone(), x);
     }
 }

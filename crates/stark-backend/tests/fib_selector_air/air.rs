@@ -66,44 +66,45 @@ where
             .expect("preprocessed window should have one element");
         let preprocessed_local: &FibonacciSelectorCols<AB::Var> = (*preprocessed_local).borrow();
 
-        let (local, next) = (main.row_slice(0).expect("window should have two elements"), main.row_slice(1).expect("window should have two elements"));
+        let (local, next) = (
+            main.row_slice(0).expect("window should have two elements"),
+            main.row_slice(1).expect("window should have two elements"),
+        );
         let local: &FibonacciCols<AB::Var> = (*local).borrow();
         let next: &FibonacciCols<AB::Var> = (*next).borrow();
 
         let mut when_first_row = builder.when_first_row();
 
-        when_first_row.assert_eq(local.left.clone(), a);
-        when_first_row.assert_eq(local.right.clone(), b);
+        when_first_row.assert_eq(local.left, a);
+        when_first_row.assert_eq(local.right, b);
 
         // a' <- sel*b + (1 - sel)*a
         builder
             .when_transition()
-            .when(preprocessed_local.sel.clone())
-            .assert_eq(local.right.clone(), next.left.clone());
+            .when(preprocessed_local.sel)
+            .assert_eq(local.right, next.left);
         builder
             .when_transition()
-            .when_ne(preprocessed_local.sel.clone(), AB::Expr::ONE)
-            .assert_eq(local.left.clone(), next.left.clone());
+            .when_ne(preprocessed_local.sel, AB::Expr::ONE)
+            .assert_eq(local.left, next.left);
 
         // b' <- sel*(a + b) + (1 - sel)*b
         builder
             .when_transition()
-            .when(preprocessed_local.sel.clone())
-            .assert_eq(local.left.clone() + local.right.clone(), next.right.clone());
+            .when(preprocessed_local.sel)
+            .assert_eq(local.left + local.right, next.right);
         builder
             .when_transition()
-            .when_ne(preprocessed_local.sel.clone(), AB::Expr::ONE)
-            .assert_eq(local.right.clone(), next.right.clone());
+            .when_ne(preprocessed_local.sel, AB::Expr::ONE)
+            .assert_eq(local.right, next.right);
 
-        builder
-            .when_last_row()
-            .assert_eq(local.right.clone(), x);
+        builder.when_last_row().assert_eq(local.right, x);
 
         if let Some(bus) = self.bus {
             bus.add_key_with_lookups(
                 builder,
-                vec![local.left.clone() + local.right.clone()],
-                preprocessed_local.sel.clone(),
+                vec![local.left + local.right],
+                preprocessed_local.sel,
             );
         }
     }

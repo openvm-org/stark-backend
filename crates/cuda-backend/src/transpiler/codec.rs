@@ -11,6 +11,7 @@ pub trait Codec {
 
     fn encode(&self) -> Self::Encoded;
 
+    #[allow(dead_code)]
     fn decode(encoded: Self::Encoded) -> Self
     where
         Self: Sized;

@@ -10,10 +10,10 @@ use openvm_stark_backend::{
 };
 use ops::*;
 use p3_baby_bear::Poseidon2BabyBear;
-use p3_commit::{ExtensionMmcs, OpenedValues};
+use p3_commit::{BatchOpening, ExtensionMmcs, OpenedValues};
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
-use p3_field::{dot_product, Field, PrimeCharacteristicRing, BasedVectorSpace, TwoAdicField};
-use p3_fri::{BatchOpening, CommitPhaseProofStep, FriProof, QueryProof};
+use p3_field::{dot_product, BasedVectorSpace, Field, PrimeCharacteristicRing, TwoAdicField};
+use p3_fri::{CommitPhaseProofStep, FriProof, QueryProof};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_util::{linear_map::LinearMap, log2_strict_usize};
@@ -156,7 +156,8 @@ impl OpeningProverGpu {
                         .iter()
                         .map(|reorder_idx| {
                             openings[*reorder_idx].iter().for_each(|ys| {
-                                ys.iter().for_each(|&y| challenger.observe_ext_element(y));
+                                ys.iter()
+                                    .for_each(|&y| challenger.observe_algebra_element(y));
                             });
                             openings[*reorder_idx].clone()
                         })
@@ -194,7 +195,7 @@ impl OpeningProverGpu {
 
                     for (z, openings) in points_for_mat.iter().zip(openings_for_mat.iter()) {
                         let inv_denom = inv_denoms.get(z).unwrap();
-                        let m_z = dot_product(alpha.powers(), openings.iter().expect("matrix index out of bounds").copied());
+                        let m_z = dot_product(alpha.powers(), openings.iter().copied());
                         reduce_matrix_quotient_acc(
                             reduced_opening,
                             &mat,
@@ -388,7 +389,7 @@ fn commit_phase_on_gpu(
 
     // Observe all coefficients of the final polynomial.
     for &x in &final_poly {
-        challenger.observe_ext_element(x);
+        challenger.observe_algebra_element(x);
     }
 
     CommitPhaseGPUResult {
@@ -427,7 +428,11 @@ fn answer_batch_queries_on_gpu(
                     // copied from commit/src/adapters/extension_mmcs.rs#open_batch
                     let opened_ext_values: Vec<Vec<EF>> = opened_base_values
                         .into_iter()
-                        .map(|row| row.chunks(4).map(EF::from_base_slice).collect())
+                        .map(|row| {
+                            row.chunks(4)
+                                .map(|row| EF::from_basis_coefficients_slice(row).unwrap())
+                                .collect()
+                        })
                         .collect();
                     let mut opened_rows = opened_ext_values;
 

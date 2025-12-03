@@ -181,7 +181,7 @@ impl FriLogUpPhaseGpu {
                     .map(|&interaction_idx| {
                         let mut interaction: SymbolicInteraction<F> =
                             all_interactions[interaction_idx].clone();
-                        let b = SymbolicExpression::from_int(interaction.bus_index as u32 + 1);
+                        let b = SymbolicExpression::from_u32(interaction.bus_index as u32 + 1);
                         let betas = symbolic_challenges[alphas_len..].to_vec();
                         debug_assert!(interaction.message.len() <= betas.len());
                         let mut fields = interaction.message.iter();

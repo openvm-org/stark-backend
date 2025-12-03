@@ -40,7 +40,7 @@ impl<AB: PartitionedAirBuilder> Air<AB> for SumAir {
 
         let mut y_sum = AB::Expr::ZERO;
         for y in ys.iter() {
-            y_sum = y_sum + y.clone();
+            y_sum += y.clone();
         }
         drop(ys);
 

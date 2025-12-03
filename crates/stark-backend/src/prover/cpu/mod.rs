@@ -5,7 +5,7 @@ use itertools::{izip, zip_eq, Itertools};
 use opener::OpeningProver;
 use p3_challenger::FieldChallenger;
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::{ExtensionField, Field, BasedVectorSpace};
+use p3_field::{BasedVectorSpace, ExtensionField, Field};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use quotient::QuotientCommitter;
@@ -513,9 +513,10 @@ where
 
 // TODO[jpw]: Avoid using this after switching to new plonky3 commit with <https://github.com/Plonky3/Plonky3/pull/796>
 /// # Safety
-/// Assumes that `EF` is `repr(C)` or `repr(transparent)` with internal memory layout `[F; EF::DIMENSION]`.
-/// This ensures `EF` and `F` have the same alignment and `size_of::<EF>() == size_of::<F>() *
-/// EF::DIMENSION`. We assume that `EF::as_basis_coefficients_slice` is the same as transmuting `EF` to `[F; EF::DIMENSION]`.
+/// Assumes that `EF` is `repr(C)` or `repr(transparent)` with internal memory layout `[F;
+/// EF::DIMENSION]`. This ensures `EF` and `F` have the same alignment and `size_of::<EF>() ==
+/// size_of::<F>() * EF::DIMENSION`. We assume that `EF::as_basis_coefficients_slice` is the same as
+/// transmuting `EF` to `[F; EF::DIMENSION]`.
 unsafe fn transmute_to_base<F: Field, EF: ExtensionField<F>>(
     ext_matrix: RowMajorMatrix<EF>,
 ) -> RowMajorMatrix<F> {

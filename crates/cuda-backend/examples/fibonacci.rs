@@ -46,9 +46,7 @@ fn main() {
     setup_tracing();
     println!("test_single_fib_stark");
 
-    let public_values = [A, B, get_fib_number(N)]
-        .map(BabyBear::from_canonical_u32)
-        .to_vec();
+    let public_values = [A, B, get_fib_number(N)].map(BabyBear::from_u32).to_vec();
     let air = FibonacciAir;
 
     let cpu_trace = Arc::new(generate_trace_rows::<Val>(A, B, N));

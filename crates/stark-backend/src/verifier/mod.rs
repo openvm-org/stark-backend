@@ -3,7 +3,7 @@ use std::iter::zip;
 use itertools::{izip, zip_eq, Itertools};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::{PrimeCharacteristicRing, BasedVectorSpace};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 

@@ -4,7 +4,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
 };
 use openvm_stark_backend::prover::hal::MatrixDimensions;
-use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, BasedVectorSpace, TwoAdicField};
+use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::{linear_map::LinearMap, log2_strict_usize};
 
 use crate::{
@@ -186,7 +186,9 @@ pub(crate) fn fri_fold(
     // we don't support folded poly whose length exceed 2^27
     // as we take advantage of the fact g_inv is a base field element if folded.len() <= 2^27
     assert!(log2_strict_usize(folded.len()) <= 27);
-    assert!(g_inv.as_basis_coefficients_slice()[1..].iter().all(F::is_zero)); // g_inv.is_in_basefield()
+    assert!(g_inv.as_basis_coefficients_slice()[1..]
+        .iter()
+        .all(F::is_zero)); // g_inv.is_in_basefield()
     assert!(!folded.is_bit_reversed);
 
     let half_one = (F::ONE / F::from_usize(2)).into();
@@ -231,8 +233,7 @@ pub(crate) fn matrix_evaluate(
     // Scale factor: M(z) / (N * s^{N-1})
     let log_height = log2_strict_usize(domain_height);
     let zerofier = z.exp_power_of_2(log_height) - shift.exp_power_of_2(log_height);
-    let denominator =
-        EF::from_usize(domain_height) * shift.exp_u64(domain_height as u64 - 1);
+    let denominator = EF::from_usize(domain_height) * shift.exp_u64(domain_height as u64 - 1);
     let scale_factor = zerofier * denominator.inverse();
 
     let ideal_chunks = domain_height.div_ceil(TARGET_CHUNK_SIZE);
