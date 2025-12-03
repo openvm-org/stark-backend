@@ -19,6 +19,12 @@ pub struct StackedLayout {
     /// column is expanded to `2^l_skip` by striding.
     #[getset(get_copy = "pub")]
     l_skip: usize,
+    /// Stacked height
+    #[getset(get_copy = "pub")]
+    height: usize,
+    /// Stacked width
+    #[getset(get_copy = "pub")]
+    width: usize,
     /// The columns of the unstacked matrices in sorted order. Each entry `(matrix index, column
     /// index, coordinate)` contains the pointer `(matrix index, column index)` to a column of the
     /// unstacked collection of matrices as well as `coordinate` which is a pointer to where the
@@ -162,16 +168,39 @@ impl StackedLayout {
                 row_idx += slice_len;
             }
         }
+        let stacked_width = col_idx + usize::from(row_idx != 0);
+        debug_assert_eq!(
+            stacked_width,
+            sorted_cols
+                .iter()
+                .map(|(_, _, slice)| slice.col_idx + 1)
+                .max()
+                .unwrap_or(0)
+        );
         Self {
             l_skip,
+            height: 1 << log_stacked_height,
+            width: stacked_width,
             sorted_cols,
         }
     }
 
     /// Raw unsafe constructor
-    pub fn from_raw_parts(l_skip: usize, sorted_cols: Vec<(usize, usize, StackedSlice)>) -> Self {
+    pub fn from_raw_parts(
+        l_skip: usize,
+        log_stacked_height: usize,
+        sorted_cols: Vec<(usize, usize, StackedSlice)>,
+    ) -> Self {
+        let height = 1 << log_stacked_height;
+        let width = sorted_cols
+            .iter()
+            .map(|(_, _, slice)| slice.col_idx + 1)
+            .max()
+            .unwrap_or(0);
         Self {
             l_skip,
+            height,
+            width,
             sorted_cols,
         }
     }
