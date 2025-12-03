@@ -19,6 +19,7 @@ pub struct TimingMetricsLayer {
 struct SpanTiming {
     name: String,
     start_time: Instant,
+    labels: Vec<(String, String)>,
 }
 
 /// A visitor to extract the return value from span events
@@ -39,10 +40,36 @@ impl Visit for ReturnValueVisitor {
     fn record_str(&mut self, _field: &Field, _value: &str) {}
 }
 
+/// A visitor to extract all string fields from span attributes as metric labels
+#[derive(Default)]
+struct LabelVisitor {
+    labels: Vec<(String, String)>,
+}
+
+impl Visit for LabelVisitor {
+    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+    fn record_i64(&mut self, _field: &Field, _value: i64) {}
+    fn record_u64(&mut self, _field: &Field, _value: u64) {}
+    fn record_bool(&mut self, _field: &Field, _value: bool) {}
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.labels
+            .push((field.name().to_string(), value.to_string()));
+    }
+}
+
 impl TimingMetricsLayer {
     /// Create a new TimingMetricsLayer
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn emit_metric(name: &str, duration_ms: f64, labels: &[(String, String)]) {
+        let metric_name = format!("{}_time_ms", name);
+        let labels: Vec<metrics::Label> = labels
+            .iter()
+            .map(|(k, v)| metrics::Label::new(k.clone(), v.clone()))
+            .collect();
+        metrics::gauge!(metric_name, labels).set(duration_ms);
     }
 }
 
@@ -52,7 +79,7 @@ where
 {
     fn on_new_span(
         &self,
-        _attrs: &tracing::span::Attributes<'_>,
+        attrs: &tracing::span::Attributes<'_>,
         id: &Id,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
@@ -62,11 +89,16 @@ where
 
             // Only track spans at INFO level or higher to match metrics_span behavior
             if metadata.level() <= &tracing::Level::INFO {
+                // Extract all string fields from span attributes as labels
+                let mut label_visitor = LabelVisitor::default();
+                attrs.record(&mut label_visitor);
+
                 self.span_timings.insert(
                     id.clone(),
                     SpanTiming {
                         name: name.to_string(),
                         start_time: Instant::now(),
+                        labels: label_visitor.labels,
                     },
                 );
             }
@@ -86,10 +118,7 @@ where
                 // Emit metric for the span that's returning
                 if let Some((_, timing)) = self.span_timings.remove(&span_id) {
                     let duration_ms = timing.start_time.elapsed().as_millis() as f64;
-
-                    // Emit the metric gauge with the span name
-                    // This matches the behavior of metrics_span
-                    metrics::gauge!(format!("{}_time_ms", timing.name)).set(duration_ms);
+                    Self::emit_metric(&timing.name, duration_ms, &timing.labels);
                 }
             }
         }
@@ -100,9 +129,7 @@ where
         // This handles spans that don't have instrumented return values
         if let Some((_, timing)) = self.span_timings.remove(&id) {
             let duration_ms = timing.start_time.elapsed().as_millis() as f64;
-
-            // Emit the metric gauge with the span name
-            metrics::gauge!(format!("{}_time_ms", timing.name)).set(duration_ms);
+            Self::emit_metric(&timing.name, duration_ms, &timing.labels);
         }
     }
 }
