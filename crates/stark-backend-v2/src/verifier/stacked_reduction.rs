@@ -278,7 +278,7 @@ mod tests {
             .collect_vec();
 
         let slice = StackedSlice::new(0, 0, L_SKIP + N_STACK);
-        let layout = StackedLayout::from_raw_parts(L_SKIP, vec![(0, 0, slice)]);
+        let layout = StackedLayout::from_raw_parts(L_SKIP, L_SKIP + N_STACK, vec![(0, 0, slice)]);
 
         let q = generate_random_linear_q(&mut rng);
         let r = (0..=N_STACK)
