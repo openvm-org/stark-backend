@@ -1,4 +1,4 @@
-use std::{cmp::max, ffi::c_void, sync::Arc};
+use std::{ffi::c_void, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::{
@@ -44,11 +44,16 @@ pub fn stacked_commit(
     cache_stacked_matrix: bool,
 ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
     let mem = MemTracker::start_and_reset_peak("prover.stacked_commit");
-    let (q_matrix, layout) = stacked_matrix(l_skip, n_stack, traces)?;
-    let (rs_matrix, opt_q_matrix) = rs_code_matrix(l_skip, log_blowup, q_matrix, cache_stacked_matrix)?;
+    let layout = get_stacked_layout(l_skip, n_stack, traces);
+    let opt_stacked_matrix = if cache_stacked_matrix {
+        Some(stack_traces(&layout, traces)?)
+    } else {
+        None
+    };
+    let rs_matrix = rs_code_matrix(log_blowup, &layout, traces, &opt_stacked_matrix)?;
     let tree = MerkleTreeGpu::<F, Digest>::new(rs_matrix, 1 << k_whir)?;
     let root = tree.root();
-    let data = StackedPcsDataGpu::new(layout, opt_q_matrix, tree);
+    let data = StackedPcsDataGpu::new(layout, opt_stacked_matrix, tree);
     mem.emit_metrics();
     Ok((root, data))
 }
@@ -62,7 +67,16 @@ pub fn stacked_matrix(
     n_stack: usize,
     traces: &[&DeviceMatrix<F>],
 ) -> Result<(PleMatrix<F>, StackedLayout), ProverError> {
-    let mem = MemTracker::start("prover.stacked_matrix");
+    let layout = get_stacked_layout(l_skip, n_stack, traces);
+    let matrix = stack_traces(&layout, traces)?;
+    Ok((matrix, layout))
+}
+
+pub(crate) fn get_stacked_layout(
+    l_skip: usize,
+    n_stack: usize,
+    traces: &[&DeviceMatrix<F>],
+) -> StackedLayout {
     let sorted_meta = traces
         .iter()
         .enumerate()
@@ -73,39 +87,39 @@ pub fn stacked_matrix(
         })
         .collect_vec();
     debug_assert!(sorted_meta.is_sorted_by(|a, b| a.2 >= b.2));
-    let layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
-    let matrix = stack_traces(n_stack, &layout, traces)?;
-    mem.emit_metrics();
-    Ok((matrix, layout))
+    StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta)
 }
 
 pub(crate) fn stack_traces(
-    n_stack: usize,
     layout: &StackedLayout,
     traces: &[&DeviceMatrix<F>],
 ) -> Result<PleMatrix<F>, ProverError> {
+    let mem = MemTracker::start("prover.stack_traces");
     let l_skip = layout.l_skip();
-    let total_cells: usize = traces
-        .iter()
-        .map(|t| max(t.height(), 1 << l_skip) * t.width())
-        .sum();
-    let height = 1usize << (l_skip + n_stack);
-    let width = total_cells.div_ceil(height);
-    assert_ne!(total_cells, 0);
-    debug_assert_eq!(
-        width,
-        layout
-            .unstacked_slices_iter()
-            .map(|s| s.col_idx)
-            .max()
-            .unwrap_or(0)
-            + 1
-    );
+    let height = layout.height();
+    let width = layout.width();
+    let mut q_evals = DeviceBuffer::<F>::with_capacity(width.checked_mul(height).unwrap());
+    stack_traces_into_expanded(layout, traces, &mut q_evals, height)?;
+    mem.emit_metrics();
+    Ok(PleMatrix::from_evals(l_skip, q_evals, height, width))
+}
 
-    let q_evals = DeviceBuffer::<F>::with_capacity(width.checked_mul(height).unwrap());
-    q_evals.fill_zero()?;
+/// `buffer` should be the buffer to write the stacked traces into.
+/// `buffer` should be a matrix with dimensions `padded_height x width` where `width` is the stacked
+/// width and `padded_height` must be a multiple of the stacked height.
+pub(crate) fn stack_traces_into_expanded(
+    layout: &StackedLayout,
+    traces: &[&DeviceMatrix<F>],
+    buffer: &mut DeviceBuffer<F>,
+    padded_height: usize,
+) -> Result<(), ProverError> {
+    let l_skip = layout.l_skip();
+    debug_assert_eq!(padded_height % layout.height(), 0);
+    debug_assert_eq!(buffer.len() % padded_height, 0);
+    debug_assert_eq!(buffer.len() / padded_height, layout.width());
+    buffer.fill_zero()?;
     for (mat_idx, j, s) in &layout.sorted_cols {
-        let start = s.col_idx * height + s.row_idx;
+        let start = s.col_idx * padded_height + s.row_idx;
         let trace = traces[*mat_idx];
         let s_len = s.len(l_skip);
         debug_assert_eq!(trace.height(), 1 << s.log_height());
@@ -116,7 +130,7 @@ pub(crate) fn stack_traces(
             // - `q_buf` has enough capacity by definition of stacked `layout`
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * s_len);
-                let dst = q_evals.as_mut_ptr().add(start);
+                let dst = buffer.as_mut_ptr().add(start);
                 // D2D memcpy
                 cuda_memcpy::<true, true>(
                     dst as *mut c_void,
@@ -133,46 +147,61 @@ pub(crate) fn stack_traces(
             //   column of length `s_len = stride * trace.height()`
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * trace.height());
-                let dst = q_evals.as_mut_ptr().add(start);
+                let dst = buffer.as_mut_ptr().add(start);
                 batch_expand_pad_wide(dst, src, trace.height() as u32, stride as u32, 1)?;
             }
         }
     }
-    Ok(PleMatrix::from_evals(l_skip, q_evals, height, width))
+    Ok(())
 }
 
 /// Computes the Reed-Solomon codeword of each column vector of `eval_matrix` where the rate is
 /// `2^{-log_blowup}`. The column vectors are treated as evaluations of a prismalinear extension on
 /// a hyperprism.
+///
+/// Uses `stacked_matrix` if available, or else stacks `traces` directly into final codeword matrix
+/// buffer.
 #[instrument(skip_all)]
 pub fn rs_code_matrix(
-    l_skip: usize,
     log_blowup: usize,
-    matrix: PleMatrix<F>,
-    cache_matrix: bool,
-) -> Result<(DeviceMatrix<F>, Option<PleMatrix<F>>), ProverError> {
-    let mem = MemTracker::start("prover.rs_code_matrix");
-    let height = matrix.height();
+    layout: &StackedLayout,
+    traces: &[&DeviceMatrix<F>],
+    stacked_matrix: &Option<PleMatrix<F>>,
+) -> Result<DeviceMatrix<F>, ProverError> {
+    let mem = MemTracker::start_and_reset_peak("prover.rs_code_matrix");
+    let l_skip = layout.l_skip();
+    let height = layout.height();
+    let width = layout.width();
     debug_assert!(height >= (1 << l_skip));
-    let width = matrix.width();
     let codeword_height = height.checked_shl(log_blowup as u32).unwrap();
-    let codewords = DeviceBuffer::<F>::with_capacity(codeword_height * width);
-    // The following three kernels together perform MLE interpolation followed by coset NTT for
+    let mut codewords = DeviceBuffer::<F>::with_capacity(codeword_height * width);
+    // The following kernels together perform MLE interpolation followed by coset NTT for
     // `width` polys from `height -> codeword_height` size domains.
-
-    // SAFETY: `codewords` is allocated for `width` polys of `codeword_height` each, and we expand
-    // from `matrix.mxied` which is `width` polys of `height` each.
-    unsafe {
-        batch_expand_pad(
-            &codewords,
-            &matrix.mixed,
-            width as u32,
-            codeword_height as u32,
-            height as u32,
-        )?;
+    if let Some(stacked_matrix) = stacked_matrix.as_ref() {
+        // SAFETY: `codewords` is allocated for `width` polys of `codeword_height` each, and we
+        // expand from `matrix.mixed` which is `width` polys of `height` each.
+        unsafe {
+            batch_expand_pad(
+                &codewords,
+                &stacked_matrix.mixed,
+                width as u32,
+                codeword_height as u32,
+                height as u32,
+            )?;
+        }
+    } else {
+        stack_traces_into_expanded(layout, traces, &mut codewords, codeword_height)?;
+        // Currently codewords has the stacked matrix, batch expanded, in evaluation form on
+        // hyperprism. We convert it to mixed form, i.e., unroll `PleMatrix::from_evals`.
+        // PERF[jpw]: We do some wasted work on the padded zero part. A more specialized kernel
+        // could be written to avoid this.
+        if l_skip > 0 {
+            // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column:
+            // (width cols) * (codeword_height / 2^l_skip chunks per col). Use natural ordering.
+            let num_uni_poly = (width * (codeword_height >> l_skip)).try_into().unwrap();
+            batch_ntt(&codewords, l_skip as u32, 0, num_uni_poly, true, true);
+        }
     }
-    // If not caching matrix, drop `matrix` now to save memory.
-    let opt_matrix = cache_matrix.then_some(matrix);
     let n = log2_strict_usize(height) - l_skip;
     // Go through coordinates X_1, ..., X_n and interpolate each one from s(0), s(1) -> s(0) +
     // (s(1) - s(0)) X_i
@@ -202,14 +231,10 @@ pub fn rs_code_matrix(
         true,
         false,
     );
-    let code_matrix = DeviceMatrix::new(
-            Arc::new(codewords),
-            codeword_height,
-            width,
-        );
+    let code_matrix = DeviceMatrix::new(Arc::new(codewords), codeword_height, width);
     mem.emit_metrics();
 
-    Ok((code_matrix, opt_matrix))
+    Ok(code_matrix)
 }
 
 impl<F, Digest> StackedPcsDataGpu<F, Digest> {
