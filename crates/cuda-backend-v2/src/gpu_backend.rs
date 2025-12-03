@@ -109,7 +109,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
         r: Vec<EF>,
     ) -> (StackingProof, WhirProof) {
-        let mem = MemTracker::start_and_reset_peak("prover.openings");
+        let mut mem = MemTracker::start_and_reset_peak("prover.openings");
         let params = self.config;
         let (stacking_proof, u_prisma, stacked_per_commit) = prove_stacked_opening_reduction_gpu(
             self,
@@ -131,6 +131,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
         let whir_proof =
             prove_whir_opening_gpu(&params, transcript, stacked_per_commit, &u_cube).unwrap();
         mem.emit_metrics();
+        mem.reset_peak();
         (stacking_proof, whir_proof)
     }
 }

@@ -95,7 +95,6 @@ impl StackedPcsData2 {
     /// # Safety
     /// `traces` must be the traces that were committed to in `pcs_data`.
     pub unsafe fn from_raw(
-        n_stack: usize,
         pcs_data: Arc<StackedPcsDataGpu<F, Digest>>,
         traces: &[&DeviceMatrix<F>],
     ) -> Result<Self, ProverError> {
@@ -106,7 +105,7 @@ impl StackedPcsData2 {
             })
         } else {
             let layout = &pcs_data.layout;
-            let matrix = stack_traces(n_stack, layout, traces)?;
+            let matrix = stack_traces(layout, traces)?;
             Ok(Self {
                 inner: pcs_data,
                 stacked_matrix: Some(matrix),
@@ -257,7 +256,7 @@ impl StackedReductionGpu {
             .collect_vec();
         // SAFETY: common_main_traces commits to common_main_pcs_data
         let common_main_stacked = unsafe {
-            StackedPcsData2::from_raw(n_stack, Arc::new(common_main_pcs_data), &common_main_traces)?
+            StackedPcsData2::from_raw(Arc::new(common_main_pcs_data), &common_main_traces)?
         };
         let mut stacked_per_commit = vec![common_main_stacked];
         // Drop all traces
@@ -272,7 +271,7 @@ impl StackedReductionGpu {
             {
                 // SAFETY: committed.trace commits to committed.data
                 let stacked = unsafe {
-                    StackedPcsData2::from_raw(n_stack, committed.data.clone(), &[&committed.trace])?
+                    StackedPcsData2::from_raw(committed.data.clone(), &[&committed.trace])?
                 };
                 stacked_per_commit.push(stacked);
             }
