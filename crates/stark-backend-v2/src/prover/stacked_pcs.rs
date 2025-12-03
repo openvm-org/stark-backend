@@ -145,6 +145,7 @@ impl StackedLayout {
         let mut col_idx = 0;
         let mut row_idx = 0;
         for (mat_idx, (width, log_ht)) in sorted.into_iter().enumerate() {
+            mat_starts.push(sorted_cols.len());
             if width == 0 {
                 continue;
             }
@@ -152,7 +153,6 @@ impl StackedLayout {
                 log_ht <= log_stacked_height,
                 "log_height={log_ht} > log_stacked_height={log_stacked_height}"
             );
-            mat_starts.push(sorted_cols.len());
             for j in 0..width {
                 let slice_len = StackedSlice::_len(log_ht, l_skip);
                 if row_idx + slice_len > (1 << log_stacked_height) {
