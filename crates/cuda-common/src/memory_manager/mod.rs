@@ -9,7 +9,7 @@ use bytesize::ByteSize;
 
 use crate::{
     error::{check, MemoryError},
-    stream::{cudaStreamPerThread, cudaStream_t, current_stream_id},
+    stream::{cudaStreamPerThread, cudaStream_t, current_stream_id, device_synchronize},
 };
 
 mod cuda;
@@ -113,6 +113,7 @@ impl MemoryManager {
 
 impl Drop for MemoryManager {
     fn drop(&mut self) {
+        device_synchronize().unwrap();
         let ptrs: Vec<*mut c_void> = self.allocated_ptrs.keys().map(|nn| nn.as_ptr()).collect();
         for &ptr in &ptrs {
             if let Err(e) = unsafe { self.d_free(ptr) } {
