@@ -127,86 +127,87 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
     // The univariate coordinate: we need to output these
     // We assume that large_domain <= gridDim.x * blockDim.x
     uint32_t z_int = blockIdx.x * blockDim.x + threadIdx.x;
-    if (z_int >= large_domain) {
-        return;
+    bool const active_thread = (z_int < large_domain);
+
+    if (active_thread) {
+        // The hypercube coordinates: we want to sum over these. [todo] We'll sum over the ones in the same block using shared memory.
+        uint32_t x_int_base = blockIdx.y * blockDim.y + threadIdx.y;
+        uint32_t x_int_stride = gridDim.y * blockDim.y;
+
+        uint32_t task_offset = x_int_base * large_domain + z_int;
+        // The maximal amount of rows done by different threads; hence we need enough global memory [buffer_size * task_stride] for intermediates
+        uint32_t task_stride = x_int_stride * large_domain;
+
+        Fp local_buffer[BUFFER_THRESHOLD];
+        Fp *inter_buffer;
+        uint32_t buffer_stride;
+        if constexpr (GLOBAL) {
+            inter_buffer = d_intermediates + task_offset;
+            buffer_stride = task_stride;
+        } else {
+            inter_buffer = local_buffer;
+            buffer_stride = 1;
+        }
+
+        uint32_t log_skip = __ffs(skip_domain) - 1;
+        uint32_t log_height_total = __ffs(height) - 1;
+        uint32_t log_segment = std::min(log_skip, log_height_total);
+        uint32_t segment_size = 1u << log_segment;
+        uint32_t log_stride = log_skip - log_segment;
+
+        Fp omega_root = TWO_ADIC_GENERATORS[__ffs(expansion_factor * skip_domain) - 1];
+        Fp omega = pow(omega_root, z_int << log_stride);
+
+        Fp eta = TWO_ADIC_GENERATORS[log_skip - log_stride];
+
+        Fp is_first_mult = avg_gp(omega, segment_size);
+        Fp is_last_mult = avg_gp(omega * eta, segment_size);
+
+        FracExt sum = {FpExt(Fp::zero()), FpExt(Fp::zero())};
+        // See zerocheck_bary_evaluate_constraints_kernel for comments
+        for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
+            Fp is_first = is_first_mult * selectors_cube[x_int];
+            Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
+            const Fp *inv_lagrange_denoms_z = inv_lagrange_denoms + z_int * skip_domain;
+
+            DagPrismEvalContext eval_ctx{
+                preprocessed,
+                main_parts,
+                public_values,
+                omega_skip_pows,
+                inv_lagrange_denoms_z,
+                inter_buffer,
+                is_first,
+                is_last,
+                skip_domain,
+                num_x,
+                height,
+                buffer_stride,
+                buffer_size,
+                z_int,
+                x_int,
+                expansion_factor
+            };
+
+            FpExt numer = FpExt(Fp::zero());
+            FpExt denom = denom_sum_init;
+            // Compute interaction sums (without eq_* multiplication)
+            bary_acc_interactions<GLOBAL>(
+                eval_ctx, numer_weights, denom_weights, d_rules, rules_len, local_buffer, numer, denom
+            );
+            FpExt eq_sharp = eq_sharp_uni[z_int] * eq_cube[x_int];
+
+            // Apply eq_val multiplier to both sums
+            sum.p += eq_sharp * numer;
+            sum.q += eq_sharp * denom;
+        }
+
+        // Reduce phase: reduce all threadIdx.y in the same block, keeping z_int independent
+        shared[threadIdx.y * blockDim.x + threadIdx.x] = sum;
     }
-    // The hypercube coordinates: we want to sum over these. [todo] We'll sum over the ones in the same block using shared memory.
-    uint32_t x_int_base = blockIdx.y * blockDim.y + threadIdx.y;
-    uint32_t x_int_stride = gridDim.y * blockDim.y;
-
-    uint32_t task_offset = x_int_base * large_domain + z_int;
-    // The maximal amount of rows done by different threads; hence we need enough global memory [buffer_size * task_stride] for intermediates
-    uint32_t task_stride = x_int_stride * large_domain;
-
-    Fp local_buffer[BUFFER_THRESHOLD];
-    Fp *inter_buffer;
-    uint32_t buffer_stride;
-    if constexpr (GLOBAL) {
-        inter_buffer = d_intermediates + task_offset;
-        buffer_stride = task_stride;
-    } else {
-        inter_buffer = local_buffer;
-        buffer_stride = 1;
-    }
-
-    uint32_t log_skip = __ffs(skip_domain) - 1;
-    uint32_t log_height_total = __ffs(height) - 1;
-    uint32_t log_segment = std::min(log_skip, log_height_total);
-    uint32_t segment_size = 1u << log_segment;
-    uint32_t log_stride = log_skip - log_segment;
-
-    Fp omega_root = TWO_ADIC_GENERATORS[__ffs(expansion_factor * skip_domain) - 1];
-    Fp omega = pow(omega_root, z_int << log_stride);
-
-    Fp eta = TWO_ADIC_GENERATORS[log_skip - log_stride];
-
-    Fp is_first_mult = avg_gp(omega, segment_size);
-    Fp is_last_mult = avg_gp(omega * eta, segment_size);
-
-    FracExt sum = {FpExt(Fp::zero()), FpExt(Fp::zero())};
-    // See zerocheck_bary_evaluate_constraints_kernel for comments
-    for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
-        Fp is_first = is_first_mult * selectors_cube[x_int];
-        Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
-        const Fp *inv_lagrange_denoms_z = inv_lagrange_denoms + z_int * skip_domain;
-
-        DagPrismEvalContext eval_ctx{
-            preprocessed,
-            main_parts,
-            public_values,
-            omega_skip_pows,
-            inv_lagrange_denoms_z,
-            inter_buffer,
-            is_first,
-            is_last,
-            skip_domain,
-            num_x,
-            height,
-            buffer_stride,
-            buffer_size,
-            z_int,
-            x_int,
-            expansion_factor
-        };
-
-        FpExt numer = FpExt(Fp::zero());
-        FpExt denom = denom_sum_init;
-        // Compute interaction sums (without eq_* multiplication)
-        bary_acc_interactions<GLOBAL>(
-            eval_ctx, numer_weights, denom_weights, d_rules, rules_len, local_buffer, numer, denom
-        );
-        FpExt eq_sharp = eq_sharp_uni[z_int] * eq_cube[x_int];
-
-        // Apply eq_val multiplier to both sums
-        sum.p += eq_sharp * numer;
-        sum.q += eq_sharp * denom;
-    }
-
-    // Reduce phase: reduce all threadIdx.y in the same block, keeping z_int independent
-    shared[threadIdx.y * blockDim.x + threadIdx.x] = sum;
     __syncthreads();
 
-    if (threadIdx.y == 0) {
+    if (active_thread && threadIdx.y == 0) {
         FracExt tile_sum = shared[threadIdx.x];
         for (int lane = 1; lane < blockDim.y; ++lane) {
             tile_sum.p += shared[lane * blockDim.x + threadIdx.x].p;
