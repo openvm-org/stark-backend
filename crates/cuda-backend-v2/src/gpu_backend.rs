@@ -1,5 +1,7 @@
 use std::{cmp::max, fmt::Debug, sync::Arc};
 
+use tracing::instrument;
+
 use itertools::Itertools;
 use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
@@ -75,6 +77,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
     type Artifacts = Vec<EF>;
 
+    #[instrument(name = "prover.rap_constraints", skip_all, fields(phase = "prover"))]
     fn prove_rap_constraints(
         &self,
         transcript: &mut TS,
@@ -101,6 +104,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<EF>;
 
+    #[instrument(name = "prover.openings", skip_all, fields(phase = "prover"))]
     fn prove_openings(
         &self,
         transcript: &mut TS,
