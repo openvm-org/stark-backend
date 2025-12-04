@@ -387,3 +387,322 @@ fn test_oom_error() {
         }
     }
 }
+
+// ============================================================================
+// Edge Case Tests for Defragmentation
+// ============================================================================
+
+// Helper to create a small test pool
+fn create_test_pool(initial_pages: usize) -> VirtualMemoryPool {
+    let config = VpmmConfig {
+        page_size: None,  // Use device granularity
+        va_size: 1 << 30, // 1 GB VA space
+        initial_pages,
+    };
+    let pool = VirtualMemoryPool::new(config);
+    if pool.page_size == usize::MAX {
+        panic!("VPMM not supported, cannot run this test");
+    }
+    pool
+}
+
+// ============================================================================
+// Test: Multiple consecutive defragmentation operations
+// ============================================================================
+#[test]
+fn test_multiple_defrag_cycles() {
+    let mut pool = create_test_pool(8);
+    let page_size = pool.page_size;
+    let stream_id = current_stream_id().unwrap();
+
+    for cycle in 0..3 {
+        // Create fragmentation
+        let ptrs: Vec<_> = (0..4)
+            .map(|_| pool.malloc_internal(2 * page_size, stream_id).unwrap())
+            .collect();
+
+        // Free alternating
+        pool.free_internal(ptrs[0], stream_id).unwrap();
+        pool.free_internal(ptrs[2], stream_id).unwrap();
+
+        // Request contiguous that requires defrag
+        let ptr_big = pool.malloc_internal(4 * page_size, stream_id).unwrap();
+        assert!(!ptr_big.is_null(), "Cycle {} failed to allocate", cycle);
+
+        // Cleanup for next cycle
+        pool.free_internal(ptrs[1], stream_id).unwrap();
+        pool.free_internal(ptrs[3], stream_id).unwrap();
+        pool.free_internal(ptr_big, stream_id).unwrap();
+    }
+}
+
+// ============================================================================
+// Additional Edge Case Tests for Complete Coverage
+// ============================================================================
+
+// ============================================================================
+// Test: Comprehensive coalescing verification for prev, next, and both neighbors
+// Tests that merged regions have correct sizes and addresses
+// ============================================================================
+#[test]
+fn test_coalesce_all_neighbor_cases() {
+    let mut pool = create_test_pool(6);
+    let page_size = pool.page_size;
+    let stream_id = current_stream_id().unwrap();
+
+    // --- Case 1: Coalesce with PREV neighbor ---
+    // Allocate: [A(2)][B(2)][C(2)]
+    let ptr_a = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_b = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_c = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+
+    // Free B, then A -> A merges with B (prev neighbor)
+    pool.free_internal(ptr_b, stream_id).unwrap();
+    pool.free_internal(ptr_a, stream_id).unwrap();
+
+    // Verify 4 pages available from coalesced A+B
+    let ptr_4 = pool.malloc_internal(4 * page_size, stream_id).unwrap();
+    assert_eq!(ptr_4 as usize, ptr_a as usize, "Prev: should start at A");
+    assert_eq!(pool.memory_usage(), 6 * page_size, "Prev: no new alloc");
+
+    // Reset for next case
+    pool.free_internal(ptr_c, stream_id).unwrap();
+    pool.free_internal(ptr_4, stream_id).unwrap();
+
+    // --- Case 2: Coalesce with NEXT neighbor ---
+    let ptr_a = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_b = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_c = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+
+    // Free A, then B -> B merges with A (next neighbor from A's POV)
+    pool.free_internal(ptr_a, stream_id).unwrap();
+    pool.free_internal(ptr_b, stream_id).unwrap();
+
+    let ptr_4 = pool.malloc_internal(4 * page_size, stream_id).unwrap();
+    assert_eq!(ptr_4 as usize, ptr_a as usize, "Next: should start at A");
+
+    // Reset for next case
+    pool.free_internal(ptr_c, stream_id).unwrap();
+    pool.free_internal(ptr_4, stream_id).unwrap();
+
+    // --- Case 3: Coalesce with BOTH neighbors ---
+    let ptr_a = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_b = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_c = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+
+    // Free A, C, then B (middle) -> B merges with both
+    pool.free_internal(ptr_a, stream_id).unwrap();
+    pool.free_internal(ptr_c, stream_id).unwrap();
+    pool.free_internal(ptr_b, stream_id).unwrap();
+
+    let ptr_6 = pool.malloc_internal(6 * page_size, stream_id).unwrap();
+    assert_eq!(ptr_6 as usize, ptr_a as usize, "Both: should start at A");
+    assert_eq!(pool.memory_usage(), 6 * page_size, "Both: no new alloc");
+
+    pool.free_internal(ptr_6, stream_id).unwrap();
+}
+
+// ============================================================================
+// Test: NO coalescing across different streams; defrag still works
+// ============================================================================
+#[test]
+fn test_no_coalesce_across_streams() {
+    let mut pool = create_test_pool(6);
+    let page_size = pool.page_size;
+    let stream_id_1 = current_stream_id().unwrap();
+    let stream_id_2 = stream_id_1 + 1000; // Simulate different stream
+
+    // Allocate: [A(2)][B(2)][C(2)]
+    let ptr_a = pool.malloc_internal(2 * page_size, stream_id_1).unwrap();
+    let ptr_b = pool.malloc_internal(2 * page_size, stream_id_1).unwrap();
+    let ptr_c = pool.malloc_internal(2 * page_size, stream_id_1).unwrap();
+
+    // Free A on stream_1, B on stream_2, C on stream_1
+    // B should NOT coalesce with A or C (different stream)
+    pool.free_internal(ptr_a, stream_id_1).unwrap();
+    pool.free_internal(ptr_b, stream_id_2).unwrap();
+    pool.free_internal(ptr_c, stream_id_1).unwrap();
+
+    // Requesting 4 pages needs defrag to combine A + C (skipping B)
+    let memory_before = pool.memory_usage();
+    let ptr_4 = pool.malloc_internal(4 * page_size, stream_id_1).unwrap();
+    assert!(!ptr_4.is_null());
+    assert_eq!(pool.memory_usage(), memory_before, "Defrag reused existing");
+
+    pool.free_internal(ptr_4, stream_id_1).unwrap();
+}
+
+// ============================================================================
+// Test: Tail free regions are properly returned and usable after defrag
+// Covers: oldest-first ordering, partial consumption, tail verification
+// ============================================================================
+#[test]
+fn test_defrag_tail_regions_returned() {
+    let mut pool = create_test_pool(10);
+    let page_size = pool.page_size;
+    let stream_id = current_stream_id().unwrap();
+
+    // Allocate 5 x 2-page regions
+    let ptrs: Vec<_> = (0..5)
+        .map(|_| pool.malloc_internal(2 * page_size, stream_id).unwrap())
+        .collect();
+
+    // Free alternating to create fragmentation with 6 free pages in 3 regions
+    // Layout: [2 free][2 alloc][2 free][2 alloc][2 free]
+    pool.free_internal(ptrs[0], stream_id).unwrap();
+    pool.free_internal(ptrs[2], stream_id).unwrap();
+    pool.free_internal(ptrs[4], stream_id).unwrap();
+
+    // Request 5 pages -> defrag takes 2+2+1, leaving 1 page as tail
+    let memory_before = pool.memory_usage();
+    let ptr_5 = pool.malloc_internal(5 * page_size, stream_id).unwrap();
+    assert_eq!(pool.memory_usage(), memory_before, "No new pages needed");
+
+    // Verify tail exists: can allocate 1 more without new allocation
+    let ptr_1 = pool.malloc_internal(page_size, stream_id).unwrap();
+    assert_eq!(pool.memory_usage(), memory_before, "Tail page reused");
+
+    // Now requesting more requires new allocation
+    let ptr_extra = pool.malloc_internal(page_size, stream_id).unwrap();
+    assert_eq!(
+        pool.memory_usage(),
+        memory_before + page_size,
+        "New page allocated"
+    );
+
+    // Cleanup
+    pool.free_internal(ptrs[1], stream_id).unwrap();
+    pool.free_internal(ptrs[3], stream_id).unwrap();
+    pool.free_internal(ptr_5, stream_id).unwrap();
+    pool.free_internal(ptr_1, stream_id).unwrap();
+    pool.free_internal(ptr_extra, stream_id).unwrap();
+}
+
+// ============================================================================
+// Test: Unmapped region coalescing during remap operations
+// ============================================================================
+#[test]
+fn test_unmapped_region_coalescing_comprehensive() {
+    let mut pool = create_test_pool(6);
+    let page_size = pool.page_size;
+    let stream_id = current_stream_id().unwrap();
+
+    // Allocate: [A(2)][B(2)][C(2)]
+    let ptr_a = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_b = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_c = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+
+    // Free A and B -> should coalesce to 4 free pages
+    pool.free_internal(ptr_a, stream_id).unwrap();
+    pool.free_internal(ptr_b, stream_id).unwrap();
+
+    // Request 4 pages from coalesced region
+    let ptr_4 = pool.malloc_internal(4 * page_size, stream_id).unwrap();
+    assert_eq!(ptr_4 as usize, ptr_a as usize);
+
+    // Free everything
+    pool.free_internal(ptr_4, stream_id).unwrap();
+    pool.free_internal(ptr_c, stream_id).unwrap();
+
+    // Request 7 pages -> needs remap + 1 new page
+    // Unmapped regions from remap should coalesce properly
+    let memory_before = pool.memory_usage();
+    let ptr_7 = pool.malloc_internal(7 * page_size, stream_id).unwrap();
+    assert_eq!(pool.memory_usage(), memory_before + page_size);
+
+    pool.free_internal(ptr_7, stream_id).unwrap();
+}
+
+// ============================================================================
+// Test: Defrag with new pages merging with existing free regions
+// ============================================================================
+#[test]
+fn test_defrag_new_pages_merge_with_existing() {
+    let config = VpmmConfig {
+        page_size: None,
+        va_size: 1 << 30,
+        initial_pages: 0,
+    };
+    let mut pool = VirtualMemoryPool::new(config);
+
+    if pool.page_size == usize::MAX {
+        println!("VPMM not supported, skipping test");
+        return;
+    }
+
+    let page_size = pool.page_size;
+    let stream_id = current_stream_id().unwrap();
+
+    // Allocate 2 pages, then free them
+    let ptr_2 = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    assert_eq!(pool.memory_usage(), 2 * page_size);
+    pool.free_internal(ptr_2, stream_id).unwrap();
+
+    // Request 4 pages -> allocates 2 new + uses 2 free (merge)
+    let ptr_4 = pool.malloc_internal(4 * page_size, stream_id).unwrap();
+    assert_eq!(pool.memory_usage(), 4 * page_size);
+    assert!(!ptr_4.is_null());
+
+    // Test with preallocated pool: alloc merges with prev free
+    pool.free_internal(ptr_4, stream_id).unwrap();
+
+    let ptr_a = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    let ptr_b = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+    pool.free_internal(ptr_a, stream_id).unwrap();
+
+    // Request 4 pages with 2 free -> need 2 more
+    let ptr_req = pool.malloc_internal(4 * page_size, stream_id).unwrap();
+    assert!(!ptr_req.is_null());
+    assert_eq!(pool.memory_usage(), 6 * page_size);
+
+    pool.free_internal(ptr_b, stream_id).unwrap();
+    pool.free_internal(ptr_req, stream_id).unwrap();
+}
+
+// ============================================================================
+// Test: Multiple defrag scenarios in sequence
+// Covers: exact fit (no tail), remap with new page allocation, combining regions
+// ============================================================================
+#[test]
+fn test_defrag_various_scenarios() {
+    let mut pool = create_test_pool(10);
+    let page_size = pool.page_size;
+    let stream_id = current_stream_id().unwrap();
+
+    // --- Scenario 1: Exact fit, no tail ---
+    let ptrs: Vec<_> = (0..5)
+        .map(|_| pool.malloc_internal(2 * page_size, stream_id).unwrap())
+        .collect();
+
+    // Free all in scattered order -> should coalesce completely
+    pool.free_internal(ptrs[1], stream_id).unwrap();
+    pool.free_internal(ptrs[3], stream_id).unwrap();
+    pool.free_internal(ptrs[0], stream_id).unwrap();
+    pool.free_internal(ptrs[4], stream_id).unwrap();
+    pool.free_internal(ptrs[2], stream_id).unwrap();
+
+    // Request all 10 pages (exact fit)
+    let ptr_10 = pool.malloc_internal(10 * page_size, stream_id).unwrap();
+    assert!(!ptr_10.is_null());
+    assert_eq!(pool.memory_usage(), 10 * page_size);
+
+    // --- Scenario 2: Remap with new page allocation (reuse same pool state) ---
+    // Layout now: [10 malloc]
+    // Free the 10-page region, then create fragmentation
+    pool.free_internal(ptr_10, stream_id).unwrap();
+
+    // Allocate 6 + 4 pages
+    let ptr_a = pool.malloc_internal(6 * page_size, stream_id).unwrap();
+    let ptr_b = pool.malloc_internal(4 * page_size, stream_id).unwrap();
+
+    // Free A, keep B -> [6 free][4 malloc]
+    pool.free_internal(ptr_a, stream_id).unwrap();
+
+    // Request 7 pages: 6 free + need 1 more
+    let memory_before = pool.memory_usage();
+    let ptr_7 = pool.malloc_internal(7 * page_size, stream_id).unwrap();
+    assert_eq!(pool.memory_usage(), memory_before + page_size);
+
+    pool.free_internal(ptr_b, stream_id).unwrap();
+    pool.free_internal(ptr_7, stream_id).unwrap();
+}
