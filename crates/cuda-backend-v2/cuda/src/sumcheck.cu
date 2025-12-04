@@ -1,7 +1,11 @@
+#include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
 #include "sumcheck.cuh"
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <vector_types.h>
 
 namespace plain_sumcheck {
 
@@ -230,6 +234,33 @@ __global__ void fold_ple_from_coeffs_kernel(
     output[idx] = result;
 }
 
+// Evaluates univariate polynomials given input evals and lagrange coefficients,
+// where lagrange_coeffs = Π_{j≠i} (r_0 - omega^j) / (Π_{j≠i} (omega^i - omega^j)).
+// This kernel is optimized for the case where there is no domain expansion.
+__global__ void fold_ple_from_evals_no_expansion_kernel(
+    const Fp* input_evals, // [num_x * width * domain_size] after iDFT
+    FpExt* output,         // [num_x * width]
+    uint32_t num_x,
+    uint32_t width,
+    uint32_t domain_size,        // 2^l_skip
+    const FpExt* lagrange_coeffs // [domain_size]
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_polys = num_x * width;
+    
+    if (idx >= total_polys) return;
+    
+    // Evals for this (x, col) are at offset idx * domain_size
+    const Fp* evals = input_evals + idx * domain_size;
+    
+    FpExt result = FpExt();
+    for (int i = 0; i < domain_size; i++) {
+        result += evals[i] * lagrange_coeffs[i];
+    }
+    
+    output[idx] = result;
+}
+
 // output should be segment tree of size 2 * 2^{output_max_n},
 // input should be segment tree of size 2 * 2^{output_max_n + 1}
 // We fold each segment of input and write to corresponding segment of output
@@ -288,6 +319,29 @@ extern "C" int _fold_ple_from_coeffs(
         width,
         domain_size,
         r_val
+    );
+    
+    return CHECK_KERNEL();
+}
+
+extern "C" int _fold_ple_from_evals_no_expansion(
+    const Fp* input_evals,
+    FpExt* output,
+    const uint32_t num_x,
+    const uint32_t width,
+    const uint32_t domain_size,
+    const FpExt* lagrange_coeffs
+) {
+    int total_polys = num_x * width;
+    auto [grid, block] = kernel_launch_params(total_polys);
+    
+    fold_ple_from_evals_no_expansion_kernel<<<grid, block>>>(
+        input_evals,
+        output,
+        num_x,
+        width,
+        domain_size,
+        lagrange_coeffs
     );
     
     return CHECK_KERNEL();

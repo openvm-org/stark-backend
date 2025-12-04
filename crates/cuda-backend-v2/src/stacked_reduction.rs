@@ -1,14 +1,17 @@
 use std::{array::from_fn, ffi::c_void, iter::zip, sync::Arc};
 
-use itertools::Itertools;
+use itertools::{Itertools, izip};
 use openvm_cuda_backend::{base::DeviceMatrix, ntt::batch_ntt};
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::{FieldAlgebra, TwoAdicField};
+use openvm_stark_backend::{
+    p3_maybe_rayon::prelude::{IntoParallelRefIterator, ParallelIterator},
+    prover::MatrixDimensions,
+};
+use p3_field::{Field, FieldAlgebra, TwoAdicField, batch_multiplicative_inverse};
 use p3_util::log2_ceil_usize;
 use stark_backend_v2::{
     poly_common::{
@@ -26,7 +29,6 @@ use tracing::{debug, info_span, instrument};
 use crate::{
     Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
     cuda::{
-        matrix::batch_expand_pad_wide,
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
             _stacked_reduction_mle_required_temp_buffer_size,
@@ -34,7 +36,7 @@ use crate::{
             stacked_reduction_sumcheck_mle_round, stacked_reduction_sumcheck_mle_round_degenerate,
             stacked_reduction_sumcheck_round0,
         },
-        sumcheck::{fold_mle, fold_ple_from_coeffs, triangular_fold_mle},
+        sumcheck::{fold_mle, fold_ple_from_evals, triangular_fold_mle},
     },
     poly::{EqEvalSegments, PleMatrix},
     stacked_pcs::{StackedPcsDataGpu, stack_traces},
@@ -42,8 +44,10 @@ use crate::{
 
 pub struct StackedReductionGpu {
     l_skip: usize,
-    omega_skip: F,
     n_stack: usize,
+
+    omega_skip: F,
+    omega_skip_pows: Vec<F>,
 
     r_0: EF,
     d_lambda_pows: DeviceBuffer<EF>,
@@ -255,8 +259,10 @@ impl StackedReductionGpu {
     ) -> Result<Self, ProverError> {
         let mem = MemTracker::start("prover.stacked_reduction_new");
         let l_skip = mpk.params.l_skip;
-        let omega_skip = F::two_adic_generator(l_skip);
         let n_stack = mpk.params.n_stack;
+
+        let omega_skip = F::two_adic_generator(l_skip);
+        let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
 
         // PERF[jpw]: stack the traces all at once. To save memory, we could either stack and drop
         // traces as we go or even at commit time only store the stacked matrix and drop the traces
@@ -352,8 +358,9 @@ impl StackedReductionGpu {
 
         Ok(Self {
             l_skip,
-            omega_skip,
             n_stack,
+            omega_skip,
+            omega_skip_pows,
             r_0: r[0],
             d_lambda_pows,
             eq_const,
@@ -389,61 +396,46 @@ impl StackedReductionGpu {
         let log_domain_size = log2_ceil_usize(s_0_deg + 1);
         let domain_size = 1 << log_domain_size;
         let mut d_s0_evals = DeviceBuffer::<EF>::with_capacity(domain_size);
-        // TODO/PERF[jpw]: Can upsampling be cached and shared between RS-code, Logup/Zerocheck,
-        // StackedReduction? The latter domain size varies by l_skip and constraint degree (for
-        // Logup/Zerocheck)
-        let log_expansion = log_domain_size - l_skip;
-        // NOTE: upsampling entire matrix altogether for convenience and best parallelism. This uses
-        // `size_of(q) * 2` extra memory. We could instead do upsampling in chunks when iterating
-        // over `ht_diff_idxs`
-        let q_upsampled_evals = self
+
+        // Instead of upsampling the entire matrix altogether (for convenience and best parallelism),
+        // for each mixed stacked matrix we do an in-place size 2^l_skip NTT. Upsampling is done on
+        // demand within the round 0 kernel using barycentric interpolation.
+        let q_ptrs = self
             .stacked_per_commit
             .iter()
             .map(|pcs_data| {
                 let q_mixed = &pcs_data.matrix().mixed;
                 let len = q_mixed.len();
-                let upsampled = DeviceBuffer::with_capacity(len << log_expansion);
                 // SAFETY:
-                // - We allocated `upsampled` with `len * 2^(log_domain_size - l_skip)`.
                 // - We chunk `q_mixed` into `len / 2^l_skip` univariate polynomials of size
                 //   `2^l_skip`.
                 // - By definition `q_mixed` is in coefficient form for these univariate
                 //   polynomials.
-                // - We expand each one from size `2^l_skip` to `2^log_domain_size
-                // - We apply batch NTT of size 2^log_domain_size on the expanded polynomials.
+                // - We apply batch NTT of size 2^l_skip on the expanded polynomials.
                 debug_assert_eq!(len % (1 << l_skip), 0);
                 let num_polys = (len >> l_skip) as u32;
-                unsafe {
-                    batch_expand_pad_wide(
-                        upsampled.as_mut_ptr(),
-                        q_mixed.as_ptr(),
-                        num_polys,
-                        domain_size as u32,
-                        1 << l_skip,
-                    )?;
-                    batch_ntt(
-                        &upsampled,
-                        log_domain_size as u32,
-                        0,
-                        num_polys,
-                        true,
-                        false, /* forward NTT */
-                    );
-                }
-                Ok(upsampled)
+                batch_ntt(
+                    q_mixed,
+                    l_skip as u32,
+                    0,
+                    num_polys,
+                    true,
+                    false, /* forward NTT */
+                );
+                q_mixed.as_ptr()
             })
-            .collect::<Result<Vec<_>, ProverError>>()
-            .unwrap();
-        let upsampled_height = self.stacked_per_commit[0].matrix().height() << log_expansion;
-        let q_upsampled_ptrs = q_upsampled_evals.iter().map(|q| q.as_ptr()).collect_vec();
-        let d_q_upsampled_ptrs = q_upsampled_ptrs.to_device().unwrap();
+            .collect::<Vec<_>>();
+        let height = self.stacked_per_commit[0].matrix().height();
+        let d_q_ptrs = q_ptrs.to_device().unwrap();
 
         let omega = F::two_adic_generator(log_domain_size);
+        let omega_pows = omega.powers().take(1 << log_domain_size).collect_vec();
+        let d_omega_skip_pows = self.omega_skip_pows.to_device().unwrap();
+
         // Default packets for n >= 0
-        let default_packets = omega
-            .powers()
-            .take(1 << log_domain_size)
-            .map(|z| {
+        let default_packets = omega_pows
+            .par_iter()
+            .map(|&z| {
                 let eq_uni_r0 = eval_eq_uni(l_skip, z.into(), self.r_0);
                 let eq_uni_r0_rot = eval_eq_uni(l_skip, z.into(), self.r_0 * omega_skip);
                 let eq_uni_1 = eval_eq_uni_at_one(l_skip, z);
@@ -453,8 +445,31 @@ impl StackedReductionGpu {
                     k_rot_1: self.eq_const * eq_uni_1,
                 }
             })
-            .collect_vec();
+            .collect::<Vec<_>>();
         let d_default_packets = default_packets.to_device().unwrap();
+
+        let inv_lagrange_denoms = omega_pows
+            .par_iter()
+            .flat_map(|&z| {
+                let denoms = self
+                    .omega_skip_pows
+                    .iter()
+                    .map(|&w_i| {
+                        let denom = z - w_i;
+                        if denom.is_zero() { F::ONE } else { denom }
+                    })
+                    .collect_vec();
+                let mut inv_denoms = batch_multiplicative_inverse(&denoms);
+                let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
+                let denominator = F::from_canonical_usize(1 << l_skip);
+                let scale_factor = zerofier * denominator.inverse();
+                for v in &mut inv_denoms {
+                    *v *= scale_factor;
+                }
+                inv_denoms
+            })
+            .collect::<Vec<_>>();
+        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
 
         // The main point is that stacking reduction is a batch sumcheck over D_{n_stack}, batching
         // over all unstacked columns. However instead of naively computing the batching in that
@@ -472,11 +487,10 @@ impl StackedReductionGpu {
                 let l = l_skip.wrapping_add_signed(n);
                 let omega_l = omega_skip.exp_power_of_2(-n as usize);
                 let r_uni = self.r_0.exp_power_of_2(-n as usize);
-                let z_packets = omega
-                    .powers()
+                let z_packets = omega_pows
+                    .iter()
                     .enumerate()
-                    .take(1 << log_domain_size)
-                    .map(|(i, z)| {
+                    .map(|(i, &z)| {
                         let ind = eval_in_uni(l_skip, n, z);
                         let eq_uni_r0 = eval_eq_uni(l, z.into(), r_uni);
                         let eq_uni_r0_rot = eval_eq_uni(l, z.into(), r_uni * omega_l);
@@ -508,21 +522,23 @@ impl StackedReductionGpu {
                 );
                 // PERF[jpw]: buffer could be reused for q PLE folding below
                 // Currently `CUBE_THREADS = 8` so this is at least D_EF/8 = 1/2 as much memory as
-                // q_upsampled itself
+                // what q_upsampled used to take
                 let mut block_sums = DeviceBuffer::with_capacity(block_sums_len as usize);
                 let unstacked_cols_ptr = self.d_unstacked_cols.as_ptr().add(window[0]);
                 // 2 per column for (eq, k_rot)
                 let lambda_pows_ptr = self.d_lambda_pows.as_ptr().add(2 * window[0]);
 
                 stacked_reduction_sumcheck_round0(
-                    &d_q_upsampled_ptrs,
+                    &d_q_ptrs,
                     &self.eq_r_ns,
                     unstacked_cols_ptr,
                     lambda_pows_ptr,
                     z_packets,
+                    &d_omega_skip_pows,
+                    &d_inv_lagrange_denoms,
                     &mut block_sums,
                     &mut d_s0_evals,
-                    upsampled_height,
+                    height,
                     log_domain_size,
                     l_skip,
                     window_len,
@@ -542,6 +558,7 @@ impl StackedReductionGpu {
 
             s_0_evals_batch.push(evals);
         }
+
         let s_0_evals = (0..domain_size)
             .map(|i| s_0_evals_batch.iter().map(|evals| evals[i]).sum::<EF>())
             .collect_vec();
@@ -560,30 +577,73 @@ impl StackedReductionGpu {
         let r_0 = self.r_0;
         let omega_skip = self.omega_skip;
         let n_max = self.n_max;
+        let skip_domain_size = 1 << l_skip;
+
+        let lagrange_coeffs = {
+            let (numerators, denominators): (Vec<_>, Vec<_>) = self
+                .omega_skip_pows
+                .iter()
+                .enumerate()
+                .map(|(i, &omega_i)| {
+                    let mut num = EF::ONE;
+                    let mut denom = EF::ONE;
+                    for (j, &omega_j) in self.omega_skip_pows.iter().enumerate() {
+                        if j != i {
+                            num *= u_0 - EF::from(omega_j);
+                            denom *= EF::from(omega_i) - EF::from(omega_j);
+                        }
+                    }
+                    (num, denom)
+                })
+                .unzip();
+            let inv_denoms = batch_multiplicative_inverse(&denominators);
+            izip!(numerators, inv_denoms)
+                .map(|(num, inv_denom)| num * inv_denom)
+                .collect_vec()
+        };
+        let d_lagrange_coeffs = lagrange_coeffs.to_device().unwrap();
+
         // fold the Q stacked matrices from mixed coefficient form
         self.q_evals = self
             .stacked_per_commit
             .iter()
             .map(|d| {
-                let coeffs = &d.matrix().mixed;
+                let evals = &d.matrix().mixed;
                 let num_x = 1 << n_stack;
                 let width = d.matrix().width();
-                debug_assert_eq!(coeffs.len(), width << (l_skip + n_stack));
-                let folded_evals = DeviceBuffer::with_capacity(coeffs.len() >> l_skip);
+                debug_assert_eq!(evals.len(), width << (l_skip + n_stack));
+                let folded_evals = DeviceBuffer::with_capacity(evals.len() >> l_skip);
                 unsafe {
-                    fold_ple_from_coeffs(
-                        coeffs.as_ptr(),
+                    fold_ple_from_evals(
+                        evals.as_ptr(),
                         folded_evals.as_mut_ptr(),
                         num_x,
                         width as u32,
-                        1 << l_skip,
-                        u_0,
+                        skip_domain_size as u32,
+                        d_lagrange_coeffs.as_ptr(),
                     )
                     .unwrap();
                 }
                 folded_evals
             })
             .collect();
+
+        // TODO[jpw]: Because WHIR expects these mixed matrices to be in coefficient form
+        // for algebraic_batch_matrices we currently need to perform iNTT after stacked
+        // reduction is complete. Once WHIR no longer depends on these, remove this.
+        self.stacked_per_commit.iter().for_each(|pcs_data| {
+            let q_mixed = &pcs_data.matrix().mixed;
+            let num_polys = (q_mixed.len() >> l_skip) as u32;
+            batch_ntt(
+                q_mixed,
+                l_skip as u32,
+                0,
+                num_polys,
+                true,
+                true, /* backwards NTT */
+            );
+        });
+
         // fold PLEs into MLEs for \eq and \kappa_\rot, using u_0
         let eq_uni_u0r0 = eval_eq_uni(l_skip, u_0, r_0);
         let eq_uni_u0r0_rot = eval_eq_uni(l_skip, u_0, r_0 * omega_skip);
