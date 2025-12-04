@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use itertools::Itertools;
+use itertools::{fold, Itertools};
 use openvm_stark_backend::{
     config::{StarkGenericConfig, Val},
     interaction::{BusIndex, InteractionBuilder},
@@ -39,14 +39,31 @@ where
         let mut next: Vec<<AB as AirBuilder>::Expr> =
             (*next).iter().map(|v| (*v).into()).collect_vec();
 
+        let local_sum = fold(&local, AB::Expr::ZERO, |acc, val| acc + val.clone());
+        let next_sum = fold(&local, AB::Expr::ZERO, |acc, val| acc + val.clone());
+
+        // Interaction where count is constant
         builder.push_interaction(self.bus_index, local.clone(), AB::Expr::ONE, 1);
         builder.push_interaction(self.bus_index, next.clone(), AB::Expr::NEG_ONE, 1);
+
+        // Interaction where count is an expression + common with interaction below
+        builder.push_interaction(self.bus_index, local.clone(), local_sum.clone(), 1);
+        builder.push_interaction(self.bus_index, next.clone(), -next_sum.clone(), 1);
+
+        // Interaction where count == fields[0]
+        builder.push_interaction(self.bus_index, local.clone(), local[0].clone(), 1);
+        builder.push_interaction(self.bus_index, next.clone(), -next[0].clone(), 1);
 
         local.reverse();
         next.reverse();
 
-        builder.push_interaction(self.bus_index, local, AB::Expr::TWO, 2);
-        builder.push_interaction(self.bus_index, next, AB::Expr::NEG_ONE * AB::Expr::TWO, 2);
+        // Interaction where count_weight != 1
+        builder.push_interaction(self.bus_index, local.clone(), AB::Expr::TWO, 2);
+        builder.push_interaction(self.bus_index, next.clone(), -AB::Expr::TWO, 2);
+
+        // Interaction where count is an expression + common with interaction above
+        builder.push_interaction(self.bus_index, local, local_sum, 1);
+        builder.push_interaction(self.bus_index, next, -next_sum, 1);
     }
 }
 
