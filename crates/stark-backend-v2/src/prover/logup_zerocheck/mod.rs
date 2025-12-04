@@ -4,7 +4,7 @@ use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
-use tracing::{debug, instrument};
+use tracing::{debug, info_span, instrument};
 
 use crate::{
     calculate_n_logup,
@@ -209,6 +209,8 @@ where
     // `s_round` is degree `s_deg` so we evaluate it at `0, ..., =s_deg`. The prover skips
     // evaluation at `0` because the verifier can infer it from the previous round's
     // `s_{round-1}(r)` claim. The degree is constraint_degree + 1, where + 1 is from eq term
+    let _mle_rounds_span =
+        info_span!("prover.batch_constraints.mle_rounds", phase = "prover").entered();
     debug!(%s_deg);
     for round in 1..=n_max {
         let s_round_evals = prover.sumcheck_polys_eval(round, r[round - 1]);
@@ -233,6 +235,7 @@ where
 
         prover.fold_mle_evals(round, r_round);
     }
+    drop(_mle_rounds_span);
     assert_eq!(r.len(), n_max + 1);
 
     let column_openings = prover.into_column_openings();
