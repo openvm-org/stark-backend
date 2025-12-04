@@ -112,8 +112,7 @@ where
     let interactions_meta: Vec<_> = ctx
         .per_trace
         .iter()
-        .enumerate()
-        .map(|(trace_idx, (air_idx, air_ctx))| {
+        .map(|(air_idx, air_ctx)| {
             let pk = &mpk.per_air[*air_idx];
 
             let num_interactions = pk.vk.symbolic_constraints.interactions.len();
@@ -121,7 +120,7 @@ where
             let log_height = log2_strict_usize(height);
             let log_lifted_height = log_height.max(l_skip);
             total_interactions += (num_interactions as u64) << log_lifted_height;
-            (trace_idx, num_interactions, log_lifted_height)
+            (num_interactions, log_lifted_height)
         })
         .collect();
     // Implicitly, the width of this stacking should be 1
