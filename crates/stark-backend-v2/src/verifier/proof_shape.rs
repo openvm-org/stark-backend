@@ -532,10 +532,7 @@ pub fn verify_proof_shape(
         mvk.params.n_stack + l_skip,
         per_trace
             .iter()
-            .enumerate()
-            .map(|(trace_idx, (_, vk, vdata))| {
-                (trace_idx, vk.params.width.common_main, vdata.log_height)
-            })
+            .map(|(_, vk, vdata)| (vk.params.width.common_main, vdata.log_height))
             .collect_vec(),
     );
 
@@ -548,7 +545,7 @@ pub fn verify_proof_shape(
                 .iter()
                 .chain(&vk.params.width.cached_mains)
                 .copied()
-                .map(|width| (0usize, width, vdata.log_height))
+                .map(|width| (width, vdata.log_height))
                 .collect_vec()
         })
         .map(|sorted| StackedLayout::new(l_skip, mvk.params.n_stack + l_skip, vec![sorted]))
