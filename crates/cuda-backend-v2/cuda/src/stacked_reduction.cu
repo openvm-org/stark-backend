@@ -41,19 +41,41 @@ __device__ __forceinline__ uint32_t rot_prev(uint32_t x_int, uint32_t cube_size)
 
 __device__ __forceinline__ Fp eq1(Fp x, Fp y) { return Fp::one() - x - y + Fp(2) * x * y; }
 
+__device__ __forceinline__ Fp barycentric_interpolate(
+    const Fp *q_evals,
+    uint32_t z,
+    uint32_t expansion_factor,
+    const Fp *inv_lagrange_denoms,
+    const Fp *omega_skip_pows,
+    uint32_t l_skip
+) {
+    Fp q = Fp::zero();
+    if (z % expansion_factor == 0) {
+        q = q_evals[z / expansion_factor];
+    } else {
+        // inv_lagrange_denoms_z[i] = ((z^skip_domain - 1) / skip_domain) * (z - omega_skip_pows[i])^{-1}
+        const Fp *inv_lagrange_denoms_z = inv_lagrange_denoms + (z << l_skip);
+        for (int i = 0; i < (1 << l_skip); i++) {
+            q += q_evals[i] * omega_skip_pows[i] * inv_lagrange_denoms_z[i];
+        }
+    }
+    return q;
+}
+
 // Each block covers a tile of z-values (threadIdx.x) and collaborates across threadIdx.y
 // to sum over x for a single (window_idx, z_int) pair. Blocks stride over window_idx via gridDim.y.
 //
 // See Rust doc comments for more details.
 __global__ void stacked_reduction_round0_block_sum_kernel(
-    const Fp *const *q_upsampled_ptr,     // pointers to upsampled matrices, one per [commit_idx]
+    const Fp *const *q_ptr,               // pointers to matrices, one per [commit_idx]
     const FpExt *eq_r_ns,                 // pointer to EqEvalSegments
     const UnstackedSlice *unstacked_cols, // pointer to unstacked_cols at window start
     const FpExt *lambda_pows,             // pointer to lambda_pows at window start
-    const Round0UniPacket *z_packets,
-    FpExt *
-        block_sums, // size = [gridDim.z][gridDim.y][domain_size] for [window_idx_base][blockIdx.y][z_int]
-    uint32_t upsampled_height, // height of q_upsampled
+    const Round0UniPacket *z_packets,     // pointer to eq_uni, k_rot_0, and k_rot_1 evals for z_int
+    const Fp *omega_skip_pows,            // [2^l_skip]
+    const Fp *inv_lagrange_denoms,        // [domain_size][2^l_skip]
+    FpExt *block_sums, // [gridDim.z][gridDim.y][domain_size] for [window_base][blockIdx.y][z_int]
+    uint32_t height,   // height of q
     uint32_t l_skip,
     uint32_t log_domain_size,
     uint32_t window_len,
@@ -65,7 +87,7 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
 
     uint32_t z_int = blockIdx.x * blockDim.x + threadIdx.x;
     bool const active_thread = (z_int < domain_size);
-    uint32_t window_idx_base = blockIdx.z;
+    uint32_t window_base = blockIdx.z;
 
     if (active_thread) {
         // Map phase: compute local sum by striding over window and hypercube
@@ -84,22 +106,25 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
             FpExt k_rot = k_rot_0 * eq_cube + k_rot_1 * (k_rot_cube - eq_cube);
 
             // We sum over window at a stride, where stride = gridDim.z is tuned based on compute / memory
-            for (uint32_t window_idx = window_idx_base; window_idx < window_len;
-                window_idx += gridDim.z) {
+            for (uint32_t window_idx = window_base; window_idx < window_len;
+                 window_idx += gridDim.z) {
                 UnstackedSlice unstacked_slice = unstacked_cols[window_idx];
-                const Fp *q_upsampled = q_upsampled_ptr[unstacked_slice.commit_idx];
+                const Fp *q_evals = q_ptr[unstacked_slice.commit_idx] +
+                                    unstacked_slice.stacked_col_idx * height +
+                                    unstacked_slice.stacked_row_idx + (x_int << l_skip);
 
-                uint32_t col_idx = unstacked_slice.stacked_col_idx;
-                // ASSUME: unstacked_slice.stacked_row_idx % (2^l_skip) == 0
-                uint32_t row_start = unstacked_slice.stacked_row_idx << (log_domain_size - l_skip);
-
-                uint32_t row_idx = row_start + (x_int << log_domain_size) + z_int;
-
-                uint32_t upsampled_idx = col_idx * upsampled_height + row_idx;
-                Fp q = q_upsampled[upsampled_idx];
+                Fp q = barycentric_interpolate(
+                    q_evals,
+                    z_int,
+                    1 << (log_domain_size - l_skip),
+                    inv_lagrange_denoms,
+                    omega_skip_pows,
+                    l_skip
+                );
 
                 auto eval =
-                    (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) * q;
+                    (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) *
+                    q;
                 local_sum += eval;
             }
         }
@@ -114,7 +139,7 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
         for (int lane = 1; lane < blockDim.y; ++lane) {
             tile_sum += shared[lane * blockDim.x + threadIdx.x];
         }
-        size_t window_offset = window_idx_base * gridDim.y * domain_size;
+        size_t window_offset = window_base * gridDim.y * domain_size;
         block_sums[window_offset + blockIdx.y * domain_size + z_int] = tile_sum;
     }
     __syncthreads();
@@ -172,7 +197,8 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
 
         // We sum over window at a stride, where stride = gridDim.y is tuned based on compute / memory
         // Currently assumes blockDim.y = 1
-        for (uint32_t window_idx = window_idx_base; window_idx < window_len; window_idx += gridDim.y) {
+        for (uint32_t window_idx = window_idx_base; window_idx < window_len;
+             window_idx += gridDim.y) {
             UnstackedSlice s = unstacked_cols[window_idx];
             const FpExt *q = q_evals[s.commit_idx];
 
@@ -199,7 +225,8 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
                 auto k_rot = k_rot_0 + k_rot_c1 * x;
 
                 local_sums[x_int - 1] +=
-                    (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) * q_x;
+                    (lambda_pows[2 * window_idx] * eq + lambda_pows[2 * window_idx + 1] * k_rot) *
+                    q_x;
             }
         }
     }
@@ -296,11 +323,13 @@ extern "C" uint32_t _stacked_reduction_r0_required_temp_buffer_size(
 }
 
 extern "C" int _stacked_reduction_sumcheck_round0(
-    const Fp *const *q_upsampled_ptr,
+    const Fp *const *q_ptr,
     const FpExt *eq_r_ns,
     const UnstackedSlice *unstacked_cols,
     const FpExt *lambda_pows,
     const Round0UniPacket *z_packets,
+    const Fp *omega_skip_pows,     // [2^l_skip]
+    const Fp *inv_lagrange_denoms, // [domain_size][2^l_skip]
     FpExt *block_sums,
     FpExt *output, // length should be domain_size
     uint32_t upsampled_height,
@@ -324,11 +353,13 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     size_t shmem_bytes = sizeof(FpExt) * block.x * block.y;
 
     stacked_reduction_round0_block_sum_kernel<<<grid, block, shmem_bytes>>>(
-        q_upsampled_ptr,
+        q_ptr,
         eq_r_ns,
         unstacked_cols,
         lambda_pows,
         z_packets,
+        omega_skip_pows,
+        inv_lagrange_denoms,
         block_sums,
         upsampled_height,
         l_skip,
