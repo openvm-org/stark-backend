@@ -28,7 +28,7 @@ use stark_backend_v2::{
         sumcheck::sumcheck_round0_deg,
     },
 };
-use tracing::{debug, instrument};
+use tracing::{debug, info_span, instrument};
 
 use crate::{
     Digest, EF, F, GpuBackendV2, GpuDeviceV2,
@@ -113,7 +113,7 @@ impl<'a, TS> LogupZerocheckProver<'a, GpuBackendV2, GpuDeviceV2, TS> for LogupZe
 where
     TS: FiatShamirTranscript,
 {
-    #[instrument(skip_all)]
+    #[instrument(name = "prover.logup_gkr", skip_all, fields(phase = "prover"))]
     fn prove_logup_gkr(
         device: &'a GpuDeviceV2,
         transcript: &mut TS,
@@ -365,6 +365,8 @@ where
 
         // Loop through one AIR at a time; it is more efficient to do everything for one AIR
         // together
+        let _round0_span =
+            info_span!("prover.batch_constraints.round0", phase = "prover").entered();
         for (trace_idx, ((air_idx, air_ctx), &n, selectors_cube, public_values, eq_3bs)) in izip!(
             &ctx.per_trace,
             &self.n_per_trace,
@@ -511,6 +513,7 @@ where
             self.mem
                 .tracing_info("after_batch_constraints_sumcheck_round0");
         }
+        drop(_round0_span);
         self.mem
             .emit_metrics_with_label("prover.batch_constraints.round0");
 
