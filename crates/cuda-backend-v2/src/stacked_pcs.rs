@@ -79,14 +79,13 @@ pub(crate) fn get_stacked_layout(
 ) -> StackedLayout {
     let sorted_meta = traces
         .iter()
-        .enumerate()
-        .map(|(idx, trace)| {
+        .map(|trace| {
             // height cannot be zero:
             let log_height = log2_strict_usize(trace.height());
-            (idx, trace.width(), log_height)
+            (trace.width(), log_height)
         })
         .collect_vec();
-    debug_assert!(sorted_meta.is_sorted_by(|a, b| a.2 >= b.2));
+    debug_assert!(sorted_meta.is_sorted_by(|a, b| a.1 >= b.1));
     StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta)
 }
 
