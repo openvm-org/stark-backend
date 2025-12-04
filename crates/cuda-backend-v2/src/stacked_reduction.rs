@@ -21,7 +21,7 @@ use stark_backend_v2::{
         sumcheck::sumcheck_round0_deg,
     },
 };
-use tracing::{debug, instrument};
+use tracing::{debug, info_span, instrument};
 
 use crate::{
     Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
@@ -171,7 +171,12 @@ impl StackedReductionGpu {
 ///
 /// The `stacked_matrix, stacked_layout` should be the result of stacking the `traces` with
 /// parameters `l_skip` and `n_stack`.
-#[instrument(name = "prove_stacked_opening_reduction", level = "info", skip_all)]
+#[instrument(
+    name = "prover.openings.stacked_reduction",
+    level = "info",
+    skip_all,
+    fields(phase = "prover")
+)]
 pub fn prove_stacked_opening_reduction_gpu<TS>(
     device: &GpuDeviceV2,
     transcript: &mut TS,
@@ -187,11 +192,15 @@ where
     // Batching randomness
     let lambda = transcript.sample_ext();
 
+    let _round0_span = info_span!("stacked_reduction.round0", phase = "prover").entered();
     let mut prover = StackedReductionGpu::new(mpk, ctx, common_main_pcs_data, r, lambda)?;
+
+    // Round 0: univariate sumcheck
     let s_0 = prover.batch_sumcheck_uni_round0_poly();
     for &coeff in s_0.coeffs() {
         transcript.observe_ext(coeff);
     }
+    drop(_round0_span);
 
     let mut u_vec = Vec::with_capacity(n_stack + 1);
     let u_0 = transcript.sample_ext();
@@ -203,6 +212,8 @@ where
 
     let mut sumcheck_round_polys = Vec::with_capacity(n_stack);
 
+    // Rounds 1..=n_stack: MLE sumcheck
+    let _mle_rounds_span = info_span!("stacked_reduction.mle_rounds", phase = "prover").entered();
     #[allow(clippy::needless_range_loop)]
     for round in 1..=n_stack {
         let batch_s_evals = prover.batch_sumcheck_poly_eval(round, u_vec[round - 1]);
@@ -218,6 +229,7 @@ where
 
         prover.fold_mle_evals(round, u_round);
     }
+    drop(_mle_rounds_span);
     let stacking_openings = prover.get_stacked_openings();
     for claims_for_com in &stacking_openings {
         for &claim in claims_for_com {
