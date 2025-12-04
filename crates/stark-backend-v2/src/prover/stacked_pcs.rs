@@ -34,6 +34,9 @@ pub struct StackedLayout {
         usize, /* unstacked column index */
         StackedSlice,
     )>,
+    /// `mat_starts[mat_idx]` is the index in `sorted_cols` where the matrix with index `mat_idx`
+    /// starts.
+    pub mat_starts: Vec<usize>,
 }
 
 /// Pointer to the location of a sub-column within the stacked matrix.
@@ -128,23 +131,21 @@ impl StackedLayout {
     /// - `l_skip` is a threshold log2 height: if a column has height less than `2^l_skip`, it is
     ///   stacked as a column of height `2^l_skip` with stride `2^{l_skip - log_height}`.
     /// - `log_stacked_height` is the log2 height of the stacked matrix.
-    /// - `sorted` is Vec of `(matrix index, width, log_height)` that must already be **sorted** in
-    ///   descending order of `log_height`.
+    /// - `sorted` is Vec of `(width, log_height)` that must already be **sorted** in descending
+    ///   order of `log_height`.
     pub fn new(
         l_skip: usize,
         log_stacked_height: usize,
-        sorted: Vec<(
-            usize, /* matrix index */
-            usize, /* width */
-            usize, /* log_height */
-        )>,
+        sorted: Vec<(usize /* width */, usize /* log_height */)>,
     ) -> Self {
         debug_assert!(l_skip <= log_stacked_height);
-        debug_assert!(sorted.is_sorted_by(|a, b| a.2 >= b.2));
-        let mut sorted_cols = Vec::new();
+        debug_assert!(sorted.is_sorted_by(|a, b| a.1 >= b.1));
+        let mut sorted_cols = Vec::with_capacity(sorted.len());
+        let mut mat_starts = Vec::new();
         let mut col_idx = 0;
         let mut row_idx = 0;
-        for (mat_idx, width, log_ht) in sorted {
+        for (mat_idx, (width, log_ht)) in sorted.into_iter().enumerate() {
+            mat_starts.push(sorted_cols.len());
             if width == 0 {
                 continue;
             }
@@ -182,6 +183,7 @@ impl StackedLayout {
             height: 1 << log_stacked_height,
             width: stacked_width,
             sorted_cols,
+            mat_starts,
         }
     }
 
@@ -197,11 +199,19 @@ impl StackedLayout {
             .map(|(_, _, slice)| slice.col_idx + 1)
             .max()
             .unwrap_or(0);
+        let mut mat_starts = Vec::new();
+        for (idx, (mat_idx, _, _)) in sorted_cols.iter().enumerate() {
+            if idx == 0 || *mat_idx + 1 != mat_starts.len() {
+                assert_eq!(*mat_idx, mat_starts.len());
+                mat_starts.push(idx);
+            }
+        }
         Self {
             l_skip,
             height,
             width,
             sorted_cols,
+            mat_starts,
         }
     }
 
@@ -211,19 +221,26 @@ impl StackedLayout {
 
     /// `(mat_idx, col_idx)` should be indexing into the unstacked collection of matrices.
     pub fn get(&self, mat_idx: usize, col_idx: usize) -> Option<&StackedSlice> {
-        // TODO[jpw]: re-organize StackedLayout so this is O(1)
-        self.sorted_cols
-            .iter()
-            .find(|&&(m, j, _)| m == mat_idx && j == col_idx)
-            .map(|(_, _, coord)| coord)
+        let idx = self.mat_starts[mat_idx];
+        if idx + col_idx >= self.sorted_cols.len() {
+            return None;
+        }
+        let (mat_idx1, col_idx1, s) = &self.sorted_cols[idx + col_idx];
+        debug_assert_eq!(*mat_idx1, mat_idx);
+        debug_assert_eq!(*col_idx1, col_idx);
+        Some(s)
     }
 
     pub fn width_of(&self, mat_idx: usize) -> usize {
-        // TODO[jpw]: re-organize StackedLayout so this is O(1)
-        self.sorted_cols
-            .iter()
-            .filter(|(m, _, _)| *m == mat_idx)
-            .count()
+        let start_idx = self.mat_starts[mat_idx];
+        debug_assert_eq!(self.sorted_cols[start_idx].0, mat_idx);
+        debug_assert_eq!(self.sorted_cols[start_idx].1, 0);
+        let next_idx = *self
+            .mat_starts
+            .get(mat_idx + 1)
+            .unwrap_or(&self.sorted_cols.len());
+        debug_assert_ne!(next_idx, usize::MAX);
+        next_idx - start_idx
     }
 
     /// Due to the definition of stacking, in a column major matrix the lifted columns of the
@@ -261,11 +278,10 @@ pub fn stacked_matrix<F: Field>(
 ) -> (ColMajorMatrix<F>, StackedLayout) {
     let sorted_meta = traces
         .iter()
-        .enumerate()
-        .map(|(idx, trace)| {
+        .map(|trace| {
             // height cannot be zero:
             let log_height = log2_strict_usize(trace.height());
-            (idx, trace.width(), log_height)
+            (trace.width(), log_height)
         })
         .collect_vec();
     let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
@@ -489,13 +505,14 @@ mod tests {
             .map(|c| ColMajorMatrix::new(c, 1))
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
-        let (stacked_mat, _layout) = stacked_matrix(0, 2, &mat_refs);
+        let (stacked_mat, layout) = stacked_matrix(0, 2, &mat_refs);
         assert_eq!(stacked_mat.height(), 4);
         assert_eq!(stacked_mat.width(), 2);
         assert_eq!(
             stacked_mat.values,
             [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_u32).to_vec()
         );
+        assert_eq!(layout.mat_starts, vec![0, 1, 2]);
     }
 
     #[test]
