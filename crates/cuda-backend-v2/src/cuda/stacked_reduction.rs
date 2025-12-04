@@ -17,14 +17,16 @@ extern "C" {
     ) -> u32;
 
     fn _stacked_reduction_sumcheck_round0(
-        q_upsampled_ptr: *const *const F,
+        q_ptr: *const *const F,
         eq_r_ns: *const EF,
         unstacked_cols: *const UnstackedSlice,
         lambda_pows: *const EF,
         z_packets: *const Round0UniPacket,
+        omega_skip_pows: *const F,
+        inv_lagrange_denoms: *const F,
         block_sums: *mut EF,
         output: *mut EF,
-        upsampled_height: u32,
+        height: u32,
         log_domain_size: u32,
         l_skip: u32,
         window_len: u32,
@@ -77,13 +79,13 @@ extern "C" {
 /// Recall overall that we want to compute `Z -> sum_{H_{n_lift}} f(Z, \vec x)` for a specific `f`
 /// on a DFT domain of size `domain_size` with `num_x = 2^{n_lift}`. The exact formula for `f` is
 /// obtained by multiplying some `eq, \kappa_\rot` terms with prismalinear polynomial evaluations
-/// `t_j(Z, \vec x)`. The setup is that we already have the "upsampled" `t_j(Z, \vec x)` evaluations
-/// on `(Z-domain) x hypercube`, but these are represented as slices within the buffers
-/// `q_upsampled_ptr[commit_idx]`.
+/// `t_j(Z, \vec x)`. We need to upsample the `t_j(Z, \vec x)` evals on `(Z-domain) x hypercube` on
+/// demand, which we use buffer slices `q_ptr[commit_idx]` to do.
+///
 ///
 /// We consider a "window" of `t_j`, with their slice locations given by `unstacked_cols` pointing
-/// to the backing buffers `q_upsampled_ptr`. Overall this means that we have a 3-dimensional array
-/// of `t_{window_idx}(Z, x_int)` and we will match it to the 3-dimensional block/grid in CUDA. For
+/// to the backing buffers `q_ptr`. Overall this means that we have a 3-dimensional array of
+/// `t_{window_idx}(Z, x_int)` and we will match it to the 3-dimensional block/grid in CUDA. For
 /// memory contiguity, we arrange so that
 /// - cuda x-dim <-> Z coordinate
 /// - cuda y-dim <-> x_int coordinate
@@ -109,7 +111,7 @@ extern "C" {
 /// It must fit in `u16` for CUDA grid dimension limits.
 ///
 /// # Safety
-/// - Each pointer in `q_upsampled_ptr` must be to a device buffer of length `upsampled_height`.
+/// - Each pointer in `q_ptr` must be to a device buffer of length `height`.
 /// - `unstacked_cols` should be pointer to DeviceBuffer<UnstackedSlice>, at an offset.
 ///   - `unstacked_cols` must be initialized for at least `window_len` elements.
 ///   - for each `UnstackedSlice` in the `window_len` elements starting at `unstacked_cols`, the
@@ -124,14 +126,16 @@ extern "C" {
 /// - `output` should have length `>= 2^log_domain_size`.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_round0(
-    q_upsampled_ptr: &DeviceBuffer<*const F>,
+    q_ptr: &DeviceBuffer<*const F>,
     eq_r_ns: &EqEvalSegments<EF>,
     unstacked_cols: *const UnstackedSlice,
     lambda_pows: *const EF,
     z_packets: &DeviceBuffer<Round0UniPacket>,
+    omega_skip_pows: &DeviceBuffer<F>,
+    inv_lagrange_denoms: &DeviceBuffer<F>,
     block_sums: &mut DeviceBuffer<EF>,
     output: &mut DeviceBuffer<EF>,
-    upsampled_height: usize,
+    height: usize,
     log_domain_size: usize,
     l_skip: usize,
     window_len: usize,
@@ -157,14 +161,16 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
         );
     }
     check(_stacked_reduction_sumcheck_round0(
-        q_upsampled_ptr.as_ptr(),
+        q_ptr.as_ptr(),
         eq_r_ns.buffer().as_ptr(),
         unstacked_cols,
         lambda_pows,
         z_packets.as_ptr(),
+        omega_skip_pows.as_ptr(),
+        inv_lagrange_denoms.as_ptr(),
         block_sums.as_mut_ptr(),
         output.as_mut_ptr(),
-        upsampled_height as u32,
+        height as u32,
         log_domain_size as u32,
         l_skip as u32,
         window_len as u32,
