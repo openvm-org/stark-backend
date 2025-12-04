@@ -38,7 +38,12 @@ use crate::{
     stacked_reduction::StackedPcsData2,
 };
 
-#[instrument(name = "prove_whir", level = "info", skip_all)]
+#[instrument(
+    name = "prover.openings.whir",
+    level = "info",
+    skip_all,
+    fields(phase = "prover")
+)]
 pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     params: &SystemParams,
     transcript: &mut TS,

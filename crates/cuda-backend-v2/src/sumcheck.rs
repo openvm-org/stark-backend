@@ -11,7 +11,7 @@ use stark_backend_v2::{
     poseidon2::sponge::FiatShamirTranscript,
     prover::sumcheck::{SumcheckCubeProof, SumcheckPrismProof},
 };
-use tracing::debug;
+use tracing::{debug, info_span, instrument};
 
 use crate::cuda::{
     matrix::batch_expand_pad_wide,
@@ -26,6 +26,7 @@ use crate::cuda::{
 /// - Final result in buffer determined by parity of n
 /// - Memory footprint: ~1.5 * evals.len() * sizeof(EF)
 #[allow(dead_code)]
+#[instrument(name = "sumcheck_multilinear_gpu", level = "info", skip_all)]
 pub fn sumcheck_multilinear_gpu<F: Field, TS: FiatShamirTranscript>(
     transcript: &mut TS,
     evals: &[F],
@@ -153,6 +154,7 @@ where
 ///
 /// NOTE: batch_ntt expects a concrete type BabyBear, so I removed generic type parameters for now
 #[allow(dead_code)]
+#[instrument(name = "sumcheck_prismalinear_gpu", level = "info", skip_all)]
 pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
     transcript: &mut TS,
     l_skip: usize,
@@ -179,6 +181,7 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
     let large_domain_size = 1 << log_large_domain;
 
     // ========== Round 0: Special PLE round ==========
+    let _round0_span = info_span!("sumcheck_prismalinear.round0").entered();
 
     let d_coeffs = evals.to_device().unwrap();
     let d_s0_coeffs = DeviceBuffer::<F>::with_capacity(large_domain_size);
@@ -289,8 +292,11 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
         .unwrap();
     }
     drop(d_coeffs);
+    drop(_round0_span);
 
     // ========== Rounds 1..n: Regular MLE rounds ==========
+    let _mle_rounds_span =
+        info_span!("sumcheck_prismalinear.mle_rounds").entered();
 
     let mut current_height = num_x; // After fold_ple, height is 2^n
     let num_matrices = 1;
@@ -356,6 +362,7 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
 
         current_height >>= 1;
     }
+    drop(_mle_rounds_span);
 
     // Get final evaluation claim
     let final_buf = if n % 2 == 1 { &d_buffer_b } else { &d_buffer_a };
