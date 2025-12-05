@@ -1,5 +1,6 @@
 use std::{ffi::c_void, sync::Arc};
 
+use getset::Getters;
 use itertools::Itertools;
 use openvm_cuda_backend::{
     base::{DeviceMatrix, DeviceMatrixView},
@@ -18,20 +19,23 @@ use crate::{
     poly::PleMatrix,
 };
 
-#[derive(derive_new::new)]
+#[derive(Getters)]
 pub struct StackedPcsDataGpu<F, Digest> {
     /// Layout of the unstacked collection of matrices within the stacked matrix.
-    pub layout: StackedLayout,
+    #[getset(get = "pub")]
+    pub(crate) layout: StackedLayout,
     /// The stacked matrix with height `2^{l_skip + n_stack}`.
     /// This cached depending on the prover configuration:
     /// - Caching increases the peak GPU memory but avoids a recomputation during stacked
     ///   reduction.
     /// - Not caching means the stacked matrix computation is recomputed during stacked reduction,
     ///   but lowers the peak GPU memory.
-    pub matrix: Option<PleMatrix<F>>,
+    #[getset(get = "pub")]
+    pub(crate) matrix: Option<PleMatrix<F>>,
     /// Merkle tree of the Reed-Solomon codewords of the stacked matrix.
     /// Depends on `k_whir` parameter.
-    pub tree: MerkleTreeGpu<F, Digest>,
+    #[getset(get = "pub")]
+    pub(crate) tree: MerkleTreeGpu<F, Digest>,
 }
 
 #[instrument(level = "info", skip_all)]
@@ -53,7 +57,11 @@ pub fn stacked_commit(
     let rs_matrix = rs_code_matrix(log_blowup, &layout, traces, &opt_stacked_matrix)?;
     let tree = MerkleTreeGpu::<F, Digest>::new(rs_matrix, 1 << k_whir)?;
     let root = tree.root();
-    let data = StackedPcsDataGpu::new(layout, opt_stacked_matrix, tree);
+    let data = StackedPcsDataGpu {
+        layout,
+        matrix: opt_stacked_matrix,
+        tree,
+    };
     mem.emit_metrics();
     Ok((root, data))
 }

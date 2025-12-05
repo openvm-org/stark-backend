@@ -3,9 +3,18 @@ use openvm_cuda_common::{
     error::{CudaError, check},
 };
 
-use crate::{EF, F};
+use crate::{D_EF, EF, F, whir::BatchingTracePacket};
 
 extern "C" {
+    fn _whir_algebraic_batch_traces(
+        output: *mut F,
+        packets: *const BatchingTracePacket,
+        mu_powers: *const EF,
+        stacked_height: usize,
+        num_packets: usize,
+        skip_domain: u32,
+    ) -> i32;
+
     pub fn _whir_sumcheck_required_temp_buffer_size(height: u32) -> u32;
 
     fn _whir_sumcheck_mle_round(
@@ -24,6 +33,28 @@ extern "C" {
         num_queries: u32,
         height: u32,
     ) -> i32;
+}
+
+/// # Safety
+/// - `packets` must contain pointers `ptr` to device buffers valid for `height x width` elements.
+///   The `stacked_row_start` must be the correct starting row index for the trace within the
+///   stacked matrix.
+/// - `mu_powers` must be defined for at least the sum of the stacked widths.
+pub unsafe fn whir_algebraic_batch_traces(
+    output: &mut DeviceBuffer<F>,
+    packets: &DeviceBuffer<BatchingTracePacket>,
+    mu_powers: &DeviceBuffer<EF>,
+    skip_domain: u32,
+) -> Result<(), CudaError> {
+    debug_assert_eq!(output.len() % D_EF, 0);
+    check(_whir_algebraic_batch_traces(
+        output.as_mut_ptr(),
+        packets.as_ptr(),
+        mu_powers.as_ptr(),
+        output.len() / D_EF,
+        packets.len(),
+        skip_domain,
+    ))
 }
 
 /// Performs a sumcheck round in WHIR on the evaluations of `f` and `w` on the hypercube.

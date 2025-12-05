@@ -56,15 +56,6 @@ pub mod sumcheck {
             r: EF,
         ) -> i32;
 
-        fn _fold_ple_from_evals_no_expansion(
-            input_evals: *const std::ffi::c_void,
-            output: *mut std::ffi::c_void,
-            num_x: u32,
-            width: u32,
-            domain_size: u32,
-            lagrange_coeffs: *const std::ffi::c_void,
-        ) -> i32;
-
         fn _triangular_fold_mle(output: *mut EF, input: *const EF, r: EF, output_max_n: u32)
         -> i32;
     }
@@ -122,24 +113,6 @@ pub mod sumcheck {
             width,
             domain_size,
             r,
-        ))
-    }
-
-    pub unsafe fn fold_ple_from_evals(
-        input_evals: *const F, // Base field (F)
-        output: *mut EF,       // Extension field (EF)
-        num_x: u32,
-        width: u32,
-        domain_size: u32,
-        lagrange_coeffs: *const EF,
-    ) -> Result<(), CudaError> {
-        CudaError::from_result(_fold_ple_from_evals_no_expansion(
-            input_evals as *const c_void,
-            output as *mut c_void,
-            num_x,
-            width,
-            domain_size,
-            lagrange_coeffs as *const c_void,
         ))
     }
 
