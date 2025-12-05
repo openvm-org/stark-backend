@@ -66,6 +66,8 @@ extern "C" {
     -> i32;
 
     fn _vector_scalar_multiply_ext(vec: *mut EF, scalar: EF, length: u32) -> i32;
+
+    fn _transpose_fp_to_fpext_vec(output: *mut EF, input: *const F, height: u32) -> i32;
 }
 
 /// Does in-place interpolation on `buffer` from eval to coeff form in one coordinate, assuming the
@@ -271,4 +273,22 @@ pub fn vector_scalar_multiply_ext(vec: &mut DeviceBuffer<EF>, scalar: EF) -> Res
             vec.len() as u32,
         ))
     }
+}
+
+/// Transposes a `DeviceBuffer<F>` as a column-major `height x D_EF` matrix into a single
+/// `DeviceBuffer<EF>` of length `height`.
+///
+/// # Safety
+/// - `input.len() == output.len() * D_EF`.
+pub unsafe fn transpose_fp_to_fpext_vec(
+    output: &mut DeviceBuffer<EF>,
+    input: &DeviceBuffer<F>,
+) -> Result<(), CudaError> {
+    let height = output.len();
+    debug_assert_eq!(height * D_EF, input.len());
+    check(_transpose_fp_to_fpext_vec(
+        output.as_mut_ptr(),
+        input.as_ptr(),
+        height as u32,
+    ))
 }

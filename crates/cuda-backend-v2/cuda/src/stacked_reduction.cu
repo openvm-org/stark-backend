@@ -20,15 +20,22 @@ constexpr int S_DEG = 2;
 
 struct UnstackedSlice {
     uint32_t commit_idx;
+    uint32_t log_height;
     uint32_t stacked_row_idx;
     uint32_t stacked_col_idx;
-    uint32_t log_height;
 };
 
 struct Round0UniPacket {
     FpExt eq_uni;
     FpExt k_rot_0;
     FpExt k_rot_1;
+};
+
+struct UnstackedPleFoldPacket {
+    const Fp *__restrict__ src;
+    FpExt *__restrict__ dst;
+    uint32_t height;
+    uint32_t width;
 };
 
 __device__ __forceinline__ FpExt get_eq_cube(const FpExt *eq_r_ns, uint32_t cube_size, uint32_t x) {
@@ -41,22 +48,24 @@ __device__ __forceinline__ uint32_t rot_prev(uint32_t x_int, uint32_t cube_size)
 
 __device__ __forceinline__ Fp eq1(Fp x, Fp y) { return Fp::one() - x - y + Fp(2) * x * y; }
 
-__device__ __forceinline__ Fp barycentric_interpolate(
-    const Fp *q_evals,
+__device__ __forceinline__ Fp barycentric_interpolate_strided(
+    const Fp *evals,
+    uint32_t evals_len,
     uint32_t z,
-    uint32_t expansion_factor,
-    const Fp *inv_lagrange_denoms,
+    uint32_t expansion_factor,     // large_domain / skip_domain
+    const Fp *inv_lagrange_denoms, // denoms specifically for z
     const Fp *omega_skip_pows,
-    uint32_t l_skip
+    uint32_t skip_domain
 ) {
     Fp q = Fp::zero();
+    uint32_t stride = evals_len >= skip_domain ? 1 : skip_domain / evals_len;
     if (z % expansion_factor == 0) {
-        q = q_evals[z / expansion_factor];
+        auto i = z / expansion_factor;
+        if (i % stride == 0)
+            q = evals[i / stride];
     } else {
-        // inv_lagrange_denoms_z[i] = ((z^skip_domain - 1) / skip_domain) * (z - omega_skip_pows[i])^{-1}
-        const Fp *inv_lagrange_denoms_z = inv_lagrange_denoms + (z << l_skip);
-        for (int i = 0; i < (1 << l_skip); i++) {
-            q += q_evals[i] * omega_skip_pows[i] * inv_lagrange_denoms_z[i];
+        for (int idx = 0; idx < (skip_domain / stride); idx++) {
+            q += evals[idx] * omega_skip_pows[idx * stride] * inv_lagrange_denoms[idx * stride];
         }
     }
     return q;
@@ -67,20 +76,21 @@ __device__ __forceinline__ Fp barycentric_interpolate(
 //
 // See Rust doc comments for more details.
 __global__ void stacked_reduction_round0_block_sum_kernel(
-    const Fp *const *q_ptr,               // pointers to matrices, one per [commit_idx]
-    const FpExt *eq_r_ns,                 // pointer to EqEvalSegments
-    const UnstackedSlice *unstacked_cols, // pointer to unstacked_cols at window start
-    const FpExt *lambda_pows,             // pointer to lambda_pows at window start
-    const Round0UniPacket *z_packets,     // pointer to eq_uni, k_rot_0, and k_rot_1 evals for z_int
-    const Fp *omega_skip_pows,            // [2^l_skip]
-    const Fp *inv_lagrange_denoms,        // [domain_size][2^l_skip]
+    const FpExt *__restrict__ eq_r_ns, // pointer to EqEvalSegments
+    const Fp *__restrict__ trace_ptr,
+    const FpExt *__restrict__ lambda_pows, // pointer to lambda_pows at window start
+    const Round0UniPacket
+        *__restrict__ z_packets, // pointer to eq_uni, k_rot_0, and k_rot_1 evals for z_int
+    const Fp *__restrict__ omega_skip_pows,     // [2^l_skip]
+    const Fp *__restrict__ inv_lagrange_denoms, // [domain_size][2^l_skip]
     FpExt *block_sums, // [gridDim.z][gridDim.y][domain_size] for [window_base][blockIdx.y][z_int]
-    uint32_t height,   // height of q
+    uint32_t height,   // trace height
+    uint32_t width,    // trace width
     uint32_t l_skip,
     uint32_t log_domain_size,
-    uint32_t window_len,
-    uint32_t num_x,
-    uint32_t domain_size
+    uint32_t num_x,       // 1 << n_lift
+    uint32_t domain_size, // the large domain size for z
+    uint32_t bary_len     // height / num_x
 ) {
     extern __shared__ char smem[];
     FpExt *shared = reinterpret_cast<FpExt *>(smem);
@@ -106,20 +116,17 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
             FpExt k_rot = k_rot_0 * eq_cube + k_rot_1 * (k_rot_cube - eq_cube);
 
             // We sum over window at a stride, where stride = gridDim.z is tuned based on compute / memory
-            for (uint32_t window_idx = window_base; window_idx < window_len;
-                 window_idx += gridDim.z) {
-                UnstackedSlice unstacked_slice = unstacked_cols[window_idx];
-                const Fp *q_evals = q_ptr[unstacked_slice.commit_idx] +
-                                    unstacked_slice.stacked_col_idx * height +
-                                    unstacked_slice.stacked_row_idx + (x_int << l_skip);
+            for (uint32_t window_idx = window_base; window_idx < width; window_idx += gridDim.z) {
 
-                Fp q = barycentric_interpolate(
-                    q_evals,
+                auto ptr = trace_ptr + window_idx * height + x_int * bary_len;
+                Fp q = barycentric_interpolate_strided(
+                    ptr,
+                    bary_len,
                     z_int,
                     1 << (log_domain_size - l_skip),
-                    inv_lagrange_denoms,
+                    inv_lagrange_denoms + (z_int << l_skip),
                     omega_skip_pows,
-                    l_skip
+                    1 << l_skip
                 );
 
                 auto eval =
@@ -143,6 +150,50 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
         block_sums[window_offset + blockIdx.y * domain_size + z_int] = tile_sum;
     }
     __syncthreads();
+}
+
+// ASSUMPTION: no trace has width exceeding u16::MAX
+// PERF[jpw]: the barycentric interpolation is non-coalesced since each thread reads a different memory slice
+__global__ void stacked_reduction_fold_ple_kernel(
+    const UnstackedPleFoldPacket *__restrict__ trace_packets,
+    const Fp *__restrict__ omega_skip_pows,
+    const FpExt *__restrict__ inv_lagrange_denoms,
+    uint32_t skip_domain, // 2^l_skip
+    uint32_t l_skip,      // log2(domain_size)
+    uint16_t num_packets
+) {
+    uint32_t trace_idx = blockIdx.z;
+    if (trace_idx >= num_packets)
+        return;
+    auto packet = trace_packets[trace_idx];
+    uint32_t height = packet.height;
+    uint32_t new_height;
+    uint32_t stride;
+    if (height >= skip_domain) {
+        new_height = height / skip_domain;
+        stride = 1;
+    } else {
+        new_height = 1;
+        stride = skip_domain / height;
+    }
+    uint32_t width = packet.width;
+
+    uint32_t new_row_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t col_idx = blockIdx.y;
+    if (new_row_idx >= new_height || col_idx >= width)
+        return;
+
+    auto src_len = std::min(height, skip_domain);
+    auto src = packet.src + (col_idx * height + new_row_idx * src_len);
+    auto dst = packet.dst + (col_idx * new_height + new_row_idx);
+
+    // Barycentric interpolation:
+    // NOTE: this is evaluation at a random out of domain point, so we should not have divide by zero in inv_lagrange_denoms
+    FpExt result(Fp::zero());
+    for (int idx = 0; idx < (skip_domain / stride); idx++) {
+        result += src[idx] * omega_skip_pows[idx * stride] * inv_lagrange_denoms[idx * stride];
+    }
+    dst[0] = result;
 }
 
 // Triangular sweep
@@ -322,20 +373,20 @@ extern "C" uint32_t _stacked_reduction_r0_required_temp_buffer_size(
     return grid_z * grid_y * domain_size;
 }
 
+// TODO[jpw]: rename window -> col (archaic naming), window_idx is same as trace column idx
 extern "C" int _stacked_reduction_sumcheck_round0(
-    const Fp *const *q_ptr,
     const FpExt *eq_r_ns,
-    const UnstackedSlice *unstacked_cols,
+    const Fp *trace_ptr,
     const FpExt *lambda_pows,
     const Round0UniPacket *z_packets,
     const Fp *omega_skip_pows,     // [2^l_skip]
     const Fp *inv_lagrange_denoms, // [domain_size][2^l_skip]
     FpExt *block_sums,
     FpExt *output, // length should be domain_size
-    uint32_t upsampled_height,
+    uint32_t height,
+    uint32_t width,
     uint32_t log_domain_size,
     uint32_t l_skip,
-    uint32_t window_len,
     uint32_t num_x,
     uint16_t thread_window_stride // how many elements in window to sum in one thread
 ) {
@@ -353,20 +404,20 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     size_t shmem_bytes = sizeof(FpExt) * block.x * block.y;
 
     stacked_reduction_round0_block_sum_kernel<<<grid, block, shmem_bytes>>>(
-        q_ptr,
         eq_r_ns,
-        unstacked_cols,
+        trace_ptr,
         lambda_pows,
         z_packets,
         omega_skip_pows,
         inv_lagrange_denoms,
         block_sums,
-        upsampled_height,
+        height,
+        width,
         l_skip,
         log_domain_size,
-        window_len,
         num_x,
-        domain_size
+        domain_size,
+        height / num_x
     );
 
     int err = CHECK_KERNEL();
@@ -381,6 +432,27 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     // d = domain_size, WD = 1 so we have gridDim.x = domain_size
     sumcheck::final_reduce_block_sums<<<domain_size, reduce_block, reduce_shmem>>>(
         block_sums, output, num_blocks
+    );
+
+    return CHECK_KERNEL();
+}
+
+extern "C" int _stacked_reduction_fold_ple(
+    const UnstackedPleFoldPacket *trace_packets,
+    const Fp *omega_skip_pows,
+    const FpExt *inv_lagrange_denoms,
+    uint32_t l_skip, // log2(domain_size)
+    uint16_t num_packets,
+    uint32_t max_new_height,
+    uint16_t max_trace_width
+) {
+    auto [grid, block] = kernel_launch_params(max_new_height);
+    grid.y = max_trace_width;
+    grid.z = num_packets;
+
+    uint32_t skip_domain = 1 << l_skip;
+    stacked_reduction_fold_ple_kernel<<<grid, block>>>(
+        trace_packets, omega_skip_pows, inv_lagrange_denoms, skip_domain, l_skip, num_packets
     );
 
     return CHECK_KERNEL();

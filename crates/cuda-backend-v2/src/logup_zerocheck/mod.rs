@@ -15,7 +15,7 @@ use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints, p3_maybe_rayon::prelude::*,
     prover::MatrixDimensions,
 };
-use p3_field::{Field, FieldAlgebra, TwoAdicField, batch_multiplicative_inverse};
+use p3_field::{Field, FieldAlgebra, TwoAdicField};
 use p3_util::{log2_ceil_usize, log2_strict_usize};
 use stark_backend_v2::{
     poly_common::{
@@ -43,6 +43,7 @@ use crate::{
     },
     poly::EqEvalSegments,
     stacked_pcs::StackedPcsDataGpu,
+    utils::compute_barycentric_inv_lagrange_denoms,
 };
 
 mod dag_scheduling;
@@ -414,27 +415,12 @@ where
                 .map(|&z| eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into()))
                 .collect();
             let d_eq_sharp_z = eq_sharp_z_host.to_device().unwrap();
-            // https://hackmd.io/@vbuterin/barycentric_evaluation#Special-case-roots-of-unity
+            // TODO: move this to outer loop and only do it for the largest domain
             // Length is large_domain * 2^l_skip, so it is easier to do on CPU
             let inv_lagrange_denoms: Vec<F> = omega_pows
                 .par_iter()
                 .flat_map(|&z| {
-                    let denoms = self
-                        .omega_skip_pows
-                        .iter()
-                        .map(|&w_i| {
-                            let denom = z - w_i;
-                            if denom.is_zero() { F::ONE } else { denom }
-                        })
-                        .collect_vec();
-                    let mut inv_denoms = batch_multiplicative_inverse(&denoms);
-                    let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
-                    let denominator = F::from_canonical_usize(1 << l_skip);
-                    let scale_factor = zerofier * denominator.inverse();
-                    for v in &mut inv_denoms {
-                        *v *= scale_factor;
-                    }
-                    inv_denoms
+                    compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, z)
                 })
                 .collect();
             let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
@@ -535,6 +521,9 @@ where
     #[instrument(name = "LogupZerocheck::fold_ple_evals", level = "debug", skip_all)]
     fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<GpuBackendV2>, r_0: EF) {
         let l_skip = self.l_skip;
+        let inv_lagrange_denoms_r0 =
+            compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, r_0);
+        let d_inv_lagrange_denoms_r0 = inv_lagrange_denoms_r0.to_device().unwrap();
 
         // GPU folding for mat_evals_per_trace
         self.mat_evals_per_trace = ctx
@@ -547,20 +536,38 @@ where
                 // Preprocessed (if exists)
                 if let Some(committed) = &air_pk.preprocessed_data {
                     let trace = &committed.trace;
-                    let folded = fold_ple_mixed_rotate(l_skip, trace, r_0).unwrap();
+                    let folded = fold_ple_mixed_rotate(
+                        l_skip,
+                        &self.d_omega_skip_pows,
+                        trace,
+                        &d_inv_lagrange_denoms_r0,
+                    )
+                    .unwrap();
                     results.push(folded);
                 }
 
                 // Cached mains
                 for committed in &air_ctx.cached_mains {
                     let trace = &committed.trace;
-                    let folded = fold_ple_mixed_rotate(l_skip, trace, r_0).unwrap();
+                    let folded = fold_ple_mixed_rotate(
+                        l_skip,
+                        &self.d_omega_skip_pows,
+                        trace,
+                        &d_inv_lagrange_denoms_r0,
+                    )
+                    .unwrap();
                     results.push(folded);
                 }
 
                 // Common main
                 let trace = &air_ctx.common_main;
-                let folded = fold_ple_mixed_rotate(l_skip, trace, r_0).unwrap();
+                let folded = fold_ple_mixed_rotate(
+                    l_skip,
+                    &self.d_omega_skip_pows,
+                    trace,
+                    &d_inv_lagrange_denoms_r0,
+                )
+                .unwrap();
                 results.push(folded);
 
                 results

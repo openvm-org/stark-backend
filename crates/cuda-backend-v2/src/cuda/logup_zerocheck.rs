@@ -1,5 +1,3 @@
-use std::ffi::c_void;
-
 use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_stark_backend::prover::MatrixDimensions;
 
@@ -51,10 +49,10 @@ extern "C" {
 
     // utils.cu
     fn _fold_ple_from_evals(
-        input_matrix: *const std::ffi::c_void,
-        output_matrix: *mut std::ffi::c_void,
-        numerators: *const std::ffi::c_void,
-        inv_lagrange_denoms: *const std::ffi::c_void,
+        input_matrix: *const F,
+        output_matrix: *mut EF,
+        omega_skip_pows: *const F,
+        inv_lagrange_denoms: *const EF,
         height: u32,
         width: u32,
         l_skip: u32,
@@ -414,7 +412,7 @@ pub unsafe fn frac_extract_claims(
 pub unsafe fn fold_ple_from_evals(
     input_matrix: &DeviceBuffer<F>,
     output_matrix: *mut EF,
-    numerators: &DeviceBuffer<EF>,
+    omega_skip_pows: &DeviceBuffer<F>,
     inv_lagrange_denoms: &DeviceBuffer<EF>,
     height: u32,
     width: u32,
@@ -423,10 +421,10 @@ pub unsafe fn fold_ple_from_evals(
     rotate: bool,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_fold_ple_from_evals(
-        input_matrix.as_raw_ptr(),
-        output_matrix as *mut c_void,
-        numerators.as_raw_ptr(),
-        inv_lagrange_denoms.as_raw_ptr(),
+        input_matrix.as_ptr(),
+        output_matrix,
+        omega_skip_pows.as_ptr(),
+        inv_lagrange_denoms.as_ptr(),
         height,
         width,
         l_skip,
