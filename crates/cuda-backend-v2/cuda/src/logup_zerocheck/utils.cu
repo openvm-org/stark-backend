@@ -18,15 +18,15 @@ namespace {
 // For each (x, col), collects 2^l_skip evaluations on coset D and interpolates for both offsets
 template <bool ROTATE>
 __global__ void fold_ple_from_evals_kernel(
-    const Fp *input_matrix,  // [height * width] column-major
-    FpExt *output_matrix,    // [new_height * output_width] column-major
-                             // If ROTATE: output_width = width * 2, layout: [orig_cols, rot_cols]
-                             // If !ROTATE: output_width = width
-    const FpExt *numerators, // [domain_size] Π_{j≠i} (r_0 - omega^j)
-    const FpExt *inv_lagrange_denoms, // [domain_size] 1/(Π_{j≠i} (omega^i - omega^j))
+    const Fp *__restrict__ input_matrix, // [height * width] column-major
+    FpExt *__restrict__ output_matrix,   // [new_height * output_width] column-major
+    // If ROTATE: output_width = width * 2, layout: [orig_cols, rot_cols]
+    // If !ROTATE: output_width = width
+    const Fp *__restrict__ omega_skip_pows, // [skip_domain]
+    const FpExt *inv_lagrange_denoms,       // [skip_domain]
     uint32_t height,
     uint32_t width,
-    uint32_t domain_size, // 2^l_skip
+    uint32_t skip_domain, // 2^l_skip
     uint32_t l_skip,      // log2(domain_size)
     uint32_t new_height   // lifted_height >> l_skip
 ) {
@@ -38,17 +38,19 @@ __global__ void fold_ple_from_evals_kernel(
     int x = idx % new_height;
     int col = idx / new_height;
 
+    // Barycentric interpolation:
+    // NOTE: there is no special handling of the case when lagrange denominator is zero because the random point `r_0` should lie outside of the skip domain with high probability.
     if constexpr (!ROTATE) {
         // Compute offset 0 if rotate=false
         FpExt result_0(Fp::zero());
 
-        for (int z = 0; z < domain_size; z++) {
+        for (int z = 0; z < skip_domain; z++) {
             // Offset 0: ((x << l_skip) + z + 0) % height
             int row_idx_0 = ((x << l_skip) + z) % height;
             int input_idx_0 = col * height + row_idx_0;
             Fp eval_0 = input_matrix[input_idx_0];
             // Lagrange interpolation: eval * numerators[z] * inv_lagrange_denoms[z]
-            result_0 = result_0 + FpExt(eval_0) * numerators[z] * inv_lagrange_denoms[z];
+            result_0 += inv_lagrange_denoms[z] * omega_skip_pows[z] * eval_0;
         }
 
         // Write original columns: output_matrix[col * new_height + x]
@@ -57,12 +59,12 @@ __global__ void fold_ple_from_evals_kernel(
     } else {
         // Compute offset 1 if rotate=true
         FpExt result_1(Fp::zero());
-        for (int z = 0; z < domain_size; z++) {
+        for (int z = 0; z < skip_domain; z++) {
             // Offset 1: ((x << l_skip) + z + 1) % height
             int row_idx_1 = ((x << l_skip) + z + 1) % height;
             int input_idx_1 = col * height + row_idx_1;
             Fp eval_1 = input_matrix[input_idx_1];
-            result_1 = result_1 + FpExt(eval_1) * numerators[z] * inv_lagrange_denoms[z];
+            result_1 += inv_lagrange_denoms[z] * omega_skip_pows[z] * eval_1;
         }
         // Write rotated columns: output_matrix[(width + col) * new_height + x]
         // Layout: [orig_col0...orig_col{width-1}, rot_col0...rot_col{width-1}]
@@ -165,7 +167,7 @@ constexpr uint32_t MAX_GRID_DIM = 65535u;
 extern "C" int _fold_ple_from_evals(
     const Fp *input_matrix,
     FpExt *output_matrix,
-    const FpExt *numerators,
+    const Fp *omega_skip_pows,
     const FpExt *inv_lagrange_denoms,
     uint32_t height,
     uint32_t width,
@@ -180,7 +182,7 @@ extern "C" int _fold_ple_from_evals(
         fold_ple_from_evals_kernel<true><<<grid, block>>>(
             input_matrix,
             output_matrix,
-            numerators,
+            omega_skip_pows,
             inv_lagrange_denoms,
             height,
             width,
@@ -192,7 +194,7 @@ extern "C" int _fold_ple_from_evals(
         fold_ple_from_evals_kernel<false><<<grid, block>>>(
             input_matrix,
             output_matrix,
-            numerators,
+            omega_skip_pows,
             inv_lagrange_denoms,
             height,
             width,
@@ -259,7 +261,15 @@ extern "C" int _frac_matrix_vertically_repeat_ext(
     grid.y = std::min(width, MAX_GRID_DIM);
     grid.z = (width + grid.y - 1) / grid.y;
     assert(grid.z <= MAX_GRID_DIM);
-    frac_matrix_vertically_repeat_mixed_kernel<<<grid, block>>>(out_numerators, out_denominators, in_numerators, in_denominators, width, lifted_height, height);
+    frac_matrix_vertically_repeat_mixed_kernel<<<grid, block>>>(
+        out_numerators,
+        out_denominators,
+        in_numerators,
+        in_denominators,
+        width,
+        lifted_height,
+        height
+    );
     return CHECK_KERNEL();
 }
 

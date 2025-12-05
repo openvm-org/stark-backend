@@ -10,6 +10,7 @@ pub mod poly;
 pub mod stacked_pcs;
 pub mod stacked_reduction;
 mod sumcheck;
+pub mod utils;
 pub mod whir;
 
 pub use device::*;
