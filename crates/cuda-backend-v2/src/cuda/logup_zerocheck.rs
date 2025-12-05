@@ -1,5 +1,6 @@
 use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_stark_backend::prover::MatrixDimensions;
+use p3_field::{Field, FieldAlgebra};
 
 use super::*;
 
@@ -34,7 +35,7 @@ extern "C" {
         buffer: *mut EF,
         stride: usize,
         step: usize,
-        r: EF,
+        r_or_r_inv: EF,
         revert: bool,
     ) -> i32;
     fn _frac_extract_claims(
@@ -387,11 +388,17 @@ pub unsafe fn fold_ef_columns(
     r: EF,
     revert: bool,
 ) -> Result<(), CudaError> {
+    let r_or_r_inv = if revert {
+        debug_assert!(r != EF::ONE);
+        (EF::ONE - r).inverse()
+    } else {
+        r
+    };
     CudaError::from_result(_frac_fold_ext_columns(
         buffer.as_mut_ptr(),
         stride,
         step,
-        r,
+        r_or_r_inv,
         revert,
     ))
 }

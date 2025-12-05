@@ -54,7 +54,6 @@ __global__ void compute_round_kernel(
     const FpExt zero = {0, 0, 0, 0};
 
     FpExt local[3] = {zero, zero, zero};
-    const FpExt xs[3] = {FpExt(Fp(1u)), FpExt(Fp(2u)), FpExt(Fp(3u))};
 
     for (size_t idx = threadIdx.x; idx < half; idx += blockDim.x) {
         size_t even = idx << 1;
@@ -63,7 +62,7 @@ __global__ void compute_round_kernel(
         FpExt eq_diff = eq_odd - eq_even;
 
         // \hat p_j({0 or 1}, {even or odd}, ..y)
-        // The {even=0, odd=1} evaluations are used to interpolate at xs
+        // The {even=0, odd=1} evaluations are used to interpolate at 1, 2, 3
         uint32_t offset = even << 1;
         auto const& p0_even = pq_nums[offset * pq_step];
         auto const& q0_even = pq_denoms[offset * pq_step];
@@ -79,17 +78,27 @@ __global__ void compute_round_kernel(
         FpExt p1_diff = p1_odd - p1_even;
         FpExt q1_diff = q1_odd - q1_even;
 
+        FpExt eq_val = eq_even;
+        FpExt p_j0 = p0_even + lambda * q0_even;
+        FpExt q_j0 = q0_even;
+        FpExt p_j1 = p1_even;
+        FpExt q_j1 = q1_even;
+
+        auto const lambda_times_q0_diff = lambda * q0_diff;
+
 #pragma unroll
         for (int i = 0; i < 3; ++i) {
-            FpExt eq_val = eq_even + xs[i] * eq_diff;
-            FpExt p_j0 = p0_even + xs[i] * p0_diff;
-            FpExt q_j0 = q0_even + xs[i] * q0_diff;
-            FpExt p_j1 = p1_even + xs[i] * p1_diff;
-            FpExt q_j1 = q1_even + xs[i] * q1_diff;
+            eq_val += eq_diff;
+            p_j0 += p0_diff;
+            p_j0 += lambda_times_q0_diff;
+            q_j0 += q0_diff;
+            p_j1 += p1_diff;
+            q_j1 += q1_diff;
 
-            FpExt p_prev = p_j0 * q_j1 + p_j1 * q_j0;
-            FpExt q_prev = q_j0 * q_j1;
-            local[i] = local[i] + eq_val * (p_prev + lambda * q_prev);
+            // FpExt p_prev = p_j0 * q_j1 + p_j1 * q_j0;
+            // FpExt q_prev = q_j0 * q_j1;
+            // local[i] += eq_val * (p_prev + lambda * q_prev);
+            local[i] += eq_val * (p_j0 * q_j1 + p_j1 * q_j0);
         }
     }
 
@@ -125,7 +134,7 @@ __global__ void fold_ef_columns_kernel(
     FpExt *__restrict__ buffer,
     size_t out_stride,
     size_t step,
-    FpExt r
+    FpExt r_or_r_inv // is the inverse of 1 - r in case if revert = true
 ) {
     size_t total = out_stride;
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -144,12 +153,10 @@ __global__ void fold_ef_columns_kernel(
         FpExt& t0 = buffer[(4 * idx + 2 * i) * step];
         FpExt const& t1 = buffer[(4 * idx + 2 * i + 1) * step];
         if constexpr (revert) {
-            assert(r != FpExt(Fp::one()));
-            FpExt const r_inv = inv(FpExt(Fp::one()) - r);
             // z = x + r * (y - x) => x = (z - r * y) / (1 - r) = (z - y + (y - r * y)) / (1 - r)
-            t0 = (t0 - t1) * r_inv + t1;
+            t0 = (t0 - t1) * r_or_r_inv + t1;
         } else {
-            t0 = t0 + r * (t1 - t0);
+            t0 = t0 + r_or_r_inv * (t1 - t0);
         }
     }
 
@@ -280,7 +287,7 @@ extern "C" int _frac_fold_ext_columns(
     FpExt *__restrict__ buffer,
     size_t in_stride,
     size_t step,
-    FpExt r,
+    FpExt r_or_r_inv,
     bool revert
 ) {
     if (in_stride <= 1) {
@@ -289,9 +296,9 @@ extern "C" int _frac_fold_ext_columns(
     size_t half = in_stride >> 1;
     auto [grid, block] = kernel_launch_params(half * 2);
     if (revert) {
-        fold_ef_columns_kernel<true><<<grid, block>>>(buffer, half, step, r);
+        fold_ef_columns_kernel<true><<<grid, block>>>(buffer, half, step, r_or_r_inv);
     } else {
-        fold_ef_columns_kernel<false><<<grid, block>>>(buffer, half, step, r);
+        fold_ef_columns_kernel<false><<<grid, block>>>(buffer, half, step, r_or_r_inv);
     }
     return CHECK_KERNEL();
 }
