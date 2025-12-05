@@ -1,9 +1,8 @@
 use std::{cmp::max, sync::Arc};
 
 use openvm_cuda_backend::base::DeviceMatrix;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
+use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::{FieldAlgebra, TwoAdicField};
 
 use super::errors::FoldPleError;
 use crate::{
@@ -16,8 +15,9 @@ use crate::{
 /// - `trace_evals` should be unlifted (the original trace).
 pub fn fold_ple_mixed_rotate(
     l_skip: usize,
+    d_omega_skip_pows: &DeviceBuffer<F>,
     trace_evals: &DeviceMatrix<F>,
-    r_0: EF,
+    d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
 ) -> Result<DeviceMatrix<EF>, FoldPleError> {
     let width = trace_evals.width();
     let height = trace_evals.height();
@@ -27,14 +27,22 @@ pub fn fold_ple_mixed_rotate(
     // - We allocated `folded_buf` for `num_x * width * 2` elements.
     // - `trace_evals` is `height x width` unlighted matrix
     unsafe {
-        fold_ple_evals_gpu(l_skip, trace_evals, folded_buf.as_mut_ptr(), r_0, false)?;
+        fold_ple_evals_gpu(
+            l_skip,
+            d_omega_skip_pows,
+            trace_evals,
+            folded_buf.as_mut_ptr(),
+            d_inv_lagrange_denoms_r0,
+            false,
+        )?;
 
         // Fold the rotation from evals
         fold_ple_evals_gpu(
             l_skip,
+            d_omega_skip_pows,
             trace_evals,
             folded_buf.as_mut_ptr().add(num_x * width),
-            r_0,
+            d_inv_lagrange_denoms_r0,
             true,
         )?;
     }
@@ -54,9 +62,10 @@ pub fn fold_ple_mixed_rotate(
 ///   max(height / 2^l_skip, 1)`.
 pub unsafe fn fold_ple_evals_gpu(
     l_skip: usize,
+    d_omega_skip_pows: &DeviceBuffer<F>,
     mat: &DeviceMatrix<F>,
     output: *mut EF,
-    r_0: EF,
+    d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
     rotate: bool,
 ) -> Result<(), FoldPleError> {
     let height = mat.height();
@@ -66,55 +75,18 @@ pub unsafe fn fold_ple_evals_gpu(
         return Ok(());
     }
 
-    let domain_size = 1usize << l_skip;
-    let lifted_height = max(domain_size, height);
-    let num_x = lifted_height >> l_skip;
-
-    // Precompute denominators and numerators on host
-    let omega = F::two_adic_generator(l_skip);
-    let omega_pows: Vec<F> = omega.powers().take(domain_size).collect();
-
-    // Compute numerators: Π_{j≠i} (r_0 - omega^j) for each i
-    let numerators: Vec<EF> = (0..domain_size)
-        .map(|i| {
-            let mut num = EF::ONE;
-            for (j, &omega_j) in omega_pows.iter().enumerate() {
-                if j != i {
-                    num *= r_0 - EF::from(omega_j);
-                }
-            }
-            num
-        })
-        .collect();
-
-    // Compute denominators for Lagrange basis: Π_{j≠i} (omega^i - omega^j) for each i
-    let lagrange_denoms: Vec<EF> = (0..domain_size)
-        .map(|i| {
-            let mut denom = EF::ONE;
-            let omega_i = omega_pows[i];
-            for (j, &omega_j) in omega_pows.iter().enumerate() {
-                if j != i {
-                    denom *= EF::from(omega_i) - EF::from(omega_j);
-                }
-            }
-            denom
-        })
-        .collect();
-    let inv_lagrange_denoms: Vec<EF> = p3_field::batch_multiplicative_inverse(&lagrange_denoms);
-
-    // Copy to device
-    let d_numerators = numerators.to_device().map_err(FoldPleError::Copy)?;
-    let d_inv_lagrange_denoms = inv_lagrange_denoms
-        .to_device()
-        .map_err(FoldPleError::Copy)?;
+    let skip_domain = d_omega_skip_pows.len();
+    debug_assert_eq!(skip_domain, 1 << l_skip);
+    let lifted_height = max(skip_domain, height);
+    let num_x = lifted_height / skip_domain;
 
     // Launch kernel
     unsafe {
         fold_ple_from_evals(
             mat.buffer(),
             output,
-            &d_numerators,
-            &d_inv_lagrange_denoms,
+            d_omega_skip_pows,
+            d_inv_lagrange_denoms_r0,
             height as u32,
             width as u32,
             l_skip as u32,

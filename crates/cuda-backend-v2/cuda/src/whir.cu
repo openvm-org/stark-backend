@@ -10,6 +10,67 @@ namespace {
 constexpr int S_DEG = 2;
 }
 
+struct BatchingTracePacket {
+    const Fp *__restrict__ ptr;
+    uint32_t height;
+    uint32_t width;
+    uint32_t stacked_row_start;
+    uint32_t mu_idx;
+};
+
+/// Algebraically batch _unstacked_ traces to get equivalent behavior to stacking traces and then algebraically batching stacked columns.
+__global__ void whir_algebraic_batch_traces_kernel(
+    Fp *__restrict__ output,                         // Length is stacked_height
+    const BatchingTracePacket *__restrict__ packets, // packets, one per unstacked trace
+    const FpExt *mu_powers,                          // Len is sum of widths of all matrices
+    size_t stacked_height,
+    size_t num_packets,
+    uint32_t skip_domain
+) {
+
+    size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= stacked_height) {
+        return;
+    }
+
+    // NOTE(perf): Depending on the number of columns, we may want to use shared memory to reduce this sum.
+    FpExt res(Fp::zero());
+    for (int idx = 0; idx < num_packets; idx++) {
+        auto packet = packets[idx];
+        auto trace = packet.ptr;
+        uint32_t height = packet.height;
+        uint32_t lifted_height = std::max(height, skip_domain);
+        uint32_t width = packet.width;
+        uint32_t row_start = packet.stacked_row_start;
+        uint32_t mu_idx_start = packet.mu_idx;
+        uint32_t stride = std::max(skip_domain / height, 1u);
+        // Determine if there are entries between `row_start..row_start + lifted_height * width (mod stacked_height)` that equal `row`
+        // This is the same as all `offset` satisfying
+        // row_start <= offset * stacked_height + row < row_start + lifted_height * width
+        auto stacked_end = row_start + lifted_height * width;
+        if (row >= stacked_end)
+            continue;
+        uint32_t offset_start = row_start <= row ? 0 : 1;
+        for (uint32_t row_offset = offset_start * stacked_height + row; row_offset < stacked_end;
+             row_offset += stacked_height) {
+            auto offset = (row_offset - row) / stacked_height;
+            uint32_t tmp = row_offset - row_start; // < lifted_height * width
+            uint32_t trace_col = tmp / lifted_height;
+            uint32_t strided_trace_row = tmp % lifted_height;
+            // match the striding that happens in stacking matrix
+            auto trace_val = strided_trace_row % stride == 0
+                                 ? trace[trace_col * height + (strided_trace_row / stride)]
+                                 : Fp::zero();
+            auto mu_pow = mu_powers[mu_idx_start + offset];
+            res += mu_pow * trace_val;
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        output[i * stacked_height + row] = res.elems[i];
+    }
+}
+
 // Computes round of sumcheck on the polynomial `\hat{f} * \hat{w}` where
 // `\hat{f}, \hat{w}` are multlinear. Hence the `s` poly has degree 2.
 //
@@ -92,6 +153,21 @@ __global__ void w_evals_accumulate_kernel(
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
+
+extern "C" int _whir_algebraic_batch_traces(
+    Fp *output, // Length is stacked_height
+    const BatchingTracePacket *packets,
+    const FpExt *mu_powers, // Len is sum of widths of all matrices
+    size_t stacked_height,
+    size_t num_packets,
+    uint32_t skip_domain
+) {
+    auto [grid, block] = kernel_launch_params(stacked_height);
+    whir_algebraic_batch_traces_kernel<<<grid, block>>>(
+        output, packets, mu_powers, stacked_height, num_packets, skip_domain
+    );
+    return CHECK_KERNEL();
+}
 
 extern "C" uint32_t _whir_sumcheck_required_temp_buffer_size(uint32_t height) {
     auto [grid, block] = kernel_launch_params(height >> 1);
