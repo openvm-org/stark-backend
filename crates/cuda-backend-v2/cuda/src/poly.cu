@@ -167,6 +167,21 @@ __global__ void vector_scalar_multiply_kernel(Field *vec, Field scalar, uint32_t
     vec[tidx] *= scalar;
 }
 
+__global__ void transpose_fp_to_fpext_vec_kernel(
+    FpExt *__restrict__ output,
+    const Fp *__restrict__ input,
+    uint32_t height
+) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= height)
+        return;
+
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        output[idx].elems[i] = input[i * height + idx];
+    }
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -318,5 +333,11 @@ extern "C" int _eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, Fp
 extern "C" int _vector_scalar_multiply_ext(FpExt *vec, FpExt scalar, uint32_t length) {
     auto [grid, block] = kernel_launch_params(length);
     vector_scalar_multiply_kernel<FpExt><<<grid, block>>>(vec, scalar, length);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _transpose_fp_to_fpext_vec(FpExt *output, const Fp *input, uint32_t height) {
+    auto [grid, block] = kernel_launch_params(height);
+    transpose_fp_to_fpext_vec_kernel<<<grid, block>>>(output, input, height);
     return CHECK_KERNEL();
 }

@@ -6,7 +6,7 @@ use openvm_cuda_common::{
 use crate::{
     EF, F,
     poly::EqEvalSegments,
-    stacked_reduction::{Round0UniPacket, UnstackedSlice},
+    stacked_reduction::{Round0UniPacket, UnstackedPleFoldPacket, UnstackedSlice},
 };
 
 extern "C" {
@@ -17,9 +17,8 @@ extern "C" {
     ) -> u32;
 
     fn _stacked_reduction_sumcheck_round0(
-        q_ptr: *const *const F,
         eq_r_ns: *const EF,
-        unstacked_cols: *const UnstackedSlice,
+        trace_ptr: *const F,
         lambda_pows: *const EF,
         z_packets: *const Round0UniPacket,
         omega_skip_pows: *const F,
@@ -27,11 +26,21 @@ extern "C" {
         block_sums: *mut EF,
         output: *mut EF,
         height: u32,
+        width: u32,
         log_domain_size: u32,
         l_skip: u32,
-        window_len: u32,
         num_x: u32,
         thread_window_stride: u16,
+    ) -> i32;
+
+    fn _stacked_reduction_fold_ple(
+        trace_packets: *const UnstackedPleFoldPacket,
+        omega_skip_pows: *const F,
+        inv_lagrange_denoms: *const EF,
+        l_skip: u32,
+        num_packets: u16,
+        max_new_height: u32,
+        max_trace_width: u16,
     ) -> i32;
 
     fn _initialize_k_rot_from_eq_segments(
@@ -111,12 +120,7 @@ extern "C" {
 /// It must fit in `u16` for CUDA grid dimension limits.
 ///
 /// # Safety
-/// - Each pointer in `q_ptr` must be to a device buffer of length `height`.
-/// - `unstacked_cols` should be pointer to DeviceBuffer<UnstackedSlice>, at an offset.
-///   - `unstacked_cols` must be initialized for at least `window_len` elements.
-///   - for each `UnstackedSlice` in the `window_len` elements starting at `unstacked_cols`, the
-///     `log_height` must all be the same and the `stacked_row_idx` must be a multiple of
-///     `2^l_skip`.
+/// - `trace_ptr` must be a pointer to a device buffer valid for `height * width` elements.
 /// - `lambda_pows` should be pointer to DeviceBuffer<EF>, at an offset.
 ///   - `lambda_pows` must be initialized for at least `2 * window_len` elements (for rotations).
 /// - `z_packets` should be of length `2^log_domain_size`.
@@ -126,9 +130,8 @@ extern "C" {
 /// - `output` should have length `>= 2^log_domain_size`.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_round0(
-    q_ptr: &DeviceBuffer<*const F>,
     eq_r_ns: &EqEvalSegments<EF>,
-    unstacked_cols: *const UnstackedSlice,
+    trace_ptr: *const F,
     lambda_pows: *const EF,
     z_packets: &DeviceBuffer<Round0UniPacket>,
     omega_skip_pows: &DeviceBuffer<F>,
@@ -136,14 +139,13 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
     block_sums: &mut DeviceBuffer<EF>,
     output: &mut DeviceBuffer<EF>,
     height: usize,
+    width: usize,
     log_domain_size: usize,
     l_skip: usize,
-    window_len: usize,
-    num_x: usize,
     thread_window_stride: u16,
 ) -> Result<(), CudaError> {
     let domain_size = 1u32 << log_domain_size;
-    let num_x = num_x as u32;
+    let num_x = (height >> l_skip).max(1) as u32;
     debug_assert_eq!(z_packets.len(), domain_size as usize);
     debug_assert!(output.len() >= domain_size as usize);
     #[cfg(debug_assertions)]
@@ -161,9 +163,8 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
         );
     }
     check(_stacked_reduction_sumcheck_round0(
-        q_ptr.as_ptr(),
         eq_r_ns.buffer().as_ptr(),
-        unstacked_cols,
+        trace_ptr,
         lambda_pows,
         z_packets.as_ptr(),
         omega_skip_pows.as_ptr(),
@@ -171,11 +172,46 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
         block_sums.as_mut_ptr(),
         output.as_mut_ptr(),
         height as u32,
+        width as u32,
         log_domain_size as u32,
         l_skip as u32,
-        window_len as u32,
         num_x,
         thread_window_stride,
+    ))
+}
+
+/// # Safety
+/// - The `src` pointers in `trace_packets` must be device pointers valid for `height x width` trace
+///   matrices.
+/// - The `dst` pointers in `trace_packets` must be device pointers valid for `new_height x width`
+///   where `new_height = max(height, skip_domin) / skip_domin` for `skip_domain = 2^l_skip`.
+///   Moreover these slices must be **disjoint**.
+/// - The max trace width and length of `trace_packets` must not exceed `u16::MAX` due to kernel
+///   grid sizes. This limitation can be removed with a kernel modification.
+pub unsafe fn stacked_reduction_fold_ple(
+    trace_packets: &DeviceBuffer<UnstackedPleFoldPacket>,
+    omega_skip_pows: &DeviceBuffer<F>,
+    inv_lagrange_denoms: &DeviceBuffer<EF>,
+    l_skip: usize,
+    max_new_height: usize,
+    max_trace_width: usize,
+) -> Result<(), CudaError> {
+    let num_packets: u16 = trace_packets
+        .len()
+        .try_into()
+        .expect("number of unstacked trace matrices must not exceed u16::MAX");
+    debug_assert_eq!(inv_lagrange_denoms.len(), 1 << l_skip);
+    let max_trace_width: u16 = max_trace_width
+        .try_into()
+        .expect("trace width must not exceed u16::MAX");
+    check(_stacked_reduction_fold_ple(
+        trace_packets.as_ptr(),
+        omega_skip_pows.as_ptr(),
+        inv_lagrange_denoms.as_ptr(),
+        l_skip as u32,
+        num_packets,
+        max_new_height as u32,
+        max_trace_width,
     ))
 }
 
