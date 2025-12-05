@@ -1,7 +1,7 @@
-use std::{array::from_fn, ffi::c_void, iter::zip, sync::Arc};
+use std::{array::from_fn, cmp::max, ffi::c_void, iter::zip, mem, sync::Arc};
 
-use itertools::{Itertools, izip};
-use openvm_cuda_backend::{base::DeviceMatrix, ntt::batch_ntt};
+use itertools::{Itertools, zip_eq};
+use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
     d_buffer::DeviceBuffer,
@@ -11,7 +11,7 @@ use openvm_stark_backend::{
     p3_maybe_rayon::prelude::{IntoParallelRefIterator, ParallelIterator},
     prover::MatrixDimensions,
 };
-use p3_field::{Field, FieldAlgebra, TwoAdicField, batch_multiplicative_inverse};
+use p3_field::{FieldAlgebra, TwoAdicField};
 use p3_util::log2_ceil_usize;
 use stark_backend_v2::{
     poly_common::{
@@ -33,13 +33,14 @@ use crate::{
         stacked_reduction::{
             _stacked_reduction_mle_required_temp_buffer_size,
             _stacked_reduction_r0_required_temp_buffer_size, initialize_k_rot_from_eq_segments,
-            stacked_reduction_sumcheck_mle_round, stacked_reduction_sumcheck_mle_round_degenerate,
-            stacked_reduction_sumcheck_round0,
+            stacked_reduction_fold_ple, stacked_reduction_sumcheck_mle_round,
+            stacked_reduction_sumcheck_mle_round_degenerate, stacked_reduction_sumcheck_round0,
         },
-        sumcheck::{fold_mle, fold_ple_from_evals, triangular_fold_mle},
+        sumcheck::{fold_mle, triangular_fold_mle},
     },
-    poly::{EqEvalSegments, PleMatrix},
-    stacked_pcs::{StackedPcsDataGpu, stack_traces},
+    poly::EqEvalSegments,
+    stacked_pcs::StackedPcsDataGpu,
+    utils::compute_barycentric_inv_lagrange_denoms,
 };
 
 pub struct StackedReductionGpu {
@@ -48,6 +49,7 @@ pub struct StackedReductionGpu {
 
     omega_skip: F,
     omega_skip_pows: Vec<F>,
+    d_omega_skip_pows: DeviceBuffer<F>,
 
     r_0: EF,
     d_lambda_pows: DeviceBuffer<EF>,
@@ -56,6 +58,11 @@ pub struct StackedReductionGpu {
     pub(crate) stacked_per_commit: Vec<StackedPcsData2>,
     d_q_widths: DeviceBuffer<u32>,
 
+    trace_ptrs: Vec<(
+        *const F, /* trace_ptr */
+        usize,    /* height */
+        usize,    /* width */
+    )>,
     unstacked_cols: Vec<UnstackedSlice>,
     d_unstacked_cols: DeviceBuffer<UnstackedSlice>,
     // boundary indices where heights change. all columns between two boundaries must have the same
@@ -86,13 +93,14 @@ pub struct StackedReductionGpu {
     mem: MemTracker,
 }
 
-/// A struct for holding stacked pcs data. Since `StackedPcsDataGpu` may not contain `matrix` if
-/// prover configuration does not cache it, we generate the matrix from traces and store in
-/// `stacked_matrix`. It will be guaranateed that either `inner.matrix` or `stacked_matrix` is
-/// present.
+/// A struct for holding stacked pcs data. We only need the `MerkleTreeGpu` from `StackedPcsDataGpu`
+/// but we wrap the latter in an `Arc` to provide uniformity in dealing with common main and
+/// preprocessed/cached traces. This struct stores the unstacked `traces`, in prismalinear
+/// evaluation form, corresponding to the stacked pcs data.
 pub struct StackedPcsData2 {
     pub(crate) inner: Arc<StackedPcsDataGpu<F, Digest>>,
-    pub(crate) stacked_matrix: Option<PleMatrix<F>>,
+    /// The unstacked traces corresponding to `inner`'s commitment.
+    pub(crate) traces: Vec<DeviceMatrix<F>>,
 }
 
 impl StackedPcsData2 {
@@ -100,33 +108,16 @@ impl StackedPcsData2 {
     /// `traces` must be the traces that were committed to in `pcs_data`.
     pub unsafe fn from_raw(
         pcs_data: Arc<StackedPcsDataGpu<F, Digest>>,
-        traces: &[&DeviceMatrix<F>],
-    ) -> Result<Self, ProverError> {
-        if pcs_data.matrix.is_some() {
-            Ok(Self {
-                inner: pcs_data,
-                stacked_matrix: None,
-            })
-        } else {
-            let layout = &pcs_data.layout;
-            let matrix = stack_traces(layout, traces)?;
-            Ok(Self {
-                inner: pcs_data,
-                stacked_matrix: Some(matrix),
-            })
+        traces: Vec<DeviceMatrix<F>>,
+    ) -> Self {
+        Self {
+            inner: pcs_data,
+            traces,
         }
     }
 
     pub fn layout(&self) -> &StackedLayout {
         &self.inner.layout
-    }
-
-    pub fn matrix(&self) -> &PleMatrix<F> {
-        self.inner
-            .matrix
-            .as_ref()
-            .or(self.stacked_matrix.as_ref())
-            .unwrap()
     }
 }
 
@@ -135,14 +126,15 @@ impl StackedPcsData2 {
 /// `max(2^log_height, 2^l_skip)`. In other words, this is a pointer to the slice
 /// `q[commit_idx].column(stacked_col_idx)[stacked_row_idx..stacked_row_idx + len]`.
 ///
-/// Note: this type is `repr(C)` as it will cross FFI boundaries for CUDA usage.
+/// # Safety
+/// - this type is `repr(C)` as it will cross FFI boundaries for CUDA usage.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct UnstackedSlice {
     commit_idx: u32,
+    log_height: u32,
     stacked_row_idx: u32,
     stacked_col_idx: u32,
-    log_height: u32,
 }
 
 /// Data that only needs to be computed per univariate coordinate z (2^log_domain_size many) in
@@ -154,6 +146,19 @@ pub(crate) struct Round0UniPacket {
     eq_uni: EF,  // to multiply by eq_cube
     k_rot_0: EF, // to multiply be eq_cube
     k_rot_1: EF, // to multiply by k_rot_cube - eq_cube
+}
+
+/// For folding of PLE evals of `src` with dimensions `(height, width)` and writing to `dst`. The
+/// size of `dst` is determined from `height, width, l_skip`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UnstackedPleFoldPacket {
+    src: *const F,
+    dst: *mut EF,
+    /// Input trace height
+    height: u32,
+    /// Input trace width
+    width: u32,
 }
 
 impl StackedReductionGpu {
@@ -252,7 +257,7 @@ impl StackedReductionGpu {
     #[instrument("stacked_reduction_new", level = "debug", skip_all)]
     fn new(
         mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-        mut ctx: ProvingContextV2<GpuBackendV2>,
+        ctx: ProvingContextV2<GpuBackendV2>,
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
         r: &[EF],
         lambda: EF,
@@ -263,24 +268,22 @@ impl StackedReductionGpu {
 
         let omega_skip = F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
+        let d_omega_skip_pows = omega_skip_pows.to_device().unwrap();
 
+        // NOTE: DeviceMatrix contains an Arc, so clone is lightweight [for now].
         // PERF[jpw]: stack the traces all at once. To save memory, we could either stack and drop
         // traces as we go or even at commit time only store the stacked matrix and drop the traces
         // much earlier.
         let common_main_traces = ctx
             .per_trace
             .iter()
-            .map(|(_, air_ctx)| &air_ctx.common_main)
+            .map(|(_, air_ctx)| air_ctx.common_main.clone())
             .collect_vec();
         // SAFETY: common_main_traces commits to common_main_pcs_data
         let common_main_stacked = unsafe {
-            StackedPcsData2::from_raw(Arc::new(common_main_pcs_data), &common_main_traces)?
+            StackedPcsData2::from_raw(Arc::new(common_main_pcs_data), common_main_traces)
         };
         let mut stacked_per_commit = vec![common_main_stacked];
-        // Drop all traces
-        for (_, air_ctx) in &mut ctx.per_trace {
-            air_ctx.common_main = DeviceMatrix::dummy();
-        }
         for (air_idx, air_ctx) in ctx.per_trace {
             for committed in mpk.per_air[air_idx]
                 .preprocessed_data
@@ -289,21 +292,20 @@ impl StackedReductionGpu {
             {
                 // SAFETY: committed.trace commits to committed.data
                 let stacked = unsafe {
-                    StackedPcsData2::from_raw(committed.data.clone(), &[&committed.trace])?
+                    StackedPcsData2::from_raw(committed.data.clone(), vec![committed.trace.clone()])
                 };
                 stacked_per_commit.push(stacked);
             }
         }
-        // ctx is dropped as this point
 
         debug_assert!(
             stacked_per_commit
                 .iter()
-                .all(|d| d.matrix().height() == 1 << (l_skip + n_stack))
+                .all(|d| d.layout().height() == 1 << (l_skip + n_stack))
         );
         let widths = stacked_per_commit
             .iter()
-            .map(|d| d.matrix().width() as u32)
+            .map(|d| d.layout().width() as u32)
             .collect_vec();
         let d_q_widths = widths.to_device().unwrap();
 
@@ -314,31 +316,33 @@ impl StackedReductionGpu {
         let lambda_pows = lambda.powers().take(total_num_col_openings).collect_vec();
         let d_lambda_pows = lambda_pows.to_device().unwrap();
 
-        let unstacked_cols = stacked_per_commit
-            .iter()
-            .enumerate()
-            .flat_map(|(com_idx, d)| {
-                d.layout()
-                    .unstacked_slices_iter()
-                    .map(move |s| UnstackedSlice {
-                        commit_idx: com_idx as u32,
+        let mut unstacked_cols = Vec::with_capacity(total_num_col_openings);
+        let mut ht_diff_idxs = Vec::new();
+        let mut trace_ptrs = Vec::new();
+        for (commit_idx, stacked) in stacked_per_commit.iter().enumerate() {
+            let layout = stacked.layout();
+            for (trace, &idx) in zip_eq(&stacked.traces, &layout.mat_starts) {
+                debug_assert_ne!(trace.width(), 0);
+                debug_assert_ne!(trace.height(), 0);
+                ht_diff_idxs.push(unstacked_cols.len());
+                trace_ptrs.push((trace.buffer().as_ptr(), trace.height(), trace.width()));
+                for j in 0..trace.width() {
+                    let (_, _j, s) = layout.sorted_cols[idx + j];
+                    debug_assert_eq!(_j, j);
+                    debug_assert_eq!(1 << s.log_height(), trace.height());
+                    unstacked_cols.push(UnstackedSlice {
+                        commit_idx: commit_idx as u32,
+                        log_height: s.log_height() as u32,
                         stacked_row_idx: s.row_idx as u32,
                         stacked_col_idx: s.col_idx as u32,
-                        log_height: s.log_height() as u32,
-                    })
-            })
-            .collect_vec();
-        let d_unstacked_cols = unstacked_cols.to_device().unwrap(); // TODO: handle error
-
-        let mut ht_diff_idxs = Vec::new();
-        let mut last_height = 0;
-        for (i, s) in unstacked_cols.iter().enumerate() {
-            if i == 0 || s.log_height != last_height {
-                ht_diff_idxs.push(i);
-                last_height = s.log_height;
+                    });
+                }
             }
         }
+        debug_assert_eq!(unstacked_cols.len(), total_num_col_openings / 2);
         ht_diff_idxs.push(unstacked_cols.len());
+
+        let d_unstacked_cols = unstacked_cols.to_device().unwrap(); // TODO: handle error
 
         // layout per commit is sorted, first height is largest
         let n_max = r.len() - 1;
@@ -361,11 +365,13 @@ impl StackedReductionGpu {
             n_stack,
             omega_skip,
             omega_skip_pows,
+            d_omega_skip_pows,
             r_0: r[0],
             d_lambda_pows,
             eq_const,
             stacked_per_commit,
             d_q_widths,
+            trace_ptrs,
             unstacked_cols,
             d_unstacked_cols,
             ht_diff_idxs,
@@ -397,41 +403,9 @@ impl StackedReductionGpu {
         let domain_size = 1 << log_domain_size;
         let mut d_s0_evals = DeviceBuffer::<EF>::with_capacity(domain_size);
 
-        // Instead of upsampling the entire matrix altogether (for convenience and best parallelism),
-        // for each mixed stacked matrix we do an in-place size 2^l_skip NTT. Upsampling is done on
-        // demand within the round 0 kernel using barycentric interpolation.
-        let q_ptrs = self
-            .stacked_per_commit
-            .iter()
-            .map(|pcs_data| {
-                let q_mixed = &pcs_data.matrix().mixed;
-                let len = q_mixed.len();
-                // SAFETY:
-                // - We chunk `q_mixed` into `len / 2^l_skip` univariate polynomials of size
-                //   `2^l_skip`.
-                // - By definition `q_mixed` is in coefficient form for these univariate
-                //   polynomials.
-                // - We apply batch NTT of size 2^l_skip on the expanded polynomials.
-                debug_assert_eq!(len % (1 << l_skip), 0);
-                let num_polys = (len >> l_skip) as u32;
-                batch_ntt(
-                    q_mixed,
-                    l_skip as u32,
-                    0,
-                    num_polys,
-                    true,
-                    false, /* forward NTT */
-                );
-                q_mixed.as_ptr()
-            })
-            .collect::<Vec<_>>();
-        let height = self.stacked_per_commit[0].matrix().height();
-        let d_q_ptrs = q_ptrs.to_device().unwrap();
-
+        // Generator for large domain
         let omega = F::two_adic_generator(log_domain_size);
         let omega_pows = omega.powers().take(1 << log_domain_size).collect_vec();
-        let d_omega_skip_pows = self.omega_skip_pows.to_device().unwrap();
-
         // Default packets for n >= 0
         let default_packets = omega_pows
             .par_iter()
@@ -451,22 +425,7 @@ impl StackedReductionGpu {
         let inv_lagrange_denoms = omega_pows
             .par_iter()
             .flat_map(|&z| {
-                let denoms = self
-                    .omega_skip_pows
-                    .iter()
-                    .map(|&w_i| {
-                        let denom = z - w_i;
-                        if denom.is_zero() { F::ONE } else { denom }
-                    })
-                    .collect_vec();
-                let mut inv_denoms = batch_multiplicative_inverse(&denoms);
-                let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
-                let denominator = F::from_canonical_usize(1 << l_skip);
-                let scale_factor = zerofier * denominator.inverse();
-                for v in &mut inv_denoms {
-                    *v *= scale_factor;
-                }
-                inv_denoms
+                compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, z)
             })
             .collect::<Vec<_>>();
         let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
@@ -476,9 +435,12 @@ impl StackedReductionGpu {
         // way, we use the special definition of the sumcheck in terms of unstacked traces to sum
         // over smaller domains on a per-trace basis.
         let mut s_0_evals_batch = Vec::with_capacity(self.ht_diff_idxs.len() - 1);
-        for window in self.ht_diff_idxs.windows(2) {
-            let window_len = window[1] - window[0];
-            let log_height = self.unstacked_cols[window[0]].log_height;
+        for ((trace_ptr, trace_height, trace_width), window) in zip(
+            mem::take(&mut self.trace_ptrs),
+            self.ht_diff_idxs.windows(2),
+        ) {
+            debug_assert_eq!(window[1] - window[0], trace_width);
+            let log_height = trace_height.ilog2();
             let n = log_height as isize - l_skip as isize;
             let n_lift = n.max(0) as usize;
 
@@ -513,7 +475,7 @@ impl StackedReductionGpu {
             let num_x = 1 << n_lift;
             // PERF[jpw]: we choose the largest stride possible for more parallelism. Adjust if peak
             // memory too high.
-            let thread_window_stride = window_len as u16;
+            let thread_window_stride = trace_width as u16;
             unsafe {
                 let block_sums_len = _stacked_reduction_r0_required_temp_buffer_size(
                     domain_size as u32,
@@ -524,25 +486,22 @@ impl StackedReductionGpu {
                 // Currently `CUBE_THREADS = 8` so this is at least D_EF/8 = 1/2 as much memory as
                 // what q_upsampled used to take
                 let mut block_sums = DeviceBuffer::with_capacity(block_sums_len as usize);
-                let unstacked_cols_ptr = self.d_unstacked_cols.as_ptr().add(window[0]);
                 // 2 per column for (eq, k_rot)
                 let lambda_pows_ptr = self.d_lambda_pows.as_ptr().add(2 * window[0]);
 
                 stacked_reduction_sumcheck_round0(
-                    &d_q_ptrs,
                     &self.eq_r_ns,
-                    unstacked_cols_ptr,
+                    trace_ptr,
                     lambda_pows_ptr,
                     z_packets,
-                    &d_omega_skip_pows,
+                    &self.d_omega_skip_pows,
                     &d_inv_lagrange_denoms,
                     &mut block_sums,
                     &mut d_s0_evals,
-                    height,
+                    trace_height,
+                    trace_width,
                     log_domain_size,
                     l_skip,
-                    window_len,
-                    num_x,
                     thread_window_stride,
                 )
                 .unwrap();
@@ -577,72 +536,60 @@ impl StackedReductionGpu {
         let r_0 = self.r_0;
         let omega_skip = self.omega_skip;
         let n_max = self.n_max;
-        let skip_domain_size = 1 << l_skip;
-
-        let lagrange_coeffs = {
-            let (numerators, denominators): (Vec<_>, Vec<_>) = self
-                .omega_skip_pows
-                .iter()
-                .enumerate()
-                .map(|(i, &omega_i)| {
-                    let mut num = EF::ONE;
-                    let mut denom = EF::ONE;
-                    for (j, &omega_j) in self.omega_skip_pows.iter().enumerate() {
-                        if j != i {
-                            num *= u_0 - EF::from(omega_j);
-                            denom *= EF::from(omega_i) - EF::from(omega_j);
-                        }
-                    }
-                    (num, denom)
-                })
-                .unzip();
-            let inv_denoms = batch_multiplicative_inverse(&denominators);
-            izip!(numerators, inv_denoms)
-                .map(|(num, inv_denom)| num * inv_denom)
-                .collect_vec()
-        };
-        let d_lagrange_coeffs = lagrange_coeffs.to_device().unwrap();
-
-        // fold the Q stacked matrices from mixed coefficient form
-        self.q_evals = self
-            .stacked_per_commit
-            .iter()
-            .map(|d| {
-                let evals = &d.matrix().mixed;
-                let num_x = 1 << n_stack;
-                let width = d.matrix().width();
-                debug_assert_eq!(evals.len(), width << (l_skip + n_stack));
-                let folded_evals = DeviceBuffer::with_capacity(evals.len() >> l_skip);
-                unsafe {
-                    fold_ple_from_evals(
-                        evals.as_ptr(),
-                        folded_evals.as_mut_ptr(),
-                        num_x,
-                        width as u32,
-                        skip_domain_size as u32,
-                        d_lagrange_coeffs.as_ptr(),
-                    )
-                    .unwrap();
+        self.q_evals.clear();
+        let mut trace_packets = Vec::with_capacity(self.ht_diff_idxs.len());
+        let mut max_trace_width = 0;
+        let mut max_new_height = 0;
+        for stacked in &self.stacked_per_commit {
+            let layout = stacked.layout();
+            let num_x = 1 << n_stack;
+            let stacked_width = layout.width();
+            debug_assert_eq!(layout.height(), 1 << (l_skip + n_stack));
+            let folded_evals = DeviceBuffer::<EF>::with_capacity(num_x * stacked_width);
+            // We must fill with zeros because some parts will be left empty due to stacking
+            folded_evals.fill_zero().unwrap();
+            let mut dst_offset = 0;
+            for trace in &stacked.traces {
+                if trace.width() == 0 || trace.height() == 0 {
+                    continue;
                 }
-                folded_evals
-            })
-            .collect();
-
-        // TODO[jpw]: Because WHIR expects these mixed matrices to be in coefficient form
-        // for algebraic_batch_matrices we currently need to perform iNTT after stacked
-        // reduction is complete. Once WHIR no longer depends on these, remove this.
-        self.stacked_per_commit.iter().for_each(|pcs_data| {
-            let q_mixed = &pcs_data.matrix().mixed;
-            let num_polys = (q_mixed.len() >> l_skip) as u32;
-            batch_ntt(
-                q_mixed,
-                l_skip as u32,
-                0,
-                num_polys,
-                true,
-                true, /* backwards NTT */
-            );
-        });
+                let packet = unsafe {
+                    let src = trace.buffer().as_ptr();
+                    let dst = folded_evals.as_mut_ptr().add(dst_offset);
+                    UnstackedPleFoldPacket {
+                        src,
+                        dst,
+                        height: trace.height() as u32,
+                        width: trace.width() as u32,
+                    }
+                };
+                trace_packets.push(packet);
+                let new_height = max(trace.height(), 1 << l_skip) >> l_skip;
+                max_new_height = max(max_new_height, new_height);
+                max_trace_width = max(max_trace_width, trace.width());
+                dst_offset += new_height * trace.width();
+            }
+            self.q_evals.push(folded_evals);
+        }
+        let d_trace_packets = trace_packets.to_device().unwrap();
+        let inv_lagrange_denoms =
+            compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, u_0);
+        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
+        // SAFETY:
+        // - we constructed `trace_packets` so that `src` are valid pointers to trace matrices and
+        //   `dst` are disjoint slices in `q_evals`. Moreover `q_evals` has capacity to fill all
+        //   folded traces.
+        unsafe {
+            stacked_reduction_fold_ple(
+                &d_trace_packets,
+                &self.d_omega_skip_pows,
+                &d_inv_lagrange_denoms,
+                l_skip,
+                max_new_height,
+                max_trace_width,
+            )
+            .unwrap();
+        }
 
         // fold PLEs into MLEs for \eq and \kappa_\rot, using u_0
         let eq_uni_u0r0 = eval_eq_uni(l_skip, u_0, r_0);

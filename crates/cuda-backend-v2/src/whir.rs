@@ -1,4 +1,4 @@
-use std::{ffi::c_void, sync::Arc};
+use std::{ffi::c_void, iter::zip, sync::Arc};
 
 use itertools::Itertools;
 use openvm_cuda_backend::{
@@ -25,18 +25,33 @@ use crate::{
     D_EF, Digest, EF, F, ProverError,
     cuda::{
         poly::{
-            algebraic_batch_matrices, batch_eq_hypercube_stage, eq_hypercube_stage_ext,
-            eval_poly_ext_at_point_from_base, mle_interpolate_stage_ext,
+            batch_eq_hypercube_stage, eq_hypercube_stage_ext, eval_poly_ext_at_point_from_base,
+            mle_interpolate_stage_ext, transpose_fp_to_fpext_vec,
         },
         sumcheck::fold_mle,
         whir::{
-            _whir_sumcheck_required_temp_buffer_size, w_evals_accumulate, whir_sumcheck_mle_round,
+            _whir_sumcheck_required_temp_buffer_size, w_evals_accumulate,
+            whir_algebraic_batch_traces, whir_sumcheck_mle_round,
         },
     },
     merkle_tree::MerkleTreeGpu,
     poly::{evals_eq_hypercube, mle_evals_to_coeffs_inplace},
     stacked_reduction::StackedPcsData2,
 };
+
+#[repr(C)]
+pub(crate) struct BatchingTracePacket {
+    /// Pointer to trace device buffer
+    ptr: *const F,
+    /// Trace height
+    height: u32,
+    /// Trace width
+    width: u32,
+    /// Row start in the stacked matrix
+    stacked_row_start: u32,
+    /// Index in mu powers
+    mu_idx: u32,
+}
 
 #[instrument(
     name = "prover.openings.whir",
@@ -58,11 +73,11 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     let whir_pow_bits = params.whir_pow_bits;
     let l_skip = params.l_skip;
 
-    let height = stacked_per_commit[0].matrix().height();
+    let height = stacked_per_commit[0].layout().height();
     debug_assert!(
         stacked_per_commit
             .iter()
-            .all(|d| d.matrix().height() == height)
+            .all(|d| d.layout().height() == height)
     );
     let mut m = log2_strict_usize(height);
     assert_eq!(m, u.len());
@@ -74,55 +89,62 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     let num_commits = stacked_per_commit.len();
 
     // The evaluations of `\hat{f}` in the current WHIR round on the hypercube `H_m`.
-    let mut f_evals = DeviceBuffer::<EF>::with_capacity(height);
+    let mut f_ple_evals = DeviceBuffer::<F>::with_capacity(height * D_EF);
     // We algebraically batch all matrices together so we only need to interpolate one column vector
     {
-        // We only need the mixed PLE buffer for each backing matrix.
-        let (mat_ptrs, widths): (Vec<_>, Vec<_>) = stacked_per_commit
-            .iter()
-            .map(|stacked| {
-                let mat = stacked.matrix();
-                (mat.mixed.as_ptr(), mat.width() as u32)
-            })
-            .unzip();
-        let mut mu_idxs = Vec::with_capacity(num_commits);
-        let mut total_width = 0u32;
-        for &width in &widths {
-            mu_idxs.push(total_width);
-            total_width += width;
+        let mut packets = Vec::new();
+        let mut total_stacked_width = 0u32;
+        for stacked in &stacked_per_commit {
+            let layout = stacked.layout();
+            for (trace, &idx) in zip(&stacked.traces, &layout.mat_starts) {
+                let (_, _, s) = layout.sorted_cols[idx];
+                let packet = BatchingTracePacket {
+                    ptr: trace.buffer().as_ptr(),
+                    height: trace.height() as u32,
+                    width: trace.width() as u32,
+                    stacked_row_start: s.row_idx as u32,
+                    mu_idx: total_stacked_width + s.col_idx as u32,
+                };
+                packets.push(packet);
+            }
+            total_stacked_width += layout.width() as u32;
         }
-        let mu_powers = mu.powers().take(total_width as usize).collect_vec();
-        let d_mat_ptrs = mat_ptrs.to_device()?;
+        let mu_powers = mu.powers().take(total_stacked_width as usize).collect_vec();
         let d_mu_powers = mu_powers.to_device()?;
-        let d_mu_idxs = mu_idxs.to_device()?;
-        let d_widths = widths.to_device()?;
+        let d_packets = packets.to_device()?;
         // SAFETY:
-        // - `mu_powers` has length `total_width` and `mu_idxs` are in bounds by construction.
-        // - `f_evals` has capacity `height`.
-        // - We assume `ple_mixed` all have same `height`
-        // - `mu_idxs`, `widths`, `ple_mixed` have same length `num_commits`.
+        // - `mu_powers` has length `total_width`.
+        // - `f_evals` has capacity `height` (stacked height).
+        // - `d_packets` contain valid pointers and stacked row indices by construction.
         unsafe {
-            algebraic_batch_matrices(
-                &mut f_evals,
-                &d_mat_ptrs,
-                &d_mu_powers,
-                &d_mu_idxs,
-                &d_widths,
-                height,
-                num_commits,
-            )?;
+            whir_algebraic_batch_traces(&mut f_ple_evals, &d_packets, &d_mu_powers, 1 << l_skip)?;
         }
-        // Free common main stacked matrix -- it is the only one that is owned
-        let common_main_pcs_data =
-            Arc::get_mut(&mut stacked_per_commit[0].inner).expect("common_main_pcs_data is owned");
-        common_main_pcs_data.matrix.take();
-        stacked_per_commit[0].stacked_matrix.take();
+        // drop all traces to free device memory
+        for stacked in &mut stacked_per_commit {
+            stacked.traces.clear();
+        }
     } // common_main_pcs_data.matrix has now been freed
 
-    // `f_evals` is currently the 2^l_skip coefficients of `f(Z, \vect x)` for each `\vect x in H_{m
+    // `f_evals` is currently *prismalinear* evaluations. We want pure multilinear evaluations.
+    // Hence we must perform PLE->MLE on every `2^l_skip` evaluations. We first do a iNTT of size
+    // `2^l_skip` to get the coefficients of `f(Z, \vect x)` for each `\vect x in H_{m
     // - l_skip}`. The univariate coefficient form is the same as the multilinear coefficient
     // form for multilinear polys on H_{l_skip}, so we must now multilinear interpolate `f_evals` to
     // get fully multilinear evaluations on `H_m`.
+    batch_ntt(
+        &f_ple_evals,
+        l_skip as u32,
+        0,
+        (f_ple_evals.len() >> l_skip) as u32,
+        true,
+        true,
+    );
+    let mut f_evals = DeviceBuffer::<EF>::with_capacity(height);
+    // SAFETY: `f_ple_evals` is constructed with length `height * D_EF`.
+    unsafe {
+        transpose_fp_to_fpext_vec(&mut f_evals, &f_ple_evals)?;
+    }
+    drop(f_ple_evals);
     for i in 0..l_skip {
         let step = 1u32 << i;
         // SAFETY: `f_evals` has length `2^m` with `m >= l_skip`.
@@ -534,26 +556,26 @@ mod tests {
         pk: MultiStarkProvingKeyV2,
         ctx: ProvingContextV2<CpuBackendV2>,
     ) -> Result<(), VerifyWhirError> {
-        let mut device = GpuDeviceV2::new(params);
-        device.prover_config.cache_stacked_matrix = true; // easier to transfer D2H, we will switch it back before the prover runs
+        let device = GpuDeviceV2::new(params);
         let mut rng = StdRng::seed_from_u64(0);
         let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
 
-        let (common_main_commit, common_main_pcs_data) = {
-            let traces = ctx
-                .common_main_traces()
-                .map(|(_, trace)| trace)
-                .collect_vec();
-            stacked_commit(
-                params.l_skip,
-                params.n_stack,
-                params.log_blowup,
-                params.k_whir,
-                &traces,
-            )
-        };
-        let mut d_common_main_pcs_data = device.transport_pcs_data_to_device(&common_main_pcs_data);
-        let d_common_main_stacked_mat = d_common_main_pcs_data.matrix.take();
+        let common_main_traces = ctx
+            .common_main_traces()
+            .map(|(_, trace)| trace)
+            .collect_vec();
+        let (common_main_commit, common_main_pcs_data) = stacked_commit(
+            params.l_skip,
+            params.n_stack,
+            params.log_blowup,
+            params.k_whir,
+            &common_main_traces,
+        );
+        let d_common_main_traces = common_main_traces
+            .iter()
+            .map(|t| device.transport_matrix_to_device(t))
+            .collect_vec();
+        let d_common_main_pcs_data = device.transport_pcs_data_to_device(&common_main_pcs_data);
 
         let mut stacking_openings = vec![stacking_openings_for_matrix(
             &params,
@@ -563,25 +585,25 @@ mod tests {
         let mut commits = vec![common_main_commit];
         let mut stacked_per_commit = vec![StackedPcsData2 {
             inner: Arc::new(d_common_main_pcs_data),
-            stacked_matrix: d_common_main_stacked_mat,
+            traces: d_common_main_traces,
         }];
         for (air_id, air_ctx) in ctx.per_trace {
-            let pcs_datas = pk.per_air[air_id]
+            for data in pk.per_air[air_id]
                 .preprocessed_data
                 .iter()
-                .chain(air_ctx.cached_mains.iter().map(|cd| &cd.data));
-            for data in pcs_datas {
+                .chain(air_ctx.cached_mains.iter().map(|cd| &cd.data))
+            {
+                let trace = device.transport_matrix_to_device(&data.mat_view(0).to_matrix());
                 commits.push(data.commit());
                 stacking_openings.push(stacking_openings_for_matrix(
                     &params,
                     &z_prism,
                     &data.matrix,
                 ));
-                let mut d_data = device.transport_pcs_data_to_device(data);
-                let d_stacked_mat = d_data.matrix.take();
+                let d_data = device.transport_pcs_data_to_device(data);
                 stacked_per_commit.push(StackedPcsData2 {
                     inner: Arc::new(d_data),
-                    stacked_matrix: d_stacked_mat,
+                    traces: vec![trace],
                 });
             }
         }
