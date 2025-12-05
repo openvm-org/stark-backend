@@ -13,7 +13,7 @@ use openvm_stark_backend::{
     config::{StarkGenericConfig, Val},
     interaction::{BusIndex, InteractionBuilder},
     p3_air::{Air, BaseAir},
-    p3_field::{Field, FieldAlgebra},
+    p3_field::PrimeCharacteristicRing,
     p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::{
         cpu::{CpuBackend, CpuDevice},
@@ -68,8 +68,8 @@ impl DummyInteractionAir {
     }
 }
 
-impl<F: Field> BaseAirWithPublicValues<F> for DummyInteractionAir {}
-impl<F: Field> PartitionedBaseAir<F> for DummyInteractionAir {
+impl<F> BaseAirWithPublicValues<F> for DummyInteractionAir {}
+impl<F> PartitionedBaseAir<F> for DummyInteractionAir {
     fn cached_main_widths(&self) -> Vec<usize> {
         if self.partition {
             vec![self.field_width]
@@ -85,7 +85,7 @@ impl<F: Field> PartitionedBaseAir<F> for DummyInteractionAir {
         }
     }
 }
-impl<F: Field> BaseAir<F> for DummyInteractionAir {
+impl<F> BaseAir<F> for DummyInteractionAir {
     fn width(&self) -> usize {
         1 + self.field_width
     }
@@ -98,14 +98,14 @@ impl<F: Field> BaseAir<F> for DummyInteractionAir {
 impl<AB: InteractionBuilder + PartitionedAirBuilder> Air<AB> for DummyInteractionAir {
     fn eval(&self, builder: &mut AB) {
         let (fields, count) = if self.partition {
-            let local_0 = builder.common_main().row_slice(0);
-            let local_1 = builder.cached_mains()[0].row_slice(0);
+            let local_0 = builder.common_main().row_slice(0).unwrap();
+            let local_1 = builder.cached_mains()[0].row_slice(0).unwrap();
             let count = local_0[0];
             let fields = local_1.to_vec();
             (fields, count)
         } else {
             let main = builder.main();
-            let local = main.row_slice(0);
+            let local = main.row_slice(0).expect("window should have two elements");
             let count = local[DummyInteractionCols::count_col()];
             let fields: Vec<_> = (0..self.field_width)
                 .map(|i| local[DummyInteractionCols::field_col(i)])
@@ -143,7 +143,7 @@ pub struct DummyInteractionData {
 
 impl<SC: StarkGenericConfig> DummyInteractionChip<SC>
 where
-    Val<SC>: FieldAlgebra,
+    Val<SC>: PrimeCharacteristicRing,
 {
     pub fn new_without_partition(field_width: usize, is_send: bool, bus_index: BusIndex) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index);
@@ -195,14 +195,11 @@ where
         let h = h.next_power_of_two();
         count.resize(h, 0);
         fields.resize(h, vec![0; w]);
-        let common_main_val: Vec<_> = count
-            .into_iter()
-            .map(Val::<SC>::from_canonical_u32)
-            .collect();
+        let common_main_val: Vec<_> = count.into_iter().map(Val::<SC>::from_u32).collect();
         let cached_trace_val: Vec<_> = fields
             .into_iter()
             .flatten()
-            .map(Val::<SC>::from_canonical_u32)
+            .map(Val::<SC>::from_u32)
             .collect();
         let cached_trace = Arc::new(RowMajorMatrix::new(cached_trace_val, w));
         let (commit, data) = self
@@ -236,7 +233,7 @@ where
             .flat_map(|(count, fields)| iter::once(count).chain(fields))
             .chain(iter::repeat(0))
             .take((w + 1) * h.next_power_of_two())
-            .map(Val::<SC>::from_canonical_u32)
+            .map(Val::<SC>::from_u32)
             .collect();
         RowMajorMatrix::new(common_main_val, w + 1)
     }

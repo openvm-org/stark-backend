@@ -7,7 +7,6 @@ use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_challenger::FieldChallenger,
     p3_commit::{Pcs, PolynomialSpace},
-    p3_field::Field,
     p3_matrix::Matrix,
     p3_util::log2_strict_usize,
     prover::{cpu::quotient::QuotientCommitter, types::RapView},
@@ -32,13 +31,13 @@ const LOG_BLOWUP: usize = 1;
 // Newtype to implement extended traits
 struct TestAir(KeccakAir);
 
-impl<F: Field> BaseAir<F> for TestAir {
+impl<F> BaseAir<F> for TestAir {
     fn width(&self) -> usize {
         BaseAir::<F>::width(&self.0)
     }
 }
-impl<F: Field> BaseAirWithPublicValues<F> for TestAir {}
-impl<F: Field> PartitionedBaseAir<F> for TestAir {}
+impl<F> BaseAirWithPublicValues<F> for TestAir {}
+impl<F> PartitionedBaseAir<F> for TestAir {}
 
 impl<AB: AirBuilder> Air<AB> for TestAir {
     fn eval(&self, builder: &mut AB) {
@@ -61,7 +60,9 @@ fn main() {
     let _air_id = keygen_builder.add_air(Arc::new(air));
     let pk = keygen_builder.generate_pk();
 
-    let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
+    let inputs = (0..NUM_PERMUTATIONS)
+        .map(|_| rng.random())
+        .collect::<Vec<_>>();
     let trace = p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0);
     let trace_height = trace.height();
     let pcs = engine.config().pcs();
@@ -73,7 +74,7 @@ fn main() {
     let timer = Instant::now();
     let mut challenger = engine.new_challenger();
     let alpha: <BabyBearPoseidon2Config as StarkGenericConfig>::Challenge =
-        challenger.sample_ext_element();
+        challenger.sample_algebra_element();
     let qc: QuotientCommitter<'_, SC> = QuotientCommitter::new(pcs, alpha, LOG_BLOWUP);
     let quotient_degree = 1 << LOG_BLOWUP;
     let constraints_dag = &pk.per_air[0].vk.symbolic_constraints.constraints;

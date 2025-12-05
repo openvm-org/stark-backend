@@ -3,7 +3,7 @@ use std::{cmp::Reverse, iter::zip};
 use itertools::Itertools;
 use openvm_stark_backend::{
     config::StarkGenericConfig,
-    p3_field::FieldAlgebra,
+    p3_field::PrimeCharacteristicRing,
     p3_matrix::Matrix,
     prover::{
         cpu::{CpuBackend, CpuDevice},
@@ -67,22 +67,18 @@ pub fn create_seeded_rng_with_seed(seed: u64) -> StdRng {
 }
 
 // Returns row major matrix
-pub fn generate_random_matrix<F: FieldAlgebra>(
+pub fn generate_random_matrix<F: PrimeCharacteristicRing>(
     mut rng: impl Rng,
     height: usize,
     width: usize,
 ) -> Vec<Vec<F>> {
     (0..height)
-        .map(|_| {
-            (0..width)
-                .map(|_| F::from_wrapped_u32(rng.gen()))
-                .collect_vec()
-        })
+        .map(|_| (0..width).map(|_| F::from_u32(rng.random())).collect_vec())
         .collect_vec()
 }
 
-pub fn to_field_vec<F: FieldAlgebra>(v: Vec<u32>) -> Vec<F> {
-    v.into_iter().map(F::from_canonical_u32).collect()
+pub fn to_field_vec<F: PrimeCharacteristicRing>(v: Vec<u32>) -> Vec<F> {
+    v.into_iter().map(F::from_u32).collect()
 }
 
 /// A macro to create a `Vec<Arc<dyn AnyRap<_>>>` from a list of AIRs because Rust cannot infer the

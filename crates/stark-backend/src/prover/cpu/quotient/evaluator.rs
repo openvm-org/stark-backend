@@ -4,7 +4,7 @@ use std::{
 };
 
 use derivative::Derivative;
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 
 use crate::{
     air_builders::symbolic::{

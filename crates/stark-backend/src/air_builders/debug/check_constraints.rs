@@ -1,6 +1,6 @@
 use itertools::izip;
 use p3_air::BaseAir;
-use p3_field::{Field, FieldAlgebra};
+use p3_field::{Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair, Matrix};
 use p3_maybe_rayon::prelude::*;
 
@@ -40,15 +40,15 @@ pub fn check_constraints<R, SC>(
             .as_ref()
             .map(|preprocessed| {
                 (
-                    preprocessed.row_slice(i).to_vec(),
-                    preprocessed.row_slice(i_next).to_vec(),
+                    preprocessed.row_slice(i).unwrap().to_vec(),
+                    preprocessed.row_slice(i_next).unwrap().to_vec(),
                 )
             })
             .unwrap_or((vec![], vec![]));
 
         let partitioned_main_row_pair = partitioned_main
             .iter()
-            .map(|part| (part.row_slice(i), part.row_slice(i_next)))
+            .map(|part| (part.row_slice(i).unwrap(), part.row_slice(i_next).unwrap()))
             .collect::<Vec<_>>();
         let partitioned_main = partitioned_main_row_pair
             .iter()
