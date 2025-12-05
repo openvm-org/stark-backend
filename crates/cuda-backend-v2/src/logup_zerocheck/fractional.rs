@@ -122,7 +122,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
     let mut d_sum_evals = DeviceBuffer::<EF>::with_capacity(3);
 
     for round in 1..total_rounds {
-        let gkr_round_span = debug_span!("GKR round {round}").entered();
+        let gkr_round_span = debug_span!("GKR", round).entered();
 
         let layer_step = 1 << (total_rounds - round - 1);
         unsafe {
