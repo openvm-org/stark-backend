@@ -28,7 +28,7 @@ use stark_backend_v2::{
         sumcheck::sumcheck_round0_deg,
     },
 };
-use tracing::{debug, info_span, instrument};
+use tracing::{debug, info, info_span, instrument};
 
 use crate::{
     Digest, EF, F, GpuBackendV2, GpuDeviceV2,
@@ -201,7 +201,7 @@ where
         .expect("failed to run fractional sumcheck on GPU");
 
         let n_global = max(n_max, n_logup);
-        debug!(%n_global);
+        info!(%n_global, %n_logup);
         while xi.len() != l_skip + n_global {
             xi.push(transcript.sample_ext());
         }
@@ -378,8 +378,6 @@ where
         .enumerate()
         {
             debug!("starting batch constraints for air_idx={air_idx} (trace_idx={trace_idx})");
-            self.mem
-                .tracing_info("starting batch constraints for new AIR");
             let single_pk = &self.pk.per_air[*air_idx];
             // Includes both plain AIR constraints and symbolic interactions
             let single_air_constraints =
@@ -457,8 +455,6 @@ where
                 batch_polys[2 * num_present_airs + trace_idx] =
                     UnivariatePoly::from_evals(&host_sums);
             }
-            // TODO: allow logging the air name (needs non-static string)
-            self.mem.tracing_info("after_zerocheck");
 
             let sum = evaluate_round0_interactions_gpu(
                 single_pk,
@@ -496,8 +492,6 @@ where
                 batch_polys[2 * trace_idx] = numer_poly;
                 batch_polys[2 * trace_idx + 1] = denom_poly;
             }
-            self.mem
-                .tracing_info("after_batch_constraints_sumcheck_round0");
         }
         drop(_round0_span);
         self.mem
@@ -623,7 +617,6 @@ where
                 self.xi.len() - l_skip,
             )
         };
-        self.mem.tracing_info("after_fold_ple_evals");
         self.mem
             .emit_metrics_with_label("prover.batch_constraints.fold_ple_evals");
     }
