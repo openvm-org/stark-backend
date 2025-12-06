@@ -20,6 +20,9 @@ extern "C" {
         step: usize,
         revert: bool,
     ) -> i32;
+
+    pub fn _frac_compute_round_temp_buffer_size(stride: u32) -> u32;
+
     fn _frac_compute_round(
         eq_xi: *const EF,
         pq_nums: *mut EF,
@@ -29,8 +32,11 @@ extern "C" {
         pq_extra_step: usize,
         lambda: EF,
         out_device: *mut EF,
+        tmp_block_sums: *mut EF,
     ) -> i32;
+
     fn _frac_fold_columns(buffer: *mut std::ffi::c_void, stride: usize, step: usize, r: EF) -> i32;
+
     fn _frac_fold_ext_columns(
         buffer: *mut EF,
         stride: usize,
@@ -38,14 +44,19 @@ extern "C" {
         r_or_r_inv: EF,
         revert: bool,
     ) -> i32;
+
     fn _frac_extract_claims(
         data: *const std::ffi::c_void,
         stride: usize,
         out_device: *mut std::ffi::c_void,
     ) -> i32;
+
     fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
+
     fn _frac_vector_scalar_multiply_ext_fp(frac_vec: *mut Frac<EF>, scalar: F, length: u32) -> i32;
+
     fn _frac_add_alpha_mixed(denominators: *mut EF, len: usize, alpha: EF) -> i32;
+
     fn _frac_vector_scalar_multiply_ext(numerators: *mut EF, scalar: F, length: u32) -> i32;
 
     // utils.cu
@@ -357,7 +368,17 @@ pub unsafe fn frac_compute_round(
     pq_extra_step: usize,
     lambda: EF,
     out_device: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
 ) -> Result<(), CudaError> {
+    #[cfg(debug_assertions)]
+    {
+        let len = tmp_block_sums.len();
+        let required = _frac_compute_round_temp_buffer_size(stride as u32);
+        assert!(
+            len >= required as usize,
+            "tmp_block_sums len={len} < required={required}"
+        );
+    }
     CudaError::from_result(_frac_compute_round(
         eq_xi.as_ptr(),
         pq_nums.as_mut_ptr(),
@@ -367,6 +388,7 @@ pub unsafe fn frac_compute_round(
         pq_extra_step,
         lambda,
         out_device.as_mut_ptr(),
+        tmp_block_sums.as_mut_ptr(),
     ))
 }
 

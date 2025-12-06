@@ -79,7 +79,7 @@ pub unsafe fn whir_sumcheck_mle_round(
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = unsafe { _whir_sumcheck_required_temp_buffer_size(height) };
+        let required = _whir_sumcheck_required_temp_buffer_size(height);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"

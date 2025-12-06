@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
+#include <vector_types.h>
 
 namespace {
 constexpr int S_DEG = 2;
@@ -83,7 +85,7 @@ __global__ void whir_algebraic_batch_traces_kernel(
 __global__ void whir_sumcheck_mle_round_kernel(
     const FpExt *f_evals,
     const FpExt *w_evals,
-    FpExt *block_sums,    // Output: [gridDim.x][d][WD] partial sums
+    FpExt *block_sums,    // Output: [gridDim.x][S_DEG] partial sums
     const uint32_t height // = 2^n
 ) {
     extern __shared__ char smem[];
@@ -117,6 +119,7 @@ __global__ void whir_sumcheck_mle_round_kernel(
     }
 
     // Reduce phase: for each x_int
+#pragma unroll
     for (int idx = 0; idx < S_DEG; idx++) {
         FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
 
@@ -169,8 +172,12 @@ extern "C" int _whir_algebraic_batch_traces(
     return CHECK_KERNEL();
 }
 
+inline std::pair<dim3, dim3> whir_sumcheck_launch_params(uint32_t height) {
+    return kernel_launch_params(height >> 1);
+}
+
 extern "C" uint32_t _whir_sumcheck_required_temp_buffer_size(uint32_t height) {
-    auto [grid, block] = kernel_launch_params(height >> 1);
+    auto [grid, block] = whir_sumcheck_launch_params(height);
     return grid.x * S_DEG;
 }
 
@@ -181,9 +188,7 @@ extern "C" int _whir_sumcheck_mle_round(
     FpExt *tmp_block_sums, // Temporary buffer: [num_blocks * d]
     const uint32_t height
 ) {
-    int half_height = height >> 1;
-    // NOTE: if you change the launch params, update _whir_sumcheck_required_temp_buffer_size
-    auto [grid, block] = kernel_launch_params(half_height);
+    auto [grid, block] = whir_sumcheck_launch_params(height);
     unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
 
