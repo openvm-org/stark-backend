@@ -18,7 +18,8 @@ use super::errors::FractionalSumcheckError;
 use crate::{
     EF,
     cuda::logup_zerocheck::{
-        fold_ef_columns, frac_build_tree_layer, frac_compute_round, frac_fold_columns,
+        _frac_compute_round_temp_buffer_size, fold_ef_columns, frac_build_tree_layer,
+        frac_compute_round, frac_fold_columns,
     },
     poly::evals_eq_hypercube,
 };
@@ -152,6 +153,11 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
 
         let lambda = transcript.sample_ext();
 
+        let tmp_buffer_capacity = unsafe { _frac_compute_round_temp_buffer_size(stride as u32) };
+        // NOTE: we re-use the buffer across sumcheck rounds below. This requires that the
+        // temp_buffer_size only decreases as stride decreases.
+        let mut tmp_block_sums = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
+
         for sum_round in 0..round {
             let step = 1 << sum_round;
             unsafe {
@@ -164,6 +170,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
                     layer_step,
                     lambda,
                     &mut d_sum_evals,
+                    &mut tmp_block_sums,
                 )
                 .map_err(FractionalSumcheckError::ComputeRound)?;
             }
