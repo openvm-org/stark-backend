@@ -4,15 +4,18 @@
 #include "launcher.cuh"
 #include "sumcheck.cuh"
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <driver_types.h>
 #include <utility>
+#include <vector_types.h>
 
 // Includes GKR for fractional sumcheck
 // The LogUp specific input to GKR is calculated in interactions.cu
 namespace fractional_sumcheck_gkr {
+constexpr int GKR_S_DEG = 3;
 // ============================================================================
 // KERNELS
 // ============================================================================
@@ -28,10 +31,10 @@ __global__ void frac_build_tree_layer_kernel(
         return;
     }
 
-    FpExt& lhs_num = numerators[2 * idx * step];
-    FpExt const& rhs_num = numerators[(2 * idx + 1) * step];
-    FpExt& lhs_denom = denominators[2 * idx * step];
-    FpExt const& rhs_denom = denominators[(2 * idx + 1) * step];
+    FpExt &lhs_num = numerators[2 * idx * step];
+    FpExt const &rhs_num = numerators[(2 * idx + 1) * step];
+    FpExt &lhs_denom = denominators[2 * idx * step];
+    FpExt const &rhs_denom = denominators[(2 * idx + 1) * step];
     if constexpr (revert) {
         frac_unadd_comps_inplace(lhs_num, lhs_denom, rhs_num, rhs_denom);
     } else {
@@ -39,7 +42,8 @@ __global__ void frac_build_tree_layer_kernel(
     }
 }
 
-__global__ void compute_round_kernel(
+// shared memory size requirement: max(num_warps,1) * sizeof(FpExt)
+__global__ void compute_round_block_sum_kernel(
     const FpExt *__restrict__ eq_xi,
     FpExt *__restrict__ pq_nums,
     FpExt *__restrict__ pq_denoms,
@@ -47,15 +51,16 @@ __global__ void compute_round_kernel(
     size_t step,
     size_t pq_step,
     FpExt lambda,
-    FpExt *__restrict__ out
+    FpExt *__restrict__ block_sums // Output: [gridDim.x][3]
 ) {
     extern __shared__ FpExt shared[];
     const size_t half = stride >> 1;
-    const FpExt zero = {0, 0, 0, 0};
 
-    FpExt local[3] = {zero, zero, zero};
-
-    for (size_t idx = threadIdx.x; idx < half; idx += blockDim.x) {
+    const FpExt zero(Fp::zero());
+    FpExt local[GKR_S_DEG] = {zero, zero, zero};
+    uint32_t idx_base = threadIdx.x + blockIdx.x * blockDim.x;
+    // Map phase: compute local sum by striding over grid
+    for (uint32_t idx = idx_base; idx < half; idx += blockDim.x * gridDim.x) {
         size_t even = idx << 1;
         FpExt eq_even = eq_xi[even * step];
         FpExt eq_odd = eq_xi[(even + 1) * step];
@@ -64,14 +69,14 @@ __global__ void compute_round_kernel(
         // \hat p_j({0 or 1}, {even or odd}, ..y)
         // The {even=0, odd=1} evaluations are used to interpolate at 1, 2, 3
         uint32_t offset = even << 1;
-        auto const& p0_even = pq_nums[offset * pq_step];
-        auto const& q0_even = pq_denoms[offset * pq_step];
-        auto const& p1_even = pq_nums[(offset + 1) * pq_step];
-        auto const& q1_even = pq_denoms[(offset + 1) * pq_step];
-        auto const& p0_odd = pq_nums[(offset + 2) * pq_step];
-        auto const& q0_odd = pq_denoms[(offset + 2) * pq_step];
-        auto const& p1_odd = pq_nums[(offset + 3) * pq_step];
-        auto const& q1_odd = pq_denoms[(offset + 3) * pq_step];
+        auto const &p0_even = pq_nums[offset * pq_step];
+        auto const &q0_even = pq_denoms[offset * pq_step];
+        auto const &p1_even = pq_nums[(offset + 1) * pq_step];
+        auto const &q1_even = pq_denoms[(offset + 1) * pq_step];
+        auto const &p0_odd = pq_nums[(offset + 2) * pq_step];
+        auto const &q0_odd = pq_denoms[(offset + 2) * pq_step];
+        auto const &p1_odd = pq_nums[(offset + 3) * pq_step];
+        auto const &q1_odd = pq_denoms[(offset + 3) * pq_step];
 
         FpExt p0_diff = p0_odd - p0_even;
         FpExt q0_diff = q0_odd - q0_even;
@@ -87,7 +92,7 @@ __global__ void compute_round_kernel(
         auto const lambda_times_q0_diff = lambda * q0_diff;
 
 #pragma unroll
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < GKR_S_DEG; ++i) {
             eq_val += eq_diff;
             p_j0 += p0_diff;
             p_j0 += lambda_times_q0_diff;
@@ -101,22 +106,19 @@ __global__ void compute_round_kernel(
             local[i] += eq_val * (p_j0 * q_j1 + p_j1 * q_j0);
         }
     }
-
-    for (int i = 0; i < 3; ++i) {
+// Reduce phase: reduce all threadIdx.x in the same block, keeping 1,2,3 independent
+#pragma unroll
+    for (int i = 0; i < GKR_S_DEG; ++i) {
         FpExt reduced = sumcheck::block_reduce_sum(local[i], shared);
+
         if (threadIdx.x == 0) {
-            out[i] = reduced;
+            block_sums[blockIdx.x * 3 + i] = reduced;
         }
         __syncthreads();
     }
 }
 
-__global__ void fold_columns_kernel(
-    FpExt *buffer,
-    size_t in_stride,
-    size_t step,
-    FpExt r
-) {
+__global__ void fold_columns_kernel(FpExt *buffer, size_t in_stride, size_t step, FpExt r) {
     size_t out_stride = in_stride >> 1;
     size_t total = out_stride;
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -124,8 +126,8 @@ __global__ void fold_columns_kernel(
         return;
     }
 
-    FpExt& t0 = buffer[idx * 2 * step];
-    FpExt const& t1 = buffer[(idx * 2 + 1) * step];
+    FpExt &t0 = buffer[idx * 2 * step];
+    FpExt const &t1 = buffer[(idx * 2 + 1) * step];
     t0 = t0 + r * (t1 - t0);
 }
 
@@ -150,8 +152,8 @@ __global__ void fold_ef_columns_kernel(
 
 #pragma unroll
     for (uint32_t i : {0, 1}) {
-        FpExt& t0 = buffer[(4 * idx + 2 * i) * step];
-        FpExt const& t1 = buffer[(4 * idx + 2 * i + 1) * step];
+        FpExt &t0 = buffer[(4 * idx + 2 * i) * step];
+        FpExt const &t1 = buffer[(4 * idx + 2 * i + 1) * step];
         if constexpr (revert) {
             // z = x + r * (y - x) => x = (z - r * y) / (1 - r) = (z - y + (y - r * y)) / (1 - r)
             t0 = (t0 - t1) * r_or_r_inv + t1;
@@ -237,11 +239,22 @@ extern "C" int _frac_build_tree_layer(
 
     auto [grid, block] = kernel_launch_params(layer_size);
     if (revert) {
-        frac_build_tree_layer_kernel<true><<<grid, block>>>(numerators, denominators, layer_size, step);
+        frac_build_tree_layer_kernel<true>
+            <<<grid, block>>>(numerators, denominators, layer_size, step);
     } else {
-        frac_build_tree_layer_kernel<false><<<grid, block>>>(numerators, denominators, layer_size, step);
+        frac_build_tree_layer_kernel<false>
+            <<<grid, block>>>(numerators, denominators, layer_size, step);
     }
     return CHECK_KERNEL();
+}
+
+inline std::pair<dim3, dim3> frac_compute_round_launch_params(uint32_t stride) {
+    return kernel_launch_params(stride >> 1, 512);
+}
+
+extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t stride) {
+    auto [grid, block] = frac_compute_round_launch_params(stride);
+    return grid.x * GKR_S_DEG;
 }
 
 extern "C" int _frac_compute_round(
@@ -252,28 +265,35 @@ extern "C" int _frac_compute_round(
     size_t step,
     size_t pq_extra_step,
     FpExt lambda,
-    FpExt *out_device
+    FpExt *out,           // Output: [d=3] final results
+    FpExt *tmp_block_sums // Temporary buffer: [gridDim.x * d]
 ) {
-    size_t half = stride >> 1;
-    if (half == 0) {
-        cudaError_t err = cudaMemsetAsync(out_device, 0, 3 * sizeof(FpExt), cudaStreamPerThread);
-        return err == cudaSuccess ? 0 : err;
-    }
+    assert(stride > 1);
 
-    size_t threads = std::min<size_t>(std::max<size_t>(half, WARP_SIZE), 256);
-    auto [grid, block] = kernel_launch_params(threads, threads);
-    size_t num_warps = std::max<size_t>(1, (block.x + WARP_SIZE - 1) / WARP_SIZE);
-    size_t shmem_bytes = num_warps * sizeof(FpExt);
-    compute_round_kernel<<<grid, block, shmem_bytes>>>(eq_xi, pq_nums, pq_denoms, stride, step, pq_extra_step * step, lambda, out_device);
+    auto [grid, block] = frac_compute_round_launch_params(stride);
+    uint32_t num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;
+    size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
+
+    // Launch main kernel - writes to tmp_block_sums
+    compute_round_block_sum_kernel<<<grid, block, shmem_bytes>>>(
+        eq_xi, pq_nums, pq_denoms, stride, step, pq_extra_step * step, lambda, tmp_block_sums
+    );
+    int err = CHECK_KERNEL();
+    if (err != 0)
+        return err;
+
+    // Launch final reduction kernel - reads from tmp_block_sums, writes to output
+    auto num_blocks = grid.x;
+    auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
+    unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
+    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
+    sumcheck::static_final_reduce_block_sums<GKR_S_DEG>
+        <<<GKR_S_DEG, reduce_block, reduce_shmem>>>(tmp_block_sums, out, num_blocks);
+
     return CHECK_KERNEL();
 }
 
-extern "C" int _frac_fold_columns(
-    FpExt *buffer,
-    size_t in_stride,
-    size_t step,
-    FpExt r
-) {
+extern "C" int _frac_fold_columns(FpExt *buffer, size_t in_stride, size_t step, FpExt r) {
     if (in_stride <= 1) {
         return 0;
     }
