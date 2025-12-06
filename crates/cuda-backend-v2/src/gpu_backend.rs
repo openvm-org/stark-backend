@@ -1,7 +1,5 @@
 use std::{cmp::max, fmt::Debug, sync::Arc};
 
-use tracing::instrument;
-
 use itertools::Itertools;
 use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
@@ -26,6 +24,7 @@ use stark_backend_v2::{
         stacked_pcs::{MerkleTree, StackedPcsData},
     },
 };
+use tracing::instrument;
 
 use crate::{
     D_EF, Digest, EF, F, GpuDeviceV2, GpuProverConfig, ProverError,
@@ -275,7 +274,7 @@ pub fn transport_and_unstack_single_data_h2d(
 }
 
 /// Transports backing matrix and tree digest layers from host to device.
-pub fn transport_merkle_tree_h2d<F, Digest>(
+pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
     tree: &MerkleTree<F, Digest>,
 ) -> Result<MerkleTreeGpu<F, Digest>, MemCopyError> {
     let backing_matrix = transport_matrix_h2d_col_major(tree.backing_matrix())?;
@@ -288,6 +287,7 @@ pub fn transport_merkle_tree_h2d<F, Digest>(
         backing_matrix,
         digest_layers,
         rows_per_query: tree.rows_per_query(),
+        root: tree.root(),
     })
 }
 

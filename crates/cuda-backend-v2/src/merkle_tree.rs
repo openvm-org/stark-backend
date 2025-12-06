@@ -8,7 +8,6 @@ use openvm_cuda_backend::{
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
-    error::CudaError,
     memory_manager::MemTracker,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
@@ -29,13 +28,15 @@ pub struct MerkleTreeGpu<F, Digest> {
     pub(crate) backing_matrix: DeviceMatrix<F>,
     pub(crate) digest_layers: Vec<DeviceBuffer<Digest>>,
     pub(crate) rows_per_query: usize,
+    pub(crate) root: Digest,
 }
 
 impl<F, Digest> MerkleTreeGpu<F, Digest> {
-    pub fn root(&self) -> Digest {
-        let root = self.digest_layers.last().unwrap();
-        assert_eq!(root.len(), 1, "Only one root is supported");
-        root.to_host().unwrap().pop().unwrap()
+    pub fn root(&self) -> Digest
+    where
+        Digest: Clone,
+    {
+        self.root.clone()
     }
 
     pub fn query_stride(&self) -> usize {
@@ -50,7 +51,7 @@ impl<F, Digest> MerkleTreeGpu<F, Digest> {
 // Base field merkle tree
 impl MerkleTreeGpu<F, Digest> {
     #[instrument(name = "merkle_tree", skip_all)]
-    pub fn new(matrix: DeviceMatrix<F>, rows_per_query: usize) -> Result<Self, CudaError> {
+    pub fn new(matrix: DeviceMatrix<F>, rows_per_query: usize) -> Result<Self, ProverError> {
         let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
         assert!(height.is_power_of_two());
@@ -104,12 +105,16 @@ impl MerkleTreeGpu<F, Digest> {
             }
             digest_layers.push(layer);
         }
+        let d_root = digest_layers.last().unwrap();
+        assert_eq!(d_root.len(), 1, "Only one root is supported");
+        let root = d_root.to_host()?.pop().unwrap();
 
         mem.emit_metrics();
         Ok(Self {
             backing_matrix: matrix,
             digest_layers,
             rows_per_query,
+            root,
         })
     }
 
@@ -281,7 +286,7 @@ impl MerkleTreeGpu<F, Digest> {
 // in our use cases
 impl MerkleTreeGpu<EF, Digest> {
     #[instrument(name = "merkle_tree_ext", skip_all)]
-    pub fn new(matrix: DeviceMatrix<EF>, rows_per_query: usize) -> Result<Self, CudaError> {
+    pub fn new(matrix: DeviceMatrix<EF>, rows_per_query: usize) -> Result<Self, ProverError> {
         let height = matrix.height();
         assert!(height.is_power_of_two());
         let k = log2_strict_usize(rows_per_query);
@@ -335,11 +340,15 @@ impl MerkleTreeGpu<EF, Digest> {
             }
             digest_layers.push(layer);
         }
+        let d_root = digest_layers.last().unwrap();
+        assert_eq!(d_root.len(), 1, "Only one root is supported");
+        let root = d_root.to_host()?.pop().unwrap();
 
         Ok(Self {
             backing_matrix: matrix,
             digest_layers,
             rows_per_query,
+            root,
         })
     }
 }
