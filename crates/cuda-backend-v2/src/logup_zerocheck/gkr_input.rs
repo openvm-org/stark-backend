@@ -17,6 +17,7 @@ use stark_backend_v2::prover::{
     DeviceMultiStarkProvingKeyV2, ProvingContextV2,
     stacked_pcs::{StackedLayout, StackedSlice},
 };
+use tracing::instrument;
 
 use super::errors::InteractionGpuError;
 use crate::{
@@ -97,6 +98,7 @@ pub fn collect_trace_interactions(
 
 /// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
 /// Returns separate buffers for numerators (F) and denominators (EF) to save memory.
+#[instrument(name = "prover.rap_constraints.logup_gkr.input_evals", skip_all)]
 pub fn log_gkr_input_evals(
     trace_interactions: &[Option<TraceInteractionMeta>],
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
