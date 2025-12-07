@@ -85,14 +85,14 @@ where
         let num_airs_present = ctx.per_trace.len();
         info!(num_airs_present);
 
-        let (common_main_commit, common_main_pcs_data) =
-            info_span!("main_trace_commit", phase = "prover").in_scope(|| {
-                let traces = ctx
-                    .common_main_traces()
-                    .map(|(_, trace)| trace)
-                    .collect_vec();
-                self.device.commit(&traces)
-            });
+        let _main_commit_span = info_span!("prover.main_trace_commit", phase = "prover").entered();
+        let (common_main_commit, common_main_pcs_data) = {
+            let traces = ctx
+                .common_main_traces()
+                .map(|(_, trace)| trace)
+                .collect_vec();
+            self.device.commit(&traces)
+        };
 
         let mut trace_vdata: Vec<Option<TraceVData>> = vec![None; mpk.per_air.len()];
         let mut public_values: Vec<Vec<F>> = vec![Vec::new(); mpk.per_air.len()];
@@ -123,6 +123,7 @@ where
         //   - for each cached main trace
         //     - 1 commitment
         transcript.observe_commit(common_main_commit);
+        drop(_main_commit_span);
 
         for (trace_vdata, pvs, pk) in izip!(&trace_vdata, &public_values, &mpk.per_air) {
             if !pk.vk.is_required {
