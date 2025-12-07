@@ -59,9 +59,6 @@ extern "C" {
     ) -> i32;
 
     // `out` must be device ptr
-    fn _eval_poly_at_point(coeffs: *const F, coeff_len: usize, x: F, out: *mut F) -> i32;
-
-    // `out` must be device ptr
     fn _eval_poly_ext_at_point(base_coeffs: *const F, coeff_len: usize, x: EF, out: *mut EF)
     -> i32;
 
@@ -222,23 +219,6 @@ pub unsafe fn batch_eq_hypercube_stage(
         width,
         height,
     ))
-}
-
-/// Evaluates a polynomial stored in `coeffs` (little-endian coefficients) at point `x`.
-///
-/// # Safety
-/// - `coeff_len` specifies how many coefficients to read from `coeffs`. `coeff_len` must be `>0`.
-#[allow(dead_code)]
-pub unsafe fn eval_poly_at_point(coeffs: &DeviceBuffer<F>, x: F) -> Result<F, ProverError> {
-    let d_out = DeviceBuffer::<F>::with_capacity(1);
-    check(_eval_poly_at_point(
-        coeffs.as_ptr(),
-        coeffs.len(),
-        x,
-        d_out.as_mut_ptr(),
-    ))?;
-    let out = d_out.to_host()?;
-    Ok(out[0])
 }
 
 /// Evaluates a `EF`-polynomial stored in coefficient form as column-major `F`-matrix at point `x`.
