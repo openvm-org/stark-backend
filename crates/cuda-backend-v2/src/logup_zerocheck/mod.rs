@@ -72,7 +72,7 @@ pub fn prove_zerocheck_and_logup_gpu<TS>(
 where
     TS: FiatShamirTranscript,
 {
-    let logup_gkr_span = info_span!("prover.logup_gkr", phase = "prover").entered();
+    let logup_gkr_span = info_span!("prover.rap_constraints.logup_gkr", phase = "prover").entered();
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
     let num_airs_present = ctx.per_trace.len();
@@ -156,6 +156,9 @@ where
 
     logup_gkr_span.exit();
 
+    // Note: this span includes ple_fold, but that function has no cuda synchronization so it does
+    // not include the kernel times for the actual folding
+    let round0_span = info_span!("prover.rap_constraints.round0", phase = "prover").entered();
     // begin batch sumcheck
     let mut sumcheck_round_polys = Vec::with_capacity(n_max);
     let mut r = Vec::with_capacity(n_max + 1);
@@ -207,6 +210,7 @@ where
     debug!(round = 0, r_round = %r_0);
 
     prover.fold_ple_evals(ctx, r_0);
+    drop(round0_span);
 
     // Sumcheck rounds:
     // - each round the prover needs to compute univariate polynomial `s_round`. This poly is linear
@@ -216,8 +220,8 @@ where
     // `s_round` is degree `s_deg` so we evaluate it at `0, ..., =s_deg`. The prover skips
     // evaluation at `0` because the verifier can infer it from the previous round's
     // `s_{round-1}(r)` claim. The degree is constraint_degree + 1, where + 1 is from eq term
-    let _mle_rounds_span =
-        info_span!("prover.batch_constraints.mle_rounds", phase = "prover").entered();
+    let mle_rounds_span =
+        info_span!("prover.rap_constraints.mle_rounds", phase = "prover").entered();
     debug!(%s_deg);
     for round in 1..=n_max {
         let s_round_evals = prover.sumcheck_polys_eval(round, r[round - 1]);
@@ -242,7 +246,6 @@ where
 
         prover.fold_mle_evals(round, r_round);
     }
-    drop(_mle_rounds_span);
     assert_eq!(r.len(), n_max + 1);
 
     let column_openings = prover.into_column_openings();
@@ -262,6 +265,7 @@ where
             }
         }
     }
+    drop(mle_rounds_span);
 
     let batch_constraint_proof = BatchConstraintProof {
         numerator_term_per_air,
@@ -428,11 +432,7 @@ impl<'a> LogupZerocheckGpu<'a> {
         }
     }
 
-    #[instrument(
-        name = "LogupZerocheck::sumcheck_uni_round0_polys",
-        level = "debug",
-        skip_all
-    )]
+    #[instrument(name = "prover.rap_constraints.ple_round0", level = "info", skip_all)]
     fn sumcheck_uni_round0_polys(
         &mut self,
         ctx: &ProvingContextV2<GpuBackendV2>,
@@ -530,8 +530,6 @@ impl<'a> LogupZerocheckGpu<'a> {
 
         // Loop through one AIR at a time; it is more efficient to do everything for one AIR
         // together
-        let _round0_span =
-            info_span!("prover.batch_constraints.round0", phase = "prover").entered();
         for (trace_idx, ((air_idx, air_ctx), &n, selectors_cube, public_values, eq_3bs)) in izip!(
             &ctx.per_trace,
             &self.n_per_trace,
@@ -657,7 +655,6 @@ impl<'a> LogupZerocheckGpu<'a> {
                 batch_polys[2 * trace_idx + 1] = denom_poly;
             }
         }
-        drop(_round0_span);
         self.mem
             .emit_metrics_with_label("prover.batch_constraints.round0");
 
@@ -676,6 +673,7 @@ impl<'a> LogupZerocheckGpu<'a> {
         batch_polys
     }
 
+    // Note: there are no gpu sync points in this function, so span does not indicate kernel times
     #[instrument(name = "LogupZerocheck::fold_ple_evals", level = "debug", skip_all)]
     fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<GpuBackendV2>, r_0: EF) {
         let l_skip = self.l_skip;
