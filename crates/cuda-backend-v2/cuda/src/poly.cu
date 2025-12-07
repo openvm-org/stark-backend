@@ -2,6 +2,7 @@
 #include "fpext.h"
 #include "launcher.cuh"
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector_types.h>
@@ -15,35 +16,65 @@ __device__ __forceinline__ Field horner_eval(const Field *coeffs, size_t len, Fi
     return acc;
 }
 
-// Single-thread Horner evaluation used when only one point is required.
-template <typename Field>
-__global__ void eval_poly_at_point_kernel(const Field *coeffs, size_t len, Field x, Field *out) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) {
-        return;
-    }
-
-    Field acc = horner_eval(coeffs, len, x);
-    *out = acc;
-}
-
-// Single-threaded Horner evaluation, but `coeffs` is the coefficients of `EF`-polynomial, but in F-column major form.
+// Parallel polynomial evaluation using chunk-based Horner with tree reduction.
+// Coefficients are FpExt stored in F-column major form (4 x len layout).
+// BlockSize must be a power of 2. Uses dynamic shared memory.
+// Kernel uses a single block.
+template <int BlockSize>
 __global__ void eval_poly_ext_at_point_kernel(const Fp *coeffs, size_t len, FpExt x, FpExt *out) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) {
-        return;
+    // Dynamic shared memory: BlockSize elements for partial sums + 1 for x^chunk_size
+    extern __shared__ FpExt smem[];
+
+    const int tid = threadIdx.x;
+    const size_t chunk_size = (len + BlockSize - 1) / BlockSize;
+
+    // Phase 1: Thread 0 computes x^chunk_size using repeated squaring
+    if (tid == 0) {
+        FpExt xk = pow(x, chunk_size);
+        smem[BlockSize] = xk; // Store x^chunk_size in the extra slot
+    }
+    __syncthreads();
+
+    FpExt x_pow_chunk = smem[BlockSize]; // All threads read x^chunk_size
+
+    // Phase 2: Each thread evaluates its chunk via Horner's method
+    // Thread tid handles coefficients [tid * chunk_size, (tid + 1) * chunk_size)
+    const size_t start = tid * chunk_size;
+    const size_t end = min(start + chunk_size, len);
+
+    FpExt acc = FpExt(Fp(0));
+    if (start < len) {
+        // Horner evaluation from highest to lowest degree within chunk
+        // p_tid(x) = c[start] + c[start+1]*x + ... + c[end-1]*x^{end-1-start}
+        for (size_t idx = end; idx > start; idx--) {
+            FpExt coeff;
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                coeff.elems[i] = coeffs[i * len + idx - 1];
+            }
+            acc = acc * x + coeff;
+        }
     }
 
-    FpExt acc;
-    for (int i = 0; i < 4; i++) {
-        acc.elems[i] = coeffs[i * len + len - 1];
-    }
-    for (size_t idx = len - 1; idx > 0; idx--) {
-        FpExt coeff;
-        for (int i = 0; i < 4; i++) {
-            coeff.elems[i] = coeffs[i * len + idx - 1];
+    // Phase 3: Scale partial sum by x^{tid * chunk_size}
+    // Compute (x^chunk_size)^tid using binary exponentiation on tid
+    FpExt my_power = pow(x_pow_chunk, tid);
+    acc = acc * my_power;
+    smem[tid] = acc;
+    __syncthreads();
+
+// Phase 4: Tree reduction to sum all partial results
+#pragma unroll
+    for (int stride = BlockSize / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            smem[tid] = smem[tid] + smem[tid + stride];
         }
-        acc = acc * x + coeff;
+        __syncthreads();
     }
-    *out = acc;
+
+    if (tid == 0) {
+        *out = smem[0];
+    }
 }
 
 template <typename Field, bool EvalToCoeff>
@@ -310,24 +341,29 @@ extern "C" int _batch_eq_hypercube_stage(
     return CHECK_KERNEL();
 }
 
-// Horner evaluation using just one thread.
-template <typename Field>
-int launch_eval_poly_at_point(const Field *coeffs, size_t len, Field x, Field *out) {
-    dim3 grid(1);
-    dim3 block(32);
-    eval_poly_at_point_kernel<Field><<<grid, block>>>(coeffs, len, x, out);
+// Helper to dispatch templated kernel based on runtime block size
+template <int BlockSize>
+int launch_eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *out) {
+    // Dynamic shared memory: BlockSize + 1 elements for partial sums and x^chunk_size
+    size_t smem_size = (BlockSize + 1) * sizeof(FpExt);
+    eval_poly_ext_at_point_kernel<BlockSize><<<1, BlockSize, smem_size>>>(coeffs, len, x, out);
     return CHECK_KERNEL();
-}
-
-extern "C" int _eval_poly_at_point(const Fp *coeffs, size_t len, Fp x, Fp *out) {
-    return launch_eval_poly_at_point(coeffs, len, x, out);
 }
 
 extern "C" int _eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *out) {
-    dim3 grid(1);
-    dim3 block(32);
-    eval_poly_ext_at_point_kernel<<<grid, block>>>(coeffs, len, x, out);
-    return CHECK_KERNEL();
+    // Choose block size based on polynomial length for optimal performance
+    // Larger polynomials benefit from more parallelism
+    if (len <= 256) {
+        return launch_eval_poly_ext_at_point<64>(coeffs, len, x, out);
+    } else if (len <= 4096) {
+        return launch_eval_poly_ext_at_point<128>(coeffs, len, x, out);
+    } else if (len <= 65536) {
+        return launch_eval_poly_ext_at_point<256>(coeffs, len, x, out);
+    } else if (len <= 524288) {
+        return launch_eval_poly_ext_at_point<512>(coeffs, len, x, out);
+    } else {
+        return launch_eval_poly_ext_at_point<1024>(coeffs, len, x, out);
+    }
 }
 
 extern "C" int _vector_scalar_multiply_ext(FpExt *vec, FpExt scalar, uint32_t length) {
