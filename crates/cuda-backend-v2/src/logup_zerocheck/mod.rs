@@ -18,31 +18,31 @@ use openvm_stark_backend::{
 use p3_field::{Field, FieldAlgebra, TwoAdicField};
 use p3_util::{log2_ceil_usize, log2_strict_usize};
 use stark_backend_v2::{
+    calculate_n_logup,
     poly_common::{
         UnivariatePoly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, eval_eq_uni_at_one,
     },
     poseidon2::sponge::FiatShamirTranscript,
+    proof::{BatchConstraintProof, GkrProof},
     prover::{
-        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, LogupZerocheckProver, ProvingContextV2,
-        fractional_sumcheck_gkr::FracSumcheckProof, stacked_pcs::StackedLayout,
+        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, ProvingContextV2, stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
     },
 };
 use tracing::{debug, info, info_span, instrument};
 
 use crate::{
-    Digest, EF, F, GpuBackendV2, GpuDeviceV2,
+    EF, F, GpuBackendV2,
     cuda::{
         logup_zerocheck::{MainMatrixPtrs, fold_selectors_round0, interpolate_columns_gpu},
         sumcheck::{fold_mle, triangular_fold_mle},
     },
     gpu_backend::transport_matrix_d2h_col_major,
     logup_zerocheck::{
-        fold_ple::fold_ple_mixed_rotate, gkr_input::TraceInteractionMeta,
+        fold_ple::fold_ple_evals_rotate, gkr_input::TraceInteractionMeta,
         round0::evaluate_round0_interactions_gpu,
     },
     poly::EqEvalSegments,
-    stacked_pcs::StackedPcsDataGpu,
     utils::compute_barycentric_inv_lagrange_denoms,
 };
 
@@ -63,14 +63,228 @@ use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu};
 use round0::evaluate_round0_constraints_gpu;
 
-#[allow(dead_code)]
+#[instrument(level = "info", skip_all)]
+pub fn prove_zerocheck_and_logup_gpu<TS>(
+    transcript: &mut TS,
+    mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    ctx: &ProvingContextV2<GpuBackendV2>,
+) -> (GkrProof, BatchConstraintProof, Vec<EF>)
+where
+    TS: FiatShamirTranscript,
+{
+    let logup_gkr_span = info_span!("prover.logup_gkr", phase = "prover").entered();
+    let l_skip = mpk.params.l_skip;
+    let constraint_degree = mpk.max_constraint_degree;
+    let num_airs_present = ctx.per_trace.len();
+
+    // Traces are sorted
+    let n_max = log2_strict_usize(ctx.per_trace[0].1.common_main.height()).saturating_sub(l_skip);
+    // Gather interactions metadata, including interactions stacked layout which depends on trace
+    // heights
+    let mut total_interactions = 0u64;
+    let interactions_meta: Vec<_> = ctx
+        .per_trace
+        .iter()
+        .map(|(air_idx, air_ctx)| {
+            let pk = &mpk.per_air[*air_idx];
+
+            let num_interactions = pk.vk.symbolic_constraints.interactions.len();
+            let height = air_ctx.common_main.height();
+            let log_height = log2_strict_usize(height);
+            let log_lifted_height = log_height.max(l_skip);
+            total_interactions += (num_interactions as u64) << log_lifted_height;
+            (num_interactions, log_lifted_height)
+        })
+        .collect();
+    // Implicitly, the width of this stacking should be 1
+    let n_logup = calculate_n_logup(l_skip, total_interactions);
+    // There's no stride threshold for `interactions_layout` because there's no univariate skip for
+    // GKR
+    let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
+
+    // Grind to increase soundness of random sampling for LogUp
+    let logup_pow_witness = transcript.grind(mpk.params.logup.pow_bits);
+    let alpha_logup = transcript.sample_ext();
+    let beta_logup = transcript.sample_ext();
+    debug!(%alpha_logup, %beta_logup);
+
+    let has_interactions = !interactions_layout.sorted_cols.is_empty();
+    let mut prover = LogupZerocheckGpu::new(
+        mpk,
+        ctx,
+        n_logup,
+        interactions_layout,
+        alpha_logup,
+        beta_logup,
+    );
+    let n_global = prover.n_global;
+
+    let total_leaves = 1 << (l_skip + n_logup);
+    prover
+        .mem
+        .emit_metrics_with_label("prover.before_gkr_input_evals");
+    prover.mem.reset_peak();
+    let (input_numerators, input_denominators) = if has_interactions {
+        log_gkr_input_evals(
+            &prover.trace_interactions,
+            mpk,
+            ctx,
+            l_skip,
+            alpha_logup,
+            &prover.beta_pows,
+            total_leaves,
+        )
+        .expect("failed to evaluate interactions on device")
+    } else {
+        (DeviceBuffer::new(), DeviceBuffer::new())
+    };
+    prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
+
+    let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(
+        transcript,
+        input_numerators,
+        input_denominators,
+        true,
+        &mut prover.mem,
+    )
+    .expect("failed to run fractional sumcheck on GPU");
+    while xi.len() != l_skip + n_global {
+        xi.push(transcript.sample_ext());
+    }
+    debug!(?xi);
+    prover.xi = xi;
+
+    logup_gkr_span.exit();
+
+    // begin batch sumcheck
+    let mut sumcheck_round_polys = Vec::with_capacity(n_max);
+    let mut r = Vec::with_capacity(n_max + 1);
+    // batching randomness
+    let lambda = transcript.sample_ext();
+    debug!(%lambda);
+
+    let s_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
+    // logup sum claims (sum_{\hat p}, sum_{\hat q}) per present AIR
+    let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = s_0_polys
+        [..2 * num_airs_present]
+        .chunks_exact(2)
+        .map(|frac| {
+            let [sum_claim_p, sum_claim_q] = [&frac[0], &frac[1]].map(|s_0| {
+                s_0.coeffs()
+                    .iter()
+                    .step_by(1 << l_skip)
+                    .copied()
+                    .sum::<EF>()
+                    * F::from_canonical_usize(1 << l_skip)
+            });
+            transcript.observe_ext(sum_claim_p);
+            transcript.observe_ext(sum_claim_q);
+
+            (sum_claim_p, sum_claim_q)
+        })
+        .unzip();
+
+    let mu = transcript.sample_ext();
+    debug!(%mu);
+
+    let s_deg = constraint_degree + 1;
+    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
+    let mu_pows = mu.powers().take(3 * num_airs_present).collect_vec();
+    let univariate_round_coeffs = (0..=s_0_deg)
+        .map(|i| {
+            let coeff = s_0_polys
+                .iter()
+                .enumerate()
+                .map(|(j, s_0)| mu_pows[j] * *s_0.coeffs().get(i).unwrap_or(&EF::ZERO))
+                .sum::<EF>();
+            transcript.observe_ext(coeff);
+            coeff
+        })
+        .collect_vec();
+
+    let r_0 = transcript.sample_ext();
+    r.push(r_0);
+    debug!(round = 0, r_round = %r_0);
+
+    prover.fold_ple_evals(ctx, r_0);
+
+    // Sumcheck rounds:
+    // - each round the prover needs to compute univariate polynomial `s_round`. This poly is linear
+    //   since we are taking MLE of `evals`.
+    // - at end of each round, sample random `r_round` in `EF`
+    //
+    // `s_round` is degree `s_deg` so we evaluate it at `0, ..., =s_deg`. The prover skips
+    // evaluation at `0` because the verifier can infer it from the previous round's
+    // `s_{round-1}(r)` claim. The degree is constraint_degree + 1, where + 1 is from eq term
+    let _mle_rounds_span =
+        info_span!("prover.batch_constraints.mle_rounds", phase = "prover").entered();
+    debug!(%s_deg);
+    for round in 1..=n_max {
+        let s_round_evals = prover.sumcheck_polys_eval(round, r[round - 1]);
+
+        let batch_s_evals = (0..s_deg)
+            .map(|i| {
+                s_round_evals
+                    .iter()
+                    .enumerate()
+                    .map(|(j, evals)| mu_pows[j] * *evals.get(i).unwrap_or(&EF::ZERO))
+                    .sum::<EF>()
+            })
+            .collect_vec();
+        for &eval in &batch_s_evals {
+            transcript.observe_ext(eval);
+        }
+        sumcheck_round_polys.push(batch_s_evals);
+
+        let r_round = transcript.sample_ext();
+        debug!(%round, %r_round);
+        r.push(r_round);
+
+        prover.fold_mle_evals(round, r_round);
+    }
+    drop(_mle_rounds_span);
+    assert_eq!(r.len(), n_max + 1);
+
+    let column_openings = prover.into_column_openings();
+
+    // Observe common main openings first, and then preprocessed/cached
+    for openings in &column_openings {
+        for (claim, claim_rot) in &openings[0] {
+            transcript.observe_ext(*claim);
+            transcript.observe_ext(*claim_rot);
+        }
+    }
+    for openings in &column_openings {
+        for part in openings.iter().skip(1) {
+            for (claim, claim_rot) in part {
+                transcript.observe_ext(*claim);
+                transcript.observe_ext(*claim_rot);
+            }
+        }
+    }
+
+    let batch_constraint_proof = BatchConstraintProof {
+        numerator_term_per_air,
+        denominator_term_per_air,
+        univariate_round_coeffs,
+        sumcheck_round_polys,
+        column_openings,
+    };
+    let gkr_proof = GkrProof {
+        logup_pow_witness,
+        q0_claim: frac_sum_proof.fractional_sum.1,
+        claims_per_layer: frac_sum_proof.claims_per_layer,
+        sumcheck_polys: frac_sum_proof.sumcheck_polys,
+    };
+    (gkr_proof, batch_constraint_proof, r)
+}
+
 pub struct LogupZerocheckGpu<'a> {
     pub alpha_logup: EF,
     pub beta_pows: Vec<EF>,
 
     pub l_skip: usize,
     n_logup: usize,
-    n_max: usize,
     n_global: usize,
 
     pub omega_skip: F,
@@ -104,32 +318,24 @@ pub struct LogupZerocheckGpu<'a> {
     trace_interactions: Vec<Option<TraceInteractionMeta>>,
     // round0: Round0Buffers,
     pk: &'a DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-    device: &'a GpuDeviceV2,
-    common_main_pcs_data: &'a StackedPcsDataGpu<F, Digest>,
 
     mem: MemTracker,
 }
 
-impl<'a, TS> LogupZerocheckProver<'a, GpuBackendV2, GpuDeviceV2, TS> for LogupZerocheckGpu<'a>
-where
-    TS: FiatShamirTranscript,
-{
-    #[instrument(name = "prover.logup_gkr", skip_all, fields(phase = "prover"))]
-    fn prove_logup_gkr(
-        device: &'a GpuDeviceV2,
-        transcript: &mut TS,
+impl<'a> LogupZerocheckGpu<'a> {
+    fn new(
         pk: &'a DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
         ctx: &ProvingContextV2<GpuBackendV2>,
-        common_main_pcs_data: &'a StackedPcsDataGpu<F, Digest>,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: EF,
         beta_logup: EF,
-    ) -> (Self, FracSumcheckProof<EF>) {
-        let mut mem = MemTracker::start("prover.logup_zerocheck_prover");
+    ) -> Self {
+        let mem = MemTracker::start("prover.logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
+        let d_omega_skip_pows = omega_skip_pows.to_device().unwrap();
         let num_airs_present = ctx.per_trace.len();
 
         let constraint_degree = pk.max_constraint_degree;
@@ -152,6 +358,8 @@ where
             .map(|(_, t)| log2_strict_usize(t.height()) as isize - l_skip as isize)
             .collect();
         let n_max = n_per_trace[0].max(0) as usize;
+        let n_global = max(n_max, n_logup);
+        info!(%n_global, %n_logup);
 
         let max_num_constraints = pk
             .per_air
@@ -167,54 +375,14 @@ where
             .max()
             .unwrap_or(0);
 
-        let has_interactions = !interactions_layout.sorted_cols.is_empty();
-
         // Collect interaction metadata for GPU execution (evaluations still run on CPU for now).
         let trace_interactions = collect_trace_interactions(pk, ctx, &interactions_layout);
 
-        let total_leaves = 1 << (l_skip + n_logup);
-        mem.emit_metrics_with_label("prover.before_gkr_input_evals");
-        mem.reset_peak();
-        let (input_numerators, input_denominators) = if has_interactions {
-            log_gkr_input_evals(
-                &trace_interactions,
-                pk,
-                ctx,
-                l_skip,
-                alpha_logup,
-                &beta_pows,
-                total_leaves,
-            )
-            .expect("failed to evaluate interactions on device")
-        } else {
-            (DeviceBuffer::new(), DeviceBuffer::new())
-        };
-        mem.emit_metrics_with_label("prover.gkr_input_evals");
-
-        let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(
-            transcript,
-            input_numerators,
-            input_denominators,
-            true,
-            &mut mem,
-        )
-        .expect("failed to run fractional sumcheck on GPU");
-
-        let n_global = max(n_max, n_logup);
-        info!(%n_global, %n_logup);
-        while xi.len() != l_skip + n_global {
-            xi.push(transcript.sample_ext());
-        }
-        debug!(?xi);
-
-        let d_omega_skip_pows = omega_skip_pows.to_device().unwrap();
-
-        let prover = Self {
+        Self {
             alpha_logup,
             beta_pows,
             l_skip,
             n_logup,
-            n_max,
             n_global,
             omega_skip,
             omega_skip_pows,
@@ -224,7 +392,7 @@ where
             n_per_trace,
             max_num_constraints,
             s_deg,
-            xi,
+            xi: vec![],
             lambda_pows: None,
             eq_xis: EqEvalSegments::new(&[]).unwrap(),
             eq_sharps: EqEvalSegments::new(&[]).unwrap(),
@@ -256,12 +424,8 @@ where
             logup_tilde_evals: vec![[EF::ZERO; 2]; num_airs_present],
             trace_interactions,
             pk,
-            device,
-            common_main_pcs_data,
             mem,
-        };
-
-        (prover, frac_sum_proof)
+        }
     }
 
     #[instrument(
@@ -530,7 +694,7 @@ where
                 // Preprocessed (if exists)
                 if let Some(committed) = &air_pk.preprocessed_data {
                     let trace = &committed.trace;
-                    let folded = fold_ple_mixed_rotate(
+                    let folded = fold_ple_evals_rotate(
                         l_skip,
                         &self.d_omega_skip_pows,
                         trace,
@@ -543,7 +707,7 @@ where
                 // Cached mains
                 for committed in &air_ctx.cached_mains {
                     let trace = &committed.trace;
-                    let folded = fold_ple_mixed_rotate(
+                    let folded = fold_ple_evals_rotate(
                         l_skip,
                         &self.d_omega_skip_pows,
                         trace,
@@ -555,7 +719,7 @@ where
 
                 // Common main
                 let trace = &air_ctx.common_main;
-                let folded = fold_ple_mixed_rotate(
+                let folded = fold_ple_evals_rotate(
                     l_skip,
                     &self.d_omega_skip_pows,
                     trace,

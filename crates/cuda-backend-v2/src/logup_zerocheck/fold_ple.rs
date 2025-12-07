@@ -13,7 +13,7 @@ use crate::{
 /// Folds plain using mixed coefficients, folds rotation from evals.
 /// - `mixed` should be mixed coefficient form of the _lifted_ trace.
 /// - `trace_evals` should be unlifted (the original trace).
-pub fn fold_ple_mixed_rotate(
+pub fn fold_ple_evals_rotate(
     l_skip: usize,
     d_omega_skip_pows: &DeviceBuffer<F>,
     trace_evals: &DeviceMatrix<F>,

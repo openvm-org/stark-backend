@@ -20,7 +20,7 @@ use stark_backend_v2::{
         AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
         DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MatrixView,
         MultiRapProver, OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2,
-        TraceCommitterV2, prove_zerocheck_and_logup,
+        TraceCommitterV2,
         stacked_pcs::{MerkleTree, StackedPcsData},
     },
 };
@@ -29,7 +29,7 @@ use tracing::instrument;
 use crate::{
     D_EF, Digest, EF, F, GpuDeviceV2, GpuProverConfig, ProverError,
     cuda::matrix::collapse_strided_matrix,
-    logup_zerocheck::LogupZerocheckGpu,
+    logup_zerocheck::prove_zerocheck_and_logup_gpu,
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
     stacked_pcs::{StackedPcsDataGpu, stacked_commit},
@@ -82,17 +82,11 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
         ctx: &ProvingContextV2<GpuBackendV2>,
-        common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
+        _common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
         let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup::<_, _, TS, LogupZerocheckGpu>(
-                self,
-                transcript,
-                mpk,
-                ctx,
-                common_main_pcs_data,
-            );
+            prove_zerocheck_and_logup_gpu(transcript, mpk, ctx);
         mem.emit_metrics();
         ((gkr_proof, batch_constraint_proof), r)
     }
