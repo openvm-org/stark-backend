@@ -201,7 +201,8 @@ where
     // Batching randomness
     let lambda = transcript.sample_ext();
 
-    let _round0_span = info_span!("stacked_reduction.round0", phase = "prover").entered();
+    let _round0_span =
+        info_span!("prover.openings.stacked_reduction.round0", phase = "prover").entered();
     let mut prover = StackedReductionGpu::new(mpk, ctx, common_main_pcs_data, r, lambda)?;
 
     // Round 0: univariate sumcheck
@@ -209,7 +210,6 @@ where
     for &coeff in s_0.coeffs() {
         transcript.observe_ext(coeff);
     }
-    drop(_round0_span);
 
     let mut u_vec = Vec::with_capacity(n_stack + 1);
     let u_0 = transcript.sample_ext();
@@ -217,12 +217,17 @@ where
     debug!(round = 0, u_round = %u_0);
 
     prover.fold_ple_evals(u_0);
+    drop(_round0_span);
     // end round 0
 
     let mut sumcheck_round_polys = Vec::with_capacity(n_stack);
 
     // Rounds 1..=n_stack: MLE sumcheck
-    let _mle_rounds_span = info_span!("stacked_reduction.mle_rounds", phase = "prover").entered();
+    let _mle_rounds_span = info_span!(
+        "prover.openings.stacked_reduction.mle_rounds",
+        phase = "prover"
+    )
+    .entered();
     #[allow(clippy::needless_range_loop)]
     for round in 1..=n_stack {
         let batch_s_evals = prover.batch_sumcheck_poly_eval(round, u_vec[round - 1]);
@@ -238,13 +243,13 @@ where
 
         prover.fold_mle_evals(round, u_round);
     }
-    drop(_mle_rounds_span);
     let stacking_openings = prover.get_stacked_openings();
     for claims_for_com in &stacking_openings {
         for &claim in claims_for_com {
             transcript.observe_ext(claim);
         }
     }
+    drop(_mle_rounds_span);
     let proof = StackingProof {
         univariate_round_coeffs: s_0.into_coeffs(),
         sumcheck_round_polys,
