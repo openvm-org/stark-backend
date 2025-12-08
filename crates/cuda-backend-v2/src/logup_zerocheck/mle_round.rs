@@ -2,10 +2,7 @@ use std::collections::HashMap;
 
 use itertools::Itertools;
 use openvm_cuda_backend::transpiler::{SymbolicRulesOnGpu, codec::Codec};
-use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::air_builders::symbolic::{
     SymbolicConstraints, SymbolicConstraintsDag,
     symbolic_expression::SymbolicExpression,
@@ -33,7 +30,7 @@ pub fn evaluate_mle_constraints_gpu(
     symbolic_constraints: &SymbolicConstraintsDag<F>,
     domain_size: usize,
     s_deg: usize,
-) -> Vec<EF> {
+) -> DeviceBuffer<EF> {
     let d_main_ptrs = main_ptrs
         .to_device()
         .expect("failed to copy main_ptrs to device");
@@ -121,9 +118,7 @@ pub fn evaluate_mle_constraints_gpu(
     }
 
     if domain_size == 1 {
-        return evaluated
-            .to_host()
-            .expect("failed to copy evaluation result to host");
+        return evaluated;
     }
 
     // REDUCTION: Sum over hypercube for each x_idx
@@ -140,11 +135,7 @@ pub fn evaluate_mle_constraints_gpu(
         reduce_hypercube_final(&mut output, &block_sums, s_deg as u32, num_blocks as u32)
             .expect("failed to finalize hypercube reduction on GPU");
     }
-
-    // Copy result to host
     output
-        .to_host()
-        .expect("failed to copy reduction result to host")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -159,7 +150,7 @@ pub fn evaluate_mle_interactions_gpu(
     symbolic_constraints: &SymbolicConstraintsDag<F>,
     domain_size: usize,
     s_deg: usize,
-) -> [Vec<EF>; 2] {
+) -> [DeviceBuffer<EF>; 2] {
     let d_main_ptrs = main_ptrs
         .to_device()
         .expect("failed to copy main_ptrs to device");
@@ -277,14 +268,7 @@ pub fn evaluate_mle_interactions_gpu(
     }
 
     if domain_size == 1 {
-        return [
-            evaluated_numer
-                .to_host()
-                .expect("failed to copy numer result to host"),
-            evaluated_denom
-                .to_host()
-                .expect("failed to copy denom result to host"),
-        ];
+        return [evaluated_numer, evaluated_denom];
     }
 
     // REDUCTION: Sum over hypercube for each x_idx (for both numer and denom)
@@ -333,12 +317,5 @@ pub fn evaluate_mle_interactions_gpu(
     }
 
     // Copy results to host
-    [
-        output_numer
-            .to_host()
-            .expect("failed to copy numer reduction result to host"),
-        output_denom
-            .to_host()
-            .expect("failed to copy denom reduction result to host"),
-    ]
+    [output_numer, output_denom]
 }
