@@ -113,7 +113,7 @@ where
             public_values[*air_id] = air_ctx.public_values.clone();
         }
         #[cfg(feature = "metrics")]
-        trace_metrics(mpk, &trace_vdata);
+        trace_metrics(mpk, &trace_vdata).emit();
 
         // Only observe commits for present AIRs.
         // Commitments order:
