@@ -361,3 +361,26 @@ impl LogUpSecurityParameters {
             .expect("max_message_length overflowed usize")
     }
 }
+
+impl<F> SymbolicInteraction<F> {
+    pub fn max_message_degree(&self) -> usize {
+        self.message
+            .iter()
+            .map(|m| m.degree_multiple())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+impl<F> Ord for SymbolicInteraction<F> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let msg_cmp = self.max_message_degree().cmp(&other.max_message_degree());
+        if msg_cmp == std::cmp::Ordering::Equal {
+            self.count
+                .degree_multiple()
+                .cmp(&other.count.degree_multiple())
+        } else {
+            msg_cmp
+        }
+    }
+}
