@@ -234,7 +234,10 @@ impl AirKeygenBuilderV2 {
                 max_degree: max_constraint_degree,
             });
         }
+        // todo: find interaction chunks
 
+        let dag = SymbolicConstraintsDag::from(symbolic_constraints);
+        let unused_variables = find_unused_vars(&dag, &vparams.width);
         let Self {
             prep_keygen_data:
                 PrepKeygenDataV2 {
@@ -243,9 +246,6 @@ impl AirKeygenBuilderV2 {
                 },
             ..
         } = self;
-
-        let dag = SymbolicConstraintsDag::from(symbolic_constraints);
-        let unused_variables = find_unused_vars(&dag, &vparams.width);
         let vk = StarkVerifyingKeyV2 {
             preprocessed_data: preprocessed_vdata,
             params: vparams,

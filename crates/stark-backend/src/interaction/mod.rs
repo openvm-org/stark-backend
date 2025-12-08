@@ -371,16 +371,3 @@ impl<F> SymbolicInteraction<F> {
             .unwrap_or(0)
     }
 }
-
-impl<F> Ord for SymbolicInteraction<F> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let msg_cmp = self.max_message_degree().cmp(&other.max_message_degree());
-        if msg_cmp == std::cmp::Ordering::Equal {
-            self.count
-                .degree_multiple()
-                .cmp(&other.count.degree_multiple())
-        } else {
-            msg_cmp
-        }
-    }
-}

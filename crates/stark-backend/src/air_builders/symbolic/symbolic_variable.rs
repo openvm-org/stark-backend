@@ -75,7 +75,7 @@ pub struct SymbolicVariable<F> {
     pub(crate) _phantom: PhantomData<F>,
 }
 
-impl<F: Field> SymbolicVariable<F> {
+impl<F> SymbolicVariable<F> {
     pub const fn new(entry: Entry, index: usize) -> Self {
         Self {
             entry,

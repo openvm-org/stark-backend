@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::SymbolicInteraction;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+/// See [`find_interaction_chunks`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct InteractionChunks {
     indices_by_chunk: Vec<Vec<usize>>,
 }
@@ -47,10 +48,8 @@ impl InteractionChunks {
 /// This function is only intended for use in preprocessing, and is not used in proving.
 ///
 /// ## Panics
-/// - If `max_constraint_degree > 0` and there are interactions that cannot fit in a singleton
+/// If `max_constraint_degree > 0` and there are interactions that cannot fit in a singleton
 ///   chunk.
-/// - This function assumes that `interactions` is sorted using the ordering on
-///   `SymbolicInteractions` (ascending max degree of expression).
 pub fn find_interaction_chunks<F: Field>(
     interactions: &[SymbolicInteraction<F>],
     max_constraint_degree: usize,
@@ -58,16 +57,21 @@ pub fn find_interaction_chunks<F: Field>(
     if interactions.is_empty() {
         return InteractionChunks::default();
     }
-    assert!(
-        interactions.is_sorted(),
-        "Interactions should be sorted before chunking"
-    );
+    let mut interaction_idxs: Vec<usize> = (0..interactions.len()).collect();
+    interaction_idxs.sort_by(|&i, &j| {
+        let a = &interactions[i];
+        let b = &interactions[j];
+        a.max_message_degree()
+            .cmp(&b.max_message_degree())
+            .then(a.count.degree_multiple().cmp(&b.count.degree_multiple()))
+    });
     // Now we greedily pack
     let mut running_sum_field_degree = 0;
     let mut numerator_max_degree = 0;
     let mut indices_by_chunk = vec![];
     let mut cur_chunk = vec![];
-    for (interaction_idx, interaction) in interactions.iter().enumerate() {
+    for interaction_idx in interaction_idxs {
+        let interaction = &interactions[interaction_idx];
         let msg_degree = interaction.max_message_degree();
         let count_degree = interaction.count.degree_multiple();
         // Can we add this interaction to the current chunk?

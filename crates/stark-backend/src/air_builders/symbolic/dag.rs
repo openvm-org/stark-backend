@@ -9,7 +9,7 @@ use crate::{
     air_builders::symbolic::{
         symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
     },
-    interaction::{Interaction, SymbolicInteraction},
+    interaction::{Interaction, InteractionChunks, SymbolicInteraction},
 };
 
 /// A node in symbolic expression DAG.
@@ -79,6 +79,9 @@ pub struct SymbolicConstraintsDag<F> {
     /// A subset of the nodes represents all constraints that will be
     /// included in the quotient polynomial via DEEP-ALI.
     pub constraints: SymbolicExpressionDag<F>,
+    /// Partition of `interactions` into chunks. The chunks are specified via indices into
+    /// `interactions`.
+    pub interaction_chunks: InteractionChunks,
     /// List of all interactions, where expressions in the interactions
     /// are referenced by node idx as `usize`.
     ///
@@ -128,6 +131,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     };
     SymbolicConstraintsDag {
         constraints,
+        interaction_chunks: todo!(),
         interactions,
     }
 }
