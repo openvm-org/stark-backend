@@ -848,8 +848,8 @@ impl<'a> LogupZerocheckGpu<'a> {
                                     air_width: m.width() as u32 / 2,
                                 })
                                 .collect_vec();
-                            if has_constraints {
-                                let zc_evals = evaluate_mle_constraints_gpu(
+                            let d_zc_evals = if has_constraints {
+                                evaluate_mle_constraints_gpu(
                                     self.eq_xis.get_ptr(0),
                                     sels.buffer().as_ptr(),
                                     prep_ptr,
@@ -859,24 +859,40 @@ impl<'a> LogupZerocheckGpu<'a> {
                                     constraints_dag,
                                     1,
                                     1,
-                                );
+                                )
+                            } else {
+                                DeviceBuffer::new()
+                            };
+                            let d_interactions_evals = if has_interactions {
+                                Some(evaluate_mle_interactions_gpu(
+                                    self.eq_sharps.get_ptr(0),
+                                    sels.buffer().as_ptr(),
+                                    prep_ptr,
+                                    &main_ptrs,
+                                    public_vals,
+                                    &self.beta_pows,
+                                    eq_3bs,
+                                    constraints_dag,
+                                    1,
+                                    1,
+                                ))
+                            } else {
+                                None
+                            };
+                            if !d_zc_evals.is_empty() {
+                                let zc_evals = d_zc_evals
+                                    .to_host()
+                                    .expect("failed to copy reduction result to host");
                                 assert_eq!(zc_evals.len(), 1);
                                 *zc_tilde_eval = zc_evals[0];
                             }
-                            if has_interactions {
-                                let [logup_numer_evals, logup_denom_evals] =
-                                    evaluate_mle_interactions_gpu(
-                                        self.eq_sharps.get_ptr(0),
-                                        sels.buffer().as_ptr(),
-                                        prep_ptr,
-                                        &main_ptrs,
-                                        public_vals,
-                                        &self.beta_pows,
-                                        eq_3bs,
-                                        constraints_dag,
-                                        1,
-                                        1,
-                                    );
+                            if let Some([numer_evals, denom_evals]) = d_interactions_evals {
+                                let logup_numer_evals = numer_evals
+                                    .to_host()
+                                    .expect("failed to copy numer result to host");
+                                let logup_denom_evals = denom_evals
+                                    .to_host()
+                                    .expect("failed to copy denom result to host");
                                 assert_eq!(logup_numer_evals.len(), 1);
                                 assert_eq!(logup_denom_evals.len(), 1);
                                 logup_tilde_eval[0] = logup_numer_evals[0] * norm_factor;
@@ -1013,8 +1029,8 @@ impl<'a> LogupZerocheckGpu<'a> {
                             })
                             .collect_vec();
                         debug_assert_eq!(widths_so_far, interpolated.width());
-                        if has_constraints {
-                            results[2] = evaluate_mle_constraints_gpu(
+                        let d_constraints_eval = if has_constraints {
+                            evaluate_mle_constraints_gpu(
                                 eq_xi_ptr,
                                 sels_ptr,
                                 prep_ptr,
@@ -1024,10 +1040,12 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 constraints_dag,
                                 interpolated_height,
                                 s_deg,
-                            );
-                        }
-                        if has_interactions {
-                            let [numer_evals, denom_evals] = evaluate_mle_interactions_gpu(
+                            )
+                        } else {
+                            DeviceBuffer::new()
+                        };
+                        let d_interactions_eval = if has_interactions {
+                            Some(evaluate_mle_interactions_gpu(
                                 eq_sharp_ptr,
                                 sels_ptr,
                                 prep_ptr,
@@ -1038,7 +1056,22 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 constraints_dag,
                                 interpolated_height,
                                 s_deg,
-                            );
+                            ))
+                        } else {
+                            None
+                        };
+                        if !d_constraints_eval.is_empty() {
+                            results[2] = d_constraints_eval
+                                .to_host()
+                                .expect("failed to copy reduction result to host");
+                        }
+                        if let Some([numer_evals, denom_evals]) = d_interactions_eval {
+                            let numer_evals = numer_evals
+                                .to_host()
+                                .expect("failed to copy numer result to host");
+                            let denom_evals = denom_evals
+                                .to_host()
+                                .expect("failed to copy denom result to host");
 
                             // Apply normalization to numer only (same as CPU)
                             let mut numer_normalized = numer_evals;
