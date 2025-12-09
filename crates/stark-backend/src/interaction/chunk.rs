@@ -1,6 +1,6 @@
 use std::{cmp::max, iter::zip, mem};
 
-use p3_field::{Field, FieldAlgebra};
+use p3_field::Field;
 use serde::{Deserialize, Serialize};
 
 use super::SymbolicInteraction;
@@ -142,8 +142,7 @@ pub fn symbolic_logup_fraction<F: Field>(
     interactions: Vec<SymbolicInteraction<F>>,
     beta_pows: &[SymbolicVariable<F>],
 ) -> (SymbolicExpression<F>, SymbolicExpression<F>) {
-    let mut cur_denom = SymbolicExpression::ONE;
-    let mut cur_num = SymbolicExpression::ZERO;
+    let mut frac: Option<(SymbolicExpression<F>, SymbolicExpression<F>)> = None;
 
     for interaction in interactions {
         let logup_num = interaction.count;
@@ -155,9 +154,14 @@ pub fn symbolic_logup_fraction<F: Field>(
                 h_beta + msg_j * beta_j
             });
 
-        cur_num += logup_num * cur_denom.clone();
-        cur_denom *= logup_denom;
+        frac = Some(match frac {
+            None => (logup_num, logup_denom),
+            Some((num, denom)) => (
+                num * logup_denom.clone() + logup_num * denom.clone(),
+                denom * logup_denom,
+            ),
+        });
     }
 
-    (cur_num, cur_denom)
+    frac.unwrap()
 }

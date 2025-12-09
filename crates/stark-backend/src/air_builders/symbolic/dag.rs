@@ -402,6 +402,7 @@ mod tests {
                         },
                         3
                     )),
+                    // expr:
                     SymbolicExpressionNode::Mul {
                         left_idx: 3,
                         right_idx: 7,
@@ -417,61 +418,50 @@ mod tests {
                         right_idx: 8,
                         degree_multiple: 2
                     },
-                    SymbolicExpressionNode::Constant(F::ZERO),
+                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 2)), /* beta^{msg_len+1} */
                     SymbolicExpressionNode::Mul {
-                        left_idx: 3,
-                        right_idx: 3,
-                        degree_multiple: 0
-                    },
-                    SymbolicExpressionNode::Add {
+                        // beta^{msg_len + 1} * (bus_index + 1)
                         left_idx: 11,
-                        right_idx: 12,
-                        degree_multiple: 0
-                    },
-                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 2)),
-                    SymbolicExpressionNode::Mul {
-                        left_idx: 14,
-                        right_idx: 3,
+                        right_idx: 3, // (bus_index + 1) is 1
                         degree_multiple: 0
                     },
                     SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 0)),
                     SymbolicExpressionNode::Mul {
-                        left_idx: 8,
-                        right_idx: 16,
+                        // beta^0 * msg[0]
+                        left_idx: 8, // msg[0]
+                        right_idx: 13,
                         degree_multiple: 1
                     },
                     SymbolicExpressionNode::Add {
-                        left_idx: 15,
-                        right_idx: 17,
+                        // beta^{msg_len + 1} * (bus_index + 1) + beta^0 * msg[0]
+                        left_idx: 12,
+                        right_idx: 14,
                         degree_multiple: 1
                     },
-                    SymbolicExpressionNode::Constant(F::TWO),
+                    SymbolicExpressionNode::Constant(F::TWO), // msg[1]
                     SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 1)),
                     SymbolicExpressionNode::Mul {
-                        left_idx: 19,
-                        right_idx: 20,
+                        // beta^1 * msg[1]
+                        left_idx: 16,
+                        right_idx: 17,
                         degree_multiple: 0
                     },
                     SymbolicExpressionNode::Add {
-                        left_idx: 18,
-                        right_idx: 21,
-                        degree_multiple: 1
-                    },
-                    SymbolicExpressionNode::Mul {
-                        left_idx: 3,
-                        right_idx: 22,
+                        // h_beta denominator
+                        left_idx: 15,
+                        right_idx: 18,
                         degree_multiple: 1
                     }
                 ],
                 constraint_idx: vec![9, 10],
-                logup_frac_nodes: vec![(13, 23)]
+                logup_frac_nodes: vec![(3, 19)]
             }
         );
         assert_eq!(
             dag.interactions,
             vec![Interaction {
                 bus_index: 0,
-                message: vec![8, 11],
+                message: vec![8, 16],
                 count: 3,
                 count_weight: 1,
             }]
