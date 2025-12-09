@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use p3_air::{AirBuilder, BaseAir, PermutationAirBuilder};
+use p3_air::{AirBuilder, BaseAir};
 
 use crate::{
     air_builders::{debug::DebugConstraintBuilder, symbolic::SymbolicRapBuilder},

@@ -273,7 +273,7 @@ impl AirKeygenBuilderV2 {
             common_main: self.air.common_main_width(),
             after_challenge: vec![],
         };
-        get_symbolic_builder(self.air.as_ref(), &width, &[], &[])
+        get_symbolic_builder(self.air.as_ref(), &width, &[])
     }
 }
 

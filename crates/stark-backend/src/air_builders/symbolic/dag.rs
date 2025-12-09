@@ -324,18 +324,6 @@ impl<'a, F: Field> From<&'a SymbolicConstraintsDag<F>> for SymbolicConstraints<F
     }
 }
 
-impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
-    fn from(dag: SymbolicConstraintsDag<F>) -> Self {
-        (&dag).into()
-    }
-}
-
-impl<F: Field> From<SymbolicConstraints<F>> for SymbolicConstraintsDag<F> {
-    fn from(sc: SymbolicConstraints<F>) -> Self {
-        build_symbolic_constraints_dag(&sc.constraints, &sc.interactions)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use p3_baby_bear::BabyBear;
@@ -347,7 +335,7 @@ mod tests {
             symbolic_expression::SymbolicExpression,
             symbolic_variable::{Entry, SymbolicVariable},
         },
-        interaction::Interaction,
+        interaction::{find_interaction_chunks, Interaction},
     };
 
     type F = BabyBear;
@@ -375,7 +363,8 @@ mod tests {
             count: SymbolicExpression::Constant(F::ONE),
             count_weight: 1,
         }];
-        let dag = build_symbolic_constraints_dag(&constraints, &interactions);
+        let interaction_chunks = find_interaction_chunks(&interactions, 0);
+        let dag = build_symbolic_constraints_dag(&constraints, &interactions, interaction_chunks);
         assert_eq!(
             dag.constraints,
             SymbolicExpressionDag::<F> {
@@ -428,9 +417,54 @@ mod tests {
                         right_idx: 8,
                         degree_multiple: 2
                     },
+                    SymbolicExpressionNode::Constant(F::ZERO),
+                    SymbolicExpressionNode::Mul {
+                        left_idx: 3,
+                        right_idx: 3,
+                        degree_multiple: 0
+                    },
+                    SymbolicExpressionNode::Add {
+                        left_idx: 11,
+                        right_idx: 12,
+                        degree_multiple: 0
+                    },
+                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 2)),
+                    SymbolicExpressionNode::Mul {
+                        left_idx: 14,
+                        right_idx: 3,
+                        degree_multiple: 0
+                    },
+                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 0)),
+                    SymbolicExpressionNode::Mul {
+                        left_idx: 8,
+                        right_idx: 16,
+                        degree_multiple: 1
+                    },
+                    SymbolicExpressionNode::Add {
+                        left_idx: 15,
+                        right_idx: 17,
+                        degree_multiple: 1
+                    },
                     SymbolicExpressionNode::Constant(F::TWO),
+                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 1)),
+                    SymbolicExpressionNode::Mul {
+                        left_idx: 19,
+                        right_idx: 20,
+                        degree_multiple: 0
+                    },
+                    SymbolicExpressionNode::Add {
+                        left_idx: 18,
+                        right_idx: 21,
+                        degree_multiple: 1
+                    },
+                    SymbolicExpressionNode::Mul {
+                        left_idx: 3,
+                        right_idx: 22,
+                        degree_multiple: 1
+                    }
                 ],
                 constraint_idx: vec![9, 10],
+                logup_frac_nodes: vec![(13, 23)]
             }
         );
         assert_eq!(

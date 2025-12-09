@@ -174,7 +174,7 @@ mod tests {
             symbolic_expression::SymbolicExpression,
             symbolic_variable::{Entry, SymbolicVariable},
         },
-        interaction::Interaction,
+        interaction::{find_interaction_chunks, Interaction},
     };
 
     type F = BabyBear;
@@ -206,8 +206,9 @@ mod tests {
             count: SymbolicExpression::Constant(F::ONE),
             count_weight: 1,
         }];
+        let interaction_chunks = find_interaction_chunks(&interactions, 0);
 
-        let dag = build_symbolic_constraints_dag(&constraints, &interactions);
+        let dag = build_symbolic_constraints_dag(&constraints, &interactions, interaction_chunks);
         AirStatisticsGenerator::print_dag(&dag.constraints);
 
         let mut generator = AirStatisticsGenerator::new();

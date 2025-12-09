@@ -8,9 +8,11 @@ use tracing::instrument;
 use types::MultiStarkVerifyingKey0;
 
 use crate::{
-    air_builders::symbolic::{get_symbolic_builder, SymbolicRapBuilder},
+    air_builders::symbolic::{
+        build_symbolic_constraints_dag, get_symbolic_builder, SymbolicRapBuilder,
+    },
     config::{Com, RapPartialProvingKey, StarkGenericConfig, Val},
-    interaction::{RapPhaseSeq, RapPhaseSeqKind},
+    interaction::{find_interaction_chunks, RapPhaseSeq, RapPhaseSeqKind},
     keygen::types::{
         LinearConstraint, MultiStarkProvingKey, ProverOnlySinglePreprocessedData, StarkProvingKey,
         StarkVerifyingKey, TraceWidth, VerifierSinglePreprocessedData,
@@ -275,10 +277,19 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
 
         let max_constraint_degree: u8 =
             u8::try_from(symbolic_constraints.max_constraint_degree()).unwrap();
+        let interaction_chunks = find_interaction_chunks(
+            &symbolic_constraints.interactions,
+            max_constraint_degree as usize,
+        );
+        let symbolic_dag = build_symbolic_constraints_dag(
+            &symbolic_constraints.constraints,
+            &symbolic_constraints.interactions,
+            interaction_chunks,
+        );
         let vk: StarkVerifyingKey<Val<SC>, Com<SC>> = StarkVerifyingKey {
             preprocessed_data: prep_verifier_data,
             params,
-            symbolic_constraints: symbolic_constraints.into(),
+            symbolic_constraints: symbolic_dag,
             quotient_degree,
             max_constraint_degree,
             rap_phase_seq_kind: self.rap_phase_seq_kind,

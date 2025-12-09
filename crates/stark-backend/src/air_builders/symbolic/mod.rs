@@ -15,7 +15,7 @@ use self::{
 };
 use super::PartitionedAirBuilder;
 use crate::{
-    interaction::{Interaction, InteractionBuilder, InteractionChunks, SymbolicInteraction},
+    interaction::{Interaction, InteractionBuilder, SymbolicInteraction},
     keygen::types::{StarkVerifyingParams, TraceWidth},
     rap::{BaseAirWithPublicValues, Rap},
 };
@@ -30,21 +30,11 @@ pub use dag::*;
 use crate::interaction::BusIndex;
 
 /// Symbolic constraints for a single AIR with interactions.
-/// The constraints contain the constraints on the logup partial sums.
 #[derive(Clone, Debug)]
 pub struct SymbolicConstraints<F> {
-    /// All constraints of the RAP, including the constraints on the logup partial sums.
+    /// The plain AIR constraints. This does **not** contain interaction  constraints.
     pub constraints: Vec<SymbolicExpression<F>>,
-    /// Partition of `interactions` into chunks. The chunks are specified via indices into
-    /// `interactions`.
-    pub interaction_chunks: InteractionChunks,
-    /// Symbolic representation of chip interactions. This is used by
-    /// the prover for after challenge trace generation, and some partial
-    /// information may be used by the verifier.
-    ///
-    /// **However**, any contributions to the quotient polynomial from
-    /// logup are already included in `constraints` and do not need to
-    /// be separately calculated from `interactions`.
+    /// Symbolic representation of AIR interactions..
     pub interactions: Vec<SymbolicInteraction<F>>,
 }
 
@@ -166,6 +156,7 @@ impl<F: Field> SymbolicRapBuilder<F> {
         }
     }
 
+    /// Returns symbolic constraints where `interaction_chunks` is empty.
     pub fn constraints(self) -> SymbolicConstraints<F> {
         SymbolicConstraints {
             constraints: self.constraints,
