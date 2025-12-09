@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use p3_air::{BaseAir, PermutationAirBuilder};
+use p3_air::{AirBuilder, BaseAir, PermutationAirBuilder};
 
 use crate::{
     air_builders::{debug::DebugConstraintBuilder, symbolic::SymbolicRapBuilder},
@@ -47,19 +47,9 @@ pub trait PartitionedBaseAir<F>: BaseAir<F> {
 /// around dynamic dispatch.
 pub trait Rap<AB>: Sync
 where
-    AB: PermutationAirBuilder,
+    AB: AirBuilder,
 {
     fn eval(&self, builder: &mut AB);
-}
-
-/// Permutation AIR builder that exposes certain values to both prover and verifier
-/// _after_ the permutation challenges are drawn. These can be thought of as
-/// "public values" known after the challenges are drawn.
-///
-/// Exposed values are used internally by the prover and verifier
-/// in cross-table permutation arguments.
-pub trait PermutationAirBuilderWithExposedValues: PermutationAirBuilder {
-    fn permutation_exposed_values(&self) -> &[Self::VarEF];
 }
 
 /// Shared reference to any Interactive Air.

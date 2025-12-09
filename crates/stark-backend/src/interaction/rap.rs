@@ -4,12 +4,12 @@
 use p3_air::Air;
 
 use super::InteractionBuilder;
-use crate::rap::{PermutationAirBuilderWithExposedValues, Rap};
+use crate::rap::Rap;
 
 impl<AB, A> Rap<AB> for A
 where
     A: Air<AB>,
-    AB: InteractionBuilder + PermutationAirBuilderWithExposedValues,
+    AB: InteractionBuilder,
 {
     fn eval(&self, builder: &mut AB) {
         // Constraints for the main trace:

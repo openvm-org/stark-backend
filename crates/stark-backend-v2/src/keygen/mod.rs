@@ -7,6 +7,7 @@ use openvm_stark_backend::{
         symbolic_variable::{Entry, SymbolicVariable},
         SymbolicConstraintsDag, SymbolicExpressionNode, SymbolicRapBuilder,
     },
+    interaction::find_interaction_chunks,
     keygen::types::{LinearConstraint, TraceWidth},
     prover::MatrixDimensions,
     rap::AnyRap,
@@ -234,6 +235,8 @@ impl AirKeygenBuilderV2 {
                 max_degree: max_constraint_degree,
             });
         }
+        let interaction_chunks =
+            find_interaction_chunks(&symbolic_constraints.interactions, max_constraint_degree);
         // todo: find interaction chunks
 
         let dag = SymbolicConstraintsDag::from(symbolic_constraints);

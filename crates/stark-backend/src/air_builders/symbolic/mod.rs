@@ -3,11 +3,9 @@
 use std::iter;
 
 use itertools::Itertools;
-use p3_air::{
-    AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder, PermutationAirBuilder,
-};
+use p3_air::{AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder};
 use p3_field::Field;
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_ceil_usize;
 use tracing::instrument;
 
@@ -17,9 +15,9 @@ use self::{
 };
 use super::PartitionedAirBuilder;
 use crate::{
-    interaction::{Interaction, InteractionBuilder, SymbolicInteraction},
+    interaction::{Interaction, InteractionBuilder, InteractionChunks, SymbolicInteraction},
     keygen::types::{StarkVerifyingParams, TraceWidth},
-    rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
+    rap::{BaseAirWithPublicValues, Rap},
 };
 
 mod dag;
@@ -37,6 +35,9 @@ use crate::interaction::BusIndex;
 pub struct SymbolicConstraints<F> {
     /// All constraints of the RAP, including the constraints on the logup partial sums.
     pub constraints: Vec<SymbolicExpression<F>>,
+    /// Partition of `interactions` into chunks. The chunks are specified via indices into
+    /// `interactions`.
+    pub interaction_chunks: InteractionChunks,
     /// Symbolic representation of chip interactions. This is used by
     /// the prover for after challenge trace generation, and some partial
     /// information may be used by the verifier.
@@ -61,30 +62,12 @@ impl<F: Field> SymbolicConstraints<F> {
             .unwrap_or(0)
     }
 
-    pub fn get_log_quotient_degree(&self) -> usize {
-        // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller
-        // degrees.
-        let constraint_degree = self.max_constraint_degree().max(2);
-
-        // The quotient's actual degree is approximately (max_constraint_degree - 1) * (trace
-        // height), where subtracting 1 comes from division by the zerofier.
-        // But we pad it to a power of two so that we can efficiently decompose the quotient.
-        log2_ceil_usize(constraint_degree - 1)
-    }
-
     /// Returns the maximum field degree and count degree across all interactions
     pub fn max_interaction_degrees(&self) -> (usize, usize) {
         let max_field_degree = self
             .interactions
             .iter()
-            .map(|interaction| {
-                interaction
-                    .message
-                    .iter()
-                    .map(|field| field.degree_multiple())
-                    .max()
-                    .unwrap_or(0)
-            })
+            .map(|interaction| interaction.max_message_degree())
             .max()
             .unwrap_or(0);
 
@@ -97,6 +80,18 @@ impl<F: Field> SymbolicConstraints<F> {
 
         (max_field_degree, max_count_degree)
     }
+
+    #[deprecated]
+    pub fn get_log_quotient_degree(&self) -> usize {
+        // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller
+        // degrees.
+        let constraint_degree = self.max_constraint_degree().max(2);
+
+        // The quotient's actual degree is approximately (max_constraint_degree - 1) * (trace
+        // height), where subtracting 1 comes from division by the zerofier.
+        // But we pad it to a power of two so that we can efficiently decompose the quotient.
+        log2_ceil_usize(constraint_degree - 1)
+    }
 }
 
 #[instrument(name = "evaluate constraints symbolically", skip_all, level = "debug")]
@@ -104,18 +99,13 @@ pub fn get_symbolic_builder<F, R>(
     rap: &R,
     width: &TraceWidth,
     num_challenges_to_sample: &[usize],
-    num_exposed_values_after_challenge: &[usize],
 ) -> SymbolicRapBuilder<F>
 where
     F: Field,
     R: Rap<SymbolicRapBuilder<F>> + BaseAirWithPublicValues<F> + ?Sized,
 {
-    let mut builder = SymbolicRapBuilder::new(
-        width,
-        rap.num_public_values(),
-        num_challenges_to_sample,
-        num_exposed_values_after_challenge,
-    );
+    let mut builder =
+        SymbolicRapBuilder::new(width, rap.num_public_values(), num_challenges_to_sample);
     Rap::eval(rap, &mut builder);
     builder
 }
@@ -125,10 +115,8 @@ where
 pub struct SymbolicRapBuilder<F> {
     preprocessed: RowMajorMatrix<SymbolicVariable<F>>,
     partitioned_main: Vec<RowMajorMatrix<SymbolicVariable<F>>>,
-    after_challenge: Vec<RowMajorMatrix<SymbolicVariable<F>>>,
     public_values: Vec<SymbolicVariable<F>>,
     challenges: Vec<Vec<SymbolicVariable<F>>>,
-    exposed_values_after_challenge: Vec<Vec<SymbolicVariable<F>>>,
     constraints: Vec<SymbolicExpression<F>>,
     interactions: Vec<SymbolicInteraction<F>>,
     trace_width: TraceWidth,
@@ -136,13 +124,10 @@ pub struct SymbolicRapBuilder<F> {
 
 impl<F: Field> SymbolicRapBuilder<F> {
     /// - `num_challenges_to_sample`: for each challenge phase, how many challenges to sample
-    /// - `num_exposed_values_after_challenge`: in each challenge phase, how many values to expose
-    ///   to verifier
     pub(crate) fn new(
         width: &TraceWidth,
         num_public_values: usize,
         num_challenges_to_sample: &[usize],
-        num_exposed_values_after_challenge: &[usize],
     ) -> Self {
         let preprocessed_width = width.preprocessed.unwrap_or(0);
         let prep_values = [0, 1]
@@ -163,7 +148,6 @@ impl<F: Field> SymbolicRapBuilder<F> {
         if width.common_main != 0 {
             partitioned_main.push(gen_main_trace(width.cached_mains.len(), width.common_main));
         }
-        let after_challenge = Self::new_after_challenge(&width.after_challenge);
 
         let public_values = (0..num_public_values)
             .map(move |index| SymbolicVariable::new(Entry::Public, index))
@@ -171,16 +155,11 @@ impl<F: Field> SymbolicRapBuilder<F> {
 
         let challenges = Self::new_challenges(num_challenges_to_sample);
 
-        let exposed_values_after_challenge =
-            Self::new_exposed_values_after_challenge(num_exposed_values_after_challenge);
-
         Self {
             preprocessed,
             partitioned_main,
-            after_challenge,
             public_values,
             challenges,
-            exposed_values_after_challenge,
             constraints: vec![],
             interactions: vec![],
             trace_width: width.clone(),
@@ -198,12 +177,11 @@ impl<F: Field> SymbolicRapBuilder<F> {
     #[allow(deprecated)]
     pub fn params(&self) -> StarkVerifyingParams {
         let width = self.width();
-        let num_exposed_values_after_challenge = self.num_exposed_values_after_challenge();
         let num_challenges_to_sample = self.num_challenges_to_sample();
         StarkVerifyingParams {
             width,
             num_public_values: self.public_values.len(),
-            num_exposed_values_after_challenge,
+            num_exposed_values_after_challenge: vec![],
             num_challenges_to_sample,
         }
     }
@@ -213,41 +191,12 @@ impl<F: Field> SymbolicRapBuilder<F> {
     }
 
     pub fn width(&self) -> TraceWidth {
-        let mut ret = self.trace_width.clone();
-        ret.after_challenge = self.after_challenge.iter().map(|m| m.width()).collect();
-        ret
-    }
-
-    #[deprecated]
-    pub fn num_exposed_values_after_challenge(&self) -> Vec<usize> {
-        self.exposed_values_after_challenge
-            .iter()
-            .map(|c| c.len())
-            .collect()
+        self.trace_width.clone()
     }
 
     #[deprecated]
     pub fn num_challenges_to_sample(&self) -> Vec<usize> {
         self.challenges.iter().map(|c| c.len()).collect()
-    }
-
-    fn new_after_challenge(
-        width_after_phase: &[usize],
-    ) -> Vec<RowMajorMatrix<SymbolicVariable<F>>> {
-        width_after_phase
-            .iter()
-            .map(|&width| {
-                let mat_values = [0, 1]
-                    .into_iter()
-                    .flat_map(|offset| {
-                        (0..width).map(move |index| {
-                            SymbolicVariable::new(Entry::Permutation { offset }, index)
-                        })
-                    })
-                    .collect_vec();
-                RowMajorMatrix::new(mat_values, width)
-            })
-            .collect_vec()
     }
 
     fn new_challenges(num_challenges_to_sample: &[usize]) -> Vec<Vec<SymbolicVariable<F>>> {
@@ -256,19 +205,6 @@ impl<F: Field> SymbolicRapBuilder<F> {
             .map(|&num_challenges| {
                 (0..num_challenges)
                     .map(|index| SymbolicVariable::new(Entry::Challenge, index))
-                    .collect_vec()
-            })
-            .collect_vec()
-    }
-
-    fn new_exposed_values_after_challenge(
-        num_exposed_values_after_challenge: &[usize],
-    ) -> Vec<Vec<SymbolicVariable<F>>> {
-        num_exposed_values_after_challenge
-            .iter()
-            .map(|&num| {
-                (0..num)
-                    .map(|index| SymbolicVariable::new(Entry::Exposed, index))
                     .collect_vec()
             })
             .collect_vec()
@@ -336,34 +272,6 @@ impl<F: Field> AirBuilderWithPublicValues for SymbolicRapBuilder<F> {
 
     fn public_values(&self) -> &[Self::PublicVar] {
         &self.public_values
-    }
-}
-
-impl<F: Field> PermutationAirBuilder for SymbolicRapBuilder<F> {
-    type MP = RowMajorMatrix<Self::VarEF>;
-    type RandomVar = SymbolicVariable<F>;
-
-    fn permutation(&self) -> Self::MP {
-        self.after_challenge
-            .first()
-            .expect("Challenge phase not supported")
-            .clone()
-    }
-
-    fn permutation_randomness(&self) -> &[Self::RandomVar] {
-        self.challenges
-            .first()
-            .map(|c| c.as_slice())
-            .expect("Challenge phase not supported")
-    }
-}
-
-impl<F: Field> PermutationAirBuilderWithExposedValues for SymbolicRapBuilder<F> {
-    fn permutation_exposed_values(&self) -> &[Self::VarEF] {
-        self.exposed_values_after_challenge
-            .first()
-            .map(|c| c.as_slice())
-            .expect("Challenge phase not supported")
     }
 }
 

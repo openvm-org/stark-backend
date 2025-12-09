@@ -8,6 +8,7 @@ use super::SymbolicConstraints;
 use crate::{
     air_builders::symbolic::{
         symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
+        SymbolicRapBuilder,
     },
     interaction::{Interaction, InteractionChunks, SymbolicInteraction},
 };
@@ -53,6 +54,9 @@ pub struct SymbolicExpressionDag<F> {
     pub nodes: Vec<SymbolicExpressionNode<F>>,
     /// Node indices of expressions to assert equal zero.
     pub constraint_idx: Vec<usize>,
+    /// Logup fractions as pairs of symbolic expression node indices for `(numerator,
+    /// denominator)`.
+    pub logup_frac_nodes: Vec<(usize, usize)>,
 }
 
 impl<F> SymbolicExpressionDag<F> {
@@ -76,27 +80,27 @@ impl<F> SymbolicExpressionDag<F> {
 #[repr(C)]
 pub struct SymbolicConstraintsDag<F> {
     /// DAG with all symbolic expressions as nodes.
-    /// A subset of the nodes represents all constraints that will be
-    /// included in the quotient polynomial via DEEP-ALI.
+    /// A subset of the nodes represents all plain AIR constraints. Other nodes are used to express
+    /// interactions as LogUp fractions.
     pub constraints: SymbolicExpressionDag<F>,
     /// Partition of `interactions` into chunks. The chunks are specified via indices into
     /// `interactions`.
+    ///
+    /// This data is implicitly already in the logup fractions within `constraints`, but we store
+    /// it separately for convenience.
     pub interaction_chunks: InteractionChunks,
     /// List of all interactions, where expressions in the interactions
     /// are referenced by node idx as `usize`.
     ///
-    /// This is used by the prover for after challenge trace generation,
-    /// and some partial information may be used by the verifier.
-    ///
-    /// **However**, any contributions to the quotient polynomial from
-    /// logup are already included in `constraints` and do not need to
-    /// be separately calculated from `interactions`.
+    /// This data is implicitly already in the logup fractions within `constraints`, but we store
+    /// it separately for convenience.
     pub interactions: Vec<Interaction<usize>>,
 }
 
 pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     constraints: &[SymbolicExpression<F>],
     interactions: &[SymbolicInteraction<F>],
+    interaction_chunks: InteractionChunks,
 ) -> SymbolicConstraintsDag<F> {
     let mut expr_to_idx = FxHashMap::default();
     let mut nodes = Vec::new();
@@ -104,21 +108,43 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
         .iter()
         .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
         .collect();
+    // It is more efficient for DAG evaluation if the constraints are in the topological order.
     constraint_idx.sort();
+
+    let max_msg_len = interactions
+        .iter()
+        .map(|interaction| interaction.message.len())
+        .max()
+        .unwrap_or(0);
+    let beta_pows = SymbolicRapBuilder::new_challenges(&[max_msg_len + 1])
+        .pop()
+        .unwrap();
+    let logup_chunk_fracs = interaction_chunks.symbolic_logup_fractions(interactions, &beta_pows);
+    // We add the fraction expression directly first to optimize the ordering of the DAG. However
+    // there is no guarantee that the fraction nodes are in any sorted order.
+    let logup_frac_nodes = logup_chunk_fracs
+        .iter()
+        .map(|(numer, denom)| {
+            let [numer_node, denom_node] = [numer, denom]
+                .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes));
+            (numer_node, denom_node)
+        })
+        .collect::<Vec<_>>();
+
     let interactions: Vec<Interaction<usize>> = interactions
         .iter()
         .map(|interaction| {
-            let fields: Vec<usize> = interaction
+            // We are using the exact SymbolicExpression that was used above in the definition of
+            // the fraction chunk, so the definition of Eq on SymbolicExpression guarantees this
+            // will return the node contained within the fraction's expression.
+            let message: Vec<usize> = interaction
                 .message
                 .iter()
-                .map(|field_expr| {
-                    topological_sort_symbolic_expr(field_expr, &mut expr_to_idx, &mut nodes)
-                })
+                .map(|expr| expr_to_idx[expr])
                 .collect();
-            let count =
-                topological_sort_symbolic_expr(&interaction.count, &mut expr_to_idx, &mut nodes);
+            let count = expr_to_idx[&interaction.count];
             Interaction {
-                message: fields,
+                message,
                 count,
                 bus_index: interaction.bus_index,
                 count_weight: interaction.count_weight,
@@ -128,10 +154,11 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     let constraints = SymbolicExpressionDag {
         nodes,
         constraint_idx,
+        logup_frac_nodes,
     };
     SymbolicConstraintsDag {
         constraints,
-        interaction_chunks: todo!(),
+        interaction_chunks,
         interactions,
     }
 }

@@ -250,6 +250,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             .max_constraint_degree()
     }
 
+    #[allow(deprecated)]
     fn generate_pk(
         self,
         rap_partial_pk: RapPartialProvingKey<SC>,
@@ -258,7 +259,6 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
         let air_name = self.air.name();
 
         let symbolic_builder = self.get_symbolic_builder(Some(max_constraint_degree));
-        #[allow(deprecated)]
         let params = symbolic_builder.params();
         let symbolic_constraints = symbolic_builder.constraints();
         let log_quotient_degree = symbolic_constraints.get_log_quotient_degree();
@@ -301,7 +301,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             common_main: self.air.common_main_width(),
             after_challenge: vec![],
         };
-        get_symbolic_builder(self.air.as_ref(), &width, &[], &[])
+        get_symbolic_builder(self.air.as_ref(), &width, &[])
     }
 }
 

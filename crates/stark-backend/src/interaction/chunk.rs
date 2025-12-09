@@ -1,10 +1,12 @@
-use std::{cmp::max, mem};
+use std::{cmp::max, iter::zip, mem};
 
-use itertools::Itertools;
-use p3_field::Field;
+use p3_field::{Field, FieldAlgebra};
 use serde::{Deserialize, Serialize};
 
 use super::SymbolicInteraction;
+use crate::air_builders::symbolic::{
+    symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
+};
 
 /// See [`find_interaction_chunks`].
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -18,8 +20,32 @@ impl InteractionChunks {
     pub fn indices_by_chunk(&self) -> &[Vec<usize>] {
         &self.indices_by_chunk
     }
+
     pub fn num_chunks(&self) -> usize {
         self.indices_by_chunk.len()
+    }
+
+    /// Returns a symbolic expresion pair consisting of `(numerator, denominator)` for the logup
+    /// fraction corresponding to each interaction chunk. The returned vector has length equal to
+    /// `num_chunks()`.
+    ///
+    /// The provided symbolic `interactions` must be in the same order as what was used to compute
+    /// the interaction chunks.
+    pub fn symbolic_logup_fractions<F: Field>(
+        &self,
+        interactions: &[SymbolicInteraction<F>],
+        beta_pows: &[SymbolicVariable<F>],
+    ) -> Vec<(SymbolicExpression<F>, SymbolicExpression<F>)> {
+        self.indices_by_chunk
+            .iter()
+            .map(|indices| {
+                let interactions_in_chunk = indices
+                    .iter()
+                    .map(|&i| interactions[i].clone())
+                    .collect::<Vec<_>>();
+                symbolic_logup_fraction(interactions_in_chunk, beta_pows)
+            })
+            .collect()
     }
 }
 
@@ -104,4 +130,34 @@ pub fn find_interaction_chunks<F: Field>(
     indices_by_chunk.push(cur_chunk);
 
     InteractionChunks { indices_by_chunk }
+}
+
+/// Computes the sum of the logup fractions corresponding to symbolic `interactions` provided. The
+/// sum is expressed as a single `(numerator, denominator)` symbolic expression pair representing
+/// the fraction.
+///
+/// The `beta_pows` should be of length at least `max_message_length + 1` and consist of
+/// `SymbolicVariable`s with `Entry::Challenge`.
+pub fn symbolic_logup_fraction<F: Field>(
+    interactions: Vec<SymbolicInteraction<F>>,
+    beta_pows: &[SymbolicVariable<F>],
+) -> (SymbolicExpression<F>, SymbolicExpression<F>) {
+    let mut cur_denom = SymbolicExpression::ONE;
+    let mut cur_num = SymbolicExpression::ZERO;
+
+    for interaction in interactions {
+        let logup_num = interaction.count;
+        let msg_len = interaction.message.len();
+        assert!(msg_len <= beta_pows.len());
+        let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
+        let logup_denom = zip(interaction.message, beta_pows)
+            .fold(beta_pows[msg_len] * b, |h_beta, (msg_j, &beta_j)| {
+                h_beta + msg_j * beta_j
+            });
+
+        cur_num += logup_num * cur_denom.clone();
+        cur_denom *= logup_denom;
+    }
+
+    (cur_num, cur_denom)
 }

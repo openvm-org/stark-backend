@@ -111,7 +111,7 @@ impl FriLogUpPhaseGpu {
     ) -> (Vec<Option<DeviceMatrix<F>>>, Vec<Option<EF>>) {
         let interaction_partitions = params_per_air
             .iter()
-            .map(|&params| params.clone().interaction_partitions())
+            .map(|&params| params.interaction_partitions())
             .collect_vec();
 
         constraints_per_air

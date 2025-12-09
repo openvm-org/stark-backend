@@ -9,7 +9,7 @@ use crate::{
     config::{StarkGenericConfig, Val},
     interaction::{
         debug::{generate_logical_interactions, LogicalInteractions},
-        RapPhaseSeqKind, SymbolicInteraction,
+        SymbolicInteraction,
     },
     rap::{PartitionedBaseAir, Rap},
 };
@@ -68,14 +68,10 @@ pub fn check_constraints<R, SC>(
                 RowMajorMatrixView::new_row(preprocessed_next.as_slice()),
             ),
             partitioned_main,
-            after_challenge: vec![], // unreachable
-            challenges: &[],         // unreachable
             public_values,
-            exposed_values_after_challenge: &[], // unreachable
             is_first_row: Val::<SC>::ZERO,
             is_last_row: Val::<SC>::ZERO,
             is_transition: Val::<SC>::ONE,
-            rap_phase_seq_kind: RapPhaseSeqKind::FriLogUp, // unused
             has_common_main: rap.common_main_width() > 0,
         };
         if i == 0 {

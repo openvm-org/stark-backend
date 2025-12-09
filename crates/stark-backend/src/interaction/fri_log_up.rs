@@ -1,9 +1,9 @@
-use std::{array, borrow::Borrow, iter::zip, marker::PhantomData};
+#![deprecated]
+use std::{array, iter::zip, marker::PhantomData};
 
 use itertools::Itertools;
-use p3_air::ExtensionBuilder;
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_field::{ExtensionField, Field, FieldAlgebra};
+use p3_field::{ExtensionField, Field};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,10 @@ use super::{LogUpSecurityParameters, PairTraceView, SymbolicInteraction};
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
     interaction::{
-        find_interaction_chunks, trace::Evaluator, utils::generate_betas, InteractionBuilder,
-        InteractionChunks, RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
+        find_interaction_chunks, trace::Evaluator, utils::generate_betas, InteractionChunks,
+        RapPhaseProverData, RapPhaseSeq, RapPhaseSeqKind, RapPhaseVerifierData,
     },
     parizip,
-    rap::PermutationAirBuilderWithExposedValues,
     utils::parallelize_chunks,
 };
 
@@ -433,107 +432,4 @@ where
 
         Some(RowMajorMatrix::new(perm_values, perm_width))
     }
-}
-
-// Initial version taken from valida/machine/src/chip.rs under MIT license.
-//
-/// The permutation row consists of 1 column for each bundle of interactions
-/// and one column for the partial sum of log derivative. These columns are trace columns
-/// "after challenge" phase 0, and they are valued in the extension field.
-/// For more details, see the comment in the trace.rs file
-pub fn eval_fri_log_up_phase<AB>(
-    builder: &mut AB,
-    symbolic_interactions: &[SymbolicInteraction<AB::F>],
-    max_constraint_degree: usize,
-) where
-    AB: InteractionBuilder + PermutationAirBuilderWithExposedValues,
-{
-    let exposed_values = builder.permutation_exposed_values();
-    // There are interactions, add constraints for the virtual columns
-    assert_eq!(
-        exposed_values.len(),
-        1,
-        "Should have one exposed value for cumulative_sum"
-    );
-    let cumulative_sum = exposed_values[0];
-
-    let rand_elems = builder.permutation_randomness();
-
-    let perm = builder.permutation();
-    let (perm_local, perm_next) = (perm.row_slice(0), perm.row_slice(1));
-    let perm_local: &[AB::VarEF] = (*perm_local).borrow();
-    let perm_next: &[AB::VarEF] = (*perm_next).borrow();
-
-    let all_interactions = builder.all_interactions().to_vec();
-    let interaction_chunks = find_interaction_chunks(symbolic_interactions, max_constraint_degree);
-    let num_chunks = interaction_chunks.num_chunks();
-    debug_assert_eq!(num_chunks + 1, perm_local.len());
-
-    let phi_local = *perm_local.last().unwrap();
-    let phi_next = *perm_next.last().unwrap();
-
-    let alpha = rand_elems[0];
-    let betas = generate_betas(rand_elems[1].into(), &all_interactions);
-
-    let phi_lhs = phi_next.into() - phi_local.into();
-    let mut phi_rhs = AB::ExprEF::ZERO;
-    let mut phi_0 = AB::ExprEF::ZERO;
-
-    for (chunk_idx, part) in interaction_chunks.indices_by_chunk().iter().enumerate() {
-        let denoms_per_chunk = part
-            .iter()
-            .map(|&interaction_idx| {
-                let interaction = &all_interactions[interaction_idx];
-                assert!(
-                    !interaction.message.is_empty(),
-                    "fields should not be empty"
-                );
-                let mut field_hash = AB::ExprEF::ZERO;
-                let b = AB::Expr::from_canonical_u32(interaction.bus_index as u32 + 1);
-                for (field, beta) in interaction.message.iter().chain([&b]).zip(&betas) {
-                    field_hash += beta.clone() * field.clone();
-                }
-                field_hash + alpha.into()
-            })
-            .collect_vec();
-
-        let mut row_lhs: AB::ExprEF = perm_local[chunk_idx].into();
-        for denom in denoms_per_chunk.iter() {
-            row_lhs *= denom.clone();
-        }
-
-        let mut row_rhs = AB::ExprEF::ZERO;
-        for (i, &interaction_idx) in part.iter().enumerate() {
-            let interaction = &all_interactions[interaction_idx];
-            let mut term: AB::ExprEF = interaction.count.clone().into();
-            for (j, denom) in denoms_per_chunk.iter().enumerate() {
-                if i != j {
-                    term *= denom.clone();
-                }
-            }
-            row_rhs += term;
-        }
-
-        // Some analysis on the degrees of row_lhs and row_rhs:
-        //
-        // Let max_field_degree_i be the maximum degree of all fields in interaction i
-        // for the AIR. Let count_degree_i to the degree of `count` in interaction i.
-        //
-        // By construction, the degree of row_lhs is bounded by 1 + sum_i(max_field_degree_i),
-        // and the degree of row_rhs is bounded by max_i(count_degree_i +
-        // sum_{j!=i}(max_field_degree_j))
-        builder.assert_eq_ext(row_lhs, row_rhs);
-
-        phi_0 += perm_local[chunk_idx].into();
-        phi_rhs += perm_next[chunk_idx].into();
-    }
-
-    // Running sum constraints
-    builder.when_transition().assert_eq_ext(phi_lhs, phi_rhs);
-    builder
-        .when_first_row()
-        .assert_eq_ext(*perm_local.last().unwrap(), phi_0);
-    builder
-        .when_last_row()
-        .assert_eq_ext(*perm_local.last().unwrap(), cumulative_sum);
 }

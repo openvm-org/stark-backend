@@ -1,18 +1,16 @@
 use std::sync::{Arc, Mutex};
 
 use itertools::{izip, Itertools};
-use p3_air::{
-    AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder, PermutationAirBuilder,
-};
+use p3_air::{AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder};
 use p3_field::FieldAlgebra;
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 
 use super::{symbolic::SymbolicConstraints, PartitionedAirBuilder, ViewPair};
 use crate::{
     config::{StarkGenericConfig, Val},
-    interaction::{Interaction, InteractionBuilder, RapPhaseSeqKind},
+    interaction::{Interaction, InteractionBuilder},
     keygen::types::StarkProvingKey,
-    rap::{AnyRap, PermutationAirBuilderWithExposedValues},
+    rap::AnyRap,
 };
 
 mod check_constraints;
@@ -81,14 +79,10 @@ pub struct DebugConstraintBuilder<'a, SC: StarkGenericConfig> {
     pub row_index: usize,
     pub preprocessed: ViewPair<'a, Val<SC>>,
     pub partitioned_main: Vec<ViewPair<'a, Val<SC>>>,
-    pub after_challenge: Vec<ViewPair<'a, SC::Challenge>>,
-    pub challenges: &'a [Vec<SC::Challenge>],
     pub is_first_row: Val<SC>,
     pub is_last_row: Val<SC>,
     pub is_transition: Val<SC>,
     pub public_values: &'a [Val<SC>],
-    pub exposed_values_after_challenge: &'a [Vec<SC::Challenge>],
-    pub rap_phase_seq_kind: RapPhaseSeqKind,
     pub has_common_main: bool,
 }
 
@@ -192,28 +186,6 @@ where
     }
 }
 
-impl<'a, SC> PermutationAirBuilder for DebugConstraintBuilder<'a, SC>
-where
-    SC: StarkGenericConfig,
-{
-    type MP = ViewPair<'a, SC::Challenge>;
-
-    type RandomVar = SC::Challenge;
-
-    fn permutation(&self) -> Self::MP {
-        *self
-            .after_challenge
-            .first()
-            .expect("Challenge phase not supported")
-    }
-
-    fn permutation_randomness(&self) -> &[Self::EF] {
-        self.challenges
-            .first()
-            .expect("Challenge phase not supported")
-    }
-}
-
 impl<SC> AirBuilderWithPublicValues for DebugConstraintBuilder<'_, SC>
 where
     SC: StarkGenericConfig,
@@ -222,17 +194,6 @@ where
 
     fn public_values(&self) -> &[Self::F] {
         self.public_values
-    }
-}
-
-impl<SC> PermutationAirBuilderWithExposedValues for DebugConstraintBuilder<'_, SC>
-where
-    SC: StarkGenericConfig,
-{
-    fn permutation_exposed_values(&self) -> &[Self::EF] {
-        self.exposed_values_after_challenge
-            .first()
-            .expect("Challenge phase not supported")
     }
 }
 

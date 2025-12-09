@@ -9,7 +9,6 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicExpression, SymbolicConstraints},
-    interaction::fri_log_up::{STARK_LU_NUM_CHALLENGES, STARK_LU_NUM_EXPOSED_VALUES},
     prover::types::PairView,
 };
 
@@ -261,12 +260,13 @@ pub enum RapPhaseSeqKind {
     FriLogUp,
 }
 
+#[allow(deprecated)]
 impl RapPhaseSeqKind {
     pub fn shape(&self) -> Vec<RapPhaseShape> {
         match self {
             RapPhaseSeqKind::FriLogUp => vec![RapPhaseShape {
-                num_challenges: STARK_LU_NUM_CHALLENGES,
-                num_exposed_values: STARK_LU_NUM_EXPOSED_VALUES,
+                num_challenges: crate::interaction::fri_log_up::STARK_LU_NUM_CHALLENGES,
+                num_exposed_values: crate::interaction::fri_log_up::STARK_LU_NUM_EXPOSED_VALUES,
                 extra_opening_rots: vec![],
             }],
         }
