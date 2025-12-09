@@ -237,9 +237,12 @@ impl AirKeygenBuilderV2 {
         }
         let interaction_chunks =
             find_interaction_chunks(&symbolic_constraints.interactions, max_constraint_degree);
-        // todo: find interaction chunks
 
-        let dag = SymbolicConstraintsDag::from(symbolic_constraints);
+        let dag = SymbolicConstraintsDag::from_expressions(
+            &symbolic_constraints.constraints,
+            &symbolic_constraints.interactions,
+            interaction_chunks,
+        );
         let unused_variables = find_unused_vars(&dag, &vparams.width);
         let Self {
             prep_keygen_data:

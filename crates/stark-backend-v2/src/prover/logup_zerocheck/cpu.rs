@@ -37,7 +37,8 @@ use crate::{
 
 pub struct LogupZerocheckCpu<'a> {
     pub alpha_logup: EF,
-    pub beta_pows: Vec<EF>,
+    // [alpha, beta^1, beta^2, ...]
+    pub challenges: Vec<EF>,
 
     pub l_skip: usize,
     pub n_logup: usize,
@@ -80,7 +81,7 @@ where
         _device: &'a CpuDeviceV2,
         transcript: &mut TS,
         pk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-        ctx: &ProvingContextV2<CpuBackendV2>,
+        ctx: &'a ProvingContextV2<CpuBackendV2>,
         _common_main_data: &'a <CpuBackendV2 as ProverBackendV2>::PcsData,
         n_logup: usize,
         interactions_layout: StackedLayout,
@@ -108,10 +109,11 @@ where
             })
             .max()
             .unwrap_or(0);
-        let beta_pows = beta_logup
+        let mut challenges = beta_logup
             .powers()
             .take(max_interaction_length + 1)
             .collect_vec();
+        challenges[0] = alpha_logup;
 
         let n_per_trace: Vec<isize> = ctx
             .common_main_traces()
@@ -125,7 +127,7 @@ where
             .map(|(air_idx, air_ctx)| {
                 let pk = &pk.per_air[*air_idx];
                 let constraints = &pk.vk.symbolic_constraints.constraints;
-                let public_values = air_ctx.public_values.clone();
+                let public_values = &air_ctx.public_values;
                 let preprocessed_trace =
                     pk.preprocessed_data.as_ref().map(|cd| cd.data.mat_view(0));
                 let partitioned_main_trace = air_ctx
@@ -188,7 +190,7 @@ where
             // Per trace, a row major matrix of interaction evaluations
             // NOTE: these are the evaluations _without_ lifting
             // PERF[jpw]: we should write directly to the stacked `evals` in memory below
-            let unstacked_interaction_evals = eval_helpers
+            let unstacked_frac_evals = eval_helpers
                 .par_iter()
                 .enumerate()
                 .map(|(trace_idx, helper)| {
@@ -215,14 +217,14 @@ where
                                         .collect_vec(),
                                 );
                             }
-                            helper.eval_interactions(&row_parts, &beta_pows)
+                            helper.eval_interactions(&row_parts, &challenges)
                         })
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
-            let mut evals = vec![Frac::default(); 1 << (l_skip + n_logup)];
-            for (trace_idx, interaction_idx, s) in interactions_layout.sorted_cols.iter().copied() {
-                let pq_evals = &unstacked_interaction_evals[trace_idx];
+            let mut evals = vec![Frac::new(EF::ZERO, EF::ONE); 1 << (l_skip + n_logup)];
+            for (trace_idx, chunk_idx, s) in interactions_layout.sorted_cols.iter().copied() {
+                let pq_evals = &unstacked_frac_evals[trace_idx];
                 let height = pq_evals.len();
                 debug_assert_eq!(s.col_idx, 0);
                 // the interactions layout has internal striding threshold=0
@@ -239,14 +241,12 @@ where
                             .par_iter_mut()
                             .zip(pq_evals)
                             .for_each(|(pq_eval, evals_at_z)| {
-                                let (mut numer, denom) = evals_at_z[interaction_idx];
+                                let (mut numer, denom) = evals_at_z[chunk_idx];
                                 numer *= norm_factor;
-                                *pq_eval = Frac::new(numer.into(), denom);
+                                *pq_eval = Frac::new(numer, denom);
                             });
                     });
             }
-            // Prevent division by zero:
-            evals.par_iter_mut().for_each(|frac| frac.q += alpha_logup);
             evals
         };
 
@@ -266,7 +266,7 @@ where
         let logup_tilde_evals = vec![[EF::ZERO; 2]; num_airs_present];
         let prover = Self {
             alpha_logup,
-            beta_pows,
+            challenges,
             l_skip,
             n_logup,
             n_max,
@@ -321,7 +321,6 @@ where
                 let mut b_vec = vec![F::ZERO; n_logup - n_lift];
                 (0..helper.interactions.len())
                     .map(|i| {
-                        // PERF[jpw]: interactions_layout.get is linear
                         let stacked_idx =
                             self.interactions_layout.get(trace_idx, i).unwrap().row_idx;
                         debug_assert!(stacked_idx.trailing_zeros() as usize >= n_lift + l_skip);
@@ -448,7 +447,7 @@ where
                             eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into())
                                 * eq_xi[x];
                         let [numer, denom] =
-                            helper.acc_interactions(row_parts, &self.beta_pows, eq_3bs);
+                            helper.acc_interactions(row_parts, &self.challenges, eq_3bs);
                         [eq_sharp * numer, eq_sharp * denom]
                     });
                 for p in numer.coeffs_mut() {
@@ -576,7 +575,7 @@ where
                         .collect_vec();
                     let eq = eq_sharp.column(0)[0];
                     *tilde_eval = helper
-                        .acc_interactions(&parts, &self.beta_pows, eq_3bs)
+                        .acc_interactions(&parts, &self.challenges, eq_3bs)
                         .map(|x| eq * x);
                     tilde_eval[0] *= norm_factor;
                 } else {
@@ -602,7 +601,7 @@ where
                     |_x, _y, row_parts| {
                         let eq_sharp = row_parts[0][0];
                         helper
-                            .acc_interactions(&row_parts[1..], &self.beta_pows, eq_3bs)
+                            .acc_interactions(&row_parts[1..], &self.challenges, eq_3bs)
                             .map(|eval| eq_sharp * eval)
                     },
                 );
@@ -665,7 +664,7 @@ where
                     .chain(mats)
                     .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
                     .collect_vec();
-                let [num, denom] = helper.acc_interactions(&parts, &self.beta_pows, eq_3bs);
+                let [num, denom] = helper.acc_interactions(&parts, &self.challenges, eq_3bs);
 
                 debug!(%trace_idx, %num, %denom, "interactions_eval");
             }

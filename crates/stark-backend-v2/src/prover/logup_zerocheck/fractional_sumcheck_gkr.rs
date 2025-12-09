@@ -26,10 +26,9 @@ pub struct FracSumcheckProof<EF> {
     pub sumcheck_polys: Vec<Vec<[EF; 3]>>,
 }
 
-#[derive(Clone, Copy, Debug, Default, derive_new::new)]
+#[derive(Clone, Copy, Debug, derive_new::new)]
 #[repr(C)]
 pub struct Frac<EF> {
-    // PERF[jpw]: in the initial round, we can keep `p` in base field
     pub p: EF,
     pub q: EF,
 }
@@ -78,7 +77,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
     let mut sumcheck_polys = Vec::with_capacity(total_rounds);
 
     // segment tree: layer i=0,...,total_rounds starts at 2^i (index 0 unused)
-    let mut tree_evals: Vec<Frac<EF>> = vec![Frac::default(); 2 << total_rounds];
+    let mut tree_evals: Vec<Frac<EF>> = vec![Frac::new(EF::ZERO, EF::ZERO); 2 << total_rounds];
     tree_evals[(1 << total_rounds)..].copy_from_slice(evals);
 
     for node_idx in (1..(1 << total_rounds)).rev() {

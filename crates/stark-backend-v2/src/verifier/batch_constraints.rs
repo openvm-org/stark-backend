@@ -266,6 +266,14 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             transcript.observe_ext(claim_rot);
         }
     }
+    let max_msg_len = mvk
+        .per_air
+        .iter()
+        .flat_map(|vk| vk.symbolic_constraints.interactions.iter())
+        .map(|i| i.message.len())
+        .max()
+        .unwrap_or(0);
+    let beta_pows = beta_logup.powers().take(max_msg_len + 1).collect_vec();
 
     for (trace_idx, air_openings) in column_openings.iter().enumerate() {
         let air_idx = trace_id_to_air_id[trace_idx];
@@ -306,6 +314,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             preprocessed,
             &partitioned_main,
             &public_values[air_idx],
+            &beta_pows,
             rs_n,
             l,
         );
@@ -320,23 +329,10 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         debug!(%trace_idx, %eq_xi_r);
         constraints_evals.push(eq_xi_r * expr);
 
-        let symbolic_constraints = SymbolicConstraints::from(&vk.symbolic_constraints);
-        let interactions = &symbolic_constraints.interactions;
-        let cur_interactions_evals = interactions
+        let cur_interactions_evals = constraints
+            .logup_frac_nodes
             .iter()
-            .map(|interaction| {
-                let num = evaluator.eval_expr(&interaction.count);
-                let denom = interaction
-                    .message
-                    .iter()
-                    .map(|expr| evaluator.eval_expr(expr))
-                    .chain(std::iter::once(EF::from_canonical_u16(
-                        interaction.bus_index + 1,
-                    )))
-                    .zip(beta_logup.powers())
-                    .fold(EF::ZERO, |acc, (x, y)| acc + x * y);
-                (num, denom)
-            })
+            .map(|&(numer_idx, denom_idx)| (nodes[numer_idx], nodes[denom_idx]))
             .collect_vec();
         let eq_3bs = &eq_3b_per_trace[trace_idx];
         let mut num = EF::ZERO;

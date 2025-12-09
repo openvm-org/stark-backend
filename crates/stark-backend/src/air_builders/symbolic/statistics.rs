@@ -169,10 +169,10 @@ mod tests {
 
     use crate::{
         air_builders::symbolic::{
-            build_symbolic_constraints_dag,
             statistics::AirStatisticsGenerator,
             symbolic_expression::SymbolicExpression,
             symbolic_variable::{Entry, SymbolicVariable},
+            SymbolicConstraintsDag,
         },
         interaction::{find_interaction_chunks, Interaction},
     };
@@ -208,7 +208,11 @@ mod tests {
         }];
         let interaction_chunks = find_interaction_chunks(&interactions, 0);
 
-        let dag = build_symbolic_constraints_dag(&constraints, &interactions, interaction_chunks);
+        let dag = SymbolicConstraintsDag::from_expressions(
+            &constraints,
+            &interactions,
+            interaction_chunks,
+        );
         AirStatisticsGenerator::print_dag(&dag.constraints);
 
         let mut generator = AirStatisticsGenerator::new();

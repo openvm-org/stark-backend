@@ -49,7 +49,7 @@ pub trait LogupZerocheckProver<'a, PB: ProverBackendV2, PD, TS>: Sized {
         device: &'a PD,
         transcript: &mut TS,
         pk: &'a DeviceMultiStarkProvingKeyV2<PB>,
-        ctx: &ProvingContextV2<PB>,
+        ctx: &'a ProvingContextV2<PB>,
         common_main_pcs_data: &'a PB::PcsData,
         n_logup: usize,
         interactions_layout: StackedLayout,
@@ -92,7 +92,7 @@ pub fn prove_zerocheck_and_logup<'a, PB, PD, TS, LZP>(
     device: &'a PD,
     transcript: &mut TS,
     mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
-    ctx: &ProvingContextV2<PB>,
+    ctx: &'a ProvingContextV2<PB>,
     common_main_pcs_data: &'a PB::PcsData,
 ) -> (GkrProof, BatchConstraintProof, Vec<PB::Challenge>)
 where
@@ -108,27 +108,28 @@ where
     let n_max = log2_strict_usize(ctx.per_trace[0].1.common_main.height()).saturating_sub(l_skip);
     // Gather interactions metadata, including interactions stacked layout which depends on trace
     // heights
-    let mut total_interactions = 0u64;
+    let mut total_logup_fracs = 0u64;
     let interactions_meta: Vec<_> = ctx
         .per_trace
         .iter()
         .map(|(air_idx, air_ctx)| {
             let pk = &mpk.per_air[*air_idx];
 
-            let num_interactions = pk.vk.symbolic_constraints.interactions.len();
+            let num_interaction_chunks = pk.vk.symbolic_constraints.interaction_chunks.num_chunks();
             let height = air_ctx.common_main.height();
             let log_height = log2_strict_usize(height);
             let log_lifted_height = log_height.max(l_skip);
-            total_interactions += (num_interactions as u64) << log_lifted_height;
-            (num_interactions, log_lifted_height)
+            total_logup_fracs += (num_interaction_chunks as u64) << log_lifted_height;
+            (num_interaction_chunks, log_lifted_height)
         })
         .collect();
     // Implicitly, the width of this stacking should be 1
-    let n_logup = calculate_n_logup(l_skip, total_interactions);
+    let n_logup = calculate_n_logup(l_skip, total_logup_fracs);
     debug!(%n_logup);
     // There's no stride threshold for `interactions_layout` because there's no univariate skip for
     // GKR
     let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
+    assert!(interactions_layout.width() <= 1);
 
     // Grind to increase soundness of random sampling for LogUp
     let logup_pow_witness = transcript.grind(mpk.params.logup.pow_bits);

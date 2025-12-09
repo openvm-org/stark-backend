@@ -136,23 +136,31 @@ pub fn find_interaction_chunks<F: Field>(
 /// sum is expressed as a single `(numerator, denominator)` symbolic expression pair representing
 /// the fraction.
 ///
-/// The `beta_pows` should be of length at least `max_message_length + 1` and consist of
-/// `SymbolicVariable`s with `Entry::Challenge`.
+/// # Assumptions
+/// - The `challenges` should be of length at least `max_message_length + 1` and consist of
+///   `SymbolicVariable`s with `Entry::Challenge`.
+/// - The `challenges` will be treated as `[alpha, beta^1, beta^2, ...]`. Note that `challenges[0]
+///   != beta^0`.
 pub fn symbolic_logup_fraction<F: Field>(
     interactions: Vec<SymbolicInteraction<F>>,
-    beta_pows: &[SymbolicVariable<F>],
+    challenges: &[SymbolicVariable<F>],
 ) -> (SymbolicExpression<F>, SymbolicExpression<F>) {
     let mut frac: Option<(SymbolicExpression<F>, SymbolicExpression<F>)> = None;
 
     for interaction in interactions {
         let logup_num = interaction.count;
         let msg_len = interaction.message.len();
-        assert!(msg_len <= beta_pows.len());
+        assert!(msg_len <= challenges.len());
         let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
-        let logup_denom = zip(interaction.message, beta_pows)
-            .fold(beta_pows[msg_len] * b, |h_beta, (msg_j, &beta_j)| {
-                h_beta + msg_j * beta_j
-            });
+        let mut message_iter = interaction.message.into_iter();
+        let alpha = challenges[0];
+        let h_beta_0 = alpha
+            + challenges[msg_len] * b
+            + message_iter
+                .next()
+                .expect("message has at least one element");
+        let logup_denom = zip(message_iter, challenges.iter().skip(1))
+            .fold(h_beta_0, |h_beta, (msg_j, &beta_j)| h_beta + msg_j * beta_j);
 
         frac = Some(match frac {
             None => (logup_num, logup_denom),

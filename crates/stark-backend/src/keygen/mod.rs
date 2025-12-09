@@ -8,9 +8,7 @@ use tracing::instrument;
 use types::MultiStarkVerifyingKey0;
 
 use crate::{
-    air_builders::symbolic::{
-        build_symbolic_constraints_dag, get_symbolic_builder, SymbolicRapBuilder,
-    },
+    air_builders::symbolic::{get_symbolic_builder, SymbolicConstraintsDag, SymbolicRapBuilder},
     config::{Com, RapPartialProvingKey, StarkGenericConfig, Val},
     interaction::{find_interaction_chunks, RapPhaseSeq, RapPhaseSeqKind},
     keygen::types::{
@@ -281,7 +279,7 @@ impl<SC: StarkGenericConfig> AirKeygenBuilder<SC> {
             &symbolic_constraints.interactions,
             max_constraint_degree as usize,
         );
-        let symbolic_dag = build_symbolic_constraints_dag(
+        let symbolic_dag = SymbolicConstraintsDag::from_expressions(
             &symbolic_constraints.constraints,
             &symbolic_constraints.interactions,
             interaction_chunks,

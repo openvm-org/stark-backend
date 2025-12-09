@@ -97,69 +97,73 @@ pub struct SymbolicConstraintsDag<F> {
     pub interactions: Vec<Interaction<usize>>,
 }
 
-pub(crate) fn build_symbolic_constraints_dag<F: Field>(
-    constraints: &[SymbolicExpression<F>],
-    interactions: &[SymbolicInteraction<F>],
-    interaction_chunks: InteractionChunks,
-) -> SymbolicConstraintsDag<F> {
-    let mut expr_to_idx = FxHashMap::default();
-    let mut nodes = Vec::new();
-    let mut constraint_idx: Vec<usize> = constraints
-        .iter()
-        .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
-        .collect();
-    // It is more efficient for DAG evaluation if the constraints are in the topological order.
-    constraint_idx.sort();
+impl<F: Field> SymbolicConstraintsDag<F> {
+    pub fn from_expressions(
+        constraints: &[SymbolicExpression<F>],
+        interactions: &[SymbolicInteraction<F>],
+        interaction_chunks: InteractionChunks,
+    ) -> Self {
+        let mut expr_to_idx = FxHashMap::default();
+        let mut nodes = Vec::new();
+        let mut constraint_idx: Vec<usize> = constraints
+            .iter()
+            .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
+            .collect();
+        // It is more efficient for DAG evaluation if the constraints are in the topological order.
+        constraint_idx.sort();
 
-    let max_msg_len = interactions
-        .iter()
-        .map(|interaction| interaction.message.len())
-        .max()
-        .unwrap_or(0);
-    let beta_pows = SymbolicRapBuilder::new_challenges(&[max_msg_len + 1])
-        .pop()
-        .unwrap();
-    let logup_chunk_fracs = interaction_chunks.symbolic_logup_fractions(interactions, &beta_pows);
-    // We add the fraction expression directly first to optimize the ordering of the DAG. However
-    // there is no guarantee that the fraction nodes are in any sorted order.
-    let logup_frac_nodes = logup_chunk_fracs
-        .iter()
-        .map(|(numer, denom)| {
-            let [numer_node, denom_node] = [numer, denom]
-                .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes));
-            (numer_node, denom_node)
-        })
-        .collect::<Vec<_>>();
+        let max_msg_len = interactions
+            .iter()
+            .map(|interaction| interaction.message.len())
+            .max()
+            .unwrap_or(0);
+        let beta_pows = SymbolicRapBuilder::new_challenges(&[max_msg_len + 1])
+            .pop()
+            .unwrap();
+        let logup_chunk_fracs =
+            interaction_chunks.symbolic_logup_fractions(interactions, &beta_pows);
+        // We add the fraction expression directly first to optimize the ordering of the DAG.
+        // However there is no guarantee that the fraction nodes are in any sorted order.
+        let logup_frac_nodes = logup_chunk_fracs
+            .iter()
+            .map(|(numer, denom)| {
+                let [numer_node, denom_node] = [numer, denom]
+                    .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes));
+                (numer_node, denom_node)
+            })
+            .collect::<Vec<_>>();
 
-    let interactions: Vec<Interaction<usize>> = interactions
-        .iter()
-        .map(|interaction| {
-            // We are using the exact SymbolicExpression that was used above in the definition of
-            // the fraction chunk, so the definition of Eq on SymbolicExpression guarantees this
-            // will return the node contained within the fraction's expression.
-            let message: Vec<usize> = interaction
-                .message
-                .iter()
-                .map(|expr| expr_to_idx[expr])
-                .collect();
-            let count = expr_to_idx[&interaction.count];
-            Interaction {
-                message,
-                count,
-                bus_index: interaction.bus_index,
-                count_weight: interaction.count_weight,
-            }
-        })
-        .collect();
-    let constraints = SymbolicExpressionDag {
-        nodes,
-        constraint_idx,
-        logup_frac_nodes,
-    };
-    SymbolicConstraintsDag {
-        constraints,
-        interaction_chunks,
-        interactions,
+        let interactions: Vec<Interaction<usize>> = interactions
+            .iter()
+            .map(|interaction| {
+                // We are using the exact SymbolicExpression that was used above in the definition
+                // of the fraction chunk, so the definition of Eq on
+                // SymbolicExpression guarantees this will return the node contained
+                // within the fraction's expression.
+                let message: Vec<usize> = interaction
+                    .message
+                    .iter()
+                    .map(|expr| expr_to_idx[expr])
+                    .collect();
+                let count = expr_to_idx[&interaction.count];
+                Interaction {
+                    message,
+                    count,
+                    bus_index: interaction.bus_index,
+                    count_weight: interaction.count_weight,
+                }
+            })
+            .collect();
+        let constraints = SymbolicExpressionDag {
+            nodes,
+            constraint_idx,
+            logup_frac_nodes,
+        };
+        SymbolicConstraintsDag {
+            constraints,
+            interaction_chunks,
+            interactions,
+        }
     }
 }
 
@@ -217,9 +221,9 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             y,
             degree_multiple,
         } => {
-            // An important case to remember: square will have Arc::as_ptr(&x) == Arc::as_ptr(&y)
-            // The `expr_to_id` will ensure only one topological sort is done to prevent exponential
-            // behavior.
+            // An important case to remember: square will have Arc::as_ptr(&x) ==
+            // Arc::as_ptr(&y) The `expr_to_id` will ensure only one topological
+            // sort is done to prevent exponential behavior.
             let left_idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
             let right_idx = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
             SymbolicExpressionNode::Mul {
@@ -239,7 +243,7 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
 impl<F: Field> SymbolicExpressionDag<F> {
     /// Convert each node to a [`SymbolicExpression<F>`] reference and return
     /// the full list.
-    fn to_symbolic_expressions(&self) -> Vec<Arc<SymbolicExpression<F>>> {
+    pub fn to_symbolic_expressions(&self) -> Vec<Arc<SymbolicExpression<F>>> {
         let mut exprs: Vec<Arc<SymbolicExpression<_>>> = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
             let expr = match *node {
@@ -289,7 +293,6 @@ impl<F: Field> SymbolicExpressionDag<F> {
     }
 }
 
-// TEMPORARY conversions until we switch main interfaces to use SymbolicConstraintsDag
 impl<'a, F: Field> From<&'a SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
     fn from(dag: &'a SymbolicConstraintsDag<F>) -> Self {
         let exprs = dag.constraints.to_symbolic_expressions();
@@ -331,9 +334,10 @@ mod tests {
 
     use crate::{
         air_builders::symbolic::{
-            dag::{build_symbolic_constraints_dag, SymbolicExpressionDag, SymbolicExpressionNode},
+            dag::{SymbolicExpressionDag, SymbolicExpressionNode},
             symbolic_expression::SymbolicExpression,
             symbolic_variable::{Entry, SymbolicVariable},
+            SymbolicConstraintsDag,
         },
         interaction::{find_interaction_chunks, Interaction},
     };
@@ -364,7 +368,11 @@ mod tests {
             count_weight: 1,
         }];
         let interaction_chunks = find_interaction_chunks(&interactions, 0);
-        let dag = build_symbolic_constraints_dag(&constraints, &interactions, interaction_chunks);
+        let dag = SymbolicConstraintsDag::from_expressions(
+            &constraints,
+            &interactions,
+            interaction_chunks,
+        );
         assert_eq!(
             dag.constraints,
             SymbolicExpressionDag::<F> {
@@ -418,24 +426,24 @@ mod tests {
                         right_idx: 8,
                         degree_multiple: 2
                     },
-                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 2)), /* beta^{msg_len+1} */
+                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 0)), /* alpha */
+                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 2)), /* beta^{msg_len} */
                     SymbolicExpressionNode::Mul {
-                        // beta^{msg_len + 1} * (bus_index + 1)
-                        left_idx: 11,
+                        // beta^msg_len * (bus_index + 1)
+                        left_idx: 12,
                         right_idx: 3, // (bus_index + 1) is 1
                         degree_multiple: 0
                     },
-                    SymbolicExpressionNode::Variable(SymbolicVariable::new(Entry::Challenge, 0)),
-                    SymbolicExpressionNode::Mul {
-                        // beta^0 * msg[0]
-                        left_idx: 8, // msg[0]
+                    SymbolicExpressionNode::Add {
+                        /* alpha + beta^{msg_len} * (bus_index + 1) */
+                        left_idx: 11,
                         right_idx: 13,
-                        degree_multiple: 1
+                        degree_multiple: 0
                     },
                     SymbolicExpressionNode::Add {
-                        // beta^{msg_len + 1} * (bus_index + 1) + beta^0 * msg[0]
-                        left_idx: 12,
-                        right_idx: 14,
+                        // alpha + beta^{msg_len} * (bus_index + 1) + msg[0]
+                        left_idx: 14,
+                        right_idx: 8,
                         degree_multiple: 1
                     },
                     SymbolicExpressionNode::Constant(F::TWO), // msg[1]
@@ -447,7 +455,7 @@ mod tests {
                         degree_multiple: 0
                     },
                     SymbolicExpressionNode::Add {
-                        // h_beta denominator
+                        // logup_denom = alpha + beta^2 * (bus_index + 1) + msg[0] + beta^1 * msg[1]
                         left_idx: 15,
                         right_idx: 18,
                         degree_multiple: 1

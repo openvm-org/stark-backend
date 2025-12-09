@@ -29,29 +29,33 @@ impl<T> ViewPair<T> {
 
 /// Struct containing partitioned view of one row together with optional "rotated" row.
 /// Constraints are evaluated on this struct.
-pub(super) struct ProverConstraintEvaluator<'a, F, EF> {
-    pub preprocessed: Option<ViewPair<EF>>,
-    pub partitioned_main: Vec<ViewPair<EF>>,
-    pub is_first_row: EF,
-    pub is_last_row: EF,
-    pub is_transition: EF,
+pub(super) struct ProverConstraintEvaluator<'a, F, FF, EF> {
+    pub preprocessed: Option<ViewPair<FF>>,
+    pub partitioned_main: Vec<ViewPair<FF>>,
+    pub is_first_row: FF,
+    pub is_last_row: FF,
+    pub is_transition: FF,
     pub public_values: &'a [F],
+    pub challenges: &'a [EF],
 }
 
-impl<F: Field, EF: ExtensionField<F>> SymbolicEvaluator<F, EF>
-    for ProverConstraintEvaluator<'_, F, EF>
+impl<F, FF, EF> SymbolicEvaluator<F, EF> for ProverConstraintEvaluator<'_, F, FF, EF>
+where
+    F: Field,
+    FF: ExtensionField<F>,
+    EF: ExtensionField<FF> + ExtensionField<F>,
 {
     fn eval_const(&self, c: F) -> EF {
         c.into()
     }
     fn eval_is_first_row(&self) -> EF {
-        self.is_first_row
+        self.is_first_row.into()
     }
     fn eval_is_last_row(&self) -> EF {
-        self.is_last_row
+        self.is_last_row.into()
     }
     fn eval_is_transition(&self) -> EF {
-        self.is_transition
+        self.is_transition.into()
     }
 
     /// SAFETY: we only use this trait implementation when we have already done
@@ -61,16 +65,25 @@ impl<F: Field, EF: ExtensionField<F>> SymbolicEvaluator<F, EF>
         let index = symbolic_var.index;
         match symbolic_var.entry {
             Entry::Preprocessed { offset } => unsafe {
-                *self
-                    .preprocessed
-                    .as_ref()
-                    .unwrap_unchecked()
-                    .get(offset, index)
+                EF::from(
+                    *self
+                        .preprocessed
+                        .as_ref()
+                        .unwrap_unchecked()
+                        .get(offset, index),
+                )
             },
             Entry::Main { part_index, offset } => unsafe {
-                *self.partitioned_main[part_index].get(offset, index)
+                EF::from(*self.partitioned_main[part_index].get(offset, index))
             },
-            Entry::Public => unsafe { EF::from(*self.public_values.get_unchecked(index)) },
+            Entry::Public => unsafe {
+                debug_assert!(index < self.public_values.len());
+                EF::from(*self.public_values.get_unchecked(index))
+            },
+            Entry::Challenge => unsafe {
+                debug_assert!(index < self.challenges.len());
+                *self.challenges.get_unchecked(index)
+            },
             _ => unreachable!("after_challenge not supported"),
         }
     }

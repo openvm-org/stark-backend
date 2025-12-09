@@ -26,6 +26,7 @@ pub(super) struct VerifierConstraintEvaluator<'a, F, EF> {
     pub is_first_row: EF,
     pub is_last_row: EF,
     pub public_values: &'a [F],
+    pub beta_pows: &'a [EF],
 }
 
 impl<'a, F, EF> VerifierConstraintEvaluator<'a, F, EF>
@@ -37,6 +38,7 @@ where
         preprocessed: Option<ViewPair<'a, EF>>,
         partitioned_main: &'a [ViewPair<'a, EF>],
         public_values: &'a [F],
+        beta_pows: &'a [EF],
         rs: &'a [EF],
         l_skip: usize,
     ) -> Self {
@@ -54,6 +56,7 @@ where
             is_first_row,
             is_last_row,
             public_values,
+            beta_pows,
         }
     }
 }
@@ -89,7 +92,8 @@ where
                 }
             }
             Entry::Public => EF::from_base(self.public_values[index]),
-            _ => unimplemented!(),
+            Entry::Challenge => self.beta_pows[index],
+            _ => unreachable!(),
         }
     }
 

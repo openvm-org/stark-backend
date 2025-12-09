@@ -32,7 +32,7 @@ use crate::interaction::BusIndex;
 /// Symbolic constraints for a single AIR with interactions.
 #[derive(Clone, Debug)]
 pub struct SymbolicConstraints<F> {
-    /// The plain AIR constraints. This does **not** contain interaction  constraints.
+    /// The plain AIR constraints. This does **not** contain interaction constraints.
     pub constraints: Vec<SymbolicExpression<F>>,
     /// Symbolic representation of AIR interactions..
     pub interactions: Vec<SymbolicInteraction<F>>,

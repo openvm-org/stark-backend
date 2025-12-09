@@ -20,7 +20,7 @@ pub struct EvalHelper<'a, F> {
     pub constraints_dag: &'a SymbolicExpressionDag<F>,
     /// Interactions
     pub interactions: Vec<SymbolicInteraction<F>>,
-    pub public_values: Vec<F>,
+    pub public_values: &'a [F],
     pub preprocessed_trace: Option<StridedColMajorMatrixView<'a, F>>,
     // TODO: skip rotation if vk dictates it is never used
     pub needs_next: bool,
@@ -68,7 +68,7 @@ impl<F: TwoAdicField> EvalHelper<'_, F> {
         row_parts: &[Vec<FF>],
         lambda_pows: &[EF],
     ) -> EF {
-        let evaluator = self.evaluator(row_parts);
+        let evaluator = self.evaluator::<FF, FF>(row_parts, &[]);
         let nodes = evaluator.eval_nodes(&self.constraints_dag.nodes);
         zip(lambda_pows, &self.constraints_dag.constraint_idx)
             .fold(EF::ZERO, |acc, (&lambda_pow, &idx)| {
@@ -107,29 +107,18 @@ impl<F: TwoAdicField> EvalHelper<'_, F> {
     pub fn eval_interactions<FF, EF>(
         &self,
         row_parts: &[Vec<FF>],
-        beta_pows: &[EF],
-    ) -> Vec<(FF, EF)>
+        challenges: &[EF],
+    ) -> Vec<(EF, EF)>
     where
         FF: ExtensionField<F>,
         EF: ExtensionField<FF> + ExtensionField<F>,
     {
-        let evaluator = self.evaluator(row_parts);
-        self.interactions
+        let evaluator = self.evaluator::<FF, EF>(row_parts, challenges);
+        let nodes = evaluator.eval_nodes(&self.constraints_dag.nodes);
+        self.constraints_dag
+            .logup_frac_nodes
             .iter()
-            .map(|interaction| {
-                let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
-                let msg_len = interaction.message.len();
-                assert!(msg_len <= beta_pows.len());
-                let denom = zip(&interaction.message, beta_pows).fold(
-                    beta_pows[msg_len] * b,
-                    |h_beta, (msg_j, &beta_j)| {
-                        let msg_j_eval = evaluator.eval_expr(msg_j);
-                        h_beta + beta_j * msg_j_eval
-                    },
-                );
-                let numer = evaluator.eval_expr(&interaction.count);
-                (numer, denom)
-            })
+            .map(|&(numer_idx, denom_idx)| (nodes[numer_idx], nodes[denom_idx]))
             .collect()
     }
 
@@ -142,10 +131,15 @@ impl<F: TwoAdicField> EvalHelper<'_, F> {
     // - ...
     // - common
     // - common_rot
-    fn evaluator<FF: ExtensionField<F>>(
-        &self,
+    fn evaluator<'a, FF, EF>(
+        &'a self,
         row_parts: &[Vec<FF>],
-    ) -> ProverConstraintEvaluator<'_, F, FF> {
+        challenges: &'a [EF],
+    ) -> ProverConstraintEvaluator<'a, F, FF, EF>
+    where
+        FF: ExtensionField<F>,
+        EF: ExtensionField<FF> + ExtensionField<F>,
+    {
         let sels = &row_parts[0];
         let mut view_pairs = row_parts[1..]
             .chunks_exact(2)
@@ -161,7 +155,8 @@ impl<F: TwoAdicField> EvalHelper<'_, F> {
             is_first_row: sels[0],
             is_transition: sels[1],
             is_last_row: sels[2],
-            public_values: &self.public_values,
+            public_values: self.public_values,
+            challenges,
         }
     }
 }
