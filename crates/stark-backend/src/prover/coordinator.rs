@@ -137,6 +137,8 @@ where
         let mut log_trace_height_per_air: Vec<u8> = Vec::with_capacity(num_air);
         let mut air_trace_views_per_air = Vec::with_capacity(num_air);
         let mut cached_pcs_datas_per_air = Vec::with_capacity(num_air);
+        let mut num_interactions = 0;
+        let mut num_interaction_chunks = 0;
         for (pk, cached_views, pvs) in izip!(&mpk.per_air, cached_views_per_air, &pvs_per_air) {
             let (mut main_trace_views, cached_pcs_datas): (Vec<PB::Matrix>, Vec<PB::PcsData>) =
                 cached_views.into_iter().unzip();
@@ -145,6 +147,9 @@ where
                 main_trace_views.push(common_main_traces_it.next().expect("expected common main"));
             }
             let trace_height = main_trace_views.first().expect("no main trace").height();
+            num_interactions += pk.vk.symbolic_constraints.interactions.len() * trace_height;
+            num_interaction_chunks +=
+                *pk.vk.params.width.after_challenge.get(0).unwrap_or(&0) * trace_height;
             let log_trace_height: u8 = log2_strict_usize(trace_height).try_into().unwrap();
             let air_trace_view = AirView {
                 partitioned_main: main_trace_views,
@@ -153,6 +158,13 @@ where
             log_trace_height_per_air.push(log_trace_height);
             air_trace_views_per_air.push(air_trace_view);
         }
+        println!("Interaction message count: {}", num_interactions);
+        println!("Interaction chunk count: {}", num_interaction_chunks);
+        println!(
+            "Interaction chunk ratio: {}",
+            num_interaction_chunks as f64 / num_interactions as f64
+        );
+
         #[cfg(feature = "metrics")]
         trace_metrics(&mpk, &log_trace_height_per_air).emit();
 
