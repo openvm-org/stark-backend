@@ -233,7 +233,7 @@ impl OpeningProverGpu {
         // commit to the folded polynomials
         let commit_phase_result = commit_phase_on_gpu(device, fri_inputs, challenger);
 
-        let pow_witness = challenger.grind(config.proof_of_work_bits);
+        let query_pow_witness = challenger.grind(config.query_proof_of_work_bits);
 
         let extra_query_index_bits = 0;
         let query_proofs = info_span!("query phase").in_scope(|| {
@@ -302,9 +302,10 @@ impl OpeningProverGpu {
 
         let fri_proof = FriProof {
             commit_phase_commits: commit_phase_result.commits,
+            commit_pow_witnesses: commit_phase_result.pow_witnesses,
             query_proofs,
             final_poly: commit_phase_result.final_poly,
-            pow_witness,
+            query_pow_witness,
         };
 
         (all_opened_values, fri_proof)
@@ -327,6 +328,7 @@ pub struct CommitPhaseGPUResult {
     pub commits: Vec<Com<SC>>,
     pub data: Vec<GpuPcsData>,
     pub final_poly: Vec<EF>,
+    pub pow_witnesses: Vec<F>,
 }
 
 fn commit_phase_on_gpu(
@@ -339,6 +341,7 @@ fn commit_phase_on_gpu(
     let mut inputs_iter = inputs.into_iter().peekable();
     let mut folded = inputs_iter.next().unwrap();
     let mut commits = vec![];
+    let mut pow_witnesses = vec![];
     let mut data: Vec<GpuPcsData> = vec![];
 
     let blowup = 1 << fri_log_blowup;
@@ -360,6 +363,9 @@ fn commit_phase_on_gpu(
 
         commits.push(commit);
         data.push(prover_data);
+
+        let pow_witness = challenger.grind(device.config.fri.commit_proof_of_work_bits);
+        pow_witnesses.push(pow_witness);
 
         let log_folded_len = log2_strict_usize(folded.len());
         let beta: EF = challenger.sample_algebra_element();
@@ -396,6 +402,7 @@ fn commit_phase_on_gpu(
         commits,
         data,
         final_poly,
+        pow_witnesses,
     }
 }
 
