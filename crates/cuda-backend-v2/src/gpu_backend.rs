@@ -64,7 +64,7 @@ impl TraceCommitterV2<GpuBackendV2> for GpuDeviceV2 {
             self.config.log_blowup,
             self.config.k_whir,
             traces,
-            self.prover_config.cache_stacked_matrix,
+            self.prover_config,
         )
         .unwrap()
     }
@@ -251,7 +251,7 @@ pub fn transport_and_unstack_single_data_h2d(
     let d_matrix = prover_config
         .cache_stacked_matrix
         .then(|| PleMatrix::from_evals(l_skip, d_matrix_evals, stacked_height, stacked_width));
-    let d_tree = transport_merkle_tree_h2d(&d.tree)?;
+    let d_tree = transport_merkle_tree_h2d(&d.tree, prover_config.cache_rs_code_matrix)?;
     let d_data = StackedPcsDataGpu {
         layout: d.layout.clone(),
         matrix: d_matrix,
@@ -270,8 +270,13 @@ pub fn transport_and_unstack_single_data_h2d(
 /// Transports backing matrix and tree digest layers from host to device.
 pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
     tree: &MerkleTree<F, Digest>,
+    cache_backing_matrix: bool,
 ) -> Result<MerkleTreeGpu<F, Digest>, MemCopyError> {
-    let backing_matrix = transport_matrix_h2d_col_major(tree.backing_matrix())?;
+    let backing_matrix = if cache_backing_matrix {
+        Some(transport_matrix_h2d_col_major(tree.backing_matrix())?)
+    } else {
+        None
+    };
     let digest_layers = tree
         .digest_layers()
         .iter()
@@ -300,7 +305,7 @@ pub fn transport_pcs_data_h2d(
     let d_matrix = prover_config
         .cache_stacked_matrix
         .then(|| PleMatrix::from_evals(layout.l_skip(), d_matrix_evals, height, width));
-    let d_tree = transport_merkle_tree_h2d(tree)?;
+    let d_tree = transport_merkle_tree_h2d(tree, prover_config.cache_rs_code_matrix)?;
 
     Ok(StackedPcsDataGpu {
         layout: layout.clone(),
@@ -331,8 +336,13 @@ pub fn transport_matrix_d2h_col_major<T>(
     Ok(ColMajorMatrix::new(values_host, matrix.width()))
 }
 
+/// For debugging purposes only.
+///
+/// # Panics
+/// If `tree.backing_matrix` is `None`.
 pub fn transport_merkle_tree_to_host(tree: &MerkleTreeGpu<F, Digest>) -> MerkleTree<F, Digest> {
-    let backing_matrix = transport_matrix_d2h_col_major(&tree.backing_matrix).unwrap();
+    let backing_matrix =
+        transport_matrix_d2h_col_major(tree.backing_matrix.as_ref().unwrap()).unwrap();
     let digest_layers = tree
         .digest_layers
         .iter()
@@ -371,7 +381,7 @@ mod v1_shims {
     use openvm_cuda_backend::{base::DeviceMatrix, prover_backend::GpuBackend};
     use stark_backend_v2::{SystemParams, prover::CommittedTraceDataV2, v1_shims::V1Compat};
 
-    use crate::{F, GpuBackendV2, stacked_pcs::stacked_commit};
+    use crate::{F, GpuBackendV2, GpuProverConfig, stacked_pcs::stacked_commit};
 
     impl V1Compat for GpuBackendV2 {
         type V1 = GpuBackend;
@@ -394,7 +404,7 @@ mod v1_shims {
                 params.log_blowup,
                 params.k_whir,
                 &[&matrix],
-                false,
+                GpuProverConfig::default(),
             )
             .unwrap();
             CommittedTraceDataV2 {
