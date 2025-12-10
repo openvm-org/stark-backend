@@ -36,6 +36,7 @@ use crate::{
     },
     merkle_tree::MerkleTreeGpu,
     poly::{evals_eq_hypercube, mle_evals_to_coeffs_inplace},
+    stacked_pcs::rs_code_matrix,
     stacked_reduction::StackedPcsData2,
 };
 
@@ -119,9 +120,11 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
         unsafe {
             whir_algebraic_batch_traces(&mut f_ple_evals, &d_packets, &d_mu_powers, 1 << l_skip)?;
         }
-        // drop all traces to free device memory
         for stacked in &mut stacked_per_commit {
-            stacked.traces.clear();
+            // drop traces to free device memory if RS codewords matrix exists
+            if stacked.inner.tree.backing_matrix.is_some() {
+                stacked.traces.clear();
+            }
         }
     } // common_main_pcs_data.matrix has now been freed
 
@@ -304,6 +307,7 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
             let g_tree = MerkleTreeGpu::<F, Digest>::new(
                 DeviceMatrix::new(Arc::new(g_rs), codeword_height, D_EF),
                 1 << k_whir,
+                true,
             )?;
             let g_commit = g_tree.root();
             transcript.observe_commit(g_commit);
@@ -350,27 +354,61 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
             codeword_merkle_proofs.push(vec![]);
         }
         if whir_round == 0 {
-            let trees = stacked_per_commit
-                .iter()
-                .map(|d| &d.inner.tree)
-                .collect::<Vec<_>>();
+            // Vector to hold owned copies of backing matrices that are regenerated in the case they
+            // were not cached
+            let mut backing_mats_owned = vec![None; stacked_per_commit.len()];
+            let mut backing_matrices = Vec::with_capacity(stacked_per_commit.len());
+            let mut trees = Vec::with_capacity(stacked_per_commit.len());
+            for (d, backing_mat_owned) in zip(&mut stacked_per_commit, &mut backing_mats_owned) {
+                trees.push(&d.inner.tree);
+                if let Some(matrix) = d.inner.tree.backing_matrix.as_ref() {
+                    backing_matrices.push(matrix);
+                } else {
+                    let layout = d.layout();
+                    let traces = d.traces.iter().collect_vec();
+                    debug_assert!(!traces.is_empty());
+                    let backing_matrix =
+                        rs_code_matrix(log_blowup, layout, &traces, &d.inner.matrix)?;
+                    d.traces.clear();
+                    *backing_mat_owned = Some(backing_matrix);
+                    backing_matrices.push(backing_mat_owned.as_ref().unwrap());
+                }
+            }
             // Get merkle proofs for in-domain samples necessary to evaluate Fold(f, \vec
             // \alpha)(z_i)
             initial_round_merkle_proofs =
                 MerkleTreeGpu::batch_query_merkle_proofs(&trees, &query_indices)?;
+
+            let query_stride = trees[0].query_stride();
+            debug_assert!(
+                trees.iter().all(|tree| tree.query_stride() == query_stride),
+                "Merkle trees don't have same layer size"
+            );
             let num_rows_per_query = trees[0].rows_per_query;
-            initial_round_opened_rows = MerkleTreeGpu::batch_open_rows(&trees, &query_indices)?
-                .into_iter()
-                .map(|rows_per_commit| {
-                    rows_per_commit
-                        .into_iter()
-                        .map(|rows| {
-                            let width = rows.len() / num_rows_per_query;
-                            rows.chunks_exact(width).map(|row| row.to_vec()).collect()
-                        })
-                        .collect()
-                })
-                .collect();
+            debug_assert!(
+                trees
+                    .iter()
+                    .all(|tree| tree.rows_per_query == num_rows_per_query),
+                "Merkle trees don't have same rows_per_query"
+            );
+
+            initial_round_opened_rows = MerkleTreeGpu::batch_open_rows(
+                &backing_matrices,
+                &query_indices,
+                query_stride,
+                num_rows_per_query,
+            )?
+            .into_iter()
+            .map(|rows_per_commit| {
+                rows_per_commit
+                    .into_iter()
+                    .map(|rows| {
+                        let width = rows.len() / num_rows_per_query;
+                        rows.chunks_exact(width).map(|row| row.to_vec()).collect()
+                    })
+                    .collect()
+            })
+            .collect();
             debug_assert_eq!(
                 Arc::strong_count(&stacked_per_commit[0].inner),
                 1,
@@ -384,13 +422,17 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
                 MerkleTreeGpu::batch_query_merkle_proofs(&[tree], &query_indices)?
                     .pop()
                     .expect("exactly 1 tree");
-            codeword_opened_values[whir_round - 1] =
-                MerkleTreeGpu::batch_open_rows(&[tree], &query_indices)?
-                    .pop()
-                    .unwrap()
-                    .into_iter() // We could transmute `rows` here, but we'll keep it safe for now
-                    .map(|rows| rows.chunks_exact(D_EF).map(EF::from_base_slice).collect())
-                    .collect();
+            codeword_opened_values[whir_round - 1] = MerkleTreeGpu::batch_open_rows(
+                &[tree.backing_matrix.as_ref().unwrap()],
+                &query_indices,
+                tree.query_stride(),
+                tree.rows_per_query,
+            )?
+            .pop()
+            .unwrap()
+            .into_iter() // We could transmute `rows` here, but we'll keep it safe for now
+            .map(|rows| rows.chunks_exact(D_EF).map(EF::from_base_slice).collect())
+            .collect();
         }
         rs_tree = g_tree;
 
