@@ -117,4 +117,37 @@ static __global__ void final_reduce_block_sums(
     }
 }
 
+// Folds MLE evaluations using challenge r: output[y] = input[2*y] + r*(input[2*y+1] - input[2*y])
+__device__ __forceinline__ void fold_mle(
+    const FpExt *__restrict__ const *__restrict__ input_matrices,
+    FpExt *__restrict__ const *__restrict__ output_matrices,
+    const uint32_t *widths, // Width of each matrix
+    const uint8_t log_output_height,
+    const FpExt &r_val,
+    uint32_t tidx,
+    uint32_t mat_idx
+) {
+    uint32_t width = widths[mat_idx];
+    uint32_t output_height = 1 << log_output_height;
+    if (tidx >= output_height * width)
+        return;
+    uint32_t row_idx = tidx & (output_height - 1);
+    uint32_t col_idx = tidx >> log_output_height;
+
+    const FpExt *input = input_matrices[mat_idx];
+    FpExt *output = output_matrices[mat_idx];
+
+    auto col_offset_out = col_idx * output_height;
+    auto col_offset_in = col_offset_out << 1;
+
+    auto idx_0 = col_offset_in + (row_idx << 1);
+    auto idx_1 = col_offset_in + (row_idx << 1) + 1;
+    auto out_idx = col_offset_out + row_idx;
+
+    FpExt t0 = input[idx_0];
+    FpExt t1 = input[idx_1];
+
+    output[out_idx] = t0 + r_val * (t1 - t0);
+}
+
 } // namespace sumcheck

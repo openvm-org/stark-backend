@@ -35,7 +35,7 @@ use crate::{
     EF, F, GpuBackendV2,
     cuda::{
         logup_zerocheck::{MainMatrixPtrs, fold_selectors_round0, interpolate_columns_gpu},
-        sumcheck::{fold_mle, triangular_fold_mle},
+        sumcheck::{batch_fold_mle, triangular_fold_mle},
     },
     gpu_backend::transport_matrix_d2h_col_major,
     logup_zerocheck::{
@@ -1094,101 +1094,81 @@ impl<'a> LogupZerocheckGpu<'a> {
 
     #[instrument(name = "LogupZerocheck::fold_mle_evals", level = "debug", skip_all, fields(round = _round))]
     fn fold_mle_evals(&mut self, _round: usize, r_round: EF) {
+        // Assumes that input_mats are sorted by height
+        let batch_fold = |input_mats: Vec<DeviceMatrix<EF>>| {
+            let num_matrices = input_mats.partition_point(|mat| mat.height() > 1);
+            let mut max_output_cells = 0;
+            let (log_output_heights, widths, mut output_mats): (Vec<_>, Vec<_>, Vec<_>) =
+                input_mats
+                    .iter()
+                    .take(num_matrices)
+                    .map(|mat| {
+                        let height = mat.height();
+                        let width = mat.width();
+                        let output_height = height >> 1;
+                        max_output_cells = max(max_output_cells, output_height * width);
+                        let output_mat = DeviceMatrix::<EF>::with_capacity(output_height, width);
+                        (output_height.ilog2() as u8, width as u32, output_mat)
+                    })
+                    .multiunzip();
+
+            let input_ptrs = input_mats
+                .iter()
+                .take(num_matrices)
+                .map(|mat| mat.buffer().as_ptr())
+                .collect_vec();
+            let output_ptrs = output_mats
+                .iter()
+                .map(|mat| mat.buffer().as_mut_ptr())
+                .collect_vec();
+
+            let d_input_ptrs = input_ptrs
+                .to_device()
+                .expect("failed to copy input ptrs to device");
+            let d_output_ptrs = output_ptrs
+                .to_device()
+                .expect("failed to copy output ptrs to device");
+            let d_log_output_heights = log_output_heights
+                .to_device()
+                .expect("failed to copy heights to device");
+            let d_widths = widths.to_device().expect("failed to copy widths to device");
+
+            unsafe {
+                batch_fold_mle(
+                    &d_input_ptrs,
+                    &d_output_ptrs,
+                    &d_widths,
+                    num_matrices.try_into().unwrap(),
+                    &d_log_output_heights,
+                    max_output_cells.try_into().unwrap(),
+                    r_round,
+                )
+                .expect("failed to fold MLE selectors on GPU");
+            }
+            output_mats.extend_from_slice(&input_mats[num_matrices..]);
+            output_mats
+        };
+
         // Fold mat_evals_per_trace: Vec<Vec<DeviceMatrix<EF>>>
-        self.mat_evals_per_trace = std::mem::take(&mut self.mat_evals_per_trace)
-            .into_iter()
-            .map(|mats| {
-                if mats.is_empty() {
-                    return mats;
-                }
-                let height = mats[0].height();
-                if height <= 1 {
-                    return mats;
-                }
-                let output_height = height >> 1;
-
-                // Prepare input/output pointers and widths
-                let num_matrices = mats.len() as u32;
-                let input_ptrs: Vec<usize> =
-                    mats.iter().map(|m| m.buffer().as_ptr() as usize).collect();
-                let widths: Vec<u32> = mats.iter().map(|m| m.width() as u32).collect();
-
-                // Allocate output matrices (preserve doubled-width structure)
-                let output_mats: Vec<DeviceMatrix<EF>> = mats
-                    .iter()
-                    .map(|m| DeviceMatrix::with_capacity(output_height, m.width()))
-                    .collect();
-                let output_ptrs: Vec<usize> = output_mats
-                    .iter()
-                    .map(|m| m.buffer().as_ptr() as usize)
-                    .collect();
-
-                // Copy to device buffers
-                let d_input_ptrs = input_ptrs
-                    .to_device()
-                    .expect("failed to copy input ptrs to device");
-                let d_output_ptrs = output_ptrs
-                    .to_device()
-                    .expect("failed to copy output ptrs to device");
-                let d_widths = widths.to_device().expect("failed to copy widths to device");
-
-                // Launch fold_mle kernel
-                unsafe {
-                    fold_mle(
-                        &d_input_ptrs,
-                        &d_output_ptrs,
-                        &d_widths,
-                        num_matrices,
-                        output_height as u32,
-                        r_round,
-                    )
-                    .expect("failed to fold MLE matrices on GPU");
-                }
-
-                output_mats
-            })
-            .collect();
+        self.mat_evals_per_trace = {
+            let lengths = self
+                .mat_evals_per_trace
+                .iter()
+                .map(|v| v.len())
+                .collect_vec();
+            let input_mats = std::mem::take(&mut self.mat_evals_per_trace)
+                .into_iter()
+                .flatten()
+                .collect_vec();
+            let mut output_mats = batch_fold(input_mats).into_iter();
+            lengths
+                .into_iter()
+                .map(|len| output_mats.by_ref().take(len).collect())
+                .collect()
+        };
 
         // Fold sels_per_trace: Vec<DeviceMatrix<EF>>
-        self.sels_per_trace = std::mem::take(&mut self.sels_per_trace)
-            .into_iter()
-            .map(|mat| {
-                let height = mat.height();
-                if height <= 1 {
-                    return mat;
-                }
-                let output_height = height >> 1;
-                let width = mat.width();
-
-                let input_ptr = mat.buffer().as_ptr() as usize;
-                let output_mat = DeviceMatrix::with_capacity(output_height, width);
-                let output_ptr = output_mat.buffer().as_ptr() as usize;
-
-                let d_input_ptrs = [input_ptr]
-                    .to_device()
-                    .expect("failed to copy input ptr to device");
-                let d_output_ptrs = [output_ptr]
-                    .to_device()
-                    .expect("failed to copy output ptr to device");
-                let d_widths = [width as u32]
-                    .to_device()
-                    .expect("failed to copy width to device");
-
-                unsafe {
-                    fold_mle(
-                        &d_input_ptrs,
-                        &d_output_ptrs,
-                        &d_widths,
-                        1,
-                        output_height as u32,
-                        r_round,
-                    )
-                    .expect("failed to fold MLE selectors on GPU");
-                }
-
-                output_mat
-            })
-            .collect();
+        self.sels_per_trace = batch_fold(std::mem::take(&mut self.sels_per_trace));
 
         let n = self.eq_xis.buffer.len().ilog2() as usize;
         if n >= 2 {

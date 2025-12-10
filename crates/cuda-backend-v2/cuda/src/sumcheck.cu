@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector_types.h>
 
 namespace plain_sumcheck {
@@ -160,45 +161,38 @@ __global__ void reduce_blocks_sumcheck(
 // - Input:  height = 2^n per column
 // - Output: height = 2^(n-1) per column
 // Grid: (blocks for height/2, num_matrices) to parallelize over both dimensions
-// [TODO] Check is it valid that all matrices have the same height?
 __global__ void fold_mle_kernel(
-    const uintptr_t *input_matrices,  // Array of input matrix pointers
-    const uintptr_t *output_matrices, // Array of output matrix pointers
-    const uint32_t *widths,           // Width of each matrix
-    const uint32_t num_matrices,
-    const uint32_t output_height,
+    const FpExt *__restrict__ const *__restrict__ input_matrices, // Array of input matrix pointers
+    FpExt *__restrict__ const *__restrict__ output_matrices,      // Array of output matrix pointers
+    const uint32_t *widths,                                       // Width of each matrix
+    const uint8_t log_output_height,
     const FpExt r_val
 ) {
-    int input_height = output_height << 1;
-
-    // blockIdx.x and threadIdx.x parallelize over output_height
-    int y = blockIdx.x * blockDim.x + threadIdx.x;
-    if (y >= output_height)
-        return;
+    uint32_t mat_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
 
     // blockIdx.y selects which matrix we're working on
-    int mat_idx = blockIdx.y;
-    if (mat_idx >= num_matrices)
-        return;
+    sumcheck::fold_mle(
+        input_matrices, output_matrices, widths, log_output_height, r_val, tidx, mat_idx
+    );
+}
 
-    int width = widths[mat_idx];
-    const FpExt *input = reinterpret_cast<const FpExt *>(input_matrices[mat_idx]);
-    FpExt *output = reinterpret_cast<FpExt *>(output_matrices[mat_idx]);
+// Folds MLE evaluations as in fold_mle_kernel above, but supports matrices of different heights
+__global__ void batch_fold_mle_kernel(
+    const FpExt *__restrict__ const *__restrict__ input_matrices, // Array of input matrix pointers
+    FpExt *__restrict__ const *__restrict__ output_matrices,      // Array of output matrix pointers
+    const uint32_t *widths,                                       // Width of each matrix
+    const uint8_t *log_output_heights,
+    const FpExt r_val
+) {
+    uint32_t mat_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Loop over all columns for this (matrix, y) pair
-    for (int col = 0; col < width; col++) {
-        int col_offset_in = col * input_height;
-        int col_offset_out = col * output_height;
+    uint8_t log_output_height = log_output_heights[mat_idx];
 
-        int idx_0 = col_offset_in + (y << 1);
-        int idx_1 = col_offset_in + (y << 1) + 1;
-        int out_idx = col_offset_out + y;
-
-        FpExt t0 = input[idx_0];
-        FpExt t1 = input[idx_1];
-
-        output[out_idx] = t0 + r_val * (t1 - t0);
-    }
+    sumcheck::fold_mle(
+        input_matrices, output_matrices, widths, log_output_height, r_val, tidx, mat_idx
+    );
 }
 
 // Evaluates univariate polynomials at challenge point r using Horner's method
@@ -213,8 +207,8 @@ __global__ void fold_mle_kernel(
 // converting evaluations to coefficients in natural order. We reuse those
 // coefficients here instead of re-interpolating from evaluations (more efficient).
 __global__ void fold_ple_from_coeffs_kernel(
-    const Fp *input_coeffs, // [num_x * width * domain_size] after iDFT
-    FpExt *output,          // [num_x * width]
+    const Fp *__restrict__ input_coeffs, // [num_x * width * domain_size] after iDFT
+    FpExt *__restrict__ output,          // [num_x * width]
     uint32_t num_x,
     uint32_t width,
     uint32_t domain_size, // 2^l_skip
@@ -259,18 +253,45 @@ __global__ void triangular_fold_mle_kernel(FpExt *output, const FpExt *input, Fp
 // LAUNCHERS
 // ============================================================================
 
+std::pair<dim3, dim3> fold_mle_launch_params(uint32_t max_output_cells, uint32_t num_matrices) {
+    if (max_output_cells <= WARP_SIZE) {
+        return kernel_launch_2d_params(max_output_cells, num_matrices);
+    } else {
+        auto [grid, block] = kernel_launch_params(max_output_cells);
+        grid.y = num_matrices;
+        return {grid, block};
+    }
+}
+
 extern "C" int _fold_mle(
-    const uintptr_t *input_matrices,
-    const uintptr_t *output_matrices,
+    const FpExt *const *input_matrices,
+    FpExt *const *output_matrices,
     const uint32_t *widths,
-    const uint32_t num_matrices,
+    const uint16_t num_matrices,
     const uint32_t output_height,
+    const uint32_t max_output_cells,
     const FpExt r_val
 ) {
-    auto [rows_grid, rows_block] = kernel_launch_params(output_height);
-    dim3 grid(rows_grid.x, num_matrices);
-    fold_mle_kernel<<<grid, rows_block>>>(
-        input_matrices, output_matrices, widths, num_matrices, output_height, r_val
+    auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
+    uint8_t log_output_height = static_cast<uint8_t>(31 - __builtin_clz(output_height));
+    fold_mle_kernel<<<grid, block>>>(
+        input_matrices, output_matrices, widths, log_output_height, r_val
+    );
+    return CHECK_KERNEL();
+}
+
+extern "C" int _batch_fold_mle(
+    const FpExt *const *input_matrices,
+    FpExt *const *output_matrices,
+    const uint32_t *widths,
+    const uint16_t num_matrices,
+    const uint8_t *log_output_heights,
+    const uint32_t max_output_cells, // max(height * width)
+    const FpExt r_val
+) {
+    auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
+    batch_fold_mle_kernel<<<grid, block>>>(
+        input_matrices, output_matrices, widths, log_output_heights, r_val
     );
     return CHECK_KERNEL();
 }

@@ -57,6 +57,7 @@ pub struct StackedReductionGpu {
 
     pub(crate) stacked_per_commit: Vec<StackedPcsData2>,
     d_q_widths: DeviceBuffer<u32>,
+    q_width_max: u32,
 
     trace_ptrs: Vec<(
         *const F, /* trace_ptr */
@@ -308,11 +309,12 @@ impl StackedReductionGpu {
                 .iter()
                 .all(|d| d.layout().height() == 1 << (l_skip + n_stack))
         );
-        let widths = stacked_per_commit
+        let q_widths = stacked_per_commit
             .iter()
             .map(|d| d.layout().width() as u32)
             .collect_vec();
-        let d_q_widths = widths.to_device().unwrap();
+        let q_width_max = *q_widths.iter().max().unwrap();
+        let d_q_widths = q_widths.to_device().unwrap();
 
         let total_num_col_openings = stacked_per_commit
             .iter()
@@ -376,6 +378,7 @@ impl StackedReductionGpu {
             eq_const,
             stacked_per_commit,
             d_q_widths,
+            q_width_max,
             trace_ptrs,
             unstacked_cols,
             d_unstacked_cols,
@@ -761,8 +764,8 @@ impl StackedReductionGpu {
             .iter()
             .map(|q| {
                 let folded = DeviceBuffer::with_capacity(q.len() >> 1);
-                let output_ptr = folded.as_mut_ptr() as usize;
-                (folded, q.as_ptr() as usize, output_ptr)
+                let output_ptr = folded.as_mut_ptr();
+                (folded, q.as_ptr(), output_ptr)
             })
             .multiunzip();
         let d_input_ptrs = input_ptrs.to_device().unwrap();
@@ -773,13 +776,15 @@ impl StackedReductionGpu {
         //   `stacked_height(round) = stacked_height(round + 1) * 2`.
         // - `d_output_ptrs` points to matrices just allocated with widths specified by `d_q_widths`
         //   and heights `stacked_height(round + 1)`.
+        let output_height = self.stacked_height(round + 1) as u32;
         unsafe {
             fold_mle(
                 &d_input_ptrs,
                 &d_output_ptrs,
                 &self.d_q_widths,
-                self.q_evals.len() as u32,
+                self.q_evals.len().try_into().unwrap(),
                 self.stacked_height(round + 1) as u32,
+                self.q_width_max * output_height,
                 u_round,
             )
             .unwrap();

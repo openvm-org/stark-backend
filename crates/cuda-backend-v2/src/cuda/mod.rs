@@ -21,9 +21,9 @@ pub mod sumcheck {
 
     extern "C" {
         fn _sumcheck_mle_round(
-            input_matrices: *const usize,
-            output: *mut std::ffi::c_void,
-            tmp_block_sums: *mut std::ffi::c_void,
+            input_matrices: *const *const EF,
+            output: *mut EF,
+            tmp_block_sums: *mut EF,
             widths: *const u32,
             num_matrices: u32,
             height: u32,
@@ -31,11 +31,22 @@ pub mod sumcheck {
         ) -> i32;
 
         fn _fold_mle(
-            input_matrices: *const usize,
-            output_matrices: *const usize,
+            input_matrices: *const *const EF,
+            output_matrices: *const *mut EF,
             widths: *const u32,
-            num_matrices: u32,
+            num_matrices: u16,
             output_height: u32,
+            max_output_cells: u32,
+            r_val: EF,
+        ) -> i32;
+
+        fn _batch_fold_mle(
+            input_matrices: *const *const EF,
+            output_matrices: *const *mut EF,
+            widths: *const u32,
+            num_matrices: u16,
+            log_output_heights: *const u8,
+            max_output_cells: u32,
             r_val: EF,
         ) -> i32;
 
@@ -60,10 +71,10 @@ pub mod sumcheck {
         -> i32;
     }
 
-    pub unsafe fn sumcheck_mle_round<T>(
-        input_matrices: &DeviceBuffer<usize>,
-        output: &DeviceBuffer<T>,
-        tmp_block_sums: &DeviceBuffer<T>,
+    pub unsafe fn sumcheck_mle_round(
+        input_matrices: &DeviceBuffer<*const EF>,
+        output: &DeviceBuffer<EF>,
+        tmp_block_sums: &DeviceBuffer<EF>,
         widths: &DeviceBuffer<u32>,
         num_matrices: u32,
         height: u32,
@@ -71,8 +82,8 @@ pub mod sumcheck {
     ) -> Result<(), CudaError> {
         CudaError::from_result(_sumcheck_mle_round(
             input_matrices.as_ptr(),
-            output.as_mut_raw_ptr(),
-            tmp_block_sums.as_mut_raw_ptr(),
+            output.as_mut_ptr(),
+            tmp_block_sums.as_mut_ptr(),
             widths.as_ptr(),
             num_matrices,
             height,
@@ -80,12 +91,16 @@ pub mod sumcheck {
         ))
     }
 
+    /// # Safety
+    /// - `input_matrices` must consist of pointers to device memory locations.
+    /// - `output_matrices` must consist of pointers to device memory locations.
     pub unsafe fn fold_mle(
-        input_matrices: &DeviceBuffer<usize>,
-        output_matrices: &DeviceBuffer<usize>,
+        input_matrices: &DeviceBuffer<*const EF>,
+        output_matrices: &DeviceBuffer<*mut EF>,
         widths: &DeviceBuffer<u32>,
-        num_matrices: u32,
+        num_matrices: u16,
         output_height: u32,
+        max_output_cells: u32,
         r_val: EF,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_fold_mle(
@@ -94,6 +109,30 @@ pub mod sumcheck {
             widths.as_ptr(),
             num_matrices,
             output_height,
+            max_output_cells,
+            r_val,
+        ))
+    }
+
+    /// # Safety
+    /// - `input_matrices` must consist of pointers to device memory locations.
+    /// - `output_matrices` must consist of pointers to device memory locations.
+    pub unsafe fn batch_fold_mle(
+        input_matrices: &DeviceBuffer<*const EF>,
+        output_matrices: &DeviceBuffer<*mut EF>,
+        widths: &DeviceBuffer<u32>,
+        num_matrices: u16,
+        log_output_heights: &DeviceBuffer<u8>,
+        max_output_cells: u32,
+        r_val: EF,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_batch_fold_mle(
+            input_matrices.as_ptr(),
+            output_matrices.as_ptr(),
+            widths.as_ptr(),
+            num_matrices,
+            log_output_heights.as_ptr(),
+            max_output_cells,
             r_val,
         ))
     }
