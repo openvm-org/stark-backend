@@ -58,8 +58,8 @@ where
     let mut d_buffer_b = DeviceBuffer::<EF>::with_capacity(total_size / 2);
 
     // Set up pointer arrays on device
-    let mut d_input_ptrs = DeviceBuffer::<usize>::with_capacity(num_matrices);
-    let mut d_output_ptrs = DeviceBuffer::<usize>::with_capacity(num_matrices);
+    let mut d_input_ptrs = DeviceBuffer::<*const EF>::with_capacity(num_matrices);
+    let mut d_output_ptrs = DeviceBuffer::<*mut EF>::with_capacity(num_matrices);
     let d_widths = [width as u32].to_device().unwrap();
 
     // Buffer for round output [d * WD]
@@ -75,8 +75,8 @@ where
         };
 
         // Update pointer arrays
-        let input_ptr = input_buf.as_ptr() as usize;
-        let output_ptr = output_buf.as_mut_ptr() as usize;
+        let input_ptr = input_buf.as_ptr();
+        let output_ptr = output_buf.as_mut_ptr();
 
         [input_ptr].copy_to(&mut d_input_ptrs).unwrap();
         [output_ptr].copy_to(&mut d_output_ptrs).unwrap();
@@ -111,13 +111,15 @@ where
         r.push(r_round);
 
         // Fold using the challenge
+        let output_height = (current_height >> 1) as u32;
         unsafe {
             fold_mle(
                 &d_input_ptrs,
                 &d_output_ptrs,
                 &d_widths,
-                num_matrices as u32,
-                (current_height >> 1) as u32,
+                num_matrices.try_into().unwrap(),
+                output_height,
+                width as u32 * output_height,
                 r_round,
             )
             .unwrap();
@@ -295,8 +297,7 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
     drop(_round0_span);
 
     // ========== Rounds 1..n: Regular MLE rounds ==========
-    let _mle_rounds_span =
-        info_span!("sumcheck_prismalinear.mle_rounds").entered();
+    let _mle_rounds_span = info_span!("sumcheck_prismalinear.mle_rounds").entered();
 
     let mut current_height = num_x; // After fold_ple, height is 2^n
     let num_matrices = 1;
@@ -305,8 +306,8 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
     let mut d_buffer_a = d_folded; // Reuse folded result
     let mut d_buffer_b = DeviceBuffer::<EF>::with_capacity(current_height / 2);
 
-    let mut d_input_ptrs = DeviceBuffer::<usize>::with_capacity(num_matrices);
-    let mut d_output_ptrs = DeviceBuffer::<usize>::with_capacity(num_matrices);
+    let mut d_input_ptrs = DeviceBuffer::<*const EF>::with_capacity(num_matrices);
+    let mut d_output_ptrs = DeviceBuffer::<*mut EF>::with_capacity(num_matrices);
     let d_widths = [width as u32].to_device().unwrap();
     let d_round_output = DeviceBuffer::<EF>::with_capacity(d);
 
@@ -317,8 +318,8 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
             (&d_buffer_b, &mut d_buffer_a)
         };
 
-        let input_ptr = input_buf.as_ptr() as usize;
-        let output_ptr = output_buf.as_mut_ptr() as usize;
+        let input_ptr = input_buf.as_ptr();
+        let output_ptr = output_buf.as_mut_ptr();
 
         [input_ptr].copy_to(&mut d_input_ptrs).unwrap();
         [output_ptr].copy_to(&mut d_output_ptrs).unwrap();
@@ -348,13 +349,15 @@ pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
         r.push(r_round);
 
         // Fold MLE
+        let output_height = (current_height >> 1) as u32;
         unsafe {
             fold_mle(
                 &d_input_ptrs,
                 &d_output_ptrs,
                 &d_widths,
-                num_matrices as u32,
-                (current_height >> 1) as u32,
+                num_matrices.try_into().unwrap(),
+                output_height,
+                width as u32 * output_height,
                 r_round,
             )
             .unwrap();
