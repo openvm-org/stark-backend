@@ -47,8 +47,15 @@ pub fn stacked_commit(
     traces: &[&DeviceMatrix<F>],
     prover_config: GpuProverConfig,
 ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
-    let mem = MemTracker::start_and_reset_peak("prover.stacked_commit");
+    let mut mem = MemTracker::start("prover.stacked_commit");
+    mem.tracing_info("before stacked_commit");
+    mem.reset_peak();
     let layout = get_stacked_layout(l_skip, n_stack, traces);
+    tracing::info!(
+        height = layout.height(),
+        width = layout.width(),
+        "stacked_matrix_dimensions"
+    );
     let opt_stacked_matrix = if prover_config.cache_stacked_matrix {
         Some(stack_traces(&layout, traces)?)
     } else {
