@@ -13,7 +13,7 @@ use stark_backend_v2::prover::stacked_pcs::StackedLayout;
 use tracing::instrument;
 
 use crate::{
-    Digest, F, ProverError,
+    Digest, F, GpuProverConfig, ProverError,
     cuda::{matrix::batch_expand_pad_wide, poly::mle_interpolate_stage_2d},
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
@@ -25,7 +25,7 @@ pub struct StackedPcsDataGpu<F, Digest> {
     #[getset(get = "pub")]
     pub(crate) layout: StackedLayout,
     /// The stacked matrix with height `2^{l_skip + n_stack}`.
-    /// This cached depending on the prover configuration:
+    /// This is optionally cached depending on the prover configuration:
     /// - Caching increases the peak GPU memory but avoids a recomputation during stacked
     ///   reduction.
     /// - Not caching means the stacked matrix computation is recomputed during stacked reduction,
@@ -45,17 +45,21 @@ pub fn stacked_commit(
     log_blowup: usize,
     k_whir: usize,
     traces: &[&DeviceMatrix<F>],
-    cache_stacked_matrix: bool,
+    prover_config: GpuProverConfig,
 ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
     let mem = MemTracker::start_and_reset_peak("prover.stacked_commit");
     let layout = get_stacked_layout(l_skip, n_stack, traces);
-    let opt_stacked_matrix = if cache_stacked_matrix {
+    let opt_stacked_matrix = if prover_config.cache_stacked_matrix {
         Some(stack_traces(&layout, traces)?)
     } else {
         None
     };
     let rs_matrix = rs_code_matrix(log_blowup, &layout, traces, &opt_stacked_matrix)?;
-    let tree = MerkleTreeGpu::<F, Digest>::new(rs_matrix, 1 << k_whir)?;
+    let tree = MerkleTreeGpu::<F, Digest>::new(
+        rs_matrix,
+        1 << k_whir,
+        prover_config.cache_rs_code_matrix,
+    )?;
     let root = tree.root();
     let data = StackedPcsDataGpu {
         layout,
@@ -245,11 +249,6 @@ pub fn rs_code_matrix(
 }
 
 impl<F, Digest> StackedPcsDataGpu<F, Digest> {
-    /// Width of the stacked matrix.
-    pub fn width(&self) -> usize {
-        self.tree.backing_matrix.width()
-    }
-
     /// Returns a view of the specified unstacked matrix in mixed form.
     ///
     /// # Notes

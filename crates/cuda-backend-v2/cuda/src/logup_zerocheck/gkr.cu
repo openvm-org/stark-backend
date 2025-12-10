@@ -249,7 +249,7 @@ extern "C" int _frac_build_tree_layer(
 }
 
 inline std::pair<dim3, dim3> frac_compute_round_launch_params(uint32_t stride) {
-    return kernel_launch_params(stride >> 1, 512);
+    return kernel_launch_params(stride >> 1, 256);
 }
 
 extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t stride) {
