@@ -181,8 +181,8 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
     let mut log_rs_domain_size = m + log_blowup;
     let mut final_poly = None;
 
-    let mut d_input_fw_ptrs = DeviceBuffer::<usize>::with_capacity(2);
-    let mut d_output_fw_ptrs = DeviceBuffer::<usize>::with_capacity(2);
+    let mut d_input_fw_ptrs = DeviceBuffer::<*const EF>::with_capacity(2);
+    let mut d_output_fw_ptrs = DeviceBuffer::<*mut EF>::with_capacity(2);
     let d_widths = [1u32, 1u32].to_device()?;
     let mut d_s_evals = DeviceBuffer::<EF>::with_capacity(2);
 
@@ -231,9 +231,8 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
 
             // PERF[jpw]: memory management could be optimized to re-use buffers
             let new_w_evals = DeviceBuffer::<EF>::with_capacity(output_height);
-            [f_evals.as_ptr() as usize, w_evals.as_ptr() as usize].copy_to(&mut d_input_fw_ptrs)?;
-            [new_f_evals.as_ptr() as usize, new_w_evals.as_ptr() as usize]
-                .copy_to(&mut d_output_fw_ptrs)?;
+            [f_evals.as_ptr(), w_evals.as_ptr()].copy_to(&mut d_input_fw_ptrs)?;
+            [new_f_evals.as_mut_ptr(), new_w_evals.as_mut_ptr()].copy_to(&mut d_output_fw_ptrs)?;
             // Fold `f_evals`, `w_evals` as MLE with respect to `alpha`:
             // SAFETY:
             // - `new_f_evals`, `new_w_evals` are allocated with half the length of `f_evals` and
@@ -247,6 +246,7 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
                     &d_output_fw_ptrs,
                     &d_widths,
                     2,
+                    output_height as u32,
                     output_height as u32,
                     alpha,
                 )?;
