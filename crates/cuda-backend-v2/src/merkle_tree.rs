@@ -25,7 +25,12 @@ use crate::{
 pub struct MerkleTreeGpu<F, Digest> {
     /// The matrix that is used to form the leaves of the Merkle tree, which are
     /// in turn hashed into the bottom digest layer.
-    pub(crate) backing_matrix: DeviceMatrix<F>,
+    ///
+    /// This matrix is optionally cached depending on the prover configuration:
+    /// - Caching increases the peak GPU memory but avoids a recomputation of MLE eval-to-coeffs,
+    ///   batch_expand, and forward NTT.
+    /// - Not caching pays a performance penalty due to the above recomputation.
+    pub(crate) backing_matrix: Option<DeviceMatrix<F>>,
     pub(crate) digest_layers: Vec<DeviceBuffer<Digest>>,
     pub(crate) rows_per_query: usize,
     pub(crate) root: Digest,
@@ -51,7 +56,11 @@ impl<F, Digest> MerkleTreeGpu<F, Digest> {
 // Base field merkle tree
 impl MerkleTreeGpu<F, Digest> {
     #[instrument(name = "merkle_tree", skip_all)]
-    pub fn new(matrix: DeviceMatrix<F>, rows_per_query: usize) -> Result<Self, ProverError> {
+    pub fn new(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, ProverError> {
         let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
         assert!(height.is_power_of_two());
@@ -65,6 +74,8 @@ impl MerkleTreeGpu<F, Digest> {
         unsafe {
             poseidon2_row_hashes(&mut row_hashes, matrix.buffer(), matrix.width(), height)?;
         }
+        // If not caching, drop the backing matrix at this point to save memory.
+        let backing_matrix = cache_backing_matrix.then_some(matrix);
 
         let query_stride = height / rows_per_query;
         let mut query_digest_layer = row_hashes;
@@ -111,7 +122,7 @@ impl MerkleTreeGpu<F, Digest> {
 
         mem.emit_metrics();
         Ok(Self {
-            backing_matrix: matrix,
+            backing_matrix,
             digest_layers,
             rows_per_query,
             root,
@@ -214,8 +225,10 @@ impl MerkleTreeGpu<F, Digest> {
     }
 
     pub fn batch_open_rows(
-        trees: &[&Self],
+        backing_matrices: &[&DeviceMatrix<F>],
         query_indices: &[usize],
+        query_stride: usize,
+        rows_per_query: usize,
     ) -> Result<
         Vec<
             // per tree
@@ -226,18 +239,6 @@ impl MerkleTreeGpu<F, Digest> {
         >,
         ProverError,
     > {
-        let query_stride = trees[0].query_stride();
-        debug_assert!(
-            trees.iter().all(|tree| tree.query_stride() == query_stride),
-            "Merkle trees don't have same layer size"
-        );
-        let rows_per_query = trees[0].rows_per_query;
-        debug_assert!(
-            trees
-                .iter()
-                .all(|tree| tree.rows_per_query == rows_per_query),
-            "Merkle trees don't have same rows_per_query"
-        );
         let row_idxs = query_indices
             .iter()
             .flat_map(|&query_idx| {
@@ -250,12 +251,10 @@ impl MerkleTreeGpu<F, Digest> {
         // PERF[jpw]: I did not batch across trees into a single kernel call because widths are
         // different so it was inconvenient. Make a new kernel if slow.
         // NOTE: par_iter requires cross-stream waits, not worth the effort
-        trees
+        backing_matrices
             .iter()
-            .map(|tree| {
-                let d_out =
-                    DeviceBuffer::<F>::with_capacity(row_idxs.len() * tree.backing_matrix.width());
-                let matrix = &tree.backing_matrix;
+            .map(|matrix| {
+                let d_out = DeviceBuffer::<F>::with_capacity(row_idxs.len() * matrix.width());
                 // SAFETY:
                 // - `output_rows` is allocated with row_idxs.len() * width
                 // - row indices are within bounds
@@ -269,7 +268,7 @@ impl MerkleTreeGpu<F, Digest> {
                         d_row_idxs.len() as u32,
                     )?;
                 }
-                let width = tree.backing_matrix.width();
+                let width = matrix.width();
                 let out = d_out.to_host()?;
                 let opened_rows_per_query = out
                     .chunks_exact(rows_per_query * width)
@@ -286,7 +285,11 @@ impl MerkleTreeGpu<F, Digest> {
 // in our use cases
 impl MerkleTreeGpu<EF, Digest> {
     #[instrument(name = "merkle_tree_ext", skip_all)]
-    pub fn new(matrix: DeviceMatrix<EF>, rows_per_query: usize) -> Result<Self, ProverError> {
+    pub fn new(
+        matrix: DeviceMatrix<EF>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, ProverError> {
         let height = matrix.height();
         assert!(height.is_power_of_two());
         let k = log2_strict_usize(rows_per_query);
@@ -299,6 +302,8 @@ impl MerkleTreeGpu<EF, Digest> {
         unsafe {
             poseidon2_row_hashes_ext(&mut row_hashes, matrix.buffer(), matrix.width(), height)?;
         }
+        // If not caching, drop the backing matrix at this point to save memory.
+        let backing_matrix = cache_backing_matrix.then_some(matrix);
 
         // === Below this line is same as for MerkleTreeGpu<F, Digest> ===
         let query_stride = height / rows_per_query;
@@ -345,7 +350,7 @@ impl MerkleTreeGpu<EF, Digest> {
         let root = d_root.to_host()?.pop().unwrap();
 
         Ok(Self {
-            backing_matrix: matrix,
+            backing_matrix,
             digest_layers,
             rows_per_query,
             root,
