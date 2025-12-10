@@ -329,6 +329,49 @@ pub fn transport_air_proving_ctx_to_device(
     }
 }
 
+pub fn transport_proving_ctx_to_host(
+    gpu_ctx: ProvingContextV2<GpuBackendV2>,
+    l_skip: usize,
+) -> ProvingContextV2<CpuBackendV2> {
+    let per_trace = gpu_ctx
+        .per_trace
+        .into_iter()
+        .map(|(i, ctx)| (i, transport_air_proving_ctx_to_host(ctx, l_skip)))
+        .collect_vec();
+    ProvingContextV2 { per_trace }
+}
+
+pub fn transport_air_proving_ctx_to_host(
+    gpu_ctx: AirProvingContextV2<GpuBackendV2>,
+    l_skip: usize,
+) -> AirProvingContextV2<CpuBackendV2> {
+    let trace = transport_matrix_d2h_col_major(&gpu_ctx.common_main).unwrap();
+    let cached_mains = gpu_ctx
+        .cached_mains
+        .into_iter()
+        .map(|mat| {
+            // WARNING: By default this matrix isn't cached. For this to work, ensure that
+            // GpuProverConfig fields cache_stacked_matrix and cache_rs_code_matrix are set
+            // to be true.
+            let evals_matrix = mat.data.matrix.as_ref().unwrap().to_evals(l_skip).unwrap();
+            CommittedTraceDataV2::<CpuBackendV2> {
+                commitment: mat.commitment,
+                trace: transport_matrix_d2h_col_major(&mat.trace).unwrap(),
+                data: Arc::new(StackedPcsData {
+                    layout: mat.data.layout.clone(),
+                    matrix: transport_matrix_d2h_col_major(&evals_matrix).unwrap(),
+                    tree: transport_merkle_tree_to_host(&mat.data.tree),
+                }),
+            }
+        })
+        .collect_vec();
+    AirProvingContextV2 {
+        cached_mains,
+        common_main: trace,
+        public_values: gpu_ctx.public_values,
+    }
+}
+
 pub fn transport_matrix_d2h_col_major<T>(
     matrix: &DeviceMatrix<T>,
 ) -> Result<ColMajorMatrix<T>, MemCopyError> {
