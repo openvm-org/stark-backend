@@ -28,6 +28,7 @@ use stark_backend_v2::{
         ColMajorMatrix, DeviceMultiStarkProvingKeyV2, ProvingContextV2, stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
     },
+    utils::batch_multiplicative_inverse_serial,
 };
 use tracing::{debug, info, info_span, instrument};
 
@@ -519,10 +520,38 @@ impl<'a> LogupZerocheckGpu<'a> {
 
         let selectors_base = self.sels_per_trace_base.clone();
 
+        let log_glob_large_domain = log2_ceil_usize(global_s0_deg + 1);
+        // Length is global_large_domain * 2^l_skip, so it is easier to do on CPU
+        let glob_inv_lagrange_denoms: Vec<F> = info_span!("inv_lagrange_denoms").in_scope(|| {
+            let omega = F::two_adic_generator(log_glob_large_domain);
+            let omega_pows = omega
+                .powers()
+                .take(1 << log_glob_large_domain)
+                .collect_vec();
+            let denoms = omega_pows
+                .iter()
+                .flat_map(|&z| {
+                    self.omega_skip_pows.iter().map(move |&w_i| {
+                        let denom = z - w_i;
+                        if denom.is_zero() { F::ONE } else { denom }
+                    })
+                })
+                .collect_vec();
+            let mut inv_denoms = batch_multiplicative_inverse_serial(&denoms);
+            let inv_weight = F::ONE.halve().exp_u64(l_skip as u64);
+            for (z, inv_denoms_z) in omega_pows.iter().zip(inv_denoms.chunks_mut(1 << l_skip)) {
+                let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
+                let scale_factor = zerofier * inv_weight;
+                for v in inv_denoms_z {
+                    *v *= scale_factor;
+                }
+            }
+            inv_denoms
+        });
+
         // All (numer, denom) pairs per present AIR for logup, followed by 1 zerocheck poly per
         // present AIR
-        let mut batch_polys =
-            vec![UnivariatePoly::new(vec![EF::ZERO; global_s0_deg + 1]); 3 * num_present_airs];
+        let mut batch_s_evals = vec![None; 3 * num_present_airs];
         let d_lambda_pows = self
             .lambda_pows
             .as_ref()
@@ -565,23 +594,21 @@ impl<'a> LogupZerocheckGpu<'a> {
             let omega = F::two_adic_generator(log_large_domain);
             let omega_pows = omega.powers().take(large_domain).collect::<Vec<_>>();
             let eq_z_host: Vec<EF> = omega_pows
-                .par_iter()
+                .iter()
                 .map(|&z| eval_eq_uni(l_skip, xi[0], z.into()))
                 .collect();
             let d_eq_z = eq_z_host.to_device().unwrap();
             // Precompute eq_sharp_z (using eq_sharp instead of eq_z)
             let eq_sharp_z_host: Vec<EF> = omega_pows
-                .par_iter()
+                .iter()
                 .map(|&z| eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into()))
                 .collect();
             let d_eq_sharp_z = eq_sharp_z_host.to_device().unwrap();
-            // TODO: move this to outer loop and only do it for the largest domain
-            // Length is large_domain * 2^l_skip, so it is easier to do on CPU
-            let inv_lagrange_denoms: Vec<F> = omega_pows
-                .par_iter()
-                .flat_map(|&z| {
-                    compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, z)
-                })
+            let inv_lagrange_denoms: Vec<F> = glob_inv_lagrange_denoms
+                .chunks(1 << l_skip)
+                .step_by(1 << (log_glob_large_domain - log_large_domain))
+                .flatten()
+                .copied()
                 .collect();
             let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
 
@@ -614,8 +641,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 let host_sums = sum_buffer
                     .to_host()
                     .expect("failed to copy aggregated constraint sums back to host");
-                batch_polys[2 * num_present_airs + trace_idx] =
-                    UnivariatePoly::from_evals(&host_sums);
+                batch_s_evals[2 * num_present_airs + trace_idx] = Some(host_sums);
             }
 
             let sum = evaluate_round0_interactions_gpu(
@@ -640,37 +666,43 @@ impl<'a> LogupZerocheckGpu<'a> {
                 let evals = sum
                     .to_host()
                     .expect("failed to copy interaction sums back to host");
-                let (numer, denom): (Vec<EF>, Vec<EF>) =
+                let (mut numer, denom): (Vec<EF>, Vec<EF>) =
                     evals.into_iter().map(|frac| (frac.p, frac.q)).unzip();
-                let mut numer_poly = UnivariatePoly::from_evals(&numer);
-                let denom_poly = UnivariatePoly::from_evals(&denom);
                 if n.is_negative() {
                     // normalize for lifting
                     let norm_factor = F::from_canonical_u32(1 << n.unsigned_abs()).inverse();
-                    for s in numer_poly.coeffs_mut() {
+                    for s in &mut numer {
                         *s *= norm_factor;
                     }
                 }
-                batch_polys[2 * trace_idx] = numer_poly;
-                batch_polys[2 * trace_idx + 1] = denom_poly;
+                batch_s_evals[2 * trace_idx] = Some(numer);
+                batch_s_evals[2 * trace_idx + 1] = Some(denom);
             }
         }
         self.mem
             .emit_metrics_with_label("prover.batch_constraints.round0");
-
-        for poly in &mut batch_polys {
-            #[cfg(debug_assertions)]
-            if poly.coeffs().len() > global_s0_deg + 1 {
-                assert!(
-                    poly.coeffs()[global_s0_deg + 1..]
-                        .iter()
-                        .all(|&coeff| coeff == EF::ZERO)
-                );
-            }
-            poly.coeffs_mut().resize(global_s0_deg + 1, EF::ZERO);
-        }
-
-        batch_polys
+        info_span!("chirp_z_transform").in_scope(|| {
+            batch_s_evals
+                .into_par_iter()
+                .map(|s_evals| {
+                    if let Some(s_evals) = s_evals {
+                        let mut poly = UnivariatePoly::from_evals(&s_evals);
+                        #[cfg(debug_assertions)]
+                        if poly.coeffs().len() > global_s0_deg + 1 {
+                            assert!(
+                                poly.coeffs()[global_s0_deg + 1..]
+                                    .iter()
+                                    .all(|&coeff| coeff == EF::ZERO)
+                            );
+                        }
+                        poly.coeffs_mut().resize(global_s0_deg + 1, EF::ZERO);
+                        poly
+                    } else {
+                        UnivariatePoly::new(vec![EF::ZERO; global_s0_deg + 1])
+                    }
+                })
+                .collect()
+        })
     }
 
     // Note: there are no gpu sync points in this function, so span does not indicate kernel times
