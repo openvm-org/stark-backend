@@ -37,6 +37,8 @@ impl From<Round0PrepError> for Round0EvalError {
 pub enum FractionalSumcheckError {
     #[error("nonzero root sum: p={p}, q={q}")]
     NonzeroRootSum { p: EF, q: EF },
+    #[error("bit reversal cuda error: {0}")]
+    BitReversal(CudaError),
     #[error("segment tree cuda error: {0}")]
     SegmentTree(CudaError),
     #[error("frac_compute_round cuda error: {0}")]
