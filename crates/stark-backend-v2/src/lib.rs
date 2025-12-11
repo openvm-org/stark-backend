@@ -14,6 +14,7 @@ pub mod poly_common;
 pub mod poseidon2;
 pub mod proof;
 pub mod prover;
+pub mod utils;
 pub mod v1_shims;
 pub mod verifier;
 
