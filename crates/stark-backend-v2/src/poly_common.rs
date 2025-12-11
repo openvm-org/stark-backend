@@ -7,7 +7,10 @@ use p3_field::{ExtensionField, Field, FieldAlgebra, TwoAdicField};
 use p3_util::log2_ceil_usize;
 use tracing::instrument;
 
-use crate::{prover::poly::evals_eq_hypercube, utils::batch_multiplicative_inverse_serial};
+use crate::{
+    prover::poly::{evals_eq_hypercube, evals_eq_hypercube_serial},
+    utils::batch_multiplicative_inverse_serial,
+};
 
 pub fn eval_eq_mle<F1, F2, F3>(x: &[F1], y: &[F2]) -> F3
 where
@@ -74,7 +77,7 @@ where
     debug_assert_eq!(omega_skip_pows.len(), 1 << l_skip);
 
     let mut res = EF::ZERO;
-    let eq_xi_evals = evals_eq_hypercube(xi_1);
+    let eq_xi_evals = evals_eq_hypercube_serial(xi_1);
     for (&omega_pow, eq_xi_eval) in omega_skip_pows.iter().zip(eq_xi_evals) {
         res += eval_eq_uni(l_skip, z, omega_pow.into()) * eq_xi_eval;
     }
