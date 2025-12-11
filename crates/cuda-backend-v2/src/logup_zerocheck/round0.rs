@@ -130,7 +130,6 @@ pub fn evaluate_round0_constraints_gpu(
 ///
 /// `constraints` includes interaction expressions for the AIR.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::type_complexity)]
 pub fn evaluate_round0_interactions_gpu(
     pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
     symbolic: &SymbolicConstraints<F>,
