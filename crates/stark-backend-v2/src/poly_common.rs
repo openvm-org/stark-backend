@@ -2,12 +2,15 @@ use core::ops::{Add, Sub};
 use std::{iter::zip, ops::Mul};
 
 use itertools::Itertools;
-use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
+use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, FieldAlgebra, TwoAdicField};
 use p3_util::log2_ceil_usize;
 use tracing::instrument;
 
-use crate::{prover::poly::evals_eq_hypercube, utils::batch_multiplicative_inverse_serial};
+use crate::{
+    dft::Radix2BowersSerial, prover::poly::evals_eq_hypercube_serial,
+    utils::batch_multiplicative_inverse_serial,
+};
 
 pub fn eval_eq_mle<F1, F2, F3>(x: &[F1], y: &[F2]) -> F3
 where
@@ -74,7 +77,7 @@ where
     debug_assert_eq!(omega_skip_pows.len(), 1 << l_skip);
 
     let mut res = EF::ZERO;
-    let eq_xi_evals = evals_eq_hypercube(xi_1);
+    let eq_xi_evals = evals_eq_hypercube_serial(xi_1);
     for (&omega_pow, eq_xi_eval) in omega_skip_pows.iter().zip(eq_xi_evals) {
         res += eval_eq_uni(l_skip, z, omega_pow.into()) * eq_xi_eval;
     }
@@ -181,7 +184,7 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         let dft_deg = (p.len() + q.len() - 1).next_power_of_two();
         p.resize(dft_deg, F::ZERO);
         q.resize(dft_deg, F::ZERO);
-        let dft = Radix2Bowers;
+        let dft = Radix2BowersSerial;
         p = dft.dft(p);
         q = dft.dft(q);
         for (x, y) in p.iter_mut().zip(q.iter()) {
@@ -196,7 +199,11 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
     /// Given z and n, find product (1 - x)(1 - zx)...(1 - z^{n-1}x).
     /// If n is odd, this can be trivially computed from n - 1.
     /// Otherwise, F_n(x) = F_{n/2}(x) * F_{n/2}(x * z^{n/2}).
-    fn geometric_sequence_linear_product_helper(dft: &Radix2Bowers, z: F, n: usize) -> Vec<F> {
+    fn geometric_sequence_linear_product_helper(
+        dft: &Radix2BowersSerial,
+        z: F,
+        n: usize,
+    ) -> Vec<F> {
         if n == 1 {
             vec![F::ONE, F::NEG_ONE]
         } else if n % 2 == 1 {
@@ -279,7 +286,7 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         let mut rhs = Self::chirp_z(&y, omega, n);
 
         // Now we need the denominator in the left-hand side.
-        let dft = Radix2Bowers;
+        let dft = Radix2BowersSerial;
         let mut denom = Self::geometric_sequence_linear_product_helper(&dft, omega, n);
 
         let len = (denom.len() + rhs.len() - 1).next_power_of_two();
@@ -384,7 +391,7 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
     /// Requires that `evals.len()` is a power of 2.
     pub fn from_evals_idft(evals: &[F]) -> Self {
         // NOTE[jpw]: Use Bowers instead of Dit to avoid RefCell
-        let dft = Radix2Bowers;
+        let dft = Radix2BowersSerial;
         let coeffs = dft.idft(evals.to_vec());
         Self(coeffs)
     }
