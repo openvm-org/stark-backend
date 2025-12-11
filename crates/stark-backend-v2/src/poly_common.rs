@@ -3,11 +3,11 @@ use std::{iter::zip, ops::Mul};
 
 use itertools::Itertools;
 use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
-use p3_field::{batch_multiplicative_inverse, ExtensionField, Field, FieldAlgebra, TwoAdicField};
+use p3_field::{ExtensionField, Field, FieldAlgebra, TwoAdicField};
 use p3_util::log2_ceil_usize;
 use tracing::instrument;
 
-use crate::prover::poly::evals_eq_hypercube;
+use crate::{prover::poly::evals_eq_hypercube, utils::batch_multiplicative_inverse_serial};
 
 pub fn eval_eq_mle<F1, F2, F3>(x: &[F1], y: &[F2]) -> F3
 where
@@ -172,7 +172,7 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         let omega_powers = (0..(s as u64))
             .map(|i| omega.exp_u64(i * (i.saturating_sub(1)) / 2))
             .collect_vec();
-        let omega_powers_inv = batch_multiplicative_inverse(&omega_powers);
+        let omega_powers_inv = batch_multiplicative_inverse_serial(&omega_powers);
         let mut p = zip(poly, &omega_powers_inv)
             .map(|(&c, &inv)| c * inv)
             .collect_vec();
@@ -323,7 +323,7 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         }
 
         // Step 2: Batch invert all denominators
-        let inv_denominators = batch_multiplicative_inverse(&denominators);
+        let inv_denominators = batch_multiplicative_inverse_serial(&denominators);
 
         // Step 3: Build coefficient form by accumulating Lagrange basis polynomials
         let mut coeffs = vec![F::ZERO; len];
