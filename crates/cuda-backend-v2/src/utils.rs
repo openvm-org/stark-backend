@@ -1,5 +1,6 @@
 use itertools::Itertools;
-use p3_field::{ExtensionField, Field, batch_multiplicative_inverse};
+use p3_field::{ExtensionField, Field};
+use stark_backend_v2::utils::batch_multiplicative_inverse_serial;
 
 // https://hackmd.io/@vbuterin/barycentric_evaluation#Special-case-roots-of-unity
 pub fn compute_barycentric_inv_lagrange_denoms<F: Field, EF: ExtensionField<F>>(
@@ -15,7 +16,7 @@ pub fn compute_barycentric_inv_lagrange_denoms<F: Field, EF: ExtensionField<F>>(
             if denom.is_zero() { EF::ONE } else { denom }
         })
         .collect_vec();
-    let mut inv_denoms = batch_multiplicative_inverse(&denoms);
+    let mut inv_denoms = batch_multiplicative_inverse_serial(&denoms);
     let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
     let denominator = F::from_canonical_usize(1 << l_skip);
     let scale_factor = zerofier * denominator.inverse();
