@@ -11,11 +11,12 @@ pub struct MainMatrixPtrs<T> {
 
 extern "C" {
     // gkr.cu
+    fn _frac_bitrev_ext(buffer: *mut EF, n: usize) -> i32;
+
     fn _frac_build_tree_layer(
         numerators: *mut EF,
         denominators: *mut EF,
         layer_size: usize,
-        step: usize,
         revert: bool,
     ) -> i32;
 
@@ -25,23 +26,16 @@ extern "C" {
         eq_xi: *const EF,
         pq_nums: *mut EF,
         pq_denoms: *mut EF,
-        stride: usize,
-        step: usize,
-        pq_extra_step: usize,
+        eq_size: usize,
+        pq_size: usize,
         lambda: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
     ) -> i32;
 
-    fn _frac_fold_columns(buffer: *mut std::ffi::c_void, stride: usize, step: usize, r: EF) -> i32;
+    fn _frac_fold_columns(buffer: *mut std::ffi::c_void, size: usize, r: EF) -> i32;
 
-    fn _frac_fold_ext_columns(
-        buffer: *mut EF,
-        stride: usize,
-        step: usize,
-        r_or_r_inv: EF,
-        revert: bool,
-    ) -> i32;
+    fn _frac_fold_ext_columns(buffer: *mut EF, size: usize, r_or_r_inv: EF, revert: bool) -> i32;
 
     fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
 
@@ -272,11 +266,14 @@ pub unsafe fn interpolate_columns_gpu(
     ))
 }
 
+pub unsafe fn frac_bitrev_ext(buffer: &mut DeviceBuffer<EF>, n: usize) -> Result<(), CudaError> {
+    CudaError::from_result(_frac_bitrev_ext(buffer.as_mut_ptr(), n))
+}
+
 pub unsafe fn frac_build_tree_layer(
     numerators: &mut DeviceBuffer<EF>,
     denominators: &mut DeviceBuffer<EF>,
     layer_size: usize,
-    step: usize,
     revert: bool,
 ) -> Result<(), CudaError> {
     debug_assert!(numerators.len() >= layer_size);
@@ -285,7 +282,6 @@ pub unsafe fn frac_build_tree_layer(
         numerators.as_mut_ptr(),
         denominators.as_mut_ptr(),
         layer_size,
-        step,
         revert,
     ))
 }
@@ -295,9 +291,8 @@ pub unsafe fn frac_compute_round(
     eq_xi: &DeviceBuffer<EF>,
     pq_nums: &mut DeviceBuffer<EF>,
     pq_denoms: &mut DeviceBuffer<EF>,
-    stride: usize,
-    step: usize,
-    pq_extra_step: usize,
+    eq_size: usize,
+    pq_size: usize,
     lambda: EF,
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
@@ -305,7 +300,7 @@ pub unsafe fn frac_compute_round(
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(stride as u32);
+        let required = _frac_compute_round_temp_buffer_size(eq_size as u32);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -315,9 +310,8 @@ pub unsafe fn frac_compute_round(
         eq_xi.as_ptr(),
         pq_nums.as_mut_ptr(),
         pq_denoms.as_mut_ptr(),
-        stride,
-        step,
-        pq_extra_step,
+        eq_size,
+        pq_size,
         lambda,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
@@ -326,19 +320,17 @@ pub unsafe fn frac_compute_round(
 
 pub unsafe fn frac_fold_columns(
     buffer: &mut DeviceBuffer<EF>,
-    stride: usize,
-    step: usize,
+    size: usize,
     r: EF,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_fold_columns(buffer.as_mut_raw_ptr(), stride, step, r))
+    CudaError::from_result(_frac_fold_columns(buffer.as_mut_raw_ptr(), size, r))
 }
 
 /// Folds matrix of `Frac<EF>` but treats `input` and `output` as **row-major** matrices in
 /// `Frac<EF>`. The numerator and denominator are folded pair-wise.
 pub unsafe fn fold_ef_columns(
     buffer: &mut DeviceBuffer<EF>,
-    stride: usize,
-    step: usize,
+    size: usize,
     r: EF,
     revert: bool,
 ) -> Result<(), CudaError> {
@@ -350,8 +342,7 @@ pub unsafe fn fold_ef_columns(
     };
     CudaError::from_result(_frac_fold_ext_columns(
         buffer.as_mut_ptr(),
-        stride,
-        step,
+        size,
         r_or_r_inv,
         revert,
     ))
