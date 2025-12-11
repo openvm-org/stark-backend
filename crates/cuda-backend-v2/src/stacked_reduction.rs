@@ -7,10 +7,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use openvm_stark_backend::{
-    p3_maybe_rayon::prelude::{IntoParallelRefIterator, ParallelIterator},
-    prover::MatrixDimensions,
-};
+use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::{FieldAlgebra, TwoAdicField};
 use p3_util::log2_ceil_usize;
 use stark_backend_v2::{
@@ -416,7 +413,7 @@ impl StackedReductionGpu {
         let omega_pows = omega.powers().take(1 << log_domain_size).collect_vec();
         // Default packets for n >= 0
         let default_packets = omega_pows
-            .par_iter()
+            .iter()
             .map(|&z| {
                 let eq_uni_r0 = eval_eq_uni(l_skip, z.into(), self.r_0);
                 let eq_uni_r0_rot = eval_eq_uni(l_skip, z.into(), self.r_0 * omega_skip);
@@ -431,7 +428,7 @@ impl StackedReductionGpu {
         let d_default_packets = default_packets.to_device().unwrap();
 
         let inv_lagrange_denoms = omega_pows
-            .par_iter()
+            .iter()
             .flat_map(|&z| {
                 compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, z)
             })
