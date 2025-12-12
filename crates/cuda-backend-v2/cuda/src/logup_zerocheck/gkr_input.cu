@@ -63,8 +63,7 @@ __device__ __forceinline__ FpExt evaluate_dag_entry_gkr(
 
 template <bool GLOBAL>
 __global__ void evaluate_interactions_gkr_kernel(
-    FpExt *__restrict__ d_numerators,
-    FpExt *__restrict__ d_denominators,
+    FracExt *__restrict__ d_fracs,
     const Fp *__restrict__ d_preprocessed,
     const uint64_t *__restrict__ d_main,
     const FpExt *__restrict__ d_challenges,
@@ -185,8 +184,7 @@ __global__ void evaluate_interactions_gkr_kernel(
                         // Numerator is computed as FpExt through DAG evaluation
                         // For logup, the numerator (count) should be in the base field
                         // Extract the base field component (first element of extension field)
-                        d_numerators[out_idx] = FpExt(numerator.elems[0]);
-                        d_denominators[out_idx] = denom;
+                        d_fracs[out_idx] = {FpExt(numerator.elems[0]), denom};
                     } else {
                         numerator = result;
                     }
@@ -204,8 +202,7 @@ __global__ void evaluate_interactions_gkr_kernel(
 
 extern "C" int _logup_gkr_input_eval(
     bool is_global,
-    FpExt *d_numerators,
-    FpExt *d_denominators,
+    FracExt *d_fracs,
     const Fp *d_preprocessed,
     const uint64_t *d_main,
     const FpExt *d_challenges,
@@ -221,8 +218,7 @@ extern "C" int _logup_gkr_input_eval(
     auto [grid, block] = kernel_launch_params(count, 256);
     if (is_global) {
         evaluate_interactions_gkr_kernel<true><<<grid, block>>>(
-            d_numerators,
-            d_denominators,
+            d_fracs,
             d_preprocessed,
             d_main,
             d_challenges,
@@ -236,8 +232,7 @@ extern "C" int _logup_gkr_input_eval(
         );
     } else {
         evaluate_interactions_gkr_kernel<false><<<grid, block>>>(
-            d_numerators,
-            d_denominators,
+            d_fracs,
             d_preprocessed,
             d_main,
             d_challenges,

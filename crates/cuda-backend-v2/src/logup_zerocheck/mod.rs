@@ -125,7 +125,7 @@ where
         .mem
         .emit_metrics_with_label("prover.before_gkr_input_evals");
     prover.mem.reset_peak();
-    let (input_numerators, input_denominators) = if has_interactions {
+    let inputs = if has_interactions {
         log_gkr_input_evals(
             &prover.trace_interactions,
             mpk,
@@ -137,18 +137,13 @@ where
         )
         .expect("failed to evaluate interactions on device")
     } else {
-        (DeviceBuffer::new(), DeviceBuffer::new())
+        DeviceBuffer::new()
     };
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
-    let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(
-        transcript,
-        input_numerators,
-        input_denominators,
-        true,
-        &mut prover.mem,
-    )
-    .expect("failed to run fractional sumcheck on GPU");
+    let (frac_sum_proof, mut xi) =
+        fractional_sumcheck_gpu(transcript, inputs, true, &mut prover.mem)
+            .expect("failed to run fractional sumcheck on GPU");
     while xi.len() != l_skip + n_global {
         xi.push(transcript.sample_ext());
     }
