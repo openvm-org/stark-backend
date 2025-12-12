@@ -5,7 +5,7 @@
 
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
-    p3_field::FieldAlgebra,
+    p3_field::PrimeCharacteristicRing,
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
 use p3_air::{Air, BaseAir};
@@ -33,12 +33,14 @@ impl<AB: PartitionedAirBuilder> Air<AB> for SumAir {
     fn eval(&self, builder: &mut AB) {
         assert_eq!(builder.cached_mains().len(), 1);
 
-        let x = builder.common_main().row_slice(0)[0];
-        let ys = builder.cached_mains()[0].row_slice(0);
+        let x = builder.common_main().row_slice(0).expect("common main row")[0].clone();
+        let ys = builder.cached_mains()[0]
+            .row_slice(0)
+            .expect("cached main row");
 
         let mut y_sum = AB::Expr::ZERO;
-        for &y in &*ys {
-            y_sum = y_sum + y;
+        for y in ys.iter() {
+            y_sum += y.clone();
         }
         drop(ys);
 

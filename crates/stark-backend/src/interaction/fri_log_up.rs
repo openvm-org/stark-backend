@@ -3,7 +3,7 @@ use std::{array, borrow::Borrow, cmp::max, iter::zip, marker::PhantomData, mem};
 use itertools::Itertools;
 use p3_air::ExtensionBuilder;
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_field::{ExtensionField, Field, FieldAlgebra};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -117,7 +117,7 @@ where
         // Proof of work phase to boost logup security.
         let logup_pow_witness = challenger.grind(self.log_up_params.log_up_pow_bits);
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
-            array::from_fn(|_| challenger.sample_ext_element::<Challenge>());
+            array::from_fn(|_| challenger.sample_algebra_element::<Challenge>());
 
         let after_challenge_trace_per_air = info_span!("generate_perm_trace").in_scope(|| {
             Self::generate_after_challenge_traces_per_air(
@@ -132,7 +132,7 @@ where
 
         // Challenger needs to observe what is exposed (cumulative_sums)
         for cumulative_sum in cumulative_sum_per_air.iter().flatten() {
-            challenger.observe_slice(cumulative_sum.as_base_slice());
+            challenger.observe_slice(cumulative_sum.as_basis_coefficients_slice());
         }
 
         let exposed_values_per_air = cumulative_sum_per_air
@@ -189,12 +189,12 @@ where
         }
 
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
-            array::from_fn(|_| challenger.sample_ext_element::<Challenge>());
+            array::from_fn(|_| challenger.sample_algebra_element::<Challenge>());
 
         for exposed_values_per_phase in exposed_values_per_phase_per_air.iter() {
             if let Some(exposed_values) = exposed_values_per_phase.first() {
                 for exposed_value in exposed_values {
-                    challenger.observe_slice(exposed_value.as_base_slice());
+                    challenger.observe_slice(exposed_value.as_basis_coefficients_slice());
                 }
             }
         }
@@ -278,6 +278,7 @@ where
                 perm_trace.as_ref().map(|perm_trace| {
                     *perm_trace
                         .row_slice(perm_trace.height() - 1)
+                        .unwrap()
                         .last()
                         .unwrap()
                 })
@@ -378,7 +379,7 @@ where
                 let evaluator = evaluator(row_offset + n);
                 for (denom, interaction) in denom_row.iter_mut().zip(all_interactions.iter()) {
                     debug_assert!(interaction.message.len() <= betas.len());
-                    let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
+                    let b = F::from_u32(interaction.bus_index as u32 + 1);
                     let mut fields = interaction.message.iter();
                     *denom = alpha
                         + evaluator.eval_expr(fields.next().expect("fields should not be empty"));
@@ -462,7 +463,10 @@ pub fn eval_fri_log_up_phase<AB>(
     let rand_elems = builder.permutation_randomness();
 
     let perm = builder.permutation();
-    let (perm_local, perm_next) = (perm.row_slice(0), perm.row_slice(1));
+    let (perm_local, perm_next) = (
+        perm.row_slice(0).expect("window should have two elements"),
+        perm.row_slice(1).expect("window should have two elements"),
+    );
     let perm_local: &[AB::VarEF] = (*perm_local).borrow();
     let perm_next: &[AB::VarEF] = (*perm_next).borrow();
 
@@ -493,9 +497,10 @@ pub fn eval_fri_log_up_phase<AB>(
                     "fields should not be empty"
                 );
                 let mut field_hash = AB::ExprEF::ZERO;
-                let b = AB::Expr::from_canonical_u32(interaction.bus_index as u32 + 1);
+                let b = AB::Expr::from_u32(interaction.bus_index as u32 + 1);
                 for (field, beta) in interaction.message.iter().chain([&b]).zip(&betas) {
-                    field_hash += beta.clone() * field.clone();
+                    let field_ext: AB::ExprEF = field.clone().into();
+                    field_hash += beta.clone() * field_ext;
                 }
                 field_hash + alpha.into()
             })

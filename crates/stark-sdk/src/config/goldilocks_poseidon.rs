@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     },
 };
 use p3_dft::Radix2DitParallel;
-use p3_fri::{FriConfig, TwoAdicFriPcs};
+use p3_fri::{FriParameters as P3FriParameters, TwoAdicFriPcs};
 use p3_goldilocks::{Goldilocks, MdsMatrixGoldilocks};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_poseidon::Poseidon;
@@ -180,16 +180,18 @@ where
         fri_params,
         log_up_params,
     } = security_params;
-    let fri_config = FriConfig {
+    let fri_config = P3FriParameters {
         log_blowup: fri_params.log_blowup,
         log_final_poly_len: fri_params.log_final_poly_len,
         num_queries: fri_params.num_queries,
-        proof_of_work_bits: fri_params.proof_of_work_bits,
+        commit_proof_of_work_bits: fri_params.commit_proof_of_work_bits,
+        query_proof_of_work_bits: fri_params.query_proof_of_work_bits,
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
+    let challenger = Challenger::new(perm.clone());
     let rap_phase = FriLogUpPhase::new(log_up_params, fri_params.log_blowup);
-    GoldilocksPermutationConfig::new(pcs, rap_phase)
+    GoldilocksPermutationConfig::new(pcs, challenger, rap_phase)
 }
 
 pub fn random_perm() -> Perm {

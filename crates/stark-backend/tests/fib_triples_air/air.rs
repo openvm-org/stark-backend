@@ -30,27 +30,36 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for FibonacciAir {
         let b = pis[1];
         let x = pis[2];
 
-        let (local, next) = (main.row_slice(0), main.row_slice(1));
+        let (local, next) = (
+            main.row_slice(0).expect("window should have two elements"),
+            main.row_slice(1).expect("window should have two elements"),
+        );
         let local: &FibonacciCols<AB::Var> = (*local).borrow();
         let next: &FibonacciCols<AB::Var> = (*next).borrow();
 
         let mut when_first_row = builder.when_first_row();
 
-        when_first_row.assert_eq(local.left, a);
-        when_first_row.assert_eq(local.middle, b);
-        when_first_row.assert_eq(local.right, local.left + local.middle);
+        when_first_row.assert_eq(local.left.clone(), a);
+        when_first_row.assert_eq(local.middle.clone(), b);
+        when_first_row.assert_eq(
+            local.right.clone(),
+            local.left.clone() + local.middle.clone(),
+        );
 
         let mut when_transition = builder.when_transition();
 
         // a' <- b
-        when_transition.assert_eq(local.middle, next.left);
+        when_transition.assert_eq(local.middle.clone(), next.left.clone());
 
         // b' <- c
-        when_transition.assert_eq(local.right, next.middle);
+        when_transition.assert_eq(local.right.clone(), next.middle.clone());
 
         // c' <- b + c
-        when_transition.assert_eq(local.middle + local.right, next.right);
+        when_transition.assert_eq(
+            local.middle.clone() + local.right.clone(),
+            next.right.clone(),
+        );
 
-        builder.when_last_row().assert_eq(local.right, x);
+        builder.when_last_row().assert_eq(local.right.clone(), x);
     }
 }

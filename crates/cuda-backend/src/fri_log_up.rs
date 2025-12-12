@@ -20,7 +20,7 @@ use openvm_stark_backend::{
     p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger},
     prover::{hal::MatrixDimensions, types::PairView},
 };
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 
 use crate::{
     base::DeviceMatrix,
@@ -66,7 +66,7 @@ impl FriLogUpPhaseGpu {
 
         let logup_pow_witness = challenger.grind(self.log_up_params.log_up_pow_bits);
         let challenges: [EF; STARK_LU_NUM_CHALLENGES] =
-            array::from_fn(|_| challenger.sample_ext_element::<EF>());
+            array::from_fn(|_| challenger.sample_algebra_element::<EF>());
 
         let (after_challenge_trace_per_air, cumulative_sum_per_air) =
             gpu_metrics_span("generate_perm_trace_time_ms", || {
@@ -81,7 +81,8 @@ impl FriLogUpPhaseGpu {
 
         // Challenger needs to observe what is exposed (cumulative_sums)
         for cumulative_sum in cumulative_sum_per_air.iter().flatten() {
-            let base_slice = <EF as FieldExtensionAlgebra<F>>::as_base_slice(cumulative_sum);
+            let base_slice =
+                <EF as BasedVectorSpace<F>>::as_basis_coefficients_slice(cumulative_sum);
             challenger.observe_slice(base_slice);
         }
 
@@ -180,9 +181,7 @@ impl FriLogUpPhaseGpu {
                     .map(|&interaction_idx| {
                         let mut interaction: SymbolicInteraction<F> =
                             all_interactions[interaction_idx].clone();
-                        let b = SymbolicExpression::from_canonical_u32(
-                            interaction.bus_index as u32 + 1,
-                        );
+                        let b = SymbolicExpression::from_u32(interaction.bus_index as u32 + 1);
                         let betas = symbolic_challenges[alphas_len..].to_vec();
                         debug_assert!(interaction.message.len() <= betas.len());
                         let mut fields = interaction.message.iter();
