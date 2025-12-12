@@ -11,21 +11,13 @@ pub struct MainMatrixPtrs<T> {
 
 extern "C" {
     // gkr.cu
-    fn _frac_bitrev_ext(buffer: *mut EF, n: usize) -> i32;
-
-    fn _frac_build_tree_layer(
-        numerators: *mut EF,
-        denominators: *mut EF,
-        layer_size: usize,
-        revert: bool,
-    ) -> i32;
+    fn _frac_build_tree_layer(layer: *mut Frac<EF>, layer_size: usize, revert: bool) -> i32;
 
     pub fn _frac_compute_round_temp_buffer_size(stride: u32) -> u32;
 
     fn _frac_compute_round(
         eq_xi: *const EF,
-        pq_nums: *mut EF,
-        pq_denoms: *mut EF,
+        pq_buffer: *mut Frac<EF>,
         eq_size: usize,
         pq_size: usize,
         lambda: EF,
@@ -35,15 +27,16 @@ extern "C" {
 
     fn _frac_fold_columns(buffer: *mut std::ffi::c_void, size: usize, r: EF) -> i32;
 
-    fn _frac_fold_ext_columns(buffer: *mut EF, size: usize, r_or_r_inv: EF, revert: bool) -> i32;
+    fn _frac_fold_fpext_columns(
+        buffer: *mut Frac<EF>,
+        size: usize,
+        r_or_r_inv: EF,
+        revert: bool,
+    ) -> i32;
 
     fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
 
     fn _frac_vector_scalar_multiply_ext_fp(frac_vec: *mut Frac<EF>, scalar: F, length: u32) -> i32;
-
-    fn _frac_add_alpha_mixed(denominators: *mut EF, len: usize, alpha: EF) -> i32;
-
-    fn _frac_vector_scalar_multiply_ext(numerators: *mut EF, scalar: F, length: u32) -> i32;
 
     // utils.cu
     fn _fold_ple_from_evals(
@@ -95,8 +88,7 @@ extern "C" {
     // gkr_input.cu
     fn _logup_gkr_input_eval(
         is_global: bool,
-        numerators: *mut EF,
-        denominators: *mut EF,
+        fracs: *mut Frac<EF>,
         preprocessed: *const std::ffi::c_void,
         partitioned_main: *const u64,
         challenges: *const std::ffi::c_void,
@@ -266,21 +258,14 @@ pub unsafe fn interpolate_columns_gpu(
     ))
 }
 
-pub unsafe fn frac_bitrev_ext(buffer: &mut DeviceBuffer<EF>, n: usize) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_bitrev_ext(buffer.as_mut_ptr(), n))
-}
-
 pub unsafe fn frac_build_tree_layer(
-    numerators: &mut DeviceBuffer<EF>,
-    denominators: &mut DeviceBuffer<EF>,
+    layer: &mut DeviceBuffer<Frac<EF>>,
     layer_size: usize,
     revert: bool,
 ) -> Result<(), CudaError> {
-    debug_assert!(numerators.len() >= layer_size);
-    debug_assert!(denominators.len() >= layer_size);
+    debug_assert!(layer.len() >= layer_size);
     CudaError::from_result(_frac_build_tree_layer(
-        numerators.as_mut_ptr(),
-        denominators.as_mut_ptr(),
+        layer.as_mut_ptr(),
         layer_size,
         revert,
     ))
@@ -289,8 +274,7 @@ pub unsafe fn frac_build_tree_layer(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_compute_round(
     eq_xi: &DeviceBuffer<EF>,
-    pq_nums: &mut DeviceBuffer<EF>,
-    pq_denoms: &mut DeviceBuffer<EF>,
+    pq_buffer: &mut DeviceBuffer<Frac<EF>>,
     eq_size: usize,
     pq_size: usize,
     lambda: EF,
@@ -308,8 +292,7 @@ pub unsafe fn frac_compute_round(
     }
     CudaError::from_result(_frac_compute_round(
         eq_xi.as_ptr(),
-        pq_nums.as_mut_ptr(),
-        pq_denoms.as_mut_ptr(),
+        pq_buffer.as_mut_ptr(),
         eq_size,
         pq_size,
         lambda,
@@ -328,8 +311,8 @@ pub unsafe fn frac_fold_columns(
 
 /// Folds matrix of `Frac<EF>` but treats `input` and `output` as **row-major** matrices in
 /// `Frac<EF>`. The numerator and denominator are folded pair-wise.
-pub unsafe fn fold_ef_columns(
-    buffer: &mut DeviceBuffer<EF>,
+pub unsafe fn fold_ef_frac_columns(
+    buffer: &mut DeviceBuffer<Frac<EF>>,
     size: usize,
     r: EF,
     revert: bool,
@@ -340,7 +323,7 @@ pub unsafe fn fold_ef_columns(
     } else {
         r
     };
-    CudaError::from_result(_frac_fold_ext_columns(
+    CudaError::from_result(_frac_fold_fpext_columns(
         buffer.as_mut_ptr(),
         size,
         r_or_r_inv,
@@ -394,8 +377,7 @@ pub unsafe fn compute_eq_sharp(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn logup_gkr_input_eval(
     is_global: bool,
-    numerators: *mut EF,
-    denominators: *mut EF,
+    fracs: *mut Frac<EF>,
     preprocessed: &DeviceBuffer<F>,
     partitioned_main: &DeviceBuffer<u64>,
     challenges: &DeviceBuffer<EF>,
@@ -409,8 +391,7 @@ pub unsafe fn logup_gkr_input_eval(
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_gkr_input_eval(
         is_global,
-        numerators,
-        denominators,
+        fracs,
         preprocessed.as_raw_ptr(),
         partitioned_main.as_ptr(),
         challenges.as_raw_ptr(),
@@ -426,17 +407,6 @@ pub unsafe fn logup_gkr_input_eval(
 
 pub unsafe fn frac_add_alpha(data: &DeviceBuffer<Frac<EF>>, alpha: EF) -> Result<(), CudaError> {
     CudaError::from_result(_frac_add_alpha(data.as_mut_raw_ptr(), data.len(), alpha))
-}
-
-pub unsafe fn frac_add_alpha_mixed(
-    denominators: &DeviceBuffer<EF>,
-    alpha: EF,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_add_alpha_mixed(
-        denominators.as_mut_ptr(),
-        denominators.len(),
-        alpha,
-    ))
 }
 
 /// # Safety
@@ -677,14 +647,6 @@ pub unsafe fn frac_vector_scalar_multiply_ext_fp(
     CudaError::from_result(_frac_vector_scalar_multiply_ext_fp(
         frac_vec, scalar, length,
     ))
-}
-
-pub unsafe fn frac_vector_scalar_multiply_ext(
-    numerators: *mut EF,
-    scalar: F,
-    length: u32,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_vector_scalar_multiply_ext(numerators, scalar, length))
 }
 
 /// Vertically repeats the rows of `input` and writes them to `out`. Both matrices are column-major.
