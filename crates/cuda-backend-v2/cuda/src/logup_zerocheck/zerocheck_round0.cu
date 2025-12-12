@@ -1,40 +1,40 @@
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <utility>
+#include <vector_types.h>
+
 #include "codec.cuh"
 #include "dag_entry.cuh"
 #include "fp.h"
 #include "fpext.h"
-#include "frac_ext.cuh"
 #include "launcher.cuh"
 #include "sumcheck.cuh"
-#include "zerocheck_utils.cuh"
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <utility>
-#include <vector_types.h>
+#include "utils.cuh"
 
 using namespace symbolic_dag;
 
-namespace logup_bary_round0 {
-
-// NOTE[jpw]: keeping separate from zerocheck so it can be tuned separately
-constexpr uint32_t BUFFER_THRESHOLD = 16;
-
-// Device function equivalent to helper.eval_interactions without eq_* parts
-// This computes the interaction numerator and denominator sums (weighted by eq_3b)
-// The eq_* multiplication is done separately in the kernel
+namespace zerocheck_round0 {
+// Device function equivalent to helper.acc_constraints without eq_* parts
+// This computes the constraint sum: sum(lambda_i * constraint_i) for all constraints
 template <bool GLOBAL>
-__device__ __forceinline__ void bary_acc_interactions(
+__device__ __forceinline__ FpExt acc_constraints(
     const DagPrismEvalContext &eval_ctx,
-    const FpExt *__restrict__ numer_weights,
-    const FpExt *__restrict__ denom_weights,
+    const FpExt *__restrict__ d_lambda_pows,
+    const uint32_t *__restrict__ d_lambda_indices,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
-    Fp *__restrict__ local_buffer,
-    FpExt &numer_sum,
-    FpExt &denom_sum
+    const size_t *__restrict__ d_used_nodes,
+    size_t used_nodes_len,
+    size_t lambda_len,
+    Fp *__restrict__ local_buffer
 ) {
-    // TODO: duplicate from bary_acc_constraints, make into function
+    size_t lambda_idx = 0;
+    FpExt constraint_sum(Fp::zero());
+
     for (size_t node = 0; node < rules_len; ++node) {
         Rule rule = d_rules[node];
         DecodedRule decoded = decode_rule(rule);
@@ -84,34 +84,41 @@ __device__ __forceinline__ void bary_acc_interactions(
         }
 
         if (decoded.is_constraint) {
-            numer_sum += numer_weights[node] * result;
-            denom_sum += denom_weights[node] * result;
+            while (lambda_idx < lambda_len && lambda_idx < used_nodes_len &&
+                   d_used_nodes[lambda_idx] == node) {
+                uint32_t mapped_idx = d_lambda_indices != nullptr
+                                          ? d_lambda_indices[lambda_idx]
+                                          : static_cast<uint32_t>(lambda_idx);
+                FpExt lambda = d_lambda_pows[mapped_idx];
+                lambda_idx++;
+                constraint_sum += lambda * result;
+            }
         }
     }
+
+    return constraint_sum;
 }
 
-// ============================================================================
-// KERNELS
-// ============================================================================
+constexpr uint32_t BUFFER_THRESHOLD = 16;
 
-// Round0 phase interactions kernel (for sumcheck round0)
-// TODO: make a struct for arguments shared with zerocheck_bary_evaluate_constraints_kernel
 template <bool GLOBAL>
-__global__ void logup_r0_bary_eval_interactions_kernel(
-    FracExt *__restrict__ tmp_sums_buffer, // [blockDim.y * gridDim.y][large_domain]
+__global__ void zerocheck_bary_evaluate_constraints_kernel(
+    FpExt *__restrict__ tmp_sums_buffer,   // [blockDim.y * gridDim.y][large_domain]
     const Fp *__restrict__ selectors_cube, // [3][num_x]
     const Fp *__restrict__ preprocessed,
     const Fp *const *__restrict__ main_parts,
     const Fp *__restrict__ omega_skip_pows,     // [skip_domain]
     const Fp *__restrict__ inv_lagrange_denoms, // [large_domain][skip_domain]
-    const FpExt *__restrict__ eq_sharp_uni,     // [large_domain]
+    const FpExt *__restrict__ eq_uni,           // [large_domain]
     const FpExt *__restrict__ eq_cube,          // [num_x]
+    const FpExt *__restrict__ d_lambda_pows,
+    const uint32_t *__restrict__ d_lambda_indices,
     const Fp *__restrict__ public_values,
-    const FpExt *__restrict__ numer_weights,
-    const FpExt *__restrict__ denom_weights,
-    FpExt denom_sum_init,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
+    const size_t *__restrict__ d_used_nodes,
+    size_t used_nodes_len,
+    size_t lambda_len,
     uint32_t buffer_size,
     Fp *__restrict__ d_intermediates,
     uint32_t large_domain,
@@ -122,7 +129,7 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
         expansion_factor // large_domain.next_power_of_two() / skip_domain: determines when to skip barycentric eval
 ) {
     extern __shared__ char smem[];
-    FracExt *shared = reinterpret_cast<FracExt *>(smem);
+    FpExt *shared = reinterpret_cast<FpExt *>(smem);
 
     // The univariate coordinate: we need to output these
     // We assume that large_domain <= gridDim.x * blockDim.x
@@ -163,9 +170,24 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
         Fp is_first_mult = avg_gp(omega, segment_size);
         Fp is_last_mult = avg_gp(omega * eta, segment_size);
 
-        FracExt sum = {FpExt(Fp::zero()), FpExt(Fp::zero())};
-        // See zerocheck_bary_evaluate_constraints_kernel for comments
+        // Handle multiple x in same thread if there aren't enough blocks
+        // NOTE: for sumcheck we can sum over all of these
+        FpExt sum = FpExt(Fp::zero());
         for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
+            // TODO: this shouldn't be needed, never read before write
+            // if (buffer_size > 0) {
+            //     if constexpr (GLOBAL) {
+            //         for (uint32_t idx = 0; idx < buffer_size; ++idx) {
+            //             inter_buffer[idx * buffer_stride] = Fp::zero();
+            //         }
+            //     } else {
+            //         uint32_t limit = buffer_size < 16 ? buffer_size : 16;
+            //         for (uint32_t idx = 0; idx < limit; ++idx) {
+            //             local_buffer[idx] = Fp::zero();
+            //         }
+            //     }
+            // }
+
             Fp is_first = is_first_mult * selectors_cube[x_int];
             Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
             const Fp *inv_lagrange_denoms_z = inv_lagrange_denoms + z_int * skip_domain;
@@ -189,39 +211,52 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
                 expansion_factor
             };
 
-            FpExt numer = FpExt(Fp::zero());
-            FpExt denom = denom_sum_init;
-            // Compute interaction sums (without eq_* multiplication)
-            bary_acc_interactions<GLOBAL>(
-                eval_ctx, numer_weights, denom_weights, d_rules, rules_len, local_buffer, numer, denom
+            FpExt constraint_sum = acc_constraints<GLOBAL>(
+                eval_ctx,
+                d_lambda_pows,
+                d_lambda_indices,
+                d_rules,
+                rules_len,
+                d_used_nodes,
+                used_nodes_len,
+                lambda_len,
+                local_buffer
             );
-            FpExt eq_sharp = eq_sharp_uni[z_int] * eq_cube[x_int];
 
-            // Apply eq_val multiplier to both sums
-            sum.p += eq_sharp * numer;
-            sum.q += eq_sharp * denom;
+            FpExt eq_val = eq_uni[z_int] * eq_cube[x_int];
+            sum += constraint_sum * eq_val;
         }
-
         // Reduce phase: reduce all threadIdx.y in the same block, keeping z_int independent
         shared[threadIdx.y * blockDim.x + threadIdx.x] = sum;
     }
     __syncthreads();
 
     if (active_thread && threadIdx.y == 0) {
-        FracExt tile_sum = shared[threadIdx.x];
+        FpExt tile_sum = shared[threadIdx.x];
         for (int lane = 1; lane < blockDim.y; ++lane) {
-            tile_sum.p += shared[lane * blockDim.x + threadIdx.x].p;
-            tile_sum.q += shared[lane * blockDim.x + threadIdx.x].q;
+            tile_sum += shared[lane * blockDim.x + threadIdx.x];
         }
         tmp_sums_buffer[blockIdx.y * large_domain + z_int] = tile_sum;
     }
-    // TODO[jpw]: is this sync necessary?
-    __syncthreads();
 }
 
-// ============================================================================
-// LAUNCHERS
-// ============================================================================
+__global__ void fold_selectors_round0_kernel(
+    FpExt *out,
+    const Fp *in,
+    FpExt is_first,
+    FpExt is_last,
+    uint32_t num_x
+) {
+    size_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tidx >= num_x)
+        return;
+
+    out[tidx] = is_first * in[tidx];                              // is_first
+    out[2 * num_x + tidx] = is_last * in[2 * num_x + tidx];       // is_last
+    out[num_x + tidx] = FpExt(Fp::one()) - out[2 * num_x + tidx]; // is_transition
+}
+
+// Launchers
 
 constexpr uint32_t UNI_THREADS = 128; // ideally at least 2^l_skip
 constexpr uint32_t CUBE_THREADS = 4;
@@ -229,7 +264,7 @@ constexpr uint32_t MAX_TASK_SIZE =
     1 << 16; // can be tuned, higher is more parallel, but increases size of intermediate buffer
 constexpr uint32_t MAX_GRID_DIM = 65535u;
 
-inline std::pair<dim3, dim3> eval_interactions_launch_params(
+inline std::pair<dim3, dim3> eval_constraints_launch_params(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x
@@ -251,17 +286,17 @@ inline std::pair<dim3, dim3> eval_interactions_launch_params(
 }
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
-// Required length of *temp_sum_buffer in FracExt  elements
-extern "C" uint32_t _logup_r0_temp_sums_buffer_size(
+// Required length of *temp_sum_buffer in FpExt elements
+extern "C" uint32_t _zerocheck_r0_temp_sums_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x
 ) {
-    auto [grid, block] = eval_interactions_launch_params(buffer_size, large_domain, num_x);
+    auto [grid, block] = eval_constraints_launch_params(buffer_size, large_domain, num_x);
     return large_domain * grid.y;
 }
 
-extern "C" uint32_t _logup_r0_intermediates_buffer_size(
+extern "C" uint32_t _zerocheck_r0_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x
@@ -269,27 +304,29 @@ extern "C" uint32_t _logup_r0_intermediates_buffer_size(
     if (buffer_size <= BUFFER_THRESHOLD) {
         return 0;
     }
-    auto [grid, block] = eval_interactions_launch_params(buffer_size, large_domain, num_x);
+    auto [grid, block] = eval_constraints_launch_params(buffer_size, large_domain, num_x);
     uint32_t task_stride = grid.y * block.y * large_domain;
     return task_stride * buffer_size;
 }
 
-extern "C" int _logup_bary_eval_interactions_round0(
-    FracExt *tmp_sums_buffer, // [blockDim.y * gridDim.y][large_domain]
-    FracExt *output,          // [large_domain]
+extern "C" int _zerocheck_bary_eval_constraints(
+    FpExt *tmp_sums_buffer,   // [blockDim.y * gridDim.y][large_domain]
+    FpExt *output,            // [large_domain]
     const Fp *selectors_cube, // [3][num_x]
     const Fp *preprocessed,
     const Fp *const *main_parts,
     const Fp *omega_skip_pows,     // [skip_domain]
     const Fp *inv_lagrange_denoms, // [large_domain][skip_domain]
-    const FpExt *eq_sharp_uni,     // [large_domain]
+    const FpExt *eq_uni,           // [large_domain]
     const FpExt *eq_cube,          // [num_x]
+    const FpExt *d_lambda_pows,
+    const uint32_t *d_lambda_indices,
     const Fp *public_values,
-    const FpExt *numer_weights,
-    const FpExt *denom_weights,
-    FpExt denom_sum_init,
     const Rule *d_rules,
     size_t rules_len,
+    const size_t *d_used_nodes,
+    size_t used_nodes_len,
+    size_t lambda_len,
     uint32_t buffer_size,
     Fp *d_intermediates,
     uint32_t large_domain,
@@ -298,20 +335,21 @@ extern "C" int _logup_bary_eval_interactions_round0(
     uint32_t height,
     uint32_t expansion_factor
 ) {
-    auto [grid, block] = eval_interactions_launch_params(buffer_size, large_domain, num_x);
-    size_t shmem_bytes = sizeof(FracExt) * block.x * block.y;
+    auto [grid, block] = eval_constraints_launch_params(buffer_size, large_domain, num_x);
+    size_t shmem_bytes = sizeof(FpExt) * block.x * block.y;
 
 #define ARGUMENTS                                                                                  \
     tmp_sums_buffer, selectors_cube, preprocessed, main_parts, omega_skip_pows,                    \
-        inv_lagrange_denoms, eq_sharp_uni, eq_cube, public_values, numer_weights, denom_weights,   \
-        denom_sum_init, d_rules, rules_len, buffer_size, d_intermediates, large_domain,            \
-        skip_domain, num_x, height, expansion_factor
+        inv_lagrange_denoms, eq_uni, eq_cube, d_lambda_pows, d_lambda_indices, public_values,      \
+        d_rules, rules_len, d_used_nodes, used_nodes_len, lambda_len, buffer_size,                 \
+        d_intermediates, large_domain, skip_domain, num_x, height, expansion_factor
 
     if (buffer_size > BUFFER_THRESHOLD) {
-        logup_r0_bary_eval_interactions_kernel<true><<<grid, block, shmem_bytes>>>(ARGUMENTS);
+        zerocheck_bary_evaluate_constraints_kernel<true><<<grid, block, shmem_bytes>>>(ARGUMENTS);
     } else {
-        logup_r0_bary_eval_interactions_kernel<false><<<grid, block, shmem_bytes>>>(ARGUMENTS);
+        zerocheck_bary_evaluate_constraints_kernel<false><<<grid, block, shmem_bytes>>>(ARGUMENTS);
     }
+
     int err = CHECK_KERNEL();
     if (err != 0)
         return err;
@@ -320,12 +358,23 @@ extern "C" int _logup_bary_eval_interactions_round0(
     auto num_blocks = grid.y;
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
-    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FracExt);
-    // FracExt = (FpExt, FpExt) so we set block = 2 * large_domain
-    sumcheck::final_reduce_block_sums<<<2 * large_domain, reduce_block, reduce_shmem>>>(
-        reinterpret_cast<FpExt *>(tmp_sums_buffer), reinterpret_cast<FpExt *>(output), num_blocks
+    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
+    sumcheck::final_reduce_block_sums<<<large_domain, reduce_block, reduce_shmem>>>(
+        tmp_sums_buffer, output, num_blocks
     );
     return CHECK_KERNEL();
 }
 
-} // namespace logup_bary_round0
+extern "C" int _fold_selectors_round0(
+    FpExt *out,
+    const Fp *in,
+    FpExt is_first,
+    FpExt is_last,
+    uint32_t num_x
+) {
+    auto [grid, block] = kernel_launch_params(num_x);
+    fold_selectors_round0_kernel<<<grid, block>>>(out, in, is_first, is_last, num_x);
+    return CHECK_KERNEL();
+}
+
+} // namespace zerocheck_round0
