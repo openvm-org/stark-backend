@@ -3,7 +3,7 @@
 #include "frac_ext.cuh"
 #include "launcher.cuh"
 #include "sumcheck.cuh"
-#include "zerocheck_utils.cuh"
+#include "utils.cuh"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -20,10 +20,7 @@ constexpr int GKR_S_DEG = 3;
 // ============================================================================
 // KERNELS
 // ============================================================================
-__global__ void frac_bitrev_ext_kernel(
-    FpExt* __restrict__ buffer,
-    uint32_t const log_n
-) {
+__global__ void frac_bitrev_ext_kernel(FpExt *__restrict__ buffer, uint32_t const log_n) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (1 << log_n)) {
         return;
@@ -234,10 +231,7 @@ __global__ void frac_vector_scalar_multiply_ext_kernel(
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
-extern "C" int _frac_bitrev_ext(
-    FpExt* buffer,
-    size_t n
-) {
+extern "C" int _frac_bitrev_ext(FpExt *buffer, size_t n) {
     if (n == 0) {
         return 0;
     }
@@ -263,11 +257,9 @@ extern "C" int _frac_build_tree_layer(
 
     auto [grid, block] = kernel_launch_params(layer_size);
     if (revert) {
-        frac_build_tree_layer_kernel<true>
-            <<<grid, block>>>(numerators, denominators, layer_size);
+        frac_build_tree_layer_kernel<true><<<grid, block>>>(numerators, denominators, layer_size);
     } else {
-        frac_build_tree_layer_kernel<false>
-            <<<grid, block>>>(numerators, denominators, layer_size);
+        frac_build_tree_layer_kernel<false><<<grid, block>>>(numerators, denominators, layer_size);
     }
     return CHECK_KERNEL();
 }
@@ -300,7 +292,13 @@ extern "C" int _frac_compute_round(
 
     // Launch main kernel - writes to tmp_block_sums
     compute_round_block_sum_kernel<<<grid, block, shmem_bytes>>>(
-        eq_xi, pq_nums, pq_denoms, __builtin_ctz((uint32_t)eq_size), __builtin_ctz((uint32_t)pq_size), lambda, tmp_block_sums
+        eq_xi,
+        pq_nums,
+        pq_denoms,
+        __builtin_ctz((uint32_t)eq_size),
+        __builtin_ctz((uint32_t)pq_size),
+        lambda,
+        tmp_block_sums
     );
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -339,9 +337,11 @@ extern "C" int _frac_fold_ext_columns(
     uint32_t quarter = size >> 2;
     auto [grid, block] = kernel_launch_params(quarter);
     if (revert) {
-        fold_ef_columns_kernel<true><<<grid, block>>>(buffer, __builtin_ctz((uint32_t)size), r_or_r_inv);
+        fold_ef_columns_kernel<true>
+            <<<grid, block>>>(buffer, __builtin_ctz((uint32_t)size), r_or_r_inv);
     } else {
-        fold_ef_columns_kernel<false><<<grid, block>>>(buffer, __builtin_ctz((uint32_t)size), r_or_r_inv);
+        fold_ef_columns_kernel<false>
+            <<<grid, block>>>(buffer, __builtin_ctz((uint32_t)size), r_or_r_inv);
     }
     return CHECK_KERNEL();
 }
