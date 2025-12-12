@@ -20,23 +20,9 @@ constexpr int GKR_S_DEG = 3;
 // ============================================================================
 // KERNELS
 // ============================================================================
-__global__ void frac_bitrev_ext_kernel(FpExt *__restrict__ buffer, uint32_t const log_n) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (1 << log_n)) {
-        return;
-    }
-    uint32_t rev_idx = rev_len(idx, log_n);
-    if (idx < rev_idx) {
-        auto const tmp = buffer[idx];
-        buffer[idx] = buffer[rev_idx];
-        buffer[rev_idx] = tmp;
-    }
-}
-
 template <bool revert>
 __global__ void frac_build_tree_layer_kernel(
-    FpExt *__restrict__ numerators,
-    FpExt *__restrict__ denominators,
+    FracExt *__restrict__ layer,
     uint32_t half
 ) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -44,22 +30,19 @@ __global__ void frac_build_tree_layer_kernel(
         return;
     }
 
-    FpExt &lhs_num = numerators[idx];
-    FpExt const &rhs_num = numerators[idx | half];
-    FpExt &lhs_denom = denominators[idx];
-    FpExt const &rhs_denom = denominators[idx | half];
+    FracExt &lhs = layer[idx];
+    FracExt const &rhs = layer[idx | half];
     if constexpr (revert) {
-        frac_unadd_comps_inplace(lhs_num, lhs_denom, rhs_num, rhs_denom);
+        frac_unadd_inplace(lhs, rhs);
     } else {
-        frac_add_comps_inplace(lhs_num, lhs_denom, rhs_num, rhs_denom);
+        frac_add_inplace(lhs, rhs);
     }
 }
 
 // shared memory size requirement: max(num_warps,1) * sizeof(FpExt)
 __global__ void compute_round_block_sum_kernel(
     const FpExt *__restrict__ eq_xi,
-    FpExt *__restrict__ pq_nums,
-    FpExt *__restrict__ pq_denoms,
+    FracExt *__restrict__ pq_buffer,
     uint32_t log_eq_size,
     uint32_t log_pq_size,
     FpExt lambda,
@@ -80,14 +63,10 @@ __global__ void compute_round_block_sum_kernel(
 
         // \hat p_j({0 or 1}, {even or odd}, ..y)
         // The {even=0, odd=1} evaluations are used to interpolate at 1, 2, 3
-        auto const &p0_even = pq_nums[idx];
-        auto const &q0_even = pq_denoms[idx];
-        auto const &p1_even = pq_nums[with_rev_bits(idx, pq_size, 1, 0)];
-        auto const &q1_even = pq_denoms[with_rev_bits(idx, pq_size, 1, 0)];
-        auto const &p0_odd = pq_nums[with_rev_bits(idx, pq_size, 0, 1)];
-        auto const &q0_odd = pq_denoms[with_rev_bits(idx, pq_size, 0, 1)];
-        auto const &p1_odd = pq_nums[with_rev_bits(idx, pq_size, 1, 1)];
-        auto const &q1_odd = pq_denoms[with_rev_bits(idx, pq_size, 1, 1)];
+        auto const &[p0_even, q0_even] = pq_buffer[idx];
+        auto const &[p1_even, q1_even] = pq_buffer[with_rev_bits(idx, pq_size, 1, 0)];
+        auto const &[p0_odd, q0_odd] = pq_buffer[with_rev_bits(idx, pq_size, 0, 1)];
+        auto const &[p1_odd, q1_odd] = pq_buffer[with_rev_bits(idx, pq_size, 1, 1)];
 
         FpExt p0_diff = p0_odd - p0_even;
         FpExt q0_diff = q0_odd - q0_even;
@@ -141,8 +120,18 @@ __global__ void fold_columns_kernel(FpExt *buffer, size_t half, FpExt r) {
 }
 
 template <bool revert>
+__device__ __forceinline__ void one_folding_round(FpExt& lhs, FpExt const& rhs, FpExt const& r_or_r_inv) {
+    if constexpr (revert) {
+        // z = x + r * (y - x) => x = (z - r * y) / (1 - r) = (z - y + (y - r * y)) / (1 - r)
+        lhs = (lhs - rhs) * r_or_r_inv + rhs;
+    } else {
+        lhs = lhs + r_or_r_inv * (rhs - lhs);
+    }
+}
+
+template <bool revert>
 __global__ void fold_ef_columns_kernel(
-    FpExt *__restrict__ buffer,
+    FracExt *__restrict__ buffer,
     uint32_t log_total,
     FpExt r_or_r_inv // is the inverse of 1 - r in case if revert = true
 ) {
@@ -159,13 +148,15 @@ __global__ void fold_ef_columns_kernel(
 
 #pragma unroll
     for (uint32_t bit : {0u, 1u << (log_total - 2)}) {
-        FpExt &t0 = buffer[idx | bit];
-        FpExt const &t1 = buffer[idx | bit | (1u << (log_total - 1))];
-        if constexpr (revert) {
-            // z = x + r * (y - x) => x = (z - r * y) / (1 - r) = (z - y + (y - r * y)) / (1 - r)
-            t0 = (t0 - t1) * r_or_r_inv + t1;
-        } else {
-            t0 = t0 + r_or_r_inv * (t1 - t0);
+        {
+            FpExt &t0 = buffer[idx | bit].p;
+            FpExt const &t1 = buffer[idx | bit | (1u << (log_total - 1))].p;
+            one_folding_round<revert>(t0, t1, r_or_r_inv);
+        }
+        {
+            FpExt &t0 = buffer[idx | bit].q;
+            FpExt const &t1 = buffer[idx | bit | (1u << (log_total - 1))].q;
+            one_folding_round<revert>(t0, t1, r_or_r_inv);
         }
     }
 
@@ -194,14 +185,6 @@ __global__ void add_alpha_kernel(FracExt *data, size_t len, FpExt alpha) {
     }
 }
 
-// Add alpha to denominators (only affects denominators buffer)
-__global__ void add_alpha_mixed_kernel(FpExt *denominators, size_t len, FpExt alpha) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < len) {
-        denominators[idx] = denominators[idx] + alpha;
-    }
-}
-
 template <typename F, typename EF>
 __global__ void frac_vector_scalar_multiply_kernel(
     std::pair<EF, EF> *frac_vec,
@@ -215,37 +198,11 @@ __global__ void frac_vector_scalar_multiply_kernel(
     frac_vec[tidx].first *= scalar;
 }
 
-// Multiply numerators (base field) by scalar
-__global__ void frac_vector_scalar_multiply_ext_kernel(
-    FpExt *numerators,
-    Fp scalar,
-    uint32_t length
-) {
-    size_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tidx >= length)
-        return;
-
-    numerators[tidx] *= scalar;
-}
-
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
-extern "C" int _frac_bitrev_ext(FpExt *buffer, size_t n) {
-    if (n == 0) {
-        return 0;
-    }
-    assert((n & (n - 1)) == 0);
-    uint32_t const log_n = __builtin_ctz(n);
-
-    auto [grid, block] = kernel_launch_params(n);
-    frac_bitrev_ext_kernel<<<grid, block>>>(buffer, log_n);
-    return CHECK_KERNEL();
-}
-
 extern "C" int _frac_build_tree_layer(
-    FpExt *numerators,
-    FpExt *denominators,
+    FracExt *layer,
     size_t layer_size,
     bool revert
 ) {
@@ -257,9 +214,11 @@ extern "C" int _frac_build_tree_layer(
 
     auto [grid, block] = kernel_launch_params(layer_size);
     if (revert) {
-        frac_build_tree_layer_kernel<true><<<grid, block>>>(numerators, denominators, layer_size);
+        frac_build_tree_layer_kernel<true>
+            <<<grid, block>>>(layer, layer_size);
     } else {
-        frac_build_tree_layer_kernel<false><<<grid, block>>>(numerators, denominators, layer_size);
+        frac_build_tree_layer_kernel<false>
+            <<<grid, block>>>(layer, layer_size);
     }
     return CHECK_KERNEL();
 }
@@ -275,8 +234,7 @@ extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t stride) {
 
 extern "C" int _frac_compute_round(
     const FpExt *eq_xi,
-    FpExt *pq_nums,
-    FpExt *pq_denoms,
+    FracExt *pq_buffer,
     size_t eq_size,
     size_t pq_size,
     FpExt lambda,
@@ -292,13 +250,7 @@ extern "C" int _frac_compute_round(
 
     // Launch main kernel - writes to tmp_block_sums
     compute_round_block_sum_kernel<<<grid, block, shmem_bytes>>>(
-        eq_xi,
-        pq_nums,
-        pq_denoms,
-        __builtin_ctz((uint32_t)eq_size),
-        __builtin_ctz((uint32_t)pq_size),
-        lambda,
-        tmp_block_sums
+        eq_xi, pq_buffer, __builtin_ctz((uint32_t)eq_size), __builtin_ctz((uint32_t)pq_size), lambda, tmp_block_sums
     );
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -325,8 +277,8 @@ extern "C" int _frac_fold_columns(FpExt *buffer, size_t size, FpExt r) {
     return CHECK_KERNEL();
 }
 
-extern "C" int _frac_fold_ext_columns(
-    FpExt *__restrict__ buffer,
+extern "C" int _frac_fold_fpext_columns(
+    FracExt *__restrict__ buffer,
     size_t size,
     FpExt r_or_r_inv,
     bool revert
@@ -361,18 +313,6 @@ extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar,
     auto [grid, block] = kernel_launch_params(length);
     frac_vector_scalar_multiply_kernel<Fp, FpExt>
         <<<grid, block>>>(reinterpret_cast<std::pair<FpExt, FpExt> *>(frac_vec), scalar, length);
-    return CHECK_KERNEL();
-}
-
-extern "C" int _frac_add_alpha_mixed(FpExt *denominators, size_t len, FpExt alpha) {
-    auto [grid, block] = kernel_launch_params(len);
-    add_alpha_mixed_kernel<<<grid, block>>>(denominators, len, alpha);
-    return CHECK_KERNEL();
-}
-
-extern "C" int _frac_vector_scalar_multiply_ext(FpExt *numerators, Fp scalar, uint32_t length) {
-    auto [grid, block] = kernel_launch_params(length);
-    frac_vector_scalar_multiply_ext_kernel<<<grid, block>>>(numerators, scalar, length);
     return CHECK_KERNEL();
 }
 } // namespace fractional_sumcheck_gkr

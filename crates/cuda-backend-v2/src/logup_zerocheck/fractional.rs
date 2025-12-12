@@ -17,24 +17,22 @@ use tracing::{debug_span, instrument};
 use super::errors::FractionalSumcheckError;
 use crate::{
     EF,
-    cuda::logup_zerocheck::{
-        _frac_compute_round_temp_buffer_size, fold_ef_columns, frac_bitrev_ext,
-        frac_build_tree_layer, frac_compute_round, frac_fold_columns,
-    },
+    cuda::{logup_zerocheck::{
+        _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, frac_build_tree_layer,
+        frac_compute_round, frac_fold_columns,
+    }, matrix::bitrev},
     poly::evals_eq_hypercube,
 };
 
 #[instrument(skip_all)]
 pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
     transcript: &mut TS,
-    numerators: DeviceBuffer<EF>,
-    denominators: DeviceBuffer<EF>,
+    leaves: DeviceBuffer<Frac<EF>>,
     assert_zero: bool,
     mem: &mut MemTracker,
 ) -> Result<(FracSumcheckProof<EF>, Vec<EF>), FractionalSumcheckError> {
-    let mut numerators = numerators;
-    let mut denominators = denominators;
-    if numerators.is_empty() {
+    let mut layer = leaves;
+    if layer.is_empty() {
         return Ok((
             FracSumcheckProof {
                 fractional_sum: (EF::ZERO, EF::ONE),
@@ -44,8 +42,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
             vec![],
         ));
     };
-    let total_leaves = numerators.len();
-    debug_assert_eq!(numerators.len(), denominators.len());
+    let total_leaves = layer.len();
     // total_rounds = l_skip + n_logup
     let total_rounds = log2_strict_usize(total_leaves);
     assert!(total_rounds > 0, "n_logup > 0 when there are interactions");
@@ -56,27 +53,20 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
 
     // We store it in bit-reversal order for coalesced memory accesses.
     unsafe {
-        frac_bitrev_ext(&mut numerators, total_leaves)
-            .map_err(FractionalSumcheckError::BitReversal)?;
-        frac_bitrev_ext(&mut denominators, total_leaves)
-            .map_err(FractionalSumcheckError::BitReversal)?;
+        bitrev(&mut layer, total_leaves).map_err(FractionalSumcheckError::BitReversal)?;
     }
 
     for i in 0..total_rounds {
         unsafe {
-            frac_build_tree_layer(&mut numerators, &mut denominators, total_leaves >> i, false)
+            frac_build_tree_layer(&mut layer, total_leaves >> i, false)
                 .map_err(FractionalSumcheckError::SegmentTree)?;
         }
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
     mem.tracing_info("fractional_sumcheck_gkr: after building segment tree");
-    let root = Frac {
-        p: copy_from_device(&numerators, 0)?,
-        q: copy_from_device(&denominators, 0)?,
-    };
+    let root = copy_from_device(&layer, 0)?;
     unsafe {
-        frac_build_tree_layer(&mut numerators, &mut denominators, 2, true)
-            .map_err(FractionalSumcheckError::SegmentTree)?;
+        frac_build_tree_layer(&mut layer, 2, true).map_err(FractionalSumcheckError::SegmentTree)?;
     }
     if assert_zero {
         if root.p != EF::ZERO {
@@ -93,14 +83,8 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
     let mut claims_per_layer = Vec::with_capacity(total_rounds);
     let mut sumcheck_polys = Vec::with_capacity(total_rounds);
 
-    let first_left = Frac {
-        p: copy_from_device(&numerators, 0)?,
-        q: copy_from_device(&denominators, 0)?,
-    };
-    let first_right = Frac {
-        p: copy_from_device(&numerators, 1)?,
-        q: copy_from_device(&denominators, 1)?,
-    };
+    let first_left = copy_from_device(&layer, 0)?;
+    let first_right = copy_from_device(&layer, 1)?;
     claims_per_layer.push(GkrLayerClaims {
         p_xi_0: first_left.p,
         q_xi_0: first_left.q,
@@ -123,7 +107,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
         let gkr_round_span = debug_span!("GKR", round).entered();
 
         unsafe {
-            frac_build_tree_layer(&mut numerators, &mut denominators, 2 << round, true)
+            frac_build_tree_layer(&mut layer, 2 << round, true)
                 .map_err(FractionalSumcheckError::SegmentTree)?;
         }
 
@@ -154,8 +138,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
             unsafe {
                 frac_compute_round(
                     &eq_buffer,
-                    &mut numerators,
-                    &mut denominators,
+                    &mut layer,
                     eq_size,
                     pq_size,
                     lambda,
@@ -179,30 +162,20 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
             unsafe {
                 frac_fold_columns(&mut eq_buffer, eq_size, r_round)
                     .map_err(FractionalSumcheckError::FoldColumns)?;
-                fold_ef_columns(&mut numerators, pq_size, r_round, false)
-                    .map_err(FractionalSumcheckError::FoldColumns)?;
-                fold_ef_columns(&mut denominators, pq_size, r_round, false)
+                fold_ef_frac_columns(&mut layer, pq_size, r_round, false)
                     .map_err(FractionalSumcheckError::FoldColumns)?;
             }
             eq_size >>= 1;
             pq_size >>= 1;
         }
         let pq_host = [
-            Frac {
-                p: copy_from_device(&numerators, 0)?,
-                q: copy_from_device(&denominators, 0)?,
-            },
-            Frac {
-                p: copy_from_device(&numerators, pq_size / 2)?,
-                q: copy_from_device(&denominators, pq_size / 2)?,
-            },
+            copy_from_device(&layer, 0)?,
+            copy_from_device(&layer, pq_size / 2)?,
         ];
         for pq_revert_round in (0..round).rev() {
             pq_size <<= 1;
             unsafe {
-                fold_ef_columns(&mut numerators, pq_size, r_vec[pq_revert_round], true)
-                    .map_err(FractionalSumcheckError::FoldColumns)?;
-                fold_ef_columns(&mut denominators, pq_size, r_vec[pq_revert_round], true)
+                fold_ef_frac_columns(&mut layer, pq_size, r_vec[pq_revert_round], true)
                     .map_err(FractionalSumcheckError::FoldColumns)?;
             }
         }
