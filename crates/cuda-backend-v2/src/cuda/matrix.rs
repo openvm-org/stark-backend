@@ -1,4 +1,5 @@
-use openvm_cuda_common::error::CudaError;
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use stark_backend_v2::{EF, prover::fractional_sumcheck_gkr::Frac};
 
 use crate::F;
 
@@ -35,6 +36,8 @@ extern "C" {
         padded_height: u32,
         height: u32,
     ) -> i32;
+
+    fn _bitrev(buffer: *mut Frac<EF>, n: usize) -> i32;
 }
 
 /// This kernel has the effect of rotating `input` column-wise as a `height x width` matrix, where
@@ -134,4 +137,8 @@ pub unsafe fn batch_expand_pad_wide(
         padded_height,
         height,
     ))
+}
+
+pub unsafe fn bitrev(buffer: &mut DeviceBuffer<Frac<EF>>, n: usize) -> Result<(), CudaError> {
+    CudaError::from_result(_bitrev(buffer.as_mut_ptr(), n))
 }

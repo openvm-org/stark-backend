@@ -15,6 +15,7 @@ use openvm_stark_backend::{
 use p3_field::{Field, FieldAlgebra};
 use stark_backend_v2::prover::{
     DeviceMultiStarkProvingKeyV2, ProvingContextV2,
+    fractional_sumcheck_gkr::Frac,
     stacked_pcs::{StackedLayout, StackedSlice},
 };
 use tracing::instrument;
@@ -23,7 +24,7 @@ use super::errors::InteractionGpuError;
 use crate::{
     EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
-        frac_add_alpha_mixed, frac_matrix_vertically_repeat_ext, frac_vector_scalar_multiply_ext,
+        frac_add_alpha, frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
         logup_gkr_input_eval,
     },
 };
@@ -107,15 +108,13 @@ pub fn log_gkr_input_evals(
     alpha_logup: EF,
     beta_pows: &[EF],
     total_leaves: usize,
-) -> Result<(DeviceBuffer<EF>, DeviceBuffer<EF>), InteractionGpuError> {
+) -> Result<DeviceBuffer<Frac<EF>>, InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
-        return Ok((DeviceBuffer::new(), DeviceBuffer::new()));
+        return Ok(DeviceBuffer::new());
     }
 
-    let leaves_numerators = DeviceBuffer::<EF>::with_capacity(total_leaves);
-    let leaves_denominators = DeviceBuffer::<EF>::with_capacity(total_leaves);
-    leaves_numerators.fill_zero()?;
-    leaves_denominators.fill_zero()?;
+    let leaves = DeviceBuffer::<Frac<EF>>::with_capacity(total_leaves);
+    leaves.fill_zero()?;
     let null_preprocessed = DeviceBuffer::<F>::new();
 
     for meta in trace_interactions.iter().flatten() {
@@ -208,8 +207,7 @@ pub fn log_gkr_input_evals(
 
         let num_rows_per_tile = height.div_ceil(TASK_SIZE as usize).max(1);
 
-        let mut tmp_numerators = DeviceBuffer::new();
-        let mut tmp_denominators = DeviceBuffer::new();
+        let mut tmp = DeviceBuffer::new();
         let slice = meta.layout_slices.first().unwrap();
         if slice.col_idx != 0 {
             return Err(InteractionGpuError::Layout);
@@ -218,21 +216,18 @@ pub fn log_gkr_input_evals(
         let lifted_height = max(height, 1 << l_skip);
         debug_assert_eq!(slice.len(l_skip), lifted_height);
         // SAFETY: by definition of interactions stacked layout, `leaves` has enough capacity
-        let leaves_num_ptr = unsafe { leaves_numerators.as_mut_ptr().add(dst_offset) };
-        let leaves_denom_ptr = unsafe { leaves_denominators.as_mut_ptr().add(dst_offset) };
+        let leaves_ptr = unsafe { leaves.as_mut_ptr().add(dst_offset) };
 
-        let (trace_output_num, trace_output_denom) = if height != lifted_height {
-            tmp_numerators = DeviceBuffer::with_capacity(height * num_interactions);
-            tmp_denominators = DeviceBuffer::with_capacity(height * num_interactions);
-            (tmp_numerators.as_mut_ptr(), tmp_denominators.as_mut_ptr())
+        let trace_output = if height != lifted_height {
+            tmp = DeviceBuffer::with_capacity(height * num_interactions);
+            tmp.as_mut_ptr()
         } else {
-            (leaves_num_ptr, leaves_denom_ptr)
+            leaves_ptr
         };
         unsafe {
             logup_gkr_input_eval(
                 is_global,
-                trace_output_num,
-                trace_output_denom,
+                trace_output,
                 d_preprocessed,
                 &d_partition_ptrs,
                 &d_challenges,
@@ -247,23 +242,21 @@ pub fn log_gkr_input_evals(
         }
         if height != lifted_height {
             debug_assert_eq!(lifted_height % height, 0);
-            debug_assert!(!tmp_numerators.is_empty());
+            debug_assert!(!tmp.is_empty());
             let norm_factor_denom = lifted_height / height;
             let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
             unsafe {
                 // SAFETY: scaling within buffer length
-                frac_vector_scalar_multiply_ext(
-                    tmp_numerators.as_mut_ptr(),
+                frac_vector_scalar_multiply_ext_fp(
+                    tmp.as_mut_ptr(),
                     norm_factor,
-                    tmp_numerators.len() as u32,
+                    tmp.len() as u32,
                 )?;
                 // SAFETY: stacked interaction layout is defined with respect to lifted height so
                 // lifting (i.e., vertically repeating) stays within bounds
-                frac_matrix_vertically_repeat_ext(
-                    leaves_num_ptr,
-                    leaves_denom_ptr,
-                    tmp_numerators.as_ptr(),
-                    tmp_denominators.as_ptr(),
+                frac_matrix_vertically_repeat(
+                    leaves_ptr,
+                    tmp.as_ptr(),
                     num_interactions as u32,
                     lifted_height as u32,
                     height as u32,
@@ -272,11 +265,11 @@ pub fn log_gkr_input_evals(
         }
     }
 
-    if !leaves_denominators.is_empty() {
+    if !leaves.is_empty() {
         unsafe {
-            frac_add_alpha_mixed(&leaves_denominators, alpha_logup)?;
+            frac_add_alpha(&leaves, alpha_logup)?;
         }
     }
 
-    Ok((leaves_numerators, leaves_denominators))
+    Ok(leaves)
 }
