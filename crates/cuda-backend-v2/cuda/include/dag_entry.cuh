@@ -2,8 +2,6 @@
 
 #include "codec.cuh"
 #include "fp.h"
-#include "fpext.h"
-#include "matrix.cuh"
 #include <cassert>
 #include <cstdint>
 
@@ -26,92 +24,6 @@ inline uint32_t get_launcher_count(uint32_t buffer_size, uint32_t height) {
 } // namespace interaction_evaluation
 
 namespace symbolic_dag {
-
-struct DagEvaluationContext {
-    uint32_t row_index;
-    const Fp *__restrict__ d_selectors;
-    const MainMatrixPtrs<Fp> *__restrict__ d_main;
-    uint32_t height;
-    uint32_t selectors_width;
-    const Fp *__restrict__ d_preprocessed;
-    uint32_t preprocessed_air_width;
-    const FpExt *__restrict__ d_eq_z;
-    const FpExt *__restrict__ d_eq_x;
-    const Fp *__restrict__ d_public;
-    uint32_t public_len;
-    FpExt *__restrict__ inter_buffer;
-    uint32_t buffer_stride;
-    uint32_t buffer_size;
-    uint32_t large_domain;
-};
-
-__device__ __forceinline__ FpExt evaluate_dag_entry(
-    const SourceInfo &src,
-    const DagEvaluationContext &ctx,
-    const FpExt *d_challenges = nullptr // Optional: for ENTRY_CHALLENGE in interactions
-) {
-    (void)ctx.large_domain;
-    switch (src.type) {
-    case ENTRY_PREPROCESSED: {
-        if (ctx.d_preprocessed == nullptr) {
-            return FpExt(Fp::zero());
-        }
-        const auto stride = ctx.height * ctx.preprocessed_air_width;
-        const Fp *matrix = ctx.d_preprocessed + stride * src.offset;
-        return FpExt(matrix[ctx.height * src.index + ctx.row_index]);
-    }
-    case ENTRY_MAIN: {
-        auto main_ptr = ctx.d_main[src.part];
-        const auto stride = ctx.height * main_ptr.air_width;
-        const Fp *matrix = main_ptr.data + stride * src.offset;
-        return FpExt(matrix[ctx.height * src.index + ctx.row_index]);
-    }
-    case ENTRY_CHALLENGE:
-        assert(d_challenges != nullptr);
-        return d_challenges[src.index];
-    case ENTRY_PERMUTATION:
-    case ENTRY_EXPOSED:
-        return FpExt(Fp::zero());
-    case ENTRY_PUBLIC: {
-        if (src.index >= ctx.public_len || ctx.d_public == nullptr) {
-            return FpExt(Fp::zero());
-        }
-        return FpExt(ctx.d_public[src.index]);
-    }
-    case SRC_CONSTANT:
-        return FpExt(Fp(src.index));
-    case SRC_INTERMEDIATE:
-        if (ctx.inter_buffer == nullptr || ctx.buffer_size == 0) {
-            return FpExt(Fp::zero());
-        }
-        if (src.index >= ctx.buffer_size) {
-            return FpExt(Fp::zero());
-        }
-        return ctx.inter_buffer[src.index * ctx.buffer_stride];
-    case SRC_IS_FIRST: {
-        if (ctx.height == 0 || ctx.selectors_width == 0) {
-            return FpExt(Fp::zero());
-        }
-        uint32_t row = ctx.row_index % ctx.height;
-        return FpExt(ctx.d_selectors[row]);
-    }
-    case SRC_IS_LAST: {
-        if (ctx.height == 0 || ctx.selectors_width < 3) {
-            return FpExt(Fp::zero());
-        }
-        uint32_t row = ctx.row_index % ctx.height;
-        return FpExt(ctx.d_selectors[ctx.height * 2 + row]);
-    }
-    case SRC_IS_TRANSITION: {
-        if (ctx.height == 0 || ctx.selectors_width < 2) {
-            return FpExt(Fp::zero());
-        }
-        uint32_t row = ctx.row_index % ctx.height;
-        return FpExt(ctx.d_selectors[ctx.height + row]);
-    }
-    }
-    return FpExt(Fp::zero());
-}
 
 // Context for evaluating DAG entries corresponding to (z, \vec x) where `z` is some point in enlarged NTT domain (subgroup of F) and `\vec x` is point on hypercube. Evaluation will directly perform barycentric interpolation to compute value of prismalinear polynomial from its evaluations on univariate skip domain `D`.
 struct DagPrismEvalContext {
