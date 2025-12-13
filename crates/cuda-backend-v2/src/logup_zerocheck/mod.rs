@@ -47,7 +47,6 @@ use crate::{
     utils::compute_barycentric_inv_lagrange_denoms,
 };
 
-mod dag_scheduling;
 mod errors;
 mod fold_ple;
 /// Fraction sumcheck via GKR
@@ -56,6 +55,7 @@ mod fractional;
 mod gkr_input;
 mod mle_round;
 mod round0;
+mod rules;
 
 pub use errors::*;
 use fold_ple::compute_eq_sharp_gpu;

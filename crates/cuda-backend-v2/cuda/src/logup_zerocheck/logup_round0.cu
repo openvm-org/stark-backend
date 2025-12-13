@@ -69,16 +69,13 @@ __device__ __forceinline__ void acc_interactions(
         }
 
         if (decoded.buffer_result && eval_ctx.buffer_size > 0) {
-            if constexpr (GLOBAL) {
 #ifdef CUDA_DEBUG
-                assert(decoded.z_index < eval_ctx.buffer_size);
+            assert(decoded.z_index < eval_ctx.buffer_size);
 #endif
+            if constexpr (GLOBAL) {
                 // Note: decoded.z_index refers to a decoding index, it doesn't have to do with prism coordinate
                 eval_ctx.inter_buffer[decoded.z_index * eval_ctx.buffer_stride] = result;
             } else {
-#ifdef CUDA_DEBUG
-                assert(decoded.z_index < 16);
-#endif
                 local_buffer[decoded.z_index] = result;
             }
         }
