@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use itertools::Itertools;
-use openvm_cuda_backend::transpiler::{SymbolicRulesOnGpu, codec::Codec};
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::air_builders::symbolic::{
     SymbolicConstraints, SymbolicConstraintsDag,
@@ -10,13 +9,13 @@ use openvm_stark_backend::air_builders::symbolic::{
 };
 use p3_field::FieldAlgebra;
 
-use super::dag_scheduling::compute_constraint_expr_indices;
 use crate::{
     EF, F,
     cuda::logup_zerocheck::{
         MainMatrixPtrs, batch_constraints_eval_mle_interactions, reduce_hypercube_blocks,
         reduce_hypercube_final, zerocheck_eval_mle,
     },
+    logup_zerocheck::rules::{SymbolicRulesOnGpuV2, codec::Codec},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -42,14 +41,14 @@ pub fn evaluate_mle_constraints_gpu(
         .enumerate()
         .map(|(idx, dag_idx)| (*dag_idx, idx))
         .collect();
-    let constraint_dag_indices = compute_constraint_expr_indices(symbolic_constraints);
-    let rules = SymbolicRulesOnGpu::new(symbolic_constraints.clone(), false);
+    let rules = SymbolicRulesOnGpuV2::new(&symbolic_constraints, false, false);
 
     let lambda_indices_host: Vec<u32> = rules
         .used_nodes
         .iter()
         .map(|&constraint_idx| {
-            constraint_dag_indices
+            rules
+                .constraint_expr_idxs
                 .get(constraint_idx)
                 .and_then(|dag_idx| lambda_index_map.get(dag_idx))
                 .copied()
@@ -206,7 +205,7 @@ pub fn evaluate_mle_interactions_gpu(
         interactions: transformed_interactions,
     }
     .into();
-    let rules = SymbolicRulesOnGpu::new(constraints_dag, true);
+    let rules = SymbolicRulesOnGpuV2::new(&constraints_dag, true, false);
 
     let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
     let d_rules = encoded_rules
