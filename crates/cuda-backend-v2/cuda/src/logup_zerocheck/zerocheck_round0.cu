@@ -123,20 +123,26 @@ __global__ void zerocheck_bary_evaluate_constraints_kernel(
     uint32_t num_x,
     uint32_t height,
     uint32_t
-        expansion_factor // large_domain.next_power_of_two() / skip_domain: determines when to skip barycentric eval
+        expansion_factor, // large_domain.next_power_of_two() / skip_domain: determines when to skip barycentric eval
+    std::pair<uint32_t, uint32_t> z_dim
 ) {
     extern __shared__ char smem[];
     FpExt *shared = reinterpret_cast<FpExt *>(smem);
 
-    // The univariate coordinate: we need to output these
-    // We assume that large_domain <= gridDim.x * blockDim.x
-    uint32_t z_int = blockIdx.x * blockDim.x + threadIdx.x;
+    // We unlinearize the thread index
+    auto [zs_per_grid, zs_per_block] = z_dim;
+    uint32_t xs_per_block = blockDim.x / zs_per_block;
+    uint32_t tidx_z = threadIdx.x % zs_per_block;
+    uint32_t tidx_x = threadIdx.x / zs_per_block;
+    uint32_t bidx_z = blockIdx.x % zs_per_grid;
+    uint32_t bidx_x = blockIdx.x / zs_per_grid;
+    uint32_t z_int = tidx_z + bidx_z * zs_per_block;
     bool const active_thread = (z_int < large_domain);
 
     if (active_thread) {
-        // The hypercube coordinates: we want to sum over these. [todo] We'll sum over the ones in the same block using shared memory.
-        uint32_t x_int_base = blockIdx.y * blockDim.y + threadIdx.y;
-        uint32_t x_int_stride = gridDim.y * blockDim.y;
+        // The hypercube coordinates: we want to sum over these.
+        uint32_t x_int_base = tidx_x + bidx_x * xs_per_block;
+        uint32_t x_int_stride = (gridDim.x / zs_per_grid) * xs_per_block;
 
         uint32_t task_offset = x_int_base * large_domain + z_int;
         // The maximal amount of rows done by different threads; hence we need enough global memory [buffer_size * task_stride] for intermediates
@@ -171,20 +177,6 @@ __global__ void zerocheck_bary_evaluate_constraints_kernel(
         // NOTE: for sumcheck we can sum over all of these
         FpExt sum = FpExt(Fp::zero());
         for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
-            // TODO: this shouldn't be needed, never read before write
-            // if (buffer_size > 0) {
-            //     if constexpr (GLOBAL) {
-            //         for (uint32_t idx = 0; idx < buffer_size; ++idx) {
-            //             inter_buffer[idx * buffer_stride] = Fp::zero();
-            //         }
-            //     } else {
-            //         uint32_t limit = buffer_size < 16 ? buffer_size : 16;
-            //         for (uint32_t idx = 0; idx < limit; ++idx) {
-            //             local_buffer[idx] = Fp::zero();
-            //         }
-            //     }
-            // }
-
             Fp is_first = is_first_mult * selectors_cube[x_int];
             Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
             const Fp *inv_lagrange_denoms_z = inv_lagrange_denoms + z_int * skip_domain;
@@ -223,17 +215,17 @@ __global__ void zerocheck_bary_evaluate_constraints_kernel(
             FpExt eq_val = eq_uni[z_int] * eq_cube[x_int];
             sum += constraint_sum * eq_val;
         }
-        // Reduce phase: reduce all threadIdx.y in the same block, keeping z_int independent
-        shared[threadIdx.y * blockDim.x + threadIdx.x] = sum;
+        shared[threadIdx.x] = sum;
     }
     __syncthreads();
 
-    if (active_thread && threadIdx.y == 0) {
-        FpExt tile_sum = shared[threadIdx.x];
-        for (int lane = 1; lane < blockDim.y; ++lane) {
-            tile_sum += shared[lane * blockDim.x + threadIdx.x];
+    // Reduce phase: reduce all threadIdx.x in the same block, keeping z_int independent
+    if (active_thread && tidx_x == 0) {
+        FpExt tile_sum = shared[tidx_z];
+        for (int lane = 1; lane < xs_per_block; ++lane) {
+            tile_sum += shared[lane * zs_per_block + tidx_z];
         }
-        tmp_sums_buffer[blockIdx.y * large_domain + z_int] = tile_sum;
+        tmp_sums_buffer[bidx_x * large_domain + z_int] = tile_sum;
     }
 }
 
@@ -254,56 +246,30 @@ __global__ void fold_selectors_round0_kernel(
 }
 
 // Launchers
-
-constexpr uint32_t UNI_THREADS = 128; // ideally at least 2^l_skip
-constexpr uint32_t CUBE_THREADS = 4;
-constexpr uint32_t MAX_TASK_SIZE =
-    1 << 16; // can be tuned, higher is more parallel, but increases size of intermediate buffer
-constexpr uint32_t MAX_GRID_DIM = 65535u;
-
-inline std::pair<dim3, dim3> eval_constraints_launch_params(
-    uint32_t buffer_size,
-    uint32_t large_domain,
-    uint32_t num_x
-) {
-    static_assert(UNI_THREADS * CUBE_THREADS <= 512, "Threads per block exceeds 512");
-    dim3 block(UNI_THREADS, CUBE_THREADS, 1);
-    uint32_t grid_x = static_cast<uint32_t>(div_ceil(large_domain, block.x));
-    // num_x ~ 2^20, so desired_grid_y may be >= 2^16
-    uint32_t desired_grid_y = static_cast<uint32_t>(div_ceil(num_x, block.y));
-    uint32_t grid_y;
-    if (buffer_size > BUFFER_THRESHOLD) {
-        grid_y = std::min(desired_grid_y, MAX_TASK_SIZE / large_domain);
-    } else {
-        grid_y = std::min(desired_grid_y, MAX_GRID_DIM);
-    }
-    dim3 grid(grid_x, grid_y, 1);
-
-    return {grid, block};
-}
+constexpr uint32_t MAX_THREADS = 256;
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
 // Required length of *temp_sum_buffer in FpExt elements
 extern "C" uint32_t _zerocheck_r0_temp_sums_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
-    uint32_t num_x
+    uint32_t num_x,
+    size_t max_temp_bytes
 ) {
-    auto [grid, block] = eval_constraints_launch_params(buffer_size, large_domain, num_x);
-    return large_domain * grid.y;
+    return round0_config::temp_sums_buffer_size(
+        buffer_size, large_domain, num_x, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
+    );
 }
 
 extern "C" uint32_t _zerocheck_r0_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
-    uint32_t num_x
+    uint32_t num_x,
+    size_t max_temp_bytes
 ) {
-    if (buffer_size <= BUFFER_THRESHOLD) {
-        return 0;
-    }
-    auto [grid, block] = eval_constraints_launch_params(buffer_size, large_domain, num_x);
-    uint32_t task_stride = grid.y * block.y * large_domain;
-    return task_stride * buffer_size;
+    return round0_config::intermediates_buffer_size(
+        buffer_size, large_domain, num_x, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
+    );
 }
 
 extern "C" int _zerocheck_bary_eval_constraints(
@@ -330,16 +296,21 @@ extern "C" int _zerocheck_bary_eval_constraints(
     uint32_t skip_domain,
     uint32_t num_x,
     uint32_t height,
-    uint32_t expansion_factor
+    uint32_t expansion_factor,
+    size_t max_temp_bytes
 ) {
-    auto [grid, block] = eval_constraints_launch_params(buffer_size, large_domain, num_x);
-    size_t shmem_bytes = sizeof(FpExt) * block.x * block.y;
+    auto [grid, block] = round0_config::eval_constraints_launch_params(
+        buffer_size, large_domain, num_x, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
+    );
+    auto z_dim = round0_config::get_z_dim(large_domain);
+    auto xs_per_grid = grid.x / z_dim.first;
+    size_t shmem_bytes = sizeof(FpExt) * block.x;
 
 #define ARGUMENTS                                                                                  \
     tmp_sums_buffer, selectors_cube, preprocessed, main_parts, omega_skip_pows,                    \
         inv_lagrange_denoms, eq_uni, eq_cube, d_lambda_pows, d_lambda_indices, public_values,      \
         d_rules, rules_len, d_used_nodes, used_nodes_len, lambda_len, buffer_size,                 \
-        d_intermediates, large_domain, skip_domain, num_x, height, expansion_factor
+        d_intermediates, large_domain, skip_domain, num_x, height, expansion_factor, z_dim
 
     if (buffer_size > BUFFER_THRESHOLD) {
         zerocheck_bary_evaluate_constraints_kernel<true><<<grid, block, shmem_bytes>>>(ARGUMENTS);
@@ -352,7 +323,7 @@ extern "C" int _zerocheck_bary_eval_constraints(
         return err;
 
     // Launch final reduction kernel - reads from block_sums, writes to output
-    auto num_blocks = grid.y;
+    auto num_blocks = xs_per_grid;
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
