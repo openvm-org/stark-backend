@@ -41,7 +41,7 @@ pub fn evaluate_mle_constraints_gpu(
         .enumerate()
         .map(|(idx, dag_idx)| (*dag_idx, idx))
         .collect();
-    let rules = SymbolicRulesOnGpuV2::new(&symbolic_constraints, false, false);
+    let rules = SymbolicRulesOnGpuV2::new(symbolic_constraints, false, false);
 
     let lambda_indices_host: Vec<u32> = rules
         .used_nodes
