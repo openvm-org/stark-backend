@@ -85,8 +85,12 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
         _common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
-        let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup_gpu(transcript, mpk, ctx);
+        let (gkr_proof, batch_constraint_proof, r) = prove_zerocheck_and_logup_gpu(
+            transcript,
+            mpk,
+            ctx,
+            !self.prover_config.cache_rs_code_matrix,
+        );
         mem.emit_metrics();
         ((gkr_proof, batch_constraint_proof), r)
     }

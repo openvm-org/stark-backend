@@ -9,7 +9,7 @@ use openvm_stark_backend::air_builders::symbolic::{
 use p3_field::FieldAlgebra;
 use rustc_hash::FxHashMap;
 use stark_backend_v2::prover::{DeviceStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::errors::Round0EvalError;
 use crate::{
@@ -38,6 +38,7 @@ pub fn evaluate_round0_constraints_gpu(
     skip_domain: u32,
     num_x: u32,
     height: u32,
+    max_temp_bytes: usize,
 ) -> Result<DeviceBuffer<EF>, Round0EvalError> {
     let constraints_dag = &pk.vk.symbolic_constraints;
     if constraints_dag.constraints.constraint_idx.is_empty() {
@@ -52,7 +53,7 @@ pub fn evaluate_round0_constraints_gpu(
         .enumerate()
         .map(|(idx, dag_idx)| (*dag_idx, idx))
         .collect();
-    let rules = SymbolicRulesOnGpuV2::new(&constraints_dag, false, true);
+    let rules = SymbolicRulesOnGpuV2::new(constraints_dag, false, true);
 
     let lambda_indices_host: Vec<u32> = rules
         .used_nodes
@@ -73,19 +74,27 @@ pub fn evaluate_round0_constraints_gpu(
     let d_used_nodes = rules.used_nodes.to_device()?;
 
     let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
-    let intermed_capacity =
-        unsafe { _zerocheck_r0_intermediates_buffer_size(buffer_size, large_domain, num_x) };
+    let intermed_capacity = unsafe {
+        _zerocheck_r0_intermediates_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
+    } as usize;
     let mut intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
-        DeviceBuffer::<F>::with_capacity(intermed_capacity as usize)
+        DeviceBuffer::<F>::with_capacity(intermed_capacity)
     } else {
         DeviceBuffer::<F>::new()
     };
 
-    let tmp_sums_buffer_capacity =
-        unsafe { _zerocheck_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x) };
-    debug!("zerocheck:tmp_sums_buffer_capacity={tmp_sums_buffer_capacity}");
-    let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(tmp_sums_buffer_capacity as usize);
+    let temp_sums_buffer_capacity = unsafe {
+        _zerocheck_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
+    } as usize;
+    debug!("zerocheck:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
+    let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
+    let used_temp_bytes = (intermed_capacity + temp_sums_buffer_capacity) * size_of::<EF>();
+    if used_temp_bytes > max_temp_bytes {
+        // We do not error if the required bytes is greater than the requested max, but this may
+        // lead to unexpected peak memory usage.
+        warn!("zerocheck used_temp_bytes ({used_temp_bytes}) > max_temp_bytes ({max_temp_bytes})");
+    }
 
     let preprocessed_ptr = pk
         .preprocessed_data
@@ -119,6 +128,7 @@ pub fn evaluate_round0_constraints_gpu(
             skip_domain,
             num_x,
             height,
+            max_temp_bytes,
         )?;
     }
 
@@ -146,6 +156,7 @@ pub fn evaluate_round0_interactions_gpu(
     skip_domain: u32,
     num_x: u32,
     height: u32,
+    max_temp_bytes: usize,
 ) -> Result<DeviceBuffer<Frac<EF>>, Round0EvalError> {
     // Check if this trace has interactions
     if eq_3bs.is_empty() {
@@ -218,20 +229,27 @@ pub fn evaluate_round0_interactions_gpu(
     let d_rules = encoded_rules.to_device()?;
 
     let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
-    let intermed_capacity =
-        unsafe { _logup_r0_intermediates_buffer_size(buffer_size, large_domain, num_x) };
+    let intermed_capacity = unsafe {
+        _logup_r0_intermediates_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
+    } as usize;
     let mut intermediates = if intermed_capacity > 0 {
         debug!("logup_r0:intermediates_capacity={intermed_capacity}");
-        DeviceBuffer::<F>::with_capacity(intermed_capacity as usize)
+        DeviceBuffer::<F>::with_capacity(intermed_capacity)
     } else {
         DeviceBuffer::<F>::new()
     };
 
-    let tmp_sums_buffer_capacity =
-        unsafe { _logup_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x) };
-    debug!("logup_r0:tmp_sums_buffer_capacity={tmp_sums_buffer_capacity}");
-    let mut temp_sums_buffer =
-        DeviceBuffer::<Frac<EF>>::with_capacity(tmp_sums_buffer_capacity as usize);
+    let temp_sums_buffer_capacity = unsafe {
+        _logup_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
+    } as usize;
+    debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
+    let mut temp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);
+    let used_temp_bytes = (intermed_capacity + temp_sums_buffer_capacity) * size_of::<EF>();
+    if used_temp_bytes > max_temp_bytes {
+        warn!(
+            "logup_round0 used_temp_bytes ({used_temp_bytes}) > max_temp_bytes ({max_temp_bytes})"
+        );
+    }
 
     let preprocessed_ptr = pk
         .preprocessed_data
@@ -263,6 +281,7 @@ pub fn evaluate_round0_interactions_gpu(
             skip_domain,
             num_x,
             height,
+            max_temp_bytes,
         )?;
     }
 

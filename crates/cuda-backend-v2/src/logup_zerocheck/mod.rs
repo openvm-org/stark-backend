@@ -69,6 +69,7 @@ pub fn prove_zerocheck_and_logup_gpu<TS>(
     transcript: &mut TS,
     mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     ctx: &ProvingContextV2<GpuBackendV2>,
+    save_memory: bool,
 ) -> (GkrProof, BatchConstraintProof, Vec<EF>)
 where
     TS: FiatShamirTranscript,
@@ -117,6 +118,7 @@ where
         interactions_layout,
         alpha_logup,
         beta_logup,
+        save_memory,
     );
     let n_global = prover.n_global;
 
@@ -320,6 +322,7 @@ pub struct LogupZerocheckGpu<'a> {
     pk: &'a DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
 
     mem: MemTracker,
+    save_memory: bool,
 }
 
 impl<'a> LogupZerocheckGpu<'a> {
@@ -330,6 +333,7 @@ impl<'a> LogupZerocheckGpu<'a> {
         interactions_layout: StackedLayout,
         alpha_logup: EF,
         beta_logup: EF,
+        save_memory: bool,
     ) -> Self {
         let mem = MemTracker::start("prover.logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
@@ -425,6 +429,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             trace_interactions,
             pk,
             mem,
+            save_memory,
         }
     }
 
@@ -451,6 +456,12 @@ impl<'a> LogupZerocheckGpu<'a> {
         let global_s0_deg = sumcheck_round0_deg(l_skip, self.s_deg);
         let num_present_airs = ctx.per_trace.len();
         debug_assert_eq!(num_present_airs, self.n_per_trace.len());
+
+        let total_main_cells = ctx
+            .per_trace
+            .iter()
+            .map(|(_, air_ctx)| air_ctx.common_main.buffer().len())
+            .sum::<usize>();
 
         self.eq_3b_per_trace = self
             .trace_interactions
@@ -616,6 +627,14 @@ impl<'a> LogupZerocheckGpu<'a> {
             let d_main_parts = main_parts.to_device().unwrap();
 
             let n_lift = n.max(0) as usize;
+            // Heuristic: either we are memory bound, in which case we have dropped the RS-codewords
+            // matrix which takes up at least `total_main_cells * size_of::<F>()` memory, or we are
+            // not memory boundy and hence can set a high limit regardless.
+            let max_temp_bytes = if self.save_memory {
+                (total_main_cells << self.pk.params.log_blowup) * size_of::<F>()
+            } else {
+                1usize << 31 // 2gb
+            };
             let sum_buffer = evaluate_round0_constraints_gpu(
                 single_pk,
                 selectors_cube.buffer(),
@@ -630,6 +649,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 1 << l_skip,
                 1 << n_lift,
                 height as u32,
+                max_temp_bytes,
             )
             .expect("failed to evaluate round-0 constraints on device");
             if !sum_buffer.is_empty() {
@@ -655,6 +675,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 1 << l_skip,
                 1 << n_lift,
                 height as u32,
+                max_temp_bytes,
             )
             .expect("failed to evaluate round-0 interactions on device");
             if !sum.is_empty() {
