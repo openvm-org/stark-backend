@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use itertools::Itertools;
-use openvm_cuda_backend::transpiler::{SymbolicRulesOnGpu, codec::Codec};
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::air_builders::symbolic::{
     SymbolicConstraints, SymbolicConstraintsDag, SymbolicExpressionDag,
@@ -12,7 +11,7 @@ use rustc_hash::FxHashMap;
 use stark_backend_v2::prover::{DeviceStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 use tracing::debug;
 
-use super::{dag_scheduling::compute_constraint_expr_indices, errors::Round0EvalError};
+use super::errors::Round0EvalError;
 use crate::{
     EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
@@ -20,6 +19,7 @@ use crate::{
         _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
         logup_bary_eval_interactions_round0, zerocheck_bary_eval_constraints,
     },
+    logup_zerocheck::rules::{SymbolicRulesOnGpuV2, codec::Codec},
 };
 
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
@@ -52,14 +52,14 @@ pub fn evaluate_round0_constraints_gpu(
         .enumerate()
         .map(|(idx, dag_idx)| (*dag_idx, idx))
         .collect();
-    let constraint_dag_indices = compute_constraint_expr_indices(constraints_dag);
-    let rules = SymbolicRulesOnGpu::new(constraints_dag.clone(), false);
+    let rules = SymbolicRulesOnGpuV2::new(&constraints_dag, false, true);
 
     let lambda_indices_host: Vec<u32> = rules
         .used_nodes
         .iter()
         .map(|&constraint_idx| {
-            constraint_dag_indices
+            rules
+                .constraint_expr_idxs
                 .get(constraint_idx)
                 .and_then(|dag_idx| lambda_index_map.get(dag_idx))
                 .copied()
@@ -186,7 +186,7 @@ pub fn evaluate_round0_interactions_gpu(
             constraints,
             interactions: vec![],
         };
-        let rules = SymbolicRulesOnGpu::new(interactions_dag, false);
+        let rules = SymbolicRulesOnGpuV2::new(&interactions_dag, false, true);
         let mut numer_weights = vec![EF::ZERO; rules.constraints.len()];
         let mut denom_weights = vec![EF::ZERO; rules.constraints.len()];
         let mut denom_sum_init = EF::ZERO;
