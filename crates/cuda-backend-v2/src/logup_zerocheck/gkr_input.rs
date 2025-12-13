@@ -1,7 +1,6 @@
 use std::cmp::max;
 
 use itertools::Itertools;
-use openvm_cuda_backend::transpiler::{SymbolicRulesOnGpu, codec::Codec};
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::{
     air_builders::symbolic::{
@@ -27,6 +26,7 @@ use crate::{
         frac_add_alpha, frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
         logup_gkr_input_eval,
     },
+    logup_zerocheck::rules::{SymbolicRulesOnGpuV2, codec::Codec},
 };
 
 const TASK_SIZE: u32 = 65536;
@@ -173,7 +173,7 @@ pub fn log_gkr_input_evals(
             interactions: frac_expressions,
         };
         let constraints_dag: SymbolicConstraintsDag<F> = constraints.into();
-        let rules = SymbolicRulesOnGpu::new(constraints_dag, true);
+        let rules = SymbolicRulesOnGpuV2::new(&constraints_dag, true, false);
         let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
 
         let partition_lens = vec![1u32; num_interactions];

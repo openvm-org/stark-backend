@@ -113,8 +113,3 @@ __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded) {
 
     return rule;
 }
-
-
-
-
-
