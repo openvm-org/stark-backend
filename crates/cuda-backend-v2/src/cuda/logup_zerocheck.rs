@@ -102,12 +102,18 @@ extern "C" {
     ) -> i32;
 
     // interactions_bary.cu
-    pub fn _logup_r0_temp_sums_buffer_size(buffer_size: u32, large_domain: u32, num_x: u32) -> u32;
+    pub fn _logup_r0_temp_sums_buffer_size(
+        buffer_size: u32,
+        large_domain: u32,
+        num_x: u32,
+        max_temp_bytes: usize,
+    ) -> u32;
 
     pub fn _logup_r0_intermediates_buffer_size(
         buffer_size: u32,
         large_domain: u32,
         num_x: u32,
+        max_temp_bytes: usize,
     ) -> u32;
 
     fn _logup_bary_eval_interactions_round0(
@@ -133,6 +139,7 @@ extern "C" {
         num_x: u32,
         height: u32,
         expansion_factor: u32,
+        max_temp_bytes: usize,
     ) -> i32;
 
     // constraints_bary.cu
@@ -140,12 +147,14 @@ extern "C" {
         buffer_size: u32,
         large_domain: u32,
         num_x: u32,
+        max_temp_bytes: usize,
     ) -> u32;
 
     pub fn _zerocheck_r0_intermediates_buffer_size(
         buffer_size: u32,
         large_domain: u32,
         num_x: u32,
+        max_temp_bytes: usize,
     ) -> u32;
 
     fn _zerocheck_bary_eval_constraints(
@@ -173,6 +182,7 @@ extern "C" {
         num_x: u32,
         height: u32,
         expansion_factor: u32,
+        max_temp_bytes: usize,
     ) -> i32;
 
     fn _fold_selectors_round0(
@@ -437,6 +447,7 @@ pub unsafe fn zerocheck_bary_eval_constraints(
     skip_domain: u32,
     num_x: u32,
     height: u32,
+    max_temp_bytes: usize,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_zerocheck_bary_eval_constraints(
         tmp_sums_buffer.as_mut_ptr(),
@@ -463,6 +474,7 @@ pub unsafe fn zerocheck_bary_eval_constraints(
         num_x,
         height,
         large_domain.next_power_of_two() / skip_domain,
+        max_temp_bytes,
     ))
 }
 
@@ -495,6 +507,7 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     skip_domain: u32,
     num_x: u32,
     height: u32,
+    max_temp_bytes: usize,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_bary_eval_interactions_round0(
         tmp_sums_buffer.as_mut_ptr(),
@@ -519,6 +532,7 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         num_x,
         height,
         large_domain.next_power_of_two() / skip_domain,
+        max_temp_bytes,
     ))
 }
 
