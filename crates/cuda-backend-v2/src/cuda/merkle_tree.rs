@@ -3,18 +3,20 @@ use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 use crate::{Digest, EF, F};
 
 extern "C" {
-    fn _poseidon2_row_hashes(
+    fn _poseidon2_compressing_row_hashes(
         out: *mut Digest,
         matrix: *const F,
         width: usize,
-        height: usize,
+        query_stride: usize,
+        log_rows_per_query: usize,
     ) -> i32;
 
-    fn _poseidon2_row_hashes_ext(
+    fn _poseidon2_compressing_row_hashes_ext(
         out: *mut Digest,
         matrix: *const EF,
         width: usize,
-        height: usize,
+        query_stride: usize,
+        log_rows_per_query: usize,
     ) -> i32;
 
     fn _poseidon2_strided_compress_layer(
@@ -31,52 +33,58 @@ extern "C" {
     ) -> i32;
 }
 
-/// Computes row hashes of `matrix` of dimensions `width` x `height` using Poseidon2 and writes the
-/// digests to `out`. Memory layout expects `matrix` to be column major in `F`, and `out` is buffer
-/// of `Digest`. Digests are written in order of rows.
+/// Computes row hashes of `matrix` of dimensions `width` x `height` using Poseidon2 and then takes
+/// merkle root of `2^log_rows_per_query` strided row hashes and writes the digests to `out`, where
+/// `height = query_stride * 2^log_rows_per_query`. Memory layout expects `matrix` to be column
+/// major in `F`, and `out` is buffer of `Digest`. Digests are written in order of rows.
 ///
 /// # Safety
-/// - `out` must have length `>= height` in `Digest` elements.
+/// - `out` must have length `>= query_stride` in `Digest` elements.
 /// - `out` and `matrix` must be non-overlapping.
-pub unsafe fn poseidon2_row_hashes(
+pub unsafe fn poseidon2_compressing_row_hashes(
     out: &mut DeviceBuffer<Digest>,
     matrix: &DeviceBuffer<F>,
     width: usize,
-    height: usize,
+    query_stride: usize,
+    log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
-    debug_assert!(matrix.len() >= width * height);
-    debug_assert!(out.len() >= height);
-    CudaError::from_result(_poseidon2_row_hashes(
+    debug_assert!(matrix.len() >= width * (query_stride << log_rows_per_query));
+    debug_assert!(out.len() >= query_stride);
+    CudaError::from_result(_poseidon2_compressing_row_hashes(
         out.as_mut_ptr(),
         matrix.as_ptr(),
         width,
-        height,
+        query_stride,
+        log_rows_per_query,
     ))
 }
 
-/// Computes row hashes of `matrix` of dimensions `width` x `height` using Poseidon2 and writes the
-/// digests to `out`. Memory layout expects `matrix` to be column major in `EF`, and `out` is buffer
-/// of `Digest`. Digests are written in order of rows.
+/// Computes row hashes of `matrix` of dimensions `width` x `height` using Poseidon2 and then takes
+/// merkle root of `2^log_rows_per_query` strided row hashes and writes the digests to `out`, where
+/// `height = query_stride * 2^log_rows_per_query`. Memory layout expects `matrix` to be column
+/// major in `EF`, and `out` is buffer of `Digest`. Digests are written in order of rows.
 ///
 /// Note: `matrix` column major in `EF` means that `EF::D` base field elements are contiguous in
 /// memory.
 ///
 /// # Safety
-/// - `out` must have length `>= height` in `Digest` elements.
+/// - `out` must have length `>= query_stride` in `Digest` elements.
 /// - `out` and `matrix` must be non-overlapping.
-pub unsafe fn poseidon2_row_hashes_ext(
+pub unsafe fn poseidon2_compressing_row_hashes_ext(
     out: &mut DeviceBuffer<Digest>,
     matrix: &DeviceBuffer<EF>,
     width: usize,
-    height: usize,
+    query_stride: usize,
+    log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
-    debug_assert!(matrix.len() >= width * height);
-    debug_assert!(out.len() >= height);
-    CudaError::from_result(_poseidon2_row_hashes_ext(
+    debug_assert!(matrix.len() >= width * (query_stride << log_rows_per_query));
+    debug_assert!(out.len() >= query_stride);
+    CudaError::from_result(_poseidon2_compressing_row_hashes_ext(
         out.as_mut_ptr(),
         matrix.as_ptr(),
         width,
-        height,
+        query_stride,
+        log_rows_per_query,
     ))
 }
 
