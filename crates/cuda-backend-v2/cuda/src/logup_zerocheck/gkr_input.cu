@@ -1,5 +1,4 @@
 #include "codec.cuh"
-#include "dag_entry.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "frac_ext.cuh"
@@ -7,8 +6,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-
-using namespace symbolic_dag;
 
 namespace logup_gkr_input_evaluation {
 
@@ -200,6 +197,8 @@ __global__ void evaluate_interactions_gkr_kernel(
 // LAUNCHERS
 // ============================================================================
 
+constexpr uint32_t TASK_SIZE = 1 << 16;
+
 extern "C" int _logup_gkr_input_eval(
     bool is_global,
     FracExt *d_fracs,
@@ -214,7 +213,7 @@ extern "C" int _logup_gkr_input_eval(
     uint32_t permutation_height,
     uint32_t num_rows_per_tile
 ) {
-    auto count = is_global ? interaction_evaluation::TASK_SIZE : permutation_height;
+    auto count = is_global ? TASK_SIZE : permutation_height;
     auto [grid, block] = kernel_launch_params(count, 256);
     if (is_global) {
         evaluate_interactions_gkr_kernel<true><<<grid, block>>>(

@@ -250,7 +250,7 @@ constexpr uint32_t MAX_THREADS = 256;
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
 // Required length of *temp_sum_buffer in FpExt elements
-extern "C" uint32_t _zerocheck_r0_temp_sums_buffer_size(
+extern "C" size_t _zerocheck_r0_temp_sums_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x,
@@ -261,7 +261,7 @@ extern "C" uint32_t _zerocheck_r0_temp_sums_buffer_size(
     );
 }
 
-extern "C" uint32_t _zerocheck_r0_intermediates_buffer_size(
+extern "C" size_t _zerocheck_r0_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x,
