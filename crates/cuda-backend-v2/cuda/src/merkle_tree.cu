@@ -9,75 +9,134 @@ struct digest_t {
     Fp cells[CELLS_OUT];
 };
 
-__global__ void poseidon2_row_hashes_kernel(
-    digest_t *out,
-    const Fp *matrix,
+// This kernel computes the row hash of each row, and then computes the merkle root of `rows_per_query` strided rows at a time, where the stride is `height / rows_per_query`.
+// - height = query_stride * 2^log_rows_per_query
+// - blockDim.y = 2^log_rows_per_query
+// - gridDim.y = 1
+__global__ void poseidon2_compressing_row_hashes_kernel(
+    digest_t *out,    // [query_stride]
+    const Fp *matrix, // [width][height]
     size_t width,
-    size_t height
+    size_t height,
+    size_t query_stride,
+    size_t log_rows_per_query
 ) {
-    uint32_t row = blockDim.x * blockIdx.x + threadIdx.x;
-    if (row >= height) {
-        return;
-    }
+    extern __shared__ char smem[]; // digest_t[blockDim.y / 2][blockDim.x]
+    digest_t *shared = reinterpret_cast<digest_t *>(smem);
+
+    const uint32_t stride_idx = blockDim.x * blockIdx.x + threadIdx.x;
+    uint32_t leaf_idx = threadIdx.y;
+    const uint32_t row = leaf_idx * query_stride + stride_idx;
 
     size_t used = 0;
     Fp cells[CELLS];
+#pragma unroll
     for (int i = 0; i < CELLS; i++) {
         cells[i] = Fp(0);
     }
 
-    for (int col = 0; col < width; col++) {
-        cells[used++] = matrix[col * height + row];
-        if (used == CELLS_RATE) {
+    if (stride_idx < query_stride) {
+        // compute row hash
+        for (int col = 0; col < width; col++) {
+            cells[used++] = matrix[col * height + row];
+            if (used == CELLS_RATE) {
+                poseidon2::poseidon2_mix(cells);
+                used = 0;
+            }
+        }
+        if (used != 0) {
             poseidon2::poseidon2_mix(cells);
-            used = 0;
         }
     }
 
-    if (used != 0) {
-        poseidon2::poseidon2_mix(cells);
+    for (int layer = 0; layer < log_rows_per_query; ++layer) {
+        uint32_t mask = (1 << (layer + 1)) - 1;
+        auto shared_offset = ((leaf_idx >> (layer + 1)) << layer) * blockDim.x + threadIdx.x;
+        if ((leaf_idx & mask) == (1 << layer)) {
+#pragma unroll
+            for (int i = 0; i < CELLS_OUT; i++) {
+                shared[shared_offset].cells[i] = cells[i];
+            }
+        }
+        __syncthreads();
+        if ((leaf_idx & mask) == 0) {
+#pragma unroll
+            for (int i = 0; i < CELLS_OUT; i++) {
+                cells[CELLS_OUT + i] = shared[shared_offset].cells[i];
+            }
+            poseidon2::poseidon2_mix(cells);
+        }
     }
 
+#pragma unroll
     for (int i = 0; i < CELLS_OUT; i++) {
-        out[row].cells[i] = cells[i];
+        out[stride_idx].cells[i] = cells[i];
     }
 }
 
-__global__ void poseidon2_row_hashes_ext_kernel(
+__global__ void poseidon2_compressing_row_hashes_ext_kernel(
     digest_t *out,
     const FpExt *matrix,
     size_t width,
-    size_t height
+    size_t height,
+    size_t query_stride,
+    size_t log_rows_per_query
 ) {
-    uint32_t row = blockDim.x * blockIdx.x + threadIdx.x;
-    if (row >= height) {
-        return;
-    }
+    extern __shared__ char smem[]; // digest_t[blockDim.y / 2][blockDim.x]
+    digest_t *shared = reinterpret_cast<digest_t *>(smem);
+
+    const uint32_t stride_idx = blockDim.x * blockIdx.x + threadIdx.x;
+    uint32_t leaf_idx = threadIdx.y;
+    const uint32_t row = leaf_idx * query_stride + stride_idx;
 
     size_t used = 0;
     Fp cells[CELLS];
+#pragma unroll
     for (int i = 0; i < CELLS; i++) {
         cells[i] = Fp(0);
     }
 
-    for (int col = 0; col < width; col++) {
+    if (stride_idx < query_stride) {
+        // compute row hash
+        for (int col = 0; col < width; col++) {
 #pragma unroll
-        // Extension field degree is 4
-        for (int i = 0; i < 4; i++) {
-            cells[used++] = matrix[col * height + row].elems[i];
+            // Extension field degree is 4
+            for (int i = 0; i < 4; i++) {
+                cells[used++] = matrix[col * height + row].elems[i];
+            }
+            if (used == CELLS_RATE) {
+                poseidon2::poseidon2_mix(cells);
+                used = 0;
+            }
         }
-        if (used == CELLS_RATE) {
+        if (used != 0) {
             poseidon2::poseidon2_mix(cells);
-            used = 0;
         }
     }
 
-    if (used != 0) {
-        poseidon2::poseidon2_mix(cells);
+    // This part is same as for poseidon2_compressing_row_hashes_kernel
+    for (int layer = 0; layer < log_rows_per_query; ++layer) {
+        uint32_t mask = (1 << (layer + 1)) - 1;
+        auto shared_offset = ((leaf_idx >> (layer + 1)) << layer) * blockDim.x + threadIdx.x;
+        if ((leaf_idx & mask) == (1 << layer)) {
+#pragma unroll
+            for (int i = 0; i < CELLS_OUT; i++) {
+                shared[shared_offset].cells[i] = cells[i];
+            }
+        }
+        __syncthreads();
+        if ((leaf_idx & mask) == 0) {
+#pragma unroll
+            for (int i = 0; i < CELLS_OUT; i++) {
+                cells[CELLS_OUT + i] = shared[shared_offset].cells[i];
+            }
+            poseidon2::poseidon2_mix(cells);
+        }
     }
 
+#pragma unroll
     for (int i = 0; i < CELLS_OUT; i++) {
-        out[row].cells[i] = cells[i];
+        out[stride_idx].cells[i] = cells[i];
     }
 }
 static_assert(CELLS_RATE % 4 == 0, "CELLS_RATE must be multiple of FpExt degree (4)");
@@ -111,20 +170,39 @@ __global__ void poseidon2_strided_compress_layer_kernel(
 
 // LAUNCHERS
 
-extern "C" int _poseidon2_row_hashes(digest_t *out, const Fp *matrix, size_t width, size_t height) {
-    auto [grid, block] = kernel_launch_params(height);
-    poseidon2_row_hashes_kernel<<<grid, block>>>(out, matrix, width, height);
+extern "C" int _poseidon2_compressing_row_hashes(
+    digest_t *out,
+    const Fp *matrix,
+    size_t width,
+    size_t query_stride,
+    size_t log_rows_per_query
+) {
+    auto [grid, block] = kernel_launch_params(query_stride, 1024 >> log_rows_per_query);
+    block.y = 1 << log_rows_per_query;
+    size_t shmem_bytes = block.x * div_ceil(block.y, 2) * sizeof(digest_t);
+    auto height = query_stride << log_rows_per_query;
+
+    poseidon2_compressing_row_hashes_kernel<<<grid, block, shmem_bytes>>>(
+        out, matrix, width, height, query_stride, log_rows_per_query
+    );
     return CHECK_KERNEL();
 }
 
-extern "C" int _poseidon2_row_hashes_ext(
+extern "C" int _poseidon2_compressing_row_hashes_ext(
     digest_t *out,
     const FpExt *matrix,
     size_t width,
-    size_t height
+    size_t query_stride,
+    size_t log_rows_per_query
 ) {
-    auto [grid, block] = kernel_launch_params(height);
-    poseidon2_row_hashes_ext_kernel<<<grid, block>>>(out, matrix, width, height);
+    auto [grid, block] = kernel_launch_params(query_stride, 1024 >> log_rows_per_query);
+    block.y = 1 << log_rows_per_query;
+    size_t shmem_bytes = block.x * div_ceil(block.y, 2) * sizeof(digest_t);
+    auto height = query_stride << log_rows_per_query;
+
+    poseidon2_compressing_row_hashes_ext_kernel<<<grid, block, shmem_bytes>>>(
+        out, matrix, width, height, query_stride, log_rows_per_query
+    );
     return CHECK_KERNEL();
 }
 
