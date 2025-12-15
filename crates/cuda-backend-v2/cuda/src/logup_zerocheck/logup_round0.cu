@@ -234,8 +234,8 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
 constexpr uint32_t MAX_THREADS = 256;
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
-// Required length of *temp_sum_buffer in FpExt elements
-extern "C" uint32_t _logup_r0_temp_sums_buffer_size(
+// Required length of *temp_sum_buffer in FracExt elements
+extern "C" size_t _logup_r0_temp_sums_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x,
@@ -246,7 +246,7 @@ extern "C" uint32_t _logup_r0_temp_sums_buffer_size(
     );
 }
 
-extern "C" uint32_t _logup_r0_intermediates_buffer_size(
+extern "C" size_t _logup_r0_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x,
@@ -308,7 +308,7 @@ extern "C" int _logup_bary_eval_interactions_round0(
     auto num_blocks = xs_per_grid;
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
-    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FracExt);
+    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     // FracExt = (FpExt, FpExt) so we set block = 2 * large_domain
     sumcheck::final_reduce_block_sums<<<2 * large_domain, reduce_block, reduce_shmem>>>(
         reinterpret_cast<FpExt *>(tmp_sums_buffer), reinterpret_cast<FpExt *>(output), num_blocks

@@ -5,6 +5,15 @@
 #include <cstdint>
 
 namespace sumcheck {
+
+template <typename Field>
+__device__ __forceinline__ Field
+mle_interpolate_single(const Field *__restrict__ column, Fp x, uint32_t y_int) {
+    auto t0 = column[y_int << 1];
+    auto t1 = column[(y_int << 1) | 1];
+    return t0 + (t1 - t0) * x;
+}
+
 // Warp-level reduction: sums FpExt values across threads in a warp (32 threads)
 // Uses shuffle instructions for efficient communication within a warp
 static __device__ inline FpExt warp_reduce_sum(FpExt val) {

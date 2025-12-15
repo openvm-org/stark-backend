@@ -872,23 +872,18 @@ impl<'a> LogupZerocheckGpu<'a> {
                     if round > n_lift {
                         // Case A.1 round == n_lift + 1
                         if round == n_lift + 1 {
-                            let (prep_ptr, first_main_idx) = if has_preprocessed {
-                                (
-                                    MainMatrixPtrs {
-                                        data: mats[0].buffer().as_ptr(),
-                                        air_width: mats[0].width() as u32 / 2,
-                                    },
-                                    1,
-                                )
+                            let prep_ptr = if has_preprocessed {
+                                MainMatrixPtrs {
+                                    data: mats[0].buffer().as_ptr(),
+                                    air_width: mats[0].width() as u32 / 2,
+                                }
                             } else {
-                                (
-                                    MainMatrixPtrs {
-                                        data: std::ptr::null(),
-                                        air_width: 0,
-                                    },
-                                    0,
-                                )
+                                MainMatrixPtrs {
+                                    data: std::ptr::null(),
+                                    air_width: 0,
+                                }
                             };
+                            let first_main_idx = usize::from(has_preprocessed);
                             let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
                                 .iter()
                                 .map(|m| MainMatrixPtrs {
@@ -934,17 +929,12 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 assert_eq!(zc_evals.len(), 1);
                                 *zc_tilde_eval = zc_evals[0];
                             }
-                            if let Some([numer_evals, denom_evals]) = d_interactions_evals {
-                                let logup_numer_evals = numer_evals
-                                    .to_host()
-                                    .expect("failed to copy numer result to host");
-                                let logup_denom_evals = denom_evals
-                                    .to_host()
-                                    .expect("failed to copy denom result to host");
-                                assert_eq!(logup_numer_evals.len(), 1);
-                                assert_eq!(logup_denom_evals.len(), 1);
-                                logup_tilde_eval[0] = logup_numer_evals[0] * norm_factor;
-                                logup_tilde_eval[1] = logup_denom_evals[0];
+                            if let Some(d_evals) = d_interactions_evals {
+                                let logup_evals =
+                                    d_evals.to_host().expect("failed to copy result to host");
+                                assert_eq!(logup_evals.len(), 1);
+                                logup_tilde_eval[0] = logup_evals[0].p * norm_factor;
+                                logup_tilde_eval[1] = logup_evals[0].q;
                             }
                         } else {
                             // Case A.2 round > n_lift + 1
@@ -975,12 +965,14 @@ impl<'a> LogupZerocheckGpu<'a> {
                         // Case B: round <= n_lift
                         let n = n_lift.saturating_sub(round - 1);
                         let height = 1 << n;
-                        let mut columns: Vec<usize> = Vec::new();
+                        debug_assert_eq!(height, mats[0].height());
+                        let num_y = height / 2;
+                        let mut columns: Vec<*const EF> = Vec::new();
                         if has_constraints {
-                            columns.push(self.eq_xis.get_ptr(n) as usize);
+                            columns.push(self.eq_xis.get_ptr(n));
                         }
                         if has_interactions {
-                            columns.push(self.eq_sharps.get_ptr(n) as usize);
+                            columns.push(self.eq_sharps.get_ptr(n));
                         }
                         columns.extend(
                             iter::once(sels)
@@ -988,13 +980,12 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 .flat_map(|m| {
                                     assert_eq!(m.height(), height);
                                     (0..m.width()).map(|col| {
-                                        m.buffer().as_ptr().wrapping_add(col * m.height()) as usize
+                                        m.buffer().as_ptr().wrapping_add(col * m.height())
                                     })
                                 })
                                 .collect_vec(),
                         );
                         let num_columns = columns.len();
-                        let num_y = height / 2;
                         let interpolated =
                             DeviceMatrix::<EF>::with_capacity(s_deg * num_y, num_columns);
                         let d_columns = columns
@@ -1014,7 +1005,6 @@ impl<'a> LogupZerocheckGpu<'a> {
 
                         // EVALUATION:
                         let interpolated_height = interpolated.height();
-                        let mats_widths: Vec<usize> = mats.iter().map(|m| m.width() / 2).collect();
                         let mut widths_so_far = 0;
                         let eq_xi_ptr = if has_constraints {
                             let ptr = interpolated
@@ -1041,43 +1031,39 @@ impl<'a> LogupZerocheckGpu<'a> {
                             .as_ptr()
                             .wrapping_add(widths_so_far * interpolated_height);
                         widths_so_far += 3;
-                        let (prep_ptr, first_main_idx) = if has_preprocessed {
-                            (
-                                MainMatrixPtrs {
-                                    data: interpolated
-                                        .buffer()
-                                        .as_ptr()
-                                        .wrapping_add(widths_so_far * interpolated_height),
-                                    air_width: mats_widths[0] as u32,
-                                },
-                                1,
-                            )
+                        // Reminder: all widths include rotations
+                        let prep_ptr = if has_preprocessed {
+                            MainMatrixPtrs {
+                                data: interpolated
+                                    .buffer()
+                                    .as_ptr()
+                                    .wrapping_add(widths_so_far * interpolated_height),
+                                air_width: mats[0].width() as u32 / 2,
+                            }
                         } else {
-                            (
-                                MainMatrixPtrs {
-                                    data: std::ptr::null(),
-                                    air_width: 0,
-                                },
-                                0,
-                            )
+                            MainMatrixPtrs {
+                                data: std::ptr::null(),
+                                air_width: 0,
+                            }
                         };
                         widths_so_far += 2 * prep_ptr.air_width as usize;
-                        let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats_widths[first_main_idx..]
+                        let first_main_idx = usize::from(has_preprocessed);
+                        let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
                             .iter()
-                            .map(|m_width| {
+                            .map(|m| {
                                 let main_ptr = MainMatrixPtrs {
                                     data: interpolated
                                         .buffer()
                                         .as_ptr()
                                         .wrapping_add(widths_so_far * interpolated_height),
-                                    air_width: *m_width as u32,
+                                    air_width: m.width() as u32 / 2,
                                 };
-                                widths_so_far += m_width * 2;
+                                widths_so_far += m.width();
                                 main_ptr
                             })
                             .collect_vec();
                         debug_assert_eq!(widths_so_far, interpolated.width());
-                        let d_constraints_eval = if has_constraints {
+                        let d_constraints_eval = has_constraints.then(|| {
                             evaluate_mle_constraints_gpu(
                                 eq_xi_ptr,
                                 sels_ptr,
@@ -1086,14 +1072,12 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 public_vals,
                                 lambda_pows,
                                 constraints_dag,
-                                interpolated_height,
+                                num_y,
                                 s_deg,
                             )
-                        } else {
-                            DeviceBuffer::new()
-                        };
-                        let d_interactions_eval = if has_interactions {
-                            Some(evaluate_mle_interactions_gpu(
+                        });
+                        let d_interactions_eval = has_interactions.then(|| {
+                            evaluate_mle_interactions_gpu(
                                 eq_sharp_ptr,
                                 sels_ptr,
                                 prep_ptr,
@@ -1102,24 +1086,20 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 &self.beta_pows,
                                 eq_3bs,
                                 constraints_dag,
-                                interpolated_height,
+                                num_y,
                                 s_deg,
-                            ))
-                        } else {
-                            None
-                        };
-                        if !d_constraints_eval.is_empty() {
-                            results[2] = d_constraints_eval
+                            )
+                        });
+                        if let Some(evals) = d_constraints_eval {
+                            results[2] = evals
                                 .to_host()
                                 .expect("failed to copy reduction result to host");
                         }
-                        if let Some([numer_evals, denom_evals]) = d_interactions_eval {
-                            let numer_evals = numer_evals
-                                .to_host()
-                                .expect("failed to copy numer result to host");
-                            let denom_evals = denom_evals
-                                .to_host()
-                                .expect("failed to copy denom result to host");
+                        if let Some(evals) = d_interactions_eval {
+                            let logup_evals =
+                                evals.to_host().expect("failed to copy result to host");
+                            let (numer_evals, denom_evals): (Vec<_>, Vec<_>) =
+                                logup_evals.into_iter().map(|f| (f.p, f.q)).unzip();
 
                             // Apply normalization to numer only (same as CPU)
                             let mut numer_normalized = numer_evals;
