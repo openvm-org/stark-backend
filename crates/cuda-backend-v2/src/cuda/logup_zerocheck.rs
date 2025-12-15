@@ -52,8 +52,8 @@ extern "C" {
     ) -> i32;
 
     fn _interpolate_columns(
-        interpolated: *mut std::ffi::c_void,
-        columns: *const usize,
+        interpolated: *mut EF,
+        columns: *const *const EF,
         s_deg: usize,
         num_y: usize,
         num_columns: usize,
@@ -101,20 +101,20 @@ extern "C" {
         num_rows_per_tile: u32,
     ) -> i32;
 
-    // interactions_bary.cu
+    // logup_round0.cu
     pub fn _logup_r0_temp_sums_buffer_size(
         buffer_size: u32,
         large_domain: u32,
         num_x: u32,
         max_temp_bytes: usize,
-    ) -> u32;
+    ) -> usize;
 
     pub fn _logup_r0_intermediates_buffer_size(
         buffer_size: u32,
         large_domain: u32,
         num_x: u32,
         max_temp_bytes: usize,
-    ) -> u32;
+    ) -> usize;
 
     fn _logup_bary_eval_interactions_round0(
         tmp_sums_buffer: *mut Frac<EF>,
@@ -142,20 +142,20 @@ extern "C" {
         max_temp_bytes: usize,
     ) -> i32;
 
-    // constraints_bary.cu
+    // zerocheck_round0.cu
     pub fn _zerocheck_r0_temp_sums_buffer_size(
         buffer_size: u32,
         large_domain: u32,
         num_x: u32,
         max_temp_bytes: usize,
-    ) -> u32;
+    ) -> usize;
 
     pub fn _zerocheck_r0_intermediates_buffer_size(
         buffer_size: u32,
         large_domain: u32,
         num_x: u32,
         max_temp_bytes: usize,
-    ) -> u32;
+    ) -> usize;
 
     fn _zerocheck_bary_eval_constraints(
         tmp_sums_buffer: *mut EF,
@@ -194,15 +194,24 @@ extern "C" {
     ) -> i32;
 
     // mle.cu
+    pub fn _zerocheck_mle_temp_sums_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
+
+    pub fn _zerocheck_mle_intermediates_buffer_size(
+        buffer_size: u32,
+        num_x: u32,
+        num_y: u32,
+    ) -> usize;
+
     fn _zerocheck_eval_mle(
-        output: *mut std::ffi::c_void,
+        tmp_sums_buffer: *mut EF,
+        output: *mut EF,
         eq_xi: *const EF,
         selectors: *const EF,
         preprocessed: MainMatrixPtrs<EF>,
         main: *const MainMatrixPtrs<EF>,
-        lambda_pows: *const std::ffi::c_void,
+        lambda_pows: *const EF,
         lambda_indices: *const u32,
-        public_values: *const std::ffi::c_void,
+        public_values: *const F,
         public_len: u32,
         rules: *const std::ffi::c_void,
         rules_len: usize,
@@ -210,57 +219,45 @@ extern "C" {
         used_nodes_len: usize,
         lambda_len: usize,
         buffer_size: u32,
-        intermediates: *mut std::ffi::c_void,
+        intermediates: *mut EF,
         num_y: u32,
         num_x: u32,
-        num_rows_per_tile: u32,
     ) -> i32;
 
-    fn _batch_constraints_eval_mle_interactions(
-        output_numer: *mut std::ffi::c_void,
-        output_denom: *mut std::ffi::c_void,
+    pub fn _logup_mle_temp_sums_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
+
+    pub fn _logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
+
+    fn _logup_eval_mle(
+        tmp_sums_buffer: *mut Frac<EF>,
+        output: *mut Frac<EF>,
         eq_sharp: *const EF,
         selectors: *const EF,
         preprocessed: MainMatrixPtrs<EF>,
         main: *const MainMatrixPtrs<EF>,
-        challenges: *const std::ffi::c_void,
-        eq_3bs: *const std::ffi::c_void,
-        public_values: *const std::ffi::c_void,
+        challenges: *const EF,
+        eq_3bs: *const EF,
+        public_values: *const F,
         public_len: u32,
         rules: *const std::ffi::c_void,
         rules_len: usize,
         used_nodes: *const usize,
         used_nodes_len: usize,
         buffer_size: u32,
-        intermediates: *mut std::ffi::c_void,
+        intermediates: *mut EF,
         num_y: u32,
         num_x: u32,
-        num_rows_per_tile: u32,
-    ) -> i32;
-
-    fn _reduce_hypercube_blocks(
-        block_sums: *mut std::ffi::c_void,
-        evaluated: *const std::ffi::c_void,
-        s_deg: u32,
-        num_y: u32,
-    ) -> i32;
-
-    fn _reduce_hypercube_final(
-        output: *mut std::ffi::c_void,
-        block_sums: *const std::ffi::c_void,
-        s_deg: u32,
-        num_blocks: u32,
     ) -> i32;
 }
 
 pub unsafe fn interpolate_columns_gpu(
     interpolated: &DeviceBuffer<EF>,
-    columns: &DeviceBuffer<usize>,
+    columns: &DeviceBuffer<*const EF>,
     s_deg: usize,
     num_y: usize,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_interpolate_columns(
-        interpolated.as_mut_raw_ptr(),
+        interpolated.as_mut_ptr(),
         columns.as_ptr(),
         s_deg,
         num_y,
@@ -538,7 +535,8 @@ pub unsafe fn logup_bary_eval_interactions_round0(
 
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn zerocheck_eval_mle(
-    output: &DeviceBuffer<EF>,
+    tmp_sums_buffer: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
     eq_xi: *const EF,
     selectors: *const EF,
     preprocessed: MainMatrixPtrs<EF>,
@@ -549,23 +547,20 @@ pub unsafe fn zerocheck_eval_mle(
     rules: &DeviceBuffer<u128>,
     used_nodes: &DeviceBuffer<usize>,
     buffer_size: u32,
-    intermediates: Option<&DeviceBuffer<EF>>,
+    intermediates: &mut DeviceBuffer<EF>,
     num_y: u32,
     num_x: u32,
-    num_rows_per_tile: u32,
 ) -> Result<(), CudaError> {
-    let intermediates_ptr = intermediates
-        .map(|buf| buf.as_mut_raw_ptr())
-        .unwrap_or(std::ptr::null_mut());
     CudaError::from_result(_zerocheck_eval_mle(
-        output.as_mut_raw_ptr(),
+        tmp_sums_buffer.as_mut_ptr(),
+        output.as_mut_ptr(),
         eq_xi,
         selectors,
         preprocessed,
         main_ptrs.as_ptr(),
-        lambda_pows.as_raw_ptr(),
+        lambda_pows.as_ptr(),
         lambda_indices.as_ptr(),
-        public_values.as_raw_ptr(),
+        public_values.as_ptr(),
         public_values.len() as u32,
         rules.as_raw_ptr(),
         rules.len(),
@@ -573,17 +568,16 @@ pub unsafe fn zerocheck_eval_mle(
         used_nodes.len(),
         lambda_pows.len(),
         buffer_size,
-        intermediates_ptr,
+        intermediates.as_mut_ptr(),
         num_y,
         num_x,
-        num_rows_per_tile,
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn batch_constraints_eval_mle_interactions(
-    output_numer: &DeviceBuffer<EF>,
-    output_denom: &DeviceBuffer<EF>,
+pub unsafe fn logup_eval_mle(
+    tmp_sums_buffer: &mut DeviceBuffer<Frac<EF>>,
+    output: &mut DeviceBuffer<Frac<EF>>,
     eq_sharp: *const EF,
     selectors: *const EF,
     preprocessed: MainMatrixPtrs<EF>,
@@ -594,62 +588,29 @@ pub unsafe fn batch_constraints_eval_mle_interactions(
     rules: &DeviceBuffer<u128>,
     used_nodes: &DeviceBuffer<usize>,
     buffer_size: u32,
-    intermediates: Option<&DeviceBuffer<EF>>,
+    intermediates: &mut DeviceBuffer<EF>,
     num_y: u32,
     num_x: u32,
-    num_rows_per_tile: u32,
 ) -> Result<(), CudaError> {
-    let intermediates_ptr = intermediates
-        .map(|buf| buf.as_mut_raw_ptr())
-        .unwrap_or(std::ptr::null_mut());
-    CudaError::from_result(_batch_constraints_eval_mle_interactions(
-        output_numer.as_mut_raw_ptr(),
-        output_denom.as_mut_raw_ptr(),
+    CudaError::from_result(_logup_eval_mle(
+        tmp_sums_buffer.as_mut_ptr(),
+        output.as_mut_ptr(),
         eq_sharp,
         selectors,
         preprocessed,
         main_ptrs.as_ptr(),
-        challenges.as_raw_ptr(),
-        eq_3bs.as_raw_ptr(),
-        public_values.as_raw_ptr(),
+        challenges.as_ptr(),
+        eq_3bs.as_ptr(),
+        public_values.as_ptr(),
         public_values.len() as u32,
         rules.as_raw_ptr(),
         rules.len(),
         used_nodes.as_ptr(),
         used_nodes.len(),
         buffer_size,
-        intermediates_ptr,
+        intermediates.as_mut_ptr(),
         num_y,
         num_x,
-        num_rows_per_tile,
-    ))
-}
-
-pub unsafe fn reduce_hypercube_blocks(
-    block_sums: &mut DeviceBuffer<EF>,
-    evaluated: &DeviceBuffer<EF>,
-    s_deg: u32,
-    num_y: u32,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_reduce_hypercube_blocks(
-        block_sums.as_mut_ptr() as *mut std::ffi::c_void,
-        evaluated.as_ptr() as *const std::ffi::c_void,
-        s_deg,
-        num_y,
-    ))
-}
-
-pub unsafe fn reduce_hypercube_final(
-    output: &mut DeviceBuffer<EF>,
-    block_sums: &DeviceBuffer<EF>,
-    s_deg: u32,
-    num_blocks: u32,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_reduce_hypercube_final(
-        output.as_mut_ptr() as *mut std::ffi::c_void,
-        block_sums.as_ptr() as *const std::ffi::c_void,
-        s_deg,
-        num_blocks,
     ))
 }
 

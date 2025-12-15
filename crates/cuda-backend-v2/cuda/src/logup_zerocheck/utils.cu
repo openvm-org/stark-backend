@@ -8,6 +8,7 @@
 #include <utility>
 
 namespace {
+
 // ============================================================================
 // KERNELS
 // ============================================================================
@@ -96,8 +97,8 @@ __global__ void compute_eq_sharp_kernel(
 }
 
 __global__ void interpolate_columns_kernel(
-    FpExt *interpolated,
-    const uintptr_t *columns,
+    FpExt *__restrict__ interpolated,
+    const FpExt *__restrict__ const *__restrict__ columns,
     uint32_t s_deg,
     uint32_t num_y,
     uint32_t num_columns
@@ -110,10 +111,10 @@ __global__ void interpolate_columns_kernel(
     if (col_idx >= num_columns)
         return;
 
-    auto column = reinterpret_cast<const FpExt *>(columns[col_idx]);
+    const FpExt *__restrict__ column = columns[col_idx];
     auto t0 = column[y << 1];
     auto t1 = column[(y << 1) | 1];
-    auto this_interpolated = interpolated + col_idx * s_deg * num_y;
+    FpExt *__restrict__ this_interpolated = interpolated + col_idx * s_deg * num_y;
 
     for (int x = 0; x < s_deg; x++) {
         this_interpolated[y * s_deg + x] = t0 + (t1 - t0) * FpExt(Fp(x + 1u));
@@ -206,19 +207,6 @@ extern "C" int _fold_ple_from_evals(
     return CHECK_KERNEL();
 }
 
-extern "C" int _interpolate_columns(
-    FpExt *interpolated,
-    const uintptr_t *columns,
-    size_t s_deg,
-    size_t num_y,
-    size_t num_columns
-) {
-    auto [grid, block] = kernel_launch_2d_params(num_y, num_columns);
-
-    interpolate_columns_kernel<<<grid, block>>>(interpolated, columns, s_deg, num_y, num_columns);
-    return CHECK_KERNEL();
-}
-
 extern "C" int _compute_eq_sharp(
     FpExt *eq_xi,
     FpExt *eq_sharp,
@@ -230,6 +218,19 @@ extern "C" int _compute_eq_sharp(
         return 0;
     auto [grid, block] = kernel_launch_params(count);
     compute_eq_sharp_kernel<<<grid, block>>>(eq_xi, eq_sharp, eq_r0, eq_sharp_r0, count);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _interpolate_columns(
+    FpExt *interpolated,
+    const FpExt *const *columns,
+    size_t s_deg,
+    size_t num_y,
+    size_t num_columns
+) {
+    auto [grid, block] = kernel_launch_2d_params(num_y, num_columns);
+
+    interpolate_columns_kernel<<<grid, block>>>(interpolated, columns, s_deg, num_y, num_columns);
     return CHECK_KERNEL();
 }
 
