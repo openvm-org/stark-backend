@@ -1,3 +1,8 @@
+#pragma once
+
+#include "fp.h"
+#include <cstdint>
+
 // Given x and 2^n, computes 1/2^n * (1 + x + ... + x^{2^n - 1}).
 __device__ __forceinline__ Fp avg_gp(Fp x, uint32_t n) {
 #ifdef CUDA_DEBUG
@@ -17,14 +22,13 @@ __device__ __forceinline__ uint32_t rev_len(uint32_t x, uint32_t len) {
     return __brev(x) >> (32 - len);
 }
 
-__device__ __forceinline__ uint32_t with_rev_bits(uint32_t x, uint32_t buf_size) {
-    return x;
-}
+__device__ __forceinline__ uint32_t with_rev_bits(uint32_t x, uint32_t buf_size) { return x; }
 
 /// Given an index and the buffer size (must be a power of two), turns on some last bits as provided.
 /// Example: with_rev_bits(0b110, 32, 1, 0) == 0b10110.
 template <typename... Bool>
-__device__ __forceinline__ uint32_t with_rev_bits(uint32_t x, uint32_t buf_size, bool first, Bool&&... others) {
+__device__ __forceinline__ uint32_t
+with_rev_bits(uint32_t x, uint32_t buf_size, bool first, Bool &&...others) {
     buf_size >>= 1;
     return with_rev_bits(x | (first * buf_size), buf_size, others...);
 }
