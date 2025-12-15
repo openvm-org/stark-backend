@@ -8,12 +8,15 @@ use openvm_stark_backend::air_builders::symbolic::{
     symbolic_variable::{Entry, SymbolicVariable},
 };
 use p3_field::FieldAlgebra;
+use stark_backend_v2::prover::fractional_sumcheck_gkr::Frac;
+use tracing::debug;
 
 use crate::{
     EF, F,
     cuda::logup_zerocheck::{
-        MainMatrixPtrs, batch_constraints_eval_mle_interactions, reduce_hypercube_blocks,
-        reduce_hypercube_final, zerocheck_eval_mle,
+        _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
+        _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size,
+        MainMatrixPtrs, logup_eval_mle, zerocheck_eval_mle,
     },
     logup_zerocheck::rules::{SymbolicRulesOnGpuV2, codec::Codec},
 };
@@ -27,7 +30,7 @@ pub fn evaluate_mle_constraints_gpu(
     public_vals: &DeviceBuffer<F>,
     lambda_pows: &DeviceBuffer<EF>,
     symbolic_constraints: &SymbolicConstraintsDag<F>,
-    domain_size: usize,
+    num_y: usize,
     s_deg: usize,
 ) -> DeviceBuffer<EF> {
     let d_main_ptrs = main_ptrs
@@ -69,35 +72,28 @@ pub fn evaluate_mle_constraints_gpu(
         .expect("failed to copy used_nodes to device");
 
     // Calculate dimensions
-    let num_y = domain_size / s_deg;
-    let num_x = s_deg;
+    let num_x = s_deg as u32;
+    let num_y = num_y as u32;
 
-    // Allocate output buffer: [num_x * num_y] for f_hat(x, y) = eq_xi_val * constraint_sum
-    let evaluated = DeviceBuffer::<EF>::with_capacity(num_x * num_y);
-
-    // Allocate intermediates buffer (same pattern as round0)
-    const TASK_SIZE: u32 = 65_536;
-    let intermediates = if rules.buffer_size > 0 {
-        let capacity = if rules.buffer_size > 10 {
-            TASK_SIZE as usize * rules.buffer_size
-        } else {
-            rules.buffer_size
-        };
-        Some(DeviceBuffer::<EF>::with_capacity(capacity))
+    let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
+    let intermed_capacity =
+        unsafe { _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };
+    let mut intermediates = if intermed_capacity > 0 {
+        debug!("zerocheck:intermediates_capacity={intermed_capacity}");
+        DeviceBuffer::<EF>::with_capacity(intermed_capacity)
     } else {
-        None
+        DeviceBuffer::<EF>::new()
     };
-
-    // Calculate num_rows_per_tile (same pattern as round0)
-    let num_rows_per_tile = {
-        let h = domain_size as u32;
-        h.div_ceil(TASK_SIZE).max(1)
-    };
-
+    let temp_sums_buffer_capacity =
+        unsafe { _zerocheck_mle_temp_sums_buffer_size(buffer_size, num_x, num_y) };
+    debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
+    let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
+    let mut output = DeviceBuffer::<EF>::with_capacity(s_deg);
     // Launch evaluation kernel
     unsafe {
         zerocheck_eval_mle(
-            &evaluated,
+            &mut temp_sums_buffer,
+            &mut output,
             eq_xi_ptr,
             sels_ptr,
             prep_ptr,
@@ -107,33 +103,14 @@ pub fn evaluate_mle_constraints_gpu(
             public_vals,
             &d_rules,
             &d_used_nodes,
-            rules.buffer_size.try_into().unwrap(),
-            intermediates.as_ref(),
-            num_y as u32,
-            num_x as u32,
-            num_rows_per_tile,
+            buffer_size,
+            &mut intermediates,
+            num_y,
+            num_x,
         )
         .expect("failed to evaluate MLE constraints on GPU");
     }
 
-    if domain_size == 1 {
-        return evaluated;
-    }
-
-    // REDUCTION: Sum over hypercube for each x_idx
-    let num_blocks = num_y.div_ceil(256); // BLOCK_SIZE = 256
-    let mut block_sums = DeviceBuffer::<EF>::with_capacity(num_blocks * s_deg);
-    let mut output = DeviceBuffer::<EF>::with_capacity(s_deg);
-
-    unsafe {
-        // Phase 1: Block-level reduction
-        reduce_hypercube_blocks(&mut block_sums, &evaluated, s_deg as u32, num_y as u32)
-            .expect("failed to reduce hypercube blocks on GPU");
-
-        // Phase 2: Final reduction
-        reduce_hypercube_final(&mut output, &block_sums, s_deg as u32, num_blocks as u32)
-            .expect("failed to finalize hypercube reduction on GPU");
-    }
     output
 }
 
@@ -147,9 +124,9 @@ pub fn evaluate_mle_interactions_gpu(
     beta_pows: &[EF],
     eq_3bs: &DeviceBuffer<EF>,
     symbolic_constraints: &SymbolicConstraintsDag<F>,
-    domain_size: usize,
+    num_y: usize,
     s_deg: usize,
-) -> [DeviceBuffer<EF>; 2] {
+) -> DeviceBuffer<Frac<EF>> {
     let d_main_ptrs = main_ptrs
         .to_device()
         .expect("failed to copy main_ptrs to device");
@@ -217,37 +194,29 @@ pub fn evaluate_mle_interactions_gpu(
         .expect("failed to copy used_nodes to device");
 
     // Calculate dimensions
-    let num_y = domain_size / s_deg;
-    let num_x = s_deg;
+    let num_y = num_y as u32;
+    let num_x = s_deg as u32;
 
-    // Allocate output buffers: [num_x * num_y] for numer and denom separately
-    let evaluated_numer = DeviceBuffer::<EF>::with_capacity(num_x * num_y);
-    let evaluated_denom = DeviceBuffer::<EF>::with_capacity(num_x * num_y);
-
-    // Allocate intermediates buffer (same pattern as round0)
-    const TASK_SIZE: u32 = 65_536;
-    let intermediates = if rules.buffer_size > 0 {
-        let capacity = if rules.buffer_size > 10 {
-            TASK_SIZE as usize * rules.buffer_size
-        } else {
-            rules.buffer_size
-        };
-        Some(DeviceBuffer::<EF>::with_capacity(capacity))
+    let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
+    let intermed_capacity =
+        unsafe { _logup_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };
+    let mut intermediates = if intermed_capacity > 0 {
+        debug!("logup:intermediates_capacity={intermed_capacity}");
+        DeviceBuffer::<EF>::with_capacity(intermed_capacity)
     } else {
-        None
+        DeviceBuffer::<EF>::new()
     };
-
-    // Calculate num_rows_per_tile (same pattern as round0)
-    let num_rows_per_tile = {
-        let h = domain_size as u32;
-        h.div_ceil(TASK_SIZE).max(1)
-    };
+    let temp_sums_buffer_capacity =
+        unsafe { _logup_mle_temp_sums_buffer_size(buffer_size, num_x, num_y) };
+    debug!("logup:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
+    let mut temp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);
+    let mut output = DeviceBuffer::<Frac<EF>>::with_capacity(s_deg);
 
     // Launch interaction evaluation kernel
     unsafe {
-        batch_constraints_eval_mle_interactions(
-            &evaluated_numer,
-            &evaluated_denom,
+        logup_eval_mle(
+            &mut temp_sums_buffer,
+            &mut output,
             eq_sharp_ptr,
             sels_ptr,
             prep_ptr,
@@ -257,64 +226,12 @@ pub fn evaluate_mle_interactions_gpu(
             public_vals,
             &d_rules,
             &d_used_nodes,
-            rules.buffer_size.try_into().unwrap(),
-            intermediates.as_ref(),
-            num_y as u32,
-            num_x as u32,
-            num_rows_per_tile,
+            buffer_size,
+            &mut intermediates,
+            num_y,
+            num_x,
         )
         .expect("failed to evaluate MLE interactions on GPU");
     }
-
-    if domain_size == 1 {
-        return [evaluated_numer, evaluated_denom];
-    }
-
-    // REDUCTION: Sum over hypercube for each x_idx (for both numer and denom)
-    let num_blocks = num_y.div_ceil(256); // BLOCK_SIZE = 256
-    let mut block_sums_numer = DeviceBuffer::<EF>::with_capacity(num_blocks * s_deg);
-    let mut block_sums_denom = DeviceBuffer::<EF>::with_capacity(num_blocks * s_deg);
-    let mut output_numer = DeviceBuffer::<EF>::with_capacity(s_deg);
-    let mut output_denom = DeviceBuffer::<EF>::with_capacity(s_deg);
-
-    unsafe {
-        // Phase 1: Block-level reduction for numer
-        reduce_hypercube_blocks(
-            &mut block_sums_numer,
-            &evaluated_numer,
-            s_deg as u32,
-            num_y as u32,
-        )
-        .expect("failed to reduce hypercube blocks (numer) on GPU");
-
-        // Phase 1: Block-level reduction for denom
-        reduce_hypercube_blocks(
-            &mut block_sums_denom,
-            &evaluated_denom,
-            s_deg as u32,
-            num_y as u32,
-        )
-        .expect("failed to reduce hypercube blocks (denom) on GPU");
-
-        // Phase 2: Final reduction for numer
-        reduce_hypercube_final(
-            &mut output_numer,
-            &block_sums_numer,
-            s_deg as u32,
-            num_blocks as u32,
-        )
-        .expect("failed to finalize hypercube reduction (numer) on GPU");
-
-        // Phase 2: Final reduction for denom
-        reduce_hypercube_final(
-            &mut output_denom,
-            &block_sums_denom,
-            s_deg as u32,
-            num_blocks as u32,
-        )
-        .expect("failed to finalize hypercube reduction (denom) on GPU");
-    }
-
-    // Copy results to host
-    [output_numer, output_denom]
+    output
 }

@@ -76,7 +76,7 @@ pub fn evaluate_round0_constraints_gpu(
     let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
     let intermed_capacity = unsafe {
         _zerocheck_r0_intermediates_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
-    } as usize;
+    };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
         DeviceBuffer::<F>::with_capacity(intermed_capacity)
@@ -86,8 +86,8 @@ pub fn evaluate_round0_constraints_gpu(
 
     let temp_sums_buffer_capacity = unsafe {
         _zerocheck_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
-    } as usize;
-    debug!("zerocheck:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
+    };
+    debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
     let used_temp_bytes = (intermed_capacity + temp_sums_buffer_capacity) * size_of::<EF>();
     if used_temp_bytes > max_temp_bytes {
@@ -231,7 +231,7 @@ pub fn evaluate_round0_interactions_gpu(
     let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
     let intermed_capacity = unsafe {
         _logup_r0_intermediates_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
-    } as usize;
+    };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("logup_r0:intermediates_capacity={intermed_capacity}");
         DeviceBuffer::<F>::with_capacity(intermed_capacity)
@@ -241,7 +241,7 @@ pub fn evaluate_round0_interactions_gpu(
 
     let temp_sums_buffer_capacity = unsafe {
         _logup_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
-    } as usize;
+    };
     debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);
     let used_temp_bytes = (intermed_capacity + temp_sums_buffer_capacity) * size_of::<EF>();

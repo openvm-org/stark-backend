@@ -11,26 +11,6 @@
 #include <utility>
 #include <vector_types.h>
 
-// for mle use
-namespace constraint_evaluation {
-inline constexpr uint32_t BUFFER_THRESHOLD = 16;
-inline constexpr uint32_t TASK_SIZE = 65536;
-
-inline uint32_t get_launcher_count(uint32_t buffer_size, uint32_t height) {
-    return buffer_size > BUFFER_THRESHOLD ? TASK_SIZE : height;
-}
-} // namespace constraint_evaluation
-
-// for mle use
-namespace interaction_evaluation {
-inline constexpr uint32_t BUFFER_THRESHOLD = 10;
-inline constexpr uint32_t TASK_SIZE = 65536;
-
-inline uint32_t get_launcher_count(uint32_t buffer_size, uint32_t height) {
-    return buffer_size > BUFFER_THRESHOLD ? TASK_SIZE : height;
-}
-} // namespace interaction_evaluation
-
 namespace symbolic_dag {
 
 // Context for evaluating DAG entries corresponding to (z, \vec x) where `z` is some point in enlarged NTT domain (subgroup of F) and `\vec x` is point on hypercube. Evaluation will directly perform barycentric interpolation to compute value of prismalinear polynomial from its evaluations on univariate skip domain `D`.
@@ -159,7 +139,7 @@ inline std::pair<dim3, dim3> eval_constraints_launch_params(
     return {grid, block};
 }
 
-inline uint32_t temp_sums_buffer_size(
+inline size_t temp_sums_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x,
@@ -172,10 +152,10 @@ inline uint32_t temp_sums_buffer_size(
     );
     auto [zs_per_grid, zs_per_block] = get_z_dim(large_domain);
     auto xs_per_grid = grid.x / zs_per_grid;
-    return large_domain * xs_per_grid;
+    return static_cast<size_t>(large_domain) * xs_per_grid;
 }
 
-inline uint32_t intermediates_buffer_size(
+inline size_t intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t large_domain,
     uint32_t num_x,
@@ -192,7 +172,50 @@ inline uint32_t intermediates_buffer_size(
     auto [zs_per_grid, zs_per_block] = get_z_dim(large_domain);
     auto xs_per_block = block.x / zs_per_block;
     auto xs_per_grid = grid.x / zs_per_grid;
-    uint32_t task_stride = xs_per_grid * xs_per_block * large_domain;
+    size_t task_stride = static_cast<size_t>(xs_per_grid) * xs_per_block * large_domain;
     return task_stride * buffer_size;
 }
 } // namespace round0_config
+
+namespace mle_rounds_config {
+inline std::pair<dim3, dim3> eval_constraints_launch_params(
+    uint32_t buffer_size,
+    uint32_t num_x,
+    uint32_t num_y,
+    uint32_t buffer_threshold, // threshold for switching intermediate buffer to global memory
+    size_t threads_per_block
+) {
+    (void)buffer_size;
+    (void)buffer_threshold;
+    return kernel_launch_params(num_x * num_y, threads_per_block);
+}
+
+inline size_t temp_sums_buffer_size(
+    uint32_t buffer_size,
+    uint32_t num_x,
+    uint32_t num_y,
+    uint32_t buffer_threshold,
+    uint32_t threads_per_block
+) {
+    auto [grid, block] = eval_constraints_launch_params(
+        buffer_size, num_x, num_y, buffer_threshold, threads_per_block
+    );
+    return static_cast<size_t>(num_x) * grid.x;
+}
+
+inline size_t intermediates_buffer_size(
+    uint32_t buffer_size,
+    uint32_t num_x,
+    uint32_t num_y,
+    uint32_t buffer_threshold,
+    uint32_t threads_per_block
+) {
+    if (buffer_size <= buffer_threshold) {
+        return 0;
+    }
+    auto [grid, block] = eval_constraints_launch_params(
+        buffer_size, num_x, num_y, buffer_threshold, threads_per_block
+    );
+    return static_cast<size_t>(block.x) * grid.x * buffer_size;
+}
+} // namespace mle_rounds_config
