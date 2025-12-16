@@ -51,7 +51,8 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
         initial_round_merkle_proofs,
         codeword_opened_values,
         codeword_merkle_proofs,
-        whir_pow_witnesses,
+        folding_pow_witnesses,
+        query_phase_pow_witnesses,
         final_poly,
     } = whir_proof;
 
@@ -60,9 +61,14 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     debug_assert_eq!((m - params.log_final_poly_len()) % k_whir, 0);
     let num_whir_rounds = params.num_whir_rounds();
     let mut log_rs_domain_size = m + params.log_blowup;
-    debug_assert!(num_whir_rounds * k_whir <= m);
+    debug_assert!(params.num_whir_sumcheck_rounds() <= m);
+    debug_assert_eq!(
+        folding_pow_witnesses.len(),
+        params.num_whir_sumcheck_rounds()
+    );
 
     let mut sumcheck_poly_iter = whir_sumcheck_polys.iter();
+    let mut folding_pow_iter = folding_pow_witnesses.iter();
     let mu_pows: Vec<_> = mu.powers().take(widths.iter().sum::<usize>()).collect();
     let mut claim = stacking_openings
         .iter()
@@ -75,9 +81,9 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     let mut z0s = Vec::with_capacity(num_whir_rounds);
     let mut alphas = Vec::with_capacity(m);
 
-    debug_assert_eq!(whir_pow_witnesses.len(), num_whir_rounds);
-    for (whir_round, (pow_witness, round_params)) in
-        zip(whir_pow_witnesses, &params.whir.rounds).enumerate()
+    debug_assert_eq!(query_phase_pow_witnesses.len(), num_whir_rounds);
+    for (whir_round, (query_phase_pow_witness, round_params)) in
+        zip(query_phase_pow_witnesses, &params.whir.rounds).enumerate()
     {
         // A WHIR round consists of the following steps:
         // 1) Run k rounds of sumcheck to obtain polynomial f'.
@@ -101,10 +107,14 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
                 transcript.observe_ext(ev1);
                 transcript.observe_ext(ev2);
 
-                let ev0 = claim - ev1;
+                let pow_witness = *folding_pow_iter.next().unwrap();
+                if !transcript.check_witness(params.whir.folding_pow_bits, pow_witness) {
+                    return Err(VerifyWhirError::FoldingPoWInvalid);
+                }
                 let alpha = transcript.sample_ext();
                 alphas_round.push(alpha);
 
+                let ev0 = claim - ev1;
                 claim = interpolate_quadratic_at_012(&[ev0, ev1, ev2], alpha);
             }
         }
@@ -128,8 +138,8 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
             Some(y0)
         };
 
-        if !transcript.check_witness(params.whir.query_phase_pow_bits, *pow_witness) {
-            return Err(VerifyWhirError::PoWInvalid);
+        if !transcript.check_witness(params.whir.query_phase_pow_bits, *query_phase_pow_witness) {
+            return Err(VerifyWhirError::QueryPhasePoWInvalid);
         }
 
         let num_queries = round_params.num_queries;
@@ -269,8 +279,10 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
 pub enum VerifyWhirError {
     #[error("final polynomial has wrong degree")]
     FinalPolyDegree,
-    #[error("proof-of-work witness check failed")]
-    PoWInvalid,
+    #[error("folding proof-of-work witness check failed")]
+    FoldingPoWInvalid,
+    #[error("query phase proof-of-work witness check failed")]
+    QueryPhasePoWInvalid,
     #[error("final polynomial doesn't explain queries")]
     FinalPolyQueryMismatch,
     #[error("final poly is not in the final constrained RS code")]
