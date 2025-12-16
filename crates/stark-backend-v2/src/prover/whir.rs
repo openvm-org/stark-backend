@@ -17,7 +17,7 @@ use crate::{
         stacked_pcs::{MerkleTree, StackedPcsData},
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
-    Digest, EF, F,
+    Digest, WhirParams, EF, F,
 };
 
 pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
@@ -53,12 +53,9 @@ impl<TS: FiatShamirTranscript> WhirProver<CpuBackendV2, CpuDeviceV2, TS> for Cpu
             .collect_vec();
         prove_whir_opening(
             transcript,
-            params.k_whir,
-            params.log_blowup,
-            params.num_whir_queries,
-            params.log_final_poly_len,
-            params.whir_pow_bits,
             params.l_skip,
+            params.log_blowup,
+            &params.whir,
             &committed_mats,
             u_cube,
         )
@@ -68,12 +65,9 @@ impl<TS: FiatShamirTranscript> WhirProver<CpuBackendV2, CpuDeviceV2, TS> for Cpu
 #[allow(clippy::too_many_arguments)]
 pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     transcript: &mut TS,
-    k_whir: usize,
-    log_blowup: usize,
-    num_whir_queries: usize,
-    log_final_poly_len: usize,
-    whir_pow_bits: usize,
     l_skip: usize,
+    log_blowup: usize,
+    whir_params: &WhirParams,
     committed_mats: &[(&ColMajorMatrix<F>, &MerkleTree<F, Digest>)],
     u: &[EF],
 ) -> WhirProof {
@@ -87,8 +81,8 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     debug_assert!(committed_mats.iter().all(|(mat, _)| mat.height() == height));
     let mut m = log2_strict_usize(height);
 
-    debug_assert_eq!((m - log_final_poly_len) % k_whir, 0);
-    let num_whir_rounds = (m - log_final_poly_len) / k_whir;
+    let k_whir = whir_params.k;
+    let num_whir_rounds = whir_params.num_whir_rounds();
 
     let mles: Vec<Vec<F>> = committed_mats
         .par_iter()
@@ -127,7 +121,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     let mut rs_tree = None;
     let mut log_rs_domain_size = m + log_blowup;
     let mut final_poly = None;
-    for whir_round in 0..num_whir_rounds {
+    for (whir_round, round_params) in whir_params.rounds.iter().enumerate() {
         let is_last_round = whir_round == num_whir_rounds - 1;
         // Run k_whir rounds of sumcheck on `sum_{x in H_m} \hat{w}(\hat{f}(x), x)`
         for round in 0..k_whir {
@@ -208,15 +202,16 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
 
         // omega is generator of RS domain `\mathcal{L}^{(2^k)}`
         let omega = F::two_adic_generator(log_rs_domain_size - k_whir);
-        let mut query_indices = Vec::with_capacity(num_whir_queries);
-        whir_pow_witnesses.push(transcript.grind(whir_pow_bits));
+        let num_queries = round_params.num_queries;
+        let mut query_indices = Vec::with_capacity(num_queries);
+        whir_pow_witnesses.push(transcript.grind(whir_params.query_phase_pow_bits));
         // Sample query indices first
-        for _ in 0..num_whir_queries {
+        for _ in 0..num_queries {
             // This is the index of the leaf in the Merkle tree
             let index = transcript.sample_bits(log_rs_domain_size - k_whir);
             query_indices.push(index as usize);
         }
-        let mut zs = Vec::with_capacity(num_whir_queries);
+        let mut zs = Vec::with_capacity(num_queries);
         if !is_last_round {
             codeword_opened_values.push(vec![]);
             codeword_merkle_proofs.push(vec![]);

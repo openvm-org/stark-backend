@@ -265,7 +265,7 @@ mod tests {
     ) -> Result<(), VerifierError> {
         setup_tracing_with_log_level(Level::DEBUG);
         let params = test_system_params_small(l_skip, n_stack, k_whir);
-        let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+        let engine = BabyBearPoseidon2CpuEngineV2::new(params.clone());
         let fx = CachedFixture11::new(params);
         let (pk, vk) = fx.keygen(&engine);
 

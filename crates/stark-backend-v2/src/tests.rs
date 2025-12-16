@@ -89,7 +89,7 @@ fn test_proof_shape_verifier() -> Result<(), ProofShapeError> {
     verify_proof_shape(&vk.inner, &proof)?;
 
     // with cached trace
-    let params = engine.config();
+    let params = engine.config().clone();
     let (vk, proof) = CachedFixture11::new(params).keygen_and_prove(&engine);
     verify_proof_shape(&vk.inner, &proof)?;
 
@@ -190,7 +190,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
     let engine = test_engine_small();
     let params = engine.config();
 
-    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params.clone());
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, _vk) = fib.keygen(&engine);
     let pk = engine.device().transport_pk_to_device(&pk);
@@ -203,7 +203,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
             params.l_skip,
             params.n_stack,
             params.log_blowup,
-            params.k_whir,
+            params.k_whir(),
             &ctx.common_main_traces()
                 .map(|(_, trace)| trace)
                 .collect_vec(),
@@ -324,7 +324,7 @@ fn test_interactions_single_sender_receiver_happy() {
 fn test_single_cached_trace_stark() {
     setup_tracing();
     let engine = test_engine_small();
-    let fx = CachedFixture11::new(engine.config());
+    let fx = CachedFixture11::new(engine.config().clone());
     let (vk, proof) = fx.keygen_and_prove(&engine);
     engine.verify(&vk, &proof).unwrap();
 }
@@ -369,7 +369,7 @@ fn test_multi_interaction_traces_stark(log_trace_degree: usize) {
 fn test_mixture_traces_stark(log_trace_degree: usize) {
     setup_tracing();
     let engine = test_engine_small();
-    let fx = MixtureFixture::standard(log_trace_degree, engine.config());
+    let fx = MixtureFixture::standard(log_trace_degree, engine.config().clone());
     let (vk, proof) = fx.keygen_and_prove(&engine);
     engine.verify(&vk, &proof).unwrap();
 }

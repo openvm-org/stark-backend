@@ -314,7 +314,7 @@ impl TestFixture for CachedFixture11 {
                     params.l_skip,
                     params.n_stack,
                     params.log_blowup,
-                    params.k_whir,
+                    params.k_whir(),
                     &[&cached],
                 );
                 assert_eq!(common.height(), cached.height());
