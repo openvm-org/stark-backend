@@ -115,7 +115,6 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
         let mut rounds = Vec::with_capacity(num_whir_rounds);
         for _ in 0..num_whir_rounds {
             rounds.push(WhirRoundConfig {
-                folding_pow_bits: 1,
                 num_queries: rng.random_range(1..=10),
             });
         }
@@ -123,6 +122,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
             k: k_whir,
             rounds,
             query_phase_pow_bits: 1,
+            folding_pow_bits: 1,
         };
         let params = SystemParams {
             l_skip,

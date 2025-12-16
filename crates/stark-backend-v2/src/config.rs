@@ -63,11 +63,14 @@ pub struct WhirConfig {
     /// Number of bits of grinding for the query phase of each WHIR round.
     /// The PoW bits can vary per round, but for simplicity we use the same number for all rounds.
     pub query_phase_pow_bits: usize,
+    /// Number of bits of grinding before sampling folding randomness in each WHIR round.
+    /// The folding PoW bits can vary per round, but for simplicity (and efficiency of the
+    /// recursion circuit) we use the same number for all rounds.
+    pub folding_pow_bits: usize,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WhirRoundConfig {
-    pub folding_pow_bits: usize,
     pub num_queries: usize,
 }
 
@@ -109,10 +112,7 @@ impl WhirConfig {
                 protocol_security_level,
                 log_inv_rate,
             );
-            round_parameters.push(WhirRoundConfig {
-                folding_pow_bits: FOLDING_POW_BITS,
-                num_queries,
-            });
+            round_parameters.push(WhirRoundConfig { num_queries });
 
             log_inv_rate = next_rate;
         }
@@ -121,6 +121,7 @@ impl WhirConfig {
             k: k_whir,
             rounds: round_parameters,
             query_phase_pow_bits,
+            folding_pow_bits: FOLDING_POW_BITS,
         }
     }
 
