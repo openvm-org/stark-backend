@@ -4,6 +4,7 @@
 #include "fpext.h"
 #include "frac_ext.cuh"
 #include "launcher.cuh"
+#include "round0_config.cuh"
 #include "sumcheck.cuh"
 #include "utils.cuh"
 #include <algorithm>
@@ -241,7 +242,7 @@ extern "C" size_t _logup_r0_temp_sums_buffer_size(
     uint32_t num_x,
     size_t max_temp_bytes
 ) {
-    return round0_config::temp_sums_buffer_size(
+    return align_x_round0_config::temp_sums_buffer_size(
         buffer_size, large_domain, num_x, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
     );
 }
@@ -252,7 +253,7 @@ extern "C" size_t _logup_r0_intermediates_buffer_size(
     uint32_t num_x,
     size_t max_temp_bytes
 ) {
-    return round0_config::intermediates_buffer_size(
+    return align_x_round0_config::intermediates_buffer_size(
         buffer_size, large_domain, num_x, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
     );
 }
@@ -282,10 +283,10 @@ extern "C" int _logup_bary_eval_interactions_round0(
     uint32_t expansion_factor,
     size_t max_temp_bytes
 ) {
-    auto [grid, block] = round0_config::eval_constraints_launch_params(
+    auto [grid, block] = align_x_round0_config::eval_constraints_launch_params(
         buffer_size, large_domain, num_x, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
     );
-    auto z_dim = round0_config::get_z_dim(large_domain);
+    auto z_dim = align_x_round0_config::get_z_dim(large_domain);
     auto xs_per_grid = grid.x / z_dim.first;
     size_t shmem_bytes = sizeof(FracExt) * block.x;
 
