@@ -17,7 +17,7 @@ use crate::{
         stacked_pcs::{MerkleTree, StackedPcsData},
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
-    Digest, WhirParams, EF, F,
+    Digest, WhirConfig, EF, F,
 };
 
 pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
@@ -67,7 +67,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     transcript: &mut TS,
     l_skip: usize,
     log_blowup: usize,
-    whir_params: &WhirParams,
+    whir_params: &WhirConfig,
     committed_mats: &[(&ColMajorMatrix<F>, &MerkleTree<F, Digest>)],
     u: &[EF],
 ) -> WhirProof {

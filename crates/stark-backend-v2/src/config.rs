@@ -9,7 +9,7 @@ pub struct SystemParams {
     /// `-log_2` of the rate for the initial Reed-Solomon code.
     pub log_blowup: usize,
     #[getset(get = "pub")]
-    pub whir: WhirParams,
+    pub whir: WhirConfig,
     pub logup: LogUpSecurityParameters,
     /// Global max constraint degree enforced across all AIR and Interaction constraints
     pub max_constraint_degree: usize,
@@ -45,18 +45,28 @@ impl SystemParams {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Configurable parameters that are used to determine the [WhirConfig] for a target security level.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WhirParams {
+    pub k: usize,
+    /// WHIR rounds will stop as soon as `log2` of the final polynomial length is `<=
+    /// log_final_poly_len`.
+    pub log_final_poly_len: usize,
+    pub query_phase_pow_bits: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WhirConfig {
     /// Constant folding factor. This means that `2^k` terms are folded per round.
     pub k: usize,
-    pub rounds: Vec<WhirRoundParams>,
+    pub rounds: Vec<WhirRoundConfig>,
     /// Number of bits of grinding for the query phase of each WHIR round.
     /// The PoW bits can vary per round, but for simplicity we use the same number for all rounds.
     pub query_phase_pow_bits: usize,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WhirRoundParams {
+pub struct WhirRoundConfig {
     pub folding_pow_bits: usize,
     pub num_queries: usize,
 }
@@ -68,7 +78,52 @@ pub enum SoundnessType {
     UniqueDecoding,
 }
 
-impl WhirParams {
+impl WhirConfig {
+    /// Sets parameters targeting 100-bits of provable security, with grinding, using the unique
+    /// decoding regime.
+    pub fn new(
+        log_blowup: usize,
+        log_stacked_height: usize,
+        whir_params: WhirParams,
+        security_bits: usize,
+    ) -> Self {
+        let query_phase_pow_bits = whir_params.query_phase_pow_bits;
+        let protocol_security_level = security_bits.saturating_sub(query_phase_pow_bits);
+        let k_whir = whir_params.k;
+        let num_rounds = log_stacked_height
+            .saturating_sub(whir_params.log_final_poly_len)
+            .div_ceil(k_whir);
+        let mut log_inv_rate = log_blowup;
+
+        // A safe setting for BabyBear and ~200 columns
+        // TODO[jpw]: use rbr_soundness_queries_combination
+        const FOLDING_POW_BITS: usize = 10;
+
+        let mut round_parameters = Vec::with_capacity(num_rounds);
+        for _round in 0..num_rounds {
+            // Queries are set w.r.t. to old rate, while the rest to the new rate
+            let next_rate = log_inv_rate + (k_whir - 1);
+
+            let num_queries = Self::queries(
+                SoundnessType::UniqueDecoding,
+                protocol_security_level,
+                log_inv_rate,
+            );
+            round_parameters.push(WhirRoundConfig {
+                folding_pow_bits: FOLDING_POW_BITS,
+                num_queries,
+            });
+
+            log_inv_rate = next_rate;
+        }
+
+        Self {
+            k: k_whir,
+            rounds: round_parameters,
+            query_phase_pow_bits,
+        }
+    }
+
     #[inline]
     pub fn log_final_poly_len(&self, log_stacked_height: usize) -> usize {
         log_stacked_height - self.num_whir_rounds() * self.k
