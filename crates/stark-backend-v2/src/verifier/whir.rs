@@ -364,9 +364,9 @@ mod tests {
             poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening, ColMajorMatrix,
             CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
         },
-        test_utils::{DuplexSpongeValidator, FibFixture, TestFixture},
+        test_utils::{test_whir_config_small, DuplexSpongeValidator, FibFixture, TestFixture},
         verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
-        EF, F,
+        WhirConfig, WhirRoundConfig, EF, F,
     };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
@@ -494,16 +494,15 @@ mod tests {
         log_final_poly_len: usize,
     ) -> Result<(), VerifyWhirError> {
         setup_tracing_with_log_level(Level::DEBUG);
+        let l_skip = 2;
+        let whir = test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len);
 
         let params = SystemParams {
-            l_skip: 2,
+            l_skip,
             n_stack,
             log_blowup,
-            k_whir,
-            num_whir_queries: 5,
-            log_final_poly_len,
+            whir,
             logup: log_up_security_params_baby_bear_100_bits(),
-            whir_pow_bits: 0,
             max_constraint_degree: 3,
         };
         run_whir_fib_test(params)
@@ -546,6 +545,23 @@ mod tests {
         assert_eq!(result, expected);
     }
 
+    fn whir_test_config(k_whir: usize) -> WhirConfig {
+        WhirConfig {
+            k: k_whir,
+            rounds: vec![
+                WhirRoundConfig {
+                    folding_pow_bits: 1,
+                    num_queries: 6,
+                },
+                WhirRoundConfig {
+                    folding_pow_bits: 1,
+                    num_queries: 5,
+                },
+            ],
+            query_phase_pow_bits: 1,
+        }
+    }
+
     #[test]
     fn test_whir_multiple_commitments() -> Result<(), VerifyWhirError> {
         setup_tracing_with_log_level(Level::DEBUG);
@@ -556,11 +572,8 @@ mod tests {
             l_skip: 3,
             n_stack: 3,
             log_blowup: 1,
-            k_whir: 2,
-            num_whir_queries: 6,
-            log_final_poly_len: 2,
+            whir: whir_test_config(2),
             logup: log_up_security_params_baby_bear_100_bits(),
-            whir_pow_bits: 1,
             max_constraint_degree: 3,
         };
 
@@ -582,7 +595,7 @@ mod tests {
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
-                params.k_whir,
+                params.k_whir(),
                 &[&mat],
             );
 
@@ -633,11 +646,8 @@ mod tests {
             l_skip: 3,
             n_stack: 3,
             log_blowup: 1,
-            k_whir: 2,
-            num_whir_queries: 6,
-            log_final_poly_len: 4,
+            whir: whir_test_config(2),
             logup: log_up_security_params_baby_bear_100_bits(),
-            whir_pow_bits: 1,
             max_constraint_degree: 3,
         };
 

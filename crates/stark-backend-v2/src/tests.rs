@@ -32,7 +32,7 @@ use crate::{
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
     },
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, F,
+    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirRoundConfig, F,
 };
 
 #[test]
@@ -111,17 +111,24 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
         let n_stack = rng.random_range(8usize..=9);
         let k_whir = rng.random_range(1usize..=4);
         let log_blowup = rng.random_range(1usize..=3);
-        let num_whir_queries = rng.random_range(1..=10);
         let num_whir_rounds = rng.random_range(1..=2);
-        let log_final_poly_len = n_stack + l_skip - num_whir_rounds * k_whir;
+        let mut rounds = Vec::with_capacity(num_whir_rounds);
+        for _ in 0..num_whir_rounds {
+            rounds.push(WhirRoundConfig {
+                folding_pow_bits: 1,
+                num_queries: rng.random_range(1..=10),
+            });
+        }
+        let whir = WhirConfig {
+            k: k_whir,
+            rounds,
+            query_phase_pow_bits: 1,
+        };
         let params = SystemParams {
             l_skip,
             n_stack,
             log_blowup,
-            k_whir,
-            num_whir_queries,
-            log_final_poly_len,
-            whir_pow_bits: 1,
+            whir,
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
         };
