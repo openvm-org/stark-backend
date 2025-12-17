@@ -20,7 +20,7 @@ use stark_backend_v2::{
     poseidon2::sponge::DuplexSponge,
     prover::{AirProvingContextV2, DeviceDataTransporterV2, ProvingContextV2},
     verifier::verify,
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams,
+    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
 };
 use tracing::info_span;
 
@@ -47,16 +47,19 @@ fn main() -> eyre::Result<()> {
     let l_skip = 4;
     let n_stack = 17;
     let k_whir = 4;
-    let log_final_poly_len = (l_skip + n_stack) % k_whir;
+    let whir_params = WhirParams {
+        k: k_whir,
+        log_final_poly_len: 2 * k_whir,
+        query_phase_pow_bits: 20,
+    };
+    let log_blowup = 1;
+    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
     let params = SystemParams {
         l_skip,
         n_stack,
-        log_blowup: 1,
-        k_whir,
-        num_whir_queries: 100,
-        log_final_poly_len,
+        log_blowup,
+        whir,
         logup: log_up_security_params_baby_bear_100_bits(),
-        whir_pow_bits: 16,
         max_constraint_degree: 3,
     };
 
@@ -64,7 +67,7 @@ fn main() -> eyre::Result<()> {
         let mut rng = StdRng::seed_from_u64(42);
         let air = TestAir(KeccakAir {});
 
-        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params.clone());
         let (pk, vk) = engine.keygen(&[Arc::new(air)]);
         let air_idx = 0;
 
@@ -74,8 +77,10 @@ fn main() -> eyre::Result<()> {
         let trace = info_span!("generate_trace")
             .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
 
-        let air_ctx =
-            AirProvingContextV2::from_v1(params, AirProvingContext::simple_no_pis(Arc::new(trace)));
+        let air_ctx = AirProvingContextV2::from_v1(
+            &params,
+            AirProvingContext::simple_no_pis(Arc::new(trace)),
+        );
         let d_pk = engine.device().transport_pk_to_device(&pk);
         let proof = engine.prove(&d_pk, ProvingContextV2::new(vec![(air_idx, air_ctx)]));
 
