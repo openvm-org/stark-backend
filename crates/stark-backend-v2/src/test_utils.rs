@@ -37,7 +37,7 @@ use crate::{
         CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver,
         ProvingContextV2, TraceCommitterV2,
     },
-    BabyBearPoseidon2CpuEngineV2, ChipV2, StarkEngineV2, SystemParams, F,
+    BabyBearPoseidon2CpuEngineV2, ChipV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams, F,
 };
 
 #[allow(clippy::type_complexity)]
@@ -303,7 +303,7 @@ impl TestFixture for CachedFixture11 {
             1,
         );
 
-        let params = self.params;
+        let params = &self.params;
         ProvingContextV2::new(
             [
                 (sender_trace, sender_cached_trace),
@@ -314,7 +314,7 @@ impl TestFixture for CachedFixture11 {
                     params.l_skip,
                     params.n_stack,
                     params.log_blowup,
-                    params.k_whir,
+                    params.k_whir(),
                     &[&cached],
                 );
                 assert_eq!(common.height(), cached.height());
@@ -499,18 +499,31 @@ pub fn test_system_params_small_with_poly_len(
     log_final_poly_len: usize,
 ) -> SystemParams {
     assert!(log_final_poly_len < l_skip + n_stack);
+    let log_blowup = 1;
     // Use all different numbers
     SystemParams {
         l_skip,
         n_stack,
-        log_blowup: 1,
-        k_whir,
-        num_whir_queries: 5,
-        log_final_poly_len,
+        log_blowup,
+        whir: test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len),
         logup: log_up_security_params_baby_bear_100_bits(),
-        whir_pow_bits: 1,
         max_constraint_degree: 3,
     }
+}
+
+pub fn test_whir_config_small(
+    log_blowup: usize,
+    log_stacked_height: usize,
+    k_whir: usize,
+    log_final_poly_len: usize,
+) -> WhirConfig {
+    let params = WhirParams {
+        k: k_whir,
+        log_final_poly_len,
+        query_phase_pow_bits: 1,
+    };
+    let security_bits = 5;
+    WhirConfig::new(log_blowup, log_stacked_height, params, security_bits)
 }
 
 pub fn default_test_params_small() -> SystemParams {
