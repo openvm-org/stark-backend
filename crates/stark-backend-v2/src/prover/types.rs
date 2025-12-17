@@ -103,7 +103,7 @@ where
     pub fn get_vk(&self) -> MultiStarkVerifyingKeyV2 {
         let per_air = self.per_air.iter().map(|pk| pk.vk.clone()).collect();
         let inner = MultiStarkVerifyingKey0V2 {
-            params: self.params,
+            params: self.params.clone(),
             per_air,
             trace_height_constraints: self.trace_height_constraints.clone(),
         };

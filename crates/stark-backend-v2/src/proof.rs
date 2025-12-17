@@ -220,9 +220,10 @@ impl Encode for WhirProof {
         let num_commits = self.initial_round_opened_rows.len();
         assert!(num_commits > 0);
         num_commits.encode(writer)?;
-        let num_whir_queries = self.initial_round_opened_rows[0].len();
-        num_whir_queries.encode(writer)?;
-        if num_whir_queries > 0 {
+        let initial_num_whir_queries = self.initial_round_opened_rows[0].len();
+        initial_num_whir_queries.encode(writer)?;
+
+        if initial_num_whir_queries > 0 {
             let k_whir_exp = self.initial_round_opened_rows[0][0].len();
             k_whir_exp.encode(writer)?;
             let merkle_depth = self.initial_round_merkle_proofs[0][0].len();
@@ -240,17 +241,18 @@ impl Encode for WhirProof {
             k_whir_exp.encode(writer)?;
         }
 
-        // Length of outer vector is num_whir_rounds, then num_whir_queries, then
-        // k_whir_exp.
-        encode_iter(
-            self.codeword_opened_values.iter().flatten().flatten(),
-            writer,
-        )?;
+        // Length of outer vector is num_whir_rounds
+        for non_init_round in &self.codeword_opened_values {
+            let num_queries = non_init_round.len();
+            num_queries.encode(writer)?;
+            // Length of nested vector is num_whir_queries, then k_whir_exp.
+            encode_iter(non_init_round.iter().flatten(), writer)?;
+        }
 
         // Length of outer vector is num_whir_rounds, then num_whir_queries. Each
         // inner vector length is one less than the one that precedes it.
         let mut first_merkle_depth = 0;
-        if num_whir_rounds > 1 && num_whir_queries > 0 {
+        if num_whir_rounds > 1 && initial_num_whir_queries > 0 {
             first_merkle_depth = self.codeword_merkle_proofs[0][0].len();
         }
         first_merkle_depth.encode(writer)?;
@@ -382,17 +384,17 @@ impl Decode for WhirProof {
 
         let num_commits = usize::decode(reader)?;
         assert!(num_commits > 0);
-        let num_whir_queries = usize::decode(reader)?;
+        let initial_num_whir_queries = usize::decode(reader)?;
         let k_whir_exp = usize::decode(reader)?;
         let mut merkle_depth = 0;
-        if num_whir_queries > 0 {
+        if initial_num_whir_queries > 0 {
             merkle_depth = usize::decode(reader)?;
         }
 
         let mut initial_round_opened_rows = Vec::with_capacity(num_commits);
         for _ in 0..num_commits {
-            let mut opened_rows = Vec::with_capacity(num_whir_queries);
-            for _ in 0..num_whir_queries {
+            let mut opened_rows = Vec::with_capacity(initial_num_whir_queries);
+            for _ in 0..initial_num_whir_queries {
                 opened_rows.push(decode_into_vec(reader, k_whir_exp)?);
             }
             initial_round_opened_rows.push(opened_rows);
@@ -400,8 +402,8 @@ impl Decode for WhirProof {
 
         let mut initial_round_merkle_proofs = Vec::with_capacity(num_commits);
         for _ in 0..num_commits {
-            let mut merkle_proofs = Vec::with_capacity(num_whir_queries);
-            for _ in 0..num_whir_queries {
+            let mut merkle_proofs = Vec::with_capacity(initial_num_whir_queries);
+            for _ in 0..initial_num_whir_queries {
                 merkle_proofs.push(decode_into_vec(reader, merkle_depth)?);
             }
             initial_round_merkle_proofs.push(merkle_proofs);
@@ -409,8 +411,9 @@ impl Decode for WhirProof {
 
         let mut codeword_opened_values = Vec::with_capacity(num_whir_rounds - 1);
         for _ in 0..num_whir_rounds - 1 {
-            let mut opened_values = Vec::with_capacity(num_whir_queries);
-            for _ in 0..num_whir_queries {
+            let num_queries = usize::decode(reader)?;
+            let mut opened_values = Vec::with_capacity(num_queries);
+            for _ in 0..num_queries {
                 opened_values.push(decode_into_vec(reader, k_whir_exp)?);
             }
             codeword_opened_values.push(opened_values);
@@ -418,9 +421,10 @@ impl Decode for WhirProof {
 
         merkle_depth = usize::decode(reader)?;
         let mut codeword_merkle_proofs = Vec::with_capacity(num_whir_rounds - 1);
-        for _ in 0..num_whir_rounds - 1 {
-            let mut merkle_proof: Vec<_> = Vec::with_capacity(num_whir_queries);
-            for _ in 0..num_whir_queries {
+        for opened_values in codeword_opened_values.iter() {
+            let num_queries = opened_values.len();
+            let mut merkle_proof: Vec<_> = Vec::with_capacity(num_queries);
+            for _ in 0..num_queries {
                 merkle_proof.push(decode_into_vec(reader, merkle_depth)?);
             }
             codeword_merkle_proofs.push(merkle_proof);
@@ -488,7 +492,7 @@ mod tests {
     #[test]
     fn test_cached_proof_encode_decode() -> Result<()> {
         let params = test_system_params_small(2, 5, 3);
-        let fx = CachedFixture11::new(params);
+        let fx = CachedFixture11::new(params.clone());
         test_proof_encode_decode(fx, params)
     }
 
