@@ -7,6 +7,7 @@ mod gpu_backend;
 pub mod logup_zerocheck;
 pub mod merkle_tree;
 pub mod poly;
+pub mod sponge;
 pub mod stacked_pcs;
 pub mod stacked_reduction;
 mod sumcheck;

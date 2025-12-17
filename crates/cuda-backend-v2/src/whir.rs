@@ -36,6 +36,7 @@ use crate::{
     },
     merkle_tree::MerkleTreeGpu,
     poly::{evals_eq_hypercube, mle_evals_to_coeffs_inplace},
+    sponge::DuplexSpongeGpu,
     stacked_pcs::rs_code_matrix,
     stacked_reduction::StackedPcsData2,
 };
@@ -60,9 +61,9 @@ pub(crate) struct BatchingTracePacket {
     skip_all,
     fields(phase = "prover")
 )]
-pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
+pub fn prove_whir_opening_gpu(
     params: &SystemParams,
-    transcript: &mut TS,
+    transcript: &mut DuplexSpongeGpu,
     mut stacked_per_commit: Vec<StackedPcsData2>,
     u: &[EF],
 ) -> Result<WhirProof, ProverError> {
@@ -342,7 +343,11 @@ pub fn prove_whir_opening_gpu<TS: FiatShamirTranscript>(
         // omega is generator of RS domain `\mathcal{L}^{(2^k)}`
         let omega = F::two_adic_generator(log_rs_domain_size - k_whir);
         let mut query_indices = Vec::with_capacity(num_whir_queries);
-        whir_pow_witnesses.push(transcript.grind(whir_pow_bits));
+        whir_pow_witnesses.push(
+            transcript
+                .grind_gpu(whir_pow_bits)
+                .map_err(ProverError::Grind)?,
+        );
         // Sample query indices first
         for _ in 0..num_whir_queries {
             // This is the index of the leaf in the Merkle tree
@@ -545,18 +550,21 @@ mod tests {
         BabyBearPoseidon2CpuEngineV2, EF, F, SystemParams,
         keygen::types::MultiStarkProvingKeyV2,
         poly_common::Squarable,
-        poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory},
+        poseidon2::sponge::DuplexSponge,
         prover::{
             ColMajorMatrix, CpuBackendV2, DeviceDataTransporterV2, ProvingContextV2, poly::Ple,
             stacked_pcs::stacked_commit,
         },
-        test_utils::{DuplexSpongeValidator, FibFixture, TestFixture},
+        test_utils::{FibFixture, TestFixture},
         verifier::whir::{VerifyWhirError, verify_whir},
     };
     use test_case::test_case;
     use tracing::Level;
 
-    use crate::{GpuDeviceV2, stacked_reduction::StackedPcsData2, whir::prove_whir_opening_gpu};
+    use crate::{
+        GpuDeviceV2, sponge::DuplexSpongeGpu, stacked_reduction::StackedPcsData2,
+        whir::prove_whir_opening_gpu,
+    };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
         let z_prism: Vec<_> = (0..params.n_stack + 1)
@@ -650,13 +658,13 @@ mod tests {
             }
         }
 
-        let mut prover_sponge = DuplexSpongeRecorder::default();
+        let mut prover_sponge = DuplexSpongeGpu::default();
 
         let proof =
             prove_whir_opening_gpu(&params, &mut prover_sponge, stacked_per_commit, &z_cube)
                 .unwrap();
 
-        let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
+        let mut verifier_sponge = DuplexSponge::default();
         verify_whir(
             &mut verifier_sponge,
             &params,
