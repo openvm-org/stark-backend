@@ -584,14 +584,12 @@ pub fn verify_proof_shape(
     // WHIR PROOF SHAPE
     let whir_proof = &proof.whir_proof;
 
-    let log_stacked_height = mvk.params.n_stack + l_skip;
-    debug_assert_eq!(
-        (log_stacked_height - mvk.params.log_final_poly_len) % mvk.params.k_whir,
-        0
-    );
-    let num_whir_rounds = (log_stacked_height - mvk.params.log_final_poly_len) / mvk.params.k_whir;
+    let log_stacked_height = mvk.params.log_stacked_height();
+    let num_whir_rounds = mvk.params.num_whir_rounds();
+    let k_whir = mvk.params.k_whir();
+    debug_assert_ne!(num_whir_rounds, 0);
 
-    if whir_proof.whir_sumcheck_polys.len() != log_stacked_height - mvk.params.log_final_poly_len {
+    if whir_proof.whir_sumcheck_polys.len() != mvk.params.num_whir_sumcheck_rounds() {
         return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidSumcheckPolys {
             expected: log_stacked_height,
             actual: whir_proof.whir_sumcheck_polys.len(),
@@ -633,44 +631,45 @@ pub fn verify_proof_shape(
             expected: num_whir_rounds - 1,
             actual: whir_proof.codeword_merkle_proofs.len(),
         });
-    } else if whir_proof.final_poly.len() != 1 << mvk.params.log_final_poly_len {
+    } else if whir_proof.final_poly.len() != 1 << mvk.params.log_final_poly_len() {
         return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidFinalPolyLen {
-            expected: 1 << mvk.params.log_final_poly_len,
+            expected: 1 << mvk.params.log_final_poly_len(),
             actual: whir_proof.final_poly.len(),
         });
     }
 
+    let initial_whir_round_num_queries = mvk.params.whir.rounds[0].num_queries;
     for (commit_idx, (opened_rows, merkle_proofs)) in whir_proof
         .initial_round_opened_rows
         .iter()
         .zip(&whir_proof.initial_round_merkle_proofs)
         .enumerate()
     {
-        if opened_rows.len() != mvk.params.num_whir_queries {
+        if opened_rows.len() != initial_whir_round_num_queries {
             return ProofShapeError::invalid_whir(
                 WhirProofShapeError::InvalidInitialRoundOpenedRowsQueries {
                     commit_idx,
-                    expected: mvk.params.num_whir_queries,
+                    expected: initial_whir_round_num_queries,
                     actual: opened_rows.len(),
                 },
             );
-        } else if merkle_proofs.len() != mvk.params.num_whir_queries {
+        } else if merkle_proofs.len() != initial_whir_round_num_queries {
             return ProofShapeError::invalid_whir(
                 WhirProofShapeError::InvalidInitialRoundMerkleProofsQueries {
                     commit_idx,
-                    expected: mvk.params.num_whir_queries,
+                    expected: initial_whir_round_num_queries,
                     actual: merkle_proofs.len(),
                 },
             );
         }
         let width = stacking_proof.stacking_openings[commit_idx].len();
         for (opened_idx, rows) in opened_rows.iter().enumerate() {
-            if rows.len() != 1 << mvk.params.k_whir {
+            if rows.len() != 1 << k_whir {
                 return ProofShapeError::invalid_whir(
                     WhirProofShapeError::InvalidInitialRoundOpenedRowK {
                         opened_idx,
                         commit_idx,
-                        expected: 1 << mvk.params.k_whir,
+                        expected: 1 << k_whir,
                         actual: rows.len(),
                     },
                 );
@@ -689,8 +688,7 @@ pub fn verify_proof_shape(
             }
         }
 
-        let merkle_depth =
-            (log_stacked_height + mvk.params.log_blowup).saturating_sub(mvk.params.k_whir);
+        let merkle_depth = (log_stacked_height + mvk.params.log_blowup).saturating_sub(k_whir);
         for (opened_idx, proof) in merkle_proofs.iter().enumerate() {
             if proof.len() != merkle_depth {
                 return ProofShapeError::invalid_whir(
@@ -713,38 +711,39 @@ pub fn verify_proof_shape(
         .enumerate()
     {
         let round = round_minus_one + 1;
-        if opened_values_per_query.len() != mvk.params.num_whir_queries {
+        let num_queries = mvk.params.whir.rounds[round].num_queries;
+        if opened_values_per_query.len() != num_queries {
             return ProofShapeError::invalid_whir(
                 WhirProofShapeError::InvalidCodewordOpenedRowsQueries {
                     round,
-                    expected: mvk.params.num_whir_queries,
+                    expected: num_queries,
                     actual: opened_values_per_query.len(),
                 },
             );
-        } else if merkle_proofs.len() != mvk.params.num_whir_queries {
+        } else if merkle_proofs.len() != num_queries {
             return ProofShapeError::invalid_whir(
                 WhirProofShapeError::InvalidCodewordMerkleProofsQueries {
                     round,
-                    expected: mvk.params.num_whir_queries,
+                    expected: num_queries,
                     actual: merkle_proofs.len(),
                 },
             );
         }
 
         for (opened_idx, opened_values) in opened_values_per_query.iter().enumerate() {
-            if opened_values.len() != 1 << mvk.params.k_whir {
+            if opened_values.len() != 1 << mvk.params.k_whir() {
                 return ProofShapeError::invalid_whir(
                     WhirProofShapeError::InvalidCodewordOpenedValues {
                         round,
                         opened_idx,
-                        expected: 1 << mvk.params.k_whir,
+                        expected: 1 << mvk.params.k_whir(),
                         actual: opened_values.len(),
                     },
                 );
             }
         }
 
-        let merkle_depth = log_stacked_height + mvk.params.log_blowup - mvk.params.k_whir - round;
+        let merkle_depth = log_stacked_height + mvk.params.log_blowup - k_whir - round;
         for (opened_idx, proof) in merkle_proofs.iter().enumerate() {
             if proof.len() != merkle_depth {
                 return ProofShapeError::invalid_whir(

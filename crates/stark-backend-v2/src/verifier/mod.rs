@@ -201,7 +201,7 @@ mod tests {
             InteractionsFixture11, PreprocessedFibFixture, TestFixture,
         },
         verifier::{verify, VerifierError},
-        BabyBearPoseidon2CpuEngineV2, SystemParams,
+        BabyBearPoseidon2CpuEngineV2, SystemParams, WhirConfig, WhirParams,
     };
 
     #[test_case(2, 10)]
@@ -213,16 +213,19 @@ mod tests {
 
         let n_stack = 8;
         let k_whir = 4;
-        let log_final_poly_len = (l_skip + n_stack) % k_whir;
+        let whir_params = WhirParams {
+            k: k_whir,
+            log_final_poly_len: k_whir,
+            query_phase_pow_bits: 1,
+        };
+        let log_blowup = 1;
+        let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 80);
         let params = SystemParams {
             l_skip,
             n_stack,
-            log_blowup: 1,
-            k_whir,
-            num_whir_queries: 100,
-            log_final_poly_len,
+            log_blowup,
+            whir,
             logup: log_up_security_params_baby_bear_100_bits(),
-            whir_pow_bits: 1,
             max_constraint_degree: 3,
         };
         let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
@@ -265,7 +268,7 @@ mod tests {
     ) -> Result<(), VerifierError> {
         setup_tracing_with_log_level(Level::DEBUG);
         let params = test_system_params_small(l_skip, n_stack, k_whir);
-        let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+        let engine = BabyBearPoseidon2CpuEngineV2::new(params.clone());
         let fx = CachedFixture11::new(params);
         let (pk, vk) = fx.keygen(&engine);
 
