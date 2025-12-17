@@ -6,7 +6,7 @@ use super::columns::NUM_FIBONACCI_COLS;
 pub fn generate_trace_rows<F: PrimeField32>(a: u32, b: u32, n: usize) -> RowMajorMatrix<F> {
     assert!(n.is_power_of_two());
 
-    let mut rows = vec![vec![F::from_canonical_u32(a), F::from_canonical_u32(b)]];
+    let mut rows = vec![vec![F::from_u32(a), F::from_u32(b)]];
 
     for i in 1..n {
         rows.push(vec![rows[i - 1][1], rows[i - 1][0] + rows[i - 1][1]]);

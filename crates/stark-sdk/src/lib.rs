@@ -1,7 +1,7 @@
 pub use openvm_stark_backend;
 pub use p3_baby_bear;
 pub use p3_blake3;
-pub use p3_bn254_fr;
+pub use p3_bn254;
 pub use p3_goldilocks;
 pub use p3_keccak;
 pub use p3_koala_bear;

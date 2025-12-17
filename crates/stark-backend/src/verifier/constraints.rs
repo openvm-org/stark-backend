@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use itertools::Itertools;
 use p3_commit::PolynomialSpace;
-use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use tracing::instrument;
 
@@ -44,8 +44,10 @@ where
                 .enumerate()
                 .filter(|(j, _)| *j != i)
                 .map(|(_, other_domain)| {
-                    other_domain.zp_at_point(zeta)
-                        * other_domain.zp_at_point(domain.first_point()).inverse()
+                    other_domain.vanishing_poly_at_point(zeta)
+                        * other_domain
+                            .vanishing_poly_at_point(domain.first_point())
+                            .inverse()
                 })
                 .product::<SC::Challenge>()
         })
@@ -57,18 +59,27 @@ where
         .map(|(ch_i, ch)| {
             ch.iter()
                 .enumerate()
-                .map(|(e_i, &c)| zps[ch_i] * SC::Challenge::monomial(e_i) * c)
+                .map(|(e_i, &c)| {
+                    zps[ch_i]
+                        * SC::Challenge::ith_basis_element(e_i)
+                            .expect("basis element index out of bounds")
+                        * c
+                })
                 .sum::<SC::Challenge>()
         })
         .sum::<SC::Challenge>();
 
     let unflatten = |v: &[SC::Challenge]| {
-        v.chunks_exact(SC::Challenge::D)
+        v.chunks_exact(SC::Challenge::DIMENSION)
             .map(|chunk| {
                 chunk
                     .iter()
                     .enumerate()
-                    .map(|(e_i, &c)| SC::Challenge::monomial(e_i) * c)
+                    .map(|(e_i, &c)| {
+                        SC::Challenge::ith_basis_element(e_i)
+                            .expect("basis element index out of bounds")
+                            * c
+                    })
                     .sum()
             })
             .collect::<Vec<SC::Challenge>>()
@@ -132,7 +143,7 @@ where
     let folded_constraints = folder.accumulator;
     // Finally, check that
     //     folded_constraints(zeta) / Z_H(zeta) = quotient(zeta)
-    if folded_constraints * sels.inv_zeroifier != quotient {
+    if folded_constraints * sels.inv_vanishing != quotient {
         return Err(VerificationError::OodEvaluationMismatch);
     }
 
