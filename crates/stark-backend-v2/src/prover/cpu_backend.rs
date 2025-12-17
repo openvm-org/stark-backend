@@ -1,6 +1,6 @@
 //! CPU [ProverBackend] trait implementation.
 
-use getset::CopyGetters;
+use getset::Getters;
 use itertools::Itertools;
 
 use crate::{
@@ -23,9 +23,9 @@ use crate::{
 #[derive(Clone, Copy)]
 pub struct CpuBackendV2;
 
-#[derive(Clone, Copy, CopyGetters, derive_new::new)]
+#[derive(Clone, Getters, derive_new::new)]
 pub struct CpuDeviceV2 {
-    #[getset(get_copy = "pub")]
+    #[getset(get = "pub")]
     config: SystemParams,
 }
 
@@ -40,8 +40,8 @@ impl ProverBackendV2 for CpuBackendV2 {
 }
 
 impl<TS: FiatShamirTranscript> ProverDeviceV2<CpuBackendV2, TS> for CpuDeviceV2 {
-    fn config(&self) -> SystemParams {
-        self.config
+    fn config(&self) -> &SystemParams {
+        &self.config
     }
 }
 
@@ -51,7 +51,7 @@ impl TraceCommitterV2<CpuBackendV2> for CpuDeviceV2 {
             self.config.l_skip,
             self.config.n_stack,
             self.config.log_blowup,
-            self.config.k_whir,
+            self.config.k_whir(),
             traces,
         )
     }
@@ -95,7 +95,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2
         common_main_pcs_data: StackedPcsData<F, Digest>,
         r: Vec<EF>,
     ) -> (StackingProof, WhirProof) {
-        let params = self.config;
+        let params = &self.config;
 
         // Currently alternates between preprocessed and cached pcs data
         let pre_cached_pcs_data_per_commit: Vec<_> = ctx
@@ -168,7 +168,7 @@ impl DeviceDataTransporterV2<CpuBackendV2> for CpuDeviceV2 {
             per_air,
             mpk.trace_height_constraints.clone(),
             mpk.max_constraint_degree,
-            mpk.params,
+            mpk.params.clone(),
             mpk.vk_pre_hash,
         )
     }
