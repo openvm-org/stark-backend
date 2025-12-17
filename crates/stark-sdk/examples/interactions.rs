@@ -22,9 +22,8 @@ type Val = BabyBear;
 fn main() {
     setup_tracing();
 
-    let engine = BabyBearPoseidon2Engine::new(
-        FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
-    );
+    let engine =
+        BabyBearPoseidon2Engine::new(FriParameters::standard_with_100_bits_security(LOG_BLOWUP));
     let mut keygen_builder = engine.keygen_builder();
 
     let sender_air = DummyInteractionAir::new(1, true, 0);
