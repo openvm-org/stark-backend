@@ -1,7 +1,7 @@
 use itertools::Itertools;
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_stark_backend::prover::hal::MatrixDimensions;
-use p3_field::{FieldAlgebra, PrimeField32};
+use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_util::log2_strict_usize;
 
 use super::ntt::batch_ntt;

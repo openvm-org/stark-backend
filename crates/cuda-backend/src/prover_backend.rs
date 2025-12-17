@@ -236,7 +236,7 @@ impl QuotientCommitter<GB> for GpuDevice {
         prover_data_after: &ProverDataAfterRapPhases<GB>,
     ) -> (GBCommitment, GBPcsData) {
         let mem = MemTracker::start("quotient");
-        let alpha: EF = challenger.sample_ext_element();
+        let alpha: EF = challenger.sample_algebra_element();
         tracing::debug!("alpha: {alpha:?}");
         let qc = QuotientCommitterGpu::new(alpha);
 
@@ -326,7 +326,7 @@ impl QuotientCommitter<GB> for GpuDevice {
         let quotient_values = quotient_data
             .split()
             .into_iter()
-            .map(|q| (q.chunk, self.config.shift / q.domain.shift))
+            .map(|q| (q.chunk, self.config.shift / q.domain.shift()))
             .collect_vec();
         mem.tracing_info("before commit");
 
@@ -357,7 +357,7 @@ impl OpeningProver<GB> for GpuDevice {
         quotient_data: GBPcsData,
         quotient_degrees: &[u8],
     ) -> OpeningProof<PcsProof<SC>, EF> {
-        let zeta: EF = challenger.sample_ext_element();
+        let zeta: EF = challenger.sample_algebra_element();
         tracing::debug!("zeta: {zeta:?}");
 
         let domain = |log_height| self.natural_domain_for_degree(1usize << log_height);

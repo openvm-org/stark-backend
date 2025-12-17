@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     interaction::fri_log_up::FriLogUpPhase,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
-    p3_field::{extension::BinomialExtensionField, Field, FieldAlgebra},
+    p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing},
     prover::{
         cpu::{CpuBackend, CpuDevice},
         MultiTraceStarkProver,
@@ -13,7 +13,7 @@ use openvm_stark_backend::{
 };
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_dft::Radix2DitParallel;
-use p3_fri::{FriConfig, TwoAdicFriPcs};
+use p3_fri::{FriParameters as P3FriParameters, TwoAdicFriPcs};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_poseidon2::ExternalLayerConstants;
 use p3_symmetric::{CryptographicPermutation, PaddingFreeSponge, TruncatedPermutation};
@@ -198,16 +198,18 @@ where
         fri_params,
         log_up_params,
     } = security_params;
-    let fri_config = FriConfig {
+    let fri_config = P3FriParameters {
         log_blowup: fri_params.log_blowup,
         log_final_poly_len: fri_params.log_final_poly_len,
         num_queries: fri_params.num_queries,
-        proof_of_work_bits: fri_params.proof_of_work_bits,
+        commit_proof_of_work_bits: fri_params.commit_proof_of_work_bits,
+        query_proof_of_work_bits: fri_params.query_proof_of_work_bits,
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
+    let challenger = Challenger::new(perm.clone());
     let rap_phase = FriLogUpPhase::new(log_up_params, fri_params.log_blowup);
-    BabyBearPermutationConfig::new(pcs, rap_phase)
+    BabyBearPermutationConfig::new(pcs, challenger, rap_phase)
 }
 
 /// Uses HorizenLabs Poseidon2 round constants, but plonky3 Mat4 and also
@@ -229,7 +231,7 @@ pub fn random_instrumented_perm() -> InstrPerm {
 }
 
 fn horizen_to_p3(horizen_babybear: HorizenBabyBear) -> BabyBear {
-    BabyBear::from_canonical_u64(horizen_babybear.into_bigint().0[0])
+    BabyBear::from_u64(horizen_babybear.into_bigint().0[0])
 }
 
 pub fn horizen_round_consts_16() -> (ExternalLayerConstants<BabyBear, 16>, Vec<BabyBear>) {

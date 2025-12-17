@@ -158,7 +158,7 @@ impl VirtualMemoryPool {
                     // Validate va_size
                     let va_size = config.va_size;
                     assert!(
-                        va_size > 0 && va_size % page_size == 0,
+                        va_size > 0 && va_size.is_multiple_of(page_size),
                         "VPMM_VA_SIZE must be > 0 and multiple of page size ({})",
                         page_size
                     );
@@ -231,7 +231,7 @@ impl VirtualMemoryPool {
         stream_id: CudaStreamId,
     ) -> Result<*mut c_void, MemoryError> {
         debug_assert!(
-            requested != 0 && requested % self.page_size == 0,
+            requested != 0 && requested.is_multiple_of(self.page_size),
             "Requested size must be a multiple of the page size"
         );
         // Phase 1: Zero-cost attempts

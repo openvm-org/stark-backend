@@ -117,7 +117,7 @@ macro_rules! parizip {
     ( $first:expr $( , $rest:expr )* $(,)* ) => {
         {
             use rayon::iter::*;
-            (( $first $( , $rest)* )).into_par_iter()
+            ( $first $( , $rest)* ).into_par_iter()
         }
     };
 }
