@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use cuda_backend_v2::{BabyBearPoseidon2GpuEngineV2, GpuDeviceV2};
+use cuda_backend_v2::BabyBearPoseidon2GpuEngineV2;
 use eyre::eyre;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
@@ -17,7 +17,7 @@ use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use stark_backend_v2::{
-    StarkEngineV2, SystemParams,
+    StarkEngineV2, SystemParams, WhirConfig, WhirParams,
     poseidon2::sponge::DuplexSponge,
     prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
     verifier::verify,
@@ -47,16 +47,19 @@ fn main() -> eyre::Result<()> {
     let l_skip = 4;
     let n_stack = 17;
     let k_whir = 4;
-    let log_final_poly_len = (l_skip + n_stack) % k_whir;
+    let whir_params = WhirParams {
+        k: k_whir,
+        log_final_poly_len: 2 * k_whir,
+        query_phase_pow_bits: 20,
+    };
+    let log_blowup = 1;
+    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
     let params = SystemParams {
         l_skip,
         n_stack,
-        log_blowup: 1,
-        k_whir,
-        num_whir_queries: 100,
-        log_final_poly_len,
+        log_blowup,
+        whir,
         logup: log_up_security_params_baby_bear_100_bits(),
-        whir_pow_bits: 16,
         max_constraint_degree: 3,
     };
 
@@ -73,7 +76,7 @@ fn main() -> eyre::Result<()> {
             .collect::<Vec<_>>();
         let trace = info_span!("generate_trace")
             .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
-        let device = GpuDeviceV2::new(params);
+        let device = engine.device();
         let d_trace = device.transport_matrix_to_device(&ColMajorMatrix::from_row_major(&trace));
 
         let air_ctx = AirProvingContextV2::simple_no_pis(d_trace);
