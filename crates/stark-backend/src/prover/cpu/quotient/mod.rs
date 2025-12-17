@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use itertools::{izip, multiunzip, Itertools};
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
@@ -64,7 +64,7 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
             .alpha
             .powers()
             .take(max_alpha_pow)
-            .map(PackedChallenge::<SC>::from_f)
+            .map(PackedChallenge::<SC>::from)
             .collect_vec();
         assert_eq!(constraints.len(), extended_views.len());
         assert_eq!(constraints.len(), quotient_degrees.len());
@@ -105,11 +105,11 @@ impl<'pcs, SC: StarkGenericConfig> QuotientCommitter<'pcs, SC> {
                     .expect("gap in challenge phase not supported yet"),
                 view.challenges
                     .into_iter()
-                    .map(PackedChallenge::<SC>::from_f)
+                    .map(PackedChallenge::<SC>::from)
                     .collect_vec(),
                 view.exposed_values
                     .into_iter()
-                    .map(PackedChallenge::<SC>::from_f)
+                    .map(PackedChallenge::<SC>::from)
                     .collect_vec(),
             )
         }));

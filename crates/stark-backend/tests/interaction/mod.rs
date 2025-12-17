@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     config::StarkGenericConfig,
     interaction::RapPhaseSeq,
     keygen::{types::LinearConstraint, MultiStarkKeygenBuilder},
-    p3_field::FieldAlgebra,
+    p3_field::PrimeCharacteristicRing,
     utils::disable_debug_builder,
     verifier::VerificationError,
 };
@@ -92,7 +92,7 @@ fn test_interaction_fib_selector_happy_path() {
     let fib_res = get_conditional_fib_number(&sels);
     let pis = vec![a, b, fib_res]
         .into_iter()
-        .map(Val::from_canonical_u32)
+        .map(Val::from_u32)
         .collect_vec();
 
     let air = FibonacciSelectorAir::new(sels.clone(), true);
@@ -108,7 +108,7 @@ fn test_interaction_fib_selector_happy_path() {
             curr_a = curr_b;
             curr_b = c;
         }
-        vals.push(Val::from_canonical_u32(curr_b));
+        vals.push(Val::from_u32(curr_b));
     }
     let sender_trace = RowMajorMatrix::new(vals, 2);
     let sender_air = DummyInteractionAir::new(1, true, 0);

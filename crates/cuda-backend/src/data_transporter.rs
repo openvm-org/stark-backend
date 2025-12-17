@@ -36,7 +36,7 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
             .map(|pk| {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|pd| {
                     let trace = self.transport_matrix_to_device(&pd.trace);
-                    let (_, data) = self.commit(&[trace.clone()]);
+                    let (_, data) = self.commit(std::slice::from_ref(&trace));
                     SingleCommitPreimage {
                         trace,
                         data,
@@ -73,7 +73,7 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
         _: &Arc<PcsProverData<SC>>,
     ) -> CommittedTraceData<GpuBackend> {
         let trace = self.transport_matrix_to_device(trace);
-        let (d_commitment, data) = self.commit(&[trace.clone()]);
+        let (d_commitment, data) = self.commit(std::slice::from_ref(&trace));
         assert_eq!(
             d_commitment, commitment,
             "GPU commitment does not match host"
@@ -160,7 +160,7 @@ pub fn assert_eq_host_and_device_matrix<T: Clone + Send + Sync + PartialEq + Deb
         for c in 0..cpu.width() {
             assert_eq!(
                 gpu[c * cpu.height() + r],
-                cpu.get(r, c),
+                cpu.get(r, c).expect("matrix index out of bounds"),
                 "Mismatch at row {} column {}",
                 r,
                 c

@@ -5,7 +5,7 @@ use itertools::{izip, zip_eq, Itertools};
 use opener::OpeningProver;
 use p3_challenger::FieldChallenger;
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::{ExtensionField, Field, FieldExtensionAlgebra};
+use p3_field::{BasedVectorSpace, ExtensionField, Field};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_util::log2_strict_usize;
 use quotient::QuotientCommitter;
@@ -43,11 +43,11 @@ pub mod quotient;
 /// # Safety
 /// For performance optimization of extension field operations, we assumes that `SC::Challenge` is
 /// an extension field of `F = Val<SC>` that is `repr(C)` or `repr(transparent)` with
-/// internal memory layout `[F; SC::Challenge::D]`.
+/// internal memory layout `[F; SC::Challenge::DIMENSION]`.
 /// This ensures `SC::Challenge` and `F` have the same alignment and
-/// `size_of::<SC::Challenge>() == size_of::<F>() * SC::Challenge::D`.
-/// We assume that `<SC::Challenge as ExtensionField<F>::as_base_slice` is the same as
-/// transmuting `SC::Challenge` to `[F; SC::Challenge::D]`.
+/// `size_of::<SC::Challenge>() == size_of::<F>() * SC::Challenge::DIMENSION`.
+/// We assume that `<SC::Challenge as ExtensionField<F>::as_basis_coefficients_slice` is the same as
+/// transmuting `SC::Challenge` to `[F; SC::Challenge::DIMENSION]`.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Copy(bound = ""), Default(bound = ""))]
 pub struct CpuBackend<SC> {
@@ -67,7 +67,7 @@ pub struct CpuDevice<SC> {
 }
 
 impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
-    const CHALLENGE_EXT_DEGREE: u8 = <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D as u8;
+    const CHALLENGE_EXT_DEGREE: u8 = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION as u8;
 
     type Val = Val<SC>;
     type Challenge = SC::Challenge;
@@ -256,7 +256,7 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
                             .flatten()
                             .map(|perm_trace| {
                                 // SAFETY: `Challenge` is assumed to be extension field of `F`
-                                // with memory layout `[F; Challenge::D]`
+                                // with memory layout `[F; Challenge::DIMENSION]`
                                 let trace = unsafe { transmute_to_base(perm_trace) };
                                 let height = trace.height();
                                 let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
@@ -294,7 +294,7 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
     ) -> (Com<SC>, PcsData<SC>) {
         let pcs = self.pcs();
         // Generate `alpha` challenge
-        let alpha: SC::Challenge = challenger.sample_ext_element();
+        let alpha: SC::Challenge = challenger.sample_algebra_element();
         tracing::debug!("alpha: {alpha:?}");
         // Prepare extended views:
         let mut common_main_idx = 0;
@@ -406,7 +406,7 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<SC
         quotient_degrees: &[u8],
     ) -> OpeningProof<PcsProof<SC>, SC::Challenge> {
         // Draw `zeta` challenge
-        let zeta: SC::Challenge = challenger.sample_ext_element();
+        let zeta: SC::Challenge = challenger.sample_algebra_element();
         tracing::debug!("zeta: {zeta:?}");
 
         let pcs = self.pcs();
@@ -513,22 +513,23 @@ where
 
 // TODO[jpw]: Avoid using this after switching to new plonky3 commit with <https://github.com/Plonky3/Plonky3/pull/796>
 /// # Safety
-/// Assumes that `EF` is `repr(C)` or `repr(transparent)` with internal memory layout `[F; EF::D]`.
-/// This ensures `EF` and `F` have the same alignment and `size_of::<EF>() == size_of::<F>() *
-/// EF::D`. We assume that `EF::as_base_slice` is the same as transmuting `EF` to `[F; EF::D]`.
+/// Assumes that `EF` is `repr(C)` or `repr(transparent)` with internal memory layout `[F;
+/// EF::DIMENSION]`. This ensures `EF` and `F` have the same alignment and `size_of::<EF>() ==
+/// size_of::<F>() * EF::DIMENSION`. We assume that `EF::as_basis_coefficients_slice` is the same as
+/// transmuting `EF` to `[F; EF::DIMENSION]`.
 unsafe fn transmute_to_base<F: Field, EF: ExtensionField<F>>(
     ext_matrix: RowMajorMatrix<EF>,
 ) -> RowMajorMatrix<F> {
     debug_assert_eq!(align_of::<EF>(), align_of::<F>());
-    debug_assert_eq!(size_of::<EF>(), size_of::<F>() * EF::D);
-    let width = ext_matrix.width * EF::D;
+    debug_assert_eq!(size_of::<EF>(), size_of::<F>() * EF::DIMENSION);
+    let width = ext_matrix.width * EF::DIMENSION;
     // Prevent ptr from deallocating
     let mut values = ManuallyDrop::new(ext_matrix.values);
     let mut len = values.len();
     let mut cap = values.capacity();
     let ptr = values.as_mut_ptr();
-    len *= EF::D;
-    cap *= EF::D;
+    len *= EF::DIMENSION;
+    cap *= EF::DIMENSION;
     // SAFETY:
     // - We know that `ptr` is from `Vec` so it is allocated by global allocator,
     // - Based on assumptions, `EF` and `F` have the same alignment

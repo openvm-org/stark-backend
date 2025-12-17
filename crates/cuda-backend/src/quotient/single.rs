@@ -176,7 +176,7 @@ fn quotient_evaluate(
     let is_first_row = &lagrange_selectors[0];
     let is_last_row = &lagrange_selectors[1];
     let is_transition = &lagrange_selectors[2];
-    let inv_zeroifier = &lagrange_selectors[3];
+    let inv_vanishing = &lagrange_selectors[3];
 
     // qdb_degree
     let qdb_degree = log2_strict_usize(quotient_size) - log2_strict_usize(trace_size);
@@ -202,7 +202,7 @@ fn quotient_evaluate(
             is_first_row,
             is_last_row,
             is_transition,
-            inv_zeroifier,
+            inv_vanishing,
             &challenge,
             &alpha,
             &d_intermediates,
@@ -237,7 +237,7 @@ fn lagrange_selectors_on_coset(
             &lagrange_selectors[0], // is_first_row
             &lagrange_selectors[1], // is_last_row
             &lagrange_selectors[2], // is_transition
-            &lagrange_selectors[3], // inv_zeroifier
+            &lagrange_selectors[3], // inv_vanishing
             log_n as u64,
             coset_log_n as u64,
             coset_shift,

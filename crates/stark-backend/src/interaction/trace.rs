@@ -23,12 +23,14 @@ impl<F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, F> {
         let height = self.height;
         let index = symbolic_var.index;
         match symbolic_var.entry {
-            Entry::Preprocessed { offset } => {
-                self.preprocessed.unwrap().get((n + offset) % height, index)
-            }
-            Entry::Main { part_index, offset } => {
-                self.partitioned_main[part_index].get((n + offset) % height, index)
-            }
+            Entry::Preprocessed { offset } => self
+                .preprocessed
+                .unwrap()
+                .get((n + offset) % height, index)
+                .expect("matrix index out of bounds"),
+            Entry::Main { part_index, offset } => self.partitioned_main[part_index]
+                .get((n + offset) % height, index)
+                .expect("matrix index out of bounds"),
             Entry::Public => self.public_values[index],
             _ => unreachable!("There should be no after challenge variables"),
         }

@@ -2,7 +2,7 @@ use std::{collections::HashMap, iter::zip, sync::Arc};
 
 use itertools::Itertools;
 use p3_commit::Pcs;
-use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use tracing::instrument;
 use types::MultiStarkVerifyingKey0;
@@ -124,7 +124,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
                 pk.vk.quotient_degree,
                 width.preprocessed.unwrap_or(0),
                 format!("{:?}",width.main_widths()),
-                format!("{:?}",width.after_challenge.iter().map(|&x| x * <SC::Challenge as FieldExtensionAlgebra<Val<SC>>>::D).collect_vec()),
+                format!("{:?}",width.after_challenge.iter().map(|&x| x * <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION).collect_vec()),
                 pk.vk.symbolic_constraints.constraints.constraint_idx.len(),
                 pk.vk.symbolic_constraints.interactions.len(),
             );
@@ -214,12 +214,8 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
         tracing::info!("pre-vkey: {} bytes", vk_bytes.len());
         // Purely to get type compatibility and convenience, we hash using pcs.commit as a single
         // row
-        let vk_as_row = RowMajorMatrix::new_row(
-            vk_bytes
-                .into_iter()
-                .map(Val::<SC>::from_canonical_u8)
-                .collect(),
-        );
+        let vk_as_row =
+            RowMajorMatrix::new_row(vk_bytes.into_iter().map(Val::<SC>::from_u8).collect());
         let pcs = self.config.pcs();
         let deg_1_domain = pcs.natural_domain_for_degree(1);
         let (vk_pre_hash, _) = pcs.commit(vec![(deg_1_domain, vk_as_row)]);
