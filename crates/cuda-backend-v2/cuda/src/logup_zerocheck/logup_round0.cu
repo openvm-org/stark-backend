@@ -1,10 +1,10 @@
 #include "codec.cuh"
 #include "dag_entry.cuh"
+#include "eval_config.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "frac_ext.cuh"
 #include "launcher.cuh"
-#include "round0_config.cuh"
 #include "sumcheck.cuh"
 #include "utils.cuh"
 #include <algorithm>
@@ -26,7 +26,7 @@ constexpr uint32_t BUFFER_THRESHOLD = 16;
 // The eq_* multiplication is done separately in the kernel
 template <bool GLOBAL>
 __device__ __forceinline__ void acc_interactions(
-    const DagPrismEvalContext &eval_ctx,
+    const BaryEvalContext &eval_ctx,
     const FpExt *__restrict__ numer_weights,
     const FpExt *__restrict__ denom_weights,
     const Rule *__restrict__ d_rules,
@@ -173,7 +173,7 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
             Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
             const Fp *inv_lagrange_denoms_z = inv_lagrange_denoms + z_int * skip_domain;
 
-            DagPrismEvalContext eval_ctx{
+            BaryEvalContext eval_ctx{
                 preprocessed,
                 main_parts,
                 public_values,

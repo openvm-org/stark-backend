@@ -1,5 +1,5 @@
 #include "codec.cuh"
-#include "dag_entry.cuh"
+#include "eval_config.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "frac_ext.cuh"
