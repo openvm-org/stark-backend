@@ -56,9 +56,9 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     } = whir_proof;
 
     let m = params.l_skip + params.n_stack;
-    let k_whir = params.k_whir;
-    debug_assert_eq!((m - params.log_final_poly_len) % k_whir, 0);
-    let num_whir_rounds = (m - params.log_final_poly_len) / k_whir;
+    let k_whir = params.k_whir();
+    debug_assert_eq!((m - params.log_final_poly_len()) % k_whir, 0);
+    let num_whir_rounds = params.num_whir_rounds();
     let mut log_rs_domain_size = m + params.log_blowup;
     debug_assert!(num_whir_rounds * k_whir <= m);
 
@@ -76,7 +76,9 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     let mut alphas = Vec::with_capacity(m);
 
     debug_assert_eq!(whir_pow_witnesses.len(), num_whir_rounds);
-    for (whir_round, pow_witness) in whir_pow_witnesses.iter().enumerate() {
+    for (whir_round, (pow_witness, round_params)) in
+        zip(whir_pow_witnesses, &params.whir.rounds).enumerate()
+    {
         // A WHIR round consists of the following steps:
         // 1) Run k rounds of sumcheck to obtain polynomial f'.
         // 2) On non-final rounds, observe commitment f' on shifted domain.
@@ -126,15 +128,16 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
             Some(y0)
         };
 
-        if !transcript.check_witness(params.whir_pow_bits, *pow_witness) {
+        if !transcript.check_witness(params.whir.query_phase_pow_bits, *pow_witness) {
             return Err(VerifyWhirError::PoWInvalid);
         }
 
-        let query_indices = (0..params.num_whir_queries)
-            .map(|_| transcript.sample_bits(log_rs_domain_size - k_whir));
+        let num_queries = round_params.num_queries;
+        let query_indices =
+            (0..num_queries).map(|_| transcript.sample_bits(log_rs_domain_size - k_whir));
 
-        let mut zs_round = Vec::with_capacity(params.num_whir_queries);
-        let mut ys_round = Vec::with_capacity(params.num_whir_queries);
+        let mut zs_round = Vec::with_capacity(num_queries);
+        let mut ys_round = Vec::with_capacity(num_queries);
 
         let omega = F::two_adic_generator(log_rs_domain_size);
         for (query_idx, index) in query_indices.into_iter().enumerate() {
@@ -207,7 +210,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     debug_assert!(sumcheck_poly_iter.next().is_none());
 
     ensure(
-        final_poly.len() == 1 << params.log_final_poly_len,
+        final_poly.len() == 1 << params.log_final_poly_len(),
         VerifyWhirError::FinalPolyDegree,
     )?;
 
@@ -249,7 +252,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
                 * horner_eval::<EF, EF, EF>(final_poly, *z0_pow_max);
         }
 
-        debug_assert_eq!(zis.len(), params.num_whir_queries);
+        debug_assert_eq!(zis.len(), params.whir.rounds[i].num_queries);
         for (zi, gamma_pow) in zip(zis, gamma.powers().skip(2)) {
             let zi_pow = zi.exp_powers_of_2().take(slc_len).collect_vec();
             let (zi_pow_max, zi_pow_left) = zi_pow.split_last().unwrap();
@@ -361,9 +364,9 @@ mod tests {
             poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening, ColMajorMatrix,
             CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
         },
-        test_utils::{DuplexSpongeValidator, FibFixture, TestFixture},
+        test_utils::{test_whir_config_small, DuplexSpongeValidator, FibFixture, TestFixture},
         verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
-        EF, F,
+        WhirConfig, WhirRoundConfig, EF, F,
     };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
@@ -415,7 +418,7 @@ mod tests {
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
-                params.k_whir,
+                params.k_whir(),
                 &traces,
             )
         };
@@ -442,12 +445,9 @@ mod tests {
 
         let proof = prove_whir_opening(
             &mut prover_sponge,
-            params.k_whir,
-            params.log_blowup,
-            params.num_whir_queries,
-            params.log_final_poly_len,
-            params.whir_pow_bits,
             params.l_skip,
+            params.log_blowup,
+            params.whir(),
             &committed_mats,
             &z_cube,
         );
@@ -473,8 +473,8 @@ mod tests {
             poseidon2::sponge::DuplexSponge, prover::DeviceDataTransporterV2,
             BabyBearPoseidon2CpuEngineV2, StarkEngineV2,
         };
-        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
-        let fib = FibFixture::new(0, 1, 1 << (params.n_stack + params.l_skip));
+        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params.clone());
+        let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
         let (pk, _vk) = fib.keygen(&engine);
         let pk = engine.device().transport_pk_to_device(&pk);
         let ctx = fib.generate_proving_ctx();
@@ -494,16 +494,15 @@ mod tests {
         log_final_poly_len: usize,
     ) -> Result<(), VerifyWhirError> {
         setup_tracing_with_log_level(Level::DEBUG);
+        let l_skip = 2;
+        let whir = test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len);
 
         let params = SystemParams {
-            l_skip: 2,
+            l_skip,
             n_stack,
             log_blowup,
-            k_whir,
-            num_whir_queries: 5,
-            log_final_poly_len,
+            whir,
             logup: log_up_security_params_baby_bear_100_bits(),
-            whir_pow_bits: 0,
             max_constraint_degree: 3,
         };
         run_whir_fib_test(params)
@@ -546,6 +545,18 @@ mod tests {
         assert_eq!(result, expected);
     }
 
+    fn whir_test_config(k_whir: usize) -> WhirConfig {
+        WhirConfig {
+            k: k_whir,
+            rounds: vec![
+                WhirRoundConfig { num_queries: 6 },
+                WhirRoundConfig { num_queries: 5 },
+            ],
+            query_phase_pow_bits: 1,
+            folding_pow_bits: 1,
+        }
+    }
+
     #[test]
     fn test_whir_multiple_commitments() -> Result<(), VerifyWhirError> {
         setup_tracing_with_log_level(Level::DEBUG);
@@ -556,11 +567,8 @@ mod tests {
             l_skip: 3,
             n_stack: 3,
             log_blowup: 1,
-            k_whir: 2,
-            num_whir_queries: 6,
-            log_final_poly_len: 2,
+            whir: whir_test_config(2),
             logup: log_up_security_params_baby_bear_100_bits(),
-            whir_pow_bits: 1,
             max_constraint_degree: 3,
         };
 
@@ -582,7 +590,7 @@ mod tests {
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
-                params.k_whir,
+                params.k_whir(),
                 &[&mat],
             );
 
@@ -600,12 +608,9 @@ mod tests {
         let committed_mats = matrices.iter().zip(trees.iter()).collect_vec();
         let proof = prove_whir_opening(
             &mut prover_sponge,
-            params.k_whir,
-            params.log_blowup,
-            params.num_whir_queries,
-            params.log_final_poly_len,
-            params.whir_pow_bits,
             params.l_skip,
+            params.log_blowup,
+            params.whir(),
             &committed_mats,
             &z_cube,
         );
@@ -636,11 +641,8 @@ mod tests {
             l_skip: 3,
             n_stack: 3,
             log_blowup: 1,
-            k_whir: 2,
-            num_whir_queries: 6,
-            log_final_poly_len: 4,
+            whir: whir_test_config(2),
             logup: log_up_security_params_baby_bear_100_bits(),
-            whir_pow_bits: 1,
             max_constraint_degree: 3,
         };
 
@@ -662,7 +664,7 @@ mod tests {
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
-                params.k_whir,
+                params.k_whir(),
                 &[&mat],
             );
 
@@ -681,12 +683,9 @@ mod tests {
         let committed_mats = matrices.iter().zip(trees.iter()).collect_vec();
         let proof = prove_whir_opening(
             &mut prover_sponge,
-            params.k_whir,
-            params.log_blowup,
-            params.num_whir_queries,
-            params.log_final_poly_len,
-            params.whir_pow_bits,
             params.l_skip,
+            params.log_blowup,
+            params.whir(),
             &committed_mats,
             &z_cube,
         );

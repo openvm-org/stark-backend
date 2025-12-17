@@ -28,13 +28,13 @@ pub trait V1Compat: ProverBackendV2 + Sized {
     fn convert_trace(matrix: <Self::V1 as ProverBackend>::Matrix) -> Self::Matrix;
 
     fn convert_committed_trace(
-        params: SystemParams,
+        params: &SystemParams,
         matrix: <Self::V1 as ProverBackend>::Matrix,
     ) -> CommittedTraceDataV2<Self>;
 }
 
 impl<PB: V1Compat> ProvingContextV2<PB> {
-    pub fn from_v1(params: SystemParams, ctx: ProvingContext<PB::V1>) -> Self {
+    pub fn from_v1(params: &SystemParams, ctx: ProvingContext<PB::V1>) -> Self {
         let per_trace = ctx
             .per_air
             .into_iter()
@@ -55,7 +55,7 @@ impl<PB: V1Compat> ProvingContextV2<PB> {
 }
 
 impl<PB: V1Compat> AirProvingContextV2<PB> {
-    pub fn from_v1(params: SystemParams, ctx: AirProvingContext<PB::V1>) -> Self {
+    pub fn from_v1(params: &SystemParams, ctx: AirProvingContext<PB::V1>) -> Self {
         let common_main = ctx
             .common_main
             .map(<PB as V1Compat>::convert_trace)
@@ -108,7 +108,7 @@ impl V1Compat for CpuBackendV2 {
     }
 
     fn convert_committed_trace(
-        params: SystemParams,
+        params: &SystemParams,
         matrix: Arc<RowMajorMatrix<F>>,
     ) -> CommittedTraceDataV2<CpuBackendV2> {
         let trace = ColMajorMatrix::from_row_major(&matrix);
@@ -116,7 +116,7 @@ impl V1Compat for CpuBackendV2 {
             params.l_skip,
             params.n_stack,
             params.log_blowup,
-            params.k_whir,
+            params.k_whir(),
             &[&trace],
         );
 

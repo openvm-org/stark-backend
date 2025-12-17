@@ -176,7 +176,7 @@ impl MultiStarkKeygenBuilderV2 {
         });
 
         let pre_vk: MultiStarkVerifyingKey0V2 = MultiStarkVerifyingKey0V2 {
-            params: self.config,
+            params: self.config.clone(),
             per_air: pk_per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: trace_height_constraints.clone(),
         };
@@ -288,7 +288,7 @@ impl PrepKeygenDataV2 {
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
-                params.k_whir,
+                params.k_whir(),
                 &[&trace],
             );
             debug_assert_eq!(trace.width(), data.mat_view(0).width());
