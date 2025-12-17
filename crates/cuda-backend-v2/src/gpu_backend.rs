@@ -51,7 +51,7 @@ impl ProverBackendV2 for GpuBackendV2 {
 }
 
 impl ProverDeviceV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
-    fn config(&self) -> SystemParams {
+    fn config(&self) -> &SystemParams {
         self.config()
     }
 }
@@ -62,7 +62,7 @@ impl TraceCommitterV2<GpuBackendV2> for GpuDeviceV2 {
             self.config.l_skip,
             self.config.n_stack,
             self.config.log_blowup,
-            self.config.k_whir,
+            self.config.k_whir(),
             traces,
             self.prover_config,
         )
@@ -111,7 +111,7 @@ impl OpeningProverV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
         r: Vec<EF>,
     ) -> (StackingProof, WhirProof) {
         let mut mem = MemTracker::start_and_reset_peak("prover.openings");
-        let params = self.config;
+        let params = self.config();
         let (stacking_proof, u_prisma, stacked_per_commit) = prove_stacked_opening_reduction_gpu(
             self,
             transcript,
@@ -130,7 +130,7 @@ impl OpeningProverV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
             .collect_vec();
 
         let whir_proof =
-            prove_whir_opening_gpu(&params, transcript, stacked_per_commit, &u_cube).unwrap();
+            prove_whir_opening_gpu(params, transcript, stacked_per_commit, &u_cube).unwrap();
         mem.emit_metrics();
         mem.reset_peak();
         (stacking_proof, whir_proof)
@@ -164,7 +164,7 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
             per_air,
             mpk.trace_height_constraints.clone(),
             mpk.max_constraint_degree,
-            mpk.params,
+            mpk.params.clone(),
             mpk.vk_pre_hash,
         )
     }
@@ -442,14 +442,14 @@ mod v1_shims {
         }
 
         fn convert_committed_trace(
-            params: SystemParams,
+            params: &SystemParams,
             matrix: DeviceMatrix<F>,
         ) -> CommittedTraceDataV2<GpuBackendV2> {
             let (commitment, data) = stacked_commit(
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
-                params.k_whir,
+                params.k_whir(),
                 &[&matrix],
                 GpuProverConfig::default(),
             )

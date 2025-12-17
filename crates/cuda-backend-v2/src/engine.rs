@@ -28,7 +28,7 @@ impl StarkEngineV2 for BabyBearPoseidon2GpuEngineV2 {
         &self,
         transcript: DuplexSpongeGpu,
     ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
-        CoordinatorV2::new(GpuBackendV2, self.device, transcript)
+        CoordinatorV2::new(GpuBackendV2, self.device.clone(), transcript)
     }
 }
 
