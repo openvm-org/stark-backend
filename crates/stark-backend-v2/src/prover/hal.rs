@@ -53,7 +53,7 @@ pub trait ProverBackendV2 {
 pub trait ProverDeviceV2<PB: ProverBackendV2, TS>:
     TraceCommitterV2<PB> + MultiRapProver<PB, TS> + OpeningProverV2<PB, TS>
 {
-    fn config(&self) -> SystemParams;
+    fn config(&self) -> &SystemParams;
 }
 
 /// Provides functionality for committing to a batch of trace matrices, possibly of different

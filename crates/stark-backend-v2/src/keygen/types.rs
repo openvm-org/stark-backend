@@ -154,7 +154,7 @@ impl MultiStarkProvingKeyV2 {
 
     fn get_vk0(&self) -> MultiStarkVerifyingKey0V2 {
         MultiStarkVerifyingKey0V2 {
-            params: self.params,
+            params: self.params.clone(),
             per_air: self.per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: self.trace_height_constraints.clone(),
         }
