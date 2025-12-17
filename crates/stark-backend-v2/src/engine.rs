@@ -51,7 +51,7 @@ where
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
     type TS: FiatShamirTranscript + Default;
 
-    fn config(&self) -> SystemParams {
+    fn config(&self) -> &SystemParams {
         self.device().config()
     }
 
@@ -72,7 +72,7 @@ where
         &self,
         airs: &[AirRef<BabyBearPoseidon2Config>],
     ) -> (MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2) {
-        let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config());
+        let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config().clone());
         for air in airs {
             keygen_builder.add_air(air.clone());
         }
@@ -143,7 +143,7 @@ where
         &self,
         transcript: TS,
     ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
-        CoordinatorV2::new(CpuBackendV2, self.device, transcript)
+        CoordinatorV2::new(CpuBackendV2, self.device.clone(), transcript)
     }
 }
 
