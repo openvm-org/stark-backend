@@ -1,10 +1,10 @@
-use getset::CopyGetters;
+use getset::Getters;
 use openvm_cuda_common::common::get_device;
 use stark_backend_v2::SystemParams;
 
-#[derive(Clone, Copy, CopyGetters)]
+#[derive(Clone, Getters)]
 pub struct GpuDeviceV2 {
-    #[getset(get_copy = "pub")]
+    #[getset(get = "pub")]
     pub(crate) config: SystemParams,
     pub(crate) prover_config: GpuProverConfig,
     pub id: u32,
