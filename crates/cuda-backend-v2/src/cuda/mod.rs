@@ -10,6 +10,7 @@ pub mod logup_zerocheck;
 pub mod matrix;
 pub mod merkle_tree;
 pub mod poly;
+pub mod sponge;
 pub mod stacked_reduction;
 pub mod whir;
 

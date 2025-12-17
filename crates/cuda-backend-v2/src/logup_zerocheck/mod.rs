@@ -44,6 +44,7 @@ use crate::{
         round0::evaluate_round0_interactions_gpu,
     },
     poly::EqEvalSegments,
+    sponge::DuplexSpongeGpu,
     utils::compute_barycentric_inv_lagrange_denoms,
 };
 
@@ -65,15 +66,12 @@ use mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu};
 use round0::evaluate_round0_constraints_gpu;
 
 #[instrument(level = "info", skip_all)]
-pub fn prove_zerocheck_and_logup_gpu<TS>(
-    transcript: &mut TS,
+pub fn prove_zerocheck_and_logup_gpu(
+    transcript: &mut DuplexSpongeGpu,
     mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     ctx: &ProvingContextV2<GpuBackendV2>,
     save_memory: bool,
-) -> (GkrProof, BatchConstraintProof, Vec<EF>)
-where
-    TS: FiatShamirTranscript,
-{
+) -> (GkrProof, BatchConstraintProof, Vec<EF>) {
     let logup_gkr_span = info_span!("prover.rap_constraints.logup_gkr", phase = "prover").entered();
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
@@ -105,7 +103,7 @@ where
     let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
 
     // Grind to increase soundness of random sampling for LogUp
-    let logup_pow_witness = transcript.grind(mpk.params.logup.pow_bits);
+    let logup_pow_witness = transcript.grind_gpu(mpk.params.logup.pow_bits).unwrap();
     let alpha_logup = transcript.sample_ext();
     let beta_logup = transcript.sample_ext();
     debug!(%alpha_logup, %beta_logup);

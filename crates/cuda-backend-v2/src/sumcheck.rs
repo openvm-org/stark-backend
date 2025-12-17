@@ -13,9 +13,12 @@ use stark_backend_v2::{
 };
 use tracing::{debug, info_span, instrument};
 
-use crate::cuda::{
-    matrix::batch_expand_pad_wide,
-    sumcheck::{fold_mle, fold_ple_from_coeffs, reduce_over_x_and_cols, sumcheck_mle_round},
+use crate::{
+    cuda::{
+        matrix::batch_expand_pad_wide,
+        sumcheck::{fold_mle, fold_ple_from_coeffs, reduce_over_x_and_cols, sumcheck_mle_round},
+    },
+    sponge::DuplexSpongeGpu,
 };
 
 /// GPU implementation of multilinear sumcheck
@@ -27,8 +30,8 @@ use crate::cuda::{
 /// - Memory footprint: ~1.5 * evals.len() * sizeof(EF)
 #[allow(dead_code)]
 #[instrument(name = "sumcheck_multilinear_gpu", level = "info", skip_all)]
-pub fn sumcheck_multilinear_gpu<F: Field, TS: FiatShamirTranscript>(
-    transcript: &mut TS,
+pub fn sumcheck_multilinear_gpu<F: Field>(
+    transcript: &mut DuplexSpongeGpu,
     evals: &[F],
 ) -> (SumcheckCubeProof<EF>, Vec<EF>)
 where
@@ -157,8 +160,8 @@ where
 /// NOTE: batch_ntt expects a concrete type BabyBear, so I removed generic type parameters for now
 #[allow(dead_code)]
 #[instrument(name = "sumcheck_prismalinear_gpu", level = "info", skip_all)]
-pub fn sumcheck_prismalinear_gpu<TS: FiatShamirTranscript>(
-    transcript: &mut TS,
+pub fn sumcheck_prismalinear_gpu(
+    transcript: &mut DuplexSpongeGpu,
     l_skip: usize,
     evals: &[F],
 ) -> (SumcheckPrismProof<EF>, Vec<EF>) {
