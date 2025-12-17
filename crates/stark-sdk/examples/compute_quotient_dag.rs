@@ -53,9 +53,8 @@ fn main() {
     let mut rng = create_seeded_rng();
     let air = TestAir(KeccakAir {});
 
-    let engine = BabyBearPoseidon2Engine::new(
-        FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
-    );
+    let engine =
+        BabyBearPoseidon2Engine::new(FriParameters::standard_with_100_bits_security(LOG_BLOWUP));
     let mut keygen_builder = engine.keygen_builder();
     let _air_id = keygen_builder.add_air(Arc::new(air));
     let pk = keygen_builder.generate_pk();

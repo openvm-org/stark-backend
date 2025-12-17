@@ -53,9 +53,8 @@ fn main() {
 
     let airs = any_rap_arc_vec![air];
 
-    let gpu_engine = GpuBabyBearPoseidon2Engine::new(
-        FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
-    );
+    let gpu_engine =
+        GpuBabyBearPoseidon2Engine::new(FriParameters::standard_with_100_bits_security(LOG_BLOWUP));
     let gpu_trace = gpu_engine.device().transport_matrix_to_device(&cpu_trace);
 
     let cpu_air_ctx = AirProvingContext::<CpuBackend<SC>>::simple(cpu_trace, public_values.clone());
@@ -72,9 +71,8 @@ fn main() {
 
     // CPU    // CPU
     println!("\nStarting CPU proof");
-    let cpu_engine = BabyBearPoseidon2Engine::new(
-        FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
-    );
+    let cpu_engine =
+        BabyBearPoseidon2Engine::new(FriParameters::standard_with_100_bits_security(LOG_BLOWUP));
     let cpu_pk = cpu_engine.device().transport_pk_to_device(&pk_host);
     let cpu_proof = cpu_engine.prove(&cpu_pk, cpu_ctx);
     cpu_engine.verify(&vk, &cpu_proof).unwrap();
