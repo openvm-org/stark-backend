@@ -11,10 +11,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use openvm_stark_backend::{
-    air_builders::symbolic::SymbolicConstraints, p3_maybe_rayon::prelude::*,
-    prover::MatrixDimensions,
-};
+use openvm_stark_backend::{air_builders::symbolic::SymbolicConstraints, prover::MatrixDimensions};
 use p3_field::{Field, FieldAlgebra, TwoAdicField};
 use p3_util::{log2_ceil_usize, log2_strict_usize};
 use stark_backend_v2::{
@@ -697,7 +694,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             .emit_metrics_with_label("prover.batch_constraints.round0");
         info_span!("chirp_z_transform").in_scope(|| {
             batch_s_evals
-                .into_par_iter()
+                .into_iter()
                 .map(|s_evals| {
                     if let Some(s_evals) = s_evals {
                         let mut poly = UnivariatePoly::from_evals(&s_evals);
