@@ -14,7 +14,6 @@ use stark_backend_v2::{
     SystemParams,
     keygen::types::MultiStarkProvingKeyV2,
     poly_common::Squarable,
-    poseidon2::sponge::FiatShamirTranscript,
     proof::*,
     prover::{
         AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
@@ -32,6 +31,7 @@ use crate::{
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
+    sponge::DuplexSpongeGpu,
     stacked_pcs::{StackedPcsDataGpu, stacked_commit},
     stacked_reduction::prove_stacked_opening_reduction_gpu,
     whir::prove_whir_opening_gpu,
@@ -50,7 +50,7 @@ impl ProverBackendV2 for GpuBackendV2 {
     type PcsData = StackedPcsDataGpu<F, Digest>;
 }
 
-impl<TS: FiatShamirTranscript> ProverDeviceV2<GpuBackendV2, TS> for GpuDeviceV2 {
+impl ProverDeviceV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
     fn config(&self) -> SystemParams {
         self.config()
     }
@@ -70,7 +70,7 @@ impl TraceCommitterV2<GpuBackendV2> for GpuDeviceV2 {
     }
 }
 
-impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 {
+impl MultiRapProver<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
     type PartialProof = (GkrProof, BatchConstraintProof);
     /// The random opening point `r` where the batch constraint sumcheck reduces to evaluation
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
@@ -79,7 +79,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
     #[instrument(name = "prover.rap_constraints", skip_all, fields(phase = "prover"))]
     fn prove_rap_constraints(
         &self,
-        transcript: &mut TS,
+        transcript: &mut DuplexSpongeGpu,
         mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
         ctx: &ProvingContextV2<GpuBackendV2>,
         _common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
@@ -96,7 +96,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<GpuBackendV2, TS> for GpuDeviceV2 
     }
 }
 
-impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2 {
+impl OpeningProverV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
     type OpeningProof = (StackingProof, WhirProof);
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<EF>;
@@ -104,7 +104,7 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<GpuBackendV2, TS> for GpuDeviceV2
     #[instrument(name = "prover.openings", skip_all, fields(phase = "prover"))]
     fn prove_openings(
         &self,
-        transcript: &mut TS,
+        transcript: &mut DuplexSpongeGpu,
         mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
         ctx: ProvingContextV2<GpuBackendV2>,
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,

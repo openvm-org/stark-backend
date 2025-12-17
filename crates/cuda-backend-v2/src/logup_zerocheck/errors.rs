@@ -1,7 +1,7 @@
 use openvm_cuda_common::error::{CudaError, MemCopyError};
 use thiserror::Error;
 
-use crate::EF;
+use crate::{EF, sponge::GrindError};
 
 #[derive(Debug, Error)]
 pub enum Round0PrepError {
@@ -49,6 +49,8 @@ pub enum FractionalSumcheckError {
     ExtractClaims(CudaError),
     #[error("evals_eq_hypercube cuda error: {0}")]
     EvalEqHypercube(CudaError),
+    #[error("grind error: {0}")]
+    Grind(#[from] GrindError),
     #[error("memcpy error: {0}")]
     Copy(#[from] MemCopyError),
 }

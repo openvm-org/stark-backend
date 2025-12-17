@@ -36,6 +36,7 @@ use crate::{
         sumcheck::{fold_mle, triangular_fold_mle},
     },
     poly::EqEvalSegments,
+    sponge::DuplexSpongeGpu,
     stacked_pcs::StackedPcsDataGpu,
     utils::compute_barycentric_inv_lagrange_denoms,
 };
@@ -184,17 +185,14 @@ impl StackedReductionGpu {
     skip_all,
     fields(phase = "prover")
 )]
-pub fn prove_stacked_opening_reduction_gpu<TS>(
+pub fn prove_stacked_opening_reduction_gpu(
     device: &GpuDeviceV2,
-    transcript: &mut TS,
+    transcript: &mut DuplexSpongeGpu,
     mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     ctx: ProvingContextV2<GpuBackendV2>,
     common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
     r: &[EF],
-) -> Result<(StackingProof, Vec<EF>, Vec<StackedPcsData2>), ProverError>
-where
-    TS: FiatShamirTranscript,
-{
+) -> Result<(StackingProof, Vec<EF>, Vec<StackedPcsData2>), ProverError> {
     let n_stack = device.config.n_stack;
     // Batching randomness
     let lambda = transcript.sample_ext();
