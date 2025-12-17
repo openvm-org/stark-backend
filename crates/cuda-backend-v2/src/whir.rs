@@ -68,12 +68,11 @@ pub fn prove_whir_opening_gpu(
     u: &[EF],
 ) -> Result<WhirProof, ProverError> {
     let mem = MemTracker::start("prover.prove_whir_opening");
-    let k_whir = params.k_whir;
-    let log_blowup = params.log_blowup;
-    let num_whir_queries = params.num_whir_queries;
-    let log_final_poly_len = params.log_final_poly_len;
-    let whir_pow_bits = params.whir_pow_bits;
     let l_skip = params.l_skip;
+    let log_blowup = params.log_blowup;
+    let k_whir = params.k_whir();
+    let whir_params = params.whir();
+    let log_final_poly_len = params.log_final_poly_len();
 
     let height = stacked_per_commit[0].layout().height();
     debug_assert!(
@@ -189,7 +188,7 @@ pub fn prove_whir_opening_gpu(
 
     mem.tracing_info("before_whir_rounds");
     // We will drop `stacked_per_commit` and hence `common_main_pcs_data` after whir round 0.
-    for whir_round in 0..num_whir_rounds {
+    for (whir_round, round_params) in whir_params.rounds.iter().enumerate() {
         let is_last_round = whir_round == num_whir_rounds - 1;
         // Run k_whir rounds of sumcheck on `sum_{x in H_m} \hat{w}(\hat{f}(x), x)`
         for round in 0..k_whir {
@@ -342,14 +341,15 @@ pub fn prove_whir_opening_gpu(
 
         // omega is generator of RS domain `\mathcal{L}^{(2^k)}`
         let omega = F::two_adic_generator(log_rs_domain_size - k_whir);
-        let mut query_indices = Vec::with_capacity(num_whir_queries);
+        let num_queries = round_params.num_queries;
+        let mut query_indices = Vec::with_capacity(num_queries);
         whir_pow_witnesses.push(
             transcript
-                .grind_gpu(whir_pow_bits)
+                .grind_gpu(whir_params.query_phase_pow_bits)
                 .map_err(ProverError::Grind)?,
         );
         // Sample query indices first
-        for _ in 0..num_whir_queries {
+        for _ in 0..num_queries {
             // This is the index of the leaf in the Merkle tree
             let index = transcript.sample_bits(log_rs_domain_size - k_whir);
             query_indices.push(index as usize);
@@ -459,7 +459,7 @@ pub fn prove_whir_opening_gpu(
             // PERF[jpw]: num_whir_queries can be 100-200, so this is a substantial amount of
             // memory. However `height` drops off with whir rounds and we have dropped the big
             // round0 merkle tree already, so this is likely not peak memory.
-            let mut eq_zs = DeviceBuffer::<F>::with_capacity(height * num_whir_queries);
+            let mut eq_zs = DeviceBuffer::<F>::with_capacity(height * num_queries);
             // We keep eq(z_0, -) separate since z_0 is in EF while the other z_i are in F.
             let mut eq_z0 = DeviceBuffer::<EF>::with_capacity(height);
             {
@@ -472,7 +472,7 @@ pub fn prove_whir_opening_gpu(
                 // initialize first entry of each column with F::ONE
                 [EF::ONE].copy_to(&mut eq_z0)?;
                 let one = [F::ONE];
-                for j in 0..num_whir_queries {
+                for j in 0..num_queries {
                     // SAFETY:
                     // - eq_zs is in bounds
                     // - H2D copy
@@ -513,7 +513,7 @@ pub fn prove_whir_opening_gpu(
                     &eq_z0,
                     &eq_zs,
                     gamma,
-                    num_whir_queries.try_into().unwrap(),
+                    num_queries.try_into().unwrap(),
                 )?;
             }
         }
@@ -547,7 +547,7 @@ mod tests {
     use p3_field::FieldAlgebra;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use stark_backend_v2::{
-        BabyBearPoseidon2CpuEngineV2, EF, F, SystemParams,
+        BabyBearPoseidon2CpuEngineV2, EF, F, SystemParams, WhirConfig, WhirParams,
         keygen::types::MultiStarkProvingKeyV2,
         poly_common::Squarable,
         poseidon2::sponge::DuplexSponge,
@@ -606,7 +606,7 @@ mod tests {
         pk: MultiStarkProvingKeyV2,
         ctx: ProvingContextV2<CpuBackendV2>,
     ) -> Result<(), VerifyWhirError> {
-        let device = GpuDeviceV2::new(params);
+        let device = GpuDeviceV2::new(params.clone());
         let mut rng = StdRng::seed_from_u64(0);
         let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
 
@@ -618,7 +618,7 @@ mod tests {
             params.l_skip,
             params.n_stack,
             params.log_blowup,
-            params.k_whir,
+            params.k_whir(),
             &common_main_traces,
         );
         let d_common_main_traces = common_main_traces
@@ -676,11 +676,19 @@ mod tests {
     }
 
     fn run_whir_fib_test(params: SystemParams) -> Result<(), VerifyWhirError> {
-        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
-        let fib = FibFixture::new(0, 1, 1 << (params.n_stack + params.l_skip));
+        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params.clone());
+        let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
         let (pk, _vk) = fib.keygen(&engine);
         let ctx = fib.generate_proving_ctx();
         run_whir_test(params, pk, ctx)
+    }
+
+    fn whir_test_params(k_whir: usize, log_final_poly_len: usize) -> WhirParams {
+        WhirParams {
+            k: k_whir,
+            log_final_poly_len,
+            query_phase_pow_bits: 2,
+        }
     }
 
     #[test_case(0, 1, 1, 0)]
@@ -697,15 +705,19 @@ mod tests {
     ) -> Result<(), VerifyWhirError> {
         setup_tracing_with_log_level(Level::DEBUG);
 
+        let l_skip = 2;
+        let whir = WhirConfig::new(
+            log_blowup,
+            l_skip + n_stack,
+            whir_test_params(k_whir, log_final_poly_len),
+            10,
+        );
         let params = SystemParams {
             l_skip: 2,
             n_stack,
             log_blowup,
-            k_whir,
-            num_whir_queries: 5,
-            log_final_poly_len,
+            whir,
             logup: log_up_security_params_baby_bear_100_bits(),
-            whir_pow_bits: 0,
             max_constraint_degree: 3,
         };
         run_whir_fib_test(params)
