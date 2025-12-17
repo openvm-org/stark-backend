@@ -149,7 +149,6 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
         size_t window_offset = window_base * gridDim.y * domain_size;
         block_sums[window_offset + blockIdx.y * domain_size + z_int] = tile_sum;
     }
-    __syncthreads();
 }
 
 // ASSUMPTION: no trace has width exceeding u16::MAX
@@ -228,8 +227,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
     uint32_t window_len,
     uint32_t num_y
 ) {
-    extern __shared__ char smem[];
-    FpExt *shared = (FpExt *)smem;
+    extern __shared__ FpExt shared[];
 
     // Map phase: compute local sum by striding over window
     FpExt local_sums[S_DEG];
@@ -269,6 +267,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
             auto k_rot_1 = get_eq_cube(k_rot_ns, num_evals, (y_int << 1) | 1);
             auto k_rot_c1 = k_rot_1 - k_rot_0;
 
+#pragma unroll
             for (int x_int = 1; x_int <= S_DEG; ++x_int) {
                 Fp x = Fp(x_int);
                 auto q_x = q_0 + q_c1 * x;
@@ -282,6 +281,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
         }
     }
 
+#pragma unroll
     // Reduce phase: for each x_int
     for (int idx = 0; idx < S_DEG; idx++) {
         if (active_thread) {
@@ -296,7 +296,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
 }
 
 // Degenerate case
-// PERF: uses single thread. We could parallelize across columns (window_idx) if needed.
+// Requires there to be a single block (gridDim.x must be 1) so we can do block reduction
 __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
     const FpExt *const *q_evals, // pointers to matrices of same height, one per [commit_idx]
     const FpExt *eq_ub_ptr,      // pointer to `eq_ub_per_trace` at window start
@@ -309,8 +309,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
     uint32_t window_len,
     uint32_t shift_factor // = l_skip + round
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0)
-        return;
+    extern __shared__ FpExt shared[];
 
     FpExt local_sums[S_DEG];
 #pragma unroll
@@ -318,7 +317,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
         local_sums[i] = FpExt(0);
     }
 
-    for (uint32_t window_idx = 0; window_idx < window_len; ++window_idx) {
+    for (uint32_t window_idx = threadIdx.x; window_idx < window_len; window_idx += blockDim.x) {
         UnstackedSlice s = unstacked_cols[window_idx];
         const FpExt *q = q_evals[s.commit_idx];
 
@@ -336,6 +335,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
 
         auto eq_ub = eq_ub_ptr[window_idx];
 
+#pragma unroll
         for (int x_int = 1; x_int <= S_DEG; ++x_int) {
             Fp x = Fp(x_int);
             auto eq_ub_x = eq_ub * eq1(x, b);
@@ -351,7 +351,11 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
 
 #pragma unroll
     for (int i = 0; i < S_DEG; i++) {
-        output[i] = local_sums[i];
+        FpExt reduced = sumcheck::block_reduce_sum(local_sums[i], shared);
+        if (threadIdx.x == 0) {
+            output[i] = reduced;
+        }
+        __syncthreads();
     }
 }
 
@@ -546,7 +550,12 @@ extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
     uint32_t round
 ) {
     auto shift_factor = l_skip + round;
-    stacked_reduction_sumcheck_mle_round_degenerate_kernel<<<1, 1>>>(
+    dim3 block(std::min(window_len, 512u));
+    dim3 grid(1);
+    unsigned int num_warps = div_ceil(block.x, WARP_SIZE);
+    size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
+
+    stacked_reduction_sumcheck_mle_round_degenerate_kernel<<<grid, block, shmem_bytes>>>(
         q_evals,
         eq_ub_ptr,
         eq_r,
