@@ -64,7 +64,7 @@ fn main() -> eyre::Result<()> {
         let mut rng = StdRng::seed_from_u64(42);
         let air = TestAir(KeccakAir {});
 
-        let engine = BabyBearPoseidon2GpuEngineV2::<DuplexSponge>::new(params);
+        let engine = BabyBearPoseidon2GpuEngineV2::new(params);
         let (pk, vk) = engine.keygen(&[Arc::new(air)]);
         let air_idx = 0;
 

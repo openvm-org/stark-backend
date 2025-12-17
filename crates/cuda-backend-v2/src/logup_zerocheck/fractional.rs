@@ -17,16 +17,20 @@ use tracing::{debug_span, instrument};
 use super::errors::FractionalSumcheckError;
 use crate::{
     EF,
-    cuda::{logup_zerocheck::{
-        _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, frac_build_tree_layer,
-        frac_compute_round, frac_fold_columns,
-    }, matrix::bitrev},
+    cuda::{
+        logup_zerocheck::{
+            _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, frac_build_tree_layer,
+            frac_compute_round, frac_fold_columns,
+        },
+        matrix::bitrev,
+    },
     poly::evals_eq_hypercube,
+    sponge::DuplexSpongeGpu,
 };
 
 #[instrument(skip_all)]
-pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
-    transcript: &mut TS,
+pub fn fractional_sumcheck_gpu(
+    transcript: &mut DuplexSpongeGpu,
     leaves: DeviceBuffer<Frac<EF>>,
     assert_zero: bool,
     mem: &mut MemTracker,
@@ -119,6 +123,7 @@ pub fn fractional_sumcheck_gpu<TS: FiatShamirTranscript>(
                     FractionalSumcheckError::EvalEqHypercube(cuda_err)
                 }
                 crate::ProverError::MemCopy(mem_err) => FractionalSumcheckError::Copy(mem_err),
+                crate::ProverError::Grind(grind_err) => FractionalSumcheckError::Grind(grind_err),
             })?;
         }
 
