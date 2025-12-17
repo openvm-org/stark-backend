@@ -82,29 +82,33 @@ pub fn standard_fri_params_with_100_bits_security(log_blowup: usize) -> FriParam
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 193,
-            proof_of_work_bits: 20,
+            commit_proof_of_work_bits: 16,
+            query_proof_of_work_bits: 20,
         },
         2 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 118,
-            proof_of_work_bits: 20,
+            commit_proof_of_work_bits: 12,
+            query_proof_of_work_bits: 20,
         },
         3 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 97,
-            proof_of_work_bits: 20,
+            commit_proof_of_work_bits: 12,
+            query_proof_of_work_bits: 20,
         },
         4 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 88,
-            proof_of_work_bits: 20,
+            commit_proof_of_work_bits: 12,
+            query_proof_of_work_bits: 20,
         },
         _ => todo!("No standard FRI params defined for log blowup {log_blowup}",),
     };
-    tracing::debug!("FRI parameters | log_blowup: {log_blowup:<2} | num_queries: {:<2} | proof_of_work_bits: {:<2}", fri_params.num_queries, fri_params.proof_of_work_bits);
+    tracing::debug!("FRI parameters | log_blowup: {log_blowup:<2} | num_queries: {:<2} | commit_proof_of_work_bits: {:<2} | query_proof_of_work_bits: {:<2}", fri_params.num_queries, fri_params.commit_proof_of_work_bits, fri_params.query_proof_of_work_bits);
     fri_params
 }
 
