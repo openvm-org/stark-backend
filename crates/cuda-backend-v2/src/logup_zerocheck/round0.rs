@@ -89,7 +89,8 @@ pub fn evaluate_round0_constraints_gpu(
     };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
-    let used_temp_bytes = (intermed_capacity + temp_sums_buffer_capacity) * size_of::<EF>();
+    let used_temp_bytes =
+        intermed_capacity * size_of::<F>() + temp_sums_buffer_capacity * size_of::<EF>();
     if used_temp_bytes > max_temp_bytes {
         // We do not error if the required bytes is greater than the requested max, but this may
         // lead to unexpected peak memory usage.

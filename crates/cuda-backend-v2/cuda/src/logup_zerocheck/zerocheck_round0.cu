@@ -9,10 +9,10 @@
 
 #include "codec.cuh"
 #include "dag_entry.cuh"
+#include "eval_config.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
-#include "round0_config.cuh"
 #include "sumcheck.cuh"
 #include "utils.cuh"
 
@@ -22,7 +22,7 @@ namespace zerocheck_round0 {
 // Device function equivalent to helper.acc_constraints without eq_* parts
 // This computes the constraint sum: sum(lambda_i * constraint_i) for all constraints
 __device__ __forceinline__ FpExt acc_constraints(
-    const DagPrismEvalContext &eval_ctx,
+    const BaryEvalContext &eval_ctx,
     const FpExt *__restrict__ d_lambda_pows,
     const uint32_t *__restrict__ d_lambda_indices,
     const Rule *__restrict__ d_rules,
@@ -164,7 +164,7 @@ __global__ void zerocheck_bary_evaluate_constraints_kernel(
             Fp is_first = is_first_mult * selectors_cube[x_int];
             Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
 
-            DagPrismEvalContext eval_ctx{
+            BaryEvalContext eval_ctx{
                 preprocessed,
                 main_parts,
                 public_values,

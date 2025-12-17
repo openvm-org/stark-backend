@@ -2,17 +2,17 @@
 
 #include "codec.cuh"
 #include "fp.h"
-#include "launcher.cuh"
 #include <cassert>
-#include <cstddef>
 #include <cstdint>
-#include <utility>
 #include <vector_types.h>
 
 namespace symbolic_dag {
 
-// Context for evaluating DAG entries corresponding to (z, \vec x) where `z` is some point in enlarged NTT domain (subgroup of F) and `\vec x` is point on hypercube. Evaluation will directly perform barycentric interpolation to compute value of prismalinear polynomial from its evaluations on univariate skip domain `D`.
-struct DagPrismEvalContext {
+// Context for evaluating DAG entries corresponding to (z, \vec x) where `z` is some point in
+// enlarged NTT domain (subgroup of F) and `\vec x` is point on hypercube. Evaluation will
+// directly perform barycentric interpolation to compute value of prismalinear polynomial from
+// its evaluations on univariate skip domain `D`.
+struct BaryEvalContext {
     const Fp *__restrict__ preprocessed;
     const Fp *const *__restrict__ main_parts;
     const Fp *__restrict__ public_values;
@@ -35,7 +35,7 @@ struct DagPrismEvalContext {
 // assumes offset < skip_domain
 __device__ __forceinline__ Fp barycentric_interpolate(
     const Fp *__restrict__ evals, // must have length height = num_x * skip_domain
-    const DagPrismEvalContext &ctx,
+    const BaryEvalContext &ctx,
     uint8_t offset
 ) {
     auto skip_domain = ctx.skip_domain;
@@ -54,7 +54,7 @@ __device__ __forceinline__ Fp barycentric_interpolate(
 }
 
 __device__ __forceinline__ Fp
-bary_eval_dag_entry(const SourceInfo &src, const DagPrismEvalContext &ctx) {
+bary_eval_dag_entry(const SourceInfo &src, const BaryEvalContext &ctx) {
     switch (src.type) {
     case ENTRY_PREPROCESSED: {
         const Fp *col = ctx.preprocessed + ctx.height * src.index;
@@ -93,45 +93,3 @@ bary_eval_dag_entry(const SourceInfo &src, const DagPrismEvalContext &ctx) {
 }
 
 } // namespace symbolic_dag
-namespace mle_rounds_config {
-inline std::pair<dim3, dim3> eval_constraints_launch_params(
-    uint32_t buffer_size,
-    uint32_t num_x,
-    uint32_t num_y,
-    uint32_t buffer_threshold, // threshold for switching intermediate buffer to global memory
-    size_t threads_per_block
-) {
-    (void)buffer_size;
-    (void)buffer_threshold;
-    return kernel_launch_params(num_x * num_y, threads_per_block);
-}
-
-inline size_t temp_sums_buffer_size(
-    uint32_t buffer_size,
-    uint32_t num_x,
-    uint32_t num_y,
-    uint32_t buffer_threshold,
-    uint32_t threads_per_block
-) {
-    auto [grid, block] = eval_constraints_launch_params(
-        buffer_size, num_x, num_y, buffer_threshold, threads_per_block
-    );
-    return static_cast<size_t>(num_x) * grid.x;
-}
-
-inline size_t intermediates_buffer_size(
-    uint32_t buffer_size,
-    uint32_t num_x,
-    uint32_t num_y,
-    uint32_t buffer_threshold,
-    uint32_t threads_per_block
-) {
-    if (buffer_size <= buffer_threshold) {
-        return 0;
-    }
-    auto [grid, block] = eval_constraints_launch_params(
-        buffer_size, num_x, num_y, buffer_threshold, threads_per_block
-    );
-    return static_cast<size_t>(block.x) * grid.x * buffer_size;
-}
-} // namespace mle_rounds_config
