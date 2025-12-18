@@ -22,7 +22,6 @@ __device__ __forceinline__ FpExt evaluate_mle_entry(
     const MainMatrixPtrs<FpExt> d_preprocessed,
     const MainMatrixPtrs<FpExt> *__restrict__ d_main,
     const Fp *__restrict__ d_public,
-    uint32_t public_len,
     const FpExt *__restrict__ inter_buffer,
     uint32_t buffer_stride,
     const uint32_t height,
@@ -78,7 +77,6 @@ __device__ __forceinline__ FpExt evaluate_mle_entry(
 // KERNELS
 // ============================================================================
 
-constexpr uint32_t MAX_NUM_X = 5;
 constexpr uint32_t ZEROCHECK_BUFFER_THRESHOLD = 16;
 constexpr uint32_t LOGUP_BUFFER_THRESHOLD = 10;
 
@@ -92,7 +90,6 @@ __global__ void zerocheck_mle_kernel(
     const FpExt *__restrict__ d_lambda_pows,
     const uint32_t *__restrict__ d_lambda_indices,
     const Fp *__restrict__ d_public,
-    uint32_t public_len,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
     const size_t *__restrict__ d_used_nodes,
@@ -100,42 +97,39 @@ __global__ void zerocheck_mle_kernel(
     size_t lambda_len,
     uint32_t buffer_size,
     FpExt *__restrict__ d_intermediates,
-    uint32_t num_y,
-    uint32_t num_x
+    uint32_t num_y
 ) {
     extern __shared__ char smem[];
     FpExt *shared = (FpExt *)smem;
 
-    uint32_t task_offset = threadIdx.x + blockIdx.x * blockDim.x;
-    uint32_t task_stride = blockDim.x * gridDim.x;
+    uint32_t num_x = gridDim.y;
+    uint32_t x_int = blockIdx.y;
+    uint32_t y_int = threadIdx.x + blockIdx.x * blockDim.x;
+    uint32_t y_int_stride = blockDim.x * gridDim.x;
+    bool const active_thread = (y_int < num_y);
 
-    FpExt local_buffer[ZEROCHECK_BUFFER_THRESHOLD];
-    FpExt *inter_buffer;
-    uint32_t buffer_stride;
-    if constexpr (GLOBAL) {
-        inter_buffer = d_intermediates + task_offset;
-        buffer_stride = task_stride;
-    } else {
-        inter_buffer = local_buffer;
-        buffer_stride = 1;
-    }
+    FpExt sum(Fp::zero());
 
-    uint32_t height = num_x * num_y;
+    if (active_thread) {
+        FpExt local_buffer[ZEROCHECK_BUFFER_THRESHOLD];
+        FpExt *inter_buffer;
+        uint32_t buffer_stride;
+        if constexpr (GLOBAL) {
+            uint32_t task_offset = x_int * y_int_stride + y_int;
+            uint32_t task_stride = y_int_stride * num_x;
+            inter_buffer = d_intermediates + task_offset;
+            buffer_stride = task_stride;
+        } else {
+            inter_buffer = local_buffer;
+            buffer_stride = 1;
+        }
 
-    // Sumcheck sum, we sum over y_int's
-    FpExt sum[MAX_NUM_X];
-#pragma unroll
-    for (uint32_t i = 0; i < MAX_NUM_X; ++i) {
-        sum[i] = FpExt(Fp::zero());
-    }
-
-    for (uint32_t row = task_offset; row < height; row += task_stride) {
-        FpExt constraint_sum(Fp::zero());
-        size_t lambda_idx = 0; // Initialize lambda_idx
+        uint32_t height = num_x * num_y;
+        uint32_t row = x_int * num_y + y_int;
+        uint32_t lambda_idx = 0;
 
 #define ZEROCHECK_EVAL_ARGS                                                                        \
-    row, d_selectors, d_preprocessed, d_main, d_public, public_len, inter_buffer, buffer_stride,   \
-        height
+    row, d_selectors, d_preprocessed, d_main, d_public, inter_buffer, buffer_stride, height
 
         for (size_t node = 0; node < rules_len; ++node) {
             Rule rule = d_rules[node];
@@ -165,9 +159,8 @@ __global__ void zerocheck_mle_kernel(
             case OP_VAR:
                 result = x_val;
                 break;
-            case OP_INV:
-                result = inv(x_val);
-                break;
+            default:
+                assert(false);
             }
 
             if (decoded.buffer_result && buffer_size > 0) {
@@ -181,27 +174,20 @@ __global__ void zerocheck_mle_kernel(
             if (decoded.is_constraint) {
                 while (lambda_idx < lambda_len && lambda_idx < used_nodes_len &&
                        d_used_nodes[lambda_idx] == node) {
-                    uint32_t mapped_idx = d_lambda_indices != nullptr
-                                              ? d_lambda_indices[lambda_idx]
-                                              : static_cast<uint32_t>(lambda_idx);
+                    uint32_t mapped_idx =
+                        d_lambda_indices ? d_lambda_indices[lambda_idx] : lambda_idx;
                     FpExt lambda = d_lambda_pows[mapped_idx];
                     lambda_idx++;
-                    constraint_sum += lambda * result;
+                    sum += lambda * result;
                 }
             }
         }
-
-        FpExt eq_xi_val = d_eq_xi[row];
-        uint32_t x_int = row % num_x;
-        sum[x_int] += eq_xi_val * constraint_sum;
+        sum *= d_eq_xi[row];
     }
 
-    for (uint32_t i = 0; i < num_x; ++i) {
-        FpExt reduced = sumcheck::block_reduce_sum(sum[i], shared);
-        if (threadIdx.x == 0) {
-            tmp_sums_buffer[blockIdx.x * num_x + i] = reduced;
-        }
-        __syncthreads();
+    FpExt reduced = sumcheck::block_reduce_sum(sum, shared);
+    if (threadIdx.x == 0) {
+        tmp_sums_buffer[blockIdx.x * num_x + x_int] = reduced;
     }
 }
 
@@ -215,53 +201,46 @@ __global__ void logup_mle_kernel(
     const FpExt *__restrict__ d_challenges,
     const FpExt *__restrict__ d_eq_3bs,
     const Fp *__restrict__ d_public,
-    uint32_t public_len,
     const Rule *__restrict__ d_rules,
-    size_t rules_len,
     const size_t *__restrict__ d_used_nodes,
     size_t used_nodes_len,
     uint32_t buffer_size,
     FpExt *__restrict__ d_intermediates,
-    uint32_t num_y,
-    uint32_t num_x
+    uint32_t num_y
 ) {
     extern __shared__ char smem[];
     FpExt *shared = reinterpret_cast<FpExt *>(smem);
 
-    uint32_t task_offset = threadIdx.x + blockIdx.x * blockDim.x;
-    uint32_t task_stride = blockDim.x * gridDim.x;
+    uint32_t num_x = gridDim.y;
+    uint32_t x_int = blockIdx.y;
+    uint32_t y_int = threadIdx.x + blockIdx.x * blockDim.x;
+    uint32_t y_int_stride = blockDim.x * gridDim.x;
+    bool const active_thread = (y_int < num_y);
 
-    FpExt local_buffer[LOGUP_BUFFER_THRESHOLD];
-    FpExt *inter_buffer;
-    uint32_t buffer_stride;
-    if constexpr (GLOBAL) {
-        inter_buffer = d_intermediates + task_offset;
-        buffer_stride = task_stride;
-    } else {
-        inter_buffer = local_buffer;
-        buffer_stride = 1;
-    }
+    FpExt numer_sum = FpExt(Fp::zero());
+    FpExt denom_sum = FpExt(Fp::zero());
 
-    uint32_t height = num_x * num_y;
+    if (active_thread) {
+        FpExt local_buffer[LOGUP_BUFFER_THRESHOLD];
+        FpExt *inter_buffer;
+        uint32_t buffer_stride;
+        if constexpr (GLOBAL) {
+            uint32_t task_offset = x_int * y_int_stride + y_int;
+            uint32_t task_stride = y_int_stride * num_x;
+            inter_buffer = d_intermediates + task_offset;
+            buffer_stride = task_stride;
+        } else {
+            inter_buffer = local_buffer;
+            buffer_stride = 1;
+        }
 
-    // Sumcheck sum, we sum over y_int's
-    FracExt sum[MAX_NUM_X];
-#pragma unroll
-    for (uint32_t i = 0; i < MAX_NUM_X; i++) {
-        sum[i] = {FpExt(Fp::zero()), FpExt(Fp::zero())};
-    }
-
-    for (uint32_t row = task_offset; row < height; row += task_stride) {
-        FpExt numer_sum = FpExt(Fp::zero());
-        FpExt denom_sum = FpExt(Fp::zero());
-
-        // Track how many rules we've evaluated so far
+        uint32_t height = num_x * num_y;
+        uint32_t row = x_int * num_y + y_int;
         size_t rules_evaluated = 0;
-        bool is_denom = false; // Alternates: false=numer, true=denom
 
 #define LOGUP_EVAL_ARGS                                                                            \
-    row, d_selectors, d_preprocessed, d_main, d_public, public_len, inter_buffer, buffer_stride,   \
-        height, d_challenges
+    row, d_selectors, d_preprocessed, d_main, d_public, inter_buffer, buffer_stride, height,       \
+        d_challenges
 
         // Iterate through used_nodes (alternates: numer, denom, numer, denom, ...)
         for (size_t used_idx = 0; used_idx < used_nodes_len; ++used_idx) {
@@ -311,9 +290,8 @@ __global__ void logup_mle_kernel(
                     case OP_VAR:
                         node_result = x_val;
                         break;
-                    case OP_INV:
-                        node_result = inv(x_val);
-                        break;
+                    default:
+                        assert(false);
                     }
 
                     if (decoded.buffer_result && buffer_size > 0) {
@@ -333,33 +311,24 @@ __global__ void logup_mle_kernel(
 
             // Accumulate to numer or denom based on alternation
             // Weight by eq_3bs[used_idx / 2] (each interaction has numer and denom)
-            result *= d_eq_3bs[used_idx / 2];
+            result *= d_eq_3bs[used_idx >> 1];
 
-            if (is_denom) {
+            if (used_idx & 1) {
                 denom_sum += result;
             } else {
                 numer_sum += result;
             }
-            is_denom = !is_denom;
         }
 
         FpExt eq_sharp_val = d_eq_sharp[row];
-        uint32_t x_int = row % num_x;
-        sum[x_int].p += eq_sharp_val * numer_sum;
-        sum[x_int].q += eq_sharp_val * denom_sum;
+        numer_sum *= eq_sharp_val;
+        denom_sum *= eq_sharp_val;
     }
 
-    for (uint32_t i = 0; i < num_x; ++i) {
-        FpExt reduced = sumcheck::block_reduce_sum(sum[i].p, shared);
-        if (threadIdx.x == 0) {
-            tmp_sums_buffer[blockIdx.x * num_x + i].p = reduced;
-        }
-        __syncthreads();
-        reduced = sumcheck::block_reduce_sum(sum[i].q, shared);
-        if (threadIdx.x == 0) {
-            tmp_sums_buffer[blockIdx.x * num_x + i].q = reduced;
-        }
-        __syncthreads();
+    FpExt numer_reduced = sumcheck::block_reduce_sum(numer_sum, shared);
+    FpExt denom_reduced = sumcheck::block_reduce_sum(denom_sum, shared);
+    if (threadIdx.x == 0) {
+        tmp_sums_buffer[blockIdx.x * num_x + x_int] = {numer_reduced, denom_reduced};
     }
 }
 
@@ -367,18 +336,12 @@ __global__ void logup_mle_kernel(
 // LAUNCHERS
 // ============================================================================
 //
-constexpr uint32_t MAX_THREADS = 256;
+constexpr uint32_t MAX_THREADS = 128;
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
 // Required length of *temp_sum_buffer in FpExt elements
-extern "C" size_t _zerocheck_mle_temp_sums_buffer_size(
-    uint32_t buffer_size,
-    uint32_t num_x,
-    uint32_t num_y
-) {
-    return mle_rounds_config::temp_sums_buffer_size(
-        buffer_size, num_x, num_y, ZEROCHECK_BUFFER_THRESHOLD, MAX_THREADS
-    );
+extern "C" size_t _zerocheck_mle_temp_sums_buffer_size(uint32_t num_x, uint32_t num_y) {
+    return mle_rounds_config::temp_sums_buffer_size(num_x, num_y, MAX_THREADS);
 }
 
 // In FpExt elements
@@ -402,7 +365,6 @@ extern "C" int _zerocheck_eval_mle(
     const FpExt *lambda_pows,
     const uint32_t *lambda_indices,
     const Fp *public_values,
-    uint32_t public_len,
     const Rule *rules,
     size_t rules_len,
     const size_t *used_nodes,
@@ -413,17 +375,14 @@ extern "C" int _zerocheck_eval_mle(
     uint32_t num_y,
     uint32_t num_x
 ) {
-    assert(num_x <= MAX_NUM_X); // num_x = s_deg = max_constraint_degree + 1
-    auto [grid, block] = mle_rounds_config::eval_constraints_launch_params(
-        buffer_size, num_x, num_y, ZEROCHECK_BUFFER_THRESHOLD, MAX_THREADS
-    );
-    unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;
-    size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
+    auto [grid, block] =
+        mle_rounds_config::eval_constraints_launch_params(num_x, num_y, MAX_THREADS);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
 #define ZEROCHECK_KERNEL_ARGS                                                                      \
     tmp_sums_buffer, eq_xi, selectors, preprocessed, main, lambda_pows, lambda_indices,            \
-        public_values, public_len, rules, rules_len, used_nodes, used_nodes_len, lambda_len,       \
-        buffer_size, intermediates, num_y, num_x
+        public_values, rules, rules_len, used_nodes, used_nodes_len, lambda_len, buffer_size,      \
+        intermediates, num_y
 
     if (buffer_size > ZEROCHECK_BUFFER_THRESHOLD) {
         zerocheck_mle_kernel<true><<<grid, block, shmem_bytes>>>(ZEROCHECK_KERNEL_ARGS);
@@ -447,14 +406,8 @@ extern "C" int _zerocheck_eval_mle(
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
 // Required length of *temp_sum_buffer in FracExt elements
-extern "C" size_t _logup_mle_temp_sums_buffer_size(
-    uint32_t buffer_size,
-    uint32_t num_x,
-    uint32_t num_y
-) {
-    return mle_rounds_config::temp_sums_buffer_size(
-        buffer_size, num_x, num_y, LOGUP_BUFFER_THRESHOLD, MAX_THREADS
-    );
+extern "C" size_t _logup_mle_temp_sums_buffer_size(uint32_t num_x, uint32_t num_y) {
+    return mle_rounds_config::temp_sums_buffer_size(num_x, num_y, MAX_THREADS);
 }
 
 // In FpExt elements
@@ -478,9 +431,7 @@ extern "C" int _logup_eval_mle(
     const FpExt *challenges,
     const FpExt *eq_3bs,
     const Fp *public_values,
-    uint32_t public_len,
     const Rule *rules,
-    size_t rules_len,
     const size_t *used_nodes,
     size_t used_nodes_len,
     uint32_t buffer_size,
@@ -488,17 +439,13 @@ extern "C" int _logup_eval_mle(
     uint32_t num_y,
     uint32_t num_x
 ) {
-    assert(num_x <= MAX_NUM_X); // num_x = s_deg = max_constraint_degree + 1
-    auto [grid, block] = mle_rounds_config::eval_constraints_launch_params(
-        buffer_size, num_x, num_y, LOGUP_BUFFER_THRESHOLD, MAX_THREADS
-    );
-    unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;
-    size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
+    auto [grid, block] =
+        mle_rounds_config::eval_constraints_launch_params(num_x, num_y, MAX_THREADS);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
 #define LOGUP_KERNEL_ARGS                                                                          \
     tmp_sums_buffer, eq_sharp, selectors, preprocessed, main, challenges, eq_3bs, public_values,   \
-        public_len, rules, rules_len, used_nodes, used_nodes_len, buffer_size, intermediates,      \
-        num_y, num_x
+        rules, used_nodes, used_nodes_len, buffer_size, intermediates, num_y
 
     if (buffer_size > LOGUP_BUFFER_THRESHOLD) {
         logup_mle_kernel<true><<<grid, block, shmem_bytes>>>(LOGUP_KERNEL_ARGS);

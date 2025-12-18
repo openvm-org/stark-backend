@@ -194,7 +194,7 @@ extern "C" {
     ) -> i32;
 
     // mle.cu
-    pub fn _zerocheck_mle_temp_sums_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
+    pub fn _zerocheck_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize;
 
     pub fn _zerocheck_mle_intermediates_buffer_size(
         buffer_size: u32,
@@ -212,7 +212,6 @@ extern "C" {
         lambda_pows: *const EF,
         lambda_indices: *const u32,
         public_values: *const F,
-        public_len: u32,
         rules: *const std::ffi::c_void,
         rules_len: usize,
         used_nodes: *const usize,
@@ -224,7 +223,7 @@ extern "C" {
         num_x: u32,
     ) -> i32;
 
-    pub fn _logup_mle_temp_sums_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
+    pub fn _logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize;
 
     pub fn _logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
 
@@ -238,9 +237,7 @@ extern "C" {
         challenges: *const EF,
         eq_3bs: *const EF,
         public_values: *const F,
-        public_len: u32,
         rules: *const std::ffi::c_void,
-        rules_len: usize,
         used_nodes: *const usize,
         used_nodes_len: usize,
         buffer_size: u32,
@@ -561,7 +558,6 @@ pub unsafe fn zerocheck_eval_mle(
         lambda_pows.as_ptr(),
         lambda_indices.as_ptr(),
         public_values.as_ptr(),
-        public_values.len() as u32,
         rules.as_raw_ptr(),
         rules.len(),
         used_nodes.as_ptr(),
@@ -602,9 +598,7 @@ pub unsafe fn logup_eval_mle(
         challenges.as_ptr(),
         eq_3bs.as_ptr(),
         public_values.as_ptr(),
-        public_values.len() as u32,
         rules.as_raw_ptr(),
-        rules.len(),
         used_nodes.as_ptr(),
         used_nodes.len(),
         buffer_size,
