@@ -84,8 +84,7 @@ pub fn evaluate_mle_constraints_gpu(
     } else {
         DeviceBuffer::<EF>::new()
     };
-    let temp_sums_buffer_capacity =
-        unsafe { _zerocheck_mle_temp_sums_buffer_size(buffer_size, num_x, num_y) };
+    let temp_sums_buffer_capacity = unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y) };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
     let mut output = DeviceBuffer::<EF>::with_capacity(s_deg);
@@ -206,8 +205,7 @@ pub fn evaluate_mle_interactions_gpu(
     } else {
         DeviceBuffer::<EF>::new()
     };
-    let temp_sums_buffer_capacity =
-        unsafe { _logup_mle_temp_sums_buffer_size(buffer_size, num_x, num_y) };
+    let temp_sums_buffer_capacity = unsafe { _logup_mle_temp_sums_buffer_size(num_x, num_y) };
     debug!("logup:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);
     let mut output = DeviceBuffer::<Frac<EF>>::with_capacity(s_deg);
