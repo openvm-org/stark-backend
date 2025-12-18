@@ -167,28 +167,21 @@ inline size_t intermediates_buffer_size(
 
 namespace mle_rounds_config {
 inline std::pair<dim3, dim3> eval_constraints_launch_params(
-    uint32_t buffer_size,
     uint32_t num_x,
     uint32_t num_y,
-    uint32_t buffer_threshold, // threshold for switching intermediate buffer to global memory
-    size_t threads_per_block
+    size_t max_threads_per_block
 ) {
-    (void)buffer_size;
-    (void)buffer_threshold;
-    return kernel_launch_params(num_x * num_y, threads_per_block);
+    auto threads_per_block = std::min(std::max(WARP_SIZE, (size_t)num_y), max_threads_per_block);
+    auto num_blocks_for_y = div_ceil(num_y, threads_per_block);
+    dim3 grid = dim3(num_blocks_for_y, num_x);
+    dim3 block = dim3(threads_per_block);
+    return {grid, block};
 }
 
-inline size_t temp_sums_buffer_size(
-    uint32_t buffer_size,
-    uint32_t num_x,
-    uint32_t num_y,
-    uint32_t buffer_threshold,
-    uint32_t threads_per_block
-) {
-    auto [grid, block] = eval_constraints_launch_params(
-        buffer_size, num_x, num_y, buffer_threshold, threads_per_block
-    );
-    return static_cast<size_t>(num_x) * grid.x;
+inline size_t temp_sums_buffer_size(uint32_t num_x, uint32_t num_y, uint32_t threads_per_block) {
+    auto [grid, block] = eval_constraints_launch_params(num_x, num_y, threads_per_block);
+    (void)block;
+    return static_cast<size_t>(grid.x) * grid.y;
 }
 
 inline size_t intermediates_buffer_size(
@@ -201,9 +194,7 @@ inline size_t intermediates_buffer_size(
     if (buffer_size <= buffer_threshold) {
         return 0;
     }
-    auto [grid, block] = eval_constraints_launch_params(
-        buffer_size, num_x, num_y, buffer_threshold, threads_per_block
-    );
-    return static_cast<size_t>(block.x) * grid.x * buffer_size;
+    auto [grid, block] = eval_constraints_launch_params(num_x, num_y, threads_per_block);
+    return static_cast<size_t>(block.x) * grid.x * grid.y * buffer_size;
 }
 } // namespace mle_rounds_config
