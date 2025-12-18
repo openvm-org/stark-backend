@@ -22,7 +22,7 @@ use stark_backend_v2::{
     prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
     verifier::verify,
 };
-use tracing::info_span;
+use tracing::trace_span;
 
 const NUM_PERMUTATIONS: usize = 1 << 10;
 
@@ -74,7 +74,7 @@ fn main() -> eyre::Result<()> {
         let inputs = (0..NUM_PERMUTATIONS)
             .map(|_| rng.random())
             .collect::<Vec<_>>();
-        let trace = info_span!("generate_trace")
+        let trace = trace_span!("generate_trace")
             .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
         let device = engine.device();
         let d_trace = device.transport_matrix_to_device(&ColMajorMatrix::from_row_major(&trace));
