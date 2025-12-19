@@ -449,25 +449,159 @@ impl Decode for WhirProof {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::{max, Reverse};
+
     use itertools::Itertools;
+    use openvm_stark_backend::interaction::LogUpSecurityParameters;
+    use openvm_stark_sdk::config::setup_tracing_with_log_level;
 
     use super::*;
     use crate::{
+        calculate_n_logup,
         poseidon2::sponge::DuplexSpongeRecorder,
+        proof_size::expected_proof_size,
+        prover::stacked_pcs::StackedLayout,
         test_utils::{
             test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
             PreprocessedFibFixture, TestFixture,
         },
-        BabyBearPoseidon2CpuEngineV2, SystemParams,
+        BabyBearPoseidon2CpuEngineV2, SystemParams, WhirConfig, WhirRoundConfig,
     };
 
     fn test_proof_encode_decode<Fx: TestFixture>(fx: Fx, params: SystemParams) -> Result<()> {
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
-        let pk = fx.keygen(&engine).0;
+        let (pk, vk) = fx.keygen(&engine);
         let proof = fx.prove_from_transcript(&engine, &pk, &mut DuplexSpongeRecorder::default());
+
+        // Compute parameters for expected_proof_size
+        let mvk = &vk.inner;
+        let l_skip = mvk.params.l_skip;
+
+        // Build per_trace: present AIRs sorted by log_height descending
+        let per_trace: Vec<_> = mvk
+            .per_air
+            .iter()
+            .zip(&proof.trace_vdata)
+            .filter_map(|(vk, vdata)| vdata.as_ref().map(|vdata| (vk, vdata)))
+            .sorted_by_key(|(_, vdata)| Reverse(vdata.log_height))
+            .collect();
+
+        // Compute n_logup from total_interactions
+        let total_interactions: u64 = per_trace.iter().fold(0u64, |acc, (vk, vdata)| {
+            acc + ((vk.num_interactions() as u64) << max(vdata.log_height, l_skip))
+        });
+        let n_logup = calculate_n_logup(l_skip, total_interactions);
+
+        // Compute n_max from max log_height
+        let n_max = per_trace
+            .first()
+            .map(|(_, vdata)| vdata.log_height.saturating_sub(l_skip))
+            .unwrap_or(0);
+
+        // Compute stacked_widths from layouts
+        let common_main_layout = StackedLayout::new(
+            l_skip,
+            mvk.params.n_stack + l_skip,
+            per_trace
+                .iter()
+                .map(|(vk, vdata)| (vk.params.width.common_main, vdata.log_height))
+                .collect(),
+        );
+
+        let other_layouts: Vec<_> = per_trace
+            .iter()
+            .flat_map(|(vk, vdata)| {
+                vk.params
+                    .width
+                    .preprocessed
+                    .iter()
+                    .chain(&vk.params.width.cached_mains)
+                    .copied()
+                    .map(|width| (width, vdata.log_height))
+                    .collect_vec()
+            })
+            .map(|sorted| StackedLayout::new(l_skip, mvk.params.n_stack + l_skip, vec![sorted]))
+            .collect();
+
+        let layouts: Vec<_> = std::iter::once(common_main_layout)
+            .chain(other_layouts)
+            .collect();
+
+        let stacked_widths: Vec<_> = layouts
+            .iter()
+            .map(|layout| layout.sorted_cols.last().map_or(0, |c| c.2.col_idx + 1))
+            .collect();
+
+        tracing::warn!(
+            "expected_proof_size: {}",
+            expected_proof_size(mvk, &stacked_widths, n_logup, n_max)
+        );
 
         let mut proof_bytes = Vec::new();
         proof.encode(&mut proof_bytes).unwrap();
+
+        // Log actual sizes of each proof component
+        {
+            fn encoded_size<T: Encode>(t: &T) -> usize {
+                let mut buf = Vec::new();
+                t.encode(&mut buf).unwrap();
+                buf.len()
+            }
+
+            let codec_version_size = size_of::<u32>();
+            let common_main_commit_size = encoded_size(&proof.common_main_commit);
+
+            // trace_vdata: num_airs + bitmap + per-present TraceVData
+            let num_airs = proof.trace_vdata.len();
+            let bitmap_size = num_airs.div_ceil(8);
+            let trace_vdata_content: usize = proof
+                .trace_vdata
+                .iter()
+                .flatten()
+                .map(|vdata| encoded_size(vdata))
+                .sum();
+            let trace_vdata_size = size_of::<usize>() + bitmap_size + trace_vdata_content;
+
+            let public_values_size: usize = proof
+                .public_values
+                .iter()
+                .map(|pvs| encoded_size(pvs))
+                .sum();
+
+            let gkr_proof_size = encoded_size(&proof.gkr_proof);
+            let batch_constraint_proof_size = encoded_size(&proof.batch_constraint_proof);
+            let stacking_proof_size = encoded_size(&proof.stacking_proof);
+            let whir_proof_size = encoded_size(&proof.whir_proof);
+
+            tracing::error!("actual codec_version: {} bytes", codec_version_size);
+            tracing::error!(
+                "actual common_main_commit: {} bytes",
+                common_main_commit_size
+            );
+            tracing::error!("actual trace_vdata: {} bytes", trace_vdata_size);
+            tracing::error!("actual public_values: {} bytes", public_values_size);
+            tracing::error!("actual gkr_proof: {} bytes", gkr_proof_size);
+            tracing::error!(
+                "actual batch_constraint_proof: {} bytes",
+                batch_constraint_proof_size
+            );
+            tracing::error!("actual stacking_proof: {} bytes", stacking_proof_size);
+            tracing::error!("actual whir_proof: {} bytes", whir_proof_size);
+
+            let total = codec_version_size
+                + common_main_commit_size
+                + trace_vdata_size
+                + public_values_size
+                + gkr_proof_size
+                + batch_constraint_proof_size
+                + stacking_proof_size
+                + whir_proof_size;
+            tracing::error!("actual total_proof_size: {} bytes", total);
+        }
+
+        tracing::error!("actual_proof_size (encoded): {}", proof_bytes.len());
+        let compressed = zstd::encode_all(&proof_bytes[..], 22)?;
+        tracing::warn!("compressed size: {}", compressed.len());
 
         let decoded_proof = Proof::decode(&mut &proof_bytes[..]).unwrap();
         assert_eq!(proof, decoded_proof);
@@ -476,9 +610,30 @@ mod tests {
 
     #[test]
     fn test_fib_proof_encode_decode() -> Result<()> {
+        setup_tracing_with_log_level(tracing::Level::INFO);
         let log_trace_height = 5;
         let fx = FibFixture::new(0, 1, 1 << log_trace_height);
-        let params = SystemParams::new_for_testing(log_trace_height);
+        let params = SystemParams {
+            l_skip: 2,
+            n_stack: 18,
+            log_blowup: 4,
+            whir: WhirConfig {
+                k: 5,
+                rounds: [
+                    WhirRoundConfig { num_queries: 88 },
+                    WhirRoundConfig { num_queries: 81 },
+                ]
+                .to_vec(),
+                query_phase_pow_bits: 20,
+                folding_pow_bits: 10,
+            },
+            logup: LogUpSecurityParameters {
+                max_interaction_count: 2013265921,
+                log_max_message_length: 7,
+                pow_bits: 16,
+            },
+            max_constraint_degree: 4,
+        };
         test_proof_encode_decode(fx, params)
     }
 
@@ -498,8 +653,29 @@ mod tests {
 
     #[test]
     fn test_preprocessed_proof_encode_decode() -> Result<()> {
+        setup_tracing_with_log_level(tracing::Level::INFO);
         let log_trace_height = 5;
-        let params = SystemParams::new_for_testing(log_trace_height);
+        let params = SystemParams {
+            l_skip: 2,
+            n_stack: 18,
+            log_blowup: 4,
+            whir: WhirConfig {
+                k: 5,
+                rounds: [
+                    WhirRoundConfig { num_queries: 88 },
+                    WhirRoundConfig { num_queries: 81 },
+                ]
+                .to_vec(),
+                query_phase_pow_bits: 20,
+                folding_pow_bits: 10,
+            },
+            logup: LogUpSecurityParameters {
+                max_interaction_count: 2013265921,
+                log_max_message_length: 7,
+                pow_bits: 16,
+            },
+            max_constraint_degree: 4,
+        };
         let sels = (0..(1 << log_trace_height))
             .map(|i| i % 2 == 0)
             .collect_vec();
