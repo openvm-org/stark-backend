@@ -17,7 +17,7 @@ use crate::{
 
 mod check_constraints;
 
-use check_constraints::*;
+pub use check_constraints::*;
 
 use crate::interaction::BusIndex;
 
