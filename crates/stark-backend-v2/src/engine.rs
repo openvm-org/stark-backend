@@ -9,6 +9,7 @@ use openvm_stark_backend::{config::StarkGenericConfig, prover::Prover, AirRef};
 use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
 
 use crate::{
+    debug::debug_impl,
     keygen::{
         types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
         MultiStarkKeygenBuilderV2,
@@ -96,6 +97,11 @@ where
         verify(vk, proof, &mut transcript)
     }
 
+    /// The indexing of AIR ID in `ctx` should be consistent with the order of `airs`. In
+    /// particular, `airs` should correspond to the global proving key with all AIRs, including ones
+    /// not present in the `ctx`.
+    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>);
+
     /// Runs a single end-to-end test for a given set of chips and traces partitions.
     /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
     fn run_test(
@@ -139,11 +145,16 @@ where
     fn device(&self) -> &Self::PD {
         &self.device
     }
+
     fn prover_from_transcript(
         &self,
         transcript: TS,
     ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
         CoordinatorV2::new(CpuBackendV2, self.device.clone(), transcript)
+    }
+
+    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>) {
+        debug_impl::<Self::PB, Self::PD>(self.config().clone(), self.device(), airs, ctx);
     }
 }
 
