@@ -485,13 +485,13 @@ mod tests {
     #[test]
     fn test_interactions_proof_encode_decode() -> Result<()> {
         let fx = InteractionsFixture11;
-        let params = test_system_params_small(2, 5, 3, 3);
+        let params = test_system_params_small(2, 5, 3);
         test_proof_encode_decode(fx, params)
     }
 
     #[test]
     fn test_cached_proof_encode_decode() -> Result<()> {
-        let params = test_system_params_small(2, 5, 3, 3);
+        let params = test_system_params_small(2, 5, 3);
         let fx = CachedFixture11::new(params.clone());
         test_proof_encode_decode(fx, params)
     }

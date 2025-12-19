@@ -483,31 +483,16 @@ impl SystemParams {
     pub fn new_for_testing(log_trace_height: usize) -> Self {
         let l_skip = 4;
         let k_whir = 4;
-        let max_constraint_degree = 4;
-        test_system_params_small(
-            l_skip,
-            log_trace_height - l_skip,
-            k_whir,
-            max_constraint_degree,
-        )
+        let mut params = test_system_params_small(l_skip, log_trace_height - l_skip, k_whir);
+        params.max_constraint_degree = 4;
+        params
     }
 }
 
 /// Trace heights cannot exceed 2^{l_skip + n_stack} when using these system params.
-pub fn test_system_params_small(
-    l_skip: usize,
-    n_stack: usize,
-    k_whir: usize,
-    max_constraint_degree: usize,
-) -> SystemParams {
+pub fn test_system_params_small(l_skip: usize, n_stack: usize, k_whir: usize) -> SystemParams {
     let log_final_poly_len = (n_stack + l_skip) % k_whir;
-    test_system_params_small_with_poly_len(
-        l_skip,
-        n_stack,
-        k_whir,
-        log_final_poly_len,
-        max_constraint_degree,
-    )
+    test_system_params_small_with_poly_len(l_skip, n_stack, k_whir, log_final_poly_len, 3)
 }
 
 pub fn test_system_params_small_with_poly_len(
@@ -546,7 +531,7 @@ pub fn test_whir_config_small(
 }
 
 pub fn default_test_params_small() -> SystemParams {
-    test_system_params_small(2, 8, 3, 3)
+    test_system_params_small(2, 8, 3)
 }
 
 pub fn test_engine_small() -> BabyBearPoseidon2CpuEngineV2<DuplexSponge> {
