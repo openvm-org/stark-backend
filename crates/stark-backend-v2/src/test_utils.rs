@@ -482,14 +482,32 @@ impl SystemParams {
     /// **These parameters should not be used in production!**
     pub fn new_for_testing(log_trace_height: usize) -> Self {
         let l_skip = 4;
-        test_system_params_small(4, log_trace_height - l_skip, 4)
+        let k_whir = 4;
+        let max_constraint_degree = 4;
+        test_system_params_small(
+            l_skip,
+            log_trace_height - l_skip,
+            k_whir,
+            max_constraint_degree,
+        )
     }
 }
 
 /// Trace heights cannot exceed 2^{l_skip + n_stack} when using these system params.
-pub fn test_system_params_small(l_skip: usize, n_stack: usize, k_whir: usize) -> SystemParams {
+pub fn test_system_params_small(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+    max_constraint_degree: usize,
+) -> SystemParams {
     let log_final_poly_len = (n_stack + l_skip) % k_whir;
-    test_system_params_small_with_poly_len(l_skip, n_stack, k_whir, log_final_poly_len)
+    test_system_params_small_with_poly_len(
+        l_skip,
+        n_stack,
+        k_whir,
+        log_final_poly_len,
+        max_constraint_degree,
+    )
 }
 
 pub fn test_system_params_small_with_poly_len(
@@ -497,6 +515,7 @@ pub fn test_system_params_small_with_poly_len(
     n_stack: usize,
     k_whir: usize,
     log_final_poly_len: usize,
+    max_constraint_degree: usize,
 ) -> SystemParams {
     assert!(log_final_poly_len < l_skip + n_stack);
     let log_blowup = 1;
@@ -507,7 +526,7 @@ pub fn test_system_params_small_with_poly_len(
         log_blowup,
         whir: test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len),
         logup: log_up_security_params_baby_bear_100_bits(),
-        max_constraint_degree: 3,
+        max_constraint_degree,
     }
 }
 
@@ -527,7 +546,7 @@ pub fn test_whir_config_small(
 }
 
 pub fn default_test_params_small() -> SystemParams {
-    test_system_params_small(2, 8, 3)
+    test_system_params_small(2, 8, 3, 3)
 }
 
 pub fn test_engine_small() -> BabyBearPoseidon2CpuEngineV2<DuplexSponge> {

@@ -453,7 +453,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
 #[test]
 fn test_matrix_stacking_overflow() {
     setup_tracing();
-    let params = test_system_params_small(3, 5, 3);
+    let params = test_system_params_small(3, 5, 3, 3);
     let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
     let fx = SelfInteractionFixture {
         widths: vec![4, 7, 8, 8, 10],

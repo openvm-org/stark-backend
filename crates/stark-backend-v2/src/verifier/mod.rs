@@ -246,7 +246,7 @@ mod tests {
         n_stack: usize,
         k_whir: usize,
     ) -> Result<(), VerifierError> {
-        let params = test_system_params_small(l_skip, n_stack, k_whir);
+        let params = test_system_params_small(l_skip, n_stack, k_whir, 3);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
         let fx = InteractionsFixture11;
         let (pk, vk) = fx.keygen(&engine);
@@ -267,7 +267,7 @@ mod tests {
         k_whir: usize,
     ) -> Result<(), VerifierError> {
         setup_tracing_with_log_level(Level::DEBUG);
-        let params = test_system_params_small(l_skip, n_stack, k_whir);
+        let params = test_system_params_small(l_skip, n_stack, k_whir, 3);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params.clone());
         let fx = CachedFixture11::new(params);
         let (pk, vk) = fx.keygen(&engine);
@@ -287,7 +287,7 @@ mod tests {
         k_whir: usize,
     ) -> Result<(), VerifierError> {
         use itertools::Itertools;
-        let params = test_system_params_small(l_skip, n_stack, k_whir);
+        let params = test_system_params_small(l_skip, n_stack, k_whir, 3);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
         let log_trace_degree = 8;
         let height = 1 << log_trace_degree;
