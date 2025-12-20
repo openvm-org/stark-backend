@@ -179,7 +179,8 @@ pub fn prove_whir_opening_gpu(
     let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof>> = vec![];
     let mut codeword_opened_values: Vec<Vec<Vec<EF>>> = vec![];
     let mut codeword_merkle_proofs: Vec<Vec<MerkleProof>> = vec![];
-    let mut whir_pow_witnesses = vec![];
+    let mut folding_pow_witnesses = vec![];
+    let mut query_phase_pow_witnesses = vec![];
     let mut rs_tree = None;
     let mut log_rs_domain_size = m + log_blowup;
     let mut final_poly = None;
@@ -235,6 +236,11 @@ pub fn prove_whir_opening_gpu(
             }
             whir_sumcheck_polys.push(s_evals.try_into().unwrap());
 
+            folding_pow_witnesses.push(
+                transcript
+                    .grind_gpu(whir_params.folding_pow_bits)
+                    .map_err(WhirProverError::FoldingGrind)?,
+            );
             let alpha = transcript.sample_ext();
 
             // PERF[jpw]: memory management could be optimized to re-use buffers
@@ -362,10 +368,10 @@ pub fn prove_whir_opening_gpu(
         let omega = F::two_adic_generator(log_rs_domain_size - k_whir);
         let num_queries = round_params.num_queries;
         let mut query_indices = Vec::with_capacity(num_queries);
-        whir_pow_witnesses.push(
+        query_phase_pow_witnesses.push(
             transcript
                 .grind_gpu(whir_params.query_phase_pow_bits)
-                .map_err(WhirProverError::Grind)?,
+                .map_err(WhirProverError::QueryPhaseGrind)?,
         );
         // Sample query indices first
         for _ in 0..num_queries {
@@ -564,7 +570,8 @@ pub fn prove_whir_opening_gpu(
         whir_sumcheck_polys,
         codeword_commits,
         ood_values,
-        whir_pow_witnesses,
+        folding_pow_witnesses,
+        query_phase_pow_witnesses,
         initial_round_opened_rows,
         initial_round_merkle_proofs,
         codeword_opened_values,
