@@ -115,8 +115,10 @@ pub enum WhirProverError {
     },
     #[error("w_evals_accumulate [whir_round={whir_round}]: {error}")]
     WEvalsAccumulate { error: CudaError, whir_round: usize },
-    #[error("Grind error: {0}")]
-    Grind(GrindError),
+    #[error("Folding grind error: {0}")]
+    FoldingGrind(GrindError),
+    #[error("Query phase grind error: {0}")]
+    QueryPhaseGrind(GrindError),
 }
 
 /// Error type for functions that call CUDA kernels and involve some memcpy operations.
