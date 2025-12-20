@@ -4,7 +4,7 @@ use openvm_cuda_common::{
     error::{CudaError, check},
 };
 
-use crate::{D_EF, EF, F, ProverError};
+use crate::{D_EF, EF, F, KernelError};
 
 extern "C" {
     fn _mle_interpolate_stage(
@@ -230,7 +230,7 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
     base_coeffs: &DeviceBuffer<F>,
     coeff_len: usize,
     x: EF,
-) -> Result<EF, ProverError> {
+) -> Result<EF, KernelError> {
     debug_assert!(base_coeffs.len() >= coeff_len * D_EF);
     let d_out = DeviceBuffer::<EF>::with_capacity(1);
     check(_eval_poly_ext_at_point(
@@ -238,8 +238,9 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
         coeff_len,
         x,
         d_out.as_mut_ptr(),
-    ))?;
-    let out = d_out.to_host()?;
+    ))
+    .map_err(KernelError::Kernel)?;
+    let out = d_out.to_host().map_err(KernelError::MemCopy)?;
     Ok(out[0])
 }
 

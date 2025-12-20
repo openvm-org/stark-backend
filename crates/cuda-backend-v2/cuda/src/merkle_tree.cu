@@ -66,11 +66,14 @@ __global__ void poseidon2_compressing_row_hashes_kernel(
             }
             poseidon2::poseidon2_mix(cells);
         }
+        __syncthreads(); // Ensure all reads complete before next iteration's writes
     }
 
+    if (leaf_idx == 0) {
 #pragma unroll
-    for (int i = 0; i < CELLS_OUT; i++) {
-        out[stride_idx].cells[i] = cells[i];
+        for (int i = 0; i < CELLS_OUT; i++) {
+            out[stride_idx].cells[i] = cells[i];
+        }
     }
 }
 
@@ -132,11 +135,14 @@ __global__ void poseidon2_compressing_row_hashes_ext_kernel(
             }
             poseidon2::poseidon2_mix(cells);
         }
+        __syncthreads(); // Ensure all reads complete before next iteration's writes
     }
 
+    if (leaf_idx == 0) {
 #pragma unroll
-    for (int i = 0; i < CELLS_OUT; i++) {
-        out[stride_idx].cells[i] = cells[i];
+        for (int i = 0; i < CELLS_OUT; i++) {
+            out[stride_idx].cells[i] = cells[i];
+        }
     }
 }
 static_assert(CELLS_RATE % 4 == 0, "CELLS_RATE must be multiple of FpExt degree (4)");

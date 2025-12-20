@@ -245,10 +245,11 @@ pub fn transport_and_unstack_single_data_h2d(
                 width as u32,
                 height as u32,
                 stride as u32,
-            )?;
+            )
+            .map_err(ProverError::CollapseStrided)?;
         }
         // Wait for kernel to finish so we can safely drop strided_trace
-        current_stream_sync()?;
+        current_stream_sync().map_err(ProverError::CurrentStreamSync)?;
         drop(strided_trace);
         buf
     };
