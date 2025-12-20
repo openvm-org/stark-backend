@@ -83,6 +83,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
 
     let k_whir = whir_params.k;
     let num_whir_rounds = whir_params.num_whir_rounds();
+    let num_sumcheck_rounds = whir_params.num_sumcheck_rounds();
 
     let mles: Vec<Vec<F>> = committed_mats
         .par_iter()
@@ -109,15 +110,16 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     // evaluations on `H_m`.
     let mut w_evals = evals_eq_hypercube(u);
 
-    let mut whir_sumcheck_polys: Vec<[EF; 2]> = vec![];
+    let mut whir_sumcheck_polys: Vec<[EF; 2]> = Vec::with_capacity(num_sumcheck_rounds);
     let mut codeword_commits = vec![];
     let mut ood_values = vec![];
     // per commitment, per whir query, per column
     let mut initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>> = vec![vec![]; committed_mats.len()];
     let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof>> = vec![vec![]; committed_mats.len()];
-    let mut codeword_opened_values: Vec<Vec<Vec<EF>>> = vec![];
-    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof>> = vec![];
-    let mut whir_pow_witnesses = vec![];
+    let mut codeword_opened_values: Vec<Vec<Vec<EF>>> = Vec::with_capacity(num_whir_rounds - 1);
+    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof>> = Vec::with_capacity(num_whir_rounds - 1);
+    let mut folding_pow_witnesses = Vec::with_capacity(num_sumcheck_rounds);
+    let mut query_phase_pow_witnesses = Vec::with_capacity(num_whir_rounds);
     let mut rs_tree = None;
     let mut log_rs_domain_size = m + log_blowup;
     let mut final_poly = None;
@@ -152,6 +154,8 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
             }
             whir_sumcheck_polys.push(s_evals.try_into().unwrap());
 
+            folding_pow_witnesses.push(transcript.grind(whir_params.folding_pow_bits));
+            // Folding randomness
             let alpha = transcript.sample_ext();
 
             // Fold the evaluations
@@ -204,7 +208,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
         let omega = F::two_adic_generator(log_rs_domain_size - k_whir);
         let num_queries = round_params.num_queries;
         let mut query_indices = Vec::with_capacity(num_queries);
-        whir_pow_witnesses.push(transcript.grind(whir_params.query_phase_pow_bits));
+        query_phase_pow_witnesses.push(transcript.grind(whir_params.query_phase_pow_bits));
         // Sample query indices first
         for _ in 0..num_queries {
             // This is the index of the leaf in the Merkle tree
@@ -278,7 +282,8 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
         whir_sumcheck_polys,
         codeword_commits,
         ood_values,
-        whir_pow_witnesses,
+        folding_pow_witnesses,
+        query_phase_pow_witnesses,
         initial_round_opened_rows,
         initial_round_merkle_proofs,
         codeword_opened_values,

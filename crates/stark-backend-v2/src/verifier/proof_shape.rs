@@ -187,7 +187,7 @@ pub enum StackingProofShapeError {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WhirProofShapeError {
     #[error(
-        "whir_sumcheck_polys should have log_stacked_height = {expected} polynomials, but it has {actual}"
+        "whir_sumcheck_polys should have num_whir_sumcheck_rounds = {expected} polynomials, but it has {actual}"
     )]
     InvalidSumcheckPolys { expected: usize, actual: usize },
     #[error("final_poly should have len = {expected}, but it has {actual}")]
@@ -201,9 +201,13 @@ pub enum WhirProofShapeError {
     )]
     InvalidOodValues { expected: usize, actual: usize },
     #[error(
-        "There should be num_whir_rounds = {expected} proof-of-work witnesses, but there are {actual}"
+        "There should be num_whir_sumcheck_rounds = {expected} folding PoW witnesses, but there are {actual}"
     )]
-    InvalidPowWitnesses { expected: usize, actual: usize },
+    InvalidFoldingPowWitnesses { expected: usize, actual: usize },
+    #[error(
+        "There should be num_whir_rounds = {expected} query phase PoW witnesses, but there are {actual}"
+    )]
+    InvalidQueryPhasePowWitnesses { expected: usize, actual: usize },
     #[error(
         "There should be num_commits = {expected} sets of initial round opened rows, but there are {actual}"
     )]
@@ -586,12 +590,13 @@ pub fn verify_proof_shape(
 
     let log_stacked_height = mvk.params.log_stacked_height();
     let num_whir_rounds = mvk.params.num_whir_rounds();
+    let num_whir_sumcheck_rounds = mvk.params.num_whir_sumcheck_rounds();
     let k_whir = mvk.params.k_whir();
     debug_assert_ne!(num_whir_rounds, 0);
 
-    if whir_proof.whir_sumcheck_polys.len() != mvk.params.num_whir_sumcheck_rounds() {
+    if whir_proof.whir_sumcheck_polys.len() != num_whir_sumcheck_rounds {
         return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidSumcheckPolys {
-            expected: log_stacked_height,
+            expected: num_whir_sumcheck_rounds,
             actual: whir_proof.whir_sumcheck_polys.len(),
         });
     } else if whir_proof.codeword_commits.len() != num_whir_rounds - 1 {
@@ -604,10 +609,15 @@ pub fn verify_proof_shape(
             expected: num_whir_rounds - 1,
             actual: whir_proof.ood_values.len(),
         });
-    } else if whir_proof.whir_pow_witnesses.len() != num_whir_rounds {
-        return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidPowWitnesses {
+    } else if whir_proof.folding_pow_witnesses.len() != num_whir_sumcheck_rounds {
+        return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidFoldingPowWitnesses {
+            expected: num_whir_sumcheck_rounds,
+            actual: whir_proof.folding_pow_witnesses.len(),
+        });
+    } else if whir_proof.query_phase_pow_witnesses.len() != num_whir_rounds {
+        return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidQueryPhasePowWitnesses {
             expected: num_whir_rounds,
-            actual: whir_proof.whir_pow_witnesses.len(),
+            actual: whir_proof.query_phase_pow_witnesses.len(),
         });
     } else if whir_proof.initial_round_opened_rows.len() != layouts.len() {
         return ProofShapeError::invalid_whir(WhirProofShapeError::InvalidInitialRoundOpenedRows {
