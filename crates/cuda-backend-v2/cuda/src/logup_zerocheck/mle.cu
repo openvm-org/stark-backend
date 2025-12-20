@@ -326,6 +326,7 @@ __global__ void logup_mle_kernel(
     }
 
     FpExt numer_reduced = sumcheck::block_reduce_sum(numer_sum, shared);
+    __syncthreads(); // Ensure first reduction completes before reusing shared memory
     FpExt denom_reduced = sumcheck::block_reduce_sum(denom_sum, shared);
     if (threadIdx.x == 0) {
         tmp_sums_buffer[blockIdx.x * num_x + x_int] = {numer_reduced, denom_reduced};
