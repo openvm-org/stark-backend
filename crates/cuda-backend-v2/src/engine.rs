@@ -1,5 +1,10 @@
 use openvm_cuda_backend::prelude::SC;
-use stark_backend_v2::{StarkEngineV2, StarkWhirEngine, SystemParams, prover::CoordinatorV2};
+use openvm_stark_backend::AirRef;
+use stark_backend_v2::{
+    StarkEngineV2, StarkWhirEngine, SystemParams,
+    debug::debug_impl,
+    prover::{CoordinatorV2, ProvingContextV2},
+};
 
 use crate::{GpuBackendV2, GpuDeviceV2, sponge::DuplexSpongeGpu};
 
@@ -29,6 +34,9 @@ impl StarkEngineV2 for BabyBearPoseidon2GpuEngineV2 {
         transcript: DuplexSpongeGpu,
     ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
         CoordinatorV2::new(GpuBackendV2, self.device.clone(), transcript)
+    }
+    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>) {
+        debug_impl(self.config().clone(), self.device(), airs, ctx);
     }
 }
 
