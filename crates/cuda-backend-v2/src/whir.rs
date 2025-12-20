@@ -22,7 +22,7 @@ use stark_backend_v2::{
 use tracing::instrument;
 
 use crate::{
-    D_EF, Digest, EF, F, ProverError,
+    D_EF, Digest, EF, F, WhirProverError,
     cuda::{
         poly::{
             batch_eq_hypercube_stage, eq_hypercube_stage_ext, eval_poly_ext_at_point_from_base,
@@ -66,7 +66,7 @@ pub fn prove_whir_opening_gpu(
     transcript: &mut DuplexSpongeGpu,
     mut stacked_per_commit: Vec<StackedPcsData2>,
     u: &[EF],
-) -> Result<WhirProof, ProverError> {
+) -> Result<WhirProof, WhirProverError> {
     let mem = MemTracker::start("prover.prove_whir_opening");
     let l_skip = params.l_skip;
     let log_blowup = params.log_blowup;
@@ -118,7 +118,8 @@ pub fn prove_whir_opening_gpu(
         // - `f_evals` has capacity `height` (stacked height).
         // - `d_packets` contain valid pointers and stacked row indices by construction.
         unsafe {
-            whir_algebraic_batch_traces(&mut f_ple_evals, &d_packets, &d_mu_powers, 1 << l_skip)?;
+            whir_algebraic_batch_traces(&mut f_ple_evals, &d_packets, &d_mu_powers, 1 << l_skip)
+                .map_err(WhirProverError::AlgebraicBatch)?;
         }
         for stacked in &mut stacked_per_commit {
             // drop traces to free device memory if RS codewords matrix exists
@@ -145,7 +146,8 @@ pub fn prove_whir_opening_gpu(
     let mut f_evals = DeviceBuffer::<EF>::with_capacity(height);
     // SAFETY: `f_ple_evals` is constructed with length `height * D_EF`.
     unsafe {
-        transpose_fp_to_fpext_vec(&mut f_evals, &f_ple_evals)?;
+        transpose_fp_to_fpext_vec(&mut f_evals, &f_ple_evals)
+            .map_err(WhirProverError::Transpose)?;
     }
     drop(f_ple_evals);
     for i in 0..l_skip {
@@ -153,7 +155,8 @@ pub fn prove_whir_opening_gpu(
         // SAFETY: `f_evals` has length `2^m` with `m >= l_skip`.
         unsafe {
             // Multilinear Coeff -> Eval
-            mle_interpolate_stage_ext(&mut f_evals, step, false)?;
+            mle_interpolate_stage_ext(&mut f_evals, step, false)
+                .map_err(|error| WhirProverError::MleInterpolate { error, step })?;
         }
     }
 
@@ -165,7 +168,7 @@ pub fn prove_whir_opening_gpu(
     // evaluations on `H_m`.
     let mut w_evals = DeviceBuffer::<EF>::with_capacity(1 << m);
     unsafe {
-        evals_eq_hypercube(&mut w_evals, u)?;
+        evals_eq_hypercube(&mut w_evals, u).map_err(WhirProverError::EvalEq)?;
     }
 
     let mut whir_sumcheck_polys: Vec<[EF; 2]> = vec![];
@@ -219,7 +222,12 @@ pub fn prove_whir_opening_gpu(
                     &mut d_s_evals,
                     &mut new_f_evals,
                     f_height as u32,
-                )?;
+                )
+                .map_err(|error| WhirProverError::SumcheckMleRound {
+                    error,
+                    whir_round,
+                    round,
+                })?;
             }
             let s_evals = d_s_evals.to_host()?;
             for &eval in &s_evals {
@@ -249,7 +257,12 @@ pub fn prove_whir_opening_gpu(
                     output_height as u32,
                     output_height as u32,
                     alpha,
-                )?;
+                )
+                .map_err(|error| WhirProverError::FoldMle {
+                    error,
+                    whir_round,
+                    round,
+                })?;
             }
             f_evals = new_f_evals;
             w_evals = new_w_evals;
@@ -268,14 +281,16 @@ pub fn prove_whir_opening_gpu(
                 &f_evals,
                 f_height as u64,
                 f_height as u32,
-            )?;
+            )
+            .map_err(|error| WhirProverError::SplitExtPoly { error, whir_round })?;
         }
         // We convert f from column major in EF to column-major in F.
         // The MLE interpolation is the same since it's linear.
         // PERF[jpw]: it may be more performant to interpolate in EF-form for better memory
         // coalescing, but our batch expand kernel is in the base field so the implementation is
         // currently simpler to go directly to F first.
-        mle_evals_to_coeffs_inplace(&mut g_coeffs, m - k_whir)?;
+        mle_evals_to_coeffs_inplace(&mut g_coeffs, m - k_whir)
+            .map_err(|error| WhirProverError::MleEvalToCoeff { error, whir_round })?;
         let (g_tree, z_0) = if !is_last_round {
             let codeword_height = 1 << (log_rs_domain_size - 1);
             // `g: \mathcal{L}^{(2)} \to \mathbb F`
@@ -292,7 +307,8 @@ pub fn prove_whir_opening_gpu(
                     D_EF as u32,
                     codeword_height as u32,
                     f_height as u32,
-                )?;
+                )
+                .map_err(|error| WhirProverError::BatchExpandPad { error, whir_round })?;
 
                 batch_ntt(
                     &g_rs,
@@ -308,7 +324,8 @@ pub fn prove_whir_opening_gpu(
                 DeviceMatrix::new(Arc::new(g_rs), codeword_height, D_EF),
                 1 << k_whir,
                 true,
-            )?;
+            )
+            .map_err(WhirProverError::MerkleTree)?;
             let g_commit = g_tree.root();
             transcript.observe_commit(g_commit);
             codeword_commits.push(g_commit);
@@ -317,8 +334,10 @@ pub fn prove_whir_opening_gpu(
             // SAFETY:
             // - `g_coeffs` is coefficient form of `\hat{g}`, which is degree `2^{m-k_whir}`.
             // - `g_coeffs` is F-column major matrix.
-            let g_opened_value =
-                unsafe { eval_poly_ext_at_point_from_base(&g_coeffs, 1 << (m - k_whir), z_0)? };
+            let g_opened_value = unsafe {
+                eval_poly_ext_at_point_from_base(&g_coeffs, 1 << (m - k_whir), z_0)
+                    .map_err(|error| WhirProverError::EvalPolyAtPoint { error, whir_round })?
+            };
             transcript.observe_ext(g_opened_value);
             ood_values.push(g_opened_value);
 
@@ -346,7 +365,7 @@ pub fn prove_whir_opening_gpu(
         whir_pow_witnesses.push(
             transcript
                 .grind_gpu(whir_params.query_phase_pow_bits)
-                .map_err(ProverError::Grind)?,
+                .map_err(WhirProverError::Grind)?,
         );
         // Sample query indices first
         for _ in 0..num_queries {
@@ -373,7 +392,8 @@ pub fn prove_whir_opening_gpu(
                     let traces = d.traces.iter().collect_vec();
                     debug_assert!(!traces.is_empty());
                     let backing_matrix =
-                        rs_code_matrix(log_blowup, layout, &traces, &d.inner.matrix)?;
+                        rs_code_matrix(log_blowup, layout, &traces, &d.inner.matrix)
+                            .map_err(WhirProverError::RsCodeMatrix)?;
                     d.traces.clear();
                     *backing_mat_owned = Some(backing_matrix);
                     backing_matrices.push(backing_mat_owned.as_ref().unwrap());
@@ -382,7 +402,8 @@ pub fn prove_whir_opening_gpu(
             // Get merkle proofs for in-domain samples necessary to evaluate Fold(f, \vec
             // \alpha)(z_i)
             initial_round_merkle_proofs =
-                MerkleTreeGpu::batch_query_merkle_proofs(&trees, &query_indices)?;
+                MerkleTreeGpu::batch_query_merkle_proofs(&trees, &query_indices)
+                    .map_err(WhirProverError::MerkleTree)?;
 
             let query_stride = trees[0].query_stride();
             debug_assert!(
@@ -402,7 +423,8 @@ pub fn prove_whir_opening_gpu(
                 &query_indices,
                 query_stride,
                 num_rows_per_query,
-            )?
+            )
+            .map_err(WhirProverError::MerkleTree)?
             .into_iter()
             .map(|rows_per_commit| {
                 rows_per_commit
@@ -424,7 +446,8 @@ pub fn prove_whir_opening_gpu(
         } else {
             let tree: &MerkleTreeGpu<F, Digest> = rs_tree.as_ref().unwrap();
             codeword_merkle_proofs[whir_round - 1] =
-                MerkleTreeGpu::batch_query_merkle_proofs(&[tree], &query_indices)?
+                MerkleTreeGpu::batch_query_merkle_proofs(&[tree], &query_indices)
+                    .map_err(WhirProverError::MerkleTree)?
                     .pop()
                     .expect("exactly 1 tree");
             codeword_opened_values[whir_round - 1] = MerkleTreeGpu::batch_open_rows(
@@ -432,7 +455,8 @@ pub fn prove_whir_opening_gpu(
                 &query_indices,
                 tree.query_stride(),
                 tree.rows_per_query,
-            )?
+            )
+            .map_err(WhirProverError::MerkleTree)?
             .pop()
             .unwrap()
             .into_iter() // We could transmute `rows` here, but we'll keep it safe for now
@@ -494,8 +518,20 @@ pub fn prove_whir_opening_gpu(
                     // - d_zs has length num_whir_queries
                     // - step < height
                     unsafe {
-                        eq_hypercube_stage_ext(eq_z0.as_mut_ptr(), z_0_pow, step)?;
-                        batch_eq_hypercube_stage(&mut eq_zs, &d_zs, step, height as u32)?;
+                        eq_hypercube_stage_ext(eq_z0.as_mut_ptr(), z_0_pow, step).map_err(
+                            |error| WhirProverError::EqHypercubeStageExt {
+                                error,
+                                whir_round,
+                                step,
+                            },
+                        )?;
+                        batch_eq_hypercube_stage(&mut eq_zs, &d_zs, step, height as u32).map_err(
+                            |error| WhirProverError::BatchEqHypercubeStage {
+                                error,
+                                whir_round,
+                                step,
+                            },
+                        )?;
                     }
                     z_0_pow = z_0_pow.square();
                     for z in &mut z_pows {
@@ -514,7 +550,8 @@ pub fn prove_whir_opening_gpu(
                     &eq_zs,
                     gamma,
                     num_queries.try_into().unwrap(),
-                )?;
+                )
+                .map_err(|error| WhirProverError::WEvalsAccumulate { error, whir_round })?;
             }
         }
 

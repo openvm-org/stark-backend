@@ -1,7 +1,7 @@
 use openvm_cuda_common::error::{CudaError, MemCopyError};
 use thiserror::Error;
 
-use crate::{EF, sponge::GrindError};
+use crate::{EF, KernelError, sponge::GrindError};
 
 #[derive(Debug, Error)]
 pub enum Round0PrepError {
@@ -37,18 +37,18 @@ impl From<Round0PrepError> for Round0EvalError {
 pub enum FractionalSumcheckError {
     #[error("nonzero root sum: p={p}, q={q}")]
     NonzeroRootSum { p: EF, q: EF },
-    #[error("bit reversal cuda error: {0}")]
+    #[error("bit reversal: {0}")]
     BitReversal(CudaError),
-    #[error("segment tree cuda error: {0}")]
+    #[error("segment tree: {0}")]
     SegmentTree(CudaError),
-    #[error("frac_compute_round cuda error: {0}")]
+    #[error("frac_compute_round: {0}")]
     ComputeRound(CudaError),
-    #[error("frac_fold_columns cuda error: {0}")]
+    #[error("frac_fold_columns: {0}")]
     FoldColumns(CudaError),
-    #[error("frac_extract_claims cuda error: {0}")]
+    #[error("frac_extract_claims: {0}")]
     ExtractClaims(CudaError),
-    #[error("evals_eq_hypercube cuda error: {0}")]
-    EvalEqHypercube(CudaError),
+    #[error("evals_eq_hypercube: {0}")]
+    EvalEqHypercube(KernelError),
     #[error("grind error: {0}")]
     Grind(#[from] GrindError),
     #[error("memcpy error: {0}")]

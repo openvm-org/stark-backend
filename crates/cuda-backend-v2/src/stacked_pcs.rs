@@ -13,7 +13,7 @@ use stark_backend_v2::prover::stacked_pcs::StackedLayout;
 use tracing::instrument;
 
 use crate::{
-    Digest, F, GpuProverConfig, ProverError,
+    Digest, F, GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError,
     cuda::{matrix::batch_expand_pad_wide, poly::mle_interpolate_stage_2d},
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
@@ -111,7 +111,7 @@ pub(crate) fn get_stacked_layout(
 pub(crate) fn stack_traces(
     layout: &StackedLayout,
     traces: &[&DeviceMatrix<F>],
-) -> Result<PleMatrix<F>, ProverError> {
+) -> Result<PleMatrix<F>, StackTracesError> {
     let mem = MemTracker::start("prover.stack_traces");
     let l_skip = layout.l_skip();
     let height = layout.height();
@@ -130,12 +130,12 @@ pub(crate) fn stack_traces_into_expanded(
     traces: &[&DeviceMatrix<F>],
     buffer: &mut DeviceBuffer<F>,
     padded_height: usize,
-) -> Result<(), ProverError> {
+) -> Result<(), StackTracesError> {
     let l_skip = layout.l_skip();
     debug_assert_eq!(padded_height % layout.height(), 0);
     debug_assert_eq!(buffer.len() % padded_height, 0);
     debug_assert_eq!(buffer.len() / padded_height, layout.width());
-    buffer.fill_zero()?;
+    buffer.fill_zero().map_err(StackTracesError::FillZero)?;
     for (mat_idx, j, s) in &layout.sorted_cols {
         let start = s.col_idx * padded_height + s.row_idx;
         let trace = traces[*mat_idx];
@@ -166,7 +166,8 @@ pub(crate) fn stack_traces_into_expanded(
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * trace.height());
                 let dst = buffer.as_mut_ptr().add(start);
-                batch_expand_pad_wide(dst, src, trace.height() as u32, stride as u32, 1)?;
+                batch_expand_pad_wide(dst, src, trace.height() as u32, stride as u32, 1)
+                    .map_err(StackTracesError::BatchExpandPadWide)?;
             }
         }
     }
@@ -185,7 +186,7 @@ pub fn rs_code_matrix(
     layout: &StackedLayout,
     traces: &[&DeviceMatrix<F>],
     stacked_matrix: &Option<PleMatrix<F>>,
-) -> Result<DeviceMatrix<F>, ProverError> {
+) -> Result<DeviceMatrix<F>, RsCodeMatrixError> {
     let mem = MemTracker::start_and_reset_peak("prover.rs_code_matrix");
     let l_skip = layout.l_skip();
     let height = layout.height();
@@ -205,10 +206,12 @@ pub fn rs_code_matrix(
                 width as u32,
                 codeword_height as u32,
                 height as u32,
-            )?;
+            )
+            .map_err(RsCodeMatrixError::BatchExpandPad)?;
         }
     } else {
-        stack_traces_into_expanded(layout, traces, &mut codewords, codeword_height)?;
+        stack_traces_into_expanded(layout, traces, &mut codewords, codeword_height)
+            .map_err(RsCodeMatrixError::StackTraces)?;
         // Currently codewords has the stacked matrix, batch expanded, in evaluation form on
         // hyperprism. We convert it to mixed form, i.e., unroll `PleMatrix::from_evals`.
         // PERF[jpw]: We do some wasted work on the padded zero part. A more specialized kernel
@@ -234,7 +237,8 @@ pub fn rs_code_matrix(
                 codeword_height as u32,
                 step,
                 true, // MLE evaluation-to-coefficient
-            )?;
+            )
+            .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d { error, step })?;
         }
     }
     // Compute RS codeword on a prismalinear polynomial in coefficient form:
