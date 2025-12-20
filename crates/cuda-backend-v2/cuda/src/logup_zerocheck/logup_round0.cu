@@ -132,6 +132,7 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
     uint32_t z_int = tidx_z + bidx_z * zs_per_block;
     bool const active_thread = (z_int < large_domain);
 
+    FracExt sum = {FpExt(Fp::zero()), FpExt(Fp::zero())};
     if (active_thread) {
         // The hypercube coordinates: we want to sum over these.
         uint32_t x_int_base = tidx_x + bidx_x * xs_per_block;
@@ -166,7 +167,6 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
         Fp is_first_mult = avg_gp(omega, segment_size);
         Fp is_last_mult = avg_gp(omega * eta, segment_size);
 
-        FracExt sum = {FpExt(Fp::zero()), FpExt(Fp::zero())};
         // See zerocheck_bary_evaluate_constraints_kernel for comments
         for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
             Fp is_first = is_first_mult * selectors_cube[x_int];
@@ -211,10 +211,8 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
             sum.p += eq_sharp * numer;
             sum.q += eq_sharp * denom;
         }
-
-        // Reduce phase: reduce all threadIdx.y in the same block, keeping z_int independent
-        shared[threadIdx.x] = sum;
     }
+    shared[threadIdx.x] = sum;
     __syncthreads();
 
     if (active_thread && tidx_x == 0) {

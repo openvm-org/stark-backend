@@ -103,11 +103,9 @@ __global__ void interpolate_columns_kernel(
     uint32_t num_y,
     uint32_t num_columns
 ) {
-    int y = threadIdx.x + blockIdx.x * blockDim.x;
-    if (y >= num_y)
-        return;
-
-    int col_idx = threadIdx.y + blockIdx.y * blockDim.y;
+    uint32_t tidx = threadIdx.x + blockIdx.x * blockDim.x;
+    uint32_t y = tidx % num_y;
+    uint32_t col_idx = tidx / num_y;
     if (col_idx >= num_columns)
         return;
 
@@ -228,7 +226,7 @@ extern "C" int _interpolate_columns(
     size_t num_y,
     size_t num_columns
 ) {
-    auto [grid, block] = kernel_launch_2d_params(num_y, num_columns);
+    auto [grid, block] = kernel_launch_params(num_y * num_columns, 512);
 
     interpolate_columns_kernel<<<grid, block>>>(interpolated, columns, s_deg, num_y, num_columns);
     return CHECK_KERNEL();

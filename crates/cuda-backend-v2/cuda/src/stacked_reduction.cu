@@ -99,9 +99,9 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
     bool const active_thread = (z_int < domain_size);
     uint32_t window_base = blockIdx.z;
 
+    FpExt local_sum = FpExt(0);
     if (active_thread) {
         // Map phase: compute local sum by striding over window and hypercube
-        FpExt local_sum = FpExt(0);
         uint32_t x_int_base = blockIdx.y * blockDim.y + threadIdx.y;
         // We divide the hypercube (`num_x` points) across the grid y-dimension
         for (uint32_t x_int = x_int_base; x_int < num_x; x_int += blockDim.y * gridDim.y) {
@@ -135,10 +135,8 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
                 local_sum += eval;
             }
         }
-
-        // Reduce phase: reduce all threadIdx.y in the same block, keeping z_int independent
-        shared[threadIdx.y * blockDim.x + threadIdx.x] = local_sum;
     }
+    shared[threadIdx.y * blockDim.x + threadIdx.x] = local_sum;
     __syncthreads();
 
     if (active_thread && threadIdx.y == 0) {
