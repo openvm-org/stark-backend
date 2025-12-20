@@ -359,10 +359,8 @@ extern "C" int _eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, Fp
         return launch_eval_poly_ext_at_point<128>(coeffs, len, x, out);
     } else if (len <= 65536) {
         return launch_eval_poly_ext_at_point<256>(coeffs, len, x, out);
-    } else if (len <= 524288) {
-        return launch_eval_poly_ext_at_point<512>(coeffs, len, x, out);
     } else {
-        return launch_eval_poly_ext_at_point<1024>(coeffs, len, x, out);
+        return launch_eval_poly_ext_at_point<512>(coeffs, len, x, out);
     }
 }
 

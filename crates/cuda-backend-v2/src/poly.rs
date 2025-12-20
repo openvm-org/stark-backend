@@ -10,7 +10,7 @@ use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::FieldAlgebra;
 
 use crate::{
-    EF, F, ProverError,
+    EF, F, KernelError,
     cuda::poly::{
         eq_hypercube_nonoverlapping_stage_ext, eq_hypercube_stage_ext, mle_interpolate_stage,
         mle_interpolate_stage_ext,
@@ -54,7 +54,7 @@ impl PleMatrix<F> {
         }
     }
 
-    pub fn to_evals(&self, l_skip: usize) -> Result<DeviceMatrix<F>, ProverError> {
+    pub fn to_evals(&self, l_skip: usize) -> Result<DeviceMatrix<F>, KernelError> {
         let width = self.width();
         let height = self.height();
         // D2D copy so we can do in-place NTT
@@ -74,7 +74,7 @@ impl PleMatrix<F> {
 pub fn mle_evals_to_coeffs_inplace(
     evals: &mut DeviceBuffer<F>,
     n: usize,
-) -> Result<(), ProverError> {
+) -> Result<(), KernelError> {
     debug_assert!(evals.len().is_power_of_two());
     debug_assert!(evals.len() >= 1 << n);
     for log_step in 0..n {
@@ -93,7 +93,7 @@ pub fn mle_evals_to_coeffs_inplace(
 pub fn mle_evals_to_coeffs_inplace_ext(
     evals: &mut DeviceBuffer<EF>,
     n: usize,
-) -> Result<(), ProverError> {
+) -> Result<(), KernelError> {
     debug_assert!(evals.len().is_power_of_two());
     debug_assert!(evals.len() >= 1 << n);
     for log_step in 0..n {
@@ -119,15 +119,15 @@ pub fn mle_evals_to_coeffs_inplace_ext(
 /// # Safety
 /// - `n` is set to the length of `xs`.
 /// - `out` must have length `>= 2^n`.
-pub unsafe fn evals_eq_hypercube(out: &mut DeviceBuffer<EF>, xs: &[EF]) -> Result<(), ProverError> {
+pub unsafe fn evals_eq_hypercube(out: &mut DeviceBuffer<EF>, xs: &[EF]) -> Result<(), KernelError> {
     let n = xs.len();
     assert!(out.len() >= 1 << n);
     // Use memcpy instead of memset since EF will be in Montgomery form.
-    [EF::ONE].copy_to(out)?;
+    [EF::ONE].copy_to(out).map_err(KernelError::MemCopy)?;
 
     for (i, &x_i) in xs.iter().enumerate() {
         let step = 1 << i;
-        eq_hypercube_stage_ext(out.as_mut_ptr(), x_i, step)?;
+        eq_hypercube_stage_ext(out.as_mut_ptr(), x_i, step).map_err(KernelError::Kernel)?;
     }
     Ok(())
 }
@@ -163,12 +163,14 @@ impl<F> EqEvalSegments<F> {
 // Currently only implement kernels for EF.
 impl EqEvalSegments<EF> {
     /// Creates a new `EqEvalSegments` instance with `max_n = x.len()`.
-    pub fn new(x: &[EF]) -> Result<Self, ProverError> {
+    pub fn new(x: &[EF]) -> Result<Self, KernelError> {
         let max_n = x.len();
         let mut buffer = DeviceBuffer::with_capacity(2 << max_n);
         // Index 0 should never to be used, but we initialize it to zero.
         // Index 1 is set to eq_0 = 1 for initial state
-        [EF::ZERO, EF::ONE].copy_to(&mut buffer)?;
+        [EF::ZERO, EF::ONE]
+            .copy_to(&mut buffer)
+            .map_err(KernelError::MemCopy)?;
         // At step i, we populate `eq_{i+1}` starting at offset `2^{i+1}`
         for (i, &x_i) in x.iter().enumerate() {
             let step = 1 << i;
@@ -180,7 +182,8 @@ impl EqEvalSegments<EF> {
                 let dst = buffer.as_mut_ptr().add(2 * step);
                 // The `eq_i` segment starts at offset `2^i`
                 let src = buffer.as_ptr().add(step);
-                eq_hypercube_nonoverlapping_stage_ext(dst, src, x_i, step as u32)?;
+                eq_hypercube_nonoverlapping_stage_ext(dst, src, x_i, step as u32)
+                    .map_err(KernelError::Kernel)?;
             }
         }
         Ok(Self { buffer, max_n })

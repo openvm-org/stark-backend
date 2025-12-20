@@ -15,7 +15,7 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    DIGEST_SIZE, Digest, EF, F, ProverError,
+    DIGEST_SIZE, Digest, EF, F, MerkleTreeError,
     cuda::merkle_tree::{
         poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
         poseidon2_compressing_row_hashes_ext,
@@ -60,7 +60,7 @@ impl MerkleTreeGpu<F, Digest> {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-    ) -> Result<Self, ProverError> {
+    ) -> Result<Self, MerkleTreeError> {
         let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
         assert!(height.is_power_of_two());
@@ -79,7 +79,8 @@ impl MerkleTreeGpu<F, Digest> {
                 matrix.width(),
                 query_stride,
                 k,
-            )?;
+            )
+            .map_err(MerkleTreeError::CompressingRowHashes)?;
         }
         // If not caching, drop the backing matrix at this point to save memory.
         let backing_matrix = cache_backing_matrix.then_some(matrix);
@@ -89,11 +90,17 @@ impl MerkleTreeGpu<F, Digest> {
             let prev_layer = digest_layers.last().unwrap();
             let mut layer = DeviceBuffer::<Digest>::with_capacity(prev_layer.len() / 2);
             let layer_len = layer.len();
+            let layer_idx = digest_layers.len();
             // SAFETY:
             // - `layer` is properly allocated with half the size of `prev_layer` and does not
             //   overlap with it.
             unsafe {
-                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len)?;
+                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len).map_err(
+                    |error| MerkleTreeError::AdjacentCompressLayer {
+                        error,
+                        layer: layer_idx,
+                    },
+                )?;
             }
             digest_layers.push(layer);
         }
@@ -125,7 +132,7 @@ impl MerkleTreeGpu<F, Digest> {
                 Vec<Digest>, // merkle proof
             >,
         >,
-        ProverError,
+        MerkleTreeError,
     > {
         // the way the kernel works is that it just treats each layer as a separate array and does
         // parallel accesses, so we just lay out all the layer pointers flattened into a vec
@@ -178,7 +185,8 @@ impl MerkleTreeGpu<F, Digest> {
                 &d_indices,
                 num_queries as u64,
                 d_layers_ptr.len() as u64,
-            )?;
+            )
+            .map_err(MerkleTreeError::QueryDigestLayers)?;
         }
         let out = d_out.to_host()?;
         // Chunk up the array into expected Vec groupings
@@ -218,7 +226,7 @@ impl MerkleTreeGpu<F, Digest> {
                 Vec<F>, // opened rows, concatenated for rows_per_query strided rows
             >,
         >,
-        ProverError,
+        MerkleTreeError,
     > {
         let row_idxs = query_indices
             .iter()
@@ -234,7 +242,8 @@ impl MerkleTreeGpu<F, Digest> {
         // NOTE: par_iter requires cross-stream waits, not worth the effort
         backing_matrices
             .iter()
-            .map(|matrix| {
+            .enumerate()
+            .map(|(matrix_idx, matrix)| {
                 let d_out = DeviceBuffer::<F>::with_capacity(row_idxs.len() * matrix.width());
                 // SAFETY:
                 // - `output_rows` is allocated with row_idxs.len() * width
@@ -247,7 +256,8 @@ impl MerkleTreeGpu<F, Digest> {
                         matrix.width() as u64,
                         matrix.height() as u64,
                         d_row_idxs.len() as u32,
-                    )?;
+                    )
+                    .map_err(|error| MerkleTreeError::MatrixGetRows { error, matrix_idx })?;
                 }
                 let width = matrix.width();
                 let out = d_out.to_host()?;
@@ -257,7 +267,7 @@ impl MerkleTreeGpu<F, Digest> {
                     .collect_vec();
                 Ok(opened_rows_per_query)
             })
-            .collect::<Result<Vec<_>, ProverError>>()
+            .collect::<Result<Vec<_>, MerkleTreeError>>()
     }
 }
 
@@ -270,7 +280,7 @@ impl MerkleTreeGpu<EF, Digest> {
         matrix: DeviceMatrix<EF>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-    ) -> Result<Self, ProverError> {
+    ) -> Result<Self, MerkleTreeError> {
         let height = matrix.height();
         assert!(height.is_power_of_two());
         let k = log2_strict_usize(rows_per_query);
@@ -288,7 +298,8 @@ impl MerkleTreeGpu<EF, Digest> {
                 matrix.width(),
                 query_stride,
                 k,
-            )?;
+            )
+            .map_err(MerkleTreeError::CompressingRowHashesExt)?;
         }
         // If not caching, drop the backing matrix at this point to save memory.
         let backing_matrix = cache_backing_matrix.then_some(matrix);
@@ -298,11 +309,17 @@ impl MerkleTreeGpu<EF, Digest> {
             let prev_layer = digest_layers.last().unwrap();
             let mut layer = DeviceBuffer::<Digest>::with_capacity(prev_layer.len() / 2);
             let layer_len = layer.len();
+            let layer_idx = digest_layers.len();
             // SAFETY:
             // - `layer` is properly allocated with half the size of `prev_layer` and does not
             //   overlap with it.
             unsafe {
-                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len)?;
+                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len).map_err(
+                    |error| MerkleTreeError::AdjacentCompressLayer {
+                        error,
+                        layer: layer_idx,
+                    },
+                )?;
             }
             digest_layers.push(layer);
         }

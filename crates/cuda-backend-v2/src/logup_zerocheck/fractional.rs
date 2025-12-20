@@ -118,13 +118,8 @@ pub fn fractional_sumcheck_gpu(
         let mut eq_buffer = DeviceBuffer::<EF>::with_capacity(1 << xi_prev.len());
         xi_prev.reverse();
         unsafe {
-            evals_eq_hypercube(&mut eq_buffer, &xi_prev).map_err(|e| match e {
-                crate::ProverError::Cuda(cuda_err) => {
-                    FractionalSumcheckError::EvalEqHypercube(cuda_err)
-                }
-                crate::ProverError::MemCopy(mem_err) => FractionalSumcheckError::Copy(mem_err),
-                crate::ProverError::Grind(grind_err) => FractionalSumcheckError::Grind(grind_err),
-            })?;
+            evals_eq_hypercube(&mut eq_buffer, &xi_prev)
+                .map_err(FractionalSumcheckError::EvalEqHypercube)?;
         }
 
         let mut round_polys_eval = Vec::with_capacity(round);
