@@ -112,8 +112,11 @@ pub struct WhirProof {
     pub codeword_commits: Vec<Digest>,
     /// The out-of-domain values "y0" per round, except the final round.
     pub ood_values: Vec<EF>,
-    /// For each WHIR round, the PoW witness.
-    pub whir_pow_witnesses: Vec<F>,
+    /// For each sumcheck round, the folding PoW witness. Length is `num_whir_sumcheck_rounds =
+    /// num_whir_rounds * k_whir`.
+    pub folding_pow_witnesses: Vec<F>,
+    /// For each WHIR round, the query phase PoW witness. Length is `num_whir_rounds`.
+    pub query_phase_pow_witnesses: Vec<F>,
     /// For the initial round: per committed matrix, per in-domain query.
     // num_commits x num_queries x (1 << k) x stacking_width[i]
     pub initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>>,
@@ -210,12 +213,21 @@ impl Encode for StackingProof {
 impl Encode for WhirProof {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         self.whir_sumcheck_polys.encode(writer)?;
+        let num_whir_sumcheck_rounds = self.whir_sumcheck_polys.len();
 
         // Each length can be derived from num_whir_rounds
         self.codeword_commits.encode(writer)?;
         encode_iter(self.ood_values.iter(), writer)?;
-        encode_iter(self.whir_pow_witnesses.iter(), writer)?;
         let num_whir_rounds = self.codeword_commits.len() + 1;
+        if num_whir_sumcheck_rounds % num_whir_rounds != 0 {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidData,
+                "num_whir_sumcheck_rounds must be a multiple of num_whir_rounds",
+            ));
+        }
+        assert_eq!(num_whir_rounds, self.query_phase_pow_witnesses.len());
+        encode_iter(self.folding_pow_witnesses.iter(), writer)?;
+        encode_iter(self.query_phase_pow_witnesses.iter(), writer)?;
 
         let num_commits = self.initial_round_opened_rows.len();
         assert!(num_commits > 0);
@@ -224,8 +236,6 @@ impl Encode for WhirProof {
         initial_num_whir_queries.encode(writer)?;
 
         if initial_num_whir_queries > 0 {
-            let k_whir_exp = self.initial_round_opened_rows[0][0].len();
-            k_whir_exp.encode(writer)?;
             let merkle_depth = self.initial_round_merkle_proofs[0][0].len();
             merkle_depth.encode(writer)?;
             encode_iter(
@@ -236,9 +246,6 @@ impl Encode for WhirProof {
                 self.initial_round_merkle_proofs.iter().flatten().flatten(),
                 writer,
             )?;
-        } else {
-            let k_whir_exp = 0usize;
-            k_whir_exp.encode(writer)?;
         }
 
         // Length of outer vector is num_whir_rounds
@@ -377,15 +384,24 @@ impl Decode for StackingProof {
 impl Decode for WhirProof {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let whir_sumcheck_polys = Vec::<[EF; 2]>::decode(reader)?;
+        let num_whir_sumcheck_rounds = whir_sumcheck_polys.len();
         let codeword_commits = Vec::<Digest>::decode(reader)?;
         let num_whir_rounds = codeword_commits.len() + 1;
+        if num_whir_sumcheck_rounds % num_whir_rounds != 0 {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidData,
+                "num_whir_sumcheck_rounds must be a multiple of num_whir_rounds",
+            ));
+        }
+        let k_whir = num_whir_sumcheck_rounds / num_whir_rounds;
         let ood_values = decode_into_vec(reader, num_whir_rounds - 1)?;
-        let whir_pow_witnesses = decode_into_vec(reader, num_whir_rounds)?;
+        let folding_pow_witnesses = decode_into_vec(reader, num_whir_sumcheck_rounds)?;
+        let query_phase_pow_witnesses = decode_into_vec(reader, num_whir_rounds)?;
 
         let num_commits = usize::decode(reader)?;
         assert!(num_commits > 0);
         let initial_num_whir_queries = usize::decode(reader)?;
-        let k_whir_exp = usize::decode(reader)?;
+        let k_whir_exp = 1 << k_whir;
         let mut merkle_depth = 0;
         if initial_num_whir_queries > 0 {
             merkle_depth = usize::decode(reader)?;
@@ -437,7 +453,8 @@ impl Decode for WhirProof {
             whir_sumcheck_polys,
             codeword_commits,
             ood_values,
-            whir_pow_witnesses,
+            folding_pow_witnesses,
+            query_phase_pow_witnesses,
             initial_round_opened_rows,
             initial_round_merkle_proofs,
             codeword_opened_values,
