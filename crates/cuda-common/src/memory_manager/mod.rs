@@ -139,18 +139,28 @@ impl Default for MemoryManager {
 }
 
 pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
-    let manager = MEMORY_MANAGER.get().unwrap();
-    let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
-    manager.d_malloc(size)
+    // let manager = MEMORY_MANAGER.get().unwrap();
+    // let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
+    // manager.d_malloc(size)
+    let mut ptr: *mut c_void = std::ptr::null_mut();
+    check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) }).map_err(|e| {
+        tracing::error!("cudaMallocAsync failed: size={}: {:?}", size, e);
+        MemoryError::from(e)
+    })?;
+    Ok(ptr)
 }
 
 /// # Safety
 /// The pointer `ptr` must be a valid, previously allocated device pointer.
 /// The caller must ensure that `ptr` is not used after this function is called.
 pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
-    let manager = MEMORY_MANAGER.get().unwrap();
-    let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
-    manager.d_free(ptr)
+    // let manager = MEMORY_MANAGER.get().unwrap();
+    // let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
+    // manager.d_free(ptr)
+    check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) }).map_err(|e| {
+        tracing::error!("cudaFreeAsync failed: ptr={:p}: {:?}", ptr, e);
+        MemoryError::from(e)
+    })
 }
 
 #[derive(Debug, Clone)]
