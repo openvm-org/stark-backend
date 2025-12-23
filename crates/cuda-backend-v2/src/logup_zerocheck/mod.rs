@@ -53,7 +53,7 @@ mod fractional;
 mod gkr_input;
 mod mle_round;
 mod round0;
-mod rules;
+pub(crate) mod rules;
 
 pub use errors::*;
 use fold_ple::compute_eq_sharp_gpu;
@@ -129,7 +129,7 @@ pub fn prove_zerocheck_and_logup_gpu(
             ctx,
             l_skip,
             alpha_logup,
-            &prover.beta_pows,
+            &prover.d_challenges,
             total_leaves,
         )
         .expect("failed to evaluate interactions on device")
@@ -279,6 +279,8 @@ pub fn prove_zerocheck_and_logup_gpu(
 pub struct LogupZerocheckGpu<'a> {
     pub alpha_logup: EF,
     pub beta_pows: Vec<EF>,
+    // [alpha, beta^0, beta^1, .., beta^max_interaction_len]
+    pub d_challenges: DeviceBuffer<EF>,
 
     pub l_skip: usize,
     n_logup: usize,
@@ -343,14 +345,15 @@ impl<'a> LogupZerocheckGpu<'a> {
         let max_interaction_length = pk
             .per_air
             .iter()
-            .flat_map(|air_pk| air_pk.vk.symbolic_constraints.interactions.iter())
-            .map(|interaction| interaction.message.len())
+            .map(|air_pk| air_pk.other_data.interaction_rules.max_fields_len)
             .max()
             .unwrap_or(0);
         let beta_pows = beta_logup
             .powers()
             .take(max_interaction_length + 1)
             .collect_vec();
+        let challenges = [&[alpha_logup], &beta_pows[..]].concat();
+        let d_challenges = challenges.to_device().unwrap();
 
         let n_per_trace: Vec<isize> = ctx
             .common_main_traces()
@@ -380,6 +383,7 @@ impl<'a> LogupZerocheckGpu<'a> {
         Self {
             alpha_logup,
             beta_pows,
+            d_challenges,
             l_skip,
             n_logup,
             n_global,
@@ -458,17 +462,19 @@ impl<'a> LogupZerocheckGpu<'a> {
             .map(|(_, air_ctx)| air_ctx.common_main.buffer().len())
             .sum::<usize>();
 
-        self.eq_3b_per_trace = self
-            .trace_interactions
+        self.eq_3b_per_trace = ctx
+            .per_trace
             .iter()
             .enumerate()
-            .map(|(trace_idx, maybe_meta)| {
-                if let Some(meta) = maybe_meta {
+            .map(|(trace_idx, (air_idx, _))| {
+                let vk = &self.pk.per_air[*air_idx].vk;
+                let num_interactions = vk.num_interactions();
+                if num_interactions > 0 {
                     let n = self.n_per_trace[trace_idx];
                     let n_lift = n.max(0) as usize;
                     let mut b_vec = vec![F::ZERO; n_logup - n_lift];
-                    let mut weights = Vec::with_capacity(meta.interactions.len());
-                    for (interaction_idx, _) in meta.interactions.iter().enumerate() {
+                    let mut weights = Vec::with_capacity(num_interactions);
+                    for interaction_idx in 0..num_interactions {
                         let stacked_idx = self
                             .interactions_layout
                             .get(trace_idx, interaction_idx)
@@ -853,10 +859,10 @@ impl<'a> LogupZerocheckGpu<'a> {
             |(&n, zc_tilde_eval, logup_tilde_eval, mats, sels, eq_3bs, public_vals, &air_idx)| {
                 let mut results = vec![vec![EF::ZERO; s_deg]; 3]; // logup numer, logup denom, zerocheck
 
-                let constraints_dag = &self.pk.per_air[air_idx].vk.symbolic_constraints;
-                let constraints = SymbolicConstraints::from(constraints_dag);
-                let has_constraints = !constraints.constraints.is_empty();
-                let has_interactions = !constraints.interactions.is_empty();
+                let pk = &self.pk.per_air[air_idx];
+                let dag = &pk.vk.symbolic_constraints;
+                let has_constraints = dag.constraints.num_constraints() > 0;
+                let has_interactions = !dag.interactions.is_empty();
 
                 if has_interactions || has_constraints {
                     let n_lift = n.max(0) as usize;
@@ -894,7 +900,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                                     &main_ptrs,
                                     public_vals,
                                     lambda_pows,
-                                    constraints_dag,
+                                    &pk.other_data.zerocheck_mle,
                                     1,
                                     1,
                                 )
@@ -908,9 +914,9 @@ impl<'a> LogupZerocheckGpu<'a> {
                                     prep_ptr,
                                     &main_ptrs,
                                     public_vals,
-                                    &self.beta_pows,
+                                    &self.d_challenges,
                                     eq_3bs,
-                                    constraints_dag,
+                                    &pk.other_data.interaction_rules,
                                     1,
                                     1,
                                 ))
@@ -1066,7 +1072,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 &main_ptrs,
                                 public_vals,
                                 lambda_pows,
-                                constraints_dag,
+                                &pk.other_data.zerocheck_mle,
                                 num_y,
                                 s_deg,
                             )
@@ -1078,9 +1084,9 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 prep_ptr,
                                 &main_ptrs,
                                 public_vals,
-                                &self.beta_pows,
+                                &self.d_challenges,
                                 eq_3bs,
-                                constraints_dag,
+                                &pk.other_data.interaction_rules,
                                 num_y,
                                 s_deg,
                             )

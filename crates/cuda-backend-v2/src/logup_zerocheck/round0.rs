@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::air_builders::symbolic::{
@@ -46,34 +44,9 @@ pub fn evaluate_round0_constraints_gpu(
         return Ok(DeviceBuffer::new());
     }
 
-    let lambda_index_map: HashMap<usize, usize> = constraints_dag
-        .constraints
-        .constraint_idx
-        .iter()
-        .enumerate()
-        .map(|(idx, dag_idx)| (*dag_idx, idx))
-        .collect();
-    let rules = SymbolicRulesOnGpuV2::new(constraints_dag, false, true);
+    let rules = &pk.other_data.zerocheck_round0;
 
-    let lambda_indices_host: Vec<u32> = rules
-        .used_nodes
-        .iter()
-        .map(|&constraint_idx| {
-            rules
-                .constraint_expr_idxs
-                .get(constraint_idx)
-                .and_then(|dag_idx| lambda_index_map.get(dag_idx))
-                .copied()
-                .unwrap_or(0) as u32
-        })
-        .collect();
-    let d_lambda_indices = lambda_indices_host.to_device()?;
-
-    let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
-    let d_rules = encoded_rules.to_device()?;
-    let d_used_nodes = rules.used_nodes.to_device()?;
-
-    let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
+    let buffer_size: u32 = rules.inner.buffer_size;
     let intermed_capacity = unsafe {
         _zerocheck_r0_intermediates_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
     };
@@ -119,10 +92,10 @@ pub fn evaluate_round0_constraints_gpu(
             eq_uni,
             eq_cube,
             lambda_pows,
-            &d_lambda_indices,
+            &rules.d_lambda_indices,
             public_values,
-            &d_rules,
-            &d_used_nodes,
+            &rules.inner.d_rules,
+            &rules.inner.d_used_nodes,
             buffer_size,
             &mut intermediates,
             large_domain,
