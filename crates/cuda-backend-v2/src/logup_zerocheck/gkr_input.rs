@@ -2,15 +2,7 @@ use std::cmp::max;
 
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
-use openvm_stark_backend::{
-    air_builders::symbolic::{
-        SymbolicConstraints, SymbolicConstraintsDag,
-        symbolic_expression::SymbolicExpression,
-        symbolic_variable::{Entry, SymbolicVariable},
-    },
-    interaction::SymbolicInteraction,
-    prover::MatrixDimensions,
-};
+use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::{Field, FieldAlgebra};
 use stark_backend_v2::prover::{
     DeviceMultiStarkProvingKeyV2, ProvingContextV2,
@@ -26,7 +18,6 @@ use crate::{
         frac_add_alpha, frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
         logup_gkr_input_eval,
     },
-    logup_zerocheck::rules::{SymbolicRulesOnGpuV2, codec::Codec},
 };
 
 const TASK_SIZE: u32 = 65536;
@@ -36,11 +27,10 @@ const TASK_SIZE: u32 = 65536;
 pub struct TraceInteractionMeta {
     pub trace_idx: usize,
     pub air_idx: usize,
-    pub interactions: Vec<SymbolicInteraction<F>>,
     pub layout_slices: Vec<StackedSlice>,
 }
 
-// TODO[jpw]: revisit if this function is needed / precompute the symbolic interactions
+// TODO[jpw]: revisit if this function is needed
 pub fn collect_trace_interactions(
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     ctx: &ProvingContextV2<GpuBackendV2>,
@@ -59,15 +49,12 @@ pub fn collect_trace_interactions(
         .iter()
         .enumerate()
         .map(|(trace_idx, (air_idx, _))| {
-            let symbolic_constraints =
-                SymbolicConstraints::from(&pk.per_air[*air_idx].vk.symbolic_constraints);
-            let interactions: Vec<SymbolicInteraction<F>> = symbolic_constraints.interactions;
-
-            if interactions.is_empty() {
+            let vk = &pk.per_air[*air_idx].vk;
+            if !vk.has_interaction() {
                 return None;
             }
 
-            let mut layout_entries = vec![None; interactions.len()];
+            let mut layout_entries = vec![None; vk.num_interactions()];
             for (interaction_idx, slice) in &slices_by_trace[trace_idx] {
                 if let Some(slot) = layout_entries.get_mut(*interaction_idx) {
                     *slot = Some(*slice);
@@ -90,7 +77,6 @@ pub fn collect_trace_interactions(
             Some(TraceInteractionMeta {
                 trace_idx,
                 air_idx: *air_idx,
-                interactions,
                 layout_slices,
             })
         })
@@ -106,7 +92,7 @@ pub fn log_gkr_input_evals(
     ctx: &ProvingContextV2<GpuBackendV2>,
     l_skip: usize,
     alpha_logup: EF,
-    beta_pows: &[EF],
+    d_challenges: &DeviceBuffer<EF>,
     total_leaves: usize,
 ) -> Result<DeviceBuffer<Frac<EF>>, InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
@@ -132,56 +118,8 @@ pub fn log_gkr_input_evals(
         }
         partitioned_main.push(&air_ctx.common_main);
 
-        let interactions = &meta.interactions;
-        let max_fields_len = interactions
-            .iter()
-            .map(|interaction| interaction.message.len())
-            .max()
-            .unwrap_or(0);
-        let betas = beta_pows
-            .iter()
-            .take(max_fields_len + 1)
-            .cloned()
-            .collect_vec();
-
-        let challenges = std::iter::once(alpha_logup)
-            .chain(betas.iter().cloned())
-            .collect_vec();
-        let symbolic_challenges: Vec<SymbolicExpression<F>> = (0..challenges.len())
-            .map(|index| SymbolicVariable::<F>::new(Entry::Challenge, index).into())
-            .collect();
-
-        // TODO[jpw]: this is a weird way to express the logup denominator with beta_pows
-        // symbolically Revisit if it's possible to do it more directly
-        let num_interactions = interactions.len();
-        let mut frac_expressions = Vec::with_capacity(num_interactions);
-        for interaction in interactions.iter() {
-            let mut interaction = interaction.clone();
-            let b = SymbolicExpression::from_canonical_u32(interaction.bus_index as u32 + 1);
-            let betas = symbolic_challenges[1..].to_vec();
-            let mut denom = SymbolicExpression::from_canonical_u32(0);
-            for (j, expr) in interaction.message.iter().enumerate() {
-                denom += betas[j].clone() * expr.clone();
-            }
-            denom += betas[interaction.message.len()].clone() * b;
-            interaction.message = vec![denom];
-            frac_expressions.push(interaction);
-        }
-
-        let constraints = SymbolicConstraints {
-            constraints: vec![],
-            interactions: frac_expressions,
-        };
-        let constraints_dag: SymbolicConstraintsDag<F> = constraints.into();
-        let rules = SymbolicRulesOnGpuV2::new(&constraints_dag, true, false);
-        let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
-
-        let partition_lens = vec![1u32; num_interactions];
-
-        let d_rules = encoded_rules.to_device()?;
-        let d_used_nodes = rules.used_nodes.to_device()?;
-        let d_partition_lens = partition_lens.to_device()?;
-        let d_challenges = challenges.to_device()?;
+        let rules = &pk_air.other_data.interaction_rules;
+        let num_interactions = pk_air.vk.symbolic_constraints.interactions.len();
 
         let d_preprocessed = preprocessed_matrix
             .as_ref()
@@ -196,11 +134,11 @@ pub fn log_gkr_input_evals(
             .collect_vec();
         let d_partition_ptrs = partition_ptrs.to_device()?;
 
-        let buffer_size = rules.buffer_size;
+        let buffer_size = rules.inner.buffer_size;
         // TODO[jpw]: remove magic 10
         let is_global = buffer_size > 10;
         let intermediates = if is_global {
-            DeviceBuffer::<EF>::with_capacity((TASK_SIZE as usize) * buffer_size)
+            DeviceBuffer::<EF>::with_capacity((TASK_SIZE as usize) * buffer_size as usize)
         } else {
             DeviceBuffer::<EF>::with_capacity(1)
         };
@@ -230,12 +168,10 @@ pub fn log_gkr_input_evals(
                 trace_output,
                 d_preprocessed,
                 &d_partition_ptrs,
-                &d_challenges,
+                d_challenges,
                 &intermediates,
-                &d_rules,
-                &d_used_nodes,
-                &d_partition_lens,
-                num_interactions,
+                &rules.inner.d_rules,
+                &rules.inner.d_used_nodes,
                 height as u32,
                 num_rows_per_tile as u32,
             )?;
