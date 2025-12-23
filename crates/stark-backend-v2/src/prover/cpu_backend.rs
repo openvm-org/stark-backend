@@ -36,6 +36,7 @@ impl ProverBackendV2 for CpuBackendV2 {
     type Challenge = EF;
     type Commitment = Digest;
     type Matrix = ColMajorMatrix<F>;
+    type OtherAirData = ();
     type PcsData = StackedPcsData<F, Digest>;
 }
 
@@ -161,6 +162,7 @@ impl DeviceDataTransporterV2<CpuBackendV2> for CpuDeviceV2 {
                     air_name: pk.air_name.clone(),
                     vk: pk.vk.clone(),
                     preprocessed_data,
+                    other_data: (),
                 }
             })
             .collect();
