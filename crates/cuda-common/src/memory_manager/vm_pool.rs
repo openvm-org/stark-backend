@@ -297,9 +297,11 @@ impl VirtualMemoryPool {
 
         // 1b. Try the oldest from other streams
         if let Some((addr, region)) = candidates.iter_mut().min_by_key(|(_, region)| region.id) {
-            if let Err(e) = region.event.synchronize() {
-                tracing::error!("Event synchronize failed during find_best_fit: {:?}", e);
-                return None;
+            if !region.event.completed() {
+                if let Err(e) = region.event.synchronize() {
+                    tracing::error!("Event synchronize failed during find_best_fit: {:?}", e);
+                    return None;
+                }
             }
             region.stream_id = stream_id;
             Some(*addr)
@@ -567,10 +569,12 @@ impl VirtualMemoryPool {
                 .free_regions
                 .remove(&addr)
                 .expect("BUG: free region disappeared");
-            region.event.synchronize().map_err(|e| {
-                tracing::error!("Event synchronize failed during defrag: {:?}", e);
-                MemoryError::from(e)
-            })?;
+            if !region.event.completed() {
+                region.event.synchronize().map_err(|e| {
+                    tracing::error!("Event synchronize failed during defrag: {:?}", e);
+                    MemoryError::from(e)
+                })?;
+            }
 
             let take = remaining.min(region.size);
             to_defrag.push((addr, take));
