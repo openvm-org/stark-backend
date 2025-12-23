@@ -42,6 +42,10 @@ pub trait ProverBackendV2 {
     /// Single matrix buffer on device together with dimension metadata. Owning this means nothing
     /// else has a shared reference to the buffer.
     type Matrix: MatrixDimensions + Send + Sync;
+    /// Backend specific type for any pre-computed data associated with a single AIR. For example,
+    /// it may contain prover-specific precomputations based on the AIR constraints (but
+    /// independent from any trace data).
+    type OtherAirData: Send + Sync;
     /// Owned buffer for the preimage of a PCS commitment on device, together with any metadata
     /// necessary for computing opening proofs.
     ///
