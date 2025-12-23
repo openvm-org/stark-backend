@@ -97,7 +97,7 @@ impl<Val, Com: Clone> MultiStarkVerifyingKeyView<'_, Val, Com> {
     {
         self.per_air
             .iter()
-            .map(|vk| vk.params.width.total_width(E::D))
+            .map(|vk| vk.params.width.total_width(E::DIMENSION))
             .collect()
     }
 

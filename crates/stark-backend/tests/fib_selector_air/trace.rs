@@ -7,7 +7,7 @@ pub fn generate_trace_rows<F: PrimeField32>(a: u32, b: u32, sels: &[bool]) -> Ro
     let n = sels.len();
     assert!(n.is_power_of_two());
 
-    let mut rows = vec![vec![F::from_canonical_u32(a), F::from_canonical_u32(b)]];
+    let mut rows = vec![vec![F::from_u32(a), F::from_u32(b)]];
 
     for i in 1..n {
         if sels[i - 1] {

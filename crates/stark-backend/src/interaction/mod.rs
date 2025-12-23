@@ -2,7 +2,7 @@ use std::{fmt::Debug, sync::Arc};
 
 use p3_air::AirBuilder;
 use p3_challenger::CanObserve;
-use p3_field::Field;
+use p3_field::{Field, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_ceil_usize;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -51,7 +51,7 @@ pub type SymbolicInteraction<F> = Interaction<SymbolicExpression<F>>;
 /// An interactive AIR is a AIR that can specify buses for sending and receiving data
 /// to other AIRs. The original AIR is augmented by virtual columns determined by
 /// the interactions to define a [RAP](crate::rap::Rap).
-pub trait InteractionBuilder: AirBuilder {
+pub trait InteractionBuilder: AirBuilder<F: Field, Var: Copy> {
     /// Stores a new interaction in the builder.
     ///
     /// See [Interaction] for more details on `count_weight`.
@@ -68,6 +68,13 @@ pub trait InteractionBuilder: AirBuilder {
 
     /// Returns all interactions stored.
     fn all_interactions(&self) -> &[Interaction<Self::Expr>];
+
+    // This used to be in Plonky3 but is no longer there. We preserve the
+    // implementation here for downstream callers.
+    fn assert_tern(&mut self, x: impl Into<Self::Expr>) {
+        let x = x.into();
+        self.assert_zero(x.clone() * (x.clone() - Self::Expr::ONE) * (x - Self::Expr::TWO));
+    }
 }
 
 /// A `Lookup` bus is used to establish that one multiset of values (the queries) are subset of

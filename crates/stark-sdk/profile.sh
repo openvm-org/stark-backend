@@ -22,7 +22,7 @@ esac
 
 export JEMALLOC_SYS_WITH_MALLOC_CONF="retain:true,background_thread:true,metadata_thp:always,dirty_decay_ms:-1,muzzy_decay_ms:-1,abort_conf:true"
 
-cargo build --profile=profiling --example $eg_name --no-default-features --features=nightly-features,jemalloc,parallel
+cargo build --profile=profiling --example $eg_name --no-default-features --features=jemalloc,parallel
 
 # Check if samply is installed
 if ! command -v samply &> /dev/null; then

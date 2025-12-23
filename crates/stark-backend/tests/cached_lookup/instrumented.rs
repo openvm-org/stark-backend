@@ -6,7 +6,7 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{self, engine_from_perm},
-        fri_params::{standard_fri_params_with_100_bits_conjectured_security, SecurityParameters},
+        fri_params::{standard_fri_params_with_100_bits_security, SecurityParameters},
         log_up_params::log_up_security_params_baby_bear_100_bits,
     },
     dummy_airs::interaction::dummy_interaction_air::DummyInteractionAir,
@@ -102,7 +102,7 @@ fn instrumented_verifier_comparison(
 #[ignore = "bench"]
 fn instrument_cached_trace_verifier() -> eyre::Result<()> {
     let fri_params = [1, 2, 3, 4]
-        .map(standard_fri_params_with_100_bits_conjectured_security)
+        .map(standard_fri_params_with_100_bits_security)
         .to_vec();
     let data_sizes = get_data_sizes();
 

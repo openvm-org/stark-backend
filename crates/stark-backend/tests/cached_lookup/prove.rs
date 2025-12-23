@@ -19,7 +19,7 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{engine_from_perm, random_perm},
-        fri_params::{standard_fri_params_with_100_bits_conjectured_security, SecurityParameters},
+        fri_params::{standard_fri_params_with_100_bits_security, SecurityParameters},
         log_up_params::log_up_security_params_baby_bear_100_bits,
         FriParameters,
     },
@@ -106,8 +106,8 @@ pub fn generate_random_trace(
     (0..height)
         .map(|_| {
             (
-                rng.gen_range(0..1000),
-                (0..field_width).map(|_| rng.gen()).collect(),
+                rng.random_range(0..1000),
+                (0..field_width).map(|_| rng.random()).collect(),
             )
         })
         .collect()
@@ -172,7 +172,7 @@ fn compare_provers(
 #[ignore = "bench"]
 fn bench_cached_trace_prover() -> eyre::Result<()> {
     let fri_params = [1, 2, 3, 4]
-        .map(standard_fri_params_with_100_bits_conjectured_security)
+        .map(standard_fri_params_with_100_bits_security)
         .to_vec();
     let data_sizes = get_data_sizes();
 

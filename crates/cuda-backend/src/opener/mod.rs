@@ -10,10 +10,10 @@ use openvm_stark_backend::{
 };
 use ops::*;
 use p3_baby_bear::Poseidon2BabyBear;
-use p3_commit::{ExtensionMmcs, OpenedValues};
+use p3_commit::{BatchOpening, ExtensionMmcs, OpenedValues};
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
-use p3_field::{dot_product, Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
-use p3_fri::{BatchOpening, CommitPhaseProofStep, FriProof, QueryProof};
+use p3_field::{dot_product, BasedVectorSpace, Field, PrimeCharacteristicRing, TwoAdicField};
+use p3_fri::{CommitPhaseProofStep, FriProof, QueryProof};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_util::{linear_map::LinearMap, log2_strict_usize};
@@ -156,7 +156,8 @@ impl OpeningProverGpu {
                         .iter()
                         .map(|reorder_idx| {
                             openings[*reorder_idx].iter().for_each(|ys| {
-                                ys.iter().for_each(|&y| challenger.observe_ext_element(y));
+                                ys.iter()
+                                    .for_each(|&y| challenger.observe_algebra_element(y));
                             });
                             openings[*reorder_idx].clone()
                         })
@@ -167,7 +168,7 @@ impl OpeningProverGpu {
         drop(inv_denoms);
 
         // Batch combination challenge
-        let alpha: EF = challenger.sample_ext_element();
+        let alpha: EF = challenger.sample_algebra_element();
         tracing::debug!("alpha sampled in gpu_pcs::open(): {:?}", alpha);
 
         // For each unique opening point z, we will find the largest degree bound
@@ -232,7 +233,7 @@ impl OpeningProverGpu {
         // commit to the folded polynomials
         let commit_phase_result = commit_phase_on_gpu(device, fri_inputs, challenger);
 
-        let pow_witness = challenger.grind(config.proof_of_work_bits);
+        let query_pow_witness = challenger.grind(config.query_proof_of_work_bits);
 
         let extra_query_index_bits = 0;
         let query_proofs = info_span!("query phase").in_scope(|| {
@@ -301,9 +302,10 @@ impl OpeningProverGpu {
 
         let fri_proof = FriProof {
             commit_phase_commits: commit_phase_result.commits,
+            commit_pow_witnesses: commit_phase_result.pow_witnesses,
             query_proofs,
             final_poly: commit_phase_result.final_poly,
-            pow_witness,
+            query_pow_witness,
         };
 
         (all_opened_values, fri_proof)
@@ -326,6 +328,7 @@ pub struct CommitPhaseGPUResult {
     pub commits: Vec<Com<SC>>,
     pub data: Vec<GpuPcsData>,
     pub final_poly: Vec<EF>,
+    pub pow_witnesses: Vec<F>,
 }
 
 fn commit_phase_on_gpu(
@@ -338,6 +341,7 @@ fn commit_phase_on_gpu(
     let mut inputs_iter = inputs.into_iter().peekable();
     let mut folded = inputs_iter.next().unwrap();
     let mut commits = vec![];
+    let mut pow_witnesses = vec![];
     let mut data: Vec<GpuPcsData> = vec![];
 
     let blowup = 1 << fri_log_blowup;
@@ -360,8 +364,11 @@ fn commit_phase_on_gpu(
         commits.push(commit);
         data.push(prover_data);
 
+        let pow_witness = challenger.grind(device.config.fri.commit_proof_of_work_bits);
+        pow_witnesses.push(pow_witness);
+
         let log_folded_len = log2_strict_usize(folded.len());
-        let beta: EF = challenger.sample_ext_element();
+        let beta: EF = challenger.sample_algebra_element();
         tracing::debug!("beta at gpu pcs (layer = {}): {:?}", log_folded_len, beta);
 
         let fri_input = inputs_iter.next_if(|v| v.len() == folded.len() / 2);
@@ -388,13 +395,14 @@ fn commit_phase_on_gpu(
 
     // Observe all coefficients of the final polynomial.
     for &x in &final_poly {
-        challenger.observe_ext_element(x);
+        challenger.observe_algebra_element(x);
     }
 
     CommitPhaseGPUResult {
         commits,
         data,
         final_poly,
+        pow_witnesses,
     }
 }
 
@@ -427,7 +435,11 @@ fn answer_batch_queries_on_gpu(
                     // copied from commit/src/adapters/extension_mmcs.rs#open_batch
                     let opened_ext_values: Vec<Vec<EF>> = opened_base_values
                         .into_iter()
-                        .map(|row| row.chunks(4).map(EF::from_base_slice).collect())
+                        .map(|row| {
+                            row.chunks(4)
+                                .map(|row| EF::from_basis_coefficients_slice(row).unwrap())
+                                .collect()
+                        })
                         .collect();
                     let mut opened_rows = opened_ext_values;
 

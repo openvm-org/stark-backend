@@ -5,7 +5,7 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 use crate::{cuda::ntt, prelude::F};
 
 const MAX_LG_DOMAIN_SIZE: usize = 27;
-const LG_WINDOW_SIZE: usize = (MAX_LG_DOMAIN_SIZE + 4) / 5;
+const LG_WINDOW_SIZE: usize = MAX_LG_DOMAIN_SIZE.div_ceil(5);
 const WINDOW_SIZE: usize = 1 << LG_WINDOW_SIZE;
 const WINDOW_NUM: usize = MAX_LG_DOMAIN_SIZE.div_ceil(LG_WINDOW_SIZE);
 
