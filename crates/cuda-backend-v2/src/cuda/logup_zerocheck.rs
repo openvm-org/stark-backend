@@ -95,8 +95,7 @@ extern "C" {
         intermediates: *const std::ffi::c_void,
         rules: *const std::ffi::c_void,
         used_nodes: *const usize,
-        partition_lens: *const u32,
-        num_partitions: usize,
+        used_nodes_len: usize,
         height: u32,
         num_rows_per_tile: u32,
     ) -> i32;
@@ -388,8 +387,6 @@ pub unsafe fn logup_gkr_input_eval(
     intermediates: &DeviceBuffer<EF>,
     rules: &DeviceBuffer<u128>,
     used_nodes: &DeviceBuffer<usize>,
-    partition_lens: &DeviceBuffer<u32>,
-    num_partitions: usize,
     height: u32,
     num_rows_per_tile: u32,
 ) -> Result<(), CudaError> {
@@ -402,8 +399,7 @@ pub unsafe fn logup_gkr_input_eval(
         intermediates.as_raw_ptr(),
         rules.as_raw_ptr(),
         used_nodes.as_ptr(),
-        partition_lens.as_ptr(),
-        num_partitions,
+        used_nodes.len(),
         height,
         num_rows_per_tile,
     ))
