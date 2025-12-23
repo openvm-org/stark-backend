@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use getset::Getters;
-use openvm_cuda_backend::{base::DeviceMatrix, ntt::batch_ntt};
+use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{MemCopyD2D, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -11,9 +11,12 @@ use p3_field::FieldAlgebra;
 
 use crate::{
     EF, F, KernelError,
-    cuda::poly::{
-        eq_hypercube_nonoverlapping_stage_ext, eq_hypercube_stage_ext, mle_interpolate_stage,
-        mle_interpolate_stage_ext,
+    cuda::{
+        batch_ntt_small::batch_ntt_small,
+        poly::{
+            eq_hypercube_nonoverlapping_stage_ext, eq_hypercube_stage_ext, mle_interpolate_stage,
+            mle_interpolate_stage_ext,
+        },
     },
 };
 
@@ -40,12 +43,14 @@ impl<F> MatrixDimensions for PleMatrix<F> {
 impl PleMatrix<F> {
     /// Creates a `PleMatrix`. This doubles the VRAM footprint to cache the `mixed` buffer.
     pub fn from_evals(l_skip: usize, evals: DeviceBuffer<F>, height: usize, width: usize) -> Self {
-        let mixed = evals;
+        let mut mixed = evals;
         if l_skip > 0 {
             // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column:
             // (width cols) * (height / 2^l_skip chunks per col). Use natural ordering.
-            let num_uni_poly = (width * (height >> l_skip)) as u32;
-            batch_ntt(&mixed, l_skip as u32, 0, num_uni_poly, true, true);
+            let num_uni_poly = width * (height >> l_skip);
+            unsafe {
+                batch_ntt_small(&mut mixed, l_skip, num_uni_poly, true).unwrap();
+            }
         }
         Self {
             mixed,
@@ -58,12 +63,14 @@ impl PleMatrix<F> {
         let width = self.width();
         let height = self.height();
         // D2D copy so we can do in-place NTT
-        let evals = self.mixed.device_copy()?;
+        let mut evals = self.mixed.device_copy()?;
         if l_skip > 0 {
             // For univariate coordinate, perform NTT for each 2^l_skip chunk per column: (width
             // cols) * (height / 2^l_skip chunks per col). Use natural ordering.
-            let num_uni_poly = (width * (height >> l_skip)) as u32;
-            batch_ntt(&evals, l_skip as u32, 0, num_uni_poly, true, false);
+            let num_uni_poly = width * (height >> l_skip);
+            unsafe {
+                batch_ntt_small(&mut evals, l_skip, num_uni_poly, false).unwrap();
+            }
         }
         Ok(DeviceMatrix::new(Arc::new(evals), height, width))
     }
