@@ -26,7 +26,7 @@ use stark_backend_v2::{
 use tracing::instrument;
 
 use crate::{
-    D_EF, Digest, EF, F, GpuDeviceV2, GpuProverConfig, ProverError,
+    AirDataGpu, D_EF, Digest, EF, F, GpuDeviceV2, GpuProverConfig, ProverError,
     cuda::matrix::collapse_strided_matrix,
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
     merkle_tree::MerkleTreeGpu,
@@ -48,6 +48,7 @@ impl ProverBackendV2 for GpuBackendV2 {
     type Commitment = Digest;
     type Matrix = DeviceMatrix<F>;
     type PcsData = StackedPcsDataGpu<F, Digest>;
+    type OtherAirData = AirDataGpu;
 }
 
 impl ProverDeviceV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
@@ -149,11 +150,13 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
                     transport_and_unstack_single_data_h2d(d.as_ref(), &self.prover_config).unwrap()
                 });
+                let other_data = AirDataGpu::new(pk).unwrap();
 
                 DeviceStarkProvingKeyV2 {
                     air_name: pk.air_name.clone(),
                     vk: pk.vk.clone(),
                     preprocessed_data,
+                    other_data,
                 }
             })
             .collect();
