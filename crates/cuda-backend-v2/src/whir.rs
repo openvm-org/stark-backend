@@ -24,6 +24,7 @@ use tracing::instrument;
 use crate::{
     D_EF, Digest, EF, F, WhirProverError,
     cuda::{
+        batch_ntt_small::batch_ntt_small,
         poly::{
             batch_eq_hypercube_stage, eq_hypercube_stage_ext, eval_poly_ext_at_point_from_base,
             mle_interpolate_stage_ext, transpose_fp_to_fpext_vec,
@@ -135,14 +136,11 @@ pub fn prove_whir_opening_gpu(
     // - l_skip}`. The univariate coefficient form is the same as the multilinear coefficient
     // form for multilinear polys on H_{l_skip}, so we must now multilinear interpolate `f_evals` to
     // get fully multilinear evaluations on `H_m`.
-    batch_ntt(
-        &f_ple_evals,
-        l_skip as u32,
-        0,
-        (f_ple_evals.len() >> l_skip) as u32,
-        true,
-        true,
-    );
+    unsafe {
+        let num_poly = f_ple_evals.len() >> l_skip;
+        batch_ntt_small(&mut f_ple_evals, l_skip, num_poly, true)
+            .map_err(WhirProverError::CustomBatchIntt)?;
+    }
     let mut f_evals = DeviceBuffer::<EF>::with_capacity(height);
     // SAFETY: `f_ple_evals` is constructed with length `height * D_EF`.
     unsafe {

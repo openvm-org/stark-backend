@@ -55,6 +55,8 @@ pub enum RsCodeMatrixError {
     StackTraces(StackTracesError),
     #[error("batch_expand_pad error: {0}")]
     BatchExpandPad(CudaError),
+    #[error("custom_batch_intt error: {0}")]
+    CustomBatchIntt(CudaError),
     #[error("mle_interpolate_stage_2d [step={step}] error: {error}")]
     MleInterpolateStage2d { error: CudaError, step: u32 },
 }
@@ -73,6 +75,8 @@ pub enum WhirProverError {
     Transpose(CudaError),
     #[error("mle_interpolate_stage_ext [step={step}]: {error}")]
     MleInterpolate { error: CudaError, step: u32 },
+    #[error("custom_batch_intt error: {0}")]
+    CustomBatchIntt(CudaError),
     #[error("evals_eq_hypercube: {0}")]
     EvalEq(KernelError),
     #[error("whir_sumcheck_mle_round [whir_round={whir_round}, round={round}]: {error}")]

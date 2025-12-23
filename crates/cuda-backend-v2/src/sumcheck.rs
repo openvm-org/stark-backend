@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use openvm_cuda_backend::{ntt::batch_ntt, prelude::*};
+use openvm_cuda_backend::prelude::*;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -15,6 +15,7 @@ use tracing::{debug, info_span, instrument};
 
 use crate::{
     cuda::{
+        batch_ntt_small::batch_ntt_small,
         matrix::batch_expand_pad_wide,
         sumcheck::{fold_mle, fold_ple_from_coeffs, reduce_over_x_and_cols, sumcheck_mle_round},
     },
@@ -188,20 +189,15 @@ pub fn sumcheck_prismalinear_gpu(
     // ========== Round 0: Special PLE round ==========
     let _round0_span = info_span!("sumcheck_prismalinear.round0").entered();
 
-    let d_coeffs = evals.to_device().unwrap();
-    let d_s0_coeffs = DeviceBuffer::<F>::with_capacity(large_domain_size);
+    let mut d_coeffs = evals.to_device().unwrap();
+    let mut d_s0_coeffs = DeviceBuffer::<F>::with_capacity(large_domain_size);
 
     // Step 1: iDFT on skip domain (reinterpreting dimensions)
     // Input: [height=2^(l_skip+n), width=1]
     // Treat as: [height=2^l_skip, width=2^n]
-    batch_ntt(
-        &d_coeffs,
-        l_skip as u32,
-        0,
-        (num_x * width) as u32,
-        true,
-        true, // iDFT
-    );
+    unsafe {
+        batch_ntt_small(&mut d_coeffs, l_skip, num_x * width, true).unwrap();
+    }
 
     if domain_size == large_domain_size {
         unsafe {
@@ -216,7 +212,8 @@ pub fn sumcheck_prismalinear_gpu(
             .unwrap();
         }
     } else {
-        let d_coeffs_large = DeviceBuffer::<F>::with_capacity(num_x * width * large_domain_size);
+        let mut d_coeffs_large =
+            DeviceBuffer::<F>::with_capacity(num_x * width * large_domain_size);
 
         // Step 2: Copy and pad each column to large domain size
         unsafe {
@@ -231,14 +228,9 @@ pub fn sumcheck_prismalinear_gpu(
         }
 
         // Step 3: DFT on large domain
-        batch_ntt(
-            &d_coeffs_large,
-            log_large_domain as u32,
-            0,
-            (num_x * width) as u32,
-            true,
-            false, // Forward DFT
-        );
+        unsafe {
+            batch_ntt_small(&mut d_coeffs_large, log_large_domain, num_x * width, false).unwrap();
+        }
 
         // Step 4: Sum over all x and columns
         unsafe {
@@ -254,14 +246,9 @@ pub fn sumcheck_prismalinear_gpu(
         drop(d_coeffs_large);
 
         // Step 5: iDFT to get coefficients
-        batch_ntt(
-            &d_s0_coeffs,
-            log_large_domain as u32,
-            0,
-            1, // Single column
-            true,
-            true, // iDFT
-        );
+        unsafe {
+            batch_ntt_small(&mut d_s0_coeffs, log_large_domain, 1, true).unwrap();
+        }
     }
     // Step 6: Copy to host and convert to extension field
     let s0_coeffs_host: Vec<F> = d_s0_coeffs.to_host().unwrap();
