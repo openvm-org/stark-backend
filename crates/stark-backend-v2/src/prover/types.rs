@@ -45,6 +45,7 @@ pub struct DeviceStarkProvingKeyV2<PB: ProverBackendV2> {
     pub vk: StarkVerifyingKeyV2<PB::Val, PB::Commitment>,
     /// Prover only data for preprocessed trace
     pub preprocessed_data: Option<CommittedTraceDataV2<PB>>,
+    pub other_data: PB::OtherAirData,
 }
 
 #[derive(derive_new::new)]
