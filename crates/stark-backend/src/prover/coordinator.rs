@@ -1,4 +1,7 @@
-use std::{iter, marker::PhantomData};
+use std::{
+    iter::{self, zip},
+    marker::PhantomData,
+};
 
 use itertools::{izip, Itertools};
 use p3_challenger::CanObserve;
@@ -81,6 +84,16 @@ where
         mpk: Self::ProvingKeyView<'a>,
         ctx: Self::ProvingContext<'a>,
     ) -> Self::Proof {
+        println!("====New proof====");
+        let total_constraint_count: usize = mpk
+            .per_air
+            .iter()
+            .map(|pk| pk.vk.symbolic_constraints.constraints.num_constraints())
+            .sum();
+        println!("total_constraint_count: {}", total_constraint_count);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("total_constraint_count").absolute(total_constraint_count as u64);
+
         assert!(mpk.validate(&ctx), "Invalid proof input");
         self.challenger.observe(mpk.vk_pre_hash.clone());
 
@@ -239,12 +252,28 @@ where
             let mut quotient_degrees = Vec::with_capacity(mpk.per_air.len());
             let mut preprocessed = Vec::new();
 
-            for pk in mpk.per_air {
+            let mut batch_sizes = vec![0; 32];
+
+            for (pk, log_trace_height) in zip(&mpk.per_air, &log_trace_height_per_air) {
+                let batch_size = &mut batch_sizes[*log_trace_height as usize];
+                let width = &pk.vk.params.width;
+                const ROT_OPENINGS: usize = 2;
+                *batch_size += width.preprocessed.unwrap_or(0) * ROT_OPENINGS;
+                *batch_size += width.common_main * ROT_OPENINGS;
+                *batch_size += width.cached_mains.iter().sum::<usize>() * ROT_OPENINGS;
+                *batch_size += width.after_challenge.iter().sum::<usize>()
+                    * PB::CHALLENGE_EXT_DEGREE as usize
+                    * ROT_OPENINGS;
+                // quotient poly is only opened at 1 OOD point
+                *batch_size += pk.vk.quotient_degree as usize * PB::CHALLENGE_EXT_DEGREE as usize;
                 quotient_degrees.push(pk.vk.quotient_degree);
                 if let Some(preprocessed_data) = &pk.preprocessed_data {
                     preprocessed.push(&preprocessed_data.data);
                 }
             }
+            let _max_batch_size = batch_sizes.into_iter().max().unwrap_or(0);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("batch_size").absolute(_max_batch_size as u64);
 
             let main = cached_pcs_datas_per_air
                 .into_iter()
