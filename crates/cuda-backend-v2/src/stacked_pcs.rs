@@ -14,7 +14,10 @@ use tracing::instrument;
 
 use crate::{
     Digest, F, GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError,
-    cuda::{matrix::batch_expand_pad_wide, poly::mle_interpolate_stage_2d},
+    cuda::{
+        batch_ntt_small::batch_ntt_small, matrix::batch_expand_pad_wide,
+        poly::mle_interpolate_stage_2d,
+    },
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
 };
@@ -219,8 +222,11 @@ pub fn rs_code_matrix(
         if l_skip > 0 {
             // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column:
             // (width cols) * (codeword_height / 2^l_skip chunks per col). Use natural ordering.
-            let num_uni_poly = (width * (codeword_height >> l_skip)).try_into().unwrap();
-            batch_ntt(&codewords, l_skip as u32, 0, num_uni_poly, true, true);
+            let num_uni_poly = width * (codeword_height >> l_skip);
+            unsafe {
+                batch_ntt_small(&mut codewords, l_skip, num_uni_poly, true)
+                    .map_err(RsCodeMatrixError::CustomBatchIntt)?;
+            }
         }
     }
     let n = log2_strict_usize(height) - l_skip;
