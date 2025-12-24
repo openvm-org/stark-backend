@@ -5,6 +5,7 @@ use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{MemCopyD2D, MemCopyH2D},
     d_buffer::DeviceBuffer,
+    error::CudaError,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::FieldAlgebra;
@@ -12,11 +13,13 @@ use p3_field::FieldAlgebra;
 use crate::{
     EF, F, KernelError,
     cuda::{
+        LOG_WARP_SIZE,
         batch_ntt_small::batch_ntt_small,
-        poly::{
-            eq_hypercube_nonoverlapping_stage_ext, eq_hypercube_stage_ext, mle_interpolate_stage,
-            mle_interpolate_stage_ext,
+        mle_interpolate::{
+            MLE_SHARED_TILE_LOG_SIZE, mle_interpolate_fused_2d, mle_interpolate_shared_2d,
+            mle_interpolate_stage_2d,
         },
+        poly::{eq_hypercube_nonoverlapping_stage_ext, eq_hypercube_stage_ext},
     },
 };
 
@@ -78,39 +81,120 @@ impl PleMatrix<F> {
 
 /// Assumes that `evals` is column-major matrix of evaluations on a hypercube `H_n`.
 /// In-place interpolates `evals` from evaluations to coefficient form.
-pub fn mle_evals_to_coeffs_inplace(
-    evals: &mut DeviceBuffer<F>,
-    n: usize,
-) -> Result<(), KernelError> {
-    debug_assert!(evals.len().is_power_of_two());
-    debug_assert!(evals.len() >= 1 << n);
-    for log_step in 0..n {
-        let step = 1 << log_step;
-        // SAFETY: `f_evals` has length `2^n >= 2 * step`.
-        unsafe {
-            // Multilinear Eval -> Coeff
-            mle_interpolate_stage(evals, step, true)?;
-        }
+pub fn mle_evals_to_coeffs_inplace(evals: &mut DeviceBuffer<F>, n: usize) -> Result<(), CudaError> {
+    if n == 0 {
+        return Ok(());
     }
-    Ok(())
+    debug_assert!(evals.len().is_multiple_of(1 << n));
+    let width = evals.len() >> n;
+    // SAFETY:
+    // - `evals` is valid buffer, representing a single column vector, so width = 1
+    // - we only use forward direction with bit_reversed = false
+    unsafe {
+        mle_interpolate_stages(
+            evals.as_mut_ptr(),
+            width.try_into().unwrap(),
+            1 << n,
+            0,
+            0,
+            n as u32 - 1,
+            true,
+            false,
+        )
+    }
 }
 
-/// Assumes that `evals` is column-major matrix of evaluations on a hypercube `H_n`.
-/// In-place interpolates `evals` from evaluations to coefficient form.
-pub fn mle_evals_to_coeffs_inplace_ext(
-    evals: &mut DeviceBuffer<EF>,
-    n: usize,
-) -> Result<(), KernelError> {
-    debug_assert!(evals.len().is_power_of_two());
-    debug_assert!(evals.len() >= 1 << n);
-    for log_step in 0..n {
-        let step = 1 << log_step;
-        // SAFETY: `f_evals` has length `2^n >= 2 * step`.
-        unsafe {
-            // Multilinear Eval -> Coeff
-            mle_interpolate_stage_ext(evals, step, true)?;
-        }
+/// Helper function to process MLE interpolation stages from `start_log_step` to `end_log_step`
+/// (both inclusive).
+///
+/// Automatically selects the best kernel(s):
+/// - Warp shuffle for steps 1-16 (log_step 0-4) when 2+ stages can be fused
+/// - Shared memory for steps up to 2048 (log_step up to 11)
+/// - Fallback individual kernels for larger steps
+///
+/// # Parameters
+/// - `log_blowup`: meaningful_count = padded_height >> log_blowup
+/// - `bit_reversed`: if true, physical index = tidx << log_blowup (strided access) if false,
+///   physical index = tidx (contiguous access)
+///
+/// # Assumptions
+/// - If `right_pad` is true, `end_log_step` must be `< MLE_SHARED_TILE_LOG_SIZE`.
+/// # Safety
+/// Same requirements as the individual kernel functions.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn mle_interpolate_stages(
+    buffer: *mut F,
+    width: u16,
+    padded_height: u32,
+    log_blowup: u32,
+    start_log_step: u32,
+    end_log_step: u32,
+    is_eval_to_coeff: bool,
+    right_pad: bool,
+) -> Result<(), CudaError> {
+    if start_log_step > end_log_step {
+        return Ok(());
     }
+
+    let mut current_log_step = start_log_step;
+
+    // Phase 1: Use warp shuffle for steps where log_step < LOG_WARP_SIZE (step <= 16)
+    // Only if we can fuse at least 2 stages (otherwise shared memory is just as good)
+    let warp_end = end_log_step.min(LOG_WARP_SIZE as u32 - 1);
+    let warp_stages = warp_end.saturating_sub(current_log_step) + 1;
+    if current_log_step < LOG_WARP_SIZE as u32 && warp_stages >= 2 {
+        let num_stages = warp_stages;
+        let start_step = 1u32 << current_log_step;
+
+        mle_interpolate_fused_2d(
+            buffer,
+            width,
+            padded_height,
+            log_blowup,
+            start_step,
+            num_stages,
+            is_eval_to_coeff,
+            right_pad,
+        )?;
+
+        current_log_step = warp_end + 1;
+    }
+
+    if current_log_step > end_log_step {
+        return Ok(());
+    }
+
+    // Phase 2: Use shared memory for steps where log_step < MLE_SHARED_TILE_LOG_SIZE
+    if current_log_step < MLE_SHARED_TILE_LOG_SIZE {
+        let shared_end = end_log_step.min(MLE_SHARED_TILE_LOG_SIZE - 1);
+
+        mle_interpolate_shared_2d(
+            buffer,
+            width,
+            padded_height,
+            log_blowup,
+            current_log_step,
+            shared_end,
+            is_eval_to_coeff,
+            right_pad,
+        )?;
+
+        current_log_step = shared_end + 1;
+    }
+
+    // Phase 3: Fallback to individual kernel launches for very large steps
+    // Note: fallback kernel doesn't support bit_reversed mode, only use for forward
+    assert!(
+        current_log_step > end_log_step || !right_pad,
+        "bit_reversed mode not supported for log_step >= MLE_SHARED_TILE_LOG_SIZE"
+    );
+    let height = padded_height >> log_blowup;
+    while current_log_step <= end_log_step {
+        let step = 1u32 << current_log_step;
+        mle_interpolate_stage_2d(buffer, width, height, padded_height, step, is_eval_to_coeff)?;
+        current_log_step += 1;
+    }
+
     Ok(())
 }
 
