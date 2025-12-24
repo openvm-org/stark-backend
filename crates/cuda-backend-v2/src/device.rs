@@ -18,11 +18,7 @@ pub struct GpuProverConfig {
 
 impl GpuDeviceV2 {
     pub fn new(config: SystemParams) -> Self {
-        let mut prover_config = GpuProverConfig::default();
-        // Heuristic to determine whether to prioritize saving memory or not
-        if config.log_blowup > 1 {
-            prover_config.cache_rs_code_matrix = true;
-        }
+        let prover_config = GpuProverConfig::default();
         Self {
             config,
             prover_config,
@@ -41,13 +37,12 @@ impl GpuDeviceV2 {
 }
 
 /// Default configuration is to reduce peak memory usage when there is not a significant performance
-/// trade-off. The Reed-Solomon code computation does incur a performance penalty, but by default we
-/// still opt to not cache to save memory.
+/// trade-off. The Reed-Solomon code computation does incur a performance penalty, so we cache it.
 impl Default for GpuProverConfig {
     fn default() -> Self {
         Self {
             cache_stacked_matrix: false,
-            cache_rs_code_matrix: false,
+            cache_rs_code_matrix: true,
         }
     }
 }
