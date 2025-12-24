@@ -94,7 +94,7 @@ pub unsafe fn bit_rev_frac_ext(
     padded_poly_size: u32,
     poly_count: u32,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_bit_rev_ext(
+    CudaError::from_result(_bit_rev_frac_ext(
         d_out.as_mut_raw_ptr(),
         d_inp.as_raw_ptr(),
         lg_domain_size,
