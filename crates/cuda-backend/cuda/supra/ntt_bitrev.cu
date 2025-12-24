@@ -14,6 +14,12 @@
 #include "launcher.cuh"
 #include "ntt/ntt.cuh"
 
+// [DIFF]: Add new type for bit reversal kernel
+struct frac_fpext_t {
+    bb31_4_t num;
+    bb31_4_t denom;
+};
+
 /*
  * Template type T requirements:
  * - Default constructible: T()
@@ -72,7 +78,9 @@ void bit_rev_permutation_z(T* out, const T* in, uint32_t lg_domain_size,
 
     const uint32_t LG_Z_COUNT = 31 - __clz(Z_COUNT); // [DIFF]: use __clz to get lg2
 
-    extern __shared__ T xchg[][Z_COUNT][Z_COUNT];
+    // Use byte array for extern shared memory to avoid symbol conflicts across template instantiations
+    extern __shared__ unsigned char xchg_raw[];
+    T (*xchg)[Z_COUNT][Z_COUNT] = reinterpret_cast<T (*)[Z_COUNT][Z_COUNT]>(xchg_raw);
 
     uint32_t gid = threadIdx.x / Z_COUNT;
     uint32_t idx = threadIdx.x % Z_COUNT;
@@ -185,7 +193,6 @@ extern "C" int _bit_rev_ext(bb31_4_t* d_out, const bb31_4_t* d_inp,
     return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
 }
 
-using frac_fpext_t = std::pair<bb31_4_t, bb31_4_t>;
 extern "C" int _bit_rev_frac_ext(frac_fpext_t* d_out, const frac_fpext_t* d_inp,
     uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
 {
