@@ -769,15 +769,17 @@ impl std::fmt::Debug for VirtualMemoryPool {
         let free_bytes: usize = self.free_regions.values().map(|r| r.size).sum();
         let malloc_bytes: usize = self.malloc_regions.values().sum();
         let unmapped_bytes: usize = self.unmapped_regions.values().sum();
+        let zombies_bytes: usize = self.zombie_regions.iter().map(|r| r.size).sum();
 
         writeln!(
             f,
-            "Total: reserved={}, allocated={}, free={}, malloc={}, unmapped={}",
+            "Total: reserved={}, allocated={}, free={}, malloc={}, unmapped={}, (zombies={})",
             ByteSize::b(reserved as u64),
             ByteSize::b(allocated as u64),
             ByteSize::b(free_bytes as u64),
             ByteSize::b(malloc_bytes as u64),
-            ByteSize::b(unmapped_bytes as u64)
+            ByteSize::b(unmapped_bytes as u64),
+            ByteSize::b(zombies_bytes as u64),
         )?;
 
         let mut regions: Vec<(CUdeviceptr, usize, String)> = Vec::new();
