@@ -612,6 +612,7 @@ impl VirtualMemoryPool {
                 .expect("BUG: free region disappeared");
 
             if other_stream && !region.event.completed() {
+                // default_stream_wait always uses current stream (= stream_id)
                 default_stream_wait(&region.event)?;
             }
 
@@ -652,6 +653,9 @@ impl VirtualMemoryPool {
     ///
     /// Returns the starting pointer of the new remapped free region or `CUdeviceptr::MAX` if no
     /// remapping is needed.
+    ///
+    /// # Assumptions
+    /// The regions are already removed from the free regions map.
     fn remap_regions(
         &mut self,
         regions: Vec<(CUdeviceptr, usize)>,
@@ -729,7 +733,7 @@ impl Drop for VirtualMemoryPool {
         // Unmap zombie regions first
         for zombie in self.zombie_regions.drain(..) {
             unsafe {
-                vpmm_unmap(zombie.ptr, zombie.size).ok();
+                vpmm_unmap(zombie.ptr, zombie.size).unwrap();
             }
         }
 
