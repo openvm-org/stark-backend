@@ -1,7 +1,5 @@
 #include "fp.h"
-#include "frac_ext.cuh"
 #include "launcher.cuh"
-#include "utils.cuh"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -102,23 +100,6 @@ __global__ void batch_expand_pad_wide_kernel(
     }
 }
 
-template <typename T>
-__global__ void bitrev_kernel(
-    T* __restrict__ buffer,
-    uint32_t const log_n
-) {
-    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (1 << log_n)) {
-        return;
-    }
-    uint32_t rev_idx = rev_len(idx, log_n);
-    if (idx < rev_idx) {
-        auto const tmp = buffer[idx];
-        buffer[idx] = buffer[rev_idx];
-        buffer[rev_idx] = tmp;
-    }
-}
-
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -180,20 +161,5 @@ extern "C" int _batch_expand_pad_wide(
     grid.z = (width + grid.y - 1) / grid.y;
     assert(grid.z <= MAX_GRID_DIM);
     batch_expand_pad_wide_kernel<<<grid, block>>>(out, in, width, padded_height, height);
-    return CHECK_KERNEL();
-}
-
-extern "C" int _bitrev(
-    FracExt* buffer,
-    size_t n
-) {
-    if (n == 0) {
-        return 0;
-    }
-    assert((n & (n - 1)) == 0);
-    uint32_t const log_n = __builtin_ctz(n);
-
-    auto [grid, block] = kernel_launch_params(n);
-    bitrev_kernel<FracExt><<<grid, block>>>(buffer, log_n);
     return CHECK_KERNEL();
 }
