@@ -3,6 +3,8 @@
 
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 
+use crate::prelude::{EF, F};
+
 // relate to supra/ntt_params.cu
 extern "C" {
     fn _generate_all_twiddles(twiddles: *mut std::ffi::c_void, inverse: bool) -> i32;
@@ -35,9 +37,25 @@ extern "C" {
         padded_poly_size: u32,
         poly_count: u32,
     ) -> i32;
+
+    fn _bit_rev_ext(
+        d_out: *mut std::ffi::c_void,
+        d_inp: *const std::ffi::c_void,
+        lg_domain_size: u32,
+        padded_poly_size: u32,
+        poly_count: u32,
+    ) -> i32;
+
+    fn _bit_rev_frac_ext(
+        d_out: *mut std::ffi::c_void,
+        d_inp: *const std::ffi::c_void,
+        lg_domain_size: u32,
+        padded_poly_size: u32,
+        poly_count: u32,
+    ) -> i32;
 }
 
-pub unsafe fn bit_rev<F>(
+pub unsafe fn bit_rev(
     d_out: &DeviceBuffer<F>,
     d_inp: &DeviceBuffer<F>,
     lg_domain_size: u32,
@@ -45,6 +63,38 @@ pub unsafe fn bit_rev<F>(
     poly_count: u32,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_bit_rev(
+        d_out.as_mut_raw_ptr(),
+        d_inp.as_raw_ptr(),
+        lg_domain_size,
+        padded_poly_size,
+        poly_count,
+    ))
+}
+
+pub unsafe fn bit_rev_ext(
+    d_out: &DeviceBuffer<EF>,
+    d_inp: &DeviceBuffer<EF>,
+    lg_domain_size: u32,
+    padded_poly_size: u32,
+    poly_count: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_bit_rev_ext(
+        d_out.as_mut_raw_ptr(),
+        d_inp.as_raw_ptr(),
+        lg_domain_size,
+        padded_poly_size,
+        poly_count,
+    ))
+}
+
+pub unsafe fn bit_rev_frac_ext(
+    d_out: &DeviceBuffer<(EF, EF)>,
+    d_inp: &DeviceBuffer<(EF, EF)>,
+    lg_domain_size: u32,
+    padded_poly_size: u32,
+    poly_count: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_bit_rev_frac_ext(
         d_out.as_mut_raw_ptr(),
         d_inp.as_raw_ptr(),
         lg_domain_size,
@@ -67,7 +117,7 @@ extern "C" {
     ) -> i32;
 }
 
-pub unsafe fn ct_mixed_radix_narrow<F>(
+pub unsafe fn ct_mixed_radix_narrow(
     d_inout: &DeviceBuffer<F>,
     radix: u32,
     lg_domain_size: u32,
