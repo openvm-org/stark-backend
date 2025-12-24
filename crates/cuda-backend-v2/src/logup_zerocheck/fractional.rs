@@ -1,5 +1,6 @@
-use std::convert::TryInto;
+use std::{convert::TryInto, mem::transmute};
 
+use openvm_cuda_backend::cuda::ntt::bit_rev_frac_ext;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, cuda_memcpy},
     d_buffer::DeviceBuffer,
@@ -17,12 +18,9 @@ use tracing::{debug_span, instrument};
 use super::errors::FractionalSumcheckError;
 use crate::{
     EF,
-    cuda::{
-        logup_zerocheck::{
-            _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, frac_build_tree_layer,
-            frac_compute_round, frac_fold_columns,
-        },
-        matrix::bitrev,
+    cuda::logup_zerocheck::{
+        _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, frac_build_tree_layer,
+        frac_compute_round, frac_fold_columns,
     },
     poly::evals_eq_hypercube,
     sponge::DuplexSpongeGpu,
@@ -57,7 +55,16 @@ pub fn fractional_sumcheck_gpu(
 
     // We store it in bit-reversal order for coalesced memory accesses.
     unsafe {
-        bitrev(&mut layer, total_leaves).map_err(FractionalSumcheckError::BitReversal)?;
+        // SAFETY: Frac<EF> has exact same memory layout and alignment as (EF, EF).
+        let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
+        bit_rev_frac_ext(
+            buf,
+            buf,
+            total_rounds as u32,
+            total_leaves.try_into().unwrap(),
+            1,
+        )
+        .map_err(FractionalSumcheckError::BitReversal)?;
     }
 
     for i in 0..total_rounds {
