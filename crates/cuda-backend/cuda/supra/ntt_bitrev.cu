@@ -184,3 +184,10 @@ extern "C" int _bit_rev_ext(bb31_4_t* d_out, const bb31_4_t* d_inp,
 {
     return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
 }
+
+using frac_fpext_t = std::pair<bb31_4_t, bb31_4_t>;
+extern "C" int _bit_rev_frac_ext(frac_fpext_t* d_out, const frac_fpext_t* d_inp,
+    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
+{
+    return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
+}
