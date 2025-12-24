@@ -2,10 +2,7 @@
 #include "launcher.cuh"
 #include "utils.cuh"
 
-constexpr uint32_t LOG_WARP_SIZE = 5;
-
-template <bool intt>
-__device__ __forceinline__ Fp sum_or_semi_sum(Fp&& x) {
+template <bool intt> __device__ __forceinline__ Fp sum_or_semi_sum(Fp &&x) {
     if constexpr (intt) {
         return x.halve();
     } else {
@@ -15,7 +12,7 @@ __device__ __forceinline__ Fp sum_or_semi_sum(Fp&& x) {
 
 template <bool intt>
 __global__ void batch_ntt_kernel(
-    Fp* __restrict__ buffer,
+    Fp *__restrict__ buffer,
     uint32_t const l_skip,
     uint32_t const cnt_blocks
 ) {
@@ -41,7 +38,7 @@ __global__ void batch_ntt_kernel(
         }
         __syncthreads();
 
-        for (uint32_t log_len = l_skip; log_len --> log_interwarp;) {
+        for (uint32_t log_len = l_skip; log_len-- > log_interwarp;) {
             if (active_thread) {
                 uint32_t const len = 1u << log_len;
                 if (!(i & len)) {
@@ -60,15 +57,17 @@ __global__ void batch_ntt_kernel(
     }
 
     if (active_thread) {
-        for (uint32_t log_len = log_interwarp; log_len --> 0;) {
+        for (uint32_t log_len = log_interwarp; log_len-- > 0;) {
             uint32_t const len = 1u << log_len;
-            Fp const other_value = Fp::fromRaw(__shfl_xor_sync(0xffffffff, this_thread_value.asRaw(), len));
+            Fp const other_value =
+                Fp::fromRaw(__shfl_xor_sync(0xffffffff, this_thread_value.asRaw(), len));
             if (!(i & len)) {
                 // this_thread_value = sum, other_value = diff
                 this_thread_value = sum_or_semi_sum<intt>(this_thread_value + other_value);
             } else {
                 // this_thread_value = diff, other_value = sum
-                this_thread_value = sum_or_semi_sum<intt>(this_thread_value - other_value) * inv_twiddle;
+                this_thread_value =
+                    sum_or_semi_sum<intt>(this_thread_value - other_value) * inv_twiddle;
             }
             inv_twiddle *= inv_twiddle;
         }
@@ -81,7 +80,7 @@ __global__ void batch_ntt_kernel(
 }
 
 extern "C" int _batch_ntt_small(
-    Fp* buffer,
+    Fp *buffer,
     size_t const l_skip,
     size_t const cnt_blocks,
     bool const is_intt
@@ -93,9 +92,15 @@ extern "C" int _batch_ntt_small(
     size_t const smem_size = (l_skip > LOG_WARP_SIZE) ? (sizeof(Fp) * threads_per_block) : 0;
     assert((1 << l_skip) <= 1024);
     if (is_intt) {
-        batch_ntt_kernel<true><<<(cnt_blocks + threads_y - 1) / threads_y, dim3{threads_x, threads_y, 1}, smem_size>>>(buffer, l_skip, cnt_blocks);
+        batch_ntt_kernel<true>
+            <<<(cnt_blocks + threads_y - 1) / threads_y,
+               dim3{threads_x, threads_y, 1},
+               smem_size>>>(buffer, l_skip, cnt_blocks);
     } else {
-        batch_ntt_kernel<false><<<(cnt_blocks + threads_y - 1) / threads_y, dim3{threads_x, threads_y, 1}, smem_size>>>(buffer, l_skip, cnt_blocks);
+        batch_ntt_kernel<false>
+            <<<(cnt_blocks + threads_y - 1) / threads_y,
+               dim3{threads_x, threads_y, 1},
+               smem_size>>>(buffer, l_skip, cnt_blocks);
     }
 
     return CHECK_KERNEL();

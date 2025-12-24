@@ -59,6 +59,8 @@ pub enum RsCodeMatrixError {
     CustomBatchIntt(CudaError),
     #[error("mle_interpolate_stage_2d [step={step}] error: {error}")]
     MleInterpolateStage2d { error: CudaError, step: u32 },
+    #[error("bit_rev error: {0}")]
+    BitRev(CudaError),
 }
 
 #[derive(Error, Debug)]
@@ -94,10 +96,7 @@ pub enum WhirProverError {
     #[error("split_ext_poly_to_base_col_major_matrix [whir_round={whir_round}]: {error}")]
     SplitExtPoly { error: CudaError, whir_round: usize },
     #[error("mle_evals_to_coeffs_inplace [whir_round={whir_round}]: {error}")]
-    MleEvalToCoeff {
-        error: KernelError,
-        whir_round: usize,
-    },
+    MleEvalToCoeff { error: CudaError, whir_round: usize },
     #[error("batch_expand_pad [whir_round={whir_round}]: {error}")]
     BatchExpandPad { error: CudaError, whir_round: usize },
     #[error("eval_poly_ext_at_point_from_base [whir_round={whir_round}]: {error}")]

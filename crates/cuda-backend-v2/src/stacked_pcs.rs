@@ -1,10 +1,10 @@
-use std::{ffi::c_void, sync::Arc};
+use std::{cmp::max, ffi::c_void, sync::Arc};
 
 use getset::Getters;
 use itertools::Itertools;
 use openvm_cuda_backend::{
     base::{DeviceMatrix, DeviceMatrixView},
-    cuda::kernels::lde::batch_expand_pad,
+    cuda::{kernels::lde::batch_expand_pad, ntt::bit_rev},
     ntt::batch_ntt,
 };
 use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer, memory_manager::MemTracker};
@@ -16,10 +16,10 @@ use crate::{
     Digest, F, GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError,
     cuda::{
         batch_ntt_small::batch_ntt_small, matrix::batch_expand_pad_wide,
-        poly::mle_interpolate_stage_2d,
+        mle_interpolate::MLE_SHARED_TILE_LOG_SIZE,
     },
     merkle_tree::MerkleTreeGpu,
-    poly::PleMatrix,
+    poly::{PleMatrix, mle_interpolate_stages},
 };
 
 #[derive(Getters)]
@@ -229,34 +229,113 @@ pub fn rs_code_matrix(
             }
         }
     }
-    let n = log2_strict_usize(height) - l_skip;
-    // Go through coordinates X_1, ..., X_n and interpolate each one from s(0), s(1) -> s(0) +
-    // (s(1) - s(0)) X_i
-    for i in 0..n {
-        let step = 1u32 << (l_skip + i);
-        // SAFETY: `codewords` is properly initialized and step is in bounds.
+    // MLE interpolation: go through coordinates X_1, ..., X_n and interpolate each one from
+    // s(0), s(1) -> s(0) + (s(1) - s(0)) X_i
+    //
+    // Two-phase strategy with bit-reversal for efficiency:
+    // - Phase 1 (natural order): Process stages with log_step < threshold using optimized kernels
+    // - Bit-reverse the entire buffer (needed for NTT anyway)
+    // - Phase 2 (bit-reversed order): Process remaining stages, which now have small log_steps due
+    //   to bit-reversal (original log_step k → new log_step = log_codeword_height - 1 - k)
+    let log_height = log2_strict_usize(height);
+    let log_codeword_height = log2_strict_usize(codeword_height);
+    let n = log_height - l_skip;
+
+    let first_log_step = l_skip;
+    let last_log_step = log_height - 1; // inclusive
+    // Threshold logic:
+    // - We need `log_height - 1 - threshold <= MLE_SHARED_TILE_LOG_SIZE - 1` so the bit reversed
+    //   stages use shared memory
+    // - The larger `log_blowup` is, the more striding between memory accesses there is after
+    //   bit-reversal, which leads to uncoalesced accesses.
+    let threshold = {
+        let min_threshold = log_height.saturating_sub(MLE_SHARED_TILE_LOG_SIZE as usize);
+        let saved = min_threshold; // number of big stages avoided
+        let stride_penalty = 1usize << log_blowup; // 2,4,8,16
+        let min_saved = 2 * stride_penalty; // tune
+        if saved < min_saved {
+            // skip mid bit-reversal, keep natural order
+            log_height
+        } else {
+            max(MLE_SHARED_TILE_LOG_SIZE as usize, min_threshold)
+        }
+    };
+
+    // Phase 1: Process stages with log_step < threshold (natural order, contiguous data)
+    let phase1_end = last_log_step.min(threshold.saturating_sub(1));
+    if n > 0 && first_log_step <= phase1_end {
+        // SAFETY: `codewords` is properly initialized and parameters are valid.
         unsafe {
-            mle_interpolate_stage_2d(
+            mle_interpolate_stages(
                 codewords.as_mut_ptr(),
-                width.try_into().unwrap(),
-                height as u32,
+                width as u16,
                 codeword_height as u32,
-                step,
-                true, // MLE evaluation-to-coefficient
+                log_blowup as u32, /* log_stride: meaningful_count = codeword_height >>
+                                    * log_blowup = height */
+                first_log_step as u32,
+                phase1_end as u32, // inclusive
+                true,              // eval to coeff
+                false,             // natural order (not bit-reversed)
             )
-            .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d { error, step })?;
+            .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d {
+                error,
+                step: 1 << first_log_step,
+            })?;
+        }
+    }
+
+    // Bit-reverse the entire buffer in-place (required for NTT, also enables efficient Phase 2)
+    unsafe {
+        bit_rev(
+            &codewords,
+            &codewords,
+            log_codeword_height as u32,
+            codeword_height as u32,
+            width as u32,
+        )
+        .map_err(RsCodeMatrixError::BitRev)?;
+    }
+
+    // Phase 2: Process remaining stages (bit-reversed order, now with small steps)
+    // After bit-reversal: original log_step k → new log_step = log_codeword_height - 1 - k
+    // Original stages [threshold, last_log_step] map to physical log_steps [log_blowup,
+    // log_codeword_height - 1 - threshold] In bit-reversed mode, thread step = physical step >>
+    // log_stride, so thread log_steps are: [0, log_codeword_height - 1 - threshold -
+    // log_blowup] = [0, log_height - 1 - threshold]
+    if n > 0 && threshold <= last_log_step {
+        // Thread-space log_steps (physical log_step - log_blowup)
+        let phase2_first_thread = 0;
+        let phase2_last_thread = log_height - 1 - threshold;
+
+        // After bit-reversal, meaningful data is at indices that are multiples of 2^log_blowup
+        // SAFETY: `codewords` is properly initialized and parameters are valid.
+        unsafe {
+            mle_interpolate_stages(
+                codewords.as_mut_ptr(),
+                width as u16,
+                codeword_height as u32,
+                log_blowup as u32, // log_stride: meaningful indices at tidx << log_blowup
+                phase2_first_thread as u32,
+                phase2_last_thread as u32, // inclusive (thread-space)
+                true,                      // eval to coeff
+                true,                      // bit-reversed order (strided access)
+            )
+            .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d {
+                error,
+                step: 1 << phase2_first_thread,
+            })?;
         }
     }
     // Compute RS codeword on a prismalinear polynomial in coefficient form:
     // We use that the coefficients are in a basis that exactly corresponds to the standard
     // monomial univariate basis. Hence RS codeword is just cosetDFT on the
-    // relevant smooth domain
+    // relevant smooth domain. Note: bit-reversal already done above.
     batch_ntt(
         &codewords,
         log2_strict_usize(codeword_height) as u32,
         0u32,
         width as u32,
-        true,
+        false, // bit-reversal already done
         false,
     );
     let code_matrix = DeviceMatrix::new(Arc::new(codewords), codeword_height, width);
