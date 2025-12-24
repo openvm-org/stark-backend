@@ -25,9 +25,10 @@ use crate::{
     D_EF, Digest, EF, F, WhirProverError,
     cuda::{
         batch_ntt_small::batch_ntt_small,
+        mle_interpolate::mle_interpolate_stage_ext,
         poly::{
             batch_eq_hypercube_stage, eq_hypercube_stage_ext, eval_poly_ext_at_point_from_base,
-            mle_interpolate_stage_ext, transpose_fp_to_fpext_vec,
+            transpose_fp_to_fpext_vec,
         },
         sumcheck::fold_mle,
         whir::{
@@ -290,9 +291,8 @@ pub fn prove_whir_opening_gpu(
         }
         // We convert f from column major in EF to column-major in F.
         // The MLE interpolation is the same since it's linear.
-        // PERF[jpw]: it may be more performant to interpolate in EF-form for better memory
-        // coalescing, but our batch expand kernel is in the base field so the implementation is
-        // currently simpler to go directly to F first.
+        // PERF[jpw]: We only use warp/shmem fused kernels in the forward direction. If we batch
+        // expand first like in rs_code_matrix, we can bit reverse in the middle.
         mle_evals_to_coeffs_inplace(&mut g_coeffs, m - k_whir)
             .map_err(|error| WhirProverError::MleEvalToCoeff { error, whir_round })?;
         let (g_tree, z_0) = if !is_last_round {
