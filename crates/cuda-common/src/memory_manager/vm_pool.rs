@@ -293,7 +293,7 @@ impl VirtualMemoryPool {
 
     /// Reclaims zombie regions whose events have completed.
     ///
-    /// Zombie regions are old VAs that have been double-mapped to new locations during defrag.
+    /// Zombies are old regions that have been double-mapped to new locations during defrag.
     /// Once the associated event completes (meaning no GPU work is using the old VA),
     /// we can safely unmap the old VA and return it to `unmapped_regions` for reuse.
     fn cleanup_zombie_regions(&mut self) {
@@ -647,7 +647,7 @@ impl VirtualMemoryPool {
 
     /// Remap a list of regions to a new base address via double-mapping.
     ///
-    /// The regions are mapped consecutively starting at `dst`. The old VAs remain mapped
+    /// The regions are mapped consecutively starting at `dst`. The old regions remain mapped
     /// (double-mapped) and are added to `zombie_regions` by the caller for async unmap.
     ///
     /// Returns the starting pointer of the new remapped free region or `CUdeviceptr::MAX` if no
