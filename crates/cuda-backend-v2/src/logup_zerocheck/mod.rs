@@ -628,9 +628,8 @@ impl<'a> LogupZerocheckGpu<'a> {
             let d_main_parts = main_parts.to_device().unwrap();
 
             let n_lift = n.max(0) as usize;
-            // Heuristic: either we are memory bound, in which case we have dropped the RS-codewords
-            // matrix which takes up at least `total_main_cells * size_of::<F>()` memory, or we are
-            // not memory boundy and hence can set a high limit regardless.
+            // TODO[jpw] We currently set `save_memory = true` even when we cache the RS-codewords
+            // matrix, so the calculation of max_temp_bytes needs to be revisited.
             let max_temp_bytes = if self.save_memory {
                 (total_main_cells << self.pk.params.log_blowup) * size_of::<F>()
             } else {
