@@ -12,7 +12,7 @@ use super::cuda::*;
 use crate::{
     common::set_device,
     error::MemoryError,
-    stream::{current_stream_id, current_stream_sync, CudaEvent, CudaStreamId},
+    stream::{current_stream_id, current_stream_sync, default_stream_wait, CudaEvent, CudaStreamId},
 };
 
 #[link(name = "cudart")]
@@ -96,6 +96,14 @@ struct FreeRegion {
     id: usize,
 }
 
+#[derive(Debug)]
+struct ZombieRegion {
+    ptr: CUdeviceptr,
+    size: usize,
+    event: Arc<CudaEvent>,
+}
+
+
 /// Virtual memory pool implementation.
 pub(super) struct VirtualMemoryPool {
     // Virtual address space roots
@@ -112,6 +120,9 @@ pub(super) struct VirtualMemoryPool {
 
     // Unmapped regions: (ptr, size)
     unmapped_regions: BTreeMap<CUdeviceptr, usize>,
+
+    // Zombie regions: (remapped, but not unmapped yet)
+    zombie_regions: Vec<ZombieRegion>,
 
     // Number of free calls (used to assign ids to free regions)
     free_num: usize,
@@ -189,6 +200,7 @@ impl VirtualMemoryPool {
             } else {
                 BTreeMap::new()
             },
+            zombie_regions: Vec::new(),
             free_num: 0,
             page_size,
             va_size,
@@ -234,6 +246,10 @@ impl VirtualMemoryPool {
             requested != 0 && requested % self.page_size == 0,
             "Requested size must be a multiple of the page size"
         );
+
+        // Phase 0: Cleanup zombie regions
+        self.cleanup_zombie_regions();
+
         // Phase 1: Zero-cost attempts
         let mut best_region = self.find_best_fit(requested, stream_id);
 
@@ -272,6 +288,27 @@ impl VirtualMemoryPool {
         })
     }
 
+    fn cleanup_zombie_regions(&mut self) {
+        let mut i = 0;
+        while i < self.zombie_regions.len() {
+            if self.zombie_regions[i].event.completed() {
+                let zombie = self.zombie_regions.swap_remove(i);
+                if let Err(e) = unsafe { vpmm_unmap(zombie.ptr, zombie.size) } {
+                    tracing::error!(
+                        "vpmm_unmap (zombie) failed: addr={:#x}, size={}: {:?}",
+                        zombie.ptr,
+                        zombie.size,
+                        e
+                    );
+                }
+                self.insert_unmapped_region(zombie.ptr, zombie.size);
+                // Don't increment i - swap_remove moved last element here
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     /// Phase 1: Try to find a suitable free region without defragmentation
     /// Returns address if found, None otherwise
     fn find_best_fit(&mut self, requested: usize, stream_id: CudaStreamId) -> Option<CUdeviceptr> {
@@ -286,7 +323,7 @@ impl VirtualMemoryPool {
             return None;
         }
 
-        // 1a. Prefer current stream (smallest fit)
+        // 1a. Prefer current stream (smallest fit) - could be not completed
         if let Some((addr, _)) = candidates
             .iter()
             .filter(|(_, region)| region.stream_id == stream_id)
@@ -295,19 +332,15 @@ impl VirtualMemoryPool {
             return Some(*addr);
         }
 
-        // 1b. Try the oldest from other streams
-        if let Some((addr, region)) = candidates.iter_mut().min_by_key(|(_, region)| region.id) {
-            if !region.event.completed() {
-                if let Err(e) = region.event.synchronize() {
-                    tracing::error!("Event synchronize failed during find_best_fit: {:?}", e);
-                    return None;
-                }
-            }
-            region.stream_id = stream_id;
-            Some(*addr)
-        } else {
-            None
-        }
+        // 1b. Other streams (smallest fit) - ONLY if already completed (no sync)
+        candidates
+            .iter_mut()
+            .filter(|(_, region)| region.event.completed())
+            .min_by_key(|(_, region)| region.size)
+            .map(|(addr, region)| {
+                region.stream_id = stream_id;
+                *addr
+            })
     }
 
     /// Frees a pointer and returns the size of the freed memory.
@@ -551,16 +584,16 @@ impl VirtualMemoryPool {
         }
         debug_assert!(allocate_size == 0 || allocated_ptr <= dst);
 
-        // Pull free regions (oldest first) until we've gathered enough pages.
+        // Pull free regions (current stream first, the other stream oldest first) until we've gathered enough pages.
         let mut to_defrag: Vec<(CUdeviceptr, usize)> = Vec::new();
-        let mut oldest_free_regions: Vec<_> = self
+        let mut ordered_free_regions: Vec<_> = self
             .free_regions
             .iter()
             .filter(|(&addr, _)| allocate_size == 0 || addr != allocated_ptr)
-            .map(|(&addr, region)| (region.id, addr))
+            .map(|(&addr, region)| (region.stream_id != stream_id, region.id, addr))
             .collect();
-        oldest_free_regions.sort_by_key(|(id, _)| *id);
-        for (_, addr) in oldest_free_regions {
+        ordered_free_regions.sort_by_key(|(is_other, id, _)| (*is_other, *id));
+        for (is_other, _, addr) in ordered_free_regions {
             if remaining == 0 {
                 break;
             }
@@ -569,14 +602,19 @@ impl VirtualMemoryPool {
                 .free_regions
                 .remove(&addr)
                 .expect("BUG: free region disappeared");
-            if !region.event.completed() {
-                region.event.synchronize().map_err(|e| {
-                    tracing::error!("Event synchronize failed during defrag: {:?}", e);
-                    MemoryError::from(e)
-                })?;
+
+            if is_other && !region.event.completed() {
+                default_stream_wait(&region.event)?;
             }
 
             let take = remaining.min(region.size);
+
+            self.zombie_regions.push(ZombieRegion { 
+                ptr: addr, 
+                size: take, 
+                event: region.event.clone() 
+            });
+
             to_defrag.push((addr, take));
             remaining -= take;
 
@@ -628,19 +666,19 @@ impl VirtualMemoryPool {
 
         let mut curr_dst = dst;
         for (region_addr, region_size) in regions {
-            // Unmap the region
-            unsafe {
-                vpmm_unmap(region_addr, region_size).map_err(|e| {
-                    tracing::error!(
-                        "vpmm_unmap failed: addr={:#x}, size={}: {:?}",
-                        region_addr,
-                        region_size,
-                        e
-                    );
-                    MemoryError::from(e)
-                })?;
-            }
-            self.insert_unmapped_region(region_addr, region_size);
+            // // Unmap the region
+            // unsafe {
+            //     vpmm_unmap(region_addr, region_size).map_err(|e| {
+            //         tracing::error!(
+            //             "vpmm_unmap failed: addr={:#x}, size={}: {:?}",
+            //             region_addr,
+            //             region_size,
+            //             e
+            //         );
+            //         MemoryError::from(e)
+            //     })?;
+            // }
+            // self.insert_unmapped_region(region_addr, region_size);
 
             // Remap the region
             let num_pages = region_size / self.page_size;
@@ -695,6 +733,12 @@ impl VirtualMemoryPool {
 impl Drop for VirtualMemoryPool {
     fn drop(&mut self) {
         current_stream_sync().unwrap();
+
+        // Unmap zombie regions first
+        for zombie in self.zombie_regions.drain(..) {
+            unsafe { vpmm_unmap(zombie.ptr, zombie.size).ok(); }
+        }
+
         for (ptr, handle) in self.active_pages.drain() {
             unsafe {
                 vpmm_unmap(ptr, self.page_size).unwrap();
