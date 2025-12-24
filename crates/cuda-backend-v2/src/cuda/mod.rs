@@ -10,10 +10,14 @@ pub mod batch_ntt_small;
 pub mod logup_zerocheck;
 pub mod matrix;
 pub mod merkle_tree;
+pub mod mle_interpolate;
 pub mod poly;
 pub mod sponge;
 pub mod stacked_reduction;
 pub mod whir;
+
+/// Log of warp size (32)
+pub const LOG_WARP_SIZE: usize = 5;
 
 pub mod sumcheck {
     use std::ffi::c_void;
