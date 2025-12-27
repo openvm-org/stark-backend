@@ -81,11 +81,12 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
     const FpExt *__restrict__ lambda_pows, // pointer to lambda_pows at window start
     const Round0UniPacket
         *__restrict__ z_packets, // pointer to eq_uni, k_rot_0, and k_rot_1 evals for z_int
-    const Fp *__restrict__ omega_skip_pows,     // [2^l_skip]
-    const Fp *__restrict__ inv_lagrange_denoms, // [domain_size][2^l_skip]
-    FpExt *block_sums, // [gridDim.z][gridDim.y][domain_size] for [window_base][blockIdx.y][z_int]
-    uint32_t height,   // trace height
-    uint32_t width,    // trace width
+    const Fp *__restrict__ omega_skip_pows, // [2^l_skip]
+    const Fp *__restrict__ inv_lagrange_denoms,
+    FpExt
+        *__restrict__ block_sums, // [gridDim.z][gridDim.y][domain_size] for [window_base][blockIdx.y][z_int]
+    uint32_t height,              // trace height
+    uint32_t width,               // trace width
     uint32_t l_skip,
     uint32_t log_domain_size,
     uint32_t num_x,       // 1 << n_lift
@@ -214,24 +215,26 @@ __global__ void initialize_k_rot_from_eq_segments_kernel(
 }
 
 // Assumes we are not in degenerate case, in particular n = n_lift > 0
+// Uses warp-aggregated atomics for reduction - no shared memory or __syncthreads() needed.
 __global__ void stacked_reduction_sumcheck_mle_round_kernel(
-    const FpExt *const *q_evals, // pointers to matrices of same height, one per [commit_idx]
-    const FpExt *eq_r_ns,        // pointer to EqEvalSegments
-    const FpExt *k_rot_ns,       // pointer to `k_rot` segments
-    const UnstackedSlice *unstacked_cols, // pointer to unstacked_cols at window start
-    const FpExt *lambda_pows,             // pointer to lambda_pows at window start
-    FpExt *block_sums,
-    uint32_t q_height, // height of each matrix in q_evals
+    const FpExt *__restrict__ const
+        *__restrict__ q_evals,          // pointers to matrices of same height, one per [commit_idx]
+    const FpExt *__restrict__ eq_r_ns,  // pointer to EqEvalSegments
+    const FpExt *__restrict__ k_rot_ns, // pointer to `k_rot` segments
+    const UnstackedSlice *__restrict__ unstacked_cols, // pointer to unstacked_cols at window start
+    const FpExt *__restrict__ lambda_pows,             // pointer to lambda_pows at window start
+    uint64_t *__restrict__ output, // [S_DEG * 4] - atomic accumulator, reduced on CPU
+    uint32_t q_height,             // height of each matrix in q_evals
     uint32_t window_len,
     uint32_t num_y
 ) {
-    extern __shared__ FpExt shared[];
-
+    extern __shared__ char smem[];
+    FpExt *shared = (FpExt *)smem;
     // Map phase: compute local sum by striding over window
     FpExt local_sums[S_DEG];
 // Initialize accumulators
 #pragma unroll
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < S_DEG; i++) {
         local_sums[i] = FpExt(0);
     }
 
@@ -242,12 +245,19 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
     if (active_thread) {
         uint32_t num_evals = num_y * 2;
 
+        auto eq_0 = get_eq_cube(eq_r_ns, num_evals, y_int << 1);
+        auto eq_1 = get_eq_cube(eq_r_ns, num_evals, (y_int << 1) | 1);
+        auto eq_c1 = eq_1 - eq_0;
+        auto k_rot_0 = get_eq_cube(k_rot_ns, num_evals, y_int << 1);
+        auto k_rot_1 = get_eq_cube(k_rot_ns, num_evals, (y_int << 1) | 1);
+        auto k_rot_c1 = k_rot_1 - k_rot_0;
+
         // We sum over window at a stride, where stride = gridDim.y is tuned based on compute / memory
         // Currently assumes blockDim.y = 1
         for (uint32_t window_idx = window_idx_base; window_idx < window_len;
              window_idx += gridDim.y) {
             UnstackedSlice s = unstacked_cols[window_idx];
-            const FpExt *q = q_evals[s.commit_idx];
+            const FpExt *__restrict__ q = q_evals[s.commit_idx];
 
             auto log_height = s.log_height;
             auto col_idx = s.stacked_col_idx;
@@ -257,13 +267,6 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
             auto q_0 = q[q_offset + (y_int << 1)];
             auto q_1 = q[q_offset + (y_int << 1) + 1];
             auto q_c1 = q_1 - q_0;
-
-            auto eq_0 = get_eq_cube(eq_r_ns, num_evals, y_int << 1);
-            auto eq_1 = get_eq_cube(eq_r_ns, num_evals, (y_int << 1) | 1);
-            auto eq_c1 = eq_1 - eq_0;
-            auto k_rot_0 = get_eq_cube(k_rot_ns, num_evals, y_int << 1);
-            auto k_rot_1 = get_eq_cube(k_rot_ns, num_evals, (y_int << 1) | 1);
-            auto k_rot_c1 = k_rot_1 - k_rot_0;
 
 #pragma unroll
             for (int x_int = 1; x_int <= S_DEG; ++x_int) {
@@ -280,34 +283,32 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
     }
 
 #pragma unroll
-    // Reduce phase: for each x_int
     for (int idx = 0; idx < S_DEG; idx++) {
-        if (active_thread) {
-            FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
-
-            if (threadIdx.x == 0) {
-                block_sums[(window_idx_base * gridDim.x + blockIdx.x) * S_DEG + idx] = reduced;
-            }
+        FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
+        if (threadIdx.x == 0) {
+            sumcheck::atomic_add_fpext_to_u64(output + idx * 4, reduced);
         }
-        __syncthreads(); // Needed before reusing shared memory
+        __syncthreads();
     }
 }
 
 // Degenerate case
-// Requires there to be a single block (gridDim.x must be 1) so we can do block reduction
+// Uses warp-aggregated atomics for reduction - no shared memory or __syncthreads() needed.
 __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
-    const FpExt *const *q_evals, // pointers to matrices of same height, one per [commit_idx]
-    const FpExt *eq_ub_ptr,      // pointer to `eq_ub_per_trace` at window start
-    FpExt eq_r,                  // pointer to EqEvalSegments
-    FpExt k_rot_r,               // pointer to `k_rot` segments
-    const UnstackedSlice *unstacked_cols, // pointer to unstacked_cols at window start
-    const FpExt *lambda_pows,             // pointer to lambda_pows at window start
-    FpExt *output,
-    uint32_t q_height, // height of each matrix in q_evals
+    const FpExt *__restrict__ const
+        *__restrict__ q_evals, // pointers to matrices of same height, one per [commit_idx]
+    const FpExt *__restrict__ eq_ub_ptr, // pointer to `eq_ub_per_trace` at window start
+    FpExt eq_r,                          // pointer to EqEvalSegments
+    FpExt k_rot_r,                       // pointer to `k_rot` segments
+    const UnstackedSlice *__restrict__ unstacked_cols, // pointer to unstacked_cols at window start
+    const FpExt *__restrict__ lambda_pows,             // pointer to lambda_pows at window start
+    uint64_t *__restrict__ output, // [S_DEG * 4] - atomic accumulator, reduced on CPU
+    uint32_t q_height,             // height of each matrix in q_evals
     uint32_t window_len,
     uint32_t shift_factor // = l_skip + round
 ) {
-    extern __shared__ FpExt shared[];
+    extern __shared__ char smem[];
+    FpExt *shared = (FpExt *)smem;
 
     FpExt local_sums[S_DEG];
 #pragma unroll
@@ -317,7 +318,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
 
     for (uint32_t window_idx = threadIdx.x; window_idx < window_len; window_idx += blockDim.x) {
         UnstackedSlice s = unstacked_cols[window_idx];
-        const FpExt *q = q_evals[s.commit_idx];
+        const FpExt *__restrict__ q = q_evals[s.commit_idx];
 
         auto col_idx = s.stacked_col_idx;
         auto row_idx = s.stacked_row_idx;
@@ -348,10 +349,10 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
     }
 
 #pragma unroll
-    for (int i = 0; i < S_DEG; i++) {
-        FpExt reduced = sumcheck::block_reduce_sum(local_sums[i], shared);
+    for (int idx = 0; idx < S_DEG; idx++) {
+        FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
         if (threadIdx.x == 0) {
-            output[i] = reduced;
+            sumcheck::atomic_add_fpext_to_u64(output + idx * 4, reduced);
         }
         __syncthreads();
     }
@@ -382,7 +383,7 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     const FpExt *lambda_pows,
     const Round0UniPacket *z_packets,
     const Fp *omega_skip_pows,     // [2^l_skip]
-    const Fp *inv_lagrange_denoms, // [domain_size][2^l_skip]
+    const Fp *inv_lagrange_denoms, // transposed: [skip_domain][domain_size]
     FpExt *block_sums,
     FpExt *output, // length should be domain_size
     uint32_t height,
@@ -404,6 +405,8 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     dim3 grid(grid_x, grid_y, grid_z);
 
     size_t shmem_bytes = sizeof(FpExt) * block.x * block.y;
+    // Ensure that atomic add does not overflow u64
+    assert((size_t)domain_size * num_x * grid_z < (size_t)1u << 32);
 
     stacked_reduction_round0_block_sum_kernel<<<grid, block, shmem_bytes>>>(
         eq_r_ns,
@@ -477,59 +480,46 @@ extern "C" int _initialize_k_rot_from_eq_segments(
     return CHECK_KERNEL();
 }
 
-extern "C" uint32_t _stacked_reduction_mle_required_temp_buffer_size(
-    uint32_t num_y,
-    uint16_t thread_window_stride
-) {
-    assert(thread_window_stride <= MAX_GRID_DIM);
-    auto [grid, block] = kernel_launch_params(num_y, 512);
-    grid.y = static_cast<uint32_t>(thread_window_stride);
-    return grid.y * grid.x * S_DEG;
-}
-
 extern "C" int _stacked_reduction_sumcheck_mle_round(
     const FpExt *const *q_evals,
     const FpExt *eq_r_ns,
     const FpExt *k_rot_ns,
     const UnstackedSlice *unstacked_cols,
     const FpExt *lambda_pows,
-    FpExt *block_sums,
-    FpExt *output,
+    uint64_t *output, // [S_DEG * D_EF] - atomic accumulator, reduced on CPU
     uint32_t q_height,
     uint32_t window_len,
     uint32_t num_y,
-    uint16_t thread_window_stride // how many elements in window to sum in one thread
+    uint32_t sm_count
 ) {
-    // PERF[jpw]: we could thread over columns too
-    // NOTE: update above temp_buffer_size function if launch params change
-    auto [grid, block] = kernel_launch_params(num_y, 512);
-    grid.y = static_cast<uint32_t>(thread_window_stride);
-    unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;
-    size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
+    // Smaller block size for more eligible warps to hide latency
+    auto [grid, block] = kernel_launch_params(num_y, 256);
+    assert(sm_count);
+
+    // Heuristic auto-tuning for window-stride (grid.y):
+    // - Increase work per thread (reduce atomics) by targeting multiple window iterations/thread
+    // - Ensure enough total blocks to keep SMs busy when num_y is small
+    constexpr uint32_t WAVES_TARGET = 4; // blocks/SM target
+    constexpr uint32_t ITERS_MIN = 4;    // prefer >= this many window iterations/thread
+    constexpr uint32_t ITERS_MAX = 16;   // prefer <= this many window iterations/thread
+
+    uint32_t stride_occ = div_ceil(sm_count * WAVES_TARGET, grid.x);
+    uint32_t stride_loop_lo = div_ceil(window_len, ITERS_MAX);
+    uint32_t stride_loop_hi = div_ceil(window_len, ITERS_MIN);
+
+    uint32_t lo = std::max(1u, std::max(stride_occ, stride_loop_lo));
+    uint32_t hi = std::min(std::min(window_len, MAX_GRID_DIM), stride_loop_hi);
+
+    uint32_t tuned_stride = (lo <= hi) ? lo : std::min(lo, std::min(window_len, MAX_GRID_DIM));
+    grid.y = tuned_stride;
+
+    // Ensure that atomic add does not overflow u64
+    assert((size_t)num_y * grid.y < (size_t)1u << 32);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     stacked_reduction_sumcheck_mle_round_kernel<<<grid, block, shmem_bytes>>>(
-        q_evals,
-        eq_r_ns,
-        k_rot_ns,
-        unstacked_cols,
-        lambda_pows,
-        block_sums,
-        q_height,
-        window_len,
-        num_y
+        q_evals, eq_r_ns, k_rot_ns, unstacked_cols, lambda_pows, output, q_height, window_len, num_y
     );
-
-    int err = CHECK_KERNEL();
-    if (err != 0)
-        return err;
-
-    auto num_blocks = grid.x * grid.y;
-    auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
-    unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
-    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
-    // There are s_deg = 2 final outputs, so gridDim.x = 2 for exactly 2 blocks
-    sumcheck::static_final_reduce_block_sums<S_DEG>
-        <<<S_DEG, reduce_block, reduce_shmem>>>(block_sums, output, num_blocks);
 
     return CHECK_KERNEL();
 }
@@ -541,17 +531,17 @@ extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
     FpExt k_rot_r,
     const UnstackedSlice *unstacked_cols,
     const FpExt *lambda_pows,
-    FpExt *output,
+    uint64_t *output, // [S_DEG * 4] - atomic accumulator, reduced on CPU
     uint32_t q_height,
     uint32_t window_len,
     uint32_t l_skip,
     uint32_t round
 ) {
     auto shift_factor = l_skip + round;
-    dim3 block(std::min(window_len, 512u));
+    dim3 block(std::min(window_len, 256u));
     dim3 grid(1);
-    unsigned int num_warps = div_ceil(block.x, WARP_SIZE);
-    size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
+    // block.x <= 512 < 2^32 so atomic u64 will not overflow
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     stacked_reduction_sumcheck_mle_round_degenerate_kernel<<<grid, block, shmem_bytes>>>(
         q_evals,

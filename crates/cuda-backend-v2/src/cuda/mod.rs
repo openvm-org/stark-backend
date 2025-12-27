@@ -7,6 +7,7 @@ use stark_backend_v2::prover::fractional_sumcheck_gkr::Frac;
 use crate::{EF, F};
 
 pub mod batch_ntt_small;
+pub mod device_info;
 pub mod logup_zerocheck;
 pub mod matrix;
 pub mod merkle_tree;
