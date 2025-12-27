@@ -24,11 +24,10 @@ use stark_backend_v2::{
 use tracing::{debug, info_span, instrument};
 
 use crate::{
-    Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
+    D_EF, Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
     cuda::{
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
-            _stacked_reduction_mle_required_temp_buffer_size,
             _stacked_reduction_r0_required_temp_buffer_size, initialize_k_rot_from_eq_segments,
             stacked_reduction_fold_ple, stacked_reduction_sumcheck_mle_round,
             stacked_reduction_sumcheck_mle_round_degenerate, stacked_reduction_sumcheck_round0,
@@ -38,10 +37,15 @@ use crate::{
     poly::EqEvalSegments,
     sponge::DuplexSpongeGpu,
     stacked_pcs::StackedPcsDataGpu,
-    utils::compute_barycentric_inv_lagrange_denoms,
+    utils::{compute_barycentric_inv_lagrange_denoms, reduce_raw_u64_to_ef},
 };
 
+/// Degree of the sumcheck polynomial for stacked reduction.
+pub const STACKED_REDUCTION_S_DEG: usize = 2;
+
 pub struct StackedReductionGpu {
+    sm_count: u32,
+
     l_skip: usize,
     n_stack: usize,
 
@@ -199,7 +203,8 @@ pub fn prove_stacked_opening_reduction_gpu(
 
     let _round0_span =
         info_span!("prover.openings.stacked_reduction.round0", phase = "prover").entered();
-    let mut prover = StackedReductionGpu::new(mpk, ctx, common_main_pcs_data, r, lambda)?;
+    let mut prover =
+        StackedReductionGpu::new(mpk, ctx, common_main_pcs_data, r, lambda, device.sm_count())?;
 
     // Round 0: univariate sumcheck
     let s_0 = prover.batch_sumcheck_uni_round0_poly();
@@ -262,6 +267,7 @@ impl StackedReductionGpu {
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
         r: &[EF],
         lambda: EF,
+        sm_count: u32,
     ) -> Result<Self, ProverError> {
         let mem = MemTracker::start("prover.stacked_reduction_new");
         let l_skip = mpk.params.l_skip;
@@ -363,6 +369,7 @@ impl StackedReductionGpu {
         let eq_ub_per_trace = vec![EF::ONE; unstacked_cols.len()];
 
         Ok(Self {
+            sm_count,
             l_skip,
             n_stack,
             omega_skip,
@@ -404,8 +411,6 @@ impl StackedReductionGpu {
 
         let log_domain_size = log2_ceil_usize(s_0_deg + 1);
         let domain_size = 1 << log_domain_size;
-        let mut d_s0_evals = DeviceBuffer::<EF>::with_capacity(domain_size);
-
         // Generator for large domain
         let omega = F::two_adic_generator(log_domain_size);
         let omega_pows = omega.powers().take(1 << log_domain_size).collect_vec();
@@ -438,6 +443,10 @@ impl StackedReductionGpu {
         // way, we use the special definition of the sumcheck in terms of unstacked traces to sum
         // over smaller domains on a per-trace basis.
         let mut s_0_evals_batch = Vec::with_capacity(self.ht_diff_idxs.len() - 1);
+
+        // Allocate output buffer
+        let mut d_output = DeviceBuffer::<EF>::with_capacity(domain_size);
+
         for ((trace_ptr, trace_height, trace_width), window) in zip(
             mem::take(&mut self.trace_ptrs),
             self.ht_diff_idxs.windows(2),
@@ -445,7 +454,6 @@ impl StackedReductionGpu {
             debug_assert_eq!(window[1] - window[0], trace_width);
             let log_height = trace_height.ilog2();
             let n = log_height as isize - l_skip as isize;
-            let n_lift = n.max(0) as usize;
 
             let d_special_packets;
             let z_packets = if n.is_negative() {
@@ -475,20 +483,22 @@ impl StackedReductionGpu {
                 &d_default_packets
             };
 
-            let num_x = 1 << n_lift;
             // PERF[jpw]: we choose the largest stride possible for more parallelism. Adjust if peak
             // memory too high.
             let thread_window_stride = trace_width as u16;
-            unsafe {
-                let block_sums_len = _stacked_reduction_r0_required_temp_buffer_size(
+            let num_x = (trace_height >> l_skip).max(1) as u32;
+
+            // Allocate block_sums buffer for intermediate reduction
+            let block_sums_len = unsafe {
+                _stacked_reduction_r0_required_temp_buffer_size(
                     domain_size as u32,
-                    num_x as u32,
+                    num_x,
                     thread_window_stride,
-                );
-                // PERF[jpw]: buffer could be reused for q PLE folding below
-                // Currently `CUBE_THREADS = 8` so this is at least D_EF/8 = 1/2 as much memory as
-                // what q_upsampled used to take
-                let mut block_sums = DeviceBuffer::with_capacity(block_sums_len as usize);
+                )
+            } as usize;
+            let mut d_block_sums = DeviceBuffer::<EF>::with_capacity(block_sums_len);
+
+            unsafe {
                 // 2 per column for (eq, k_rot)
                 let lambda_pows_ptr = self.d_lambda_pows.as_ptr().add(2 * window[0]);
 
@@ -499,8 +509,8 @@ impl StackedReductionGpu {
                     z_packets,
                     &self.d_omega_skip_pows,
                     &d_inv_lagrange_denoms,
-                    &mut block_sums,
-                    &mut d_s0_evals,
+                    &mut d_block_sums,
+                    &mut d_output,
                     trace_height,
                     trace_width,
                     log_domain_size,
@@ -510,7 +520,9 @@ impl StackedReductionGpu {
                 .unwrap();
             };
 
-            let evals = d_s0_evals.to_host().unwrap();
+            // D2H copy - output is already EF
+            let evals = d_output.to_host().unwrap();
+
             debug_assert!(
                 UnivariatePoly::from_evals_idft(&evals).coeffs()[s_0_deg + 1..]
                     .iter()
@@ -636,10 +648,17 @@ impl StackedReductionGpu {
     }
 
     #[instrument("stacked_reduction_sumcheck", level = "debug", skip_all, fields(round = round))]
-    fn batch_sumcheck_poly_eval(&mut self, round: usize, _u_prev: EF) -> [EF; 2] {
+    fn batch_sumcheck_poly_eval(
+        &mut self,
+        round: usize,
+        _u_prev: EF,
+    ) -> [EF; STACKED_REDUCTION_S_DEG] {
         let l_skip = self.l_skip;
-        let s_deg = 2;
-        let mut d_s_evals = DeviceBuffer::<EF>::with_capacity(s_deg);
+
+        // Allocate u64 accumulator buffer for atomic reduction
+        let accum_len = STACKED_REDUCTION_S_DEG * D_EF;
+        let mut d_accum = DeviceBuffer::<u64>::with_capacity(accum_len);
+
         let q_eval_ptrs = self.q_evals.iter().map(|q| q.as_ptr()).collect_vec();
         let d_q_eval_ptrs = q_eval_ptrs.to_device().unwrap();
 
@@ -683,6 +702,10 @@ impl StackedReductionGpu {
             let lambda_pows_ptr = unsafe { self.d_lambda_pows.as_ptr().add(2 * window[0]) };
 
             let log_height = self.unstacked_cols[window[0]].log_height as usize;
+
+            // Zero-initialize accumulator for atomic adds
+            d_accum.fill_zero().unwrap();
+
             if log_height < l_skip + round {
                 // We are in the eq, k_rot stable regime
                 // This includes all n < 0 cases
@@ -703,7 +726,7 @@ impl StackedReductionGpu {
                         k_rot_r,
                         unstacked_cols_ptr,
                         lambda_pows_ptr,
-                        &mut d_s_evals,
+                        &mut d_accum,
                         self.stacked_height(round),
                         window_len,
                         l_skip,
@@ -711,40 +734,33 @@ impl StackedReductionGpu {
                     )
                     .unwrap();
                 }
-                let evals = d_s_evals.to_host().unwrap();
-                s_evals_batch.push(evals);
             } else {
                 let hypercube_dim = log_height - l_skip - round;
                 let num_y = 1 << hypercube_dim;
-                // PERF[jpw]: we choose the largest stride possible for more parallelism. Adjust if
-                // peak memory too high.
-                let thread_window_stride = window_len as u16;
+                // Allow the CUDA launcher to auto-tune grid.y (thread_window_stride) based on
+                // (num_y, window_len) and device SM count.
 
                 unsafe {
-                    let block_sums_len = _stacked_reduction_mle_required_temp_buffer_size(
-                        num_y as u32,
-                        thread_window_stride,
-                    );
-                    let mut block_sums = DeviceBuffer::with_capacity(block_sums_len as usize);
-
                     stacked_reduction_sumcheck_mle_round(
                         &d_q_eval_ptrs,
                         &self.eq_r_ns,
                         &self.k_rot_ns,
                         unstacked_cols_ptr,
                         lambda_pows_ptr,
-                        &mut block_sums,
-                        &mut d_s_evals,
+                        &mut d_accum,
                         self.stacked_height(round),
                         window_len,
                         num_y,
-                        thread_window_stride,
+                        self.sm_count,
                     )
                     .unwrap();
                 };
-                let evals = d_s_evals.to_host().unwrap();
-                s_evals_batch.push(evals);
             }
+
+            // D2H copy and reduce modulo P
+            let h_accum = d_accum.to_host().unwrap();
+            let evals = reduce_raw_u64_to_ef(&h_accum);
+            s_evals_batch.push(evals);
         }
 
         from_fn(|i| s_evals_batch.iter().map(|evals| evals[i]).sum::<EF>())
