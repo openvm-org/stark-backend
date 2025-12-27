@@ -1,13 +1,17 @@
-use getset::Getters;
+use getset::{CopyGetters, Getters};
 use openvm_cuda_common::common::get_device;
 use stark_backend_v2::SystemParams;
 
-#[derive(Clone, Getters)]
+use crate::cuda::device_info::get_sm_count;
+
+#[derive(Clone, Getters, CopyGetters)]
 pub struct GpuDeviceV2 {
     #[getset(get = "pub")]
     pub(crate) config: SystemParams,
     pub(crate) prover_config: GpuProverConfig,
     pub id: u32,
+    #[getset(get_copy = "pub")]
+    pub sm_count: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -19,10 +23,13 @@ pub struct GpuProverConfig {
 impl GpuDeviceV2 {
     pub fn new(config: SystemParams) -> Self {
         let prover_config = GpuProverConfig::default();
+        let id = get_device().unwrap() as u32;
+        let sm_count = get_sm_count(id).expect("failed to get SM count");
         Self {
             config,
             prover_config,
-            id: get_device().unwrap() as u32,
+            id,
+            sm_count,
         }
     }
 

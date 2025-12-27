@@ -1,6 +1,10 @@
+use std::mem::transmute;
+
 use itertools::Itertools;
-use p3_field::{ExtensionField, Field};
+use p3_field::{ExtensionField, Field, FieldExtensionAlgebra, PrimeField64};
 use stark_backend_v2::utils::batch_multiplicative_inverse_serial;
+
+use crate::{D_EF, EF, F};
 
 // https://hackmd.io/@vbuterin/barycentric_evaluation#Special-case-roots-of-unity
 pub fn compute_barycentric_inv_lagrange_denoms<F: Field, EF: ExtensionField<F>>(
@@ -24,4 +28,24 @@ pub fn compute_barycentric_inv_lagrange_denoms<F: Field, EF: ExtensionField<F>>(
         *v *= scale_factor;
     }
     inv_denoms
+}
+
+/// Reduce overflowing u64 to extension field elements. After reducing modulo `p`, the `u64` are in
+/// Montgomery form.
+#[inline]
+pub fn reduce_raw_u64_to_ef(accum: &[u64]) -> Vec<EF> {
+    debug_assert_eq!(accum.len() % D_EF, 0);
+    debug_assert_eq!(size_of::<F>(), size_of::<u32>());
+    accum
+        .chunks_exact(D_EF)
+        .map(|chunk| {
+            EF::from_base_fn(|i| {
+                let monty_raw = (chunk[i] % F::ORDER_U64) as u32;
+                // SAFETY:
+                // - BabyBear has same memory layout as u32
+                // - Internally stored in Montgomery form
+                unsafe { transmute::<u32, F>(monty_raw) }
+            })
+        })
+        .collect()
 }
