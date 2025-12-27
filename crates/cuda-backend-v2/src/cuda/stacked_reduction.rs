@@ -4,9 +4,11 @@ use openvm_cuda_common::{
 };
 
 use crate::{
-    EF, F,
+    D_EF, EF, F,
     poly::EqEvalSegments,
-    stacked_reduction::{Round0UniPacket, UnstackedPleFoldPacket, UnstackedSlice},
+    stacked_reduction::{
+        Round0UniPacket, STACKED_REDUCTION_S_DEG, UnstackedPleFoldPacket, UnstackedSlice,
+    },
 };
 
 extern "C" {
@@ -51,23 +53,17 @@ extern "C" {
         max_n: u32,
     ) -> i32;
 
-    pub fn _stacked_reduction_mle_required_temp_buffer_size(
-        num_y: u32,
-        thread_window_stride: u16,
-    ) -> u32;
-
     fn _stacked_reduction_sumcheck_mle_round(
         q_evals: *const *const EF,
         eq_r_ns: *const EF,
         k_rot_ns: *const EF,
         unstacked_cols: *const UnstackedSlice,
         lambda_pows: *const EF,
-        block_sums: *mut EF,
-        output: *mut EF,
+        output: *mut u64, // atomic accumulator [S_DEG * D_EF]
         q_height: u32,
         window_len: u32,
         num_y: u32,
-        thread_window_stride: u16,
+        sm_count: u32,
     ) -> i32;
 
     fn _stacked_reduction_sumcheck_mle_round_degenerate(
@@ -77,7 +73,7 @@ extern "C" {
         k_rot_r: EF,
         unstacked_cols: *const UnstackedSlice,
         lambda_pows: *const EF,
-        output: *mut EF,
+        output: *mut u64, // atomic accumulator [S_DEG * D_EF]
         q_height: u32,
         window_len: u32,
         l_skip: u32,
@@ -91,7 +87,6 @@ extern "C" {
 /// `t_j(Z, \vec x)`. We need to upsample the `t_j(Z, \vec x)` evals on `(Z-domain) x hypercube` on
 /// demand, which we use buffer slices `q_ptr[commit_idx]` to do.
 ///
-///
 /// We consider a "window" of `t_j`, with their slice locations given by `unstacked_cols` pointing
 /// to the backing buffers `q_ptr`. Overall this means that we have a 3-dimensional array of
 /// `t_{window_idx}(Z, x_int)` and we will match it to the 3-dimensional block/grid in CUDA. For
@@ -103,11 +98,11 @@ extern "C" {
 /// We fix 1 z-thread per block, and the hard-code fixed constants for the x-threads per block and
 /// y-threads per block. Now recall we want to sum over `x_int` and also over `window_idx` where we
 /// algebraically batch over `window_idx` using `lambda_pows`. This means we must sum over cuda
-/// y-dim and cuda z-dim but **not** over cuda x-dim. To do so, we use a temporary buffer
-/// `block_sums`, whose required size can be computed via
-/// [_stacked_reduction_r0_required_temp_buffer_size]. To avoid excessive memory usage for
-/// `block_sums`, we use shared memory to perform block reduction by summing over all threadIdx.y
-/// within a block (without summing over threadIdx.x).
+/// y-dim and cuda z-dim but **not** over cuda x-dim.
+///
+/// The reduction is done in two stages:
+/// 1. Block-level reduction to `block_sums` (shared memory within block)
+/// 2. Final reduction kernel to combine block sums into `output`
 ///
 /// Lastly, due to limitations on the CUDA grid dimensions, a single thread may need to sum over
 /// multiple `x_int` and `window_idx` coordinates. This is achieved by separately striding in
@@ -115,19 +110,13 @@ extern "C" {
 /// gridDim.y` to be the maximum possible. The `window_idx` stride is specified by the user input
 /// parameter `thread_window_stride`.
 ///
-/// The `thread_window_stride` can be adjusted: smaller means more work per thread but smaller
-/// required `block_sums` size. Larger means more parallelism but requires more `block_sums` size.
-/// It must fit in `u16` for CUDA grid dimension limits.
-///
 /// # Safety
 /// - `trace_ptr` must be a pointer to a device buffer valid for `height * width` elements.
 /// - `lambda_pows` should be pointer to DeviceBuffer<EF>, at an offset.
 ///   - `lambda_pows` must be initialized for at least `2 * window_len` elements (for rotations).
 /// - `z_packets` should be of length `2^log_domain_size`.
-/// - `block_sums` should have capacity at least
-///   [`_stacked_reduction_r0_required_temp_buffer_size(domain_size, num_x,
-///   thread_window_stride)`](_stacked_reduction_r0_required_temp_buffer_size).
-/// - `output` should have length `>= 2^log_domain_size`.
+/// - `block_sums` should have length `>= _stacked_reduction_r0_required_temp_buffer_size(...)`.
+/// - `output` should have length `>= domain_size`.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_round0(
     eq_r_ns: &EqEvalSegments<EF>,
@@ -148,20 +137,7 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
     let num_x = (height >> l_skip).max(1) as u32;
     debug_assert_eq!(z_packets.len(), domain_size as usize);
     debug_assert!(output.len() >= domain_size as usize);
-    #[cfg(debug_assertions)]
-    {
-        let required_size = _stacked_reduction_r0_required_temp_buffer_size(
-            domain_size,
-            num_x,
-            thread_window_stride,
-        );
-        assert!(
-            block_sums.len() >= required_size as usize,
-            "block_sums.len() = {}, required = {}",
-            block_sums.len(),
-            required_size
-        );
-    }
+
     check(_stacked_reduction_sumcheck_round0(
         eq_r_ns.buffer().as_ptr(),
         trace_ptr,
@@ -244,10 +220,11 @@ pub unsafe fn initialize_k_rot_from_eq_segments(
 /// One important distinction is that `k_rot_ns` needs to be provided separately from `eq_r_ns`, but
 /// in the same segmented memory layout.
 ///
+/// Uses warp-aggregated atomics for reduction into u64 accumulators. The caller is responsible for
+/// zero-initializing `output` before calling and reducing modulo P after kernel completion.
+///
 /// # Safety
 /// - `q_evals` must be pointers to DeviceBuffer<EF> matrices all of the same height `q_height`.
-/// - `block_sums` needs enough size as specified by
-///   [`_stacked_reduction_mle_required_temp_buffer_size`].
 /// - `unstacked_cols` should be pointer to DeviceBuffer<UnstackedSlice>, at an offset.
 ///   - `unstacked_cols` must be initialized for at least `window_len` elements.
 ///   - for each `UnstackedSlice` in the `window_len` elements starting at `unstacked_cols`, the
@@ -256,7 +233,7 @@ pub unsafe fn initialize_k_rot_from_eq_segments(
 /// - `lambda_pows` should be pointer to DeviceBuffer<EF>, at an offset.
 ///   - `lambda_pows` must be initialized for at least `2 * window_len` elements (for rotations).
 /// - `unstacked_cols` pointers must be within bounds of `q_evals`.
-/// - `output` must have length at least `s_deg = 2`.
+/// - `output` must have length at least `S_DEG * D_EF = 8` and be zero-initialized.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_mle_round(
     q_evals: &DeviceBuffer<*const EF>,
@@ -264,24 +241,13 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
     k_rot_ns: &EqEvalSegments<EF>,
     unstacked_cols: *const UnstackedSlice,
     lambda_pows: *const EF,
-    block_sums: &mut DeviceBuffer<EF>,
-    output: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<u64>,
     q_height: usize,
     window_len: usize,
     num_y: usize,
-    thread_window_stride: u16,
+    sm_count: u32,
 ) -> Result<(), CudaError> {
-    debug_assert!(output.len() >= 2);
-    #[cfg(debug_assertions)]
-    {
-        let required_size =
-            _stacked_reduction_mle_required_temp_buffer_size(num_y as u32, thread_window_stride);
-        let len = block_sums.len();
-        assert!(
-            len >= required_size as usize,
-            "block_sums.len() = {len}, required = {required_size}"
-        );
-    }
+    debug_assert!(output.len() >= STACKED_REDUCTION_S_DEG * D_EF);
 
     check(_stacked_reduction_sumcheck_mle_round(
         q_evals.as_ptr(),
@@ -289,15 +255,21 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
         k_rot_ns.buffer.as_ptr(),
         unstacked_cols,
         lambda_pows,
-        block_sums.as_mut_ptr(),
         output.as_mut_ptr(),
         q_height as u32,
         window_len as u32,
         num_y as u32,
-        thread_window_stride,
+        sm_count,
     ))
 }
 
+/// Degenerate case for MLE sumcheck rounds.
+///
+/// Uses warp-aggregated atomics for reduction into u64 accumulators. The caller is responsible for
+/// zero-initializing `output` before calling and reducing modulo P after kernel completion.
+///
+/// # Safety
+/// - `output` must have length at least `S_DEG * D_EF = 8` and be zero-initialized.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate(
     q_evals: &DeviceBuffer<*const EF>,
@@ -306,12 +278,14 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate(
     k_rot_r: EF,
     unstacked_cols: *const UnstackedSlice,
     lambda_pows: *const EF,
-    output: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<u64>,
     q_height: usize,
     window_len: usize,
     l_skip: usize,
     round: usize,
 ) -> Result<(), CudaError> {
+    debug_assert!(output.len() >= STACKED_REDUCTION_S_DEG * D_EF);
+
     check(_stacked_reduction_sumcheck_mle_round_degenerate(
         q_evals.as_ptr(),
         eq_ub_ptr.as_ptr(),

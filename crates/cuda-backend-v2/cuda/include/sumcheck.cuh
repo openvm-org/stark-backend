@@ -2,7 +2,9 @@
 
 #include "fp.h"
 #include "fpext.h"
+#include "launcher.cuh"
 #include <cstdint>
+#include <device_atomic_functions.h>
 
 namespace sumcheck {
 
@@ -19,6 +21,7 @@ mle_interpolate_single(const Field *__restrict__ column, Fp x, uint32_t y_int) {
 static __device__ inline FpExt warp_reduce_sum(FpExt val) {
     unsigned mask = __activemask();
 
+#pragma unroll
     for (int offset = 16; offset > 0; offset /= 2) {
         FpExt other;
         other.elems[0] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[0].asRaw(), offset));
@@ -28,6 +31,66 @@ static __device__ inline FpExt warp_reduce_sum(FpExt val) {
         val = val + other;
     }
     return val;
+}
+
+// ============================================================================
+// ATOMIC U64 ACCUMULATION (delayed modular reduction to CPU)
+// ============================================================================
+//
+// BabyBear elements in Montgomery form are < 2^31. Summing N elements in uint64_t
+// overflows when N * 2^31 > 2^64, i.e., N > 2^33. Safe for typical GPU workloads.
+// Final modular reduction is done on CPU after kernel completion.
+
+// Atomically add Fp raw value to uint64_t accumulator
+__device__ __forceinline__ void atomic_add_fp_to_u64(uint64_t *output, Fp val) {
+    atomicAdd((unsigned long long *)output, static_cast<uint64_t>(val.asRaw()));
+}
+
+// Atomically add FpExt to uint64_t[4] accumulator
+// Layout: output[0..3] correspond to elems[0..3]
+__device__ __forceinline__ void atomic_add_fpext_to_u64(uint64_t *output, FpExt val) {
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        atomic_add_fp_to_u64(output + i, val.elems[i]);
+    }
+}
+
+// ============================================================================
+// WARP-AGGREGATED ATOMIC REDUCTION
+// ============================================================================
+//
+// Modern best practice for block-wide sums on Volta+ architectures:
+// 1. Warp-level reduction via __shfl_down_sync (zero memory latency)
+// 2. Lane 0 of each warp does one atomicAdd to global memory
+// 3. No __syncthreads() or shared memory required
+//
+// Trade-off: More atomics than full block reduction (num_warps vs 1), but
+// eliminates barrier latency and shared memory bank conflicts. Modern L2
+// caches handle concurrent atomics efficiently.
+
+// Warp-aggregated atomic: reduce within warp, lane 0 does single atomic add
+__device__ __forceinline__ void warp_aggregated_atomic_add_fpext(
+    uint64_t *output, // Global memory, uint64_t[4] for one FpExt
+    FpExt val
+) {
+    // Step 1: Warp-level reduction via shuffles
+    val = warp_reduce_sum(val);
+
+    // Step 2: Lane 0 does the atomic add
+    int lane_id = threadIdx.x % WARP_SIZE;
+    if (lane_id == 0) {
+        atomic_add_fpext_to_u64(output, val);
+    }
+}
+
+// Indexed version for arrays of FpExt outputs
+// Layout: output[idx * 4 .. idx * 4 + 3]
+__device__ __forceinline__ void warp_aggregated_atomic_add_fpext_indexed(
+    uint64_t *output, // Global memory, uint64_t[d * 4]
+    uint32_t idx,
+    FpExt val
+) {
+    warp_aggregated_atomic_add_fpext(output + idx * 4, val);
 }
 
 // Block-level reduction: sums FpExt values across all threads in a block
