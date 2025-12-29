@@ -342,6 +342,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
 #[test_case(2, 1; "where log_trace_degree=1 less than l_skip=2")]
 #[test_case(2, 0; "where log_trace_degree=0 less than l_skip=2")]
 #[test_case(3, 2; "where log_trace_degree=2 less than l_skip=3")]
+#[test_case(6, 10; "where l_skip exceeds log_warp_size")]
 fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError> {
     setup_tracing_with_log_level(Level::DEBUG);
 
@@ -395,6 +396,7 @@ fn test_dummy_interactions_roundtrip(
 #[test_case(2, 8, 3)]
 #[test_case(5, 5, 4)]
 #[test_case(5, 8, 3)]
+#[test_case(6, 7, 3; "where l_skip exceeds log_warp_size")]
 fn test_cached_trace_roundtrip(
     l_skip: usize,
     n_stack: usize,
@@ -485,7 +487,7 @@ fn test_multi_interaction_traces_stark(log_trace_degree: usize) {
     engine.verify(&vk, &proof).unwrap();
 }
 
-#[test_case(10 ; "when log_height equals n_stack l_skip")]
+#[test_case(10 ; "when log_height equals n_stack plus l_skip")]
 #[test_case(3 ; "when log_height greater than l_skip")]
 #[test_case(2 ; "when log_height equals l_skip")]
 #[test_case(1 ; "when log_height less than l_skip")]
