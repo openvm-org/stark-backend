@@ -2,7 +2,7 @@ use getset::{CopyGetters, Getters};
 use openvm_cuda_common::common::get_device;
 use stark_backend_v2::SystemParams;
 
-use crate::cuda::device_info::get_sm_count;
+use crate::cuda::{batch_ntt_small::ensure_device_ntt_twiddles_initialized, device_info::get_sm_count};
 
 #[derive(Clone, Getters, CopyGetters)]
 pub struct GpuDeviceV2 {
@@ -22,6 +22,8 @@ pub struct GpuProverConfig {
 
 impl GpuDeviceV2 {
     pub fn new(config: SystemParams) -> Self {
+        ensure_device_ntt_twiddles_initialized();
+
         let prover_config = GpuProverConfig::default();
         let id = get_device().unwrap() as u32;
         let sm_count = get_sm_count(id).expect("failed to get SM count");
