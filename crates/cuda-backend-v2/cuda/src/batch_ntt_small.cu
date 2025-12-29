@@ -5,9 +5,74 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime.h>
 #include <vector_types.h>
 
 using namespace device_ntt;
+
+// ============================================================================
+// Constant Memory Definition and Initialization
+// ============================================================================
+
+namespace device_ntt {
+
+// Define the constant memory (declared extern in device_ntt.cuh)
+__constant__ Fp DEVICE_NTT_TWIDDLES[DEVICE_NTT_TWIDDLES_SIZE];
+
+} // namespace device_ntt
+
+// Kernel to generate twiddles for all levels 1..MAX_NTT_LEVEL
+// Each thread handles one twiddle: omega_level^index
+__global__ void generate_device_ntt_twiddles_kernel(Fp *d_twiddles) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= DEVICE_NTT_TWIDDLES_SIZE)
+        return;
+
+    // Find which level this tid belongs to
+    // Level L starts at offset 2^L - 2 and has 2^L elements
+    // tid in [2^L - 2, 2^(L+1) - 2) => level L
+    uint32_t level = 1;
+    uint32_t offset = 0;
+    while (level <= MAX_NTT_LEVEL) {
+        uint32_t level_size = 1u << level;
+        if (tid < offset + level_size) {
+            break;
+        }
+        offset += level_size;
+        level++;
+    }
+
+    uint32_t index = tid - offset;
+    // Compute omega_level^index where omega_level = TWO_ADIC_GENERATORS[level]
+    d_twiddles[tid] = pow(TWO_ADIC_GENERATORS[level], index);
+}
+
+// Generate twiddles into the provided device buffer and copy to constant memory.
+// `d_twiddles` must have capacity for DEVICE_NTT_TWIDDLES_SIZE elements.
+// Returns 0 on success, non-zero on error.
+extern "C" int _generate_device_ntt_twiddles(Fp *d_twiddles) {
+    // Generate twiddles on GPU
+    constexpr uint32_t BLOCK_SIZE = 256;
+    uint32_t num_blocks = div_ceil(DEVICE_NTT_TWIDDLES_SIZE, BLOCK_SIZE);
+    generate_device_ntt_twiddles_kernel<<<num_blocks, BLOCK_SIZE>>>(d_twiddles);
+
+    // Copy to constant memory using per-thread stream
+    cudaMemcpyToSymbolAsync(
+        DEVICE_NTT_TWIDDLES,
+        d_twiddles,
+        DEVICE_NTT_TWIDDLES_SIZE * sizeof(Fp),
+        0,
+        cudaMemcpyDeviceToDevice,
+        cudaStreamPerThread
+    );
+    cudaStreamSynchronize(cudaStreamPerThread);
+
+    return CHECK_KERNEL();
+}
+
+// ============================================================================
+// Batch NTT Kernels
+// ============================================================================
 
 template <bool intt, bool needs_shmem>
 __global__ void batch_ntt_kernel(

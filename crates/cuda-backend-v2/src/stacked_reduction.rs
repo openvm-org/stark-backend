@@ -26,6 +26,7 @@ use tracing::{debug, info_span, instrument};
 use crate::{
     D_EF, Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
     cuda::{
+        batch_ntt_small::ensure_device_ntt_twiddles_initialized,
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
             _stacked_reduction_r0_required_temp_buffer_size, initialize_k_rot_from_eq_segments,
@@ -269,6 +270,7 @@ impl StackedReductionGpu {
         lambda: EF,
         sm_count: u32,
     ) -> Result<Self, ProverError> {
+        ensure_device_ntt_twiddles_initialized();
         let mem = MemTracker::start("prover.stacked_reduction_new");
         let l_skip = mpk.params.l_skip;
         let n_stack = mpk.params.n_stack;
