@@ -406,14 +406,13 @@ impl StackedReductionGpu {
     fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<EF> {
         let l_skip = self.l_skip;
         let omega_skip = self.omega_skip;
-        // +1 from eq term
-        let s_0_deg = sumcheck_round0_deg(l_skip, 2);
-
-        let log_domain_size = log2_ceil_usize(s_0_deg + 1);
-        let domain_size = 1 << log_domain_size;
+        let domain_size = STACKED_REDUCTION_S_DEG << l_skip;
+        let log_domain_size = log2_ceil_usize(domain_size);
+        let s_0_deg = sumcheck_round0_deg(l_skip, STACKED_REDUCTION_S_DEG);
+        debug_assert!(domain_size >= s_0_deg);
         // Generator for large domain
         let omega = F::two_adic_generator(log_domain_size);
-        let omega_pows = omega.powers().take(1 << log_domain_size).collect_vec();
+        let omega_pows = omega.powers().take(domain_size).collect_vec();
         // Default packets for n >= 0
         let default_packets = omega_pows
             .iter()
@@ -429,14 +428,6 @@ impl StackedReductionGpu {
             })
             .collect::<Vec<_>>();
         let d_default_packets = default_packets.to_device().unwrap();
-
-        let inv_lagrange_denoms = omega_pows
-            .iter()
-            .flat_map(|&z| {
-                compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, z)
-            })
-            .collect::<Vec<_>>();
-        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
 
         // The main point is that stacking reduction is a batch sumcheck over D_{n_stack}, batching
         // over all unstacked columns. However instead of naively computing the batching in that
@@ -485,15 +476,13 @@ impl StackedReductionGpu {
 
             // PERF[jpw]: we choose the largest stride possible for more parallelism. Adjust if peak
             // memory too high.
-            let thread_window_stride = trace_width as u16;
-            let num_x = (trace_height >> l_skip).max(1) as u32;
-
+            let col_stride: u16 = trace_width.try_into().unwrap();
             // Allocate block_sums buffer for intermediate reduction
             let block_sums_len = unsafe {
                 _stacked_reduction_r0_required_temp_buffer_size(
-                    domain_size as u32,
-                    num_x,
-                    thread_window_stride,
+                    trace_height as u32,
+                    l_skip as u32,
+                    col_stride,
                 )
             } as usize;
             let mut d_block_sums = DeviceBuffer::<EF>::with_capacity(block_sums_len);
@@ -507,15 +496,12 @@ impl StackedReductionGpu {
                     trace_ptr,
                     lambda_pows_ptr,
                     z_packets,
-                    &self.d_omega_skip_pows,
-                    &d_inv_lagrange_denoms,
                     &mut d_block_sums,
                     &mut d_output,
                     trace_height,
                     trace_width,
-                    log_domain_size,
                     l_skip,
-                    thread_window_stride,
+                    col_stride,
                 )
                 .unwrap();
             };
