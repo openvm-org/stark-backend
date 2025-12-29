@@ -13,9 +13,9 @@ use crate::{
 
 extern "C" {
     pub fn _stacked_reduction_r0_required_temp_buffer_size(
-        domain_size: u32,
-        num_x: u32,
-        thread_window_stride: u16,
+        trace_height: u32,
+        l_skip: u32,
+        col_stride: u16,
     ) -> u32;
 
     fn _stacked_reduction_sumcheck_round0(
@@ -23,16 +23,13 @@ extern "C" {
         trace_ptr: *const F,
         lambda_pows: *const EF,
         z_packets: *const Round0UniPacket,
-        omega_skip_pows: *const F,
-        inv_lagrange_denoms: *const F,
         block_sums: *mut EF,
         output: *mut EF,
-        height: u32,
-        width: u32,
-        log_domain_size: u32,
+        trace_height: u32,
+        trace_width: u32,
         l_skip: u32,
         num_x: u32,
-        thread_window_stride: u16,
+        col_stride: u16,
     ) -> i32;
 
     fn _stacked_reduction_fold_ple(
@@ -116,43 +113,37 @@ extern "C" {
 ///   - `lambda_pows` must be initialized for at least `2 * window_len` elements (for rotations).
 /// - `z_packets` should be of length `2^log_domain_size`.
 /// - `block_sums` should have length `>= _stacked_reduction_r0_required_temp_buffer_size(...)`.
-/// - `output` should have length `>= domain_size`.
+/// - `output` should have length `>= STACKED_REDUCTION_S_DEG * 2^l_skip`.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_round0(
     eq_r_ns: &EqEvalSegments<EF>,
     trace_ptr: *const F,
     lambda_pows: *const EF,
     z_packets: &DeviceBuffer<Round0UniPacket>,
-    omega_skip_pows: &DeviceBuffer<F>,
-    inv_lagrange_denoms: &DeviceBuffer<F>,
     block_sums: &mut DeviceBuffer<EF>,
     output: &mut DeviceBuffer<EF>,
     height: usize,
     width: usize,
-    log_domain_size: usize,
     l_skip: usize,
-    thread_window_stride: u16,
+    col_stride: u16,
 ) -> Result<(), CudaError> {
-    let domain_size = 1u32 << log_domain_size;
+    let domain_size = STACKED_REDUCTION_S_DEG << l_skip;
     let num_x = (height >> l_skip).max(1) as u32;
-    debug_assert_eq!(z_packets.len(), domain_size as usize);
-    debug_assert!(output.len() >= domain_size as usize);
+    debug_assert_eq!(z_packets.len(), domain_size);
+    debug_assert!(output.len() >= domain_size);
 
     check(_stacked_reduction_sumcheck_round0(
         eq_r_ns.buffer().as_ptr(),
         trace_ptr,
         lambda_pows,
         z_packets.as_ptr(),
-        omega_skip_pows.as_ptr(),
-        inv_lagrange_denoms.as_ptr(),
         block_sums.as_mut_ptr(),
         output.as_mut_ptr(),
         height as u32,
         width as u32,
-        log_domain_size as u32,
         l_skip as u32,
         num_x,
-        thread_window_stride,
+        col_stride,
     ))
 }
 
