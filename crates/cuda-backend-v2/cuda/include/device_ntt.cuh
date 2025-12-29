@@ -7,6 +7,35 @@
 
 namespace device_ntt {
 
+// ============================================================================
+// Precomputed Twiddle Tables in Constant Memory
+// ============================================================================
+//
+// Layout: twiddles for level L contain omega_L^i for i in [0, 2^L)
+// where omega_L = TWO_ADIC_GENERATORS[L].
+//
+// Twiddles for level L (1 <= L <= MAX_NTT_LEVEL) start at offset (2^L - 2).
+// Total size: sum(2^i for i=1..MAX_NTT_LEVEL) = 2^(MAX_NTT_LEVEL+1) - 2
+//
+// For MAX_NTT_LEVEL=10: 2^11 - 2 = 2046 elements * 4 bytes = ~8KB
+
+constexpr uint32_t MAX_NTT_LEVEL = 10;
+constexpr uint32_t DEVICE_NTT_TWIDDLES_SIZE = (1u << (MAX_NTT_LEVEL + 1)) - 2;
+
+// Constant memory for precomputed twiddles
+extern __constant__ Fp DEVICE_NTT_TWIDDLES[DEVICE_NTT_TWIDDLES_SIZE];
+
+// Get offset into DEVICE_NTT_TWIDDLES for level L (L >= 1)
+__device__ __host__ __forceinline__ constexpr uint32_t twiddle_offset(uint32_t level) {
+    return (1u << level) - 2;
+}
+
+// Get precomputed twiddle: omega_level^index
+// Requires: level >= 1 && level <= MAX_NTT_LEVEL && index < 2^level
+__device__ __forceinline__ Fp get_twiddle(uint32_t level, uint32_t index) {
+    return DEVICE_NTT_TWIDDLES[twiddle_offset(level) + index];
+}
+
 template <bool intt> __device__ __forceinline__ Fp sum_or_semi_sum(Fp &&x) {
     if constexpr (intt) {
         return x.halve();
@@ -45,7 +74,7 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
     }
     // reverse index for iNTT to get the inverse twiddle
     uint32_t const twiddle_idx = intt ? (i ? (1 << l_skip) - i : 0) : i;
-    Fp twiddle = pow(TWO_ADIC_GENERATORS[l_skip], twiddle_idx);
+    Fp twiddle = get_twiddle(l_skip, twiddle_idx);
 
     // Shared memory phase (for l_skip > LOG_WARP_SIZE)
     if constexpr (needs_shmem) {
@@ -87,7 +116,6 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
 //
 // # Assumption
 // - No warp has exited early before this call. We use the full `0xffffffff` mask.
-// TODO[jpw]: create constant memory for partial twiddles
 template <bool intt, bool needs_shmem>
 __device__ __forceinline__ void ntt_bitrev_to_natural(
     Fp &this_thread_value,
@@ -104,7 +132,7 @@ __device__ __forceinline__ void ntt_bitrev_to_natural(
         uint32_t j = i & (len - 1);
         if constexpr (intt)
             j = j ? ((2u << m) - j) : 0;
-        Fp twiddle = pow(TWO_ADIC_GENERATORS[m + 1], j);
+        Fp twiddle = get_twiddle(m + 1, j);
 
         Fp other = Fp::fromRaw(__shfl_xor_sync(0xffffffff, this_thread_value.asRaw(), len));
 
@@ -129,7 +157,7 @@ __device__ __forceinline__ void ntt_bitrev_to_natural(
             uint32_t j = i & (len - 1);
             if constexpr (intt)
                 j = j ? ((2u << m) - j) : 0;
-            Fp twiddle = pow(TWO_ADIC_GENERATORS[m + 1], j);
+            Fp twiddle = get_twiddle(m + 1, j);
 
             if (!(i & len)) {
                 Fp a = sbuf[i];
