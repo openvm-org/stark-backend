@@ -9,6 +9,53 @@ pub struct MainMatrixPtrs<T> {
     pub air_width: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct BlockCtx {
+    pub local_block_idx_x: u32,
+    pub air_idx: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EvalCtx {
+    pub d_selectors: *const EF,
+    pub d_preprocessed: MainMatrixPtrs<EF>,
+    pub d_main: *const MainMatrixPtrs<EF>,
+    pub d_public: *const F,
+    pub d_intermediates: *mut EF,
+    pub height: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ZerocheckCtx {
+    pub eval_ctx: EvalCtx,
+    pub num_y: u32,
+    pub d_eq_xi: *const EF,
+    pub d_lambda_indices: *const u32,
+    pub d_rules: *const std::ffi::c_void,
+    pub rules_len: usize,
+    pub d_used_nodes: *const usize,
+    pub used_nodes_len: usize,
+    pub buffer_size: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LogupCtx {
+    pub eval_ctx: EvalCtx,
+    pub num_y: u32,
+    pub d_eq_sharp: *const EF,
+    pub d_challenges: *const EF,
+    pub d_eq_3bs: *const EF,
+    pub d_rules: *const std::ffi::c_void,
+    pub rules_len: usize,
+    pub d_used_nodes: *const usize,
+    pub used_nodes_len: usize,
+    pub buffer_size: u32,
+}
+
 extern "C" {
     // gkr.cu
     fn _frac_build_tree_layer(layer: *mut Frac<EF>, layer_size: usize, revert: bool) -> i32;
@@ -201,6 +248,8 @@ extern "C" {
         num_y: u32,
     ) -> usize;
 
+    pub fn _mle_eval_num_blocks(num_x: u32, num_y: u32) -> u32;
+
     fn _zerocheck_eval_mle(
         tmp_sums_buffer: *mut EF,
         output: *mut EF,
@@ -222,9 +271,34 @@ extern "C" {
         num_x: u32,
     ) -> i32;
 
+    fn _zerocheck_batch_eval_mle(
+        tmp_sums_buffer: *mut EF,
+        output: *mut EF,
+        block_ctxs: *const BlockCtx,
+        zc_ctxs: *const ZerocheckCtx,
+        air_block_offsets: *const u32,
+        lambda_pows: *const EF,
+        lambda_len: usize,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+    ) -> i32;
+
     pub fn _logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize;
 
     pub fn _logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
+
+    // batch_mle.cu (batch kernels always use global intermediates when buffer_size > 0)
+    pub fn _zerocheck_batch_mle_intermediates_buffer_size(
+        buffer_size: u32,
+        num_x: u32,
+        num_y: u32,
+    ) -> usize;
+    pub fn _logup_batch_mle_intermediates_buffer_size(
+        buffer_size: u32,
+        num_x: u32,
+        num_y: u32,
+    ) -> usize;
 
     fn _logup_eval_mle(
         tmp_sums_buffer: *mut Frac<EF>,
@@ -243,6 +317,17 @@ extern "C" {
         intermediates: *mut EF,
         num_y: u32,
         num_x: u32,
+    ) -> i32;
+
+    fn _logup_batch_eval_mle(
+        tmp_sums_buffer: *mut Frac<EF>,
+        output: *mut Frac<EF>,
+        block_ctxs: *const BlockCtx,
+        logup_ctxs: *const LogupCtx,
+        air_block_offsets: *const u32,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
     ) -> i32;
 }
 
@@ -567,6 +652,33 @@ pub unsafe fn zerocheck_eval_mle(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub unsafe fn zerocheck_batch_eval_mle(
+    tmp_sums_buffer: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    zc_ctxs: &DeviceBuffer<ZerocheckCtx>,
+    air_block_offsets: &[u32],
+    lambda_pows: &DeviceBuffer<EF>,
+    lambda_len: usize,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_zerocheck_batch_eval_mle(
+        tmp_sums_buffer.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        zc_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        lambda_pows.as_ptr(),
+        lambda_len,
+        num_blocks,
+        num_x,
+        num_airs,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn logup_eval_mle(
     tmp_sums_buffer: &mut DeviceBuffer<Frac<EF>>,
     output: &mut DeviceBuffer<Frac<EF>>,
@@ -601,6 +713,29 @@ pub unsafe fn logup_eval_mle(
         intermediates.as_mut_ptr(),
         num_y,
         num_x,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn logup_batch_eval_mle(
+    tmp_sums_buffer: &mut DeviceBuffer<Frac<EF>>,
+    output: &mut DeviceBuffer<Frac<EF>>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    logup_ctxs: &DeviceBuffer<LogupCtx>,
+    air_block_offsets: &[u32],
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_logup_batch_eval_mle(
+        tmp_sums_buffer.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        logup_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        num_blocks,
+        num_x,
+        num_airs,
     ))
 }
 
