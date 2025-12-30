@@ -32,12 +32,18 @@ use tracing::{debug, info, info_span, instrument};
 use crate::{
     EF, F, GpuBackendV2,
     cuda::{
-        logup_zerocheck::{MainMatrixPtrs, fold_selectors_round0, interpolate_columns_gpu},
+        logup_zerocheck::{
+            _logup_batch_mle_intermediates_buffer_size, _mle_eval_num_blocks,
+            _zerocheck_batch_mle_intermediates_buffer_size, BlockCtx, EvalCtx, LogupCtx,
+            MainMatrixPtrs, ZerocheckCtx, fold_selectors_round0, interpolate_columns_gpu,
+        },
         sumcheck::{batch_fold_mle, triangular_fold_mle},
     },
     gpu_backend::transport_matrix_d2h_col_major,
     logup_zerocheck::{
-        fold_ple::fold_ple_evals_rotate, gkr_input::TraceInteractionMeta,
+        fold_ple::fold_ple_evals_rotate,
+        gkr_input::TraceInteractionMeta,
+        mle_round::{evaluate_mle_constraints_gpu_batch, evaluate_mle_interactions_gpu_batch},
         round0::evaluate_round0_interactions_gpu,
     },
     poly::EqEvalSegments,
@@ -217,7 +223,11 @@ pub fn prove_zerocheck_and_logup_gpu(
         info_span!("prover.rap_constraints.mle_rounds", phase = "prover").entered();
     debug!(%s_deg);
     for round in 1..=n_max {
-        let s_round_evals = prover.sumcheck_polys_eval(round, r[round - 1]);
+        let s_round_evals = if round > 1 {
+            prover.sumcheck_polys_batch_eval(round, r[round - 1])
+        } else {
+            prover.sumcheck_polys_eval(round, r[round - 1])
+        };
 
         let batch_s_evals = (0..s_deg)
             .map(|i| {
@@ -1118,6 +1128,470 @@ impl<'a> LogupZerocheckGpu<'a> {
         );
 
         s_logup_evals.into_iter().chain(s_zerocheck_evals).collect()
+    }
+
+    #[instrument(
+        name = "LogupZerocheck::sumcheck_polys_batch_eval",
+        level = "debug",
+        skip_all,
+        fields(round = round)
+    )]
+    #[allow(dead_code)]
+    fn sumcheck_polys_batch_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
+        let s_deg = self.s_deg;
+        let lambda_pows = self.lambda_pows.as_ref().expect("lambda_pows must be set");
+
+        // Per-trace outputs (filled as we go)
+        let mut zc_out: Vec<Vec<EF>> = vec![vec![EF::ZERO; s_deg]; self.n_per_trace.len()];
+        let mut logup_out: Vec<[Vec<EF>; 2]> =
+            vec![[vec![EF::ZERO; s_deg], vec![EF::ZERO; s_deg]]; self.n_per_trace.len()];
+
+        struct TraceCtx {
+            trace_idx: usize,
+            air_idx: usize,
+            n_lift: usize,
+            num_y: u32,
+            has_constraints: bool,
+            has_interactions: bool,
+            norm_factor: F,
+            // shared eval pointers (same for zerocheck + logup)
+            eq_xi_ptr: *const EF,
+            eq_sharp_ptr: *const EF,
+            sels_ptr: *const EF,
+            prep_ptr: MainMatrixPtrs<EF>,
+            main_ptrs_dev: DeviceBuffer<MainMatrixPtrs<EF>>,
+            public_ptr: *const F,
+            eq_3bs_ptr: *const EF,
+        }
+
+        // Keep early interpolations alive for duration of kernels
+        let mut _keepalive_interpolated: Vec<DeviceMatrix<EF>> = Vec::new();
+
+        let mut late_eval: Vec<TraceCtx> = Vec::new(); // round == n_lift + 1
+        let mut early_eval: Vec<TraceCtx> = Vec::new(); // round <= n_lift
+
+        // First, handle traces in original order and split into cases
+        for (trace_idx, (&n, mats, sels, eq_3bs, public_vals, &air_idx)) in izip!(
+            self.n_per_trace.iter(),
+            self.mat_evals_per_trace.iter(),
+            self.sels_per_trace.iter(),
+            self.d_eq_3b_per_trace.iter(),
+            self.public_values_per_trace.iter(),
+            self.air_indices_per_trace.iter()
+        )
+        .enumerate()
+        {
+            let pk = &self.pk.per_air[air_idx];
+            let dag = &pk.vk.symbolic_constraints;
+            let has_constraints = dag.constraints.num_constraints() > 0;
+            let has_interactions = !dag.interactions.is_empty();
+            if !has_constraints && !has_interactions {
+                continue;
+            }
+
+            let n_lift = n.max(0) as usize;
+            let norm_factor_denom = 1 << (-n).max(0);
+            let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+            let has_preprocessed = pk.preprocessed_data.is_some();
+            let first_main_idx = usize::from(has_preprocessed);
+
+            if round > n_lift {
+                // Case A
+                if round == n_lift + 1 {
+                    // A.1: evaluate directly at (num_x=1, num_y=1)
+                    let prep_ptr = if has_preprocessed {
+                        MainMatrixPtrs {
+                            data: mats[0].buffer().as_ptr(),
+                            air_width: mats[0].width() as u32 / 2,
+                        }
+                    } else {
+                        MainMatrixPtrs {
+                            data: std::ptr::null(),
+                            air_width: 0,
+                        }
+                    };
+                    let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
+                        .iter()
+                        .map(|m| MainMatrixPtrs {
+                            data: m.buffer().as_ptr(),
+                            air_width: m.width() as u32 / 2,
+                        })
+                        .collect_vec();
+                    let main_ptrs_dev = main_ptrs
+                        .to_device()
+                        .expect("failed to copy main_ptrs to device");
+
+                    late_eval.push(TraceCtx {
+                        trace_idx,
+                        air_idx,
+                        n_lift,
+                        num_y: 1,
+                        has_constraints,
+                        has_interactions,
+                        norm_factor,
+                        eq_xi_ptr: self.eq_xis.get_ptr(0),
+                        eq_sharp_ptr: self.eq_sharps.get_ptr(0),
+                        sels_ptr: sels.buffer().as_ptr(),
+                        prep_ptr,
+                        main_ptrs_dev,
+                        public_ptr: public_vals.as_ptr(),
+                        eq_3bs_ptr: eq_3bs.as_ptr(),
+                    });
+                } else {
+                    // A.2: scale tilde evals only
+                    if has_constraints {
+                        self.zerocheck_tilde_evals[trace_idx] *= r_prev;
+                        zc_out[trace_idx] = (1..=s_deg)
+                            .map(|x| {
+                                self.zerocheck_tilde_evals[trace_idx] * F::from_canonical_usize(x)
+                            })
+                            .collect();
+                    }
+                    if has_interactions {
+                        for x in self.logup_tilde_evals[trace_idx].iter_mut() {
+                            *x *= r_prev;
+                        }
+                        let [numer, denom] = self.logup_tilde_evals[trace_idx].map(|tilde| {
+                            (1..=s_deg)
+                                .map(|x| tilde * F::from_canonical_usize(x))
+                                .collect::<Vec<_>>()
+                        });
+                        logup_out[trace_idx] = [numer, denom];
+                    }
+                }
+            } else {
+                // Case B: interpolate columns and evaluate (num_x = s_deg, num_y = height/2)
+                let n_round = n_lift.saturating_sub(round - 1);
+                let height = 1 << n_round;
+                debug_assert_eq!(height, mats[0].height());
+                let num_y = height / 2;
+
+                let mut columns: Vec<*const EF> = Vec::new();
+                if has_constraints {
+                    columns.push(self.eq_xis.get_ptr(n_round));
+                }
+                if has_interactions {
+                    columns.push(self.eq_sharps.get_ptr(n_round));
+                }
+                columns.extend(
+                    iter::once(sels)
+                        .chain(mats.iter())
+                        .flat_map(|m| {
+                            assert_eq!(m.height(), height);
+                            (0..m.width())
+                                .map(|col| m.buffer().as_ptr().wrapping_add(col * m.height()))
+                        })
+                        .collect_vec(),
+                );
+                let interpolated = DeviceMatrix::<EF>::with_capacity(s_deg * num_y, columns.len());
+                let d_columns = columns
+                    .to_device()
+                    .expect("failed to copy column ptrs to device");
+                unsafe {
+                    interpolate_columns_gpu(interpolated.buffer(), &d_columns, s_deg, num_y)
+                        .expect("failed to interpolate columns on GPU");
+                }
+
+                let interpolated_height = interpolated.height();
+                let mut widths_so_far = 0usize;
+                let eq_xi_ptr = if has_constraints {
+                    let ptr = interpolated
+                        .buffer()
+                        .as_ptr()
+                        .wrapping_add(widths_so_far * interpolated_height);
+                    widths_so_far += 1;
+                    ptr
+                } else {
+                    std::ptr::null()
+                };
+                let eq_sharp_ptr = if has_interactions {
+                    let ptr = interpolated
+                        .buffer()
+                        .as_ptr()
+                        .wrapping_add(widths_so_far * interpolated_height);
+                    widths_so_far += 1;
+                    ptr
+                } else {
+                    std::ptr::null()
+                };
+                let sels_ptr = interpolated
+                    .buffer()
+                    .as_ptr()
+                    .wrapping_add(widths_so_far * interpolated_height);
+                widths_so_far += 3;
+                let prep_ptr = if has_preprocessed {
+                    MainMatrixPtrs {
+                        data: interpolated
+                            .buffer()
+                            .as_ptr()
+                            .wrapping_add(widths_so_far * interpolated_height),
+                        air_width: mats[0].width() as u32 / 2,
+                    }
+                } else {
+                    MainMatrixPtrs {
+                        data: std::ptr::null(),
+                        air_width: 0,
+                    }
+                };
+                widths_so_far += 2 * prep_ptr.air_width as usize;
+                let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
+                    .iter()
+                    .map(|m| {
+                        let main_ptr = MainMatrixPtrs {
+                            data: interpolated
+                                .buffer()
+                                .as_ptr()
+                                .wrapping_add(widths_so_far * interpolated_height),
+                            air_width: m.width() as u32 / 2,
+                        };
+                        widths_so_far += m.width();
+                        main_ptr
+                    })
+                    .collect_vec();
+                debug_assert_eq!(widths_so_far, interpolated.width());
+                let main_ptrs_dev = main_ptrs
+                    .to_device()
+                    .expect("failed to copy interpolated main ptrs");
+
+                _keepalive_interpolated.push(interpolated);
+                early_eval.push(TraceCtx {
+                    trace_idx,
+                    air_idx,
+                    n_lift,
+                    num_y: num_y as u32,
+                    has_constraints,
+                    has_interactions,
+                    norm_factor,
+                    eq_xi_ptr,
+                    eq_sharp_ptr,
+                    sels_ptr,
+                    prep_ptr,
+                    main_ptrs_dev,
+                    public_ptr: public_vals.as_ptr(),
+                    eq_3bs_ptr: eq_3bs.as_ptr(),
+                });
+            }
+        }
+
+        let mut eval_batch = |traces: &[TraceCtx], num_x: u32| {
+            if traces.is_empty() {
+                return;
+            }
+
+            // ZEROCHECK BATCH
+            let zc_traces: Vec<&TraceCtx> = traces.iter().filter(|t| t.has_constraints).collect();
+            if !zc_traces.is_empty() {
+                let num_airs = zc_traces.len() as u32;
+                let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
+                let mut air_offsets_h: Vec<u32> = Vec::with_capacity(zc_traces.len() + 1);
+                air_offsets_h.push(0);
+                let mut num_blocks_total: u32 = 0;
+                for (local_air, _t) in zc_traces.iter().enumerate() {
+                    let nb = unsafe { _mle_eval_num_blocks(num_x, _t.num_y) };
+                    for b in 0..nb {
+                        block_ctxs_h.push(BlockCtx {
+                            local_block_idx_x: b,
+                            air_idx: local_air as u32,
+                        });
+                    }
+                    num_blocks_total += nb;
+                    air_offsets_h.push(block_ctxs_h.len() as u32);
+                }
+
+                // Keep per-AIR intermediates alive for the duration of the kernel (matches non-batch).
+                let mut zc_intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::new();
+
+                let mut zc_ctxs_h: Vec<ZerocheckCtx> = Vec::with_capacity(zc_traces.len());
+                for t in zc_traces.iter() {
+                    let pk = &self.pk.per_air[t.air_idx];
+                    let buffer_size = pk.other_data.zerocheck_mle.inner.buffer_size;
+
+                    let d_intermediates = if buffer_size > 0 {
+                        // Delegate size computation to CUDA helper (single source of truth).
+                        let intermediates_len = unsafe {
+                            _zerocheck_batch_mle_intermediates_buffer_size(
+                                buffer_size,
+                                num_x,
+                                t.num_y,
+                            )
+                        };
+                        let buf = DeviceBuffer::<EF>::with_capacity(intermediates_len);
+                        let ptr = buf.as_mut_ptr();
+                        zc_intermediates_keepalive.push(buf);
+                        ptr
+                    } else {
+                        std::ptr::null_mut()
+                    };
+
+                    let eval_ctx = EvalCtx {
+                        d_selectors: t.sels_ptr,
+                        d_preprocessed: t.prep_ptr,
+                        d_main: t.main_ptrs_dev.as_ptr(),
+                        d_public: t.public_ptr,
+                        d_intermediates,
+                        height: num_x * t.num_y,
+                    };
+                    zc_ctxs_h.push(ZerocheckCtx {
+                        eval_ctx,
+                        num_y: t.num_y,
+                        d_eq_xi: t.eq_xi_ptr,
+                        d_lambda_indices: pk.other_data.zerocheck_mle.d_lambda_indices.as_ptr(),
+                        d_rules: pk.other_data.zerocheck_mle.inner.d_rules.as_raw_ptr(),
+                        rules_len: pk.other_data.zerocheck_mle.inner.d_rules.len(),
+                        d_used_nodes: pk.other_data.zerocheck_mle.inner.d_used_nodes.as_ptr(),
+                        used_nodes_len: pk.other_data.zerocheck_mle.inner.d_used_nodes.len(),
+                        buffer_size,
+                    });
+                }
+
+                let d_block_ctxs = block_ctxs_h.to_device().expect("copy zc block ctxs");
+                let d_zc_ctxs = zc_ctxs_h.to_device().expect("copy zc ctxs");
+
+                let out = evaluate_mle_constraints_gpu_batch(
+                    &d_block_ctxs,
+                    &d_zc_ctxs,
+                    &air_offsets_h,
+                    lambda_pows,
+                    lambda_pows.len(),
+                    num_blocks_total,
+                    num_x,
+                    num_airs,
+                );
+
+                let host = out.to_host().expect("copy zc output");
+                for (i, t) in zc_traces.iter().enumerate() {
+                    let slice = &host[(i * num_x as usize)..((i + 1) * num_x as usize)];
+                    if num_x == 1 {
+                        self.zerocheck_tilde_evals[t.trace_idx] = slice[0];
+                        zc_out[t.trace_idx] = (1..=s_deg)
+                            .map(|x| slice[0] * F::from_canonical_usize(x))
+                            .collect();
+                    } else {
+                        zc_out[t.trace_idx] = slice.to_vec();
+                    }
+                }
+            }
+
+            // LOGUP BATCH
+            let logup_traces: Vec<&TraceCtx> =
+                traces.iter().filter(|t| t.has_interactions).collect();
+            if !logup_traces.is_empty() {
+                let num_airs = logup_traces.len() as u32;
+                let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
+                let mut air_offsets_h: Vec<u32> = Vec::with_capacity(logup_traces.len() + 1);
+                air_offsets_h.push(0);
+                let mut num_blocks_total: u32 = 0;
+                for (local_air, _t) in logup_traces.iter().enumerate() {
+                    let nb = unsafe { _mle_eval_num_blocks(num_x, _t.num_y) };
+                    for b in 0..nb {
+                        block_ctxs_h.push(BlockCtx {
+                            local_block_idx_x: b,
+                            air_idx: local_air as u32,
+                        });
+                    }
+                    num_blocks_total += nb;
+                    air_offsets_h.push(block_ctxs_h.len() as u32);
+                }
+
+                // Keep per-AIR intermediates alive for the duration of the kernel.
+                // Logup batch kernel always uses global intermediates when `buffer_size > 0`.
+                let mut logup_intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::new();
+
+                let mut logup_ctxs_h: Vec<LogupCtx> = Vec::with_capacity(logup_traces.len());
+                for t in logup_traces.iter() {
+                    let pk = &self.pk.per_air[t.air_idx];
+                    let buffer_size = pk.other_data.interaction_rules.inner.buffer_size;
+
+                    // Allocate per-AIR global intermediates if required by kernel.
+                    let d_intermediates = if buffer_size > 0 {
+                        // Delegate size computation to CUDA helper (single source of truth).
+                        let intermediates_len = unsafe {
+                            _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y)
+                        };
+                        let buf = DeviceBuffer::<EF>::with_capacity(intermediates_len);
+                        let ptr = buf.as_mut_ptr();
+                        logup_intermediates_keepalive.push(buf);
+                        ptr
+                    } else {
+                        std::ptr::null_mut()
+                    };
+
+                    let eval_ctx = EvalCtx {
+                        d_selectors: t.sels_ptr,
+                        d_preprocessed: t.prep_ptr,
+                        d_main: t.main_ptrs_dev.as_ptr(),
+                        d_public: t.public_ptr,
+                        d_intermediates,
+                        height: num_x * t.num_y,
+                    };
+                    logup_ctxs_h.push(LogupCtx {
+                        eval_ctx,
+                        num_y: t.num_y,
+                        d_eq_sharp: t.eq_sharp_ptr,
+                        d_challenges: self.d_challenges.as_ptr(),
+                        d_eq_3bs: t.eq_3bs_ptr,
+                        d_rules: pk.other_data.interaction_rules.inner.d_rules.as_raw_ptr(),
+                        rules_len: pk.other_data.interaction_rules.inner.d_rules.len(),
+                        d_used_nodes: pk.other_data.interaction_rules.inner.d_used_nodes.as_ptr(),
+                        used_nodes_len: pk.other_data.interaction_rules.inner.d_used_nodes.len(),
+                        buffer_size,
+                    });
+                }
+
+                let d_block_ctxs = block_ctxs_h.to_device().expect("copy logup block ctxs");
+                let d_logup_ctxs = logup_ctxs_h.to_device().expect("copy logup ctxs");
+
+                let out = evaluate_mle_interactions_gpu_batch(
+                    &d_block_ctxs,
+                    &d_logup_ctxs,
+                    &air_offsets_h,
+                    num_blocks_total,
+                    num_x,
+                    num_airs,
+                );
+
+                let host = out.to_host().expect("copy logup output");
+                for (i, t) in logup_traces.iter().enumerate() {
+                    let slice = &host[(i * num_x as usize)..((i + 1) * num_x as usize)];
+                    if num_x == 1 {
+                        self.logup_tilde_evals[t.trace_idx][0] = slice[0].p * t.norm_factor;
+                        self.logup_tilde_evals[t.trace_idx][1] = slice[0].q;
+                        let numer = (1..=s_deg)
+                            .map(|x| {
+                                self.logup_tilde_evals[t.trace_idx][0] * F::from_canonical_usize(x)
+                            })
+                            .collect();
+                        let denom = (1..=s_deg)
+                            .map(|x| {
+                                self.logup_tilde_evals[t.trace_idx][1] * F::from_canonical_usize(x)
+                            })
+                            .collect();
+                        logup_out[t.trace_idx] = [numer, denom];
+                    } else {
+                        let mut numer: Vec<EF> = slice.iter().map(|f| f.p).collect();
+                        for p in numer.iter_mut() {
+                            *p *= t.norm_factor;
+                        }
+                        let denom: Vec<EF> = slice.iter().map(|f| f.q).collect();
+                        logup_out[t.trace_idx] = [numer, denom];
+                    }
+                }
+            }
+        };
+
+        // Run kernels: late_eval and early_eval
+        eval_batch(&late_eval, 1);
+        eval_batch(&early_eval, s_deg as u32);
+
+        // Emit final output in the same order as original
+        let mut s_logup = Vec::with_capacity(self.n_per_trace.len() * 2);
+        let mut s_zc = Vec::with_capacity(self.n_per_trace.len());
+        for trace_idx in 0..self.n_per_trace.len() {
+            s_logup.push(logup_out[trace_idx][0].clone());
+            s_logup.push(logup_out[trace_idx][1].clone());
+            s_zc.push(zc_out[trace_idx].clone());
+        }
+        s_logup.into_iter().chain(s_zc).collect()
     }
 
     #[instrument(name = "LogupZerocheck::fold_mle_evals", level = "debug", skip_all, fields(round = _round))]
