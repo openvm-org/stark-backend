@@ -12,9 +12,9 @@ use crate::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
     prover::{
-        fractional_sumcheck_gkr::FracSumcheckProof, logup_zerocheck::single::EvalHelper,
-        stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKeyV2,
-        ProverBackendV2, ProvingContextV2,
+        fractional_sumcheck_gkr::FracSumcheckProof, stacked_pcs::StackedLayout,
+        sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKeyV2, ProverBackendV2,
+        ProvingContextV2,
     },
     EF, F,
 };
@@ -25,6 +25,7 @@ pub mod fractional_sumcheck_gkr;
 mod single;
 
 pub use cpu::LogupZerocheckCpu;
+pub use single::*;
 
 /// Helper trait for implementing [MultiRapProver] by performing Logup GKR to reduce interaction bus
 /// balancing to an _input layer sumcheck_ which may be viewed as a stacking reduction from the GKR
