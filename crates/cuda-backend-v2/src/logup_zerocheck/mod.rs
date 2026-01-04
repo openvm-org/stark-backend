@@ -33,8 +33,8 @@ use crate::{
     EF, F, GpuBackendV2,
     cuda::{
         logup_zerocheck::{
-            _logup_batch_mle_intermediates_buffer_size, _mle_eval_num_blocks,
-            _zerocheck_batch_mle_intermediates_buffer_size, BlockCtx, EvalCtx, LogupCtx,
+            _logup_batch_mle_intermediates_buffer_size,
+            _zerocheck_batch_mle_intermediates_buffer_size, BlockCtx, EvalCoreCtx, LogupCtx,
             MainMatrixPtrs, ZerocheckCtx, fold_selectors_round0, interpolate_columns_gpu,
         },
         sumcheck::{batch_fold_mle, triangular_fold_mle},
@@ -1132,7 +1132,7 @@ impl<'a> LogupZerocheckGpu<'a> {
 
     #[instrument(
         name = "LogupZerocheck::sumcheck_polys_batch_eval",
-        level = "debug",
+        level = "info",
         skip_all,
         fields(round = round)
     )]
@@ -1373,7 +1373,9 @@ impl<'a> LogupZerocheckGpu<'a> {
             }
         }
 
+        // Builds cuda block inputs for zerocheck_batch_mle and logup_batch_mle and launches kernels
         let mut eval_batch = |traces: &[TraceCtx], num_x: u32| {
+            const MAX_THREADS_PER_BLOCK: u32 = 128;
             if traces.is_empty() {
                 return;
             }
@@ -1381,20 +1383,19 @@ impl<'a> LogupZerocheckGpu<'a> {
             // ZEROCHECK BATCH
             let zc_traces: Vec<&TraceCtx> = traces.iter().filter(|t| t.has_constraints).collect();
             if !zc_traces.is_empty() {
-                let num_airs = zc_traces.len() as u32;
                 let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
                 let mut air_offsets_h: Vec<u32> = Vec::with_capacity(zc_traces.len() + 1);
                 air_offsets_h.push(0);
-                let mut num_blocks_total: u32 = 0;
-                for (local_air, _t) in zc_traces.iter().enumerate() {
-                    let nb = unsafe { _mle_eval_num_blocks(num_x, _t.num_y) };
+                let max_num_y = zc_traces.iter().map(|t| t.num_y).max().unwrap_or(0);
+                let threads_per_block = max_num_y.min(MAX_THREADS_PER_BLOCK);
+                for (local_air, t) in zc_traces.iter().enumerate() {
+                    let nb = t.num_y.div_ceil(threads_per_block);
                     for b in 0..nb {
                         block_ctxs_h.push(BlockCtx {
                             local_block_idx_x: b,
                             air_idx: local_air as u32,
                         });
                     }
-                    num_blocks_total += nb;
                     air_offsets_h.push(block_ctxs_h.len() as u32);
                 }
 
@@ -1424,13 +1425,12 @@ impl<'a> LogupZerocheckGpu<'a> {
                         std::ptr::null_mut()
                     };
 
-                    let eval_ctx = EvalCtx {
+                    let eval_ctx = EvalCoreCtx {
                         d_selectors: t.sels_ptr,
                         d_preprocessed: t.prep_ptr,
                         d_main: t.main_ptrs_dev.as_ptr(),
                         d_public: t.public_ptr,
                         d_intermediates,
-                        height: num_x * t.num_y,
                     };
                     zc_ctxs_h.push(ZerocheckCtx {
                         eval_ctx,
@@ -1453,9 +1453,8 @@ impl<'a> LogupZerocheckGpu<'a> {
                     &air_offsets_h,
                     lambda_pows,
                     lambda_pows.len(),
-                    num_blocks_total,
                     num_x,
-                    num_airs,
+                    threads_per_block,
                 );
 
                 let host = out.to_host().expect("copy zc output");
@@ -1476,20 +1475,19 @@ impl<'a> LogupZerocheckGpu<'a> {
             let logup_traces: Vec<&TraceCtx> =
                 traces.iter().filter(|t| t.has_interactions).collect();
             if !logup_traces.is_empty() {
-                let num_airs = logup_traces.len() as u32;
                 let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
                 let mut air_offsets_h: Vec<u32> = Vec::with_capacity(logup_traces.len() + 1);
                 air_offsets_h.push(0);
-                let mut num_blocks_total: u32 = 0;
-                for (local_air, _t) in logup_traces.iter().enumerate() {
-                    let nb = unsafe { _mle_eval_num_blocks(num_x, _t.num_y) };
+                let max_num_y = logup_traces.iter().map(|t| t.num_y).max().unwrap_or(0);
+                let threads_per_block = max_num_y.min(MAX_THREADS_PER_BLOCK);
+                for (local_air, t) in logup_traces.iter().enumerate() {
+                    let nb = t.num_y.div_ceil(threads_per_block);
                     for b in 0..nb {
                         block_ctxs_h.push(BlockCtx {
                             local_block_idx_x: b,
                             air_idx: local_air as u32,
                         });
                     }
-                    num_blocks_total += nb;
                     air_offsets_h.push(block_ctxs_h.len() as u32);
                 }
 
@@ -1516,13 +1514,12 @@ impl<'a> LogupZerocheckGpu<'a> {
                         std::ptr::null_mut()
                     };
 
-                    let eval_ctx = EvalCtx {
+                    let eval_ctx = EvalCoreCtx {
                         d_selectors: t.sels_ptr,
                         d_preprocessed: t.prep_ptr,
                         d_main: t.main_ptrs_dev.as_ptr(),
                         d_public: t.public_ptr,
                         d_intermediates,
-                        height: num_x * t.num_y,
                     };
                     logup_ctxs_h.push(LogupCtx {
                         eval_ctx,
@@ -1546,9 +1543,8 @@ impl<'a> LogupZerocheckGpu<'a> {
                     &d_block_ctxs,
                     &d_logup_ctxs,
                     &air_offsets_h,
-                    num_blocks_total,
                     num_x,
-                    num_airs,
+                    threads_per_block,
                 );
 
                 let host = out.to_host().expect("copy logup output");
