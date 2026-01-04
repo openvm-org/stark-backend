@@ -1,8 +1,7 @@
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicConstraints, SymbolicConstraintsDag, SymbolicExpressionDag,
-    topological_sort_symbolic_expr,
+    SymbolicConstraints, SymbolicExpressionDag, topological_sort_symbolic_expr,
 };
 use p3_field::FieldAlgebra;
 use rustc_hash::FxHashMap;
@@ -17,7 +16,7 @@ use crate::{
         _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
         logup_bary_eval_interactions_round0, zerocheck_bary_eval_constraints,
     },
-    logup_zerocheck::rules::{SymbolicRulesOnGpuV2, codec::Codec},
+    logup_zerocheck::rules::{SymbolicRulesGpuV2, codec::Codec},
 };
 
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
@@ -92,7 +91,6 @@ pub fn evaluate_round0_constraints_gpu(
             eq_uni,
             eq_cube,
             lambda_pows,
-            &rules.d_lambda_indices,
             public_values,
             &rules.inner.d_rules,
             &rules.inner.d_used_nodes,
@@ -142,7 +140,8 @@ pub fn evaluate_round0_interactions_gpu(
     // We track the indices with InteractionNode
 
     // Copied from build_symbolic_constraints_dag to handle sorting of constraints
-    // TODO: rework this for interaction chunking
+    // NOTE: For logup round0, the kernel uses weights indexed by rule_idx, not constraint_idx.
+    // So we deduplicate constraint_idx and use dag_idx_to_rule_idx for weight mapping.
     let (rules, d_numer_weights, d_denom_weights, denom_sum_init) = {
         let mut expr_to_idx = FxHashMap::default();
         let mut nodes = Vec::new();
@@ -156,32 +155,22 @@ pub fn evaluate_round0_interactions_gpu(
             }));
         }
         sorted_used_dag_idxs.sort();
-        // TODO: SymbolicRulesOnGpu::new already has this
-        let dag_idx_to_used_idx = FxHashMap::from_iter(
-            sorted_used_dag_idxs
-                .iter()
-                .enumerate()
-                .map(|(used_idx, dag_idx)| (*dag_idx, used_idx)),
-        );
-        let constraints = SymbolicExpressionDag {
+        // Deduplicate for the dag since logup round0 kernel doesn't use used_nodes
+        sorted_used_dag_idxs.dedup();
+        let dag = SymbolicExpressionDag {
             nodes,
             constraint_idx: sorted_used_dag_idxs,
         };
-        let interactions_dag = SymbolicConstraintsDag {
-            constraints,
-            interactions: vec![],
-        };
-        let rules = SymbolicRulesOnGpuV2::new(&interactions_dag, false, true);
-        let mut numer_weights = vec![EF::ZERO; rules.constraints.len()];
-        let mut denom_weights = vec![EF::ZERO; rules.constraints.len()];
+        let rules = SymbolicRulesGpuV2::new(&dag, true);
+        let mut numer_weights = vec![EF::ZERO; rules.rules.len()];
+        let mut denom_weights = vec![EF::ZERO; rules.rules.len()];
         let mut denom_sum_init = EF::ZERO;
         for (interaction_idx, interaction) in symbolic.interactions.iter().enumerate() {
             // CAUTION: an expression node could be used in multiple interactions, and might even be
             // used as `count` in one, but message field in another. We only care about their
             // weighted sum with eq_3b, so we compute the weights ahead of time.
             let count_dag_idx = expr_to_idx[&interaction.count];
-            let count_used_idx = dag_idx_to_used_idx[&count_dag_idx];
-            let count_rule_idx = rules.used_nodes[count_used_idx];
+            let count_rule_idx = rules.dag_idx_to_rule_idx[&count_dag_idx];
             numer_weights[count_rule_idx] += eq_3bs[interaction_idx];
             denom_sum_init += eq_3bs[interaction_idx]
                 * beta_pows[interaction.message.len()]
@@ -189,8 +178,7 @@ pub fn evaluate_round0_interactions_gpu(
 
             for (message_idx, message) in interaction.message.iter().enumerate() {
                 let message_dag_idx = expr_to_idx[message];
-                let message_used_idx = dag_idx_to_used_idx[&message_dag_idx];
-                let message_rule_idx = rules.used_nodes[message_used_idx];
+                let message_rule_idx = rules.dag_idx_to_rule_idx[&message_dag_idx];
                 denom_weights[message_rule_idx] += eq_3bs[interaction_idx] * beta_pows[message_idx];
             }
         }
@@ -199,7 +187,7 @@ pub fn evaluate_round0_interactions_gpu(
         (rules, d_numer_weights, d_denom_weights, denom_sum_init)
     };
 
-    let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
+    let encoded_rules = rules.rules.iter().map(|c| c.encode()).collect_vec();
     let d_rules = encoded_rules.to_device()?;
 
     let buffer_size: u32 = rules.buffer_size.try_into().unwrap();

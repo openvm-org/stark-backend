@@ -33,7 +33,6 @@ struct ZerocheckCtx {
     EvalCtx eval_ctx;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_xi;
-    const uint32_t *__restrict__ d_lambda_indices;
     const Rule *__restrict__ d_rules;
     size_t rules_len;
     const size_t *__restrict__ d_used_nodes;
@@ -50,6 +49,7 @@ struct LogupCtx {
     const Rule *__restrict__ d_rules;
     size_t rules_len;
     const size_t *__restrict__ d_used_nodes;
+    const uint32_t *__restrict__ d_pair_idxs;
     size_t used_nodes_len;
     uint32_t buffer_size;
 };
@@ -188,9 +188,7 @@ __global__ void zerocheck_batch_mle_kernel(
             if (decoded.is_constraint) {
                 while (lambda_idx < lambda_len && lambda_idx < zc_ctx.used_nodes_len &&
                        zc_ctx.d_used_nodes[lambda_idx] == node) {
-                    uint32_t mapped_idx =
-                        zc_ctx.d_lambda_indices ? zc_ctx.d_lambda_indices[lambda_idx] : lambda_idx;
-                    FpExt lambda = d_lambda_pows[mapped_idx];
+                    FpExt lambda = d_lambda_pows[lambda_idx];
                     lambda_idx++;
                     sum += lambda * result;
                 }
@@ -317,11 +315,12 @@ __global__ void logup_batch_mle_kernel(
                 }
             }
 
-            // Accumulate to numer or denom based on alternation
-            // Weight by eq_3bs[used_idx / 2] (each interaction has numer and denom)
-            result *= logup_ctx.d_eq_3bs[used_idx >> 1];
+            // Use pair_idxs to get the actual pair index for this used node
+            // pair_idx = 2 * interaction_idx + is_denom
+            uint32_t pair_idx = logup_ctx.d_pair_idxs[used_idx];
+            result *= logup_ctx.d_eq_3bs[pair_idx >> 1];
 
-            if (used_idx & 1) {
+            if (pair_idx & 1) {
                 denom_sum += result;
             } else {
                 numer_sum += result;

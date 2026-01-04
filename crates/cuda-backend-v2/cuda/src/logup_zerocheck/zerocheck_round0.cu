@@ -24,7 +24,6 @@ namespace zerocheck_round0 {
 __device__ __forceinline__ FpExt acc_constraints(
     const BaryEvalContext &eval_ctx,
     const FpExt *__restrict__ d_lambda_pows,
-    const uint32_t *__restrict__ d_lambda_indices,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
     const size_t *__restrict__ d_used_nodes,
@@ -78,10 +77,7 @@ __device__ __forceinline__ FpExt acc_constraints(
         if (decoded.is_constraint) {
             while (lambda_idx < lambda_len && lambda_idx < used_nodes_len &&
                    d_used_nodes[lambda_idx] == node) {
-                uint32_t mapped_idx = d_lambda_indices != nullptr
-                                          ? d_lambda_indices[lambda_idx]
-                                          : static_cast<uint32_t>(lambda_idx);
-                FpExt lambda = d_lambda_pows[mapped_idx];
+                FpExt lambda = d_lambda_pows[lambda_idx];
                 lambda_idx++;
                 constraint_sum += lambda * result;
             }
@@ -104,7 +100,6 @@ __global__ void zerocheck_bary_evaluate_constraints_kernel(
     const FpExt *__restrict__ eq_uni,           // [large_domain]
     const FpExt *__restrict__ eq_cube,          // [num_x]
     const FpExt *__restrict__ d_lambda_pows,
-    const uint32_t *__restrict__ d_lambda_indices,
     const Fp *__restrict__ public_values,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
@@ -186,7 +181,6 @@ __global__ void zerocheck_bary_evaluate_constraints_kernel(
             FpExt constraint_sum = acc_constraints(
                 eval_ctx,
                 d_lambda_pows,
-                d_lambda_indices,
                 d_rules,
                 rules_len,
                 d_used_nodes,
@@ -262,7 +256,6 @@ extern "C" int _zerocheck_bary_eval_constraints(
     const FpExt *eq_uni,           // [large_domain]
     const FpExt *eq_cube,          // [num_x]
     const FpExt *d_lambda_pows,
-    const uint32_t *d_lambda_indices,
     const Fp *public_values,
     const Rule *d_rules,
     size_t rules_len,
@@ -285,9 +278,9 @@ extern "C" int _zerocheck_bary_eval_constraints(
 
 #define ARGUMENTS                                                                                  \
     tmp_sums_buffer, selectors_cube, preprocessed, main_parts, omega_skip_pows,                    \
-        inv_lagrange_denoms, eq_uni, eq_cube, d_lambda_pows, d_lambda_indices, public_values,      \
-        d_rules, rules_len, d_used_nodes, used_nodes_len, lambda_len, buffer_size,                 \
-        d_intermediates, skip_domain, num_x, height, expansion_factor
+        inv_lagrange_denoms, eq_uni, eq_cube, d_lambda_pows, public_values, d_rules, rules_len,    \
+        d_used_nodes, used_nodes_len, lambda_len, buffer_size, d_intermediates, skip_domain,       \
+        num_x, height, expansion_factor
 
     if (buffer_size > BUFFER_THRESHOLD) {
         zerocheck_bary_evaluate_constraints_kernel<true><<<grid, block, shmem_bytes>>>(ARGUMENTS);
