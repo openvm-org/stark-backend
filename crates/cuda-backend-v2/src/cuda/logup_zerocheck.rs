@@ -9,28 +9,30 @@ pub struct MainMatrixPtrs<T> {
     pub air_width: u32,
 }
 
+// Types for batch MLE:
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct BlockCtx {
     pub local_block_idx_x: u32,
+    /// Caution: this refers to the index within buffer of `ZerocheckCtx` or `LogupCtx`. It is
+    /// hence a "local" AIR index and not the global AIR index within the proving key.
     pub air_idx: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct EvalCtx {
+pub struct EvalCoreCtx {
     pub d_selectors: *const EF,
     pub d_preprocessed: MainMatrixPtrs<EF>,
     pub d_main: *const MainMatrixPtrs<EF>,
     pub d_public: *const F,
     pub d_intermediates: *mut EF,
-    pub height: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ZerocheckCtx {
-    pub eval_ctx: EvalCtx,
+    pub eval_ctx: EvalCoreCtx,
     pub num_y: u32,
     pub d_eq_xi: *const EF,
     pub d_rules: *const std::ffi::c_void,
@@ -43,7 +45,7 @@ pub struct ZerocheckCtx {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LogupCtx {
-    pub eval_ctx: EvalCtx,
+    pub eval_ctx: EvalCoreCtx,
     pub num_y: u32,
     pub d_eq_sharp: *const EF,
     pub d_challenges: *const EF,
@@ -55,6 +57,7 @@ pub struct LogupCtx {
     pub used_nodes_len: usize,
     pub buffer_size: u32,
 }
+// end of types for batch MLE
 
 extern "C" {
     // gkr.cu
@@ -248,8 +251,6 @@ extern "C" {
         num_y: u32,
     ) -> usize;
 
-    pub fn _mle_eval_num_blocks(num_x: u32, num_y: u32) -> u32;
-
     fn _zerocheck_eval_mle(
         tmp_sums_buffer: *mut EF,
         output: *mut EF,
@@ -270,34 +271,9 @@ extern "C" {
         num_x: u32,
     ) -> i32;
 
-    fn _zerocheck_batch_eval_mle(
-        tmp_sums_buffer: *mut EF,
-        output: *mut EF,
-        block_ctxs: *const BlockCtx,
-        zc_ctxs: *const ZerocheckCtx,
-        air_block_offsets: *const u32,
-        lambda_pows: *const EF,
-        lambda_len: usize,
-        num_blocks: u32,
-        num_x: u32,
-        num_airs: u32,
-    ) -> i32;
-
     pub fn _logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize;
 
     pub fn _logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
-
-    // batch_mle.cu (batch kernels always use global intermediates when buffer_size > 0)
-    pub fn _zerocheck_batch_mle_intermediates_buffer_size(
-        buffer_size: u32,
-        num_x: u32,
-        num_y: u32,
-    ) -> usize;
-    pub fn _logup_batch_mle_intermediates_buffer_size(
-        buffer_size: u32,
-        num_x: u32,
-        num_y: u32,
-    ) -> usize;
 
     fn _logup_eval_mle(
         tmp_sums_buffer: *mut Frac<EF>,
@@ -319,6 +295,33 @@ extern "C" {
         num_x: u32,
     ) -> i32;
 
+    // batch_mle.cu (batch kernels always use global intermediates when buffer_size > 0)
+    pub fn _zerocheck_batch_mle_intermediates_buffer_size(
+        buffer_size: u32,
+        num_x: u32,
+        num_y: u32,
+    ) -> usize;
+
+    pub fn _logup_batch_mle_intermediates_buffer_size(
+        buffer_size: u32,
+        num_x: u32,
+        num_y: u32,
+    ) -> usize;
+
+    fn _zerocheck_batch_eval_mle(
+        tmp_sums_buffer: *mut EF,
+        output: *mut EF,
+        block_ctxs: *const BlockCtx,
+        zc_ctxs: *const ZerocheckCtx,
+        air_block_offsets: *const u32,
+        lambda_pows: *const EF,
+        lambda_len: usize,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        threads_per_block: u32,
+    ) -> i32;
+
     fn _logup_batch_eval_mle(
         tmp_sums_buffer: *mut Frac<EF>,
         output: *mut Frac<EF>,
@@ -328,6 +331,7 @@ extern "C" {
         num_blocks: u32,
         num_x: u32,
         num_airs: u32,
+        threads_per_block: u32,
     ) -> i32;
 }
 
@@ -662,6 +666,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
     num_blocks: u32,
     num_x: u32,
     num_airs: u32,
+    threads_per_block: u32,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_zerocheck_batch_eval_mle(
         tmp_sums_buffer.as_mut_ptr(),
@@ -674,6 +679,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
         num_blocks,
         num_x,
         num_airs,
+        threads_per_block,
     ))
 }
 
@@ -728,6 +734,7 @@ pub unsafe fn logup_batch_eval_mle(
     num_blocks: u32,
     num_x: u32,
     num_airs: u32,
+    threads_per_block: u32,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_batch_eval_mle(
         tmp_sums_buffer.as_mut_ptr(),
@@ -738,6 +745,7 @@ pub unsafe fn logup_batch_eval_mle(
         num_blocks,
         num_x,
         num_airs,
+        threads_per_block,
     ))
 }
 
