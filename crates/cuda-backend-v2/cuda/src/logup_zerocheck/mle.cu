@@ -88,7 +88,6 @@ __global__ void zerocheck_mle_kernel(
     const MainMatrixPtrs<FpExt> d_preprocessed,
     const MainMatrixPtrs<FpExt> *__restrict__ d_main,
     const FpExt *__restrict__ d_lambda_pows,
-    const uint32_t *__restrict__ d_lambda_indices,
     const Fp *__restrict__ d_public,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
@@ -174,9 +173,7 @@ __global__ void zerocheck_mle_kernel(
             if (decoded.is_constraint) {
                 while (lambda_idx < lambda_len && lambda_idx < used_nodes_len &&
                        d_used_nodes[lambda_idx] == node) {
-                    uint32_t mapped_idx =
-                        d_lambda_indices ? d_lambda_indices[lambda_idx] : lambda_idx;
-                    FpExt lambda = d_lambda_pows[mapped_idx];
+                    FpExt lambda = d_lambda_pows[lambda_idx];
                     lambda_idx++;
                     sum += lambda * result;
                 }
@@ -203,6 +200,7 @@ __global__ void logup_mle_kernel(
     const Fp *__restrict__ d_public,
     const Rule *__restrict__ d_rules,
     const size_t *__restrict__ d_used_nodes,
+    const uint32_t *__restrict__ d_pair_idxs,
     size_t used_nodes_len,
     uint32_t buffer_size,
     FpExt *__restrict__ d_intermediates,
@@ -309,11 +307,12 @@ __global__ void logup_mle_kernel(
                 }
             }
 
-            // Accumulate to numer or denom based on alternation
-            // Weight by eq_3bs[used_idx / 2] (each interaction has numer and denom)
-            result *= d_eq_3bs[used_idx >> 1];
+            // Use pair_idxs to get the actual pair index for this used node
+            // pair_idx = 2 * interaction_idx + is_denom
+            uint32_t pair_idx = d_pair_idxs[used_idx];
+            result *= d_eq_3bs[pair_idx >> 1];
 
-            if (used_idx & 1) {
+            if (pair_idx & 1) {
                 denom_sum += result;
             } else {
                 numer_sum += result;
@@ -364,7 +363,6 @@ extern "C" int _zerocheck_eval_mle(
     const MainMatrixPtrs<FpExt> preprocessed,
     const MainMatrixPtrs<FpExt> *main,
     const FpExt *lambda_pows,
-    const uint32_t *lambda_indices,
     const Fp *public_values,
     const Rule *rules,
     size_t rules_len,
@@ -381,9 +379,8 @@ extern "C" int _zerocheck_eval_mle(
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
 #define ZEROCHECK_KERNEL_ARGS                                                                      \
-    tmp_sums_buffer, eq_xi, selectors, preprocessed, main, lambda_pows, lambda_indices,            \
-        public_values, rules, rules_len, used_nodes, used_nodes_len, lambda_len, buffer_size,      \
-        intermediates, num_y
+    tmp_sums_buffer, eq_xi, selectors, preprocessed, main, lambda_pows, public_values, rules,      \
+        rules_len, used_nodes, used_nodes_len, lambda_len, buffer_size, intermediates, num_y
 
     if (buffer_size > ZEROCHECK_BUFFER_THRESHOLD) {
         zerocheck_mle_kernel<true><<<grid, block, shmem_bytes>>>(ZEROCHECK_KERNEL_ARGS);
@@ -434,6 +431,7 @@ extern "C" int _logup_eval_mle(
     const Fp *public_values,
     const Rule *rules,
     const size_t *used_nodes,
+    const uint32_t *pair_idxs,
     size_t used_nodes_len,
     uint32_t buffer_size,
     FpExt *intermediates,
@@ -446,7 +444,7 @@ extern "C" int _logup_eval_mle(
 
 #define LOGUP_KERNEL_ARGS                                                                          \
     tmp_sums_buffer, eq_sharp, selectors, preprocessed, main, challenges, eq_3bs, public_values,   \
-        rules, used_nodes, used_nodes_len, buffer_size, intermediates, num_y
+        rules, used_nodes, pair_idxs, used_nodes_len, buffer_size, intermediates, num_y
 
     if (buffer_size > LOGUP_BUFFER_THRESHOLD) {
         logup_mle_kernel<true><<<grid, block, shmem_bytes>>>(LOGUP_KERNEL_ARGS);
