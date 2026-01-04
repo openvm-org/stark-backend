@@ -2,9 +2,10 @@
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::MemCopyError};
 use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicConstraints, SymbolicConstraintsDag,
+    SymbolicConstraints, SymbolicExpressionDag,
     symbolic_expression::SymbolicExpression,
     symbolic_variable::{Entry, SymbolicVariable},
+    topological_sort_symbolic_expr,
 };
 use p3_field::FieldAlgebra;
 use rustc_hash::FxHashMap;
@@ -12,7 +13,7 @@ use stark_backend_v2::keygen::types::StarkProvingKeyV2;
 
 use crate::{
     F,
-    logup_zerocheck::rules::{SymbolicRulesOnGpuV2, codec::Codec},
+    logup_zerocheck::rules::{SymbolicRulesGpuV2, codec::Codec},
 };
 
 pub struct AirDataGpu {
@@ -26,13 +27,17 @@ pub struct AirDataGpu {
 /// Used for GKR input evaluation and logup MLE sumcheck rounds.
 pub struct InteractionEvalRules {
     pub(crate) inner: EvalRules,
+    /// Constraints consist of all `(numer, denom)` pairs **topologically sorted**. We map the
+    /// constraint idx back to unsorted order. ```text
+    /// constraint_idx => 2 * interaction_idx + is_denom
+    /// ```
+    pub(crate) d_pair_idxs: DeviceBuffer<u32>,
     pub(crate) max_fields_len: usize,
 }
 
 /// Constraints only, no interactions
 pub struct ConstraintOnlyRules<const BUFFER_VARS: bool> {
     pub(crate) inner: EvalRules,
-    pub d_lambda_indices: DeviceBuffer<u32>,
 }
 
 pub struct EvalRules {
@@ -47,8 +52,8 @@ impl AirDataGpu {
         let dag = &pk.vk.symbolic_constraints;
         let symbolic_constraints = SymbolicConstraints::from(dag);
         let interaction_rules = InteractionEvalRules::new(&symbolic_constraints)?;
-        let zerocheck_round0 = ConstraintOnlyRules::<true>::new(dag)?;
-        let zerocheck_mle = ConstraintOnlyRules::<false>::new(dag)?;
+        let zerocheck_round0 = ConstraintOnlyRules::<true>::new(&dag.constraints)?;
+        let zerocheck_mle = ConstraintOnlyRules::<false>::new(&dag.constraints)?;
         Ok(Self {
             interaction_rules,
             zerocheck_round0,
@@ -58,15 +63,15 @@ impl AirDataGpu {
 }
 
 impl InteractionEvalRules {
-    // TODO[jpw]: this is a weird way to express the logup denominator with beta_pows
-    // symbolically. Revisit if it's possible to do it more directly
     pub fn new(symbolic_constraints: &SymbolicConstraints<F>) -> Result<Self, MemCopyError> {
         let interactions = &symbolic_constraints.interactions;
         let num_interactions = interactions.len();
         if num_interactions == 0 {
             return Ok(Self {
                 inner: EvalRules::dummy(),
+
                 max_fields_len: 0,
+                d_pair_idxs: DeviceBuffer::new(),
             });
         }
         let max_fields_len = interactions
@@ -79,9 +84,9 @@ impl InteractionEvalRules {
             .map(|index| SymbolicVariable::<F>::new(Entry::Challenge, index).into())
             .collect();
 
-        let mut frac_expressions = Vec::with_capacity(num_interactions);
+        let mut frac_pairs = Vec::with_capacity(num_interactions * 2);
         for interaction in interactions.iter() {
-            let mut interaction = interaction.clone();
+            let numer = interaction.count.clone();
             let b = SymbolicExpression::from_canonical_u32(interaction.bus_index as u32 + 1);
             let betas = symbolic_challenges[1..].to_vec();
             let mut denom = SymbolicExpression::from_canonical_u32(0);
@@ -89,21 +94,44 @@ impl InteractionEvalRules {
                 denom += betas[j].clone() * expr.clone();
             }
             denom += betas[interaction.message.len()].clone() * b;
-            interaction.message = vec![denom];
-            frac_expressions.push(interaction);
+            frac_pairs.push(numer);
+            frac_pairs.push(denom);
         }
-
-        let constraints = SymbolicConstraints {
-            constraints: vec![],
-            interactions: frac_expressions,
+        // build DAG without sorting constraint idxs:
+        let (dag, pair_idxs) = {
+            let mut expr_to_idx = FxHashMap::default();
+            let mut nodes = Vec::new();
+            let mut dag_pair_idxs: Vec<(usize, u32)> = frac_pairs
+                .iter()
+                .enumerate()
+                .map(|(pair_idx, expr)| {
+                    let dag_idx =
+                        topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes);
+                    (dag_idx, pair_idx.try_into().unwrap())
+                })
+                .collect_vec();
+            dag_pair_idxs.sort();
+            let (constraint_idx, pair_idxs): (Vec<_>, Vec<_>) = dag_pair_idxs.into_iter().unzip();
+            // NOTE: do not sort pair_idxs since we need to keep them in pairs
+            let dag = SymbolicExpressionDag {
+                nodes,
+                constraint_idx,
+            };
+            (dag, pair_idxs)
         };
-        let constraints_dag: SymbolicConstraintsDag<F> = constraints.into();
-        let rules = SymbolicRulesOnGpuV2::new(&constraints_dag, true, false);
-        let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
+        let rules = SymbolicRulesGpuV2::new(&dag, false);
+        // Build used_nodes with duplicates, preserving order from constraint_idx
+        let used_nodes = dag
+            .constraint_idx
+            .iter()
+            .map(|&dag_idx| rules.dag_idx_to_rule_idx[&dag_idx])
+            .collect_vec();
+        let encoded_rules = rules.rules.iter().map(|c| c.encode()).collect_vec();
         let d_rules = encoded_rules.to_device()?;
-        let d_used_nodes = rules.used_nodes.to_device()?;
+        let d_used_nodes = used_nodes.to_device()?;
+        let d_pair_idxs = pair_idxs.to_device()?;
         assert_eq!(
-            rules.used_nodes.len(),
+            used_nodes.len(),
             2 * num_interactions,
             "Rules come in (numer, denom) pairs"
         );
@@ -119,46 +147,31 @@ impl InteractionEvalRules {
 
         Ok(Self {
             inner,
+            d_pair_idxs,
             max_fields_len,
         })
     }
 }
 
 impl<const BUFFER_VARS: bool> ConstraintOnlyRules<BUFFER_VARS> {
-    pub fn new(dag: &SymbolicConstraintsDag<F>) -> Result<Self, MemCopyError> {
-        if dag.constraints.num_constraints() == 0 {
+    pub fn new(dag: &SymbolicExpressionDag<F>) -> Result<Self, MemCopyError> {
+        if dag.num_constraints() == 0 {
             return Ok(Self {
                 inner: EvalRules::dummy(),
-                d_lambda_indices: DeviceBuffer::new(),
             });
         }
 
-        let lambda_index_map: FxHashMap<usize, usize> = dag
-            .constraints
+        let rules = SymbolicRulesGpuV2::new(dag, BUFFER_VARS);
+        // Build used_nodes with duplicates, preserving order from constraint_idx
+        let used_nodes = dag
             .constraint_idx
             .iter()
-            .enumerate()
-            .map(|(idx, dag_idx)| (*dag_idx, idx))
-            .collect();
-        let rules = SymbolicRulesOnGpuV2::new(dag, false, BUFFER_VARS);
+            .map(|&dag_idx| rules.dag_idx_to_rule_idx[&dag_idx])
+            .collect_vec();
 
-        let lambda_indices_host: Vec<u32> = rules
-            .used_nodes
-            .iter()
-            .map(|&constraint_idx| {
-                rules
-                    .constraint_expr_idxs
-                    .get(constraint_idx)
-                    .and_then(|dag_idx| lambda_index_map.get(dag_idx))
-                    .copied()
-                    .unwrap_or(0) as u32
-            })
-            .collect();
-        let d_lambda_indices = lambda_indices_host.to_device()?;
-
-        let encoded_rules = rules.constraints.iter().map(|c| c.encode()).collect_vec();
+        let encoded_rules = rules.rules.iter().map(|c| c.encode()).collect_vec();
         let d_rules = encoded_rules.to_device()?;
-        let d_used_nodes = rules.used_nodes.to_device()?;
+        let d_used_nodes = used_nodes.to_device()?;
 
         let inner = EvalRules {
             d_rules,
@@ -168,10 +181,7 @@ impl<const BUFFER_VARS: bool> ConstraintOnlyRules<BUFFER_VARS> {
                 .try_into()
                 .expect("buffer_size exceeds u32"),
         };
-        Ok(Self {
-            inner,
-            d_lambda_indices,
-        })
+        Ok(Self { inner })
     }
 }
 

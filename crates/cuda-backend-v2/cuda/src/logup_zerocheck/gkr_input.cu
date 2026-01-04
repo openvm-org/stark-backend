@@ -67,6 +67,7 @@ __global__ void evaluate_interactions_gkr_kernel(
     const FpExt *__restrict__ d_intermediates,
     const Rule *__restrict__ d_rules,
     const size_t *__restrict__ d_used_nodes,
+    const uint32_t *__restrict__ d_pair_idxs,
     const size_t used_nodes_len,
     const uint32_t permutation_height,
     const uint32_t num_rows_per_tile
@@ -90,10 +91,6 @@ __global__ void evaluate_interactions_gkr_kernel(
 
         if (row < permutation_height) {
             uint32_t rules_evaluated = 0;
-            bool is_denom = false;
-            FpExt numerator(0);
-            FpExt denom(0);
-
             // Iterate through used_nodes (alternates: numer, denom, numer, denom, ...)
             for (uint32_t used_idx = 0; used_idx < used_nodes_len; used_idx++) {
                 uint32_t node_idx = d_used_nodes[used_idx];
@@ -168,19 +165,15 @@ __global__ void evaluate_interactions_gkr_kernel(
                     }
                 }
 
-                if (is_denom) {
-                    denom = result;
-                    // We use the fact that used nodes come in (numer, denom) pairs
-                    size_t interaction_idx = used_idx >> 1;
-                    size_t out_idx = interaction_idx * permutation_height + row;
-                    // Numerator is computed as FpExt through DAG evaluation
-                    // For logup, the numerator (count) should be in the base field
-                    // Extract the base field component (first element of extension field)
-                    d_fracs[out_idx] = {FpExt(numerator.elems[0]), denom};
+                uint32_t pair_idx = d_pair_idxs[used_idx];
+                size_t interaction_idx = pair_idx >> 1;
+                size_t out_idx = interaction_idx * permutation_height + row;
+                if (pair_idx & 1) {
+                    d_fracs[out_idx].q = result;
                 } else {
-                    numerator = result;
+                    // For logup, the numerator (count) should be in the base field
+                    d_fracs[out_idx].p = FpExt(result.elems[0]);
                 }
-                is_denom = !is_denom;
             }
         }
     }
@@ -201,6 +194,7 @@ extern "C" int _logup_gkr_input_eval(
     const FpExt *d_intermediates,
     const Rule *d_rules,
     const size_t *d_used_nodes,
+    const uint32_t *d_pair_idxs,
     size_t used_nodes_len,
     uint32_t permutation_height,
     uint32_t num_rows_per_tile
@@ -216,6 +210,7 @@ extern "C" int _logup_gkr_input_eval(
             d_intermediates,
             d_rules,
             d_used_nodes,
+            d_pair_idxs,
             used_nodes_len,
             permutation_height,
             num_rows_per_tile
@@ -229,6 +224,7 @@ extern "C" int _logup_gkr_input_eval(
             d_intermediates,
             d_rules,
             d_used_nodes,
+            d_pair_idxs,
             used_nodes_len,
             permutation_height,
             num_rows_per_tile
