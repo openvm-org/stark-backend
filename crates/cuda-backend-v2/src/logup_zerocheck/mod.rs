@@ -1398,7 +1398,8 @@ impl<'a> LogupZerocheckGpu<'a> {
                     air_offsets_h.push(block_ctxs_h.len() as u32);
                 }
 
-                // Keep per-AIR intermediates alive for the duration of the kernel (matches non-batch).
+                // Keep per-AIR intermediates alive for the duration of the kernel (matches
+                // non-batch).
                 let mut zc_intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::new();
 
                 let mut zc_ctxs_h: Vec<ZerocheckCtx> = Vec::with_capacity(zc_traces.len());
@@ -1435,7 +1436,6 @@ impl<'a> LogupZerocheckGpu<'a> {
                         eval_ctx,
                         num_y: t.num_y,
                         d_eq_xi: t.eq_xi_ptr,
-                        d_lambda_indices: pk.other_data.zerocheck_mle.d_lambda_indices.as_ptr(),
                         d_rules: pk.other_data.zerocheck_mle.inner.d_rules.as_raw_ptr(),
                         rules_len: pk.other_data.zerocheck_mle.inner.d_rules.len(),
                         d_used_nodes: pk.other_data.zerocheck_mle.inner.d_used_nodes.as_ptr(),
@@ -1533,6 +1533,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                         d_rules: pk.other_data.interaction_rules.inner.d_rules.as_raw_ptr(),
                         rules_len: pk.other_data.interaction_rules.inner.d_rules.len(),
                         d_used_nodes: pk.other_data.interaction_rules.inner.d_used_nodes.as_ptr(),
+                        d_pair_idxs: pk.other_data.interaction_rules.d_pair_idxs.as_ptr(),
                         used_nodes_len: pk.other_data.interaction_rules.inner.d_used_nodes.len(),
                         buffer_size,
                     });

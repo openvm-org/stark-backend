@@ -3,7 +3,7 @@
 use openvm_stark_backend::air_builders::symbolic::symbolic_variable::{Entry, SymbolicVariable};
 use p3_field::{Field, PrimeField32};
 
-use super::{Constraint, ConstraintWithFlag, Source};
+use super::{Rule, RuleWithFlag, Source};
 
 // Basic codec trait
 pub trait Codec {
@@ -158,28 +158,28 @@ const OP_VAR: u8 = 4;
 const INPUT_OPERANDS_MASK: u64 = (1 << 48) - 1; // 48-bit mask
 const OUTPUT_OPERAND_MASK: u64 = (1 << 24) - 1; // 24-bit mask
 
-impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
+impl<F: Field + PrimeField32> Codec for RuleWithFlag<F> {
     type Encoded = u128;
 
     // 48-bit x | 48-bit y | 24-bit z | 7-bit op | 1-bit is_constraint
     fn encode(&self) -> u128 {
         let dummy_source = Source::Constant(F::ZERO);
-        let (x, y, z, exp, write_buffer) = match &self.constraint {
-            Constraint::Add(x, y, z) => (
+        let (x, y, z, exp, write_buffer) = match &self.inner {
+            Rule::Add(x, y, z) => (
                 x.encode(),
                 y.encode(),
                 z.encode(),
                 OP_ADD,
                 !matches!(z, Source::TerminalIntermediate),
             ),
-            Constraint::Sub(x, y, z) => (
+            Rule::Sub(x, y, z) => (
                 x.encode(),
                 y.encode(),
                 z.encode(),
                 OP_SUB,
                 !matches!(z, Source::TerminalIntermediate),
             ),
-            Constraint::Mul(x, y, z) => (
+            Rule::Mul(x, y, z) => (
                 x.encode(),
                 y.encode(),
                 z.encode(),
@@ -187,23 +187,21 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
                 !matches!(z, Source::TerminalIntermediate),
             ),
             // since y is not used, we just fill it with F::ZERO
-            Constraint::Neg(x, z) => (
+            Rule::Neg(x, z) => (
                 x.encode(),
                 dummy_source.encode(),
                 z.encode(),
                 OP_NEG,
                 !matches!(z, Source::TerminalIntermediate),
             ),
-            Constraint::Variable(v) => (
+            Rule::Variable(v) => (
                 v.encode(),
                 dummy_source.encode(),
                 dummy_source.encode(),
                 OP_VAR,
                 false,
             ),
-            Constraint::BufferVar(v, z) => {
-                (v.encode(), dummy_source.encode(), z.encode(), OP_VAR, true)
-            }
+            Rule::BufferVar(v, z) => (v.encode(), dummy_source.encode(), z.encode(), OP_VAR, true),
         };
 
         let x = x & INPUT_OPERANDS_MASK; // 48bit
@@ -234,16 +232,16 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
         let exp = (encoded >> 120) as u8 & 0x3F; // 6bit
         let need_accumulate = (encoded >> 127) & 1 == 1;
 
-        let constraint = match exp {
-            OP_ADD => Constraint::Add(x, y, z),
-            OP_SUB => Constraint::Sub(x, y, z),
-            OP_MUL => Constraint::Mul(x, y, z),
-            OP_NEG => Constraint::Neg(x, z),
+        let inner = match exp {
+            OP_ADD => Rule::Add(x, y, z),
+            OP_SUB => Rule::Sub(x, y, z),
+            OP_MUL => Rule::Mul(x, y, z),
+            OP_NEG => Rule::Neg(x, z),
             OP_VAR => {
                 if write_buffer {
-                    Constraint::BufferVar(x, z)
+                    Rule::BufferVar(x, z)
                 } else {
-                    Constraint::Variable(x)
+                    Rule::Variable(x)
                 }
             }
             _ => panic!(
@@ -253,7 +251,7 @@ impl<F: Field + PrimeField32> Codec for ConstraintWithFlag<F> {
         };
 
         Self {
-            constraint,
+            inner,
             need_accumulate,
         }
     }
