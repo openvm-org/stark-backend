@@ -1,5 +1,4 @@
 #include "codec.cuh"
-#include "eval_config.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "frac_ext.cuh"
@@ -20,17 +19,16 @@ struct BlockCtx {
     uint32_t air_idx;
 };
 
-struct EvalCtx {
+struct EvalCoreCtx {
     const FpExt *__restrict__ d_selectors;
     const MainMatrixPtrs<FpExt> d_preprocessed;
     const MainMatrixPtrs<FpExt> *__restrict__ d_main;
     const Fp *__restrict__ d_public;
     FpExt *__restrict__ d_intermediates;
-    uint32_t height;
 };
 
 struct ZerocheckCtx {
-    EvalCtx eval_ctx;
+    EvalCoreCtx eval_ctx;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_xi;
     const Rule *__restrict__ d_rules;
@@ -41,7 +39,7 @@ struct ZerocheckCtx {
 };
 
 struct LogupCtx {
-    EvalCtx eval_ctx;
+    EvalCoreCtx eval_ctx;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_sharp;
     const FpExt *__restrict__ d_challenges;
@@ -52,6 +50,16 @@ struct LogupCtx {
     const uint32_t *__restrict__ d_pair_idxs;
     size_t used_nodes_len;
     uint32_t buffer_size;
+};
+
+// Local context for device use only
+struct EvalCtx {
+    const FpExt *__restrict__ d_selectors;
+    const MainMatrixPtrs<FpExt> d_preprocessed;
+    const MainMatrixPtrs<FpExt> *__restrict__ d_main;
+    const Fp *__restrict__ d_public;
+    FpExt *__restrict__ d_intermediates;
+    uint32_t height;
 };
 
 __device__ __forceinline__ FpExt evaluate_mle_entry(
@@ -132,21 +140,26 @@ __global__ void zerocheck_batch_mle_kernel(
     FpExt sum(Fp::zero());
 
     if (active_thread) {
-        EvalCtx eval_ctx = zc_ctx.eval_ctx;
-        uint32_t buffer_stride = 0;
+        uint32_t height = num_x * zc_ctx.num_y;
         uint32_t row = x_int * zc_ctx.num_y + y_int;
+        // No tiling: task_offset = row, task_stride = height
+        uint32_t buffer_stride = 0;
+        FpExt *__restrict__ intermediates = nullptr;
         if (zc_ctx.buffer_size > 0) {
+#ifdef CUDA_DEBUG
             assert(eval_ctx.d_intermediates != nullptr);
-            // Match non-batch GLOBAL layout: SoA over tasks with stride = task_stride.
-            uint32_t y_int_stride = ((zc_ctx.num_y + blockDim.x - 1) / blockDim.x) * blockDim.x;
-            uint32_t task_offset = x_int * y_int_stride + y_int;
-            uint32_t task_stride = y_int_stride * num_x;
-            eval_ctx.d_intermediates = eval_ctx.d_intermediates + task_offset;
-            buffer_stride = task_stride;
-        } else {
-            eval_ctx.d_intermediates = nullptr;
-            buffer_stride = 0;
+#endif
+            intermediates = zc_ctx.eval_ctx.d_intermediates + row;
+            buffer_stride = height;
         }
+        EvalCtx eval_ctx{
+            zc_ctx.eval_ctx.d_selectors,
+            zc_ctx.eval_ctx.d_preprocessed,
+            zc_ctx.eval_ctx.d_main,
+            zc_ctx.eval_ctx.d_public,
+            intermediates,
+            height
+        };
         uint32_t lambda_idx = 0;
 
         for (size_t node = 0; node < zc_ctx.rules_len; ++node) {
@@ -223,27 +236,28 @@ __global__ void logup_batch_mle_kernel(
     FpExt denom_sum = FpExt(Fp::zero());
 
     if (active_thread) {
-        // Match non-batch GLOBAL layout: SoA over tasks with stride = task_stride.
-        FpExt *intermediates = nullptr;
+        uint32_t height = num_x * logup_ctx.num_y;
+        uint32_t row = x_int * logup_ctx.num_y + y_int;
+        // No tiling: task_offset = row, task_stride = height
         uint32_t buffer_stride = 0;
+        FpExt *intermediates = nullptr;
         if (logup_ctx.buffer_size > 0) {
             assert(logup_ctx.eval_ctx.d_intermediates != nullptr);
-            // Unique task slot per (x_int, y_int) for this AIR.
-            // y_int_stride is rounded up to blockDim.x so the mapping matches `BlockCtx.local_block_idx_x`.
-            uint32_t y_int_stride = ((logup_ctx.num_y + blockDim.x - 1) / blockDim.x) * blockDim.x;
-            uint32_t task_offset = x_int * y_int_stride + y_int;
-            uint32_t task_stride = y_int_stride * num_x;
-            intermediates = logup_ctx.eval_ctx.d_intermediates + task_offset;
-            buffer_stride = task_stride;
+            intermediates = logup_ctx.eval_ctx.d_intermediates + row;
+            buffer_stride = height;
         }
 
         // Build local EvalCtx with correct intermediates backing.
         // NOTE: `eval_ctx.d_intermediates` points at the current task's base, so indexing uses
         // `decoded.z_index * buffer_stride`.
-        EvalCtx eval_ctx = logup_ctx.eval_ctx;
-        eval_ctx.d_intermediates = intermediates;
-
-        uint32_t row = x_int * logup_ctx.num_y + y_int;
+        EvalCtx eval_ctx{
+            logup_ctx.eval_ctx.d_selectors,
+            logup_ctx.eval_ctx.d_preprocessed,
+            logup_ctx.eval_ctx.d_main,
+            logup_ctx.eval_ctx.d_public,
+            intermediates,
+            height
+        };
         size_t rules_evaluated = 0;
 
         // Iterate through used_nodes (alternates: numer, denom, numer, denom, ...)
@@ -343,8 +357,6 @@ __global__ void logup_batch_mle_kernel(
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
-//
-constexpr uint32_t MAX_THREADS = 128;
 
 // ============================================================================
 // SIZE HELPERS (batch kernels)
@@ -360,12 +372,8 @@ extern "C" size_t _zerocheck_batch_mle_intermediates_buffer_size(
     uint32_t num_x,
     uint32_t num_y
 ) {
-    if (buffer_size == 0)
-        return 0;
-    // Must match `zerocheck_batch_mle_kernel`'s y-stride computation.
-    uint32_t y_int_stride = ((num_y + MAX_THREADS - 1) / MAX_THREADS) * MAX_THREADS;
-    size_t task_stride = static_cast<size_t>(y_int_stride) * static_cast<size_t>(num_x);
-    return static_cast<size_t>(buffer_size) * task_stride;
+    size_t height = static_cast<size_t>(num_x) * num_y;
+    return height * buffer_size;
 }
 
 // In FpExt elements.
@@ -374,12 +382,8 @@ extern "C" size_t _logup_batch_mle_intermediates_buffer_size(
     uint32_t num_x,
     uint32_t num_y
 ) {
-    if (buffer_size == 0)
-        return 0;
-    // Must match `logup_batch_mle_kernel`'s y-stride computation.
-    uint32_t y_int_stride = ((num_y + MAX_THREADS - 1) / MAX_THREADS) * MAX_THREADS;
-    size_t task_stride = static_cast<size_t>(y_int_stride) * static_cast<size_t>(num_x);
-    return static_cast<size_t>(buffer_size) * task_stride;
+    size_t height = static_cast<size_t>(num_x) * num_y;
+    return height * buffer_size;
 }
 
 extern "C" int _zerocheck_batch_eval_mle(
@@ -392,10 +396,11 @@ extern "C" int _zerocheck_batch_eval_mle(
     size_t lambda_len,
     uint32_t num_blocks,
     uint32_t num_x,
-    uint32_t num_airs
+    uint32_t num_airs,
+    uint32_t threads_per_block
 ) {
     dim3 grid(num_blocks, num_x);
-    dim3 block(MAX_THREADS);
+    dim3 block(threads_per_block);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     zerocheck_batch_mle_kernel<<<grid, block, shmem_bytes>>>(
@@ -427,13 +432,6 @@ extern "C" int _zerocheck_batch_eval_mle(
     return 0;
 }
 
-extern "C" uint32_t _mle_eval_num_blocks(uint32_t num_x, uint32_t num_y) {
-    auto [grid, block] =
-        mle_rounds_config::eval_constraints_launch_params(num_x, num_y, MAX_THREADS);
-    (void)block;
-    return grid.x;
-}
-
 extern "C" int _logup_batch_eval_mle(
     FracExt *tmp_sums_buffer,
     FracExt *output,
@@ -442,10 +440,11 @@ extern "C" int _logup_batch_eval_mle(
     const uint32_t *air_block_offsets, // size = num_airs + 1, grouped by air_idx
     uint32_t num_blocks,
     uint32_t num_x,
-    uint32_t num_airs
+    uint32_t num_airs,
+    uint32_t threads_per_block
 ) {
     dim3 grid(num_blocks, num_x);
-    dim3 block(MAX_THREADS);
+    dim3 block(threads_per_block);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     logup_batch_mle_kernel<<<grid, block, shmem_bytes>>>(tmp_sums_buffer, block_ctxs, logup_ctxs);
