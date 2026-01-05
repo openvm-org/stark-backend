@@ -146,11 +146,11 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
 /// - `x - (-y)` → `x + y`
 pub struct SymbolicDagBuilder<F: Field> {
     /// Cache: Arc pointer -> node index (fast path for same Arc)
-    expr_to_idx: FxHashMap<*const SymbolicExpression<F>, usize>,
+    pub expr_to_idx: FxHashMap<*const SymbolicExpression<F>, usize>,
     /// Cache: node structure -> node index (structural deduplication)
-    node_to_idx: FxHashMap<SymbolicExpressionNode<F>, usize>,
+    pub node_to_idx: FxHashMap<SymbolicExpressionNode<F>, usize>,
     /// Nodes in topological order
-    nodes: Vec<SymbolicExpressionNode<F>>,
+    pub nodes: Vec<SymbolicExpressionNode<F>>,
 }
 
 impl<F: Field> Default for SymbolicDagBuilder<F> {
