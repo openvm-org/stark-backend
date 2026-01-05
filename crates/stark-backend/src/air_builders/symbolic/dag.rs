@@ -100,7 +100,9 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     let mut nodes = Vec::new();
     let mut constraint_idx: Vec<usize> = constraints
         .iter()
-        .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut node_to_idx, &mut nodes))
+        .map(|expr| {
+            topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut node_to_idx, &mut nodes)
+        })
         .collect();
     constraint_idx.sort();
     constraint_idx.dedup();
@@ -111,11 +113,20 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
                 .message
                 .iter()
                 .map(|field_expr| {
-                    topological_sort_symbolic_expr(field_expr, &mut expr_to_idx, &mut node_to_idx, &mut nodes)
+                    topological_sort_symbolic_expr(
+                        field_expr,
+                        &mut expr_to_idx,
+                        &mut node_to_idx,
+                        &mut nodes,
+                    )
                 })
                 .collect();
-            let count =
-                topological_sort_symbolic_expr(&interaction.count, &mut expr_to_idx, &mut node_to_idx, &mut nodes);
+            let count = topological_sort_symbolic_expr(
+                &interaction.count,
+                &mut expr_to_idx,
+                &mut node_to_idx,
+                &mut nodes,
+            );
             Interaction {
                 message: fields,
                 count,
@@ -142,11 +153,11 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
 /// - `node_to_idx`: Structural deduplication - catches identical nodes with different Arc pointers
 ///
 /// Algebraic simplifications performed:
+/// - Constant folding: `a + b` → `c`, `a - b` → `c`, `a * b` → `c`, `-a` → `c` (for constants)
 /// - `x + 0` → `x`, `0 + x` → `x`
 /// - `x - 0` → `x`
 /// - `x * 1` → `x`, `1 * x` → `x`
 /// - `x * 0` → `0`, `0 * x` → `0`
-/// - `-0` → `0`
 /// - `x + (-y)` → `x - y` (normalizes Add+Neg to Sub)
 /// - `x - (-y)` → `x + y` (double negation)
 pub fn topological_sort_symbolic_expr<'a, F: Field>(
@@ -162,6 +173,14 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
     // Helper to check if a node at given index is a constant with specific value
     let is_const = |nodes: &[SymbolicExpressionNode<F>], idx: usize, val: F| -> bool {
         matches!(&nodes[idx], SymbolicExpressionNode::Constant(c) if *c == val)
+    };
+
+    // Helper to get constant value from a node
+    let get_const = |nodes: &[SymbolicExpressionNode<F>], idx: usize| -> Option<F> {
+        match &nodes[idx] {
+            SymbolicExpressionNode::Constant(c) => Some(*c),
+            _ => None,
+        }
     };
 
     // Helper to check if a node is a Neg and return its child index
@@ -198,8 +217,12 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             let right_idx =
                 topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
 
+            // Constant folding: const + const = const
+            if let (Some(a), Some(b)) = (get_const(nodes, left_idx), get_const(nodes, right_idx)) {
+                intern_node(SymbolicExpressionNode::Constant(a + b), node_to_idx, nodes)
+            }
             // Simplify: 0 + x = x, x + 0 = x
-            if is_const(nodes, left_idx, F::ZERO) {
+            else if is_const(nodes, left_idx, F::ZERO) {
                 right_idx
             } else if is_const(nodes, right_idx, F::ZERO) {
                 left_idx
@@ -237,8 +260,12 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             let right_idx =
                 topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
 
+            // Constant folding: const - const = const
+            if let (Some(a), Some(b)) = (get_const(nodes, left_idx), get_const(nodes, right_idx)) {
+                intern_node(SymbolicExpressionNode::Constant(a - b), node_to_idx, nodes)
+            }
             // Simplify: x - 0 = x
-            if is_const(nodes, right_idx, F::ZERO) {
+            else if is_const(nodes, right_idx, F::ZERO) {
                 left_idx
             }
             // Simplify: x - (-y) = x + y (double negation)
@@ -268,9 +295,9 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             let child_idx =
                 topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
 
-            // Simplify: -0 = 0
-            if is_const(nodes, child_idx, F::ZERO) {
-                child_idx
+            // Constant folding: -const = const
+            if let Some(c) = get_const(nodes, child_idx) {
+                intern_node(SymbolicExpressionNode::Constant(-c), node_to_idx, nodes)
             } else {
                 intern_node(
                     SymbolicExpressionNode::Neg {
@@ -288,24 +315,23 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             degree_multiple,
         } => {
             // An important case to remember: square will have Arc::as_ptr(&x) == Arc::as_ptr(&y)
-            // The `expr_to_idx` will ensure only one topological sort is done to prevent exponential
-            // behavior.
+            // The `expr_to_idx` will ensure only one topological sort is done to prevent
+            // exponential behavior.
             let left_idx =
                 topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
             let right_idx =
                 topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
 
-            // Simplify: 0 * x = 0, x * 0 = 0
-            if is_const(nodes, left_idx, F::ZERO) {
-                left_idx
-            } else if is_const(nodes, right_idx, F::ZERO) {
-                right_idx
+            // Constant folding: const * const = const
+            if let (Some(a), Some(b)) = (get_const(nodes, left_idx), get_const(nodes, right_idx)) {
+                intern_node(SymbolicExpressionNode::Constant(a * b), node_to_idx, nodes)
             }
-            // Simplify: 1 * x = x, x * 1 = x
-            else if is_const(nodes, left_idx, F::ONE) {
-                right_idx
-            } else if is_const(nodes, right_idx, F::ONE) {
+            // Simplify: 0 * x = 0, x * 1 = x (return left_idx)
+            // Simplify: x * 0 = 0, 1 * x = x (return right_idx)
+            else if is_const(nodes, left_idx, F::ZERO) || is_const(nodes, right_idx, F::ONE) {
                 left_idx
+            } else if is_const(nodes, right_idx, F::ZERO) || is_const(nodes, left_idx, F::ONE) {
+                right_idx
             } else {
                 intern_node(
                     SymbolicExpressionNode::Mul {
@@ -471,7 +497,11 @@ mod tests {
         let dag = build_symbolic_constraints_dag(&constraints, &interactions);
 
         // Nodes are deduplicated - there's only 1 node in the DAG
-        assert_eq!(dag.constraints.nodes.len(), 1, "Nodes should be deduplicated");
+        assert_eq!(
+            dag.constraints.nodes.len(),
+            1,
+            "Nodes should be deduplicated"
+        );
 
         // constraint_idx should also be deduplicated
         assert_eq!(
@@ -605,6 +635,55 @@ mod tests {
         assert!(matches!(
             dag.constraints.nodes[dag.constraints.constraint_idx[0]],
             SymbolicExpressionNode::Add { .. }
+        ));
+    }
+
+    #[test]
+    fn test_constant_folding() {
+        let two = SymbolicExpression::<F>::Constant(F::TWO);
+        let three = SymbolicExpression::<F>::Constant(F::from_canonical_u32(3));
+        let five = F::from_canonical_u32(5);
+        let six = F::from_canonical_u32(6);
+        let neg_three = -F::from_canonical_u32(3);
+
+        // Test 2 + 3 = 5
+        let expr_add = two.clone() + three.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_add], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Constant(c) if c == five
+        ));
+
+        // Test 3 - 2 = 1
+        let expr_sub = three.clone() - two.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_sub], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Constant(c) if c == F::ONE
+        ));
+
+        // Test 2 * 3 = 6
+        let expr_mul = two.clone() * three.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_mul], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Constant(c) if c == six
+        ));
+
+        // Test -3 = neg_three
+        let expr_neg = -three.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_neg], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Constant(c) if c == neg_three
+        ));
+
+        // Test chained: (2 + 3) * 2 = 10
+        let expr_chain = (two.clone() + three.clone()) * two.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_chain], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Constant(c) if c == F::from_canonical_u32(10)
         ));
     }
 
