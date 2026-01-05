@@ -95,14 +95,10 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     constraints: &[SymbolicExpression<F>],
     interactions: &[SymbolicInteraction<F>],
 ) -> SymbolicConstraintsDag<F> {
-    let mut expr_to_idx = FxHashMap::default();
-    let mut node_to_idx = FxHashMap::default();
-    let mut nodes = Vec::new();
+    let mut builder = SymbolicDagBuilder::new();
     let mut constraint_idx: Vec<usize> = constraints
         .iter()
-        .map(|expr| {
-            topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut node_to_idx, &mut nodes)
-        })
+        .map(|expr| builder.add_expr(expr))
         .collect();
     constraint_idx.sort();
     constraint_idx.dedup();
@@ -112,21 +108,9 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
             let fields: Vec<usize> = interaction
                 .message
                 .iter()
-                .map(|field_expr| {
-                    topological_sort_symbolic_expr(
-                        field_expr,
-                        &mut expr_to_idx,
-                        &mut node_to_idx,
-                        &mut nodes,
-                    )
-                })
+                .map(|field_expr| builder.add_expr(field_expr))
                 .collect();
-            let count = topological_sort_symbolic_expr(
-                &interaction.count,
-                &mut expr_to_idx,
-                &mut node_to_idx,
-                &mut nodes,
-            );
+            let count = builder.add_expr(&interaction.count);
             Interaction {
                 message: fields,
                 count,
@@ -136,7 +120,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
         })
         .collect();
     let constraints = SymbolicExpressionDag {
-        nodes,
+        nodes: builder.nodes,
         constraint_idx,
     };
     SymbolicConstraintsDag {
@@ -145,7 +129,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     }
 }
 
-/// Converts a symbolic expression tree into a DAG representation with structural deduplication
+/// Builder for constructing a symbolic expression DAG with structural deduplication
 /// and algebraic simplifications.
 ///
 /// Two caches are used:
@@ -153,214 +137,199 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
 /// - `node_to_idx`: Structural deduplication - catches identical nodes with different Arc pointers
 ///
 /// Algebraic simplifications performed:
-/// - Constant folding: `a + b` → `c`, `a - b` → `c`, `a * b` → `c`, `-a` → `c` (for constants)
+/// - Constant folding: `a + b` → `c`, `a - b` → `c`, `a * b` → `c`, `-a` → `c` (for constants a,b)
 /// - `x + 0` → `x`, `0 + x` → `x`
 /// - `x - 0` → `x`
 /// - `x * 1` → `x`, `1 * x` → `x`
 /// - `x * 0` → `0`, `0 * x` → `0`
-/// - `x + (-y)` → `x - y` (normalizes Add+Neg to Sub)
-/// - `x - (-y)` → `x + y` (double negation)
-pub fn topological_sort_symbolic_expr<'a, F: Field>(
-    expr: &'a SymbolicExpression<F>,
-    expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, usize>,
-    node_to_idx: &mut FxHashMap<SymbolicExpressionNode<F>, usize>,
-    nodes: &mut Vec<SymbolicExpressionNode<F>>,
-) -> usize {
-    if let Some(&idx) = expr_to_idx.get(expr) {
-        return idx;
+/// - `x + (-y)` → `x - y`
+/// - `x - (-y)` → `x + y`
+pub struct SymbolicDagBuilder<F: Field> {
+    /// Cache: Arc pointer -> node index (fast path for same Arc)
+    expr_to_idx: FxHashMap<*const SymbolicExpression<F>, usize>,
+    /// Cache: node structure -> node index (structural deduplication)
+    node_to_idx: FxHashMap<SymbolicExpressionNode<F>, usize>,
+    /// Nodes in topological order
+    nodes: Vec<SymbolicExpressionNode<F>>,
+}
+
+impl<F: Field> Default for SymbolicDagBuilder<F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<F: Field> SymbolicDagBuilder<F> {
+    pub fn new() -> Self {
+        Self {
+            expr_to_idx: FxHashMap::default(),
+            node_to_idx: FxHashMap::default(),
+            nodes: Vec::new(),
+        }
     }
 
-    // Helper to check if a node at given index is a constant with specific value
-    let is_const = |nodes: &[SymbolicExpressionNode<F>], idx: usize, val: F| -> bool {
-        matches!(&nodes[idx], SymbolicExpressionNode::Constant(c) if *c == val)
-    };
+    /// Add a symbolic expression to the DAG, returning its node index.
+    /// Performs structural deduplication and algebraic simplifications.
+    pub fn add_expr(&mut self, expr: &SymbolicExpression<F>) -> usize {
+        // Fast path: check if we've seen this exact Arc pointer before
+        let ptr = expr as *const SymbolicExpression<F>;
+        if let Some(&idx) = self.expr_to_idx.get(&ptr) {
+            return idx;
+        }
 
-    // Helper to get constant value from a node
-    let get_const = |nodes: &[SymbolicExpressionNode<F>], idx: usize| -> Option<F> {
-        match &nodes[idx] {
+        let idx = match expr {
+            SymbolicExpression::Variable(var) => {
+                self.intern_node(SymbolicExpressionNode::Variable(*var))
+            }
+            SymbolicExpression::IsFirstRow => self.intern_node(SymbolicExpressionNode::IsFirstRow),
+            SymbolicExpression::IsLastRow => self.intern_node(SymbolicExpressionNode::IsLastRow),
+            SymbolicExpression::IsTransition => {
+                self.intern_node(SymbolicExpressionNode::IsTransition)
+            }
+            SymbolicExpression::Constant(cons) => {
+                self.intern_node(SymbolicExpressionNode::Constant(*cons))
+            }
+            SymbolicExpression::Add {
+                x,
+                y,
+                degree_multiple,
+            } => {
+                let left_idx = self.add_expr(x.as_ref());
+                let right_idx = self.add_expr(y.as_ref());
+
+                // Constant folding: const + const = const
+                if let (Some(a), Some(b)) = (self.get_const(left_idx), self.get_const(right_idx)) {
+                    self.intern_node(SymbolicExpressionNode::Constant(a + b))
+                }
+                // Simplify: 0 + x = x, x + 0 = x
+                else if self.is_const(left_idx, F::ZERO) {
+                    right_idx
+                } else if self.is_const(right_idx, F::ZERO) {
+                    left_idx
+                }
+                // Normalize: x + (-y) = x - y
+                else if let Some(neg_child_idx) = self.get_neg_child(right_idx) {
+                    self.intern_node(SymbolicExpressionNode::Sub {
+                        left_idx,
+                        right_idx: neg_child_idx,
+                        degree_multiple: *degree_multiple,
+                    })
+                } else {
+                    self.intern_node(SymbolicExpressionNode::Add {
+                        left_idx,
+                        right_idx,
+                        degree_multiple: *degree_multiple,
+                    })
+                }
+            }
+            SymbolicExpression::Sub {
+                x,
+                y,
+                degree_multiple,
+            } => {
+                let left_idx = self.add_expr(x.as_ref());
+                let right_idx = self.add_expr(y.as_ref());
+
+                // Constant folding: const - const = const
+                if let (Some(a), Some(b)) = (self.get_const(left_idx), self.get_const(right_idx)) {
+                    self.intern_node(SymbolicExpressionNode::Constant(a - b))
+                }
+                // Simplify: x - 0 = x
+                else if self.is_const(right_idx, F::ZERO) {
+                    left_idx
+                }
+                // Simplify: x - (-y) = x + y (double negation)
+                else if let Some(neg_child_idx) = self.get_neg_child(right_idx) {
+                    self.intern_node(SymbolicExpressionNode::Add {
+                        left_idx,
+                        right_idx: neg_child_idx,
+                        degree_multiple: *degree_multiple,
+                    })
+                } else {
+                    self.intern_node(SymbolicExpressionNode::Sub {
+                        left_idx,
+                        right_idx,
+                        degree_multiple: *degree_multiple,
+                    })
+                }
+            }
+            SymbolicExpression::Neg { x, degree_multiple } => {
+                let child_idx = self.add_expr(x.as_ref());
+
+                // Constant folding: -const = const
+                if let Some(c) = self.get_const(child_idx) {
+                    self.intern_node(SymbolicExpressionNode::Constant(-c))
+                } else {
+                    self.intern_node(SymbolicExpressionNode::Neg {
+                        idx: child_idx,
+                        degree_multiple: *degree_multiple,
+                    })
+                }
+            }
+            SymbolicExpression::Mul {
+                x,
+                y,
+                degree_multiple,
+            } => {
+                // An important case to remember: square will have Arc::as_ptr(&x) ==
+                // Arc::as_ptr(&y) The `expr_to_idx` will ensure only one recursive
+                // call is done to prevent exponential behavior.
+                let left_idx = self.add_expr(x.as_ref());
+                let right_idx = self.add_expr(y.as_ref());
+
+                // Constant folding: const * const = const
+                if let (Some(a), Some(b)) = (self.get_const(left_idx), self.get_const(right_idx)) {
+                    self.intern_node(SymbolicExpressionNode::Constant(a * b))
+                }
+                // Simplify: 0 * x = 0, x * 1 = x (return left_idx)
+                // Simplify: x * 0 = 0, 1 * x = x (return right_idx)
+                else if self.is_const(left_idx, F::ZERO) || self.is_const(right_idx, F::ONE) {
+                    left_idx
+                } else if self.is_const(right_idx, F::ZERO) || self.is_const(left_idx, F::ONE) {
+                    right_idx
+                } else {
+                    self.intern_node(SymbolicExpressionNode::Mul {
+                        left_idx,
+                        right_idx,
+                        degree_multiple: *degree_multiple,
+                    })
+                }
+            }
+        };
+
+        self.expr_to_idx.insert(ptr, idx);
+        idx
+    }
+
+    /// Intern a node: return existing index if the node already exists, otherwise add it.
+    fn intern_node(&mut self, node: SymbolicExpressionNode<F>) -> usize {
+        *self.node_to_idx.entry(node.clone()).or_insert_with(|| {
+            let idx = self.nodes.len();
+            self.nodes.push(node);
+            idx
+        })
+    }
+
+    /// Check if a node at given index is a constant with specific value.
+    fn is_const(&self, idx: usize, val: F) -> bool {
+        matches!(&self.nodes[idx], SymbolicExpressionNode::Constant(c) if *c == val)
+    }
+
+    /// Get constant value from a node, if it is a constant.
+    fn get_const(&self, idx: usize) -> Option<F> {
+        match &self.nodes[idx] {
             SymbolicExpressionNode::Constant(c) => Some(*c),
             _ => None,
         }
-    };
+    }
 
-    // Helper to check if a node is a Neg and return its child index
-    let get_neg_child = |nodes: &[SymbolicExpressionNode<F>], idx: usize| -> Option<usize> {
-        match &nodes[idx] {
+    /// If a node is a Neg, return its child index.
+    fn get_neg_child(&self, idx: usize) -> Option<usize> {
+        match &self.nodes[idx] {
             SymbolicExpressionNode::Neg { idx, .. } => Some(*idx),
             _ => None,
         }
-    };
-
-    let idx = match expr {
-        SymbolicExpression::Variable(var) => {
-            intern_node(SymbolicExpressionNode::Variable(*var), node_to_idx, nodes)
-        }
-        SymbolicExpression::IsFirstRow => {
-            intern_node(SymbolicExpressionNode::IsFirstRow, node_to_idx, nodes)
-        }
-        SymbolicExpression::IsLastRow => {
-            intern_node(SymbolicExpressionNode::IsLastRow, node_to_idx, nodes)
-        }
-        SymbolicExpression::IsTransition => {
-            intern_node(SymbolicExpressionNode::IsTransition, node_to_idx, nodes)
-        }
-        SymbolicExpression::Constant(cons) => {
-            intern_node(SymbolicExpressionNode::Constant(*cons), node_to_idx, nodes)
-        }
-        SymbolicExpression::Add {
-            x,
-            y,
-            degree_multiple,
-        } => {
-            let left_idx =
-                topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
-            let right_idx =
-                topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
-
-            // Constant folding: const + const = const
-            if let (Some(a), Some(b)) = (get_const(nodes, left_idx), get_const(nodes, right_idx)) {
-                intern_node(SymbolicExpressionNode::Constant(a + b), node_to_idx, nodes)
-            }
-            // Simplify: 0 + x = x, x + 0 = x
-            else if is_const(nodes, left_idx, F::ZERO) {
-                right_idx
-            } else if is_const(nodes, right_idx, F::ZERO) {
-                left_idx
-            }
-            // Normalize: x + (-y) = x - y
-            else if let Some(neg_child_idx) = get_neg_child(nodes, right_idx) {
-                intern_node(
-                    SymbolicExpressionNode::Sub {
-                        left_idx,
-                        right_idx: neg_child_idx,
-                        degree_multiple: *degree_multiple,
-                    },
-                    node_to_idx,
-                    nodes,
-                )
-            } else {
-                intern_node(
-                    SymbolicExpressionNode::Add {
-                        left_idx,
-                        right_idx,
-                        degree_multiple: *degree_multiple,
-                    },
-                    node_to_idx,
-                    nodes,
-                )
-            }
-        }
-        SymbolicExpression::Sub {
-            x,
-            y,
-            degree_multiple,
-        } => {
-            let left_idx =
-                topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
-            let right_idx =
-                topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
-
-            // Constant folding: const - const = const
-            if let (Some(a), Some(b)) = (get_const(nodes, left_idx), get_const(nodes, right_idx)) {
-                intern_node(SymbolicExpressionNode::Constant(a - b), node_to_idx, nodes)
-            }
-            // Simplify: x - 0 = x
-            else if is_const(nodes, right_idx, F::ZERO) {
-                left_idx
-            }
-            // Simplify: x - (-y) = x + y (double negation)
-            else if let Some(neg_child_idx) = get_neg_child(nodes, right_idx) {
-                intern_node(
-                    SymbolicExpressionNode::Add {
-                        left_idx,
-                        right_idx: neg_child_idx,
-                        degree_multiple: *degree_multiple,
-                    },
-                    node_to_idx,
-                    nodes,
-                )
-            } else {
-                intern_node(
-                    SymbolicExpressionNode::Sub {
-                        left_idx,
-                        right_idx,
-                        degree_multiple: *degree_multiple,
-                    },
-                    node_to_idx,
-                    nodes,
-                )
-            }
-        }
-        SymbolicExpression::Neg { x, degree_multiple } => {
-            let child_idx =
-                topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
-
-            // Constant folding: -const = const
-            if let Some(c) = get_const(nodes, child_idx) {
-                intern_node(SymbolicExpressionNode::Constant(-c), node_to_idx, nodes)
-            } else {
-                intern_node(
-                    SymbolicExpressionNode::Neg {
-                        idx: child_idx,
-                        degree_multiple: *degree_multiple,
-                    },
-                    node_to_idx,
-                    nodes,
-                )
-            }
-        }
-        SymbolicExpression::Mul {
-            x,
-            y,
-            degree_multiple,
-        } => {
-            // An important case to remember: square will have Arc::as_ptr(&x) == Arc::as_ptr(&y)
-            // The `expr_to_idx` will ensure only one topological sort is done to prevent
-            // exponential behavior.
-            let left_idx =
-                topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
-            let right_idx =
-                topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
-
-            // Constant folding: const * const = const
-            if let (Some(a), Some(b)) = (get_const(nodes, left_idx), get_const(nodes, right_idx)) {
-                intern_node(SymbolicExpressionNode::Constant(a * b), node_to_idx, nodes)
-            }
-            // Simplify: 0 * x = 0, x * 1 = x (return left_idx)
-            // Simplify: x * 0 = 0, 1 * x = x (return right_idx)
-            else if is_const(nodes, left_idx, F::ZERO) || is_const(nodes, right_idx, F::ONE) {
-                left_idx
-            } else if is_const(nodes, right_idx, F::ZERO) || is_const(nodes, left_idx, F::ONE) {
-                right_idx
-            } else {
-                intern_node(
-                    SymbolicExpressionNode::Mul {
-                        left_idx,
-                        right_idx,
-                        degree_multiple: *degree_multiple,
-                    },
-                    node_to_idx,
-                    nodes,
-                )
-            }
-        }
-    };
-
-    expr_to_idx.insert(expr, idx);
-    idx
-}
-
-/// Intern a node: return existing index if the node already exists, otherwise add it.
-fn intern_node<F: Field>(
-    node: SymbolicExpressionNode<F>,
-    node_to_idx: &mut FxHashMap<SymbolicExpressionNode<F>, usize>,
-    nodes: &mut Vec<SymbolicExpressionNode<F>>,
-) -> usize {
-    *node_to_idx.entry(node.clone()).or_insert_with(|| {
-        let idx = nodes.len();
-        nodes.push(node);
-        idx
-    })
+    }
 }
 
 impl<F: Field> SymbolicExpressionDag<F> {
