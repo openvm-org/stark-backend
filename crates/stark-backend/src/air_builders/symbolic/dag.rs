@@ -15,7 +15,7 @@ use crate::{
 /// A node in symbolic expression DAG.
 /// Basically replace `Arc`s in `SymbolicExpression` with node IDs.
 /// Intended to be serializable and deserializable.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(bound(serialize = "F: Serialize", deserialize = "F: Deserialize<'de>"))]
 #[repr(C)]
 pub enum SymbolicExpressionNode<F> {
@@ -96,12 +96,14 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     interactions: &[SymbolicInteraction<F>],
 ) -> SymbolicConstraintsDag<F> {
     let mut expr_to_idx = FxHashMap::default();
+    let mut node_to_idx = FxHashMap::default();
     let mut nodes = Vec::new();
     let mut constraint_idx: Vec<usize> = constraints
         .iter()
-        .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes))
+        .map(|expr| topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut node_to_idx, &mut nodes))
         .collect();
     constraint_idx.sort();
+    constraint_idx.dedup();
     let interactions: Vec<Interaction<usize>> = interactions
         .iter()
         .map(|interaction| {
@@ -109,11 +111,11 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
                 .message
                 .iter()
                 .map(|field_expr| {
-                    topological_sort_symbolic_expr(field_expr, &mut expr_to_idx, &mut nodes)
+                    topological_sort_symbolic_expr(field_expr, &mut expr_to_idx, &mut node_to_idx, &mut nodes)
                 })
                 .collect();
             let count =
-                topological_sort_symbolic_expr(&interaction.count, &mut expr_to_idx, &mut nodes);
+                topological_sort_symbolic_expr(&interaction.count, &mut expr_to_idx, &mut node_to_idx, &mut nodes);
             Interaction {
                 message: fields,
                 count,
@@ -132,11 +134,15 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     }
 }
 
-/// `expr_to_idx` is a cache so that the `Arc<_>` references within symbolic expressions get
-/// mapped to the same node ID if their underlying references are the same.
+/// Converts a symbolic expression tree into a DAG representation with structural deduplication.
+///
+/// Two caches are used:
+/// - `expr_to_idx`: Fast path for expressions with the same Arc pointer
+/// - `node_to_idx`: Structural deduplication - catches identical nodes with different Arc pointers
 pub fn topological_sort_symbolic_expr<'a, F: Field>(
     expr: &'a SymbolicExpression<F>,
     expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, usize>,
+    node_to_idx: &mut FxHashMap<SymbolicExpressionNode<F>, usize>,
     nodes: &mut Vec<SymbolicExpressionNode<F>>,
 ) -> usize {
     if let Some(&idx) = expr_to_idx.get(expr) {
@@ -153,8 +159,10 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             y,
             degree_multiple,
         } => {
-            let left_idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
-            let right_idx = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
+            let left_idx =
+                topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
+            let right_idx =
+                topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
             SymbolicExpressionNode::Add {
                 left_idx,
                 right_idx,
@@ -166,8 +174,10 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             y,
             degree_multiple,
         } => {
-            let left_idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
-            let right_idx = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
+            let left_idx =
+                topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
+            let right_idx =
+                topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
             SymbolicExpressionNode::Sub {
                 left_idx,
                 right_idx,
@@ -175,7 +185,7 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             }
         }
         SymbolicExpression::Neg { x, degree_multiple } => {
-            let idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
+            let idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
             SymbolicExpressionNode::Neg {
                 idx,
                 degree_multiple: *degree_multiple,
@@ -187,10 +197,12 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
             degree_multiple,
         } => {
             // An important case to remember: square will have Arc::as_ptr(&x) == Arc::as_ptr(&y)
-            // The `expr_to_id` will ensure only one topological sort is done to prevent exponential
+            // The `expr_to_idx` will ensure only one topological sort is done to prevent exponential
             // behavior.
-            let left_idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, nodes);
-            let right_idx = topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, nodes);
+            let left_idx =
+                topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
+            let right_idx =
+                topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
             SymbolicExpressionNode::Mul {
                 left_idx,
                 right_idx,
@@ -199,8 +211,13 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
         }
     };
 
-    let idx = nodes.len();
-    nodes.push(node);
+    // Intern: check if this exact node already exists
+    let idx = *node_to_idx.entry(node.clone()).or_insert_with(|| {
+        let idx = nodes.len();
+        nodes.push(node);
+        idx
+    });
+
     expr_to_idx.insert(expr, idx);
     idx
 }
@@ -322,6 +339,67 @@ mod tests {
     type F = BabyBear;
 
     #[test]
+    fn test_duplicate_constraints_are_deduplicated() {
+        // Create a simple expression
+        let expr: SymbolicExpression<F> = SymbolicExpression::Variable(SymbolicVariable::new(
+            Entry::Main {
+                part_index: 0,
+                offset: 0,
+            },
+            0,
+        ));
+
+        // Simulate calling assert_zero twice on the same expression
+        let constraints = vec![expr.clone(), expr.clone()];
+        let interactions = vec![];
+
+        let dag = build_symbolic_constraints_dag(&constraints, &interactions);
+
+        // Nodes are deduplicated - there's only 1 node in the DAG
+        assert_eq!(dag.constraints.nodes.len(), 1, "Nodes should be deduplicated");
+
+        // constraint_idx should also be deduplicated
+        assert_eq!(
+            dag.constraints.constraint_idx,
+            vec![0],
+            "constraint_idx should be deduplicated"
+        );
+
+        // Only 1 constraint
+        assert_eq!(
+            dag.constraints.num_constraints(),
+            1,
+            "Duplicate constraints should be deduplicated"
+        );
+    }
+
+    #[test]
+    fn test_structural_deduplication() {
+        // Create two structurally identical expressions with different Arc pointers
+        // This simulates: builder.assert_zero(x - ONE); builder.assert_zero(x - ONE);
+        let var = SymbolicVariable::<F>::new(
+            Entry::Main {
+                part_index: 0,
+                offset: 0,
+            },
+            0,
+        );
+        let expr1 = SymbolicExpression::from(var) - SymbolicExpression::Constant(F::ONE);
+        let expr2 = SymbolicExpression::from(var) - SymbolicExpression::Constant(F::ONE);
+
+        // These are different Arc allocations
+        assert!(!std::ptr::eq(&expr1, &expr2));
+
+        let constraints = vec![expr1, expr2];
+        let dag = build_symbolic_constraints_dag(&constraints, &[]);
+
+        // With structural deduplication, both expressions should map to the same node
+        // Nodes: Variable(0), Constant(1), Sub(0,1)
+        assert_eq!(dag.constraints.nodes.len(), 3);
+        assert_eq!(dag.constraints.constraint_idx, vec![2]);
+    }
+
+    #[test]
     fn test_symbolic_constraints_dag() {
         let expr = SymbolicExpression::Constant(F::ONE)
             * SymbolicVariable::new(
@@ -362,17 +440,11 @@ mod tests {
                         right_idx: 3,
                         degree_multiple: 2
                     },
-                    // Currently topological sort does not detect all subgraph isomorphisms. For
-                    // example each IsFirstRow and IsLastRow is a new reference so ptr::hash is
-                    // distinct.
-                    SymbolicExpressionNode::Mul {
-                        left_idx: 0,
-                        right_idx: 1,
-                        degree_multiple: 2
-                    },
+                    // With structural deduplication, IsFirstRow * IsLastRow is now reused
+                    // instead of duplicated. The second occurrence reuses node index 2.
                     SymbolicExpressionNode::Add {
                         left_idx: 4,
-                        right_idx: 5,
+                        right_idx: 2,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Variable(SymbolicVariable::new(
@@ -384,29 +456,29 @@ mod tests {
                     )),
                     SymbolicExpressionNode::Mul {
                         left_idx: 3,
-                        right_idx: 7,
+                        right_idx: 6,
                         degree_multiple: 1
                     },
                     SymbolicExpressionNode::Add {
-                        left_idx: 6,
-                        right_idx: 8,
+                        left_idx: 5,
+                        right_idx: 7,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Mul {
-                        left_idx: 8,
-                        right_idx: 8,
+                        left_idx: 7,
+                        right_idx: 7,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Constant(F::TWO),
                 ],
-                constraint_idx: vec![9, 10],
+                constraint_idx: vec![8, 9],
             }
         );
         assert_eq!(
             dag.interactions,
             vec![Interaction {
                 bus_index: 0,
-                message: vec![8, 11],
+                message: vec![7, 10],
                 count: 3,
                 count_weight: 1,
             }]
