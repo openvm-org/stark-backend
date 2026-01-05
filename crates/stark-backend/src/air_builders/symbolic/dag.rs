@@ -134,11 +134,21 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     }
 }
 
-/// Converts a symbolic expression tree into a DAG representation with structural deduplication.
+/// Converts a symbolic expression tree into a DAG representation with structural deduplication
+/// and algebraic simplifications.
 ///
 /// Two caches are used:
 /// - `expr_to_idx`: Fast path for expressions with the same Arc pointer
 /// - `node_to_idx`: Structural deduplication - catches identical nodes with different Arc pointers
+///
+/// Algebraic simplifications performed:
+/// - `x + 0` → `x`, `0 + x` → `x`
+/// - `x - 0` → `x`
+/// - `x * 1` → `x`, `1 * x` → `x`
+/// - `x * 0` → `0`, `0 * x` → `0`
+/// - `-0` → `0`
+/// - `x + (-y)` → `x - y` (normalizes Add+Neg to Sub)
+/// - `x - (-y)` → `x + y` (double negation)
 pub fn topological_sort_symbolic_expr<'a, F: Field>(
     expr: &'a SymbolicExpression<F>,
     expr_to_idx: &mut FxHashMap<&'a SymbolicExpression<F>, usize>,
@@ -148,12 +158,36 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
     if let Some(&idx) = expr_to_idx.get(expr) {
         return idx;
     }
-    let node = match expr {
-        SymbolicExpression::Variable(var) => SymbolicExpressionNode::Variable(*var),
-        SymbolicExpression::IsFirstRow => SymbolicExpressionNode::IsFirstRow,
-        SymbolicExpression::IsLastRow => SymbolicExpressionNode::IsLastRow,
-        SymbolicExpression::IsTransition => SymbolicExpressionNode::IsTransition,
-        SymbolicExpression::Constant(cons) => SymbolicExpressionNode::Constant(*cons),
+
+    // Helper to check if a node at given index is a constant with specific value
+    let is_const = |nodes: &[SymbolicExpressionNode<F>], idx: usize, val: F| -> bool {
+        matches!(&nodes[idx], SymbolicExpressionNode::Constant(c) if *c == val)
+    };
+
+    // Helper to check if a node is a Neg and return its child index
+    let get_neg_child = |nodes: &[SymbolicExpressionNode<F>], idx: usize| -> Option<usize> {
+        match &nodes[idx] {
+            SymbolicExpressionNode::Neg { idx, .. } => Some(*idx),
+            _ => None,
+        }
+    };
+
+    let idx = match expr {
+        SymbolicExpression::Variable(var) => {
+            intern_node(SymbolicExpressionNode::Variable(*var), node_to_idx, nodes)
+        }
+        SymbolicExpression::IsFirstRow => {
+            intern_node(SymbolicExpressionNode::IsFirstRow, node_to_idx, nodes)
+        }
+        SymbolicExpression::IsLastRow => {
+            intern_node(SymbolicExpressionNode::IsLastRow, node_to_idx, nodes)
+        }
+        SymbolicExpression::IsTransition => {
+            intern_node(SymbolicExpressionNode::IsTransition, node_to_idx, nodes)
+        }
+        SymbolicExpression::Constant(cons) => {
+            intern_node(SymbolicExpressionNode::Constant(*cons), node_to_idx, nodes)
+        }
         SymbolicExpression::Add {
             x,
             y,
@@ -163,10 +197,34 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
                 topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
             let right_idx =
                 topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
-            SymbolicExpressionNode::Add {
-                left_idx,
-                right_idx,
-                degree_multiple: *degree_multiple,
+
+            // Simplify: 0 + x = x, x + 0 = x
+            if is_const(nodes, left_idx, F::ZERO) {
+                right_idx
+            } else if is_const(nodes, right_idx, F::ZERO) {
+                left_idx
+            }
+            // Normalize: x + (-y) = x - y
+            else if let Some(neg_child_idx) = get_neg_child(nodes, right_idx) {
+                intern_node(
+                    SymbolicExpressionNode::Sub {
+                        left_idx,
+                        right_idx: neg_child_idx,
+                        degree_multiple: *degree_multiple,
+                    },
+                    node_to_idx,
+                    nodes,
+                )
+            } else {
+                intern_node(
+                    SymbolicExpressionNode::Add {
+                        left_idx,
+                        right_idx,
+                        degree_multiple: *degree_multiple,
+                    },
+                    node_to_idx,
+                    nodes,
+                )
             }
         }
         SymbolicExpression::Sub {
@@ -178,17 +236,50 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
                 topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
             let right_idx =
                 topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
-            SymbolicExpressionNode::Sub {
-                left_idx,
-                right_idx,
-                degree_multiple: *degree_multiple,
+
+            // Simplify: x - 0 = x
+            if is_const(nodes, right_idx, F::ZERO) {
+                left_idx
+            }
+            // Simplify: x - (-y) = x + y (double negation)
+            else if let Some(neg_child_idx) = get_neg_child(nodes, right_idx) {
+                intern_node(
+                    SymbolicExpressionNode::Add {
+                        left_idx,
+                        right_idx: neg_child_idx,
+                        degree_multiple: *degree_multiple,
+                    },
+                    node_to_idx,
+                    nodes,
+                )
+            } else {
+                intern_node(
+                    SymbolicExpressionNode::Sub {
+                        left_idx,
+                        right_idx,
+                        degree_multiple: *degree_multiple,
+                    },
+                    node_to_idx,
+                    nodes,
+                )
             }
         }
         SymbolicExpression::Neg { x, degree_multiple } => {
-            let idx = topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
-            SymbolicExpressionNode::Neg {
-                idx,
-                degree_multiple: *degree_multiple,
+            let child_idx =
+                topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
+
+            // Simplify: -0 = 0
+            if is_const(nodes, child_idx, F::ZERO) {
+                child_idx
+            } else {
+                intern_node(
+                    SymbolicExpressionNode::Neg {
+                        idx: child_idx,
+                        degree_multiple: *degree_multiple,
+                    },
+                    node_to_idx,
+                    nodes,
+                )
             }
         }
         SymbolicExpression::Mul {
@@ -203,23 +294,47 @@ pub fn topological_sort_symbolic_expr<'a, F: Field>(
                 topological_sort_symbolic_expr(x.as_ref(), expr_to_idx, node_to_idx, nodes);
             let right_idx =
                 topological_sort_symbolic_expr(y.as_ref(), expr_to_idx, node_to_idx, nodes);
-            SymbolicExpressionNode::Mul {
-                left_idx,
-                right_idx,
-                degree_multiple: *degree_multiple,
+
+            // Simplify: 0 * x = 0, x * 0 = 0
+            if is_const(nodes, left_idx, F::ZERO) {
+                left_idx
+            } else if is_const(nodes, right_idx, F::ZERO) {
+                right_idx
+            }
+            // Simplify: 1 * x = x, x * 1 = x
+            else if is_const(nodes, left_idx, F::ONE) {
+                right_idx
+            } else if is_const(nodes, right_idx, F::ONE) {
+                left_idx
+            } else {
+                intern_node(
+                    SymbolicExpressionNode::Mul {
+                        left_idx,
+                        right_idx,
+                        degree_multiple: *degree_multiple,
+                    },
+                    node_to_idx,
+                    nodes,
+                )
             }
         }
     };
 
-    // Intern: check if this exact node already exists
-    let idx = *node_to_idx.entry(node.clone()).or_insert_with(|| {
+    expr_to_idx.insert(expr, idx);
+    idx
+}
+
+/// Intern a node: return existing index if the node already exists, otherwise add it.
+fn intern_node<F: Field>(
+    node: SymbolicExpressionNode<F>,
+    node_to_idx: &mut FxHashMap<SymbolicExpressionNode<F>, usize>,
+    nodes: &mut Vec<SymbolicExpressionNode<F>>,
+) -> usize {
+    *node_to_idx.entry(node.clone()).or_insert_with(|| {
         let idx = nodes.len();
         nodes.push(node);
         idx
-    });
-
-    expr_to_idx.insert(expr, idx);
-    idx
+    })
 }
 
 impl<F: Field> SymbolicExpressionDag<F> {
@@ -400,7 +515,102 @@ mod tests {
     }
 
     #[test]
+    fn test_algebraic_simplifications() {
+        let var = SymbolicVariable::<F>::new(
+            Entry::Main {
+                part_index: 0,
+                offset: 0,
+            },
+            0,
+        );
+        let x = SymbolicExpression::from(var);
+        let zero = SymbolicExpression::Constant(F::ZERO);
+        let one = SymbolicExpression::Constant(F::ONE);
+
+        // Test x + 0 = x
+        let expr_add_zero = x.clone() + zero.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_add_zero], &[]);
+        // Should only have Variable node, no Add node
+        assert_eq!(dag.constraints.nodes.len(), 2); // Variable + Constant(0) interned but Add simplified away
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Variable(_)
+        ));
+
+        // Test 0 + x = x
+        let expr_zero_add = zero.clone() + x.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_zero_add], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Variable(_)
+        ));
+
+        // Test x * 1 = x
+        let expr_mul_one = x.clone() * one.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_mul_one], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Variable(_)
+        ));
+
+        // Test 1 * x = x
+        let expr_one_mul = one.clone() * x.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_one_mul], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Variable(_)
+        ));
+
+        // Test x * 0 = 0
+        let expr_mul_zero = x.clone() * zero.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_mul_zero], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Constant(c) if c == F::ZERO
+        ));
+
+        // Test x - 0 = x
+        let expr_sub_zero = x.clone() - zero.clone();
+        let dag = build_symbolic_constraints_dag(&[expr_sub_zero], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Variable(_)
+        ));
+
+        // Test x + (-y) normalizes to x - y (same as Sub)
+        let y = SymbolicExpression::from(SymbolicVariable::<F>::new(
+            Entry::Main {
+                part_index: 0,
+                offset: 0,
+            },
+            1,
+        ));
+        let expr_add_neg = x.clone() + (-y.clone());
+        let expr_sub = x.clone() - y.clone();
+        let dag1 = build_symbolic_constraints_dag(&[expr_add_neg], &[]);
+        let dag2 = build_symbolic_constraints_dag(&[expr_sub], &[]);
+        // Both should produce the same constraint node (Sub)
+        assert!(matches!(
+            dag1.constraints.nodes[dag1.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Sub { .. }
+        ));
+        assert_eq!(
+            dag1.constraints.nodes[dag1.constraints.constraint_idx[0]],
+            dag2.constraints.nodes[dag2.constraints.constraint_idx[0]]
+        );
+
+        // Test x - (-y) = x + y
+        let expr_sub_neg = x.clone() - (-y.clone());
+        let dag = build_symbolic_constraints_dag(&[expr_sub_neg], &[]);
+        assert!(matches!(
+            dag.constraints.nodes[dag.constraints.constraint_idx[0]],
+            SymbolicExpressionNode::Add { .. }
+        ));
+    }
+
+    #[test]
     fn test_symbolic_constraints_dag() {
+        // expr = Constant(1) * Variable, which simplifies to just Variable
         let expr = SymbolicExpression::Constant(F::ONE)
             * SymbolicVariable::new(
                 Entry::Main {
@@ -447,6 +657,7 @@ mod tests {
                         right_idx: 2,
                         degree_multiple: 2
                     },
+                    // expr = Constant(1) * Variable simplifies to just Variable (1 * x = x)
                     SymbolicExpressionNode::Variable(SymbolicVariable::new(
                         Entry::Main {
                             part_index: 1,
@@ -454,31 +665,29 @@ mod tests {
                         },
                         3
                     )),
-                    SymbolicExpressionNode::Mul {
-                        left_idx: 3,
-                        right_idx: 6,
-                        degree_multiple: 1
-                    },
+                    // First constraint: ... + expr (which is Variable at index 6)
                     SymbolicExpressionNode::Add {
                         left_idx: 5,
-                        right_idx: 7,
+                        right_idx: 6,
                         degree_multiple: 2
                     },
+                    // Second constraint: expr * expr = Variable * Variable
                     SymbolicExpressionNode::Mul {
-                        left_idx: 7,
-                        right_idx: 7,
+                        left_idx: 6,
+                        right_idx: 6,
                         degree_multiple: 2
                     },
                     SymbolicExpressionNode::Constant(F::TWO),
                 ],
-                constraint_idx: vec![8, 9],
+                constraint_idx: vec![7, 8],
             }
         );
         assert_eq!(
             dag.interactions,
             vec![Interaction {
                 bus_index: 0,
-                message: vec![7, 10],
+                // expr simplified to Variable at index 6, Constant(2) at index 9
+                message: vec![6, 9],
                 count: 3,
                 count_weight: 1,
             }]
