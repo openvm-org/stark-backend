@@ -1,20 +1,23 @@
 //! Batch sumcheck for ZeroCheck constraints and sumcheck for LogUp input layer MLEs
 
+use std::cmp::max;
+
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::FieldAlgebra;
+use p3_field::{Field, FieldAlgebra};
+use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::{debug, info_span, instrument};
 
 use crate::{
     calculate_n_logup,
-    poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
     prover::{
-        fractional_sumcheck_gkr::FracSumcheckProof, stacked_pcs::StackedLayout,
-        sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKeyV2, ProverBackendV2,
-        ProvingContextV2,
+        fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
+        stacked_pcs::StackedLayout,
+        sumcheck::sumcheck_round0_deg,
+        CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixView, ProvingContextV2,
     },
     EF, F,
 };
@@ -27,79 +30,14 @@ mod single;
 pub use cpu::LogupZerocheckCpu;
 pub use single::*;
 
-/// Helper trait for implementing [MultiRapProver] by performing Logup GKR to reduce interaction bus
-/// balancing to an _input layer sumcheck_ which may be viewed as a stacking reduction from the GKR
-/// leaf input layer to column evaluations of the trace. The input layer sumcheck is then batched
-/// together with ZeroCheck in one large _batch constraints sumcheck_.
-///
-/// This trait is intended to be implemented on a stateful struct that holds state between the
-/// stages of proving. The constructor is given by [`LogupZerocheckProver::prove_logup_gkr`] and the
-/// trait is generic in `PD` which represents the `ProverDevice`.
-pub trait LogupZerocheckProver<'a, PB: ProverBackendV2, PD, TS>: Sized {
-    /// From trace matrices, evaluates the symbolic interactions to get the GKR input layer
-    /// evaluations. These are stacked into a single matrix of `(\hat{p}(x), \hat{q}(x))` pairs. It
-    /// is recommended to store the evaluations as part of a segment tree to aid in the GKR layer
-    /// sum computation, although memory saving techniques may take precedence.
-    ///
-    /// This function both proves the LogUp GKR, without the input layer sumcheck, and provides the
-    /// constructor for subsequent steps.
-    ///
-    /// Returns `self`, fractional sumcheck GKR proof.
-    #[allow(clippy::too_many_arguments)]
-    fn prove_logup_gkr(
-        device: &'a PD,
-        transcript: &mut TS,
-        pk: &'a DeviceMultiStarkProvingKeyV2<PB>,
-        ctx: &ProvingContextV2<PB>,
-        common_main_pcs_data: &'a PB::PcsData,
-        n_logup: usize,
-        interactions_layout: StackedLayout,
-        alpha_logup: PB::Challenge,
-        beta_logup: PB::Challenge,
-    ) -> (Self, FracSumcheckProof<PB::Challenge>);
-
-    /// Returns the `s_0` polynomials in coefficient form. There should be exactly `num_airs_present
-    /// \* 3` polynomials, in the order `(s_0)_{p,T}, (s_0)_{q,T}, (s_0)_{zerocheck,T}` per trace
-    /// `T`. This is computed _before_ sampling batching randomness `mu` because the result is
-    /// used to observe the sum claims `sum_{p,T}, sum_{q,T}`. The `s_0` polynomials could be
-    /// returned in either coefficient or evaluation form, but we return them all in coefficient
-    /// form for uniformity and debugging since this interpolation is inexpensive.
-    fn sumcheck_uni_round0_polys(
-        &mut self,
-        ctx: &ProvingContextV2<PB>,
-        lambda: PB::Challenge,
-    ) -> Vec<UnivariatePoly<PB::Challenge>>;
-
-    /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
-    /// Folding _could_ directly mutate inplace the trace matrices in `ctx` as they will not be
-    /// needed after this.
-    fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<PB>, r_0: PB::Challenge);
-
-    /// Returns length `3 * num_airs_present` polynomials, each evaluated at `1..=s_deg`.
-    fn sumcheck_polys_eval(
-        &mut self,
-        round: usize,
-        r_prev: PB::Challenge,
-    ) -> Vec<Vec<PB::Challenge>>;
-
-    fn fold_mle_evals(&mut self, round: usize, r_round: PB::Challenge);
-
-    #[allow(clippy::type_complexity)]
-    fn into_column_openings(self) -> Vec<Vec<Vec<(PB::Challenge, PB::Challenge)>>>;
-}
-
 #[instrument(level = "info", skip_all)]
-pub fn prove_zerocheck_and_logup<'a, PB, PD, TS, LZP>(
-    device: &'a PD,
+pub fn prove_zerocheck_and_logup<'a, TS>(
     transcript: &mut TS,
-    mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
-    ctx: &ProvingContextV2<PB>,
-    common_main_pcs_data: &'a PB::PcsData,
-) -> (GkrProof, BatchConstraintProof, Vec<PB::Challenge>)
+    mpk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
+    ctx: &ProvingContextV2<CpuBackendV2>,
+) -> (GkrProof, BatchConstraintProof, Vec<EF>)
 where
-    PB: ProverBackendV2<Val = F, Challenge = EF>,
     TS: FiatShamirTranscript,
-    LZP: LogupZerocheckProver<'a, PB, PD, TS>,
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
@@ -137,17 +75,100 @@ where
     let beta_logup = transcript.sample_ext();
     debug!(%alpha_logup, %beta_logup);
 
-    let (mut prover, frac_sum_proof) = LZP::prove_logup_gkr(
-        device,
-        transcript,
+    let mut prover = LogupZerocheckCpu::new(
         mpk,
         ctx,
-        common_main_pcs_data,
         n_logup,
         interactions_layout,
         alpha_logup,
         beta_logup,
     );
+    // GKR
+    // Compute logup input layer: these are the evaluations of \hat{p}, \hat{q} on the hypercube
+    // `H_{l_skip + n_logup}`
+    let has_interactions = !prover.interactions_layout.sorted_cols.is_empty();
+    let gkr_input_evals = if !has_interactions {
+        vec![]
+    } else {
+        // Per trace, a row major matrix of interaction evaluations
+        // NOTE: these are the evaluations _without_ lifting
+        // PERF[jpw]: we should write directly to the stacked `evals` in memory below
+        let unstacked_interaction_evals = prover
+            .eval_helpers
+            .par_iter()
+            .enumerate()
+            .map(|(trace_idx, helper)| {
+                let trace_ctx = &ctx.per_trace[trace_idx].1;
+                let mats = helper.view_mats(trace_ctx);
+                let height = trace_ctx.common_main.height();
+                (0..height)
+                    .into_par_iter()
+                    .map(|i| {
+                        let mut row_parts = Vec::with_capacity(mats.len() + 1);
+                        let is_first = F::from_bool(i == 0);
+                        let is_transition = F::from_bool(i != height - 1);
+                        let is_last = F::from_bool(i == height - 1);
+                        let sels = vec![is_first, is_transition, is_last];
+                        row_parts.push(sels);
+                        for (mat, is_rot) in &mats {
+                            let offset = usize::from(*is_rot);
+                            row_parts.push(
+                                // SAFETY: %height ensures we never go out of bounds
+                                (0..mat.width())
+                                    .map(|j| unsafe {
+                                        *mat.get_unchecked((i + offset) % height, j)
+                                    })
+                                    .collect_vec(),
+                            );
+                        }
+                        helper.eval_interactions(&row_parts, &prover.beta_pows)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut evals = vec![Frac::default(); 1 << (l_skip + n_logup)];
+        for (trace_idx, interaction_idx, s) in
+            prover.interactions_layout.sorted_cols.iter().copied()
+        {
+            let pq_evals = &unstacked_interaction_evals[trace_idx];
+            let height = pq_evals.len();
+            debug_assert_eq!(s.col_idx, 0);
+            // the interactions layout has internal striding threshold=0
+            debug_assert_eq!(1 << s.log_height(), s.len(0));
+            debug_assert_eq!(s.len(0) % height, 0);
+            let norm_factor_denom = s.len(0) / height;
+            let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+            // We need to fill `evals` with the logup evaluations on the lifted trace, which is
+            // the same as cyclic repeating of the unlifted evaluations
+            evals[s.row_idx..s.row_idx + s.len(0)]
+                .chunks_exact_mut(height)
+                .for_each(|evals| {
+                    evals
+                        .par_iter_mut()
+                        .zip(pq_evals)
+                        .for_each(|(pq_eval, evals_at_z)| {
+                            let (mut numer, denom) = evals_at_z[interaction_idx];
+                            numer *= norm_factor;
+                            *pq_eval = Frac::new(numer.into(), denom);
+                        });
+                });
+        }
+        // Prevent division by zero:
+        evals.par_iter_mut().for_each(|frac| frac.q += alpha_logup);
+        evals
+    };
+
+    let (frac_sum_proof, mut xi) = fractional_sumcheck(transcript, &gkr_input_evals, true);
+
+    // Sample more for `\xi` in the edge case that some AIRs don't have interactions
+    let n_global = max(n_max, n_logup);
+    debug!(%n_global);
+    while xi.len() != l_skip + n_global {
+        xi.push(transcript.sample_ext());
+    }
+    debug!(?xi);
+    prover.xi = xi;
+    // we now have full \xi vector
 
     // begin batch sumcheck
     let mut sumcheck_round_polys = Vec::with_capacity(n_max);
