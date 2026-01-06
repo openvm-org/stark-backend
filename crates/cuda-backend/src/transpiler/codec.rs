@@ -1,6 +1,9 @@
 // A simple custom codec for symbolic constraints that's easy to implement in CUDA
 
-use openvm_stark_backend::air_builders::symbolic::symbolic_variable::{Entry, SymbolicVariable};
+use openvm_stark_backend::air_builders::symbolic::{
+    packing::{pack_entry, pack_index},
+    symbolic_variable::{Entry, SymbolicVariable},
+};
 use p3_field::{Field, PrimeField32};
 
 use super::{Constraint, ConstraintWithFlag, Source};
@@ -28,19 +31,7 @@ impl Codec for Entry {
     type Encoded = u64;
 
     fn encode(&self) -> u64 {
-        let (src, part_index, offset) = match self {
-            Entry::Preprocessed { offset } => (PREPROCESSED, 0, *offset),
-            Entry::Main { part_index, offset } => (MAIN, *part_index, *offset),
-            Entry::Permutation { offset } => (PERMUTATION, 0, *offset),
-            Entry::Public => (PUBLIC, 0, 0),
-            Entry::Challenge => (CHALLENGE, 0, 0),
-            Entry::Exposed => (EXPOSED, 0, 0),
-        };
-        // 4-bit src | 8-bit part_index | 4-bit offset
-        assert!(src < 16);
-        assert!(part_index < 256);
-        assert!(offset < 16);
-        src | (part_index << 4) as u64 | (offset << 12) as u64
+        pack_entry(self) as u64
     }
 
     fn decode(encoded: u64) -> Self {
@@ -68,11 +59,8 @@ impl<F: Field> Codec for SymbolicVariable<F> {
     type Encoded = u64;
 
     fn encode(&self) -> u64 {
-        let entry_code = self.entry.encode();
-        let index = self.index as u64;
-
-        assert!(entry_code <= 0xffff);
-        assert!(index <= 0xffff);
+        let entry_code = pack_entry(&self.entry) as u64;
+        let index = pack_index(self.index) as u64;
         // 16-bit entry | 16-bit index
         const ENTRY_SHIFT: u64 = 16;
         entry_code | (index << ENTRY_SHIFT)

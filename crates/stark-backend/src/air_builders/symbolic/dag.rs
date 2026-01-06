@@ -5,6 +5,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::SymbolicConstraints;
+use super::monomial::ExpandedMonomials;
 use crate::{
     air_builders::symbolic::{
         symbolic_expression::SymbolicExpression, symbolic_variable::SymbolicVariable,
@@ -53,6 +54,10 @@ pub struct SymbolicExpressionDag<F> {
     pub nodes: Vec<SymbolicExpressionNode<F>>,
     /// Node indices of expressions to assert equal zero.
     pub constraint_idx: Vec<usize>,
+    /// Pre-expanded monomials for GPU evaluation. Computed during keygen.
+    /// Skipped during serialization since it's recomputed when needed.
+    #[serde(skip)]
+    pub expanded_monomials: Option<ExpandedMonomials<F>>,
 }
 
 impl<F> SymbolicExpressionDag<F> {
@@ -68,6 +73,16 @@ impl<F> SymbolicExpressionDag<F> {
 
     pub fn num_constraints(&self) -> usize {
         self.constraint_idx.len()
+    }
+}
+
+impl<F: Field> SymbolicExpressionDag<F> {
+    /// Expand constraints to monomials and store them for GPU evaluation.
+    /// This should be called during keygen to precompute the expansion.
+    pub fn expand_monomials(&mut self) {
+        if self.num_constraints() > 0 && self.expanded_monomials.is_none() {
+            self.expanded_monomials = Some(ExpandedMonomials::from_dag(self));
+        }
     }
 }
 
@@ -122,6 +137,7 @@ pub(crate) fn build_symbolic_constraints_dag<F: Field>(
     let constraints = SymbolicExpressionDag {
         nodes: builder.nodes,
         constraint_idx,
+        expanded_monomials: None,
     };
     SymbolicConstraintsDag {
         constraints,
@@ -383,6 +399,10 @@ impl<F: Field> SymbolicExpressionDag<F> {
         }
         exprs
     }
+
+    pub fn expand_to_monomials(&self) -> ExpandedMonomials<F> {
+        ExpandedMonomials::from_dag(self)
+    }
 }
 
 // TEMPORARY conversions until we switch main interfaces to use SymbolicConstraintsDag
@@ -428,7 +448,10 @@ impl<F: Field> From<SymbolicConstraintsDag<F>> for SymbolicConstraints<F> {
 
 impl<F: Field> From<SymbolicConstraints<F>> for SymbolicConstraintsDag<F> {
     fn from(sc: SymbolicConstraints<F>) -> Self {
-        build_symbolic_constraints_dag(&sc.constraints, &sc.interactions)
+        let mut dag = build_symbolic_constraints_dag(&sc.constraints, &sc.interactions);
+        // Pre-expand monomials for GPU evaluation during keygen
+        dag.constraints.expand_monomials();
+        dag
     }
 }
 
