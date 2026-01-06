@@ -139,8 +139,6 @@ template<typename T>
 static int bit_rev_impl(T* d_out, const T* d_inp,
     uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
 {
-    assert(lg_domain_size <= MAX_LG_DOMAIN_SIZE);
-
     size_t domain_size = (size_t)1 << lg_domain_size;
     // aim to read 4 cache lines of consecutive data per read
     const uint32_t Z_COUNT = 256 / sizeof(T);
