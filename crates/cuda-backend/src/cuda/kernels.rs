@@ -691,3 +691,64 @@ pub mod fri {
         ))
     }
 }
+
+// relate to batch_mle_low.cu
+pub mod batch_mle_low {
+    use super::*;
+
+    extern "C" {
+        fn launch_batch_mle_low(
+            d_output: *mut std::ffi::c_void,
+            d_tmp_sums: *mut std::ffi::c_void,
+            d_data: *const std::ffi::c_void,
+            d_offsets: *const u32,
+            num_monomials: u32,
+            d_lambda_pows: *const std::ffi::c_void,
+            d_mat_evals_local: *const std::ffi::c_void,
+            d_mat_evals_next: *const std::ffi::c_void,
+            d_mat_widths: *const u32,
+            d_mat_offsets: *const u32,
+            d_sels: *const std::ffi::c_void,
+            d_eq_xi: *const std::ffi::c_void,
+            num_x: u32,
+            num_y: u32,
+            stream: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn batch_mle_low_kernel<EF>(
+        d_output: &DeviceBuffer<EF>,
+        d_tmp_sums: &DeviceBuffer<EF>,
+        d_data: &DeviceBuffer<u8>,
+        d_offsets: &DeviceBuffer<u32>,
+        num_monomials: u32,
+        d_lambda_pows: &DeviceBuffer<EF>,
+        d_mat_evals_local: &DeviceBuffer<EF>,
+        d_mat_evals_next: &DeviceBuffer<EF>,
+        d_mat_widths: &DeviceBuffer<u32>,
+        d_mat_offsets: &DeviceBuffer<u32>,
+        d_sels: &DeviceBuffer<EF>,
+        d_eq_xi: &DeviceBuffer<EF>,
+        num_x: u32,
+        num_y: u32,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(launch_batch_mle_low(
+            d_output.as_mut_raw_ptr(),
+            d_tmp_sums.as_mut_raw_ptr(),
+            d_data.as_raw_ptr(),
+            d_offsets.as_ptr(),
+            num_monomials,
+            d_lambda_pows.as_raw_ptr(),
+            d_mat_evals_local.as_raw_ptr(),
+            d_mat_evals_next.as_raw_ptr(),
+            d_mat_widths.as_ptr(),
+            d_mat_offsets.as_ptr(),
+            d_sels.as_raw_ptr(),
+            d_eq_xi.as_raw_ptr(),
+            num_x,
+            num_y,
+            std::ptr::null_mut(), // default stream
+        ))
+    }
+}

@@ -12,6 +12,8 @@ use rustc_hash::FxHashMap;
 use tracing::instrument;
 
 pub(crate) mod codec;
+pub mod batch_mle_low;
+pub mod monomial;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Source<F: Field> {
