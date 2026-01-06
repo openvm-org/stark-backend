@@ -3,6 +3,8 @@
 //! This module provides [`DuplexSpongeGpu`], a transcript implementation that maintains
 //! state on both host and device with explicit synchronization methods.
 
+use std::ffi::c_void;
+
 use openvm_cuda_backend::types::Challenger;
 use openvm_cuda_common::{
     copy::cuda_memcpy,
@@ -12,8 +14,6 @@ use openvm_cuda_common::{
 use openvm_stark_backend::p3_challenger::{CanObserve, CanSample};
 use p3_field::{FieldAlgebra, PrimeField32};
 use p3_symmetric::Permutation;
-use std::ffi::c_void;
-
 use stark_backend_v2::poseidon2::{CHUNK, WIDTH, poseidon2_perm, sponge::FiatShamirTranscript};
 
 use crate::F;
