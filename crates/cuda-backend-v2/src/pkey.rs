@@ -2,13 +2,11 @@
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::MemCopyError};
 use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicConstraints, SymbolicExpressionDag,
+    SymbolicConstraints, SymbolicDagBuilder, SymbolicExpressionDag,
     symbolic_expression::SymbolicExpression,
     symbolic_variable::{Entry, SymbolicVariable},
-    topological_sort_symbolic_expr,
 };
 use p3_field::FieldAlgebra;
-use rustc_hash::FxHashMap;
 use stark_backend_v2::keygen::types::StarkProvingKeyV2;
 
 use crate::{
@@ -99,14 +97,12 @@ impl InteractionEvalRules {
         }
         // build DAG without sorting constraint idxs:
         let (dag, pair_idxs) = {
-            let mut expr_to_idx = FxHashMap::default();
-            let mut nodes = Vec::new();
+            let mut dag_builder = SymbolicDagBuilder::new();
             let mut dag_pair_idxs: Vec<(usize, u32)> = frac_pairs
                 .iter()
                 .enumerate()
                 .map(|(pair_idx, expr)| {
-                    let dag_idx =
-                        topological_sort_symbolic_expr(expr, &mut expr_to_idx, &mut nodes);
+                    let dag_idx = dag_builder.add_expr(expr);
                     (dag_idx, pair_idx.try_into().unwrap())
                 })
                 .collect_vec();
@@ -114,7 +110,7 @@ impl InteractionEvalRules {
             let (constraint_idx, pair_idxs): (Vec<_>, Vec<_>) = dag_pair_idxs.into_iter().unzip();
             // NOTE: do not sort pair_idxs since we need to keep them in pairs
             let dag = SymbolicExpressionDag {
-                nodes,
+                nodes: dag_builder.nodes,
                 constraint_idx,
             };
             (dag, pair_idxs)
