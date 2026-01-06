@@ -1,10 +1,10 @@
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicConstraints, SymbolicExpressionDag, topological_sort_symbolic_expr,
+    SymbolicConstraints, SymbolicDagBuilder, SymbolicExpressionDag,
+    symbolic_expression::SymbolicExpression,
 };
 use p3_field::FieldAlgebra;
-use rustc_hash::FxHashMap;
 use stark_backend_v2::prover::{DeviceStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 use tracing::{debug, warn};
 
@@ -143,22 +143,23 @@ pub fn evaluate_round0_interactions_gpu(
     // NOTE: For logup round0, the kernel uses weights indexed by rule_idx, not constraint_idx.
     // So we deduplicate constraint_idx and use dag_idx_to_rule_idx for weight mapping.
     let (rules, d_numer_weights, d_denom_weights, denom_sum_init) = {
-        let mut expr_to_idx = FxHashMap::default();
-        let mut nodes = Vec::new();
+        let mut dag_builder = SymbolicDagBuilder::new();
         let mut sorted_used_dag_idxs = Vec::new();
         for interaction in &symbolic.interactions {
-            let count =
-                topological_sort_symbolic_expr(&interaction.count, &mut expr_to_idx, &mut nodes);
+            let count = dag_builder.add_expr(&interaction.count);
             sorted_used_dag_idxs.push(count);
-            sorted_used_dag_idxs.extend(interaction.message.iter().map(|field_expr| {
-                topological_sort_symbolic_expr(field_expr, &mut expr_to_idx, &mut nodes)
-            }));
+            sorted_used_dag_idxs.extend(
+                interaction
+                    .message
+                    .iter()
+                    .map(|field_expr| dag_builder.add_expr(field_expr)),
+            );
         }
         sorted_used_dag_idxs.sort();
         // Deduplicate for the dag since logup round0 kernel doesn't use used_nodes
         sorted_used_dag_idxs.dedup();
         let dag = SymbolicExpressionDag {
-            nodes,
+            nodes: dag_builder.nodes,
             constraint_idx: sorted_used_dag_idxs,
         };
         let rules = SymbolicRulesGpuV2::new(&dag, true);
@@ -169,7 +170,8 @@ pub fn evaluate_round0_interactions_gpu(
             // CAUTION: an expression node could be used in multiple interactions, and might even be
             // used as `count` in one, but message field in another. We only care about their
             // weighted sum with eq_3b, so we compute the weights ahead of time.
-            let count_dag_idx = expr_to_idx[&interaction.count];
+            let count_dag_idx =
+                dag_builder.expr_to_idx[&(&interaction.count as *const SymbolicExpression<_>)];
             let count_rule_idx = rules.dag_idx_to_rule_idx[&count_dag_idx];
             numer_weights[count_rule_idx] += eq_3bs[interaction_idx];
             denom_sum_init += eq_3bs[interaction_idx]
@@ -177,7 +179,8 @@ pub fn evaluate_round0_interactions_gpu(
                 * F::from_canonical_u32(interaction.bus_index as u32 + 1);
 
             for (message_idx, message) in interaction.message.iter().enumerate() {
-                let message_dag_idx = expr_to_idx[message];
+                let message_dag_idx =
+                    dag_builder.expr_to_idx[&(message as *const SymbolicExpression<_>)];
                 let message_rule_idx = rules.dag_idx_to_rule_idx[&message_dag_idx];
                 denom_weights[message_rule_idx] += eq_3bs[interaction_idx] * beta_pows[message_idx];
             }
