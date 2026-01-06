@@ -6,9 +6,8 @@ use crate::{
     ConstraintOnlyRules, EF, F, InteractionEvalRules,
     cuda::logup_zerocheck::{
         _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
-        _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size, BlockCtx,
-        LogupCtx, MainMatrixPtrs, ZerocheckCtx, logup_batch_eval_mle, logup_eval_mle,
-        zerocheck_batch_eval_mle, zerocheck_eval_mle,
+        _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size,
+        MainMatrixPtrs, logup_eval_mle, zerocheck_eval_mle,
     },
 };
 
@@ -128,77 +127,6 @@ pub fn evaluate_mle_interactions_gpu(
             num_x,
         )
         .expect("failed to evaluate MLE interactions on GPU");
-    }
-    output
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn evaluate_mle_constraints_gpu_batch(
-    block_ctxs: &DeviceBuffer<BlockCtx>,
-    zc_ctxs: &DeviceBuffer<ZerocheckCtx>,
-    air_block_offsets: &[u32],
-    lambda_pows: &DeviceBuffer<EF>,
-    lambda_len: usize,
-    num_x: u32,
-    threads_per_block: u32,
-) -> DeviceBuffer<EF> {
-    let num_blocks = block_ctxs.len();
-    let num_airs = zc_ctxs.len();
-    tracing::debug!(
-        %num_blocks,
-        %num_x,
-        %threads_per_block,
-        %num_airs,
-        "zerocheck_batch_eval_mle"
-    );
-    // Need one buffer slot per block
-    let mut tmp_sums_buffer = DeviceBuffer::<EF>::with_capacity(num_blocks * num_x as usize);
-    let mut output = DeviceBuffer::<EF>::with_capacity(num_airs * num_x as usize);
-    unsafe {
-        zerocheck_batch_eval_mle(
-            &mut tmp_sums_buffer,
-            &mut output,
-            block_ctxs,
-            zc_ctxs,
-            air_block_offsets,
-            lambda_pows,
-            lambda_len,
-            num_blocks as u32,
-            num_x,
-            num_airs as u32,
-            threads_per_block,
-        )
-        .expect("failed to evaluate MLE constraints (batch) on GPU");
-    }
-    output
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn evaluate_mle_interactions_gpu_batch(
-    block_ctxs: &DeviceBuffer<BlockCtx>,
-    logup_ctxs: &DeviceBuffer<LogupCtx>,
-    air_block_offsets: &[u32],
-    num_x: u32,
-    threads_per_block: u32,
-) -> DeviceBuffer<Frac<EF>> {
-    let num_blocks = block_ctxs.len();
-    let num_airs = logup_ctxs.len();
-    // Need one buffer slot per block
-    let mut tmp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(num_blocks * num_x as usize);
-    let mut output = DeviceBuffer::<Frac<EF>>::with_capacity(num_airs * num_x as usize);
-    unsafe {
-        logup_batch_eval_mle(
-            &mut tmp_sums_buffer,
-            &mut output,
-            block_ctxs,
-            logup_ctxs,
-            air_block_offsets,
-            num_blocks as u32,
-            num_x,
-            num_airs as u32,
-            threads_per_block,
-        )
-        .expect("failed to evaluate MLE interactions (batch) on GPU");
     }
     output
 }
