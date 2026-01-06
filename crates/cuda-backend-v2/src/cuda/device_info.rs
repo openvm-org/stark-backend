@@ -9,4 +9,3 @@ pub fn get_sm_count(device_id: u32) -> Result<u32, CudaError> {
     unsafe { CudaError::from_result(_cuda_get_sm_count(device_id, &mut sm_count))? };
     Ok(sm_count)
 }
-
