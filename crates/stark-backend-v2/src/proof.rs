@@ -441,8 +441,7 @@ impl Decode for WhirProof {
         }
 
         let mut initial_round_opened_rows = Vec::with_capacity(num_commits);
-        for commit_idx in 0..num_commits {
-            let width = widths[commit_idx];
+        for width in widths {
             let mut opened_rows = Vec::with_capacity(initial_num_whir_queries);
             for _ in 0..initial_num_whir_queries {
                 // Each query has k_whir_exp rows. Each row is a fixed-width list of F elements.
