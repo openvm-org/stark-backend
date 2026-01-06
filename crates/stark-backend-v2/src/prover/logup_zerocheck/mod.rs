@@ -32,9 +32,9 @@ pub use cpu::LogupZerocheckCpu;
 pub use single::*;
 
 #[instrument(level = "info", skip_all)]
-pub fn prove_zerocheck_and_logup<'a, TS>(
+pub fn prove_zerocheck_and_logup<TS>(
     transcript: &mut TS,
-    mpk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
+    mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
     ctx: &ProvingContextV2<CpuBackendV2>,
 ) -> (GkrProof, BatchConstraintProof, Vec<EF>)
 where
