@@ -2,7 +2,9 @@ use getset::{CopyGetters, Getters};
 use openvm_cuda_common::common::get_device;
 use stark_backend_v2::SystemParams;
 
-use crate::cuda::{batch_ntt_small::ensure_device_ntt_twiddles_initialized, device_info::get_sm_count};
+use crate::cuda::{
+    batch_ntt_small::ensure_device_ntt_twiddles_initialized, device_info::get_sm_count,
+};
 
 #[derive(Clone, Getters, CopyGetters)]
 pub struct GpuDeviceV2 {
