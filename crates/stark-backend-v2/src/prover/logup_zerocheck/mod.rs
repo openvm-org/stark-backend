@@ -11,6 +11,7 @@ use tracing::{debug, info_span, instrument};
 
 use crate::{
     calculate_n_logup,
+    poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
     prover::{
@@ -41,7 +42,7 @@ where
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
-    let num_airs_present = ctx.per_trace.len();
+    let num_traces = ctx.per_trace.len();
 
     // Traces are sorted
     let n_max = log2_strict_usize(ctx.per_trace[0].1.common_main.height()).saturating_sub(l_skip);
@@ -180,7 +181,7 @@ where
     let s_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
     // logup sum claims (sum_{\hat p}, sum_{\hat q}) per present AIR
     let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = s_0_polys
-        [..2 * num_airs_present]
+        [..2 * num_traces]
         .chunks_exact(2)
         .map(|frac| {
             let [sum_claim_p, sum_claim_q] = [&frac[0], &frac[1]].map(|s_0| {
@@ -203,22 +204,26 @@ where
 
     let s_deg = constraint_degree + 1;
     let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
-    let mu_pows = mu.powers().take(3 * num_airs_present).collect_vec();
-    let univariate_round_coeffs = (0..=s_0_deg)
-        .map(|i| {
-            let coeff = s_0_polys
-                .iter()
-                .enumerate()
-                .map(|(j, s_0)| mu_pows[j] * *s_0.coeffs().get(i).unwrap_or(&EF::ZERO))
-                .sum::<EF>();
-            transcript.observe_ext(coeff);
-            coeff
-        })
-        .collect_vec();
+    let mu_pows = mu.powers().take(3 * num_traces).collect_vec();
+    let s_0_poly = UnivariatePoly::new(
+        (0..=s_0_deg)
+            .map(|i| {
+                let coeff = s_0_polys
+                    .iter()
+                    .enumerate()
+                    .map(|(j, s_0)| mu_pows[j] * *s_0.coeffs().get(i).unwrap_or(&EF::ZERO))
+                    .sum::<EF>();
+                transcript.observe_ext(coeff);
+                coeff
+            })
+            .collect(),
+    );
 
     let r_0 = transcript.sample_ext();
     r.push(r_0);
     debug!(round = 0, r_round = %r_0);
+    prover.prev_s_eval = s_0_poly.eval_at_point(r_0);
+    debug!("s_0(r_0) = {}", prover.prev_s_eval);
 
     prover.fold_ple_evals(ctx, r_0);
 
@@ -234,16 +239,78 @@ where
         info_span!("prover.batch_constraints.mle_rounds", phase = "prover").entered();
     debug!(%s_deg);
     for round in 1..=n_max {
-        let s_round_evals = prover.sumcheck_polys_eval(round, r[round - 1]);
-
-        let batch_s_evals = (0..s_deg)
-            .map(|i| {
-                s_round_evals
-                    .iter()
-                    .enumerate()
-                    .map(|(j, evals)| mu_pows[j] * *evals.get(i).unwrap_or(&EF::ZERO))
-                    .sum::<EF>()
-            })
+        let sp_round_evals = prover.sumcheck_polys_eval(round, r[round - 1]);
+        // From s'_T above, we can form s'_head(X) and s'_tail where s'_tail is constant
+        // The desired polynomial s(X) for this round `j` is
+        // s(X) = eq(\vec xi, \vec r_{j-1}) eq(xi_{}, X) s'_head(X) + s'_tail * X
+        //
+        // The head vs tail corresponds to the cutoff in front loaded batching where the coordinates
+        // have been exhausted.
+        //
+        // In fact, we further need to split s'_head into s'_{head,zc} and s'_{head,logup} due to
+        // different eq versus eq_sharp round 0 contributions.
+        let tail_start = prover
+            .n_per_trace
+            .iter()
+            .find_position(|&&n| round as isize > n)
+            .map(|(i, _)| i)
+            .unwrap_or(num_traces);
+        let mut sp_head_zc = vec![EF::ZERO; constraint_degree];
+        let mut sp_head_logup = vec![EF::ZERO; constraint_degree];
+        let mut sp_tail = EF::ZERO;
+        for trace_idx in 0..num_traces {
+            let zc_idx = 2 * num_traces + trace_idx;
+            let numer_idx = 2 * trace_idx;
+            let denom_idx = numer_idx + 1;
+            if trace_idx < tail_start {
+                for i in 0..constraint_degree {
+                    sp_head_zc[i] += mu_pows[zc_idx] * sp_round_evals[zc_idx][i];
+                    sp_head_logup[i] += mu_pows[numer_idx] * sp_round_evals[numer_idx][i]
+                        + mu_pows[denom_idx] * sp_round_evals[denom_idx][i];
+                }
+            } else {
+                sp_tail += mu_pows[zc_idx] * sp_round_evals[zc_idx][0]
+                    + mu_pows[numer_idx] * sp_round_evals[numer_idx][0]
+                    + mu_pows[denom_idx] * sp_round_evals[denom_idx][0];
+            }
+        }
+        // With eq(xi,r) contributions
+        let mut sp_head_evals = vec![EF::ZERO; s_deg];
+        for i in 0..constraint_degree {
+            sp_head_evals[i + 1] = prover.eq_ns[round - 1] * sp_head_zc[i]
+                + prover.eq_sharp_ns[round - 1] * sp_head_logup[i];
+        }
+        // We need to derive s'(0).
+        // We use that s_j(0) + s_j(1) = s_{j-1}(r_{j-1})
+        let xi_cur = prover.xi[l_skip + round - 1];
+        {
+            let eq_xi_0 = EF::ONE - xi_cur;
+            let eq_xi_1 = xi_cur;
+            sp_head_evals[0] =
+                (prover.prev_s_eval - eq_xi_1 * sp_head_evals[1] - sp_tail) * eq_xi_0.inverse();
+        }
+        // s' has degree s_deg - 1
+        let sp_head = UnivariatePoly::lagrange_interpolate(
+            &(0..s_deg).map(F::from_canonical_usize).collect_vec(),
+            &sp_head_evals,
+        );
+        // eq(xi, X) = (2 * xi - 1) * X + (1 - xi)
+        // Compute s(X) = eq(xi, X) * s'_head(X) + s'_tail * X (s'_head now contains eq(..,r))
+        // s(X) has degree s_deg
+        let batch_s = {
+            let mut coeffs = sp_head.into_coeffs();
+            coeffs.push(EF::ZERO);
+            let b = EF::ONE - xi_cur;
+            let a = xi_cur - b;
+            for i in (0..s_deg).rev() {
+                coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1];
+            }
+            coeffs[0] *= b;
+            coeffs[1] += sp_tail;
+            UnivariatePoly::new(coeffs)
+        };
+        let batch_s_evals = (1..=s_deg)
+            .map(|i| batch_s.eval_at_point(EF::from_canonical_usize(i)))
             .collect_vec();
         for &eval in &batch_s_evals {
             transcript.observe_ext(eval);
@@ -253,6 +320,7 @@ where
         let r_round = transcript.sample_ext();
         debug!(%round, %r_round);
         r.push(r_round);
+        prover.prev_s_eval = batch_s.eval_at_point(r_round);
 
         prover.fold_mle_evals(round, r_round);
     }
@@ -280,7 +348,7 @@ where
     let batch_constraint_proof = BatchConstraintProof {
         numerator_term_per_air,
         denominator_term_per_air,
-        univariate_round_coeffs,
+        univariate_round_coeffs: s_0_poly.into_coeffs(),
         sumcheck_round_polys,
         column_openings,
     };

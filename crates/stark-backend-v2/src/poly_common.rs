@@ -303,7 +303,10 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn lagrange_interpolate(points: &[F], evals: &[F]) -> Self {
+    pub fn lagrange_interpolate<BF: Field>(points: &[BF], evals: &[F]) -> Self
+    where
+        F: ExtensionField<BF>,
+    {
         assert_eq!(points.len(), evals.len());
         let len = points.len();
 

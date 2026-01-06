@@ -21,7 +21,7 @@ use crate::{
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
     prover::{
         logup_zerocheck::EvalHelper,
-        poly::evals_eq_hypercube,
+        poly::evals_eq_hypercubes,
         stacked_pcs::StackedLayout,
         sumcheck::{
             batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round0_deg,
@@ -54,9 +54,8 @@ pub struct LogupZerocheckCpu<'a> {
     // Available after GKR:
     pub xi: Vec<EF>,
     lambda_pows: Vec<EF>,
-
-    pub eq_xi_per_trace: Vec<ColMajorMatrix<EF>>,
-    pub eq_sharp_per_trace: Vec<ColMajorMatrix<EF>>,
+    // T -> segment tree of eq(xi[j..1+n_T]) for j=1..=n_T in _reverse_ layout
+    eq_xi_per_trace: Vec<Vec<EF>>,
     eq_3b_per_trace: Vec<Vec<EF>>,
     sels_per_trace_base: Vec<ColMajorMatrix<F>>,
     // After univariate round 0:
@@ -64,11 +63,13 @@ pub struct LogupZerocheckCpu<'a> {
     pub sels_per_trace: Vec<ColMajorMatrix<EF>>,
     // Stores \hat{f}(\vec r_n) * r_{n+1} .. r_{round-1} for polys f that are "done" in the batch
     // sumcheck
-    zerocheck_tilde_evals: Vec<EF>,
-    logup_tilde_evals: Vec<[EF; 2]>,
+    pub(crate) zerocheck_tilde_evals: Vec<EF>,
+    pub(crate) logup_tilde_evals: Vec<[EF; 2]>,
 
     // In round `j`, contains `s_{j-1}(r_{j-1})`
-    prev_s_eval: EF,
+    pub(crate) prev_s_eval: EF,
+    pub(crate) eq_ns: Vec<EF>,
+    pub(crate) eq_sharp_ns: Vec<EF>,
 }
 
 impl<'a> LogupZerocheckCpu<'a> {
@@ -192,13 +193,14 @@ impl<'a> LogupZerocheckCpu<'a> {
             lambda_pows: vec![],
             sels_per_trace_base: vec![],
             eq_xi_per_trace: vec![],
-            eq_sharp_per_trace: vec![],
             eq_3b_per_trace: vec![],
             mat_evals_per_trace: vec![],
             sels_per_trace: vec![],
             zerocheck_tilde_evals,
             logup_tilde_evals,
             prev_s_eval: EF::ZERO,
+            eq_ns: Vec::with_capacity(n_max + 1),
+            eq_sharp_ns: Vec::with_capacity(n_max + 1),
         }
     }
 
@@ -264,8 +266,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                 // PERF[jpw]: might be able to share computations between eq_xi, eq_sharp
                 // computations the eq(xi, -) evaluations on hyperprism for
                 // zerocheck
-                let eq_xi = evals_eq_hypercube(&xi[l_skip..l_skip + n_lift]);
-                ColMajorMatrix::new(eq_xi, 1)
+                evals_eq_hypercubes(n_lift, xi[l_skip..l_skip + n_lift].iter().rev())
             })
             .collect();
 
@@ -306,7 +307,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                 let trace_ctx = &ctx.per_trace[trace_idx].1;
                 let n_lift = log2_strict_usize(trace_ctx.height()).saturating_sub(l_skip);
                 let mats = &helper.view_mats(trace_ctx);
-                let eq_xi = self.eq_xi_per_trace[trace_idx].column(0);
+                let eq_xi = &self.eq_xi_per_trace[trace_idx][(1 << n_lift) - 1..(2 << n_lift) - 1];
                 let sels = self.sels_per_trace_base[trace_idx].as_view();
                 let mut parts = vec![(sels.into(), false)];
                 parts.extend_from_slice(mats);
@@ -349,7 +350,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                 let log_height = log2_strict_usize(trace_ctx.height());
                 let n_lift = log_height.saturating_sub(l_skip);
                 let mats = &helper.view_mats(trace_ctx);
-                let eq_xi = self.eq_xi_per_trace[trace_idx].column(0);
+                let eq_xi = &self.eq_xi_per_trace[trace_idx][(1 << n_lift) - 1..(2 << n_lift) - 1];
                 let eq_3bs = &self.eq_3b_per_trace[trace_idx];
                 let sels = self.sels_per_trace_base[trace_idx].as_view();
                 let mut parts = vec![(sels.into(), false)];
@@ -400,31 +401,23 @@ impl<'a> LogupZerocheckCpu<'a> {
             batch_fold_ple_evals(l_skip, take(&mut self.sels_per_trace_base), false, r_0);
         let eq_r0 = eval_eq_uni(l_skip, self.xi[0], r_0);
         let eq_sharp_r0 = eval_eq_sharp_uni(&self.omega_skip_pows, &self.xi[..l_skip], r_0);
-        // Define eq^\sharp_D(xi[0], r0) * eq_{H_n}(xi[1..1+n], x) and also update eq_D(xi[0], r0) *
-        // eq_{H_n}(xi[1..1+n], x)
-        self.eq_sharp_per_trace = self
-            .eq_xi_per_trace
-            .par_iter_mut()
-            .map(|eq| {
-                let eq_sharp_evals = eq
-                    .values
-                    .par_iter_mut()
-                    .map(|x| {
-                        let eq = *x;
-                        *x *= eq_r0;
-                        eq * eq_sharp_r0
-                    })
-                    .collect();
-                ColMajorMatrix::new(eq_sharp_evals, 1)
-            })
-            .collect();
+        self.eq_ns.push(eq_r0);
+        self.eq_sharp_ns.push(eq_sharp_r0);
+        self.eq_xi_per_trace.iter_mut().for_each(|eq| {
+            // trim the back (which corresponds to r_{j-1}) because we don't need it anymore
+            if eq.len() > 1 {
+                eq.truncate(eq.len() / 2);
+            }
+        });
     }
 
-    /// Returns length `3 * num_airs_present` polynomials, each evaluated at `1..=s_deg`.
+    /// Returns length `3 * num_airs_present` polynomials, each polynomial either evaluated at
+    /// `1,...,deg(s')` or at `1` if a linear term (terms in front-loaded sumcheck that have reached
+    /// exhaustion)
     pub fn sumcheck_polys_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
-        // PERF[jpw]: use per AIR s_deg
-        let s_deg = self.s_deg;
-        let s_zerocheck_evals: Vec<Vec<EF>> = parizip!(
+        // sp = s'
+        let sp_deg = self.constraint_degree;
+        let sp_zerocheck_evals: Vec<Vec<EF>> = parizip!(
             &self.eval_helpers,
             &mut self.zerocheck_tilde_evals,
             &self.n_per_trace,
@@ -432,7 +425,7 @@ impl<'a> LogupZerocheckCpu<'a> {
             &self.sels_per_trace,
             &self.eq_xi_per_trace
         )
-        .map(|(helper, tilde_eval, &n, mats, sels, eq_xi)| {
+        .map(|(helper, tilde_eval, &n, mats, sels, eq_xi_tree)| {
             let n_lift = n.max(0) as usize;
             if round > n_lift {
                 if round == n_lift + 1 {
@@ -441,48 +434,44 @@ impl<'a> LogupZerocheckCpu<'a> {
                         .chain(mats)
                         .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
                         .collect_vec();
-                    *tilde_eval =
-                        eq_xi.column(0)[0] * helper.acc_constraints(&parts, &self.lambda_pows);
+                    // eq(xi, \vect r_{round-1})
+                    let eq_r_acc = *self.eq_ns.last().unwrap();
+                    *tilde_eval = eq_r_acc * helper.acc_constraints(&parts, &self.lambda_pows);
                 } else {
                     *tilde_eval *= r_prev;
                 };
-                (1..=s_deg)
-                    .map(|x| *tilde_eval * F::from_canonical_usize(x))
-                    .collect()
+                vec![*tilde_eval]
             } else {
-                let parts = iter::empty()
-                    .chain([eq_xi, sels])
+                let log_num_y = n_lift - round;
+                let num_y = 1 << log_num_y;
+                let eq_xi = &eq_xi_tree[num_y - 1..];
+                let parts = iter::once(sels)
                     .chain(mats)
                     .map(|m| m.as_view())
                     .collect_vec();
-                let [s] = sumcheck_round_poly_evals(
-                    n_lift - (round - 1),
-                    s_deg,
-                    &parts,
-                    |_x, _y, row_parts| {
-                        let eq = row_parts[0][0];
-                        let constraint_eval =
-                            helper.acc_constraints(&row_parts[1..], &self.lambda_pows);
+                let [s] =
+                    sumcheck_round_poly_evals(log_num_y + 1, sp_deg, &parts, |_x, y, row_parts| {
+                        let eq = eq_xi[y];
+                        let constraint_eval = helper.acc_constraints(row_parts, &self.lambda_pows);
                         [eq * constraint_eval]
-                    },
-                );
+                    });
                 s
             }
         })
         .collect();
 
-        let s_logup_evals: Vec<Vec<EF>> = parizip!(
+        let sp_logup_evals: Vec<Vec<EF>> = parizip!(
             &self.eval_helpers,
             &mut self.logup_tilde_evals,
             &self.n_per_trace,
             &self.mat_evals_per_trace,
             &self.sels_per_trace,
-            &self.eq_sharp_per_trace,
+            &self.eq_xi_per_trace,
             &self.eq_3b_per_trace
         )
-        .flat_map(|(helper, tilde_eval, &n, mats, sels, eq_sharp, eq_3bs)| {
+        .flat_map(|(helper, tilde_eval, &n, mats, sels, eq_xi_tree, eq_3bs)| {
             if helper.interactions.is_empty() {
-                return [vec![EF::ZERO; s_deg], vec![EF::ZERO; s_deg]];
+                return [vec![EF::ZERO; sp_deg], vec![EF::ZERO; sp_deg]];
             }
             let n_lift = n.max(0) as usize;
             let norm_factor_denom = 1 << (-n).max(0);
@@ -494,38 +483,32 @@ impl<'a> LogupZerocheckCpu<'a> {
                         .chain(mats)
                         .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
                         .collect_vec();
-                    let eq = eq_sharp.column(0)[0];
+                    let eq_sharp_r_acc = *self.eq_sharp_ns.last().unwrap();
                     *tilde_eval = helper
                         .acc_interactions(&parts, &self.beta_pows, eq_3bs)
-                        .map(|x| eq * x);
+                        .map(|x| eq_sharp_r_acc * x);
                     tilde_eval[0] *= norm_factor;
                 } else {
                     for x in tilde_eval.iter_mut() {
                         *x *= r_prev;
                     }
                 };
-                tilde_eval.map(|tilde_eval| {
-                    (1..=s_deg)
-                        .map(|x| tilde_eval * F::from_canonical_usize(x))
-                        .collect()
-                })
+                tilde_eval.map(|tilde_eval| vec![tilde_eval])
             } else {
-                let parts = iter::empty()
-                    .chain([eq_sharp, sels])
+                let parts = iter::once(sels)
                     .chain(mats)
                     .map(|m| m.as_view())
                     .collect_vec();
-                let [mut numer, denom] = sumcheck_round_poly_evals(
-                    n_lift - (round - 1),
-                    s_deg,
-                    &parts,
-                    |_x, _y, row_parts| {
-                        let eq_sharp = row_parts[0][0];
+                let log_num_y = n_lift - round;
+                let num_y = 1 << log_num_y;
+                let eq_xi = &eq_xi_tree[num_y - 1..];
+                let [mut numer, denom] =
+                    sumcheck_round_poly_evals(log_num_y + 1, sp_deg, &parts, |_x, y, row_parts| {
+                        let eq = eq_xi[y];
                         helper
-                            .acc_interactions(&row_parts[1..], &self.beta_pows, eq_3bs)
-                            .map(|eval| eq_sharp * eval)
-                    },
-                );
+                            .acc_interactions(row_parts, &self.beta_pows, eq_3bs)
+                            .map(|eval| eq * eval)
+                    });
                 for p in &mut numer {
                     *p *= norm_factor;
                 }
@@ -534,21 +517,32 @@ impl<'a> LogupZerocheckCpu<'a> {
         })
         .collect();
 
-        s_logup_evals.into_iter().chain(s_zerocheck_evals).collect()
+        sp_logup_evals
+            .into_iter()
+            .chain(sp_zerocheck_evals)
+            .collect()
     }
 
-    pub fn fold_mle_evals(&mut self, _round: usize, r_round: EF) {
+    pub fn fold_mle_evals(&mut self, round: usize, r_round: EF) {
         self.mat_evals_per_trace = take(&mut self.mat_evals_per_trace)
             .into_iter()
             .map(|mats| batch_fold_mle_evals(mats, r_round))
             .collect_vec();
         self.sels_per_trace = batch_fold_mle_evals(take(&mut self.sels_per_trace), r_round);
-        self.eq_xi_per_trace = batch_fold_mle_evals(take(&mut self.eq_xi_per_trace), r_round);
-        self.eq_sharp_per_trace = batch_fold_mle_evals(take(&mut self.eq_sharp_per_trace), r_round);
+        self.eq_xi_per_trace.par_iter_mut().for_each(|eq| {
+            // trim the back (which corresponds to r_{j-1}) because we don't need it anymore
+            if eq.len() > 1 {
+                eq.truncate(eq.len() / 2);
+            }
+        });
+        let xi = self.xi[self.l_skip + round - 1];
+        let eq_r = eval_eq_mle(&[xi], &[r_round]);
+        self.eq_ns.push(self.eq_ns[round - 1] * eq_r);
+        self.eq_sharp_ns.push(self.eq_sharp_ns[round - 1] * eq_r);
 
         #[allow(unused_variables)]
         #[cfg(debug_assertions)]
-        if tracing::enabled!(tracing::Level::DEBUG) && _round == self.n_max {
+        if tracing::enabled!(tracing::Level::DEBUG) && round == self.n_max {
             use itertools::izip;
 
             for (trace_idx, (helper, &n, mats, sels, eq_xi)) in izip!(
@@ -568,12 +562,11 @@ impl<'a> LogupZerocheckCpu<'a> {
                 debug!(%trace_idx, %expr, "constraints_eval");
             }
 
-            for (trace_idx, (helper, &n, mats, sels, eq_sharp, eq_3bs)) in izip!(
+            for (trace_idx, (helper, &n, mats, sels, eq_3bs)) in izip!(
                 &self.eval_helpers,
                 &self.n_per_trace,
                 &self.mat_evals_per_trace,
                 &self.sels_per_trace,
-                &self.eq_sharp_per_trace,
                 &self.eq_3b_per_trace
             )
             .enumerate()
