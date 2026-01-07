@@ -95,9 +95,12 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
     uint32_t log_stride
 ) {
     extern __shared__ char smem[];
-    FpExt *shared_sum = reinterpret_cast<FpExt *>(smem); // FpExt[S_DEG][blockDim.x]
+    // Use blockDim.x + 1 stride to avoid shared memory bank conflicts
+    // when accessing shared_sum[i * stride + ...] for different i values
+    const uint32_t PADDED_X = blockDim.x + 1;
+    FpExt *shared_sum = reinterpret_cast<FpExt *>(smem); // FpExt[S_DEG][PADDED_X]
     Fp *shared_eval =
-        reinterpret_cast<Fp *>(smem + S_DEG * blockDim.x * sizeof(FpExt)); // Fp[blockDim.x]
+        reinterpret_cast<Fp *>(smem + S_DEG * PADDED_X * sizeof(FpExt)); // Fp[blockDim.x]
 
     bool needs_shmem = l_skip > LOG_WARP_SIZE;
     uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -167,16 +170,16 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
     }
 #pragma unroll
     for (uint32_t i = 0; i < S_DEG; i++) {
-        shared_sum[i * blockDim.x + threadIdx.x] = local_sum[i];
+        shared_sum[i * PADDED_X + threadIdx.x] = local_sum[i];
     }
     __syncthreads();
 
     if ((threadIdx.x >> l_skip) == 0) {
 #pragma unroll
         for (uint32_t i = 0; i < S_DEG; i++) {
-            FpExt tile_sum = shared_sum[i * blockDim.x + z_idx];
+            FpExt tile_sum = shared_sum[i * PADDED_X + z_idx];
             for (int lane = 1; lane < (blockDim.x >> l_skip); ++lane) {
-                tile_sum += shared_sum[i * blockDim.x + (lane << l_skip) + z_idx];
+                tile_sum += shared_sum[i * PADDED_X + (lane << l_skip) + z_idx];
             }
             block_sums
                 [(col_idx_base * gridDim.x + blockIdx.x) * (S_DEG << l_skip) + S_DEG * z_idx + i] =
@@ -442,7 +445,8 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     uint32_t stride = std::max(skip_domain / trace_height, 1u);
     auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, l_skip, col_stride);
 
-    size_t shmem_sum_size = sizeof(FpExt) * block.x * S_DEG;
+    // Use block.x + 1 stride for shared_sum to avoid bank conflicts
+    size_t shmem_sum_size = sizeof(FpExt) * (block.x + 1) * S_DEG;
     size_t shmem_eval_size = sizeof(Fp) * block.x;
     size_t shmem_bytes = shmem_sum_size + shmem_eval_size;
 
