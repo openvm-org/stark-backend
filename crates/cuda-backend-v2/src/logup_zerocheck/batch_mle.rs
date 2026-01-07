@@ -7,7 +7,6 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
 };
-use p3_field::FieldAlgebra;
 use stark_backend_v2::prover::{DeviceMultiStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 
 use crate::{
@@ -27,7 +26,11 @@ const MAX_THREADS_PER_BLOCK: u32 = 128;
 // ============================================================================
 
 /// Computes zerocheck intermediate buffer memory in bytes for a trace.
-fn zerocheck_batch_mle_intermediates_buffer_bytes(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
+fn zerocheck_batch_mle_intermediates_buffer_bytes(
+    buffer_size: u32,
+    num_x: u32,
+    num_y: u32,
+) -> usize {
     unsafe {
         _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
             * std::mem::size_of::<EF>()
@@ -87,7 +90,6 @@ pub(crate) struct TraceCtx {
     pub norm_factor: F,
     // shared eval pointers (same for zerocheck + logup)
     pub eq_xi_ptr: *const EF,
-    pub eq_sharp_ptr: *const EF,
     pub sels_ptr: *const EF,
     pub prep_ptr: MainMatrixPtrs<EF>,
     pub main_ptrs_dev: DeviceBuffer<MainMatrixPtrs<EF>>,
@@ -205,6 +207,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
     }
 
     /// Returns true if there are no traces to evaluate.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.traces.is_empty()
     }
@@ -322,7 +325,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
             logup_ctxs_h.push(LogupCtx {
                 eval_ctx,
                 num_y: t.num_y,
-                d_eq_sharp: t.eq_sharp_ptr,
+                d_eq_xi: t.eq_xi_ptr,
                 d_challenges: d_challenges_ptr,
                 d_eq_3bs: t.eq_3bs_ptr,
                 d_rules: air_pk
@@ -359,6 +362,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
     }
 
     /// Returns true if there are no traces to evaluate.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.traces.is_empty()
     }
@@ -412,7 +416,6 @@ pub(crate) fn evaluate_batch_mle(
     d_challenges_ptr: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
     num_x: u32,
-    s_deg: usize,
     zc_out: &mut [Vec<EF>],
     logup_out: &mut [[Vec<EF>; 2]],
     zc_tilde_evals: &mut [EF],
@@ -429,7 +432,6 @@ pub(crate) fn evaluate_batch_mle(
         pk,
         lambda_pows,
         num_x,
-        s_deg,
         zc_out,
         zc_tilde_evals,
         memory_limit_bytes,
@@ -442,7 +444,6 @@ pub(crate) fn evaluate_batch_mle(
         pk,
         d_challenges_ptr,
         num_x,
-        s_deg,
         logup_out,
         logup_tilde_evals,
         memory_limit_bytes,
@@ -460,7 +461,6 @@ fn evaluate_single_zerocheck(
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     lambda_pows: &DeviceBuffer<EF>,
     num_x: u32,
-    s_deg: usize,
     zc_out: &mut Vec<EF>,
     zc_tilde_eval: &mut EF,
 ) {
@@ -480,9 +480,7 @@ fn evaluate_single_zerocheck(
 
     if num_x == 1 {
         *zc_tilde_eval = host[0];
-        *zc_out = (1..=s_deg)
-            .map(|x| host[0] * F::from_canonical_usize(x))
-            .collect();
+        // zc_out not set, will be handled directly from tilde eval in compute_batch_s
     } else {
         *zc_out = host;
     }
@@ -495,13 +493,12 @@ fn evaluate_single_logup(
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     d_challenges_ptr: *const EF,
     num_x: u32,
-    s_deg: usize,
     logup_out: &mut [Vec<EF>; 2],
     logup_tilde_eval: &mut [EF; 2],
 ) {
     let air_pk = &pk.per_air[t.air_idx];
     let out = evaluate_mle_interactions_gpu(
-        t.eq_sharp_ptr,
+        t.eq_xi_ptr,
         t.sels_ptr,
         t.prep_ptr,
         &t.main_ptrs_dev,
@@ -517,13 +514,7 @@ fn evaluate_single_logup(
     if num_x == 1 {
         logup_tilde_eval[0] = fracs[0].p * t.norm_factor;
         logup_tilde_eval[1] = fracs[0].q;
-        let numer = (1..=s_deg)
-            .map(|x| logup_tilde_eval[0] * F::from_canonical_usize(x))
-            .collect();
-        let denom = (1..=s_deg)
-            .map(|x| logup_tilde_eval[1] * F::from_canonical_usize(x))
-            .collect();
-        *logup_out = [numer, denom];
+        // logup_out not set, will be handled directly from tilde eval in compute_batch_s
     } else {
         let numer: Vec<EF> = fracs.iter().map(|f| f.p * t.norm_factor).collect();
         let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
@@ -541,7 +532,6 @@ fn evaluate_zerocheck_batched(
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     lambda_pows: &DeviceBuffer<EF>,
     num_x: u32,
-    s_deg: usize,
     zc_out: &mut [Vec<EF>],
     zc_tilde_evals: &mut [EF],
     memory_limit_bytes: usize,
@@ -551,7 +541,11 @@ fn evaluate_zerocheck_batched(
         .iter()
         .filter(|t| t.has_constraints)
         .map(|t| {
-            let buffer_size = pk.per_air[t.air_idx].other_data.zerocheck_mle.inner.buffer_size;
+            let buffer_size = pk.per_air[t.air_idx]
+                .other_data
+                .zerocheck_mle
+                .inner
+                .buffer_size;
             let mem = zerocheck_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y);
             (t, mem)
         })
@@ -591,7 +585,6 @@ fn evaluate_zerocheck_batched(
                 pk,
                 lambda_pows,
                 num_x,
-                s_deg,
                 &mut zc_out[t.trace_idx],
                 &mut zc_tilde_evals[t.trace_idx],
             );
@@ -611,9 +604,6 @@ fn evaluate_zerocheck_batched(
                 let evals = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
                 if num_x == 1 {
                     zc_tilde_evals[trace_idx] = evals[0];
-                    zc_out[trace_idx] = (1..=s_deg)
-                        .map(|x| evals[0] * F::from_canonical_usize(x))
-                        .collect();
                 } else {
                     zc_out[trace_idx].copy_from_slice(evals);
                 }
@@ -629,7 +619,6 @@ fn evaluate_logup_batched(
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     d_challenges_ptr: *const EF,
     num_x: u32,
-    s_deg: usize,
     logup_out: &mut [[Vec<EF>; 2]],
     logup_tilde_evals: &mut [[EF; 2]],
     memory_limit_bytes: usize,
@@ -639,7 +628,11 @@ fn evaluate_logup_batched(
         .iter()
         .filter(|t| t.has_interactions)
         .map(|t| {
-            let buffer_size = pk.per_air[t.air_idx].other_data.interaction_rules.inner.buffer_size;
+            let buffer_size = pk.per_air[t.air_idx]
+                .other_data
+                .interaction_rules
+                .inner
+                .buffer_size;
             let mem = logup_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y);
             (t, mem)
         })
@@ -679,7 +672,6 @@ fn evaluate_logup_batched(
                 pk,
                 d_challenges_ptr,
                 num_x,
-                s_deg,
                 &mut logup_out[t.trace_idx],
                 &mut logup_tilde_evals[t.trace_idx],
             );
@@ -701,13 +693,6 @@ fn evaluate_logup_batched(
                 if num_x == 1 {
                     logup_tilde_evals[trace_idx][0] = fracs[0].p * norm_factor;
                     logup_tilde_evals[trace_idx][1] = fracs[0].q;
-                    let numer = (1..=s_deg)
-                        .map(|x| logup_tilde_evals[trace_idx][0] * F::from_canonical_usize(x))
-                        .collect();
-                    let denom = (1..=s_deg)
-                        .map(|x| logup_tilde_evals[trace_idx][1] * F::from_canonical_usize(x))
-                        .collect();
-                    logup_out[trace_idx] = [numer, denom];
                 } else {
                     let numer: Vec<EF> = fracs.iter().map(|f| f.p * norm_factor).collect();
                     let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
