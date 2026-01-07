@@ -41,7 +41,7 @@ struct ZerocheckCtx {
 struct LogupCtx {
     EvalCoreCtx eval_ctx;
     uint32_t num_y;
-    const FpExt *__restrict__ d_eq_sharp;
+    const FpExt *__restrict__ d_eq_xi;
     const FpExt *__restrict__ d_challenges;
     const FpExt *__restrict__ d_eq_3bs;
     const Rule *__restrict__ d_rules;
@@ -207,7 +207,7 @@ __global__ void zerocheck_batch_mle_kernel(
                 }
             }
         }
-        sum *= zc_ctx.d_eq_xi[row];
+        sum *= zc_ctx.d_eq_xi[y_int];
     }
 
     FpExt reduced = sumcheck::block_reduce_sum(sum, shared);
@@ -341,9 +341,9 @@ __global__ void logup_batch_mle_kernel(
             }
         }
 
-        FpExt eq_sharp_val = logup_ctx.d_eq_sharp[row];
-        numer_sum *= eq_sharp_val;
-        denom_sum *= eq_sharp_val;
+        FpExt eq_val = logup_ctx.d_eq_xi[y_int];
+        numer_sum *= eq_val;
+        denom_sum *= eq_val;
     }
 
     FpExt numer_reduced = sumcheck::block_reduce_sum(numer_sum, shared);

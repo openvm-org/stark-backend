@@ -74,28 +74,6 @@ __global__ void fold_ple_from_evals_kernel(
     }
 }
 
-// Combined kernel: mutates eq_xi in-place (eq_xi *= eq_r0) and computes eq_sharp (original_eq_xi * eq_sharp_r0)
-// Note: eq_sharp uses the ORIGINAL eq_xi value, not the multiplied one (matches CPU behavior)
-__global__ void compute_eq_sharp_kernel(
-    FpExt *eq_xi,      // [count] input/output: mutated in-place to eq_xi * eq_r0
-    FpExt *eq_sharp,   // [count] output: original_eq_xi * eq_sharp_r0
-    FpExt eq_r0,       // scalar
-    FpExt eq_sharp_r0, // scalar
-    uint32_t count
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= count)
-        return;
-
-    FpExt original_eq_xi = eq_xi[idx];
-
-    // Mutate in-place: eq_xi *= eq_r0
-    eq_xi[idx] = original_eq_xi * eq_r0;
-
-    // Compute eq_sharp using the ORIGINAL eq_xi value
-    eq_sharp[idx] = original_eq_xi * eq_sharp_r0;
-}
-
 __global__ void interpolate_columns_kernel(
     FpExt *__restrict__ interpolated,
     const FpExt *__restrict__ const *__restrict__ columns,
@@ -202,20 +180,6 @@ extern "C" int _fold_ple_from_evals(
             new_height
         );
     }
-    return CHECK_KERNEL();
-}
-
-extern "C" int _compute_eq_sharp(
-    FpExt *eq_xi,
-    FpExt *eq_sharp,
-    const FpExt eq_r0,
-    const FpExt eq_sharp_r0,
-    uint32_t count
-) {
-    if (count == 0)
-        return 0;
-    auto [grid, block] = kernel_launch_params(count);
-    compute_eq_sharp_kernel<<<grid, block>>>(eq_xi, eq_sharp, eq_r0, eq_sharp_r0, count);
     return CHECK_KERNEL();
 }
 
