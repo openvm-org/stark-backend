@@ -110,7 +110,9 @@ __global__ void algebraic_batch_matrices_kernel(
     }
 }
 
-__global__ void eq_hypercube_stage_ext_kernel(FpExt *out, FpExt x_i, uint32_t step) {
+// Inplace update.
+// Insert x_i from the back
+__global__ void eq_hypercube_stage_ext_kernel(FpExt *__restrict__ out, FpExt x_i, uint32_t step) {
     size_t y = blockIdx.x * blockDim.x + threadIdx.x;
     if (y >= step)
         return;
@@ -120,18 +122,36 @@ __global__ void eq_hypercube_stage_ext_kernel(FpExt *out, FpExt x_i, uint32_t st
 }
 
 // Same as eq_hypercube_stage_ext_kernel but does not modify in-place
+// Insert x_i from the back
 __global__ void eq_hypercube_nonoverlapping_stage_ext_kernel(
-    FpExt *out,
-    const FpExt *in,
+    FpExt *__restrict__ out,
+    const FpExt *__restrict__ in,
     FpExt x_i,
     uint32_t step
 ) {
     size_t y = blockIdx.x * blockDim.x + threadIdx.x;
     if (y >= step)
         return;
-    FpExt hi = in[y] * x_i;
+    FpExt prev = in[y];
+    FpExt hi = prev * x_i;
     out[y | step] = hi;
-    out[y] = in[y] - hi; // save a multiplication
+    out[y] = prev - hi; // save a multiplication
+}
+
+// Insert x_i from the front
+__global__ void eq_hypercube_interleaved_stage_ext_kernel(
+    FpExt *__restrict__ out,
+    const FpExt *__restrict__ in,
+    FpExt x_i,
+    uint32_t step
+) {
+    size_t y = blockIdx.x * blockDim.x + threadIdx.x;
+    if (y >= step)
+        return;
+    FpExt prev = in[y];
+    FpExt hi = prev * x_i;
+    out[(y << 1) | 1] = hi;
+    out[y << 1] = prev - hi;
 }
 
 // out is `height x width` column-major matrix of evaluations of eq(x[j], -) on hypercube for j in 0..width
@@ -211,6 +231,17 @@ extern "C" int _eq_hypercube_nonoverlapping_stage_ext(
 ) {
     auto [grid, block] = kernel_launch_params(step);
     eq_hypercube_nonoverlapping_stage_ext_kernel<<<grid, block>>>(out, in, x_i, step);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _eq_hypercube_interleaved_stage_ext(
+    FpExt *out,
+    const FpExt *in,
+    FpExt x_i,
+    uint32_t step
+) {
+    auto [grid, block] = kernel_launch_params(step);
+    eq_hypercube_interleaved_stage_ext_kernel<<<grid, block>>>(out, in, x_i, step);
     return CHECK_KERNEL();
 }
 

@@ -28,7 +28,6 @@ pub fn evaluate_round0_constraints_gpu(
     public_values: &DeviceBuffer<F>,
     omega_skip_pows: &DeviceBuffer<F>,
     inv_lagrange_denoms: &DeviceBuffer<F>,
-    eq_uni: &DeviceBuffer<EF>,
     eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
     large_domain: u32,
@@ -75,20 +74,19 @@ pub fn evaluate_round0_constraints_gpu(
         .map(|cd| cd.trace.buffer().as_ptr())
         .unwrap_or(std::ptr::null());
 
-    let mut s_evals = DeviceBuffer::<EF>::with_capacity(large_domain as usize);
+    let mut sp_evals = DeviceBuffer::<EF>::with_capacity(large_domain as usize);
     // SAFETY:
     // - No bounds checks are done in this kernel. It fully assumes that the Rules are trusted and
     //   all nodes are valid.
     unsafe {
         zerocheck_bary_eval_constraints(
             &mut temp_sums_buffer,
-            &mut s_evals,
+            &mut sp_evals,
             selectors_cube,
             preprocessed_ptr,
             main_parts,
             omega_skip_pows,
             inv_lagrange_denoms,
-            eq_uni,
             eq_cube,
             lambda_pows,
             public_values,
@@ -104,7 +102,7 @@ pub fn evaluate_round0_constraints_gpu(
         )?;
     }
 
-    Ok(s_evals)
+    Ok(sp_evals)
 }
 
 /// Evaluate interaction constraints (excluding plain AIR constraints) for a single AIR, given
@@ -120,7 +118,6 @@ pub fn evaluate_round0_interactions_gpu(
     public_values: &DeviceBuffer<F>,
     omega_skip_pows: &DeviceBuffer<F>,
     inv_lagrange_denoms: &DeviceBuffer<F>,
-    eq_sharp_uni: &DeviceBuffer<EF>,
     eq_cube: *const EF,
     beta_pows: &[EF],
     eq_3bs: &[EF],
@@ -233,7 +230,6 @@ pub fn evaluate_round0_interactions_gpu(
             main_parts,
             omega_skip_pows,
             inv_lagrange_denoms,
-            eq_sharp_uni,
             eq_cube,
             public_values,
             &d_numer_weights,
