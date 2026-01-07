@@ -241,10 +241,10 @@ extern "C" int _ct_mixed_radix_narrow(
         _CT_NTT<1><<<dim3(num_blocks, grid_y, grid_z), block_size, shared_sz>>>(NTT_ARGUMENTS);
     else if (stage == 0 || lg_domain_size < 12)
         _CT_NTT<Z_COUNT><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
-    else if (lg_domain_size < MAX_LG_DOMAIN_SIZE)
+    else if (lg_domain_size <= MAX_LG_DOMAIN_SIZE)
         _CT_NTT<Z_COUNT, true><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
     else
-        assert(lg_domain_size < MAX_LG_DOMAIN_SIZE);
+        assert(lg_domain_size <= MAX_LG_DOMAIN_SIZE);
             
     #undef NTT_ARGUMENTS
 
