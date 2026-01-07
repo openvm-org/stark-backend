@@ -1,17 +1,20 @@
 //! Batch sumcheck for ZeroCheck constraints and sumcheck for LogUp input layer MLEs
 
-use std::cmp::max;
+use std::{cmp::max, iter::zip};
 
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
+use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{Field, FieldAlgebra};
+use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::{debug, info_span, instrument};
 
 use crate::{
     calculate_n_logup,
-    poly_common::UnivariatePoly,
+    dft::Radix2BowersSerial,
+    poly_common::{eq_sharp_uni_poly, eq_uni_poly, UnivariatePoly},
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
     prover::{
@@ -178,19 +181,57 @@ where
     let lambda = transcript.sample_ext();
     debug!(%lambda);
 
-    let s_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
+    let sp_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
+    let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree);
+    let s_deg = constraint_degree + 1;
+    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
+    let large_uni_domain = (s_0_deg + 1).next_power_of_two();
+    let dft = Radix2BowersSerial;
+    let s_0_logup_polys = {
+        let eq_sharp_uni = eq_sharp_uni_poly(&prover.xi[..l_skip]);
+        let mut eq_coeffs = eq_sharp_uni.into_coeffs();
+        eq_coeffs.resize(large_uni_domain, EF::ZERO);
+        let eq_evals = dft.dft(eq_coeffs);
+
+        let width = 2 * num_traces;
+        let mut sp_coeffs_mat = EF::zero_vec(width * large_uni_domain);
+        for (i, coeffs) in sp_0_polys[..2 * num_traces].iter().enumerate() {
+            debug_assert!(coeffs.coeffs().len() <= sp_0_deg + 1);
+            for (j, &c_j) in coeffs.coeffs().iter().enumerate() {
+                // SAFETY:
+                // - coeffs length is <= sp_0_deg + 1 <= s_0_deg < large_uni_domain
+                // - sp_coeffs_mat allocated for width
+                unsafe {
+                    *sp_coeffs_mat.get_unchecked_mut(j * width + i) = c_j;
+                }
+            }
+        }
+        let mut s_evals = dft.dft_batch(RowMajorMatrix::new(sp_coeffs_mat, width));
+        for (eq, row) in zip(eq_evals, s_evals.values.chunks_mut(width)) {
+            for x in row {
+                *x *= eq;
+            }
+        }
+        dft.idft_batch(s_evals)
+    };
+
+    let skip_domain_size = F::from_canonical_usize(1 << l_skip);
     // logup sum claims (sum_{\hat p}, sum_{\hat q}) per present AIR
-    let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = s_0_polys
-        [..2 * num_traces]
-        .chunks_exact(2)
-        .map(|frac| {
-            let [sum_claim_p, sum_claim_q] = [&frac[0], &frac[1]].map(|s_0| {
-                s_0.coeffs()
-                    .iter()
+    let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = (0..num_traces)
+        .map(|trace_idx| {
+            let [sum_claim_p, sum_claim_q] = [0, 1].map(|is_denom| {
+                // Compute sum over D of s_0(Z) to get the sum claim
+                (0..=s_0_deg)
                     .step_by(1 << l_skip)
-                    .copied()
+                    .map(|j| unsafe {
+                        // SAFETY: matrix is 2 * num_trace x large_uni_domain, s_0_deg <
+                        // large_uni_domain
+                        *s_0_logup_polys
+                            .values
+                            .get_unchecked(j * 2 * num_traces + 2 * trace_idx + is_denom)
+                    })
                     .sum::<EF>()
-                    * F::from_canonical_usize(1 << l_skip)
+                    * skip_domain_size
             });
             transcript.observe_ext(sum_claim_p);
             transcript.observe_ext(sum_claim_q);
@@ -201,22 +242,45 @@ where
 
     let mu = transcript.sample_ext();
     debug!(%mu);
-
-    let s_deg = constraint_degree + 1;
-    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
     let mu_pows = mu.powers().take(3 * num_traces).collect_vec();
+
+    let s_0_zc_poly = {
+        let eq_uni = eq_uni_poly::<F, _>(l_skip, prover.xi[0]);
+        let mut eq_coeffs = eq_uni.into_coeffs();
+        eq_coeffs.resize(large_uni_domain, EF::ZERO);
+        let eq_evals = dft.dft(eq_coeffs);
+
+        let mut sp_coeffs = EF::zero_vec(large_uni_domain);
+        let mus = &mu_pows[2 * num_traces..];
+        let polys = &sp_0_polys[2 * num_traces..];
+        for (j, batch_coeff) in sp_coeffs.iter_mut().enumerate().take(sp_0_deg + 1) {
+            for (&mu, poly) in zip(mus, polys) {
+                *batch_coeff += mu * *poly.coeffs().get(j).unwrap_or(&EF::ZERO);
+            }
+        }
+        let mut s_evals = dft.dft(sp_coeffs);
+        for (eq, x) in zip(eq_evals, &mut s_evals) {
+            *x *= eq;
+        }
+        dft.idft(s_evals)
+    };
+
+    // Algebraically batch
     let s_0_poly = UnivariatePoly::new(
-        (0..=s_0_deg)
-            .map(|i| {
-                let coeff = s_0_polys
-                    .iter()
-                    .enumerate()
-                    .map(|(j, s_0)| mu_pows[j] * *s_0.coeffs().get(i).unwrap_or(&EF::ZERO))
+        zip(
+            s_0_logup_polys.values.chunks_exact(2 * num_traces),
+            s_0_zc_poly,
+        )
+        .take(s_0_deg + 1)
+        .map(|(logup_row, batched_zc)| {
+            let coeff = batched_zc
+                + zip(&mu_pows, logup_row)
+                    .map(|(&mu_j, &x)| mu_j * x)
                     .sum::<EF>();
-                transcript.observe_ext(coeff);
-                coeff
-            })
-            .collect(),
+            transcript.observe_ext(coeff);
+            coeff
+        })
+        .collect(),
     );
 
     let r_0 = transcript.sample_ext();

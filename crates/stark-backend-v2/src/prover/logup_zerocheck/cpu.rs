@@ -24,8 +24,8 @@ use crate::{
         poly::evals_eq_hypercubes,
         stacked_pcs::StackedLayout,
         sumcheck::{
-            batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round0_deg,
-            sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
+            batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round_poly_evals,
+            sumcheck_uni_round0_poly,
         },
         ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
     },
@@ -49,7 +49,6 @@ pub struct LogupZerocheckCpu<'a> {
     pub constraint_degree: usize,
     pub n_per_trace: Vec<isize>,
     max_num_constraints: usize,
-    s_deg: usize,
 
     // Available after GKR:
     pub xi: Vec<EF>,
@@ -87,8 +86,6 @@ impl<'a> LogupZerocheckCpu<'a> {
         let num_airs_present = ctx.per_trace.len();
 
         let constraint_degree = pk.max_constraint_degree;
-        // +1 from eq term
-        let s_deg = constraint_degree + 1;
         let max_interaction_length = ctx
             .per_trace
             .iter()
@@ -128,6 +125,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                     .map(|cd| cd.data.mat_view(0))
                     .chain(iter::once(air_ctx.common_main.as_view().into()))
                     .collect_vec();
+                let constraint_degree = pk.vk.max_constraint_degree;
                 // Scan constraints to see if we need `next` row and also check index bounds
                 // so we don't need to check them per row.
                 let mut rotation = 0;
@@ -163,6 +161,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                     public_values,
                     preprocessed_trace,
                     needs_next,
+                    constraint_degree,
                 }
             })
             .collect(); // end of preparation / loading of constraints
@@ -186,7 +185,6 @@ impl<'a> LogupZerocheckCpu<'a> {
             interactions_layout,
             constraint_degree,
             max_num_constraints,
-            s_deg,
             n_per_trace,
             eval_helpers,
             xi: vec![],
@@ -219,8 +217,6 @@ impl<'a> LogupZerocheckCpu<'a> {
         let l_skip = self.l_skip;
         let xi = &self.xi;
         self.lambda_pows = lambda.powers().take(self.max_num_constraints).collect_vec();
-        let s_deg = self.s_deg;
-        let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
 
         // For each trace, for each interaction \hat\sigma, the eq(ξ_3,b_{T,\hat\sigma}) term.
         // This is some weight per interaction that does not depend on the row.
@@ -299,7 +295,7 @@ impl<'a> LogupZerocheckCpu<'a> {
         // \prod_{z in D} (Z - z)` where `s'_0` has degree `d * (2^{l_skip} - 1) - 1`. We
         // can evaluate s'_0 on a coset and then perform coset iDFT to get `s'_0`
         // coefficients. We need to use a coset to ensure disjointedness from `D`.
-        let s_0_zerochecks = self
+        let sp_0_zerochecks = self
             .eval_helpers
             .par_iter()
             .enumerate()
@@ -311,18 +307,22 @@ impl<'a> LogupZerocheckCpu<'a> {
                 let sels = self.sels_per_trace_base[trace_idx].as_view();
                 let mut parts = vec![(sels.into(), false)];
                 parts.extend_from_slice(mats);
-
-                // degree is constraint_degree + 1 due to eq term
-                let [s_0] =
-                    sumcheck_uni_round0_poly(l_skip, n_lift, s_deg, &parts, |z, x, row_parts| {
+                // s'_0 has degree dependent on this AIR's constraint degree
+                let [sp_0] = sumcheck_uni_round0_poly(
+                    l_skip,
+                    n_lift,
+                    helper.constraint_degree as usize,
+                    &parts,
+                    |_z, x, row_parts| {
                         // PERF[jpw]: we are limited by the closure interface but `eq_uni` should be
                         // cached
-                        let eq = eval_eq_uni(l_skip, xi[0], z.into()) * eq_xi[x];
+                        let eq = eq_xi[x];
                         let constraint_eval = helper.acc_constraints(row_parts, &self.lambda_pows);
                         [eq * constraint_eval]
-                    });
+                    },
+                );
                 debug_assert_eq!(
-                    s_0.coeffs()
+                    sp_0.coeffs()
                         .iter()
                         .step_by(1 << l_skip)
                         .copied()
@@ -331,20 +331,20 @@ impl<'a> LogupZerocheckCpu<'a> {
                     "Zerocheck sum is not zero for air_id: {}",
                     ctx.per_trace[trace_idx].0
                 );
-                s_0
+                sp_0
             })
             .collect::<Vec<_>>();
         // Reminder: sum claims for zerocheck are zero, per AIR
 
         // We interpolate each logup round 0 sumcheck poly because we need to use it to compute
         // sum_{\hat{p}, T, I}, sum_{\hat{q}, T, I} per trace.
-        let s_0_logups = self
+        let sp_0_logups = self
             .eval_helpers
             .par_iter()
             .enumerate()
             .flat_map(|(trace_idx, helper)| {
                 if helper.interactions.is_empty() {
-                    return [(); 2].map(|_| UnivariatePoly::new(vec![EF::ZERO; s_0_deg + 1]));
+                    return [(); 2].map(|_| UnivariatePoly::new(vec![]));
                 }
                 let trace_ctx = &ctx.per_trace[trace_idx].1;
                 let log_height = log2_strict_usize(trace_ctx.height());
@@ -359,15 +359,18 @@ impl<'a> LogupZerocheckCpu<'a> {
                 let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
 
                 // degree is constraint_degree + 1 due to eq term
-                let [mut numer, denom] =
-                    sumcheck_uni_round0_poly(l_skip, n_lift, s_deg, &parts, |z, x, row_parts| {
-                        let eq_sharp =
-                            eval_eq_sharp_uni(&self.omega_skip_pows, &xi[..l_skip], z.into())
-                                * eq_xi[x];
+                let [mut numer, denom] = sumcheck_uni_round0_poly(
+                    l_skip,
+                    n_lift,
+                    helper.constraint_degree as usize,
+                    &parts,
+                    |_z, x, row_parts| {
+                        let eq = eq_xi[x];
                         let [numer, denom] =
                             helper.acc_interactions(row_parts, &self.beta_pows, eq_3bs);
-                        [eq_sharp * numer, eq_sharp * denom]
-                    });
+                        [eq * numer, eq * denom]
+                    },
+                );
                 for p in numer.coeffs_mut() {
                     *p *= norm_factor;
                 }
@@ -375,7 +378,7 @@ impl<'a> LogupZerocheckCpu<'a> {
             })
             .collect::<Vec<_>>();
 
-        s_0_logups.into_iter().chain(s_0_zerochecks).collect()
+        sp_0_logups.into_iter().chain(sp_0_zerochecks).collect()
     }
 
     /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
