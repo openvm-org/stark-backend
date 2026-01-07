@@ -26,6 +26,13 @@ extern "C" {
         step: u32,
     ) -> i32;
 
+    fn _eq_hypercube_interleaved_stage_ext(
+        out: *mut EF,
+        input: *const EF,
+        x_i: EF,
+        step: u32,
+    ) -> i32;
+
     // `x` must be **device** buffer
     fn _batch_eq_hypercube_stage(
         out: *mut F,
@@ -107,6 +114,16 @@ pub unsafe fn eq_hypercube_nonoverlapping_stage_ext(
     check(_eq_hypercube_nonoverlapping_stage_ext(
         out, input, x_i, step,
     ))
+}
+
+/// Same as [eq_hypercube_nonoverlapping_stage_ext] except `x_i` is inserted from the front.
+pub unsafe fn eq_hypercube_interleaved_stage_ext(
+    out: *mut EF,
+    input: *const EF,
+    x_i: EF,
+    step: u32,
+) -> Result<(), CudaError> {
+    check(_eq_hypercube_interleaved_stage_ext(out, input, x_i, step))
 }
 
 /// Same as `eq_hypercube_stage`, over base field, but computes `eq` evals in batch for multiple

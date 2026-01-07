@@ -5,10 +5,7 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_stark_backend::prover::MatrixDimensions;
 
 use super::errors::FoldPleError;
-use crate::{
-    EF, F,
-    cuda::logup_zerocheck::{compute_eq_sharp as compute_eq_sharp_ffi, fold_ple_from_evals},
-};
+use crate::{EF, F, cuda::logup_zerocheck::fold_ple_from_evals};
 
 /// Folds plain using mixed coefficients, folds rotation from evals.
 /// - `mixed` should be mixed coefficient form of the _lifted_ trace.
@@ -95,26 +92,4 @@ pub unsafe fn fold_ple_evals_gpu(
         )?;
     }
     Ok(())
-}
-
-/// Multiply eq_xi by eq_r0 in-place and compute eq_sharp = original_eq_xi * eq_sharp_r0
-/// This combines both operations in a single kernel call for efficiency
-pub fn compute_eq_sharp_gpu(
-    eq_xis: &mut DeviceBuffer<EF>,
-    eq_r0: EF,
-    eq_sharp_r0: EF,
-) -> Result<DeviceBuffer<EF>, FoldPleError> {
-    let count = eq_xis.len();
-
-    // Allocate output buffer for eq_sharp
-    let eq_sharp_buffer = DeviceBuffer::<EF>::with_capacity(count);
-
-    // Call the combined kernel that mutates eq_xi in-place and computes eq_sharp
-    // SAFETY: We have exclusive access to eq_xi via &mut DeviceMatrix, so mutating its buffer is
-    // safe
-    unsafe {
-        compute_eq_sharp_ffi(eq_xis, &eq_sharp_buffer, eq_r0, eq_sharp_r0)?;
-    }
-
-    Ok(eq_sharp_buffer)
 }

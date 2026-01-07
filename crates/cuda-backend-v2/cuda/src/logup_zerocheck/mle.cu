@@ -179,7 +179,7 @@ __global__ void zerocheck_mle_kernel(
                 }
             }
         }
-        sum *= d_eq_xi[row];
+        sum *= d_eq_xi[y_int];
     }
 
     FpExt reduced = sumcheck::block_reduce_sum(sum, shared);
@@ -191,7 +191,7 @@ __global__ void zerocheck_mle_kernel(
 template <bool GLOBAL>
 __global__ void logup_mle_kernel(
     FracExt *__restrict__ tmp_sums_buffer,
-    const FpExt *__restrict__ d_eq_sharp,
+    const FpExt *__restrict__ d_eq_xi,
     const FpExt *__restrict__ d_selectors,
     const MainMatrixPtrs<FpExt> d_preprocessed,
     const MainMatrixPtrs<FpExt> *__restrict__ d_main,
@@ -319,9 +319,9 @@ __global__ void logup_mle_kernel(
             }
         }
 
-        FpExt eq_sharp_val = d_eq_sharp[row];
-        numer_sum *= eq_sharp_val;
-        denom_sum *= eq_sharp_val;
+        FpExt eq_val = d_eq_xi[y_int];
+        numer_sum *= eq_val;
+        denom_sum *= eq_val;
     }
 
     FpExt numer_reduced = sumcheck::block_reduce_sum(numer_sum, shared);
@@ -422,7 +422,7 @@ extern "C" size_t _logup_mle_intermediates_buffer_size(
 extern "C" int _logup_eval_mle(
     FracExt *tmp_sums_buffer,
     FracExt *output,
-    const FpExt *eq_sharp,
+    const FpExt *eq_xi,
     const FpExt *selectors,
     const MainMatrixPtrs<FpExt> preprocessed,
     const MainMatrixPtrs<FpExt> *main,
@@ -443,7 +443,7 @@ extern "C" int _logup_eval_mle(
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
 #define LOGUP_KERNEL_ARGS                                                                          \
-    tmp_sums_buffer, eq_sharp, selectors, preprocessed, main, challenges, eq_3bs, public_values,   \
+    tmp_sums_buffer, eq_xi, selectors, preprocessed, main, challenges, eq_3bs, public_values,      \
         rules, used_nodes, pair_idxs, used_nodes_len, buffer_size, intermediates, num_y
 
     if (buffer_size > LOGUP_BUFFER_THRESHOLD) {
