@@ -47,7 +47,7 @@ pub struct ZerocheckCtx {
 pub struct LogupCtx {
     pub eval_ctx: EvalCoreCtx,
     pub num_y: u32,
-    pub d_eq_sharp: *const EF,
+    pub d_eq_xi: *const EF,
     pub d_challenges: *const EF,
     pub d_eq_3bs: *const EF,
     pub d_rules: *const std::ffi::c_void,
@@ -109,14 +109,6 @@ extern "C" {
         num_columns: usize,
     ) -> i32;
 
-    fn _compute_eq_sharp(
-        eq_xi: *mut std::ffi::c_void,
-        eq_sharp: *mut std::ffi::c_void,
-        eq_r0: EF,
-        eq_sharp_r0: EF,
-        count: u32,
-    ) -> i32;
-
     fn _frac_matrix_vertically_repeat(
         out: *mut Frac<EF>,
         input: *const Frac<EF>,
@@ -174,7 +166,6 @@ extern "C" {
         main_parts: *const *const F,
         omega_skip_pows: *const F,
         inv_lagrange_denoms: *const F,
-        eq_sharp_uni: *const EF,
         eq_cube: *const EF,
         public_values: *const F,
         numer_weights: *const EF,
@@ -215,7 +206,6 @@ extern "C" {
         main_parts: *const *const F,
         omega_skip_pows: *const F,
         inv_lagrange_denoms: *const F,
-        eq_uni: *const EF,
         eq_cube: *const EF,
         d_lambda_pows: *const EF,
         public_values: *const F,
@@ -278,7 +268,7 @@ extern "C" {
     fn _logup_eval_mle(
         tmp_sums_buffer: *mut Frac<EF>,
         output: *mut Frac<EF>,
-        eq_sharp: *const EF,
+        eq_xi: *const EF,
         selectors: *const EF,
         preprocessed: MainMatrixPtrs<EF>,
         main: *const MainMatrixPtrs<EF>,
@@ -448,21 +438,6 @@ pub unsafe fn fold_ple_from_evals(
     ))
 }
 
-pub unsafe fn compute_eq_sharp(
-    eq_xi: &DeviceBuffer<EF>,
-    eq_sharp: &DeviceBuffer<EF>,
-    eq_r0: EF,
-    eq_sharp_r0: EF,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_compute_eq_sharp(
-        eq_xi.as_mut_raw_ptr(),
-        eq_sharp.as_mut_raw_ptr(),
-        eq_r0,
-        eq_sharp_r0,
-        eq_xi.len() as u32,
-    ))
-}
-
 /// # Safety
 /// - `output` must be a pointer to a device buffer with capacity at least `num_partitions *
 ///   height`.
@@ -516,7 +491,6 @@ pub unsafe fn zerocheck_bary_eval_constraints(
     main_ptrs: &DeviceBuffer<*const F>,
     omega_skip_pows: &DeviceBuffer<F>,
     inv_lagrange_denoms: &DeviceBuffer<F>,
-    eq_uni: &DeviceBuffer<EF>,
     eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
     public_values: &DeviceBuffer<F>,
@@ -538,7 +512,6 @@ pub unsafe fn zerocheck_bary_eval_constraints(
         main_ptrs.as_ptr(),
         omega_skip_pows.as_ptr(),
         inv_lagrange_denoms.as_ptr(),
-        eq_uni.as_ptr(),
         eq_cube,
         lambda_pows.as_ptr(),
         public_values.as_ptr(),
@@ -574,7 +547,6 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     main_ptrs: &DeviceBuffer<*const F>,
     omega_skip_pows: &DeviceBuffer<F>,
     inv_lagrange_denoms: &DeviceBuffer<F>,
-    eq_sharp_uni: &DeviceBuffer<EF>,
     eq_cube: *const EF,
     public_values: &DeviceBuffer<F>,
     numer_weights: &DeviceBuffer<EF>,
@@ -597,7 +569,6 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         main_ptrs.as_ptr(),
         omega_skip_pows.as_ptr(),
         inv_lagrange_denoms.as_ptr(),
-        eq_sharp_uni.as_ptr(),
         eq_cube,
         public_values.as_ptr(),
         numer_weights.as_ptr(),
@@ -692,7 +663,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
 pub unsafe fn logup_eval_mle(
     tmp_sums_buffer: &mut DeviceBuffer<Frac<EF>>,
     output: &mut DeviceBuffer<Frac<EF>>,
-    eq_sharp: *const EF,
+    eq_xi: *const EF,
     selectors: *const EF,
     preprocessed: MainMatrixPtrs<EF>,
     main_ptrs: *const MainMatrixPtrs<EF>,
@@ -711,7 +682,7 @@ pub unsafe fn logup_eval_mle(
     CudaError::from_result(_logup_eval_mle(
         tmp_sums_buffer.as_mut_ptr(),
         output.as_mut_ptr(),
-        eq_sharp,
+        eq_xi,
         selectors,
         preprocessed,
         main_ptrs,

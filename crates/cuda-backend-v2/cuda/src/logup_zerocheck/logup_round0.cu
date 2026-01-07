@@ -101,7 +101,6 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
     const Fp *const *__restrict__ main_parts,
     const Fp *__restrict__ omega_skip_pows,     // [skip_domain]
     const Fp *__restrict__ inv_lagrange_denoms, // [large_domain][skip_domain]
-    const FpExt *__restrict__ eq_sharp_uni,     // [large_domain]
     const FpExt *__restrict__ eq_cube,          // [num_x]
     const Fp *__restrict__ public_values,
     const FpExt *__restrict__ numer_weights,
@@ -205,11 +204,11 @@ __global__ void logup_r0_bary_eval_interactions_kernel(
                 numer,
                 denom
             );
-            FpExt eq_sharp = eq_sharp_uni[z_int] * eq_cube[x_int];
+            FpExt eq = eq_cube[x_int];
 
             // Apply eq_val multiplier to both sums
-            sum.p += eq_sharp * numer;
-            sum.q += eq_sharp * denom;
+            sum.p += eq * numer;
+            sum.q += eq * denom;
         }
     }
     shared[threadIdx.x] = sum;
@@ -264,7 +263,6 @@ extern "C" int _logup_bary_eval_interactions_round0(
     const Fp *const *main_parts,
     const Fp *omega_skip_pows,     // [skip_domain]
     const Fp *inv_lagrange_denoms, // [large_domain][skip_domain]
-    const FpExt *eq_sharp_uni,     // [large_domain]
     const FpExt *eq_cube,          // [num_x]
     const Fp *public_values,
     const FpExt *numer_weights,
@@ -290,9 +288,9 @@ extern "C" int _logup_bary_eval_interactions_round0(
 
 #define ARGUMENTS                                                                                  \
     tmp_sums_buffer, selectors_cube, preprocessed, main_parts, omega_skip_pows,                    \
-        inv_lagrange_denoms, eq_sharp_uni, eq_cube, public_values, numer_weights, denom_weights,   \
-        denom_sum_init, d_rules, rules_len, buffer_size, d_intermediates, large_domain,            \
-        skip_domain, num_x, height, expansion_factor, z_dim
+        inv_lagrange_denoms, eq_cube, public_values, numer_weights, denom_weights, denom_sum_init, \
+        d_rules, rules_len, buffer_size, d_intermediates, large_domain, skip_domain, num_x,        \
+        height, expansion_factor, z_dim
 
     if (buffer_size > BUFFER_THRESHOLD) {
         logup_r0_bary_eval_interactions_kernel<true><<<grid, block, shmem_bytes>>>(ARGUMENTS);
