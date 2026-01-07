@@ -238,10 +238,36 @@ impl Encode for WhirProof {
         if initial_num_whir_queries > 0 {
             let merkle_depth = self.initial_round_merkle_proofs[0][0].len();
             merkle_depth.encode(writer)?;
-            encode_iter(
-                self.initial_round_opened_rows.iter().flatten().flatten(),
-                writer,
-            )?;
+
+            // We avoid per-row Vec length prefixes by encoding each commit's stacked width,
+            // which we can use to determine the shapes of the remaining WHIR proof fields.
+            let widths: Vec<usize> = self
+                .initial_round_opened_rows
+                .iter()
+                .map(|commit_rows| {
+                    // If there are any queries/rows, infer width from the first row.
+                    commit_rows
+                        .first()
+                        .and_then(|q| q.first())
+                        .map(|row| row.len())
+                        .unwrap_or(0)
+                })
+                .collect();
+
+            // Encode widths (length is implicit via num_commits).
+            encode_iter(widths.iter(), writer)?;
+
+            // Encode all opened row values (no per-row length prefixes).
+            for (commit_rows, &width) in self.initial_round_opened_rows.iter().zip(&widths) {
+                debug_assert_eq!(commit_rows.len(), initial_num_whir_queries);
+                for query_rows in commit_rows {
+                    for row in query_rows {
+                        debug_assert_eq!(row.len(), width);
+                        encode_iter(row.iter(), writer)?;
+                    }
+                }
+            }
+
             encode_iter(
                 self.initial_round_merkle_proofs.iter().flatten().flatten(),
                 writer,
@@ -407,11 +433,23 @@ impl Decode for WhirProof {
             merkle_depth = usize::decode(reader)?;
         }
 
+        let mut widths = vec![0usize; num_commits];
+        if initial_num_whir_queries > 0 {
+            for width in &mut widths {
+                *width = usize::decode(reader)?;
+            }
+        }
+
         let mut initial_round_opened_rows = Vec::with_capacity(num_commits);
-        for _ in 0..num_commits {
+        for width in widths {
             let mut opened_rows = Vec::with_capacity(initial_num_whir_queries);
             for _ in 0..initial_num_whir_queries {
-                opened_rows.push(decode_into_vec(reader, k_whir_exp)?);
+                // Each query has k_whir_exp rows. Each row is a fixed-width list of F elements.
+                let mut rows = Vec::with_capacity(k_whir_exp);
+                for _ in 0..k_whir_exp {
+                    rows.push(decode_into_vec(reader, width)?);
+                }
+                opened_rows.push(rows);
             }
             initial_round_opened_rows.push(opened_rows);
         }
