@@ -17,9 +17,63 @@ use crate::{
         BlockCtx, EvalCoreCtx, LogupCtx, MainMatrixPtrs, ZerocheckCtx, logup_batch_eval_mle,
         zerocheck_batch_eval_mle,
     },
+    logup_zerocheck::mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
 };
 
 const MAX_THREADS_PER_BLOCK: u32 = 128;
+
+// ============================================================================
+// Memory calculation helpers
+// ============================================================================
+
+/// Computes zerocheck intermediate buffer memory in bytes for a trace.
+fn zerocheck_batch_mle_intermediates_buffer_bytes(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
+    unsafe {
+        _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
+            * std::mem::size_of::<EF>()
+    }
+}
+
+/// Computes logup intermediate buffer memory in bytes for a trace.
+fn logup_batch_mle_intermediates_buffer_bytes(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
+    unsafe {
+        _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
+            * std::mem::size_of::<EF>()
+    }
+}
+
+// ============================================================================
+// Batching helpers
+// ============================================================================
+
+/// Find how many traces fit in the memory budget.
+/// Returns (count, total_memory_of_batch).
+fn find_batch_end<T, M>(traces: &[T], memory_fn: M, memory_limit_bytes: usize) -> (usize, usize)
+where
+    M: Fn(&T) -> usize,
+{
+    let mut batch_end = 0;
+    let mut batch_memory = 0usize;
+
+    while batch_end < traces.len() {
+        let trace_memory = memory_fn(&traces[batch_end]);
+
+        if batch_end == 0 {
+            // First trace always included (even if oversized)
+            batch_memory = trace_memory;
+            batch_end = 1;
+            if trace_memory > memory_limit_bytes {
+                break; // Single oversized trace
+            }
+        } else if batch_memory + trace_memory <= memory_limit_bytes {
+            batch_memory += trace_memory;
+            batch_end += 1;
+        } else {
+            break; // Would exceed limit
+        }
+    }
+    (batch_end, batch_memory)
+}
 
 /// Context for a single trace used in batch MLE evaluation.
 pub(crate) struct TraceCtx {
@@ -336,8 +390,8 @@ impl<'a> LogupMleBatchBuilder<'a> {
 /// Evaluates batch MLE for both zerocheck and logup across the given traces.
 ///
 /// This function coordinates the evaluation of both constraint (zerocheck) and
-/// interaction (logup) batch MLE evaluations. Results are written to the provided
-/// output slices indexed by trace_idx.
+/// interaction (logup) batch MLE evaluations with memory-aware batching.
+/// Results are written to the provided output slices indexed by trace_idx.
 ///
 /// # Arguments
 /// * `traces` - Slice of trace contexts to evaluate
@@ -350,6 +404,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
 /// * `logup_out` - Output slice for logup results (indexed by trace_idx)
 /// * `zc_tilde_evals` - Tilde evals to update for num_x==1 case
 /// * `logup_tilde_evals` - Tilde evals to update for num_x==1 case
+/// * `memory_limit_bytes` - Maximum memory budget for intermediate buffers per batch
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_batch_mle(
     traces: &[TraceCtx],
@@ -362,56 +417,305 @@ pub(crate) fn evaluate_batch_mle(
     logup_out: &mut [[Vec<EF>; 2]],
     zc_tilde_evals: &mut [EF],
     logup_tilde_evals: &mut [[EF; 2]],
+    memory_limit_bytes: usize,
 ) {
     if traces.is_empty() {
         return;
     }
 
-    let num_x_usize = num_x as usize;
+    // === ZEROCHECK (independent budget) ===
+    evaluate_zerocheck_batched(
+        traces,
+        pk,
+        lambda_pows,
+        num_x,
+        s_deg,
+        zc_out,
+        zc_tilde_evals,
+        memory_limit_bytes,
+    );
+    // Zerocheck intermediate buffers are dropped here before logup starts
 
-    // Evaluate zerocheck batch
-    let zc_builder = ZerocheckMleBatchBuilder::new(traces.iter(), pk, num_x);
-    if !zc_builder.is_empty() {
-        let out = zc_builder.evaluate(lambda_pows, num_x);
-        let host = out.to_host().expect("copy zc output");
+    // === LOGUP (independent budget) ===
+    evaluate_logup_batched(
+        traces,
+        pk,
+        d_challenges_ptr,
+        num_x,
+        s_deg,
+        logup_out,
+        logup_tilde_evals,
+        memory_limit_bytes,
+    );
+}
 
-        for (i, trace_idx) in zc_builder.trace_indices().enumerate() {
-            let evals = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
-            if num_x == 1 {
-                zc_tilde_evals[trace_idx] = evals[0];
-                zc_out[trace_idx] = (1..=s_deg)
-                    .map(|x| evals[0] * F::from_canonical_usize(x))
-                    .collect();
-            } else {
-                zc_out[trace_idx].copy_from_slice(evals);
-            }
-        }
+// ============================================================================
+// Single-trace evaluation helpers (fallback for oversized traces)
+// ============================================================================
+
+/// Evaluate zerocheck for a single trace using non-batch kernel.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_single_zerocheck(
+    t: &TraceCtx,
+    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    lambda_pows: &DeviceBuffer<EF>,
+    num_x: u32,
+    s_deg: usize,
+    zc_out: &mut Vec<EF>,
+    zc_tilde_eval: &mut EF,
+) {
+    let air_pk = &pk.per_air[t.air_idx];
+    let out = evaluate_mle_constraints_gpu(
+        t.eq_xi_ptr,
+        t.sels_ptr,
+        t.prep_ptr,
+        &t.main_ptrs_dev,
+        t.public_ptr,
+        lambda_pows,
+        &air_pk.other_data.zerocheck_mle,
+        t.num_y,
+        num_x,
+    );
+    let host = out.to_host().expect("copy zc output");
+
+    if num_x == 1 {
+        *zc_tilde_eval = host[0];
+        *zc_out = (1..=s_deg)
+            .map(|x| host[0] * F::from_canonical_usize(x))
+            .collect();
+    } else {
+        *zc_out = host;
+    }
+}
+
+/// Evaluate logup for a single trace using non-batch kernel.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_single_logup(
+    t: &TraceCtx,
+    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    d_challenges_ptr: *const EF,
+    num_x: u32,
+    s_deg: usize,
+    logup_out: &mut [Vec<EF>; 2],
+    logup_tilde_eval: &mut [EF; 2],
+) {
+    let air_pk = &pk.per_air[t.air_idx];
+    let out = evaluate_mle_interactions_gpu(
+        t.eq_sharp_ptr,
+        t.sels_ptr,
+        t.prep_ptr,
+        &t.main_ptrs_dev,
+        t.public_ptr,
+        d_challenges_ptr,
+        t.eq_3bs_ptr,
+        &air_pk.other_data.interaction_rules,
+        t.num_y,
+        num_x,
+    );
+    let fracs = out.to_host().expect("copy logup output");
+
+    if num_x == 1 {
+        logup_tilde_eval[0] = fracs[0].p * t.norm_factor;
+        logup_tilde_eval[1] = fracs[0].q;
+        let numer = (1..=s_deg)
+            .map(|x| logup_tilde_eval[0] * F::from_canonical_usize(x))
+            .collect();
+        let denom = (1..=s_deg)
+            .map(|x| logup_tilde_eval[1] * F::from_canonical_usize(x))
+            .collect();
+        *logup_out = [numer, denom];
+    } else {
+        let numer: Vec<EF> = fracs.iter().map(|f| f.p * t.norm_factor).collect();
+        let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
+        *logup_out = [numer, denom];
+    }
+}
+
+// ============================================================================
+// Memory-aware batched evaluation
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_zerocheck_batched(
+    traces: &[TraceCtx],
+    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    lambda_pows: &DeviceBuffer<EF>,
+    num_x: u32,
+    s_deg: usize,
+    zc_out: &mut [Vec<EF>],
+    zc_tilde_evals: &mut [EF],
+    memory_limit_bytes: usize,
+) {
+    // Collect traces with constraints and their buffer sizes
+    let mut zc_traces_with_size: Vec<(&TraceCtx, usize)> = traces
+        .iter()
+        .filter(|t| t.has_constraints)
+        .map(|t| {
+            let buffer_size = pk.per_air[t.air_idx].other_data.zerocheck_mle.inner.buffer_size;
+            let mem = zerocheck_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y);
+            (t, mem)
+        })
+        .collect();
+    if zc_traces_with_size.is_empty() {
+        return;
     }
 
-    // Evaluate logup batch
-    let logup_builder = LogupMleBatchBuilder::new(traces.iter(), pk, d_challenges_ptr, num_x);
-    if !logup_builder.is_empty() {
-        let out = logup_builder.evaluate(num_x);
-        let host = out.to_host().expect("copy logup output");
+    // Sort by buffer size descending for better bin packing (First Fit Decreasing)
+    zc_traces_with_size.sort_by(|a, b| b.1.cmp(&a.1));
 
-        for (i, (trace_idx, norm_factor)) in logup_builder.trace_info().enumerate() {
-            let fracs = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
-            if num_x == 1 {
-                logup_tilde_evals[trace_idx][0] = fracs[0].p * norm_factor;
-                logup_tilde_evals[trace_idx][1] = fracs[0].q;
-                let numer = (1..=s_deg)
-                    .map(|x| logup_tilde_evals[trace_idx][0] * F::from_canonical_usize(x))
-                    .collect();
-                let denom = (1..=s_deg)
-                    .map(|x| logup_tilde_evals[trace_idx][1] * F::from_canonical_usize(x))
-                    .collect();
-                logup_out[trace_idx] = [numer, denom];
-            } else {
-                let numer: Vec<EF> = fracs.iter().map(|f| f.p * norm_factor).collect();
-                let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
-                logup_out[trace_idx] = [numer, denom];
+    let num_x_usize = num_x as usize;
+    let mut batch_start = 0;
+
+    while batch_start < zc_traces_with_size.len() {
+        let (batch_count, batch_memory) = find_batch_end(
+            &zc_traces_with_size[batch_start..],
+            |(_, mem)| *mem,
+            memory_limit_bytes,
+        );
+        let batch: Vec<&TraceCtx> = zc_traces_with_size[batch_start..batch_start + batch_count]
+            .iter()
+            .map(|(t, _)| *t)
+            .collect();
+
+        if batch.len() == 1 && batch_memory > memory_limit_bytes {
+            // Single oversized trace: use non-batch kernel
+            let t = batch[0];
+            tracing::warn!(
+                air_idx = t.air_idx,
+                intermediate_buffer_bytes = batch_memory,
+                memory_limit_bytes,
+                "zerocheck: trace exceeds memory limit, using non-batch kernel"
+            );
+            evaluate_single_zerocheck(
+                t,
+                pk,
+                lambda_pows,
+                num_x,
+                s_deg,
+                &mut zc_out[t.trace_idx],
+                &mut zc_tilde_evals[t.trace_idx],
+            );
+        } else {
+            // Normal batch using ZerocheckMleBatchBuilder
+            tracing::debug!(
+                batch_size = batch.len(),
+                batch_memory,
+                memory_limit_bytes,
+                "zerocheck: batching traces"
+            );
+            let builder = ZerocheckMleBatchBuilder::new(batch.iter().copied(), pk, num_x);
+            let out = builder.evaluate(lambda_pows, num_x);
+            let host = out.to_host().expect("copy zc output");
+
+            for (i, trace_idx) in builder.trace_indices().enumerate() {
+                let evals = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
+                if num_x == 1 {
+                    zc_tilde_evals[trace_idx] = evals[0];
+                    zc_out[trace_idx] = (1..=s_deg)
+                        .map(|x| evals[0] * F::from_canonical_usize(x))
+                        .collect();
+                } else {
+                    zc_out[trace_idx].copy_from_slice(evals);
+                }
             }
         }
+        batch_start += batch_count;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_logup_batched(
+    traces: &[TraceCtx],
+    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    d_challenges_ptr: *const EF,
+    num_x: u32,
+    s_deg: usize,
+    logup_out: &mut [[Vec<EF>; 2]],
+    logup_tilde_evals: &mut [[EF; 2]],
+    memory_limit_bytes: usize,
+) {
+    // Collect traces with interactions and their buffer sizes
+    let mut logup_traces_with_size: Vec<(&TraceCtx, usize)> = traces
+        .iter()
+        .filter(|t| t.has_interactions)
+        .map(|t| {
+            let buffer_size = pk.per_air[t.air_idx].other_data.interaction_rules.inner.buffer_size;
+            let mem = logup_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y);
+            (t, mem)
+        })
+        .collect();
+    if logup_traces_with_size.is_empty() {
+        return;
+    }
+
+    // Sort by buffer size descending for better bin packing (First Fit Decreasing)
+    logup_traces_with_size.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let num_x_usize = num_x as usize;
+    let mut batch_start = 0;
+
+    while batch_start < logup_traces_with_size.len() {
+        let (batch_count, batch_memory) = find_batch_end(
+            &logup_traces_with_size[batch_start..],
+            |(_, mem)| *mem,
+            memory_limit_bytes,
+        );
+        let batch: Vec<&TraceCtx> = logup_traces_with_size[batch_start..batch_start + batch_count]
+            .iter()
+            .map(|(t, _)| *t)
+            .collect();
+
+        if batch.len() == 1 && batch_memory > memory_limit_bytes {
+            // Single oversized trace: use non-batch kernel
+            let t = batch[0];
+            tracing::warn!(
+                air_idx = t.air_idx,
+                intermediate_buffer_bytes = batch_memory,
+                memory_limit_bytes,
+                "logup: trace exceeds memory limit, using non-batch kernel"
+            );
+            evaluate_single_logup(
+                t,
+                pk,
+                d_challenges_ptr,
+                num_x,
+                s_deg,
+                &mut logup_out[t.trace_idx],
+                &mut logup_tilde_evals[t.trace_idx],
+            );
+        } else {
+            // Normal batch using LogupMleBatchBuilder
+            tracing::debug!(
+                batch_size = batch.len(),
+                batch_memory,
+                memory_limit_bytes,
+                "logup: batching traces"
+            );
+            let builder =
+                LogupMleBatchBuilder::new(batch.iter().copied(), pk, d_challenges_ptr, num_x);
+            let out = builder.evaluate(num_x);
+            let host = out.to_host().expect("copy logup output");
+
+            for (i, (trace_idx, norm_factor)) in builder.trace_info().enumerate() {
+                let fracs = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
+                if num_x == 1 {
+                    logup_tilde_evals[trace_idx][0] = fracs[0].p * norm_factor;
+                    logup_tilde_evals[trace_idx][1] = fracs[0].q;
+                    let numer = (1..=s_deg)
+                        .map(|x| logup_tilde_evals[trace_idx][0] * F::from_canonical_usize(x))
+                        .collect();
+                    let denom = (1..=s_deg)
+                        .map(|x| logup_tilde_evals[trace_idx][1] * F::from_canonical_usize(x))
+                        .collect();
+                    logup_out[trace_idx] = [numer, denom];
+                } else {
+                    let numer: Vec<EF> = fracs.iter().map(|f| f.p * norm_factor).collect();
+                    let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
+                    logup_out[trace_idx] = [numer, denom];
+                }
+            }
+        }
+        batch_start += batch_count;
     }
 }
 
