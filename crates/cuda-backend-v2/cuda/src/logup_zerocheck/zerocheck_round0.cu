@@ -97,7 +97,6 @@ __global__ void zerocheck_bary_evaluate_constraints_kernel(
     const Fp *const *__restrict__ main_parts,
     const Fp *__restrict__ omega_skip_pows,     // [skip_domain]
     const Fp *__restrict__ inv_lagrange_denoms, // [large_domain][skip_domain]
-    const FpExt *__restrict__ eq_uni,           // [large_domain]
     const FpExt *__restrict__ eq_cube,          // [num_x]
     const FpExt *__restrict__ d_lambda_pows,
     const Fp *__restrict__ public_values,
@@ -190,7 +189,6 @@ __global__ void zerocheck_bary_evaluate_constraints_kernel(
 
             sum += constraint_sum * eq_cube[x_int];
         }
-        sum *= eq_uni[z_int];
     }
 
     // Reduce phase: reduce all threadIdx.x in the same block
@@ -253,7 +251,6 @@ extern "C" int _zerocheck_bary_eval_constraints(
     const Fp *const *main_parts,
     const Fp *omega_skip_pows,     // [skip_domain]
     const Fp *inv_lagrange_denoms, // [large_domain][skip_domain]
-    const FpExt *eq_uni,           // [large_domain]
     const FpExt *eq_cube,          // [num_x]
     const FpExt *d_lambda_pows,
     const Fp *public_values,
@@ -278,7 +275,7 @@ extern "C" int _zerocheck_bary_eval_constraints(
 
 #define ARGUMENTS                                                                                  \
     tmp_sums_buffer, selectors_cube, preprocessed, main_parts, omega_skip_pows,                    \
-        inv_lagrange_denoms, eq_uni, eq_cube, d_lambda_pows, public_values, d_rules, rules_len,    \
+        inv_lagrange_denoms, eq_cube, d_lambda_pows, public_values, d_rules, rules_len,            \
         d_used_nodes, used_nodes_len, lambda_len, buffer_size, d_intermediates, skip_domain,       \
         num_x, height, expansion_factor
 

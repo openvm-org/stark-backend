@@ -5,9 +5,9 @@ use tracing::debug;
 use crate::{
     ConstraintOnlyRules, EF, F, InteractionEvalRules,
     cuda::logup_zerocheck::{
-        MainMatrixPtrs, _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
+        _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
         _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size,
-        logup_eval_mle, zerocheck_eval_mle,
+        MainMatrixPtrs, logup_eval_mle, zerocheck_eval_mle,
     },
 };
 
@@ -38,8 +38,7 @@ pub fn evaluate_mle_constraints_gpu(
     } else {
         DeviceBuffer::<EF>::new()
     };
-    let temp_sums_buffer_capacity =
-        unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y) };
+    let temp_sums_buffer_capacity = unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y) };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
     let mut output = DeviceBuffer::<EF>::with_capacity(num_x as usize);
@@ -74,7 +73,7 @@ pub fn evaluate_mle_constraints_gpu(
 /// Takes device pointers directly, avoiding H2D copies when data is already on device.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_mle_interactions_gpu(
-    eq_sharp_ptr: *const EF,
+    eq_xi_ptr: *const EF,
     sels_ptr: *const EF,
     prep_ptr: MainMatrixPtrs<EF>,
     d_main_ptrs: &DeviceBuffer<MainMatrixPtrs<EF>>,
@@ -103,7 +102,7 @@ pub fn evaluate_mle_interactions_gpu(
         logup_eval_mle(
             &mut temp_sums_buffer,
             &mut output,
-            eq_sharp_ptr,
+            eq_xi_ptr,
             sels_ptr,
             prep_ptr,
             d_main_ptrs.as_ptr(),

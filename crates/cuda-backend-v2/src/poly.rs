@@ -19,7 +19,10 @@ use crate::{
             MLE_SHARED_TILE_LOG_SIZE, mle_interpolate_fused_2d, mle_interpolate_shared_2d,
             mle_interpolate_stage_2d,
         },
-        poly::{eq_hypercube_nonoverlapping_stage_ext, eq_hypercube_stage_ext},
+        poly::{
+            eq_hypercube_interleaved_stage_ext, eq_hypercube_nonoverlapping_stage_ext,
+            eq_hypercube_stage_ext,
+        },
     },
 };
 
@@ -278,5 +281,48 @@ impl EqEvalSegments<EF> {
             }
         }
         Ok(Self { buffer, max_n })
+    }
+}
+
+/// Same as [EqEvalSegments] but keeping segment tree with buffers separated by layer to allow
+/// dropping layers.
+#[derive(Getters)]
+pub struct EqEvalLayers<F> {
+    /// Index 0 should never to read, but it will be initialized to zero.
+    pub layers: Vec<DeviceBuffer<F>>,
+}
+
+impl<F> EqEvalLayers<F> {
+    /// Returns start pointer for buffer of length `2^n` corresponding to evaluations of `eq(x[..n],
+    /// -)` on `H_n`.
+    pub fn get_ptr(&self, n: usize) -> *const F {
+        debug_assert_eq!(self.layers[n].len(), 1 << n);
+        self.layers[n].as_ptr()
+    }
+}
+
+// Currently only implement kernels for EF.
+impl EqEvalLayers<EF> {
+    /// Creates a new `EqEvalLayers` instance with `layers.len() = x.len() + 1`.
+    ///
+    /// Inserts `x_i` from the front for each layer.
+    pub fn new_rev<'a>(n: usize, x: impl IntoIterator<Item = &'a EF>) -> Result<Self, KernelError> {
+        let mut layers = Vec::with_capacity(n + 1);
+        let layer_0 = [EF::ONE].to_device().map_err(KernelError::MemCopy)?;
+        layers.push(layer_0);
+        for (i, &x_i) in x.into_iter().enumerate() {
+            let step = 1 << i;
+            let buffer = DeviceBuffer::with_capacity(2 * step);
+            // SAFETY:
+            // - `buffer` has length `2^{i+1}`
+            unsafe {
+                let dst = buffer.as_mut_ptr();
+                let src = layers.last().unwrap().as_ptr();
+                eq_hypercube_interleaved_stage_ext(dst, src, x_i, step as u32)
+                    .map_err(KernelError::Kernel)?;
+            }
+            layers.push(buffer);
+        }
+        Ok(Self { layers })
     }
 }
