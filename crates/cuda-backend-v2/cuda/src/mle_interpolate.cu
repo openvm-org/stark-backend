@@ -122,6 +122,13 @@ __global__ void mle_interpolate_fused_2d_kernel(
     buffer[base_idx] = val;
 }
 
+// Add 1 padding per 32 elements to avoid shared memory bank conflicts.
+// CUDA has 32 banks with 4-byte stride, so power-of-2 step accesses (especially step=32)
+// cause all threads to hit the same bank. Adding 1 element per 32 breaks this alignment.
+__device__ __forceinline__ uint32_t padded_idx(uint32_t i) {
+    return i + (i >> 5); // i + i/32
+}
+
 // Shared memory MLE interpolation kernel that processes multiple stages within a tile.
 // Each thread block handles a tile of elements from one column, loading into shared memory.
 // Processes stages where step < tile_size.
@@ -150,7 +157,7 @@ __global__ void mle_interpolate_shared_2d_kernel(
     uint32_t tile_start = tile_idx * tile_size; // in logical (thread) space
     uint32_t col_offset = col * padded_height;
 
-// Load tile into shared memory
+// Load tile into shared memory (with bank conflict avoidance padding)
 #pragma unroll 4
     for (uint32_t i = tid; i < tile_size; i += blockDim.x) {
         uint32_t logical_idx = tile_start + i;
@@ -161,9 +168,9 @@ __global__ void mle_interpolate_shared_2d_kernel(
             } else {
                 physical_idx = logical_idx;
             }
-            smem_mle[i] = buffer[col_offset + physical_idx];
+            smem_mle[padded_idx(i)] = buffer[col_offset + physical_idx];
         } else {
-            smem_mle[i] = Fp(0);
+            smem_mle[padded_idx(i)] = Fp(0);
         }
     }
     __syncthreads();
@@ -185,9 +192,9 @@ __global__ void mle_interpolate_shared_2d_kernel(
             uint32_t logical_second = tile_start + second;
             if (logical_second < meaningful_count) {
                 if constexpr (EvalToCoeff) {
-                    smem_mle[second] -= smem_mle[base];
+                    smem_mle[padded_idx(second)] -= smem_mle[padded_idx(base)];
                 } else {
-                    smem_mle[second] += smem_mle[base];
+                    smem_mle[padded_idx(second)] += smem_mle[padded_idx(base)];
                 }
             }
         }
@@ -205,7 +212,7 @@ __global__ void mle_interpolate_shared_2d_kernel(
             } else {
                 physical_idx = logical_idx;
             }
-            buffer[col_offset + physical_idx] = smem_mle[i];
+            buffer[col_offset + physical_idx] = smem_mle[padded_idx(i)];
         }
     }
 }
@@ -376,7 +383,8 @@ int launch_mle_interpolate_shared_2d(
 ) {
     constexpr uint32_t tile_size = 1 << MLE_SHARED_TILE_LOG_SIZE;
     constexpr uint32_t block_size = 256;
-    size_t smem_size = tile_size * sizeof(Fp);
+    // Add bank conflict padding: 1 extra element per 32 elements
+    size_t smem_size = (tile_size + tile_size / 32) * sizeof(Fp);
 
     uint32_t meaningful_count = padded_height >> log_stride;
     uint32_t num_tiles = (meaningful_count + tile_size - 1) / tile_size;
