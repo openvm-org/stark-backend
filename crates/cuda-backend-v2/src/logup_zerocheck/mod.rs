@@ -22,8 +22,8 @@ use stark_backend_v2::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof},
     prover::{
-        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, ProvingContextV2, stacked_pcs::StackedLayout,
-        sumcheck::sumcheck_round0_deg,
+        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
+        fractional_sumcheck_gkr::Frac, stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
     },
     utils::batch_multiplicative_inverse_serial,
 };
@@ -138,6 +138,8 @@ pub fn prove_zerocheck_and_logup_gpu(
     } else {
         DeviceBuffer::new()
     };
+    // Set memory limit for batch MLE based on inputs buffer size
+    prover.memory_limit_bytes = inputs.len() * std::mem::size_of::<Frac<EF>>();
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
     let (frac_sum_proof, mut xi) =
@@ -326,6 +328,9 @@ pub struct LogupZerocheckGpu<'a> {
 
     mem: MemTracker,
     save_memory: bool,
+
+    /// Memory limit for batch MLE intermediate buffers (set after GKR input eval)
+    memory_limit_bytes: usize,
 }
 
 impl<'a> LogupZerocheckGpu<'a> {
@@ -435,6 +440,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             pk,
             mem,
             save_memory,
+            memory_limit_bytes: 0, // Set after GKR input eval
         }
     }
 
@@ -897,13 +903,16 @@ impl<'a> LogupZerocheckGpu<'a> {
                                     air_width: m.width() as u32 / 2,
                                 })
                                 .collect_vec();
+                            let d_main_ptrs = main_ptrs
+                                .to_device()
+                                .expect("failed to copy main_ptrs to device");
                             let d_zc_evals = if has_constraints {
                                 evaluate_mle_constraints_gpu(
                                     self.eq_xis.get_ptr(0),
                                     sels.buffer().as_ptr(),
                                     prep_ptr,
-                                    &main_ptrs,
-                                    public_vals,
+                                    &d_main_ptrs,
+                                    public_vals.as_ptr(),
                                     lambda_pows,
                                     &pk.other_data.zerocheck_mle,
                                     1,
@@ -917,10 +926,10 @@ impl<'a> LogupZerocheckGpu<'a> {
                                     self.eq_sharps.get_ptr(0),
                                     sels.buffer().as_ptr(),
                                     prep_ptr,
-                                    &main_ptrs,
-                                    public_vals,
-                                    &self.d_challenges,
-                                    eq_3bs,
+                                    &d_main_ptrs,
+                                    public_vals.as_ptr(),
+                                    self.d_challenges.as_ptr(),
+                                    eq_3bs.as_ptr(),
                                     &pk.other_data.interaction_rules,
                                     1,
                                     1,
@@ -1069,17 +1078,20 @@ impl<'a> LogupZerocheckGpu<'a> {
                             })
                             .collect_vec();
                         debug_assert_eq!(widths_so_far, interpolated.width());
+                        let d_main_ptrs = main_ptrs
+                            .to_device()
+                            .expect("failed to copy main_ptrs to device");
                         let d_constraints_eval = has_constraints.then(|| {
                             evaluate_mle_constraints_gpu(
                                 eq_xi_ptr,
                                 sels_ptr,
                                 prep_ptr,
-                                &main_ptrs,
-                                public_vals,
+                                &d_main_ptrs,
+                                public_vals.as_ptr(),
                                 lambda_pows,
                                 &pk.other_data.zerocheck_mle,
-                                num_y,
-                                s_deg,
+                                num_y as u32,
+                                s_deg as u32,
                             )
                         });
                         let d_interactions_eval = has_interactions.then(|| {
@@ -1087,13 +1099,13 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 eq_sharp_ptr,
                                 sels_ptr,
                                 prep_ptr,
-                                &main_ptrs,
-                                public_vals,
-                                &self.d_challenges,
-                                eq_3bs,
+                                &d_main_ptrs,
+                                public_vals.as_ptr(),
+                                self.d_challenges.as_ptr(),
+                                eq_3bs.as_ptr(),
                                 &pk.other_data.interaction_rules,
-                                num_y,
-                                s_deg,
+                                num_y as u32,
+                                s_deg as u32,
                             )
                         });
                         if let Some(evals) = d_constraints_eval {
@@ -1363,6 +1375,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             &mut logup_out,
             &mut self.zerocheck_tilde_evals,
             &mut self.logup_tilde_evals,
+            self.memory_limit_bytes,
         );
         evaluate_batch_mle(
             &early_eval,
@@ -1375,6 +1388,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             &mut logup_out,
             &mut self.zerocheck_tilde_evals,
             &mut self.logup_tilde_evals,
+            self.memory_limit_bytes,
         );
 
         // Emit final output in the same order as original
