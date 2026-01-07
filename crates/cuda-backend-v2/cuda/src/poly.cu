@@ -1,6 +1,7 @@
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
+#include "sumcheck.cuh"
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -21,13 +22,19 @@ __device__ __forceinline__ Field horner_eval(const Field *coeffs, size_t len, Fi
 // KERNELS
 // ============================================================================
 
-// Parallel polynomial evaluation using chunk-based Horner with tree reduction.
+// Parallel polynomial evaluation using chunk-based Horner with warp-shuffle reduction.
 // Coefficients are FpExt stored in F-column major form (4 x len layout).
 // BlockSize must be a power of 2. Uses dynamic shared memory.
 // Kernel uses a single block.
+//
+// Uses sumcheck::block_reduce_sum for the reduction phase, which:
+// - Uses warp shuffle for intra-warp reduction (no bank conflicts)
+// - Only uses shared memory for inter-warp communication (num_warps elements)
 template <int BlockSize>
 __global__ void eval_poly_ext_at_point_kernel(const Fp *coeffs, size_t len, FpExt x, FpExt *out) {
-    // Dynamic shared memory: BlockSize elements for partial sums + 1 for x^chunk_size
+    // Dynamic shared memory layout:
+    // - smem[0]: x^chunk_size (computed by thread 0, read by all)
+    // - smem[0..num_warps-1]: reused for warp reduction results
     extern __shared__ FpExt smem[];
 
     const int tid = threadIdx.x;
@@ -36,11 +43,12 @@ __global__ void eval_poly_ext_at_point_kernel(const Fp *coeffs, size_t len, FpEx
     // Phase 1: Thread 0 computes x^chunk_size using repeated squaring
     if (tid == 0) {
         FpExt xk = pow(x, chunk_size);
-        smem[BlockSize] = xk; // Store x^chunk_size in the extra slot
+        smem[0] = xk; // Store x^chunk_size
     }
     __syncthreads();
 
-    FpExt x_pow_chunk = smem[BlockSize]; // All threads read x^chunk_size
+    FpExt x_pow_chunk = smem[0]; // All threads read x^chunk_size
+    __syncthreads();             // Ensure all threads have read before smem is reused
 
     // Phase 2: Each thread evaluates its chunk via Horner's method
     // Thread tid handles coefficients [tid * chunk_size, (tid + 1) * chunk_size)
@@ -65,20 +73,14 @@ __global__ void eval_poly_ext_at_point_kernel(const Fp *coeffs, size_t len, FpEx
     // Compute (x^chunk_size)^tid using binary exponentiation on tid
     FpExt my_power = pow(x_pow_chunk, tid);
     acc = acc * my_power;
-    smem[tid] = acc;
-    __syncthreads();
 
-// Phase 4: Tree reduction to sum all partial results
-#pragma unroll
-    for (int stride = BlockSize / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            smem[tid] = smem[tid] + smem[tid + stride];
-        }
-        __syncthreads();
-    }
+    // Phase 4: Warp-shuffle-based block reduction (eliminates bank conflicts)
+    // block_reduce_sum uses warp shuffle for intra-warp reduction,
+    // then shared memory only for inter-warp communication
+    FpExt result = sumcheck::block_reduce_sum(acc, smem);
 
     if (tid == 0) {
-        *out = smem[0];
+        *out = result;
     }
 }
 
@@ -262,8 +264,11 @@ extern "C" int _batch_eq_hypercube_stage(
 // Helper to dispatch templated kernel based on runtime block size
 template <int BlockSize>
 int launch_eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *out) {
-    // Dynamic shared memory: BlockSize + 1 elements for partial sums and x^chunk_size
-    size_t smem_size = (BlockSize + 1) * sizeof(FpExt);
+    // Shared memory size: num_warps elements for warp reduction results
+    // (also reused for x^chunk_size storage in smem[0])
+    // This eliminates bank conflicts by using warp shuffle for intra-warp reduction
+    constexpr unsigned int num_warps = (BlockSize + WARP_SIZE - 1) / WARP_SIZE;
+    size_t smem_size = num_warps * sizeof(FpExt);
     eval_poly_ext_at_point_kernel<BlockSize><<<1, BlockSize, smem_size>>>(coeffs, len, x, out);
     return CHECK_KERNEL();
 }
