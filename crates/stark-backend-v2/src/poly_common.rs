@@ -474,8 +474,8 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
                     poly_coeffs[k] += value * *basis_coeff;
                 }
             }
-            for (block_idx, coeff) in poly_coeffs.into_iter().enumerate() {
-                coeffs[block_idx * height + row_idx] = coeff;
+            for (coset_idx, coeff) in poly_coeffs.into_iter().enumerate() {
+                coeffs[coset_idx * height + row_idx] = coeff;
             }
         }
         Self(coeffs)
