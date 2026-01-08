@@ -1,6 +1,7 @@
 use p3_field::{Field, FieldAlgebra};
 
 use super::*;
+use crate::poly::SqrtHyperBuffer;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -66,16 +67,16 @@ extern "C" {
     pub fn _frac_compute_round_temp_buffer_size(stride: u32) -> u32;
 
     fn _frac_compute_round(
-        eq_xi: *const EF,
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
         pq_buffer: *mut Frac<EF>,
         eq_size: usize,
+        eq_low_cap: usize,
         pq_size: usize,
         lambda: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
     ) -> i32;
-
-    fn _frac_fold_columns(buffer: *mut std::ffi::c_void, size: usize, r: EF) -> i32;
 
     fn _frac_fold_fpext_columns(
         buffer: *mut Frac<EF>,
@@ -355,9 +356,8 @@ pub unsafe fn frac_build_tree_layer(
 
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_compute_round(
-    eq_xi: &DeviceBuffer<EF>,
+    eq_xi: &SqrtHyperBuffer,
     pq_buffer: &mut DeviceBuffer<Frac<EF>>,
-    eq_size: usize,
     pq_size: usize,
     lambda: EF,
     out_device: &mut DeviceBuffer<EF>,
@@ -366,29 +366,23 @@ pub unsafe fn frac_compute_round(
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(eq_size as u32);
+        let required = _frac_compute_round_temp_buffer_size(eq_xi.size as u32);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
         );
     }
     CudaError::from_result(_frac_compute_round(
-        eq_xi.as_ptr(),
+        eq_xi.low.as_ptr(),
+        eq_xi.high.as_ptr(),
         pq_buffer.as_mut_ptr(),
-        eq_size,
+        eq_xi.size,
+        eq_xi.low_capacity,
         pq_size,
         lambda,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
     ))
-}
-
-pub unsafe fn frac_fold_columns(
-    buffer: &mut DeviceBuffer<EF>,
-    size: usize,
-    r: EF,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_fold_columns(buffer.as_mut_raw_ptr(), size, r))
 }
 
 /// Folds matrix of `Frac<EF>` but treats `input` and `output` as **row-major** matrices in

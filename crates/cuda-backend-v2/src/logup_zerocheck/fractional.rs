@@ -20,9 +20,9 @@ use crate::{
     EF,
     cuda::logup_zerocheck::{
         _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, frac_build_tree_layer,
-        frac_compute_round, frac_fold_columns,
+        frac_compute_round,
     },
-    poly::evals_eq_hypercube,
+    poly::SqrtHyperBuffer,
     sponge::DuplexSpongeGpu,
 };
 
@@ -122,21 +122,18 @@ pub fn fractional_sumcheck_gpu(
                 .map_err(FractionalSumcheckError::SegmentTree)?;
         }
 
-        let mut eq_buffer = DeviceBuffer::<EF>::with_capacity(1 << xi_prev.len());
         xi_prev.reverse();
-        unsafe {
-            evals_eq_hypercube(&mut eq_buffer, &xi_prev)
-                .map_err(FractionalSumcheckError::EvalEqHypercube)?;
-        }
+        let mut eq_buffer =
+            SqrtHyperBuffer::from_xi(&xi_prev).map_err(FractionalSumcheckError::EvalEqHypercube)?;
 
         let mut round_polys_eval = Vec::with_capacity(round);
         let mut r_vec = Vec::with_capacity(round);
-        let mut eq_size = 1 << round;
         let mut pq_size = 2 << round;
 
         let lambda = transcript.sample_ext();
 
-        let tmp_buffer_capacity = unsafe { _frac_compute_round_temp_buffer_size(eq_size as u32) };
+        let tmp_buffer_capacity =
+            unsafe { _frac_compute_round_temp_buffer_size(eq_buffer.size as u32) };
         // NOTE: we re-use the buffer across sumcheck rounds below. This requires that the
         // temp_buffer_size only decreases as stride decreases.
         let mut tmp_block_sums = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
@@ -146,7 +143,6 @@ pub fn fractional_sumcheck_gpu(
                 frac_compute_round(
                     &eq_buffer,
                     &mut layer,
-                    eq_size,
                     pq_size,
                     lambda,
                     &mut d_sum_evals,
@@ -166,13 +162,13 @@ pub fn fractional_sumcheck_gpu(
             let r_round = transcript.sample_ext();
             r_vec.push(r_round);
 
+            eq_buffer
+                .fold_columns(r_round)
+                .map_err(FractionalSumcheckError::FoldColumns)?;
             unsafe {
-                frac_fold_columns(&mut eq_buffer, eq_size, r_round)
-                    .map_err(FractionalSumcheckError::FoldColumns)?;
                 fold_ef_frac_columns(&mut layer, pq_size, r_round, false)
                     .map_err(FractionalSumcheckError::FoldColumns)?;
             }
-            eq_size >>= 1;
             pq_size >>= 1;
         }
         let pq_host = [
