@@ -47,6 +47,8 @@ pub mod sumcheck {
             r_val: EF,
         ) -> i32;
 
+        fn _fold_mle_column(buffer: *mut std::ffi::c_void, size: usize, r: EF) -> i32;
+
         fn _batch_fold_mle(
             input_matrices: *const *const EF,
             output_matrices: *const *mut EF,
@@ -119,6 +121,14 @@ pub mod sumcheck {
             max_output_cells,
             r_val,
         ))
+    }
+
+    pub unsafe fn fold_mle_column(
+        buffer: &mut DeviceBuffer<EF>,
+        size: usize,
+        r: EF,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_fold_mle_column(buffer.as_mut_raw_ptr(), size, r))
     }
 
     /// # Safety
