@@ -177,6 +177,17 @@ __global__ void fold_mle_kernel(
     );
 }
 
+__global__ void fold_mle_column_kernel(FpExt *buffer, size_t half, FpExt r) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= half) {
+        return;
+    }
+
+    FpExt &t0 = buffer[idx];
+    FpExt const &t1 = buffer[idx | half];
+    t0 += r * (t1 - t0);
+}
+
 // Folds MLE evaluations as in fold_mle_kernel above, but supports matrices of different heights
 __global__ void batch_fold_mle_kernel(
     const FpExt *__restrict__ const *__restrict__ input_matrices, // Array of input matrix pointers
@@ -277,6 +288,16 @@ extern "C" int _fold_mle(
     fold_mle_kernel<<<grid, block>>>(
         input_matrices, output_matrices, widths, log_output_height, r_val
     );
+    return CHECK_KERNEL();
+}
+
+extern "C" int _fold_mle_column(FpExt *buffer, size_t size, FpExt r) {
+    if (size <= 1) {
+        return 0;
+    }
+    size_t half = size >> 1;
+    auto [grid, block] = kernel_launch_params(half);
+    fold_mle_column_kernel<<<grid, block>>>(buffer, half, r);
     return CHECK_KERNEL();
 }
 

@@ -23,6 +23,7 @@ use crate::{
             eq_hypercube_interleaved_stage_ext, eq_hypercube_nonoverlapping_stage_ext,
             eq_hypercube_stage_ext,
         },
+        sumcheck::fold_mle_column,
     },
 };
 
@@ -324,5 +325,55 @@ impl EqEvalLayers<EF> {
             layers.push(buffer);
         }
         Ok(Self { layers })
+    }
+}
+
+/// Square-root decomposition of hypercube equality buffer for memory optimization.
+///
+/// Instead of storing a single buffer of size 2^n, we store two buffers of size
+/// 2^(n/2), reducing memory usage from O(2^n) to O(2*2^(n/2)). The full value at
+/// index i is computed on-the-fly as: low[i % low_cap] * high[i / low_cap]
+pub struct SqrtHyperBuffer {
+    pub low: DeviceBuffer<EF>,
+    pub high: DeviceBuffer<EF>,
+    pub low_capacity: usize,
+    pub size: usize,
+}
+
+impl SqrtHyperBuffer {
+    /// Build a buffer from `xi`. Note that last elements of `xi` correspond to the lowest index
+    /// bits.
+    pub fn from_xi(xi: &[EF]) -> Result<Self, KernelError> {
+        let low = {
+            let mut res = DeviceBuffer::with_capacity(1 << (xi.len() / 2));
+            unsafe { evals_eq_hypercube(&mut res, &xi[..xi.len() / 2])? };
+            res
+        };
+        let high = {
+            let mut res = DeviceBuffer::with_capacity(1 << xi.len().div_ceil(2));
+            unsafe { evals_eq_hypercube(&mut res, &xi[xi.len() / 2..])? };
+            res
+        };
+        Ok(Self {
+            low,
+            high,
+            low_capacity: 1 << (xi.len() / 2),
+            size: 1 << xi.len(),
+        })
+    }
+
+    pub fn fold_columns(&mut self, r: EF) -> Result<(), CudaError> {
+        assert!(self.size > 1);
+        if self.size > self.low_capacity {
+            unsafe {
+                fold_mle_column(&mut self.high, self.size / self.low_capacity, r)?;
+            }
+        } else {
+            unsafe {
+                fold_mle_column(&mut self.low, self.size, r)?;
+            }
+        };
+        self.size /= 2;
+        Ok(())
     }
 }
