@@ -4,7 +4,8 @@ use std::{iter::zip, ops::Mul};
 use itertools::Itertools;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, FieldAlgebra, TwoAdicField};
-use p3_util::log2_ceil_usize;
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_util::{log2_ceil_usize, log2_strict_usize};
 use tracing::instrument;
 
 use crate::{
@@ -430,6 +431,55 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         let coeffs = dft.idft(evals.to_vec());
         Self(coeffs)
     }
+
+    /// Interpolates from evaluations on cosets `g^i D` for `i = 1,..,width` where `D` is a smooth
+    /// subgroup of F.
+    pub fn from_geometric_cosets_evals_idft<BF: Field>(evals: RowMajorMatrix<F>, shift: BF) -> Self
+    where
+        F: ExtensionField<BF>,
+    {
+        let height = evals.height();
+        let width = evals.width();
+        if height == 0 || width == 0 {
+            return Self(Vec::new());
+        }
+
+        let log_height = log2_strict_usize(height);
+        let dft = Radix2BowersSerial;
+
+        // First interpolate within each coset (size `height`) to get the remainder
+        // modulo `X^height - shift^height`, then unshift coefficients by `shift^{-t}`.
+        let mut coeffs_mat = dft.idft_batch(evals);
+        let shift_inv = shift.inverse();
+        let shift_invs = shift_inv.powers().skip(1).take(width).collect_vec();
+        let mut shift_pows = vec![F::ONE; width];
+        for row in coeffs_mat.rows_mut() {
+            for (col, value) in row.iter_mut().enumerate() {
+                *value *= shift_pows[col];
+                shift_pows[col] *= shift_invs[col];
+            }
+        }
+
+        // Interpolate across cosets for each coefficient degree.
+        let coset_base = shift.exp_power_of_2(log_height);
+        let lagrange_basis = lagrange_basis_from_geometric_points(coset_base, width);
+        let mut coeffs = vec![F::ZERO; height * width];
+        for (row_idx, row_vals) in coeffs_mat.row_slices().enumerate() {
+            let mut poly_coeffs = vec![F::ZERO; width];
+            for (i, &value) in row_vals.iter().enumerate() {
+                if value == F::ZERO {
+                    continue;
+                }
+                for (k, basis_coeff) in lagrange_basis[i].iter().enumerate() {
+                    poly_coeffs[k] += value * *basis_coeff;
+                }
+            }
+            for (block_idx, coeff) in poly_coeffs.into_iter().enumerate() {
+                coeffs[block_idx * height + row_idx] = coeff;
+            }
+        }
+        Self(coeffs)
+    }
 }
 
 /// Evaluates univariate polynomial using [Horner's method].
@@ -511,13 +561,63 @@ pub trait Squarable: FieldAlgebra + Clone {
 
 impl<T: FieldAlgebra + Clone> Squarable for T {}
 
+/// Precompute Lagrange basis polynomials for interpolation at `base^i` for i=1..width.
+fn lagrange_basis_from_geometric_points<F: Field>(base: F, width: usize) -> Vec<Vec<F>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    if width == 1 {
+        return vec![vec![F::ONE]];
+    }
+
+    let points = base.powers().skip(1).take(width).collect_vec();
+
+    // Build the monic polynomial P(x) = ∏(x - points[i]).
+    let mut root_poly = vec![F::ONE];
+    for &x in &points {
+        root_poly.push(F::ZERO);
+        for k in (1..root_poly.len()).rev() {
+            let prev = root_poly[k - 1];
+            root_poly[k] = prev - x * root_poly[k];
+        }
+        root_poly[0] = -x * root_poly[0];
+    }
+
+    // Precompute products of (1 - base^k) for k=1..width-1.
+    let mut prefix = vec![F::ONE; width];
+    for (i, base_pow) in base.powers().skip(1).take(width - 1).enumerate() {
+        prefix[i + 1] = prefix[i] * (F::ONE - base_pow);
+    }
+
+    // Compute P(x)/(x - points[i]) for each i and scale by the inverse denominator.
+    let mut quotients = Vec::with_capacity(width);
+    for (i, &x) in points.iter().enumerate() {
+        let mut q = vec![F::ZERO; width];
+        q[width - 1] = root_poly[width];
+        for k in (0..width - 1).rev() {
+            q[k] = root_poly[k + 1] + x * q[k + 1];
+        }
+
+        let sign = if i % 2 == 0 { F::ONE } else { F::NEG_ONE };
+        let exp = (i + 1) * (width - 1) - (i * (i + 1) / 2);
+        let pow = base.exp_u64(exp as u64);
+        let denom = sign * pow * prefix[i] * prefix[width - 1 - i];
+        let inv_denom = denom.inverse();
+        for coeff in q.iter_mut() {
+            *coeff *= inv_denom;
+        }
+        quotients.push(q);
+    }
+    quotients
+}
+
 #[cfg(test)]
 mod tests {
     use std::iter::zip;
 
     use itertools::Itertools;
     use p3_field::{FieldAlgebra, TwoAdicField};
-    use p3_util::log2_ceil_usize;
+    use p3_util::{log2_ceil_usize, log2_strict_usize};
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
@@ -675,5 +775,39 @@ mod tests {
             * (u_0.exp_power_of_2(l.wrapping_add_signed(n)) - F::ONE).inverse()
             * F::from_canonical_usize(1 << n.unsigned_abs()).inverse();
         assert_eq!(ind, expected);
+    }
+
+    #[test]
+    fn test_from_geometric_cosets_evals_idft_round_trip() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let height = 8usize;
+        let log_height = log2_strict_usize(height);
+        let omega = F::two_adic_generator(log_height);
+        let shift = F::GENERATOR;
+
+        for width in 2..=4usize {
+            let coeffs = (0..height * width)
+                .map(|_| F::from_wrapped_u32(rng.random()))
+                .collect_vec();
+            let coeffs_ref = &coeffs;
+
+            let evals: Vec<F> = (0..height)
+                .flat_map(|row| {
+                    let omega_pow = omega.exp_u64(row as u64);
+                    (0..width).map(move |col| {
+                        let coset_shift = shift.exp_u64((col + 1) as u64);
+                        horner_eval(coeffs_ref, coset_shift * omega_pow)
+                    })
+                })
+                .collect_vec();
+
+            let evals_mat = RowMajorMatrix::new(evals, width);
+            let poly = UnivariatePoly::from_geometric_cosets_evals_idft(evals_mat, shift);
+            assert_eq!(
+                poly.into_coeffs(),
+                coeffs,
+                "width {width} round-trip failed"
+            );
+        }
     }
 }
