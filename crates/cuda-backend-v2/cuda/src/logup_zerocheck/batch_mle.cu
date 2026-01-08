@@ -1,9 +1,7 @@
 #include "codec.cuh"
-#include "fp.h"
-#include "fpext.h"
+#include "eval_ctx.cuh"
 #include "frac_ext.cuh"
 #include "launcher.cuh"
-#include "matrix.cuh"
 #include "sumcheck.cuh"
 
 #include <algorithm>
@@ -14,21 +12,9 @@
 
 namespace logup_zerocheck_mle {
 
-struct BlockCtx {
-    uint32_t local_block_idx_x;
-    uint32_t air_idx;
-};
-
-struct EvalCoreCtx {
-    const FpExt *__restrict__ d_selectors;
-    const MainMatrixPtrs<FpExt> d_preprocessed;
-    const MainMatrixPtrs<FpExt> *__restrict__ d_main;
-    const Fp *__restrict__ d_public;
-    FpExt *__restrict__ d_intermediates;
-};
-
 struct ZerocheckCtx {
     EvalCoreCtx eval_ctx;
+    FpExt *__restrict__ d_intermediates;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_xi;
     const Rule *__restrict__ d_rules;
@@ -40,6 +26,7 @@ struct ZerocheckCtx {
 
 struct LogupCtx {
     EvalCoreCtx eval_ctx;
+    FpExt *__restrict__ d_intermediates;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_xi;
     const FpExt *__restrict__ d_challenges;
@@ -147,9 +134,9 @@ __global__ void zerocheck_batch_mle_kernel(
         FpExt *__restrict__ intermediates = nullptr;
         if (zc_ctx.buffer_size > 0) {
 #ifdef CUDA_DEBUG
-            assert(eval_ctx.d_intermediates != nullptr);
+            assert(zc_ctx.d_intermediates != nullptr);
 #endif
-            intermediates = zc_ctx.eval_ctx.d_intermediates + row;
+            intermediates = zc_ctx.d_intermediates + row;
             buffer_stride = height;
         }
         EvalCtx eval_ctx{
@@ -242,8 +229,8 @@ __global__ void logup_batch_mle_kernel(
         uint32_t buffer_stride = 0;
         FpExt *intermediates = nullptr;
         if (logup_ctx.buffer_size > 0) {
-            assert(logup_ctx.eval_ctx.d_intermediates != nullptr);
-            intermediates = logup_ctx.eval_ctx.d_intermediates + row;
+            assert(logup_ctx.d_intermediates != nullptr);
+            intermediates = logup_ctx.d_intermediates + row;
             buffer_stride = height;
         }
 
@@ -410,26 +397,17 @@ extern "C" int _zerocheck_batch_eval_mle(
     if (err != 0)
         return err;
 
-    // Reduce per AIR. block_ctxs are grouped by air_idx using air_block_offsets.
-    for (uint32_t air = 0; air < num_airs; ++air) {
-        uint32_t start = air_block_offsets[air];
-        uint32_t end = air_block_offsets[air + 1];
-        uint32_t blocks_for_air = end - start;
-        if (blocks_for_air == 0)
-            continue;
+    // Batched reduction for all AIRs in single launch
+    auto [_, reduce_block] = kernel_launch_params(num_blocks / num_airs + 1);
+    unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
+    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
 
-        auto [reduce_grid, reduce_block] = kernel_launch_params(blocks_for_air);
-        unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
-        size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
-        sumcheck::final_reduce_block_sums<<<num_x, reduce_block, reduce_shmem>>>(
-            tmp_sums_buffer + start * num_x, output + air * num_x, blocks_for_air
-        );
-        err = CHECK_KERNEL();
-        if (err != 0)
-            return err;
-    }
+    dim3 reduce_grid(num_airs, num_x);
+    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem>>>(
+        tmp_sums_buffer, output, air_block_offsets, num_x
+    );
 
-    return 0;
+    return CHECK_KERNEL();
 }
 
 extern "C" int _logup_batch_eval_mle(
@@ -452,30 +430,21 @@ extern "C" int _logup_batch_eval_mle(
     if (err != 0)
         return err;
 
-    // Launch final reduction kernel per AIR. block_ctxs are grouped by air_idx with offsets provided.
-    for (uint32_t air = 0; air < num_airs; ++air) {
-        uint32_t start = air_block_offsets[air];
-        uint32_t end = air_block_offsets[air + 1];
-        uint32_t blocks_for_air = end - start;
-        if (blocks_for_air == 0)
-            continue;
+    // Batched reduction for all AIRs in single launch
+    // FracExt = (FpExt, FpExt) so d = 2 * num_x
+    auto [_, reduce_block] = kernel_launch_params(num_blocks / num_airs + 1);
+    unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
+    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
 
-        auto [reduce_grid, reduce_block] = kernel_launch_params(blocks_for_air);
-        unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
-        size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
+    dim3 reduce_grid(num_airs, 2 * num_x);
+    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem>>>(
+        reinterpret_cast<FpExt *>(tmp_sums_buffer),
+        reinterpret_cast<FpExt *>(output),
+        air_block_offsets,
+        2 * num_x
+    );
 
-        // FracExt = (FpExt, FpExt) so we set block = 2 * num_x
-        sumcheck::final_reduce_block_sums<<<2 * num_x, reduce_block, reduce_shmem>>>(
-            reinterpret_cast<FpExt *>(tmp_sums_buffer + start * num_x),
-            reinterpret_cast<FpExt *>(output + air * num_x),
-            blocks_for_air
-        );
-        err = CHECK_KERNEL();
-        if (err != 0)
-            return err;
-    }
-
-    return 0;
+    return CHECK_KERNEL();
 }
 
 } // namespace logup_zerocheck_mle

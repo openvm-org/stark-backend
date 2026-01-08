@@ -6,6 +6,7 @@ mod error;
 mod gpu_backend;
 pub mod logup_zerocheck;
 pub mod merkle_tree;
+pub mod monomial;
 mod pkey;
 pub mod poly;
 pub mod sponge;
