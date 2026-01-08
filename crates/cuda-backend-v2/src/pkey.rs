@@ -12,6 +12,7 @@ use stark_backend_v2::keygen::types::StarkProvingKeyV2;
 use crate::{
     F,
     logup_zerocheck::rules::{SymbolicRulesGpuV2, codec::Codec},
+    monomial::{ExpandedMonomials, LambdaTerm, MonomialHeader, PackedVar},
 };
 
 pub struct AirDataGpu {
@@ -20,6 +21,7 @@ pub struct AirDataGpu {
     /// This may be tuned.
     pub zerocheck_round0: ConstraintOnlyRules<true>,
     pub zerocheck_mle: ConstraintOnlyRules<false>,
+    pub zerocheck_monomials: Option<ZerocheckMonomials>,
 }
 
 /// Used for GKR input evaluation and logup MLE sumcheck rounds.
@@ -45,6 +47,13 @@ pub struct EvalRules {
     pub buffer_size: u32,
 }
 
+pub struct ZerocheckMonomials {
+    pub d_headers: DeviceBuffer<MonomialHeader>,
+    pub d_variables: DeviceBuffer<PackedVar>,
+    pub d_lambda_terms: DeviceBuffer<LambdaTerm<F>>,
+    pub num_monomials: u32,
+}
+
 impl AirDataGpu {
     pub fn new(pk: &StarkProvingKeyV2) -> Result<Self, MemCopyError> {
         let dag = &pk.vk.symbolic_constraints;
@@ -52,10 +61,49 @@ impl AirDataGpu {
         let interaction_rules = InteractionEvalRules::new(&symbolic_constraints)?;
         let zerocheck_round0 = ConstraintOnlyRules::<true>::new(&dag.constraints)?;
         let zerocheck_mle = ConstraintOnlyRules::<false>::new(&dag.constraints)?;
+        // Expand monomials from the constraint DAG during GPU pkey creation
+        let zerocheck_monomials = if dag.constraints.num_constraints() > 0 {
+            let expanded = ExpandedMonomials::from_dag(&dag.constraints);
+            Some(ZerocheckMonomials::from_expanded(&expanded)?)
+        } else {
+            None
+        };
         Ok(Self {
             interaction_rules,
             zerocheck_round0,
             zerocheck_mle,
+            zerocheck_monomials,
+        })
+    }
+}
+
+impl ZerocheckMonomials {
+    pub fn from_expanded(expanded: &ExpandedMonomials<F>) -> Result<Self, MemCopyError> {
+        // Validate bounds for all monomial headers to prevent out-of-bounds access in CUDA kernel
+        let num_variables = expanded.variables.len();
+        let num_lambda_terms = expanded.lambda_terms.len();
+        for (i, hdr) in expanded.headers.iter().enumerate() {
+            let var_end = hdr.var_offset as usize + hdr.num_vars as usize;
+            let lambda_end = hdr.lambda_offset as usize + hdr.num_lambdas as usize;
+            assert!(
+                var_end <= num_variables,
+                "Monomial {i}: var_offset ({}) + num_vars ({}) = {var_end} exceeds variables.len() ({num_variables})",
+                hdr.var_offset,
+                hdr.num_vars
+            );
+            assert!(
+                lambda_end <= num_lambda_terms,
+                "Monomial {i}: lambda_offset ({}) + num_lambdas ({}) = {lambda_end} exceeds lambda_terms.len() ({num_lambda_terms})",
+                hdr.lambda_offset,
+                hdr.num_lambdas
+            );
+        }
+
+        Ok(Self {
+            d_headers: expanded.headers.to_device()?,
+            d_variables: expanded.variables.to_device()?,
+            d_lambda_terms: expanded.lambda_terms.to_device()?,
+            num_monomials: expanded.headers.len() as u32,
         })
     }
 }

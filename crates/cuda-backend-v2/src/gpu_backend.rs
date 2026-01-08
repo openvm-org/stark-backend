@@ -23,7 +23,7 @@ use stark_backend_v2::{
         stacked_pcs::{MerkleTree, StackedPcsData},
     },
 };
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use crate::{
     AirDataGpu, D_EF, Digest, EF, F, GpuDeviceV2, GpuProverConfig, ProverError,
@@ -87,8 +87,17 @@ impl MultiRapProver<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
         let save_memory = self.config.log_blowup == 1;
-        let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup_gpu(transcript, mpk, ctx, save_memory);
+        // Threshold for monomial evaluation path based on proof type:
+        // - App proofs (log_blowup=1): higher threshold (512)
+        // - Recursion proofs: lower threshold (64)
+        let monomial_num_y_threshold = if self.config.log_blowup == 1 { 512 } else { 64 };
+        let (gkr_proof, batch_constraint_proof, r) = prove_zerocheck_and_logup_gpu(
+            transcript,
+            mpk,
+            ctx,
+            save_memory,
+            monomial_num_y_threshold,
+        );
         mem.emit_metrics();
         ((gkr_proof, batch_constraint_proof), r)
     }
@@ -148,6 +157,12 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
                     transport_and_unstack_single_data_h2d(d.as_ref(), &self.prover_config).unwrap()
                 });
                 let other_data = AirDataGpu::new(pk).unwrap();
+                let num_monomials = other_data
+                    .zerocheck_monomials
+                    .as_ref()
+                    .map(|m| m.num_monomials)
+                    .unwrap_or(0);
+                debug!(air = %pk.air_name, num_monomials, "monomial expansion");
 
                 DeviceStarkProvingKeyV2 {
                     air_name: pk.air_name.clone(),

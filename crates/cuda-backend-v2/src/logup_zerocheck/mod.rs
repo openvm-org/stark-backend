@@ -52,9 +52,10 @@ use crate::{
     utils::compute_barycentric_inv_lagrange_denoms,
 };
 
-mod batch_mle;
+pub(crate) mod batch_mle;
+pub(crate) mod batch_mle_monomial;
 mod errors;
-mod fold_ple;
+pub(crate) mod fold_ple;
 /// Fraction sumcheck via GKR
 mod fractional;
 /// Logup interaction evaluations for GKR input
@@ -63,7 +64,10 @@ mod mle_round;
 mod round0;
 pub(crate) mod rules;
 
-use batch_mle::{TraceCtx, evaluate_batch_mle};
+use batch_mle::{
+    TraceCtx, ZerocheckMleBatchBuilder, evaluate_logup_batched, evaluate_zerocheck_batched,
+};
+use batch_mle_monomial::{ZerocheckMonomialBatch, trace_has_monomials};
 pub use errors::*;
 use fractional::fractional_sumcheck_gpu;
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
@@ -76,6 +80,7 @@ pub fn prove_zerocheck_and_logup_gpu(
     mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     ctx: &ProvingContextV2<GpuBackendV2>,
     save_memory: bool,
+    monomial_num_y_threshold: u32,
 ) -> (GkrProof, BatchConstraintProof, Vec<EF>) {
     let logup_gkr_span = info_span!("prover.rap_constraints.logup_gkr", phase = "prover").entered();
     let l_skip = mpk.params.l_skip;
@@ -122,6 +127,7 @@ pub fn prove_zerocheck_and_logup_gpu(
         alpha_logup,
         beta_logup,
         save_memory,
+        monomial_num_y_threshold,
     );
     let n_global = prover.n_global;
 
@@ -370,6 +376,7 @@ pub struct LogupZerocheckGpu<'a> {
     pub constraint_degree: usize,
     n_per_trace: Vec<isize>,
     max_num_constraints: usize,
+    pub monomial_num_y_threshold: u32,
     // Available after GKR:
     pub xi: Vec<EF>,
     pub lambda_pows: Option<DeviceBuffer<EF>>,
@@ -414,6 +421,7 @@ impl<'a> LogupZerocheckGpu<'a> {
         alpha_logup: EF,
         beta_logup: EF,
         save_memory: bool,
+        monomial_num_y_threshold: u32,
     ) -> Self {
         let mem = MemTracker::start("prover.logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
@@ -513,6 +521,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             mem,
             save_memory,
             memory_limit_bytes: 0, // Set after GKR input eval
+            monomial_num_y_threshold,
         }
     }
 
@@ -1176,7 +1185,6 @@ impl<'a> LogupZerocheckGpu<'a> {
         skip_all,
         fields(round = round)
     )]
-    #[allow(dead_code)]
     fn sumcheck_polys_batch_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
         let sp_deg = self.constraint_degree;
         let lambda_pows = self.lambda_pows.as_ref().expect("lambda_pows must be set");
@@ -1364,31 +1372,94 @@ impl<'a> LogupZerocheckGpu<'a> {
             }
         }
 
-        // Run kernels: late_eval and early_eval
-        evaluate_batch_mle(
+        let d_challenges_ptr = self.d_challenges.as_ptr();
+
+        // Late traces (num_y=1): logup via DAG, zerocheck via monomial
+        evaluate_logup_batched(
             &late_eval,
             self.pk,
-            self.d_challenges.as_ptr(),
-            lambda_pows,
+            d_challenges_ptr,
             1,
-            &mut zc_out,
             &mut logup_out,
-            &mut self.zerocheck_tilde_evals,
             &mut self.logup_tilde_evals,
             self.memory_limit_bytes,
         );
-        evaluate_batch_mle(
-            &early_eval,
-            self.pk,
-            self.d_challenges.as_ptr(),
-            lambda_pows,
-            sp_deg as u32,
-            &mut zc_out,
-            &mut logup_out,
-            &mut self.zerocheck_tilde_evals,
-            &mut self.logup_tilde_evals,
-            self.memory_limit_bytes,
-        );
+        // Late traces (num_y=1) always use monomial for zerocheck
+        let late_mono_traces: Vec<_> = late_eval
+            .iter()
+            .filter(|t| trace_has_monomials(t, self.pk))
+            .collect();
+        if !late_mono_traces.is_empty() {
+            let batch = ZerocheckMonomialBatch::new(late_mono_traces.iter().copied(), self.pk);
+            let out = batch.evaluate(lambda_pows, 1);
+            let host = out.to_host().expect("copy monomial output");
+            for (i, trace_idx) in batch.trace_indices().enumerate() {
+                self.zerocheck_tilde_evals[trace_idx] = host[i];
+                // zc_out not set for num_x=1, handled from tilde_eval in compute_batch_s
+            }
+        }
+
+        // Early traces (num_y>1): partition by threshold for zerocheck path
+        let (low_early, high_early): (Vec<&TraceCtx>, Vec<&TraceCtx>) = early_eval
+            .iter()
+            .partition(|t| t.num_y <= self.monomial_num_y_threshold);
+
+        if low_early.is_empty() {
+            // All early traces have high num_y: zerocheck + logup together via DAG
+            evaluate_zerocheck_batched(
+                &early_eval,
+                self.pk,
+                lambda_pows,
+                sp_deg as u32,
+                &mut zc_out,
+                &mut self.zerocheck_tilde_evals,
+                self.memory_limit_bytes,
+            );
+            evaluate_logup_batched(
+                &early_eval,
+                self.pk,
+                d_challenges_ptr,
+                sp_deg as u32,
+                &mut logup_out,
+                &mut self.logup_tilde_evals,
+                self.memory_limit_bytes,
+            );
+        } else {
+            // Mixed: logup via DAG for all, zerocheck split by threshold
+            evaluate_logup_batched(
+                &early_eval,
+                self.pk,
+                d_challenges_ptr,
+                sp_deg as u32,
+                &mut logup_out,
+                &mut self.logup_tilde_evals,
+                self.memory_limit_bytes,
+            );
+            // DAG zerocheck for high num_y traces
+            let zc_builder =
+                ZerocheckMleBatchBuilder::new(high_early.iter().copied(), self.pk, sp_deg as u32);
+            if !zc_builder.is_empty() {
+                let out = zc_builder.evaluate(lambda_pows, sp_deg as u32);
+                let host = out.to_host().expect("copy zc output");
+                for (i, trace_idx) in zc_builder.trace_indices().enumerate() {
+                    zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
+                }
+            }
+            // Monomial zerocheck for low num_y traces
+            let low_mono_traces: Vec<_> = low_early
+                .iter()
+                .filter(|t| trace_has_monomials(t, self.pk))
+                .copied()
+                .collect();
+            if !low_mono_traces.is_empty() {
+                let batch = ZerocheckMonomialBatch::new(low_mono_traces.into_iter(), self.pk);
+                let out = batch.evaluate(lambda_pows, sp_deg as u32);
+                let host = out.to_host().expect("copy monomial output");
+                for (i, trace_idx) in batch.trace_indices().enumerate() {
+                    zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
+                }
+            }
+        }
 
         // Emit final output in the same order as original
         logup_out.into_iter().flatten().chain(zc_out).collect()

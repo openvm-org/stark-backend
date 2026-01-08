@@ -1,3 +1,4 @@
+use crate::monomial::{LambdaTerm, MonomialHeader, PackedVar};
 use p3_field::{Field, FieldAlgebra};
 
 use super::*;
@@ -20,6 +21,19 @@ pub struct BlockCtx {
     pub air_idx: u32,
 }
 
+/// Per-AIR context for batched monomial evaluation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MonomialAirCtx {
+    pub d_headers: *const MonomialHeader,
+    pub d_variables: *const PackedVar,
+    pub d_lambda_terms: *const LambdaTerm<F>,
+    pub num_monomials: u32,
+    pub eval_ctx: EvalCoreCtx,
+    pub d_eq_xi: *const EF,
+    pub num_y: u32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct EvalCoreCtx {
@@ -27,13 +41,13 @@ pub struct EvalCoreCtx {
     pub d_preprocessed: MainMatrixPtrs<EF>,
     pub d_main: *const MainMatrixPtrs<EF>,
     pub d_public: *const F,
-    pub d_intermediates: *mut EF,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ZerocheckCtx {
     pub eval_ctx: EvalCoreCtx,
+    pub d_intermediates: *mut EF,
     pub num_y: u32,
     pub d_eq_xi: *const EF,
     pub d_rules: *const std::ffi::c_void,
@@ -47,6 +61,7 @@ pub struct ZerocheckCtx {
 #[derive(Clone, Copy, Debug)]
 pub struct LogupCtx {
     pub eval_ctx: EvalCoreCtx,
+    pub d_intermediates: *mut EF,
     pub num_y: u32,
     pub d_eq_xi: *const EF,
     pub d_challenges: *const EF,
@@ -319,6 +334,19 @@ extern "C" {
         block_ctxs: *const BlockCtx,
         logup_ctxs: *const LogupCtx,
         air_block_offsets: *const u32,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        threads_per_block: u32,
+    ) -> i32;
+
+    fn _zerocheck_monomial_batched(
+        tmp_sums: *mut EF,
+        output: *mut EF,
+        block_ctxs: *const BlockCtx,
+        air_ctxs: *const MonomialAirCtx,
+        air_block_offsets: *const u32,
+        lambda_pows: *const EF,
         num_blocks: u32,
         num_x: u32,
         num_airs: u32,
@@ -629,7 +657,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
     output: &mut DeviceBuffer<EF>,
     block_ctxs: &DeviceBuffer<BlockCtx>,
     zc_ctxs: &DeviceBuffer<ZerocheckCtx>,
-    air_block_offsets: &[u32],
+    air_block_offsets: &DeviceBuffer<u32>,
     lambda_pows: &DeviceBuffer<EF>,
     lambda_len: usize,
     num_blocks: u32,
@@ -700,7 +728,7 @@ pub unsafe fn logup_batch_eval_mle(
     output: &mut DeviceBuffer<Frac<EF>>,
     block_ctxs: &DeviceBuffer<BlockCtx>,
     logup_ctxs: &DeviceBuffer<LogupCtx>,
-    air_block_offsets: &[u32],
+    air_block_offsets: &DeviceBuffer<u32>,
     num_blocks: u32,
     num_x: u32,
     num_airs: u32,
@@ -712,6 +740,33 @@ pub unsafe fn logup_batch_eval_mle(
         block_ctxs.as_ptr(),
         logup_ctxs.as_ptr(),
         air_block_offsets.as_ptr(),
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn zerocheck_monomial_batched(
+    tmp_sums: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    air_ctxs: &DeviceBuffer<MonomialAirCtx>,
+    air_block_offsets: &DeviceBuffer<u32>,
+    lambda_pows: &DeviceBuffer<EF>,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+    threads_per_block: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_zerocheck_monomial_batched(
+        tmp_sums.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        air_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        lambda_pows.as_ptr(),
         num_blocks,
         num_x,
         num_airs,

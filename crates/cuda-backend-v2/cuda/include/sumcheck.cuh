@@ -189,6 +189,41 @@ static __global__ void final_reduce_block_sums(
     }
 }
 
+// Batched version: reduces partial sums for multiple segments (e.g., AIRs) in a single launch.
+// Grid: (num_segments, d) where each block (seg, x) reduces blocks for segment `seg` at output index `x`.
+// segment_offsets[seg] gives the start block index; segment_offsets[seg+1] gives the end.
+static __global__ void batched_final_reduce_block_sums(
+    const FpExt *block_sums,           // [total_blocks][d]
+    FpExt *output,                     // [num_segments][d]
+    const uint32_t *segment_offsets,   // [num_segments + 1], device memory
+    uint32_t d
+) {
+    extern __shared__ char smem[];
+    FpExt *shared = (FpExt *)smem;
+
+    uint32_t seg_idx = blockIdx.x;
+    uint32_t out_idx = blockIdx.y;
+    int tid = threadIdx.x;
+
+    uint32_t start = segment_offsets[seg_idx];
+    uint32_t end = segment_offsets[seg_idx + 1];
+    uint32_t num_blocks = end - start;
+
+    FpExt sum = {0, 0, 0, 0};
+
+    // Each thread accumulates a strided subset of this segment's blocks
+    for (uint32_t i = tid; i < num_blocks; i += blockDim.x) {
+        sum += block_sums[(start + i) * d + out_idx];
+    }
+
+    // Block-level reduction
+    sum = block_reduce_sum(sum, shared);
+
+    if (tid == 0) {
+        output[seg_idx * d + out_idx] = sum;
+    }
+}
+
 // Folds MLE evaluations using challenge r: output[y] = input[2*y] + r*(input[2*y+1] - input[2*y])
 __device__ __forceinline__ void fold_mle(
     const FpExt *__restrict__ const *__restrict__ input_matrices,
