@@ -21,10 +21,7 @@ constexpr int GKR_S_DEG = 3;
 // KERNELS
 // ============================================================================
 template <bool revert>
-__global__ void frac_build_tree_layer_kernel(
-    FracExt *__restrict__ layer,
-    uint32_t half
-) {
+__global__ void frac_build_tree_layer_kernel(FracExt *__restrict__ layer, uint32_t half) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= half) {
         return;
@@ -39,11 +36,23 @@ __global__ void frac_build_tree_layer_kernel(
     }
 }
 
+__device__ __forceinline__ FpExt sqrt_buffer_get(
+    const FpExt *__restrict__ eq_xi_low,
+    const FpExt *__restrict__ eq_xi_high,
+    uint32_t const log_eq_size,
+    uint32_t const log_eq_low_cap,
+    uint32_t const idx
+) {
+    return eq_xi_low[idx & ((1u << log_eq_low_cap) - 1)] * eq_xi_high[idx >> log_eq_low_cap];
+}
+
 // shared memory size requirement: max(num_warps,1) * sizeof(FpExt)
 __global__ void compute_round_block_sum_kernel(
-    const FpExt *__restrict__ eq_xi,
+    const FpExt *__restrict__ eq_xi_low,
+    const FpExt *__restrict__ eq_xi_high,
     FracExt *__restrict__ pq_buffer,
     uint32_t log_eq_size,
+    uint32_t log_eq_low_cap,
     uint32_t log_pq_size,
     FpExt lambda,
     FpExt *__restrict__ block_sums // Output: [gridDim.x][3]
@@ -57,8 +66,10 @@ __global__ void compute_round_block_sum_kernel(
     uint32_t idx_base = threadIdx.x + blockIdx.x * blockDim.x;
     // Map phase: compute local sum by striding over grid
     for (uint32_t idx = idx_base; idx < eq_size / 2; idx += blockDim.x * gridDim.x) {
-        FpExt eq_even = eq_xi[idx];
-        FpExt eq_odd = eq_xi[with_rev_bits(idx, eq_size, 1)];
+        FpExt eq_even = sqrt_buffer_get(eq_xi_low, eq_xi_high, log_eq_size, log_eq_low_cap, idx);
+        FpExt eq_odd = sqrt_buffer_get(
+            eq_xi_low, eq_xi_high, log_eq_size, log_eq_low_cap, with_rev_bits(idx, eq_size, 1)
+        );
         FpExt eq_diff = eq_odd - eq_even;
 
         // \hat p_j({0 or 1}, {even or odd}, ..y)
@@ -108,19 +119,12 @@ __global__ void compute_round_block_sum_kernel(
     }
 }
 
-__global__ void fold_columns_kernel(FpExt *buffer, size_t half, FpExt r) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= half) {
-        return;
-    }
-
-    FpExt &t0 = buffer[idx];
-    FpExt const &t1 = buffer[idx | half];
-    t0 += r * (t1 - t0);
-}
-
 template <bool revert>
-__device__ __forceinline__ void one_folding_round(FpExt& lhs, FpExt const& rhs, FpExt const& r_or_r_inv) {
+__device__ __forceinline__ void one_folding_round(
+    FpExt &lhs,
+    FpExt const &rhs,
+    FpExt const &r_or_r_inv
+) {
     if constexpr (revert) {
         // z = x + r * (y - x) => x = (z - r * y) / (1 - r) = (z - y + (y - r * y)) / (1 - r)
         lhs = (lhs - rhs) * r_or_r_inv + rhs;
@@ -201,11 +205,7 @@ __global__ void frac_vector_scalar_multiply_kernel(
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
-extern "C" int _frac_build_tree_layer(
-    FracExt *layer,
-    size_t layer_size,
-    bool revert
-) {
+extern "C" int _frac_build_tree_layer(FracExt *layer, size_t layer_size, bool revert) {
     if (layer_size == 0) {
         return 0;
     }
@@ -214,11 +214,9 @@ extern "C" int _frac_build_tree_layer(
 
     auto [grid, block] = kernel_launch_params(layer_size);
     if (revert) {
-        frac_build_tree_layer_kernel<true>
-            <<<grid, block>>>(layer, layer_size);
+        frac_build_tree_layer_kernel<true><<<grid, block>>>(layer, layer_size);
     } else {
-        frac_build_tree_layer_kernel<false>
-            <<<grid, block>>>(layer, layer_size);
+        frac_build_tree_layer_kernel<false><<<grid, block>>>(layer, layer_size);
     }
     return CHECK_KERNEL();
 }
@@ -233,9 +231,11 @@ extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t stride) {
 }
 
 extern "C" int _frac_compute_round(
-    const FpExt *eq_xi,
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
     FracExt *pq_buffer,
     size_t eq_size,
+    size_t eq_low_cap,
     size_t pq_size,
     FpExt lambda,
     FpExt *out,           // Output: [d=3] final results
@@ -250,7 +250,14 @@ extern "C" int _frac_compute_round(
 
     // Launch main kernel - writes to tmp_block_sums
     compute_round_block_sum_kernel<<<grid, block, shmem_bytes>>>(
-        eq_xi, pq_buffer, __builtin_ctz((uint32_t)eq_size), __builtin_ctz((uint32_t)pq_size), lambda, tmp_block_sums
+        eq_xi_low,
+        eq_xi_high,
+        pq_buffer,
+        __builtin_ctz((uint32_t)eq_size),
+        __builtin_ctz((uint32_t)eq_low_cap),
+        __builtin_ctz((uint32_t)pq_size),
+        lambda,
+        tmp_block_sums
     );
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -264,16 +271,6 @@ extern "C" int _frac_compute_round(
     sumcheck::static_final_reduce_block_sums<GKR_S_DEG>
         <<<GKR_S_DEG, reduce_block, reduce_shmem>>>(tmp_block_sums, out, num_blocks);
 
-    return CHECK_KERNEL();
-}
-
-extern "C" int _frac_fold_columns(FpExt *buffer, size_t size, FpExt r) {
-    if (size <= 1) {
-        return 0;
-    }
-    size_t half = size >> 1;
-    auto [grid, block] = kernel_launch_params(half);
-    fold_columns_kernel<<<grid, block>>>(buffer, half, r);
     return CHECK_KERNEL();
 }
 
