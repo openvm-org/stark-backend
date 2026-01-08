@@ -104,7 +104,7 @@ pub(crate) struct ZerocheckMleBatchBuilder<'a> {
     traces: Vec<&'a TraceCtx>,
     d_block_ctxs: DeviceBuffer<BlockCtx>,
     d_zc_ctxs: DeviceBuffer<ZerocheckCtx>,
-    air_offsets: Vec<u32>,
+    air_offsets: DeviceBuffer<u32>,
     threads_per_block: u32,
     _intermediates_keepalive: Vec<DeviceBuffer<EF>>,
 }
@@ -126,7 +126,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
                 traces: vec![],
                 d_block_ctxs: DeviceBuffer::new(),
                 d_zc_ctxs: DeviceBuffer::new(),
-                air_offsets: vec![],
+                air_offsets: DeviceBuffer::new(),
                 threads_per_block: 0,
                 _intermediates_keepalive: vec![],
             };
@@ -177,11 +177,11 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
                 d_preprocessed: t.prep_ptr,
                 d_main: t.main_ptrs_dev.as_ptr(),
                 d_public: t.public_ptr,
-                d_intermediates,
             };
 
             zc_ctxs_h.push(ZerocheckCtx {
                 eval_ctx,
+                d_intermediates,
                 num_y: t.num_y,
                 d_eq_xi: t.eq_xi_ptr,
                 d_rules: air_pk.other_data.zerocheck_mle.inner.d_rules.as_raw_ptr(),
@@ -195,6 +195,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
         // Upload to device
         let d_block_ctxs = block_ctxs_h.to_device().expect("copy zc block ctxs");
         let d_zc_ctxs = zc_ctxs_h.to_device().expect("copy zc ctxs");
+        let air_offsets = air_offsets.to_device().expect("copy zc air offsets");
 
         Self {
             traces,
@@ -245,7 +246,7 @@ pub(crate) struct LogupMleBatchBuilder<'a> {
     traces: Vec<&'a TraceCtx>,
     d_block_ctxs: DeviceBuffer<BlockCtx>,
     d_logup_ctxs: DeviceBuffer<LogupCtx>,
-    air_offsets: Vec<u32>,
+    air_offsets: DeviceBuffer<u32>,
     threads_per_block: u32,
     _intermediates_keepalive: Vec<DeviceBuffer<EF>>,
 }
@@ -268,7 +269,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
                 traces: vec![],
                 d_block_ctxs: DeviceBuffer::new(),
                 d_logup_ctxs: DeviceBuffer::new(),
-                air_offsets: vec![],
+                air_offsets: DeviceBuffer::new(),
                 threads_per_block: 0,
                 _intermediates_keepalive: vec![],
             };
@@ -319,11 +320,11 @@ impl<'a> LogupMleBatchBuilder<'a> {
                 d_preprocessed: t.prep_ptr,
                 d_main: t.main_ptrs_dev.as_ptr(),
                 d_public: t.public_ptr,
-                d_intermediates,
             };
 
             logup_ctxs_h.push(LogupCtx {
                 eval_ctx,
+                d_intermediates,
                 num_y: t.num_y,
                 d_eq_xi: t.eq_xi_ptr,
                 d_challenges: d_challenges_ptr,
@@ -350,6 +351,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
         // Upload to device
         let d_block_ctxs = block_ctxs_h.to_device().expect("copy logup block ctxs");
         let d_logup_ctxs = logup_ctxs_h.to_device().expect("copy logup ctxs");
+        let air_offsets = air_offsets.to_device().expect("copy logup air offsets");
 
         Self {
             traces,
@@ -389,65 +391,6 @@ impl<'a> LogupMleBatchBuilder<'a> {
             self.threads_per_block,
         )
     }
-}
-
-/// Evaluates batch MLE for both zerocheck and logup across the given traces.
-///
-/// This function coordinates the evaluation of both constraint (zerocheck) and
-/// interaction (logup) batch MLE evaluations with memory-aware batching.
-/// Results are written to the provided output slices indexed by trace_idx.
-///
-/// # Arguments
-/// * `traces` - Slice of trace contexts to evaluate
-/// * `pk` - Multi-STARK proving key with per-AIR data
-/// * `d_challenges_ptr` - Device pointer to challenges for logup
-/// * `lambda_pows` - Lambda powers for zerocheck batching
-/// * `num_x` - Number of evaluation points (1 for late_eval, s_deg for early_eval)
-/// * `s_deg` - Sumcheck degree for scaling tilde evals
-/// * `zc_out` - Output slice for zerocheck results (indexed by trace_idx)
-/// * `logup_out` - Output slice for logup results (indexed by trace_idx)
-/// * `zc_tilde_evals` - Tilde evals to update for num_x==1 case
-/// * `logup_tilde_evals` - Tilde evals to update for num_x==1 case
-/// * `memory_limit_bytes` - Maximum memory budget for intermediate buffers per batch
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_batch_mle(
-    traces: &[TraceCtx],
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-    d_challenges_ptr: *const EF,
-    lambda_pows: &DeviceBuffer<EF>,
-    num_x: u32,
-    zc_out: &mut [Vec<EF>],
-    logup_out: &mut [[Vec<EF>; 2]],
-    zc_tilde_evals: &mut [EF],
-    logup_tilde_evals: &mut [[EF; 2]],
-    memory_limit_bytes: usize,
-) {
-    if traces.is_empty() {
-        return;
-    }
-
-    // === ZEROCHECK (independent budget) ===
-    evaluate_zerocheck_batched(
-        traces,
-        pk,
-        lambda_pows,
-        num_x,
-        zc_out,
-        zc_tilde_evals,
-        memory_limit_bytes,
-    );
-    // Zerocheck intermediate buffers are dropped here before logup starts
-
-    // === LOGUP (independent budget) ===
-    evaluate_logup_batched(
-        traces,
-        pk,
-        d_challenges_ptr,
-        num_x,
-        logup_out,
-        logup_tilde_evals,
-        memory_limit_bytes,
-    );
 }
 
 // ============================================================================
@@ -527,7 +470,7 @@ fn evaluate_single_logup(
 // ============================================================================
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_zerocheck_batched(
+pub(crate) fn evaluate_zerocheck_batched(
     traces: &[TraceCtx],
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     lambda_pows: &DeviceBuffer<EF>,
@@ -614,7 +557,7 @@ fn evaluate_zerocheck_batched(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_logup_batched(
+pub(crate) fn evaluate_logup_batched(
     traces: &[TraceCtx],
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     d_challenges_ptr: *const EF,
@@ -712,7 +655,7 @@ fn evaluate_logup_batched(
 fn evaluate_mle_constraints_gpu_batch(
     block_ctxs: &DeviceBuffer<BlockCtx>,
     zc_ctxs: &DeviceBuffer<ZerocheckCtx>,
-    air_block_offsets: &[u32],
+    air_block_offsets: &DeviceBuffer<u32>,
     lambda_pows: &DeviceBuffer<EF>,
     lambda_len: usize,
     num_x: u32,
@@ -753,7 +696,7 @@ fn evaluate_mle_constraints_gpu_batch(
 fn evaluate_mle_interactions_gpu_batch(
     block_ctxs: &DeviceBuffer<BlockCtx>,
     logup_ctxs: &DeviceBuffer<LogupCtx>,
-    air_block_offsets: &[u32],
+    air_block_offsets: &DeviceBuffer<u32>,
     num_x: u32,
     threads_per_block: u32,
 ) -> DeviceBuffer<Frac<EF>> {
