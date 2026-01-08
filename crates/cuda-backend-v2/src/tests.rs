@@ -588,3 +588,285 @@ fn test_matrix_stacking_overflow() {
     let (vk, proof) = fx.keygen_and_prove(&engine);
     engine.verify(&vk, &proof).unwrap();
 }
+
+/// Tests that monomial-based and DAG-based zerocheck evaluation paths produce identical results.
+///
+/// This test verifies that `ZerocheckMonomialBatchBuilder` and `ZerocheckMleBatchBuilder`
+/// compute the same output for traces where both paths are applicable.
+#[test]
+fn test_monomial_vs_dag_equivalence() {
+    use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
+    use p3_util::log2_strict_usize;
+    use stark_backend_v2::{
+        poly_common::eval_eq_uni_at_one,
+        test_utils::prove_up_to_batch_constraints,
+    };
+
+    use crate::{
+        EF,
+        cuda::logup_zerocheck::{MainMatrixPtrs, fold_selectors_round0, interpolate_columns_gpu},
+        logup_zerocheck::{
+            batch_mle::{TraceCtx, ZerocheckMleBatchBuilder},
+            batch_mle_monomial::ZerocheckMonomialBatch,
+            fold_ple::fold_ple_evals_rotate,
+        },
+        poly::EqEvalSegments,
+    };
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    // Use FibFixture for a simple AIR with only constraints (no interactions)
+    let log_trace_degree = 5; // 32 rows - small enough for monomial path
+
+    // Threshold for monomial path - test traces with num_y <= this value
+    let threshold = 32u32;
+
+    let engine = test_gpu_engine_small();
+    let device = engine.device();
+    let params = engine.config();
+    let l_skip = params.l_skip;
+
+    let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
+    let (pk, _vk) = fib.keygen(&engine);
+    let pk = device.transport_pk_to_device(&pk);
+
+    // Run GKR/batch constraints to get random challenges
+    let ctx_for_challenges = device
+        .transport_proving_ctx_to_device(&fib.generate_proving_ctx())
+        .into_sorted();
+    let mut prover_sponge = DuplexSpongeGpu::default();
+    let ((_, _), r) =
+        prove_up_to_batch_constraints(&engine, &mut prover_sponge, &pk, ctx_for_challenges);
+
+    // Regenerate context for the actual test
+    let ctx = device
+        .transport_proving_ctx_to_device(&fib.generate_proving_ctx())
+        .into_sorted();
+
+    // Build xi vector with proper length: need l_skip + n_lift elements for EqEvalSegments
+    // r contains the sumcheck round challenges, but we need to prefix with l_skip elements
+    let height = ctx.per_trace[0].1.common_main.height();
+    let n_calc = log2_strict_usize(height).saturating_sub(l_skip);
+    let xi_len = l_skip + n_calc + 1;
+
+    // Generate deterministic xi values (using r and extending with sponge samples)
+    let mut xi: Vec<EF> = Vec::with_capacity(xi_len);
+    // Add l_skip initial elements (these would come from GKR in real prover)
+    for _ in 0..l_skip {
+        xi.push(prover_sponge.sample_ext());
+    }
+    // Add the sumcheck round challenges
+    xi.extend_from_slice(&r);
+    // Ensure we have enough elements
+    while xi.len() < xi_len {
+        xi.push(prover_sponge.sample_ext());
+    }
+    assert!(xi.len() >= l_skip + 1, "xi vector must have enough elements");
+
+    // Setup omega skip powers
+    let omega_skip = F::two_adic_generator(l_skip);
+    let omega_skip_pows: Vec<F> = omega_skip.powers().take(1 << l_skip).collect();
+    let d_omega_skip_pows = omega_skip_pows.to_device().unwrap();
+
+    // Get trace info
+    let (air_idx, air_ctx) = &ctx.per_trace[0];
+    let height = air_ctx.common_main.height();
+    let n = log2_strict_usize(height) as isize - l_skip as isize;
+    let n_lift = n.max(0) as usize;
+
+    // Setup eq_xis
+    let eq_xis = EqEvalSegments::new(&xi[l_skip..]).expect("failed to compute eq_xis");
+
+    // Setup selectors (is_first, is_transition, is_last)
+    let sel_height = 1 << n_lift;
+    let mut sel_cols = F::zero_vec(3 * sel_height);
+    sel_cols[sel_height..2 * sel_height - 1].fill(F::ONE); // is_transition
+    sel_cols[0] = F::ONE; // is_first
+    sel_cols[2 * sel_height + sel_height - 1] = F::ONE; // is_last
+    let d_sels_base = sel_cols.to_device().unwrap();
+
+    // Fold selectors
+    let (l, r_fold) = if n.is_negative() {
+        (
+            l_skip.wrapping_add_signed(n),
+            r[0].exp_power_of_2(-n as usize),
+        )
+    } else {
+        (l_skip, r[0])
+    };
+    let omega = F::two_adic_generator(l);
+    let is_first = eval_eq_uni_at_one(l, r_fold);
+    let is_last = eval_eq_uni_at_one(l, r_fold * omega);
+    let d_sels_folded = openvm_cuda_common::d_buffer::DeviceBuffer::<EF>::with_capacity(sel_height * 3);
+    unsafe {
+        fold_selectors_round0(
+            d_sels_folded.as_mut_ptr(),
+            d_sels_base.as_ptr(),
+            is_first,
+            is_last,
+            sel_height,
+        )
+        .unwrap();
+    }
+
+    // Setup inv_lagrange_denoms for PLE fold
+    let inv_lagrange_denoms_r0 =
+        crate::utils::compute_barycentric_inv_lagrange_denoms(l_skip, &omega_skip_pows, r[0]);
+    let d_inv_lagrange_denoms_r0 = inv_lagrange_denoms_r0.to_device().unwrap();
+
+    // Fold common_main trace
+    let mat_folded = fold_ple_evals_rotate(
+        l_skip,
+        &d_omega_skip_pows,
+        &air_ctx.common_main,
+        &d_inv_lagrange_denoms_r0,
+    )
+    .unwrap();
+
+    // Setup lambda powers
+    let lambda = prover_sponge.sample_ext();
+    let air_pk = &pk.per_air[*air_idx];
+    let max_num_constraints = air_pk
+        .vk
+        .symbolic_constraints
+        .constraints
+        .constraint_idx
+        .len();
+    let h_lambda_pows: Vec<EF> = lambda.powers().take(max_num_constraints).collect();
+    let d_lambda_pows = h_lambda_pows.to_device().unwrap();
+
+    // Public values
+    let d_public_values = if air_ctx.public_values.is_empty() {
+        openvm_cuda_common::d_buffer::DeviceBuffer::new()
+    } else {
+        air_ctx.public_values.to_device().unwrap()
+    };
+
+    // Verify the AIR has constraints and monomials available
+    let dag = &air_pk.vk.symbolic_constraints;
+    let has_constraints = dag.constraints.num_constraints() > 0;
+    assert!(has_constraints, "FibFixture should have constraints");
+
+    let has_monomials = air_pk
+        .other_data
+        .zerocheck_monomials
+        .as_ref()
+        .map(|m| m.num_monomials > 0)
+        .unwrap_or(false);
+    assert!(
+        has_monomials,
+        "Proving key should have expanded monomials for monomial path"
+    );
+
+    // Test at multiple num_y values to ensure equivalence across different sizes.
+    // The threshold was set on the engine above - use it to filter test cases.
+    let s_deg = params.max_constraint_degree as usize + 1;
+
+    for test_round in 1..=n_lift.min(3) {
+        let n_round = n_lift.saturating_sub(test_round - 1);
+        let test_height = 1 << n_round;
+        let num_y = (test_height / 2) as u32;
+
+        if num_y == 0 || num_y > threshold {
+            continue;
+        }
+
+        debug!(test_round, num_y, %threshold, "testing monomial vs DAG equivalence");
+
+        // For this test, we need to interpolate columns first (like in sumcheck_polys_batch_eval)
+        let has_interactions = false;
+        let mut columns: Vec<*const EF> = Vec::new();
+        columns.push(eq_xis.get_ptr(n_round));
+        // Add selector columns
+        for col in 0..3 {
+            columns.push(
+                d_sels_folded
+                    .as_ptr()
+                    .wrapping_add(col * sel_height)
+            );
+        }
+        // Add main trace columns
+        for col in 0..mat_folded.width() {
+            columns.push(
+                mat_folded
+                    .buffer()
+                    .as_ptr()
+                    .wrapping_add(col * mat_folded.height()),
+            );
+        }
+
+        let interpolated = openvm_cuda_backend::base::DeviceMatrix::<EF>::with_capacity(
+            s_deg * num_y as usize,
+            columns.len(),
+        );
+        let d_columns = columns.to_device().unwrap();
+        unsafe {
+            interpolate_columns_gpu(interpolated.buffer(), &d_columns, s_deg, num_y as usize)
+                .expect("failed to interpolate columns");
+        }
+
+        let interpolated_height = interpolated.height();
+        // eq_xi_ptr should point to non-interpolated eq_xi (num_y elements)
+        // The kernel accesses eq_xi[y_int], not eq_xi[row]
+        let eq_xi_ptr = eq_xis.get_ptr(n_round);
+        let sels_ptr = interpolated.buffer().as_ptr().wrapping_add(interpolated_height);
+
+        let main_ptrs = vec![MainMatrixPtrs {
+            data: interpolated
+                .buffer()
+                .as_ptr()
+                .wrapping_add(4 * interpolated_height), // after eq_xi + 3 sels
+            air_width: mat_folded.width() as u32 / 2,
+        }];
+        let main_ptrs_dev = main_ptrs.to_device().unwrap();
+
+        // Build TraceCtx
+        let trace_ctx = TraceCtx {
+            trace_idx: 0,
+            air_idx: *air_idx,
+            n_lift,
+            num_y,
+            has_constraints: true,
+            has_interactions,
+            norm_factor: F::ONE,
+            eq_xi_ptr,
+            sels_ptr,
+            prep_ptr: MainMatrixPtrs {
+                data: std::ptr::null(),
+                air_width: 0,
+            },
+            main_ptrs_dev,
+            public_ptr: d_public_values.as_ptr(),
+            eq_3bs_ptr: std::ptr::null(),
+        };
+
+        // Run DAG-based evaluation
+        let dag_builder =
+            ZerocheckMleBatchBuilder::new(std::iter::once(&trace_ctx), &pk, s_deg as u32);
+        let dag_output = dag_builder.evaluate(&d_lambda_pows, s_deg as u32);
+        let dag_results: Vec<EF> = dag_output.to_host().expect("copy DAG output");
+
+        // Run monomial-based evaluation
+        let mono_batch = ZerocheckMonomialBatch::new(std::iter::once(&trace_ctx), &pk);
+        let mono_output = mono_batch.evaluate(&d_lambda_pows, s_deg as u32);
+        let mono_results: Vec<EF> = mono_output.to_host().expect("copy monomial output");
+
+        // Compare results
+        assert_eq!(
+            dag_results.len(),
+            mono_results.len(),
+            "Output lengths should match"
+        );
+        for (i, (dag_val, mono_val)) in dag_results.iter().zip(mono_results.iter()).enumerate() {
+            assert_eq!(
+                dag_val, mono_val,
+                "Mismatch at index {i} for num_y={num_y}: DAG={dag_val:?}, monomial={mono_val:?}"
+            );
+        }
+        debug!(
+            num_y,
+            num_results = dag_results.len(),
+            "monomial vs DAG equivalence verified"
+        );
+    }
+}
