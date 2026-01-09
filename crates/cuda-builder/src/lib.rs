@@ -10,6 +10,7 @@ pub struct CudaBuilder {
     library_name: String,
     cuda_arch: Vec<String>,
     cuda_opt_level: Option<String>,
+    lineinfo: bool,
     custom_flags: Vec<String>,
     link_libraries: Vec<String>,
     link_search_paths: Vec<String>,
@@ -32,6 +33,7 @@ impl Default for CudaBuilder {
             library_name: String::new(),
             cuda_arch: Vec::new(),
             cuda_opt_level: None,
+            lineinfo: false,
             custom_flags: vec![
                 "--std=c++17".to_string(),
                 "--expt-relaxed-constexpr".to_string(),
@@ -132,6 +134,12 @@ impl CudaBuilder {
         self
     }
 
+    /// Enable line info for profiling (NCU). Keeps other optimizations intact.
+    pub fn lineinfo(mut self, enabled: bool) -> Self {
+        self.lineinfo = enabled;
+        self
+    }
+
     /// Add custom compiler flag
     pub fn flag(mut self, flag: &str) -> Self {
         self.custom_flags.push(flag.to_string());
@@ -215,6 +223,11 @@ impl CudaBuilder {
                 .flag(format!("--ptxas-options=-O{}", cuda_opt_level));
         }
 
+        // Add line info for profiling (NCU) if enabled
+        if self.get_lineinfo() {
+            builder.flag("-lineinfo");
+        }
+
         // Add source files
         for file in &self.source_files {
             builder.file(file);
@@ -265,6 +278,7 @@ impl CudaBuilder {
         println!("cargo:rerun-if-env-changed=CUDA_ARCH");
         println!("cargo:rerun-if-env-changed=CUDA_OPT_LEVEL");
         println!("cargo:rerun-if-env-changed=CUDA_DEBUG");
+        println!("cargo:rerun-if-env-changed=CUDA_LINEINFO");
         println!("cargo:rerun-if-env-changed=NVCC_THREADS");
 
         // Watch specific paths
@@ -302,6 +316,10 @@ impl CudaBuilder {
         }
 
         env::var("CUDA_OPT_LEVEL").unwrap_or_else(|_| "3".to_string())
+    }
+
+    fn get_lineinfo(&self) -> bool {
+        self.lineinfo || env::var("CUDA_LINEINFO").map(|v| v == "1").unwrap_or(false)
     }
 
     fn handle_debug_shortcuts(&self, builder: &mut cc::Build) {
