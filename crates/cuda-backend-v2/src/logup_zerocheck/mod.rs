@@ -67,7 +67,9 @@ pub(crate) mod rules;
 use batch_mle::{
     TraceCtx, ZerocheckMleBatchBuilder, evaluate_logup_batched, evaluate_zerocheck_batched,
 };
-use batch_mle_monomial::{ZerocheckMonomialBatch, trace_has_monomials};
+use batch_mle_monomial::{
+    ZerocheckMonomialBatch, compute_lambda_combinations, trace_has_monomials,
+};
 pub use errors::*;
 use fractional::fractional_sumcheck_gpu;
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
@@ -380,6 +382,8 @@ pub struct LogupZerocheckGpu<'a> {
     // Available after GKR:
     pub xi: Vec<EF>,
     pub lambda_pows: Option<DeviceBuffer<EF>>,
+    /// Precomputed lambda combinations per AIR (indexed by air_idx). Set when lambda is sampled.
+    lambda_combinations: Vec<Option<DeviceBuffer<EF>>>,
 
     // n_T => segment tree of eq(xi[j..1+n_T]) for j=1..={n_T-round+1} in _reverse_ layout
     eq_xis: FxHashMap<usize, EqEvalLayers<EF>>,
@@ -413,6 +417,7 @@ pub struct LogupZerocheckGpu<'a> {
 }
 
 impl<'a> LogupZerocheckGpu<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         pk: &'a DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
         ctx: &ProvingContextV2<GpuBackendV2>,
@@ -486,6 +491,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             max_num_constraints,
             xi: vec![],
             lambda_pows: None,
+            lambda_combinations: (0..pk.per_air.len()).map(|_| None).collect(),
             eq_xis: FxHashMap::default(),
             eq_3b_per_trace: vec![],
             d_eq_3b_per_trace: vec![],
@@ -547,6 +553,14 @@ impl<'a> LogupZerocheckGpu<'a> {
         } else {
             DeviceBuffer::new()
         });
+        // Precompute lambda combinations for all AIRs with monomials
+        let lambda_pows_ref = self.lambda_pows.as_ref().unwrap();
+        for (air_idx, air_pk) in self.pk.per_air.iter().enumerate() {
+            if air_pk.other_data.zerocheck_monomials.is_some() {
+                self.lambda_combinations[air_idx] =
+                    Some(compute_lambda_combinations(self.pk, air_idx, lambda_pows_ref).unwrap());
+            }
+        }
         let global_sp_0_deg = sumcheck_round0_deg(l_skip, self.constraint_degree);
         let num_present_airs = ctx.per_trace.len();
         debug_assert_eq!(num_present_airs, self.n_per_trace.len());
@@ -1390,8 +1404,16 @@ impl<'a> LogupZerocheckGpu<'a> {
             .filter(|t| trace_has_monomials(t, self.pk))
             .collect();
         if !late_mono_traces.is_empty() {
-            let batch = ZerocheckMonomialBatch::new(late_mono_traces.iter().copied(), self.pk);
-            let out = batch.evaluate(lambda_pows, 1);
+            let lambda_combs: Vec<_> = late_mono_traces
+                .iter()
+                .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
+                .collect();
+            let batch = ZerocheckMonomialBatch::new(
+                late_mono_traces.iter().copied(),
+                self.pk,
+                &lambda_combs,
+            );
+            let out = batch.evaluate(1);
             let host = out.to_host().expect("copy monomial output");
             for (i, trace_idx) in batch.trace_indices().enumerate() {
                 self.zerocheck_tilde_evals[trace_idx] = host[i];
@@ -1452,8 +1474,16 @@ impl<'a> LogupZerocheckGpu<'a> {
                 .copied()
                 .collect();
             if !low_mono_traces.is_empty() {
-                let batch = ZerocheckMonomialBatch::new(low_mono_traces.into_iter(), self.pk);
-                let out = batch.evaluate(lambda_pows, sp_deg as u32);
+                let lambda_combs: Vec<_> = low_mono_traces
+                    .iter()
+                    .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
+                    .collect();
+                let batch = ZerocheckMonomialBatch::new(
+                    low_mono_traces.into_iter(),
+                    self.pk,
+                    &lambda_combs,
+                );
+                let out = batch.evaluate(sp_deg as u32);
                 let host = out.to_host().expect("copy monomial output");
                 for (i, trace_idx) in batch.trace_indices().enumerate() {
                     zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
