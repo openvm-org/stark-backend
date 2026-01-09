@@ -598,8 +598,7 @@ fn test_monomial_vs_dag_equivalence() {
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
     use p3_util::log2_strict_usize;
     use stark_backend_v2::{
-        poly_common::eval_eq_uni_at_one,
-        test_utils::prove_up_to_batch_constraints,
+        poly_common::eval_eq_uni_at_one, test_utils::prove_up_to_batch_constraints,
     };
 
     use crate::{
@@ -607,7 +606,7 @@ fn test_monomial_vs_dag_equivalence() {
         cuda::logup_zerocheck::{MainMatrixPtrs, fold_selectors_round0, interpolate_columns_gpu},
         logup_zerocheck::{
             batch_mle::{TraceCtx, ZerocheckMleBatchBuilder},
-            batch_mle_monomial::ZerocheckMonomialBatch,
+            batch_mle_monomial::{ZerocheckMonomialBatch, compute_lambda_combinations},
             fold_ple::fold_ple_evals_rotate,
         },
         poly::EqEvalSegments,
@@ -661,7 +660,7 @@ fn test_monomial_vs_dag_equivalence() {
     while xi.len() < xi_len {
         xi.push(prover_sponge.sample_ext());
     }
-    assert!(xi.len() >= l_skip + 1, "xi vector must have enough elements");
+    assert!(xi.len() > l_skip, "xi vector must have enough elements");
 
     // Setup omega skip powers
     let omega_skip = F::two_adic_generator(l_skip);
@@ -697,7 +696,8 @@ fn test_monomial_vs_dag_equivalence() {
     let omega = F::two_adic_generator(l);
     let is_first = eval_eq_uni_at_one(l, r_fold);
     let is_last = eval_eq_uni_at_one(l, r_fold * omega);
-    let d_sels_folded = openvm_cuda_common::d_buffer::DeviceBuffer::<EF>::with_capacity(sel_height * 3);
+    let d_sels_folded =
+        openvm_cuda_common::d_buffer::DeviceBuffer::<EF>::with_capacity(sel_height * 3);
     unsafe {
         fold_selectors_round0(
             d_sels_folded.as_mut_ptr(),
@@ -779,11 +779,7 @@ fn test_monomial_vs_dag_equivalence() {
         columns.push(eq_xis.get_ptr(n_round));
         // Add selector columns
         for col in 0..3 {
-            columns.push(
-                d_sels_folded
-                    .as_ptr()
-                    .wrapping_add(col * sel_height)
-            );
+            columns.push(d_sels_folded.as_ptr().wrapping_add(col * sel_height));
         }
         // Add main trace columns
         for col in 0..mat_folded.width() {
@@ -809,9 +805,12 @@ fn test_monomial_vs_dag_equivalence() {
         // eq_xi_ptr should point to non-interpolated eq_xi (num_y elements)
         // The kernel accesses eq_xi[y_int], not eq_xi[row]
         let eq_xi_ptr = eq_xis.get_ptr(n_round);
-        let sels_ptr = interpolated.buffer().as_ptr().wrapping_add(interpolated_height);
+        let sels_ptr = interpolated
+            .buffer()
+            .as_ptr()
+            .wrapping_add(interpolated_height);
 
-        let main_ptrs = vec![MainMatrixPtrs {
+        let main_ptrs = [MainMatrixPtrs {
             data: interpolated
                 .buffer()
                 .as_ptr()
@@ -847,8 +846,10 @@ fn test_monomial_vs_dag_equivalence() {
         let dag_results: Vec<EF> = dag_output.to_host().expect("copy DAG output");
 
         // Run monomial-based evaluation
-        let mono_batch = ZerocheckMonomialBatch::new(std::iter::once(&trace_ctx), &pk);
-        let mono_output = mono_batch.evaluate(&d_lambda_pows, s_deg as u32);
+        let lambda_comb = compute_lambda_combinations(&pk, 0, &d_lambda_pows).unwrap();
+        let mono_batch =
+            ZerocheckMonomialBatch::new(std::iter::once(&trace_ctx), &pk, &[&lambda_comb]);
+        let mono_output = mono_batch.evaluate(s_deg as u32);
         let mono_results: Vec<EF> = mono_output.to_host().expect("copy monomial output");
 
         // Compare results

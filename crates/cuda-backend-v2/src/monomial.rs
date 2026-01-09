@@ -3,13 +3,14 @@
 //! This module expands symbolic constraint DAGs into monomials for efficient
 //! GPU evaluation via the monomial kernel.
 
+use std::sync::Arc;
+
 use openvm_stark_backend::air_builders::symbolic::{
     SymbolicExpressionDag, SymbolicExpressionNode,
     symbolic_variable::{Entry, SymbolicVariable},
 };
 use p3_field::Field;
 use rustc_hash::FxHashMap;
-use std::sync::Arc;
 
 /// Packed variable following the CUDA monomial layout.
 #[repr(C)]
@@ -126,14 +127,10 @@ impl<F: Field> ExpandedMonomials<F> {
                 num_lambdas: lambda_terms.len() as u16,
             });
             all_vars.extend(vars);
-            all_lambda_terms.extend(
-                lambda_terms
-                    .into_iter()
-                    .map(|(idx, coeff)| LambdaTerm {
-                        constraint_idx: idx,
-                        coefficient: coeff,
-                    }),
-            );
+            all_lambda_terms.extend(lambda_terms.into_iter().map(|(idx, coeff)| LambdaTerm {
+                constraint_idx: idx,
+                coefficient: coeff,
+            }));
         }
 
         Self {
