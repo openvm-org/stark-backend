@@ -1,8 +1,10 @@
-use crate::monomial::{LambdaTerm, MonomialHeader, PackedVar};
 use p3_field::{Field, FieldAlgebra};
 
 use super::*;
-use crate::poly::SqrtHyperBuffer;
+use crate::{
+    monomial::{LambdaTerm, MonomialHeader, PackedVar},
+    poly::SqrtHyperBuffer,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -27,7 +29,7 @@ pub struct BlockCtx {
 pub struct MonomialAirCtx {
     pub d_headers: *const MonomialHeader,
     pub d_variables: *const PackedVar,
-    pub d_lambda_terms: *const LambdaTerm<F>,
+    pub d_lambda_combinations: *const EF, // Precomputed per-monomial
     pub num_monomials: u32,
     pub eval_ctx: EvalCoreCtx,
     pub d_eq_xi: *const EF,
@@ -346,11 +348,18 @@ extern "C" {
         block_ctxs: *const BlockCtx,
         air_ctxs: *const MonomialAirCtx,
         air_block_offsets: *const u32,
-        lambda_pows: *const EF,
         num_blocks: u32,
         num_x: u32,
         num_airs: u32,
         threads_per_block: u32,
+    ) -> i32;
+
+    fn _precompute_lambda_combinations(
+        out: *mut EF,
+        headers: *const MonomialHeader,
+        lambda_terms: *const LambdaTerm<F>,
+        lambda_pows: *const EF,
+        num_monomials: u32,
     ) -> i32;
 }
 
@@ -754,7 +763,6 @@ pub unsafe fn zerocheck_monomial_batched(
     block_ctxs: &DeviceBuffer<BlockCtx>,
     air_ctxs: &DeviceBuffer<MonomialAirCtx>,
     air_block_offsets: &DeviceBuffer<u32>,
-    lambda_pows: &DeviceBuffer<EF>,
     num_blocks: u32,
     num_x: u32,
     num_airs: u32,
@@ -766,11 +774,26 @@ pub unsafe fn zerocheck_monomial_batched(
         block_ctxs.as_ptr(),
         air_ctxs.as_ptr(),
         air_block_offsets.as_ptr(),
-        lambda_pows.as_ptr(),
         num_blocks,
         num_x,
         num_airs,
         threads_per_block,
+    ))
+}
+
+pub unsafe fn precompute_lambda_combinations(
+    out: &mut DeviceBuffer<EF>,
+    headers: *const MonomialHeader,
+    lambda_terms: *const LambdaTerm<F>,
+    lambda_pows: &DeviceBuffer<EF>,
+    num_monomials: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_precompute_lambda_combinations(
+        out.as_mut_ptr(),
+        headers,
+        lambda_terms,
+        lambda_pows.as_ptr(),
+        num_monomials,
     ))
 }
 

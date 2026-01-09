@@ -3,14 +3,15 @@
 //! This module provides a batch evaluator for monomial evaluations across multiple AIRs,
 //! enabling efficient GPU kernel launches that process multiple traces in a single launch.
 
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
 use stark_backend_v2::prover::DeviceMultiStarkProvingKeyV2;
 use tracing::debug;
 
 use crate::{
     EF, GpuBackendV2,
     cuda::logup_zerocheck::{
-        BlockCtx, EvalCoreCtx, MonomialAirCtx, zerocheck_monomial_batched,
+        BlockCtx, EvalCoreCtx, MonomialAirCtx, precompute_lambda_combinations,
+        zerocheck_monomial_batched,
     },
     logup_zerocheck::batch_mle::TraceCtx,
 };
@@ -33,6 +34,35 @@ pub(crate) fn trace_has_monomials(
             .unwrap_or(false)
 }
 
+/// Precompute lambda combinations for a single AIR's monomials.
+///
+/// Returns a buffer of length `num_monomials` where each element is
+/// `sum_l(coefficient_l * lambda_pows[constraint_idx_l])` for that monomial.
+///
+/// The AIR must have nonempty monomials.
+pub(crate) fn compute_lambda_combinations(
+    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    air_idx: usize,
+    lambda_pows: &DeviceBuffer<EF>,
+) -> Result<DeviceBuffer<EF>, CudaError> {
+    let monomials = pk.per_air[air_idx]
+        .other_data
+        .zerocheck_monomials
+        .as_ref()
+        .expect("AIR must have monomials");
+    let mut buf = DeviceBuffer::<EF>::with_capacity(monomials.num_monomials as usize);
+    unsafe {
+        precompute_lambda_combinations(
+            &mut buf,
+            monomials.d_headers.as_ptr(),
+            monomials.d_lambda_terms.as_ptr(),
+            lambda_pows,
+            monomials.num_monomials,
+        )?;
+    }
+    Ok(buf)
+}
+
 /// Batch evaluator for monomial-based zerocheck MLE evaluation.
 ///
 /// Pre-builds GPU contexts for all traces, then evaluates in a single kernel launch.
@@ -52,15 +82,27 @@ pub(crate) struct ZerocheckMonomialBatch<'a> {
 impl<'a> ZerocheckMonomialBatch<'a> {
     /// Creates a new batch from an iterator of traces.
     ///
+    /// `lambda_combinations` must contain one buffer per trace (in iteration order),
+    /// each precomputed via [`compute_lambda_combinations`].
+    ///
     /// # Panics
     ///
-    /// Panics if `traces` is empty. Caller must filter with [`trace_has_monomials`] first.
+    /// Panics if `traces` is empty or if `lambda_combinations` length doesn't match.
     pub fn new(
         traces: impl Iterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        lambda_combinations: &[&DeviceBuffer<EF>],
     ) -> Self {
         let traces: Vec<_> = traces.collect();
-        assert!(!traces.is_empty(), "ZerocheckMonomialBatch requires at least one trace");
+        assert!(
+            !traces.is_empty(),
+            "ZerocheckMonomialBatch requires at least one trace"
+        );
+        assert_eq!(
+            traces.len(),
+            lambda_combinations.len(),
+            "lambda_combinations must have one buffer per trace"
+        );
 
         let threads_per_block = THREADS_PER_BLOCK;
 
@@ -90,10 +132,10 @@ impl<'a> ZerocheckMonomialBatch<'a> {
         }
 
         // Build MonomialAirCtx for each trace
-        // The TraceCtx references guarantee the underlying device buffers remain valid
         let air_ctxs_h: Vec<MonomialAirCtx> = traces
             .iter()
-            .map(|t| {
+            .zip(lambda_combinations)
+            .map(|(t, lc)| {
                 let monomials = pk.per_air[t.air_idx]
                     .other_data
                     .zerocheck_monomials
@@ -110,7 +152,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 MonomialAirCtx {
                     d_headers: monomials.d_headers.as_ptr(),
                     d_variables: monomials.d_variables.as_ptr(),
-                    d_lambda_terms: monomials.d_lambda_terms.as_ptr(),
+                    d_lambda_combinations: lc.as_ptr(),
                     num_monomials: monomials.num_monomials,
                     eval_ctx,
                     d_eq_xi: t.eq_xi_ptr,
@@ -153,7 +195,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
     ///
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
-    pub fn evaluate(&self, lambda_pows: &DeviceBuffer<EF>, num_x: u32) -> DeviceBuffer<EF> {
+    pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<EF> {
         let num_blocks = self.block_ctxs.len();
         let num_airs = self.air_ctxs.len();
 
@@ -173,8 +215,8 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             "air_offsets must have num_airs + 1 elements"
         );
         // SAFETY: All device pointers in block_ctxs and air_ctxs were constructed from
-        // valid DeviceBuffers that outlive this call (TraceCtx references, pk monomial data).
-        // The air_offsets buffer has length num_airs + 1 as required by the kernel.
+        // valid DeviceBuffers that outlive this call (TraceCtx references, pk monomial data,
+        // lambda_combinations). The air_offsets buffer has length num_airs + 1 as required.
         unsafe {
             zerocheck_monomial_batched(
                 &mut tmp_sums,
@@ -182,7 +224,6 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 &self.block_ctxs,
                 &self.air_ctxs,
                 &self.air_offsets,
-                lambda_pows,
                 num_blocks as u32,
                 num_x,
                 num_airs as u32,
