@@ -354,6 +354,19 @@ extern "C" {
         threads_per_block: u32,
     ) -> i32;
 
+    fn _zerocheck_monomial_par_y_batched(
+        tmp_sums: *mut EF,
+        output: *mut EF,
+        block_ctxs: *const BlockCtx,
+        air_ctxs: *const MonomialAirCtx,
+        air_block_offsets: *const u32,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        chunk_size: u32,
+        threads_per_block: u32,
+    ) -> i32;
+
     fn _precompute_lambda_combinations(
         out: *mut EF,
         headers: *const MonomialHeader,
@@ -777,6 +790,33 @@ pub unsafe fn zerocheck_monomial_batched(
         num_blocks,
         num_x,
         num_airs,
+        threads_per_block,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn zerocheck_monomial_par_y_batched(
+    tmp_sums: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    air_ctxs: &DeviceBuffer<MonomialAirCtx>,
+    air_block_offsets: &DeviceBuffer<u32>,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+    chunk_size: u32,
+    threads_per_block: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_zerocheck_monomial_par_y_batched(
+        tmp_sums.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        air_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        num_blocks,
+        num_x,
+        num_airs,
+        chunk_size,
         threads_per_block,
     ))
 }
