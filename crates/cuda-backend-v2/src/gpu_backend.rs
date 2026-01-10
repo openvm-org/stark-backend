@@ -97,6 +97,7 @@ impl MultiRapProver<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
             ctx,
             save_memory,
             monomial_num_y_threshold,
+            self.sm_count,
         );
         mem.emit_metrics();
         ((gkr_proof, batch_constraint_proof), r)
