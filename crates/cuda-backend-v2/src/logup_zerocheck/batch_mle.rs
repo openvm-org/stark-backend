@@ -97,6 +97,9 @@ pub(crate) struct TraceCtx {
     pub eq_3bs_ptr: *const EF,
 }
 
+// NOTE[jpw]: we do not expect to use this since most of the time zerocheck will use monomial_par_y.
+// We use DAG evaluation primarily for Poseidon2Air. Consider deleting either the non-batch or batch
+// dag version to reduce code duplication.
 /// Builder for batched zerocheck MLE evaluation.
 ///
 /// Collects traces and pre-builds all GPU contexts, then evaluates in a single kernel launch.
@@ -394,94 +397,20 @@ impl<'a> LogupMleBatchBuilder<'a> {
 }
 
 // ============================================================================
-// Single-trace evaluation helpers (fallback for oversized traces)
-// ============================================================================
-
-/// Evaluate zerocheck for a single trace using non-batch kernel.
-#[allow(clippy::too_many_arguments)]
-fn evaluate_single_zerocheck(
-    t: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-    lambda_pows: &DeviceBuffer<EF>,
-    num_x: u32,
-    zc_out: &mut Vec<EF>,
-    zc_tilde_eval: &mut EF,
-) {
-    let air_pk = &pk.per_air[t.air_idx];
-    let out = evaluate_mle_constraints_gpu(
-        t.eq_xi_ptr,
-        t.sels_ptr,
-        t.prep_ptr,
-        &t.main_ptrs_dev,
-        t.public_ptr,
-        lambda_pows,
-        &air_pk.other_data.zerocheck_mle,
-        t.num_y,
-        num_x,
-    );
-    let host = out.to_host().expect("copy zc output");
-
-    if num_x == 1 {
-        *zc_tilde_eval = host[0];
-        // zc_out not set, will be handled directly from tilde eval in compute_batch_s
-    } else {
-        *zc_out = host;
-    }
-}
-
-/// Evaluate logup for a single trace using non-batch kernel.
-#[allow(clippy::too_many_arguments)]
-fn evaluate_single_logup(
-    t: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-    d_challenges_ptr: *const EF,
-    num_x: u32,
-    logup_out: &mut [Vec<EF>; 2],
-    logup_tilde_eval: &mut [EF; 2],
-) {
-    let air_pk = &pk.per_air[t.air_idx];
-    let out = evaluate_mle_interactions_gpu(
-        t.eq_xi_ptr,
-        t.sels_ptr,
-        t.prep_ptr,
-        &t.main_ptrs_dev,
-        t.public_ptr,
-        d_challenges_ptr,
-        t.eq_3bs_ptr,
-        &air_pk.other_data.interaction_rules,
-        t.num_y,
-        num_x,
-    );
-    let fracs = out.to_host().expect("copy logup output");
-
-    if num_x == 1 {
-        logup_tilde_eval[0] = fracs[0].p * t.norm_factor;
-        logup_tilde_eval[1] = fracs[0].q;
-        // logup_out not set, will be handled directly from tilde eval in compute_batch_s
-    } else {
-        let numer: Vec<EF> = fracs.iter().map(|f| f.p * t.norm_factor).collect();
-        let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
-        *logup_out = [numer, denom];
-    }
-}
-
-// ============================================================================
 // Memory-aware batched evaluation
 // ============================================================================
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_zerocheck_batched(
-    traces: &[TraceCtx],
+pub(crate) fn evaluate_zerocheck_batched<'a>(
+    traces: impl IntoIterator<Item = &'a TraceCtx>,
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     lambda_pows: &DeviceBuffer<EF>,
     num_x: u32,
     zc_out: &mut [Vec<EF>],
-    zc_tilde_evals: &mut [EF],
     memory_limit_bytes: usize,
 ) {
     // Collect traces with constraints and their buffer sizes
     let mut zc_traces_with_size: Vec<(&TraceCtx, usize)> = traces
-        .iter()
+        .into_iter()
         .filter(|t| t.has_constraints)
         .map(|t| {
             let buffer_size = pk.per_air[t.air_idx]
@@ -514,23 +443,31 @@ pub(crate) fn evaluate_zerocheck_batched(
             .map(|(t, _)| *t)
             .collect();
 
-        if batch.len() == 1 && batch_memory > memory_limit_bytes {
-            // Single oversized trace: use non-batch kernel
+        if batch.len() == 1 {
+            // Single trace: use non-batch kernel
             let t = batch[0];
-            tracing::warn!(
-                air_idx = t.air_idx,
-                intermediate_buffer_bytes = batch_memory,
-                memory_limit_bytes,
-                "zerocheck: trace exceeds memory limit, using non-batch kernel"
-            );
-            evaluate_single_zerocheck(
-                t,
-                pk,
+            if batch_memory > memory_limit_bytes {
+                tracing::warn!(
+                    air_idx = t.air_idx,
+                    intermediate_buffer_bytes = batch_memory,
+                    memory_limit_bytes,
+                    "zerocheck: trace exceeds memory limit, using non-batch kernel"
+                );
+            }
+            let rules = &pk.per_air[t.air_idx].other_data.zerocheck_mle;
+            let out = evaluate_mle_constraints_gpu(
+                t.eq_xi_ptr,
+                t.sels_ptr,
+                t.prep_ptr,
+                &t.main_ptrs_dev,
+                t.public_ptr,
                 lambda_pows,
+                rules,
+                t.num_y,
                 num_x,
-                &mut zc_out[t.trace_idx],
-                &mut zc_tilde_evals[t.trace_idx],
             );
+            let out_host = out.to_host().expect("copy zc output");
+            zc_out[t.trace_idx].copy_from_slice(&out_host);
         } else {
             // Normal batch using ZerocheckMleBatchBuilder
             tracing::debug!(
@@ -545,18 +482,13 @@ pub(crate) fn evaluate_zerocheck_batched(
 
             for (i, trace_idx) in builder.trace_indices().enumerate() {
                 let evals = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
-                if num_x == 1 {
-                    zc_tilde_evals[trace_idx] = evals[0];
-                } else {
-                    zc_out[trace_idx].copy_from_slice(evals);
-                }
+                zc_out[trace_idx].copy_from_slice(evals);
             }
         }
         batch_start += batch_count;
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_logup_batched(
     traces: &[TraceCtx],
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
@@ -647,11 +579,45 @@ pub(crate) fn evaluate_logup_batched(
     }
 }
 
+/// Evaluate logup for a single trace using non-batch kernel.
+fn evaluate_single_logup(
+    t: &TraceCtx,
+    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    d_challenges_ptr: *const EF,
+    num_x: u32,
+    logup_out: &mut [Vec<EF>; 2],
+    logup_tilde_eval: &mut [EF; 2],
+) {
+    let air_pk = &pk.per_air[t.air_idx];
+    let out = evaluate_mle_interactions_gpu(
+        t.eq_xi_ptr,
+        t.sels_ptr,
+        t.prep_ptr,
+        &t.main_ptrs_dev,
+        t.public_ptr,
+        d_challenges_ptr,
+        t.eq_3bs_ptr,
+        &air_pk.other_data.interaction_rules,
+        t.num_y,
+        num_x,
+    );
+    let fracs = out.to_host().expect("copy logup output");
+
+    if num_x == 1 {
+        logup_tilde_eval[0] = fracs[0].p * t.norm_factor;
+        logup_tilde_eval[1] = fracs[0].q;
+        // logup_out not set, will be handled directly from tilde eval in compute_batch_s
+    } else {
+        let numer: Vec<EF> = fracs.iter().map(|f| f.p * t.norm_factor).collect();
+        let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
+        *logup_out = [numer, denom];
+    }
+}
+
 // ============================================================================
-// Batch wrapper functions (moved from mle_round.rs)
+// FFI wrappers
 // ============================================================================
 
-#[allow(clippy::too_many_arguments)]
 fn evaluate_mle_constraints_gpu_batch(
     block_ctxs: &DeviceBuffer<BlockCtx>,
     zc_ctxs: &DeviceBuffer<ZerocheckCtx>,
@@ -692,7 +658,6 @@ fn evaluate_mle_constraints_gpu_batch(
     output
 }
 
-#[allow(clippy::too_many_arguments)]
 fn evaluate_mle_interactions_gpu_batch(
     block_ctxs: &DeviceBuffer<BlockCtx>,
     logup_ctxs: &DeviceBuffer<LogupCtx>,
