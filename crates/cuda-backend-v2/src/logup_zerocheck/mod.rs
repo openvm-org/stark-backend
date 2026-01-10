@@ -44,8 +44,8 @@ use crate::{
     },
     gpu_backend::transport_matrix_d2h_col_major,
     logup_zerocheck::{
-        fold_ple::fold_ple_evals_rotate, gkr_input::TraceInteractionMeta,
-        round0::evaluate_round0_interactions_gpu,
+        batch_mle::evaluate_zerocheck_batched, fold_ple::fold_ple_evals_rotate,
+        gkr_input::TraceInteractionMeta, round0::evaluate_round0_interactions_gpu,
     },
     poly::EqEvalLayers,
     sponge::DuplexSpongeGpu,
@@ -64,17 +64,21 @@ mod mle_round;
 mod round0;
 pub(crate) mod rules;
 
-use batch_mle::{
-    TraceCtx, ZerocheckMleBatchBuilder, evaluate_logup_batched, evaluate_zerocheck_batched,
-};
+use batch_mle::{TraceCtx, evaluate_logup_batched};
 use batch_mle_monomial::{
-    ZerocheckMonomialBatch, compute_lambda_combinations, trace_has_monomials,
+    ZerocheckMonomialBatch, ZerocheckMonomialParYBatch, compute_lambda_combinations,
+    get_num_monomials, get_zerocheck_rules_len, trace_has_monomials,
 };
 pub use errors::*;
 use fractional::fractional_sumcheck_gpu;
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
-use mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu};
 use round0::evaluate_round0_constraints_gpu;
+
+/// When `num_monomials >= DAG_FALLBACK_MONOMIAL_RATIO * rules_len`, use DAG evaluation
+/// instead of the monomial kernel for high num_y traces.
+/// This ratio can be tuned. Currently it is set to prefer the monomial kernel except for the
+/// Poseidon2Air where the DAG node size is much smaller than number of monomials.
+const DAG_FALLBACK_MONOMIAL_RATIO: usize = 2;
 
 #[instrument(level = "info", skip_all)]
 pub fn prove_zerocheck_and_logup_gpu(
@@ -83,6 +87,7 @@ pub fn prove_zerocheck_and_logup_gpu(
     ctx: &ProvingContextV2<GpuBackendV2>,
     save_memory: bool,
     monomial_num_y_threshold: u32,
+    sm_count: u32,
 ) -> (GkrProof, BatchConstraintProof, Vec<EF>) {
     let logup_gkr_span = info_span!("prover.rap_constraints.logup_gkr", phase = "prover").entered();
     let l_skip = mpk.params.l_skip;
@@ -130,6 +135,7 @@ pub fn prove_zerocheck_and_logup_gpu(
         beta_logup,
         save_memory,
         monomial_num_y_threshold,
+        sm_count,
     );
     let n_global = prover.n_global;
 
@@ -302,11 +308,7 @@ pub fn prove_zerocheck_and_logup_gpu(
         info_span!("prover.rap_constraints.mle_rounds", phase = "prover").entered();
     debug!(%s_deg);
     for round in 1..=n_max {
-        let sp_round_evals = if round > 1 {
-            prover.sumcheck_polys_batch_eval(round, r[round - 1])
-        } else {
-            prover.sumcheck_polys_eval(round, r[round - 1])
-        };
+        let sp_round_evals = prover.sumcheck_polys_batch_eval(round, r[round - 1]);
         let batch_s = prover.compute_batch_s_poly(sp_round_evals, num_traces, round, &mu_pows);
         let batch_s_evals = (1..=s_deg)
             .map(|i| batch_s.eval_at_point(EF::from_canonical_usize(i)))
@@ -379,6 +381,7 @@ pub struct LogupZerocheckGpu<'a> {
     n_per_trace: Vec<isize>,
     max_num_constraints: usize,
     pub monomial_num_y_threshold: u32,
+    sm_count: u32,
     // Available after GKR:
     pub xi: Vec<EF>,
     pub lambda_pows: Option<DeviceBuffer<EF>>,
@@ -427,6 +430,7 @@ impl<'a> LogupZerocheckGpu<'a> {
         beta_logup: EF,
         save_memory: bool,
         monomial_num_y_threshold: u32,
+        sm_count: u32,
     ) -> Self {
         let mem = MemTracker::start("prover.logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
@@ -489,6 +493,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             constraint_degree,
             n_per_trace,
             max_num_constraints,
+            sm_count,
             xi: vec![],
             lambda_pows: None,
             lambda_combinations: (0..pk.per_air.len()).map(|_| None).collect(),
@@ -931,269 +936,6 @@ impl<'a> LogupZerocheckGpu<'a> {
     }
 
     #[instrument(
-        name = "LogupZerocheck::sumcheck_polys_eval",
-        level = "debug",
-        skip_all,
-        fields(round = round)
-    )]
-    fn sumcheck_polys_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
-        // sp = s'
-        let sp_deg = self.constraint_degree;
-        let lambda_pows = self.lambda_pows.as_ref().expect("lambda_pows must be set");
-
-        let mut s_logup_evals = Vec::new();
-        let mut s_zerocheck_evals = Vec::new();
-        // Process zerocheck and logup together per trace
-        izip!(
-            self.n_per_trace.iter(),
-            self.zerocheck_tilde_evals.iter_mut(),
-            self.logup_tilde_evals.iter_mut(),
-            self.mat_evals_per_trace.iter(),
-            self.sels_per_trace.iter(),
-            self.d_eq_3b_per_trace.iter(),
-            self.public_values_per_trace.iter(),
-            self.air_indices_per_trace.iter()
-        )
-        .for_each(
-            |(&n, zc_tilde_eval, logup_tilde_eval, mats, sels, eq_3bs, public_vals, &air_idx)| {
-                let mut results = vec![vec![EF::ZERO; sp_deg]; 3]; // logup numer, logup denom, zerocheck
-
-                let pk = &self.pk.per_air[air_idx];
-                let dag = &pk.vk.symbolic_constraints;
-                let has_constraints = dag.constraints.num_constraints() > 0;
-                let has_interactions = !dag.interactions.is_empty();
-
-                if has_interactions || has_constraints {
-                    let n_lift = n.max(0) as usize;
-                    let norm_factor_denom = 1 << (-n).max(0);
-                    let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
-                    let has_preprocessed = self.pk.per_air[air_idx].preprocessed_data.is_some();
-                    let eq_xi_tree = &self.eq_xis[&n_lift];
-
-                    if round > n_lift {
-                        // Case A.1 round == n_lift + 1
-                        if round == n_lift + 1 {
-                            let prep_ptr = if has_preprocessed {
-                                MainMatrixPtrs {
-                                    data: mats[0].buffer().as_ptr(),
-                                    air_width: mats[0].width() as u32 / 2,
-                                }
-                            } else {
-                                MainMatrixPtrs {
-                                    data: std::ptr::null(),
-                                    air_width: 0,
-                                }
-                            };
-                            let first_main_idx = usize::from(has_preprocessed);
-                            let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
-                                .iter()
-                                .map(|m| MainMatrixPtrs {
-                                    data: m.buffer().as_ptr(),
-                                    air_width: m.width() as u32 / 2,
-                                })
-                                .collect_vec();
-                            let d_main_ptrs = main_ptrs
-                                .to_device()
-                                .expect("failed to copy main_ptrs to device");
-                            let d_zc_evals = if has_constraints {
-                                evaluate_mle_constraints_gpu(
-                                    eq_xi_tree.get_ptr(0),
-                                    sels.buffer().as_ptr(),
-                                    prep_ptr,
-                                    &d_main_ptrs,
-                                    public_vals.as_ptr(),
-                                    lambda_pows,
-                                    &pk.other_data.zerocheck_mle,
-                                    1,
-                                    1,
-                                )
-                            } else {
-                                DeviceBuffer::new()
-                            };
-                            let d_interactions_evals = if has_interactions {
-                                Some(evaluate_mle_interactions_gpu(
-                                    eq_xi_tree.get_ptr(0),
-                                    sels.buffer().as_ptr(),
-                                    prep_ptr,
-                                    &d_main_ptrs,
-                                    public_vals.as_ptr(),
-                                    self.d_challenges.as_ptr(),
-                                    eq_3bs.as_ptr(),
-                                    &pk.other_data.interaction_rules,
-                                    1,
-                                    1,
-                                ))
-                            } else {
-                                None
-                            };
-                            if !d_zc_evals.is_empty() {
-                                let zc_evals = d_zc_evals
-                                    .to_host()
-                                    .expect("failed to copy reduction result to host");
-                                assert_eq!(zc_evals.len(), 1);
-                                // NOTE: eq_r_acc will be multiplied in after the function call
-                                *zc_tilde_eval = zc_evals[0];
-                                // zc_out not set, will be handled directly from tilde eval in
-                                // compute_batch_s
-                            }
-                            if let Some(d_evals) = d_interactions_evals {
-                                let logup_evals =
-                                    d_evals.to_host().expect("failed to copy result to host");
-                                assert_eq!(logup_evals.len(), 1);
-                                logup_tilde_eval[0] = logup_evals[0].p * norm_factor;
-                                logup_tilde_eval[1] = logup_evals[0].q;
-                                // logup_out not set, will be handled directly from tilde eval in
-                                // compute_batch_s
-                            }
-                        } else {
-                            // Case A.2 round > n_lift + 1
-                            if has_constraints {
-                                *zc_tilde_eval *= r_prev;
-                            }
-                            if has_interactions {
-                                for x in logup_tilde_eval.iter_mut() {
-                                    *x *= r_prev;
-                                }
-                            }
-                        }
-                    } else {
-                        // Case B: round <= n_lift
-                        let log_num_y = n_lift - round;
-                        let num_y = 1 << log_num_y;
-                        let height = 2 * num_y;
-                        debug_assert_eq!(height, mats[0].height());
-                        let mut columns: Vec<*const EF> = Vec::new();
-                        columns.extend(
-                            iter::once(sels)
-                                .chain(mats.iter())
-                                .flat_map(|m| {
-                                    assert_eq!(m.height(), height);
-                                    (0..m.width()).map(|col| {
-                                        m.buffer().as_ptr().wrapping_add(col * m.height())
-                                    })
-                                })
-                                .collect_vec(),
-                        );
-                        let num_columns = columns.len();
-                        let interpolated =
-                            DeviceMatrix::<EF>::with_capacity(sp_deg * num_y, num_columns);
-                        let d_columns = columns
-                            .to_device()
-                            .expect("failed to copy column ptrs to device");
-                        unsafe {
-                            interpolate_columns_gpu(
-                                interpolated.buffer(),
-                                &d_columns,
-                                sp_deg,
-                                num_y,
-                            )
-                            .expect("failed to interpolate columns on GPU");
-                        }
-                        // interpolated columns layout:
-                        // [sels (x3), prep? (x1), main[i] (x1)]
-
-                        // EVALUATION:
-                        let interpolated_height = interpolated.height();
-                        let mut widths_so_far = 0;
-                        let eq_xi_ptr = eq_xi_tree.get_ptr(log_num_y);
-                        let sels_ptr = interpolated
-                            .buffer()
-                            .as_ptr()
-                            .wrapping_add(widths_so_far * interpolated_height);
-                        widths_so_far += 3;
-                        // Reminder: all widths include rotations
-                        let prep_ptr = if has_preprocessed {
-                            MainMatrixPtrs {
-                                data: interpolated
-                                    .buffer()
-                                    .as_ptr()
-                                    .wrapping_add(widths_so_far * interpolated_height),
-                                air_width: mats[0].width() as u32 / 2,
-                            }
-                        } else {
-                            MainMatrixPtrs {
-                                data: std::ptr::null(),
-                                air_width: 0,
-                            }
-                        };
-                        widths_so_far += 2 * prep_ptr.air_width as usize;
-                        let first_main_idx = usize::from(has_preprocessed);
-                        let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
-                            .iter()
-                            .map(|m| {
-                                let main_ptr = MainMatrixPtrs {
-                                    data: interpolated
-                                        .buffer()
-                                        .as_ptr()
-                                        .wrapping_add(widths_so_far * interpolated_height),
-                                    air_width: m.width() as u32 / 2,
-                                };
-                                widths_so_far += m.width();
-                                main_ptr
-                            })
-                            .collect_vec();
-                        debug_assert_eq!(widths_so_far, interpolated.width());
-                        let d_main_ptrs = main_ptrs
-                            .to_device()
-                            .expect("failed to copy main_ptrs to device");
-                        let d_constraints_eval = has_constraints.then(|| {
-                            evaluate_mle_constraints_gpu(
-                                eq_xi_ptr,
-                                sels_ptr,
-                                prep_ptr,
-                                &d_main_ptrs,
-                                public_vals.as_ptr(),
-                                lambda_pows,
-                                &pk.other_data.zerocheck_mle,
-                                num_y as u32,
-                                sp_deg as u32,
-                            )
-                        });
-                        let d_interactions_eval = has_interactions.then(|| {
-                            evaluate_mle_interactions_gpu(
-                                eq_xi_ptr,
-                                sels_ptr,
-                                prep_ptr,
-                                &d_main_ptrs,
-                                public_vals.as_ptr(),
-                                self.d_challenges.as_ptr(),
-                                eq_3bs.as_ptr(),
-                                &pk.other_data.interaction_rules,
-                                num_y as u32,
-                                sp_deg as u32,
-                            )
-                        });
-                        if let Some(evals) = d_constraints_eval {
-                            results[2] = evals
-                                .to_host()
-                                .expect("failed to copy reduction result to host");
-                        }
-                        if let Some(evals) = d_interactions_eval {
-                            let logup_evals =
-                                evals.to_host().expect("failed to copy result to host");
-                            let (numer_evals, denom_evals): (Vec<_>, Vec<_>) =
-                                logup_evals.into_iter().map(|f| (f.p, f.q)).unzip();
-
-                            // Apply normalization to numer only (same as CPU)
-                            let mut numer_normalized = numer_evals;
-                            for p in numer_normalized.iter_mut() {
-                                *p *= norm_factor;
-                            }
-                            results[0] = numer_normalized;
-                            results[1] = denom_evals;
-                        }
-                    }
-                }
-                s_logup_evals.push(results[0].clone());
-                s_logup_evals.push(results[1].clone());
-                s_zerocheck_evals.push(results[2].clone());
-            },
-        );
-
-        s_logup_evals.into_iter().chain(s_zerocheck_evals).collect()
-    }
-
-    #[instrument(
         name = "LogupZerocheck::sumcheck_polys_batch_eval",
         level = "info",
         skip_all,
@@ -1201,7 +943,6 @@ impl<'a> LogupZerocheckGpu<'a> {
     )]
     fn sumcheck_polys_batch_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
         let sp_deg = self.constraint_degree;
-        let lambda_pows = self.lambda_pows.as_ref().expect("lambda_pows must be set");
 
         // Per-trace outputs (filled as we go)
         let mut zc_out: Vec<Vec<EF>> = vec![vec![EF::ZERO; sp_deg]; self.n_per_trace.len()];
@@ -1421,77 +1162,83 @@ impl<'a> LogupZerocheckGpu<'a> {
             }
         }
 
+        // Logup via DAG for all early traces
+        evaluate_logup_batched(
+            &early_eval,
+            self.pk,
+            d_challenges_ptr,
+            sp_deg as u32,
+            &mut logup_out,
+            &mut self.logup_tilde_evals,
+            self.memory_limit_bytes,
+        );
+
         // Early traces (num_y>1): partition by threshold for zerocheck path
         let (low_early, high_early): (Vec<&TraceCtx>, Vec<&TraceCtx>) = early_eval
             .iter()
+            .filter(|t| t.has_constraints)
             .partition(|t| t.num_y <= self.monomial_num_y_threshold);
 
-        if low_early.is_empty() {
-            // All early traces have high num_y: zerocheck + logup together via DAG
+        // Partition high num_y traces by monomial-to-rules ratio
+        // (traces without monomials are skipped - they contribute zero)
+        let (high_dag_traces, high_mono_traces): (Vec<&TraceCtx>, Vec<&TraceCtx>) =
+            high_early.iter().partition(|t| {
+                let num_monomials = get_num_monomials(t, self.pk);
+                let rules_len = get_zerocheck_rules_len(t, self.pk);
+                // Use DAG when monomial expansion significantly increased the term count
+                num_monomials as usize >= DAG_FALLBACK_MONOMIAL_RATIO * rules_len
+            });
+
+        // DAG evaluation for high num_y traces with high monomial-to-rules ratio
+        if !high_dag_traces.is_empty() {
+            let lambda_pows = self.lambda_pows.as_ref().unwrap();
             evaluate_zerocheck_batched(
-                &early_eval,
+                high_dag_traces,
                 self.pk,
                 lambda_pows,
                 sp_deg as u32,
                 &mut zc_out,
-                &mut self.zerocheck_tilde_evals,
                 self.memory_limit_bytes,
             );
-            evaluate_logup_batched(
-                &early_eval,
-                self.pk,
-                d_challenges_ptr,
-                sp_deg as u32,
-                &mut logup_out,
-                &mut self.logup_tilde_evals,
-                self.memory_limit_bytes,
-            );
-        } else {
-            // Mixed: logup via DAG for all, zerocheck split by threshold
-            evaluate_logup_batched(
-                &early_eval,
-                self.pk,
-                d_challenges_ptr,
-                sp_deg as u32,
-                &mut logup_out,
-                &mut self.logup_tilde_evals,
-                self.memory_limit_bytes,
-            );
-            // DAG zerocheck for high num_y traces
-            let zc_builder =
-                ZerocheckMleBatchBuilder::new(high_early.iter().copied(), self.pk, sp_deg as u32);
-            if !zc_builder.is_empty() {
-                let out = zc_builder.evaluate(lambda_pows, sp_deg as u32);
-                let host = out.to_host().expect("copy zc output");
-                for (i, trace_idx) in zc_builder.trace_indices().enumerate() {
-                    zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
-                }
-            }
-            // Monomial zerocheck for low num_y traces
-            let low_mono_traces: Vec<_> = low_early
+        }
+
+        // Par-Y monomial kernel for high num_y traces
+        if !high_mono_traces.is_empty() {
+            let lambda_combs: Vec<_> = high_mono_traces
                 .iter()
-                .filter(|t| trace_has_monomials(t, self.pk))
-                .copied()
+                .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
                 .collect();
-            if !low_mono_traces.is_empty() {
-                let lambda_combs: Vec<_> = low_mono_traces
-                    .iter()
-                    .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
-                    .collect();
-                let batch = ZerocheckMonomialBatch::new(
-                    low_mono_traces.into_iter(),
-                    self.pk,
-                    &lambda_combs,
-                );
-                let out = batch.evaluate(sp_deg as u32);
-                let host = out.to_host().expect("copy monomial output");
-                for (i, trace_idx) in batch.trace_indices().enumerate() {
-                    zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
-                }
+            let batch = ZerocheckMonomialParYBatch::new(
+                high_mono_traces,
+                self.pk,
+                &lambda_combs,
+                self.sm_count,
+                sp_deg as u32,
+                None,
+            );
+            let out = batch.evaluate(sp_deg as u32);
+            let host = out.to_host().expect("copy par_y output");
+            for (i, trace_idx) in batch.trace_indices().enumerate() {
+                zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
             }
         }
 
-        // Emit final output in the same order as original
+        // Monomial zerocheck for low num_y traces
+        let low_mono_traces = low_early;
+        if !low_mono_traces.is_empty() {
+            let lambda_combs: Vec<_> = low_mono_traces
+                .iter()
+                .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
+                .collect();
+            let batch =
+                ZerocheckMonomialBatch::new(low_mono_traces.into_iter(), self.pk, &lambda_combs);
+            let out = batch.evaluate(sp_deg as u32);
+            let host = out.to_host().expect("copy monomial output");
+            for (i, trace_idx) in batch.trace_indices().enumerate() {
+                zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
+            }
+        }
+
         logup_out.into_iter().flatten().chain(zc_out).collect()
     }
 
