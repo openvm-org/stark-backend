@@ -1,6 +1,7 @@
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
+#include "sumcheck.cuh"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -16,61 +17,54 @@ namespace {
 // Folds PLE evaluations by interpolating univariate polynomials on coset D and evaluating at r_0
 // Input: column-major matrix [height * width] of evaluations
 // Output: column-major matrix [new_height * width] of folded evaluations (original OR rotated)
-// For each (x, col), collects 2^l_skip evaluations on coset D and interpolates for both offsets
+// For each (x, col), collects 2^l_skip evaluations on coset D and interpolates
+// Parallelizes barycentric interpolation: each chunk of skip_domain threads handles one output cell
+// Grid: (num_row_blocks, width) where blockIdx.y selects the column
 template <bool ROTATE>
 __global__ void fold_ple_from_evals_kernel(
     const Fp *__restrict__ input_matrix, // [height * width] column-major
-    FpExt *__restrict__ output_matrix,   // [new_height * output_width] column-major
-    // If ROTATE: output_width = width * 2, layout: [orig_cols, rot_cols]
-    // If !ROTATE: output_width = width
+    FpExt *__restrict__ output_matrix,   // [new_height * width] column-major
     const Fp *__restrict__ omega_skip_pows, // [skip_domain]
     const FpExt *inv_lagrange_denoms,       // [skip_domain]
     uint32_t height,
-    uint32_t width,
     uint32_t skip_domain, // 2^l_skip
     uint32_t l_skip,      // log2(domain_size)
     uint32_t new_height   // lifted_height >> l_skip
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_outputs = new_height * width;
-    if (idx >= total_outputs)
-        return;
+    extern __shared__ char smem_raw[];
+    FpExt *smem = reinterpret_cast<FpExt *>(smem_raw);
 
-    int x = idx % new_height;
-    int col = idx / new_height;
+    uint32_t col = blockIdx.y;
+    uint32_t chunks_per_block = blockDim.x / skip_domain;
+    uint32_t chunk_in_block = threadIdx.x / skip_domain;
+    uint32_t tid_in_chunk = threadIdx.x % skip_domain;
+    uint32_t x = blockIdx.x * chunks_per_block + chunk_in_block; // row index in output
 
-    // Barycentric interpolation:
-    // NOTE: there is no special handling of the case when lagrange denominator is zero because the random point `r_0` should lie outside of the skip domain with high probability.
-    if constexpr (!ROTATE) {
-        // Compute offset 0 if rotate=false
-        FpExt result_0(Fp::zero());
+    // Cannot early-return: all threads must participate in chunk_reduce_sum (uses __syncthreads)
+    bool const active_chunk = (x < new_height);
 
-        for (int z = 0; z < skip_domain; z++) {
-            // Offset 0: ((x << l_skip) + z + 0) % height
-            int row_idx_0 = ((x << l_skip) + z) % height;
-            int input_idx_0 = col * height + row_idx_0;
-            Fp eval_0 = input_matrix[input_idx_0];
-            // Lagrange interpolation: eval * numerators[z] * inv_lagrange_denoms[z]
-            result_0 += inv_lagrange_denoms[z] * omega_skip_pows[z] * eval_0;
-        }
+    // Each thread handles exactly ONE term of the barycentric interpolation
+    FpExt local_val(Fp::zero());
+    if (active_chunk) {
+        uint32_t z = tid_in_chunk;
+        uint32_t offset = ROTATE ? 1 : 0;
+        uint32_t row_idx = ((x << l_skip) + z + offset) % height;
+        uint32_t input_idx = col * height + row_idx;
+        Fp eval = input_matrix[input_idx];
 
-        // Write original columns: output_matrix[col * new_height + x]
-        int output_idx_original = col * new_height + x;
-        output_matrix[output_idx_original] = result_0;
-    } else {
-        // Compute offset 1 if rotate=true
-        FpExt result_1(Fp::zero());
-        for (int z = 0; z < skip_domain; z++) {
-            // Offset 1: ((x << l_skip) + z + 1) % height
-            int row_idx_1 = ((x << l_skip) + z + 1) % height;
-            int input_idx_1 = col * height + row_idx_1;
-            Fp eval_1 = input_matrix[input_idx_1];
-            result_1 += inv_lagrange_denoms[z] * omega_skip_pows[z] * eval_1;
-        }
-        // Write rotated columns: output_matrix[(width + col) * new_height + x]
-        // Layout: [orig_col0...orig_col{width-1}, rot_col0...rot_col{width-1}]
-        int output_idx_rotated = col * new_height + x;
-        output_matrix[output_idx_rotated] = result_1;
+        // Lagrange interpolation: eval * omega_skip_pows[z] * inv_lagrange_denoms[z]
+        local_val = inv_lagrange_denoms[z] * omega_skip_pows[z] * eval;
+    }
+
+    // Reduce within chunk
+    // All threads must participate; inactive chunks contribute zero
+    FpExt result =
+        sumcheck::chunk_reduce_sum(local_val, smem, tid_in_chunk, skip_domain, chunk_in_block);
+
+    // No __syncthreads() needed: each chunk writes to a distinct output location
+    // and kernel exits immediately after this write
+    if (active_chunk && tid_in_chunk == 0) {
+        output_matrix[col * new_height + x] = result;
     }
 }
 
@@ -152,30 +146,40 @@ extern "C" int _fold_ple_from_evals(
     uint32_t new_height,
     bool rotate
 ) {
-    int total_outputs = new_height * width;
-    auto [grid, block] = kernel_launch_params(total_outputs);
+    uint32_t skip_domain = 1u << l_skip;
+
+    // Block size: at least skip_domain, prefer 256 for occupancy
+    uint32_t block_size = std::max(256u, skip_domain);
+    uint32_t chunks_per_block = block_size / skip_domain;
+
+    // 2D grid: x-dim for rows, y-dim for columns
+    dim3 grid(div_ceil(new_height, chunks_per_block), width);
+    dim3 block(block_size);
+
+    // Shared memory for cross-warp reduction (needed when skip_domain > 32)
+    // Each warp in the block needs one FpExt slot for cross-warp reduction
+    uint32_t total_warps_in_block = block_size / WARP_SIZE;
+    size_t smem_bytes = (skip_domain > WARP_SIZE) ? total_warps_in_block * sizeof(FpExt) : 0;
 
     if (rotate) {
-        fold_ple_from_evals_kernel<true><<<grid, block>>>(
+        fold_ple_from_evals_kernel<true><<<grid, block, smem_bytes>>>(
             input_matrix,
             output_matrix,
             omega_skip_pows,
             inv_lagrange_denoms,
             height,
-            width,
-            1 << l_skip,
+            skip_domain,
             l_skip,
             new_height
         );
     } else {
-        fold_ple_from_evals_kernel<false><<<grid, block>>>(
+        fold_ple_from_evals_kernel<false><<<grid, block, smem_bytes>>>(
             input_matrix,
             output_matrix,
             omega_skip_pows,
             inv_lagrange_denoms,
             height,
-            width,
-            1 << l_skip,
+            skip_domain,
             l_skip,
             new_height
         );
