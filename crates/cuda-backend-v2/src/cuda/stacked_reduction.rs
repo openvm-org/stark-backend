@@ -6,9 +6,7 @@ use openvm_cuda_common::{
 use crate::{
     D_EF, EF, F,
     poly::EqEvalSegments,
-    stacked_reduction::{
-        Round0UniPacket, STACKED_REDUCTION_S_DEG, UnstackedPleFoldPacket, UnstackedSlice,
-    },
+    stacked_reduction::{Round0UniPacket, STACKED_REDUCTION_S_DEG, UnstackedSlice},
 };
 
 extern "C" {
@@ -33,13 +31,13 @@ extern "C" {
     ) -> i32;
 
     fn _stacked_reduction_fold_ple(
-        trace_packets: *const UnstackedPleFoldPacket,
+        src: *const F,
+        dst: *mut EF,
         omega_skip_pows: *const F,
         inv_lagrange_denoms: *const EF,
+        trace_height: u32,
+        trace_width: u32,
         l_skip: u32,
-        num_packets: u16,
-        max_new_height: u32,
-        max_trace_width: u16,
     ) -> i32;
 
     fn _initialize_k_rot_from_eq_segments(
@@ -147,38 +145,39 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
     ))
 }
 
+/// Parallelizes barycentric interpolation across `2^l_skip` threads per cell.
+///
+/// Each kernel launch handles one trace. The caller should loop over traces and call this for each.
+///
 /// # Safety
-/// - The `src` pointers in `trace_packets` must be device pointers valid for `height x width` trace
-///   matrices.
-/// - The `dst` pointers in `trace_packets` must be device pointers valid for `new_height x width`
-///   where `new_height = max(height, skip_domin) / skip_domin` for `skip_domain = 2^l_skip`.
-///   Moreover these slices must be **disjoint**.
-/// - The max trace width and length of `trace_packets` must not exceed `u16::MAX` due to kernel
-///   grid sizes. This limitation can be removed with a kernel modification.
+/// - `src` must be a device pointer valid for `trace_height * trace_width` Fp elements.
+/// - `dst` must be a device pointer valid for `new_height * trace_width` FpExt elements,
+///   where `new_height = max(trace_height, 2^l_skip) / 2^l_skip`.
+/// - `src` and `dst` memory regions must not overlap.
+/// - `omega_skip_pows` must have length `>= 2^l_skip`.
+/// - `inv_lagrange_denoms` must have length `>= 2^l_skip`.
+/// - `l_skip` must be in range [0, 10] (skip_domain = 2^l_skip must be in [1, 1024]).
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_fold_ple(
-    trace_packets: &DeviceBuffer<UnstackedPleFoldPacket>,
+    src: *const F,
+    dst: *mut EF,
     omega_skip_pows: &DeviceBuffer<F>,
     inv_lagrange_denoms: &DeviceBuffer<EF>,
+    trace_height: usize,
+    trace_width: usize,
     l_skip: usize,
-    max_new_height: usize,
-    max_trace_width: usize,
 ) -> Result<(), CudaError> {
-    let num_packets: u16 = trace_packets
-        .len()
-        .try_into()
-        .expect("number of unstacked trace matrices must not exceed u16::MAX");
-    debug_assert_eq!(inv_lagrange_denoms.len(), 1 << l_skip);
-    let max_trace_width: u16 = max_trace_width
-        .try_into()
-        .expect("trace width must not exceed u16::MAX");
+    let skip_domain = 1 << l_skip;
+    debug_assert!(omega_skip_pows.len() >= skip_domain);
+    debug_assert!(inv_lagrange_denoms.len() >= skip_domain);
     check(_stacked_reduction_fold_ple(
-        trace_packets.as_ptr(),
+        src,
+        dst,
         omega_skip_pows.as_ptr(),
         inv_lagrange_denoms.as_ptr(),
+        trace_height as u32,
+        trace_width as u32,
         l_skip as u32,
-        num_packets,
-        max_new_height as u32,
-        max_trace_width,
     ))
 }
 

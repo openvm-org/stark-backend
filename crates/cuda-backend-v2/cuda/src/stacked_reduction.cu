@@ -188,48 +188,55 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
     }
 }
 
-// ASSUMPTION: no trace has width exceeding u16::MAX
-// PERF[jpw]: the barycentric interpolation is non-coalesced since each thread reads a different memory slice
+// Single-trace kernel: each chunk of skip_domain threads handles one output cell
+// Parallelizes barycentric interpolation across threads for better performance
+// Grid: (num_row_blocks, trace_width) where blockIdx.y selects the column
 __global__ void stacked_reduction_fold_ple_kernel(
-    const UnstackedPleFoldPacket *__restrict__ trace_packets,
+    const Fp *__restrict__ src,
+    FpExt *__restrict__ dst,
     const Fp *__restrict__ omega_skip_pows,
     const FpExt *__restrict__ inv_lagrange_denoms,
-    uint32_t skip_domain, // 2^l_skip
-    uint32_t l_skip,      // log2(domain_size)
-    uint16_t num_packets
+    uint32_t trace_height,
+    uint32_t new_height,
+    uint32_t skip_domain
 ) {
-    uint32_t trace_idx = blockIdx.z;
-    if (trace_idx >= num_packets)
-        return;
-    auto packet = trace_packets[trace_idx];
-    uint32_t height = packet.height;
-    uint32_t new_height;
-    uint32_t stride;
-    if (height >= skip_domain) {
-        new_height = height / skip_domain;
-        stride = 1;
-    } else {
-        new_height = 1;
-        stride = skip_domain / height;
-    }
-    uint32_t width = packet.width;
+    extern __shared__ char smem_raw[];
+    FpExt *smem = reinterpret_cast<FpExt *>(smem_raw);
 
-    uint32_t new_row_idx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t col_idx = blockIdx.y;
-    if (new_row_idx >= new_height || col_idx >= width)
-        return;
+    uint32_t chunks_per_block = blockDim.x / skip_domain;
+    uint32_t chunk_in_block = threadIdx.x / skip_domain;
+    uint32_t tid_in_chunk = threadIdx.x % skip_domain;
+    uint32_t row_idx = blockIdx.x * chunks_per_block + chunk_in_block;
 
-    auto src_len = std::min(height, skip_domain);
-    auto src = packet.src + (col_idx * height + new_row_idx * src_len);
-    auto dst = packet.dst + (col_idx * new_height + new_row_idx);
+    // Cannot early-return: all threads must participate in chunk_reduce_sum (uses __syncthreads)
+    bool const active_chunk = (row_idx < new_height);
 
-    // Barycentric interpolation:
-    // NOTE: this is evaluation at a random out of domain point, so we should not have divide by zero in inv_lagrange_denoms
-    FpExt result(Fp::zero());
-    for (int idx = 0; idx < (skip_domain / stride); idx++) {
-        result += src[idx] * omega_skip_pows[idx * stride] * inv_lagrange_denoms[idx * stride];
+    // Barycentric interpolation: each thread handles exactly ONE term
+    // (since src_len <= skip_domain, each thread contributes at most one term)
+    FpExt local_val(Fp::zero());
+    if (active_chunk) {
+        uint32_t src_len = std::min(trace_height, skip_domain);
+        uint32_t stride = skip_domain / src_len;
+        const Fp *cell_src = src + col_idx * trace_height + row_idx * src_len;
+
+        if (tid_in_chunk < src_len) {
+            uint32_t idx = tid_in_chunk;
+            local_val =
+                cell_src[idx] * omega_skip_pows[idx * stride] * inv_lagrange_denoms[idx * stride];
+        }
     }
-    dst[0] = result;
+
+    // Reduce within chunk using the helper from sumcheck.cuh
+    // All threads must participate; inactive chunks contribute zero
+    FpExt result =
+        sumcheck::chunk_reduce_sum(local_val, smem, tid_in_chunk, skip_domain, chunk_in_block);
+
+    // No __syncthreads() needed: each chunk writes to a distinct dst location
+    // and kernel exits immediately after this write
+    if (active_chunk && tid_in_chunk == 0) {
+        dst[col_idx * new_height + row_idx] = result;
+    }
 }
 
 // Triangular sweep
@@ -480,22 +487,40 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     return CHECK_KERNEL();
 }
 
+// Parallelizes barycentric interpolation across 2^l_skip threads per output cell
 extern "C" int _stacked_reduction_fold_ple(
-    const UnstackedPleFoldPacket *trace_packets,
+    const Fp *src,
+    FpExt *dst,
     const Fp *omega_skip_pows,
     const FpExt *inv_lagrange_denoms,
-    uint32_t l_skip, // log2(domain_size)
-    uint16_t num_packets,
-    uint32_t max_new_height,
-    uint16_t max_trace_width
+    uint32_t trace_height,
+    uint32_t trace_width,
+    uint32_t l_skip
 ) {
-    auto [grid, block] = kernel_launch_params(max_new_height);
-    grid.y = max_trace_width;
-    grid.z = num_packets;
+    uint32_t skip_domain = 1u << l_skip;
+    uint32_t new_height = std::max(trace_height, skip_domain) / skip_domain;
 
-    uint32_t skip_domain = 1 << l_skip;
-    stacked_reduction_fold_ple_kernel<<<grid, block>>>(
-        trace_packets, omega_skip_pows, inv_lagrange_denoms, skip_domain, l_skip, num_packets
+    // Block size: at least skip_domain, prefer 256 for occupancy
+    uint32_t block_size = std::max(256u, skip_domain);
+    uint32_t chunks_per_block = block_size / skip_domain;
+
+    // 2D grid: x-dim for rows, y-dim for columns
+    dim3 grid(div_ceil(new_height, chunks_per_block), trace_width);
+    dim3 block(block_size);
+
+    // Shared memory for cross-warp reduction (needed when skip_domain > 32)
+    // Each warp in the block needs one FpExt slot for cross-warp reduction
+    uint32_t total_warps_in_block = block_size / WARP_SIZE;
+    size_t smem_bytes = (skip_domain > WARP_SIZE) ? total_warps_in_block * sizeof(FpExt) : 0;
+
+    stacked_reduction_fold_ple_kernel<<<grid, block, smem_bytes>>>(
+        src,
+        dst,
+        omega_skip_pows,
+        inv_lagrange_denoms,
+        trace_height,
+        new_height,
+        skip_domain
     );
 
     return CHECK_KERNEL();
