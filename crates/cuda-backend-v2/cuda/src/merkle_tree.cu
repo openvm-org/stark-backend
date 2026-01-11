@@ -21,8 +21,9 @@ __global__ void poseidon2_compressing_row_hashes_kernel(
     size_t query_stride,
     size_t log_rows_per_query
 ) {
-    extern __shared__ char smem[]; // digest_t[blockDim.y / 2][blockDim.x]
-    digest_t *shared = reinterpret_cast<digest_t *>(smem);
+    extern __shared__ char smem[]; // Fp[CELLS_OUT][blockDim.y / 2 * blockDim.x]
+    Fp *shared = reinterpret_cast<Fp *>(smem);
+    const uint32_t shared_stride = blockDim.x * (blockDim.y >> 1);
 
     const uint32_t stride_idx = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t leaf_idx = threadIdx.y;
@@ -55,14 +56,14 @@ __global__ void poseidon2_compressing_row_hashes_kernel(
         if ((leaf_idx & mask) == (1 << layer)) {
 #pragma unroll
             for (int i = 0; i < CELLS_OUT; i++) {
-                shared[shared_offset].cells[i] = cells[i];
+                shared[i * shared_stride + shared_offset] = cells[i];
             }
         }
         __syncthreads();
         if ((leaf_idx & mask) == 0) {
 #pragma unroll
             for (int i = 0; i < CELLS_OUT; i++) {
-                cells[CELLS_OUT + i] = shared[shared_offset].cells[i];
+                cells[CELLS_OUT + i] = shared[i * shared_stride + shared_offset];
             }
             poseidon2::poseidon2_mix(cells);
         }
@@ -85,8 +86,9 @@ __global__ void poseidon2_compressing_row_hashes_ext_kernel(
     size_t query_stride,
     size_t log_rows_per_query
 ) {
-    extern __shared__ char smem[]; // digest_t[blockDim.y / 2][blockDim.x]
-    digest_t *shared = reinterpret_cast<digest_t *>(smem);
+    extern __shared__ char smem[]; // Fp[CELLS_OUT][blockDim.y / 2 * blockDim.x]
+    Fp *shared = reinterpret_cast<Fp *>(smem);
+    const uint32_t shared_stride = blockDim.x * (blockDim.y >> 1);
 
     const uint32_t stride_idx = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t leaf_idx = threadIdx.y;
@@ -124,14 +126,14 @@ __global__ void poseidon2_compressing_row_hashes_ext_kernel(
         if ((leaf_idx & mask) == (1 << layer)) {
 #pragma unroll
             for (int i = 0; i < CELLS_OUT; i++) {
-                shared[shared_offset].cells[i] = cells[i];
+                shared[i * shared_stride + shared_offset] = cells[i];
             }
         }
         __syncthreads();
         if ((leaf_idx & mask) == 0) {
 #pragma unroll
             for (int i = 0; i < CELLS_OUT; i++) {
-                cells[CELLS_OUT + i] = shared[shared_offset].cells[i];
+                cells[CELLS_OUT + i] = shared[i * shared_stride + shared_offset];
             }
             poseidon2::poseidon2_mix(cells);
         }
@@ -183,9 +185,10 @@ extern "C" int _poseidon2_compressing_row_hashes(
     size_t query_stride,
     size_t log_rows_per_query
 ) {
-    auto [grid, block] = kernel_launch_params(query_stride, 1024 >> log_rows_per_query);
+    auto [grid, block] = kernel_launch_params(query_stride, 512 >> log_rows_per_query);
     block.y = 1 << log_rows_per_query;
-    size_t shmem_bytes = block.x * div_ceil(block.y, 2) * sizeof(digest_t);
+    size_t shared_stride = block.x * div_ceil(block.y, 2);
+    size_t shmem_bytes = CELLS_OUT * shared_stride * sizeof(Fp);
     auto height = query_stride << log_rows_per_query;
 
     poseidon2_compressing_row_hashes_kernel<<<grid, block, shmem_bytes>>>(
@@ -201,9 +204,10 @@ extern "C" int _poseidon2_compressing_row_hashes_ext(
     size_t query_stride,
     size_t log_rows_per_query
 ) {
-    auto [grid, block] = kernel_launch_params(query_stride, 1024 >> log_rows_per_query);
+    auto [grid, block] = kernel_launch_params(query_stride, 512 >> log_rows_per_query);
     block.y = 1 << log_rows_per_query;
-    size_t shmem_bytes = block.x * div_ceil(block.y, 2) * sizeof(digest_t);
+    size_t shared_stride = block.x * div_ceil(block.y, 2);
+    size_t shmem_bytes = CELLS_OUT * shared_stride * sizeof(Fp);
     auto height = query_stride << log_rows_per_query;
 
     poseidon2_compressing_row_hashes_ext_kernel<<<grid, block, shmem_bytes>>>(
