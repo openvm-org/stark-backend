@@ -152,19 +152,6 @@ pub(crate) struct Round0UniPacket {
     k_rot_1: EF, // to multiply by k_rot_cube - eq_cube
 }
 
-/// For folding of PLE evals of `src` with dimensions `(height, width)` and writing to `dst`. The
-/// size of `dst` is determined from `height, width, l_skip`.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct UnstackedPleFoldPacket {
-    src: *const F,
-    dst: *mut EF,
-    /// Input trace height
-    height: u32,
-    /// Input trace width
-    width: u32,
-}
-
 impl StackedReductionGpu {
     fn log_stacked_height(&self, round: usize) -> usize {
         self.n_stack - (round - 1)
@@ -540,9 +527,13 @@ impl StackedReductionGpu {
         let omega_skip = self.omega_skip;
         let n_max = self.n_max;
         self.q_evals.clear();
-        let mut trace_packets = Vec::with_capacity(self.ht_diff_idxs.len());
-        let mut max_trace_width = 0;
-        let mut max_new_height = 0;
+
+        // Precompute Lagrange denominators once (shared across all traces)
+        let skip_domain = 1 << l_skip;
+        let inv_lagrange_denoms =
+            compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, u_0);
+        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
+
         for stacked in &self.stacked_per_commit {
             let layout = stacked.layout();
             let num_x = 1 << n_stack;
@@ -556,42 +547,32 @@ impl StackedReductionGpu {
                 if trace.width() == 0 || trace.height() == 0 {
                     continue;
                 }
-                let packet = unsafe {
-                    let src = trace.buffer().as_ptr();
+                let new_height = max(trace.height(), skip_domain) / skip_domain;
+
+                // Launch single-trace kernel for this trace
+                // SAFETY:
+                // - `trace.buffer()` is a valid device pointer for `trace.height() * trace.width()`
+                //   elements
+                // - `folded_evals` at `dst_offset` is valid for `new_height * trace.width()` elements
+                //   since we allocated `num_x * stacked_width` and traces fill contiguously
+                // - `d_omega_skip_pows` and `d_inv_lagrange_denoms` have length `>= skip_domain`
+                unsafe {
                     let dst = folded_evals.as_mut_ptr().add(dst_offset);
-                    UnstackedPleFoldPacket {
-                        src,
+                    stacked_reduction_fold_ple(
+                        trace.buffer().as_ptr(),
                         dst,
-                        height: trace.height() as u32,
-                        width: trace.width() as u32,
-                    }
-                };
-                trace_packets.push(packet);
-                let new_height = max(trace.height(), 1 << l_skip) >> l_skip;
-                max_new_height = max(max_new_height, new_height);
-                max_trace_width = max(max_trace_width, trace.width());
+                        &self.d_omega_skip_pows,
+                        &d_inv_lagrange_denoms,
+                        trace.height(),
+                        trace.width(),
+                        l_skip,
+                    )
+                    .unwrap();
+                }
+
                 dst_offset += new_height * trace.width();
             }
             self.q_evals.push(folded_evals);
-        }
-        let d_trace_packets = trace_packets.to_device().unwrap();
-        let inv_lagrange_denoms =
-            compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, u_0);
-        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
-        // SAFETY:
-        // - we constructed `trace_packets` so that `src` are valid pointers to trace matrices and
-        //   `dst` are disjoint slices in `q_evals`. Moreover `q_evals` has capacity to fill all
-        //   folded traces.
-        unsafe {
-            stacked_reduction_fold_ple(
-                &d_trace_packets,
-                &self.d_omega_skip_pows,
-                &d_inv_lagrange_denoms,
-                l_skip,
-                max_new_height,
-                max_trace_width,
-            )
-            .unwrap();
         }
 
         // fold PLEs into MLEs for \eq and \kappa_\rot, using u_0
