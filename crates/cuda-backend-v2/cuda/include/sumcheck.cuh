@@ -33,6 +33,67 @@ static __device__ inline FpExt warp_reduce_sum(FpExt val) {
     return val;
 }
 
+// Reduce FpExt across n threads using warp shuffles (butterfly pattern)
+// n must be a power of 2, 1 <= n <= 32
+// All participating threads must call this function
+__device__ __forceinline__ FpExt warp_reduce_sum_n(FpExt val, uint32_t n) {
+    for (uint32_t offset = n >> 1; offset > 0; offset >>= 1) {
+        FpExt other;
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            other.elems[i] =
+                Fp::fromRaw(__shfl_xor_sync(0xffffffff, val.elems[i].asRaw(), offset));
+        }
+        val = val + other;
+    }
+    return val;
+}
+
+// Reduce FpExt across chunk_size threads within a block
+// chunk_size must be a power of 2
+// tid_in_chunk: thread's index within its chunk [0, chunk_size)
+// chunk_in_block: which chunk this thread belongs to
+// smem: shared memory for cross-warp reduction (size >= total_warps_in_block)
+//
+// Note: When chunk_size > 32, writes to chunk_smem[warp_in_chunk] from different chunks
+// may hit the same bank (FpExt = 16 bytes = 4 words). This is a minor inefficiency in the
+// reduction phase, not a correctness issue.
+__device__ inline FpExt chunk_reduce_sum(
+    FpExt val,
+    FpExt *smem,
+    uint32_t tid_in_chunk,
+    uint32_t chunk_size,
+    uint32_t chunk_in_block
+) {
+    if (chunk_size <= 32) {
+        return warp_reduce_sum_n(val, chunk_size);
+    }
+
+    // Cross-warp case (chunk_size > 32)
+    uint32_t warps_per_chunk = chunk_size >> 5;
+    uint32_t warp_in_chunk = tid_in_chunk >> 5;
+    uint32_t lane_id = tid_in_chunk & 31;
+
+    // Step 1: Warp-level reduction
+    val = warp_reduce_sum(val);
+
+    // Step 2: Store warp result to shared memory
+    FpExt *chunk_smem = smem + chunk_in_block * warps_per_chunk;
+    if (lane_id == 0) {
+        chunk_smem[warp_in_chunk] = val;
+    }
+    __syncthreads();
+
+    // Step 3: First warp of chunk reads and reduces warp results
+    if (warp_in_chunk == 0) {
+        FpExt zero = {0, 0, 0, 0};
+        FpExt warp_val = (lane_id < warps_per_chunk) ? chunk_smem[lane_id] : zero;
+        val = warp_reduce_sum(warp_val);
+    }
+
+    return val;
+}
+
 // ============================================================================
 // ATOMIC U64 ACCUMULATION (delayed modular reduction to CPU)
 // ============================================================================
