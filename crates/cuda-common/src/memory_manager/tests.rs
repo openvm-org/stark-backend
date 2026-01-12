@@ -336,59 +336,6 @@ fn test_mixed_allocations() {
 }
 
 // ============================================================================
-// OOM test: exhaust GPU memory and verify we get OutOfMemory error
-// ============================================================================
-#[test]
-#[ignore] // Run explicitly: exhausts GPU memory
-fn test_oom_error() {
-    use super::d_malloc;
-    use crate::error::MemoryError;
-
-    let initial_free = get_gpu_free_memory();
-    println!(
-        "GPU memory: {:.2} GB free",
-        initial_free as f64 / (1 << 30) as f64
-    );
-
-    // Fill GPU memory in 1GB chunks until we can't anymore
-    let chunk_size = 1 << 30; // 1 GB
-    let mut buffers: Vec<*mut std::ffi::c_void> = Vec::new();
-
-    loop {
-        match d_malloc(chunk_size) {
-            Ok(ptr) => {
-                buffers.push(ptr);
-                println!(
-                    "Allocated chunk {}: {:.2} GB total",
-                    buffers.len(),
-                    (buffers.len() * chunk_size) as f64 / (1 << 30) as f64
-                );
-            }
-            Err(MemoryError::OutOfMemory { requested, .. }) => {
-                println!(
-                    "Got expected OutOfMemory error: requested {} bytes ({:.2} GB)",
-                    requested,
-                    requested as f64 / (1 << 30) as f64
-                );
-                // This is what we wanted - OOM error was properly returned
-                // Clean up and exit successfully
-                for ptr in buffers {
-                    unsafe { super::d_free(ptr).unwrap() };
-                }
-                return; // Test passed!
-            }
-            Err(e) => {
-                // Clean up before panicking
-                for ptr in buffers {
-                    unsafe { super::d_free(ptr).unwrap() };
-                }
-                panic!("Expected OutOfMemory error, got: {:?}", e);
-            }
-        }
-    }
-}
-
-// ============================================================================
 // OOM recovery: allocator should still work after an OOM event
 // ============================================================================
 #[test]
