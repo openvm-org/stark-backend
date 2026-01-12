@@ -175,11 +175,14 @@ pub fn fractional_sumcheck_gpu(
             copy_from_device(&layer, 0)?,
             copy_from_device(&layer, pq_size / 2)?,
         ];
-        for pq_revert_round in (0..round).rev() {
-            pq_size <<= 1;
-            unsafe {
-                fold_ef_frac_columns(&mut layer, pq_size, r_vec[pq_revert_round], true)
-                    .map_err(FractionalSumcheckError::FoldColumns)?;
+        // No need to revert on the last round since `layer` buffer will be dropped
+        if round != total_rounds - 1 {
+            for pq_revert_round in (0..round).rev() {
+                pq_size <<= 1;
+                unsafe {
+                    fold_ef_frac_columns(&mut layer, pq_size, r_vec[pq_revert_round], true)
+                        .map_err(FractionalSumcheckError::FoldColumns)?;
+                }
             }
         }
 
