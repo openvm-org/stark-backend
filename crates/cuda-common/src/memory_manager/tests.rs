@@ -361,7 +361,16 @@ fn test_oom_recovery_after_error() {
     // After OOM, allocator should still succeed for smaller requests without
     // freeing the large buffers we already hold.
     let small = d_malloc(1 << 20).expect("Small allocation after OOM failed"); // 1 MB (cudaMallocAsync path)
-    let medium = d_malloc(128 << 20).expect("Pool allocation after OOM failed"); // 128 MB (pool path)
+
+    // Request just under the currently free memory to exercise the pool path.
+    let free_after_oom = get_gpu_free_memory();
+    let safety = 64 << 20; // leave 64 MB headroom to avoid rounding issues
+    assert!(
+        free_after_oom > safety + (2 << 20),
+        "Not enough free memory to attempt medium alloc after OOM"
+    );
+    let medium_req = free_after_oom - safety;
+    let medium = d_malloc(medium_req).expect("Pool allocation after OOM failed");
 
     // Cleanup
     unsafe { super::d_free(small).unwrap() };
