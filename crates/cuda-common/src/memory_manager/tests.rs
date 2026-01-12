@@ -389,6 +389,43 @@ fn test_oom_error() {
 }
 
 // ============================================================================
+// OOM recovery: allocator should still work after an OOM event
+// ============================================================================
+#[test]
+#[ignore] // Heavy: intentionally exhausts GPU memory
+fn test_oom_recovery_after_error() {
+    use super::d_malloc;
+    use crate::error::MemoryError;
+
+    // Allocate large chunks to drive the device near OOM. Keep them alive to
+    // simulate a server that retains existing allocations.
+    let chunk_size = 2 << 30; // 2 GB
+    let mut buffers: Vec<*mut std::ffi::c_void> = Vec::new();
+
+    // Fill GPU memory until we hit OOM on a 2 GB request
+    loop {
+        match d_malloc(chunk_size) {
+            Ok(ptr) => buffers.push(ptr),
+            Err(MemoryError::OutOfMemory { .. }) => break,
+            Err(e) => panic!("Expected OOM, got {:?}", e),
+        }
+    }
+
+    // After OOM, allocator should still succeed for smaller requests without
+    // freeing the large buffers we already hold.
+    let small = d_malloc(1 << 20).expect("Small allocation after OOM failed"); // 1 MB (cudaMallocAsync path)
+    let medium = d_malloc(128 << 20).expect("Pool allocation after OOM failed"); // 128 MB (pool path)
+
+    // Cleanup
+    unsafe { super::d_free(small).unwrap() };
+    unsafe { super::d_free(medium).unwrap() };
+    for ptr in buffers {
+        unsafe { super::d_free(ptr).unwrap() };
+    }
+    current_stream_sync().expect("stream sync after cleanup");
+}
+
+// ============================================================================
 // Edge Case Tests for Defragmentation
 // ============================================================================
 

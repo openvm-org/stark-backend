@@ -476,6 +476,31 @@ impl VirtualMemoryPool {
         self.unmapped_regions.insert(addr, size);
     }
 
+    /// Roll back partially allocated pages when allocation fails.
+    /// Unmaps and releases any mapped pages and restores the reserved VA span.
+    fn rollback_new_pages(
+        &mut self,
+        reserved_ptr: CUdeviceptr,
+        reserved_size: usize,
+        allocated_pages: &[(CUdeviceptr, CUmemGenericAllocationHandle)],
+    ) {
+        for (addr, handle) in allocated_pages {
+            if let Err(e) = unsafe { vpmm_unmap(*addr, self.page_size) } {
+                tracing::error!(
+                    "rollback: vpmm_unmap failed: addr={:#x}, size={}: {:?}",
+                    addr,
+                    self.page_size,
+                    e
+                );
+            }
+            self.active_pages.remove(addr);
+            if let Err(e) = unsafe { vpmm_release(*handle) } {
+                tracing::error!("rollback: vpmm_release failed: handle={}: {:?}", handle, e);
+            }
+        }
+        self.insert_unmapped_region(reserved_ptr, reserved_size);
+    }
+
     /// Defragments the pool by reusing existing holes and, if needed, reserving more VA space.
     /// Moves just enough pages to satisfy `requested`, keeping the remainder in place.
     ///
@@ -509,6 +534,7 @@ impl VirtualMemoryPool {
         let mut allocated_dst = dst;
         let mut allocate_size = requested.saturating_sub(total_free_size);
         debug_assert_eq!(allocate_size % self.page_size, 0);
+        let mut allocated_pages: Vec<(CUdeviceptr, CUmemGenericAllocationHandle)> = Vec::new();
         while allocated_dst < dst + allocate_size as u64 {
             let handle = unsafe {
                 match vpmm_create_physical(self.device_id, self.page_size) {
@@ -521,6 +547,7 @@ impl VirtualMemoryPool {
                             e
                         );
                         if e.is_out_of_memory() {
+                            self.rollback_new_pages(dst, requested, &allocated_pages);
                             return Err(MemoryError::OutOfMemory {
                                 requested: allocate_size,
                                 available: (allocated_dst - dst) as usize,
@@ -544,6 +571,7 @@ impl VirtualMemoryPool {
                 })?;
             }
             self.active_pages.insert(allocated_dst, handle);
+            allocated_pages.push((allocated_dst, handle));
             allocated_dst += self.page_size as u64;
         }
         debug_assert_eq!(allocated_dst, dst + allocate_size as u64);

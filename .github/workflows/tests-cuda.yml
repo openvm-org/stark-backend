@@ -53,7 +53,7 @@ jobs:
 
       - name: Run cuda-common ignored tests (OOM)
         working-directory: crates/cuda-common
-        run: cargo nextest run --run-ignored ignored-only
+        run: cargo nextest run --run-ignored ignored-only --test-threads=1
 
       - name: Run cuda-backend tests
         working-directory: crates/cuda-backend
