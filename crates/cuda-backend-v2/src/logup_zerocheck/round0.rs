@@ -14,7 +14,7 @@ use crate::{
     cuda::logup_zerocheck::{
         _logup_r0_intermediates_buffer_size, _logup_r0_temp_sums_buffer_size,
         _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
-        logup_bary_eval_interactions_round0, zerocheck_bary_eval_constraints,
+        logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints,
     },
     logup_zerocheck::rules::{SymbolicRulesGpuV2, codec::Codec},
 };
@@ -26,14 +26,13 @@ pub fn evaluate_round0_constraints_gpu(
     selectors_cube: &DeviceBuffer<F>,
     main_parts: &DeviceBuffer<*const F>,
     public_values: &DeviceBuffer<F>,
-    omega_skip_pows: &DeviceBuffer<F>,
-    inv_lagrange_denoms: &DeviceBuffer<F>,
     eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
-    large_domain: u32,
     skip_domain: u32,
     num_x: u32,
     height: u32,
+    num_cosets: u32,
+    g_shift: F,
     max_temp_bytes: usize,
 ) -> Result<DeviceBuffer<EF>, Round0EvalError> {
     let constraints_dag = &pk.vk.symbolic_constraints;
@@ -46,7 +45,13 @@ pub fn evaluate_round0_constraints_gpu(
 
     let buffer_size: u32 = rules.inner.buffer_size;
     let intermed_capacity = unsafe {
-        _zerocheck_r0_intermediates_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
+        _zerocheck_r0_intermediates_buffer_size(
+            buffer_size,
+            skip_domain,
+            num_x,
+            num_cosets,
+            max_temp_bytes,
+        )
     };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
@@ -56,7 +61,13 @@ pub fn evaluate_round0_constraints_gpu(
     };
 
     let temp_sums_buffer_capacity = unsafe {
-        _zerocheck_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
+        _zerocheck_r0_temp_sums_buffer_size(
+            buffer_size,
+            skip_domain,
+            num_x,
+            num_cosets,
+            max_temp_bytes,
+        )
     };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
@@ -74,19 +85,18 @@ pub fn evaluate_round0_constraints_gpu(
         .map(|cd| cd.trace.buffer().as_ptr())
         .unwrap_or(std::ptr::null());
 
-    let mut sp_evals = DeviceBuffer::<EF>::with_capacity(large_domain as usize);
+    let mut sp_evals =
+        DeviceBuffer::<EF>::with_capacity(num_cosets as usize * skip_domain as usize);
     // SAFETY:
     // - No bounds checks are done in this kernel. It fully assumes that the Rules are trusted and
     //   all nodes are valid.
     unsafe {
-        zerocheck_bary_eval_constraints(
+        zerocheck_ntt_eval_constraints(
             &mut temp_sums_buffer,
             &mut sp_evals,
             selectors_cube,
             preprocessed_ptr,
             main_parts,
-            omega_skip_pows,
-            inv_lagrange_denoms,
             eq_cube,
             lambda_pows,
             public_values,
@@ -94,10 +104,11 @@ pub fn evaluate_round0_constraints_gpu(
             &rules.inner.d_used_nodes,
             buffer_size,
             &mut intermediates,
-            large_domain,
             skip_domain,
             num_x,
             height,
+            num_cosets,
+            g_shift,
             max_temp_bytes,
         )?;
     }
@@ -116,21 +127,21 @@ pub fn evaluate_round0_interactions_gpu(
     selectors_cube: &DeviceBuffer<F>,
     main_parts: &DeviceBuffer<*const F>,
     public_values: &DeviceBuffer<F>,
-    omega_skip_pows: &DeviceBuffer<F>,
-    inv_lagrange_denoms: &DeviceBuffer<F>,
     eq_cube: *const EF,
     beta_pows: &[EF],
     eq_3bs: &[EF],
-    large_domain: u32,
     skip_domain: u32,
     num_x: u32,
     height: u32,
+    num_cosets: u32,
+    g_shift: F,
     max_temp_bytes: usize,
 ) -> Result<DeviceBuffer<Frac<EF>>, Round0EvalError> {
     // Check if this trace has interactions
     if eq_3bs.is_empty() {
         return Ok(DeviceBuffer::new());
     }
+    let large_domain = num_cosets * skip_domain;
 
     // We create a new "interactions DAG" where the new .constraints are the interaction [count,
     // message_0, message_1, ..] expressions themselves, while the .interactions are empty
@@ -192,7 +203,7 @@ pub fn evaluate_round0_interactions_gpu(
 
     let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
     let intermed_capacity = unsafe {
-        _logup_r0_intermediates_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
+        _logup_r0_intermediates_buffer_size(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes)
     };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("logup_r0:intermediates_capacity={intermed_capacity}");
@@ -202,11 +213,12 @@ pub fn evaluate_round0_interactions_gpu(
     };
 
     let temp_sums_buffer_capacity = unsafe {
-        _logup_r0_temp_sums_buffer_size(buffer_size, large_domain, num_x, max_temp_bytes)
+        _logup_r0_temp_sums_buffer_size(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes)
     };
     debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);
-    let used_temp_bytes = (intermed_capacity + temp_sums_buffer_capacity) * size_of::<EF>();
+    let used_temp_bytes =
+        intermed_capacity * size_of::<F>() + temp_sums_buffer_capacity * size_of::<Frac<EF>>();
     if used_temp_bytes > max_temp_bytes {
         warn!(
             "logup_round0 used_temp_bytes ({used_temp_bytes}) > max_temp_bytes ({max_temp_bytes})"
@@ -228,8 +240,6 @@ pub fn evaluate_round0_interactions_gpu(
             selectors_cube,
             preprocessed_ptr,
             main_parts,
-            omega_skip_pows,
-            inv_lagrange_denoms,
             eq_cube,
             public_values,
             &d_numer_weights,
@@ -238,10 +248,11 @@ pub fn evaluate_round0_interactions_gpu(
             &d_rules,
             buffer_size,
             &mut intermediates,
-            large_domain,
             skip_domain,
             num_x,
             height,
+            num_cosets,
+            g_shift,
             max_temp_bytes,
         )?;
     }
