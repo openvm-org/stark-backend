@@ -107,11 +107,20 @@ impl<F: Field> ExpandedMonomials<F> {
             }
         }
 
-        let mut headers = Vec::with_capacity(monomial_map.len());
+        let mut monomials: Vec<_> = monomial_map.into_iter().collect();
+        monomials.sort_by(|(vars_a, _), (vars_b, _)| {
+            vars_a
+                .len()
+                .cmp(&vars_b.len())
+                .then_with(|| vars_a.cmp(vars_b))
+        });
+
+        let mut headers = Vec::with_capacity(monomials.len());
         let mut all_vars = Vec::new();
         let mut all_lambda_terms = Vec::new();
 
-        for (vars, lambda_terms) in monomial_map {
+        for (vars, mut lambda_terms) in monomials {
+            lambda_terms.sort_by_key(|(constraint_idx, _)| *constraint_idx);
             assert!(
                 vars.len() <= u16::MAX as usize,
                 "monomial has too many variables for PackedVar header"
