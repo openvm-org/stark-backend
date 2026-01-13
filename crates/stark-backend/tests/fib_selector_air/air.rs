@@ -2,7 +2,7 @@ use std::borrow::Borrow;
 
 use openvm_stark_backend::{
     interaction::{InteractionBuilder, LookupBus},
-    p3_field::{Field, FieldAlgebra},
+    p3_field::{Field, PrimeCharacteristicRing},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
 use openvm_stark_sdk::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
@@ -49,6 +49,8 @@ impl<F: Field> BaseAirWithPublicValues<F> for FibonacciSelectorAir {
 
 impl<AB: AirBuilderWithPublicValues + PairBuilder + InteractionBuilder> Air<AB>
     for FibonacciSelectorAir
+where
+    AB::F: Field,
 {
     fn eval(&self, builder: &mut AB) {
         let pis = builder.public_values();
@@ -59,10 +61,15 @@ impl<AB: AirBuilderWithPublicValues + PairBuilder + InteractionBuilder> Air<AB>
         let b = pis[1];
         let x = pis[2];
 
-        let preprocessed_local = preprocessed.row_slice(0);
+        let preprocessed_local = preprocessed
+            .row_slice(0)
+            .expect("preprocessed window should have one element");
         let preprocessed_local: &FibonacciSelectorCols<AB::Var> = (*preprocessed_local).borrow();
 
-        let (local, next) = (main.row_slice(0), main.row_slice(1));
+        let (local, next) = (
+            main.row_slice(0).expect("window should have two elements"),
+            main.row_slice(1).expect("window should have two elements"),
+        );
         let local: &FibonacciCols<AB::Var> = (*local).borrow();
         let next: &FibonacciCols<AB::Var> = (*next).borrow();
 

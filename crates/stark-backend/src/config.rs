@@ -38,10 +38,7 @@ where
     fn rap_phase_seq(&self) -> &Self::RapPhaseSeq;
 }
 
-pub type Val<SC> = <<<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Domain as PolynomialSpace>::Val;
+pub type Val<SC> = <Domain<SC> as PolynomialSpace>::Val;
 
 pub type Com<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
     <SC as StarkGenericConfig>::Challenge,
@@ -94,14 +91,16 @@ pub type PackedChallenge<SC> =
 #[derive(Debug)]
 pub struct StarkConfig<Pcs, RapPhaseSeq, Challenge, Challenger> {
     pcs: Pcs,
+    challenger: Challenger,
     rap_phase: RapPhaseSeq,
     _phantom: PhantomData<(Challenge, Challenger)>,
 }
 
 impl<Pcs, RapPhaseSeq, Challenge, Challenger> StarkConfig<Pcs, RapPhaseSeq, Challenge, Challenger> {
-    pub const fn new(pcs: Pcs, rap_phase: RapPhaseSeq) -> Self {
+    pub const fn new(pcs: Pcs, challenger: Challenger, rap_phase: RapPhaseSeq) -> Self {
         Self {
             pcs,
+            challenger,
             rap_phase,
             _phantom: PhantomData,
         }
@@ -137,16 +136,47 @@ where
     }
 }
 
-pub struct UniStarkConfig<SC>(pub SC);
-
-impl<SC: StarkGenericConfig> p3_uni_stark::StarkGenericConfig for UniStarkConfig<SC> {
-    type Pcs = SC::Pcs;
-
-    type Challenge = SC::Challenge;
-
-    type Challenger = SC::Challenger;
+impl<Pcs, Rps, Challenge, Challenger> p3_uni_stark::StarkGenericConfig
+    for StarkConfig<Pcs, Rps, Challenge, Challenger>
+where
+    Challenge: ExtensionField<<Pcs::Domain as PolynomialSpace>::Val>,
+    Pcs: p3_commit::Pcs<Challenge, Challenger>,
+    Pcs::Domain: Send + Sync,
+    Pcs::Commitment: Send + Sync,
+    Pcs::ProverData: Send + Sync,
+    Pcs::Proof: Send + Sync,
+    Challenger: FieldChallenger<<Pcs::Domain as PolynomialSpace>::Val>
+        + CanObserve<Pcs::Commitment>
+        + CanSample<Challenge>
+        + Clone,
+{
+    type Pcs = Pcs;
+    type Challenge = Challenge;
+    type Challenger = Challenger;
 
     fn pcs(&self) -> &Self::Pcs {
-        self.0.pcs()
+        &self.pcs
+    }
+
+    fn initialise_challenger(&self) -> Self::Challenger {
+        self.challenger.clone()
+    }
+}
+
+pub struct UniStarkConfig<SC>(pub SC);
+
+impl<SC: p3_uni_stark::StarkGenericConfig> p3_uni_stark::StarkGenericConfig for UniStarkConfig<SC> {
+    type Pcs = <SC as p3_uni_stark::StarkGenericConfig>::Pcs;
+
+    type Challenge = <SC as p3_uni_stark::StarkGenericConfig>::Challenge;
+
+    type Challenger = <SC as p3_uni_stark::StarkGenericConfig>::Challenger;
+
+    fn pcs(&self) -> &Self::Pcs {
+        p3_uni_stark::StarkGenericConfig::pcs(&self.0)
+    }
+
+    fn initialise_challenger(&self) -> Self::Challenger {
+        self.0.initialise_challenger()
     }
 }

@@ -1,10 +1,10 @@
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 
 use super::Interaction;
 
 /// Returns [beta^0, beta^1, ..., beta^{max_num_fields}]
 /// where max_num_fields is the maximum length of `fields` in any interaction.
-pub fn generate_betas<AF: FieldAlgebra, E>(
+pub fn generate_betas<AF: PrimeCharacteristicRing, E>(
     beta: AF,
     all_interactions: &[Interaction<E>],
 ) -> Vec<AF> {

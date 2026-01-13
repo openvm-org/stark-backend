@@ -5,7 +5,6 @@ use openvm_cuda_common::stream::current_stream_id;
 use openvm_stark_backend::{
     engine::StarkEngine,
     p3_air::{Air, AirBuilder, BaseAir},
-    p3_field::Field,
     prover::{
         hal::DeviceDataTransporter,
         types::{AirProvingContext, ProvingContext},
@@ -24,13 +23,13 @@ use tracing::info_span;
 
 struct TestAir(KeccakAir);
 
-impl<F: Field> BaseAir<F> for TestAir {
+impl<F> BaseAir<F> for TestAir {
     fn width(&self) -> usize {
         BaseAir::<F>::width(&self.0)
     }
 }
-impl<F: Field> BaseAirWithPublicValues<F> for TestAir {}
-impl<F: Field> PartitionedBaseAir<F> for TestAir {}
+impl<F> BaseAirWithPublicValues<F> for TestAir {}
+impl<F> PartitionedBaseAir<F> for TestAir {}
 
 impl<AB: AirBuilder> Air<AB> for TestAir {
     fn eval(&self, builder: &mut AB) {
@@ -70,7 +69,7 @@ fn main() {
         // ----- CPU keygen once, shared by all threads -----
         let air = TestAir(KeccakAir {});
         let engine_cpu = BabyBearPoseidon2Engine::new(
-            FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
+            FriParameters::standard_with_100_bits_security(LOG_BLOWUP),
         );
 
         let mut keygen_builder = engine_cpu.keygen_builder();
@@ -80,7 +79,7 @@ fn main() {
 
         // Base seed to derive per-thread RNGs deterministically but independently.
         let mut master_rng = create_seeded_rng();
-        let base_seed: u64 = master_rng.gen();
+        let base_seed: u64 = master_rng.random();
 
         let tasks_per_thread = num_tasks.div_ceil(num_threads);
         let mut worker_handles = Vec::new();
@@ -100,14 +99,16 @@ fn main() {
                             base_seed ^ ((t as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
                         let mut rng = StdRng::seed_from_u64(task_seed);
 
-                        let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
+                        let inputs = (0..NUM_PERMUTATIONS)
+                            .map(|_| rng.random())
+                            .collect::<Vec<_>>();
                         let trace = info_span!("generate_trace", task=%t)
                             .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
                         let cpu_trace = Arc::new(trace);
 
                         println!("[task {t}] Starting GPU proof");
                         let engine_gpu = GpuBabyBearPoseidon2Engine::new(
-                            FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
+                            FriParameters::standard_with_100_bits_security(LOG_BLOWUP),
                         );
 
                         let pk_dev = engine_gpu.device().transport_pk_to_device(&pk_host);

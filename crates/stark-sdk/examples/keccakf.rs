@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
-    p3_field::Field,
     prover::types::{AirProvingContext, ProvingContext},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
@@ -26,13 +25,13 @@ const LOG_BLOWUP: usize = 1;
 // Newtype to implement extended traits
 struct TestAir(KeccakAir);
 
-impl<F: Field> BaseAir<F> for TestAir {
+impl<F> BaseAir<F> for TestAir {
     fn width(&self) -> usize {
         BaseAir::<F>::width(&self.0)
     }
 }
-impl<F: Field> BaseAirWithPublicValues<F> for TestAir {}
-impl<F: Field> PartitionedBaseAir<F> for TestAir {}
+impl<F> BaseAirWithPublicValues<F> for TestAir {}
+impl<F> PartitionedBaseAir<F> for TestAir {}
 
 impl<AB: AirBuilder> Air<AB> for TestAir {
     fn eval(&self, builder: &mut AB) {
@@ -45,14 +44,16 @@ fn main() {
         let mut rng = create_seeded_rng();
         let air = TestAir(KeccakAir {});
 
-        let engine = BabyBearPoseidon2Engine::new(
-            FriParameters::standard_with_100_bits_conjectured_security(LOG_BLOWUP),
-        );
+        let engine = BabyBearPoseidon2Engine::new(FriParameters::standard_with_100_bits_security(
+            LOG_BLOWUP,
+        ));
         let mut keygen_builder = engine.keygen_builder();
         let air_id = keygen_builder.add_air(Arc::new(air));
         let pk = keygen_builder.generate_pk();
 
-        let inputs = (0..NUM_PERMUTATIONS).map(|_| rng.gen()).collect::<Vec<_>>();
+        let inputs = (0..NUM_PERMUTATIONS)
+            .map(|_| rng.random())
+            .collect::<Vec<_>>();
         let trace = info_span!("generate_trace")
             .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
 

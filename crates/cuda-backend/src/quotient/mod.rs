@@ -146,7 +146,7 @@ impl SingleQuotientDataGpu {
                 let remainder = height % num_chunks;
                 let final_stride = matrix_idx < remainder;
                 let matrix_height = full_strides + final_stride as usize;
-                let matrix_width = 4; // EF::D
+                let matrix_width = 4; // EF::DIMENSION
                 tracing::debug!(
                     "matrix {}: width = {}, height = {}",
                     matrix_idx,
