@@ -24,8 +24,8 @@ use crate::{
         poly::evals_eq_hypercubes,
         stacked_pcs::StackedLayout,
         sumcheck::{
-            batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round_poly_evals,
-            sumcheck_uni_round0_poly,
+            batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round0_deg,
+            sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
         ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
     },
@@ -289,12 +289,6 @@ impl<'a> LogupZerocheckCpu<'a> {
             })
             .collect_vec();
 
-        // PERF[jpw]: see Gruen, Section 3.2 and 4 on some ways to reduce the degree of the
-        // univariate polynomial. We know s_0 is supposed to vanish on univariate skip
-        // domain `D` of size `2^{l_skip}`. Hence `s_0 = Z_D * s'_0(Z)` where `Z_D =
-        // \prod_{z in D} (Z - z)` where `s'_0` has degree `d * (2^{l_skip} - 1) - 1`. We
-        // can evaluate s'_0 on a coset and then perform coset iDFT to get `s'_0`
-        // coefficients. We need to use a coset to ensure disjointedness from `D`.
         let sp_0_zerochecks = self
             .eval_helpers
             .par_iter()
@@ -308,30 +302,47 @@ impl<'a> LogupZerocheckCpu<'a> {
                 let mut parts = vec![(sels.into(), false)];
                 parts.extend_from_slice(mats);
                 // s'_0 has degree dependent on this AIR's constraint degree
-                let [sp_0] = sumcheck_uni_round0_poly(
+                // s'_0(Z) is a univariate polynomial which vanishes on D (zerocheck). Hence q(Z) =
+                // s'_0(Z) / Z_D(Z) = s'_0(Z) / (Z^{2^l_skip} - 1) is a polynomial of degree d *
+                // (2^l_skip - 1) - 2^l_skip = (d - 1) * 2^l_skip - d We can obtain
+                // q(Z) by interpolating evaluations on (d - 1) * 2^l_skip points. For computation
+                // efficiency, we choose these to be (d - 1) cosets of D. To avoid divide by zero,
+                // we avoid the coset equal to the subgroup D itself.
+                let constraint_deg = helper.constraint_degree as usize;
+                if constraint_deg == 0 {
+                    return UnivariatePoly(vec![]);
+                }
+                let num_cosets = constraint_deg - 1;
+                let [q] = sumcheck_uni_round0_poly(
                     l_skip,
                     n_lift,
-                    helper.constraint_degree as usize,
+                    num_cosets,
                     &parts,
-                    |_z, x, row_parts| {
-                        // PERF[jpw]: we are limited by the closure interface but `eq_uni` should be
-                        // cached
+                    |z, x, row_parts| {
                         let eq = eq_xi[x];
                         let constraint_eval = helper.acc_constraints(row_parts, &self.lambda_pows);
-                        [eq * constraint_eval]
+                        let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
+                        [eq * constraint_eval * zerofier.inverse()]
                     },
                 );
+                // sp_0 = (Z^{2^l_skip} - 1) * q
+                let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_deg);
+                let coeffs = (0..=sp_0_deg)
+                    .map(|i| {
+                        let mut c = -*q.coeffs().get(i).unwrap_or(&EF::ZERO);
+                        if i >= 1 << l_skip {
+                            c += q.coeffs()[i - (1 << l_skip)];
+                        }
+                        c
+                    })
+                    .collect_vec();
                 debug_assert_eq!(
-                    sp_0.coeffs()
-                        .iter()
-                        .step_by(1 << l_skip)
-                        .copied()
-                        .sum::<EF>(),
+                    coeffs.iter().step_by(1 << l_skip).copied().sum::<EF>(),
                     EF::ZERO,
                     "Zerocheck sum is not zero for air_id: {}",
                     ctx.per_trace[trace_idx].0
                 );
-                sp_0
+                UnivariatePoly(coeffs)
             })
             .collect::<Vec<_>>();
         // Reminder: sum claims for zerocheck are zero, per AIR
