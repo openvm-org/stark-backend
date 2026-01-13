@@ -36,15 +36,11 @@ struct NttEvalContext {
 // Each coset handled in a different block: coset_idx = blockDim.y
 //
 // Algorithm:
-// 1. All threads load trace data into their coset's NTT buffer
-// 2. All threads perform iNTT on their own buffer (redundant across cosets, but needed for sync)
-// 3. coset_idx=0 stores coefficients to coeffs_buffer
-// 4. Sync, all threads read coefficient from coeffs_buffer
+// 1. All threads load trace data into their NTT buffer
+// 2. All threads perform iNTT on their own buffer (redundant across cosets in different blocks)
+// 3. Sync if shared memory needed (skip_domain > WARP_SIZE)
 // 5. All threads apply coset-specific shift
-// 6. All cosets do forward NTT in parallel
-//
-// Note: The iNTT is done redundantly by all cosets to ensure all threads hit the same
-// __syncthreads() calls. Only coset_idx=0's result is used.
+// 6. All threads do forward NTT in parallel
 template <bool NEEDS_SHMEM>
 __device__ __forceinline__ Fp ntt_coset_interpolate(
     const Fp *__restrict__ evals, // must have length height = num_x * skip_domain
@@ -69,7 +65,7 @@ __device__ __forceinline__ Fp ntt_coset_interpolate(
     // Each coset uses its own NTT buffer slice
     Fp *__restrict__ ntt_buffer = ctx.ntt_buffer;
 
-    // Step 2: iNTT - all cosets perform this redundantly for sync correctness
+    // iNTT - each coset is in a different block, so currently this is redundant across blocks
     if constexpr (NEEDS_SHMEM) {
         ntt_buffer[ntt_idx] = this_thread_value;
         __syncthreads();
