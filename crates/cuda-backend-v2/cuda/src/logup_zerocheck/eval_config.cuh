@@ -4,64 +4,83 @@
 #include "fpext.h"
 #include "launcher.cuh"
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
 #include <vector_types.h>
 
-// Launch strategy: 2D grid (grid.x blocks over x_int, grid.y over z_int), 1D block over x threads.
+// Launch strategy: 2D grid (grid.x blocks over (ntt_idx, x_int), grid.y over coset_idx), 1D block over x threads.
 // Each thread may stride over multiple x_int values to stay within max_temp_bytes for intermediates.
-namespace align_z_round0_config {
+namespace coset_round0_config {
 
 inline std::pair<dim3, dim3> eval_constraints_launch_params(
     uint32_t buffer_size,
-    uint32_t large_domain, // range of z_int
-    uint32_t num_x,        // range of x_int
+    uint32_t skip_domain,
+    uint32_t num_x, // range of x_int
+    uint32_t num_cosets,
     size_t max_temp_bytes,
     uint32_t buffer_threshold, // threshold for switching intermediate buffer to global memory
     uint32_t max_threads_per_block
 ) {
-    // Decide how many threads each block needs.
-    uint32_t threads_per_block =
-        std::min(std::max(num_x, static_cast<uint32_t>(WARP_SIZE)), max_threads_per_block);
+    // ASSERTION: full skip domain must fit in one block
+    // This should always hold since l_skip <= 8 typically
+    assert(skip_domain <= 1024 && "skip_domain exceeds CUDA max threads per block (1024)");
+    // Entire skip domain must fit within a block for NTT
+    auto max_threads = std::max(skip_domain, max_threads_per_block);
+    auto [grid, block] = kernel_launch_params(skip_domain * num_x, max_threads);
+    grid.y = num_cosets;
 
     // If possible, we would like to have each thread take care of a single row (i.e.
     // x_int). To do this, however, we need to ensure that the intermediate buffer size
     // is less than max_temp_bytes where each thread needs buffer_size Fp slots, which
     // are 4 bytes each.
-    uint32_t total_pairs = num_x * large_domain;
-    uint32_t desired_intermed_capacity_bytes =
-        buffer_size <= buffer_threshold ? 0 : total_pairs * buffer_size * sizeof(Fp);
+    size_t desired_intermed_capacity_bytes =
+        buffer_size <= buffer_threshold
+            ? 0
+            : (size_t)skip_domain * num_x * num_cosets * buffer_size * sizeof(Fp);
 
-    uint32_t num_x_per_thread =
-        std::max(div_ceil(desired_intermed_capacity_bytes, max_temp_bytes), static_cast<size_t>(1));
-    uint32_t grid_x = div_ceil(div_ceil(num_x, num_x_per_thread), threads_per_block);
-
-    dim3 grid(grid_x, large_domain);
-    dim3 block(threads_per_block);
+    uint32_t num_x_per_thread = std::max(
+        div_ceil(desired_intermed_capacity_bytes, std::max(max_temp_bytes, (size_t)1)),
+        (size_t)1
+    );
+    if (num_x_per_thread <= grid.x) {
+        grid.x = grid.x / num_x_per_thread;
+    } else {
+        grid.x = 1;
+        // shrink threads
+        block.x = std::max(num_x / num_x_per_thread, 1u) * skip_domain;
+    }
 
     return {grid, block};
 }
 
 inline uint32_t temp_sums_buffer_size(
     uint32_t buffer_size,
-    uint32_t large_domain,
+    uint32_t skip_domain,
     uint32_t num_x,
+    uint32_t num_cosets,
     size_t max_temp_bytes,
     uint32_t buffer_threshold,
     uint32_t threads_per_block
 ) {
-    auto [grid, block] = eval_constraints_launch_params(
-        buffer_size, large_domain, num_x, max_temp_bytes, buffer_threshold, threads_per_block
+    [[maybe_unused]] auto [grid, _] = eval_constraints_launch_params(
+        buffer_size,
+        skip_domain,
+        num_x,
+        num_cosets,
+        max_temp_bytes,
+        buffer_threshold,
+        threads_per_block
     );
-    (void)block;
-    return grid.x * grid.y;
+    return grid.x * grid.y * skip_domain;
 }
 
 inline uint32_t intermediates_buffer_size(
     uint32_t buffer_size,
-    uint32_t large_domain,
+    uint32_t skip_domain,
     uint32_t num_x,
+    uint32_t num_cosets,
     size_t max_temp_bytes,
     uint32_t buffer_threshold,
     uint32_t threads_per_block
@@ -70,12 +89,18 @@ inline uint32_t intermediates_buffer_size(
         return 0;
     }
     auto [grid, block] = eval_constraints_launch_params(
-        buffer_size, large_domain, num_x, max_temp_bytes, buffer_threshold, threads_per_block
+        buffer_size,
+        skip_domain,
+        num_x,
+        num_cosets,
+        max_temp_bytes,
+        buffer_threshold,
+        threads_per_block
     );
     return grid.x * grid.y * block.x * buffer_size;
 }
 
-} // namespace align_z_round0_config
+} // namespace coset_round0_config
 
 // Launch strategy: linearize (x_int, z_int) into a 1D threadIdx.x to keep warps aligned on x_int.
 // We tile z within a block (up to WARP_SIZE) and use the remaining threads for x; grid.x scales x
