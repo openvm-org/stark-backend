@@ -336,56 +336,49 @@ fn test_mixed_allocations() {
 }
 
 // ============================================================================
-// OOM test: exhaust GPU memory and verify we get OutOfMemory error
+// OOM recovery: allocator should still work after an OOM event
 // ============================================================================
 #[test]
-#[ignore] // Run explicitly: exhausts GPU memory
-fn test_oom_error() {
+#[ignore] // Heavy: intentionally exhausts GPU memory
+fn test_oom_recovery_after_error() {
     use super::d_malloc;
     use crate::error::MemoryError;
 
-    let initial_free = get_gpu_free_memory();
-    println!(
-        "GPU memory: {:.2} GB free",
-        initial_free as f64 / (1 << 30) as f64
-    );
-
-    // Fill GPU memory in 1GB chunks until we can't anymore
-    let chunk_size = 1 << 30; // 1 GB
+    // Allocate large chunks to drive the device near OOM. Keep them alive to
+    // simulate a server that retains existing allocations.
+    let chunk_size = 2 << 30; // 2 GB
     let mut buffers: Vec<*mut std::ffi::c_void> = Vec::new();
 
+    // Fill GPU memory until we hit OOM on a 2 GB request
     loop {
         match d_malloc(chunk_size) {
-            Ok(ptr) => {
-                buffers.push(ptr);
-                println!(
-                    "Allocated chunk {}: {:.2} GB total",
-                    buffers.len(),
-                    (buffers.len() * chunk_size) as f64 / (1 << 30) as f64
-                );
-            }
-            Err(MemoryError::OutOfMemory { requested, .. }) => {
-                println!(
-                    "Got expected OutOfMemory error: requested {} bytes ({:.2} GB)",
-                    requested,
-                    requested as f64 / (1 << 30) as f64
-                );
-                // This is what we wanted - OOM error was properly returned
-                // Clean up and exit successfully
-                for ptr in buffers {
-                    unsafe { super::d_free(ptr).unwrap() };
-                }
-                return; // Test passed!
-            }
-            Err(e) => {
-                // Clean up before panicking
-                for ptr in buffers {
-                    unsafe { super::d_free(ptr).unwrap() };
-                }
-                panic!("Expected OutOfMemory error, got: {:?}", e);
-            }
+            Ok(ptr) => buffers.push(ptr),
+            Err(MemoryError::OutOfMemory { .. }) => break,
+            Err(e) => panic!("Expected OOM, got {:?}", e),
         }
     }
+
+    // After OOM, allocator should still succeed for smaller requests without
+    // freeing the large buffers we already hold.
+    let small = d_malloc(1 << 20).expect("Small allocation after OOM failed"); // 1 MB (cudaMallocAsync path)
+
+    // Request just under the currently free memory to exercise the pool path.
+    let free_after_oom = get_gpu_free_memory();
+    let safety = 64 << 20; // leave 64 MB headroom to avoid rounding issues
+    assert!(
+        free_after_oom > safety + (2 << 20),
+        "Not enough free memory to attempt medium alloc after OOM"
+    );
+    let medium_req = free_after_oom - safety;
+    let medium = d_malloc(medium_req).expect("Pool allocation after OOM failed");
+
+    // Cleanup
+    unsafe { super::d_free(small).unwrap() };
+    unsafe { super::d_free(medium).unwrap() };
+    for ptr in buffers {
+        unsafe { super::d_free(ptr).unwrap() };
+    }
+    current_stream_sync().expect("stream sync after cleanup");
 }
 
 // ============================================================================
