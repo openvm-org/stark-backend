@@ -1,5 +1,5 @@
 [workspace.package]
-version = "1.2.3"
+version = "2.0.0-alpha"
 edition = "2021"
 rust-version = "1.83"
 authors = ["OpenVM contributors"]
@@ -8,9 +8,22 @@ repository = "https://github.com/openvm-org/"
 license = "MIT OR Apache-2.0"
 
 [workspace]
-members = ["crates/stark-backend", "crates/stark-sdk", "crates/cuda-common", "crates/cuda-backend", "crates/cuda-builder"]
+members = [
+    "crates/stark-backend",
+    "crates/stark-sdk",
+    "crates/cuda-common",
+    "crates/cuda-backend",
+    "crates/cuda-builder",
+    "crates/stark-backend-v2",
+    "crates/stark-backend-v2/derive",
+]
 # Only these build by default
-default-members = ["crates/stark-backend", "crates/stark-sdk"]
+default-members = [
+    "crates/stark-backend",
+    "crates/stark-sdk",
+    "crates/stark-backend-v2",
+    "crates/stark-backend-v2/derive",
+]
 resolver = "2"
 
 # Fastest runtime configuration
@@ -55,10 +68,13 @@ openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
 openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
 openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
+stark-backend-v2 = { path = "crates/stark-backend-v2", default-features = false }
+codec-derive = { path = "crates/stark-backend-v2/derive", default-features = false }
 
 # Plonky3
 p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
 p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-interpolation = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
 p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
 p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
 p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
@@ -116,6 +132,7 @@ async-trait = "0.1.83"
 getset = "0.1.3"
 rand = { version = "0.8.5", default-features = false }
 hex = { version = "0.4.3", default-features = false }
+hex-literal = "1.0.0"
 bitcode = "0.6.5"
 bincode = "2.0.1"
 bincode_derive = "2.0.1"
