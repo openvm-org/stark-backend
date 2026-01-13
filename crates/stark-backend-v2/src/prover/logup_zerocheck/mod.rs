@@ -196,8 +196,9 @@ where
         let width = 2 * num_traces;
         let mut sp_coeffs_mat = EF::zero_vec(width * large_uni_domain);
         for (i, coeffs) in sp_0_polys[..2 * num_traces].iter().enumerate() {
-            debug_assert!(coeffs.coeffs().len() <= sp_0_deg + 1);
-            for (j, &c_j) in coeffs.coeffs().iter().enumerate() {
+            // NOTE: coeffs could have length longer than `sp_0_deg + 1` due to coset evaluation,
+            // but trailing coefficients should be zero.
+            for (j, &c_j) in coeffs.coeffs().iter().enumerate().take(sp_0_deg + 1) {
                 // SAFETY:
                 // - coeffs length is <= sp_0_deg + 1 <= s_0_deg < large_uni_domain
                 // - sp_coeffs_mat allocated for width
