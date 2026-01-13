@@ -164,15 +164,17 @@ extern "C" {
     // logup_round0.cu
     pub fn _logup_r0_temp_sums_buffer_size(
         buffer_size: u32,
-        large_domain: u32,
+        skip_domain: u32,
         num_x: u32,
+        num_cosets: u32,
         max_temp_bytes: usize,
     ) -> usize;
 
     pub fn _logup_r0_intermediates_buffer_size(
         buffer_size: u32,
-        large_domain: u32,
+        skip_domain: u32,
         num_x: u32,
+        num_cosets: u32,
         max_temp_bytes: usize,
     ) -> usize;
 
@@ -182,8 +184,6 @@ extern "C" {
         selectors_cube: *const F,
         preprocessed: *const F,
         main_parts: *const *const F,
-        omega_skip_pows: *const F,
-        inv_lagrange_denoms: *const F,
         eq_cube: *const EF,
         public_values: *const F,
         numer_weights: *const EF,
@@ -193,37 +193,37 @@ extern "C" {
         rules_len: usize,
         buffer_size: u32,
         d_intermediates: *mut F,
-        large_domain: u32,
         skip_domain: u32,
         num_x: u32,
         height: u32,
-        expansion_factor: u32,
+        num_cosets: u32,
+        g_shift: F,
         max_temp_bytes: usize,
     ) -> i32;
 
     // zerocheck_round0.cu
     pub fn _zerocheck_r0_temp_sums_buffer_size(
         buffer_size: u32,
-        large_domain: u32,
+        skip_domain: u32,
         num_x: u32,
+        num_cosets: u32,
         max_temp_bytes: usize,
     ) -> usize;
 
     pub fn _zerocheck_r0_intermediates_buffer_size(
         buffer_size: u32,
-        large_domain: u32,
+        skip_domain: u32,
         num_x: u32,
+        num_cosets: u32,
         max_temp_bytes: usize,
     ) -> usize;
 
-    fn _zerocheck_bary_eval_constraints(
+    fn _zerocheck_ntt_eval_constraints(
         tmp_sums_buffer: *mut EF,
         output: *mut EF,
         selectors_cube: *const F,
         preprocessed: *const F,
         main_parts: *const *const F,
-        omega_skip_pows: *const F,
-        inv_lagrange_denoms: *const F,
         eq_cube: *const EF,
         d_lambda_pows: *const EF,
         public_values: *const F,
@@ -234,11 +234,11 @@ extern "C" {
         lambda_len: usize,
         buffer_size: u32,
         d_intermediates: *mut F,
-        large_domain: u32,
         skip_domain: u32,
         num_x: u32,
         height: u32,
-        expansion_factor: u32,
+        num_cosets: u32,
+        g_shift: F,
         max_temp_bytes: usize,
     ) -> i32;
 
@@ -527,14 +527,12 @@ pub unsafe fn frac_add_alpha(data: &DeviceBuffer<Frac<EF>>, alpha: EF) -> Result
 /// - `eq_cube` must be a pointer to device buffer with at least `num_x` elements representing
 ///   evaluations on hypercube.
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn zerocheck_bary_eval_constraints(
+pub unsafe fn zerocheck_ntt_eval_constraints(
     tmp_sums_buffer: &mut DeviceBuffer<EF>,
     output: &mut DeviceBuffer<EF>,
     selectors_cube: &DeviceBuffer<F>,
     preprocessed: *const F,
     main_ptrs: &DeviceBuffer<*const F>,
-    omega_skip_pows: &DeviceBuffer<F>,
-    inv_lagrange_denoms: &DeviceBuffer<F>,
     eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
     public_values: &DeviceBuffer<F>,
@@ -542,20 +540,19 @@ pub unsafe fn zerocheck_bary_eval_constraints(
     used_nodes: &DeviceBuffer<usize>,
     buffer_size: u32,
     intermediates: &mut DeviceBuffer<F>,
-    large_domain: u32,
     skip_domain: u32,
     num_x: u32,
     height: u32,
+    num_cosets: u32,
+    g_shift: F,
     max_temp_bytes: usize,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_zerocheck_bary_eval_constraints(
+    CudaError::from_result(_zerocheck_ntt_eval_constraints(
         tmp_sums_buffer.as_mut_ptr(),
         output.as_mut_ptr(),
         selectors_cube.as_ptr(),
         preprocessed,
         main_ptrs.as_ptr(),
-        omega_skip_pows.as_ptr(),
-        inv_lagrange_denoms.as_ptr(),
         eq_cube,
         lambda_pows.as_ptr(),
         public_values.as_ptr(),
@@ -566,11 +563,11 @@ pub unsafe fn zerocheck_bary_eval_constraints(
         lambda_pows.len(),
         buffer_size,
         intermediates.as_mut_ptr(),
-        large_domain,
         skip_domain,
         num_x,
         height,
-        large_domain.next_power_of_two() / skip_domain,
+        num_cosets,
+        g_shift,
         max_temp_bytes,
     ))
 }
@@ -589,8 +586,6 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     selectors_cube: &DeviceBuffer<F>,
     preprocessed: *const F,
     main_ptrs: &DeviceBuffer<*const F>,
-    omega_skip_pows: &DeviceBuffer<F>,
-    inv_lagrange_denoms: &DeviceBuffer<F>,
     eq_cube: *const EF,
     public_values: &DeviceBuffer<F>,
     numer_weights: &DeviceBuffer<EF>,
@@ -599,10 +594,11 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     rules: &DeviceBuffer<u128>,
     buffer_size: u32,
     intermediates: &mut DeviceBuffer<F>,
-    large_domain: u32,
     skip_domain: u32,
     num_x: u32,
     height: u32,
+    num_cosets: u32,
+    g_shift: F,
     max_temp_bytes: usize,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_bary_eval_interactions_round0(
@@ -611,8 +607,6 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         selectors_cube.as_ptr(),
         preprocessed,
         main_ptrs.as_ptr(),
-        omega_skip_pows.as_ptr(),
-        inv_lagrange_denoms.as_ptr(),
         eq_cube,
         public_values.as_ptr(),
         numer_weights.as_ptr(),
@@ -622,11 +616,11 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         rules.len(),
         buffer_size,
         intermediates.as_mut_ptr(),
-        large_domain,
         skip_domain,
         num_x,
         height,
-        large_domain.next_power_of_two() / skip_domain,
+        num_cosets,
+        g_shift,
         max_temp_bytes,
     ))
 }
