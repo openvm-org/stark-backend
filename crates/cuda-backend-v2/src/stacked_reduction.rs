@@ -401,7 +401,12 @@ impl StackedReductionGpu {
         debug_assert!(domain_size >= s_0_deg);
         // Generator for large domain
         let omega = F::two_adic_generator(log_domain_size);
-        let omega_pows = omega.powers().take(domain_size).collect_vec();
+        let omega_pows = {
+            let pows = omega.powers().take(domain_size);
+            let (evens, odds) = pows.enumerate().partition::<Vec<_>, _>(|(i, _)| i & 1 == 0);
+            evens.into_iter().chain(odds).map(|(_, v)| v).collect_vec()
+        };
+
         // Default packets for n >= 0
         let default_packets = omega_pows
             .iter()
@@ -422,10 +427,8 @@ impl StackedReductionGpu {
         // over all unstacked columns. However instead of naively computing the batching in that
         // way, we use the special definition of the sumcheck in terms of unstacked traces to sum
         // over smaller domains on a per-trace basis.
-        let mut s_0_evals_batch = Vec::with_capacity(self.ht_diff_idxs.len() - 1);
-
-        // Allocate output buffer
-        let mut d_output = DeviceBuffer::<EF>::with_capacity(domain_size);
+        let mut d_s_0_evals = DeviceBuffer::<EF>::with_capacity(domain_size);
+        d_s_0_evals.fill_zero().unwrap();
 
         for ((trace_ptr, trace_height, trace_width), window) in zip(
             mem::take(&mut self.trace_ptrs),
@@ -463,17 +466,17 @@ impl StackedReductionGpu {
                 &d_default_packets
             };
 
-            // PERF[jpw]: we choose the largest stride possible for more parallelism. Adjust if peak
-            // memory too high.
-            let col_stride: u16 = trace_width.try_into().unwrap();
-            // Allocate block_sums buffer for intermediate reduction
+            // PERF: Peak memory is currently low enough where we can have a seperate kernel block per trace
+            // column. If peak memory usage becomes a concern here, we should do several columns per block.
             let block_sums_len = unsafe {
                 _stacked_reduction_r0_required_temp_buffer_size(
                     trace_height as u32,
+                    trace_width as u32,
                     l_skip as u32,
-                    col_stride,
                 )
             } as usize;
+
+            // Allocate block_sums buffer for intermediate reduction
             let mut d_block_sums = DeviceBuffer::<EF>::with_capacity(block_sums_len);
 
             unsafe {
@@ -486,31 +489,16 @@ impl StackedReductionGpu {
                     lambda_pows_ptr,
                     z_packets,
                     &mut d_block_sums,
-                    &mut d_output,
+                    &mut d_s_0_evals,
                     trace_height,
                     trace_width,
                     l_skip,
-                    col_stride,
                 )
                 .unwrap();
             };
-
-            // D2H copy - output is already EF
-            let evals = d_output.to_host().unwrap();
-
-            debug_assert!(
-                UnivariatePoly::from_evals_idft(&evals).coeffs()[s_0_deg + 1..]
-                    .iter()
-                    .all(|c| *c == EF::ZERO),
-                "s_0 degree exceeds {s_0_deg}"
-            );
-
-            s_0_evals_batch.push(evals);
         }
 
-        let s_0_evals = (0..domain_size)
-            .map(|i| s_0_evals_batch.iter().map(|evals| evals[i]).sum::<EF>())
-            .collect_vec();
+        let s_0_evals = d_s_0_evals.to_host().unwrap();
         let mut s_0 = UnivariatePoly::from_evals_idft(&s_0_evals);
         debug_assert!(s_0.coeffs()[s_0_deg + 1..].iter().all(|c| *c == EF::ZERO));
         s_0.coeffs_mut().truncate(s_0_deg + 1);

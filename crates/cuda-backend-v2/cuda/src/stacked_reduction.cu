@@ -79,6 +79,7 @@ __device__ __forceinline__ Fp barycentric_interpolate_strided(
 // to sum over x for a single (window_idx, z_int) pair. Blocks stride over window_idx via gridDim.y.
 //
 // See Rust doc comments for more details.
+template <bool NEEDS_SHMEM>
 __global__ void stacked_reduction_round0_block_sum_kernel(
     const FpExt *__restrict__ eq_r_ns, // pointer to EqEvalSegments
     const Fp *__restrict__ trace_ptr,
@@ -99,92 +100,79 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
     // when accessing shared_sum[i * stride + ...] for different i values
     const uint32_t PADDED_X = blockDim.x + 1;
     FpExt *shared_sum = reinterpret_cast<FpExt *>(smem); // FpExt[S_DEG][PADDED_X]
-    Fp *shared_eval =
-        reinterpret_cast<Fp *>(smem + S_DEG * PADDED_X * sizeof(FpExt)); // Fp[blockDim.x]
 
-    bool needs_shmem = l_skip > LOG_WARP_SIZE;
     uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t z_idx = tidx & skip_mask;
     uint32_t x_int = tidx >> l_skip;
-    uint32_t col_idx_base = blockIdx.y; // blockDim.y = 1
+    uint32_t col_idx = blockIdx.y;
     // Each thread will handle z_int in S_DEG * z_idx..(S_DEG + 1) * z_idx
-    FpExt eq[S_DEG];
-    FpExt k_rot[S_DEG];
+    FpExt eq_k_rot[S_DEG];
     // Compute eq, k_rot depending on (z_int, x_int)
     FpExt eq_cube = get_eq_cube(eq_r_ns, num_x, x_int);
-    FpExt k_rot_cube = get_eq_cube(eq_r_ns, num_x, rot_prev(x_int, num_x));
-    auto const z_idx_rev = rev_len(z_idx, l_skip);
-    Fp omega_shift = pow(TWO_ADIC_GENERATORS[l_skip + 1], z_idx_rev); // 1 = log2(S_DEG)
+    FpExt k_rot_cube = get_eq_cube(eq_r_ns, num_x, rot_prev(x_int, num_x)) - eq_cube;
+    FpExt eq_lambda = lambda_pows[2 * col_idx] * eq_cube;
+    FpExt k_rot_lambda = lambda_pows[2 * col_idx + 1];
 
 #pragma unroll
     for (uint32_t i = 0; i < S_DEG; i++) {
-        uint32_t z_int = S_DEG * z_idx + i;
-        FpExt eq_uni = z_packets[z_int].eq_uni;
-        FpExt k_rot_0 = z_packets[z_int].k_rot_0;
-        FpExt k_rot_1 = z_packets[z_int].k_rot_1;
-
-        eq[i] = eq_uni * eq_cube;
-        k_rot[i] = k_rot_0 * eq_cube + k_rot_1 * (k_rot_cube - eq_cube);
-    }
-    FpExt local_sum[S_DEG];
-#pragma unroll
-    for (uint32_t i = 0; i < S_DEG; i++) {
-        local_sum[i] = FpExt(Fp::zero());
+        uint32_t z_int = (i << l_skip) + z_idx;
+        auto packet = z_packets[z_int];
+        eq_k_rot[i] = packet.eq_uni * eq_lambda +
+                      (packet.k_rot_0 * eq_cube + packet.k_rot_1 * k_rot_cube) * k_rot_lambda;
     }
 
+    // First, each thread reads trace_ptr and loads to shared_eval
+    auto evals = trace_ptr + col_idx * height + (x_int << (l_skip - log_stride));
     auto stride_mask = (1u << log_stride) - 1;
-    for (uint32_t col_idx = col_idx_base; col_idx < width; col_idx += gridDim.y) {
+    Fp this_thread_value = (z_idx & stride_mask) == 0 ? evals[z_idx >> log_stride] : Fp::zero();
 
-        // First, each thread reads trace_ptr and loads to shared_eval
-        auto evals = trace_ptr + col_idx * height + (x_int << (l_skip - log_stride));
-        Fp this_thread_value = (z_idx & stride_mask) == 0 ? evals[z_idx >> log_stride] : Fp::zero();
-        // We make special use of the fact S_DEG=2:
-        {
-            // i = 0: it's just the eval
-            auto q = this_thread_value;
-            local_sum[0] +=
-                (lambda_pows[2 * col_idx] * eq[0] + lambda_pows[2 * col_idx + 1] * k_rot[0]) * q;
-        }
-        {
-            // i = 1: iNTT, shift, forward NTT
-            // Note: we configured the block so all threads are active
-            Fp *__restrict__ sbuf = shared_eval + ((threadIdx.x >> l_skip) << l_skip);
-            if (needs_shmem) {
-                sbuf[z_idx] = this_thread_value;
-                __syncthreads();
-            }
-            // iNTT, bitrev output stored to this_thread_value
-            DISPATCH_BOOL_PAIR(
-                ntt_natural_to_bitrev, true, needs_shmem, this_thread_value, sbuf, z_idx, l_skip
-            );
-            // multiply by shift. regardless of whether shmem is needed, the input for forward NTT must be placed in `this_thread_value` for `ntt_bitrev_to_natural`
-            this_thread_value *= omega_shift;
-            // forward NTT of shifted coeffs
-            DISPATCH_BOOL_PAIR(
-                ntt_bitrev_to_natural, false, needs_shmem, this_thread_value, sbuf, z_idx, l_skip
-            );
-            auto q = this_thread_value;
-            local_sum[1] +=
-                (lambda_pows[2 * col_idx] * eq[1] + lambda_pows[2 * col_idx + 1] * k_rot[1]) * q;
-        }
+    // We make special use of the fact S_DEG=2:
+    {
+        // i = 0: it's just the eval
+        auto q = this_thread_value;
+        shared_sum[threadIdx.x] = eq_k_rot[0] * q;
     }
-#pragma unroll
-    for (uint32_t i = 0; i < S_DEG; i++) {
-        shared_sum[i * PADDED_X + threadIdx.x] = local_sum[i];
+    {
+        // i = 1: iNTT, shift, forward NTT
+        // Note: we configured the block so all threads are active
+        Fp *__restrict__ sbuf = nullptr;
+        if constexpr (NEEDS_SHMEM) {
+            Fp *shared_eval =
+                reinterpret_cast<Fp *>(smem + S_DEG * PADDED_X * sizeof(FpExt)); // Fp[blockDim.x]
+            sbuf = shared_eval + ((threadIdx.x >> l_skip) << l_skip);
+            sbuf[z_idx] = this_thread_value;
+            __syncthreads();
+        }
+        // iNTT, bitrev output stored to this_thread_value
+        ntt_natural_to_bitrev<true, NEEDS_SHMEM>(this_thread_value, sbuf, z_idx, l_skip);
+        // multiply by shift. regardless of whether shmem is needed, the input for forward NTT must be placed in `this_thread_value` for `ntt_bitrev_to_natural`
+        auto const z_idx_rev = rev_len(z_idx, l_skip);
+        Fp omega_shift = pow(TWO_ADIC_GENERATORS[l_skip + 1], z_idx_rev); // 1 = log2(S_DEG)
+        this_thread_value *= omega_shift;
+        // forward NTT of shifted coeffs
+        ntt_bitrev_to_natural<false, NEEDS_SHMEM>(this_thread_value, sbuf, z_idx, l_skip);
+        auto q = this_thread_value;
+        shared_sum[PADDED_X + threadIdx.x] = eq_k_rot[1] * q;
     }
+
     __syncthreads();
-
     if ((threadIdx.x >> l_skip) == 0) {
-#pragma unroll
-        for (uint32_t i = 0; i < S_DEG; i++) {
-            FpExt tile_sum = shared_sum[i * PADDED_X + z_idx];
-            for (int lane = 1; lane < (blockDim.x >> l_skip); ++lane) {
-                tile_sum += shared_sum[i * PADDED_X + (lane << l_skip) + z_idx];
-            }
-            block_sums
-                [(col_idx_base * gridDim.x + blockIdx.x) * (S_DEG << l_skip) + S_DEG * z_idx + i] =
-                    tile_sum;
+        struct FpExt2 {
+            FpExt a;
+            FpExt b;
+        };
+
+        // Compute both tile sums (i=0 and i=1) in lockstep.
+        FpExt2 out{shared_sum[0 * PADDED_X + z_idx], shared_sum[1 * PADDED_X + z_idx]};
+        for (int lane = 1; lane < (blockDim.x >> l_skip); ++lane) {
+            out.a += shared_sum[0 * PADDED_X + (lane << l_skip) + z_idx];
+            out.b += shared_sum[1 * PADDED_X + (lane << l_skip) + z_idx];
         }
+
+        // Write both tile sums with a single contiguous store
+        FpExt *out_ptr =
+            block_sums + (col_idx * gridDim.x + blockIdx.x) * (S_DEG << l_skip) + (S_DEG * z_idx);
+        *reinterpret_cast<FpExt2 *>(out_ptr) = out;
     }
 }
 
@@ -409,8 +397,8 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
 
 inline std::pair<dim3, dim3> stacked_reduction_round0_launch_params(
     uint32_t trace_height,
-    uint32_t l_skip,
-    uint16_t col_stride
+    uint32_t trace_width,
+    uint32_t l_skip
 ) {
     uint32_t skip_domain = 1u << l_skip;
     auto lifted_height = std::max(trace_height, skip_domain);
@@ -418,7 +406,7 @@ inline std::pair<dim3, dim3> stacked_reduction_round0_launch_params(
     auto max_threads = std::max(skip_domain, 256u);
     auto [grid, block] = kernel_launch_params(lifted_height, max_threads);
     // NOTE: lifted_height = skip_domain * num_x will always be divisible by block.x since num_x is a power of 2. Therefore all threads in a block will be active.
-    grid.y = static_cast<uint32_t>(col_stride);
+    grid.y = trace_width;
     return {grid, block};
 }
 
@@ -426,10 +414,10 @@ inline std::pair<dim3, dim3> stacked_reduction_round0_launch_params(
 // Required length of *block_sums in FpExt elements
 extern "C" uint32_t _stacked_reduction_r0_required_temp_buffer_size(
     uint32_t trace_height,
-    uint32_t l_skip,
-    uint16_t col_stride
+    uint32_t trace_width,
+    uint32_t l_skip
 ) {
-    auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, l_skip, col_stride);
+    auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, trace_width, l_skip);
     return ((grid.x * grid.y) << l_skip) * S_DEG;
 }
 
@@ -443,33 +431,29 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     uint32_t trace_height,
     uint32_t trace_width,
     uint32_t l_skip,
-    uint32_t num_x,
-    uint16_t col_stride // how many elements in window to sum in one thread
+    uint32_t num_x
 ) {
     // We currently use this hardcoded value to optimize the coset NTT
     static_assert(S_DEG == 2);
     uint32_t skip_domain = 1u << l_skip;
     uint32_t stride = std::max(skip_domain / trace_height, 1u);
-    auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, l_skip, col_stride);
+    auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, trace_width, l_skip);
 
     // Use block.x + 1 stride for shared_sum to avoid bank conflicts
     size_t shmem_sum_size = sizeof(FpExt) * (block.x + 1) * S_DEG;
-    size_t shmem_eval_size = sizeof(Fp) * block.x;
-    size_t shmem_bytes = shmem_sum_size + shmem_eval_size;
 
-    stacked_reduction_round0_block_sum_kernel<<<grid, block, shmem_bytes>>>(
-        eq_r_ns,
-        trace_ptr,
-        lambda_pows,
-        z_packets,
-        block_sums,
-        trace_height,
-        trace_width,
-        l_skip,
-        (1u << l_skip) - 1,
-        num_x,
-        31 - __builtin_clz(stride) // log_stride
-    );
+#define ARGUMENTS                                                                                  \
+    eq_r_ns, trace_ptr, lambda_pows, z_packets, block_sums, trace_height, trace_width, l_skip,     \
+        (1u << l_skip) - 1, num_x, 31 - __builtin_clz(stride)
+
+    if (l_skip > LOG_WARP_SIZE) {
+        size_t shmem_eval_size = sizeof(Fp) * block.x;
+        size_t shmem_bytes = shmem_sum_size + shmem_eval_size;
+        stacked_reduction_round0_block_sum_kernel<true><<<grid, block, shmem_bytes>>>(ARGUMENTS);
+    } else {
+        size_t shmem_bytes = shmem_sum_size;
+        stacked_reduction_round0_block_sum_kernel<false><<<grid, block, shmem_bytes>>>(ARGUMENTS);
+    }
 
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -480,9 +464,8 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     auto domain_size = S_DEG << l_skip;
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     size_t reduce_shmem = div_ceil(reduce_block.x, WARP_SIZE) * sizeof(FpExt);
-    sumcheck::final_reduce_block_sums<<<domain_size, reduce_block, reduce_shmem>>>(
-        block_sums, output, num_blocks
-    );
+    sumcheck::final_reduce_block_sums<true>
+        <<<domain_size, reduce_block, reduce_shmem>>>(block_sums, output, num_blocks);
 
     return CHECK_KERNEL();
 }
@@ -514,13 +497,7 @@ extern "C" int _stacked_reduction_fold_ple(
     size_t smem_bytes = (skip_domain > WARP_SIZE) ? total_warps_in_block * sizeof(FpExt) : 0;
 
     stacked_reduction_fold_ple_kernel<<<grid, block, smem_bytes>>>(
-        src,
-        dst,
-        omega_skip_pows,
-        inv_lagrange_denoms,
-        trace_height,
-        new_height,
-        skip_domain
+        src, dst, omega_skip_pows, inv_lagrange_denoms, trace_height, new_height, skip_domain
     );
 
     return CHECK_KERNEL();
