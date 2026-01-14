@@ -12,8 +12,8 @@ use crate::{
 extern "C" {
     pub fn _stacked_reduction_r0_required_temp_buffer_size(
         trace_height: u32,
+        trace_width: u32,
         l_skip: u32,
-        col_stride: u16,
     ) -> u32;
 
     fn _stacked_reduction_sumcheck_round0(
@@ -27,7 +27,6 @@ extern "C" {
         trace_width: u32,
         l_skip: u32,
         num_x: u32,
-        col_stride: u16,
     ) -> i32;
 
     fn _stacked_reduction_fold_ple(
@@ -123,7 +122,6 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
     height: usize,
     width: usize,
     l_skip: usize,
-    col_stride: u16,
 ) -> Result<(), CudaError> {
     let domain_size = STACKED_REDUCTION_S_DEG << l_skip;
     let num_x = (height >> l_skip).max(1) as u32;
@@ -141,7 +139,6 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
         width as u32,
         l_skip as u32,
         num_x,
-        col_stride,
     ))
 }
 
