@@ -221,6 +221,7 @@ static __global__ void static_final_reduce_block_sums(
 }
 
 // gridDim.x must be set to equal `d`
+template <bool ADD_TO_OUTPUT = false>
 static __global__ void final_reduce_block_sums(
     const FpExt *block_sums, // [num_blocks][d]
     FpExt *output,           // [d]
@@ -246,7 +247,11 @@ static __global__ void final_reduce_block_sums(
     sum = block_reduce_sum(sum, shared);
 
     if (tid == 0) {
-        output[out_idx] = sum;
+        if constexpr (ADD_TO_OUTPUT) {
+            output[out_idx] += sum;
+        } else {
+            output[out_idx] = sum;
+        }
     }
 }
 
