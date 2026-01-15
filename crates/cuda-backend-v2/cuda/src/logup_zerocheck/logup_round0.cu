@@ -135,7 +135,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
 
     Fp const omega_skip = TWO_ADIC_GENERATORS[l_skip];
     Fp const eval_point = g_coset * pow(omega_skip, ntt_idx);
-    Fp const omega = pow(eval_point, 1u << log_stride);
+    Fp const omega = exp_power_of_2(eval_point, log_stride);
     Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
     Fp const is_first_mult = avg_gp(omega, segment_size);
     Fp const is_last_mult = avg_gp(omega * eta, segment_size);
@@ -181,7 +181,9 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
 
         FpExt numer = FpExt(Fp::zero());
         FpExt denom = denom_sum_init;
-        acc_interactions<NEEDS_SHMEM>(eval_ctx, numer_weights, denom_weights, d_rules, rules_len, numer, denom);
+        acc_interactions<NEEDS_SHMEM>(
+            eval_ctx, numer_weights, denom_weights, d_rules, rules_len, numer, denom
+        );
 
         FpExt eq = eq_cube[x_int];
         sum.p += eq * numer;
@@ -308,7 +310,7 @@ extern "C" int _logup_bary_eval_interactions_round0(
     const Fp *selectors_cube, // [3][num_x]
     const Fp *preprocessed,
     const Fp *const *main_parts,
-    const FpExt *eq_cube,          // [num_x]
+    const FpExt *eq_cube, // [num_x]
     const Fp *public_values,
     const FpExt *numer_weights,
     const FpExt *denom_weights,
