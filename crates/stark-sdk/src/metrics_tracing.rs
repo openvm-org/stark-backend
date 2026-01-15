@@ -89,16 +89,37 @@ where
 
             // Only track spans at INFO level or higher to match metrics_span behavior
             if metadata.level() <= &tracing::Level::INFO {
+                // Start with labels inherited from parent span
+                let mut labels = if let Some(parent) = span.parent() {
+                    if let Some((_, parent_timing)) = self.span_timings.get(&parent.id()) {
+                        parent_timing.labels.clone()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+
                 // Extract all string fields from span attributes as labels
+                // These will override any inherited labels with the same key
                 let mut label_visitor = LabelVisitor::default();
                 attrs.record(&mut label_visitor);
+
+                // Merge: own labels override inherited ones
+                for (key, value) in label_visitor.labels {
+                    if let Some(pos) = labels.iter().position(|(k, _)| k == &key) {
+                        labels[pos] = (key, value);
+                    } else {
+                        labels.push((key, value));
+                    }
+                }
 
                 self.span_timings.insert(
                     id.clone(),
                     SpanTiming {
                         name: name.to_string(),
                         start_time: Instant::now(),
-                        labels: label_visitor.labels,
+                        labels,
                     },
                 );
             }
