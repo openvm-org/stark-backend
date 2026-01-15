@@ -5,6 +5,15 @@
 
 constexpr uint32_t LOG_WARP_SIZE = 5;
 
+/// Compute x^{2^power_log} by repeated squaring.
+__device__ __forceinline__ Fp exp_power_of_2(Fp x, uint32_t power_log) {
+    Fp res = x;
+    while (power_log--) {
+        res.sqr();
+    }
+    return res;
+}
+
 // Given x and 2^n, computes 1/2^n * (1 + x + ... + x^{2^n - 1}).
 __device__ __forceinline__ Fp avg_gp(Fp x, uint32_t n) {
 #ifdef CUDA_DEBUG
