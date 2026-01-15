@@ -20,6 +20,8 @@ use crate::{
 };
 
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
+///
+/// `num_cosets` should equal `constraint_degree - 1` because we evaluate the quotient polynomial.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_round0_constraints_gpu(
     pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
@@ -36,7 +38,7 @@ pub fn evaluate_round0_constraints_gpu(
     max_temp_bytes: usize,
 ) -> Result<DeviceBuffer<EF>, Round0EvalError> {
     let constraints_dag = &pk.vk.symbolic_constraints;
-    if constraints_dag.constraints.constraint_idx.is_empty() {
+    if constraints_dag.constraints.constraint_idx.is_empty() || num_cosets == 0 {
         // No plain AIR constraints, return empty buffer
         return Ok(DeviceBuffer::new());
     }
@@ -203,7 +205,13 @@ pub fn evaluate_round0_interactions_gpu(
 
     let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
     let intermed_capacity = unsafe {
-        _logup_r0_intermediates_buffer_size(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes)
+        _logup_r0_intermediates_buffer_size(
+            buffer_size,
+            skip_domain,
+            num_x,
+            num_cosets,
+            max_temp_bytes,
+        )
     };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("logup_r0:intermediates_capacity={intermed_capacity}");
