@@ -7,6 +7,7 @@
 #pragma once
 
 #include "fp.h"
+#include <sys/types.h>
 
 namespace poseidon2 {
 
@@ -65,7 +66,6 @@ static __device__ __constant__ Fp internal_diag16[16] = {
     15          // -1/2^27
 };
 
-
 #define CELLS 16
 #define CELLS_RATE 8
 #define CELLS_OUT 8
@@ -87,9 +87,7 @@ static __device__ void do_full_sboxes(Fp *cells) {
     }
 }
 
-static __device__ void do_partial_sboxes(Fp *cells) { 
-    cells[0] = sbox_d7(cells[0]); 
-}
+static __device__ void do_partial_sboxes(Fp *cells) { cells[0] = sbox_d7(cells[0]); }
 
 // Plonky3 version
 // Multiply a 4-element vector x by:
@@ -104,8 +102,8 @@ static __device__ void multiply_by_4x4_circulant(Fp *x) {
     Fp t01123 = t0123 + x[1];
     Fp t01233 = t0123 + x[3];
 
-    x[3] = t01233 + Fp(2) * x[0];
-    x[1] = t01123 + Fp(2) * x[2];
+    x[3] = t01233 + x[0].doubled();
+    x[1] = t01123 + x[2].doubled();
     x[0] = t01123 + t01;
     x[2] = t01233 + t23;
 }
@@ -113,10 +111,6 @@ static __device__ void multiply_by_4x4_circulant(Fp *x) {
 static __device__ void multiply_by_m_ext(Fp *old_cells) {
     // Optimized method for multiplication by M_EXT.
     // See appendix B of Poseidon2 paper for additional details.
-    Fp cells[CELLS];
-    for (uint i = 0; i < CELLS; i++) {
-        cells[0] = 0;
-    }
     Fp tmp_sums[4];
     for (uint i = 0; i < 4; i++) {
         tmp_sums[i] = 0;
@@ -124,17 +118,19 @@ static __device__ void multiply_by_m_ext(Fp *old_cells) {
     for (uint i = 0; i < CELLS / 4; i++) {
         multiply_by_4x4_circulant(old_cells + i * 4);
         for (uint j = 0; j < 4; j++) {
-            Fp to_add = old_cells[i * 4 + j];
-            tmp_sums[j] += to_add;
-            cells[i * 4 + j] += to_add;
+            tmp_sums[j] += old_cells[i * 4 + j];
         }
     }
     for (uint i = 0; i < CELLS; i++) {
-        old_cells[i] = cells[i] + tmp_sums[i % 4];
+        old_cells[i] += tmp_sums[i % 4];
     }
 }
 
-static __device__ void add_round_constants_full(const Fp *ROUND_CONSTANTS_PLONKY3, Fp *cells, uint round) {
+static __device__ void add_round_constants_full(
+    const Fp *ROUND_CONSTANTS_PLONKY3,
+    Fp *cells,
+    uint round
+) {
     for (uint i = 0; i < CELLS; i++) {
         cells[i] += ROUND_CONSTANTS_PLONKY3[round * CELLS + i];
     }
@@ -148,12 +144,29 @@ static __device__ void add_round_constants_partial(
     cells[0] += PARTIAL_ROUND_CONSTANTS_PLONKY3[round];
 }
 
-static __device__ __forceinline__ void internal_layer_mat_mul(Fp* cells, Fp sum) {
-    cells[1] += sum;
-#pragma unroll
-    for (int i = 2; i < CELLS; i++) {
-        cells[i] = sum + cells[i] * internal_diag16[i];
+static __device__ __forceinline__ void internal_layer_mat_mul(Fp *cells) {
+    Fp part_sum = cells[1];
+    for (uint i = 2; i < CELLS; i++) {
+        part_sum += cells[i];
     }
+    // https://github.com/Plonky3/Plonky3/blob/ecc66909d17f37a4d626d4601dc1420742571630/baby-bear/src/poseidon2.rs#L219
+    Fp sum = part_sum + cells[0];
+    cells[0] = part_sum - cells[0];                    // -2
+    cells[1] += sum;                                   // 1
+    cells[2] = sum + cells[2].doubled();               // 2
+    cells[3] = sum + cells[3].halve();                 // 1/2
+    cells[4] = sum + cells[4].doubled() + cells[4];    // 3
+    cells[5] = sum + cells[5].doubled().doubled();     // 4
+    cells[6] = sum - cells[6].halve();                 // -1/2
+    cells[7] = sum - (cells[7].doubled() + cells[7]);  // -3
+    cells[8] = sum - cells[8].doubled().doubled();     // -4
+    cells[9] = sum + cells[9] * internal_diag16[9];    // 1/2^8
+    cells[10] = sum + cells[10].halve().halve();       // 1/4
+    cells[11] = sum + cells[11] * internal_diag16[11]; // 1/8
+    cells[12] = sum + cells[12] * internal_diag16[12]; // 1/2^27
+    cells[13] = sum + cells[13] * internal_diag16[13]; // -1/2^8
+    cells[14] = sum + cells[14] * internal_diag16[14]; // -1/16
+    cells[15] = sum + cells[15] * internal_diag16[15]; // -1/2^27
 }
 
 static __device__ void full_round_half(const Fp *ROUND_CONSTANTS, Fp *cells, uint round) {
@@ -165,13 +178,7 @@ static __device__ void full_round_half(const Fp *ROUND_CONSTANTS, Fp *cells, uin
 static __device__ void partial_round(const Fp *PARTIAL_ROUND_CONSTANTS, Fp *cells, uint round) {
     add_round_constants_partial(PARTIAL_ROUND_CONSTANTS, cells, round);
     do_partial_sboxes(cells);
-    Fp part_sum = Fp(0);
-    for (uint i = 1; i < CELLS; i++) {
-        part_sum += cells[i];
-    }
-    Fp full_sum = part_sum + cells[0];
-    cells[0] = part_sum - cells[0];
-    internal_layer_mat_mul(cells, full_sum);
+    internal_layer_mat_mul(cells);
 }
 
 static __device__ void poseidon2_mix(Fp *cells) {
