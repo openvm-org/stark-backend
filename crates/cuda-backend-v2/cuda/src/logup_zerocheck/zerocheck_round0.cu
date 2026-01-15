@@ -207,7 +207,9 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
         );
         sum += constraint_sum * eq_cube[x_int];
     }
-    shared_sum[threadIdx.x] = sum;
+    Fp zerofier = exp_power_of_2(eval_point, l_skip) - Fp::one();
+    // We assume `g_shift` is not in skip domain and since we use `coset_idx + 1` power, eval_point is never in skip domain. Hence zerofier is never zero and inversion is safe.
+    shared_sum[threadIdx.x] = sum * inv(zerofier);
     __syncthreads();
 
     if (threadIdx.x < skip_domain) {
