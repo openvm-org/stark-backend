@@ -91,7 +91,7 @@ where
             if metadata.level() <= &tracing::Level::INFO {
                 // Start with labels inherited from parent span
                 let mut labels = if let Some(parent) = span.parent() {
-                    if let Some((_, parent_timing)) = self.span_timings.get(&parent.id()) {
+                    if let Some(parent_timing) = self.span_timings.get(&parent.id()) {
                         parent_timing.labels.clone()
                     } else {
                         Vec::new()
