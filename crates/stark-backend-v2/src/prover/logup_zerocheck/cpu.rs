@@ -15,7 +15,6 @@ use openvm_stark_backend::{
 use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
-use tracing::debug;
 
 use crate::{
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
@@ -573,7 +572,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                     .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
                     .collect_vec();
                 let expr = helper.acc_constraints(&parts, &self.lambda_pows);
-                debug!(%trace_idx, %expr, "constraints_eval");
+                tracing::debug!(%trace_idx, %expr, "constraints_eval");
             }
 
             for (trace_idx, (helper, &n, mats, sels, eq_3bs)) in izip!(
@@ -594,7 +593,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                     .collect_vec();
                 let [num, denom] = helper.acc_interactions(&parts, &self.beta_pows, eq_3bs);
 
-                debug!(%trace_idx, %num, %denom, "interactions_eval");
+                tracing::debug!(%trace_idx, %num, %denom, "interactions_eval");
             }
         }
     }
