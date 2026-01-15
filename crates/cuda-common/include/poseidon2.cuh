@@ -87,9 +87,7 @@ static __device__ void do_full_sboxes(Fp *cells) {
     }
 }
 
-static __device__ void do_partial_sboxes(Fp *cells) { 
-    cells[0] = sbox_d7(cells[0]); 
-}
+static __device__ void do_partial_sboxes(Fp *cells) { cells[0] = sbox_d7(cells[0]); }
 
 // Plonky3 version
 // Multiply a 4-element vector x by:
@@ -151,23 +149,24 @@ static __device__ __forceinline__ void internal_layer_mat_mul(Fp *cells) {
     for (uint i = 2; i < CELLS; i++) {
         part_sum += cells[i];
     }
+    // https://github.com/Plonky3/Plonky3/blob/ecc66909d17f37a4d626d4601dc1420742571630/baby-bear/src/poseidon2.rs#L219
     Fp sum = part_sum + cells[0];
-    cells[0] = part_sum - cells[0];                      // -2
-    cells[1] += sum;                                     // 1
-    cells[2] = sum + cells[2].doubled();                 // 2
-    cells[3] = sum + cells[3].halve();                   // 1/2
-    cells[4] = sum + cells[4].doubled() + cells[4];      // 3
-    cells[5] = sum + cells[5].doubled().doubled();       // 4
-    cells[6] = sum - cells[6].halve();                   // -1/2
-    cells[7] = sum - (cells[7].doubled() + cells[7]);    // -3
-    cells[8] = sum - cells[8].doubled().doubled();       // -4
-    cells[9] = sum + cells[9].mul_2exp_neg_n(8);         // 1/2^8
-    cells[10] = sum + cells[10].halve().halve();         // 1/4
-    cells[11] = sum + cells[11].halve().halve().halve(); // 1/8
-    cells[12] = sum + cells[12].mul_2exp_neg_n(27);      // 1/2^27
-    cells[13] = sum - cells[13].mul_2exp_neg_n(8);       // -1/2^8
-    cells[14] = sum - cells[14].mul_2exp_neg_n(4);       // -1/16
-    cells[15] = sum - cells[15].mul_2exp_neg_n(27);      // -1/2^27
+    cells[0] = part_sum - cells[0];                    // -2
+    cells[1] += sum;                                   // 1
+    cells[2] = sum + cells[2].doubled();               // 2
+    cells[3] = sum + cells[3].halve();                 // 1/2
+    cells[4] = sum + cells[4].doubled() + cells[4];    // 3
+    cells[5] = sum + cells[5].doubled().doubled();     // 4
+    cells[6] = sum - cells[6].halve();                 // -1/2
+    cells[7] = sum - (cells[7].doubled() + cells[7]);  // -3
+    cells[8] = sum - cells[8].doubled().doubled();     // -4
+    cells[9] = sum + cells[9] * internal_diag16[9];    // 1/2^8
+    cells[10] = sum + cells[10].halve().halve();       // 1/4
+    cells[11] = sum + cells[11] * internal_diag16[11]; // 1/8
+    cells[12] = sum + cells[12] * internal_diag16[12]; // 1/2^27
+    cells[13] = sum + cells[13] * internal_diag16[13]; // -1/2^8
+    cells[14] = sum + cells[14] * internal_diag16[14]; // -1/16
+    cells[15] = sum + cells[15] * internal_diag16[15]; // -1/2^27
 }
 
 static __device__ void full_round_half(const Fp *ROUND_CONSTANTS, Fp *cells, uint round) {
