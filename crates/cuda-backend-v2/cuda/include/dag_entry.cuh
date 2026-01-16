@@ -10,119 +10,178 @@
 namespace symbolic_dag {
 
 // Context for evaluating DAG entries using NTT-based coset evaluation.
-// iNTT is done once by coset_idx=0 threads, coefficients stored in shared memory,
-// then each coset group does shift + forward NTT in parallel.
-struct NttEvalContext {
+// Each thread handles ALL cosets in lockstep:
+// - iNTT is done once, coefficient saved in register
+// - For each coset: apply shift, forward NTT, store result
+template <uint32_t NUM_COSETS> struct NttEvalContext {
     const Fp *__restrict__ preprocessed;
     const Fp *const *__restrict__ main_parts;
     const Fp *__restrict__ public_values;
-    Fp *__restrict__ inter_buffer;
-    Fp *__restrict__ ntt_buffer; // shared memory for coset NTT [skip_domain]
-    Fp is_first;
-    Fp is_last;
-    Fp omega_shift;       // g^(coset_idx * z_idx_rev) for coset evaluation
-    uint32_t skip_domain; // 2^l_skip
-    uint32_t num_cosets;  // number of cosets (d)
-    uint32_t num_x;
-    uint32_t height; // <= num_x * skip_domain (could be < in lifted case)
+    Fp *__restrict__ inter_buffer; // [buffer_size][NUM_COSETS] per thread
+    Fp *__restrict__ ntt_buffer;   // shared memory for NTT scratch (only when NEEDS_SHMEM)
+    Fp is_first[NUM_COSETS];       // per-coset selectors
+    Fp is_last[NUM_COSETS];
+    Fp omega_shifts[NUM_COSETS]; // precomputed: g^((c+1)*ntt_idx_rev)
+    uint32_t skip_domain;        // 2^l_skip
+    uint32_t height;             // trace height (could be < num_x * skip_domain in lifted case)
     uint32_t buffer_stride;
     uint32_t buffer_size;
-    uint32_t ntt_idx;   // 0..skip_domain (thread's position within skip domain)
-    uint32_t coset_idx; // 0..num_cosets (thread's coset)
-    uint32_t x_int;     // 0..num_x
+    uint32_t ntt_idx; // 0..skip_domain (thread's position within skip domain)
+    uint32_t x_int;   // 0..num_x
 };
 
-// Evaluates f(g^(coset_idx+1) * omega_skip^ntt_idx, x) using NTT-based coset evaluation.
-// Each coset handled in a different block: coset_idx = blockDim.y
+// Evaluates f(g^(c+1) * omega_skip^ntt_idx, x) for all cosets c in [0, NUM_COSETS).
+// Single thread handles ALL cosets in lockstep with DAG traversal.
 //
 // Algorithm:
-// 1. All threads load trace data into their NTT buffer
-// 2. All threads perform iNTT on their own buffer (redundant across cosets in different blocks)
-// 3. Sync if shared memory needed (skip_domain > WARP_SIZE)
-// 5. All threads apply coset-specific shift
-// 6. All threads do forward NTT in parallel
-template <bool NEEDS_SHMEM>
-__device__ __forceinline__ Fp ntt_coset_interpolate(
+// 1. Load trace value once
+// 2. iNTT once -> save coefficient in register (shared across all cosets)
+// 3. For each coset c (sequentially):
+//    - Copy coefficient, multiply by omega_shifts[c]
+//    - Forward NTT
+//    - Store result[c]
+//
+// For NEEDS_SHMEM=false (l_skip <= 5, skip_domain <= 32):
+// - All NTT operations use warp shuffles only
+// - No shared memory needed, coefficient stays in register
+// - This is the priority case for latency
+template <uint32_t NUM_COSETS, bool NEEDS_SHMEM>
+__device__ __forceinline__ void ntt_coset_interpolate(
+    Fp *__restrict__ results,     // output [NUM_COSETS]
     const Fp *__restrict__ evals, // must have length height = num_x * skip_domain
-    const NttEvalContext &ctx,
+    const Fp *omega_shifts,       // [NUM_COSETS] precomputed shifts
+    Fp *__restrict__ ntt_buffer,  // shared memory for NTT scratch (unused when !NEEDS_SHMEM)
+    uint32_t ntt_idx,
+    uint32_t x_int,
+    uint32_t skip_domain,
+    uint32_t height,
     uint8_t offset
 ) {
-    auto const skip_domain = ctx.skip_domain;
-    auto const base = ctx.x_int * skip_domain;
-    auto const ntt_idx = ctx.ntt_idx;
+    uint32_t const l_skip = __ffs(skip_domain) - 1;
+    uint32_t const base = x_int * skip_domain;
 
 #ifdef CUDA_DEBUG
     assert(ntt_idx < skip_domain);
-    assert(ctx.coset_idx < ctx.num_cosets);
 #endif
 
-    uint32_t const l_skip = __ffs(skip_domain) - 1;
+    // All threads load trace value from global memory (wrap by height for rotation)
+    uint32_t const idx = (base + ntt_idx + offset) % height;
+    Fp coeff = evals[idx];
 
-    // All threads load trace value from global memory (wrap by height for rotation, height <= lifted_height)
-    uint32_t const idx = (base + ntt_idx + offset) % ctx.height;
-    Fp this_thread_value = evals[idx];
-
-    // Each coset uses its own NTT buffer slice
-    Fp *__restrict__ ntt_buffer = ctx.ntt_buffer;
-
-    // iNTT - each coset is in a different block, so currently this is redundant across blocks
+    // iNTT once (shared across all cosets)
     if constexpr (NEEDS_SHMEM) {
-        ntt_buffer[ntt_idx] = this_thread_value;
+        ntt_buffer[ntt_idx] = coeff;
         __syncthreads();
     }
-    device_ntt::ntt_natural_to_bitrev<true, NEEDS_SHMEM>(
-        this_thread_value, ntt_buffer, ntt_idx, l_skip
-    );
-    // multiply by shift. regardless of whether shmem is needed, the input for forward NTT must be placed in `this_thread_value` for `ntt_bitrev_to_natural`
-    this_thread_value *= ctx.omega_shift;
-    // Step 6: Forward NTT of shifted coeffs
-    device_ntt::ntt_bitrev_to_natural<false, NEEDS_SHMEM>(
-        this_thread_value, ntt_buffer, ntt_idx, l_skip
-    );
+    device_ntt::ntt_natural_to_bitrev<true, NEEDS_SHMEM>(coeff, ntt_buffer, ntt_idx, l_skip);
 
-    return this_thread_value;
+    // Save coefficient in dedicated register - critical for NEEDS_SHMEM=false
+    Fp const saved_coeff = coeff;
+
+    // For each coset: shift + forward NTT (sequential, reusing ntt_buffer)
+#pragma unroll
+    for (uint32_t c = 0; c < NUM_COSETS; c++) {
+        Fp shifted = saved_coeff * omega_shifts[c];
+        // For both possibilities of NEEDS_SHMEM, this function starts from the register value `shifted` and then overwrites shared `ntt_buffer` in every location before syncthreads. Hence we don't need a sync between calls to iNTT and cosetNTTs.
+        device_ntt::ntt_bitrev_to_natural<false, NEEDS_SHMEM>(shifted, ntt_buffer, ntt_idx, l_skip);
+        results[c] = shifted;
+    }
 }
 
-// NTT-based DAG entry evaluation.
-// Uses coset NTT instead of barycentric interpolation for ENTRY_PREPROCESSED and ENTRY_MAIN.
-// All threads in the block must call this together (for __syncthreads in NTT).
-template <bool NEEDS_SHMEM>
-__device__ __forceinline__ Fp ntt_eval_dag_entry(const SourceInfo &src, const NttEvalContext &ctx) {
+// NTT-based DAG entry evaluation for all cosets.
+// Returns results for all NUM_COSETS cosets simultaneously.
+// All threads in the block must call this together (for __syncthreads in NTT when NEEDS_SHMEM).
+template <uint32_t NUM_COSETS, bool NEEDS_SHMEM>
+__device__ __forceinline__ void ntt_eval_dag_entry(
+    Fp *__restrict__ results, // output [NUM_COSETS]
+    const SourceInfo &src,
+    const NttEvalContext<NUM_COSETS> &ctx
+) {
     switch (src.type) {
     case ENTRY_PREPROCESSED: {
         const Fp *col = ctx.preprocessed + ctx.height * src.index;
-        return ntt_coset_interpolate<NEEDS_SHMEM>(col, ctx, src.offset);
+        ntt_coset_interpolate<NUM_COSETS, NEEDS_SHMEM>(
+            results,
+            col,
+            ctx.omega_shifts,
+            ctx.ntt_buffer,
+            ctx.ntt_idx,
+            ctx.x_int,
+            ctx.skip_domain,
+            ctx.height,
+            src.offset
+        );
+        return;
     }
     case ENTRY_MAIN: {
         auto main_ptr = ctx.main_parts[src.part];
         const Fp *col = main_ptr + ctx.height * src.index;
-        return ntt_coset_interpolate<NEEDS_SHMEM>(col, ctx, src.offset);
+        ntt_coset_interpolate<NUM_COSETS, NEEDS_SHMEM>(
+            results,
+            col,
+            ctx.omega_shifts,
+            ctx.ntt_buffer,
+            ctx.ntt_idx,
+            ctx.x_int,
+            ctx.skip_domain,
+            ctx.height,
+            src.offset
+        );
+        return;
     }
     case ENTRY_PUBLIC: {
-        return ctx.public_values[src.index];
+        Fp val = ctx.public_values[src.index];
+#pragma unroll
+        for (uint32_t c = 0; c < NUM_COSETS; c++) {
+            results[c] = val;
+        }
+        return;
     }
-    case SRC_CONSTANT:
-        return Fp(src.index);
+    case SRC_CONSTANT: {
+        Fp val = Fp(src.index);
+#pragma unroll
+        for (uint32_t c = 0; c < NUM_COSETS; c++) {
+            results[c] = val;
+        }
+        return;
+    }
     case SRC_INTERMEDIATE:
 #ifdef CUDA_DEBUG
         assert(ctx.buffer_size > 0);
         assert(src.index < ctx.buffer_size);
 #endif
-        return ctx.inter_buffer[src.index * ctx.buffer_stride];
-    case SRC_IS_FIRST: {
-        return ctx.is_first;
-    }
-    case SRC_IS_LAST: {
-        return ctx.is_last;
-    }
-    case SRC_IS_TRANSITION: {
-        // NOTE: we may change this to an unnormalized version
-        return Fp::one() - ctx.is_last;
-    }
+        // Intermediate buffer layout: [buffer_size][NUM_COSETS] per thread
+#pragma unroll
+        for (uint32_t c = 0; c < NUM_COSETS; c++) {
+            results[c] = ctx.inter_buffer[src.index * ctx.buffer_stride + c];
+        }
+        return;
+    case SRC_IS_FIRST:
+#pragma unroll
+        for (uint32_t c = 0; c < NUM_COSETS; c++) {
+            results[c] = ctx.is_first[c];
+        }
+        return;
+    case SRC_IS_LAST:
+#pragma unroll
+        for (uint32_t c = 0; c < NUM_COSETS; c++) {
+            results[c] = ctx.is_last[c];
+        }
+        return;
+    case SRC_IS_TRANSITION:
+        // is_transition = 1 - is_last
+#pragma unroll
+        for (uint32_t c = 0; c < NUM_COSETS; c++) {
+            results[c] = Fp::one() - ctx.is_last[c];
+        }
+        return;
     default:
         assert(false);
     }
-    return Fp::zero();
+#pragma unroll
+    for (uint32_t c = 0; c < NUM_COSETS; c++) {
+        results[c] = Fp::zero();
+    }
 }
 
 } // namespace symbolic_dag
