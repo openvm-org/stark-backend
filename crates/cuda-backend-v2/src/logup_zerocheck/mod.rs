@@ -65,8 +65,9 @@ pub(crate) mod rules;
 
 use batch_mle::{TraceCtx, evaluate_logup_batched};
 use batch_mle_monomial::{
-    ZerocheckMonomialBatch, ZerocheckMonomialParYBatch, compute_lambda_combinations,
-    get_num_monomials, get_zerocheck_rules_len, trace_has_monomials,
+    LogupCombinations, LogupMonomialBatch, ZerocheckMonomialBatch, ZerocheckMonomialParYBatch,
+    compute_lambda_combinations, compute_logup_combinations, get_num_monomials,
+    get_zerocheck_rules_len, trace_has_monomials,
 };
 pub use errors::*;
 use fractional::fractional_sumcheck_gpu;
@@ -390,6 +391,10 @@ pub struct LogupZerocheckGpu<'a> {
     pub lambda_pows: Option<DeviceBuffer<EF>>,
     /// Precomputed lambda combinations per AIR (indexed by air_idx). Set when lambda is sampled.
     lambda_combinations: Vec<Option<DeviceBuffer<EF>>>,
+    /// Beta powers on device for logup MLE rounds.
+    d_beta_pows: DeviceBuffer<EF>,
+    /// Precomputed logup combinations per trace (indexed by trace_idx). Set when xi is sampled.
+    logup_combinations: Vec<Option<LogupCombinations>>,
 
     // n_T => segment tree of eq(xi[j..1+n_T]) for j=1..={n_T-round+1} in _reverse_ layout
     eq_xis: FxHashMap<usize, EqEvalLayers<EF>>,
@@ -457,6 +462,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             .collect_vec();
         let challenges = [&[alpha_logup], &beta_pows[..]].concat();
         let d_challenges = challenges.to_device().unwrap();
+        let d_beta_pows = beta_pows.to_device().unwrap();
 
         let n_per_trace: Vec<isize> = ctx
             .common_main_traces()
@@ -501,6 +507,8 @@ impl<'a> LogupZerocheckGpu<'a> {
             xi: vec![],
             lambda_pows: None,
             lambda_combinations: (0..pk.per_air.len()).map(|_| None).collect(),
+            d_beta_pows,
+            logup_combinations: (0..num_airs_present).map(|_| None).collect(),
             eq_xis: FxHashMap::default(),
             eq_3b_per_trace: vec![],
             d_eq_3b_per_trace: vec![],
@@ -618,6 +626,26 @@ impl<'a> LogupZerocheckGpu<'a> {
                 }
             })
             .collect();
+
+        // Precompute logup combinations for all traces with interaction monomials
+        for (trace_idx, (air_idx, _)) in ctx.per_trace.iter().enumerate() {
+            let air_pk = &self.pk.per_air[*air_idx];
+            if air_pk.other_data.interaction_monomials.is_some()
+                && !self.eq_3b_per_trace[trace_idx].is_empty()
+            {
+                self.logup_combinations[trace_idx] = Some(
+                    compute_logup_combinations(
+                        self.pk,
+                        *air_idx,
+                        &self.d_beta_pows,
+                        &self.d_eq_3b_per_trace[trace_idx],
+                        &self.eq_3b_per_trace[trace_idx],
+                        &self.beta_pows,
+                    )
+                    .expect("failed to compute logup combinations"),
+                );
+            }
+        }
 
         // PERF[jpw]: we could also build the layers for different n in a transposed way using
         // eq_nonoverlapping_stage_ext, which is more memory efficient
@@ -1118,17 +1146,25 @@ impl<'a> LogupZerocheckGpu<'a> {
 
         let d_challenges_ptr = self.d_challenges.as_ptr();
 
-        // Late traces (num_y=1): logup via DAG, zerocheck via monomial
-        evaluate_logup_batched(
-            &late_eval,
-            self.pk,
-            d_challenges_ptr,
-            1,
-            &mut logup_out,
-            &mut self.logup_tilde_evals,
-            self.memory_limit_bytes,
-        );
-        // Late traces (num_y=1) always use monomial for zerocheck
+        // Late traces (num_y=1): always use monomial
+        let late_logup_traces: Vec<_> = late_eval.iter().filter(|t| t.has_interactions).collect();
+        if !late_logup_traces.is_empty() {
+            let logup_combs: Vec<_> = late_logup_traces
+                .iter()
+                .map(|t| {
+                    self.logup_combinations[t.trace_idx]
+                        .as_ref()
+                        .expect("missing logup monomial combinations for late trace")
+                })
+                .collect();
+            let batch = LogupMonomialBatch::new(late_logup_traces.iter().copied(), self.pk, &logup_combs);
+            let out = batch.evaluate(1);
+            let host = out.to_host().expect("copy logup monomial output");
+            for (i, trace_idx) in batch.trace_indices().enumerate() {
+                self.logup_tilde_evals[trace_idx][0] = host[i].p * late_logup_traces[i].norm_factor;
+                self.logup_tilde_evals[trace_idx][1] = host[i].q;
+            }
+        }
         let late_mono_traces: Vec<_> = late_eval
             .iter()
             .filter(|t| trace_has_monomials(t, self.pk))
@@ -1138,11 +1174,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 .iter()
                 .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
                 .collect();
-            let batch = ZerocheckMonomialBatch::new(
-                late_mono_traces.iter().copied(),
-                self.pk,
-                &lambda_combs,
-            );
+            let batch = ZerocheckMonomialBatch::new(late_mono_traces, self.pk, &lambda_combs);
             let out = batch.evaluate(1);
             let host = out.to_host().expect("copy monomial output");
             for (i, trace_idx) in batch.trace_indices().enumerate() {
@@ -1151,16 +1183,20 @@ impl<'a> LogupZerocheckGpu<'a> {
             }
         }
 
-        // Logup via DAG for all early traces
-        evaluate_logup_batched(
-            &early_eval,
-            self.pk,
-            d_challenges_ptr,
-            sp_deg as u32,
-            &mut logup_out,
-            &mut self.logup_tilde_evals,
-            self.memory_limit_bytes,
-        );
+        // Logup for early traces: partition by num_y threshold
+        if !early_eval.is_empty() {
+            evaluate_logup_batched(
+                &early_eval,
+                self.pk,
+                d_challenges_ptr,
+                sp_deg as u32,
+                self.monomial_num_y_threshold,
+                &self.logup_combinations,
+                &mut logup_out,
+                &mut self.logup_tilde_evals,
+                self.memory_limit_bytes,
+            );
+        }
 
         // Early traces (num_y>1): partition by threshold for zerocheck path
         let (low_early, high_early): (Vec<&TraceCtx>, Vec<&TraceCtx>) = early_eval
@@ -1219,8 +1255,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 .iter()
                 .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
                 .collect();
-            let batch =
-                ZerocheckMonomialBatch::new(low_mono_traces.into_iter(), self.pk, &lambda_combs);
+            let batch = ZerocheckMonomialBatch::new(low_mono_traces, self.pk, &lambda_combs);
             let out = batch.evaluate(sp_deg as u32);
             let host = out.to_host().expect("copy monomial output");
             for (i, trace_idx) in batch.trace_indices().enumerate() {
