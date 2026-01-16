@@ -1,16 +1,23 @@
-//! Batched monomial-based MLE evaluation for zerocheck.
+//! Batched monomial-based MLE evaluation for zerocheck and logup.
 //!
-//! This module provides a batch evaluator for monomial evaluations across multiple AIRs,
+//! This module provides batch evaluators for monomial evaluations across multiple AIRs,
 //! enabling efficient GPU kernel launches that process multiple traces in a single launch.
 
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
-use stark_backend_v2::prover::DeviceMultiStarkProvingKeyV2;
+use openvm_cuda_common::{
+    copy::{MemCopyD2H, MemCopyH2D},
+    d_buffer::DeviceBuffer,
+    error::CudaError,
+};
+use p3_field::FieldAlgebra;
+use stark_backend_v2::prover::{DeviceMultiStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 use tracing::debug;
 
 use crate::{
     EF, GpuBackendV2,
     cuda::logup_zerocheck::{
-        BlockCtx, EvalCoreCtx, MonomialAirCtx, precompute_lambda_combinations,
+        BlockCtx, EvalCoreCtx, LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
+        logup_monomial_batched, precompute_lambda_combinations,
+        precompute_logup_denom_combinations, precompute_logup_numer_combinations,
         zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
     },
     logup_zerocheck::batch_mle::TraceCtx,
@@ -115,11 +122,11 @@ impl<'a> ZerocheckMonomialBatch<'a> {
     ///
     /// Panics if `traces` is empty or if `lambda_combinations` length doesn't match.
     pub fn new(
-        traces: impl Iterator<Item = &'a TraceCtx>,
+        traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
         lambda_combinations: &[&DeviceBuffer<EF>],
     ) -> Self {
-        let traces: Vec<_> = traces.collect();
+        let traces: Vec<_> = traces.into_iter().collect();
         assert!(
             !traces.is_empty(),
             "ZerocheckMonomialBatch requires at least one trace"
@@ -488,6 +495,322 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                 THREADS_PER_BLOCK_PAR_Y,
             )
             .expect("zerocheck monomial par_y batched kernel failed");
+        }
+
+        output
+    }
+}
+
+// ============================================================================
+// LOGUP MONOMIAL EVALUATION
+// ============================================================================
+
+/// Precomputed logup combinations for a single AIR.
+pub struct LogupCombinations {
+    pub d_numer_combinations: DeviceBuffer<EF>,
+    pub d_denom_combinations: DeviceBuffer<EF>,
+    pub bus_term_sum: EF,
+}
+
+/// Precompute logup combinations for a single AIR's interaction monomials.
+///
+/// Returns numerator and denominator combination buffers plus the bus_term_sum.
+///
+/// The AIR must have nonempty interaction monomials.
+pub(crate) fn compute_logup_combinations(
+    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    air_idx: usize,
+    d_beta_pows: &DeviceBuffer<EF>,
+    d_eq_3bs: &DeviceBuffer<EF>,
+    eq_3bs_host: &[EF],
+    beta_pows_host: &[EF],
+) -> Result<LogupCombinations, CudaError> {
+    let monomials = pk.per_air[air_idx]
+        .other_data
+        .interaction_monomials
+        .as_ref()
+        .expect("AIR must have interaction monomials");
+
+    // Precompute numerator combinations: sum_i(coeff_i * eq_3bs[interaction_idx_i])
+    let mut d_numer_combinations = if monomials.num_numer_monomials > 0 {
+        DeviceBuffer::<EF>::with_capacity(monomials.num_numer_monomials as usize)
+    } else {
+        DeviceBuffer::new()
+    };
+    if monomials.num_numer_monomials > 0 {
+        unsafe {
+            precompute_logup_numer_combinations(
+                &mut d_numer_combinations,
+                monomials.d_numer_headers.as_ptr(),
+                monomials.d_numer_terms.as_ptr(),
+                d_eq_3bs,
+                monomials.num_numer_monomials,
+            )?;
+        }
+    }
+
+    // Precompute denominator combinations: sum_i(coeff_i * beta_pows[field_idx_i] *
+    // eq_3bs[interaction_idx_i])
+    let mut d_denom_combinations = if monomials.num_denom_monomials > 0 {
+        DeviceBuffer::<EF>::with_capacity(monomials.num_denom_monomials as usize)
+    } else {
+        DeviceBuffer::new()
+    };
+    if monomials.num_denom_monomials > 0 {
+        unsafe {
+            precompute_logup_denom_combinations(
+                &mut d_denom_combinations,
+                monomials.d_denom_headers.as_ptr(),
+                monomials.d_denom_terms.as_ptr(),
+                d_beta_pows,
+                d_eq_3bs,
+                monomials.num_denom_monomials,
+            )?;
+        }
+    }
+
+    // Compute bus_term_sum on CPU: sum_i(beta_pows[message_len_i] * (bus_idx[i]+1) * eq_3bs[i])
+    let bus_indices = monomials
+        .d_bus_indices
+        .to_host()
+        .expect("failed to copy bus_indices to host");
+    let interactions = &pk.per_air[air_idx].vk.symbolic_constraints.interactions;
+    debug_assert_eq!(
+        interactions.len(),
+        bus_indices.len(),
+        "interaction count must match bus_indices"
+    );
+    let mut bus_term_sum = EF::ZERO;
+    for (i, interaction) in interactions.iter().enumerate() {
+        let beta_len = beta_pows_host[interaction.message.len()];
+        let bus_idx = interaction.bus_index as u32;
+        bus_term_sum += beta_len * EF::from_canonical_u32(bus_idx + 1) * eq_3bs_host[i];
+    }
+
+    Ok(LogupCombinations {
+        d_numer_combinations,
+        d_denom_combinations,
+        bus_term_sum,
+    })
+}
+
+const THREADS_PER_BLOCK_LOGUP: u32 = 128;
+
+/// Batch evaluator for logup monomial MLE evaluation.
+///
+/// Each block evaluates a monomial chunk for a y_int, producing a FracExt output
+/// compatible with standard reduction.
+pub(crate) struct LogupMonomialBatch<'a> {
+    traces: Vec<&'a TraceCtx>,
+    block_ctxs: DeviceBuffer<BlockCtx>,
+    common_ctxs: DeviceBuffer<LogupMonomialCommonCtx>,
+    numer_ctxs: DeviceBuffer<LogupMonomialCtx>,
+    denom_ctxs: DeviceBuffer<LogupMonomialCtx>,
+    air_offsets: DeviceBuffer<u32>,
+    num_blocks: u32,
+}
+
+impl<'a> LogupMonomialBatch<'a> {
+    /// Creates a new batch from an iterator of traces.
+    ///
+    /// `logup_combinations` must contain one `LogupCombinations` per trace (in iteration order),
+    /// each precomputed via [`compute_logup_combinations`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `traces` is empty or if `logup_combinations` length doesn't match.
+    pub fn new(
+        traces: impl IntoIterator<Item = &'a TraceCtx>,
+        pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        logup_combinations: &[&LogupCombinations],
+    ) -> Self {
+        let traces: Vec<_> = traces.into_iter().collect();
+        assert!(
+            !traces.is_empty(),
+            "LogupMonomialBatch requires at least one trace"
+        );
+        assert_eq!(
+            traces.len(),
+            logup_combinations.len(),
+            "logup_combinations must have one entry per trace"
+        );
+
+        let threads_per_block = THREADS_PER_BLOCK_LOGUP;
+
+        // Build block_ctxs: one block per (y_int, mono_block) per trace
+        // local_block_idx_x = y_int * mono_blocks + mono_block
+        let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
+        let mut air_offsets: Vec<u32> = Vec::with_capacity(traces.len() + 1);
+        air_offsets.push(0);
+
+        for (local_air, t) in traces.iter().enumerate() {
+            let monomials = pk.per_air[t.air_idx]
+                .other_data
+                .interaction_monomials
+                .as_ref()
+                .unwrap();
+            let max_monomials = monomials
+                .num_numer_monomials
+                .max(monomials.num_denom_monomials);
+            let mono_blocks = max_monomials.div_ceil(threads_per_block).max(1);
+            for y_int in 0..t.num_y {
+                for mono_block in 0..mono_blocks {
+                    block_ctxs_h.push(BlockCtx {
+                        local_block_idx_x: y_int * mono_blocks + mono_block,
+                        air_idx: local_air as u32,
+                    });
+                }
+            }
+            air_offsets.push(block_ctxs_h.len() as u32);
+        }
+
+        let num_blocks = block_ctxs_h.len() as u32;
+
+        // Build logup monomial ctxs for each trace
+        let common_ctxs_h: Vec<LogupMonomialCommonCtx> = traces
+            .iter()
+            .zip(logup_combinations)
+            .map(|(t, lc)| {
+                let monomials = pk.per_air[t.air_idx]
+                    .other_data
+                    .interaction_monomials
+                    .as_ref()
+                    .unwrap();
+                let max_monomials = monomials
+                    .num_numer_monomials
+                    .max(monomials.num_denom_monomials);
+                let mono_blocks = max_monomials.div_ceil(threads_per_block).max(1);
+
+                let eval_ctx = EvalCoreCtx {
+                    d_selectors: t.sels_ptr,
+                    d_preprocessed: t.prep_ptr,
+                    d_main: t.main_ptrs_dev.as_ptr(),
+                    d_public: t.public_ptr,
+                };
+
+                LogupMonomialCommonCtx {
+                    eval_ctx,
+                    d_eq_xi: t.eq_xi_ptr,
+                    bus_term_sum: lc.bus_term_sum,
+                    num_y: t.num_y,
+                    mono_blocks,
+                }
+            })
+            .collect();
+        let numer_ctxs_h: Vec<LogupMonomialCtx> = traces
+            .iter()
+            .zip(logup_combinations)
+            .map(|(t, lc)| {
+                let monomials = pk.per_air[t.air_idx]
+                    .other_data
+                    .interaction_monomials
+                    .as_ref()
+                    .unwrap();
+                LogupMonomialCtx {
+                    d_headers: monomials.d_numer_headers.as_ptr(),
+                    d_variables: monomials.d_numer_variables.as_ptr(),
+                    d_combinations: lc.d_numer_combinations.as_ptr(),
+                    num_monomials: monomials.num_numer_monomials,
+                }
+            })
+            .collect();
+        let denom_ctxs_h: Vec<LogupMonomialCtx> = traces
+            .iter()
+            .zip(logup_combinations)
+            .map(|(t, lc)| {
+                let monomials = pk.per_air[t.air_idx]
+                    .other_data
+                    .interaction_monomials
+                    .as_ref()
+                    .unwrap();
+                LogupMonomialCtx {
+                    d_headers: monomials.d_denom_headers.as_ptr(),
+                    d_variables: monomials.d_denom_variables.as_ptr(),
+                    d_combinations: lc.d_denom_combinations.as_ptr(),
+                    num_monomials: monomials.num_denom_monomials,
+                }
+            })
+            .collect();
+
+        // Upload to device
+        let block_ctxs = block_ctxs_h
+            .to_device()
+            .expect("failed to copy logup block ctxs to device");
+        let common_ctxs = common_ctxs_h
+            .to_device()
+            .expect("failed to copy logup common ctxs to device");
+        let numer_ctxs = numer_ctxs_h
+            .to_device()
+            .expect("failed to copy logup numer ctxs to device");
+        let denom_ctxs = denom_ctxs_h
+            .to_device()
+            .expect("failed to copy logup denom ctxs to device");
+        let air_offsets = air_offsets
+            .to_device()
+            .expect("failed to copy logup air offsets to device");
+
+        debug!(
+            num_airs = traces.len(),
+            num_blocks, "LogupMonomialBatch created"
+        );
+
+        Self {
+            traces,
+            block_ctxs,
+            common_ctxs,
+            numer_ctxs,
+            denom_ctxs,
+            air_offsets,
+            num_blocks,
+        }
+    }
+
+    /// Returns the trace indices in order.
+    pub fn trace_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.traces.iter().map(|t| t.trace_idx)
+    }
+
+    /// Evaluates the batch and returns the output device buffer.
+    ///
+    /// The buffer contains `num_airs * num_x` FracExt elements, laid out as
+    /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
+    pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<Frac<EF>> {
+        let num_airs = self.common_ctxs.len();
+
+        debug!(
+            num_blocks = %self.num_blocks,
+            %num_x,
+            %num_airs,
+            "logup_monomial_batched"
+        );
+
+        let mut tmp_sums =
+            DeviceBuffer::<Frac<EF>>::with_capacity(self.num_blocks as usize * num_x as usize);
+        let mut output = DeviceBuffer::<Frac<EF>>::with_capacity(num_airs * num_x as usize);
+
+        debug_assert_eq!(
+            self.air_offsets.len(),
+            num_airs + 1,
+            "air_offsets must have num_airs + 1 elements"
+        );
+
+        // SAFETY: All device pointers were constructed from valid DeviceBuffers that outlive this
+        // call.
+        unsafe {
+            logup_monomial_batched(
+                &mut tmp_sums,
+                &mut output,
+                &self.block_ctxs,
+                &self.common_ctxs,
+                &self.numer_ctxs,
+                &self.denom_ctxs,
+                &self.air_offsets,
+                self.num_blocks,
+                num_x,
+                num_airs as u32,
+                THREADS_PER_BLOCK_LOGUP,
+            )
+            .expect("logup monomial batched kernel failed");
         }
 
         output

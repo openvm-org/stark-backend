@@ -466,8 +466,9 @@ impl StackedReductionGpu {
                 &d_default_packets
             };
 
-            // PERF: Peak memory is currently low enough where we can have a seperate kernel block per trace
-            // column. If peak memory usage becomes a concern here, we should do several columns per block.
+            // PERF: Peak memory is currently low enough where we can have a seperate kernel block
+            // per trace column. If peak memory usage becomes a concern here, we should
+            // do several columns per block.
             let block_sums_len = unsafe {
                 _stacked_reduction_r0_required_temp_buffer_size(
                     trace_height as u32,
@@ -541,8 +542,9 @@ impl StackedReductionGpu {
                 // SAFETY:
                 // - `trace.buffer()` is a valid device pointer for `trace.height() * trace.width()`
                 //   elements
-                // - `folded_evals` at `dst_offset` is valid for `new_height * trace.width()` elements
-                //   since we allocated `num_x * stacked_width` and traces fill contiguously
+                // - `folded_evals` at `dst_offset` is valid for `new_height * trace.width()`
+                //   elements since we allocated `num_x * stacked_width` and traces fill
+                //   contiguously
                 // - `d_omega_skip_pows` and `d_inv_lagrange_denoms` have length `>= skip_domain`
                 unsafe {
                     let dst = folded_evals.as_mut_ptr().add(dst_offset);
