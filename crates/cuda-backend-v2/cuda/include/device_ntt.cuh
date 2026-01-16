@@ -2,7 +2,6 @@
 
 #include "fp.h"
 #include "utils.cuh"
-#include <cmath>
 #include <cstdint>
 
 namespace device_ntt {

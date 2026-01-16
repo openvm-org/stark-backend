@@ -44,7 +44,34 @@ with_rev_bits(uint32_t x, uint32_t buf_size, bool first, Bool &&...others) {
     return with_rev_bits(x | (first * buf_size), buf_size, others...);
 }
 
+#define DISPATCH_BOOL(func, b1, ...) ((b1) ? func<true>(__VA_ARGS__) : func<false>(__VA_ARGS__))
+
 // Dispatch helper for two bool template parameters
 #define DISPATCH_BOOL_PAIR(func, b1, b2, ...)                                                      \
     ((b1) ? ((b2) ? func<true, true>(__VA_ARGS__) : func<true, false>(__VA_ARGS__))                \
           : ((b2) ? func<false, true>(__VA_ARGS__) : func<false, false>(__VA_ARGS__)))
+
+// Generic dispatcher for <uint32_t N, bool B1, bool B2> template functions.
+// Generates recursive template to dispatch runtime n (1..MAX_N) to compile-time N.
+// Usage: DEFINE_DISPATCH_N_B1_B2(dispatcher_name, target_func, MAX_N)
+// Then call: dispatcher_name(n, b1, b2, args...)
+#define DEFINE_DISPATCH_N_B1_B2(name, func, max_n)                                                 \
+    template <uint32_t N, typename... Args>                                                        \
+    inline int name##_impl(uint32_t n, bool b1, bool b2, Args &&...args) {                         \
+        if (n == N) {                                                                              \
+            if (b1) {                                                                              \
+                return b2 ? func<N, true, true>(std::forward<Args>(args)...)                       \
+                          : func<N, true, false>(std::forward<Args>(args)...);                     \
+            } else {                                                                               \
+                return b2 ? func<N, false, true>(std::forward<Args>(args)...)                      \
+                          : func<N, false, false>(std::forward<Args>(args)...);                    \
+            }                                                                                      \
+        } else if constexpr (N == 1) {                                                             \
+            return -1;                                                                             \
+        } else {                                                                                   \
+            return name##_impl<N - 1>(n, b1, b2, std::forward<Args>(args)...);                     \
+        }                                                                                          \
+    }                                                                                              \
+    template <typename... Args> inline int name(uint32_t n, bool b1, bool b2, Args &&...args) {    \
+        return name##_impl<max_n>(n, b1, b2, std::forward<Args>(args)...);                         \
+    }
