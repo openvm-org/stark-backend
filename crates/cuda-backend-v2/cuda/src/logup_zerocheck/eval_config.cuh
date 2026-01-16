@@ -10,51 +10,54 @@
 #include <utility>
 #include <vector_types.h>
 
-// Launch strategy: 2D grid (grid.x blocks over (ntt_idx, x_int), grid.y over coset_idx), 1D block over x threads.
-// Each thread may stride over multiple x_int values to stay within max_temp_bytes for intermediates.
-namespace coset_round0_config {
+// Shared implementation for coset-based round0 launch configs.
+// Template parameter COSET_PARALLEL controls grid organization:
+// - false (lockstep): grid.y = 1, each thread handles all cosets via NUM_COSETS template
+// - true (coset-parallel): grid.y = num_cosets, each block handles one coset
+namespace round0_config_impl {
 
+template <bool COSET_PARALLEL>
 inline std::pair<dim3, dim3> eval_constraints_launch_params(
     uint32_t buffer_size,
     uint32_t skip_domain,
-    uint32_t num_x, // range of x_int
+    uint32_t num_x,
     uint32_t num_cosets,
     size_t max_temp_bytes,
-    uint32_t buffer_threshold, // threshold for switching intermediate buffer to global memory
+    uint32_t buffer_threshold,
     uint32_t max_threads_per_block
 ) {
     // ASSERTION: full skip domain must fit in one block
-    // This should always hold since l_skip <= 8 typically
     assert(skip_domain <= 1024 && "skip_domain exceeds CUDA max threads per block (1024)");
-    // Entire skip domain must fit within a block for NTT
     auto max_threads = std::max(skip_domain, max_threads_per_block);
     auto [grid, block] = kernel_launch_params(skip_domain * num_x, max_threads);
-    grid.y = num_cosets;
 
-    // If possible, we would like to have each thread take care of a single row (i.e.
-    // x_int). To do this, however, we need to ensure that the intermediate buffer size
-    // is less than max_temp_bytes where each thread needs buffer_size Fp slots, which
-    // are 4 bytes each.
+    if constexpr (COSET_PARALLEL) {
+        grid.y = num_cosets; // 2D grid for coset-parallel mode
+    }
+    // grid.y = 1 implicitly for lockstep mode
+
+    // Both modes have the same total buffer size:
+    // - Lockstep: grid.x * block.x * num_cosets * buffer_size
+    // - Coset-parallel: grid.x * grid.y * block.x * buffer_size (where grid.y = num_cosets)
     size_t desired_intermed_capacity_bytes =
         buffer_size <= buffer_threshold
             ? 0
-            : (size_t)skip_domain * num_x * num_cosets * buffer_size * sizeof(Fp);
+            : (size_t)grid.x * block.x * num_cosets * buffer_size * sizeof(Fp);
 
     uint32_t num_x_per_thread = std::max(
-        div_ceil(desired_intermed_capacity_bytes, std::max(max_temp_bytes, (size_t)1)),
-        (size_t)1
+        div_ceil(desired_intermed_capacity_bytes, std::max(max_temp_bytes, (size_t)1)), (size_t)1
     );
     if (num_x_per_thread <= grid.x) {
         grid.x = grid.x / num_x_per_thread;
     } else {
         grid.x = 1;
-        // shrink threads
         block.x = std::max(num_x / num_x_per_thread, 1u) * skip_domain;
     }
 
     return {grid, block};
 }
 
+template <bool COSET_PARALLEL>
 inline uint32_t temp_sums_buffer_size(
     uint32_t buffer_size,
     uint32_t skip_domain,
@@ -64,7 +67,7 @@ inline uint32_t temp_sums_buffer_size(
     uint32_t buffer_threshold,
     uint32_t threads_per_block
 ) {
-    [[maybe_unused]] auto [grid, _] = eval_constraints_launch_params(
+    auto [grid, _] = eval_constraints_launch_params<COSET_PARALLEL>(
         buffer_size,
         skip_domain,
         num_x,
@@ -73,9 +76,11 @@ inline uint32_t temp_sums_buffer_size(
         buffer_threshold,
         threads_per_block
     );
-    return grid.x * grid.y * skip_domain;
+    // Output layout: [num_blocks][num_cosets * skip_domain]
+    return grid.x * num_cosets * skip_domain;
 }
 
+template <bool COSET_PARALLEL>
 inline uint32_t intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t skip_domain,
@@ -88,7 +93,7 @@ inline uint32_t intermediates_buffer_size(
     if (buffer_size <= buffer_threshold) {
         return 0;
     }
-    auto [grid, block] = eval_constraints_launch_params(
+    auto [grid, block] = eval_constraints_launch_params<COSET_PARALLEL>(
         buffer_size,
         skip_domain,
         num_x,
@@ -97,10 +102,62 @@ inline uint32_t intermediates_buffer_size(
         buffer_threshold,
         threads_per_block
     );
-    return grid.x * grid.y * block.x * buffer_size;
+    // Layout: [buffer_size][num_threads][num_cosets]
+    return grid.x * block.x * buffer_size * num_cosets;
+}
+
+} // namespace round0_config_impl
+
+// Lockstep mode: 1D grid (grid.x blocks), each thread handles ALL cosets via NUM_COSETS template.
+namespace coset_round0_config {
+
+inline std::pair<dim3, dim3> eval_constraints_launch_params(
+    uint32_t buffer_size,
+    uint32_t skip_domain,
+    uint32_t num_x,
+    uint32_t num_cosets,
+    size_t max_temp_bytes,
+    uint32_t buffer_threshold,
+    uint32_t max_threads_per_block
+) {
+    return round0_config_impl::eval_constraints_launch_params<false>(
+        buffer_size,
+        skip_domain,
+        num_x,
+        num_cosets,
+        max_temp_bytes,
+        buffer_threshold,
+        max_threads_per_block
+    );
 }
 
 } // namespace coset_round0_config
+
+// Coset-parallel mode: 2D grid (grid.x * grid.y where grid.y = num_cosets),
+// each block handles ONE coset identified by blockIdx.y.
+namespace coset_parallel_round0_config {
+
+inline std::pair<dim3, dim3> eval_constraints_launch_params(
+    uint32_t buffer_size,
+    uint32_t skip_domain,
+    uint32_t num_x,
+    uint32_t num_cosets,
+    size_t max_temp_bytes,
+    uint32_t buffer_threshold,
+    uint32_t max_threads_per_block
+) {
+    return round0_config_impl::eval_constraints_launch_params<true>(
+        buffer_size,
+        skip_domain,
+        num_x,
+        num_cosets,
+        max_temp_bytes,
+        buffer_threshold,
+        max_threads_per_block
+    );
+}
+
+} // namespace coset_parallel_round0_config
 
 // Launch strategy: linearize (x_int, z_int) into a 1D threadIdx.x to keep warps aligned on x_int.
 // We tile z within a block (up to WARP_SIZE) and use the remaining threads for x; grid.x scales x
