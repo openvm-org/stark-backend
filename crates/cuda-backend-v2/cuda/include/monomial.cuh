@@ -18,9 +18,9 @@ struct PackedVar {
 // Monomial metadata (12 bytes, fields ordered to avoid padding)
 struct MonomialHeader {
     uint32_t var_offset;
-    uint32_t lambda_offset;
+    uint32_t term_offset;
     uint16_t num_vars;
-    uint16_t num_lambdas;
+    uint16_t num_terms;
 };
 
 // Lambda term: (constraint_idx, coefficient) pair (8 bytes)
@@ -28,4 +28,14 @@ struct MonomialHeader {
 struct LambdaTerm {
     uint32_t constraint_idx;
     Fp coefficient;
+};
+
+// Interaction monomial term: maps a monomial to interaction context
+// On GPU we compute:
+//   For numerator:   sum_i (coefficient_i * eq_3bs[interaction_idx_i])
+//   For denominator: sum_i (coefficient_i * beta_pows[field_idx_i] * eq_3bs[interaction_idx_i])
+struct InteractionMonomialTerm {
+    Fp coefficient;
+    uint16_t interaction_idx;
+    uint16_t field_idx; // For denom: index into message for beta_pows. For numer: unused.
 };
