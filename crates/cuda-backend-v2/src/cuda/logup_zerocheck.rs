@@ -2,7 +2,7 @@ use p3_field::{Field, FieldAlgebra};
 
 use super::*;
 use crate::{
-    monomial::{LambdaTerm, MonomialHeader, PackedVar},
+    monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader, PackedVar},
     poly::SqrtHyperBuffer,
 };
 
@@ -74,6 +74,27 @@ pub struct LogupCtx {
     pub d_pair_idxs: *const u32,
     pub used_nodes_len: usize,
     pub buffer_size: u32,
+}
+
+/// Common per-AIR context for batched logup monomial evaluation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LogupMonomialCommonCtx {
+    pub eval_ctx: EvalCoreCtx,
+    pub d_eq_xi: *const EF,
+    pub bus_term_sum: EF, // Precomputed sum_i(beta[message_len_i] * (bus_idx[i]+1) * eq_3bs[i])
+    pub num_y: u32,
+    pub mono_blocks: u32,
+}
+
+/// Per-AIR context for batched logup monomial evaluation (numerator or denominator).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LogupMonomialCtx {
+    pub d_headers: *const MonomialHeader,
+    pub d_variables: *const PackedVar,
+    pub d_combinations: *const EF,
+    pub num_monomials: u32,
 }
 // end of types for batch MLE
 
@@ -373,6 +394,38 @@ extern "C" {
         lambda_terms: *const LambdaTerm<F>,
         lambda_pows: *const EF,
         num_monomials: u32,
+    ) -> i32;
+
+    // Logup monomial kernels
+    fn _precompute_logup_numer_combinations(
+        out: *mut EF,
+        headers: *const MonomialHeader,
+        terms: *const InteractionMonomialTerm<F>,
+        eq_3bs: *const EF,
+        num_monomials: u32,
+    ) -> i32;
+
+    fn _precompute_logup_denom_combinations(
+        out: *mut EF,
+        headers: *const MonomialHeader,
+        terms: *const InteractionMonomialTerm<F>,
+        beta_pows: *const EF,
+        eq_3bs: *const EF,
+        num_monomials: u32,
+    ) -> i32;
+
+    fn _logup_monomial_batched(
+        tmp_sums: *mut Frac<EF>,
+        output: *mut Frac<EF>,
+        block_ctxs: *const BlockCtx,
+        common_ctxs: *const LogupMonomialCommonCtx,
+        numer_ctxs: *const LogupMonomialCtx,
+        denom_ctxs: *const LogupMonomialCtx,
+        air_block_offsets: *const u32,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        threads_per_block: u32,
     ) -> i32;
 }
 
@@ -828,6 +881,69 @@ pub unsafe fn precompute_lambda_combinations(
         lambda_terms,
         lambda_pows.as_ptr(),
         num_monomials,
+    ))
+}
+
+pub unsafe fn precompute_logup_numer_combinations(
+    out: &mut DeviceBuffer<EF>,
+    headers: *const MonomialHeader,
+    terms: *const InteractionMonomialTerm<F>,
+    eq_3bs: &DeviceBuffer<EF>,
+    num_monomials: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_precompute_logup_numer_combinations(
+        out.as_mut_ptr(),
+        headers,
+        terms,
+        eq_3bs.as_ptr(),
+        num_monomials,
+    ))
+}
+
+pub unsafe fn precompute_logup_denom_combinations(
+    out: &mut DeviceBuffer<EF>,
+    headers: *const MonomialHeader,
+    terms: *const InteractionMonomialTerm<F>,
+    beta_pows: &DeviceBuffer<EF>,
+    eq_3bs: &DeviceBuffer<EF>,
+    num_monomials: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_precompute_logup_denom_combinations(
+        out.as_mut_ptr(),
+        headers,
+        terms,
+        beta_pows.as_ptr(),
+        eq_3bs.as_ptr(),
+        num_monomials,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn logup_monomial_batched(
+    tmp_sums: &mut DeviceBuffer<Frac<EF>>,
+    output: &mut DeviceBuffer<Frac<EF>>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    common_ctxs: &DeviceBuffer<LogupMonomialCommonCtx>,
+    numer_ctxs: &DeviceBuffer<LogupMonomialCtx>,
+    denom_ctxs: &DeviceBuffer<LogupMonomialCtx>,
+    air_block_offsets: &DeviceBuffer<u32>,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+    threads_per_block: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_logup_monomial_batched(
+        tmp_sums.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        common_ctxs.as_ptr(),
+        numer_ctxs.as_ptr(),
+        denom_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
     ))
 }
 

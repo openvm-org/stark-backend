@@ -12,7 +12,10 @@ use stark_backend_v2::keygen::types::StarkProvingKeyV2;
 use crate::{
     F,
     logup_zerocheck::rules::{SymbolicRulesGpuV2, codec::Codec},
-    monomial::{ExpandedMonomials, LambdaTerm, MonomialHeader, PackedVar},
+    monomial::{
+        ExpandedInteractionMonomials, ExpandedMonomials, InteractionMonomialTerm, LambdaTerm,
+        MonomialHeader, PackedVar,
+    },
 };
 
 pub struct AirDataGpu {
@@ -22,6 +25,7 @@ pub struct AirDataGpu {
     pub zerocheck_round0: ConstraintOnlyRules<true>,
     pub zerocheck_mle: ConstraintOnlyRules<false>,
     pub zerocheck_monomials: Option<ZerocheckMonomials>,
+    pub interaction_monomials: Option<InteractionMonomials>,
 }
 
 /// Used for GKR input evaluation and logup MLE sumcheck rounds.
@@ -54,6 +58,28 @@ pub struct ZerocheckMonomials {
     pub num_monomials: u32,
 }
 
+pub struct InteractionMonomials {
+    pub d_numer_headers: DeviceBuffer<MonomialHeader>,
+    pub d_numer_variables: DeviceBuffer<PackedVar>,
+    pub d_numer_terms: DeviceBuffer<InteractionMonomialTerm<F>>,
+    pub num_numer_monomials: u32,
+    pub d_denom_headers: DeviceBuffer<MonomialHeader>,
+    pub d_denom_variables: DeviceBuffer<PackedVar>,
+    pub d_denom_terms: DeviceBuffer<InteractionMonomialTerm<F>>,
+    pub num_denom_monomials: u32,
+    pub d_bus_indices: DeviceBuffer<u16>,
+    pub max_fields_len: usize,
+    pub num_interactions: u32,
+}
+
+fn to_device_or_empty<T>(data: &[T]) -> Result<DeviceBuffer<T>, MemCopyError> {
+    if data.is_empty() {
+        Ok(DeviceBuffer::new())
+    } else {
+        data.to_device()
+    }
+}
+
 impl AirDataGpu {
     pub fn new(pk: &StarkProvingKeyV2) -> Result<Self, MemCopyError> {
         let dag = &pk.vk.symbolic_constraints;
@@ -61,10 +87,17 @@ impl AirDataGpu {
         let interaction_rules = InteractionEvalRules::new(&symbolic_constraints)?;
         let zerocheck_round0 = ConstraintOnlyRules::<true>::new(&dag.constraints)?;
         let zerocheck_mle = ConstraintOnlyRules::<false>::new(&dag.constraints)?;
-        // Expand monomials from the constraint DAG during GPU pkey creation
+
         let zerocheck_monomials = if dag.constraints.num_constraints() > 0 {
             let expanded = ExpandedMonomials::from_dag(&dag.constraints);
             Some(ZerocheckMonomials::from_expanded(&expanded)?)
+        } else {
+            None
+        };
+        let interaction_monomials = if !symbolic_constraints.interactions.is_empty() {
+            let expanded =
+                ExpandedInteractionMonomials::from_symbolic_constraints(&symbolic_constraints);
+            Some(InteractionMonomials::from_expanded(&expanded)?)
         } else {
             None
         };
@@ -73,6 +106,7 @@ impl AirDataGpu {
             zerocheck_round0,
             zerocheck_mle,
             zerocheck_monomials,
+            interaction_monomials,
         })
     }
 }
@@ -84,7 +118,7 @@ impl ZerocheckMonomials {
         let num_lambda_terms = expanded.lambda_terms.len();
         for (i, hdr) in expanded.headers.iter().enumerate() {
             let var_end = hdr.var_offset as usize + hdr.num_vars as usize;
-            let lambda_end = hdr.lambda_offset as usize + hdr.num_lambdas as usize;
+            let term_end = hdr.term_offset as usize + hdr.num_terms as usize;
             assert!(
                 var_end <= num_variables,
                 "Monomial {i}: var_offset ({}) + num_vars ({}) = {var_end} exceeds variables.len() ({num_variables})",
@@ -92,10 +126,10 @@ impl ZerocheckMonomials {
                 hdr.num_vars
             );
             assert!(
-                lambda_end <= num_lambda_terms,
-                "Monomial {i}: lambda_offset ({}) + num_lambdas ({}) = {lambda_end} exceeds lambda_terms.len() ({num_lambda_terms})",
-                hdr.lambda_offset,
-                hdr.num_lambdas
+                term_end <= num_lambda_terms,
+                "Monomial {i}: term_offset ({}) + num_terms ({}) = {term_end} exceeds lambda_terms.len() ({num_lambda_terms})",
+                hdr.term_offset,
+                hdr.num_terms
             );
         }
 
@@ -104,6 +138,56 @@ impl ZerocheckMonomials {
             d_variables: expanded.variables.to_device()?,
             d_lambda_terms: expanded.lambda_terms.to_device()?,
             num_monomials: expanded.headers.len() as u32,
+        })
+    }
+}
+
+impl InteractionMonomials {
+    pub fn from_expanded(expanded: &ExpandedInteractionMonomials<F>) -> Result<Self, MemCopyError> {
+        // Validate numerator monomial headers
+        let num_numer_vars = expanded.numer_variables.len();
+        let num_numer_terms = expanded.numer_terms.len();
+        for (i, hdr) in expanded.numer_headers.iter().enumerate() {
+            let var_end = hdr.var_offset as usize + hdr.num_vars as usize;
+            let term_end = hdr.term_offset as usize + hdr.num_terms as usize;
+            assert!(
+                var_end <= num_numer_vars,
+                "Numer monomial {i}: var_offset + num_vars exceeds bounds"
+            );
+            assert!(
+                term_end <= num_numer_terms,
+                "Numer monomial {i}: term_offset + num_terms exceeds bounds"
+            );
+        }
+
+        // Validate denominator monomial headers
+        let num_denom_vars = expanded.denom_variables.len();
+        let num_denom_terms = expanded.denom_terms.len();
+        for (i, hdr) in expanded.denom_headers.iter().enumerate() {
+            let var_end = hdr.var_offset as usize + hdr.num_vars as usize;
+            let term_end = hdr.term_offset as usize + hdr.num_terms as usize;
+            assert!(
+                var_end <= num_denom_vars,
+                "Denom monomial {i}: var_offset + num_vars exceeds bounds"
+            );
+            assert!(
+                term_end <= num_denom_terms,
+                "Denom monomial {i}: term_offset + num_terms exceeds bounds"
+            );
+        }
+
+        Ok(Self {
+            d_numer_headers: to_device_or_empty(&expanded.numer_headers)?,
+            d_numer_variables: to_device_or_empty(&expanded.numer_variables)?,
+            d_numer_terms: to_device_or_empty(&expanded.numer_terms)?,
+            num_numer_monomials: expanded.numer_headers.len() as u32,
+            d_denom_headers: to_device_or_empty(&expanded.denom_headers)?,
+            d_denom_variables: to_device_or_empty(&expanded.denom_variables)?,
+            d_denom_terms: to_device_or_empty(&expanded.denom_terms)?,
+            num_denom_monomials: expanded.denom_headers.len() as u32,
+            d_bus_indices: expanded.bus_indices.to_device()?,
+            max_fields_len: expanded.max_fields_len,
+            num_interactions: expanded.bus_indices.len() as u32,
         })
     }
 }
