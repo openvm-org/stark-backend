@@ -148,8 +148,8 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
 ///
 /// # Safety
 /// - `src` must be a device pointer valid for `trace_height * trace_width` Fp elements.
-/// - `dst` must be a device pointer valid for `new_height * trace_width` FpExt elements,
-///   where `new_height = max(trace_height, 2^l_skip) / 2^l_skip`.
+/// - `dst` must be a device pointer valid for `new_height * trace_width` FpExt elements, where
+///   `new_height = max(trace_height, 2^l_skip) / 2^l_skip`.
 /// - `src` and `dst` memory regions must not overlap.
 /// - `omega_skip_pows` must have length `>= 2^l_skip`.
 /// - `inv_lagrange_denoms` must have length `>= 2^l_skip`.

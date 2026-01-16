@@ -16,7 +16,10 @@ use crate::{
         BlockCtx, EvalCoreCtx, LogupCtx, MainMatrixPtrs, ZerocheckCtx, logup_batch_eval_mle,
         zerocheck_batch_eval_mle,
     },
-    logup_zerocheck::mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
+    logup_zerocheck::{
+        batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
+        mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
+    },
 };
 
 const MAX_THREADS_PER_BLOCK: u32 = 128;
@@ -494,14 +497,49 @@ pub(crate) fn evaluate_logup_batched(
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
     d_challenges_ptr: *const EF,
     num_x: u32,
+    monomial_num_y_threshold: u32,
+    logup_combinations: &[Option<LogupCombinations>],
     logup_out: &mut [[Vec<EF>; 2]],
     logup_tilde_evals: &mut [[EF; 2]],
     memory_limit_bytes: usize,
 ) {
-    // Collect traces with interactions and their buffer sizes
-    let mut logup_traces_with_size: Vec<(&TraceCtx, usize)> = traces
+    let (low_traces, high_traces): (Vec<&TraceCtx>, Vec<&TraceCtx>) = traces
         .iter()
         .filter(|t| t.has_interactions)
+        .partition(|t| t.num_y <= monomial_num_y_threshold);
+
+    if !low_traces.is_empty() {
+        let logup_combs: Vec<_> = low_traces
+            .iter()
+            .map(|t| logup_combinations[t.trace_idx].as_ref().unwrap())
+            .collect();
+        let batch = LogupMonomialBatch::new(low_traces.iter().copied(), pk, &logup_combs);
+        let out = batch.evaluate(num_x);
+        let host = out.to_host().expect("copy logup monomial output");
+        let num_x_usize = num_x as usize;
+        for (i, trace_idx) in batch.trace_indices().enumerate() {
+            let fracs = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
+            let norm = low_traces[i].norm_factor;
+            if num_x == 1 {
+                logup_tilde_evals[trace_idx][0] = fracs[0].p * norm;
+                logup_tilde_evals[trace_idx][1] = fracs[0].q;
+            } else {
+                for (j, frac) in fracs.iter().enumerate() {
+                    logup_out[trace_idx][0][j] = frac.p * norm;
+                    logup_out[trace_idx][1][j] = frac.q;
+                }
+            }
+        }
+    }
+
+    if high_traces.is_empty() {
+        return;
+    }
+
+    // Collect high traces with interactions and their buffer sizes
+    let mut logup_traces_with_size: Vec<(&TraceCtx, usize)> = high_traces
+        .iter()
+        .copied()
         .map(|t| {
             let buffer_size = pk.per_air[t.air_idx]
                 .other_data
@@ -512,9 +550,6 @@ pub(crate) fn evaluate_logup_batched(
             (t, mem)
         })
         .collect();
-    if logup_traces_with_size.is_empty() {
-        return;
-    }
 
     // Sort by buffer size descending for better bin packing (First Fit Decreasing)
     logup_traces_with_size.sort_by(|a, b| b.1.cmp(&a.1));
