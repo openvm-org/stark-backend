@@ -45,8 +45,22 @@ typedef struct {
     uint32_t z_index;
 } DecodedRule;
 
+// Lightweight header: only op, flags, and x (always needed).
+// Use this for lazy decoding to reduce register pressure.
+typedef struct {
+    bool is_constraint;
+    bool buffer_result;
+    OperationType op;
+    SourceInfo x;
+} RuleHeader;
+
 __host__ __device__ __forceinline__ SourceInfo decode_source(uint64_t encoded);
 __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded);
+
+// Lazy decoding functions - decode only what's needed
+__host__ __device__ __forceinline__ RuleHeader decode_rule_header(Rule encoded);
+__host__ __device__ __forceinline__ SourceInfo decode_y(Rule encoded);
+__host__ __device__ __forceinline__ uint32_t decode_z_index(Rule encoded);
 
 static const uint64_t ENTRY_SRC_MASK = 0xF;
 static const uint64_t ENTRY_PART_SHIFT = 4;
@@ -112,4 +126,30 @@ __host__ __device__ __forceinline__ DecodedRule decode_rule(Rule encoded) {
     rule.is_constraint = (encoded.high & IS_CONSTRAINT_MASK) != 0;
 
     return rule;
+}
+
+// Decode only header (op, flags, x) - for lazy decoding pattern
+__host__ __device__ __forceinline__ RuleHeader decode_rule_header(Rule encoded) {
+    RuleHeader header;
+
+    uint64_t x_encoded = (encoded.low & LOW_48_BITS_MASK);
+    header.x = decode_source(x_encoded);
+
+    header.op = (OperationType)((encoded.high >> OP_SHIFT) & OP_MASK);
+    header.buffer_result = (encoded.high & BUFFER_RESULT_MASK) != 0;
+    header.is_constraint = (encoded.high & IS_CONSTRAINT_MASK) != 0;
+
+    return header;
+}
+
+// Decode y operand on demand (only needed for binary ops: ADD, SUB, MUL)
+__host__ __device__ __forceinline__ SourceInfo decode_y(Rule encoded) {
+    uint64_t y_encoded = ((encoded.low >> 48) | ((encoded.high & Y_HIGH_MASK) << Y_HIGH_SHIFT));
+    return decode_source(y_encoded);
+}
+
+// Decode z_index on demand (only needed when buffer_result is true)
+__host__ __device__ __forceinline__ uint32_t decode_z_index(Rule encoded) {
+    uint64_t z_encoded = (encoded.high >> Z_LOW_SHIFT) & Z_LOW_MASK;
+    return (z_encoded >> SOURCE_INTERMEDIATE_SHIFT) & SOURCE_INTERMEDIATE_MASK;
 }
