@@ -19,9 +19,7 @@ use p3_symmetric::{CompressionFunctionFromHasher, CryptographicHasher, Serializi
 
 use super::FriParameters;
 use crate::{
-    config::{
-        fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
-    },
+    config::fri_params::SecurityParameters,
     engine::{StarkEngine, StarkFriEngine},
 };
 
@@ -128,6 +126,7 @@ where
     let SecurityParameters {
         fri_params,
         log_up_params,
+        deep_ali_params,
     } = security_params;
     let fri_config = P3FriParameters {
         log_blowup: fri_params.log_blowup,
@@ -140,7 +139,7 @@ where
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
     let challenger = Challenger::from_hasher(vec![], byte_hash);
     let rap_phase = FriLogUpPhase::new(log_up_params, fri_params.log_blowup);
-    BabyBearByteHashConfig::new(pcs, challenger, rap_phase)
+    BabyBearByteHashConfig::new(pcs, challenger, rap_phase, deep_ali_params)
 }
 
 pub trait BabyBearByteHashEngineWithDefaultHash<H>
@@ -156,10 +155,7 @@ where
     BabyBearByteHashEngine<H>: BabyBearByteHashEngineWithDefaultHash<H>,
 {
     fn new(fri_params: FriParameters) -> Self {
-        let security_params = SecurityParameters {
-            fri_params,
-            log_up_params: log_up_security_params_baby_bear_100_bits(),
-        };
+        let security_params = SecurityParameters::new_baby_bear_100_bits(fri_params);
         engine_from_byte_hash(Self::default_hash(), security_params)
     }
     fn fri_params(&self) -> FriParameters {
