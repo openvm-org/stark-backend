@@ -457,13 +457,15 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         let shift_inv = shift.inverse();
         let init_inv = init.inverse();
         // shift_invs[i] = (init * shift^i)^{-1} = init^{-1} * shift^{-i}
-        let shift_invs = (0..width).fold(
-            (Vec::with_capacity(width), init_inv),
-            |(mut acc, pow), _| {
-                acc.push(pow);
-                (acc, pow * shift_inv)
-            },
-        ).0;
+        let shift_invs = (0..width)
+            .fold(
+                (Vec::with_capacity(width), init_inv),
+                |(mut acc, pow), _| {
+                    acc.push(pow);
+                    (acc, pow * shift_inv)
+                },
+            )
+            .0;
         let mut shift_pows = vec![F::ONE; width];
         for row in coeffs_mat.rows_mut() {
             for (col, value) in row.iter_mut().enumerate() {
@@ -473,7 +475,8 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
         }
 
         // Interpolate across cosets for each coefficient degree.
-        // Points are init^height, init^height * shift^height, ..., init^height * shift^{(width-1)*height}
+        // Points are init^height, init^height * shift^height, ..., init^height *
+        // shift^{(width-1)*height}
         let coset_base = shift.exp_power_of_2(log_height);
         let init_base = init.exp_power_of_2(log_height);
         let lagrange_basis = lagrange_basis_from_geometric_points(coset_base, width, init_base);
@@ -585,10 +588,12 @@ fn lagrange_basis_from_geometric_points<F: Field>(base: F, width: usize, init: F
     }
 
     // Points are init, init * base, init * base^2, ..., init * base^{width-1}
-    let points = (0..width).fold((Vec::with_capacity(width), init), |(mut acc, pow), _| {
-        acc.push(pow);
-        (acc, pow * base)
-    }).0;
+    let points = (0..width)
+        .fold((Vec::with_capacity(width), init), |(mut acc, pow), _| {
+            acc.push(pow);
+            (acc, pow * base)
+        })
+        .0;
 
     // Build the monic polynomial P(x) = ∏(x - points[i]).
     let mut root_poly = vec![F::ONE];
@@ -619,9 +624,10 @@ fn lagrange_basis_from_geometric_points<F: Field>(base: F, width: usize, init: F
         // Denominator is prod_{j != i} (points[i] - points[j])
         // = prod_{j != i} (init * base^i - init * base^j)
         // = init^{width-1} * base^{i*(width-1)} * prod_{j != i} (1 - base^{j-i})
-        // = init^{width-1} * base^{i*(width-1)} * prod_{k=1}^{i} (1 - base^{-k}) * prod_{k=1}^{width-1-i} (1 - base^k)
-        // For k=1..i: (1 - base^{-k}) = -base^{-k} * (1 - base^k)
-        // So prod_{k=1}^{i} (1 - base^{-k}) = (-1)^i * base^{-i*(i+1)/2} * prefix[i]
+        // = init^{width-1} * base^{i*(width-1)} * prod_{k=1}^{i} (1 - base^{-k}) *
+        // prod_{k=1}^{width-1-i} (1 - base^k) For k=1..i: (1 - base^{-k}) = -base^{-k} * (1
+        // - base^k) So prod_{k=1}^{i} (1 - base^{-k}) = (-1)^i * base^{-i*(i+1)/2} *
+        // prefix[i]
         let sign = if i % 2 == 0 { F::ONE } else { F::NEG_ONE };
         let exp = i * (width - 1) - (i * (i + 1) / 2);
         let pow = base.exp_u64(exp as u64);
