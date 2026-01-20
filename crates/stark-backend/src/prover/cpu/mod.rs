@@ -3,7 +3,7 @@ use std::{iter::zip, marker::PhantomData, mem::ManuallyDrop, ops::Deref, sync::A
 use derivative::Derivative;
 use itertools::{izip, zip_eq, Itertools};
 use opener::OpeningProver;
-use p3_challenger::FieldChallenger;
+use p3_challenger::{FieldChallenger, GrindingChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{BasedVectorSpace, ExtensionField, Field};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
@@ -21,8 +21,7 @@ use super::{
 use crate::{
     air_builders::symbolic::SymbolicConstraints,
     config::{
-        Com, PcsProof, PcsProverData, RapPartialProvingKey, RapPhaseSeqPartialProof,
-        StarkGenericConfig, Val,
+        Com, PcsProverData, RapPartialProvingKey, RapPhaseSeqPartialProof, StarkGenericConfig, Val,
     },
     interaction::RapPhaseSeq,
     keygen::types::MultiStarkProvingKey,
@@ -71,7 +70,7 @@ impl<SC: StarkGenericConfig> ProverBackend for CpuBackend<SC> {
 
     type Val = Val<SC>;
     type Challenge = SC::Challenge;
-    type OpeningProof = OpeningProof<PcsProof<SC>, SC::Challenge>;
+    type OpeningProof = OpeningProof<SC>;
     type RapPartialProof = Option<RapPhaseSeqPartialProof<SC>>;
     type Commitment = Com<SC>;
     type Challenger = SC::Challenger;
@@ -293,7 +292,7 @@ impl<SC: StarkGenericConfig> hal::QuotientCommitter<CpuBackend<SC>> for CpuDevic
         prover_data_after: &ProverDataAfterRapPhases<CpuBackend<SC>>,
     ) -> (Com<SC>, PcsData<SC>) {
         let pcs = self.pcs();
-        // Generate `alpha` challenge
+        // Generate `alpha` challenge for algebraic batching
         let alpha: SC::Challenge = challenger.sample_algebra_element();
         tracing::debug!("alpha: {alpha:?}");
         // Prepare extended views:
@@ -404,14 +403,16 @@ impl<SC: StarkGenericConfig> hal::OpeningProver<CpuBackend<SC>> for CpuDevice<SC
         quotient_data: PcsData<SC>,
         // Quotient degree for each RAP committed in quotient_data, in order
         quotient_degrees: &[u8],
-    ) -> OpeningProof<PcsProof<SC>, SC::Challenge> {
+    ) -> OpeningProof<SC> {
+        // Grind before non-interactive Fiat-Shamir sampling of the out-of-domain point
+        let deep_pow_witness = challenger.grind(self.config().deep_ali_params().deep_pow_bits);
         // Draw `zeta` challenge
         let zeta: SC::Challenge = challenger.sample_algebra_element();
         tracing::debug!("zeta: {zeta:?}");
 
         let pcs = self.pcs();
         let domain = |log_height| pcs.natural_domain_for_degree(1usize << log_height);
-        let opener = OpeningProver::<SC>::new(pcs, zeta);
+        let opener = OpeningProver::<SC>::new(pcs, zeta, deep_pow_witness);
         let preprocessed = preprocessed
             .iter()
             .map(|v| {

@@ -1,5 +1,6 @@
 use derivative::Derivative;
 use openvm_cuda_common::common::get_device;
+use openvm_stark_backend::config::DeepAliParameters;
 use openvm_stark_sdk::config::FriParameters;
 use p3_baby_bear::BabyBear;
 use p3_field::{coset::TwoAdicMultiplicativeCoset, PrimeCharacteristicRing};
@@ -11,6 +12,7 @@ use crate::fri_log_up::FriLogUpPhaseGpu;
 pub struct GpuConfig {
     pub fri: FriParameters,
     pub shift: BabyBear,
+    pub deep_ali: DeepAliParameters,
 }
 
 #[derive(Derivative, Clone, Debug)]

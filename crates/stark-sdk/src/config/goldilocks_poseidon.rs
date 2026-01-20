@@ -179,6 +179,7 @@ where
     let SecurityParameters {
         fri_params,
         log_up_params,
+        deep_ali_params,
     } = security_params;
     let fri_config = P3FriParameters {
         log_blowup: fri_params.log_blowup,
@@ -191,7 +192,7 @@ where
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
     let challenger = Challenger::new(perm.clone());
     let rap_phase = FriLogUpPhase::new(log_up_params, fri_params.log_blowup);
-    GoldilocksPermutationConfig::new(pcs, challenger, rap_phase)
+    GoldilocksPermutationConfig::new(pcs, challenger, rap_phase, deep_ali_params)
 }
 
 pub fn random_perm() -> Perm {

@@ -15,4 +15,6 @@ pub enum VerificationError {
     OodEvaluationMismatch,
     #[error("challenge phase error")]
     ChallengePhaseError,
+    #[error("invalid DEEP proof of work witness")]
+    InvalidDeepPowWitness,
 }

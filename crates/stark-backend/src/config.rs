@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use p3_challenger::{CanObserve, CanSample, FieldChallenger};
+use p3_challenger::{CanObserve, CanSample, FieldChallenger, GrindingChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{ExtensionField, Field};
 
@@ -31,11 +31,14 @@ where
     /// The challenger (Fiat-Shamir) implementation used.
     type Challenger: FieldChallenger<Val<Self>>
         + CanObserve<<Self::Pcs as Pcs<Self::Challenge, Self::Challenger>>::Commitment>
-        + CanSample<Self::Challenge>;
+        + CanSample<Self::Challenge>
+        + GrindingChallenger<Witness = Val<Self>>;
 
     fn pcs(&self) -> &Self::Pcs;
 
     fn rap_phase_seq(&self) -> &Self::RapPhaseSeq;
+
+    fn deep_ali_params(&self) -> DeepAliParameters;
 }
 
 pub type Val<SC> = <Domain<SC> as PolynomialSpace>::Val;
@@ -91,17 +94,24 @@ pub type PackedChallenge<SC> =
 #[derive(Debug)]
 pub struct StarkConfig<Pcs, RapPhaseSeq, Challenge, Challenger> {
     pcs: Pcs,
-    challenger: Challenger,
+    _challenger: Challenger,
     rap_phase: RapPhaseSeq,
+    deep_ali_params: DeepAliParameters,
     _phantom: PhantomData<(Challenge, Challenger)>,
 }
 
 impl<Pcs, RapPhaseSeq, Challenge, Challenger> StarkConfig<Pcs, RapPhaseSeq, Challenge, Challenger> {
-    pub const fn new(pcs: Pcs, challenger: Challenger, rap_phase: RapPhaseSeq) -> Self {
+    pub const fn new(
+        pcs: Pcs,
+        _challenger: Challenger,
+        rap_phase: RapPhaseSeq,
+        deep_ali_params: DeepAliParameters,
+    ) -> Self {
         Self {
             pcs,
-            challenger,
+            _challenger,
             rap_phase,
+            deep_ali_params,
             _phantom: PhantomData,
         }
     }
@@ -121,7 +131,8 @@ where
     Rps::PartialProvingKey: Send + Sync,
     Challenger: FieldChallenger<<Pcs::Domain as PolynomialSpace>::Val>
         + CanObserve<<Pcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment>
-        + CanSample<Challenge>,
+        + CanSample<Challenge>
+        + GrindingChallenger<Witness = <Pcs::Domain as PolynomialSpace>::Val>,
 {
     type Pcs = Pcs;
     type RapPhaseSeq = Rps;
@@ -134,49 +145,13 @@ where
     fn rap_phase_seq(&self) -> &Self::RapPhaseSeq {
         &self.rap_phase
     }
-}
-
-impl<Pcs, Rps, Challenge, Challenger> p3_uni_stark::StarkGenericConfig
-    for StarkConfig<Pcs, Rps, Challenge, Challenger>
-where
-    Challenge: ExtensionField<<Pcs::Domain as PolynomialSpace>::Val>,
-    Pcs: p3_commit::Pcs<Challenge, Challenger>,
-    Pcs::Domain: Send + Sync,
-    Pcs::Commitment: Send + Sync,
-    Pcs::ProverData: Send + Sync,
-    Pcs::Proof: Send + Sync,
-    Challenger: FieldChallenger<<Pcs::Domain as PolynomialSpace>::Val>
-        + CanObserve<Pcs::Commitment>
-        + CanSample<Challenge>
-        + Clone,
-{
-    type Pcs = Pcs;
-    type Challenge = Challenge;
-    type Challenger = Challenger;
-
-    fn pcs(&self) -> &Self::Pcs {
-        &self.pcs
-    }
-
-    fn initialise_challenger(&self) -> Self::Challenger {
-        self.challenger.clone()
+    fn deep_ali_params(&self) -> DeepAliParameters {
+        self.deep_ali_params
     }
 }
 
-pub struct UniStarkConfig<SC>(pub SC);
-
-impl<SC: p3_uni_stark::StarkGenericConfig> p3_uni_stark::StarkGenericConfig for UniStarkConfig<SC> {
-    type Pcs = <SC as p3_uni_stark::StarkGenericConfig>::Pcs;
-
-    type Challenge = <SC as p3_uni_stark::StarkGenericConfig>::Challenge;
-
-    type Challenger = <SC as p3_uni_stark::StarkGenericConfig>::Challenger;
-
-    fn pcs(&self) -> &Self::Pcs {
-        p3_uni_stark::StarkGenericConfig::pcs(&self.0)
-    }
-
-    fn initialise_challenger(&self) -> Self::Challenger {
-        self.0.initialise_challenger()
-    }
+#[derive(Copy, Clone, Debug, derive_new::new)]
+pub struct DeepAliParameters {
+    /// The number of proof-of-work bits for the DEEP proof-of-work phase.
+    pub deep_pow_bits: usize,
 }

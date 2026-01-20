@@ -350,8 +350,8 @@ pub struct LogUpSecurityParameters {
 }
 
 impl LogUpSecurityParameters {
-    /// The number of conjectured bits of security.
-    pub fn conjectured_bits_of_security<F: Field>(&self) -> u32 {
+    /// The number of bits of security with grinding.
+    pub fn bits_of_security<F: Field>(&self) -> u32 {
         // See Section 4 of [docs/Soundness_of_Interactions_via_LogUp.pdf].
         let log_order = u32::try_from(F::order().bits() - 1).unwrap();
         log_order
