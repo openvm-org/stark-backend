@@ -161,21 +161,21 @@ pub fn standard_fri_params_with_100_bits_security(log_blowup: usize) -> FriParam
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 120,
-            commit_proof_of_work_bits: 17,
+            commit_proof_of_work_bits: 18,
             query_proof_of_work_bits: 20,
         },
         3 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 99,
-            commit_proof_of_work_bits: 17,
+            commit_proof_of_work_bits: 18,
             query_proof_of_work_bits: 20,
         },
         4 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
             num_queries: 90,
-            commit_proof_of_work_bits: 17,
+            commit_proof_of_work_bits: 18,
             query_proof_of_work_bits: 20,
         },
         _ => todo!("No standard FRI params defined for log blowup {log_blowup}",),
@@ -306,7 +306,7 @@ mod security_tests {
         let challenge_field_bits = (BabyBear::ORDER_U64 as f64).powi(4).log2();
         for log_blowup in 1..=4 {
             let params = SecurityParameters::standard_100_bits_with_fri_log_blowup(log_blowup);
-            let num_batch_columns = if log_blowup == 1 { 30_000 } else { 2_000 };
+            let num_batch_columns = if log_blowup == 1 { 30_000 } else { 4_000 };
             let max_num_constraints = 15_000;
             let max_constraint_degree = (1 << log_blowup) + 1;
             let max_log_domain_size = BabyBear::TWO_ADICITY;
