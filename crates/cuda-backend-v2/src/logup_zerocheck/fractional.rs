@@ -19,12 +19,44 @@ use super::errors::FractionalSumcheckError;
 use crate::{
     EF,
     cuda::logup_zerocheck::{
-        _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, frac_build_tree_layer,
-        frac_compute_round,
+        _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, fold_ef_frac_columns_inplace,
+        frac_build_tree_layer, frac_compute_round,
     },
     poly::SqrtHyperBuffer,
     sponge::DuplexSpongeGpu,
 };
+
+/// Compute one sumcheck round: evaluate polynomial, observe in transcript, sample challenge.
+/// Returns the sampled challenge `r`.
+#[allow(clippy::too_many_arguments)]
+fn do_sumcheck_round(
+    eq_buffer: &SqrtHyperBuffer,
+    pq_buffer: &DeviceBuffer<Frac<EF>>,
+    pq_size: usize,
+    lambda: EF,
+    transcript: &mut DuplexSpongeGpu,
+    d_sum_evals: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+    round_polys_eval: &mut Vec<[EF; 3]>,
+    r_vec: &mut Vec<EF>,
+) -> Result<EF, FractionalSumcheckError> {
+    unsafe {
+        frac_compute_round(eq_buffer, pq_buffer, pq_size, lambda, d_sum_evals, tmp_block_sums)
+            .map_err(FractionalSumcheckError::ComputeRound)?;
+    }
+    let s_vec = d_sum_evals.to_host()?;
+    let s_evals: [EF; 3] = s_vec
+        .try_into()
+        .expect("sumcheck round produced unexpected number of evaluations");
+    for &eval in &s_evals {
+        transcript.observe_ext(eval);
+    }
+    round_polys_eval.push(s_evals);
+
+    let r = transcript.sample_ext();
+    r_vec.push(r);
+    Ok(r)
+}
 
 #[instrument(skip_all)]
 pub fn fractional_sumcheck_gpu(
@@ -114,6 +146,17 @@ pub fn fractional_sumcheck_gpu(
     let mut xi_prev = vec![mu_1];
     let mut d_sum_evals = DeviceBuffer::<EF>::with_capacity(3);
 
+    // Work buffer to avoid revert operations on layer. Only needed for non-last rounds.
+    // For the last round (round == total_rounds - 1), we fold in-place on layer.
+    // For non-last rounds, max pq_size is 2 << (total_rounds - 2) = total_leaves / 2,
+    // and after first fold we have total_leaves / 4 elements.
+    let max_work_size = if total_rounds > 2 {
+        total_leaves >> 2
+    } else {
+        0
+    };
+    let mut work_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(max_work_size);
+
     for round in 1..total_rounds {
         let gkr_round_span = debug_span!("GKR", round).entered();
 
@@ -138,53 +181,77 @@ pub fn fractional_sumcheck_gpu(
         // temp_buffer_size only decreases as stride decreases.
         let mut tmp_block_sums = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
 
-        for _sum_round in 0..round {
-            unsafe {
-                frac_compute_round(
-                    &eq_buffer,
-                    &mut layer,
-                    pq_size,
-                    lambda,
-                    &mut d_sum_evals,
-                    &mut tmp_block_sums,
-                )
-                .map_err(FractionalSumcheckError::ComputeRound)?;
-            }
-            let s_vec = d_sum_evals.to_host()?;
-            let s_evals: [EF; 3] = s_vec
-                .try_into()
-                .expect("sumcheck round produced unexpected number of evaluations");
-            for &eval in &s_evals {
-                transcript.observe_ext(eval);
-            }
-            round_polys_eval.push(s_evals);
+        let last_outer_round = round == total_rounds - 1;
+        debug_assert!(round > 0);
 
-            let r_round = transcript.sample_ext();
-            r_vec.push(r_round);
-
+        // Round 0: always reads from `layer`, writes to either layer or work_buffer
+        {
+            let r = do_sumcheck_round(
+                &eq_buffer,
+                &layer,
+                pq_size,
+                lambda,
+                transcript,
+                &mut d_sum_evals,
+                &mut tmp_block_sums,
+                &mut round_polys_eval,
+                &mut r_vec,
+            )?;
             eq_buffer
-                .fold_columns(r_round)
+                .fold_columns(r)
+                .map_err(FractionalSumcheckError::FoldColumns)?;
+
+            if last_outer_round {
+                unsafe {
+                    fold_ef_frac_columns_inplace(&mut layer, pq_size, r)
+                        .map_err(FractionalSumcheckError::FoldColumns)?;
+                }
+            } else {
+                unsafe {
+                    fold_ef_frac_columns(&layer, &mut work_buffer, pq_size, r)
+                        .map_err(FractionalSumcheckError::FoldColumns)?;
+                }
+            }
+
+            pq_size >>= 1;
+        }
+
+        // After the first step:
+        // - if last_outer_round: we keep folding in-place on `layer`
+        // - else: we fold in-place on `work_buffer`
+        let active: &mut DeviceBuffer<Frac<EF>> = if last_outer_round {
+            &mut layer
+        } else {
+            &mut work_buffer
+        };
+
+        // Remaining rounds: always read + fold in-place on `active`
+        for _ in 1..round {
+            let r = do_sumcheck_round(
+                &eq_buffer,
+                active,
+                pq_size,
+                lambda,
+                transcript,
+                &mut d_sum_evals,
+                &mut tmp_block_sums,
+                &mut round_polys_eval,
+                &mut r_vec,
+            )?;
+            eq_buffer
+                .fold_columns(r)
                 .map_err(FractionalSumcheckError::FoldColumns)?;
             unsafe {
-                fold_ef_frac_columns(&mut layer, pq_size, r_round, false)
+                fold_ef_frac_columns_inplace(active, pq_size, r)
                     .map_err(FractionalSumcheckError::FoldColumns)?;
             }
             pq_size >>= 1;
         }
+
         let pq_host = [
-            copy_from_device(&layer, 0)?,
-            copy_from_device(&layer, pq_size / 2)?,
+            copy_from_device(&*active, 0)?,
+            copy_from_device(&*active, pq_size / 2)?,
         ];
-        // No need to revert on the last round since `layer` buffer will be dropped
-        if round != total_rounds - 1 {
-            for pq_revert_round in (0..round).rev() {
-                pq_size <<= 1;
-                unsafe {
-                    fold_ef_frac_columns(&mut layer, pq_size, r_vec[pq_revert_round], true)
-                        .map_err(FractionalSumcheckError::FoldColumns)?;
-                }
-            }
-        }
 
         claims_per_layer.push(GkrLayerClaims {
             p_xi_0: pq_host[0].p,
