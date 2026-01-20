@@ -37,7 +37,7 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
     }
 }
 
-const LOG_BLOWUP: usize = 2;
+const LOG_BLOWUP: usize = 1;
 const NUM_PERMUTATIONS: usize = 1 << 10;
 
 fn main() {

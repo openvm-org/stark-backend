@@ -3,6 +3,7 @@ use openvm_cuda_common::memory_manager::MemTracker;
 use openvm_stark_backend::prover::types::AirProvingContext;
 use openvm_stark_backend::{
     config::StarkGenericConfig,
+    keygen::MultiStarkKeygenBuilder,
     proof::Proof,
     prover::{
         coordinator::Coordinator,
@@ -13,8 +14,10 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{config_from_perm, default_perm, BabyBearPoseidon2Config},
-        fri_params::SecurityParameters,
-        log_up_params::log_up_security_params_baby_bear_100_bits,
+        fri_params::{
+            SecurityParameters, MAX_BATCH_SIZE_LOG_BLOWUP_1, MAX_BATCH_SIZE_LOG_BLOWUP_2,
+            MAX_NUM_CONSTRAINTS,
+        },
         FriParameters,
     },
     engine::{StarkEngine, StarkFriEngine},
@@ -40,19 +43,17 @@ pub struct GpuBabyBearPoseidon2Engine {
 impl StarkFriEngine for GpuBabyBearPoseidon2Engine {
     fn new(fri_params: FriParameters) -> Self {
         let perm = default_perm();
-        let log_up_params = log_up_security_params_baby_bear_100_bits();
+        let security_params = SecurityParameters::new_baby_bear_100_bits(fri_params);
         Self {
             device: GpuDevice::new(
-                GpuConfig::new(fri_params, BabyBear::GENERATOR),
-                Some(FriLogUpPhaseGpu::new(log_up_params.clone())),
-            ),
-            config: config_from_perm(
-                &perm,
-                SecurityParameters {
+                GpuConfig::new(
                     fri_params,
-                    log_up_params,
-                },
+                    BabyBear::GENERATOR,
+                    security_params.deep_ali_params,
+                ),
+                Some(FriLogUpPhaseGpu::new(security_params.log_up_params.clone())),
             ),
+            config: config_from_perm(&perm, security_params),
             perm,
         }
     }
@@ -80,6 +81,20 @@ impl StarkEngine for GpuBabyBearPoseidon2Engine {
 
     fn device(&self) -> &Self::PD {
         &self.device
+    }
+
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<'_, Self::SC> {
+        let mut builder = MultiStarkKeygenBuilder::new(self.config());
+        builder.set_max_constraint_degree(self.max_constraint_degree().unwrap());
+        let max_batch_size = if self.fri_params().log_blowup == 1 {
+            MAX_BATCH_SIZE_LOG_BLOWUP_1
+        } else {
+            MAX_BATCH_SIZE_LOG_BLOWUP_2
+        };
+        builder.max_batch_size = Some(max_batch_size);
+        builder.max_num_constraints = Some(MAX_NUM_CONSTRAINTS);
+
+        builder
     }
 
     fn prover(&self) -> MultiTraceStarkProverGPU {

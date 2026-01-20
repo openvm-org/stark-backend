@@ -44,7 +44,7 @@ pub struct FriLogUpPhaseGpu {
 
 impl FriLogUpPhaseGpu {
     pub fn new(log_up_params: LogUpSecurityParameters) -> Self {
-        assert!(log_up_params.conjectured_bits_of_security::<EF>() >= 100);
+        assert!(log_up_params.bits_of_security::<EF>() >= 100);
         Self { log_up_params }
     }
 

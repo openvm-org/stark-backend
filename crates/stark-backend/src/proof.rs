@@ -14,7 +14,7 @@ pub struct Proof<SC: StarkGenericConfig> {
     /// The PCS commitments
     pub commitments: Commitments<Com<SC>>,
     /// Opening proofs separated by partition, but this may change
-    pub opening: OpeningProof<PcsProof<SC>, SC::Challenge>,
+    pub opening: OpeningProof<SC>,
     /// Proof data for each AIR
     pub per_air: Vec<AirProofData<Val<SC>, SC::Challenge>>,
     /// Partial proof for rap phase if it exists
@@ -49,10 +49,14 @@ pub struct Commitments<Com> {
 }
 
 /// PCS opening proof with opened values for multi-matrix AIR.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct OpeningProof<PcsProof, Challenge> {
-    pub proof: PcsProof,
-    pub values: OpenedValues<Challenge>,
+#[derive(Serialize, Deserialize, Derivative)]
+#[serde(bound = "")]
+#[derivative(Clone(bound = ""))]
+pub struct OpeningProof<SC: StarkGenericConfig> {
+    pub proof: PcsProof<SC>,
+    pub values: OpenedValues<SC::Challenge>,
+    /// Proof-of-work witness for DEEP grinding
+    pub deep_pow_witness: Val<SC>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
