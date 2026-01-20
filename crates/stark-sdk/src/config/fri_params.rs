@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 
-pub const MAX_NUM_CONSTRAINTS: usize = 15_000;
+pub const MAX_NUM_CONSTRAINTS: usize = 30_000;
 pub const MAX_BATCH_SIZE_LOG_BLOWUP_1: usize = 80_000;
 pub const MAX_BATCH_SIZE_LOG_BLOWUP_2: usize = 4_000;
 
