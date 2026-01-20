@@ -1,3 +1,5 @@
+use std::f64::consts::LN_2;
+
 use openvm_stark_backend::{
     config::DeepAliParameters, interaction::LogUpSecurityParameters, p3_field::Field,
 };
@@ -124,7 +126,7 @@ impl FriParameters {
     pub fn security_bits_fri_query_phase(&self) -> f64 {
         let rho = (2.0_f64).powi(-(self.log_blowup as i32));
         let theta = (1.0 - rho) / 2.0;
-        -(1.0 - theta).powi(self.num_queries as i32).log2() + self.query_proof_of_work_bits as f64
+        -(self.num_queries as f64 * (-theta).ln_1p() / LN_2) + self.query_proof_of_work_bits as f64
     }
 
     /// The bits of security from DEEP-ALI.
