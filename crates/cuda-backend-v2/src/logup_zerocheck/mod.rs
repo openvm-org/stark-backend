@@ -760,6 +760,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                     UnivariatePoly::from_geometric_cosets_evals_idft(
                         RowMajorMatrix::new(values, num_cosets_zc),
                         omega_root,
+                        omega_root,
                     )
                 };
                 // sp_0 = (Z^{2^l_skip} - 1) * q
@@ -825,13 +826,16 @@ impl<'a> LogupZerocheckGpu<'a> {
                         denom_values[dst] = denom[src];
                     }
                 }
+                // Logup uses cosets 1, g^1, g^2, ... (init = 1, shift = omega_root)
                 batch_sp_poly[2 * trace_idx] = UnivariatePoly::from_geometric_cosets_evals_idft(
                     RowMajorMatrix::new(numer_values, num_cosets_logup),
                     omega_root,
+                    F::ONE, // init = 1 for identity coset
                 );
                 batch_sp_poly[2 * trace_idx + 1] = UnivariatePoly::from_geometric_cosets_evals_idft(
                     RowMajorMatrix::new(denom_values, num_cosets_logup),
                     omega_root,
+                    F::ONE, // init = 1 for identity coset
                 );
             }
         }
@@ -1157,7 +1161,8 @@ impl<'a> LogupZerocheckGpu<'a> {
                         .expect("missing logup monomial combinations for late trace")
                 })
                 .collect();
-            let batch = LogupMonomialBatch::new(late_logup_traces.iter().copied(), self.pk, &logup_combs);
+            let batch =
+                LogupMonomialBatch::new(late_logup_traces.iter().copied(), self.pk, &logup_combs);
             let out = batch.evaluate(1);
             let host = out.to_host().expect("copy logup monomial output");
             for (i, trace_idx) in batch.trace_indices().enumerate() {
