@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::hal::ProverBackend;
 use crate::{
-    config::{Com, PcsProof, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
+    config::{Com, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
     keygen::types::{LinearConstraint, StarkVerifyingKey},
     proof::{AirProofData, Commitments, OpeningProof, Proof},
 };
@@ -236,7 +236,7 @@ pub struct HalProof<PB: ProverBackend> {
 impl<PB, SC: StarkGenericConfig> From<HalProof<PB>> for Proof<SC>
 where
     PB: ProverBackend<Val = Val<SC>, Challenge = SC::Challenge, Commitment = Com<SC>>,
-    PB::OpeningProof: Into<OpeningProof<PcsProof<SC>, SC::Challenge>>,
+    PB::OpeningProof: Into<OpeningProof<SC>>,
     PB::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
 {
     fn from(proof: HalProof<PB>) -> Self {

@@ -2,7 +2,7 @@ use itertools::{zip_eq, Itertools};
 
 use crate::{
     air_builders::debug::debug_constraints_and_interactions,
-    config::{Com, PcsProof, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
+    config::{Com, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
     keygen::{
         types::{MultiStarkProvingKey, MultiStarkVerifyingKey, StarkProvingKey},
         MultiStarkKeygenBuilder,
@@ -28,8 +28,7 @@ pub struct VerificationData<SC: StarkGenericConfig> {
 /// keygen and proving. Currently this trait is CPU specific.
 pub trait StarkEngine
 where
-    <Self::PB as ProverBackend>::OpeningProof:
-        Into<OpeningProof<PcsProof<Self::SC>, <Self::SC as StarkGenericConfig>::Challenge>>,
+    <Self::PB as ProverBackend>::OpeningProof: Into<OpeningProof<Self::SC>>,
     <Self::PB as ProverBackend>::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<Self::SC>>>,
 {
     type SC: StarkGenericConfig;

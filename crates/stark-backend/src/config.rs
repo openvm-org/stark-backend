@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use p3_challenger::{CanObserve, CanSample, FieldChallenger};
+use p3_challenger::{CanObserve, CanSample, FieldChallenger, GrindingChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{ExtensionField, Field};
 
@@ -31,7 +31,8 @@ where
     /// The challenger (Fiat-Shamir) implementation used.
     type Challenger: FieldChallenger<Val<Self>>
         + CanObserve<<Self::Pcs as Pcs<Self::Challenge, Self::Challenger>>::Commitment>
-        + CanSample<Self::Challenge>;
+        + CanSample<Self::Challenge>
+        + GrindingChallenger<Witness = Val<Self>>;
 
     fn pcs(&self) -> &Self::Pcs;
 
@@ -130,7 +131,8 @@ where
     Rps::PartialProvingKey: Send + Sync,
     Challenger: FieldChallenger<<Pcs::Domain as PolynomialSpace>::Val>
         + CanObserve<<Pcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment>
-        + CanSample<Challenge>,
+        + CanSample<Challenge>
+        + GrindingChallenger<Witness = <Pcs::Domain as PolynomialSpace>::Val>,
 {
     type Pcs = Pcs;
     type RapPhaseSeq = Rps;

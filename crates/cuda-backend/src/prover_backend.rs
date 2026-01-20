@@ -4,9 +4,9 @@ use itertools::{izip, zip_eq, Itertools};
 use openvm_cuda_common::{memory_manager::MemTracker, stream::gpu_metrics_span};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints,
-    config::{Com, PcsProof, RapPartialProvingKey, RapPhaseSeqPartialProof},
+    config::{Com, RapPartialProvingKey, RapPhaseSeqPartialProof},
     keygen::view::MultiStarkVerifyingKeyView,
-    p3_challenger::{DuplexChallenger, FieldChallenger},
+    p3_challenger::{DuplexChallenger, FieldChallenger, GrindingChallenger},
     proof::{OpenedValues, OpeningProof},
     prover::{
         hal::{
@@ -44,7 +44,7 @@ impl ProverBackend for GpuBackend {
     // Host Types
     type Val = F;
     type Challenge = EF;
-    type OpeningProof = OpeningProof<PcsProof<SC>, Self::Challenge>;
+    type OpeningProof = OpeningProof<SC>;
     type RapPartialProof = Option<RapPhaseSeqPartialProof<SC>>;
     type Commitment = Com<SC>; // From<[BabyBear; DIGEST_WIDTH]>
     type Challenger = DuplexChallenger<F, Poseidon2BabyBear<WIDTH>, WIDTH, RATE>;
@@ -356,7 +356,8 @@ impl OpeningProver<GB> for GpuDevice {
         after_phase: Vec<GBPcsData>,
         quotient_data: GBPcsData,
         quotient_degrees: &[u8],
-    ) -> OpeningProof<PcsProof<SC>, EF> {
+    ) -> OpeningProof<SC> {
+        let deep_pow_witness = challenger.grind(self.config.deep_ali.deep_pow_bits);
         let zeta: EF = challenger.sample_algebra_element();
         tracing::debug!("zeta: {zeta:?}");
 
@@ -467,6 +468,7 @@ impl OpeningProver<GB> for GpuDevice {
                 after_challenge: after_challenge_openings,
                 quotient: quotient_openings,
             },
+            deep_pow_witness,
         }
     }
 }

@@ -14,7 +14,6 @@ use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{config_from_perm, default_perm, BabyBearPoseidon2Config},
         fri_params::SecurityParameters,
-        log_up_params::log_up_security_params_baby_bear_100_bits,
         FriParameters,
     },
     engine::{StarkEngine, StarkFriEngine},
@@ -40,19 +39,17 @@ pub struct GpuBabyBearPoseidon2Engine {
 impl StarkFriEngine for GpuBabyBearPoseidon2Engine {
     fn new(fri_params: FriParameters) -> Self {
         let perm = default_perm();
-        let log_up_params = log_up_security_params_baby_bear_100_bits();
+        let security_params = SecurityParameters::new_baby_bear_100_bits(fri_params);
         Self {
             device: GpuDevice::new(
-                GpuConfig::new(fri_params, BabyBear::GENERATOR),
-                Some(FriLogUpPhaseGpu::new(log_up_params.clone())),
-            ),
-            config: config_from_perm(
-                &perm,
-                SecurityParameters {
+                GpuConfig::new(
                     fri_params,
-                    log_up_params,
-                },
+                    BabyBear::GENERATOR,
+                    security_params.deep_ali_params,
+                ),
+                Some(FriLogUpPhaseGpu::new(security_params.log_up_params.clone())),
             ),
+            config: config_from_perm(&perm, security_params),
             perm,
         }
     }

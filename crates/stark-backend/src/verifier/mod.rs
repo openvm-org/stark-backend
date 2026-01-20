@@ -1,7 +1,7 @@
 use std::iter::zip;
 
 use itertools::{izip, zip_eq, Itertools};
-use p3_challenger::{CanObserve, FieldChallenger};
+use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
@@ -190,6 +190,12 @@ impl<'c, SC: StarkGenericConfig> MultiTraceStarkVerifier<'c, SC> {
         // Observe quotient commitments
         challenger.observe(proof.commitments.quotient.clone());
 
+        if !challenger.check_witness(
+            self.config.deep_ali_params().deep_pow_bits,
+            proof.opening.deep_pow_witness,
+        ) {
+            return Err(VerificationError::InvalidDeepPowWitness);
+        }
         // Draw `zeta` challenge
         let zeta: SC::Challenge = challenger.sample_algebra_element();
         tracing::debug!("zeta: {zeta:?}");

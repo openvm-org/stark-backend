@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use clap::Parser;
 use openvm_cuda_backend::gpu_device::{GpuConfig, GpuDevice};
-use openvm_stark_backend::prover::{
-    cpu::CpuDevice,
-    hal::{DeviceDataTransporter, TraceCommitter},
+use openvm_stark_backend::{
+    config::StarkGenericConfig,
+    prover::{
+        cpu::CpuDevice,
+        hal::{DeviceDataTransporter, TraceCommitter},
+    },
 };
 use openvm_stark_sdk::{
     config::{
@@ -67,6 +70,7 @@ fn main() {
         &default_perm(),
         SecurityParameters::standard_100_bits_with_fri_log_blowup(log_blowup),
     ));
+    let deep_ali_params = config.deep_ali_params();
     let cpu_device = CpuDevice::<BabyBearPoseidon2Config>::new(config, log_blowup);
     let cpu_time = std::time::Instant::now();
     let (root, _pcs_data) = cpu_device.commit(&trace_vec);
@@ -79,6 +83,7 @@ fn main() {
         GpuConfig::new(
             FriParameters::standard_with_100_bits_security(log_blowup),
             shift,
+            deep_ali_params,
         ),
         None,
     );
