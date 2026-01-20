@@ -1,4 +1,3 @@
-use p3_field::{Field, FieldAlgebra};
 
 use super::*;
 use crate::{
@@ -107,7 +106,7 @@ extern "C" {
     fn _frac_compute_round(
         eq_xi_low: *const EF,
         eq_xi_high: *const EF,
-        pq_buffer: *mut Frac<EF>,
+        pq_buffer: *const Frac<EF>,
         eq_size: usize,
         eq_low_cap: usize,
         pq_size: usize,
@@ -117,10 +116,10 @@ extern "C" {
     ) -> i32;
 
     fn _frac_fold_fpext_columns(
-        buffer: *mut Frac<EF>,
+        src: *const Frac<EF>,
+        dst: *mut Frac<EF>,
         size: usize,
-        r_or_r_inv: EF,
-        revert: bool,
+        r: EF,
     ) -> i32;
 
     fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
@@ -460,7 +459,7 @@ pub unsafe fn frac_build_tree_layer(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_compute_round(
     eq_xi: &SqrtHyperBuffer,
-    pq_buffer: &mut DeviceBuffer<Frac<EF>>,
+    pq_buffer: &DeviceBuffer<Frac<EF>>,
     pq_size: usize,
     lambda: EF,
     out_device: &mut DeviceBuffer<EF>,
@@ -478,7 +477,7 @@ pub unsafe fn frac_compute_round(
     CudaError::from_result(_frac_compute_round(
         eq_xi.low.as_ptr(),
         eq_xi.high.as_ptr(),
-        pq_buffer.as_mut_ptr(),
+        pq_buffer.as_ptr(),
         eq_xi.size,
         eq_xi.low_capacity,
         pq_size,
@@ -488,26 +487,34 @@ pub unsafe fn frac_compute_round(
     ))
 }
 
-/// Folds matrix of `Frac<EF>` but treats `input` and `output` as **row-major** matrices in
-/// `Frac<EF>`. The numerator and denominator are folded pair-wise.
+/// Folds `Frac<EF>` buffer. Pairs (idx, idx+quarter) and (idx+half, idx+3*quarter),
+/// writes results to dst[idx] and dst[idx+quarter]. Output size is `size / 2`.
+/// Safe for src == dst (in-place) because each thread handles disjoint indices.
 pub unsafe fn fold_ef_frac_columns(
+    src: &DeviceBuffer<Frac<EF>>,
+    dst: &mut DeviceBuffer<Frac<EF>>,
+    size: usize,
+    r: EF,
+) -> Result<(), CudaError> {
+    debug_assert!(src.len() >= size);
+    debug_assert!(dst.len() >= size / 2);
+    CudaError::from_result(_frac_fold_fpext_columns(
+        src.as_ptr(),
+        dst.as_mut_ptr(),
+        size,
+        r,
+    ))
+}
+
+/// In-place fold. See [`fold_ef_frac_columns`] for details.
+pub unsafe fn fold_ef_frac_columns_inplace(
     buffer: &mut DeviceBuffer<Frac<EF>>,
     size: usize,
     r: EF,
-    revert: bool,
 ) -> Result<(), CudaError> {
-    let r_or_r_inv = if revert {
-        debug_assert!(r != EF::ONE);
-        (EF::ONE - r).inverse()
-    } else {
-        r
-    };
-    CudaError::from_result(_frac_fold_fpext_columns(
-        buffer.as_mut_ptr(),
-        size,
-        r_or_r_inv,
-        revert,
-    ))
+    debug_assert!(buffer.len() >= size);
+    let ptr = buffer.as_mut_ptr();
+    CudaError::from_result(_frac_fold_fpext_columns(ptr, ptr, size, r))
 }
 
 #[allow(clippy::too_many_arguments)]
