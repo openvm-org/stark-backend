@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 
-pub const MAX_LOG_TRACE_HEIGHT: usize = 24;
+pub const MAX_NUM_CONSTRAINTS: usize = 15_000;
+pub const MAX_BATCH_SIZE_LOG_BLOWUP_1: usize = 80_000;
+pub const MAX_BATCH_SIZE_LOG_BLOWUP_2: usize = 4_000;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FriParameters {
@@ -71,10 +73,15 @@ impl FriParameters {
     /// We (via Plonky3) use multi-FRI, whose security in the unique decoding regime can be bounded
     /// above by the security of batch FRI by considering all polynomials in the largest domain.
     ///
+    /// Following <https://eprint.iacr.org/2023/1071.pdf>, <https://eprint.iacr.org/2025/1993.pdf>,
+    /// we use round-by-round soundness since we use FRI as a non-interactive protocol via
+    /// Fiat-Shamir.
+    ///
     /// We use multi-FRI with <=2 opening points (the second point for rotation openings). The
-    /// `num_batch_columns` is the number of columns to be batched across all domain sizes. A trace
-    /// polynomial over the base field opened at 2 points gets a contribution of 2. A trace
-    /// polynomial over the extension field opened at 2 points gets a contribution of 8.
+    /// `num_batch_columns` is the maximum number of columns to be batched for any fixed domain
+    /// size. A trace polynomial over the base field opened at 2 points gets a contribution of
+    /// 2. A trace polynomial over the extension field opened at 2 points gets a contribution of
+    /// 8.
     pub fn security_bits_fri(
         &self,
         challenge_field_bits: f64,
@@ -89,7 +96,7 @@ impl FriParameters {
         tracing::debug!("FRI commit phase security bits: {commit_bits}");
         let query_bits = self.security_bits_fri_query_phase();
         tracing::debug!("FRI query phase security bits: {query_bits}");
-        -(0.5_f64.powf(commit_bits) + 0.5_f64.powf(query_bits)).log2()
+        commit_bits.min(query_bits)
     }
 
     /// Batch FRI error according to <https://eprint.iacr.org/2022/1216.pdf> in the unique decoding regime.
@@ -108,9 +115,9 @@ impl FriParameters {
 
         // Using formula (1) from https://eprint.iacr.org/2022/1216.pdf on correlated agreement in UDR.
         let batch_term = num_batch_columns - 1;
-        let fold_term = 2; // (3 - 1) * (1/2 + 1/4 + ...), where in each stage of multi-FRI we batch 3 terms using 1,
-                           // beta, beta^2 and we start at half the largest domain size
-        -((batch_term as f64 + fold_term as f64) * domain_size / field_size).log2()
+        let fold_term = 1; // (3 - 1) * 1/2, where in each stage of multi-FRI we batch 3 terms using 1, beta, beta^2
+                           // and we start at half the largest domain size
+        -(batch_term.max(fold_term) as f64 * domain_size / field_size).log2()
             + self.commit_proof_of_work_bits as f64
     }
 
@@ -134,19 +141,23 @@ impl FriParameters {
         let trace_length = 2.0_f64.powi(max_log_domain_size.saturating_sub(self.log_blowup) as i32);
         let domain_size = 2.0_f64.powi(max_log_domain_size as i32);
         let field_size = 2.0_f64.powf(challenge_field_bits);
-        // Schwartz-Zippel applied to constraint polynomial, random out-of-domain point must
-        // subgroup H and codeword evaluation coset D
+        // Error term obtained from Schwartz-Zippel applied to the constraint polynomial and
+        // vanishing polynomial. The random out-of-domain point must avoid subgroup H and
+        // codeword evaluation coset D.
         let e_deep = (max_constraint_degree as f64) * (trace_length - 1.0)
             / (field_size - trace_length - domain_size);
         // ALI error is from algebraic batching
         let e_ali = (max_num_constraints as f64) / field_size;
-        -(e_deep + e_ali).log2() + (params.deep_pow_bits as f64)
+        (-e_deep.log2() + params.deep_pow_bits as f64).min(-e_ali.log2())
     }
 }
 
 /// Pre-defined FRI parameters with 100 bits of provable security, meaning we do
 /// not rely on any conjectures about Reed–Solomon codes (e.g., about proximity
 /// gaps) or the ethSTARK Toy Problem Conjecture.
+///
+/// Bits of provable security refers to Fiat-Shamir security, which is obtained from round-by-round
+/// soundness analysis.
 ///
 /// The value `num_queries` is chosen so that the verifier accepts a δ-far
 /// codeword for δ = (1 - 2**(-log_blowup)) with probability at most 2^{-80}.
@@ -155,40 +166,41 @@ impl FriParameters {
 ///
 /// Assumes that:
 /// - the challenge field has size at least 2^123
-/// - for `log_blowup = 1`, the number of trace polynomials batched in multi-FRI is at most 30000. A
-///   trace polynomial over the base field opened at 2 points gets a contribution of 2. A trace
-///   polynomial over the extension field opened at 2 points gets a contribution of 8.
-/// - for `log_blowup > 1`, the number of trace polynomials batched in multi-FRI is at most 4000.
-/// - the maximum trace height is 2^24
+/// - for `log_blowup = 1`, the number of trace polynomials batched in any level of multi-FRI is at
+///   most 80000. A trace polynomial over the base field opened at 2 points gets a contribution of
+///   2. A trace polynomial over the extension field opened at 2 points gets a contribution of 8.
+/// - for `log_blowup > 1`, the number of trace polynomials batched in any level of multi-FRI is at
+///   most 4000.
+/// - the maximum trace height is 2^27
 /// - for DEEP-ALI, the maximum number of constraints is 15000.
 pub fn standard_fri_params_with_100_bits_security(log_blowup: usize) -> FriParameters {
     let fri_params = match log_blowup {
         1 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
-            num_queries: 198,
+            num_queries: 193,
             commit_proof_of_work_bits: 20,
             query_proof_of_work_bits: 20,
         },
         2 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
-            num_queries: 120,
-            commit_proof_of_work_bits: 18,
+            num_queries: 118,
+            commit_proof_of_work_bits: 16,
             query_proof_of_work_bits: 20,
         },
         3 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
-            num_queries: 99,
-            commit_proof_of_work_bits: 18,
+            num_queries: 97,
+            commit_proof_of_work_bits: 16,
             query_proof_of_work_bits: 20,
         },
         4 => FriParameters {
             log_blowup,
             log_final_poly_len: 0,
-            num_queries: 90,
-            commit_proof_of_work_bits: 18,
+            num_queries: 88,
+            commit_proof_of_work_bits: 16,
             query_proof_of_work_bits: 20,
         },
         _ => todo!("No standard FRI params defined for log blowup {log_blowup}",),
@@ -256,6 +268,9 @@ impl SecurityParameters {
     }
 
     /// See [standard_fri_params_with_100_bits_security].
+    ///
+    /// Bits of provable security refers to Fiat-Shamir security, which is obtained from
+    /// round-by-round soundness analysis.
     pub fn standard_100_bits_with_fri_log_blowup(log_blowup: usize) -> Self {
         Self::new_baby_bear_100_bits(FriParameters::standard_with_100_bits_security(log_blowup))
     }
@@ -293,19 +308,19 @@ impl SecurityParameters {
         let logup_bits = self.log_up_params.bits_of_security::<EF>() as i32;
         tracing::debug!("LogUp security bits: {logup_bits}");
 
-        // We take a union bound of errors following the literature, although we note that in the
-        // non-interactive setting, round-by-round soundness may be more appropriate (cf. <https://eprint.iacr.org/2025/1993.pdf>)
-        -(0.5_f64.powf(fri_bits) + 0.5_f64.powf(deep_ali_bits) + 0.5_f64.powi(logup_bits)).log2()
+        fri_bits.min(deep_ali_bits).min(logup_bits as f64)
     }
 }
 
 pub fn deep_ali_security_params_baby_bear_100_bits() -> DeepAliParameters {
-    DeepAliParameters { deep_pow_bits: 7 }
+    DeepAliParameters { deep_pow_bits: 5 }
 }
 
 #[cfg(test)]
 mod security_tests {
-    use openvm_stark_backend::p3_field::{extension::BinomialExtensionField, PrimeField64};
+    use openvm_stark_backend::p3_field::{
+        extension::BinomialExtensionField, PrimeField64, TwoAdicField,
+    };
     use p3_baby_bear::BabyBear;
     use tracing::Level;
 
@@ -319,16 +334,19 @@ mod security_tests {
         let challenge_field_bits = (BabyBear::ORDER_U64 as f64).powi(4).log2();
         for log_blowup in 1..=4 {
             let params = SecurityParameters::standard_100_bits_with_fri_log_blowup(log_blowup);
-            let num_batch_columns = if log_blowup == 1 { 80_000 } else { 4_000 };
-            let max_num_constraints = 15_000;
+            let num_batch_columns = if log_blowup == 1 {
+                MAX_BATCH_SIZE_LOG_BLOWUP_1
+            } else {
+                MAX_BATCH_SIZE_LOG_BLOWUP_2
+            };
             let max_constraint_degree = (1 << log_blowup) + 1;
-            let max_log_domain_size = log_blowup + MAX_LOG_TRACE_HEIGHT;
+            let max_log_domain_size = BabyBear::TWO_ADICITY;
             let bits = params.security_bits::<BinomialExtensionField<BabyBear, 4>>(
                 challenge_field_bits,
                 num_batch_columns,
                 max_log_domain_size,
                 max_constraint_degree,
-                max_num_constraints,
+                MAX_NUM_CONSTRAINTS,
             );
             assert!(
                 bits >= 100.0,
