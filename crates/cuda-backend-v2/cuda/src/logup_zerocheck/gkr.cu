@@ -50,7 +50,7 @@ __device__ __forceinline__ FpExt sqrt_buffer_get(
 __global__ void compute_round_block_sum_kernel(
     const FpExt *__restrict__ eq_xi_low,
     const FpExt *__restrict__ eq_xi_high,
-    FracExt *__restrict__ pq_buffer,
+    const FracExt *__restrict__ pq_buffer,
     uint32_t log_eq_size,
     uint32_t log_eq_low_cap,
     uint32_t log_pq_size,
@@ -119,56 +119,33 @@ __global__ void compute_round_block_sum_kernel(
     }
 }
 
-template <bool revert>
-__device__ __forceinline__ void one_folding_round(
-    FpExt &lhs,
-    FpExt const &rhs,
-    FpExt const &r_or_r_inv
-) {
-    if constexpr (revert) {
-        // z = x + r * (y - x) => x = (z - r * y) / (1 - r) = (z - y + (y - r * y)) / (1 - r)
-        lhs = (lhs - rhs) * r_or_r_inv + rhs;
-    } else {
-        lhs = lhs + r_or_r_inv * (rhs - lhs);
-    }
-}
-
-template <bool revert>
+// Fold kernel operating on FpExt* view of FracExt buffer.
+// Since FracExt = {p, q} has p and q folded independently with the same formula,
+// we can treat the buffer as FpExt* with 2x the elements.
+//
+// Pairs (idx, idx+quarter) and (idx+half, idx+3*quarter),
+// writes results to dst[idx] and dst[idx+quarter].
+// Safe for src == dst (in-place) because each thread reads before writing to the same index.
 __global__ void fold_ef_columns_kernel(
-    FracExt *__restrict__ buffer,
-    uint32_t log_total,
-    FpExt r_or_r_inv // is the inverse of 1 - r in case if revert = true
+    const FpExt *src,
+    FpExt *dst,
+    uint32_t quarter,
+    FpExt r
 ) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (1 << (log_total - 2))) {
+    if (idx >= quarter) {
         return;
     }
 
-    if constexpr (!revert) {
-        auto tmp = buffer[idx | (1u << (log_total - 1))];
-        buffer[idx | (1u << (log_total - 1))] = buffer[idx | (1u << (log_total - 2))];
-        buffer[idx | (1u << (log_total - 2))] = tmp;
-    }
+    FpExt v0 = src[idx];
+    FpExt v1 = src[idx | quarter];
+    dst[idx] = v0 + r * (v1 - v0);
 
-#pragma unroll
-    for (uint32_t bit : {0u, 1u << (log_total - 2)}) {
-        {
-            FpExt &t0 = buffer[idx | bit].p;
-            FpExt const &t1 = buffer[idx | bit | (1u << (log_total - 1))].p;
-            one_folding_round<revert>(t0, t1, r_or_r_inv);
-        }
-        {
-            FpExt &t0 = buffer[idx | bit].q;
-            FpExt const &t1 = buffer[idx | bit | (1u << (log_total - 1))].q;
-            one_folding_round<revert>(t0, t1, r_or_r_inv);
-        }
-    }
+    uint32_t half = quarter << 1;
 
-    if constexpr (revert) {
-        auto tmp = buffer[idx | (1u << (log_total - 1))];
-        buffer[idx | (1u << (log_total - 1))] = buffer[idx | (1u << (log_total - 2))];
-        buffer[idx | (1u << (log_total - 2))] = tmp;
-    }
+    FpExt v2 = src[idx | half];
+    FpExt v3 = src[idx | half | quarter];
+    dst[idx | quarter] = v2 + r * (v3 - v2);
 }
 
 __global__ void extract_claims_kernel(const FpExt *data, size_t stride, FpExt *out) {
@@ -233,7 +210,7 @@ extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t stride) {
 extern "C" int _frac_compute_round(
     const FpExt *eq_xi_low,
     const FpExt *eq_xi_high,
-    FracExt *pq_buffer,
+    const FracExt *pq_buffer,
     size_t eq_size,
     size_t eq_low_cap,
     size_t pq_size,
@@ -275,23 +252,25 @@ extern "C" int _frac_compute_round(
 }
 
 extern "C" int _frac_fold_fpext_columns(
-    FracExt *__restrict__ buffer,
+    const FracExt *src,
+    FracExt *dst,
     size_t size,
-    FpExt r_or_r_inv,
-    bool revert
+    FpExt r
 ) {
     if (size <= 2) {
         return 0;
     }
-    uint32_t quarter = size >> 2;
-    auto [grid, block] = kernel_launch_params(quarter);
-    if (revert) {
-        fold_ef_columns_kernel<true>
-            <<<grid, block>>>(buffer, __builtin_ctz((uint32_t)size), r_or_r_inv);
-    } else {
-        fold_ef_columns_kernel<false>
-            <<<grid, block>>>(buffer, __builtin_ctz((uint32_t)size), r_or_r_inv);
-    }
+    // FracExt = {p, q} = 2 FpExt elements.
+    // size is in FracExt; quarter_fpext is in FpExt.
+    // quarter_fpext = (size / 4) * 2 = size / 2
+    uint32_t quarter_fpext = size >> 1;
+    auto [grid, block] = kernel_launch_params(quarter_fpext);
+    fold_ef_columns_kernel<<<grid, block>>>(
+        reinterpret_cast<const FpExt *>(src),
+        reinterpret_cast<FpExt *>(dst),
+        quarter_fpext,
+        r
+    );
     return CHECK_KERNEL();
 }
 
@@ -312,4 +291,5 @@ extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar,
         <<<grid, block>>>(reinterpret_cast<std::pair<FpExt, FpExt> *>(frac_vec), scalar, length);
     return CHECK_KERNEL();
 }
+
 } // namespace fractional_sumcheck_gkr
