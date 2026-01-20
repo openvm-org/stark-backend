@@ -202,10 +202,12 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             threshold: log_up_security_params.max_interaction_count,
         });
 
+        let deep_pow_bits = self.config.deep_ali_params().deep_pow_bits;
         let pre_vk: MultiStarkVerifyingKey0<SC> = MultiStarkVerifyingKey0 {
             per_air: pk_per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: trace_height_constraints.clone(),
             log_up_pow_bits: log_up_security_params.log_up_pow_bits,
+            deep_pow_bits,
         };
         // To protect against weak Fiat-Shamir, we hash the "pre"-verifying key and include it in
         // the final verifying key. This just needs to commit to the verifying key and does
@@ -225,6 +227,7 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             trace_height_constraints,
             max_constraint_degree: self.max_constraint_degree,
             log_up_pow_bits: log_up_security_params.log_up_pow_bits,
+            deep_pow_bits,
             vk_pre_hash,
         }
     }

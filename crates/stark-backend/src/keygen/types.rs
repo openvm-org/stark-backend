@@ -119,6 +119,7 @@ pub struct MultiStarkVerifyingKey0<SC: StarkGenericConfig> {
     pub per_air: Vec<StarkVerifyingKey<Val<SC>, Com<SC>>>,
     pub trace_height_constraints: Vec<LinearConstraint>,
     pub log_up_pow_bits: usize,
+    pub deep_pow_bits: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -161,6 +162,7 @@ pub struct MultiStarkProvingKey<SC: StarkGenericConfig> {
     /// Maximum degree of constraints across all AIRs
     pub max_constraint_degree: usize,
     pub log_up_pow_bits: usize,
+    pub deep_pow_bits: usize,
     /// See [MultiStarkVerifyingKey]
     pub vk_pre_hash: Com<SC>,
 }
@@ -192,6 +194,7 @@ impl<SC: StarkGenericConfig> MultiStarkProvingKey<SC> {
             per_air: self.per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: self.trace_height_constraints.clone(),
             log_up_pow_bits: self.log_up_pow_bits,
+            deep_pow_bits: self.deep_pow_bits,
         }
     }
 }
