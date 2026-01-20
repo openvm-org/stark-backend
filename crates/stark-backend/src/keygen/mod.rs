@@ -31,6 +31,8 @@ struct AirKeygenBuilder<SC: StarkGenericConfig> {
 /// for system of multiple RAPs with multiple multi-matrix commitments
 pub struct MultiStarkKeygenBuilder<'a, SC: StarkGenericConfig> {
     pub config: &'a SC,
+    pub max_batch_size: Option<usize>,
+    pub max_num_constraints: Option<usize>,
     /// Information for partitioned AIRs.
     partitioned_airs: Vec<AirKeygenBuilder<SC>>,
     max_constraint_degree: usize,
@@ -40,6 +42,8 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
     pub fn new(config: &'a SC) -> Self {
         Self {
             config,
+            max_batch_size: None,
+            max_num_constraints: None,
             partitioned_airs: vec![],
             max_constraint_degree: 0,
         }
@@ -209,6 +213,41 @@ impl<'a, SC: StarkGenericConfig> MultiStarkKeygenBuilder<'a, SC> {
             log_up_pow_bits: log_up_security_params.log_up_pow_bits,
             deep_pow_bits,
         };
+        if let Some(max_batch_size) = self.max_batch_size {
+            let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+            let mut total_width = pre_vk
+                .per_air
+                .iter()
+                .map(|vk| vk.params.width.total_width(ext_degree))
+                .sum::<usize>();
+            let quotient_deg = pre_vk
+                .per_air
+                .iter()
+                .map(|vk| vk.quotient_degree as usize)
+                .max()
+                .unwrap_or_default();
+            // Quotient polynomial contribution
+            total_width += quotient_deg * ext_degree;
+            tracing::info!(%total_width);
+            // x2 for rotation opening
+            assert!(
+                total_width * 2 <= max_batch_size,
+                "Maximum number of AIR columns exceeded for desired security level"
+            );
+        }
+        if let Some(max_num_constraints) = self.max_num_constraints {
+            let total_constraint_count = pre_vk
+                .per_air
+                .iter()
+                .map(|vk| vk.symbolic_constraints.constraints.num_constraints())
+                .sum::<usize>();
+            tracing::info!(%total_constraint_count);
+            assert!(
+                total_constraint_count <= max_num_constraints,
+                "Maximum number of constraints exceeded for desired security level"
+            );
+        }
+
         // To protect against weak Fiat-Shamir, we hash the "pre"-verifying key and include it in
         // the final verifying key. This just needs to commit to the verifying key and does
         // not need to be verified by the verifier, so we just use bincode to serialize it.

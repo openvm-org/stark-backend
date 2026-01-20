@@ -3,6 +3,7 @@ use std::sync::Arc;
 use openvm_stark_backend::{
     config::StarkConfig,
     interaction::fri_log_up::FriLogUpPhase,
+    keygen::MultiStarkKeygenBuilder,
     p3_challenger::MultiField32Challenger,
     p3_commit::ExtensionMmcs,
     p3_field::extension::BinomialExtensionField,
@@ -26,7 +27,10 @@ use zkhash::{
 use super::FriParameters;
 use crate::{
     assert_sc_compatible_with_serde,
-    config::fri_params::SecurityParameters,
+    config::fri_params::{
+        SecurityParameters, MAX_BATCH_SIZE_LOG_BLOWUP_1, MAX_BATCH_SIZE_LOG_BLOWUP_2,
+        MAX_NUM_CONSTRAINTS,
+    },
     engine::{StarkEngine, StarkFriEngine},
 };
 
@@ -79,6 +83,20 @@ where
 
     fn device(&self) -> &CpuDevice<BabyBearPermutationRootConfig<P>> {
         &self.device
+    }
+
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<'_, Self::SC> {
+        let mut builder = MultiStarkKeygenBuilder::new(self.config());
+        builder.set_max_constraint_degree(self.max_constraint_degree);
+        let max_batch_size = if self.fri_params.log_blowup == 1 {
+            MAX_BATCH_SIZE_LOG_BLOWUP_1
+        } else {
+            MAX_BATCH_SIZE_LOG_BLOWUP_2
+        };
+        builder.max_batch_size = Some(max_batch_size);
+        builder.max_num_constraints = Some(MAX_NUM_CONSTRAINTS);
+
+        builder
     }
 
     fn prover(&self) -> MultiTraceStarkProver<BabyBearPermutationRootConfig<P>> {
