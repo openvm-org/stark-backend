@@ -1,6 +1,7 @@
 #include "device_ntt.cuh"
 #include "fp.h"
 #include "fpext.h"
+#include "frac_ext.cuh"
 #include "launcher.cuh"
 #include "sumcheck.cuh"
 #include "utils.cuh"
@@ -157,22 +158,19 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
 
     __syncthreads();
     if ((threadIdx.x >> l_skip) == 0) {
-        struct FpExt2 {
-            FpExt a;
-            FpExt b;
-        };
-
-        // Compute both tile sums (i=0 and i=1) in lockstep.
-        FpExt2 out{shared_sum[0 * PADDED_X + z_idx], shared_sum[1 * PADDED_X + z_idx]};
+        // Compute both tile sums (i=0 and i=1) in lockstep. Note we are using
+        // FracExt as a contiguous FpExt pair (instead of a fraction), as we
+        // use S_DEG = 2.
+        FracExt out{shared_sum[0 * PADDED_X + z_idx], shared_sum[1 * PADDED_X + z_idx]};
         for (int lane = 1; lane < (blockDim.x >> l_skip); ++lane) {
-            out.a += shared_sum[0 * PADDED_X + (lane << l_skip) + z_idx];
-            out.b += shared_sum[1 * PADDED_X + (lane << l_skip) + z_idx];
+            out.p += shared_sum[0 * PADDED_X + (lane << l_skip) + z_idx];
+            out.q += shared_sum[1 * PADDED_X + (lane << l_skip) + z_idx];
         }
 
         // Write both tile sums with a single contiguous store
         FpExt *out_ptr =
             block_sums + (col_idx * gridDim.x + blockIdx.x) * (S_DEG << l_skip) + (S_DEG * z_idx);
-        *reinterpret_cast<FpExt2 *>(out_ptr) = out;
+        *reinterpret_cast<FracExt *>(out_ptr) = out;
     }
 }
 
