@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 
+pub const MAX_LOG_TRACE_HEIGHT: usize = 24;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FriParameters {
     pub log_blowup: usize,
@@ -27,6 +29,7 @@ impl FriParameters {
         challenge_field_bits.min(fri_query_security_bits)
     }
 
+    /// See [standard_fri_params_with_100_bits_security].
     pub fn standard_fast() -> Self {
         standard_fri_params_with_100_bits_security(1)
     }
@@ -37,6 +40,7 @@ impl FriParameters {
         standard_fri_params_with_100_bits_conjectured_security(log_blowup)
     }
 
+    /// See [standard_fri_params_with_100_bits_security].
     pub fn standard_with_100_bits_security(log_blowup: usize) -> Self {
         standard_fri_params_with_100_bits_security(log_blowup)
     }
@@ -67,7 +71,7 @@ impl FriParameters {
     /// We (via Plonky3) use multi-FRI, whose security in the unique decoding regime can be bounded
     /// above by the security of batch FRI by considering all polynomials in the largest domain.
     ///
-    /// We use batch FRI with <=2 opening points (the second point for rotation openings). The
+    /// We use multi-FRI with <=2 opening points (the second point for rotation openings). The
     /// `num_batch_columns` is the number of columns to be batched across all domain sizes. A trace
     /// polynomial over the base field opened at 2 points gets a contribution of 2. A trace
     /// polynomial over the extension field opened at 2 points gets a contribution of 8.
@@ -89,6 +93,8 @@ impl FriParameters {
     }
 
     /// Batch FRI error according to <https://eprint.iacr.org/2022/1216.pdf> in the unique decoding regime.
+    /// The batch FRI bound is an overestimate because in multi-FRI the error contribution for
+    /// batching over smaller domain sizes is smaller.
     ///
     /// We assume arity-2 folding.
     pub fn security_bits_fri_commit_phase(
@@ -97,12 +103,15 @@ impl FriParameters {
         num_batch_columns: usize,
         max_log_domain_size: usize,
     ) -> f64 {
-        // Using formula (1) from https://eprint.iacr.org/2022/1216.pdf on correlated agreement in UDR
+        let domain_size = 2.0_f64.powi(max_log_domain_size as i32);
+        let field_size = 2.0_f64.powf(challenge_field_bits);
+
+        // Using formula (1) from https://eprint.iacr.org/2022/1216.pdf on correlated agreement in UDR.
         let batch_term = num_batch_columns - 1;
-        let fold_term = 2;
-        challenge_field_bits + (self.commit_proof_of_work_bits as f64)
-            - max_log_domain_size as f64
-            - ((batch_term + fold_term) as f64).log2()
+        let fold_term = 2; // (3 - 1) * (1/2 + 1/4 + ...), where in each stage of multi-FRI we batch 3 terms using 1,
+                           // beta, beta^2 and we start at half the largest domain size
+        -((batch_term as f64 + fold_term as f64) * domain_size / field_size).log2()
+            + self.commit_proof_of_work_bits as f64
     }
 
     pub fn security_bits_fri_query_phase(&self) -> f64 {
@@ -146,8 +155,12 @@ impl FriParameters {
 ///
 /// Assumes that:
 /// - the challenge field has size at least 2^123
-/// - for `log_blowup = 1`, multi-FRI will be run with at most width 30000 at any level
-/// - for `log_blowup > 1`, multi-FRI will be run with at most width 2000 at any level
+/// - for `log_blowup = 1`, the number of trace polynomials batched in multi-FRI is at most 30000. A
+///   trace polynomial over the base field opened at 2 points gets a contribution of 2. A trace
+///   polynomial over the extension field opened at 2 points gets a contribution of 8.
+/// - for `log_blowup > 1`, the number of trace polynomials batched in multi-FRI is at most 4000.
+/// - the maximum trace height is 2^24
+/// - for DEEP-ALI, the maximum number of constraints is 15000.
 pub fn standard_fri_params_with_100_bits_security(log_blowup: usize) -> FriParameters {
     let fri_params = match log_blowup {
         1 => FriParameters {
@@ -237,10 +250,12 @@ pub struct SecurityParameters {
 }
 
 impl SecurityParameters {
+    /// See [standard_fri_params_with_100_bits_security].
     pub fn standard_fast() -> Self {
         Self::new_baby_bear_100_bits(FriParameters::standard_fast())
     }
 
+    /// See [standard_fri_params_with_100_bits_security].
     pub fn standard_100_bits_with_fri_log_blowup(log_blowup: usize) -> Self {
         Self::new_baby_bear_100_bits(FriParameters::standard_with_100_bits_security(log_blowup))
     }
@@ -290,9 +305,7 @@ pub fn deep_ali_security_params_baby_bear_100_bits() -> DeepAliParameters {
 
 #[cfg(test)]
 mod security_tests {
-    use openvm_stark_backend::p3_field::{
-        extension::BinomialExtensionField, PrimeField64, TwoAdicField,
-    };
+    use openvm_stark_backend::p3_field::{extension::BinomialExtensionField, PrimeField64};
     use p3_baby_bear::BabyBear;
     use tracing::Level;
 
@@ -306,10 +319,10 @@ mod security_tests {
         let challenge_field_bits = (BabyBear::ORDER_U64 as f64).powi(4).log2();
         for log_blowup in 1..=4 {
             let params = SecurityParameters::standard_100_bits_with_fri_log_blowup(log_blowup);
-            let num_batch_columns = if log_blowup == 1 { 30_000 } else { 4_000 };
+            let num_batch_columns = if log_blowup == 1 { 80_000 } else { 4_000 };
             let max_num_constraints = 15_000;
             let max_constraint_degree = (1 << log_blowup) + 1;
-            let max_log_domain_size = BabyBear::TWO_ADICITY;
+            let max_log_domain_size = log_blowup + MAX_LOG_TRACE_HEIGHT;
             let bits = params.security_bits::<BinomialExtensionField<BabyBear, 4>>(
                 challenge_field_bits,
                 num_batch_columns,
