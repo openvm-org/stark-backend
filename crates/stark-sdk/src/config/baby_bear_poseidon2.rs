@@ -3,6 +3,7 @@ use std::{any::type_name, sync::Arc};
 use openvm_stark_backend::{
     config::StarkConfig,
     interaction::fri_log_up::FriLogUpPhase,
+    keygen::MultiStarkKeygenBuilder,
     p3_challenger::DuplexChallenger,
     p3_commit::ExtensionMmcs,
     p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing},
@@ -29,8 +30,9 @@ use super::{
 };
 use crate::{
     assert_sc_compatible_with_serde,
-    config::{
-        fri_params::SecurityParameters, log_up_params::log_up_security_params_baby_bear_100_bits,
+    config::fri_params::{
+        SecurityParameters, MAX_BATCH_SIZE_LOG_BLOWUP_1, MAX_BATCH_SIZE_LOG_BLOWUP_2,
+        MAX_NUM_CONSTRAINTS,
     },
     engine::{StarkEngine, StarkEngineWithHashInstrumentation, StarkFriEngine},
 };
@@ -93,6 +95,20 @@ where
         &self.device
     }
 
+    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<'_, Self::SC> {
+        let mut builder = MultiStarkKeygenBuilder::new(self.config());
+        builder.set_max_constraint_degree(self.max_constraint_degree);
+        let max_batch_size = if self.fri_params.log_blowup == 1 {
+            MAX_BATCH_SIZE_LOG_BLOWUP_1
+        } else {
+            MAX_BATCH_SIZE_LOG_BLOWUP_2
+        };
+        builder.max_batch_size = Some(max_batch_size);
+        builder.max_num_constraints = Some(MAX_NUM_CONSTRAINTS);
+
+        builder
+    }
+
     fn prover(&self) -> MultiTraceStarkProver<BabyBearPermutationConfig<P>> {
         MultiTraceStarkProver::new(
             CpuBackend::default(),
@@ -148,10 +164,7 @@ pub fn default_engine() -> BabyBearPoseidon2Engine {
 /// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
 fn default_engine_impl(fri_params: FriParameters) -> BabyBearPoseidon2Engine {
     let perm = default_perm();
-    let security_params = SecurityParameters {
-        fri_params,
-        log_up_params: log_up_security_params_baby_bear_100_bits(),
-    };
+    let security_params = SecurityParameters::new_baby_bear_100_bits(fri_params);
     engine_from_perm(perm, security_params)
 }
 
@@ -197,6 +210,7 @@ where
     let SecurityParameters {
         fri_params,
         log_up_params,
+        deep_ali_params,
     } = security_params;
     let fri_config = P3FriParameters {
         log_blowup: fri_params.log_blowup,
@@ -209,7 +223,7 @@ where
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
     let challenger = Challenger::new(perm.clone());
     let rap_phase = FriLogUpPhase::new(log_up_params, fri_params.log_blowup);
-    BabyBearPermutationConfig::new(pcs, challenger, rap_phase)
+    BabyBearPermutationConfig::new(pcs, challenger, rap_phase, deep_ali_params)
 }
 
 /// Uses HorizenLabs Poseidon2 round constants, but plonky3 Mat4 and also

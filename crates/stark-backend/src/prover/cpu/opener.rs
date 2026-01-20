@@ -4,18 +4,23 @@ use itertools::Itertools;
 use p3_commit::{Pcs, PolynomialSpace};
 
 use crate::{
-    config::{Domain, PcsProof, PcsProverData, StarkGenericConfig},
+    config::{Domain, PcsProverData, StarkGenericConfig, Val},
     proof::{AdjacentOpenedValues, OpenedValues, OpeningProof},
 };
 
 pub struct OpeningProver<'pcs, SC: StarkGenericConfig> {
     pcs: &'pcs SC::Pcs,
     zeta: SC::Challenge,
+    deep_pow_witness: Val<SC>,
 }
 
 impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
-    pub fn new(pcs: &'pcs SC::Pcs, zeta: SC::Challenge) -> Self {
-        Self { pcs, zeta }
+    pub fn new(pcs: &'pcs SC::Pcs, zeta: SC::Challenge, deep_pow_witness: Val<SC>) -> Self {
+        Self {
+            pcs,
+            zeta,
+            deep_pow_witness,
+        }
     }
 
     /// Opening proof for multiple RAP matrices, where
@@ -39,7 +44,7 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
         quotient_data: &PcsProverData<SC>,
         // Quotient degree for each RAP committed in quotient_data, in order
         quotient_degrees: &[u8],
-    ) -> OpeningProof<PcsProof<SC>, SC::Challenge> {
+    ) -> OpeningProof<SC> {
         let preprocessed: Vec<_> = preprocessed
             .into_iter()
             .map(|(data, domain)| (data, vec![domain]))
@@ -129,6 +134,7 @@ impl<'pcs, SC: StarkGenericConfig> OpeningProver<'pcs, SC> {
                 after_challenge: after_challenge_openings,
                 quotient: quotient_openings,
             },
+            deep_pow_witness: self.deep_pow_witness,
         }
     }
 }
