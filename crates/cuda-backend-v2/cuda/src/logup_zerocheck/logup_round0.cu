@@ -28,7 +28,12 @@ constexpr uint32_t COSET_PARALLEL_THRESHOLD = 32768; // 2^15
 // Device function to evaluate interactions for all cosets in lockstep with DAG traversal.
 // Computes numerator and denominator sums for each coset.
 // NOTE: Using __inline__ instead of __forceinline__ to let compiler decide based on register pressure.
-template <uint32_t NUM_COSETS, bool NEEDS_SHMEM>
+//
+// Template params:
+// - FIRST_COSET_IS_IDENTITY: compile-time flag for lockstep kernel when coset 0 has shift=1
+// Runtime params:
+// - skip_ntt: runtime flag for coset-parallel kernel when processing identity coset
+template <uint32_t NUM_COSETS, bool NEEDS_SHMEM, bool FIRST_COSET_IS_IDENTITY = false>
 __device__ __inline__ void acc_interactions(
     const NttEvalContext<NUM_COSETS> &eval_ctx,
     const FpExt *__restrict__ numer_weights,
@@ -36,7 +41,8 @@ __device__ __inline__ void acc_interactions(
     const Rule *__restrict__ d_rules,
     size_t rules_len,
     FpExt *__restrict__ numer_sums, // output [NUM_COSETS]
-    FpExt *__restrict__ denom_sums  // output [NUM_COSETS]
+    FpExt *__restrict__ denom_sums, // output [NUM_COSETS]
+    bool skip_ntt = false           // Runtime flag for identity coset
 ) {
     // Initialize sums to zero
 #pragma unroll
@@ -52,7 +58,9 @@ __device__ __inline__ void acc_interactions(
 
         // Evaluate x operand for all cosets
         Fp x_vals[NUM_COSETS];
-        ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(x_vals, header.x, eval_ctx);
+        ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
+            x_vals, header.x, eval_ctx, skip_ntt
+        );
 
         Fp results[NUM_COSETS];
 
@@ -61,7 +69,9 @@ __device__ __inline__ void acc_interactions(
             // Decode y only for binary ops
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
+                y_vals, y_src, eval_ctx, skip_ntt
+            );
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 results[c] = x_vals[c] + y_vals[c];
@@ -71,7 +81,9 @@ __device__ __inline__ void acc_interactions(
         case OP_SUB: {
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
+                y_vals, y_src, eval_ctx, skip_ntt
+            );
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 results[c] = x_vals[c] - y_vals[c];
@@ -81,7 +93,9 @@ __device__ __inline__ void acc_interactions(
         case OP_MUL: {
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
+                y_vals, y_src, eval_ctx, skip_ntt
+            );
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 results[c] = x_vals[c] * y_vals[c];
@@ -194,14 +208,15 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
     Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
     Fp const omega_skip_ntt = pow(omega_skip, ntt_idx);
 
-    Fp g_coset = g_shift; // g^1, will iterate g^2, g^3, ...
+    // Cosets c=0..NUM_COSETS-1 with shifts 1,g^1, g^2, ...
+    Fp g_coset = Fp::one();
 #pragma unroll
     for (uint32_t c = 0; c < NUM_COSETS; c++) {
         Fp eval_point = g_coset * omega_skip_ntt;
         Fp omega = exp_power_of_2(eval_point, log_stride);
         is_first_mult[c] = avg_gp(omega, segment_size);
         is_last_mult[c] = avg_gp(omega * eta, segment_size);
-        g_coset *= g_shift; // g^(c+2) for next iteration
+        g_coset *= g_shift; // g^(c+1) for next iteration
     }
 
     // Intermediate buffer setup
@@ -244,10 +259,11 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
         ntt_idx,
         0 // x_int - updated per iteration
     };
-    // Compute omega_shifts directly into context using iterative multiplication
-    g_coset = g_shift; // reset to g^1
+    // Compute omega_shifts: coset 0 has identity shift, rest use g^c
+    eval_ctx.omega_shifts[0] = Fp::one(); // Identity coset
+    g_coset = g_shift;                    // g^1
 #pragma unroll
-    for (uint32_t c = 0; c < NUM_COSETS; c++) {
+    for (uint32_t c = 1; c < NUM_COSETS; c++) {
         eval_ctx.omega_shifts[c] = pow(g_coset, ntt_idx_rev);
         g_coset *= g_shift;
     }
@@ -264,7 +280,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
 
         FpExt numer_results[NUM_COSETS];
         FpExt denom_results[NUM_COSETS];
-        acc_interactions<NUM_COSETS, NEEDS_SHMEM>(
+        acc_interactions<NUM_COSETS, NEEDS_SHMEM, /*FIRST_COSET_IS_IDENTITY=*/true>(
             eval_ctx, numer_weights, denom_weights, d_rules, rules_len, numer_results, denom_results
         );
 
@@ -340,6 +356,7 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
 
     // KEY DIFFERENCE: coset_idx from blockIdx.y
     uint32_t const coset_idx = blockIdx.y;
+    bool const is_identity_coset = (coset_idx == 0);
 
     // Precompute values for this single coset
     uint32_t const ntt_idx_rev = rev_len(ntt_idx, l_skip);
@@ -353,13 +370,13 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
     Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
     Fp const omega_skip_ntt = pow(omega_skip, ntt_idx);
 
-    // Compute for single coset: g^(coset_idx + 1)
-    Fp const g_coset = pow(g_shift, coset_idx + 1);
-    Fp const eval_point = g_coset * omega_skip_ntt;
+    // Compute for single coset: coset 0 has shift=1, rest have shift=g^coset_idx
+    Fp const g_coset = is_identity_coset ? Fp::one() : pow(g_shift, coset_idx);
+    Fp const eval_point = is_identity_coset ? omega_skip_ntt : (g_coset * omega_skip_ntt);
     Fp const omega = exp_power_of_2(eval_point, log_stride);
     Fp const is_first_mult = avg_gp(omega, segment_size);
     Fp const is_last_mult = avg_gp(omega * eta, segment_size);
-    Fp const omega_shift = pow(g_coset, ntt_idx_rev);
+    Fp const omega_shift = is_identity_coset ? Fp::one() : pow(g_coset, ntt_idx_rev);
 
     // Intermediate buffer setup (single coset, no NUM_COSETS multiplier)
     Fp local_buffer[GLOBAL ? 1 : BUFFER_THRESHOLD];
@@ -405,8 +422,17 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
 
         FpExt numer_results[1];
         FpExt denom_results[1];
-        acc_interactions<1, NEEDS_SHMEM>(
-            eval_ctx, numer_weights, denom_weights, d_rules, rules_len, numer_results, denom_results
+        // We use this device function to handle a single coset so NUM_COSETS = 1 and FIRST_COSET_IS_IDENTITY = false.
+        // The actual `coset_idx = 0` skip is handled by the `is_identity_coset` flag.
+        acc_interactions</*NUM_COSETS=*/1, NEEDS_SHMEM, /*FIRST_COSET_IS_IDENTITY=*/false>(
+            eval_ctx,
+            numer_weights,
+            denom_weights,
+            d_rules,
+            rules_len,
+            numer_results,
+            denom_results,
+            is_identity_coset // skip_ntt flag for identity coset
         );
 
         FpExt eq = eq_cube[x_int];

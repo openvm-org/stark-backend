@@ -30,13 +30,14 @@ template <uint32_t NUM_COSETS> struct NttEvalContext {
     uint32_t x_int;   // 0..num_x
 };
 
-// Evaluates f(g^(c+1) * omega_skip^ntt_idx, x) for all cosets c in [0, NUM_COSETS).
+// Evaluates f(g^c * omega_skip^ntt_idx, x) for all cosets c in [0, NUM_COSETS).
 // Single thread handles ALL cosets in lockstep with DAG traversal.
 //
 // Algorithm:
 // 1. Load trace value once
-// 2. iNTT once -> save coefficient in register (shared across all cosets)
-// 3. For each coset c (sequentially):
+// 2. For identity coset (c=0 with FIRST_COSET_IS_IDENTITY or skip_ntt): use trace value directly
+// 3. iNTT once -> save coefficient in register (shared across remaining cosets)
+// 4. For each remaining coset c:
 //    - Copy coefficient, multiply by omega_shifts[c]
 //    - Forward NTT
 //    - Store result[c]
@@ -45,7 +46,12 @@ template <uint32_t NUM_COSETS> struct NttEvalContext {
 // - All NTT operations use warp shuffles only
 // - No shared memory needed, coefficient stays in register
 // - This is the priority case for latency
-template <uint32_t NUM_COSETS, bool NEEDS_SHMEM>
+//
+// Template params:
+// - FIRST_COSET_IS_IDENTITY: compile-time flag for lockstep kernel when coset 0 has shift=1
+// Runtime params:
+// - skip_ntt: runtime flag for coset-parallel kernel when processing identity coset
+template <uint32_t NUM_COSETS, bool NEEDS_SHMEM, bool FIRST_COSET_IS_IDENTITY = false>
 __device__ __forceinline__ void ntt_coset_interpolate(
     Fp *__restrict__ results,     // output [NUM_COSETS]
     const Fp *__restrict__ evals, // must have length height = num_x * skip_domain
@@ -55,7 +61,8 @@ __device__ __forceinline__ void ntt_coset_interpolate(
     uint32_t x_int,
     uint32_t skip_domain,
     uint32_t height,
-    uint8_t offset
+    uint8_t offset,
+    bool skip_ntt = false // Runtime flag for identity coset (coset-parallel kernel)
 ) {
     uint32_t const l_skip = __ffs(skip_domain) - 1;
     uint32_t const base = x_int * skip_domain;
@@ -68,39 +75,61 @@ __device__ __forceinline__ void ntt_coset_interpolate(
     uint32_t const idx = (base + ntt_idx + offset) % height;
     Fp coeff = evals[idx];
 
-    // iNTT once (shared across all cosets)
-    if constexpr (NEEDS_SHMEM) {
-        ntt_buffer[ntt_idx] = coeff;
-        __syncthreads();
+    // Runtime skip path for coset-parallel identity coset
+    if (skip_ntt) {
+        results[0] = coeff;
+        return;
     }
-    device_ntt::ntt_natural_to_bitrev<true, NEEDS_SHMEM>(coeff, ntt_buffer, ntt_idx, l_skip);
 
-    // Save coefficient in dedicated register - critical for NEEDS_SHMEM=false
-    Fp const saved_coeff = coeff;
+    // Compile-time handling of identity coset for lockstep kernel
+    if constexpr (FIRST_COSET_IS_IDENTITY) {
+        // Coset 0 with shift=1: result is trace value directly (skip all NTT)
+        results[0] = coeff;
+    }
 
-    // For each coset: shift + forward NTT (sequential, reusing ntt_buffer)
+    // iNTT for remaining cosets (or all if no identity first)
+    constexpr uint32_t start_c = FIRST_COSET_IS_IDENTITY ? 1 : 0;
+    if constexpr (start_c < NUM_COSETS) {
+        // iNTT once (shared across all cosets that need it)
+        if constexpr (NEEDS_SHMEM) {
+            ntt_buffer[ntt_idx] = coeff;
+            __syncthreads();
+        }
+        device_ntt::ntt_natural_to_bitrev<true, NEEDS_SHMEM>(coeff, ntt_buffer, ntt_idx, l_skip);
+
+        // Save coefficient in dedicated register - critical for NEEDS_SHMEM=false
+        Fp const saved_coeff = coeff;
+
+        // For each coset: shift + forward NTT (sequential, reusing ntt_buffer)
 #pragma unroll
-    for (uint32_t c = 0; c < NUM_COSETS; c++) {
-        Fp shifted = saved_coeff * omega_shifts[c];
-        // For both possibilities of NEEDS_SHMEM, this function starts from the register value `shifted` and then overwrites shared `ntt_buffer` in every location before syncthreads. Hence we don't need a sync between calls to iNTT and cosetNTTs.
-        device_ntt::ntt_bitrev_to_natural<false, NEEDS_SHMEM>(shifted, ntt_buffer, ntt_idx, l_skip);
-        results[c] = shifted;
+        for (uint32_t c = start_c; c < NUM_COSETS; c++) {
+            Fp shifted = saved_coeff * omega_shifts[c];
+            // For both possibilities of NEEDS_SHMEM, this function starts from the register value `shifted` and then overwrites shared `ntt_buffer` in every location before syncthreads. Hence we don't need a sync between calls to iNTT and cosetNTTs.
+            device_ntt::ntt_bitrev_to_natural<false, NEEDS_SHMEM>(shifted, ntt_buffer, ntt_idx, l_skip);
+            results[c] = shifted;
+        }
     }
 }
 
 // NTT-based DAG entry evaluation for all cosets.
 // Returns results for all NUM_COSETS cosets simultaneously.
 // All threads in the block must call this together (for __syncthreads in NTT when NEEDS_SHMEM).
-template <uint32_t NUM_COSETS, bool NEEDS_SHMEM>
+//
+// Template params:
+// - FIRST_COSET_IS_IDENTITY: compile-time flag for lockstep kernel when coset 0 has shift=1
+// Runtime params:
+// - skip_ntt: runtime flag for coset-parallel kernel when processing identity coset
+template <uint32_t NUM_COSETS, bool NEEDS_SHMEM, bool FIRST_COSET_IS_IDENTITY = false>
 __device__ __forceinline__ void ntt_eval_dag_entry(
     Fp *__restrict__ results, // output [NUM_COSETS]
     const SourceInfo &src,
-    const NttEvalContext<NUM_COSETS> &ctx
+    const NttEvalContext<NUM_COSETS> &ctx,
+    bool skip_ntt = false // Runtime flag for identity coset
 ) {
     switch (src.type) {
     case ENTRY_PREPROCESSED: {
         const Fp *col = ctx.preprocessed + ctx.height * src.index;
-        ntt_coset_interpolate<NUM_COSETS, NEEDS_SHMEM>(
+        ntt_coset_interpolate<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
             results,
             col,
             ctx.omega_shifts,
@@ -109,14 +138,15 @@ __device__ __forceinline__ void ntt_eval_dag_entry(
             ctx.x_int,
             ctx.skip_domain,
             ctx.height,
-            src.offset
+            src.offset,
+            skip_ntt
         );
         return;
     }
     case ENTRY_MAIN: {
         auto main_ptr = ctx.main_parts[src.part];
         const Fp *col = main_ptr + ctx.height * src.index;
-        ntt_coset_interpolate<NUM_COSETS, NEEDS_SHMEM>(
+        ntt_coset_interpolate<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
             results,
             col,
             ctx.omega_shifts,
@@ -125,7 +155,8 @@ __device__ __forceinline__ void ntt_eval_dag_entry(
             ctx.x_int,
             ctx.skip_domain,
             ctx.height,
-            src.offset
+            src.offset,
+            skip_ntt
         );
         return;
     }
