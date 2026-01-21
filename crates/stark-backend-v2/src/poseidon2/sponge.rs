@@ -71,14 +71,23 @@ pub trait TranscriptHistory {
 
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptLog {
+    /// Every sampled or observed value F
     values: Vec<F>,
+    /// True iff values[tidx] was a sampled value
     is_sample: Vec<bool>,
+    /// Sponge state after every permutation; note that not all implementations of
+    /// TranscriptHistory will define this
+    perm_results: Vec<[F; WIDTH]>,
 }
 
 impl TranscriptLog {
     pub fn new(values: Vec<F>, is_sample: Vec<bool>) -> Self {
         debug_assert_eq!(values.len(), is_sample.len());
-        Self { values, is_sample }
+        Self {
+            values,
+            is_sample,
+            perm_results: vec![],
+        }
     }
 
     pub fn values(&self) -> &[F] {
@@ -105,6 +114,10 @@ impl TranscriptLog {
     pub fn push_sample(&mut self, value: F) {
         self.values.push(value);
         self.is_sample.push(true);
+    }
+
+    pub fn push_perm_result(&mut self, state: [F; WIDTH]) {
+        self.perm_results.push(state);
     }
 
     pub fn extend_observe(&mut self, values: &[F]) {
@@ -136,6 +149,10 @@ impl TranscriptLog {
     pub fn into_parts(self) -> (Vec<F>, Vec<bool>) {
         (self.values, self.is_sample)
     }
+
+    pub fn perm_results(&self) -> &Vec<[F; WIDTH]> {
+        &self.perm_results
+    }
 }
 
 impl Deref for TranscriptLog {
@@ -163,6 +180,8 @@ pub struct DuplexSponge {
     absorb_idx: usize,
     /// Invariant to be preserved: 0 <= sample_idx <= CHUNK
     sample_idx: usize,
+    /// True iff last sample/observe triggered a permutation
+    last_op_perm: bool,
 }
 
 impl Default for DuplexSponge {
@@ -172,6 +191,7 @@ impl Default for DuplexSponge {
             state: [F::ZERO; WIDTH],
             absorb_idx: 0,
             sample_idx: 0,
+            last_op_perm: false,
         }
     }
 }
@@ -180,7 +200,8 @@ impl FiatShamirTranscript for DuplexSponge {
     fn observe(&mut self, value: F) {
         self.state[self.absorb_idx] = value;
         self.absorb_idx += 1;
-        if self.absorb_idx == CHUNK {
+        self.last_op_perm = self.absorb_idx == CHUNK;
+        if self.last_op_perm {
             self.perm.permute_mut(&mut self.state);
             self.absorb_idx = 0;
             self.sample_idx = CHUNK;
@@ -188,7 +209,8 @@ impl FiatShamirTranscript for DuplexSponge {
     }
 
     fn sample(&mut self) -> F {
-        if self.absorb_idx != 0 || self.sample_idx == 0 {
+        self.last_op_perm = self.absorb_idx != 0 || self.sample_idx == 0;
+        if self.last_op_perm {
             self.perm.permute_mut(&mut self.state);
             self.absorb_idx = 0;
             self.sample_idx = CHUNK;
@@ -258,21 +280,38 @@ pub fn poseidon2_tree_compress(mut hashes: Vec<Digest>) -> Digest {
     hashes.pop().unwrap()
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct DuplexSpongeRecorder {
     pub inner: DuplexSponge,
     pub log: TranscriptLog,
+}
+
+impl Default for DuplexSpongeRecorder {
+    fn default() -> Self {
+        let mut log = TranscriptLog::default();
+        log.push_perm_result([F::ZERO; WIDTH]);
+        Self {
+            inner: Default::default(),
+            log,
+        }
+    }
 }
 
 impl FiatShamirTranscript for DuplexSpongeRecorder {
     fn observe(&mut self, x: F) {
         <DuplexSponge as FiatShamirTranscript>::observe(&mut self.inner, x);
         self.log.push_observe(x);
+        if self.inner.last_op_perm {
+            self.log.push_perm_result(self.inner.state);
+        }
     }
 
     fn sample(&mut self) -> F {
         let x = self.inner.sample();
         self.log.push_sample(x);
+        if self.inner.last_op_perm {
+            self.log.push_perm_result(self.inner.state);
+        }
         x
     }
 }
