@@ -126,12 +126,7 @@ __global__ void compute_round_block_sum_kernel(
 // Pairs (idx, idx+quarter) and (idx+half, idx+3*quarter),
 // writes results to dst[idx] and dst[idx+quarter].
 // Safe for src == dst (in-place) because each thread reads before writing to the same index.
-__global__ void fold_ef_columns_kernel(
-    const FpExt *src,
-    FpExt *dst,
-    uint32_t quarter,
-    FpExt r
-) {
+__global__ void fold_ef_columns_kernel(const FpExt *src, FpExt *dst, uint32_t quarter, FpExt r) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= quarter) {
         return;
@@ -199,7 +194,7 @@ extern "C" int _frac_build_tree_layer(FracExt *layer, size_t layer_size, bool re
 }
 
 inline std::pair<dim3, dim3> frac_compute_round_launch_params(uint32_t stride) {
-    return kernel_launch_params(stride >> 1, 256);
+    return kernel_launch_params(stride >> 1, 512);
 }
 
 extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t stride) {
@@ -251,12 +246,7 @@ extern "C" int _frac_compute_round(
     return CHECK_KERNEL();
 }
 
-extern "C" int _frac_fold_fpext_columns(
-    const FracExt *src,
-    FracExt *dst,
-    size_t size,
-    FpExt r
-) {
+extern "C" int _frac_fold_fpext_columns(const FracExt *src, FracExt *dst, size_t size, FpExt r) {
     if (size <= 2) {
         return 0;
     }
@@ -266,10 +256,7 @@ extern "C" int _frac_fold_fpext_columns(
     uint32_t quarter_fpext = size >> 1;
     auto [grid, block] = kernel_launch_params(quarter_fpext);
     fold_ef_columns_kernel<<<grid, block>>>(
-        reinterpret_cast<const FpExt *>(src),
-        reinterpret_cast<FpExt *>(dst),
-        quarter_fpext,
-        r
+        reinterpret_cast<const FpExt *>(src), reinterpret_cast<FpExt *>(dst), quarter_fpext, r
     );
     return CHECK_KERNEL();
 }
