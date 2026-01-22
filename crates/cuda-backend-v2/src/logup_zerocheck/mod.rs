@@ -160,11 +160,17 @@ pub fn prove_zerocheck_and_logup_gpu(
     };
     // Set memory limit for batch MLE based on inputs buffer size
     prover.gkr_mem_contribution = inputs.len() * std::mem::size_of::<Frac<EF>>();
-    prover.memory_limit_bytes = if prover.save_memory {
-        5usize << 30 // 5GiB
-    } else {
-        prover.gkr_mem_contribution
-    };
+    prover.memory_limit_bytes = prover.gkr_mem_contribution;
+    if !prover.save_memory {
+        const DEFAULT_MEMORY_LIMIT: usize = 5 << 30; // 5GiB
+        if prover.memory_limit_bytes > DEFAULT_MEMORY_LIMIT {
+            tracing::warn!(
+                "prover.memory_limit_bytes {} already exceeds 5GiB",
+                prover.memory_limit_bytes
+            );
+        }
+        prover.memory_limit_bytes = DEFAULT_MEMORY_LIMIT;
+    }
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
     let (frac_sum_proof, mut xi) =
@@ -902,7 +908,9 @@ impl<'a> LogupZerocheckGpu<'a> {
                 results
             })
             .collect();
-        self.memory_limit_bytes = mem_limit;
+        if self.save_memory {
+            self.memory_limit_bytes = mem_limit;
+        }
 
         // GPU folding for sels_per_trace (rotate=false, only need offset=0)
         self.sels_per_trace = std::mem::take(&mut self.sels_per_trace_base)
@@ -1420,13 +1428,15 @@ impl<'a> LogupZerocheckGpu<'a> {
                 .map(|len| output_mats.by_ref().take(len).collect())
                 .collect()
         };
-        self.memory_limit_bytes = self.gkr_mem_contribution.saturating_sub(
-            self.mat_evals_per_trace
-                .iter()
-                .flatten()
-                .map(|m| m.buffer().len() * size_of::<EF>())
-                .sum(),
-        );
+        if self.save_memory {
+            self.memory_limit_bytes = self.gkr_mem_contribution.saturating_sub(
+                self.mat_evals_per_trace
+                    .iter()
+                    .flatten()
+                    .map(|m| m.buffer().len() * size_of::<EF>())
+                    .sum(),
+            );
+        }
 
         // Fold sels_per_trace: Vec<DeviceMatrix<EF>>
         self.sels_per_trace = batch_fold(std::mem::take(&mut self.sels_per_trace));
