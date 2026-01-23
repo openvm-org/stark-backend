@@ -72,7 +72,7 @@ __global__ void precompute_lambda_combinations_kernel(
     FpExt sum(Fp::zero());
     for (uint16_t l = 0; l < hdr.num_terms; ++l) {
         LambdaTerm term = lambda_terms[hdr.term_offset + l];
-        sum += FpExt(term.coefficient) * lambda_pows[term.constraint_idx];
+        sum += lambda_pows[term.constraint_idx] * term.coefficient;
     }
     out[m] = sum;
 }
@@ -317,7 +317,7 @@ __global__ void precompute_logup_combinations_kernel(
     FpExt sum(Fp::zero());
     for (uint16_t t = 0; t < hdr.num_terms; ++t) {
         InteractionMonomialTerm term = terms[hdr.term_offset + t];
-        FpExt value = FpExt(term.coefficient) * eq_3bs[term.interaction_idx];
+        FpExt value = eq_3bs[term.interaction_idx] * term.coefficient;
         if constexpr (IS_DENOM) {
             value *= beta_pows[term.field_idx];
         }
