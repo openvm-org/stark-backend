@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::{
     monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader, PackedVar},
@@ -169,10 +168,10 @@ extern "C" {
     fn _logup_gkr_input_eval(
         is_global: bool,
         fracs: *mut Frac<EF>,
-        preprocessed: *const std::ffi::c_void,
+        preprocessed: *const F,
         partitioned_main: *const u64,
-        challenges: *const std::ffi::c_void,
-        intermediates: *const std::ffi::c_void,
+        challenges: *const EF,
+        intermediates: *const EF,
         rules: *const std::ffi::c_void,
         used_nodes: *const usize,
         pair_idxs: *const u32,
@@ -543,7 +542,7 @@ pub unsafe fn fold_ple_from_evals(
 }
 
 /// # Safety
-/// - `output` must be a pointer to a device buffer with capacity at least `num_partitions *
+/// - `fracs` must be a pointer to a device buffer with capacity at least `num_interactions *
 ///   height`.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn logup_gkr_input_eval(
@@ -563,10 +562,10 @@ pub unsafe fn logup_gkr_input_eval(
     CudaError::from_result(_logup_gkr_input_eval(
         is_global,
         fracs,
-        preprocessed.as_raw_ptr(),
+        preprocessed.as_ptr(),
         partitioned_main.as_ptr(),
-        challenges.as_raw_ptr(),
-        intermediates.as_raw_ptr(),
+        challenges.as_ptr(),
+        intermediates.as_ptr(),
         rules.as_raw_ptr(),
         used_nodes.as_ptr(),
         pair_idxs.as_ptr(),
