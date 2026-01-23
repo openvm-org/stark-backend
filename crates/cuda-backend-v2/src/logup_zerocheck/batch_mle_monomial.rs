@@ -3,11 +3,7 @@
 //! This module provides batch evaluators for monomial evaluations across multiple AIRs,
 //! enabling efficient GPU kernel launches that process multiple traces in a single launch.
 
-use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-    error::CudaError,
-};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
 use p3_field::FieldAlgebra;
 use stark_backend_v2::prover::{DeviceMultiStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 use tracing::debug;
@@ -514,8 +510,6 @@ pub struct LogupCombinations {
 
 /// Precompute logup combinations for a single AIR's interaction monomials.
 ///
-/// Returns numerator and denominator combination buffers plus the bus_term_sum.
-///
 /// The AIR must have nonempty interaction monomials.
 pub(crate) fn compute_logup_combinations(
     pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
@@ -570,15 +564,11 @@ pub(crate) fn compute_logup_combinations(
     }
 
     // Compute bus_term_sum on CPU: sum_i(beta_pows[message_len_i] * (bus_idx[i]+1) * eq_3bs[i])
-    let bus_indices = monomials
-        .d_bus_indices
-        .to_host()
-        .expect("failed to copy bus_indices to host");
     let interactions = &pk.per_air[air_idx].vk.symbolic_constraints.interactions;
     debug_assert_eq!(
         interactions.len(),
-        bus_indices.len(),
-        "interaction count must match bus_indices"
+        eq_3bs_host.len(),
+        "interaction count must match eq_3bs"
     );
     let mut bus_term_sum = EF::ZERO;
     for (i, interaction) in interactions.iter().enumerate() {

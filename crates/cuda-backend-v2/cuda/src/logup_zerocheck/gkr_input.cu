@@ -167,13 +167,8 @@ __global__ void evaluate_interactions_gkr_kernel(
 
                 uint32_t pair_idx = d_pair_idxs[used_idx];
                 size_t interaction_idx = pair_idx >> 1;
-                size_t out_idx = interaction_idx * permutation_height + row;
-                if (pair_idx & 1) {
-                    d_fracs[out_idx].q = result;
-                } else {
-                    // For logup, the numerator (count) should be in the base field
-                    d_fracs[out_idx].p = FpExt(result.elems[0]);
-                }
+                size_t out_idx = (interaction_idx * permutation_height + row) * 2;
+                reinterpret_cast<FpExt *>(d_fracs)[out_idx + (pair_idx & 1)] = result;
             }
         }
     }
