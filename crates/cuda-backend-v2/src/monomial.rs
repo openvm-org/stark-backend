@@ -304,8 +304,8 @@ pub struct ExpandedInteractionMonomials<F> {
     pub denom_variables: Vec<PackedVar>,
     /// Denominator interaction terms: (interaction_idx, field_idx, coefficient)
     pub denom_terms: Vec<InteractionMonomialTerm<F>>,
-    /// Bus indices per interaction (for computing bus_term_sum on CPU)
-    pub bus_indices: Vec<u16>,
+    /// Number of interactions
+    pub num_interactions: u32,
     /// Maximum message length across all interactions
     pub max_fields_len: usize,
 }
@@ -322,7 +322,7 @@ impl<F: Field> ExpandedInteractionMonomials<F> {
                 denom_headers: Vec::new(),
                 denom_variables: Vec::new(),
                 denom_terms: Vec::new(),
-                bus_indices: Vec::new(),
+                num_interactions: 0,
                 max_fields_len: 0,
             };
         }
@@ -332,8 +332,6 @@ impl<F: Field> ExpandedInteractionMonomials<F> {
             .map(|i| i.message.len())
             .max()
             .unwrap_or(0);
-
-        let bus_indices: Vec<u16> = interactions.iter().map(|i| i.bus_index as u16).collect();
 
         // Build numerator monomials: expand count expressions
         // Group by variables -> (interaction_idx, coefficient)
@@ -398,7 +396,7 @@ impl<F: Field> ExpandedInteractionMonomials<F> {
             denom_headers,
             denom_variables,
             denom_terms,
-            bus_indices,
+            num_interactions: interactions.len() as u32,
             max_fields_len,
         }
     }

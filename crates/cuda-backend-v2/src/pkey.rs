@@ -67,7 +67,6 @@ pub struct InteractionMonomials {
     pub d_denom_variables: DeviceBuffer<PackedVar>,
     pub d_denom_terms: DeviceBuffer<InteractionMonomialTerm<F>>,
     pub num_denom_monomials: u32,
-    pub d_bus_indices: DeviceBuffer<u16>,
     pub max_fields_len: usize,
     pub num_interactions: u32,
 }
@@ -185,9 +184,8 @@ impl InteractionMonomials {
             d_denom_variables: to_device_or_empty(&expanded.denom_variables)?,
             d_denom_terms: to_device_or_empty(&expanded.denom_terms)?,
             num_denom_monomials: expanded.denom_headers.len() as u32,
-            d_bus_indices: expanded.bus_indices.to_device()?,
             max_fields_len: expanded.max_fields_len,
-            num_interactions: expanded.bus_indices.len() as u32,
+            num_interactions: expanded.num_interactions,
         })
     }
 }
