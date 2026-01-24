@@ -107,7 +107,8 @@ pub fn fractional_sumcheck_gpu(
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
     mem.tracing_info("fractional_sumcheck_gkr: after building segment tree");
-    let root = copy_from_device(&layer, 0)?;
+    let mut copy_scratch = DeviceBuffer::<Frac<EF>>::with_capacity(1);
+    let root = copy_from_device(&layer, 0, &mut copy_scratch)?;
     unsafe {
         frac_build_tree_layer(&mut layer, 2, true).map_err(FractionalSumcheckError::SegmentTree)?;
     }
@@ -126,8 +127,8 @@ pub fn fractional_sumcheck_gpu(
     let mut claims_per_layer = Vec::with_capacity(total_rounds);
     let mut sumcheck_polys = Vec::with_capacity(total_rounds);
 
-    let first_left = copy_from_device(&layer, 0)?;
-    let first_right = copy_from_device(&layer, 1)?;
+    let first_left = copy_from_device(&layer, 0, &mut copy_scratch)?;
+    let first_right = copy_from_device(&layer, 1, &mut copy_scratch)?;
     claims_per_layer.push(GkrLayerClaims {
         p_xi_0: first_left.p,
         q_xi_0: first_left.q,
@@ -156,6 +157,17 @@ pub fn fractional_sumcheck_gpu(
         0
     };
     let mut work_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(max_work_size);
+    let max_tmp_buffer_capacity = if total_rounds > 1 {
+        (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32) })
+            as usize
+    } else {
+        0
+    };
+    let mut tmp_block_sums = if max_tmp_buffer_capacity > 0 {
+        DeviceBuffer::<EF>::with_capacity(max_tmp_buffer_capacity)
+    } else {
+        DeviceBuffer::new()
+    };
 
     for round in 1..total_rounds {
         let gkr_round_span = debug_span!("GKR", round).entered();
@@ -176,10 +188,10 @@ pub fn fractional_sumcheck_gpu(
         let lambda = transcript.sample_ext();
 
         let tmp_buffer_capacity =
-            unsafe { _frac_compute_round_temp_buffer_size(eq_buffer.size as u32) };
-        // NOTE: we re-use the buffer across sumcheck rounds below. This requires that the
-        // temp_buffer_size only decreases as stride decreases.
-        let mut tmp_block_sums = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
+            unsafe { _frac_compute_round_temp_buffer_size(eq_buffer.size as u32) } as usize;
+        if tmp_buffer_capacity > tmp_block_sums.len() {
+            tmp_block_sums = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity);
+        }
 
         let last_outer_round = round == total_rounds - 1;
         debug_assert!(round > 0);
@@ -249,8 +261,8 @@ pub fn fractional_sumcheck_gpu(
         }
 
         let pq_host = [
-            copy_from_device(&*active, 0)?,
-            copy_from_device(&*active, pq_size / 2)?,
+            copy_from_device(&*active, 0, &mut copy_scratch)?,
+            copy_from_device(&*active, pq_size / 2, &mut copy_scratch)?,
         ];
 
         claims_per_layer.push(GkrLayerClaims {
@@ -286,8 +298,9 @@ pub fn fractional_sumcheck_gpu(
 fn copy_from_device<T: Copy>(
     buf: &DeviceBuffer<T>,
     index: usize,
+    scratch: &mut DeviceBuffer<T>,
 ) -> Result<T, FractionalSumcheckError> {
-    let scratch = DeviceBuffer::<T>::with_capacity(1);
+    debug_assert!(scratch.len() >= 1);
     unsafe {
         cuda_memcpy::<true, true>(
             scratch.as_mut_raw_ptr(),
