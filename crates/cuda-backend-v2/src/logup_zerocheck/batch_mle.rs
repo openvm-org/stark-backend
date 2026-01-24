@@ -653,6 +653,7 @@ fn evaluate_single_logup(
 // FFI wrappers
 // ============================================================================
 
+/// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 fn evaluate_mle_constraints_gpu_batch(
     block_ctxs: &DeviceBuffer<BlockCtx>,
     zc_ctxs: &DeviceBuffer<ZerocheckCtx>,
@@ -693,6 +694,7 @@ fn evaluate_mle_constraints_gpu_batch(
     output
 }
 
+/// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 fn evaluate_mle_interactions_gpu_batch(
     block_ctxs: &DeviceBuffer<BlockCtx>,
     logup_ctxs: &DeviceBuffer<LogupCtx>,

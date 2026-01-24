@@ -1,3 +1,12 @@
+//! ## Async frees and peak memory
+//!
+//! Many logup/zerocheck GPU helpers allocate temporary device buffers and launch kernels. Those
+//! buffers are freed via cudaFreeAsync through the VPMM pool, so frees are only stream-ordered. If
+//! new allocations happen before the current stream is synchronized, physical peak memory can
+//! temporarily include both the old and new buffers even though MemTracker only sees the logical
+//! max. Callers that care about physical peak should ensure a current-stream sync after use (e.g.
+//! by calling `to_host()` on outputs or `current_stream_sync()`).
+
 use std::{
     cmp::max,
     iter::{self, zip},
