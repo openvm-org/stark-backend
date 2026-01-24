@@ -22,6 +22,7 @@ use crate::{
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
 ///
 /// `num_cosets` should equal `constraint_degree - 1` because we evaluate the quotient polynomial.
+/// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_round0_constraints_gpu(
     pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
@@ -122,6 +123,7 @@ pub fn evaluate_round0_constraints_gpu(
 /// prepared trace input.
 ///
 /// `constraints` includes interaction expressions for the AIR.
+/// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_round0_interactions_gpu(
     pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
