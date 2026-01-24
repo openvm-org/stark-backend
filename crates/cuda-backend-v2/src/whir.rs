@@ -366,6 +366,7 @@ pub fn prove_whir_opening_gpu(
         let omega = F::two_adic_generator(log_rs_domain_size - k_whir);
         let num_queries = round_params.num_queries;
         let mut query_indices = Vec::with_capacity(num_queries);
+        let mut d_zs = DeviceBuffer::<F>::with_capacity(num_queries);
         query_phase_pow_witnesses.push(
             transcript
                 .grind_gpu(whir_params.query_phase_pow_bits)
@@ -515,7 +516,7 @@ pub fn prove_whir_opening_gpu(
                 for i in 0..log_height {
                     let step = 1 << i;
 
-                    let d_zs = z_pows.to_device()?;
+                    z_pows.copy_to(&mut d_zs)?;
                     // SAFETY:
                     // - eq_z0 has size height
                     // - eq_zs has size height * num_whir_queries

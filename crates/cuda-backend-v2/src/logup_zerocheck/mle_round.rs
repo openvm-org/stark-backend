@@ -17,6 +17,7 @@ const ZEROCHECK_BUFFER_VARS: bool = false;
 /// Evaluate MLE constraints on GPU.
 ///
 /// Takes device pointers directly, avoiding H2D copies when data is already on device.
+/// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_mle_constraints_gpu(
     eq_xi_ptr: *const EF,
@@ -71,6 +72,7 @@ pub fn evaluate_mle_constraints_gpu(
 /// Evaluate MLE interactions on GPU.
 ///
 /// Takes device pointers directly, avoiding H2D copies when data is already on device.
+/// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_mle_interactions_gpu(
     eq_xi_ptr: *const EF,

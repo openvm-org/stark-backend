@@ -103,6 +103,8 @@ pub fn log_gkr_input_evals(
     leaves.fill_zero()?;
     let null_preprocessed = DeviceBuffer::<F>::new();
 
+    let mut d_partition_ptrs = DeviceBuffer::<u64>::new();
+    let mut tmp = DeviceBuffer::<Frac<EF>>::new();
     for meta in trace_interactions.iter().flatten() {
         let air_ctx = &ctx.per_trace[meta.trace_idx].1;
         let pk_air = &pk.per_air[meta.air_idx];
@@ -132,7 +134,10 @@ pub fn log_gkr_input_evals(
             .iter()
             .map(|m| m.buffer().as_ptr() as u64)
             .collect_vec();
-        let d_partition_ptrs = partition_ptrs.to_device()?;
+        if partition_ptrs.len() > d_partition_ptrs.len() {
+            d_partition_ptrs = DeviceBuffer::with_capacity(partition_ptrs.len());
+        }
+        partition_ptrs.copy_to(&mut d_partition_ptrs)?;
 
         let buffer_size = rules.inner.buffer_size;
         // TODO[jpw]: remove magic 10
@@ -145,7 +150,6 @@ pub fn log_gkr_input_evals(
 
         let num_rows_per_tile = height.div_ceil(TASK_SIZE as usize).max(1);
 
-        let mut tmp = DeviceBuffer::new();
         let slice = meta.layout_slices.first().unwrap();
         if slice.col_idx != 0 {
             return Err(InteractionGpuError::Layout);
@@ -157,7 +161,10 @@ pub fn log_gkr_input_evals(
         let leaves_ptr = unsafe { leaves.as_mut_ptr().add(dst_offset) };
 
         let trace_output = if height != lifted_height {
-            tmp = DeviceBuffer::with_capacity(height * num_interactions);
+            let required = height * num_interactions;
+            if required > tmp.len() {
+                tmp = DeviceBuffer::with_capacity(required);
+            }
             tmp.as_mut_ptr()
         } else {
             leaves_ptr
