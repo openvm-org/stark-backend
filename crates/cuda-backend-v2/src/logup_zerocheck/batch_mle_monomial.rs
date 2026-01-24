@@ -224,6 +224,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
     ///
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
+    /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
     pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<EF> {
         let num_blocks = self.block_ctxs.len();
         let num_airs = self.air_ctxs.len();
@@ -454,6 +455,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
     ///
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
+    /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
     pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<EF> {
         let num_airs = self.air_ctxs.len();
 
@@ -764,6 +766,7 @@ impl<'a> LogupMonomialBatch<'a> {
     ///
     /// The buffer contains `num_airs * num_x` FracExt elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
+    /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
     pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<Frac<EF>> {
         let num_airs = self.common_ctxs.len();
 

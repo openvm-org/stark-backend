@@ -61,6 +61,7 @@ pub struct StackedReductionGpu {
     pub(crate) stacked_per_commit: Vec<StackedPcsData2>,
     d_q_widths: DeviceBuffer<u32>,
     q_width_max: u32,
+    d_q_eval_ptrs: DeviceBuffer<*const EF>,
 
     trace_ptrs: Vec<(
         *const F, /* trace_ptr */
@@ -93,6 +94,13 @@ pub struct StackedReductionGpu {
     k_rot_ns: EqEvalSegments<EF>,
     /// Stores eq(u[1+n_T..round-1], b_{T,j}[..round-n_T-1])
     eq_ub_per_trace: Vec<EF>,
+    d_eq_ub: DeviceBuffer<EF>,
+
+    d_block_sums: DeviceBuffer<EF>,
+    d_accum: DeviceBuffer<u64>,
+    d_input_ptrs: DeviceBuffer<*const EF>,
+    d_output_ptrs: DeviceBuffer<*mut EF>,
+    d_special_packets: DeviceBuffer<Round0UniPacket>,
 
     mem: MemTracker,
 }
@@ -340,6 +348,11 @@ impl StackedReductionGpu {
         ht_diff_idxs.push(unstacked_cols.len());
 
         let d_unstacked_cols = unstacked_cols.to_device().unwrap(); // TODO: handle error
+        let max_window_len = ht_diff_idxs
+            .windows(2)
+            .map(|window| window[1] - window[0])
+            .max()
+            .unwrap_or(0);
 
         // layout per commit is sorted, first height is largest
         let n_max = r.len() - 1;
@@ -356,6 +369,27 @@ impl StackedReductionGpu {
 
         let eq_const = eval_eq_uni_at_one(l_skip, r[0] * omega_skip);
         let eq_ub_per_trace = vec![EF::ONE; unstacked_cols.len()];
+        let d_q_eval_ptrs = if stacked_per_commit.is_empty() {
+            DeviceBuffer::new()
+        } else {
+            DeviceBuffer::with_capacity(stacked_per_commit.len())
+        };
+        let d_input_ptrs = if stacked_per_commit.is_empty() {
+            DeviceBuffer::new()
+        } else {
+            DeviceBuffer::with_capacity(stacked_per_commit.len())
+        };
+        let d_output_ptrs = if stacked_per_commit.is_empty() {
+            DeviceBuffer::new()
+        } else {
+            DeviceBuffer::with_capacity(stacked_per_commit.len())
+        };
+        let d_accum = DeviceBuffer::<u64>::with_capacity(STACKED_REDUCTION_S_DEG * D_EF);
+        let d_eq_ub = if max_window_len > 0 {
+            DeviceBuffer::with_capacity(max_window_len)
+        } else {
+            DeviceBuffer::new()
+        };
 
         Ok(Self {
             sm_count,
@@ -370,6 +404,7 @@ impl StackedReductionGpu {
             stacked_per_commit,
             d_q_widths,
             q_width_max,
+            d_q_eval_ptrs,
             trace_ptrs,
             unstacked_cols,
             d_unstacked_cols,
@@ -382,6 +417,12 @@ impl StackedReductionGpu {
             // SAFETY: This is unused in round 0 and will be initialized properly after round 0.
             k_rot_ns: unsafe { EqEvalSegments::from_raw_parts(DeviceBuffer::new(), 0) },
             eq_ub_per_trace,
+            d_eq_ub,
+            d_block_sums: DeviceBuffer::new(),
+            d_accum,
+            d_input_ptrs,
+            d_output_ptrs,
+            d_special_packets: DeviceBuffer::new(),
             mem,
         })
     }
@@ -438,7 +479,6 @@ impl StackedReductionGpu {
             let log_height = trace_height.ilog2();
             let n = log_height as isize - l_skip as isize;
 
-            let d_special_packets;
             let z_packets = if n.is_negative() {
                 let l = l_skip.wrapping_add_signed(n);
                 let omega_l = omega_skip.exp_power_of_2(-n as usize);
@@ -460,8 +500,11 @@ impl StackedReductionGpu {
                         }
                     })
                     .collect_vec();
-                d_special_packets = z_packets.to_device().unwrap();
-                &d_special_packets
+                if z_packets.len() > self.d_special_packets.len() {
+                    self.d_special_packets = DeviceBuffer::with_capacity(z_packets.len());
+                }
+                z_packets.copy_to(&mut self.d_special_packets).unwrap();
+                &self.d_special_packets
             } else {
                 &d_default_packets
             };
@@ -478,7 +521,9 @@ impl StackedReductionGpu {
             } as usize;
 
             // Allocate block_sums buffer for intermediate reduction
-            let mut d_block_sums = DeviceBuffer::<EF>::with_capacity(block_sums_len);
+            if block_sums_len > self.d_block_sums.len() {
+                self.d_block_sums = DeviceBuffer::<EF>::with_capacity(block_sums_len);
+            }
 
             unsafe {
                 // 2 per column for (eq, k_rot)
@@ -489,7 +534,7 @@ impl StackedReductionGpu {
                     trace_ptr,
                     lambda_pows_ptr,
                     z_packets,
-                    &mut d_block_sums,
+                    &mut self.d_block_sums,
                     &mut d_s_0_evals,
                     trace_height,
                     trace_width,
@@ -614,12 +659,8 @@ impl StackedReductionGpu {
     ) -> [EF; STACKED_REDUCTION_S_DEG] {
         let l_skip = self.l_skip;
 
-        // Allocate u64 accumulator buffer for atomic reduction
-        let accum_len = STACKED_REDUCTION_S_DEG * D_EF;
-        let mut d_accum = DeviceBuffer::<u64>::with_capacity(accum_len);
-
         let q_eval_ptrs = self.q_evals.iter().map(|q| q.as_ptr()).collect_vec();
-        let d_q_eval_ptrs = q_eval_ptrs.to_device().unwrap();
+        q_eval_ptrs.copy_to(&mut self.d_q_eval_ptrs).unwrap();
 
         if self.n_max >= (round - 1) {
             // Move stable eq, k_rot to stable vectors
@@ -663,7 +704,7 @@ impl StackedReductionGpu {
             let log_height = self.unstacked_cols[window[0]].log_height as usize;
 
             // Zero-initialize accumulator for atomic adds
-            d_accum.fill_zero().unwrap();
+            self.d_accum.fill_zero().unwrap();
 
             if log_height < l_skip + round {
                 // We are in the eq, k_rot stable regime
@@ -674,19 +715,22 @@ impl StackedReductionGpu {
                 let k_rot_r = self.k_rot_stable[log_height];
                 // PERF[jpw]: most of eq_ub can be incorporated into eq_stable, k_rot_stable, so
                 // this transfer can be minimized.
-                let d_eq_ub = self.eq_ub_per_trace[window[0]..window[1]]
-                    .to_device()
-                    .unwrap();
+                let eq_ub_slice = &self.eq_ub_per_trace[window[0]..window[1]];
+                if eq_ub_slice.len() > self.d_eq_ub.len() {
+                    self.d_eq_ub = DeviceBuffer::with_capacity(eq_ub_slice.len());
+                }
+                eq_ub_slice.copy_to(&mut self.d_eq_ub).unwrap();
+                let stacked_height = self.stacked_height(round);
                 unsafe {
                     stacked_reduction_sumcheck_mle_round_degenerate(
-                        &d_q_eval_ptrs,
-                        &d_eq_ub,
+                        &self.d_q_eval_ptrs,
+                        &self.d_eq_ub,
                         eq_r,
                         k_rot_r,
                         unstacked_cols_ptr,
                         lambda_pows_ptr,
-                        &mut d_accum,
-                        self.stacked_height(round),
+                        &mut self.d_accum,
+                        stacked_height,
                         window_len,
                         l_skip,
                         round,
@@ -699,15 +743,16 @@ impl StackedReductionGpu {
                 // Allow the CUDA launcher to auto-tune grid.y (thread_window_stride) based on
                 // (num_y, window_len) and device SM count.
 
+                let stacked_height = self.stacked_height(round);
                 unsafe {
                     stacked_reduction_sumcheck_mle_round(
-                        &d_q_eval_ptrs,
+                        &self.d_q_eval_ptrs,
                         &self.eq_r_ns,
                         &self.k_rot_ns,
                         unstacked_cols_ptr,
                         lambda_pows_ptr,
-                        &mut d_accum,
-                        self.stacked_height(round),
+                        &mut self.d_accum,
+                        stacked_height,
                         window_len,
                         num_y,
                         self.sm_count,
@@ -717,7 +762,7 @@ impl StackedReductionGpu {
             }
 
             // D2H copy and reduce modulo P
-            let h_accum = d_accum.to_host().unwrap();
+            let h_accum = self.d_accum.to_host().unwrap();
             let evals = reduce_raw_u64_to_ef(&h_accum);
             s_evals_batch.push(evals);
         }
@@ -738,8 +783,8 @@ impl StackedReductionGpu {
                 (folded, q.as_ptr(), output_ptr)
             })
             .multiunzip();
-        let d_input_ptrs = input_ptrs.to_device().unwrap();
-        let d_output_ptrs = output_ptrs.to_device().unwrap();
+        input_ptrs.copy_to(&mut self.d_input_ptrs).unwrap();
+        output_ptrs.copy_to(&mut self.d_output_ptrs).unwrap();
 
         // SAFETY:
         // - `d_input_ptrs` points to matrices with widths specified by `d_q_widths` and heights
@@ -749,8 +794,8 @@ impl StackedReductionGpu {
         let output_height = self.stacked_height(round + 1) as u32;
         unsafe {
             fold_mle(
-                &d_input_ptrs,
-                &d_output_ptrs,
+                &self.d_input_ptrs,
+                &self.d_output_ptrs,
                 &self.d_q_widths,
                 self.q_evals.len().try_into().unwrap(),
                 self.stacked_height(round + 1) as u32,
