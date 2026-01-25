@@ -20,18 +20,117 @@ use crate::{
     EF,
     cuda::logup_zerocheck::{
         _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, fold_ef_frac_columns_inplace,
-        frac_build_tree_layer, frac_compute_round,
+        frac_build_tree_layer, frac_compute_round_and_fold,
+        frac_compute_round_and_fold_inplace, frac_compute_round_and_revert,
     },
     poly::SqrtHyperBuffer,
     sponge::DuplexSpongeGpu,
 };
 
-/// Compute one sumcheck round: evaluate polynomial, observe in transcript, sample challenge.
-/// Returns the sampled challenge `r`.
+/// Describes which buffer operation to use for the next fused compute+fold round.
+#[derive(Debug, Clone, Copy)]
+enum BufferTarget {
+    /// Out-of-place: layer → work_buffer
+    LayerToWork,
+    /// Out-of-place: work_buffer → layer
+    WorkToLayer,
+    /// In-place on layer buffer
+    InPlaceLayer,
+    /// In-place on work_buffer
+    InPlaceWork,
+}
+
+/// Encapsulates ping-pong buffer scheduling state for GKR inner rounds.
+///
+/// This struct manages the decision of whether to use in-place or out-of-place
+/// (ping-pong) kernel variants based on buffer capacities and current data location.
+struct BufferScheduler {
+    /// True if data currently resides in work_buffer, false if in layer.
+    data_in_work_buffer: bool,
+    /// Maximum capacity of work_buffer in elements.
+    work_buffer_cap: usize,
+}
+
+impl BufferScheduler {
+    /// Creates a new scheduler with data initially in layer buffer.
+    fn new(work_buffer_cap: usize) -> Self {
+        Self {
+            data_in_work_buffer: false,
+            work_buffer_cap,
+        }
+    }
+
+    /// Returns true if we can use ping-pong (out-of-place) for the given post-fold size.
+    fn can_pingpong(&self, post_fold_size: usize) -> bool {
+        post_fold_size <= self.work_buffer_cap
+    }
+
+    /// Determines the next buffer target for a fused compute+fold operation.
+    ///
+    /// For last outer round: uses ping-pong when possible for __restrict__ optimization.
+    /// For non-last outer rounds: preserves layer for tree revert operations.
+    fn next_target(&mut self, post_fold_size: usize, last_outer_round: bool) -> BufferTarget {
+        let can_pingpong = self.can_pingpong(post_fold_size);
+
+        if last_outer_round {
+            if can_pingpong {
+                // Ping-pong to other buffer
+                if self.data_in_work_buffer {
+                    self.data_in_work_buffer = false;
+                    BufferTarget::WorkToLayer
+                } else {
+                    self.data_in_work_buffer = true;
+                    BufferTarget::LayerToWork
+                }
+            } else {
+                // In-place on layer (data must be in layer for early rounds of last outer round)
+                debug_assert!(
+                    !self.data_in_work_buffer,
+                    "in-place path requires data in layer"
+                );
+                BufferTarget::InPlaceLayer
+            }
+        } else {
+            // Non-last outer round: preserve layer for tree revert
+            if self.data_in_work_buffer {
+                // Already in work_buffer, stay there in-place
+                BufferTarget::InPlaceWork
+            } else {
+                // Data in layer, move to work_buffer (out-of-place)
+                self.data_in_work_buffer = true;
+                BufferTarget::LayerToWork
+            }
+        }
+    }
+
+    /// Returns the buffer target for the final fold (no fused compute).
+    fn final_fold_target(&self, last_outer_round: bool) -> BufferTarget {
+        if last_outer_round {
+            if self.data_in_work_buffer {
+                BufferTarget::InPlaceWork
+            } else {
+                BufferTarget::InPlaceLayer
+            }
+        } else {
+            // Non-last outer round: fold into work_buffer to preserve layer
+            if self.data_in_work_buffer {
+                BufferTarget::InPlaceWork
+            } else {
+                BufferTarget::LayerToWork
+            }
+        }
+    }
+
+}
+
+/// Fused revert + compute round: reverts the tree layer and computes sumcheck polynomial.
+///
+/// This kernel fuses `frac_build_tree_layer(revert=true)` with the first inner round compute,
+/// eliminating one kernel launch per outer round.
 #[allow(clippy::too_many_arguments)]
-fn do_sumcheck_round(
+fn do_sumcheck_round_and_revert(
     eq_buffer: &SqrtHyperBuffer,
-    pq_buffer: &DeviceBuffer<Frac<EF>>,
+    layer: &mut DeviceBuffer<Frac<EF>>,
     pq_size: usize,
     lambda: EF,
     transcript: &mut DuplexSpongeGpu,
@@ -41,8 +140,95 @@ fn do_sumcheck_round(
     r_vec: &mut Vec<EF>,
 ) -> Result<EF, FractionalSumcheckError> {
     unsafe {
-        frac_compute_round(eq_buffer, pq_buffer, pq_size, lambda, d_sum_evals, tmp_block_sums)
+        frac_compute_round_and_revert(eq_buffer, layer, pq_size, lambda, d_sum_evals, tmp_block_sums)
             .map_err(FractionalSumcheckError::ComputeRound)?;
+    }
+    let s_vec = d_sum_evals.to_host()?;
+    let s_evals: [EF; 3] = s_vec
+        .try_into()
+        .expect("sumcheck round produced unexpected number of evaluations");
+    for &eval in &s_evals {
+        transcript.observe_ext(eval);
+    }
+    round_polys_eval.push(s_evals);
+
+    let r = transcript.sample_ext();
+    r_vec.push(r);
+    Ok(r)
+}
+
+/// Fused compute round: computes sumcheck polynomial AND folds the pq_buffer for next round.
+///
+/// This kernel fuses the fold operation (using `r_prev` from the previous round) into the current
+/// round's compute, eliminating one kernel launch and reducing memory traffic.
+///
+/// The eq_buffer should already be folded to the correct size for this round (eq_size = src_pq_size/2).
+#[allow(clippy::too_many_arguments)]
+fn do_fused_sumcheck_round(
+    eq_buffer: &SqrtHyperBuffer,
+    src_pq_buffer: &DeviceBuffer<Frac<EF>>,
+    dst_pq_buffer: &mut DeviceBuffer<Frac<EF>>,
+    src_pq_size: usize,
+    lambda: EF,
+    r_prev: EF,
+    transcript: &mut DuplexSpongeGpu,
+    d_sum_evals: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+    round_polys_eval: &mut Vec<[EF; 3]>,
+    r_vec: &mut Vec<EF>,
+) -> Result<EF, FractionalSumcheckError> {
+    unsafe {
+        frac_compute_round_and_fold(
+            eq_buffer,
+            src_pq_buffer,
+            dst_pq_buffer,
+            src_pq_size,
+            lambda,
+            r_prev,
+            d_sum_evals,
+            tmp_block_sums,
+        )
+        .map_err(FractionalSumcheckError::ComputeRound)?;
+    }
+    let s_vec = d_sum_evals.to_host()?;
+    let s_evals: [EF; 3] = s_vec
+        .try_into()
+        .expect("sumcheck round produced unexpected number of evaluations");
+    for &eval in &s_evals {
+        transcript.observe_ext(eval);
+    }
+    round_polys_eval.push(s_evals);
+
+    let r = transcript.sample_ext();
+    r_vec.push(r);
+    Ok(r)
+}
+
+/// In-place variant of [`do_fused_sumcheck_round`]. Reads and writes to the same buffer.
+#[allow(clippy::too_many_arguments)]
+fn do_fused_sumcheck_round_inplace(
+    eq_buffer: &SqrtHyperBuffer,
+    pq_buffer: &mut DeviceBuffer<Frac<EF>>,
+    src_pq_size: usize,
+    lambda: EF,
+    r_prev: EF,
+    transcript: &mut DuplexSpongeGpu,
+    d_sum_evals: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+    round_polys_eval: &mut Vec<[EF; 3]>,
+    r_vec: &mut Vec<EF>,
+) -> Result<EF, FractionalSumcheckError> {
+    unsafe {
+        frac_compute_round_and_fold_inplace(
+            eq_buffer,
+            pq_buffer,
+            src_pq_size,
+            lambda,
+            r_prev,
+            d_sum_evals,
+            tmp_block_sums,
+        )
+        .map_err(FractionalSumcheckError::ComputeRound)?;
     }
     let s_vec = d_sum_evals.to_host()?;
     let s_evals: [EF; 3] = s_vec
@@ -172,10 +358,7 @@ pub fn fractional_sumcheck_gpu(
     for round in 1..total_rounds {
         let gkr_round_span = debug_span!("GKR", round).entered();
 
-        unsafe {
-            frac_build_tree_layer(&mut layer, 2 << round, true)
-                .map_err(FractionalSumcheckError::SegmentTree)?;
-        }
+        // Note: frac_build_tree_layer revert is now fused into do_sumcheck_round_and_revert below.
 
         xi_prev.reverse();
         let mut eq_buffer =
@@ -196,73 +379,124 @@ pub fn fractional_sumcheck_gpu(
         let last_outer_round = round == total_rounds - 1;
         debug_assert!(round > 0);
 
-        // Round 0: always reads from `layer`, writes to either layer or work_buffer
-        {
-            let r = do_sumcheck_round(
-                &eq_buffer,
-                &layer,
-                pq_size,
-                lambda,
-                transcript,
-                &mut d_sum_evals,
-                &mut tmp_block_sums,
-                &mut round_polys_eval,
-                &mut r_vec,
-            )?;
+        // Round 0: compute + revert fused. The pq_buffer fold will be fused into next round's compute.
+        // This fuses frac_build_tree_layer(revert=true) with the first inner round compute.
+        let r0 = do_sumcheck_round_and_revert(
+            &eq_buffer,
+            &mut layer,
+            pq_size,
+            lambda,
+            transcript,
+            &mut d_sum_evals,
+            &mut tmp_block_sums,
+            &mut round_polys_eval,
+            &mut r_vec,
+        )?;
+        eq_buffer
+            .fold_columns(r0)
+            .map_err(FractionalSumcheckError::FoldColumns)?;
+
+        // Fused rounds 1..(round-1): compute + fold using prev_r.
+        // BufferScheduler manages ping-pong vs in-place decisions.
+        let mut prev_r = r0;
+        let mut scheduler = BufferScheduler::new(max_work_size);
+
+        for _inner_round in 1..round {
+            let src_pq_size = pq_size;
+            let post_fold_size = pq_size >> 1;
+
+            let r = match scheduler.next_target(post_fold_size, last_outer_round) {
+                BufferTarget::LayerToWork => do_fused_sumcheck_round(
+                    &eq_buffer,
+                    &layer,
+                    &mut work_buffer,
+                    src_pq_size,
+                    lambda,
+                    prev_r,
+                    transcript,
+                    &mut d_sum_evals,
+                    &mut tmp_block_sums,
+                    &mut round_polys_eval,
+                    &mut r_vec,
+                )?,
+                BufferTarget::WorkToLayer => do_fused_sumcheck_round(
+                    &eq_buffer,
+                    &work_buffer,
+                    &mut layer,
+                    src_pq_size,
+                    lambda,
+                    prev_r,
+                    transcript,
+                    &mut d_sum_evals,
+                    &mut tmp_block_sums,
+                    &mut round_polys_eval,
+                    &mut r_vec,
+                )?,
+                BufferTarget::InPlaceLayer => do_fused_sumcheck_round_inplace(
+                    &eq_buffer,
+                    &mut layer,
+                    src_pq_size,
+                    lambda,
+                    prev_r,
+                    transcript,
+                    &mut d_sum_evals,
+                    &mut tmp_block_sums,
+                    &mut round_polys_eval,
+                    &mut r_vec,
+                )?,
+                BufferTarget::InPlaceWork => do_fused_sumcheck_round_inplace(
+                    &eq_buffer,
+                    &mut work_buffer,
+                    src_pq_size,
+                    lambda,
+                    prev_r,
+                    transcript,
+                    &mut d_sum_evals,
+                    &mut tmp_block_sums,
+                    &mut round_polys_eval,
+                    &mut r_vec,
+                )?,
+            };
+
             eq_buffer
                 .fold_columns(r)
                 .map_err(FractionalSumcheckError::FoldColumns)?;
-
-            if last_outer_round {
-                unsafe {
-                    fold_ef_frac_columns_inplace(&mut layer, pq_size, r)
-                        .map_err(FractionalSumcheckError::FoldColumns)?;
-                }
-            } else {
-                unsafe {
-                    fold_ef_frac_columns(&layer, &mut work_buffer, pq_size, r)
-                        .map_err(FractionalSumcheckError::FoldColumns)?;
-                }
-            }
-
             pq_size >>= 1;
+            prev_r = r;
         }
 
-        // After the first step:
-        // - if last_outer_round: we keep folding in-place on `layer`
-        // - else: we fold in-place on `work_buffer`
-        let active: &mut DeviceBuffer<Frac<EF>> = if last_outer_round {
-            &mut layer
-        } else {
-            &mut work_buffer
-        };
-
-        // Remaining rounds: always read + fold in-place on `active`
-        for _ in 1..round {
-            let r = do_sumcheck_round(
-                &eq_buffer,
-                active,
-                pq_size,
-                lambda,
-                transcript,
-                &mut d_sum_evals,
-                &mut tmp_block_sums,
-                &mut round_polys_eval,
-                &mut r_vec,
-            )?;
-            eq_buffer
-                .fold_columns(r)
-                .map_err(FractionalSumcheckError::FoldColumns)?;
-            unsafe {
-                fold_ef_frac_columns_inplace(active, pq_size, r)
-                    .map_err(FractionalSumcheckError::FoldColumns)?;
-            }
-            pq_size >>= 1;
-        }
+        // Final fold after last r (no next compute to fuse with).
+        let active: &mut DeviceBuffer<Frac<EF>> =
+            match scheduler.final_fold_target(last_outer_round) {
+                BufferTarget::InPlaceWork => {
+                    unsafe {
+                        fold_ef_frac_columns_inplace(&mut work_buffer, pq_size, prev_r)
+                            .map_err(FractionalSumcheckError::FoldColumns)?;
+                    }
+                    &mut work_buffer
+                }
+                BufferTarget::InPlaceLayer => {
+                    unsafe {
+                        fold_ef_frac_columns_inplace(&mut layer, pq_size, prev_r)
+                            .map_err(FractionalSumcheckError::FoldColumns)?;
+                    }
+                    &mut layer
+                }
+                BufferTarget::LayerToWork => {
+                    unsafe {
+                        fold_ef_frac_columns(&layer, &mut work_buffer, pq_size, prev_r)
+                            .map_err(FractionalSumcheckError::FoldColumns)?;
+                    }
+                    &mut work_buffer
+                }
+                // WorkToLayer is only used during inner rounds (ping-pong), never for final fold
+                BufferTarget::WorkToLayer => unreachable!(),
+            };
+        pq_size >>= 1;
 
         let pq_host = [
-            copy_from_device(&*active, 0, &mut copy_scratch)?,
-            copy_from_device(&*active, pq_size / 2, &mut copy_scratch)?,
+            copy_from_device(active, 0, &mut copy_scratch)?,
+            copy_from_device(active, pq_size / 2, &mut copy_scratch)?,
         ];
 
         claims_per_layer.push(GkrLayerClaims {
