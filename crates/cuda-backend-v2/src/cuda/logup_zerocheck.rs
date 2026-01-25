@@ -114,11 +114,55 @@ extern "C" {
         tmp_block_sums: *mut EF,
     ) -> i32;
 
+    /// Fused compute round + tree layer revert. Combines frac_build_tree_layer(revert=true)
+    /// with compute_round for the first inner round. Modifies layer in-place for revert.
+    fn _frac_compute_round_and_revert(
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
+        layer: *mut Frac<EF>,
+        eq_size: usize,
+        eq_low_cap: usize,
+        pq_size: usize,
+        lambda: EF,
+        out_device: *mut EF,
+        tmp_block_sums: *mut EF,
+    ) -> i32;
+
     fn _frac_fold_fpext_columns(
         src: *const Frac<EF>,
         dst: *mut Frac<EF>,
         size: usize,
         r: EF,
+    ) -> i32;
+
+    /// Fused compute round + fold (out-of-place). Reads from pre-fold src_pq_buffer (size src_pq_size),
+    /// computes sumcheck sums, and writes folded output to dst_pq_buffer (size src_pq_size/2).
+    /// IMPORTANT: src_pq_buffer and dst_pq_buffer must NOT alias.
+    fn _frac_compute_round_and_fold(
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
+        src_pq_buffer: *const Frac<EF>,
+        dst_pq_buffer: *mut Frac<EF>,
+        src_pq_size: usize,
+        eq_low_cap: usize,
+        lambda: EF,
+        r_prev: EF,
+        out_device: *mut EF,
+        tmp_block_sums: *mut EF,
+    ) -> i32;
+
+    /// Fused compute round + fold (in-place). Reads from pre-fold pq_buffer (size src_pq_size),
+    /// computes sumcheck sums, and writes folded output to the same buffer (first src_pq_size/2 elements).
+    fn _frac_compute_round_and_fold_inplace(
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
+        pq_buffer: *mut Frac<EF>,
+        src_pq_size: usize,
+        eq_low_cap: usize,
+        lambda: EF,
+        r_prev: EF,
+        out_device: *mut EF,
+        tmp_block_sums: *mut EF,
     ) -> i32;
 
     fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
@@ -486,6 +530,44 @@ pub unsafe fn frac_compute_round(
     ))
 }
 
+/// Fused compute round + tree layer revert kernel.
+///
+/// Combines `frac_build_tree_layer(revert=true)` with `compute_round` for the first inner round.
+/// The revert operation modifies `layer` in-place: `layer[i] = layer[i] - layer[i + half]` for `i < half`.
+///
+/// This eliminates one kernel launch per outer round.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_compute_round_and_revert(
+    eq_xi: &SqrtHyperBuffer,
+    layer: &mut DeviceBuffer<Frac<EF>>,
+    pq_size: usize,
+    lambda: EF,
+    out_device: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+) -> Result<(), CudaError> {
+    #[cfg(debug_assertions)]
+    {
+        let len = tmp_block_sums.len();
+        let required = _frac_compute_round_temp_buffer_size(eq_xi.size as u32);
+        assert!(
+            len >= required as usize,
+            "tmp_block_sums len={len} < required={required}"
+        );
+        assert!(layer.len() >= pq_size, "layer too small for pq_size");
+    }
+    CudaError::from_result(_frac_compute_round_and_revert(
+        eq_xi.low.as_ptr(),
+        eq_xi.high.as_ptr(),
+        layer.as_mut_ptr(),
+        eq_xi.size,
+        eq_xi.low_capacity,
+        pq_size,
+        lambda,
+        out_device.as_mut_ptr(),
+        tmp_block_sums.as_mut_ptr(),
+    ))
+}
+
 /// Folds `Frac<EF>` buffer. Pairs (idx, idx+quarter) and (idx+half, idx+3*quarter),
 /// writes results to dst[idx] and dst[idx+quarter]. Output size is `size / 2`.
 /// Safe for src == dst (in-place) because each thread handles disjoint indices.
@@ -514,6 +596,129 @@ pub unsafe fn fold_ef_frac_columns_inplace(
     debug_assert!(buffer.len() >= size);
     let ptr = buffer.as_mut_ptr();
     CudaError::from_result(_frac_fold_fpext_columns(ptr, ptr, size, r))
+}
+
+/// Fused compute round + fold kernel.
+///
+/// Reads from pre-fold `src_pq_buffer` (size `src_pq_size`), performs fold-on-the-fly using
+/// `r_prev`, computes sumcheck polynomial evaluations, and writes folded output to `dst_pq_buffer`
+/// (size `src_pq_size/2`).
+///
+/// This fuses the fold operation into the next round's compute, eliminating one kernel launch per
+/// inner round and reducing memory traffic.
+///
+/// The eq_xi buffer should have size `src_pq_size / 2` (post-fold eq_size).
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_compute_round_and_fold(
+    eq_xi: &SqrtHyperBuffer,
+    src_pq_buffer: &DeviceBuffer<Frac<EF>>,
+    dst_pq_buffer: &mut DeviceBuffer<Frac<EF>>,
+    src_pq_size: usize,
+    lambda: EF,
+    r_prev: EF,
+    out_device: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+) -> Result<(), CudaError> {
+    #[cfg(debug_assertions)]
+    {
+        assert!(src_pq_size > 2, "src_pq_size must be > 2");
+        let pq_size = src_pq_size >> 1;
+        let eq_size = pq_size >> 1;
+        assert!(eq_size > 0, "eq_size must be > 0");
+        assert!(
+            src_pq_buffer.len() >= src_pq_size,
+            "src_pq_buffer too small: {} < {}",
+            src_pq_buffer.len(),
+            src_pq_size
+        );
+        assert!(
+            dst_pq_buffer.len() >= pq_size,
+            "dst_pq_buffer too small: {} < {}",
+            dst_pq_buffer.len(),
+            pq_size
+        );
+        // eq_xi.size should be the post-fold eq_size
+        assert!(
+            eq_xi.size == eq_size,
+            "eq_xi.size mismatch: {} != {}",
+            eq_xi.size,
+            eq_size
+        );
+        let len = tmp_block_sums.len();
+        let required = _frac_compute_round_temp_buffer_size(eq_size as u32);
+        assert!(
+            len >= required as usize,
+            "tmp_block_sums len={len} < required={required}"
+        );
+    }
+    CudaError::from_result(_frac_compute_round_and_fold(
+        eq_xi.low.as_ptr(),
+        eq_xi.high.as_ptr(),
+        src_pq_buffer.as_ptr(),
+        dst_pq_buffer.as_mut_ptr(),
+        src_pq_size,
+        eq_xi.low_capacity,
+        lambda,
+        r_prev,
+        out_device.as_mut_ptr(),
+        tmp_block_sums.as_mut_ptr(),
+    ))
+}
+
+/// In-place fused compute round + fold kernel. See [`frac_compute_round_and_fold`] for details.
+///
+/// Uses a dedicated in-place kernel that doesn't have `__restrict__` on the pq pointer,
+/// avoiding undefined behavior from aliased restrict pointers.
+///
+/// **IN-PLACE SAFETY:** Each thread writes only to indices it reads from in the first half of the
+/// buffer, so there are no cross-thread conflicts. The second half is read-only.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_compute_round_and_fold_inplace(
+    eq_xi: &SqrtHyperBuffer,
+    pq_buffer: &mut DeviceBuffer<Frac<EF>>,
+    src_pq_size: usize,
+    lambda: EF,
+    r_prev: EF,
+    out_device: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+) -> Result<(), CudaError> {
+    #[cfg(debug_assertions)]
+    {
+        assert!(src_pq_size > 2, "src_pq_size must be > 2");
+        let pq_size = src_pq_size >> 1;
+        let eq_size = pq_size >> 1;
+        assert!(eq_size > 0, "eq_size must be > 0");
+        assert!(
+            pq_buffer.len() >= src_pq_size,
+            "pq_buffer too small: {} < {}",
+            pq_buffer.len(),
+            src_pq_size
+        );
+        // eq_xi.size should be the post-fold eq_size
+        assert!(
+            eq_xi.size == eq_size,
+            "eq_xi.size mismatch: {} != {}",
+            eq_xi.size,
+            eq_size
+        );
+        let len = tmp_block_sums.len();
+        let required = _frac_compute_round_temp_buffer_size(eq_size as u32);
+        assert!(
+            len >= required as usize,
+            "tmp_block_sums len={len} < required={required}"
+        );
+    }
+    CudaError::from_result(_frac_compute_round_and_fold_inplace(
+        eq_xi.low.as_ptr(),
+        eq_xi.high.as_ptr(),
+        pq_buffer.as_mut_ptr(),
+        src_pq_size,
+        eq_xi.low_capacity,
+        lambda,
+        r_prev,
+        out_device.as_mut_ptr(),
+        tmp_block_sums.as_mut_ptr(),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
