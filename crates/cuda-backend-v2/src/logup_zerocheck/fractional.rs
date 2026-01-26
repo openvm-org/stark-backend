@@ -20,8 +20,8 @@ use crate::{
     EF,
     cuda::logup_zerocheck::{
         _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, fold_ef_frac_columns_inplace,
-        frac_build_tree_layer, frac_compute_round_and_fold,
-        frac_compute_round_and_fold_inplace, frac_compute_round_and_revert,
+        frac_build_tree_layer, frac_compute_round_and_fold, frac_compute_round_and_fold_inplace,
+        frac_compute_round_and_revert,
     },
     poly::SqrtHyperBuffer,
     sponge::DuplexSpongeGpu,
@@ -120,7 +120,6 @@ impl BufferScheduler {
             }
         }
     }
-
 }
 
 /// Fused revert + compute round: reverts the tree layer and computes sumcheck polynomial.
@@ -140,8 +139,15 @@ fn do_sumcheck_round_and_revert(
     r_vec: &mut Vec<EF>,
 ) -> Result<EF, FractionalSumcheckError> {
     unsafe {
-        frac_compute_round_and_revert(eq_buffer, layer, pq_size, lambda, d_sum_evals, tmp_block_sums)
-            .map_err(FractionalSumcheckError::ComputeRound)?;
+        frac_compute_round_and_revert(
+            eq_buffer,
+            layer,
+            pq_size,
+            lambda,
+            d_sum_evals,
+            tmp_block_sums,
+        )
+        .map_err(FractionalSumcheckError::ComputeRound)?;
     }
     let s_vec = d_sum_evals.to_host()?;
     let s_evals: [EF; 3] = s_vec
@@ -162,7 +168,8 @@ fn do_sumcheck_round_and_revert(
 /// This kernel fuses the fold operation (using `r_prev` from the previous round) into the current
 /// round's compute, eliminating one kernel launch and reducing memory traffic.
 ///
-/// The eq_buffer should already be folded to the correct size for this round (eq_size = src_pq_size/2).
+/// The eq_buffer should already be folded to the correct size for this round (eq_size =
+/// src_pq_size/2).
 #[allow(clippy::too_many_arguments)]
 fn do_fused_sumcheck_round(
     eq_buffer: &SqrtHyperBuffer,
@@ -344,8 +351,7 @@ pub fn fractional_sumcheck_gpu(
     };
     let mut work_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(max_work_size);
     let max_tmp_buffer_capacity = if total_rounds > 1 {
-        (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32) })
-            as usize
+        (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32) }) as usize
     } else {
         0
     };
@@ -379,8 +385,9 @@ pub fn fractional_sumcheck_gpu(
         let last_outer_round = round == total_rounds - 1;
         debug_assert!(round > 0);
 
-        // Round 0: compute + revert fused. The pq_buffer fold will be fused into next round's compute.
-        // This fuses frac_build_tree_layer(revert=true) with the first inner round compute.
+        // Round 0: compute + revert fused. The pq_buffer fold will be fused into next round's
+        // compute. This fuses frac_build_tree_layer(revert=true) with the first inner round
+        // compute.
         let r0 = do_sumcheck_round_and_revert(
             &eq_buffer,
             &mut layer,
