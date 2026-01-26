@@ -19,7 +19,10 @@ using namespace device_ntt;
 namespace {
 
 constexpr uint32_t MAX_GRID_DIM = 65535u;
+// S_DEG=2 for MLE sumcheck rounds (kept for backward compatibility)
 constexpr int S_DEG = 2;
+// Number of G outputs per z in round 0 (SP_DEG=1): G0, G1, G2
+constexpr int NUM_G = 3;
 
 } // namespace
 
@@ -28,12 +31,6 @@ struct UnstackedSlice {
     uint32_t log_height;
     uint32_t stacked_row_idx;
     uint32_t stacked_col_idx;
-};
-
-struct Round0UniPacket {
-    FpExt eq_uni;
-    FpExt k_rot_0;
-    FpExt k_rot_1;
 };
 
 struct UnstackedPleFoldPacket {
@@ -76,21 +73,24 @@ __device__ __forceinline__ Fp barycentric_interpolate_strided(
     return q;
 }
 
-// Each block covers a tile of z-values (threadIdx.x) and collaborates across threadIdx.y
-// to sum over x for a single (window_idx, z_int) pair. Blocks stride over window_idx via gridDim.y.
+// SP_DEG=1 kernel: compute 3 partial sums G0, G1, G2 on identity coset only.
+// No iNTT/NTT operations - reconstruction happens on CPU via NTT-based polynomial multiplication.
 //
-// See Rust doc comments for more details.
-template <bool NEEDS_SHMEM>
+// Each block covers a tile of z-values (threadIdx.x) and collaborates across threads
+// to sum over x for a single column. Blocks stride over columns via gridDim.y.
+//
+// G0(Z) = Σ_{col,x} coeff_eq[col] * eq_cube(x) * q_{col,x}(Z)
+// G1(Z) = Σ_{col,x} coeff_rot[col] * eq_cube(x) * q_{col,x}(Z)
+// G2(Z) = Σ_{col,x} coeff_rot[col] * (eq_cube(rot_prev(x)) - eq_cube(x)) * q_{col,x}(Z)
+//
+// where coeff_eq[col] = lambda_pows[2*col], coeff_rot[col] = lambda_pows[2*col+1]
 __global__ void stacked_reduction_round0_block_sum_kernel(
     const FpExt *__restrict__ eq_r_ns, // pointer to EqEvalSegments
     const Fp *__restrict__ trace_ptr,
     const FpExt *__restrict__ lambda_pows, // pointer to lambda_pows at window start
-    const Round0UniPacket
-        *__restrict__ z_packets, // pointer to eq_uni, k_rot_0, and k_rot_1 evals for z_int
-    FpExt
-        *__restrict__ block_sums, // [gridDim.z][gridDim.y][domain_size] for [window_base][blockIdx.y][z_int]
-    uint32_t height,              // trace height
-    uint32_t width,               // trace width
+    FpExt *__restrict__ block_sums, // [gridDim.x * gridDim.y][NUM_G * skip_domain]
+    uint32_t height,                // trace height
+    uint32_t width,                 // trace width
     uint32_t l_skip,
     uint32_t skip_mask, // 2^l_skip - 1
     uint32_t num_x,     // 1 << n_lift
@@ -98,79 +98,57 @@ __global__ void stacked_reduction_round0_block_sum_kernel(
 ) {
     extern __shared__ char smem[];
     // Use blockDim.x + 1 stride to avoid shared memory bank conflicts
-    // when accessing shared_sum[i * stride + ...] for different i values
     const uint32_t PADDED_X = blockDim.x + 1;
-    FpExt *shared_sum = reinterpret_cast<FpExt *>(smem); // FpExt[S_DEG][PADDED_X]
+    FpExt *shared_sum = reinterpret_cast<FpExt *>(smem); // FpExt[NUM_G][PADDED_X]
 
     uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t z_idx = tidx & skip_mask;
     uint32_t x_int = tidx >> l_skip;
     uint32_t col_idx = blockIdx.y;
-    // Each thread will handle z_int in S_DEG * z_idx..(S_DEG + 1) * z_idx
-    FpExt eq_k_rot[S_DEG];
-    // Compute eq, k_rot depending on (z_int, x_int)
+
+    // Compute G weights (no z-dependent packets needed)
     FpExt eq_cube = get_eq_cube(eq_r_ns, num_x, x_int);
-    FpExt k_rot_cube = get_eq_cube(eq_r_ns, num_x, rot_prev(x_int, num_x)) - eq_cube;
-    FpExt eq_lambda = lambda_pows[2 * col_idx] * eq_cube;
-    FpExt k_rot_lambda = lambda_pows[2 * col_idx + 1];
+    FpExt eq_cube_rot_prev = get_eq_cube(eq_r_ns, num_x, rot_prev(x_int, num_x));
+    FpExt k_rot_diff = eq_cube_rot_prev - eq_cube;
 
-#pragma unroll
-    for (uint32_t i = 0; i < S_DEG; i++) {
-        uint32_t z_int = (i << l_skip) + z_idx;
-        auto packet = z_packets[z_int];
-        eq_k_rot[i] = packet.eq_uni * eq_lambda +
-                      (packet.k_rot_0 * eq_cube + packet.k_rot_1 * k_rot_cube) * k_rot_lambda;
-    }
+    FpExt coeff_eq = lambda_pows[2 * col_idx];      // for G0
+    FpExt coeff_rot = lambda_pows[2 * col_idx + 1]; // for G1, G2
 
-    // First, each thread reads trace_ptr and loads to shared_eval
+    FpExt w0 = coeff_eq * eq_cube;      // weight for G0
+    FpExt w1 = coeff_rot * eq_cube;     // weight for G1
+    FpExt w2 = coeff_rot * k_rot_diff;  // weight for G2
+
+    // Load trace value (identity coset only, no NTT needed)
     auto evals = trace_ptr + col_idx * height + (x_int << (l_skip - log_stride));
     auto stride_mask = (1u << log_stride) - 1;
-    Fp this_thread_value = (z_idx & stride_mask) == 0 ? evals[z_idx >> log_stride] : Fp::zero();
+    Fp q = (z_idx & stride_mask) == 0 ? evals[z_idx >> log_stride] : Fp::zero();
 
-    // We make special use of the fact S_DEG=2:
-    {
-        // i = 0: it's just the eval
-        auto q = this_thread_value;
-        shared_sum[threadIdx.x] = eq_k_rot[0] * q;
-    }
-    {
-        // i = 1: iNTT, shift, forward NTT
-        // Note: we configured the block so all threads are active
-        Fp *__restrict__ sbuf = nullptr;
-        if constexpr (NEEDS_SHMEM) {
-            Fp *shared_eval =
-                reinterpret_cast<Fp *>(smem + S_DEG * PADDED_X * sizeof(FpExt)); // Fp[blockDim.x]
-            sbuf = shared_eval + ((threadIdx.x >> l_skip) << l_skip);
-            sbuf[z_idx] = this_thread_value;
-            __syncthreads();
-        }
-        // iNTT, bitrev output stored to this_thread_value
-        ntt_natural_to_bitrev<true, NEEDS_SHMEM>(this_thread_value, sbuf, z_idx, l_skip);
-        // multiply by shift. regardless of whether shmem is needed, the input for forward NTT must be placed in `this_thread_value` for `ntt_bitrev_to_natural`
-        auto const z_idx_rev = rev_len(z_idx, l_skip);
-        Fp omega_shift = pow(TWO_ADIC_GENERATORS[l_skip + 1], z_idx_rev); // 1 = log2(S_DEG)
-        this_thread_value *= omega_shift;
-        // forward NTT of shifted coeffs
-        ntt_bitrev_to_natural<false, NEEDS_SHMEM>(this_thread_value, sbuf, z_idx, l_skip);
-        auto q = this_thread_value;
-        shared_sum[PADDED_X + threadIdx.x] = eq_k_rot[1] * q;
-    }
+    // Store 3 partial sums to shared memory
+    shared_sum[0 * PADDED_X + threadIdx.x] = w0 * q;
+    shared_sum[1 * PADDED_X + threadIdx.x] = w1 * q;
+    shared_sum[2 * PADDED_X + threadIdx.x] = w2 * q;
 
     __syncthreads();
+
+    // Reduction: only threads in first x-slice participate
     if ((threadIdx.x >> l_skip) == 0) {
-        // Compute both tile sums (i=0 and i=1) in lockstep. Note we are using
-        // FracExt as a contiguous FpExt pair (instead of a fraction), as we
-        // use S_DEG = 2.
-        FracExt out{shared_sum[0 * PADDED_X + z_idx], shared_sum[1 * PADDED_X + z_idx]};
+        FpExt g0 = shared_sum[0 * PADDED_X + z_idx];
+        FpExt g1 = shared_sum[1 * PADDED_X + z_idx];
+        FpExt g2 = shared_sum[2 * PADDED_X + z_idx];
+
         for (int lane = 1; lane < (blockDim.x >> l_skip); ++lane) {
-            out.p += shared_sum[0 * PADDED_X + (lane << l_skip) + z_idx];
-            out.q += shared_sum[1 * PADDED_X + (lane << l_skip) + z_idx];
+            g0 += shared_sum[0 * PADDED_X + (lane << l_skip) + z_idx];
+            g1 += shared_sum[1 * PADDED_X + (lane << l_skip) + z_idx];
+            g2 += shared_sum[2 * PADDED_X + (lane << l_skip) + z_idx];
         }
 
-        // Write both tile sums with a single contiguous store
+        // Output: 3 values per z_idx, stored contiguously
+        uint32_t skip_domain = 1u << l_skip;
         FpExt *out_ptr =
-            block_sums + (col_idx * gridDim.x + blockIdx.x) * (S_DEG << l_skip) + (S_DEG * z_idx);
-        *reinterpret_cast<FracExt *>(out_ptr) = out;
+            block_sums + (col_idx * gridDim.x + blockIdx.x) * (NUM_G * skip_domain);
+        out_ptr[0 * skip_domain + z_idx] = g0;
+        out_ptr[1 * skip_domain + z_idx] = g1;
+        out_ptr[2 * skip_domain + z_idx] = g2;
     }
 }
 
@@ -410,60 +388,54 @@ inline std::pair<dim3, dim3> stacked_reduction_round0_launch_params(
 
 // (Not a launcher) Utility function to calculate required size of temp buffer.
 // Required length of *block_sums in FpExt elements
+// SP_DEG=1: outputs NUM_G=3 values per z (G0, G1, G2)
 extern "C" uint32_t _stacked_reduction_r0_required_temp_buffer_size(
     uint32_t trace_height,
     uint32_t trace_width,
     uint32_t l_skip
 ) {
     auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, trace_width, l_skip);
-    return ((grid.x * grid.y) << l_skip) * S_DEG;
+    return ((grid.x * grid.y) << l_skip) * NUM_G;
 }
 
+// SP_DEG=1: No z_packets needed, outputs G0, G1, G2 on identity coset only.
+// Uses ADD_TO_OUTPUT=true to accumulate into output buffer (for bucket-based accumulation).
 extern "C" int _stacked_reduction_sumcheck_round0(
     const FpExt *eq_r_ns,
     const Fp *trace_ptr,
     const FpExt *lambda_pows,
-    const Round0UniPacket *z_packets,
     FpExt *block_sums,
-    FpExt *output, // length should be domain_size
+    FpExt *output, // length should be NUM_G * skip_domain, ADD to existing values
     uint32_t trace_height,
     uint32_t trace_width,
     uint32_t l_skip,
     uint32_t num_x
 ) {
-    // We currently use this hardcoded value to optimize the coset NTT
-    static_assert(S_DEG == 2);
     uint32_t skip_domain = 1u << l_skip;
     uint32_t stride = std::max(skip_domain / trace_height, 1u);
     auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, trace_width, l_skip);
 
     // Use block.x + 1 stride for shared_sum to avoid bank conflicts
-    size_t shmem_sum_size = sizeof(FpExt) * (block.x + 1) * S_DEG;
+    // NUM_G=3 outputs per z (G0, G1, G2)
+    size_t shmem_sum_size = sizeof(FpExt) * (block.x + 1) * NUM_G;
 
-#define ARGUMENTS                                                                                  \
-    eq_r_ns, trace_ptr, lambda_pows, z_packets, block_sums, trace_height, trace_width, l_skip,     \
-        (1u << l_skip) - 1, num_x, 31 - __builtin_clz(stride)
-
-    if (l_skip > LOG_WARP_SIZE) {
-        size_t shmem_eval_size = sizeof(Fp) * block.x;
-        size_t shmem_bytes = shmem_sum_size + shmem_eval_size;
-        stacked_reduction_round0_block_sum_kernel<true><<<grid, block, shmem_bytes>>>(ARGUMENTS);
-    } else {
-        size_t shmem_bytes = shmem_sum_size;
-        stacked_reduction_round0_block_sum_kernel<false><<<grid, block, shmem_bytes>>>(ARGUMENTS);
-    }
+    stacked_reduction_round0_block_sum_kernel<<<grid, block, shmem_sum_size>>>(
+        eq_r_ns, trace_ptr, lambda_pows, block_sums,
+        trace_height, trace_width, l_skip,
+        skip_domain - 1, num_x, 31 - __builtin_clz(stride)
+    );
 
     int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
-    // Launch final reduction kernel - reads from block_sums, writes to output
+    // Launch final reduction kernel - reads from block_sums, ADDs to output
     auto num_blocks = grid.x * grid.y;
-    auto domain_size = S_DEG << l_skip;
+    auto output_size = NUM_G * skip_domain;
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     size_t reduce_shmem = div_ceil(reduce_block.x, WARP_SIZE) * sizeof(FpExt);
     sumcheck::final_reduce_block_sums<true>
-        <<<domain_size, reduce_block, reduce_shmem>>>(block_sums, output, num_blocks);
+        <<<output_size, reduce_block, reduce_shmem>>>(block_sums, output, num_blocks);
 
     return CHECK_KERNEL();
 }
