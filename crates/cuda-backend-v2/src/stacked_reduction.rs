@@ -7,12 +7,14 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::{FieldAlgebra, TwoAdicField};
-use p3_util::log2_ceil_usize;
+use openvm_stark_backend::{p3_matrix::dense::RowMajorMatrix, prover::MatrixDimensions};
+use p3_dft::TwoAdicSubgroupDft;
+use p3_field::{Field, FieldAlgebra, TwoAdicField};
 use stark_backend_v2::{
+    dft::Radix2BowersSerial,
     poly_common::{
-        Squarable, UnivariatePoly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni,
+        Squarable, UnivariatePoly, eq_uni_poly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one,
+        eval_in_uni,
     },
     poseidon2::sponge::FiatShamirTranscript,
     proof::StackingProof,
@@ -29,9 +31,10 @@ use crate::{
         batch_ntt_small::ensure_device_ntt_twiddles_initialized,
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
-            _stacked_reduction_r0_required_temp_buffer_size, initialize_k_rot_from_eq_segments,
-            stacked_reduction_fold_ple, stacked_reduction_sumcheck_mle_round,
-            stacked_reduction_sumcheck_mle_round_degenerate, stacked_reduction_sumcheck_round0,
+            _stacked_reduction_r0_required_temp_buffer_size, NUM_G,
+            initialize_k_rot_from_eq_segments, stacked_reduction_fold_ple,
+            stacked_reduction_sumcheck_mle_round, stacked_reduction_sumcheck_mle_round_degenerate,
+            stacked_reduction_sumcheck_round0,
         },
         sumcheck::{fold_mle, triangular_fold_mle},
     },
@@ -100,7 +103,6 @@ pub struct StackedReductionGpu {
     d_accum: DeviceBuffer<u64>,
     d_input_ptrs: DeviceBuffer<*const EF>,
     d_output_ptrs: DeviceBuffer<*mut EF>,
-    d_special_packets: DeviceBuffer<Round0UniPacket>,
 
     mem: MemTracker,
 }
@@ -147,17 +149,6 @@ pub(crate) struct UnstackedSlice {
     log_height: u32,
     stacked_row_idx: u32,
     stacked_col_idx: u32,
-}
-
-/// Data that only needs to be computed per univariate coordinate z (2^log_domain_size many) in
-/// round 0 sumcheck. Seems easiest to just compute on CPU and H2D transfer.
-///
-/// Terms include the `ind` factor for `n < 0`.
-#[repr(C)]
-pub(crate) struct Round0UniPacket {
-    eq_uni: EF,  // to multiply by eq_cube
-    k_rot_0: EF, // to multiply be eq_cube
-    k_rot_1: EF, // to multiply by k_rot_cube - eq_cube
 }
 
 impl StackedReductionGpu {
@@ -422,11 +413,15 @@ impl StackedReductionGpu {
             d_accum,
             d_input_ptrs,
             d_output_ptrs,
-            d_special_packets: DeviceBuffer::new(),
             mem,
         })
     }
 
+    /// SP_DEG=1 round 0: computes G0, G1, G2 on identity coset, then reconstructs s_0 on CPU.
+    ///
+    /// Key insight: Instead of computing s₀(Z) directly on 2 cosets with in-kernel NTT,
+    /// we compute three partial sums G0, G1, G2 on the identity coset only, then
+    /// reconstruct s₀ via CPU-side NTT-based polynomial multiplication.
     #[instrument(
         "stacked_reduction_sumcheck",
         level = "debug",
@@ -435,42 +430,24 @@ impl StackedReductionGpu {
     )]
     fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<EF> {
         let l_skip = self.l_skip;
-        let omega_skip = self.omega_skip;
-        let domain_size = STACKED_REDUCTION_S_DEG << l_skip;
-        let log_domain_size = log2_ceil_usize(domain_size);
+        let skip_domain = 1 << l_skip;
         let s_0_deg = sumcheck_round0_deg(l_skip, STACKED_REDUCTION_S_DEG);
-        debug_assert!(domain_size >= s_0_deg);
-        // Generator for large domain
-        let omega = F::two_adic_generator(log_domain_size);
-        let omega_pows = {
-            let pows = omega.powers().take(domain_size);
-            let (evens, odds) = pows.enumerate().partition::<Vec<_>, _>(|(i, _)| i & 1 == 0);
-            evens.into_iter().chain(odds).map(|(_, v)| v).collect_vec()
-        };
 
-        // Default packets for n >= 0
-        let default_packets = omega_pows
-            .iter()
-            .map(|&z| {
-                let eq_uni_r0 = eval_eq_uni(l_skip, z.into(), self.r_0);
-                let eq_uni_r0_rot = eval_eq_uni(l_skip, z.into(), self.r_0 * omega_skip);
-                let eq_uni_1 = eval_eq_uni_at_one(l_skip, z);
-                Round0UniPacket {
-                    eq_uni: eq_uni_r0,
-                    k_rot_0: eq_uni_r0_rot,
-                    k_rot_1: self.eq_const * eq_uni_1,
-                }
+        // Accumulation buffers for G0, G1, G2 (on identity coset)
+        // d_g_pos: for n >= 0 traces
+        let mut d_g_pos = DeviceBuffer::<EF>::with_capacity(NUM_G * skip_domain);
+        d_g_pos.fill_zero().unwrap();
+
+        // d_g_neg[k]: for traces with |n| = k+1, where n < 0 and k in 0..l_skip
+        let mut d_g_neg: Vec<DeviceBuffer<EF>> = (0..l_skip)
+            .map(|_| {
+                let b = DeviceBuffer::with_capacity(NUM_G * skip_domain);
+                b.fill_zero().unwrap();
+                b
             })
-            .collect::<Vec<_>>();
-        let d_default_packets = default_packets.to_device().unwrap();
+            .collect();
 
-        // The main point is that stacking reduction is a batch sumcheck over D_{n_stack}, batching
-        // over all unstacked columns. However instead of naively computing the batching in that
-        // way, we use the special definition of the sumcheck in terms of unstacked traces to sum
-        // over smaller domains on a per-trace basis.
-        let mut d_s_0_evals = DeviceBuffer::<EF>::with_capacity(domain_size);
-        d_s_0_evals.fill_zero().unwrap();
-
+        // Process each trace - call kernel for each, accumulating into appropriate bucket
         for ((trace_ptr, trace_height, trace_width), window) in zip(
             mem::take(&mut self.trace_ptrs),
             self.ht_diff_idxs.windows(2),
@@ -479,39 +456,14 @@ impl StackedReductionGpu {
             let log_height = trace_height.ilog2();
             let n = log_height as isize - l_skip as isize;
 
-            let z_packets = if n.is_negative() {
-                let l = l_skip.wrapping_add_signed(n);
-                let omega_l = omega_skip.exp_power_of_2(-n as usize);
-                let r_uni = self.r_0.exp_power_of_2(-n as usize);
-                let z_packets = omega_pows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &z)| {
-                        let ind = eval_in_uni(l_skip, n, z);
-                        let eq_uni_r0 = eval_eq_uni(l, z.into(), r_uni);
-                        let eq_uni_r0_rot = eval_eq_uni(l, z.into(), r_uni * omega_l);
-
-                        // default_packets[i].k_rot_1 = self.eq_const * eq_uni_1 doesn't change with
-                        // n<0
-                        Round0UniPacket {
-                            eq_uni: eq_uni_r0 * ind,
-                            k_rot_0: eq_uni_r0_rot * ind,
-                            k_rot_1: default_packets[i].k_rot_1 * ind,
-                        }
-                    })
-                    .collect_vec();
-                if z_packets.len() > self.d_special_packets.len() {
-                    self.d_special_packets = DeviceBuffer::with_capacity(z_packets.len());
-                }
-                z_packets.copy_to(&mut self.d_special_packets).unwrap();
-                &self.d_special_packets
+            // Select output bucket based on n
+            let d_g_output = if n >= 0 {
+                &mut d_g_pos
             } else {
-                &d_default_packets
+                &mut d_g_neg[(-n - 1) as usize]
             };
 
-            // PERF: Peak memory is currently low enough where we can have a seperate kernel block
-            // per trace column. If peak memory usage becomes a concern here, we should
-            // do several columns per block.
+            // Allocate block_sums buffer for intermediate reduction
             let block_sums_len = unsafe {
                 _stacked_reduction_r0_required_temp_buffer_size(
                     trace_height as u32,
@@ -520,22 +472,20 @@ impl StackedReductionGpu {
                 )
             } as usize;
 
-            // Allocate block_sums buffer for intermediate reduction
             if block_sums_len > self.d_block_sums.len() {
                 self.d_block_sums = DeviceBuffer::<EF>::with_capacity(block_sums_len);
             }
 
             unsafe {
-                // 2 per column for (eq, k_rot)
+                // 2 per column for (eq, k_rot) - coeff_eq and coeff_rot
                 let lambda_pows_ptr = self.d_lambda_pows.as_ptr().add(2 * window[0]);
 
                 stacked_reduction_sumcheck_round0(
                     &self.eq_r_ns,
                     trace_ptr,
                     lambda_pows_ptr,
-                    z_packets,
                     &mut self.d_block_sums,
-                    &mut d_s_0_evals,
+                    d_g_output,
                     trace_height,
                     trace_width,
                     l_skip,
@@ -544,13 +494,141 @@ impl StackedReductionGpu {
             };
         }
 
-        let s_0_evals = d_s_0_evals.to_host().unwrap();
-        let mut s_0 = UnivariatePoly::from_evals_idft(&s_0_evals);
-        debug_assert!(s_0.coeffs()[s_0_deg + 1..].iter().all(|c| *c == EF::ZERO));
-        s_0.coeffs_mut().truncate(s_0_deg + 1);
+        // CPU reconstruction: s₀(Z) = E0(Z)*G0(Z) + E1(Z)*G1(Z) + E2(Z)*G2(Z)
+        let s_0 = self.reconstruct_s0_from_g(d_g_pos, d_g_neg, s_0_deg);
         self.mem.tracing_info("stacked_reduction_sumcheck round 0");
 
         s_0
+    }
+
+    /// Reconstructs s_0 from G0, G1, G2 using NTT-based polynomial multiplication.
+    ///
+    /// For n >= 0:
+    /// - E0(Z) = eq_uni(l_skip, Z, r0)
+    /// - E1(Z) = eq_uni(l_skip, Z, r0*ω_skip)
+    /// - E2(Z) = eq_const * eq_uni_at_one(l_skip, Z)
+    ///
+    /// For n < 0: multiply each E by ind(Z) = eval_in_uni(l_skip, n, Z)
+    fn reconstruct_s0_from_g(
+        &self,
+        d_g_pos: DeviceBuffer<EF>,
+        d_g_neg: Vec<DeviceBuffer<EF>>,
+        s_0_deg: usize,
+    ) -> UnivariatePoly<EF> {
+        let l_skip = self.l_skip;
+        let skip_domain = 1 << l_skip;
+        let large_uni_domain = (s_0_deg + 1).next_power_of_two(); // 2 * skip_domain
+        let dft = Radix2BowersSerial;
+
+        // Accumulate s_0 coefficients across all buckets
+        let mut s_0_coeffs = vec![EF::ZERO; large_uni_domain];
+
+        // --- Process n >= 0 bucket ---
+        let g_pos = d_g_pos.to_host().unwrap();
+        if !g_pos.iter().all(|&x| x == EF::ZERO) {
+            // Build E polynomials for n >= 0
+            let e0 = eq_uni_poly::<F, EF>(l_skip, self.r_0);
+            let e1 = eq_uni_poly::<F, EF>(l_skip, self.r_0 * self.omega_skip);
+            let e2 = eq_uni_at_one_poly(l_skip, self.eq_const);
+
+            // NTT-based multiplication: s_0 += E0*G0 + E1*G1 + E2*G2
+            Self::ntt_multiply_and_add(
+                &dft,
+                large_uni_domain,
+                [e0.coeffs(), e1.coeffs(), e2.coeffs()],
+                [
+                    &g_pos[0..skip_domain],
+                    &g_pos[skip_domain..2 * skip_domain],
+                    &g_pos[2 * skip_domain..3 * skip_domain],
+                ],
+                &mut s_0_coeffs,
+            );
+        }
+
+        // --- Process n < 0 buckets ---
+        for (bucket_idx, d_g_neg_bucket) in d_g_neg.into_iter().enumerate() {
+            let n_abs = bucket_idx + 1;
+            let g_neg = d_g_neg_bucket.to_host().unwrap();
+            if g_neg.iter().all(|&x| x == EF::ZERO) {
+                continue;
+            }
+
+            // Adjusted parameters for n < 0
+            let l = l_skip - n_abs;
+            let omega_l = self.omega_skip.exp_power_of_2(n_abs);
+            let r_uni = self.r_0.exp_power_of_2(n_abs);
+
+            // Build E polynomials with indicator factor
+            let ind = build_indicator_poly(l_skip, -(n_abs as isize));
+            let e0_base = eq_uni_poly::<F, EF>(l, r_uni);
+            let e1_base = eq_uni_poly::<F, EF>(l, r_uni * omega_l);
+            let e2_base = eq_uni_at_one_poly(l, self.eq_const);
+
+            // E_neg = E_base * ind (polynomial multiplication)
+            let e0_neg = poly_multiply_ntt(&dft, e0_base.coeffs(), ind.coeffs(), skip_domain);
+            let e1_neg = poly_multiply_ntt(&dft, e1_base.coeffs(), ind.coeffs(), skip_domain);
+            let e2_neg = poly_multiply_ntt(&dft, e2_base.coeffs(), ind.coeffs(), skip_domain);
+
+            Self::ntt_multiply_and_add(
+                &dft,
+                large_uni_domain,
+                [&e0_neg, &e1_neg, &e2_neg],
+                [
+                    &g_neg[0..skip_domain],
+                    &g_neg[skip_domain..2 * skip_domain],
+                    &g_neg[2 * skip_domain..3 * skip_domain],
+                ],
+                &mut s_0_coeffs,
+            );
+        }
+
+        s_0_coeffs.truncate(s_0_deg + 1);
+        UnivariatePoly::new(s_0_coeffs)
+    }
+
+    /// NTT-based polynomial multiplication following logup pattern.
+    /// Computes: out += sum_i E[i] * G[i]
+    fn ntt_multiply_and_add(
+        dft: &Radix2BowersSerial,
+        domain_size: usize,
+        e_coeffs: [&[EF]; 3],
+        g_evals: [&[EF]; 3], // G evaluations on identity coset
+        out: &mut [EF],
+    ) {
+        // 1. iDFT G evaluations to get G coefficients
+        let g_coeffs: [Vec<EF>; 3] = std::array::from_fn(|i| dft.idft(g_evals[i].to_vec()));
+
+        // 2. Prepare coefficient matrices, resize to domain_size
+        let mut e_padded = vec![EF::ZERO; domain_size * 3];
+        let mut g_padded = vec![EF::ZERO; domain_size * 3];
+        for i in 0..3 {
+            for (j, &c) in e_coeffs[i].iter().enumerate() {
+                e_padded[j * 3 + i] = c;
+            }
+            for (j, &c) in g_coeffs[i].iter().enumerate() {
+                g_padded[j * 3 + i] = c;
+            }
+        }
+
+        // 3. DFT batch to evaluation domain
+        let e_evals_mat = dft.dft_batch(RowMajorMatrix::new(e_padded, 3));
+        let g_evals_mat = dft.dft_batch(RowMajorMatrix::new(g_padded, 3));
+
+        // 4. Pointwise multiply and sum: s[j] = sum_i e[j][i] * g[j][i]
+        let mut s_evals = vec![EF::ZERO; domain_size];
+        for j in 0..domain_size {
+            for i in 0..3 {
+                s_evals[j] += e_evals_mat.values[j * 3 + i] * g_evals_mat.values[j * 3 + i];
+            }
+        }
+
+        // 5. iDFT to get product coefficients
+        let s_coeffs = dft.idft(s_evals);
+
+        // 6. Add to output
+        for (o, c) in out.iter_mut().zip(s_coeffs) {
+            *o += c;
+        }
     }
 
     #[instrument("stacked_reduction_fold_ple", level = "debug", skip_all)]
@@ -856,4 +934,41 @@ impl StackedReductionGpu {
     fn get_stacked_openings(&self) -> Vec<Vec<EF>> {
         self.q_evals.iter().map(|q| q.to_host().unwrap()).collect()
     }
+}
+
+/// Build indicator polynomial: ind(Z) = sum_{k=0}^{2^{n_abs}-1} Z^{k * 2^l} / 2^{n_abs}
+fn build_indicator_poly(l_skip: usize, n: isize) -> UnivariatePoly<EF> {
+    let n_abs = (-n) as usize;
+    let l = l_skip - n_abs;
+    let scale = EF::ONE.halve().exp_u64(n_abs as u64);
+    let mut coeffs = vec![EF::ZERO; 1 << l_skip];
+    for k in 0..(1 << n_abs) {
+        coeffs[k * (1 << l)] = scale;
+    }
+    UnivariatePoly::new(coeffs)
+}
+
+/// eq_uni_at_one polynomial: eq_D(Z, 1) as a polynomial in Z
+///
+/// All coefficients are n_inv * scale where n_inv = 1 / 2^l
+fn eq_uni_at_one_poly(l: usize, scale: EF) -> UnivariatePoly<EF> {
+    let n_inv = F::ONE.halve().exp_u64(l as u64);
+    UnivariatePoly::new(vec![EF::from(n_inv) * scale; 1 << l])
+}
+
+/// NTT-based polynomial multiplication
+fn poly_multiply_ntt(dft: &Radix2BowersSerial, a: &[EF], b: &[EF], min_size: usize) -> Vec<EF> {
+    let size = (a.len() + b.len() - 1).max(min_size).next_power_of_two();
+    let mut a_pad = a.to_vec();
+    a_pad.resize(size, EF::ZERO);
+    let mut b_pad = b.to_vec();
+    b_pad.resize(size, EF::ZERO);
+    let a_evals = dft.dft(a_pad);
+    let b_evals = dft.dft(b_pad);
+    let c_evals: Vec<EF> = a_evals
+        .into_iter()
+        .zip(b_evals)
+        .map(|(a, b)| a * b)
+        .collect();
+    dft.idft(c_evals)
 }
