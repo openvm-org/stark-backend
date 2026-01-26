@@ -135,9 +135,9 @@ extern "C" {
         r: EF,
     ) -> i32;
 
-    /// Fused compute round + fold (out-of-place). Reads from pre-fold src_pq_buffer (size src_pq_size),
-    /// computes sumcheck sums, and writes folded output to dst_pq_buffer (size src_pq_size/2).
-    /// IMPORTANT: src_pq_buffer and dst_pq_buffer must NOT alias.
+    /// Fused compute round + fold (out-of-place). Reads from pre-fold src_pq_buffer (size
+    /// src_pq_size), computes sumcheck sums, and writes folded output to dst_pq_buffer (size
+    /// src_pq_size/2). IMPORTANT: src_pq_buffer and dst_pq_buffer must NOT alias.
     fn _frac_compute_round_and_fold(
         eq_xi_low: *const EF,
         eq_xi_high: *const EF,
@@ -152,7 +152,8 @@ extern "C" {
     ) -> i32;
 
     /// Fused compute round + fold (in-place). Reads from pre-fold pq_buffer (size src_pq_size),
-    /// computes sumcheck sums, and writes folded output to the same buffer (first src_pq_size/2 elements).
+    /// computes sumcheck sums, and writes folded output to the same buffer (first src_pq_size/2
+    /// elements).
     fn _frac_compute_round_and_fold_inplace(
         eq_xi_low: *const EF,
         eq_xi_high: *const EF,
@@ -533,7 +534,8 @@ pub unsafe fn frac_compute_round(
 /// Fused compute round + tree layer revert kernel.
 ///
 /// Combines `frac_build_tree_layer(revert=true)` with `compute_round` for the first inner round.
-/// The revert operation modifies `layer` in-place: `layer[i] = layer[i] - layer[i + half]` for `i < half`.
+/// The revert operation modifies `layer` in-place: `layer[i] = layer[i] - layer[i + half]` for `i <
+/// half`.
 ///
 /// This eliminates one kernel launch per outer round.
 #[allow(clippy::too_many_arguments)]

@@ -6,8 +6,11 @@ use openvm_cuda_common::{
 use crate::{
     D_EF, EF, F,
     poly::EqEvalSegments,
-    stacked_reduction::{Round0UniPacket, STACKED_REDUCTION_S_DEG, UnstackedSlice},
+    stacked_reduction::{STACKED_REDUCTION_S_DEG, UnstackedSlice},
 };
+
+/// Number of G outputs per z in round 0: G0, G1, G2
+pub const NUM_G: usize = 3;
 
 extern "C" {
     pub fn _stacked_reduction_r0_required_temp_buffer_size(
@@ -16,11 +19,11 @@ extern "C" {
         l_skip: u32,
     ) -> u32;
 
+    // SP_DEG=1: no z_packets needed, outputs [NUM_G * skip_domain] to be ADDed
     fn _stacked_reduction_sumcheck_round0(
         eq_r_ns: *const EF,
         trace_ptr: *const F,
         lambda_pows: *const EF,
-        z_packets: *const Round0UniPacket,
         block_sums: *mut EF,
         output: *mut EF,
         trace_height: u32,
@@ -75,64 +78,45 @@ extern "C" {
     ) -> i32;
 }
 
-/// Recall overall that we want to compute `Z -> sum_{H_{n_lift}} f(Z, \vec x)` for a specific `f`
-/// on a DFT domain of size `domain_size` with `num_x = 2^{n_lift}`. The exact formula for `f` is
-/// obtained by multiplying some `eq, \kappa_\rot` terms with prismalinear polynomial evaluations
-/// `t_j(Z, \vec x)`. We need to upsample the `t_j(Z, \vec x)` evals on `(Z-domain) x hypercube` on
-/// demand, which we use buffer slices `q_ptr[commit_idx]` to do.
+/// SP_DEG=1 round 0 kernel: computes G0, G1, G2 partial sums on identity coset only.
 ///
-/// We consider a "window" of `t_j`, with their slice locations given by `unstacked_cols` pointing
-/// to the backing buffers `q_ptr`. Overall this means that we have a 3-dimensional array of
-/// `t_{window_idx}(Z, x_int)` and we will match it to the 3-dimensional block/grid in CUDA. For
-/// memory contiguity, we arrange so that
-/// - cuda x-dim <-> Z coordinate
-/// - cuda y-dim <-> x_int coordinate
-/// - cuda z-dim <-> window_idx coordinate
+/// This kernel computes three partial sums per z-coordinate:
+/// - G0(Z) = Σ_{col,x} coeff_eq[col] * eq_cube(x) * q_{col,x}(Z)
+/// - G1(Z) = Σ_{col,x} coeff_rot[col] * eq_cube(x) * q_{col,x}(Z)
+/// - G2(Z) = Σ_{col,x} coeff_rot[col] * (eq_cube(rot_prev(x)) - eq_cube(x)) * q_{col,x}(Z)
 ///
-/// We fix 1 z-thread per block, and the hard-code fixed constants for the x-threads per block and
-/// y-threads per block. Now recall we want to sum over `x_int` and also over `window_idx` where we
-/// algebraically batch over `window_idx` using `lambda_pows`. This means we must sum over cuda
-/// y-dim and cuda z-dim but **not** over cuda x-dim.
+/// The reconstruction s₀(Z) = E0(Z)*G0(Z) + E1(Z)*G1(Z) + E2(Z)*G2(Z) happens on CPU.
 ///
 /// The reduction is done in two stages:
 /// 1. Block-level reduction to `block_sums` (shared memory within block)
-/// 2. Final reduction kernel to combine block sums into `output`
-///
-/// Lastly, due to limitations on the CUDA grid dimensions, a single thread may need to sum over
-/// multiple `x_int` and `window_idx` coordinates. This is achieved by separately striding in
-/// `x_int` and `window_idx`. The `x_int` stride is configured automatically to `blockDim.y *
-/// gridDim.y` to be the maximum possible. The `window_idx` stride is specified by the user input
-/// parameter `thread_window_stride`.
+/// 2. Final reduction kernel that ADDs block sums into `output` (for bucket accumulation)
 ///
 /// # Safety
 /// - `trace_ptr` must be a pointer to a device buffer valid for `height * width` elements.
 /// - `lambda_pows` should be pointer to DeviceBuffer<EF>, at an offset.
 ///   - `lambda_pows` must be initialized for at least `2 * window_len` elements (for rotations).
-/// - `z_packets` should be of length `2^log_domain_size`.
 /// - `block_sums` should have length `>= _stacked_reduction_r0_required_temp_buffer_size(...)`.
-/// - `output` should have length `>= STACKED_REDUCTION_S_DEG * 2^l_skip`.
+/// - `output` should have length `>= NUM_G * 2^l_skip` and be zero-initialized before first call.
+///   Values are ADDED to output for bucket-based accumulation.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_round0(
     eq_r_ns: &EqEvalSegments<EF>,
     trace_ptr: *const F,
     lambda_pows: *const EF,
-    z_packets: &DeviceBuffer<Round0UniPacket>,
     block_sums: &mut DeviceBuffer<EF>,
     output: &mut DeviceBuffer<EF>,
     height: usize,
     width: usize,
     l_skip: usize,
 ) -> Result<(), CudaError> {
-    let domain_size = STACKED_REDUCTION_S_DEG << l_skip;
+    let output_size = NUM_G << l_skip;
     let num_x = (height >> l_skip).max(1) as u32;
-    debug_assert_eq!(z_packets.len(), domain_size);
-    debug_assert!(output.len() >= domain_size);
+    debug_assert!(output.len() >= output_size);
 
     check(_stacked_reduction_sumcheck_round0(
         eq_r_ns.buffer().as_ptr(),
         trace_ptr,
         lambda_pows,
-        z_packets.as_ptr(),
         block_sums.as_mut_ptr(),
         output.as_mut_ptr(),
         height as u32,
