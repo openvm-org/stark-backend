@@ -97,10 +97,10 @@ __global__ void evaluate_interactions_gkr_kernel(
                 FpExt result(0);
                 if (node_idx < rules_evaluated) {
                     Rule rule = d_rules[node_idx];
-                    DecodedRule decoded_rule = decode_rule(rule);
-                    if (decoded_rule.op == OP_VAR) {
+                    RuleHeader header = decode_rule_header(rule);
+                    if (header.op == OP_VAR) {
                         result = evaluate_dag_entry_gkr(
-                            decoded_rule.x,
+                            header.x,
                             row,
                             d_preprocessed,
                             d_main,
@@ -110,15 +110,16 @@ __global__ void evaluate_interactions_gkr_kernel(
                             permutation_height
                         );
                     } else {
-                        result = intermediates_ptr[decoded_rule.z_index * intermediate_stride];
+                        uint32_t z_index = decode_z_index(rule);
+                        result = intermediates_ptr[z_index * intermediate_stride];
                     }
                 } else {
                     for (; rules_evaluated <= node_idx; rules_evaluated++) {
                         Rule rule = d_rules[rules_evaluated];
-                        DecodedRule decoded_rule = decode_rule(rule);
+                        RuleHeader header = decode_rule_header(rule);
 
                         FpExt x = evaluate_dag_entry_gkr(
-                            decoded_rule.x,
+                            header.x,
                             row,
                             d_preprocessed,
                             d_main,
@@ -127,25 +128,46 @@ __global__ void evaluate_interactions_gkr_kernel(
                             intermediate_stride,
                             permutation_height
                         );
-                        FpExt y = evaluate_dag_entry_gkr(
-                            decoded_rule.y,
-                            row,
-                            d_preprocessed,
-                            d_main,
-                            d_challenges,
-                            intermediates_ptr,
-                            intermediate_stride,
-                            permutation_height
-                        );
+                        FpExt y;
 
-                        switch (decoded_rule.op) {
+                        switch (header.op) {
                         case OP_ADD:
+                            y = evaluate_dag_entry_gkr(
+                                decode_y(rule),
+                                row,
+                                d_preprocessed,
+                                d_main,
+                                d_challenges,
+                                intermediates_ptr,
+                                intermediate_stride,
+                                permutation_height
+                            );
                             result = x + y;
                             break;
                         case OP_SUB:
+                            y = evaluate_dag_entry_gkr(
+                                decode_y(rule),
+                                row,
+                                d_preprocessed,
+                                d_main,
+                                d_challenges,
+                                intermediates_ptr,
+                                intermediate_stride,
+                                permutation_height
+                            );
                             result = x - y;
                             break;
                         case OP_MUL:
+                            y = evaluate_dag_entry_gkr(
+                                decode_y(rule),
+                                row,
+                                d_preprocessed,
+                                d_main,
+                                d_challenges,
+                                intermediates_ptr,
+                                intermediate_stride,
+                                permutation_height
+                            );
                             x *= y;
                             result = x;
                             break;
@@ -159,8 +181,9 @@ __global__ void evaluate_interactions_gkr_kernel(
                             assert(0);
                         }
 
-                        if (decoded_rule.buffer_result) {
-                            intermediates_ptr[decoded_rule.z_index * intermediate_stride] = result;
+                        if (header.buffer_result) {
+                            uint32_t z_index = decode_z_index(rule);
+                            intermediates_ptr[z_index * intermediate_stride] = result;
                         }
                     }
                 }
