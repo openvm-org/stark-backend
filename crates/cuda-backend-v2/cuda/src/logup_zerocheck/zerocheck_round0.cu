@@ -57,8 +57,6 @@ __device__ __inline__ void acc_constraints(
         Fp x_vals[NUM_COSETS];
         ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(x_vals, header.x, eval_ctx);
 
-        Fp results[NUM_COSETS];
-
         switch (header.op) {
         case OP_ADD: {
             // Decode y only for binary ops
@@ -67,7 +65,7 @@ __device__ __inline__ void acc_constraints(
             ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
-                results[c] = x_vals[c] + y_vals[c];
+                x_vals[c] += y_vals[c];
             }
             break;
         }
@@ -77,7 +75,7 @@ __device__ __inline__ void acc_constraints(
             ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
-                results[c] = x_vals[c] - y_vals[c];
+                x_vals[c] -= y_vals[c];
             }
             break;
         }
@@ -87,26 +85,22 @@ __device__ __inline__ void acc_constraints(
             ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
-                results[c] = x_vals[c] * y_vals[c];
+                x_vals[c] *= y_vals[c];
             }
             break;
         }
         case OP_NEG:
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
-                results[c] = -x_vals[c];
+                x_vals[c] = -x_vals[c];
             }
             break;
         case OP_VAR:
-#pragma unroll
-            for (uint32_t c = 0; c < NUM_COSETS; c++) {
-                results[c] = x_vals[c];
-            }
             break;
         case OP_INV:
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
-                results[c] = inv(x_vals[c]);
+                x_vals[c] = inv(x_vals[c]);
             }
             break;
         }
@@ -121,7 +115,7 @@ __device__ __inline__ void acc_constraints(
             // Intermediate buffer layout: [buffer_size][NUM_COSETS] per thread
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
-                eval_ctx.inter_buffer[z_index * eval_ctx.buffer_stride + c] = results[c];
+                eval_ctx.inter_buffer[z_index * eval_ctx.buffer_stride + c] = x_vals[c];
             }
         }
 
@@ -133,7 +127,7 @@ __device__ __inline__ void acc_constraints(
                 lambda_idx++;
 #pragma unroll
                 for (uint32_t c = 0; c < NUM_COSETS; c++) {
-                    constraint_sums[c] += lambda * results[c];
+                    constraint_sums[c] += lambda * x_vals[c];
                 }
             }
         }
@@ -189,7 +183,6 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
 
     // Precompute values needed for all cosets
     uint32_t const ntt_idx_rev = rev_len(ntt_idx, l_skip);
-    Fp const omega_skip = TWO_ADIC_GENERATORS[l_skip];
 
     // Compute is_first_mult, is_last_mult for all cosets
     uint32_t const log_height_total = __ffs(height) - 1;
@@ -200,13 +193,14 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
     Fp is_first_mult[NUM_COSETS];
     Fp is_last_mult[NUM_COSETS];
     Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
-    Fp const omega_skip_ntt = pow(omega_skip, ntt_idx);
+    Fp const omega_skip_ntt =
+        (l_skip == 0) ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
 
     Fp g_coset = g_shift; // g^1, will iterate g^2, g^3, ...
 #pragma unroll
     for (uint32_t c = 0; c < NUM_COSETS; c++) {
         Fp eval_point = g_coset * omega_skip_ntt;
-        Fp omega = pow(eval_point, 1u << log_stride);
+        Fp omega = exp_power_of_2(eval_point, log_stride);
         is_first_mult[c] = avg_gp(omega, segment_size);
         is_last_mult[c] = avg_gp(omega * eta, segment_size);
         g_coset *= g_shift; // g^(c+2) for next iteration
@@ -249,11 +243,12 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
         0 // x_int - updated per iteration
     };
     // Compute omega_shifts directly into context using iterative multiplication
-    g_coset = g_shift; // reset to g^1
+    Fp const omega_shift_base = pow(g_shift, ntt_idx_rev);
+    Fp omega_shift = omega_shift_base;
 #pragma unroll
     for (uint32_t c = 0; c < NUM_COSETS; c++) {
-        eval_ctx.omega_shifts[c] = pow(g_coset, ntt_idx_rev);
-        g_coset *= g_shift;
+        eval_ctx.omega_shifts[c] = omega_shift;
+        omega_shift *= omega_shift_base;
     }
 
     // Tile across x_int to save intermediate buffer size
@@ -375,7 +370,6 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
 
     // Precompute values for this single coset
     uint32_t const ntt_idx_rev = rev_len(ntt_idx, l_skip);
-    Fp const omega_skip = TWO_ADIC_GENERATORS[l_skip];
 
     uint32_t const log_height_total = __ffs(height) - 1;
     uint32_t const log_segment = min(l_skip, log_height_total);
@@ -383,12 +377,13 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
     uint32_t const log_stride = l_skip - log_segment;
 
     Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
-    Fp const omega_skip_ntt = pow(omega_skip, ntt_idx);
+    Fp const omega_skip_ntt =
+        (l_skip == 0) ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
 
     // Compute for single coset: g^(coset_idx + 1)
     Fp const g_coset = pow(g_shift, coset_idx + 1);
     Fp const eval_point = g_coset * omega_skip_ntt;
-    Fp const omega = pow(eval_point, 1u << log_stride);
+    Fp const omega = exp_power_of_2(eval_point, log_stride);
     Fp const is_first_mult = avg_gp(omega, segment_size);
     Fp const is_last_mult = avg_gp(omega * eta, segment_size);
     Fp const omega_shift = pow(g_coset, ntt_idx_rev);
