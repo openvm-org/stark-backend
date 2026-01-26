@@ -72,7 +72,13 @@ __device__ __forceinline__ void ntt_coset_interpolate(
 #endif
 
     // All threads load trace value from global memory (wrap by height for rotation)
-    uint32_t const idx = (base + ntt_idx + offset) % height;
+    // NOTE: `height` must be a power of two throughout this code path.
+    // Many other computations (e.g. `__ffs(height) - 1`) already rely on this.
+    // Use bitmask instead of `%` to avoid the expensive integer remainder in the hot path.
+#ifdef CUDA_DEBUG
+    assert(height && !(height & (height - 1)));
+#endif
+    uint32_t const idx = (base + ntt_idx + offset) & (height - 1);
     Fp coeff = evals[idx];
 
     // Runtime skip path for coset-parallel identity coset
