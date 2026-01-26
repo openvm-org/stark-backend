@@ -462,7 +462,7 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
 // LAUNCHERS
 // ============================================================================
 
-constexpr uint32_t MAX_THREADS = 256;
+constexpr uint32_t MAX_THREADS = 128;
 
 // Helper to determine which mode to use based on threshold
 inline bool use_coset_parallel_mode(uint32_t num_x, uint32_t skip_domain) {
