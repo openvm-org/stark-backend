@@ -202,8 +202,14 @@ fn whir_test_config(k_whir: usize) -> WhirConfig {
     WhirConfig {
         k: k_whir,
         rounds: vec![
-            WhirRoundConfig { num_queries: 6 },
-            WhirRoundConfig { num_queries: 5 },
+            WhirRoundConfig {
+                num_queries: 6,
+                num_ood_samples: 1,
+            },
+            WhirRoundConfig {
+                num_queries: 5,
+                num_ood_samples: 1,
+            },
         ],
         mu_pow_bits: 1,
         query_phase_pow_bits: 1,
