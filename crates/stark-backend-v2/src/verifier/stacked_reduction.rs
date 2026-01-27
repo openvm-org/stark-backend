@@ -216,15 +216,15 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                     let b = (l_skip + n_lift..l_skip + n_stack)
                         .map(|j| F::from_bool((s.row_idx >> j) & 1 == 1))
                         .collect_vec();
-                let eq_mle = eval_eq_mle(&u[n_lift + 1..], &b);
-                let ind = eval_in_uni(l_skip, n, u[0]);
-                let (l, rs_n) = if n.is_negative() {
-                    (
-                        l_skip.wrapping_add_signed(n),
-                        &[r[0].exp_power_of_2(-n as usize)] as &[_],
-                    )
-                } else {
-                    (l_skip, &r[..=n_lift])
+                    let eq_mle = eval_eq_mle(&u[n_lift + 1..], &b);
+                    let ind = eval_in_uni(l_skip, n, u[0]);
+                    let (l, rs_n) = if n.is_negative() {
+                        (
+                            l_skip.wrapping_add_signed(n),
+                            &[r[0].exp_power_of_2(-n as usize)] as &[_],
+                        )
+                    } else {
+                        (l_skip, &r[..=n_lift])
                     };
                     let eq_prism = eval_eq_prism(l, &u[..=n_lift], rs_n);
                     let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
