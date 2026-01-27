@@ -31,6 +31,8 @@ pub struct StarkVerifyingParamsV2 {
     pub width: TraceWidth,
     /// Number of public values for this STARK only
     pub num_public_values: usize,
+    /// A flag indication whether we need the rotations
+    pub need_rot: bool,
 }
 
 /// Verifier data for preprocessed trace for a single AIR.
