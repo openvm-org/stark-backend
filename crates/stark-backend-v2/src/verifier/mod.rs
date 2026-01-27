@@ -148,10 +148,31 @@ pub fn verify<TS: FiatShamirTranscript>(
         &omega_skip_pows,
     )?;
 
+    let need_rot_per_trace = trace_id_to_air_id
+        .iter()
+        .map(|&air_id| per_air[air_id].params.need_rot)
+        .collect_vec();
+    let mut need_rot_per_commit = vec![need_rot_per_trace];
+    for &air_id in &trace_id_to_air_id {
+        let need_rot = per_air[air_id].params.need_rot;
+        if per_air[air_id].preprocessed_data.is_some() {
+            need_rot_per_commit.push(vec![need_rot]);
+        }
+        let cached_len = trace_vdata[air_id]
+            .as_ref()
+            .unwrap()
+            .cached_commitments
+            .len();
+        for _ in 0..cached_len {
+            need_rot_per_commit.push(vec![need_rot]);
+        }
+    }
+
     let u_prism = verify_stacked_reduction(
         transcript,
         stacking_proof,
         &layouts,
+        &need_rot_per_commit,
         l_skip,
         params.n_stack,
         &proof.batch_constraint_proof.column_openings,
