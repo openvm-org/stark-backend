@@ -91,10 +91,8 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
             t_claims.push(t);
             if need_rot {
                 t_claims.push(t_rot);
-            } else {
-                if t_rot != EF::ZERO {
-                    return Err(StackedReductionError::RotationsNotNeeded);
-                }
+            } else if t_rot != EF::ZERO {
+                return Err(StackedReductionError::RotationsNotNeeded);
             }
         }
     }
@@ -108,10 +106,8 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                 t_claims.push(t);
                 if need_rot {
                     t_claims.push(t_rot);
-                } else {
-                    if t_rot != EF::ZERO {
-                        return Err(StackedReductionError::RotationsNotNeeded);
-                    }
+                } else if t_rot != EF::ZERO {
+                    return Err(StackedReductionError::RotationsNotNeeded);
                 }
             }
             commit_idx += 1;
