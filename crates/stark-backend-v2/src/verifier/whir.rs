@@ -561,8 +561,14 @@ mod tests {
         WhirConfig {
             k: k_whir,
             rounds: vec![
-                WhirRoundConfig { num_queries: 6 },
-                WhirRoundConfig { num_queries: 5 },
+                WhirRoundConfig {
+                    num_queries: 6,
+                    num_odd_samples: 1,
+                },
+                WhirRoundConfig {
+                    num_queries: 5,
+                    num_odd_samples: 1,
+                },
             ],
             query_phase_pow_bits: 1,
             folding_pow_bits: 1,
