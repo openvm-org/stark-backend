@@ -23,6 +23,9 @@ pub enum StackedReductionError {
 
     #[error("s_n(u_n) does not match claimed q(u) sum: {claim} != {final_sum}")]
     FinalSumMismatch { claim: EF, final_sum: EF },
+
+    #[error("rotation opening provided when rotations are not needed")]
+    RotationsNotNeeded,
 }
 
 /// `has_preprocessed` must be per present trace in sorted AIR order.
@@ -32,6 +35,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
     transcript: &mut TS,
     proof: &StackingProof,
     layouts: &[StackedLayout],
+    need_rot_per_commit: &[Vec<bool>],
     l_skip: usize,
     n_stack: usize,
     column_openings: &Vec<Vec<Vec<(EF, EF)>>>,
@@ -51,26 +55,68 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
     let omega_order = omega_shift_pows.len();
     let omega_order_f = F::from_usize(omega_order);
 
-    let t_claims_len = layouts
+    debug_assert_eq!(layouts.len(), need_rot_per_commit.len());
+    let mut lambda_idx = 0usize;
+    let lambda_indices_per_layout: Vec<Vec<(usize, Option<usize>)>> = layouts
         .iter()
-        .map(|l| l.sorted_cols.len() * 2)
-        .sum::<usize>();
+        .enumerate()
+        .map(|(commit_idx, layout)| {
+            let need_rot_for_commit = &need_rot_per_commit[commit_idx];
+            debug_assert_eq!(need_rot_for_commit.len(), layout.mat_starts.len());
+            layout
+                .sorted_cols
+                .iter()
+                .map(|&(mat_idx, _col_idx, _slice)| {
+                    let lambda_eq_idx = lambda_idx;
+                    lambda_idx += 1;
+                    let lambda_rot_idx = if need_rot_for_commit[mat_idx] {
+                        let idx = lambda_idx;
+                        lambda_idx += 1;
+                        Some(idx)
+                    } else {
+                        None
+                    };
+                    (lambda_eq_idx, lambda_rot_idx)
+                })
+                .collect_vec()
+        })
+        .collect_vec();
+    let t_claims_len = lambda_idx;
     let mut t_claims = Vec::with_capacity(t_claims_len);
 
-    // common main columns
-    column_openings.iter().for_each(|parts| {
-        t_claims.extend(parts[0].iter().flat_map(|(t, t_rot)| [*t, *t_rot]));
-    });
+    // common main columns (commit 0)
+    for (trace_idx, parts) in column_openings.iter().enumerate() {
+        let need_rot = need_rot_per_commit[0][trace_idx];
+        for &(t, t_rot) in &parts[0] {
+            t_claims.push(t);
+            if need_rot {
+                t_claims.push(t_rot);
+            } else {
+                if t_rot != EF::ZERO {
+                    return Err(StackedReductionError::RotationsNotNeeded);
+                }
+            }
+        }
+    }
 
-    // preprocessed and cached columns
-    column_openings.iter().for_each(|parts| {
-        t_claims.extend(
-            parts
-                .iter()
-                .skip(1)
-                .flat_map(|cols| cols.iter().flat_map(|(t, t_rot)| [*t, *t_rot])),
-        );
-    });
+    // preprocessed and cached columns (commits 1..)
+    let mut commit_idx = 1usize;
+    for parts in column_openings {
+        for cols in parts.iter().skip(1) {
+            let need_rot = need_rot_per_commit[commit_idx][0];
+            for &(t, t_rot) in cols {
+                t_claims.push(t);
+                if need_rot {
+                    t_claims.push(t_rot);
+                } else {
+                    if t_rot != EF::ZERO {
+                        return Err(StackedReductionError::RotationsNotNeeded);
+                    }
+                }
+            }
+            commit_idx += 1;
+        }
+    }
 
     assert_eq!(t_claims.len(), t_claims_len);
     debug!(?t_claims);
@@ -153,17 +199,23 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
         .map(|vec| vec![EF::ZERO; vec.len()])
         .collect_vec();
 
-    let mut j = 0usize;
     layouts
         .iter()
+        .enumerate()
         .zip(q_coeffs.iter_mut())
-        .for_each(|(layout, coeffs)| {
-            layout.sorted_cols.iter().for_each(|&(_, _, s)| {
-                let n = s.log_height() as isize - l_skip as isize;
-                let n_lift = n.max(0) as usize;
-                let b = (l_skip + n_lift..l_skip + n_stack)
-                    .map(|j| F::from_bool((s.row_idx >> j) & 1 == 1))
-                    .collect_vec();
+        .for_each(|((commit_idx, layout), coeffs)| {
+            let lambda_indices = &lambda_indices_per_layout[commit_idx];
+            layout
+                .sorted_cols
+                .iter()
+                .enumerate()
+                .for_each(|(col_idx, &(_, _, s))| {
+                    let (lambda_eq_idx, lambda_rot_idx) = lambda_indices[col_idx];
+                    let n = s.log_height() as isize - l_skip as isize;
+                    let n_lift = n.max(0) as usize;
+                    let b = (l_skip + n_lift..l_skip + n_stack)
+                        .map(|j| F::from_bool((s.row_idx >> j) & 1 == 1))
+                        .collect_vec();
                 let eq_mle = eval_eq_mle(&u[n_lift + 1..], &b);
                 let ind = eval_in_uni(l_skip, n, u[0]);
                 let (l, rs_n) = if n.is_negative() {
@@ -173,14 +225,15 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                     )
                 } else {
                     (l_skip, &r[..=n_lift])
-                };
-                let eq_prism = eval_eq_prism(l, &u[..=n_lift], rs_n);
-                let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
-                coeffs[s.col_idx] += eq_mle
-                    * (lambda_powers[j] * eq_prism + lambda_powers[j + 1] * rot_kernel_prism)
-                    * ind;
-                j += 2;
-            });
+                    };
+                    let eq_prism = eval_eq_prism(l, &u[..=n_lift], rs_n);
+                    let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
+                    let mut batched = lambda_powers[lambda_eq_idx] * eq_prism;
+                    if let Some(rot_idx) = lambda_rot_idx {
+                        batched += lambda_powers[rot_idx] * rot_kernel_prism;
+                    }
+                    coeffs[s.col_idx] += eq_mle * batched * ind;
+                });
         });
 
     let final_sum = q_coeffs.iter().zip(proof.stacking_openings.iter()).fold(
@@ -221,6 +274,7 @@ mod tests {
         pub transcript: DuplexSponge,
         pub proof: StackingProof,
         pub layouts: Vec<StackedLayout>,
+        pub need_rot_per_commit: Vec<Vec<bool>>,
         pub column_openings: Vec<Vec<Vec<(EF, EF)>>>,
         pub r: Vec<EF>,
         pub omega_pows: Vec<F>,
@@ -346,6 +400,7 @@ mod tests {
             transcript: DuplexSponge::default(),
             proof,
             layouts: vec![layout],
+            need_rot_per_commit: vec![vec![true]],
             column_openings,
             r,
             omega_pows,
@@ -359,6 +414,7 @@ mod tests {
             &mut test_case.transcript,
             &test_case.proof,
             &test_case.layouts,
+            &test_case.need_rot_per_commit,
             L_SKIP,
             N_STACK,
             &test_case.column_openings,
@@ -376,6 +432,7 @@ mod tests {
             &mut test_case.transcript,
             &test_case.proof,
             &test_case.layouts,
+            &test_case.need_rot_per_commit,
             L_SKIP,
             N_STACK,
             &test_case.column_openings,
@@ -393,6 +450,7 @@ mod tests {
             &mut test_case.transcript,
             &test_case.proof,
             &test_case.layouts,
+            &test_case.need_rot_per_commit,
             L_SKIP,
             N_STACK,
             &test_case.column_openings,
@@ -410,6 +468,7 @@ mod tests {
             &mut test_case.transcript,
             &test_case.proof,
             &test_case.layouts,
+            &test_case.need_rot_per_commit,
             L_SKIP,
             N_STACK,
             &test_case.column_openings,

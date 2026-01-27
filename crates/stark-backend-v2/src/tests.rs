@@ -229,11 +229,14 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
         &common_main_pcs_data,
     );
 
+    let need_rot = pk.per_air[ctx.per_trace[0].0].vk.params.need_rot;
+    let need_rot_per_commit = vec![vec![need_rot]];
     let (stacking_proof, _) = prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
         device,
         &mut DuplexSponge::default(),
         params.n_stack,
         vec![&common_main_pcs_data],
+        need_rot_per_commit.clone(),
         &r,
     );
 
@@ -243,6 +246,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
         &mut DuplexSponge::default(),
         &stacking_proof,
         &[common_main_pcs_data.layout],
+        &need_rot_per_commit,
         params.l_skip,
         params.n_stack,
         &batch_proof.column_openings,

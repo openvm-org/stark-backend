@@ -38,6 +38,7 @@ pub trait StackedReductionProver<'a, PB: ProverBackendV2, PD> {
     fn new(
         device: &'a PD,
         stacked_per_commit: Vec<&'a PB::PcsData>,
+        need_rot_per_commit: Vec<Vec<bool>>,
         r: &[PB::Challenge],
         lambda: PB::Challenge,
     ) -> Self;
@@ -68,6 +69,7 @@ pub fn prove_stacked_opening_reduction<'a, PB, PD, TS, SRP>(
     transcript: &mut TS,
     n_stack: usize,
     stacked_per_commit: Vec<&'a PB::PcsData>,
+    need_rot_per_commit: Vec<Vec<bool>>,
     r: &[PB::Challenge],
 ) -> (StackingProof, Vec<PB::Challenge>)
 where
@@ -78,7 +80,7 @@ where
     // Batching randomness
     let lambda = transcript.sample_ext();
 
-    let mut prover = SRP::new(device, stacked_per_commit, r, lambda);
+    let mut prover = SRP::new(device, stacked_per_commit, need_rot_per_commit, r, lambda);
     let s_0 = prover.batch_sumcheck_uni_round0_poly();
     for &coeff in s_0.coeffs() {
         transcript.observe_ext(coeff);
@@ -132,7 +134,7 @@ pub struct StackedReductionCpu<'a> {
     eq_const: EF,
 
     stacked_per_commit: Vec<&'a StackedPcsData<F, Digest>>,
-    trace_views: Vec<(usize, StackedSlice)>,
+    trace_views: Vec<TraceViewMeta>,
     ht_diff_idxs: Vec<usize>,
 
     eq_r_per_lht: HashMap<usize, ColMajorMatrix<EF>>,
@@ -144,41 +146,62 @@ pub struct StackedReductionCpu<'a> {
     eq_ub_per_trace: Vec<EF>,
 }
 
+struct TraceViewMeta {
+    com_idx: usize,
+    slice: StackedSlice,
+    lambda_eq_idx: usize,
+    lambda_rot_idx: Option<usize>,
+}
+
 impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReductionCpu<'a> {
     fn new(
         device: &CpuDeviceV2,
         stacked_per_commit: Vec<&'a StackedPcsData<F, Digest>>,
+        need_rot_per_commit: Vec<Vec<bool>>,
         r: &[EF],
         lambda: EF,
     ) -> Self {
         let l_skip = device.config().l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
 
-        let total_num_col_openings = stacked_per_commit
-            .iter()
-            .map(|d| d.layout.sorted_cols.len() * 2)
-            .sum();
-        let lambda_pows = lambda.powers().take(total_num_col_openings).collect_vec();
-
-        // Flattened list of unstacked trace column slices for convenience
-        let trace_views = stacked_per_commit
-            .iter()
-            .enumerate()
-            .flat_map(|(com_idx, d)| d.layout.unstacked_slices_iter().map(move |s| (com_idx, *s)))
-            .collect_vec();
+        let mut trace_views = Vec::new();
+        let mut lambda_idx = 0usize;
+        for (com_idx, d) in stacked_per_commit.iter().enumerate() {
+            let need_rot_for_commit = &need_rot_per_commit[com_idx];
+            debug_assert_eq!(need_rot_for_commit.len(), d.layout.mat_starts.len());
+            for &(mat_idx, _col_idx, slice) in &d.layout.sorted_cols {
+                let need_rot = need_rot_for_commit[mat_idx];
+                let lambda_eq_idx = lambda_idx;
+                lambda_idx += 1;
+                let lambda_rot_idx = if need_rot {
+                    let idx = lambda_idx;
+                    lambda_idx += 1;
+                    Some(idx)
+                } else {
+                    None
+                };
+                trace_views.push(TraceViewMeta {
+                    com_idx,
+                    slice,
+                    lambda_eq_idx,
+                    lambda_rot_idx,
+                });
+            }
+        }
+        let lambda_pows = lambda.powers().take(lambda_idx).collect_vec();
 
         let mut ht_diff_idxs = Vec::new();
         let mut eq_r_per_lht: HashMap<usize, ColMajorMatrix<EF>> = HashMap::new();
         let mut last_height = 0;
-        for (i, (_, s)) in trace_views.iter().enumerate() {
-            let n_lift = s.log_height().saturating_sub(l_skip);
-            if i == 0 || s.log_height() != last_height {
+        for (i, tv) in trace_views.iter().enumerate() {
+            let n_lift = tv.slice.log_height().saturating_sub(l_skip);
+            if i == 0 || tv.slice.log_height() != last_height {
                 ht_diff_idxs.push(i);
-                last_height = s.log_height();
+                last_height = tv.slice.log_height();
             }
-            eq_r_per_lht
-                .entry(s.log_height())
-                .or_insert_with(|| ColMajorMatrix::new(evals_eq_hypercube(&r[1..1 + n_lift]), 1));
+            eq_r_per_lht.entry(tv.slice.log_height()).or_insert_with(|| {
+                ColMajorMatrix::new(evals_eq_hypercube(&r[1..1 + n_lift]), 1)
+            });
         }
         ht_diff_idxs.push(trace_views.len());
 
@@ -233,7 +256,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
             .par_windows(2)
             .flat_map(|window| {
                 let t_window = &self.trace_views[window[0]..window[1]];
-                let log_height = t_window[0].1.log_height();
+                let log_height = t_window[0].slice.log_height();
                 let n = log_height as isize - l_skip as isize;
                 let n_lift = n.max(0) as usize;
                 let eq_rs = self.eq_r_per_lht.get(&log_height).unwrap().column(0);
@@ -241,9 +264,10 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                 // Prepare the q subslice eval views
                 let q_t_cols = t_window
                     .iter()
-                    .map(|(com_idx, s)| {
-                        debug_assert_eq!(s.log_height(), log_height);
-                        let q = &self.stacked_per_commit[*com_idx].matrix;
+                    .map(|tv| {
+                        debug_assert_eq!(tv.slice.log_height(), log_height);
+                        let q = &self.stacked_per_commit[tv.com_idx].matrix;
+                        let s = tv.slice;
                         let q_t_col = &q.column(s.col_idx)[s.row_idx..s.row_idx + s.len(l_skip)];
                         // NOTE: even if s.stride(l_skip) != 1, we use the full non-strided column
                         // subslice. The sumcheck will not depend on the values outside of the
@@ -272,14 +296,12 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                     let eq = eq_uni_r0 * eq_cube;
                     let k_rot =
                         eq_uni_r0_rot * eq_cube + self.eq_const * eq_uni_1 * (k_rot_cube - eq_cube);
-                    zip(
-                        self.lambda_pows[2 * window[0]..2 * window[1]].chunks_exact(2),
-                        evals,
-                    )
-                    .fold([EF::ZERO; 2], |mut acc, (lambdas, eval)| {
+                    zip(t_window, evals).fold([EF::ZERO; 2], |mut acc, (tv, eval)| {
                         let q = eval[0];
-                        acc[0] += lambdas[0] * eq * q * ind;
-                        acc[1] += lambdas[1] * k_rot * q * ind;
+                        acc[0] += self.lambda_pows[tv.lambda_eq_idx] * eq * q * ind;
+                        if let Some(rot_idx) = tv.lambda_rot_idx {
+                            acc[1] += self.lambda_pows[rot_idx] * k_rot * q * ind;
+                        }
                         acc
                     })
                 })
@@ -361,7 +383,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
             .par_windows(2)
             .flat_map(|window| {
                 let t_views = &self.trace_views[window[0]..window[1]];
-                let log_height = t_views[0].1.log_height();
+                let log_height = t_views[0].slice.log_height();
                 let n_lift = log_height.saturating_sub(l_skip); // \tilde{n}_T
                 let hypercube_dim = n_lift.saturating_sub(round);
                 let eq_rs = self.eq_r_per_lht.get(&log_height).unwrap().column(0);
@@ -371,11 +393,12 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                 // Prepare the q subslice eval views
                 let t_cols = t_views
                     .iter()
-                    .map(|(com_idx, s)| {
-                        debug_assert_eq!(s.log_height(), log_height);
+                    .map(|tv| {
+                        debug_assert_eq!(tv.slice.log_height(), log_height);
                         // q(u[..round], X, b_{T,j}[round-\tilde n_T..])
                         // q_evals has been folded already
-                        let q = &self.q_evals[*com_idx];
+                        let q = &self.q_evals[tv.com_idx];
+                        let s = tv.slice;
                         let row_start = if round <= n_lift {
                             // round >= 1 so n_lift >= 1
                             (s.row_idx >> log_height) << (hypercube_dim + 1)
@@ -393,12 +416,12 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                         .enumerate()
                         .fold([EF::ZERO; 2], |mut acc, (i, eval)| {
                             let t_idx = window[0] + i;
+                            let tv = &self.trace_views[t_idx];
                             let q = eval[0];
                             let mut eq_ub = self.eq_ub_per_trace[t_idx];
                             let (eq, k_rot) = if round > n_lift {
                                 // Extra contribution of eq(X, b_{T,j}[round-n_T-1])
-                                let b =
-                                    (self.trace_views[t_idx].1.row_idx >> (l_skip + round - 1)) & 1;
+                                let b = (tv.slice.row_idx >> (l_skip + round - 1)) & 1;
                                 eq_ub *= eval_eq_mle(&[x], &[F::from_bool(b == 1)]);
                                 debug_assert_eq!(y, 0);
                                 (eq_rs[0] * eq_ub, k_rot_rs[0] * eq_ub)
@@ -410,8 +433,10 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                                     k_rot_rs[y << 1] * (EF::ONE - x) + k_rot_rs[(y << 1) + 1] * x;
                                 (eq_r * eq_ub, k_rot_r * eq_ub)
                             };
-                            acc[0] += self.lambda_pows[t_idx * 2] * q * eq;
-                            acc[1] += self.lambda_pows[t_idx * 2 + 1] * q * k_rot;
+                            acc[0] += self.lambda_pows[tv.lambda_eq_idx] * q * eq;
+                            if let Some(rot_idx) = tv.lambda_rot_idx {
+                                acc[1] += self.lambda_pows[rot_idx] * q * k_rot;
+                            }
                             acc
                         })
                 })
@@ -431,7 +456,8 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
             .into_par_iter()
             .map(|(lht, mat)| (lht, fold_mle_evals(mat, u_round)))
             .collect();
-        for ((_, s), eq_ub) in zip(&self.trace_views, &mut self.eq_ub_per_trace) {
+        for (tv, eq_ub) in zip(&self.trace_views, &mut self.eq_ub_per_trace) {
+            let s = tv.slice;
             let n_lift = s.log_height().saturating_sub(l_skip);
             if round > n_lift {
                 // Folding above did nothing, and we update the eq(u[1+n_T..=round],
