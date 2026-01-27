@@ -138,6 +138,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
         for _ in 0..num_whir_rounds {
             rounds.push(WhirRoundConfig {
                 num_queries: rng.random_range(1..=10),
+                num_ood_samples: 1,
             });
         }
         let whir = WhirConfig {
