@@ -199,9 +199,9 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                 ht_diff_idxs.push(i);
                 last_height = tv.slice.log_height();
             }
-            eq_r_per_lht.entry(tv.slice.log_height()).or_insert_with(|| {
-                ColMajorMatrix::new(evals_eq_hypercube(&r[1..1 + n_lift]), 1)
-            });
+            eq_r_per_lht
+                .entry(tv.slice.log_height())
+                .or_insert_with(|| ColMajorMatrix::new(evals_eq_hypercube(&r[1..1 + n_lift]), 1));
         }
         ht_diff_idxs.push(trace_views.len());
 
