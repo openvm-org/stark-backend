@@ -8,8 +8,8 @@ use crate::{
     stream::{cudaStreamPerThread, cudaStream_t, CudaEvent},
 };
 
-lazy_static! {
-    static ref COPY_EVENT: Mutex<CudaEvent> = Mutex::new(CudaEvent::new().unwrap());
+thread_local! {
+    static COPY_EVENT: RefCell<Option<CudaEvent>> = Mutex::new(CudaEvent::new().unwrap());
 }
 
 #[repr(i32)]
