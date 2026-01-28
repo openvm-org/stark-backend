@@ -9,7 +9,7 @@ use crate::{
 };
 
 thread_local! {
-    static COPY_EVENT: RefCell<Option<CudaEvent>> = Mutex::new(CudaEvent::new().unwrap());
+    static COPY_EVENT: std::cell::RefCell<Option<CudaEvent>> = Mutex::new(CudaEvent::new().unwrap());
 }
 
 #[repr(i32)]
