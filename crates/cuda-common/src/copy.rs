@@ -1,6 +1,4 @@
-use std::{ffi::c_void, sync::Mutex};
-
-use lazy_static::lazy_static;
+use std::{cell::RefCell, ffi::c_void};
 
 use crate::{
     d_buffer::DeviceBuffer,
@@ -8,8 +6,8 @@ use crate::{
     stream::{cudaStreamPerThread, cudaStream_t, CudaEvent},
 };
 
-lazy_static! {
-    static ref COPY_EVENT: Mutex<CudaEvent> = Mutex::new(CudaEvent::new().unwrap());
+thread_local! {
+    static COPY_EVENT: RefCell<Option<CudaEvent>> = RefCell::new(Some(CudaEvent::new().unwrap()));
 }
 
 #[repr(i32)]
@@ -114,9 +112,7 @@ impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
         })?;
         unsafe {
             COPY_EVENT
-                .lock()
-                .unwrap()
-                .record_and_wait(cudaStreamPerThread)?;
+                .with_borrow(|ce| ce.as_ref().unwrap().record_and_wait(cudaStreamPerThread))?;
 
             host_vec.set_len(self.len());
         }
