@@ -150,7 +150,8 @@ struct TraceViewMeta {
     com_idx: usize,
     slice: StackedSlice,
     lambda_eq_idx: usize,
-    lambda_rot_idx: Option<usize>,
+    lambda_rot_idx: usize,
+    need_rot: bool,
 }
 
 impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReductionCpu<'a> {
@@ -172,19 +173,14 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
             for &(mat_idx, _col_idx, slice) in &d.layout.sorted_cols {
                 let need_rot = need_rot_for_commit[mat_idx];
                 let lambda_eq_idx = lambda_idx;
-                lambda_idx += 1;
-                let lambda_rot_idx = if need_rot {
-                    let idx = lambda_idx;
-                    lambda_idx += 1;
-                    Some(idx)
-                } else {
-                    None
-                };
+                let lambda_rot_idx = lambda_idx + 1;
+                lambda_idx += 2;
                 trace_views.push(TraceViewMeta {
                     com_idx,
                     slice,
                     lambda_eq_idx,
                     lambda_rot_idx,
+                    need_rot,
                 });
             }
         }
@@ -299,8 +295,8 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                     zip(t_window, evals).fold([EF::ZERO; 2], |mut acc, (tv, eval)| {
                         let q = eval[0];
                         acc[0] += self.lambda_pows[tv.lambda_eq_idx] * eq * q * ind;
-                        if let Some(rot_idx) = tv.lambda_rot_idx {
-                            acc[1] += self.lambda_pows[rot_idx] * k_rot * q * ind;
+                        if tv.need_rot {
+                            acc[1] += self.lambda_pows[tv.lambda_rot_idx] * k_rot * q * ind;
                         }
                         acc
                     })
@@ -434,8 +430,8 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReduct
                                 (eq_r * eq_ub, k_rot_r * eq_ub)
                             };
                             acc[0] += self.lambda_pows[tv.lambda_eq_idx] * q * eq;
-                            if let Some(rot_idx) = tv.lambda_rot_idx {
-                                acc[1] += self.lambda_pows[rot_idx] * q * k_rot;
+                            if tv.need_rot {
+                                acc[1] += self.lambda_pows[tv.lambda_rot_idx] * q * k_rot;
                             }
                             acc
                         })

@@ -57,7 +57,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
 
     debug_assert_eq!(layouts.len(), need_rot_per_commit.len());
     let mut lambda_idx = 0usize;
-    let lambda_indices_per_layout: Vec<Vec<(usize, Option<usize>)>> = layouts
+    let lambda_indices_per_layout: Vec<Vec<(usize, usize, bool)>> = layouts
         .iter()
         .enumerate()
         .map(|(commit_idx, layout)| {
@@ -68,15 +68,9 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                 .iter()
                 .map(|&(mat_idx, _col_idx, _slice)| {
                     let lambda_eq_idx = lambda_idx;
-                    lambda_idx += 1;
-                    let lambda_rot_idx = if need_rot_for_commit[mat_idx] {
-                        let idx = lambda_idx;
-                        lambda_idx += 1;
-                        Some(idx)
-                    } else {
-                        None
-                    };
-                    (lambda_eq_idx, lambda_rot_idx)
+                    let lambda_rot_idx = lambda_idx + 1;
+                    lambda_idx += 2;
+                    (lambda_eq_idx, lambda_rot_idx, need_rot_for_commit[mat_idx])
                 })
                 .collect_vec()
         })
@@ -89,9 +83,8 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
         let need_rot = need_rot_per_commit[0][trace_idx];
         for &(t, t_rot) in &parts[0] {
             t_claims.push(t);
-            if need_rot {
-                t_claims.push(t_rot);
-            } else if t_rot != EF::ZERO {
+            t_claims.push(t_rot);
+            if !need_rot && t_rot != EF::ZERO {
                 return Err(StackedReductionError::RotationsNotNeeded);
             }
         }
@@ -104,9 +97,8 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
             let need_rot = need_rot_per_commit[commit_idx][0];
             for &(t, t_rot) in cols {
                 t_claims.push(t);
-                if need_rot {
-                    t_claims.push(t_rot);
-                } else if t_rot != EF::ZERO {
+                t_claims.push(t_rot);
+                if !need_rot && t_rot != EF::ZERO {
                     return Err(StackedReductionError::RotationsNotNeeded);
                 }
             }
@@ -206,7 +198,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                 .iter()
                 .enumerate()
                 .for_each(|(col_idx, &(_, _, s))| {
-                    let (lambda_eq_idx, lambda_rot_idx) = lambda_indices[col_idx];
+                    let (lambda_eq_idx, lambda_rot_idx, need_rot) = lambda_indices[col_idx];
                     let n = s.log_height() as isize - l_skip as isize;
                     let n_lift = n.max(0) as usize;
                     let b = (l_skip + n_lift..l_skip + n_stack)
@@ -225,8 +217,8 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                     let eq_prism = eval_eq_prism(l, &u[..=n_lift], rs_n);
                     let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
                     let mut batched = lambda_powers[lambda_eq_idx] * eq_prism;
-                    if let Some(rot_idx) = lambda_rot_idx {
-                        batched += lambda_powers[rot_idx] * rot_kernel_prism;
+                    if need_rot {
+                        batched += lambda_powers[lambda_rot_idx] * rot_kernel_prism;
                     }
                     coeffs[s.col_idx] += eq_mle * batched * ind;
                 });
