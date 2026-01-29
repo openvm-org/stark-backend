@@ -71,6 +71,10 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     committed_mats: &[(&ColMajorMatrix<F>, &MerkleTree<F, Digest>)],
     u: &[EF],
 ) -> WhirProof {
+    // Proof-of-work grinding before μ batching challenge.
+    // This amplifies soundness of the initial batching step.
+    let mu_pow_witness = transcript.grind(whir_params.mu_pow_bits);
+
     // Sample randomness for algebraic batching.
     // We batch the codewords for \hat{q}_j together _before_ applying WHIR.
     let mu = transcript.sample_ext();
@@ -279,6 +283,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
     }
 
     WhirProof {
+        mu_pow_witness,
         whir_sumcheck_polys,
         codeword_commits,
         ood_values,

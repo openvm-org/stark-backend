@@ -105,6 +105,8 @@ pub type MerkleProof = Vec<Digest>;
 /// multiple commitments.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WhirProof {
+    /// Proof-of-work witness for μ batching challenge.
+    pub mu_pow_witness: F,
     /// Per sumcheck round; evaluations on {1, 2}. This list is "flattened" with respect to the
     /// WHIR rounds.
     pub whir_sumcheck_polys: Vec<[EF; 2]>,
@@ -212,6 +214,7 @@ impl Encode for StackingProof {
 
 impl Encode for WhirProof {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
+        self.mu_pow_witness.encode(writer)?;
         self.whir_sumcheck_polys.encode(writer)?;
         let num_whir_sumcheck_rounds = self.whir_sumcheck_polys.len();
 
@@ -409,6 +412,7 @@ impl Decode for StackingProof {
 
 impl Decode for WhirProof {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
+        let mu_pow_witness = F::decode(reader)?;
         let whir_sumcheck_polys = Vec::<[EF; 2]>::decode(reader)?;
         let num_whir_sumcheck_rounds = whir_sumcheck_polys.len();
         let codeword_commits = Vec::<Digest>::decode(reader)?;
@@ -488,6 +492,7 @@ impl Decode for WhirProof {
         let final_poly = Vec::<EF>::decode(reader)?;
 
         Ok(Self {
+            mu_pow_witness,
             whir_sumcheck_polys,
             codeword_commits,
             ood_values,
