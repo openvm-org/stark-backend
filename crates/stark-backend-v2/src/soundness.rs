@@ -346,11 +346,12 @@ impl SoundnessAnalysis {
         );
         // Initial μ batching: err*(C, num_stacked_columns, δ) = (n-1) · 2^m / (ρ · |F|)
         // where m = log_stacked_height (the RS code blocklength), ρ = 2^{-log_blowup}
-        // Security = |F_ext| - log₂(num_stacked_columns - 1) - log_stacked_height - log_blowup
+        // Security = |F_ext| - log₂(num_stacked_columns - 1) - log_stacked_height - log_blowup + mu_pow_bits
         let mu_batching_bits = challenge_field_bits
             - ((num_stacked_columns - 1) as f64).log2()
             - log_stacked_height as f64
-            - params.log_blowup as f64;
+            - params.log_blowup as f64
+            + whir.mu_pow_bits as f64;
 
         let mut log_inv_rate = params.log_blowup;
         let mut current_log_degree = log_stacked_height;
@@ -515,6 +516,7 @@ pub fn print_soundness_report(
     println!("  log_blowup: {}", params.log_blowup);
     println!("  WHIR k: {}", params.whir.k);
     println!("  WHIR rounds: {}", params.whir.rounds.len());
+    println!("  WHIR mu_pow_bits: {}", params.whir.mu_pow_bits);
     println!(
         "  WHIR query_phase_pow_bits: {}",
         params.whir.query_phase_pow_bits
@@ -644,6 +646,7 @@ mod tests {
                     WhirRoundConfig { num_queries: 36 },
                     WhirRoundConfig { num_queries: 18 },
                 ],
+                mu_pow_bits: 20,
                 query_phase_pow_bits: 16,
                 folding_pow_bits: 10,
             },
