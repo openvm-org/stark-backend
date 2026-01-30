@@ -1,20 +1,25 @@
 use openvm_stark_backend::{
+    engine::VerificationData,
     p3_field::FieldAlgebra,
     prover::{hal::DeviceDataTransporter, types::ProvingContext},
     utils::disable_debug_builder,
     Chip,
 };
-use openvm_stark_sdk::config::FriParameters;
 /// Test utils
 use openvm_stark_sdk::{
-    any_rap_arc_vec, config,
-    config::baby_bear_poseidon2::BabyBearPoseidon2Engine,
+    any_rap_arc_vec,
+    config::{self, baby_bear_poseidon2::BabyBearPoseidon2Engine},
     dummy_airs::{
         fib_air::chip::FibonacciChip,
         interaction::dummy_interaction_air::{DummyInteractionChip, DummyInteractionData},
     },
     engine::StarkFriEngine,
     utils,
+};
+use openvm_stark_sdk::{
+    config::{fri_params::SecurityParameters, FriParameters},
+    engine::VerificationDataWithFriParams,
+    verify_fri_bb_pos2::verify_stark,
 };
 use p3_baby_bear::BabyBear;
 
@@ -43,8 +48,22 @@ fn test_single_fib_stark() {
 
     let trace = generate_trace_rows::<Val>(a, b, n);
 
-    BabyBearPoseidon2Engine::run_simple_test_fast(any_rap_arc_vec![air], vec![trace], vec![pis])
-        .expect("Verification failed");
+    let VerificationDataWithFriParams {
+        data: VerificationData { vk, proof },
+        fri_params,
+    } = BabyBearPoseidon2Engine::run_simple_test_fast(
+        any_rap_arc_vec![air],
+        vec![trace],
+        vec![pis],
+    )
+    .expect("Verification failed");
+
+    verify_stark(
+        &SecurityParameters::standard_100_bits_with_fri_log_blowup(fri_params.log_blowup),
+        &vk,
+        proof.into(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -168,19 +187,23 @@ fn test_optional_air() {
             count: vec![2, 4, 12],
             fields: vec![vec![1], vec![2], vec![3]],
         });
-        engine
-            .prove_then_verify(
-                &pk,
-                ProvingContext {
-                    per_air: vec![
-                        (fib_chip_id, fib_chip.generate_proving_ctx(())),
-                        (send_chip1_id, send_chip1.generate_proving_ctx(())),
-                        (send_chip2_id, send_chip2.generate_proving_ctx(())),
-                        (recv_chip1_id, recv_chip1.generate_proving_ctx(())),
-                    ],
-                },
-            )
-            .expect("Verification failed");
+        let proof = engine.prove(
+            &engine.device.transport_pk_to_device(&pk),
+            ProvingContext {
+                per_air: vec![
+                    (fib_chip_id, fib_chip.generate_proving_ctx(())),
+                    (send_chip1_id, send_chip1.generate_proving_ctx(())),
+                    (send_chip2_id, send_chip2.generate_proving_ctx(())),
+                    (recv_chip1_id, recv_chip1.generate_proving_ctx(())),
+                ],
+            },
+        );
+        verify_stark(
+            &SecurityParameters::standard_fast(),
+            &pk.get_vk(),
+            proof.into(),
+        )
+        .expect("Verification failed");
     }
     // Case 2: The second AIR is not presented.
     {
@@ -194,17 +217,21 @@ fn test_optional_air() {
             count: vec![1, 2, 4],
             fields: vec![vec![1], vec![2], vec![3]],
         });
-        engine
-            .prove_then_verify(
-                &pk,
-                ProvingContext {
-                    per_air: vec![
-                        (send_chip1_id, send_chip1.generate_proving_ctx(())),
-                        (recv_chip1_id, recv_chip1.generate_proving_ctx(())),
-                    ],
-                },
-            )
-            .expect("Verification failed");
+        let proof = engine.prove(
+            &engine.device.transport_pk_to_device(&pk),
+            ProvingContext {
+                per_air: vec![
+                    (send_chip1_id, send_chip1.generate_proving_ctx(())),
+                    (recv_chip1_id, recv_chip1.generate_proving_ctx(())),
+                ],
+            },
+        );
+        verify_stark(
+            &SecurityParameters::standard_fast(),
+            &pk.get_vk(),
+            proof.into(),
+        )
+        .expect("Verification failed");
     }
     // Case 3: Negative - unbalanced interactions.
     {
@@ -225,6 +252,12 @@ fn test_optional_air() {
         assert!(verifier
             .verify(&mut challenger, &pk.get_vk(), &proof)
             .is_err());
+        assert!(verify_stark(
+            &SecurityParameters::standard_fast(),
+            &pk.get_vk(),
+            proof.into(),
+        )
+        .is_err());
     }
 }
 
