@@ -48,6 +48,9 @@ pub enum BatchConstraintError {
 
     #[error("Claims are inconsistent")]
     InconsistentClaims,
+
+    #[error("rotation opening provided when rotations are not needed")]
+    RotationsNotNeeded,
 }
 
 /// `public_values` should be in vkey (air_idx) order, including non-present AIRs.
@@ -258,10 +261,18 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     // 9. Compute the interaction/constraint evals and their hash
     let mut interactions_evals = Vec::new();
     let mut constraints_evals = Vec::new();
+    let need_rot_per_trace = trace_id_to_air_id
+        .iter()
+        .map(|&air_idx| mvk.per_air[air_idx].params.need_rot)
+        .collect_vec();
 
     // Observe common main openings first, and then preprocessed/cached
-    for air_openings in column_openings.iter() {
+    for (trace_idx, air_openings) in column_openings.iter().enumerate() {
+        let need_rot = need_rot_per_trace[trace_idx];
         for &(claim, claim_rot) in &air_openings[0] {
+            if !need_rot && claim_rot != EF::ZERO {
+                return Err(BatchConstraintError::RotationsNotNeeded);
+            }
             transcript.observe_ext(claim);
             transcript.observe_ext(claim_rot);
         }
@@ -272,10 +283,14 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         let vk = &mvk.per_air[air_idx];
         let n = n_per_trace[trace_idx];
         let n_lift = n.max(0) as usize;
+        let need_rot = need_rot_per_trace[trace_idx];
 
         // claim lengths are checked in proof shape
         for claims in air_openings.iter().skip(1) {
             for &(claim, claim_rot) in claims.iter() {
+                if !need_rot && claim_rot != EF::ZERO {
+                    return Err(BatchConstraintError::RotationsNotNeeded);
+                }
                 transcript.observe_ext(claim);
                 transcript.observe_ext(claim_rot);
             }

@@ -92,6 +92,12 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2
     ) -> (StackingProof, WhirProof) {
         let params = &self.config;
 
+        let need_rot_per_trace = ctx
+            .per_trace
+            .iter()
+            .map(|(air_idx, _)| mpk.per_air[*air_idx].vk.params.need_rot)
+            .collect_vec();
+
         // Currently alternates between preprocessed and cached pcs data
         let pre_cached_pcs_data_per_commit: Vec<_> = ctx
             .per_trace
@@ -109,12 +115,23 @@ impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2
         for data in &pre_cached_pcs_data_per_commit {
             stacked_per_commit.push(data);
         }
+        let mut need_rot_per_commit = vec![need_rot_per_trace];
+        for (air_idx, air_ctx) in &ctx.per_trace {
+            let need_rot = mpk.per_air[*air_idx].vk.params.need_rot;
+            if mpk.per_air[*air_idx].preprocessed_data.is_some() {
+                need_rot_per_commit.push(vec![need_rot]);
+            }
+            for _ in &air_ctx.cached_mains {
+                need_rot_per_commit.push(vec![need_rot]);
+            }
+        }
         let (stacking_proof, u_prisma) =
             prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
                 self,
                 transcript,
                 self.config.n_stack,
                 stacked_per_commit,
+                need_rot_per_commit,
                 &r,
             );
 

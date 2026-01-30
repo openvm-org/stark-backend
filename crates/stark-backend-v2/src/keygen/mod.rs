@@ -218,12 +218,8 @@ impl AirKeygenBuilderV2 {
         let air_name = self.air.name();
 
         let symbolic_builder = self.get_symbolic_builder();
-        let vparams = StarkVerifyingParamsV2 {
-            width: symbolic_builder.width(),
-            num_public_values: symbolic_builder.num_public_values(),
-        };
-        // Deprecated in v2:
-        assert!(vparams.width.after_challenge.is_empty());
+        let width = symbolic_builder.width();
+        let num_public_values = symbolic_builder.num_public_values();
 
         let symbolic_constraints = symbolic_builder.constraints();
         let constraint_degree = symbolic_constraints.max_constraint_degree();
@@ -245,6 +241,16 @@ impl AirKeygenBuilderV2 {
         } = self;
 
         let dag = SymbolicConstraintsDag::from(symbolic_constraints);
+        let max_rotation = dag.constraints.max_rotation(); // TODO: exclude unused vars?
+        debug_assert!(max_rotation <= 1);
+        let vparams = StarkVerifyingParamsV2 {
+            width,
+            num_public_values,
+            need_rot: max_rotation == 1,
+        };
+        // Deprecated in v2:
+        assert!(vparams.width.after_challenge.is_empty());
+
         let unused_variables = find_unused_vars(&dag, &vparams.width);
         let vk = StarkVerifyingKeyV2 {
             preprocessed_data: preprocessed_vdata,
