@@ -118,15 +118,15 @@ fn measure<F: FnMut()>(config: &BenchConfig, total_ops: u64, mut f: F) -> OpResu
     // Warmup
     for _ in 0..config.warmup_iters {
         f();
-        sync();
     }
+    sync();
     
     // Timed
     let start = Instant::now();
     for _ in 0..config.bench_iters {
         f();
-        sync();
     }
+    sync();
     let elapsed = start.elapsed();
     
     let avg_time_ms = elapsed.as_secs_f64() * 1000.0 / config.bench_iters as f64;
@@ -139,21 +139,16 @@ pub fn bench_fp(config: &BenchConfig) -> FieldBenchResult {
     let n = config.num_elements;
     let reps = config.ops_per_element;
     
-    let raw_a = random_u32s(n, 12345);
-    let raw_b = random_u32s(n, 67890);
-    let d_raw_a = raw_a.to_device().unwrap();
-    let d_raw_b = raw_b.to_device().unwrap();
-    let d_a = DeviceBuffer::<u32>::with_capacity(n);
-    let d_b = DeviceBuffer::<u32>::with_capacity(n);
+    // Only 3 device buffers: a, b, out (init works in-place)
+    let d_a = random_u32s(n, 12345).to_device().unwrap();
+    let d_b = random_u32s(n, 67890).to_device().unwrap();
     let d_out = DeviceBuffer::<u32>::with_capacity(n);
     
+    // Benchmark init (in-place: raw u32 -> Fp) - also initializes d_a
     let init = measure(config, n as u64, || {
-        cuda_check(unsafe { launch_bench_init_fp(d_a.as_mut_raw_ptr(), d_raw_a.as_ptr(), n) });
+        cuda_check(unsafe { launch_bench_init_fp(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
     });
-    
-    // Initialize both buffers
-    cuda_check(unsafe { launch_bench_init_fp(d_a.as_mut_raw_ptr(), d_raw_a.as_ptr(), n) });
-    cuda_check(unsafe { launch_bench_init_fp(d_b.as_mut_raw_ptr(), d_raw_b.as_ptr(), n) });
+    cuda_check(unsafe { launch_bench_init_fp(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
     sync();
     
     let ops = n as u64 * reps as u64;
@@ -177,20 +172,16 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
     let n = config.num_elements;
     let reps = config.ops_per_element;
     
-    let raw_a = random_u32s(n * 4, 12345);
-    let raw_b = random_u32s(n * 4, 67890);
-    let d_raw_a = raw_a.to_device().unwrap();
-    let d_raw_b = raw_b.to_device().unwrap();
-    let d_a = DeviceBuffer::<u32>::with_capacity(n * 4);
-    let d_b = DeviceBuffer::<u32>::with_capacity(n * 4);
+    // Only 3 device buffers: a, b, out (init works in-place)
+    let d_a = random_u32s(n * 4, 12345).to_device().unwrap();
+    let d_b = random_u32s(n * 4, 67890).to_device().unwrap();
     let d_out = DeviceBuffer::<u32>::with_capacity(n * 4);
     
+    // Benchmark init (in-place: raw u32s -> FpExt) - also initializes d_a
     let init = measure(config, n as u64, || {
-        cuda_check(unsafe { launch_bench_init_fpext(d_a.as_mut_raw_ptr(), d_raw_a.as_ptr(), n) });
+        cuda_check(unsafe { launch_bench_init_fpext(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
     });
-    
-    cuda_check(unsafe { launch_bench_init_fpext(d_a.as_mut_raw_ptr(), d_raw_a.as_ptr(), n) });
-    cuda_check(unsafe { launch_bench_init_fpext(d_b.as_mut_raw_ptr(), d_raw_b.as_ptr(), n) });
+    cuda_check(unsafe { launch_bench_init_fpext(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
     sync();
     
     let ops = n as u64 * reps as u64;
