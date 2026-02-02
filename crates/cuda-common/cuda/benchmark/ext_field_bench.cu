@@ -2,7 +2,7 @@
  * Extension Field Benchmark Kernels
  * 
  * Provides templated kernels for benchmarking field arithmetic operations.
- * Supports Fp (base field) and FpExt (quartic extension).
+ * Supports Fp (base field), FpExt (quartic extension), and Fp5 (quintic extension).
  * 
  * Operations:
  * - init: Initialize field elements from raw u32 arrays
@@ -13,6 +13,7 @@
 
 #include "fp.h"
 #include "fpext.h"
+#include "fp5.h"
 
 // ============================================================================
 // Launch Configuration
@@ -34,6 +35,7 @@ inline dim3 get_launch_config(size_t n, int& grid_size) {
 /// Initialize field elements from raw u32 data
 /// For Fp: 1 u32 per element
 /// For FpExt: 4 u32s per element
+/// For Fp5: 5 u32s per element
 template<typename T, int ELEMS_PER_FIELD>
 __global__ void bench_init_kernel(T* out, const uint32_t* raw_data, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -48,6 +50,12 @@ __global__ void bench_init_kernel(T* out, const uint32_t* raw_data, size_t n) {
         FpExt& elem = reinterpret_cast<FpExt*>(out)[idx];
         elem = FpExt(Fp(raw_data[base]), Fp(raw_data[base+1]), 
                      Fp(raw_data[base+2]), Fp(raw_data[base+3]));
+    } else if constexpr (ELEMS_PER_FIELD == 5) {
+        // Fp5: 5 u32s
+        size_t base = idx * 5;
+        Fp5& elem = reinterpret_cast<Fp5*>(out)[idx];
+        elem = Fp5(Fp(raw_data[base]), Fp(raw_data[base+1]), 
+                   Fp(raw_data[base+2]), Fp(raw_data[base+3]), Fp(raw_data[base+4]));
     }
 }
 
@@ -162,5 +170,39 @@ extern "C" int launch_bench_inv_fpext(void* out, const void* a, size_t n, int re
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
     bench_inv_kernel<FpExt><<<grid_size, block>>>(static_cast<FpExt*>(out), static_cast<const FpExt*>(a), n, reps);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Extern "C" Wrappers for Fp5 (quintic extension)
+// ============================================================================
+
+extern "C" int launch_bench_init_fp5(void* out, const uint32_t* raw_data, size_t n) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_init_kernel<Fp5, 5><<<grid_size, block>>>(static_cast<Fp5*>(out), raw_data, n);
+    return cudaGetLastError();
+}
+
+extern "C" int launch_bench_add_fp5(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_add_kernel<Fp5><<<grid_size, block>>>(
+        static_cast<Fp5*>(out), static_cast<const Fp5*>(a), static_cast<const Fp5*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int launch_bench_mul_fp5(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_mul_kernel<Fp5><<<grid_size, block>>>(
+        static_cast<Fp5*>(out), static_cast<const Fp5*>(a), static_cast<const Fp5*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int launch_bench_inv_fp5(void* out, const void* a, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_inv_kernel<Fp5><<<grid_size, block>>>(static_cast<Fp5*>(out), static_cast<const Fp5*>(a), n, reps);
     return cudaGetLastError();
 }

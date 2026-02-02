@@ -27,6 +27,11 @@ extern "C" {
     fn launch_bench_add_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn launch_bench_mul_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn launch_bench_inv_fpext(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
+    fn launch_bench_init_fp5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn launch_bench_add_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn launch_bench_mul_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn launch_bench_inv_fp5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 }
 
 /// Check CUDA return code, panic on error
@@ -53,7 +58,7 @@ pub struct BenchConfig {
 impl Default for BenchConfig {
     fn default() -> Self {
         Self {
-            num_elements: 1 << 25,
+            num_elements: 1 << 22, // 4M elements
             warmup_iters: 3,
             bench_iters: 10,
             ops_per_element: 100,
@@ -201,6 +206,39 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
     FieldBenchResult { field_name: "FpExt".into(), u32s_per_element: 4, init, add, mul, inv }
 }
 
+pub fn bench_fp5(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    // Only 3 device buffers: a, b, out (init works in-place)
+    let d_a = random_u32s(n * 5, 12345).to_device().unwrap();
+    let d_b = random_u32s(n * 5, 67890).to_device().unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity(n * 5);
+    
+    // Benchmark init (in-place: raw u32s -> Fp5) - also initializes d_a
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { launch_bench_init_fp5(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { launch_bench_init_fp5(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { launch_bench_add_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { launch_bench_mul_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { launch_bench_inv_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    FieldBenchResult { field_name: "Fp5".into(), u32s_per_element: 5, init, add, mul, inv }
+}
+
 pub fn run_all_benchmarks(config: &BenchConfig) {
     println!("=== Extension Field Benchmark ===");
     println!("Elements: {}", config.num_elements);
@@ -217,6 +255,10 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     
     let fpext = bench_fpext(config);
     fpext.print(Some(&fp));
+    println!();
+    
+    let fp5 = bench_fp5(config);
+    fp5.print(Some(&fp));
 }
 
 #[cfg(test)]
