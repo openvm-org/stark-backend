@@ -16,22 +16,51 @@ use crate::stream::current_stream_sync;
 // FFI Bindings
 // ============================================================================
 
+// Benchmark kernels
 #[link(name = "ext_field_bench")]
 extern "C" {
-    fn launch_bench_init_fp(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn launch_bench_add_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn launch_bench_mul_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn launch_bench_inv_fp(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    fn init_fp(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_fp(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
-    fn launch_bench_init_fpext(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn launch_bench_add_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn launch_bench_mul_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn launch_bench_inv_fpext(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    fn init_fpext(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_fpext(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
-    fn launch_bench_init_fp5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn launch_bench_add_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn launch_bench_mul_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn launch_bench_inv_fp5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    fn init_fp5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_fp5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
+    fn init_fp6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_fp6(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
+    fn init_fp2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_fp2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
+    fn init_fp3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_fp3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
+    // Verification kernels
+    fn verify_inv_fp5(failures: *mut u32, a: *const c_void, n: usize) -> i32;
+    fn verify_distrib_fp5(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
+
+    fn verify_inv_fp6(failures: *mut u32, a: *const c_void, n: usize) -> i32;
+    fn verify_distrib_fp6(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
+
+    fn verify_inv_fp2x3(failures: *mut u32, a: *const c_void, n: usize) -> i32;
+    fn verify_distrib_fp2x3(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
+
+    fn verify_inv_fp3x2(failures: *mut u32, a: *const c_void, n: usize) -> i32;
+    fn verify_distrib_fp3x2(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
 }
 
 /// Check CUDA return code, panic on error
@@ -151,23 +180,23 @@ pub fn bench_fp(config: &BenchConfig) -> FieldBenchResult {
     
     // Benchmark init (in-place: raw u32 -> Fp) - also initializes d_a
     let init = measure(config, n as u64, || {
-        cuda_check(unsafe { launch_bench_init_fp(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+        cuda_check(unsafe { init_fp(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
     });
-    cuda_check(unsafe { launch_bench_init_fp(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    cuda_check(unsafe { init_fp(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
     sync();
     
     let ops = n as u64 * reps as u64;
     
     let add = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_add_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { add_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
     });
     
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_mul_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { mul_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
     });
     
     let inv = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_inv_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { inv_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
     FieldBenchResult { field_name: "Fp".into(), u32s_per_element: 1, init, add, mul, inv }
@@ -184,23 +213,23 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
     
     // Benchmark init (in-place: raw u32s -> FpExt) - also initializes d_a
     let init = measure(config, n as u64, || {
-        cuda_check(unsafe { launch_bench_init_fpext(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+        cuda_check(unsafe { init_fpext(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
     });
-    cuda_check(unsafe { launch_bench_init_fpext(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    cuda_check(unsafe { init_fpext(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
     sync();
     
     let ops = n as u64 * reps as u64;
     
     let add = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_add_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { add_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
     });
     
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_mul_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { mul_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
     });
     
     let inv = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_inv_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { inv_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
     FieldBenchResult { field_name: "FpExt".into(), u32s_per_element: 4, init, add, mul, inv }
@@ -217,26 +246,121 @@ pub fn bench_fp5(config: &BenchConfig) -> FieldBenchResult {
     
     // Benchmark init (in-place: raw u32s -> Fp5) - also initializes d_a
     let init = measure(config, n as u64, || {
-        cuda_check(unsafe { launch_bench_init_fp5(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+        cuda_check(unsafe { init_fp5(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
     });
-    cuda_check(unsafe { launch_bench_init_fp5(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    cuda_check(unsafe { init_fp5(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
     sync();
     
     let ops = n as u64 * reps as u64;
     
     let add = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_add_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { add_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
     });
     
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_mul_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { mul_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
     });
     
     let inv = measure(config, ops, || {
-        cuda_check(unsafe { launch_bench_inv_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe { inv_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
     FieldBenchResult { field_name: "Fp5".into(), u32s_per_element: 5, init, add, mul, inv }
+}
+
+pub fn bench_fp6(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    // Only 3 device buffers: a, b, out (init works in-place)
+    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    
+    // Benchmark init (in-place: raw u32s -> Fp6) - also initializes d_a
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_fp6(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_fp6(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_fp6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_fp6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_fp6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    FieldBenchResult { field_name: "Fp6".into(), u32s_per_element: 6, init, add, mul, inv }
+}
+
+pub fn bench_fp2x3(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_fp2x3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_fp2x3(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_fp2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_fp2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_fp2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    FieldBenchResult { field_name: "Fp2x3".into(), u32s_per_element: 6, init, add, mul, inv }
+}
+
+pub fn bench_fp3x2(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_fp3x2(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_fp3x2(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_fp3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_fp3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_fp3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    FieldBenchResult { field_name: "Fp3x2".into(), u32s_per_element: 6, init, add, mul, inv }
 }
 
 pub fn run_all_benchmarks(config: &BenchConfig) {
@@ -259,12 +383,106 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     
     let fp5 = bench_fp5(config);
     fp5.print(Some(&fp));
+    println!();
+    
+    let fp6 = bench_fp6(config);
+    fp6.print(Some(&fp));
+    println!();
+    
+    let fp2x3 = bench_fp2x3(config);
+    fp2x3.print(Some(&fp));
+    println!();
+    
+    let fp3x2 = bench_fp3x2(config);
+    fp3x2.print(Some(&fp));
+}
+
+// ============================================================================
+// Verification
+// ============================================================================
+
+/// Generic verification function for extension fields
+fn verify_field(
+    field_name: &str,
+    n: usize,
+    elems_per_field: usize,
+    init_fn: unsafe extern "C" fn(*mut c_void, *const u32, usize) -> i32,
+    inv_fn: unsafe extern "C" fn(*mut u32, *const c_void, usize) -> i32,
+    distrib_fn: unsafe extern "C" fn(*mut u32, *const c_void, *const c_void, *const c_void, usize) -> i32,
+) -> bool {
+    use crate::copy::MemCopyD2H;
+    
+    println!("  Testing {}...", field_name);
+    
+    // Create test data
+    let d_a = random_u32s(n * elems_per_field, 11111).to_device().unwrap();
+    let d_b = random_u32s(n * elems_per_field, 22222).to_device().unwrap();
+    let d_c = random_u32s(n * elems_per_field, 33333).to_device().unwrap();
+    
+    // Initialize
+    cuda_check(unsafe { init_fn(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    cuda_check(unsafe { init_fn(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    cuda_check(unsafe { init_fn(d_c.as_mut_raw_ptr(), d_c.as_ptr(), n) });
+    sync();
+    
+    // Test 1: a * inv(a) = 1
+    let d_failures = vec![0u32].to_device().unwrap();
+    cuda_check(unsafe { inv_fn(d_failures.as_mut_raw_ptr() as *mut u32, d_a.as_raw_ptr(), n) });
+    sync();
+    let inv_failures = d_failures.to_host().unwrap();
+    
+    // Test 2: Distributivity
+    let d_failures2 = vec![0u32].to_device().unwrap();
+    cuda_check(unsafe { distrib_fn(
+        d_failures2.as_mut_raw_ptr() as *mut u32,
+        d_a.as_raw_ptr(), d_b.as_raw_ptr(), d_c.as_raw_ptr(), n
+    ) });
+    sync();
+    let distrib_failures = d_failures2.to_host().unwrap();
+    
+    let passed = inv_failures[0] == 0 && distrib_failures[0] == 0;
+    println!("    Inversion: {} failures, Distributivity: {} failures -> {}",
+             inv_failures[0], distrib_failures[0], if passed { "PASSED" } else { "FAILED" });
+    
+    passed
+}
+
+/// Verify all extension field implementations
+pub fn verify_all_fields(num_elements: usize) -> bool {
+    println!("=== Extension Field Verification ===");
+    println!("Testing {} elements per field...", num_elements);
+    println!();
+    
+    let mut all_passed = true;
+    
+    // Use existing benchmark init functions for initialization
+    all_passed &= verify_field("Fp5", num_elements, 5,
+        init_fp5, verify_inv_fp5, verify_distrib_fp5);
+    
+    all_passed &= verify_field("Fp6", num_elements, 6,
+        init_fp6, verify_inv_fp6, verify_distrib_fp6);
+    
+    all_passed &= verify_field("Fp2x3 (2×3 tower)", num_elements, 6,
+        init_fp2x3, verify_inv_fp2x3, verify_distrib_fp2x3);
+    
+    all_passed &= verify_field("Fp3x2 (3×2 tower)", num_elements, 6,
+        init_fp3x2, verify_inv_fp3x2, verify_distrib_fp3x2);
+    
+    println!();
+    println!("Overall: {}", if all_passed { "ALL PASSED" } else { "SOME FAILED" });
+    
+    all_passed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_extension_field_verification() {
+        assert!(verify_all_fields(1024), "Extension field verification failed!");
+    }
+    
     #[test]
     fn test_extension_field_benchmark() {
         run_all_benchmarks(&BenchConfig::default());

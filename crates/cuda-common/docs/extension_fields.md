@@ -7,8 +7,10 @@ This document describes the mathematical foundations and implementation details 
 1. [Base Field: Baby Bear](#base-field-baby-bear)
 2. [Extension Field Theory](#extension-field-theory)
 3. [Fp5 Implementation](#fp5-implementation)
-4. [Benchmarking System](#benchmarking-system)
-5. [Performance Analysis](#performance-analysis)
+4. [Fp6 Implementation](#fp6-implementation)
+5. [Fp6 Tower Constructions](#fp6-tower-constructions)
+6. [Benchmarking System](#benchmarking-system)
+7. [Performance Analysis](#performance-analysis)
 
 ---
 
@@ -226,6 +228,267 @@ These tests validate:
 
 ---
 
+## Fp6 Implementation
+
+### Irreducible Polynomial Selection
+
+For `Fp6 = Fp[x] / (x^6 - W)`, we need `W` that is:
+- **NOT a quadratic residue** (not a square in Fp)
+- **NOT a cubic residue** (not a cube in Fp)
+
+This is stricter than Fp5, which only required "not a 5th power."
+
+**Verification** (computed `W^((p-1)/2)` and `W^((p-1)/3)` mod p):
+
+| W | Is square? | Is cube? | Valid for Fp6? |
+|---|------------|----------|----------------|
+| 2 | Yes | No | ❌ |
+| 3 | Yes | No | ❌ |
+| 7 | Yes | No | ❌ |
+| 11 | No | Yes | ❌ |
+| 22 | No | No | ✅ First valid |
+| 31 | No | No | ✅ **Chosen** |
+
+### Why W = 31 was Chosen
+
+While W = 22 is the smallest valid choice, we chose **W = 31** for these reasons:
+
+1. **Conventional constant**: 31 is the multiplicative generator of Baby Bear, widely used in the ecosystem
+2. **Efficient reduction**: `31 = 2^5 - 1`, so `31·x = (x << 5) - x` (one subtraction vs three additions for W = 22)
+3. **Memorable**: As a well-known constant, it's easier to recognize and debug
+
+### Irreducible Polynomial
+
+```
+x^6 - 31
+```
+
+### Element Representation
+
+```cpp
+struct Fp6 {
+    Fp elems[6];  // [a₀, a₁, a₂, a₃, a₄, a₅]
+    static constexpr uint32_t W = 31;
+};
+```
+
+Memory: 6 × 4 = 24 bytes per element.
+
+### Multiplication Algorithm
+
+**Schoolbook multiplication** with fused reduction:
+
+Given `a, b ∈ Fp6`, compute `c = a · b`:
+
+1. Compute product coefficients `t[0..10]` (degree 10 polynomial)
+2. Reduce using `x^6 = 31`:
+   - `c[0] = t[0] + 31·t[6]`
+   - `c[1] = t[1] + 31·t[7]`
+   - `c[2] = t[2] + 31·t[8]`
+   - `c[3] = t[3] + 31·t[9]`
+   - `c[4] = t[4] + 31·t[10]`
+   - `c[5] = t[5]`
+
+**Cost**: 36 Fp multiplications + ~35 Fp additions
+
+### Squaring Algorithm
+
+Uses symmetry: for `i ≠ j`, `aᵢaⱼ` appears twice in the product.
+
+**Cost**: 21 Fp multiplications (vs 36 for general multiply)
+
+### Inversion Algorithm
+
+Same approach as Fp5: **Gaussian elimination** on the 6×6 multiplication matrix.
+
+**Cost**: O(n³) = O(216) Fp operations + 6 Fp inversions
+
+### Correctness Verification
+
+The Fp6 implementation was verified using on-device tests with 1024 random elements:
+
+**Test 1: Multiplicative Inverse**
+```
+∀a ≠ 0: a · inv(a) = 1
+```
+Result: **0 failures**.
+
+**Test 2: Distributivity**
+```
+∀a, b, c: (a + b) · c = a·c + b·c
+```
+Result: **0 failures**.
+
+---
+
+## Fp6 Tower Constructions
+
+Instead of building Fp6 directly as `Fp[x]/(x^6 - W)`, we can construct it as a **tower of extensions**. This can improve performance, especially for inversion, by leveraging more efficient algorithms at each level.
+
+### Tower Options
+
+| Tower | Structure | Base → Level 1 → Level 2 |
+|-------|-----------|--------------------------|
+| **2×3** | Fp → Fp2 → Fp6 | Quadratic then cubic extension |
+| **3×2** | Fp → Fp3 → Fp6 | Cubic then quadratic extension |
+
+Both produce isomorphic fields with `p^6` elements, but arithmetic efficiency differs.
+
+### Choosing Tower Constants
+
+For each tower level, we need an irreducible polynomial. The key insight is that constants must remain non-residues when lifted to the extension field.
+
+#### Why Constants 11 and 2 Work for Both Towers
+
+**Constant 11 (non-square in Fp)**:
+- Test: `11^((p-1)/2) ≠ 1 (mod p)` ✓
+- In Fp3: If 11 were a square in Fp3, then `11 = a²` for some `a ∈ Fp3`. Taking the norm: `N(11) = N(a²) = N(a)² = 11³`. But `11³ = 11 · 11²` implies 11 is a square in Fp (contradiction).
+- Therefore 11 remains a non-square in both Fp and Fp3.
+
+**Constant 2 (non-cube in Fp)**:
+- Test: `2^((p-1)/3) ≠ 1 (mod p)` ✓
+- In Fp2: If 2 were a cube in Fp2, say `2 = a³`, then `N(2) = N(a³) = N(a)³ = 4`. We need `4 = b³` for some `b ∈ Fp`. But `4^((p-1)/3) ≠ 1 (mod p)`, so 4 is not a cube.
+- Therefore 2 remains a non-cube in both Fp and Fp2.
+
+### 2×3 Tower (Fp2x3)
+
+**Construction**:
+```
+Fp2 = Fp[u] / (u² - 11)      -- u² = 11
+Fp6 = Fp2[v] / (v³ - 2)      -- v³ = 2
+```
+
+**Element Representation**:
+```cpp
+struct Fp2_11 {
+    Fp c0, c1;  // c0 + c1·u where u² = 11
+    static constexpr uint32_t W = 11;
+};
+
+struct Fp2x3 {
+    Fp2_11 c0, c1, c2;  // c0 + c1·v + c2·v² where v³ = 2
+    static constexpr uint32_t W = 2;  // for cubic extension
+};
+```
+
+Memory: 6 × 4 = 24 bytes (same as direct Fp6).
+
+**Arithmetic**:
+
+*Fp2 Multiplication* (Karatsuba-style):
+```
+(a0 + a1·u)(b0 + b1·u) = (a0·b0 + 11·a1·b1) + (a0·b1 + a1·b0)·u
+```
+Cost: 3 Fp muls (using Karatsuba) or 4 Fp muls (schoolbook)
+
+*Fp2x3 Multiplication*:
+```
+(a0 + a1·v + a2·v²)(b0 + b1·v + b2·v²)
+```
+Reduce using `v³ = 2`:
+- `v³ → 2`
+- `v⁴ → 2v`
+
+Cost: 9 Fp2 muls + reductions
+
+*Fp2x3 Inversion* (via Gaussian elimination on 3×3 matrix over Fp2):
+```
+Solve M·x = e₀ where M is the "multiply by a" matrix over Fp2
+```
+Cost: O(27) Fp2 ops + 3 Fp2 inversions
+
+*Fp2 Inversion* (via norm):
+```
+(a + b·u)⁻¹ = (a - b·u) / (a² - 11·b²)
+```
+Cost: 2 Fp muls + 1 Fp square + 1 Fp sub + 1 Fp inv
+
+### 3×2 Tower (Fp3x2)
+
+**Construction**:
+```
+Fp3 = Fp[u] / (u³ - 2)       -- u³ = 2
+Fp6 = Fp3[v] / (v² - 11)     -- v² = 11
+```
+
+**Element Representation**:
+```cpp
+struct Fp3 {
+    Fp c0, c1, c2;  // c0 + c1·u + c2·u² where u³ = 2
+    static constexpr uint32_t W = 2;
+};
+
+struct Fp3x2 {
+    Fp3 c0, c1;  // c0 + c1·v where v² = 11
+    static constexpr uint32_t W = 11;  // for quadratic extension
+};
+```
+
+Memory: 6 × 4 = 24 bytes (same as direct Fp6).
+
+**Arithmetic**:
+
+*Fp3 Multiplication*:
+```
+(a0 + a1·u + a2·u²)(b0 + b1·u + b2·u²)
+```
+Reduce using `u³ = 2`:
+- `u³ → 2`
+- `u⁴ → 2u`
+- `u⁵ → 2u²`
+
+Cost: 9 Fp muls + reductions
+
+*Fp3x2 Multiplication* (Karatsuba-style):
+```
+(a0 + a1·v)(b0 + b1·v) = (a0·b0 + 11·a1·b1) + (a0·b1 + a1·b0)·v
+```
+Cost: 3 Fp3 muls (Karatsuba) = 27 Fp muls
+
+*Fp3x2 Inversion* (via norm to Fp3):
+```
+(a + b·v)⁻¹ = (a - b·v) / (a² - 11·b²)
+```
+Where `a² - 11·b²` is computed in Fp3, then inverted.
+
+Cost: 2 Fp3 muls + 1 Fp3 square + 1 Fp3 sub + 1 Fp3 inv
+
+*Fp3 Inversion* (Gaussian elimination on 3×3 matrix):
+```
+Solve M·x = e₀ where M is the "multiply by a" matrix over Fp
+```
+Cost: O(27) Fp ops + 3 Fp inversions
+
+### Why 3×2 Tower is Faster for Inversion
+
+The key difference is in how inversion cascades through the tower:
+
+| Tower | Inversion Strategy | Fp Inversions Required |
+|-------|-------------------|----------------------|
+| Direct Fp6 | 6×6 Gaussian elimination | 6 |
+| 2×3 (Fp2x3) | 3×3 over Fp2, then Fp2 inv via norm | 3 × (1 per Fp2 inv) = 3 |
+| 3×2 (Fp3x2) | Norm to Fp3, then 3×3 Gaussian | 3 |
+
+However, the **norm-based** approach in Fp3x2 requires fewer total operations:
+- Fp3x2: Compute norm (2 Fp3 muls + 1 Fp3 sq), then invert in Fp3
+- Fp2x3: Must do 3×3 Gaussian over Fp2, each Fp2 op costs 3-4 Fp ops
+
+**Benchmark result**: Fp3x2 inversion is **~5.6× faster** than direct Fp6 and **~1.8× faster** than Fp2x3.
+
+### Correctness Verification
+
+Both tower implementations were verified using on-device tests with 1024 random elements:
+
+**Fp2x3 (2×3 tower)**:
+- Multiplicative inverse test: **0 failures**
+- Distributivity test: **0 failures**
+
+**Fp3x2 (3×2 tower)**:
+- Multiplicative inverse test: **0 failures**
+- Distributivity test: **0 failures**
+
+---
+
 ## Benchmarking System
 
 ### Architecture
@@ -239,7 +502,7 @@ These tests validate:
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                 CUDA Kernel Launchers                        │
-│  ext_field_bench.cu: launch_bench_{init,add,mul,inv}_*      │
+│  ext_field_bench.cu: {init,add,mul,inv}_{fp,fpext,fp5,...}  │
 └──────────────────────────┬──────────────────────────────────┘
                            │ kernel launches
                            ▼
@@ -320,31 +583,50 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 
 | Field | Size | init | add | mul | inv |
 |-------|------|------|-----|-----|-----|
-| Fp | 4 B | 310 Gops/s | 3547 Gops/s | 1824 Gops/s | 59.7 Gops/s |
-| FpExt (Fp4) | 16 B | 53 Gops/s | 1480 Gops/s | 203 Gops/s | 41.6 Gops/s |
-| Fp5 | 20 B | 43 Gops/s | 960 Gops/s | 77 Gops/s | 3.8 Gops/s |
+| Fp | 4 B | 308 Gops/s | 3532 Gops/s | 1869 Gops/s | 59.6 Gops/s |
+| FpExt (Fp4) | 16 B | 53 Gops/s | 1339 Gops/s | 187 Gops/s | 41.6 Gops/s |
+| Fp5 | 20 B | 43 Gops/s | 1201 Gops/s | 77 Gops/s | 3.8 Gops/s |
+| Fp6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 2.2 Gops/s |
+| Fp2x3 (2×3 tower) | 24 B | 36 Gops/s | 986 Gops/s | 42 Gops/s | 7.2 Gops/s |
+| Fp3x2 (3×2 tower) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 12.7 Gops/s |
 
 ### Relative Performance (vs Fp baseline)
 
 | Field | init | add | mul | inv |
 |-------|------|-----|-----|-----|
 | Fp | 1.0× | 1.0× | 1.0× | 1.0× |
-| FpExt | 5.8× slower | 2.4× slower | 9.0× slower | 1.4× slower |
-| Fp5 | 7.2× slower | 3.7× slower | 23.6× slower | 15.6× slower |
+| FpExt | 5.8× slower | 2.6× slower | 10.0× slower | 1.4× slower |
+| Fp5 | 7.2× slower | 2.9× slower | 24.3× slower | 15.7× slower |
+| Fp6 (direct) | 8.6× slower | 3.6× slower | 38.3× slower | 26.6× slower |
+| Fp2x3 | 8.6× slower | 3.6× slower | 44.0× slower | 8.2× slower |
+| Fp3x2 | 8.7× slower | 3.6× slower | 38.1× slower | 4.7× slower |
+
+### Fp6 Implementation Comparison
+
+| Implementation | Multiplication | Inversion | Best For |
+|---------------|----------------|-----------|----------|
+| Direct Fp6 | 49 Gops/s | 2.2 Gops/s | General purpose |
+| Fp2x3 (2×3 tower) | 42 Gops/s | 7.2 Gops/s | Inversion-heavy workloads |
+| Fp3x2 (3×2 tower) | 49 Gops/s | **12.7 Gops/s** | **Best overall** |
+
+**Key findings**:
+- **Multiplication**: Direct Fp6 and Fp3x2 are equivalent (~49 Gops/s), Fp2x3 is ~15% slower
+- **Inversion**: Fp3x2 is **5.8× faster** than direct, Fp2x3 is **3.3× faster** than direct
+- **Recommendation**: Use **Fp3x2** for best overall performance
 
 ### Analysis
 
-**Addition**: Near-linear scaling with degree (expected: 4× and 5× for Fp4/Fp5).
+**Addition**: Near-linear scaling with degree (expected: 4×, 5×, 6× for Fp4/Fp5/Fp6).
 
 **Multiplication**: Super-linear scaling due to:
-- Schoolbook: O(n²) multiplications
+- Schoolbook: O(n²) multiplications (16, 25, 36 for Fp4/Fp5/Fp6)
 - FpExt uses optimized `bb31_4_t` with possible SIMD
-- Fp5 uses manual schoolbook
+- Fp5/Fp6 use manual schoolbook
 
 **Inversion**:
 - Fp uses Fermat with optimized addition chain (~31 squares + 7 muls)
 - FpExt uses norm-based inversion (reduce to Fp inversion)
-- Fp5 uses Gaussian elimination (much faster than naive Fermat)
+- Fp5/Fp6 use Gaussian elimination (much faster than naive Fermat)
 
 ### Optimization History
 
@@ -381,7 +663,6 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 
 ## Future Work
 
-- [ ] Fp6 implementation (consider 2×3 vs 3×2 tower construction)
-- [ ] Lazy reduction for Fp5 multiplication
+- [ ] Lazy reduction for Fp5/Fp6 multiplication
 - [ ] Batch inversion using Montgomery's trick
-- [ ] Karatsuba evaluation for larger extensions
+- [ ] Karatsuba multiplication for Fp5/Fp6 (potential 20-30% speedup)

@@ -24,6 +24,7 @@ fn main() {
             .include(&include_path)
             .flag("-Xcompiler=-fPIC")
             .file("cuda/benchmark/ext_field_bench.cu")
+            .file("cuda/benchmark/verification.cu")
             .build();
 
         println!("cargo:include={}", include_path.display()); // -> DEP_CUDA_COMMON_INCLUDE
