@@ -215,9 +215,9 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                         (l_skip, &r[..=n_lift])
                     };
                     let eq_prism = eval_eq_prism(l, &u[..=n_lift], rs_n);
-                    let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
                     let mut batched = lambda_powers[lambda_eq_idx] * eq_prism;
                     if need_rot {
+                        let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
                         batched += lambda_powers[lambda_rot_idx] * rot_kernel_prism;
                     }
                     coeffs[s.col_idx] += eq_mle * batched * ind;
