@@ -3,6 +3,7 @@
  * 
  * Provides templated kernels for benchmarking field arithmetic operations.
  * Supports: Fp, FpExt (Fp4), Fp5, Fp6, Fp2x3 (2×3 tower), Fp3x2 (3×2 tower)
+ *           Kb (KoalaBear base)
  * 
  * Operations:
  * - init: Initialize field elements from raw u32 arrays
@@ -17,6 +18,7 @@
 #include "fp6.h"
 #include "fp2x3.h"
 #include "fp3x2.h"
+#include "kb.h"
 
 // ============================================================================
 // Launch Configuration
@@ -327,5 +329,46 @@ extern "C" int inv_fp3x2(void* out, const void* a, size_t n, int reps) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
     bench_inv_kernel<Fp3x2><<<grid_size, block>>>(static_cast<Fp3x2*>(out), static_cast<const Fp3x2*>(a), n, reps);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Extern "C" Wrappers for Kb (KoalaBear base field)
+// ============================================================================
+
+/// Initialize Kb elements from raw u32 data
+__global__ void bench_init_kb_kernel(Kb* out, const uint32_t* raw_data, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    out[idx] = Kb(raw_data[idx]);
+}
+
+extern "C" int init_kb(void* out, const uint32_t* raw_data, size_t n) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_init_kb_kernel<<<grid_size, block>>>(static_cast<Kb*>(out), raw_data, n);
+    return cudaGetLastError();
+}
+
+extern "C" int add_kb(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_add_kernel<Kb><<<grid_size, block>>>(
+        static_cast<Kb*>(out), static_cast<const Kb*>(a), static_cast<const Kb*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int mul_kb(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_mul_kernel<Kb><<<grid_size, block>>>(
+        static_cast<Kb*>(out), static_cast<const Kb*>(a), static_cast<const Kb*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int inv_kb(void* out, const void* a, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_inv_kernel<Kb><<<grid_size, block>>>(static_cast<Kb*>(out), static_cast<const Kb*>(a), n, reps);
     return cudaGetLastError();
 }
