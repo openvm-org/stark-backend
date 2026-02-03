@@ -146,6 +146,7 @@ pub struct OpResult {
     pub throughput_gops: f64,
 }
 
+#[derive(Clone)]
 pub struct FieldBenchResult {
     pub field_name: String,
     pub u32s_per_element: usize,
@@ -155,30 +156,57 @@ pub struct FieldBenchResult {
     pub inv: OpResult,
 }
 
-impl FieldBenchResult {
-    pub fn print(&self, baseline: Option<&FieldBenchResult>) {
-        println!("--- {} ({} u32s/elem) ---", self.field_name, self.u32s_per_element);
-        
-        let print_op = |name: &str, op: &OpResult, base_op: Option<&OpResult>| {
-            let delta = match base_op {
-                Some(base) if base.throughput_gops > 0.0 => {
-                    let ratio = base.throughput_gops / op.throughput_gops;
-                    if ratio >= 1.0 {
-                        format!(" (x{:.1} slower)", ratio)
-                    } else {
-                        format!(" (x{:.1} faster)", 1.0 / ratio)
-                    }
-                }
-                _ => String::new(),
-            };
-            println!("  {:4}: {:>8.3} ms, {:>8.2} Gops/s{}", name, op.avg_time_ms, op.throughput_gops, delta);
-        };
-        
-        print_op("init", &self.init, baseline.map(|b| &b.init));
-        print_op("add", &self.add, baseline.map(|b| &b.add));
-        print_op("mul", &self.mul, baseline.map(|b| &b.mul));
-        print_op("inv", &self.inv, baseline.map(|b| &b.inv));
+/// Print a table of benchmark results
+fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenchResult) {
+    // Find max field name length for alignment
+    let max_name_len = results.iter().map(|r| r.field_name.len()).max().unwrap_or(10);
+    
+    // Table 1: Time (ms)
+    println!("### Time (ms)");
+    println!();
+    print!("| {:width$} |", "Field", width = max_name_len);
+    println!("    init |     add |     mul |     inv |");
+    print!("|{:-<width$}--|", "", width = max_name_len);
+    println!("--------:|--------:|--------:|--------:|");
+    for r in results {
+        print!("| {:width$} |", r.field_name, width = max_name_len);
+        println!(" {:>7.3} | {:>7.3} | {:>7.3} | {:>7.3} |", 
+            r.init.avg_time_ms, r.add.avg_time_ms, r.mul.avg_time_ms, r.inv.avg_time_ms);
     }
+    println!();
+    
+    // Table 2: Throughput (Gops/s)
+    println!("### Throughput (Gops/s)");
+    println!();
+    print!("| {:width$} |", "Field", width = max_name_len);
+    println!("    init |     add |     mul |     inv |");
+    print!("|{:-<width$}--|", "", width = max_name_len);
+    println!("--------:|--------:|--------:|--------:|");
+    for r in results {
+        print!("| {:width$} |", r.field_name, width = max_name_len);
+        println!(" {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} |", 
+            r.init.throughput_gops, r.add.throughput_gops, r.mul.throughput_gops, r.inv.throughput_gops);
+    }
+    println!();
+    
+    // Table 3: Relative to baseline (xN)
+    println!("### Relative to {} (xN)", baseline.field_name);
+    println!();
+    print!("| {:width$} |", "Field", width = max_name_len);
+    println!("    init |     add |     mul |     inv |");
+    print!("|{:-<width$}--|", "", width = max_name_len);
+    println!("--------:|--------:|--------:|--------:|");
+    for r in results {
+        let init_ratio = baseline.init.throughput_gops / r.init.throughput_gops;
+        let add_ratio = baseline.add.throughput_gops / r.add.throughput_gops;
+        let mul_ratio = baseline.mul.throughput_gops / r.mul.throughput_gops;
+        let inv_ratio = baseline.inv.throughput_gops / r.inv.throughput_gops;
+        
+        print!("| {:width$} |", r.field_name, width = max_name_len);
+        println!(" {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} |", 
+            init_ratio, add_ratio, mul_ratio, inv_ratio);
+    }
+    println!();
 }
 
 // ============================================================================
@@ -571,59 +599,33 @@ pub fn bench_kb3x2(config: &BenchConfig) -> FieldBenchResult {
 
 pub fn run_all_benchmarks(config: &BenchConfig) {
     println!("=== Extension Field Benchmark ===");
+    println!();
     println!("Elements: {}", config.num_elements);
-    println!("Ops per element: {} (to measure compute, not memory bandwidth)", config.ops_per_element);
+    println!("Ops per element: {}", config.ops_per_element);
     println!("Warmup: {}, Bench iters: {}", config.warmup_iters, config.bench_iters);
     println!();
-    println!("Throughput in Gops/s = billion operations per second");
-    println!("Delta shows comparison to Fp baseline (slower/faster)");
-    println!();
     
+    // Collect all BabyBear results
     let fp = bench_fp(config);
-    fp.print(None);
-    println!();
-    
     let fpext = bench_fpext(config);
-    fpext.print(Some(&fp));
-    println!();
-    
     let fp5 = bench_fp5(config);
-    fp5.print(Some(&fp));
-    println!();
-    
     let fp6 = bench_fp6(config);
-    fp6.print(Some(&fp));
-    println!();
-    
     let fp2x3 = bench_fp2x3(config);
-    fp2x3.print(Some(&fp));
-    println!();
-    
     let fp3x2 = bench_fp3x2(config);
-    fp3x2.print(Some(&fp));
-    println!();
     
-    println!("=== KoalaBear Fields ===");
-    println!();
-    
+    // Collect all KoalaBear results
     let kb = bench_kb(config);
-    kb.print(Some(&fp));
-    println!();
-    
     let kb5 = bench_kb5(config);
-    kb5.print(Some(&fp));
-    println!();
-    
     let kb6 = bench_kb6(config);
-    kb6.print(Some(&fp));
-    println!();
-    
     let kb2x3 = bench_kb2x3(config);
-    kb2x3.print(Some(&fp));
-    println!();
-    
     let kb3x2 = bench_kb3x2(config);
-    kb3x2.print(Some(&fp));
+    
+    // Combine all results
+    let all_results = vec![
+        fp.clone(), fpext, fp5, fp6, fp2x3, fp3x2,
+        kb, kb5, kb6, kb2x3, kb3x2,
+    ];
+    print_benchmark_tables(&all_results, &fp);
 }
 
 // ============================================================================
