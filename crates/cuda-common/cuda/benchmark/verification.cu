@@ -7,7 +7,7 @@
  * 
  * Supported fields:
  * - Baby Bear: Fp5, Fp6, Fp2x3, Fp3x2
- * - KoalaBear: Kb (base), Kb5 (quintic), Kb6 (sextic)
+ * - KoalaBear: Kb (base), Kb5, Kb6, Kb2x3 (2×3 tower), Kb3x2 (3×2 tower)
  * 
  * Note: Uses init functions from ext_field_bench.cu for initialization.
  */
@@ -21,6 +21,8 @@
 #include "kb.h"
 #include "kb5.h"
 #include "kb6.h"
+#include "kb2x3.h"
+#include "kb3x2.h"
 
 // ============================================================================
 // Launch Configuration
@@ -202,5 +204,43 @@ extern "C" int verify_distrib_kb6(uint32_t* failures, const void* a, const void*
     dim3 block = get_verify_config(n, grid_size);
     verify_distrib_kernel<Kb6><<<grid_size, block>>>(
         failures, static_cast<const Kb6*>(a), static_cast<const Kb6*>(b), static_cast<const Kb6*>(c), n);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Kb2x3 Verification (KoalaBear 2×3 tower)
+// ============================================================================
+
+extern "C" int verify_inv_kb2x3(uint32_t* failures, const void* a, size_t n) {
+    int grid_size;
+    dim3 block = get_verify_config(n, grid_size);
+    verify_inv_kernel<Kb2x3><<<grid_size, block>>>(failures, static_cast<const Kb2x3*>(a), n);
+    return cudaGetLastError();
+}
+
+extern "C" int verify_distrib_kb2x3(uint32_t* failures, const void* a, const void* b, const void* c, size_t n) {
+    int grid_size;
+    dim3 block = get_verify_config(n, grid_size);
+    verify_distrib_kernel<Kb2x3><<<grid_size, block>>>(
+        failures, static_cast<const Kb2x3*>(a), static_cast<const Kb2x3*>(b), static_cast<const Kb2x3*>(c), n);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Kb3x2 Verification (KoalaBear 3×2 tower)
+// ============================================================================
+
+extern "C" int verify_inv_kb3x2(uint32_t* failures, const void* a, size_t n) {
+    int grid_size;
+    dim3 block = get_verify_config(n, grid_size);
+    verify_inv_kernel<Kb3x2><<<grid_size, block>>>(failures, static_cast<const Kb3x2*>(a), n);
+    return cudaGetLastError();
+}
+
+extern "C" int verify_distrib_kb3x2(uint32_t* failures, const void* a, const void* b, const void* c, size_t n) {
+    int grid_size;
+    dim3 block = get_verify_config(n, grid_size);
+    verify_distrib_kernel<Kb3x2><<<grid_size, block>>>(
+        failures, static_cast<const Kb3x2*>(a), static_cast<const Kb3x2*>(b), static_cast<const Kb3x2*>(c), n);
     return cudaGetLastError();
 }

@@ -67,6 +67,18 @@ extern "C" {
     fn mul_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_kb6(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
+    // KoalaBear 2×3 tower (u²=3, v³=1+u)
+    fn init_kb2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_kb2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
+    // KoalaBear 3×2 tower (w³=-w-4, z²=3)
+    fn init_kb3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_kb3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
     // Verification kernels
     fn verify_inv_fp5(failures: *mut u32, a: *const c_void, n: usize) -> i32;
     fn verify_distrib_fp5(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
@@ -88,6 +100,12 @@ extern "C" {
 
     fn verify_inv_kb6(failures: *mut u32, a: *const c_void, n: usize) -> i32;
     fn verify_distrib_kb6(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
+
+    fn verify_inv_kb2x3(failures: *mut u32, a: *const c_void, n: usize) -> i32;
+    fn verify_distrib_kb2x3(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
+
+    fn verify_inv_kb3x2(failures: *mut u32, a: *const c_void, n: usize) -> i32;
+    fn verify_distrib_kb3x2(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
 }
 
 /// Check CUDA return code, panic on error
@@ -487,6 +505,70 @@ pub fn bench_kb6(config: &BenchConfig) -> FieldBenchResult {
     FieldBenchResult { field_name: "Kb6".into(), u32s_per_element: 6, init, add, mul, inv }
 }
 
+pub fn bench_kb2x3(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    // Kb2x3 has 6 u32s per element
+    let d_a = random_u32s(n * 6, 55555).to_device().unwrap();
+    let d_b = random_u32s(n * 6, 66666).to_device().unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_kb2x3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_kb2x3(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_kb2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_kb2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_kb2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    FieldBenchResult { field_name: "Kb2x3".into(), u32s_per_element: 6, init, add, mul, inv }
+}
+
+pub fn bench_kb3x2(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    // Kb3x2 has 6 u32s per element
+    let d_a = random_u32s(n * 6, 77777).to_device().unwrap();
+    let d_b = random_u32s(n * 6, 88888).to_device().unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_kb3x2(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_kb3x2(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_kb3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_kb3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_kb3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    FieldBenchResult { field_name: "Kb3x2".into(), u32s_per_element: 6, init, add, mul, inv }
+}
+
 pub fn run_all_benchmarks(config: &BenchConfig) {
     println!("=== Extension Field Benchmark ===");
     println!("Elements: {}", config.num_elements);
@@ -534,6 +616,14 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     
     let kb6 = bench_kb6(config);
     kb6.print(Some(&fp));
+    println!();
+    
+    let kb2x3 = bench_kb2x3(config);
+    kb2x3.print(Some(&fp));
+    println!();
+    
+    let kb3x2 = bench_kb3x2(config);
+    kb3x2.print(Some(&fp));
 }
 
 // ============================================================================
@@ -619,6 +709,12 @@ pub fn verify_all_fields(num_elements: usize) -> bool {
     
     all_passed &= verify_field("Kb6 (KoalaBear sextic)", num_elements, 6,
         init_kb6, verify_inv_kb6, verify_distrib_kb6);
+    
+    all_passed &= verify_field("Kb2x3 (KoalaBear 2×3 tower)", num_elements, 6,
+        init_kb2x3, verify_inv_kb2x3, verify_distrib_kb2x3);
+    
+    all_passed &= verify_field("Kb3x2 (KoalaBear 3×2 tower)", num_elements, 6,
+        init_kb3x2, verify_inv_kb3x2, verify_distrib_kb3x2);
     
     println!();
     println!("Overall: {}", if all_passed { "ALL PASSED" } else { "SOME FAILED" });

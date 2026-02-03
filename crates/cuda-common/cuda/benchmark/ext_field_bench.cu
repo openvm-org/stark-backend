@@ -5,7 +5,7 @@
  * 
  * Supported fields:
  * - Baby Bear: Fp (base), FpExt (Fp4), Fp5, Fp6, Fp2x3 (2×3 tower), Fp3x2 (3×2 tower)
- * - KoalaBear: Kb (base), Kb5 (x^5 + x + 4), Kb6 (x^6 + x^3 + 1)
+ * - KoalaBear: Kb (base), Kb5, Kb6, Kb2x3 (2×3 tower), Kb3x2 (3×2 tower)
  * 
  * Operations:
  * - init: Initialize field elements from raw u32 arrays
@@ -23,6 +23,8 @@
 #include "kb.h"
 #include "kb5.h"
 #include "kb6.h"
+#include "kb2x3.h"
+#include "kb3x2.h"
 
 // ============================================================================
 // Launch Configuration
@@ -417,5 +419,73 @@ extern "C" int inv_kb6(void* out, const void* a, size_t n, int reps) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
     bench_inv_kernel<Kb6><<<grid_size, block>>>(static_cast<Kb6*>(out), static_cast<const Kb6*>(a), n, reps);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Extern "C" Wrappers for Kb2x3 (KoalaBear 2×3 tower)
+// ============================================================================
+
+extern "C" int init_kb2x3(void* out, const uint32_t* raw_data, size_t n) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_init_kernel<Kb2x3, Kb, 6><<<grid_size, block>>>(static_cast<Kb2x3*>(out), raw_data, n);
+    return cudaGetLastError();
+}
+
+extern "C" int add_kb2x3(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_add_kernel<Kb2x3><<<grid_size, block>>>(
+        static_cast<Kb2x3*>(out), static_cast<const Kb2x3*>(a), static_cast<const Kb2x3*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int mul_kb2x3(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_mul_kernel<Kb2x3><<<grid_size, block>>>(
+        static_cast<Kb2x3*>(out), static_cast<const Kb2x3*>(a), static_cast<const Kb2x3*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int inv_kb2x3(void* out, const void* a, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_inv_kernel<Kb2x3><<<grid_size, block>>>(static_cast<Kb2x3*>(out), static_cast<const Kb2x3*>(a), n, reps);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Extern "C" Wrappers for Kb3x2 (KoalaBear 3×2 tower)
+// ============================================================================
+
+extern "C" int init_kb3x2(void* out, const uint32_t* raw_data, size_t n) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_init_kernel<Kb3x2, Kb, 6><<<grid_size, block>>>(static_cast<Kb3x2*>(out), raw_data, n);
+    return cudaGetLastError();
+}
+
+extern "C" int add_kb3x2(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_add_kernel<Kb3x2><<<grid_size, block>>>(
+        static_cast<Kb3x2*>(out), static_cast<const Kb3x2*>(a), static_cast<const Kb3x2*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int mul_kb3x2(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_mul_kernel<Kb3x2><<<grid_size, block>>>(
+        static_cast<Kb3x2*>(out), static_cast<const Kb3x2*>(a), static_cast<const Kb3x2*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int inv_kb3x2(void* out, const void* a, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_inv_kernel<Kb3x2><<<grid_size, block>>>(static_cast<Kb3x2*>(out), static_cast<const Kb3x2*>(a), n, reps);
     return cudaGetLastError();
 }

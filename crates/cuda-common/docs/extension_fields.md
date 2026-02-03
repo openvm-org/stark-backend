@@ -671,6 +671,69 @@ Cost: O(216) Kb operations + 6 Kb inversions
 | Fp6/Kb6 polynomial | X⁶ - 31 | X⁶ + X³ + 1 |
 | Reduction cost | Multiply by W | Add/sub only (Kb6) |
 
+### KoalaBear Tower Constructions
+
+Like Baby Bear, KoalaBear supports two tower constructions for degree-6 extensions.
+
+#### Kb2x3: 2×3 Tower
+
+**Construction**:
+```
+Kb2 = Kb[u] / (u² - 3)      -- u² = 3 (3 is smallest nonsquare in Kb)
+Kb6 = Kb2[v] / (v³ - (1+u)) -- v³ = 1+u
+```
+
+**Why these constants**:
+- 3 is the smallest nonsquare in KoalaBear
+- (1+u) is not a cube in Kb2 (verified: gcd(3, p²-1) = 3, and norm(1+u)^((p²-1)/3) ≠ 1)
+
+**Element representation**:
+```cpp
+struct Kb2 { Kb c0, c1; };       // c0 + c1*u
+struct Kb2x3 { Kb2 c0, c1, c2; }; // c0 + c1*v + c2*v²
+```
+
+**Reduction rules**:
+- `u² = 3`
+- `v³ = 1 + u`
+- `v⁴ = (1+u)*v`
+- `v⁵ = (1+u)*v²`
+
+#### Kb3x2: 3×2 Tower
+
+**Construction**:
+```
+Kb3 = Kb[w] / (w³ + w + 4)  -- w³ = -w - 4 (trinomial, since binomial fails)
+Kb6 = Kb3[z] / (z² - 3)     -- z² = 3
+```
+
+**Why trinomial for Kb3**:
+Since gcd(3, p-1) = 1, every element in Kb is a cube, so no binomial `w³ - W` is irreducible. We must use the trinomial `w³ + w + 4`.
+
+**Why 3 works for quadratic step**:
+Since deg(Kb3/Kb) = 3 is odd, an element is a square in Kb3 iff it was a square in Kb. Since 3 is nonsquare in Kb, it remains nonsquare in Kb3.
+
+**Element representation**:
+```cpp
+struct Kb3 { Kb c0, c1, c2; };    // c0 + c1*w + c2*w²
+struct Kb3x2 { Kb3 c0, c1; };     // c0 + c1*z
+```
+
+**Reduction rules**:
+- `w³ = -w - 4`
+- `w⁴ = -w² - 4w`
+- `z² = 3`
+
+#### KoalaBear Tower vs BabyBear Tower Comparison
+
+| Property | BabyBear Towers | KoalaBear Towers |
+|----------|-----------------|------------------|
+| Quadratic constant | 11 | **3** (smaller) |
+| Cubic (2×3) | v³ = 2 (binomial) | v³ = 1+u (Kb2 element) |
+| Cubic (3×2) | u³ = 2 (binomial) | w³ = -w - 4 (trinomial) |
+| Kb3x2 inversion | Norm-based | Norm-based |
+| Kb2x3 inversion | 3×3 Gaussian over Kb2 | 3×3 Gaussian over Kb2 |
+
 ---
 
 ## Benchmarking System
@@ -782,7 +845,9 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 |-------|------|------|-----|-----|-----|
 | Kb | 4 B | 290 Gops/s | 3545 Gops/s | 1867 Gops/s | 45.4 Gops/s |
 | Kb5 | 20 B | 43 Gops/s | 1199 Gops/s | 68 Gops/s | 3.7 Gops/s |
-| Kb6 | 24 B | 36 Gops/s | 987 Gops/s | **53 Gops/s** | 2.2 Gops/s |
+| Kb6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | **53 Gops/s** | 2.2 Gops/s |
+| Kb2x3 (2×3 tower) | 24 B | 36 Gops/s | 987 Gops/s | 43 Gops/s | 6.6 Gops/s |
+| Kb3x2 (3×2 tower) | 24 B | 36 Gops/s | 986 Gops/s | 43 Gops/s | **10.1 Gops/s** |
 
 ### Relative Performance (vs Fp baseline)
 
@@ -818,6 +883,20 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | inv | 2.2 Gops/s | 2.2 Gops/s | Same |
 
 The Kb6 trinomial `X⁶ + X³ + 1` has a special property: `α⁹ = 1`. This means reduction from degree-10 terms only requires additions/subtractions, making Kb6 multiplication faster than Fp6 despite both being degree-6 extensions.
+
+### Kb6 Tower Implementation Comparison
+
+| Implementation | Multiplication | Inversion | Best For |
+|---------------|----------------|-----------|----------|
+| Direct Kb6 | **53 Gops/s** | 2.2 Gops/s | Multiplication-heavy |
+| Kb2x3 (2×3 tower) | 43 Gops/s | 6.6 Gops/s | Balanced workloads |
+| Kb3x2 (3×2 tower) | 43 Gops/s | **10.1 Gops/s** | Inversion-heavy |
+
+**Key findings for KoalaBear**:
+- **Multiplication**: Direct Kb6 is fastest (23% faster than towers) due to its add/sub-only reduction
+- **Inversion**: Kb3x2 is **4.6× faster** than direct Kb6
+- **Trade-off**: Unlike BabyBear (where Fp3x2 matches direct Fp6 on multiplication), KoalaBear towers sacrifice multiplication speed for inversion speed
+- **Recommendation**: Use direct Kb6 for general workloads; consider Kb3x2 if inversion dominates
 
 ### Analysis
 
@@ -857,4 +936,4 @@ The Kb6 trinomial `X⁶ + X³ + 1` has a special property: `α⁹ = 1`. This mea
 - [ ] Lazy reduction for Fp5/Fp6 multiplication
 - [ ] Batch inversion using Montgomery's trick
 - [ ] Karatsuba multiplication for Fp5/Fp6 (potential 20-30% speedup)
-- [ ] KoalaBear tower constructions (Kb2x3, Kb3x2)
+
