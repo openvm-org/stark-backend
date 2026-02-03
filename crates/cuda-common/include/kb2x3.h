@@ -31,53 +31,107 @@
 // ============================================================================
 
 struct Kb2 {
-    Kb c0, c1;  // c0 + c1*u
+    union { Kb elems[2]; uint32_t u[2]; };  // c0 + c1*u
     
     static constexpr uint32_t W = 3;  // u² = 3
+    static constexpr uint32_t MOD  = 0x7f000001;
+    static constexpr uint32_t M    = 0x7effffff;
+    static constexpr uint32_t BETA = 0x05FFFFFA;  // (3 << 32) % MOD
     
-    __device__ Kb2() : c0(), c1() {}
-    __device__ Kb2(Kb a0) : c0(a0), c1() {}
-    __device__ Kb2(Kb a0, Kb a1) : c0(a0), c1(a1) {}
-    __device__ explicit Kb2(uint32_t x) : c0(Kb(x)), c1() {}
+    __device__ Kb2() : elems{Kb(), Kb()} {}
+    __device__ Kb2(Kb a0) : elems{a0, Kb()} {}
+    __device__ Kb2(Kb a0, Kb a1) : elems{a0, a1} {}
+    __device__ explicit Kb2(uint32_t x) : elems{Kb(x), Kb()} {}
+    
+    // Accessors for compatibility
+    __device__ Kb& c0() { return elems[0]; }
+    __device__ Kb& c1() { return elems[1]; }
+    __device__ const Kb& c0() const { return elems[0]; }
+    __device__ const Kb& c1() const { return elems[1]; }
     
     __device__ static Kb2 zero() { return Kb2(); }
     __device__ static Kb2 one() { return Kb2(Kb::one()); }
     
     __device__ Kb2 operator+(Kb2 rhs) const {
-        return Kb2(c0 + rhs.c0, c1 + rhs.c1);
+        return Kb2(elems[0] + rhs.elems[0], elems[1] + rhs.elems[1]);
     }
     
     __device__ Kb2 operator-(Kb2 rhs) const {
-        return Kb2(c0 - rhs.c0, c1 - rhs.c1);
+        return Kb2(elems[0] - rhs.elems[0], elems[1] - rhs.elems[1]);
     }
     
     __device__ Kb2 operator-() const {
-        return Kb2(-c0, -c1);
+        return Kb2(-elems[0], -elems[1]);
     }
     
     __device__ Kb2 operator*(Kb rhs) const {
-        return Kb2(c0 * rhs, c1 * rhs);
+        return Kb2(elems[0] * rhs, elems[1] * rhs);
     }
     
     // (a0 + a1*u) * (b0 + b1*u) = (a0*b0 + 3*a1*b1) + (a0*b1 + a1*b0)*u
+    // r0 = a0*b0 + BETA*a1*b1
+    // r1 = a0*b1 + a1*b0
     __device__ Kb2 operator*(Kb2 rhs) const {
-        Kb a0b0 = c0 * rhs.c0;
-        Kb a1b1 = c1 * rhs.c1;
-        Kb a0b1_a1b0 = c0 * rhs.c1 + c1 * rhs.c0;
-        // 3*a1*b1 = a1*b1 + a1*b1 + a1*b1 (avoid Kb(3) multiplication)
-        return Kb2(a0b0 + a1b1 + a1b1 + a1b1, a0b1_a1b0);
+        Kb2 ret;
+        
+# if defined(__CUDA_ARCH__) && !defined(__clang__) && !defined(__clang_analyzer__)
+#  ifdef __GNUC__
+#   define asm __asm__ __volatile__
+#  else
+#   define asm asm volatile
+#  endif
+        // Operand mapping: %1=a0, %2=a1, %3=b0, %4=b1, %5=MOD, %6=M, %7=BETA
+        
+        // r0 = a0*b0 + BETA*a1*b1
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %2, %4;     mul.hi.u32  %hi, %2, %4;\n\t"       // a1*b1
+            "mul.lo.u32    %m, %lo, %6;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %5, %lo; madc.hi.u32 %hi, %m, %5, %hi;\n\t"
+            "mul.lo.u32    %lo, %hi, %7;    mul.hi.u32  %hi, %hi, %7;\n\t"      // *BETA
+            "mad.lo.cc.u32 %lo, %1, %3, %lo; madc.hi.u32 %hi, %1, %3, %hi;\n\t" // +a0*b0
+            "setp.ge.u32   %p, %hi, %5;\n\t"
+            "@%p sub.u32   %hi, %hi, %5;\n\t"
+            "mul.lo.u32    %m, %lo, %6;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %5, %lo; madc.hi.u32 %0, %m, %5, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %5;\n\t"
+            "@%p sub.u32   %0, %0, %5;\n\t"
+            "}" : "=r"(ret.u[0])
+                : "r"(u[0]), "r"(u[1]), "r"(rhs.u[0]), "r"(rhs.u[1]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+
+        // r1 = a0*b1 + a1*b0 (no BETA)
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %1, %4;     mul.hi.u32  %hi, %1, %4;\n\t"       // a0*b1
+            "mad.lo.cc.u32 %lo, %2, %3, %lo; madc.hi.u32 %hi, %2, %3, %hi;\n\t" // +a1*b0
+            "setp.ge.u32   %p, %hi, %5;\n\t"
+            "@%p sub.u32   %hi, %hi, %5;\n\t"
+            "mul.lo.u32    %m, %lo, %6;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %5, %lo; madc.hi.u32 %0, %m, %5, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %5;\n\t"
+            "@%p sub.u32   %0, %0, %5;\n\t"
+            "}" : "=r"(ret.u[1])
+                : "r"(u[0]), "r"(u[1]), "r"(rhs.u[0]), "r"(rhs.u[1]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+#  undef asm
+# else
+        Kb a0b0 = elems[0] * rhs.elems[0];
+        Kb a1b1 = elems[1] * rhs.elems[1];
+        Kb a0b1_a1b0 = elems[0] * rhs.elems[1] + elems[1] * rhs.elems[0];
+        ret.elems[0] = a0b0 + a1b1 + a1b1 + a1b1;
+        ret.elems[1] = a0b1_a1b0;
+# endif
+        return ret;
     }
     
     __device__ Kb2 square() const {
-        // (a0 + a1*u)² = (a0² + 3*a1²) + 2*a0*a1*u
-        Kb a0sq = c0 * c0;
-        Kb a1sq = c1 * c1;
-        Kb a0a1 = c0 * c1;
+        Kb a0sq = elems[0] * elems[0];
+        Kb a1sq = elems[1] * elems[1];
+        Kb a0a1 = elems[0] * elems[1];
         return Kb2(a0sq + a1sq + a1sq + a1sq, a0a1 + a0a1);
     }
     
     __device__ bool operator==(Kb2 rhs) const {
-        return c0 == rhs.c0 && c1 == rhs.c1;
+        return elems[0] == rhs.elems[0] && elems[1] == rhs.elems[1];
     }
     
     __device__ bool operator!=(Kb2 rhs) const {
@@ -87,7 +141,7 @@ struct Kb2 {
 
 // Inversion for Kb2: (a + b*u)^(-1) = (a - b*u) / (a² - 3*b²)
 __device__ inline Kb2 inv(Kb2 x) {
-    Kb a = x.c0, b = x.c1;
+    Kb a = x.elems[0], b = x.elems[1];
     Kb bsq = b * b;
     Kb norm = a * a - bsq - bsq - bsq;  // a² - 3*b²
     Kb norm_inv = inv(norm);

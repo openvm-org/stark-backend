@@ -270,6 +270,7 @@ extern "C" int inv_fp5(void* out, const void* a, size_t n, int reps) {
     return cudaGetLastError();
 }
 
+
 // ============================================================================
 // Extern "C" Wrappers for Fp6 (sextic extension)
 // ============================================================================

@@ -25,52 +25,108 @@
 // ============================================================================
 
 struct Fp2 {
-    Fp c0, c1;  // c0 + c1*u
+    union { Fp elems[2]; uint32_t u[2]; };  // c0 + c1*u
     
     static constexpr uint32_t W = 11;  // u² = 11
+    static constexpr uint32_t MOD  = 0x78000001;
+    static constexpr uint32_t M    = 0x77ffffff;
+    static constexpr uint32_t BETA = 0x37FFFFE9;  // (11 << 32) % MOD
     
-    __device__ Fp2() : c0(), c1() {}
-    __device__ Fp2(Fp a0) : c0(a0), c1() {}
-    __device__ Fp2(Fp a0, Fp a1) : c0(a0), c1(a1) {}
-    __device__ explicit Fp2(uint32_t x) : c0(Fp(x)), c1() {}
+    __device__ Fp2() : elems{Fp(), Fp()} {}
+    __device__ Fp2(Fp a0) : elems{a0, Fp()} {}
+    __device__ Fp2(Fp a0, Fp a1) : elems{a0, a1} {}
+    __device__ explicit Fp2(uint32_t x) : elems{Fp(x), Fp()} {}
+    
+    // Accessors for compatibility
+    __device__ Fp& c0() { return elems[0]; }
+    __device__ Fp& c1() { return elems[1]; }
+    __device__ const Fp& c0() const { return elems[0]; }
+    __device__ const Fp& c1() const { return elems[1]; }
     
     __device__ static Fp2 zero() { return Fp2(); }
     __device__ static Fp2 one() { return Fp2(Fp::one()); }
     
     __device__ Fp2 operator+(Fp2 rhs) const {
-        return Fp2(c0 + rhs.c0, c1 + rhs.c1);
+        return Fp2(elems[0] + rhs.elems[0], elems[1] + rhs.elems[1]);
     }
     
     __device__ Fp2 operator-(Fp2 rhs) const {
-        return Fp2(c0 - rhs.c0, c1 - rhs.c1);
+        return Fp2(elems[0] - rhs.elems[0], elems[1] - rhs.elems[1]);
     }
     
     __device__ Fp2 operator-() const {
-        return Fp2(-c0, -c1);
+        return Fp2(-elems[0], -elems[1]);
     }
     
     __device__ Fp2 operator*(Fp rhs) const {
-        return Fp2(c0 * rhs, c1 * rhs);
+        return Fp2(elems[0] * rhs, elems[1] * rhs);
     }
     
     // (a0 + a1*u) * (b0 + b1*u) = (a0*b0 + 11*a1*b1) + (a0*b1 + a1*b0)*u
+    // r0 = a0*b0 + BETA*a1*b1
+    // r1 = a0*b1 + a1*b0
     __device__ Fp2 operator*(Fp2 rhs) const {
-        Fp a0b0 = c0 * rhs.c0;
-        Fp a1b1 = c1 * rhs.c1;
-        Fp a0b1_a1b0 = c0 * rhs.c1 + c1 * rhs.c0;
-        return Fp2(a0b0 + Fp(W) * a1b1, a0b1_a1b0);
+        Fp2 ret;
+        
+# if defined(__CUDA_ARCH__) && !defined(__clang__) && !defined(__clang_analyzer__)
+#  ifdef __GNUC__
+#   define asm __asm__ __volatile__
+#  else
+#   define asm asm volatile
+#  endif
+        // Operand mapping: %1=a0, %2=a1, %3=b0, %4=b1, %5=MOD, %6=M, %7=BETA
+        
+        // r0 = a0*b0 + BETA*a1*b1
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %2, %4;     mul.hi.u32  %hi, %2, %4;\n\t"       // a1*b1
+            "mul.lo.u32    %m, %lo, %6;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %5, %lo; madc.hi.u32 %hi, %m, %5, %hi;\n\t"
+            "mul.lo.u32    %lo, %hi, %7;    mul.hi.u32  %hi, %hi, %7;\n\t"      // *BETA
+            "mad.lo.cc.u32 %lo, %1, %3, %lo; madc.hi.u32 %hi, %1, %3, %hi;\n\t" // +a0*b0
+            "setp.ge.u32   %p, %hi, %5;\n\t"
+            "@%p sub.u32   %hi, %hi, %5;\n\t"
+            "mul.lo.u32    %m, %lo, %6;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %5, %lo; madc.hi.u32 %0, %m, %5, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %5;\n\t"
+            "@%p sub.u32   %0, %0, %5;\n\t"
+            "}" : "=r"(ret.u[0])
+                : "r"(u[0]), "r"(u[1]), "r"(rhs.u[0]), "r"(rhs.u[1]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+
+        // r1 = a0*b1 + a1*b0 (no BETA)
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %1, %4;     mul.hi.u32  %hi, %1, %4;\n\t"       // a0*b1
+            "mad.lo.cc.u32 %lo, %2, %3, %lo; madc.hi.u32 %hi, %2, %3, %hi;\n\t" // +a1*b0
+            "setp.ge.u32   %p, %hi, %5;\n\t"
+            "@%p sub.u32   %hi, %hi, %5;\n\t"
+            "mul.lo.u32    %m, %lo, %6;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %5, %lo; madc.hi.u32 %0, %m, %5, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %5;\n\t"
+            "@%p sub.u32   %0, %0, %5;\n\t"
+            "}" : "=r"(ret.u[1])
+                : "r"(u[0]), "r"(u[1]), "r"(rhs.u[0]), "r"(rhs.u[1]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+#  undef asm
+# else
+        Fp a0b0 = elems[0] * rhs.elems[0];
+        Fp a1b1 = elems[1] * rhs.elems[1];
+        Fp a0b1_a1b0 = elems[0] * rhs.elems[1] + elems[1] * rhs.elems[0];
+        ret.elems[0] = a0b0 + Fp(W) * a1b1;
+        ret.elems[1] = a0b1_a1b0;
+# endif
+        return ret;
     }
     
     __device__ Fp2 square() const {
         // (a0 + a1*u)² = (a0² + 11*a1²) + 2*a0*a1*u
-        Fp a0sq = c0 * c0;
-        Fp a1sq = c1 * c1;
-        Fp a0a1 = c0 * c1;
+        Fp a0sq = elems[0] * elems[0];
+        Fp a1sq = elems[1] * elems[1];
+        Fp a0a1 = elems[0] * elems[1];
         return Fp2(a0sq + Fp(W) * a1sq, a0a1 + a0a1);
     }
     
     __device__ bool operator==(Fp2 rhs) const {
-        return c0 == rhs.c0 && c1 == rhs.c1;
+        return elems[0] == rhs.elems[0] && elems[1] == rhs.elems[1];
     }
     
     __device__ bool operator!=(Fp2 rhs) const {
@@ -80,9 +136,9 @@ struct Fp2 {
 
 // Inversion for Fp2: (a + b*u)^(-1) = (a - b*u) / (a² - 11*b²)
 __device__ inline Fp2 inv(Fp2 x) {
-    Fp norm = x.c0 * x.c0 - Fp(Fp2::W) * x.c1 * x.c1;
+    Fp norm = x.elems[0] * x.elems[0] - Fp(Fp2::W) * x.elems[1] * x.elems[1];
     Fp norm_inv = inv(norm);
-    return Fp2(x.c0 * norm_inv, -x.c1 * norm_inv);
+    return Fp2(x.elems[0] * norm_inv, -x.elems[1] * norm_inv);
 }
 
 // ============================================================================

@@ -741,7 +741,6 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     
     // Collect all BabyBear results
     let fp = bench_fp(config);
-    let fp4 = bench_fp4(config);
     let fpext = bench_fpext(config);
     let fp5 = bench_fp5(config);
     let fp6 = bench_fp6(config);
@@ -761,7 +760,7 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     
     // Combine all results and sort by bits (then by name for consistent ordering)
     let mut all_results = vec![
-        fp.clone(), fp4, fpext, fp5, fp6, fp2x3, fp3x2,
+        fp.clone(), fpext, fp5, fp6, fp2x3, fp3x2,
         kb, kb5, kb6, kb2x3, kb3x2,
         gl, gl3,
     ];

@@ -25,59 +25,135 @@
 // ============================================================================
 
 struct Fp3 {
-    Fp c0, c1, c2;  // c0 + c1*u + c2*u²
+    union { Fp elems[3]; uint32_t u[3]; };  // c0 + c1*u + c2*u²
     
     static constexpr uint32_t W = 2;  // u³ = 2
+    static constexpr uint32_t MOD  = 0x78000001;
+    static constexpr uint32_t M    = 0x77ffffff;
+    static constexpr uint32_t BETA = 0x1FFFFFFC;  // (2 << 32) % MOD
     
-    __device__ Fp3() : c0(), c1(), c2() {}
-    __device__ Fp3(Fp a0) : c0(a0), c1(), c2() {}
-    __device__ Fp3(Fp a0, Fp a1, Fp a2) : c0(a0), c1(a1), c2(a2) {}
-    __device__ explicit Fp3(uint32_t x) : c0(Fp(x)), c1(), c2() {}
+    // Accessors for compatibility
+    __device__ Fp& c0() { return elems[0]; }
+    __device__ Fp& c1() { return elems[1]; }
+    __device__ Fp& c2() { return elems[2]; }
+    __device__ const Fp& c0() const { return elems[0]; }
+    __device__ const Fp& c1() const { return elems[1]; }
+    __device__ const Fp& c2() const { return elems[2]; }
+    
+    __device__ Fp3() : elems{Fp(), Fp(), Fp()} {}
+    __device__ Fp3(Fp a0) : elems{a0, Fp(), Fp()} {}
+    __device__ Fp3(Fp a0, Fp a1, Fp a2) : elems{a0, a1, a2} {}
+    __device__ explicit Fp3(uint32_t x) : elems{Fp(x), Fp(), Fp()} {}
     
     __device__ static Fp3 zero() { return Fp3(); }
     __device__ static Fp3 one() { return Fp3(Fp::one()); }
     
     __device__ Fp3 operator+(Fp3 rhs) const {
-        return Fp3(c0 + rhs.c0, c1 + rhs.c1, c2 + rhs.c2);
+        return Fp3(elems[0] + rhs.elems[0], elems[1] + rhs.elems[1], elems[2] + rhs.elems[2]);
     }
     
     __device__ Fp3 operator-(Fp3 rhs) const {
-        return Fp3(c0 - rhs.c0, c1 - rhs.c1, c2 - rhs.c2);
+        return Fp3(elems[0] - rhs.elems[0], elems[1] - rhs.elems[1], elems[2] - rhs.elems[2]);
     }
     
     __device__ Fp3 operator-() const {
-        return Fp3(-c0, -c1, -c2);
+        return Fp3(-elems[0], -elems[1], -elems[2]);
     }
     
     __device__ Fp3 operator*(Fp rhs) const {
-        return Fp3(c0 * rhs, c1 * rhs, c2 * rhs);
+        return Fp3(elems[0] * rhs, elems[1] * rhs, elems[2] * rhs);
     }
     
     // (a0 + a1*u + a2*u²) * (b0 + b1*u + b2*u²) with u³ = 2
+    // r0 = a0*b0 + 2*(a1*b2 + a2*b1)
+    // r1 = a0*b1 + a1*b0 + 2*a2*b2
+    // r2 = a0*b2 + a1*b1 + a2*b0
     __device__ Fp3 operator*(Fp3 rhs) const {
-        Fp a0 = c0, a1 = c1, a2 = c2;
-        Fp b0 = rhs.c0, b1 = rhs.c1, b2 = rhs.c2;
+        Fp3 ret;
         
-        // Schoolbook
+# if defined(__CUDA_ARCH__) && !defined(__clang__) && !defined(__clang_analyzer__)
+#  ifdef __GNUC__
+#   define asm __asm__ __volatile__
+#  else
+#   define asm asm volatile
+#  endif
+        // Operand mapping:
+        // %1=a0, %2=a1, %3=a2, %4=b0, %5=b1, %6=b2, %7=MOD, %8=M, %9=BETA
+        
+        // r0 = a0*b0 + BETA*(a1*b2 + a2*b1)
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %2, %6;     mul.hi.u32  %hi, %2, %6;\n\t"       // a1*b2
+            "mad.lo.cc.u32 %lo, %3, %5, %lo; madc.hi.u32 %hi, %3, %5, %hi;\n\t" // +a2*b1
+            "mul.lo.u32    %m, %lo, %8;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %7, %lo; madc.hi.u32 %hi, %m, %7, %hi;\n\t"
+            "mul.lo.u32    %lo, %hi, %9;    mul.hi.u32  %hi, %hi, %9;\n\t"      // *BETA
+            "mad.lo.cc.u32 %lo, %1, %4, %lo; madc.hi.u32 %hi, %1, %4, %hi;\n\t" // +a0*b0
+            "setp.ge.u32   %p, %hi, %7;\n\t"
+            "@%p sub.u32   %hi, %hi, %7;\n\t"
+            "mul.lo.u32    %m, %lo, %8;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %7, %lo; madc.hi.u32 %0, %m, %7, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %7;\n\t"
+            "@%p sub.u32   %0, %0, %7;\n\t"
+            "}" : "=r"(ret.u[0])
+                : "r"(u[0]), "r"(u[1]), "r"(u[2]),
+                  "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+
+        // r1 = a0*b1 + a1*b0 + BETA*a2*b2
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %3, %6;     mul.hi.u32  %hi, %3, %6;\n\t"       // a2*b2
+            "mul.lo.u32    %m, %lo, %8;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %7, %lo; madc.hi.u32 %hi, %m, %7, %hi;\n\t"
+            "mul.lo.u32    %lo, %hi, %9;    mul.hi.u32  %hi, %hi, %9;\n\t"      // *BETA
+            "mad.lo.cc.u32 %lo, %1, %5, %lo; madc.hi.u32 %hi, %1, %5, %hi;\n\t" // +a0*b1
+            "mad.lo.cc.u32 %lo, %2, %4, %lo; madc.hi.u32 %hi, %2, %4, %hi;\n\t" // +a1*b0
+            "setp.ge.u32   %p, %hi, %7;\n\t"
+            "@%p sub.u32   %hi, %hi, %7;\n\t"
+            "mul.lo.u32    %m, %lo, %8;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %7, %lo; madc.hi.u32 %0, %m, %7, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %7;\n\t"
+            "@%p sub.u32   %0, %0, %7;\n\t"
+            "}" : "=r"(ret.u[1])
+                : "r"(u[0]), "r"(u[1]), "r"(u[2]),
+                  "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+
+        // r2 = a0*b2 + a1*b1 + a2*b0 (no BETA)
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %1, %6;     mul.hi.u32  %hi, %1, %6;\n\t"       // a0*b2
+            "mad.lo.cc.u32 %lo, %2, %5, %lo; madc.hi.u32 %hi, %2, %5, %hi;\n\t" // +a1*b1
+            "mad.lo.cc.u32 %lo, %3, %4, %lo; madc.hi.u32 %hi, %3, %4, %hi;\n\t" // +a2*b0
+            "setp.ge.u32   %p, %hi, %7;\n\t"
+            "@%p sub.u32   %hi, %hi, %7;\n\t"
+            "mul.lo.u32    %m, %lo, %8;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %7, %lo; madc.hi.u32 %0, %m, %7, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %7;\n\t"
+            "@%p sub.u32   %0, %0, %7;\n\t"
+            "}" : "=r"(ret.u[2])
+                : "r"(u[0]), "r"(u[1]), "r"(u[2]),
+                  "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+#  undef asm
+# else
+        // Fallback: schoolbook multiplication
+        Fp a0 = elems[0], a1 = elems[1], a2 = elems[2];
+        Fp b0 = rhs.elems[0], b1 = rhs.elems[1], b2 = rhs.elems[2];
+        
         Fp t0 = a0 * b0;
         Fp t1 = a0 * b1 + a1 * b0;
         Fp t2 = a0 * b2 + a1 * b1 + a2 * b0;
         Fp t3 = a1 * b2 + a2 * b1;
         Fp t4 = a2 * b2;
         
-        // Reduction: u³ = 2, so u³ → 2, u⁴ → 2u
-        // c0 = t0 + 2*t3
-        // c1 = t1 + 2*t4
-        // c2 = t2
-        return Fp3(
-            t0 + t3 + t3,
-            t1 + t4 + t4,
-            t2
-        );
+        ret.elems[0] = t0 + t3 + t3;
+        ret.elems[1] = t1 + t4 + t4;
+        ret.elems[2] = t2;
+# endif
+        return ret;
     }
     
     __device__ Fp3 square() const {
-        Fp a0 = c0, a1 = c1, a2 = c2;
+        Fp a0 = elems[0], a1 = elems[1], a2 = elems[2];
         
         Fp a0sq = a0 * a0;
         Fp a1sq = a1 * a1;
@@ -100,7 +176,7 @@ struct Fp3 {
     }
     
     __device__ bool operator==(Fp3 rhs) const {
-        return c0 == rhs.c0 && c1 == rhs.c1 && c2 == rhs.c2;
+        return elems[0] == rhs.elems[0] && elems[1] == rhs.elems[1] && elems[2] == rhs.elems[2];
     }
     
     __device__ bool operator!=(Fp3 rhs) const {
@@ -112,7 +188,7 @@ struct Fp3 {
 __device__ inline Fp3 inv(Fp3 x) {
     if (x == Fp3::zero()) return Fp3::zero();
     
-    Fp a0 = x.c0, a1 = x.c1, a2 = x.c2;
+    Fp a0 = x.elems[0], a1 = x.elems[1], a2 = x.elems[2];
     Fp W_val(Fp3::W);
     
     // Matrix for multiplication by x:

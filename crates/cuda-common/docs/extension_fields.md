@@ -1005,9 +1005,9 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 
 | Field | Size | init | add | mul | inv |
 |-------|------|------|-----|-----|-----|
-| Fp | 4 B | 308 Gops/s | 3532 Gops/s | 1869 Gops/s | 59.6 Gops/s |
-| FpExt (Fp4) | 16 B | 53 Gops/s | 1339 Gops/s | 187 Gops/s | 41.6 Gops/s |
-| Fp5 | 20 B | 43 Gops/s | 1201 Gops/s | 77 Gops/s | 3.8 Gops/s |
+| Fp | 4 B | 309 Gops/s | 3544 Gops/s | 1872 Gops/s | 59.6 Gops/s |
+| FpExt (Fp4) | 16 B | 53 Gops/s | 1328 Gops/s | 185 Gops/s | 41.3 Gops/s |
+| Fp5 (PTX+Frob) | 20 B | 43 Gops/s | 1199 Gops/s | **138 Gops/s** | **20.6 Gops/s** |
 | Fp6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 2.2 Gops/s |
 | Fp2x3 (2×3 tower) | 24 B | 36 Gops/s | 986 Gops/s | 42 Gops/s | 7.2 Gops/s |
 | Fp3x2 (3×2 tower) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 12.7 Gops/s |
@@ -1034,8 +1034,8 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Field | init | add | mul | inv |
 |-------|------|-----|-----|-----|
 | Fp | 1.0× | 1.0× | 1.0× | 1.0× |
-| FpExt | 5.8× slower | 2.6× slower | 10.0× slower | 1.4× slower |
-| Fp5 | 7.2× slower | 2.9× slower | 24.3× slower | 15.7× slower |
+| FpExt | 5.8× slower | 2.7× slower | 10.1× slower | 1.4× slower |
+| Fp5 (PTX+Frob) | 7.1× slower | 3.0× slower | **13.5× slower** | **2.9× slower** |
 | Fp6 (direct) | 8.6× slower | 3.6× slower | 38.3× slower | 26.6× slower |
 | Fp2x3 | 8.6× slower | 3.6× slower | 44.0× slower | 8.2× slower |
 | Fp3x2 | 8.7× slower | 3.6× slower | 38.1× slower | 4.7× slower |
@@ -1117,15 +1117,144 @@ Comparing fields with the same total size (24 bytes / 192 bits):
 - **After**: Fermat-based (`bb31_t::reciprocal()`)
 - **Speedup**: 3.16×
 
-#### Fp5 Inversion
-- **Before**: Naive Fermat (155-bit exponent)
-- **After**: Gaussian elimination (5×5 matrix solve)
-- **Speedup**: 9.5×
+#### Fp5 Inversion (Frobenius-based)
 
-#### Fp5 Multiplication
-- **Optimization 1**: Use `x + x` instead of `Fp(2) * x` for reduction
-- **Optimization 2**: Reduce register pressure by fusing computations
-- **Total improvement**: ~9%
+**Before (Gaussian elimination)**: 5×5 matrix solve requiring 5 Fp inversions
+**After (Frobenius norm)**: Uses only 1 Fp inversion
+
+**Algorithm**:
+1. Compute Frobenius conjugates: φ(a), φ²(a), φ³(a), φ⁴(a) - each is 4 Fp muls
+2. Compute conjugate product: c = φ(a) * φ²(a) * φ³(a) * φ⁴(a) - 3 Fp5 muls
+3. Compute norm: N(a) = a * c ∈ Fp - 1 Fp5 mul (result is in base field)
+4. Return a⁻¹ = c / N(a) - 1 Fp inv + 5 Fp muls
+
+**Frobenius constants** (precomputed for p ≡ 1 mod 5):
+```cpp
+// FROB[i]^j = W^(i*j*k) where k = (p-1)/5
+static constexpr uint32_t FROB_TABLE[4][4] = {
+    {0x309476E5, 0x24553874, 0x749B8749, 0x267AC95F},
+    {0x24553874, 0x267AC95F, 0x309476E5, 0x749B8749},
+    {0x749B8749, 0x309476E5, 0x267AC95F, 0x24553874},
+    {0x267AC95F, 0x749B8749, 0x24553874, 0x309476E5},
+};
+```
+
+**Performance results**:
+| Metric | Gaussian (before) | Frobenius (after) |
+|--------|-------------------|-------------------|
+| Time | 110.4 ms | 20.4 ms |
+| Throughput | 3.8 Gops/s | 20.6 Gops/s |
+| vs Fp | 15.7× slower | 2.9× slower |
+| **Speedup** | | **5.4×** |
+
+#### Fp5 Multiplication (PTX Assembly Optimization)
+
+**Implementation**: Inline PTX assembly following the same pattern as `bb31_4_t` (FpExt).
+
+**Key optimizations**:
+1. **Raw uint32_t access** via union - avoids Fp wrapper overhead
+2. **Inline PTX instructions** - `mul.lo.u32`, `mul.hi.u32`, `mad.lo.cc.u32`, `madc.hi.u32`
+3. **Fused multiply-accumulate** - chains partial products efficiently in 64-bit accumulators
+4. **Inline Montgomery reduction** - reduces within the accumulation chain
+5. **BETA precomputation** - `BETA = (W << 32) % MOD = 0x1FFFFFFC` for efficient `x^5 = 2` reduction
+
+**Performance results**:
+| Metric | Schoolbook (before) | PTX assembly (after) |
+|--------|---------------------|----------------------|
+| Time | 5.46 ms | 3.03 ms |
+| Throughput | 76.8 Gops/s | 138.3 Gops/s |
+| vs Fp | 24.4× slower | 12.9× slower |
+| **Speedup** | | **1.8×** |
+
+**Backward compatibility**: Uses `#if defined(__CUDA_ARCH__) && !defined(__clang__)` to select PTX or fallback code.
+
+```cpp
+// Operand mapping for PTX:
+// %1=a0, %2=a1, %3=a2, %4=a3, %5=a4
+// %6=b0, %7=b1, %8=b2, %9=b3, %10=b4
+// %11=MOD, %12=M, %13=BETA
+
+// Example: ret[0] = a0*b0 + BETA*(a1*b4 + a2*b3 + a3*b2 + a4*b1)
+asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+    "mul.lo.u32    %lo, %2, %10;     mul.hi.u32  %hi, %2, %10;\n\t"   // a1*b4
+    "mad.lo.cc.u32 %lo, %3, %9, %lo; madc.hi.u32 %hi, %3, %9, %hi;\n\t"  // +a2*b3
+    // ... more accumulation ...
+    "mul.lo.u32    %lo, %hi, %13;    mul.hi.u32  %hi, %hi, %13;\n\t"  // *BETA
+    "mad.lo.cc.u32 %lo, %1, %6, %lo; madc.hi.u32 %hi, %1, %6, %hi;\n\t"  // +a0*b0
+    // ... Montgomery reduction ...
+    "}" : "=r"(ret.u[0]) : ... );
+```
+
+#### Fp6 Multiplication (PTX Assembly Optimization)
+
+**Implementation**: Same PTX pattern as Fp5, adapted for 6 coefficients (36 partial products).
+
+**Key differences from Fp5**:
+- 6 coefficients instead of 5 (more PTX blocks)
+- Uses `BETA = (31 << 32) % MOD = 0x0FFFFFBE` for X⁶ - 31 reduction
+- 6 output registers instead of 5
+
+**Performance results**:
+| Metric | Schoolbook (before) | PTX assembly (after) |
+|--------|---------------------|----------------------|
+| Time | 8.56 ms | 4.00 ms |
+| Throughput | 49.0 Gops/s | 104.9 Gops/s |
+| vs Fp | 36.3× slower | 17.0× slower |
+| **Speedup** | | **2.1×** |
+
+**Note**: Fp6 inversion uses Gaussian elimination. Frobenius-based inversion was attempted but
+failed verification (2/1024 failures). The root cause is unclear - the mathematical algorithm
+is correct (verified in Python), but there's a subtle issue in the CUDA implementation,
+possibly related to Montgomery form handling in the multi-level Frobenius computation.
+This remains a potential future optimization.
+
+---
+
+## Optimizations Applied - Summary
+
+### Flat Extensions (Binomial Polynomials)
+
+| Field | Operation | Before (ms) | After (ms) | Before (Gops/s) | After (Gops/s) | Speedup |
+|-------|-----------|-------------|------------|-----------------|----------------|---------|
+| **Fp5** | mul | 5.46 | 3.03 | 76.8 | 138.3 | **1.8×** |
+| **Fp5** | inv | 110.4 | 20.4 | 3.8 | 20.6 | **5.4×** |
+| **Fp6** | mul | 8.56 | 4.00 | 49.0 | 104.9 | **2.1×** |
+
+### Tower Fields (Base-Level PTX Optimization)
+
+PTX optimization applied to base fields (Fp2, Fp3, Kb2) propagates up to tower fields:
+
+| Field | Base Optimized | Before (Gops/s) | After (Gops/s) | Speedup |
+|-------|----------------|-----------------|----------------|---------|
+| **Fp2x3** | Fp2 | 42.5 | 54.6 | **1.28×** |
+| **Fp3x2** | Fp3 | 49.1 | 70.9 | **1.44×** |
+| **Kb2x3** | Kb2 | 42.5 | 50.8 | **1.20×** |
+| **Kb3x2** | Kb3 (trinomial) | 42.5 | 42.8 | 1.01× |
+
+**Note**: Kb3x2 barely improved because Kb3 uses a trinomial polynomial (w³ + w + 4 = 0),
+which doesn't benefit from single-BETA PTX optimization.
+
+### Not Optimized (Trinomial Extensions)
+
+| Field | Polynomial | Reason |
+|-------|------------|--------|
+| **Kb5** | X⁵ + X + 4 | Trinomial reduction requires multiple coefficients (-1, -4) |
+| **Kb6** | X⁶ + X³ + 1 | Trinomial reduction requires multiple coefficients (-1) |
+| **Kb3** | X³ + X + 4 | Base of Kb3x2, trinomial prevents efficient PTX |
+
+**Why binomial vs trinomial matters**:
+- Binomial (X^n - W): Reduction `x^n = W` allows single BETA multiplication
+- Trinomial (X^n + aX + b): Reduction requires subtractions with multiple coefficients
+
+**Why Frobenius works for binomial Fp5**:
+- For X⁵ - 2 with p ≡ 1 (mod 5): Frobenius is coefficient-wise scaling by precomputed constants
+- Norm computation: N(a) = a × φ(a) × φ²(a) × φ³(a) × φ⁴(a) ∈ Fp
+- Only 1 base field inversion needed instead of 5
+
+**Why Frobenius doesn't help for trinomial Kb5**:
+- For X⁵ + X + 4: Frobenius of x gives a full 5th-degree polynomial with large coefficients
+- Applying Frobenius requires matrix multiplication, not simple scaling
+- Gaussian elimination is simpler and comparable in cost
 
 ---
 
@@ -1133,5 +1262,25 @@ Comparing fields with the same total size (24 bytes / 192 bits):
 
 - [ ] Lazy reduction for Fp5/Fp6 multiplication
 - [ ] Batch inversion using Montgomery's trick
-- [ ] Karatsuba multiplication for Fp5/Fp6 (potential 20-30% speedup)
+
+### Karatsuba Multiplication - Analysis
+
+**Conclusion: Not beneficial for Fp5/Fp6 with PTX**
+
+Karatsuba reduces multiplication count from O(n²) to O(n^1.585):
+- Fp5: 25 → ~15 Fp muls, but +20 Fp additions
+- Fp6: 36 → ~18 Fp muls, but +24 Fp additions
+
+**Why current PTX is better for small degrees:**
+
+1. **Fused accumulation** - Current PTX chains partial products in 64-bit accumulators
+   with only ONE Montgomery reduction per output coefficient
+2. **Karatsuba breaks fusion** - Requires separate reduction for each Karatsuba sub-product
+3. **More intermediate values** - Increases register pressure and reduction count
+4. **Small n** - The O(n^1.585) vs O(n²) gap is minimal for n=5,6
+
+**When Karatsuba would help:**
+- Fp12 or higher (multiplication savings dominate)
+- Without PTX (when using high-level Fp operations)
+- Very large polynomial degrees
 
