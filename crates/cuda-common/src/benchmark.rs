@@ -86,6 +86,18 @@ extern "C" {
     fn mul_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_kb3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
+    // Goldilocks base field (64-bit prime: 2^64 - 2^32 + 1)
+    fn init_gl(out: *mut c_void, raw_data: *const u64, n: usize) -> i32;
+    fn add_gl(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_gl(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_gl(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
+    // Goldilocks cubic extension (X³ - X - 1)
+    fn init_gl3(out: *mut c_void, raw_data: *const u64, n: usize) -> i32;
+    fn add_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_gl3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
     // Verification kernels
     fn verify_inv_fp4(failures: *mut u32, a: *const c_void, n: usize) -> i32;
     fn verify_distrib_fp4(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
@@ -159,6 +171,7 @@ pub struct OpResult {
 #[derive(Clone)]
 pub struct FieldBenchResult {
     pub field_name: String,
+    pub bits: usize,           // bits of provable security
     pub u32s_per_element: usize,
     pub init: OpResult,
     pub add: OpResult,
@@ -174,12 +187,12 @@ fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenchRes
     // Table 1: Time (ms)
     println!("### Time (ms)");
     println!();
-    print!("| {:width$} |", "Field", width = max_name_len);
+    print!("| {:width$} | bits |", "Field", width = max_name_len);
     println!("    init |     add |     mul |     inv |");
-    print!("|{:-<width$}--|", "", width = max_name_len);
+    print!("|{:-<width$}--|-----:|", "", width = max_name_len);
     println!("--------:|--------:|--------:|--------:|");
     for r in results {
-        print!("| {:width$} |", r.field_name, width = max_name_len);
+        print!("| {:width$} | {:>4} |", r.field_name, r.bits, width = max_name_len);
         println!(" {:>7.3} | {:>7.3} | {:>7.3} | {:>7.3} |", 
             r.init.avg_time_ms, r.add.avg_time_ms, r.mul.avg_time_ms, r.inv.avg_time_ms);
     }
@@ -188,12 +201,12 @@ fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenchRes
     // Table 2: Throughput (Gops/s)
     println!("### Throughput (Gops/s)");
     println!();
-    print!("| {:width$} |", "Field", width = max_name_len);
+    print!("| {:width$} | bits |", "Field", width = max_name_len);
     println!("    init |     add |     mul |     inv |");
-    print!("|{:-<width$}--|", "", width = max_name_len);
+    print!("|{:-<width$}--|-----:|", "", width = max_name_len);
     println!("--------:|--------:|--------:|--------:|");
     for r in results {
-        print!("| {:width$} |", r.field_name, width = max_name_len);
+        print!("| {:width$} | {:>4} |", r.field_name, r.bits, width = max_name_len);
         println!(" {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} |", 
             r.init.throughput_gops, r.add.throughput_gops, r.mul.throughput_gops, r.inv.throughput_gops);
     }
@@ -202,9 +215,9 @@ fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenchRes
     // Table 3: Relative to baseline (xN)
     println!("### Relative to {} (xN)", baseline.field_name);
     println!();
-    print!("| {:width$} |", "Field", width = max_name_len);
+    print!("| {:width$} | bits |", "Field", width = max_name_len);
     println!("    init |     add |     mul |     inv |");
-    print!("|{:-<width$}--|", "", width = max_name_len);
+    print!("|{:-<width$}--|-----:|", "", width = max_name_len);
     println!("--------:|--------:|--------:|--------:|");
     for r in results {
         let init_ratio = baseline.init.throughput_gops / r.init.throughput_gops;
@@ -212,7 +225,7 @@ fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenchRes
         let mul_ratio = baseline.mul.throughput_gops / r.mul.throughput_gops;
         let inv_ratio = baseline.inv.throughput_gops / r.inv.throughput_gops;
         
-        print!("| {:width$} |", r.field_name, width = max_name_len);
+        print!("| {:width$} | {:>4} |", r.field_name, r.bits, width = max_name_len);
         println!(" {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} |", 
             init_ratio, add_ratio, mul_ratio, inv_ratio);
     }
@@ -228,6 +241,14 @@ fn random_u32s(count: usize, seed: u64) -> Vec<u32> {
     (0..count).map(|_| {
         rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (rng >> 32) as u32
+    }).collect()
+}
+
+fn random_u64s(count: usize, seed: u64) -> Vec<u64> {
+    let mut rng = seed;
+    (0..count).map(|_| {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng
     }).collect()
 }
 
@@ -282,7 +303,7 @@ pub fn bench_fp(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Fp".into(), u32s_per_element: 1, init, add, mul, inv }
+    FieldBenchResult { field_name: "Fp".into(), bits: 31, u32s_per_element: 1, init, add, mul, inv }
 }
 
 pub fn bench_fp4(config: &BenchConfig) -> FieldBenchResult {
@@ -313,7 +334,7 @@ pub fn bench_fp4(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_fp4(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Fp4".into(), u32s_per_element: 4, init, add, mul, inv }
+    FieldBenchResult { field_name: "Fp4".into(), bits: 124, u32s_per_element: 4, init, add, mul, inv }
 }
 
 pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
@@ -346,7 +367,7 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "FpExt".into(), u32s_per_element: 4, init, add, mul, inv }
+    FieldBenchResult { field_name: "FpExt".into(), bits: 124, u32s_per_element: 4, init, add, mul, inv }
 }
 
 pub fn bench_fp5(config: &BenchConfig) -> FieldBenchResult {
@@ -379,7 +400,7 @@ pub fn bench_fp5(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Fp5".into(), u32s_per_element: 5, init, add, mul, inv }
+    FieldBenchResult { field_name: "Fp5".into(), bits: 155, u32s_per_element: 5, init, add, mul, inv }
 }
 
 pub fn bench_fp6(config: &BenchConfig) -> FieldBenchResult {
@@ -412,7 +433,7 @@ pub fn bench_fp6(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_fp6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Fp6".into(), u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult { field_name: "Fp6".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
 }
 
 pub fn bench_fp2x3(config: &BenchConfig) -> FieldBenchResult {
@@ -443,7 +464,7 @@ pub fn bench_fp2x3(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_fp2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Fp2x3".into(), u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult { field_name: "Fp2x3".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
 }
 
 pub fn bench_fp3x2(config: &BenchConfig) -> FieldBenchResult {
@@ -474,7 +495,7 @@ pub fn bench_fp3x2(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_fp3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Fp3x2".into(), u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult { field_name: "Fp3x2".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
 }
 
 pub fn bench_kb(config: &BenchConfig) -> FieldBenchResult {
@@ -507,7 +528,7 @@ pub fn bench_kb(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_kb(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Kb".into(), u32s_per_element: 1, init, add, mul, inv }
+    FieldBenchResult { field_name: "Kb".into(), bits: 31, u32s_per_element: 1, init, add, mul, inv }
 }
 
 pub fn bench_kb5(config: &BenchConfig) -> FieldBenchResult {
@@ -539,7 +560,7 @@ pub fn bench_kb5(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_kb5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Kb5".into(), u32s_per_element: 5, init, add, mul, inv }
+    FieldBenchResult { field_name: "Kb5".into(), bits: 155, u32s_per_element: 5, init, add, mul, inv }
 }
 
 pub fn bench_kb6(config: &BenchConfig) -> FieldBenchResult {
@@ -571,7 +592,7 @@ pub fn bench_kb6(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_kb6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Kb6".into(), u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult { field_name: "Kb6".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
 }
 
 pub fn bench_kb2x3(config: &BenchConfig) -> FieldBenchResult {
@@ -603,7 +624,7 @@ pub fn bench_kb2x3(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_kb2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Kb2x3".into(), u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult { field_name: "Kb2x3".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
 }
 
 pub fn bench_kb3x2(config: &BenchConfig) -> FieldBenchResult {
@@ -635,7 +656,79 @@ pub fn bench_kb3x2(config: &BenchConfig) -> FieldBenchResult {
         cuda_check(unsafe { inv_kb3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
     
-    FieldBenchResult { field_name: "Kb3x2".into(), u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult { field_name: "Kb3x2".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
+}
+
+pub fn bench_gl(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    // Goldilocks uses u64 elements (8 bytes)
+    let h_a = random_u64s(n, 99999);
+    let h_b = random_u64s(n, 88888);
+    
+    let d_a = h_a.to_device().unwrap();
+    let d_b = h_b.to_device().unwrap();
+    let d_out = DeviceBuffer::<u64>::with_capacity(n);
+    
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_gl(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_gl(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_gl(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_gl(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_gl(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    // u32s_per_element = 2 for Goldilocks (64-bit)
+    FieldBenchResult { field_name: "Gl".into(), bits: 64, u32s_per_element: 2, init, add, mul, inv }
+}
+
+pub fn bench_gl3(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    // Gl3 uses 3 x u64 elements (24 bytes)
+    let h_a = random_u64s(n * 3, 77777);
+    let h_b = random_u64s(n * 3, 66666);
+    
+    let d_a = h_a.to_device().unwrap();
+    let d_b = h_b.to_device().unwrap();
+    let d_out = DeviceBuffer::<u64>::with_capacity(n * 3);
+    
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_gl3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_gl3(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_gl3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_gl3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_gl3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    // u32s_per_element = 6 for Gl3 (3 x 64-bit = 24 bytes)
+    FieldBenchResult { field_name: "Gl3".into(), bits: 192, u32s_per_element: 6, init, add, mul, inv }
 }
 
 pub fn run_all_benchmarks(config: &BenchConfig) {
@@ -662,11 +755,19 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     let kb2x3 = bench_kb2x3(config);
     let kb3x2 = bench_kb3x2(config);
     
-    // Combine all results
-    let all_results = vec![
+    // Collect Goldilocks results
+    let gl = bench_gl(config);
+    let gl3 = bench_gl3(config);
+    
+    // Combine all results and sort by bits (then by name for consistent ordering)
+    let mut all_results = vec![
         fp.clone(), fp4, fpext, fp5, fp6, fp2x3, fp3x2,
         kb, kb5, kb6, kb2x3, kb3x2,
+        gl, gl3,
     ];
+    all_results.sort_by(|a, b| {
+        a.bits.cmp(&b.bits).then_with(|| a.field_name.cmp(&b.field_name))
+    });
     print_benchmark_tables(&all_results, &fp);
 }
 

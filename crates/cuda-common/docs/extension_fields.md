@@ -6,13 +6,15 @@ This document describes the mathematical foundations and implementation details 
 
 1. [Base Field: Baby Bear](#base-field-baby-bear)
 2. [Base Field: KoalaBear](#base-field-koalabear)
-3. [Extension Field Theory](#extension-field-theory)
-4. [Fp5 Implementation](#fp5-implementation)
-5. [Fp6 Implementation](#fp6-implementation)
-6. [Fp6 Tower Constructions](#fp6-tower-constructions)
-7. [KoalaBear Extensions](#koalabear-extensions)
-8. [Benchmarking System](#benchmarking-system)
-9. [Performance Analysis](#performance-analysis)
+3. [Base Field: Goldilocks](#base-field-goldilocks)
+4. [Extension Field Theory](#extension-field-theory)
+5. [Fp5 Implementation](#fp5-implementation)
+6. [Fp6 Implementation](#fp6-implementation)
+7. [Fp6 Tower Constructions](#fp6-tower-constructions)
+8. [KoalaBear Extensions](#koalabear-extensions)
+9. [Goldilocks Extensions](#goldilocks-extensions)
+10. [Benchmarking System](#benchmarking-system)
+11. [Performance Analysis](#performance-analysis)
 
 ---
 
@@ -83,6 +85,62 @@ M0  = 0x7EFFFFFF  (-p^{-1} mod 2^32)
 RR  = 0x17F7EFE4  (R² mod p, where R = 2^32)
 ONE = 0x01FFFFFE  (R mod p, i.e., 1 in Montgomery form)
 ```
+
+---
+
+## Base Field: Goldilocks
+
+### Definition
+
+Goldilocks is a 64-bit prime field with:
+
+```
+p = 2^64 - 2^32 + 1 = 18446744069414584321 = 0xFFFFFFFF00000001
+```
+
+### Key Properties
+
+| Property | Value | Significance |
+|----------|-------|--------------|
+| Size | 64 bits | Requires `uint64_t` storage |
+| Two-adicity | 32 | `p - 1 = 2^32 × (2^32 - 1)`, excellent for FFT |
+| Form | `2^64 - 2^32 + 1` | Enables extremely fast modular reduction |
+
+### Why Goldilocks is Special
+
+The prime `p = 2^64 - 2^32 + 1` has the form `φ² - φ + 1` where `φ = 2^32`. This means:
+
+```
+2^64 ≡ 2^32 - 1 (mod p)
+```
+
+Multiplication reduction becomes very cheap: a 128-bit product can be reduced with just a few 32-bit additions/subtractions, avoiding expensive 64×64→128 multiplies for the reduction step.
+
+### Implementation (sppark)
+
+The implementation is based on [Supranational's sppark](https://github.com/supranational/sppark) library.
+
+**Key features**:
+- Uses PTX inline assembly for optimal register allocation
+- Montgomery-style lazy reduction
+- Optimized addition chain for inversion (Fermat's method)
+
+**Files**:
+- `include/ff/gl64_t.cuh` - Core 64-bit field implementation
+- `include/ff/pow.hpp` - Power function helper
+- `include/gl.h` - Wrapper class for consistent API
+
+### Performance Characteristics
+
+Goldilocks is remarkably efficient for a 64-bit field:
+
+| Operation | Goldilocks (64-bit) | BabyBear (32-bit) | Ratio |
+|-----------|---------------------|-------------------|-------|
+| add | 1216 Gops/s | 3540 Gops/s | 2.9× slower |
+| mul | 670 Gops/s | 1870 Gops/s | 2.8× slower |
+| inv | 10.5 Gops/s | 60 Gops/s | 5.7× slower |
+
+The ~2.8× slowdown for multiplication (vs 4× expected for 2× larger elements) demonstrates the efficiency of the Goldilocks reduction.
 
 ---
 
@@ -736,6 +794,121 @@ struct Kb3x2 { Kb3 c0, c1; };     // c0 + c1*z
 
 ---
 
+## Goldilocks Extensions
+
+### Gl3: Cubic Extension
+
+Goldilocks uses a cubic extension for many STARK protocols (e.g., Plonky2, Polygon zkEVM).
+
+#### Irreducible Polynomial
+
+```
+X³ - X - 1
+```
+
+This polynomial is irreducible over `Fp` (Goldilocks prime).
+
+#### Reduction Rule
+
+Let `α` be a root, so `α³ - α - 1 = 0`. Then:
+```
+α³ = α + 1
+α⁴ = α² + α
+α⁵ = α² + α + 1
+```
+
+#### Element Representation
+
+```cpp
+struct Gl3 {
+    Gl c[3];  // c[0] + c[1]·α + c[2]·α²
+};
+```
+
+Memory: 3 × 8 = 24 bytes per element.
+
+#### Multiplication Algorithm (Karatsuba-style)
+
+The implementation uses an optimized Karatsuba-style approach with only **6 base field multiplications** instead of the naive 9:
+
+```
+Given a = a₀ + a₁α + a₂α², b = b₀ + b₁α + b₂α²
+
+Compute:
+  A = (a₀ + a₁)(b₀ + b₁)
+  B = (a₀ + a₂)(b₀ + b₂)
+  C = (a₁ + a₂)(b₁ + b₂)
+  D = a₀ · b₀
+  E = a₁ · b₁
+  F = a₂ · b₂
+  G = D - E
+
+Result:
+  c₀ = C + G - F
+  c₁ = A + C - 2E - D
+  c₂ = B - G
+```
+
+**Cost**: 6 Gl multiplications + 14 Gl additions
+
+#### Inversion Algorithm (Direct Formula)
+
+The implementation uses a direct formula based on the norm, avoiding Gaussian elimination:
+
+```
+For a = a₀ + a₁α + a₂α², compute intermediate products:
+  aa = a₀², ac = a₀a₂, ba = a₁a₀, bb = a₁², bc = a₁a₂, cc = a₂²
+  aaa, aac, abc, abb, acc, bbb, bcc, ccc (various cubic terms)
+
+Compute norm:
+  t = 3·abc + abb - aaa - 2·aac - acc - bbb + bcc - ccc
+
+Result:
+  a⁻¹ = (i₁, i₂, i₃) where:
+  i₁ = (bc + bb - aa - 2·ac - cc) / t
+  i₂ = (ba - cc) / t
+  i₃ = (ac + cc - bb) / t
+```
+
+**Cost**: ~15 Gl multiplications + 1 Gl inversion
+
+#### Performance
+
+| Operation | Gl3 | Gl (base) | Ratio |
+|-----------|-----|-----------|-------|
+| add | 445 Gops/s | 1216 Gops/s | 2.7× slower |
+| mul | 58.5 Gops/s | 670 Gops/s | 11.4× slower |
+| inv | 7.8 Gops/s | 10.5 Gops/s | 1.3× slower |
+
+#### Comparison with BabyBear Degree-6 Extensions
+
+Interestingly, Gl3 (192-bit total) is competitive with Fp6 (192-bit total):
+
+| Field | Element Size | mul | inv |
+|-------|--------------|-----|-----|
+| Gl3 | 24 bytes | **58.5 Gops/s** | **7.8 Gops/s** |
+| Fp6 | 24 bytes | 49 Gops/s | 2.2 Gops/s |
+| Fp3x2 | 24 bytes | 49 Gops/s | 12.7 Gops/s |
+
+**Key findings**:
+- Gl3 multiplication is **19% faster** than Fp6 despite both being 192-bit fields
+- This is due to the Karatsuba-style algorithm (6 muls) vs schoolbook (36 muls for Fp6, though smaller muls)
+- Gl3 inversion is **3.5× faster** than direct Fp6, similar to Fp2x3 tower performance
+
+### Implementation Files
+
+- `include/gl.h` - Goldilocks base field wrapper
+- `include/gl3.h` - Cubic extension (based on Polygon's zisk)
+- `include/ff/gl64_t.cuh` - Core 64-bit arithmetic (from sppark)
+
+### Attribution
+
+The Goldilocks implementation is based on:
+- **sppark** (Supranational): Base field `gl64_t` with optimized PTX assembly
+- **zisk** (Polygon): Cubic extension formulas with Karatsuba multiplication
+
+---
+
 ## Benchmarking System
 
 ### Architecture
@@ -849,6 +1022,13 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Kb2x3 (2×3 tower) | 24 B | 36 Gops/s | 987 Gops/s | 43 Gops/s | 6.6 Gops/s |
 | Kb3x2 (3×2 tower) | 24 B | 36 Gops/s | 986 Gops/s | 43 Gops/s | **10.1 Gops/s** |
 
+#### Goldilocks Fields
+
+| Field | Size | init | add | mul | inv |
+|-------|------|------|-----|-----|-----|
+| Gl | 8 B | 180 Gops/s | 1216 Gops/s | 670 Gops/s | 10.5 Gops/s |
+| Gl3 | 24 B | 36 Gops/s | 445 Gops/s | 58.5 Gops/s | 7.8 Gops/s |
+
 ### Relative Performance (vs Fp baseline)
 
 | Field | init | add | mul | inv |
@@ -859,6 +1039,8 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Fp6 (direct) | 8.6× slower | 3.6× slower | 38.3× slower | 26.6× slower |
 | Fp2x3 | 8.6× slower | 3.6× slower | 44.0× slower | 8.2× slower |
 | Fp3x2 | 8.7× slower | 3.6× slower | 38.1× slower | 4.7× slower |
+| Gl | 1.7× slower | 2.9× slower | 2.8× slower | 5.7× slower |
+| Gl3 | 8.6× slower | 8.0× slower | 32.0× slower | 7.6× slower |
 
 ### Fp6 Implementation Comparison
 
@@ -897,6 +1079,22 @@ The Kb6 trinomial `X⁶ + X³ + 1` has a special property: `α⁹ = 1`. This mea
 - **Inversion**: Kb3x2 is **4.6× faster** than direct Kb6
 - **Trade-off**: Unlike BabyBear (where Fp3x2 matches direct Fp6 on multiplication), KoalaBear towers sacrifice multiplication speed for inversion speed
 - **Recommendation**: Use direct Kb6 for general workloads; consider Kb3x2 if inversion dominates
+
+### Cross-Field Comparison (192-bit total)
+
+Comparing fields with the same total size (24 bytes / 192 bits):
+
+| Field | Base | Extension | mul | inv | Notes |
+|-------|------|-----------|-----|-----|-------|
+| Fp6 | 32-bit | Degree 6 | 49 Gops/s | 2.2 Gops/s | Binomial X⁶-31 |
+| Fp3x2 | 32-bit | Tower 3×2 | 49 Gops/s | **12.7 Gops/s** | Best inv for BB |
+| Kb6 | 31-bit | Degree 6 | **53 Gops/s** | 2.2 Gops/s | Trinomial X⁶+X³+1 |
+| Kb3x2 | 31-bit | Tower 3×2 | 43 Gops/s | 10.1 Gops/s | |
+| **Gl3** | **64-bit** | **Degree 3** | **58.5 Gops/s** | 7.8 Gops/s | **Karatsuba mul** |
+
+**Key insight**: Gl3 achieves the **fastest multiplication** among all 192-bit extensions, despite using 64-bit base elements. This is because:
+1. Only 6 base muls (Karatsuba) vs 36 for schoolbook Fp6
+2. The 64-bit Goldilocks prime allows very efficient reduction
 
 ### Analysis
 

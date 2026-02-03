@@ -26,6 +26,8 @@
 #include "kb6.h"
 #include "kb2x3.h"
 #include "kb3x2.h"
+#include "gl.h"
+#include "gl3.h"
 
 // ============================================================================
 // Launch Configuration
@@ -69,6 +71,21 @@ __global__ void bench_init_kernel(ExtT* out, const uint32_t* raw_data, size_t n)
         out[idx] = ExtT(BaseT(raw_data[base]), BaseT(raw_data[base+1]), BaseT(raw_data[base+2]),
                         BaseT(raw_data[base+3]), BaseT(raw_data[base+4]), BaseT(raw_data[base+5]));
     }
+}
+
+/// Goldilocks init kernel (uses u64 instead of u32)
+__global__ void bench_init_gl_kernel(Gl* out, const uint64_t* raw_data, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    out[idx] = Gl(raw_data[idx]);
+}
+
+/// Goldilocks cubic extension init kernel
+__global__ void bench_init_gl3_kernel(Gl3* out, const uint64_t* raw_data, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    size_t base = idx * 3;
+    out[idx] = Gl3(Gl(raw_data[base]), Gl(raw_data[base+1]), Gl(raw_data[base+2]));
 }
 
 /// Element-wise addition with repetition to amortize memory access
@@ -522,5 +539,73 @@ extern "C" int inv_kb3x2(void* out, const void* a, size_t n, int reps) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
     bench_inv_kernel<Kb3x2><<<grid_size, block>>>(static_cast<Kb3x2*>(out), static_cast<const Kb3x2*>(a), n, reps);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Extern "C" Wrappers for Gl (Goldilocks base field)
+// ============================================================================
+
+extern "C" int init_gl(void* out, const uint64_t* raw_data, size_t n) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_init_gl_kernel<<<grid_size, block>>>(static_cast<Gl*>(out), raw_data, n);
+    return cudaGetLastError();
+}
+
+extern "C" int add_gl(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_add_kernel<Gl><<<grid_size, block>>>(
+        static_cast<Gl*>(out), static_cast<const Gl*>(a), static_cast<const Gl*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int mul_gl(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_mul_kernel<Gl><<<grid_size, block>>>(
+        static_cast<Gl*>(out), static_cast<const Gl*>(a), static_cast<const Gl*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int inv_gl(void* out, const void* a, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_inv_kernel<Gl><<<grid_size, block>>>(static_cast<Gl*>(out), static_cast<const Gl*>(a), n, reps);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Extern "C" Wrappers for Gl3 (Goldilocks cubic extension)
+// ============================================================================
+
+extern "C" int init_gl3(void* out, const uint64_t* raw_data, size_t n) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_init_gl3_kernel<<<grid_size, block>>>(static_cast<Gl3*>(out), raw_data, n);
+    return cudaGetLastError();
+}
+
+extern "C" int add_gl3(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_add_kernel<Gl3><<<grid_size, block>>>(
+        static_cast<Gl3*>(out), static_cast<const Gl3*>(a), static_cast<const Gl3*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int mul_gl3(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_mul_kernel<Gl3><<<grid_size, block>>>(
+        static_cast<Gl3*>(out), static_cast<const Gl3*>(a), static_cast<const Gl3*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int inv_gl3(void* out, const void* a, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_inv_kernel<Gl3><<<grid_size, block>>>(static_cast<Gl3*>(out), static_cast<const Gl3*>(a), n, reps);
     return cudaGetLastError();
 }
