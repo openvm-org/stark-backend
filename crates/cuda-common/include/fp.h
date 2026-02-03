@@ -253,7 +253,8 @@ static __device__ inline int64_t gcd_inversion_prime_field_32(uint32_t a, uint32
 /// Compute the multiplicative inverse of x, or `1/x` in finite field terms, using a fast
 /// gcd-based algorithm specialized for 31-bit prime P.
 /// For x = 0, returns 0.
-__device__ inline Fp inv(Fp x) {
+/// WARNING: GCD algorithm has warp divergence on GPU - prefer inv_fermat() for better performance.
+__device__ inline Fp inv_gcd(Fp x) {
     if (x.asRaw() == 0u) {
         return Fp::zero();
     }
@@ -267,6 +268,24 @@ __device__ inline Fp inv(Fp x) {
     }
 
     return Fp(static_cast<uint32_t>(v_mod)) * Fp(Fp::INV_2EXP_K);
+}
+
+/// Compute the multiplicative inverse of x using Fermat's little theorem: x^(-1) = x^(P-2) mod P.
+/// Uses optimized addition chain from bb31_t::reciprocal().
+/// For x = 0, returns 0.
+/// This is GPU-friendly: no branches, uniform control flow across warps.
+__device__ inline Fp inv_fermat(Fp x) {
+    if (x.asRaw() == 0u) {
+        return Fp::zero();
+    }
+    // bb31_t::reciprocal() computes x^(P-2) using optimized addition chain:
+    // ~31 squarings + 7 multiplications, no branches
+    return Fp(static_cast<bb31_t>(x).reciprocal());
+}
+
+/// Default inv() - uses Fermat's method for GPU-friendly performance
+__device__ inline Fp inv(Fp x) {
+    return inv_fermat(x);
 }
 
 constexpr __device__ Fp TWO_ADIC_GENERATORS[Fp::TWO_ADICITY + 1] = {
