@@ -55,6 +55,12 @@ extern "C" {
     fn mul_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_kb(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
+    // KoalaBear quintic extension (x^5 + x + 4)
+    fn init_kb5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_kb5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
     // Verification kernels
     fn verify_inv_fp5(failures: *mut u32, a: *const c_void, n: usize) -> i32;
     fn verify_distrib_fp5(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
@@ -70,6 +76,9 @@ extern "C" {
 
     fn verify_inv_kb(failures: *mut u32, a: *const c_void, n: usize) -> i32;
     fn verify_distrib_kb(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
+
+    fn verify_inv_kb5(failures: *mut u32, a: *const c_void, n: usize) -> i32;
+    fn verify_distrib_kb5(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
 }
 
 /// Check CUDA return code, panic on error
@@ -405,6 +414,38 @@ pub fn bench_kb(config: &BenchConfig) -> FieldBenchResult {
     FieldBenchResult { field_name: "Kb".into(), u32s_per_element: 1, init, add, mul, inv }
 }
 
+pub fn bench_kb5(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    // Kb5 has 5 u32s per element
+    let d_a = random_u32s(n * 5, 11111).to_device().unwrap();
+    let d_b = random_u32s(n * 5, 22222).to_device().unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity(n * 5);
+    
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_kb5(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_kb5(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_kb5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_kb5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_kb5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    FieldBenchResult { field_name: "Kb5".into(), u32s_per_element: 5, init, add, mul, inv }
+}
+
 pub fn run_all_benchmarks(config: &BenchConfig) {
     println!("=== Extension Field Benchmark ===");
     println!("Elements: {}", config.num_elements);
@@ -444,6 +485,10 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     
     let kb = bench_kb(config);
     kb.print(Some(&fp));
+    println!();
+    
+    let kb5 = bench_kb5(config);
+    kb5.print(Some(&fp));
 }
 
 // ============================================================================
@@ -523,6 +568,9 @@ pub fn verify_all_fields(num_elements: usize) -> bool {
     
     all_passed &= verify_field("Kb (KoalaBear base)", num_elements, 1,
         init_kb, verify_inv_kb, verify_distrib_kb);
+    
+    all_passed &= verify_field("Kb5 (KoalaBear quintic)", num_elements, 5,
+        init_kb5, verify_inv_kb5, verify_distrib_kb5);
     
     println!();
     println!("Overall: {}", if all_passed { "ALL PASSED" } else { "SOME FAILED" });

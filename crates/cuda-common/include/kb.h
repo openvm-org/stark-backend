@@ -44,11 +44,12 @@ public:
     __device__ Kb(const kb31_base& b) : kb31_t(b) {}
 
     /// Constructor from uint32_t that forces encoding
-    __host__ __device__ constexpr Kb(uint32_t v) : kb31_t(static_cast<int>(v)) {}
+    /// Reduces mod P first to handle values >= INT_MAX correctly
+    __host__ __device__ constexpr Kb(uint32_t v) : kb31_t(static_cast<int>(v % P)) {}
 
     /// Constructor from any numerical type that forces encoding
     template <class I, std::enable_if_t<std::is_integral_v<I>, int> = 0>
-    __host__ __device__ constexpr Kb(I v) : kb31_t(static_cast<int>(v)) {}
+    __host__ __device__ constexpr Kb(I v) : kb31_t(static_cast<int>(static_cast<uint32_t>(v) % P)) {}
 
     /// Construct a Kb from an already-encoded raw value
     __device__ static constexpr Kb fromRaw(uint32_t val) { 

@@ -2,8 +2,10 @@
  * Extension Field Benchmark Kernels
  * 
  * Provides templated kernels for benchmarking field arithmetic operations.
- * Supports: Fp, FpExt (Fp4), Fp5, Fp6, Fp2x3 (2×3 tower), Fp3x2 (3×2 tower)
- *           Kb (KoalaBear base)
+ * 
+ * Supported fields:
+ * - Baby Bear: Fp (base), FpExt (Fp4), Fp5, Fp6, Fp2x3 (2×3 tower), Fp3x2 (3×2 tower)
+ * - KoalaBear: Kb (base), Kb5 (quintic extension via x^5 + x + 4)
  * 
  * Operations:
  * - init: Initialize field elements from raw u32 arrays
@@ -19,6 +21,7 @@
 #include "fp2x3.h"
 #include "fp3x2.h"
 #include "kb.h"
+#include "kb5.h"
 
 // ============================================================================
 // Launch Configuration
@@ -38,36 +41,29 @@ inline dim3 get_launch_config(size_t n, int& grid_size) {
 // ============================================================================
 
 /// Initialize field elements from raw u32 data
-/// For Fp: 1 u32 per element
-/// For FpExt: 4 u32s per element
-/// For Fp5: 5 u32s per element
-/// For Fp6: 6 u32s per element
-template<typename T, int ELEMS_PER_FIELD>
-__global__ void bench_init_kernel(T* out, const uint32_t* raw_data, size_t n) {
+/// Template parameters:
+///   ExtT - Extension field type (e.g., Fp5, Kb5)
+///   BaseT - Base field type (e.g., Fp, Kb)
+///   ELEMS_PER_FIELD - Number of base field elements per extension element
+template<typename ExtT, typename BaseT, int ELEMS_PER_FIELD>
+__global__ void bench_init_kernel(ExtT* out, const uint32_t* raw_data, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     
     if constexpr (ELEMS_PER_FIELD == 1) {
-        // Fp: single u32
-        out[idx] = Fp(raw_data[idx]);
+        out[idx] = BaseT(raw_data[idx]);
     } else if constexpr (ELEMS_PER_FIELD == 4) {
-        // FpExt: 4 u32s
         size_t base = idx * 4;
-        FpExt& elem = reinterpret_cast<FpExt*>(out)[idx];
-        elem = FpExt(Fp(raw_data[base]), Fp(raw_data[base+1]), 
-                     Fp(raw_data[base+2]), Fp(raw_data[base+3]));
+        out[idx] = ExtT(BaseT(raw_data[base]), BaseT(raw_data[base+1]), 
+                        BaseT(raw_data[base+2]), BaseT(raw_data[base+3]));
     } else if constexpr (ELEMS_PER_FIELD == 5) {
-        // Fp5: 5 u32s
         size_t base = idx * 5;
-        Fp5& elem = reinterpret_cast<Fp5*>(out)[idx];
-        elem = Fp5(Fp(raw_data[base]), Fp(raw_data[base+1]), 
-                   Fp(raw_data[base+2]), Fp(raw_data[base+3]), Fp(raw_data[base+4]));
+        out[idx] = ExtT(BaseT(raw_data[base]), BaseT(raw_data[base+1]), 
+                        BaseT(raw_data[base+2]), BaseT(raw_data[base+3]), BaseT(raw_data[base+4]));
     } else if constexpr (ELEMS_PER_FIELD == 6) {
-        // Fp6: 6 u32s
         size_t base = idx * 6;
-        Fp6& elem = reinterpret_cast<Fp6*>(out)[idx];
-        elem = Fp6(Fp(raw_data[base]), Fp(raw_data[base+1]), Fp(raw_data[base+2]),
-                   Fp(raw_data[base+3]), Fp(raw_data[base+4]), Fp(raw_data[base+5]));
+        out[idx] = ExtT(BaseT(raw_data[base]), BaseT(raw_data[base+1]), BaseT(raw_data[base+2]),
+                        BaseT(raw_data[base+3]), BaseT(raw_data[base+4]), BaseT(raw_data[base+5]));
     }
 }
 
@@ -124,7 +120,7 @@ __global__ void bench_inv_kernel(T* out, const T* a, size_t n, int reps) {
 extern "C" int init_fp(void* out, const uint32_t* raw_data, size_t n) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp, 1><<<grid_size, block>>>(static_cast<Fp*>(out), raw_data, n);
+    bench_init_kernel<Fp, Fp, 1><<<grid_size, block>>>(static_cast<Fp*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
@@ -158,7 +154,7 @@ extern "C" int inv_fp(void* out, const void* a, size_t n, int reps) {
 extern "C" int init_fpext(void* out, const uint32_t* raw_data, size_t n) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<FpExt, 4><<<grid_size, block>>>(static_cast<FpExt*>(out), raw_data, n);
+    bench_init_kernel<FpExt, Fp, 4><<<grid_size, block>>>(static_cast<FpExt*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
@@ -192,7 +188,7 @@ extern "C" int inv_fpext(void* out, const void* a, size_t n, int reps) {
 extern "C" int init_fp5(void* out, const uint32_t* raw_data, size_t n) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp5, 5><<<grid_size, block>>>(static_cast<Fp5*>(out), raw_data, n);
+    bench_init_kernel<Fp5, Fp, 5><<<grid_size, block>>>(static_cast<Fp5*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
@@ -226,7 +222,7 @@ extern "C" int inv_fp5(void* out, const void* a, size_t n, int reps) {
 extern "C" int init_fp6(void* out, const uint32_t* raw_data, size_t n) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp6, 6><<<grid_size, block>>>(static_cast<Fp6*>(out), raw_data, n);
+    bench_init_kernel<Fp6, Fp, 6><<<grid_size, block>>>(static_cast<Fp6*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
@@ -257,21 +253,10 @@ extern "C" int inv_fp6(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Fp2x3 (2×3 tower: Fp → Fp2 → Fp6)
 // ============================================================================
 
-// Generic init for 6-element tower types
-template<typename T>
-__global__ void bench_init_tower6_kernel(T* out, const uint32_t* raw_data, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-    
-    size_t base = idx * 6;
-    out[idx] = T(Fp(raw_data[base]), Fp(raw_data[base+1]), Fp(raw_data[base+2]),
-                 Fp(raw_data[base+3]), Fp(raw_data[base+4]), Fp(raw_data[base+5]));
-}
-
 extern "C" int init_fp2x3(void* out, const uint32_t* raw_data, size_t n) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_tower6_kernel<Fp2x3><<<grid_size, block>>>(static_cast<Fp2x3*>(out), raw_data, n);
+    bench_init_kernel<Fp2x3, Fp, 6><<<grid_size, block>>>(static_cast<Fp2x3*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
@@ -305,7 +290,7 @@ extern "C" int inv_fp2x3(void* out, const void* a, size_t n, int reps) {
 extern "C" int init_fp3x2(void* out, const uint32_t* raw_data, size_t n) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_tower6_kernel<Fp3x2><<<grid_size, block>>>(static_cast<Fp3x2*>(out), raw_data, n);
+    bench_init_kernel<Fp3x2, Fp, 6><<<grid_size, block>>>(static_cast<Fp3x2*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
@@ -336,17 +321,10 @@ extern "C" int inv_fp3x2(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Kb (KoalaBear base field)
 // ============================================================================
 
-/// Initialize Kb elements from raw u32 data
-__global__ void bench_init_kb_kernel(Kb* out, const uint32_t* raw_data, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-    out[idx] = Kb(raw_data[idx]);
-}
-
 extern "C" int init_kb(void* out, const uint32_t* raw_data, size_t n) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kb_kernel<<<grid_size, block>>>(static_cast<Kb*>(out), raw_data, n);
+    bench_init_kernel<Kb, Kb, 1><<<grid_size, block>>>(static_cast<Kb*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
@@ -370,5 +348,39 @@ extern "C" int inv_kb(void* out, const void* a, size_t n, int reps) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
     bench_inv_kernel<Kb><<<grid_size, block>>>(static_cast<Kb*>(out), static_cast<const Kb*>(a), n, reps);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Extern "C" Wrappers for Kb5 (KoalaBear quintic extension)
+// ============================================================================
+
+extern "C" int init_kb5(void* out, const uint32_t* raw_data, size_t n) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_init_kernel<Kb5, Kb, 5><<<grid_size, block>>>(static_cast<Kb5*>(out), raw_data, n);
+    return cudaGetLastError();
+}
+
+extern "C" int add_kb5(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_add_kernel<Kb5><<<grid_size, block>>>(
+        static_cast<Kb5*>(out), static_cast<const Kb5*>(a), static_cast<const Kb5*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int mul_kb5(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_mul_kernel<Kb5><<<grid_size, block>>>(
+        static_cast<Kb5*>(out), static_cast<const Kb5*>(a), static_cast<const Kb5*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int inv_kb5(void* out, const void* a, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_inv_kernel<Kb5><<<grid_size, block>>>(static_cast<Kb5*>(out), static_cast<const Kb5*>(a), n, reps);
     return cudaGetLastError();
 }
