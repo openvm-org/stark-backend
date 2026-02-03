@@ -647,20 +647,6 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 
 ---
 
-## References
-
-1. **Plonky3**: https://github.com/Plonky3/Plonky3
-   - BabyBear implementation with degree-4 extension
-   - Uses `x^4 - 11` as irreducible polynomial
-
-2. **ICICLE**: https://github.com/ingonyama-zk/icicle
-   - CUDA-accelerated cryptographic primitives
-   - BabyBear support
-
-3. **Montgomery Multiplication**: https://en.wikipedia.org/wiki/Montgomery_modular_multiplication
-
----
-
 ## Future Work
 
 - [ ] Lazy reduction for Fp5/Fp6 multiplication
