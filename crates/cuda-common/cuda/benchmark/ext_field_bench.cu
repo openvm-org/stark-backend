@@ -15,6 +15,7 @@
  */
 
 #include "fp.h"
+#include "fp4.h"
 #include "fpext.h"
 #include "fp5.h"
 #include "fp6.h"
@@ -151,7 +152,41 @@ extern "C" int inv_fp(void* out, const void* a, size_t n, int reps) {
 }
 
 // ============================================================================
-// Extern "C" Wrappers for FpExt (quartic extension)
+// Extern "C" Wrappers for Fp4 (quartic extension - simple implementation)
+// ============================================================================
+
+extern "C" int init_fp4(void* out, const uint32_t* raw_data, size_t n) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_init_kernel<Fp4, Fp, 4><<<grid_size, block>>>(static_cast<Fp4*>(out), raw_data, n);
+    return cudaGetLastError();
+}
+
+extern "C" int add_fp4(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_add_kernel<Fp4><<<grid_size, block>>>(
+        static_cast<Fp4*>(out), static_cast<const Fp4*>(a), static_cast<const Fp4*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int mul_fp4(void* out, const void* a, const void* b, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_mul_kernel<Fp4><<<grid_size, block>>>(
+        static_cast<Fp4*>(out), static_cast<const Fp4*>(a), static_cast<const Fp4*>(b), n, reps);
+    return cudaGetLastError();
+}
+
+extern "C" int inv_fp4(void* out, const void* a, size_t n, int reps) {
+    int grid_size;
+    dim3 block = get_launch_config(n, grid_size);
+    bench_inv_kernel<Fp4><<<grid_size, block>>>(static_cast<Fp4*>(out), static_cast<const Fp4*>(a), n, reps);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Extern "C" Wrappers for FpExt (quartic extension - optimized bb31_4_t)
 // ============================================================================
 
 extern "C" int init_fpext(void* out, const uint32_t* raw_data, size_t n) {

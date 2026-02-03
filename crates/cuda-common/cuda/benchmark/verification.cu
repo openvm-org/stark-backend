@@ -13,6 +13,7 @@
  */
 
 #include "fp.h"
+#include "fp4.h"
 #include "fpext.h"
 #include "fp5.h"
 #include "fp6.h"
@@ -72,6 +73,25 @@ __global__ void verify_distrib_kernel(uint32_t* failures, const T* a, const T* b
     if (lhs != rhs) {
         atomicAdd(failures, 1);
     }
+}
+
+// ============================================================================
+// Fp4 Verification (simple implementation)
+// ============================================================================
+
+extern "C" int verify_inv_fp4(uint32_t* failures, const void* a, size_t n) {
+    int grid_size;
+    dim3 block = get_verify_config(n, grid_size);
+    verify_inv_kernel<Fp4><<<grid_size, block>>>(failures, static_cast<const Fp4*>(a), n);
+    return cudaGetLastError();
+}
+
+extern "C" int verify_distrib_fp4(uint32_t* failures, const void* a, const void* b, const void* c, size_t n) {
+    int grid_size;
+    dim3 block = get_verify_config(n, grid_size);
+    verify_distrib_kernel<Fp4><<<grid_size, block>>>(
+        failures, static_cast<const Fp4*>(a), static_cast<const Fp4*>(b), static_cast<const Fp4*>(c), n);
+    return cudaGetLastError();
 }
 
 // ============================================================================

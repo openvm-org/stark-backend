@@ -24,6 +24,13 @@ extern "C" {
     fn mul_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_fp(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
+    // BabyBear quartic extension (simple implementation)
+    fn init_fp4(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn add_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn mul_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
+    fn inv_fp4(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+
+    // BabyBear quartic extension (optimized bb31_4_t)
     fn init_fpext(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
@@ -80,6 +87,9 @@ extern "C" {
     fn inv_kb3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
     // Verification kernels
+    fn verify_inv_fp4(failures: *mut u32, a: *const c_void, n: usize) -> i32;
+    fn verify_distrib_fp4(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
+
     fn verify_inv_fp5(failures: *mut u32, a: *const c_void, n: usize) -> i32;
     fn verify_distrib_fp5(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
 
@@ -273,6 +283,37 @@ pub fn bench_fp(config: &BenchConfig) -> FieldBenchResult {
     });
     
     FieldBenchResult { field_name: "Fp".into(), u32s_per_element: 1, init, add, mul, inv }
+}
+
+pub fn bench_fp4(config: &BenchConfig) -> FieldBenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+    
+    let d_a = random_u32s(n * 4, 11111).to_device().unwrap();
+    let d_b = random_u32s(n * 4, 22222).to_device().unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity(n * 4);
+    
+    let init = measure(config, n as u64, || {
+        cuda_check(unsafe { init_fp4(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
+    });
+    cuda_check(unsafe { init_fp4(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
+    sync();
+    
+    let ops = n as u64 * reps as u64;
+    
+    let add = measure(config, ops, || {
+        cuda_check(unsafe { add_fp4(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let mul = measure(config, ops, || {
+        cuda_check(unsafe { mul_fp4(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+    });
+    
+    let inv = measure(config, ops, || {
+        cuda_check(unsafe { inv_fp4(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
+    });
+    
+    FieldBenchResult { field_name: "Fp4".into(), u32s_per_element: 4, init, add, mul, inv }
 }
 
 pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
@@ -607,6 +648,7 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     
     // Collect all BabyBear results
     let fp = bench_fp(config);
+    let fp4 = bench_fp4(config);
     let fpext = bench_fpext(config);
     let fp5 = bench_fp5(config);
     let fp6 = bench_fp6(config);
@@ -622,7 +664,7 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     
     // Combine all results
     let all_results = vec![
-        fp.clone(), fpext, fp5, fp6, fp2x3, fp3x2,
+        fp.clone(), fp4, fpext, fp5, fp6, fp2x3, fp3x2,
         kb, kb5, kb6, kb2x3, kb3x2,
     ];
     print_benchmark_tables(&all_results, &fp);
@@ -687,6 +729,9 @@ pub fn verify_all_fields(num_elements: usize) -> bool {
     let mut all_passed = true;
     
     // Use existing benchmark init functions for initialization
+    all_passed &= verify_field("Fp4 (simple)", num_elements, 4,
+        init_fp4, verify_inv_fp4, verify_distrib_fp4);
+    
     all_passed &= verify_field("Fp5", num_elements, 5,
         init_fp5, verify_inv_fp5, verify_distrib_fp5);
     
