@@ -4,9 +4,6 @@
  * KoalaBear prime: p = 2^31 - 2^24 + 1 = 2130706433 = 0x7F000001
  * 2-adicity: 24 (p-1 = 2^24 * 127)
  * 
- * Key property: gcd(3, p-1) = gcd(5, p-1) = 1, so x^3 and x^5 are automorphisms.
- * This means no binomial x^k - W is irreducible for k = 3, 5; use trinomials instead.
- * 
  * Montgomery constants:
  *   MOD = 0x7F000001  (the prime)
  *   M0  = 0x7EFFFFFF  (-p^{-1} mod 2^32)

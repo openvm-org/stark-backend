@@ -7,7 +7,7 @@
  * 
  * Supported fields:
  * - Baby Bear: Fp5, Fp6, Fp2x3, Fp3x2
- * - KoalaBear: Kb (base), Kb5 (quintic extension)
+ * - KoalaBear: Kb (base), Kb5 (quintic), Kb6 (sextic)
  * 
  * Note: Uses init functions from ext_field_bench.cu for initialization.
  */
@@ -20,6 +20,7 @@
 #include "fp3x2.h"
 #include "kb.h"
 #include "kb5.h"
+#include "kb6.h"
 
 // ============================================================================
 // Launch Configuration
@@ -182,5 +183,24 @@ extern "C" int verify_distrib_kb5(uint32_t* failures, const void* a, const void*
     dim3 block = get_verify_config(n, grid_size);
     verify_distrib_kernel<Kb5><<<grid_size, block>>>(
         failures, static_cast<const Kb5*>(a), static_cast<const Kb5*>(b), static_cast<const Kb5*>(c), n);
+    return cudaGetLastError();
+}
+
+// ============================================================================
+// Kb6 Verification (KoalaBear sextic)
+// ============================================================================
+
+extern "C" int verify_inv_kb6(uint32_t* failures, const void* a, size_t n) {
+    int grid_size;
+    dim3 block = get_verify_config(n, grid_size);
+    verify_inv_kernel<Kb6><<<grid_size, block>>>(failures, static_cast<const Kb6*>(a), n);
+    return cudaGetLastError();
+}
+
+extern "C" int verify_distrib_kb6(uint32_t* failures, const void* a, const void* b, const void* c, size_t n) {
+    int grid_size;
+    dim3 block = get_verify_config(n, grid_size);
+    verify_distrib_kernel<Kb6><<<grid_size, block>>>(
+        failures, static_cast<const Kb6*>(a), static_cast<const Kb6*>(b), static_cast<const Kb6*>(c), n);
     return cudaGetLastError();
 }

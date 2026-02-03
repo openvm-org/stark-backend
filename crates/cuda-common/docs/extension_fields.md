@@ -5,12 +5,14 @@ This document describes the mathematical foundations and implementation details 
 ## Table of Contents
 
 1. [Base Field: Baby Bear](#base-field-baby-bear)
-2. [Extension Field Theory](#extension-field-theory)
-3. [Fp5 Implementation](#fp5-implementation)
-4. [Fp6 Implementation](#fp6-implementation)
-5. [Fp6 Tower Constructions](#fp6-tower-constructions)
-6. [Benchmarking System](#benchmarking-system)
-7. [Performance Analysis](#performance-analysis)
+2. [Base Field: KoalaBear](#base-field-koalabear)
+3. [Extension Field Theory](#extension-field-theory)
+4. [Fp5 Implementation](#fp5-implementation)
+5. [Fp6 Implementation](#fp6-implementation)
+6. [Fp6 Tower Constructions](#fp6-tower-constructions)
+7. [KoalaBear Extensions](#koalabear-extensions)
+8. [Benchmarking System](#benchmarking-system)
+9. [Performance Analysis](#performance-analysis)
 
 ---
 
@@ -41,6 +43,46 @@ Mont(x) = x * R mod p,  where R = 2^32
 ```
 
 Multiplication: `Mont(a) * Mont(b) → Mont(a*b)` via Montgomery reduction.
+
+---
+
+## Base Field: KoalaBear
+
+### Definition
+
+KoalaBear is a prime field with:
+
+```
+p = 2^31 - 2^24 + 1 = 2130706433 = 0x7F000001
+```
+
+### Key Properties
+
+| Property | Value | Significance |
+|----------|-------|--------------|
+| Size | 31 bits | Fits in `uint32_t` with room for lazy reduction |
+| Two-adicity | 24 | `p - 1 = 127 × 2^24`, good for FFT |
+| Form | `2^31 - 2^24 + 1` | Enables fast modular reduction |
+
+### Critical Difference from Baby Bear
+
+**KoalaBear has `gcd(3, p-1) = gcd(5, p-1) = 1`**, meaning:
+- The cube map `x → x³` is an **automorphism** (permutation) of `Fp*`
+- The 5th power map `x → x⁵` is also an **automorphism** of `Fp*`
+- **Every nonzero element is both a cube AND a 5th power**
+
+This has profound implications for extension field construction (see [KoalaBear Extensions](#koalabear-extensions)).
+
+### Montgomery Representation
+
+KoalaBear elements use Montgomery form with these constants:
+
+```
+MOD = 0x7F000001  (the prime)
+M0  = 0x7EFFFFFF  (-p^{-1} mod 2^32)
+RR  = 0x17F7EFE4  (R² mod p, where R = 2^32)
+ONE = 0x01FFFFFE  (R mod p, i.e., 1 in Montgomery form)
+```
 
 ---
 
@@ -489,6 +531,148 @@ Both tower implementations were verified using on-device tests with 1024 random 
 
 ---
 
+## KoalaBear Extensions
+
+### Why Binomial Extensions Fail for KoalaBear
+
+Unlike Baby Bear, KoalaBear **cannot use binomial extensions** `X^n - W` for degrees 3, 5, or 6.
+
+**Mathematical reason**: For a binomial `X^n - W` to be irreducible over `Fp`, the constant `W` must NOT be an n-th power in `Fp`.
+
+For KoalaBear:
+- `gcd(3, p-1) = 1` → Every element is a cube → No irreducible `X³ - W`
+- `gcd(5, p-1) = 1` → Every element is a 5th power → No irreducible `X⁵ - W`
+- `gcd(6, p-1) = 2` → For `X⁶ - W` to be irreducible, W must not be a square or cube. But every element is a cube! → No irreducible `X⁶ - W`
+
+**Solution**: Use **sparse trinomials** instead of binomials.
+
+### Kb5: Quintic Extension
+
+#### Irreducible Polynomial
+
+```
+X⁵ + X + 4
+```
+
+This is the simplest sparse trinomial irreducible over KoalaBear.
+
+#### Reduction Rule
+
+Let `α` be a root, so `α⁵ + α + 4 = 0`. Then:
+```
+α⁵ = -α - 4
+```
+
+For a product giving coefficients `t[0..8]`:
+```
+c[0] = t[0] - 4·t[5]
+c[1] = t[1] - t[5] - 4·t[6]
+c[2] = t[2] - t[6] - 4·t[7]
+c[3] = t[3] - t[7] - 4·t[8]
+c[4] = t[4] - t[8]
+```
+
+#### Element Representation
+
+```cpp
+struct Kb5 {
+    Kb elems[5];  // [a₀, a₁, a₂, a₃, a₄]
+};
+```
+
+Memory: 5 × 4 = 20 bytes per element.
+
+#### Inversion Algorithm
+
+**Gaussian elimination** on the 5×5 multiplication matrix over Kb.
+
+The matrix for `a = a₀ + a₁α + a₂α² + a₃α³ + a₄α⁴`:
+```
+┌ a₀        -4·a₄      -4·a₃      -4·a₂      -4·a₁     ┐
+│ a₁        a₀-a₄      -a₃-4·a₄   -a₂-4·a₃   -a₁-4·a₂  │
+│ a₂        a₁         a₀-a₄      -a₃-4·a₄   -a₂-4·a₃  │
+│ a₃        a₂         a₁         a₀-a₄      -a₃-4·a₄  │
+└ a₄        a₃         a₂         a₁         a₀-a₄     ┘
+```
+
+Cost: O(125) Kb operations + 5 Kb inversions
+
+#### Correctness Verification
+
+- Multiplicative inverse test (1024 elements): **0 failures**
+- Distributivity test (1024 elements): **0 failures**
+
+### Kb6: Sextic Extension
+
+#### Irreducible Polynomial
+
+```
+X⁶ + X³ + 1
+```
+
+This trinomial has a **remarkably efficient** reduction rule.
+
+#### Reduction Rule
+
+Let `α` be a root, so `α⁶ + α³ + 1 = 0`. Then:
+```
+α⁶ = -α³ - 1
+α⁷ = -α⁴ - α
+α⁸ = -α⁵ - α²
+α⁹ = 1       ← Key property!
+α¹⁰ = α
+```
+
+The fact that `α⁹ = 1` makes reduction extremely cheap.
+
+For a product giving coefficients `t[0..10]`:
+```
+c[0] = t[0] - t[6] + t[9]
+c[1] = t[1] - t[7] + t[10]
+c[2] = t[2] - t[8]
+c[3] = t[3] - t[6]
+c[4] = t[4] - t[7]
+c[5] = t[5] - t[8]
+```
+
+**Note**: This reduction uses **only additions and subtractions** - no multiplications by constants! This makes Kb6 multiplication faster than Fp6 (which requires multiplying by 31).
+
+#### Element Representation
+
+```cpp
+struct Kb6 {
+    Kb elems[6];  // [a₀, a₁, a₂, a₃, a₄, a₅]
+};
+```
+
+Memory: 6 × 4 = 24 bytes per element.
+
+#### Inversion Algorithm
+
+**Gaussian elimination** on the 6×6 multiplication matrix over Kb.
+
+Cost: O(216) Kb operations + 6 Kb inversions
+
+#### Correctness Verification
+
+- Multiplicative inverse test (1024 elements): **0 failures**
+- Distributivity test (1024 elements): **0 failures**
+
+### KoalaBear vs Baby Bear Extension Comparison
+
+| Property | Baby Bear | KoalaBear |
+|----------|-----------|-----------|
+| gcd(3, p-1) | 3 | **1** |
+| gcd(5, p-1) | 5 | **1** |
+| X⁵ - W works? | Yes (W=2) | **No** |
+| X⁶ - W works? | Yes (W=31) | **No** |
+| Extension type | Binomial | **Trinomial** |
+| Fp5/Kb5 polynomial | X⁵ - 2 | X⁵ + X + 4 |
+| Fp6/Kb6 polynomial | X⁶ - 31 | X⁶ + X³ + 1 |
+| Reduction cost | Multiply by W | Add/sub only (Kb6) |
+
+---
+
 ## Benchmarking System
 
 ### Architecture
@@ -581,6 +765,8 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 
 ### Benchmark Results (RTX series, 4M elements)
 
+#### Baby Bear Fields
+
 | Field | Size | init | add | mul | inv |
 |-------|------|------|-----|-----|-----|
 | Fp | 4 B | 308 Gops/s | 3532 Gops/s | 1869 Gops/s | 59.6 Gops/s |
@@ -589,6 +775,14 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Fp6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 2.2 Gops/s |
 | Fp2x3 (2×3 tower) | 24 B | 36 Gops/s | 986 Gops/s | 42 Gops/s | 7.2 Gops/s |
 | Fp3x2 (3×2 tower) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 12.7 Gops/s |
+
+#### KoalaBear Fields
+
+| Field | Size | init | add | mul | inv |
+|-------|------|------|-----|-----|-----|
+| Kb | 4 B | 290 Gops/s | 3545 Gops/s | 1867 Gops/s | 45.4 Gops/s |
+| Kb5 | 20 B | 43 Gops/s | 1199 Gops/s | 68 Gops/s | 3.7 Gops/s |
+| Kb6 | 24 B | 36 Gops/s | 987 Gops/s | **53 Gops/s** | 2.2 Gops/s |
 
 ### Relative Performance (vs Fp baseline)
 
@@ -613,6 +807,17 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 - **Multiplication**: Direct Fp6 and Fp3x2 are equivalent (~49 Gops/s), Fp2x3 is ~15% slower
 - **Inversion**: Fp3x2 is **5.8× faster** than direct, Fp2x3 is **3.3× faster** than direct
 - **Recommendation**: Use **Fp3x2** for best overall performance
+
+### Fp6 vs Kb6 Comparison
+
+| Metric | Fp6 (Baby Bear) | Kb6 (KoalaBear) | Notes |
+|--------|-----------------|-----------------|-------|
+| Polynomial | X⁶ - 31 | X⁶ + X³ + 1 | Binomial vs trinomial |
+| Reduction | Multiply by 31 | Add/sub only | Kb6 cheaper |
+| mul | 49 Gops/s | **53 Gops/s** | **8% faster** |
+| inv | 2.2 Gops/s | 2.2 Gops/s | Same |
+
+The Kb6 trinomial `X⁶ + X³ + 1` has a special property: `α⁹ = 1`. This means reduction from degree-10 terms only requires additions/subtractions, making Kb6 multiplication faster than Fp6 despite both being degree-6 extensions.
 
 ### Analysis
 
@@ -652,3 +857,4 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 - [ ] Lazy reduction for Fp5/Fp6 multiplication
 - [ ] Batch inversion using Montgomery's trick
 - [ ] Karatsuba multiplication for Fp5/Fp6 (potential 20-30% speedup)
+- [ ] KoalaBear tower constructions (Kb2x3, Kb3x2)
