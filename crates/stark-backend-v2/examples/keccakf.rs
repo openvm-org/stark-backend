@@ -29,7 +29,7 @@ const NUM_PERMUTATIONS: usize = 1 << 10;
 // Newtype to implement extended traits
 struct TestAir(KeccakAir);
 
-impl<F: Field> BaseAir<F> for TestAir {
+impl<F> BaseAir<F> for TestAir {
     fn width(&self) -> usize {
         BaseAir::<F>::width(&self.0)
     }

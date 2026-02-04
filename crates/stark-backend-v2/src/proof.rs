@@ -219,7 +219,7 @@ impl Encode for WhirProof {
         self.codeword_commits.encode(writer)?;
         encode_iter(self.ood_values.iter(), writer)?;
         let num_whir_rounds = self.codeword_commits.len() + 1;
-        if num_whir_sumcheck_rounds % num_whir_rounds != 0 {
+        if !num_whir_sumcheck_rounds.is_multiple_of(num_whir_rounds) {
             return Err(Error::new(
                 std::io::ErrorKind::InvalidData,
                 "num_whir_sumcheck_rounds must be a multiple of num_whir_rounds",
