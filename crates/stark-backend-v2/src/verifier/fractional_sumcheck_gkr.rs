@@ -1,4 +1,4 @@
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use thiserror::Error;
 use tracing::debug;
 
@@ -302,16 +302,16 @@ mod tests {
     fn test_gkr_base_layer_numerator_zero() {
         setup_tracing();
         let layer1_claims = GkrLayerClaims {
-            p_xi_0: EF::from_canonical_u64(1), // Non-zero
-            p_xi_1: EF::from_canonical_u64(2),
-            q_xi_0: EF::from_canonical_u64(3),
-            q_xi_1: EF::from_canonical_u64(4),
+            p_xi_0: EF::from_u64(1), // Non-zero
+            p_xi_1: EF::from_u64(2),
+            q_xi_0: EF::from_u64(3),
+            q_xi_1: EF::from_u64(4),
         };
 
         // p0 = 1*4 + 2*3 = 10 (non-zero)
         let proof = GkrProof {
             logup_pow_witness: F::ZERO,
-            q0_claim: EF::from_canonical_u64(12), // q0 = 3*4 = 12
+            q0_claim: EF::from_u64(12), // q0 = 3*4 = 12
             claims_per_layer: vec![layer1_claims],
             sumcheck_polys: vec![],
         };
@@ -476,11 +476,11 @@ mod tests {
         setup_tracing();
         let fractions = vec![
             Frac {
-                p: EF::from_canonical_u64(5),
+                p: EF::from_u64(5),
                 q: EF::ONE,
             },
             Frac {
-                p: -EF::from_canonical_u64(5),
+                p: -EF::from_u64(5),
                 q: EF::ONE,
             },
         ];

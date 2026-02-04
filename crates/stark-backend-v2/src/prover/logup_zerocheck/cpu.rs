@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     parizip,
     prover::MatrixDimensions,
 };
-use p3_field::{Field, FieldAlgebra, TwoAdicField};
+use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::debug;
@@ -229,7 +229,7 @@ where
                 debug_assert_eq!(1 << s.log_height(), s.len(0));
                 debug_assert_eq!(s.len(0) % height, 0);
                 let norm_factor_denom = s.len(0) / height;
-                let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+                let norm_factor = F::from_usize(norm_factor_denom).inverse();
                 // We need to fill `evals` with the logup evaluations on the lifted trace, which is
                 // the same as cyclic repeating of the unlifted evaluations
                 evals[s.row_idx..s.row_idx + s.len(0)]
@@ -439,7 +439,7 @@ where
                 let mut parts = vec![(sels.into(), false)];
                 parts.extend_from_slice(mats);
                 let norm_factor_denom = 1 << l_skip.saturating_sub(log_height);
-                let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+                let norm_factor = F::from_usize(norm_factor_denom).inverse();
 
                 // degree is constraint_degree + 1 due to eq term
                 let [mut numer, denom] =
@@ -527,7 +527,7 @@ where
                     *tilde_eval *= r_prev;
                 };
                 (1..=s_deg)
-                    .map(|x| *tilde_eval * F::from_canonical_usize(x))
+                    .map(|x| *tilde_eval * F::from_usize(x))
                     .collect()
             } else {
                 let parts = iter::empty()
@@ -566,7 +566,7 @@ where
             }
             let n_lift = n.max(0) as usize;
             let norm_factor_denom = 1 << (-n).max(0);
-            let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+            let norm_factor = F::from_usize(norm_factor_denom).inverse();
             if round > n_lift {
                 if round == n_lift + 1 {
                     // Evaluate \hat{f}(\vec r_n)
@@ -586,7 +586,7 @@ where
                 };
                 tilde_eval.map(|tilde_eval| {
                     (1..=s_deg)
-                        .map(|x| tilde_eval * F::from_canonical_usize(x))
+                        .map(|x| tilde_eval * F::from_usize(x))
                         .collect()
                 })
             } else {

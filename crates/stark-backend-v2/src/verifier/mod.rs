@@ -1,7 +1,7 @@
 use core::cmp::Reverse;
 
 use itertools::{izip, Itertools};
-use p3_field::{FieldAlgebra, TwoAdicField};
+use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use thiserror::Error;
 
 use crate::{
@@ -66,7 +66,6 @@ pub fn verify<TS: FiatShamirTranscript>(
         params,
         per_air,
         trace_height_constraints,
-        max_constraint_degree: _,
     } = &mvk;
     let l_skip = params.l_skip;
 
@@ -116,7 +115,7 @@ pub fn verify<TS: FiatShamirTranscript>(
             if let Some(pdata) = avk.preprocessed_data.as_ref() {
                 transcript.observe_commit(pdata.commit);
             } else {
-                transcript.observe(F::from_canonical_usize(trace_vdata.log_height));
+                transcript.observe(F::from_usize(trace_vdata.log_height));
             }
             debug_assert_eq!(
                 avk.params.width.cached_mains.len(),
@@ -189,7 +188,9 @@ pub fn verify<TS: FiatShamirTranscript>(
 
 #[cfg(test)]
 mod tests {
-    use openvm_stark_sdk::config::setup_tracing_with_log_level;
+    use openvm_stark_sdk::config::{
+        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
+    };
     use test_case::test_case;
     use tracing::Level;
 
@@ -220,8 +221,9 @@ mod tests {
             k_whir,
             num_whir_queries: 100,
             log_final_poly_len,
-            logup_pow_bits: 1,
+            logup: log_up_security_params_baby_bear_100_bits(),
             whir_pow_bits: 1,
+            max_constraint_degree: 3,
         };
         let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
 

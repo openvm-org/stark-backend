@@ -3,7 +3,7 @@ use std::{iter::zip, ops::Mul};
 
 use itertools::Itertools;
 use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
-use p3_field::{batch_multiplicative_inverse, ExtensionField, Field, FieldAlgebra, TwoAdicField};
+use p3_field::{batch_multiplicative_inverse, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_ceil_usize;
 use tracing::instrument;
 
@@ -422,13 +422,13 @@ pub fn interpolate_quadratic_at_012<F: Field>(evals: &[F; 3], x: F) -> F {
 /// (2, evals[2]), (3, evals[3]) and evaluates it at x.
 #[inline(always)]
 pub fn interpolate_cubic_at_0123<F: Field>(evals: &[F; 4], x: F) -> F {
-    let inv6 = F::from_canonical_u64(6).inverse();
+    let inv6 = F::from_u64(6).inverse();
 
     let s1 = evals[1] - evals[0];
     let s2 = evals[2] - evals[0];
     let s3 = evals[3] - evals[0];
 
-    let d3 = s3 - (s2 - s1) * F::from_canonical_u64(3);
+    let d3 = s3 - (s2 - s1) * F::from_u64(3);
 
     let p = d3 * inv6;
     let q = (s2 - d3).halve() - s1;
@@ -441,7 +441,7 @@ pub struct ExpPowers2<T> {
     current: Option<T>,
 }
 
-impl<T: Squarable + FieldAlgebra> Iterator for ExpPowers2<T> {
+impl<T: Squarable + PrimeCharacteristicRing> Iterator for ExpPowers2<T> {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(curr) = self.current.take() {
@@ -454,7 +454,7 @@ impl<T: Squarable + FieldAlgebra> Iterator for ExpPowers2<T> {
     }
 }
 
-pub trait Squarable: FieldAlgebra + Clone {
+pub trait Squarable: PrimeCharacteristicRing + Clone {
     #[inline]
     fn exp_powers_of_2(&self) -> ExpPowers2<Self> {
         ExpPowers2 {
@@ -463,14 +463,14 @@ pub trait Squarable: FieldAlgebra + Clone {
     }
 }
 
-impl<T: FieldAlgebra + Clone> Squarable for T {}
+impl<T: PrimeCharacteristicRing + Clone> Squarable for T {}
 
 #[cfg(test)]
 mod tests {
     use std::iter::zip;
 
     use itertools::Itertools;
-    use p3_field::{FieldAlgebra, TwoAdicField};
+    use p3_field::{PrimeCharacteristicRing, TwoAdicField};
     use p3_util::log2_ceil_usize;
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -488,7 +488,7 @@ mod tests {
             let mut original_coeffs = vec![];
             for _ in 0..num_evals {
                 // Use deterministic values for reproducibility
-                original_coeffs.push(F::from_wrapped_u32(rng.random()));
+                original_coeffs.push(F::from_u32(rng.random()));
             }
 
             // Generate evaluation points (powers of omega)
@@ -528,7 +528,7 @@ mod tests {
             let mut original_coeffs = vec![];
             for _ in 0..num_evals {
                 // Use deterministic values for reproducibility
-                original_coeffs.push(F::from_wrapped_u32(rng.random()));
+                original_coeffs.push(F::from_u32(rng.random()));
             }
 
             let log_domain_size = log2_ceil_usize(num_evals);
@@ -564,8 +564,8 @@ mod tests {
     #[test]
     fn test_interpolate_linear() {
         let evals = [
-            EF::from_canonical_u64(20), // s(0)
-            EF::from_canonical_u64(10), // s(1)
+            EF::from_u64(20), // s(0)
+            EF::from_u64(10), // s(1)
         ];
 
         // Test interpolation at known points
@@ -576,16 +576,16 @@ mod tests {
     #[test]
     fn test_interpolate_quadratic() {
         let evals = [
-            EF::from_canonical_u64(20), // s(0)
-            EF::from_canonical_u64(10), // s(1)
-            EF::from_canonical_u64(18), // s(2)
+            EF::from_u64(20), // s(0)
+            EF::from_u64(10), // s(1)
+            EF::from_u64(18), // s(2)
         ];
 
         // Test interpolation at known points
         assert_eq!(interpolate_quadratic_at_012(&evals, EF::ZERO), evals[0]);
         assert_eq!(interpolate_quadratic_at_012(&evals, EF::ONE), evals[1]);
         assert_eq!(
-            interpolate_quadratic_at_012(&evals, EF::from_canonical_u64(2)),
+            interpolate_quadratic_at_012(&evals, EF::from_u64(2)),
             evals[2]
         );
     }
@@ -593,28 +593,28 @@ mod tests {
     #[test]
     fn test_interpolate_cubic() {
         let evals = [
-            EF::from_canonical_u64(20), // s(0)
-            EF::from_canonical_u64(10), // s(1)
-            EF::from_canonical_u64(18), // s(2)
-            EF::from_canonical_u64(28), // s(3)
+            EF::from_u64(20), // s(0)
+            EF::from_u64(10), // s(1)
+            EF::from_u64(18), // s(2)
+            EF::from_u64(28), // s(3)
         ];
 
         // Test interpolation at known points
         assert_eq!(interpolate_cubic_at_0123(&evals, EF::ZERO), evals[0]);
         assert_eq!(interpolate_cubic_at_0123(&evals, EF::ONE), evals[1]);
         assert_eq!(
-            interpolate_cubic_at_0123(&evals, EF::from_canonical_u64(2)),
+            interpolate_cubic_at_0123(&evals, EF::from_u64(2)),
             evals[2]
         );
         assert_eq!(
-            interpolate_cubic_at_0123(&evals, EF::from_canonical_u64(3)),
+            interpolate_cubic_at_0123(&evals, EF::from_u64(3)),
             evals[3]
         );
     }
 
     #[test]
     fn test_exp_powers_of_2() {
-        let x = F::from_canonical_u32(3);
+        let x = F::from_u32(3);
         let s = x.exp_powers_of_2().take(3).collect_vec();
         assert_eq!(s, vec![x, x * x, x * x * x * x],);
     }
@@ -623,11 +623,11 @@ mod tests {
     fn test_eval_in_uni() {
         let l = 3;
         let n = -2;
-        let u_0 = F::from_canonical_u32(12345);
+        let u_0 = F::from_u32(12345);
         let ind = eval_in_uni(l, n, u_0);
         let expected = (u_0.exp_power_of_2(l) - F::ONE)
             * (u_0.exp_power_of_2(l.wrapping_add_signed(n)) - F::ONE).inverse()
-            * F::from_canonical_usize(1 << n.unsigned_abs()).inverse();
+            * F::from_usize(1 << n.unsigned_abs()).inverse();
         assert_eq!(ind, expected);
     }
 }

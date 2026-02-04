@@ -5,7 +5,7 @@ use openvm_stark_backend::{
     config::{StarkGenericConfig, Val},
     interaction::{BusIndex, InteractionBuilder},
     p3_air::{Air, AirBuilder, BaseAir},
-    p3_field::{FieldAlgebra, PrimeField32},
+    p3_field::{PrimeCharacteristicRing, PrimeField32},
     p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::{cpu::CpuBackend, types::AirProvingContext},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
@@ -33,7 +33,7 @@ where
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
 
-        let (local, next) = (main.row_slice(0), main.row_slice(1));
+        let (local, next) = (main.row_slice(0).expect("window should have two elements"), main.row_slice(1).expect("window should have two elements"));
         let mut local: Vec<<AB as AirBuilder>::Expr> =
             (*local).iter().map(|v| (*v).into()).collect_vec();
         let mut next: Vec<<AB as AirBuilder>::Expr> =
@@ -62,7 +62,7 @@ impl<SC: StarkGenericConfig> Chip<(), CpuBackend<SC>> for SelfInteractionChip {
         let mut trace = vec![Val::<SC>::ZERO; (1 << self.log_height) * self.width];
         for (row_idx, chunk) in trace.chunks_mut(self.width).enumerate() {
             for (i, val) in chunk.iter_mut().enumerate() {
-                *val = Val::<SC>::from_canonical_usize((row_idx + i) % self.width);
+                *val = Val::<SC>::from_usize((row_idx + i) % self.width);
             }
         }
         AirProvingContext::simple_no_pis(Arc::new(RowMajorMatrix::new(trace, self.width)))

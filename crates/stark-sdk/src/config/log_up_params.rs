@@ -8,7 +8,7 @@ pub fn log_up_security_params_baby_bear_100_bits() -> LogUpSecurityParameters {
     let params = LogUpSecurityParameters {
         max_interaction_count: BabyBear::ORDER_U32,
         log_max_message_length: 7,
-        log_up_pow_bits: 18,
+        pow_bits: 18,
     };
     assert!(params.bits_of_security::<BinomialExtensionField<BabyBear, 4>>() >= 100);
     params

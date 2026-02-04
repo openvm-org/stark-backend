@@ -2,7 +2,7 @@
 
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 use tracing::{debug, instrument};
 
@@ -132,7 +132,7 @@ where
     let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
 
     // Grind to increase soundness of random sampling for LogUp
-    let logup_pow_witness = transcript.grind(mpk.params.logup_pow_bits);
+    let logup_pow_witness = transcript.grind(mpk.params.logup.pow_bits);
     let alpha_logup = transcript.sample_ext();
     let beta_logup = transcript.sample_ext();
     debug!(%alpha_logup, %beta_logup);
@@ -168,7 +168,7 @@ where
                     .step_by(1 << l_skip)
                     .copied()
                     .sum::<EF>()
-                    * F::from_canonical_usize(1 << l_skip)
+                    * F::from_usize(1 << l_skip)
             });
             transcript.observe_ext(sum_claim_p);
             transcript.observe_ext(sum_claim_q);

@@ -2,7 +2,7 @@ use core::{array::from_fn, ops::Deref};
 
 use p3_baby_bear::Poseidon2BabyBear;
 use p3_challenger::CanObserve;
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PrimeField32};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32};
 use p3_maybe_rayon::prelude::*;
 use p3_symmetric::Permutation;
 use tracing::instrument;
@@ -22,14 +22,13 @@ pub trait FiatShamirTranscript: Clone + Send + Sync {
 
     fn observe_ext(&mut self, value: EF) {
         // for i in 0..D
-        for &base_val in value.as_base_slice() {
+        for &base_val in value.as_basis_coefficients_slice() {
             self.observe(base_val);
         }
     }
 
     fn sample_ext(&mut self) -> EF {
-        let slice: [F; D_EF] = from_fn(|_| self.sample());
-        EF::from_base_slice(&slice)
+        EF::from_basis_coefficients_fn(|_| self.sample())
     }
 
     fn sample_bits(&mut self, bits: usize) -> u32 {
@@ -53,7 +52,7 @@ pub trait FiatShamirTranscript: Clone + Send + Sync {
 
         let witness = (0..F::ORDER_U32)
             .into_par_iter()
-            .map(F::from_canonical_u32)
+            .map(F::from_u32)
             .find_any(|witness| self.clone().check_witness(bits, *witness))
             .expect("failed to find PoW witness");
         assert!(self.check_witness(bits, witness));
@@ -350,7 +349,7 @@ mod test {
     use openvm_stark_sdk::config::baby_bear_poseidon2::Challenger;
     use p3_baby_bear::BabyBear;
     use p3_challenger::{CanObserve, CanSample};
-    use p3_field::FieldAlgebra;
+    use p3_field::PrimeCharacteristicRing;
 
     use crate::poseidon2::{
         poseidon2_perm,
@@ -375,8 +374,8 @@ mod test {
             }
 
             for j in 0..i * i {
-                challenger.observe(BabyBear::from_canonical_usize(j));
-                FiatShamirTranscript::observe(&mut sponge, BabyBear::from_canonical_usize(j));
+                challenger.observe(BabyBear::from_usize(j));
+                FiatShamirTranscript::observe(&mut sponge, BabyBear::from_usize(j));
             }
         }
     }
@@ -385,10 +384,10 @@ mod test {
     fn test_read_only_transcript() {
         // Record a sequence of operations
         let mut recorder = DuplexSpongeRecorder::default();
-        recorder.observe(BabyBear::from_canonical_u32(42));
-        recorder.observe(BabyBear::from_canonical_u32(100));
+        recorder.observe(BabyBear::from_u32(42));
+        recorder.observe(BabyBear::from_u32(100));
         let s1 = recorder.sample();
-        recorder.observe(BabyBear::from_canonical_u32(200));
+        recorder.observe(BabyBear::from_u32(200));
         let s2 = recorder.sample();
         let s3 = recorder.sample();
 
@@ -396,10 +395,10 @@ mod test {
 
         // Replay from start
         let mut replay = ReadOnlyTranscript::new(&log, 0);
-        replay.observe(BabyBear::from_canonical_u32(42));
-        replay.observe(BabyBear::from_canonical_u32(100));
+        replay.observe(BabyBear::from_u32(42));
+        replay.observe(BabyBear::from_u32(100));
         assert_eq!(replay.sample(), s1);
-        replay.observe(BabyBear::from_canonical_u32(200));
+        replay.observe(BabyBear::from_u32(200));
         assert_eq!(replay.sample(), s2);
         assert_eq!(replay.sample(), s3);
         assert_eq!(replay.len(), 6);
@@ -407,7 +406,7 @@ mod test {
         // Replay from middle
         let mut replay2 = ReadOnlyTranscript::new(&log, 2);
         assert_eq!(replay2.sample(), s1);
-        replay2.observe(BabyBear::from_canonical_u32(200));
+        replay2.observe(BabyBear::from_u32(200));
         assert_eq!(replay2.sample(), s2);
         assert_eq!(replay2.len(), 5);
     }
@@ -421,7 +420,7 @@ mod test {
         let log = recorder.into_log();
 
         let mut replay = ReadOnlyTranscript::new(&log, 0);
-        replay.observe(BabyBear::from_canonical_u32(42)); // Should panic
+        replay.observe(BabyBear::from_u32(42)); // Should panic
     }
 
     #[test]
@@ -429,10 +428,10 @@ mod test {
     #[should_panic(expected = "value mismatch at 0")]
     fn test_read_only_transcript_wrong_value() {
         let mut recorder = DuplexSpongeRecorder::default();
-        recorder.observe(BabyBear::from_canonical_u32(42));
+        recorder.observe(BabyBear::from_u32(42));
         let log = recorder.into_log();
 
         let mut replay = ReadOnlyTranscript::new(&log, 0);
-        replay.observe(BabyBear::from_canonical_u32(99)); // Should panic
+        replay.observe(BabyBear::from_u32(99)); // Should panic
     }
 }

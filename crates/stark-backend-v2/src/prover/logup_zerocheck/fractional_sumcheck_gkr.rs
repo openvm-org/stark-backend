@@ -1,6 +1,6 @@
 use std::ops::Add;
 
-use p3_field::{Field, FieldAlgebra};
+use p3_field::{Field, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
 use tracing::{debug, instrument};
 
