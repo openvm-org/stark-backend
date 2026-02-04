@@ -8,6 +8,7 @@ use p3_util::log2_ceil_u64;
 mod chip;
 pub mod codec;
 mod config;
+pub mod dft;
 mod engine;
 pub mod keygen;
 pub mod poly_common;
