@@ -115,7 +115,7 @@ where
         }
 
         // Proof of work phase to boost logup security.
-        let logup_pow_witness = challenger.grind(self.log_up_params.log_up_pow_bits);
+        let logup_pow_witness = challenger.grind(self.log_up_params.pow_bits);
         let challenges: [Challenge; STARK_LU_NUM_CHALLENGES] =
             array::from_fn(|_| challenger.sample_algebra_element::<Challenge>());
 
@@ -178,10 +178,7 @@ where
             }
         };
 
-        if !challenger.check_witness(
-            self.log_up_params.log_up_pow_bits,
-            partial_proof.logup_pow_witness,
-        ) {
+        if !challenger.check_witness(self.log_up_params.pow_bits, partial_proof.logup_pow_witness) {
             return (
                 RapPhaseVerifierData::default(),
                 Err(FriLogUpError::InvalidPowWitness),

@@ -5,13 +5,14 @@
 
 use std::marker::PhantomData;
 
-use openvm_stark_backend::{
-    config::StarkGenericConfig, engine::StarkEngine, prover::Prover, AirRef,
-};
-use openvm_stark_sdk::config::baby_bear_poseidon2::{default_engine, BabyBearPoseidon2Config};
+use openvm_stark_backend::{config::StarkGenericConfig, prover::Prover, AirRef};
+use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
 
 use crate::{
-    keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
+    keygen::{
+        types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
+        MultiStarkKeygenBuilderV2,
+    },
     poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
     proof::*,
     prover::{
@@ -71,13 +72,12 @@ where
         &self,
         airs: &[AirRef<BabyBearPoseidon2Config>],
     ) -> (MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2) {
-        // TODO[jpw]: switch to v2 keygen builder
-        let engine = default_engine();
-        let mut keygen_builder = engine.keygen_builder();
-        engine.set_up_keygen_builder(&mut keygen_builder, airs);
+        let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config());
+        for air in airs {
+            keygen_builder.add_air(air.clone());
+        }
 
-        let pk_v1 = keygen_builder.generate_pk();
-        let pk = MultiStarkProvingKeyV2::from_v1(self.device().config(), pk_v1);
+        let pk = keygen_builder.generate_pk().unwrap();
         let vk = pk.get_vk();
         (pk, vk)
     }

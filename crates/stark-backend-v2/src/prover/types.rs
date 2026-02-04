@@ -106,7 +106,6 @@ where
             params: self.params,
             per_air,
             trace_height_constraints: self.trace_height_constraints.clone(),
-            max_constraint_degree: self.max_constraint_degree,
         };
         MultiStarkVerifyingKeyV2 {
             inner,

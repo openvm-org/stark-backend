@@ -6,16 +6,23 @@
 use std::sync::Arc;
 
 use openvm_stark_backend::{
-    air_builders::symbolic::{
-        symbolic_variable::{Entry, SymbolicVariable},
-        SymbolicConstraintsDag, SymbolicExpressionNode,
-    },
+    air_builders::symbolic::{symbolic_variable::SymbolicVariable, SymbolicConstraintsDag},
     keygen::types::{LinearConstraint, TraceWidth},
 };
-use p3_field::Field;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{prover::stacked_pcs::StackedPcsData, Digest, SystemParams, F};
+
+#[derive(Error, Debug)]
+pub enum KeygenError {
+    #[error("Max constraint degree exceeded for AIR {name}: {degree} > {max_degree}")]
+    MaxConstraintDegreeExceeded {
+        name: String,
+        degree: usize,
+        max_degree: usize,
+    },
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]
@@ -80,7 +87,6 @@ pub struct MultiStarkVerifyingKey0V2 {
     pub params: SystemParams,
     pub per_air: Vec<StarkVerifyingKeyV2<F, Digest>>,
     pub trace_height_constraints: Vec<LinearConstraint>,
-    pub max_constraint_degree: usize,
 }
 
 /// Proving key for a single STARK (corresponding to single AIR matrix)
@@ -151,59 +157,19 @@ impl MultiStarkProvingKeyV2 {
             params: self.params,
             per_air: self.per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: self.trace_height_constraints.clone(),
-            max_constraint_degree: self.max_constraint_degree,
         }
     }
 }
 
-pub(crate) fn find_unused_vars<F: Field>(
-    constraints: &SymbolicConstraintsDag<F>,
-    width: &TraceWidth,
-) -> Vec<SymbolicVariable<F>> {
-    let preprocessed_width = width.preprocessed.unwrap_or(0);
-    let mut preprocessed_present = vec![vec![false; 2]; preprocessed_width];
-
-    let mut main_present = vec![];
-    for width in width.main_widths() {
-        main_present.push(vec![vec![false; 2]; width]);
+impl MultiStarkVerifyingKeyV2 {
+    /// Global maximum constraint degree across all AIRs and Interactions.
+    pub fn max_constraint_degree(&self) -> usize {
+        self.inner.max_constraint_degree()
     }
+}
 
-    for node in &constraints.constraints.nodes {
-        let SymbolicExpressionNode::Variable(var) = node else {
-            continue;
-        };
-
-        match var.entry {
-            Entry::Preprocessed { offset } => {
-                preprocessed_present[var.index][offset] = true;
-            }
-            Entry::Main { part_index, offset } => {
-                main_present[part_index][var.index][offset] = true;
-            }
-            Entry::Public => {}
-            Entry::Challenge | Entry::Exposed | Entry::Permutation { .. } => unreachable!(),
-        }
+impl MultiStarkVerifyingKey0V2 {
+    pub fn max_constraint_degree(&self) -> usize {
+        self.params.max_constraint_degree
     }
-
-    let mut missing = vec![];
-    for (index, presents) in preprocessed_present.iter().enumerate() {
-        for (offset, present) in presents.iter().enumerate() {
-            if !present {
-                missing.push(SymbolicVariable::new(Entry::Preprocessed { offset }, index));
-            }
-        }
-    }
-    for (part_index, present_per_part) in main_present.iter().enumerate() {
-        for (index, presents) in present_per_part.iter().enumerate() {
-            for (offset, present) in presents.iter().enumerate() {
-                if !present {
-                    missing.push(SymbolicVariable::new(
-                        Entry::Main { part_index, offset },
-                        index,
-                    ));
-                }
-            }
-        }
-    }
-    missing
 }

@@ -1,6 +1,6 @@
 use itertools::{izip, Itertools};
 use openvm_stark_backend::prover::{MatrixDimensions, Prover};
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 use tracing::{info, info_span, instrument};
 
@@ -122,7 +122,7 @@ where
                 if let Some(cd) = &pk.preprocessed_data {
                     transcript.observe_commit(cd.commitment);
                 } else {
-                    transcript.observe(F::from_canonical_usize(trace_vdata.log_height));
+                    transcript.observe(F::from_usize(trace_vdata.log_height));
                 }
                 for commit in &trace_vdata.cached_commitments {
                     transcript.observe_commit(*commit);

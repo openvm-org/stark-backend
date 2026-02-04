@@ -1,4 +1,4 @@
-use p3_field::{ExtensionField, Field, FieldAlgebra};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
 use tracing::debug;
 
@@ -78,11 +78,11 @@ where
     let r_0 = transcript.sample_ext();
     debug!(round = 0, r_round = %r_0);
 
-    if *sum_claim != s_0.0[0] * EF::from_canonical_usize(s_0.0.len()) {
+    if *sum_claim != s_0.0[0] * EF::from_usize(s_0.0.len()) {
         return Err(format!(
             "`sum_claim` does not equal the sum of `s_0` at all the roots of unity: {} != {}",
             *sum_claim,
-            s_0.0[0] * EF::from_canonical_usize(s_0.0.len())
+            s_0.0[0] * EF::from_usize(s_0.0.len())
         ));
     }
 
