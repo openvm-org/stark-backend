@@ -3,7 +3,7 @@ use std::array::from_fn;
 use cfg_if::cfg_if;
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
-use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
+use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{
     batch_multiplicative_inverse, BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing,
     TwoAdicField,
@@ -11,10 +11,11 @@ use p3_field::{
 use p3_interpolation::{interpolate_coset, interpolate_coset_with_precomputation};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
-use p3_util::{log2_ceil_usize, log2_strict_usize};
+use p3_util::log2_strict_usize;
 use tracing::{debug, instrument, trace};
 
 use crate::{
+    dft::Radix2BowersSerial,
     poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
     prover::{ColMajorMatrix, ColMajorMatrixView, MatrixView, StridedColMajorMatrixView},
@@ -60,6 +61,9 @@ where
         ) -> [EF; WD]
         + Sync,
 {
+    if d == 0 {
+        return from_fn(|_| UnivariatePoly(vec![]));
+    }
     #[cfg(debug_assertions)]
     if n > 0 {
         for (m, _) in mats.iter() {
@@ -74,19 +78,19 @@ where
             );
         }
     }
-    let s_deg = sumcheck_round0_deg(l_skip, d);
-    let log_domain_size = log2_ceil_usize(s_deg + 1);
-    let omega = F::two_adic_generator(log_domain_size);
-    // Let L = `{ω^0, ω^1, ..., ω^{s_deg}}` be the larger domain we want to evaluate `s` on.
+    let g = F::GENERATOR;
+    let omega_skip = F::two_adic_generator(l_skip);
+    // skip 1 to avoid divide by zero in zerocheck
+    let coset_shifts = g.powers().skip(1).take(d).collect_vec();
 
     // Map-Reduce
     // Map: for each x in H_n, compute
     // ```
-    // [W(\hat{T}_0(z, x), ..., \hat{T}_{m-1}(z, x)) for z in {ω^0,...,ω^{s_deg}}]
+    // [W(\hat{T}_0(z, x), ..., \hat{T}_{m-1}(z, x)) for z in `g_i D` for `d` cosets of `D`.
     // ```
     // We choose to iterate over x first to avoid multiple memory accesses to `\hat{T}`s
     let evals = (0..1 << n).into_par_iter().map(|x| {
-        let dft = Radix2Bowers;
+        let dft = Radix2BowersSerial;
         // For fixed `x`, `Z -> \hat{T}_i(Z, x)` is a polynomial of degree `<2^l_skip` and we
         // have evaluations on the univariate skip domain `D = <ω_skip>` and we want to get
         // evaluations on the larger domain `L`.
@@ -107,31 +111,38 @@ where
                         let col_x = ((x << l_skip)..(x + 1) << l_skip)
                             .map(|i| unsafe { *mat.get_unchecked((i + offset) % height, col_idx) })
                             .collect_vec();
-                        let mut coeffs = dft.idft(col_x);
-                        coeffs.resize(1 << log_domain_size, F::ZERO);
-                        dft.dft(coeffs)
+                        let coeffs = dft.idft(col_x);
+                        coset_shifts
+                            .iter()
+                            .flat_map(|&shift| dft.coset_dft(coeffs.clone(), shift))
+                            .collect_vec()
                     })
                     .collect_vec()
             })
             .collect_vec();
-        // Apply W(..) to `{\hat{T}_i(z, x)}` for each z in L
-        // NOTE: `2^log_domain_size` can be larger than `s_deg + 1`, and we want to avoid
-        // unnecessary sums over the hypercube.
-        omega
+        // Apply W(..) to `{\hat{T}_i(z, x)}` for each z in g_i D
+        omega_skip
             .powers()
-            .take(s_deg + 1)
+            .take(1 << l_skip)
             .enumerate()
-            .map(|(z_idx, z)| {
-                let row_z_x = mats_at_zs
+            .flat_map(|(z_idx, z)| {
+                coset_shifts
                     .iter()
-                    .map(|mat_at_zs| {
-                        mat_at_zs
+                    .enumerate()
+                    .map(|(coset_idx, &shift)| {
+                        let z_int = (coset_idx << l_skip) + z_idx;
+                        let row_z_x = mats_at_zs
                             .iter()
-                            .map(|col_at_zs| col_at_zs[z_idx])
-                            .collect_vec()
+                            .map(|mat_at_zs| {
+                                mat_at_zs
+                                    .iter()
+                                    .map(|col_at_zs| col_at_zs[z_int])
+                                    .collect_vec()
+                            })
+                            .collect_vec();
+                        w(shift * z, x, &row_z_x)
                     })
-                    .collect_vec();
-                w(z, x, &row_z_x)
+                    .collect_vec()
             })
             .collect_vec()
     });
@@ -147,18 +158,21 @@ where
     cfg_if! {
         if #[cfg(feature = "parallel")] {
             let evals = evals.reduce(
-                || vec![[EF::ZERO; WD]; s_deg + 1],
+                || vec![[EF::ZERO; WD]; d << l_skip],
                 hypercube_sum
             );
         } else {
             let evals = evals.collect_vec();
             let evals = evals.into_iter().fold(
-                vec![[EF::ZERO; WD]; s_deg + 1],
+                vec![[EF::ZERO; WD]; d << l_skip],
                 hypercube_sum
             );
         }
     }
-    from_fn(|i| UnivariatePoly::from_evals(&evals.iter().map(|eval| eval[i]).collect_vec()))
+    from_fn(|i| {
+        let values = evals.iter().map(|x| x[i]).collect_vec();
+        UnivariatePoly::from_geometric_cosets_evals_idft(RowMajorMatrix::new(values, d), g)
+    })
 }
 
 pub const fn sumcheck_round0_deg(l_skip: usize, d: usize) -> usize {
