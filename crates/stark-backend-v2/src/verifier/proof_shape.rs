@@ -4,8 +4,8 @@ use itertools::{izip, Itertools};
 use thiserror::Error;
 
 use crate::{
-    calculate_n_logup, keygen::types::MultiStarkVerifyingKey0V2, proof::Proof,
-    prover::stacked_pcs::StackedLayout,
+    block_sumcheck_sizes, calculate_n_logup, gkr_block_len,
+    keygen::types::MultiStarkVerifyingKey0V2, proof::Proof, prover::stacked_pcs::StackedLayout,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -84,13 +84,17 @@ pub enum GkrProofShapeError {
     )]
     InvalidClaimsPerLayer { expected: usize, actual: usize },
     #[error(
-        "sumcheck_polys should have num_gkr_rounds.saturating_sub(1) = {expected} polynomials, but it has {actual}"
+        "block_sumcheck_polys should have num_gkr_rounds.saturating_sub(1) = {expected} layers, but it has {actual}"
     )]
-    InvalidSumcheckPolys { expected: usize, actual: usize },
-    #[error(
-        "Sumcheck polynomial for round {round} should have {expected} evaluations, but it has {actual}"
-    )]
-    InvalidSumcheckPolyEvals {
+    InvalidBlockSumcheckPolys { expected: usize, actual: usize },
+    #[error("Block sumcheck entry for round {round} block {block} has invalid length {len}")]
+    InvalidBlockSumcheckPolyLen {
+        round: usize,
+        block: usize,
+        len: usize,
+    },
+    #[error("Round {round} should have {expected} sumcheck variables, but got {actual}")]
+    InvalidBlockSumcheckRoundVars {
         round: usize,
         expected: usize,
         actual: usize,
@@ -391,20 +395,47 @@ pub fn verify_proof_shape(
             expected: num_gkr_rounds,
             actual: proof.gkr_proof.claims_per_layer.len(),
         });
-    } else if proof.gkr_proof.sumcheck_polys.len() != num_gkr_rounds.saturating_sub(1) {
-        return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidSumcheckPolys {
+    } else if proof.gkr_proof.block_sumcheck_polys.len() != num_gkr_rounds.saturating_sub(1) {
+        return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidBlockSumcheckPolys {
             expected: num_gkr_rounds.saturating_sub(1),
-            actual: proof.gkr_proof.sumcheck_polys.len(),
+            actual: proof.gkr_proof.block_sumcheck_polys.len(),
         });
     }
 
-    for (i, poly) in proof.gkr_proof.sumcheck_polys.iter().enumerate() {
-        if poly.len() != i + 1 {
-            return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidSumcheckPolyEvals {
-                round: i + 1,
-                expected: i + 1,
-                actual: poly.len(),
-            });
+    for (round_idx, blocks) in proof.gkr_proof.block_sumcheck_polys.iter().enumerate() {
+        let round = round_idx + 1;
+        let mut sizes = block_sumcheck_sizes(round);
+        let mut consumed = 0usize;
+        for (block_idx, block) in blocks.iter().enumerate() {
+            let Some(k) = sizes.next() else {
+                return ProofShapeError::invalid_gkr(
+                    GkrProofShapeError::InvalidBlockSumcheckRoundVars {
+                        round,
+                        expected: round,
+                        actual: round + 1,
+                    },
+                );
+            };
+            let expected_len = gkr_block_len(k);
+            if block.len() != expected_len {
+                return ProofShapeError::invalid_gkr(
+                    GkrProofShapeError::InvalidBlockSumcheckPolyLen {
+                        round,
+                        block: block_idx,
+                        len: block.len(),
+                    },
+                );
+            }
+            consumed += k;
+        }
+        if sizes.next().is_some() || consumed != round {
+            return ProofShapeError::invalid_gkr(
+                GkrProofShapeError::InvalidBlockSumcheckRoundVars {
+                    round,
+                    expected: round,
+                    actual: consumed,
+                },
+            );
         }
     }
 
