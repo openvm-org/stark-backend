@@ -1,5 +1,5 @@
 [workspace.package]
-version = "1.3.0-rc.0"
+version = "2.0.0-alpha"
 edition = "2021"
 rust-version = "1.83"
 authors = ["OpenVM contributors"]
@@ -8,9 +8,22 @@ repository = "https://github.com/openvm-org/"
 license = "MIT OR Apache-2.0"
 
 [workspace]
-members = ["crates/stark-backend", "crates/stark-sdk", "crates/cuda-common", "crates/cuda-backend", "crates/cuda-builder"]
+members = [
+    "crates/stark-backend",
+    "crates/stark-sdk",
+    "crates/cuda-common",
+    "crates/cuda-backend",
+    "crates/cuda-builder",
+    "crates/stark-backend-v2",
+    "crates/stark-backend-v2/derive",
+]
 # Only these build by default
-default-members = ["crates/stark-backend", "crates/stark-sdk"]
+default-members = [
+    "crates/stark-backend",
+    "crates/stark-sdk",
+    "crates/stark-backend-v2",
+    "crates/stark-backend-v2/derive",
+]
 resolver = "2"
 
 # Fastest runtime configuration
@@ -55,7 +68,10 @@ openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
 openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
 openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
+stark-backend-v2 = { path = "crates/stark-backend-v2", default-features = false }
+codec-derive = { path = "crates/stark-backend-v2/derive", default-features = false }
 
+<<<<<<< HEAD
 # Plonky3 - we pin the exact version since this dependency is security critical
 p3-air = { version = "=0.4.1", default-features = false }
 p3-field = { version = "=0.4.1", default-features = false }
@@ -79,6 +95,32 @@ p3-poseidon2 = { version = "=0.4.1", default-features = false }
 p3-symmetric = { version = "=0.4.1", default-features = false }
 p3-uni-stark = { version = "=0.4.1", default-features = false }
 p3-maybe-rayon = { version = "=0.4.1", default-features = false } # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
+=======
+# Plonky3
+p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-interpolation = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-keccak = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-blake3 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-mds = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-monty-31 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-poseidon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false } # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
+>>>>>>> a1d66495 (chore: add `stark-backend-v2` to workspace (#174))
 
 # Bn254 support
 p3-bn254 = { version = "=0.4.1", default-features = false }
@@ -116,6 +158,7 @@ async-trait = "0.1.83"
 getset = "0.1.3"
 rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 hex = { version = "0.4.3", default-features = false }
+hex-literal = "1.0.0"
 bitcode = "0.6.5"
 bincode = "2.0.1"
 bincode_derive = "2.0.1"
