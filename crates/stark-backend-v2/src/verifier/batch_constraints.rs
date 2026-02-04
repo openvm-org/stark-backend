@@ -16,7 +16,7 @@ use crate::{
     keygen::types::MultiStarkVerifyingKey0V2,
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
     poseidon2::sponge::FiatShamirTranscript,
-    proof::{BatchConstraintProof, GkrProof},
+    proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     verifier::{
         evaluator::VerifierConstraintEvaluator,
         fractional_sumcheck_gkr::{verify_gkr, GkrVerificationError},
@@ -48,9 +48,6 @@ pub enum BatchConstraintError {
 
     #[error("Claims are inconsistent")]
     InconsistentClaims,
-
-    #[error("rotation opening provided when rotations are not needed")]
-    RotationsNotNeeded,
 }
 
 /// `public_values` should be in vkey (air_idx) order, including non-present AIRs.
@@ -269,10 +266,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     // Observe common main openings first, and then preprocessed/cached
     for (trace_idx, air_openings) in column_openings.iter().enumerate() {
         let need_rot = need_rot_per_trace[trace_idx];
-        for &(claim, claim_rot) in &air_openings[0] {
-            if !need_rot && claim_rot != EF::ZERO {
-                return Err(BatchConstraintError::RotationsNotNeeded);
-            }
+        for (claim, claim_rot) in column_openings_by_rot(&air_openings[0], need_rot) {
             transcript.observe_ext(claim);
             transcript.observe_ext(claim_rot);
         }
@@ -287,24 +281,26 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
 
         // claim lengths are checked in proof shape
         for claims in air_openings.iter().skip(1) {
-            for &(claim, claim_rot) in claims.iter() {
-                if !need_rot && claim_rot != EF::ZERO {
-                    return Err(BatchConstraintError::RotationsNotNeeded);
-                }
+            for (claim, claim_rot) in column_openings_by_rot(claims, need_rot) {
                 transcript.observe_ext(claim);
                 transcript.observe_ext(claim_rot);
             }
         }
 
         let has_preprocessed = vk.preprocessed_data.is_some();
-        let common_main = air_openings[0].as_slice();
-        let preprocessed = has_preprocessed.then(|| air_openings[1].as_slice());
+        let common_main = column_openings_by_rot(&air_openings[0], need_rot).collect::<Vec<_>>();
+        let preprocessed = has_preprocessed
+            .then(|| column_openings_by_rot(&air_openings[1], need_rot).collect::<Vec<_>>());
         let cached_idx = 1 + has_preprocessed as usize;
         let mut partitioned_main: Vec<_> = air_openings[cached_idx..]
             .iter()
-            .map(|opening| opening.as_slice())
+            .map(|opening| column_openings_by_rot(opening, need_rot).collect::<Vec<_>>())
             .collect();
         partitioned_main.push(common_main);
+        let part_main_slices = partitioned_main
+            .iter()
+            .map(|x| x.as_slice())
+            .collect::<Vec<_>>();
 
         // We are evaluating the lift, which is the same as evaluating the original with domain
         // D^{(2^{n})}
@@ -318,8 +314,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             (l_skip, &rs[..=(n as usize)], F::ONE)
         };
         let evaluator = VerifierConstraintEvaluator::<F, EF>::new(
-            preprocessed,
-            &partitioned_main,
+            preprocessed.as_deref(),
+            &part_main_slices,
             &public_values[air_idx],
             rs_n,
             l,
