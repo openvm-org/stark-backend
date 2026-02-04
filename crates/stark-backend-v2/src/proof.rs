@@ -7,6 +7,8 @@ use crate::{
     Digest, EF, F,
 };
 
+use p3_field::FieldAlgebra;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof {
     /// The commitment to the data in common_main.
@@ -82,11 +84,23 @@ pub struct BatchConstraintProof {
     /// For rounds `1, ..., n_max`; evaluations on `{1, ..., vk.d + 1}`.
     pub sumcheck_round_polys: Vec<Vec<EF>>,
 
-    /// Per AIR **in sorted AIR order**, per AIR part, per column index in that part, opening of
-    /// the prismalinear column polynomial and its rotational convolution.
-    /// The trace parts are ordered: [CommonMain (part
-    /// 0), Preprocessed (if any), Cached(0), Cached(1), ...]
-    pub column_openings: Vec<Vec<Vec<(EF, EF)>>>,
+    /// Per AIR **in sorted AIR order**, per AIR part, per column index in that part, openings for
+    /// the prismalinear column polynomial and (optionally) its rotational convolution. All column
+    /// openings are stored in a flat way, so only column openings or them interleaved with
+    /// rotations. The trace parts are ordered: [CommonMain (part 0), Preprocessed (if any),
+    /// Cached(0), Cached(1), ...]
+    pub column_openings: Vec<Vec<Vec<EF>>>,
+}
+
+pub fn column_openings_by_rot<'a>(
+    openings: &'a [EF],
+    need_rot: bool,
+) -> Box<dyn Iterator<Item = (EF, EF)> + 'a> {
+    if need_rot {
+        Box::new(openings.chunks_exact(2).map(|chunk| (chunk[0], chunk[1])))
+    } else {
+        Box::new(openings.iter().map(|&claim| (claim, EF::ZERO)))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,7 +398,7 @@ impl Decode for BatchConstraintProof {
 
         let mut column_openings = Vec::with_capacity(num_present_airs);
         for _ in 0..num_present_airs {
-            column_openings.push(Vec::<Vec<(EF, EF)>>::decode(reader)?);
+            column_openings.push(Vec::<Vec<EF>>::decode(reader)?);
         }
 
         Ok(Self {

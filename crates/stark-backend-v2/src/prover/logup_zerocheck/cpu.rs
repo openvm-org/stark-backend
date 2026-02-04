@@ -599,7 +599,7 @@ impl<'a> LogupZerocheckCpu<'a> {
         }
     }
 
-    pub fn into_column_openings(mut self) -> Vec<Vec<Vec<(EF, EF)>>> {
+    pub fn into_column_openings(&mut self) -> Vec<Vec<Vec<EF>>> {
         let num_airs_present = self.mat_evals_per_trace.len();
         let mut column_openings = Vec::with_capacity(num_airs_present);
         // At the end, we've folded all MLEs so they only have one row equal to evaluation at `\vec
@@ -611,17 +611,17 @@ impl<'a> LogupZerocheckCpu<'a> {
         {
             // For column openings, we pop common_main (and common_main_rot when present) and put it
             // at the front.
-            let openings_of_air = if helper.needs_next {
+            let openings_of_air: Vec<Vec<EF>> = if helper.needs_next {
                 let common_main_rot = mat_evals.pop().unwrap();
                 let common_main = mat_evals.pop().unwrap();
                 iter::once(&[common_main, common_main_rot] as &[_])
                     .chain(mat_evals.chunks_exact(2))
                     .map(|pair| {
                         zip(pair[0].columns(), pair[1].columns())
-                            .map(|(claim, claim_rot)| {
+                            .flat_map(|(claim, claim_rot)| {
                                 assert_eq!(claim.len(), 1);
                                 assert_eq!(claim_rot.len(), 1);
-                                (claim[0], claim_rot[0])
+                                [claim[0], claim_rot[0]]
                             })
                             .collect_vec()
                     })
@@ -634,7 +634,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                         mat.columns()
                             .map(|claim| {
                                 assert_eq!(claim.len(), 1);
-                                (claim[0], EF::ZERO)
+                                claim[0]
                             })
                             .collect_vec()
                     })

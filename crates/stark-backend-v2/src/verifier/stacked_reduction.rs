@@ -11,7 +11,7 @@ use crate::{
         interpolate_quadratic_at_012,
     },
     poseidon2::sponge::FiatShamirTranscript,
-    proof::StackingProof,
+    proof::{column_openings_by_rot, StackingProof},
     prover::stacked_pcs::StackedLayout,
     EF, F,
 };
@@ -23,9 +23,6 @@ pub enum StackedReductionError {
 
     #[error("s_n(u_n) does not match claimed q(u) sum: {claim} != {final_sum}")]
     FinalSumMismatch { claim: EF, final_sum: EF },
-
-    #[error("rotation opening provided when rotations are not needed")]
-    RotationsNotNeeded,
 }
 
 /// `has_preprocessed` must be per present trace in sorted AIR order.
@@ -38,7 +35,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
     need_rot_per_commit: &[Vec<bool>],
     l_skip: usize,
     n_stack: usize,
-    column_openings: &Vec<Vec<Vec<(EF, EF)>>>,
+    column_openings: &Vec<Vec<Vec<EF>>>,
     r: &[EF],
     omega_shift_pows: &[F],
 ) -> Result<Vec<EF>, StackedReductionError> {
@@ -57,7 +54,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
 
     debug_assert_eq!(layouts.len(), need_rot_per_commit.len());
     let mut lambda_idx = 0usize;
-    let lambda_indices_per_layout: Vec<Vec<(usize, usize, bool)>> = layouts
+    let lambda_indices_per_layout: Vec<Vec<(usize, bool)>> = layouts
         .iter()
         .enumerate()
         .map(|(commit_idx, layout)| {
@@ -67,10 +64,8 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                 .sorted_cols
                 .iter()
                 .map(|&(mat_idx, _col_idx, _slice)| {
-                    let lambda_eq_idx = lambda_idx;
-                    let lambda_rot_idx = lambda_idx + 1;
-                    lambda_idx += 2;
-                    (lambda_eq_idx, lambda_rot_idx, need_rot_for_commit[mat_idx])
+                    lambda_idx += 1;
+                    (lambda_idx - 1, need_rot_for_commit[mat_idx])
                 })
                 .collect_vec()
         })
@@ -81,13 +76,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
     // common main columns (commit 0)
     for (trace_idx, parts) in column_openings.iter().enumerate() {
         let need_rot = need_rot_per_commit[0][trace_idx];
-        for &(t, t_rot) in &parts[0] {
-            t_claims.push(t);
-            t_claims.push(t_rot);
-            if !need_rot && t_rot != EF::ZERO {
-                return Err(StackedReductionError::RotationsNotNeeded);
-            }
-        }
+        t_claims.extend(column_openings_by_rot(&parts[0], need_rot));
     }
 
     // preprocessed and cached columns (commits 1..)
@@ -95,13 +84,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
     for parts in column_openings {
         for cols in parts.iter().skip(1) {
             let need_rot = need_rot_per_commit[commit_idx][0];
-            for &(t, t_rot) in cols {
-                t_claims.push(t);
-                t_claims.push(t_rot);
-                if !need_rot && t_rot != EF::ZERO {
-                    return Err(StackedReductionError::RotationsNotNeeded);
-                }
-            }
+            t_claims.extend(column_openings_by_rot(cols, need_rot));
             commit_idx += 1;
         }
     }
@@ -110,7 +93,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
     debug!(?t_claims);
 
     let lambda = transcript.sample_ext();
-    let lambda_powers = lambda.powers().take(t_claims_len).collect_vec();
+    let lambda_sqr_powers = (lambda * lambda).powers().take(t_claims_len).collect_vec();
 
     /*
      * INITIAL UNIVARIATE ROUND
@@ -123,8 +106,8 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
      * of sum_{z in D} s_1(z). Suppose s_1(x) = a_0 + a_1 * x + ... a_k * x^k. Because we have
      * omega^{|D|} == 1, sum_{z in D} s_1(z) = |D| * (a_0 + a_{|D|} + ...).
      */
-    let s_0 = zip(&t_claims, &lambda_powers)
-        .map(|(&t_i, &lambda_i)| t_i * lambda_i)
+    let s_0 = zip(&t_claims, &lambda_sqr_powers)
+        .map(|(&t_i, &lambda_i)| (t_i.0 + t_i.1 * lambda) * lambda_i)
         .sum::<EF>();
     let s_0_sum_eval = proof
         .univariate_round_coeffs
@@ -198,7 +181,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                 .iter()
                 .enumerate()
                 .for_each(|(col_idx, &(_, _, s))| {
-                    let (lambda_eq_idx, lambda_rot_idx, need_rot) = lambda_indices[col_idx];
+                    let (lambda_idx, need_rot) = lambda_indices[col_idx];
                     let n = s.log_height() as isize - l_skip as isize;
                     let n_lift = n.max(0) as usize;
                     let b = (l_skip + n_lift..l_skip + n_stack)
@@ -215,10 +198,10 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
                         (l_skip, &r[..=n_lift])
                     };
                     let eq_prism = eval_eq_prism(l, &u[..=n_lift], rs_n);
-                    let mut batched = lambda_powers[lambda_eq_idx] * eq_prism;
+                    let mut batched = lambda_sqr_powers[lambda_idx] * eq_prism;
                     if need_rot {
                         let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
-                        batched += lambda_powers[lambda_rot_idx] * rot_kernel_prism;
+                        batched += lambda_sqr_powers[lambda_idx] * lambda * rot_kernel_prism;
                     }
                     coeffs[s.col_idx] += eq_mle * batched * ind;
                 });
@@ -263,7 +246,7 @@ mod tests {
         pub proof: StackingProof,
         pub layouts: Vec<StackedLayout>,
         pub need_rot_per_commit: Vec<Vec<bool>>,
-        pub column_openings: Vec<Vec<Vec<(EF, EF)>>>,
+        pub column_openings: Vec<Vec<Vec<EF>>>,
         pub r: Vec<EF>,
         pub omega_pows: Vec<F>,
     }
@@ -338,7 +321,7 @@ mod tests {
         let t_rot = omega_pows.iter().fold(EF::ZERO, |acc, &omega| {
             acc + compute_t::<true>(&q, &r, &b, &u, EF::from(omega), 0, L_SKIP)
         });
-        let column_openings = vec![vec![vec![(t, t_rot)]]];
+        let column_openings = vec![vec![vec![t, t_rot]]];
 
         let mut transcript = DuplexSponge::default();
         let lambda = transcript.sample_ext();
