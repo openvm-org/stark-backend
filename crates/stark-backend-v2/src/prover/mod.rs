@@ -148,10 +148,11 @@ where
 
         let (constraints_proof, r) =
             self.device
-                .prove_rap_constraints(transcript, mpk, ctx, &common_main_pcs_data);
+                .prove_rap_constraints(transcript, mpk, &ctx, &common_main_pcs_data);
 
         let opening_proof = self.device.prove_openings(
             transcript,
+            ctx,
             common_main_pcs_data,
             pre_cached_pcs_data_per_commit,
             r.into(),

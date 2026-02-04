@@ -218,7 +218,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
     let ((_, batch_proof), r) = device.prove_rap_constraints(
         &mut DuplexSponge::default(),
         &pk,
-        ctx,
+        &ctx,
         &common_main_pcs_data,
     );
 
