@@ -5,10 +5,9 @@ use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{
-    batch_multiplicative_inverse, BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing,
-    TwoAdicField,
+    batch_multiplicative_inverse, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField,
 };
-use p3_interpolation::{interpolate_coset, interpolate_coset_with_precomputation};
+use p3_interpolation::interpolate_coset_with_precomputation;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
