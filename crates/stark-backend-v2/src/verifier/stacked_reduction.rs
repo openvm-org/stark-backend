@@ -207,7 +207,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
 mod tests {
     use itertools::Itertools;
     use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
-    use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32, TwoAdicField};
+    use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
     use p3_util::log2_ceil_usize;
     use rand::{rngs::StdRng, Rng, SeedableRng};
 

@@ -610,10 +610,10 @@ mod tests {
     #[test]
     fn test_constant_folding() {
         let two = SymbolicExpression::<F>::Constant(F::TWO);
-        let three = SymbolicExpression::<F>::Constant(F::from_canonical_u32(3));
-        let five = F::from_canonical_u32(5);
-        let six = F::from_canonical_u32(6);
-        let neg_three = -F::from_canonical_u32(3);
+        let three = SymbolicExpression::<F>::Constant(F::from_u32(3));
+        let five = F::from_u32(5);
+        let six = F::from_u32(6);
+        let neg_three = -F::from_u32(3);
 
         // Test 2 + 3 = 5
         let expr_add = two.clone() + three.clone();
@@ -652,7 +652,7 @@ mod tests {
         let dag = build_symbolic_constraints_dag(&[expr_chain], &[]);
         assert!(matches!(
             dag.constraints.nodes[dag.constraints.constraint_idx[0]],
-            SymbolicExpressionNode::Constant(c) if c == F::from_canonical_u32(10)
+            SymbolicExpressionNode::Constant(c) if c == F::from_u32(10)
         ));
     }
 

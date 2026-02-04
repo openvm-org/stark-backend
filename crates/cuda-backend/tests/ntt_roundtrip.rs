@@ -3,7 +3,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
 };
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 
 #[test]
 #[ignore] // Run explicitly: requires large GPU memory and significant runtime.
@@ -13,7 +13,7 @@ fn ntt_roundtrip_max_log_domain_size() {
     let mut host = Vec::<F>::with_capacity(n);
 
     for i in 0..n {
-        host.push(F::from_canonical_usize(i));
+        host.push(F::from_usize(i));
     }
 
     let mut device = DeviceBuffer::<F>::with_capacity(n);
