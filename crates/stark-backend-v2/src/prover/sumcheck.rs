@@ -171,7 +171,7 @@ where
     }
     from_fn(|i| {
         let values = evals.iter().map(|x| x[i]).collect_vec();
-        UnivariatePoly::from_geometric_cosets_evals_idft(RowMajorMatrix::new(values, d), g)
+        UnivariatePoly::from_geometric_cosets_evals_idft(RowMajorMatrix::new(values, d), g, g)
     })
 }
 
