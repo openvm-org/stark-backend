@@ -1,6 +1,6 @@
-use openvm_stark_backend::p3_field::PrimeField32;
-use openvm_stark_sdk::dummy_airs::fib_air::columns::NUM_FIBONACCI_COLS;
-use p3_matrix::dense::RowMajorMatrix;
+use openvm_stark_backend::{p3_field::PrimeField32, p3_matrix::dense::RowMajorMatrix};
+
+use crate::dummy_airs::fib_air::columns::NUM_FIBONACCI_COLS;
 
 /// sels contain boolean selectors to enable the fibonacci gate
 pub fn generate_trace_rows<F: PrimeField32>(a: u32, b: u32, sels: &[bool]) -> RowMajorMatrix<F> {

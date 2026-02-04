@@ -2,14 +2,14 @@ use std::borrow::Borrow;
 
 use openvm_stark_backend::{
     interaction::{InteractionBuilder, LookupBus},
+    p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, PairBuilder},
     p3_field::{Field, PrimeCharacteristicRing},
+    p3_matrix::{dense::RowMajorMatrix, Matrix},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
 };
-use openvm_stark_sdk::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, PairBuilder};
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
 
 use super::columns::FibonacciSelectorCols;
+use crate::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
 
 pub struct FibonacciSelectorAir {
     sels: Vec<bool>,
