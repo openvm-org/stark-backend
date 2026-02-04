@@ -5,10 +5,10 @@ use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
 use p3_field::{
-    batch_multiplicative_inverse, ExtensionField, Field, FieldAlgebra, FieldExtensionAlgebra,
+    batch_multiplicative_inverse, BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing,
     TwoAdicField,
 };
-use p3_interpolation::interpolate_coset;
+use p3_interpolation::{interpolate_coset, interpolate_coset_with_precomputation};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 use p3_util::{log2_ceil_usize, log2_strict_usize};
@@ -187,10 +187,10 @@ where
     let width = mat.width();
 
     let omega = F::two_adic_generator(l_skip);
-    let denoms = omega
-        .powers()
-        .take(1 << l_skip)
-        .map(|x_i| r - EF::from(x_i))
+    let omega_pows = omega.powers().take(1 << l_skip).collect_vec();
+    let denoms = omega_pows
+        .iter()
+        .map(|&x_i| r - EF::from(x_i))
         .collect_vec();
     let inv_denoms = batch_multiplicative_inverse(&denoms);
 
@@ -207,11 +207,12 @@ where
             let uni_evals = (0..1 << l_skip)
                 .map(|z| unsafe { *mat.get_unchecked(((x << l_skip) + z + offset) % height, j) })
                 .collect_vec();
-            interpolate_coset(
+            interpolate_coset_with_precomputation(
                 &RowMajorMatrix::new_col(uni_evals),
                 F::ONE,
                 r,
-                Some(&inv_denoms),
+                &omega_pows,
+                &inv_denoms,
             )[0]
         })
         .collect::<Vec<_>>();
@@ -275,7 +276,7 @@ where
     let hypercube_dim = n - 1;
     // \hat{f}(x, \vec y) where \vec y is point on hypercube H_{n-1}
     let f_hat = |x: usize, y: usize| {
-        let x = F::from_canonical_usize(x);
+        let x = F::from_usize(x);
         let row_x_y = mats
             .iter()
             .map(|mat| {
@@ -425,8 +426,7 @@ where
 
     // Working copy of evaluations that gets folded after each round
     // PERF[jpw]: the first round should be treated specially in the case F is the base field
-    let mut current_evals =
-        ColMajorMatrix::new(evals.iter().map(|&x| EF::from_base(x)).collect(), 1);
+    let mut current_evals = ColMajorMatrix::new(evals.iter().map(|&x| EF::from(x)).collect(), 1);
     let sum_claim: EF = evals.iter().fold(F::ZERO, |acc, &x| acc + x).into();
     transcript.observe_ext(sum_claim);
 

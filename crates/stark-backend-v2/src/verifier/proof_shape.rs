@@ -409,7 +409,7 @@ pub fn verify_proof_shape(
 
     let n_max = per_trace[0].2.log_height.saturating_sub(l_skip);
 
-    let s_0_deg = (mvk.max_constraint_degree + 1) * ((1 << l_skip) - 1);
+    let s_0_deg = (mvk.max_constraint_degree() + 1) * ((1 << l_skip) - 1);
     if batch_proof.numerator_term_per_air.len() != num_airs_present {
         return ProofShapeError::invalid_batch_constraint(
             BatchProofShapeError::InvalidNumeratorTerms {
@@ -448,11 +448,11 @@ pub fn verify_proof_shape(
     }
 
     for (i, evals) in batch_proof.sumcheck_round_polys.iter().enumerate() {
-        if evals.len() != mvk.max_constraint_degree + 1 {
+        if evals.len() != mvk.max_constraint_degree() + 1 {
             return ProofShapeError::invalid_batch_constraint(
                 BatchProofShapeError::InvalidSumcheckRoundPolyEvals {
                     round: i,
-                    expected: mvk.max_constraint_degree + 1,
+                    expected: mvk.max_constraint_degree() + 1,
                     actual: evals.len(),
                 },
             );
