@@ -24,6 +24,7 @@ pub struct EvalHelper<'a, F> {
     pub preprocessed_trace: Option<StridedColMajorMatrixView<'a, F>>,
     // TODO: skip rotation if vk dictates it is never used
     pub needs_next: bool,
+    pub constraint_degree: u8,
 }
 
 impl<'a> EvalHelper<'a, crate::F> {
