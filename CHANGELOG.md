@@ -4,6 +4,14 @@ All notable changes to STARK Backend will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## Unreleased
+
+## v1.3.0 (2026-02-05)
+
+### Changed
+- Updated Plonky3 to crates.io `v0.4.1`.
+- Updated STARK protocol to 100 bits of provable security with FRI.
+
 ## v1.2.3 (2026-01-11)
 
 ### Changed
