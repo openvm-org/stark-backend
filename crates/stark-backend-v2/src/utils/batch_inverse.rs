@@ -1,6 +1,6 @@
 //! Copied from p3-field [src/batch_inverse.rs] to remove use of rayon
 
-use p3_field::{Field, FieldAlgebra, FieldArray, PackedValue};
+use p3_field::{Field, FieldArray, PackedValue, PrimeCharacteristicRing};
 use tracing::instrument;
 
 /// Batch multiplicative inverses with Montgomery's trick
@@ -53,7 +53,7 @@ fn batch_multiplicative_inverse_helper<F: Field>(x: &[F], result: &mut [F]) {
 /// support inversion, this takes a custom inversion function.
 pub(crate) fn batch_multiplicative_inverse_general<F, Inv>(x: &[F], result: &mut [F], inv: Inv)
 where
-    F: FieldAlgebra + Copy,
+    F: PrimeCharacteristicRing + Copy,
     Inv: Fn(F) -> F,
 {
     let n = x.len();
