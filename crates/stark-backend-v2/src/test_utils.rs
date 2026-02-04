@@ -57,7 +57,7 @@ pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
     );
     engine
         .device()
-        .prove_rap_constraints(transcript, pk, ctx, &common_main_pcs_data)
+        .prove_rap_constraints(transcript, pk, &ctx, &common_main_pcs_data)
 }
 
 fn get_fib_number(mut a: u32, mut b: u32, n: usize) -> u32 {
