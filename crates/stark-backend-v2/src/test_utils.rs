@@ -9,7 +9,10 @@ use openvm_stark_backend::{
 pub use openvm_stark_sdk::dummy_airs::fib_air::air::FibonacciAir;
 use openvm_stark_sdk::{
     any_rap_arc_vec,
-    config::{baby_bear_poseidon2::BabyBearPoseidon2Config, setup_tracing},
+    config::{
+        baby_bear_poseidon2::BabyBearPoseidon2Config,
+        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
+    },
     dummy_airs::{
         self,
         fib_selector_air::air::FibonacciSelectorAir,
@@ -20,7 +23,7 @@ use openvm_stark_sdk::{
     },
 };
 use p3_baby_bear::BabyBear;
-use p3_field::{FieldAlgebra, PrimeField32};
+use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
@@ -163,7 +166,7 @@ impl TestFixture for FibFixture {
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
         use dummy_airs::fib_air::trace::generate_trace_rows;
         let f_n = get_fib_number(self.a, self.b, self.n);
-        let pis = [self.a, self.b, f_n].map(BabyBear::from_canonical_u32);
+        let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);
 
         ProvingContextV2::new(
             (0..self.num_airs)
@@ -204,7 +207,7 @@ impl TestFixture for InteractionsFixture11 {
         let sender_trace = RowMajorMatrix::new(
             [0, 1, 3, 5, 7, 4, 546, 889]
                 .into_iter()
-                .map(BabyBear::from_canonical_usize)
+                .map(BabyBear::from_usize)
                 .collect(),
             2,
         );
@@ -221,7 +224,7 @@ impl TestFixture for InteractionsFixture11 {
         let receiver_trace = RowMajorMatrix::new(
             [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 1, 889, 0, 456]
                 .into_iter()
-                .map(BabyBear::from_canonical_usize)
+                .map(BabyBear::from_usize)
                 .collect(),
             2,
         );
@@ -264,14 +267,14 @@ impl TestFixture for CachedFixture11 {
         let sender_trace = ColMajorMatrix::new(
             [0, 3, 7, 546]
                 .into_iter()
-                .map(BabyBear::from_canonical_usize)
+                .map(BabyBear::from_usize)
                 .collect(),
             1,
         );
         let sender_cached_trace = ColMajorMatrix::new(
             [1, 5, 4, 889]
                 .into_iter()
-                .map(BabyBear::from_canonical_usize)
+                .map(BabyBear::from_usize)
                 .collect(),
             1,
         );
@@ -288,14 +291,14 @@ impl TestFixture for CachedFixture11 {
         let receiver_trace = ColMajorMatrix::new(
             [1, 3, 4, 2, 0, 545, 1, 0]
                 .into_iter()
-                .map(BabyBear::from_canonical_usize)
+                .map(BabyBear::from_usize)
                 .collect(),
             1,
         );
         let receiver_cached_trace = ColMajorMatrix::new(
             [5, 4, 4, 5, 123, 889, 889, 456]
                 .into_iter()
-                .map(BabyBear::from_canonical_usize)
+                .map(BabyBear::from_usize)
                 .collect(),
             1,
         );
@@ -350,7 +353,7 @@ impl TestFixture for PreprocessedFibFixture {
         use openvm_stark_sdk::dummy_airs::fib_selector_air::trace::generate_trace_rows;
         let trace = generate_trace_rows(self.a, self.b, &self.sels);
         let f_n = get_conditional_fib_number(self.a, self.b, &self.sels);
-        let pis = [self.a, self.b, f_n].map(BabyBear::from_canonical_u32);
+        let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);
 
         let single_ctx =
             AirProvingContextV2::simple(ColMajorMatrix::from_row_major(&trace), pis.to_vec());
@@ -504,8 +507,9 @@ pub fn test_system_params_small_with_poly_len(
         k_whir,
         num_whir_queries: 5,
         log_final_poly_len,
-        logup_pow_bits: 1,
+        logup: log_up_security_params_baby_bear_100_bits(),
         whir_pow_bits: 1,
+        max_constraint_degree: 3,
     }
 }
 

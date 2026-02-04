@@ -3,7 +3,7 @@ use std::{iter::once, sync::Arc};
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
-use p3_field::{ExtensionField, Field, FieldAlgebra, TwoAdicField};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
@@ -137,7 +137,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
             let s_deg = 2;
             let s_evals = (1..=s_deg)
                 .map(|x| {
-                    let x = F::from_canonical_usize(x);
+                    let x = F::from_usize(x);
                     let hypercube_dim = m - round - 1;
                     (0..(1usize << hypercube_dim))
                         .map(|y| {

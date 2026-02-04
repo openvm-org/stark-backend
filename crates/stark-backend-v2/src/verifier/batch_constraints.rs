@@ -7,7 +7,7 @@ use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
     symbolic_expression::SymbolicEvaluator, SymbolicConstraints,
 };
-use p3_field::{batch_multiplicative_inverse, Field, FieldAlgebra};
+use p3_field::{batch_multiplicative_inverse, Field, PrimeCharacteristicRing};
 use thiserror::Error;
 use tracing::{debug, instrument};
 
@@ -74,7 +74,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     } = batch_proof;
 
     // 1. Check GKR witness
-    if !transcript.check_witness(mvk.params.logup_pow_bits, gkr_proof.logup_pow_witness) {
+    if !transcript.check_witness(mvk.params.logup.pow_bits, gkr_proof.logup_pow_witness) {
         return Err(BatchConstraintError::InvalidLogupPowWitness);
     }
 
@@ -143,12 +143,12 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         transcript.observe_ext(coeff);
     }
 
-    let s_deg = mvk.max_constraint_degree + 1;
+    let s_deg = mvk.params.max_constraint_degree + 1;
     let r_0 = transcript.sample_ext();
     debug!(round = 0, r_round = %r_0);
     assert_eq!(
         univariate_round_coeffs.len(),
-        (mvk.max_constraint_degree + 1) * ((1 << l_skip) - 1) + 1
+        (mvk.max_constraint_degree() + 1) * ((1 << l_skip) - 1) + 1
     );
     let s_0 = UnivariatePoly::new(univariate_round_coeffs.clone());
     let sum_univ_domain_s_0 = s_0
@@ -157,7 +157,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         .step_by(1 << l_skip)
         .copied()
         .sum::<EF>()
-        * EF::from_canonical_usize(1 << l_skip);
+        * EF::from_usize(1 << l_skip);
     if sum_claim != sum_univ_domain_s_0 {
         return Err(BatchConstraintError::SumClaimMismatch {
             sum_claim,
@@ -181,7 +181,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
 
         let mut factorials = vec![F::ONE; s_deg + 1];
         for i in 1..=s_deg {
-            factorials[i] = factorials[i - 1] * F::from_canonical_usize(i);
+            factorials[i] = factorials[i - 1] * F::from_usize(i);
         }
         let invfact = batch_multiplicative_inverse(&factorials);
 
@@ -189,8 +189,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         let mut pref_product = vec![EF::ONE; s_deg + 1];
         let mut suf_product = vec![EF::ONE; s_deg + 1];
         for i in 0..s_deg {
-            pref_product[i + 1] = pref_product[i] * (r - EF::from_canonical_usize(i));
-            suf_product[i + 1] = suf_product[i] * (EF::from_canonical_usize(s_deg - i) - r);
+            pref_product[i + 1] = pref_product[i] * (r - EF::from_usize(i));
+            suf_product[i + 1] = suf_product[i] * (EF::from_usize(s_deg - i) - r);
         }
         cur_sum = (0..=s_deg)
             .map(|i| {
@@ -297,7 +297,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             (
                 l_skip.wrapping_add_signed(n),
                 &[rs[0].exp_power_of_2(-n as usize)] as &[_],
-                F::from_canonical_usize(1 << n.unsigned_abs()).inverse(),
+                F::from_usize(1 << n.unsigned_abs()).inverse(),
             )
         } else {
             (l_skip, &rs[..=(n as usize)], F::ONE)
@@ -330,7 +330,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
                     .message
                     .iter()
                     .map(|expr| evaluator.eval_expr(expr))
-                    .chain(std::iter::once(EF::from_canonical_u16(
+                    .chain(std::iter::once(EF::from_u16(
                         interaction.bus_index + 1,
                     )))
                     .zip(beta_logup.powers())
