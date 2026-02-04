@@ -212,8 +212,9 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
         let mvk_view = mpk.vk_view();
 
         let mut perm_matrix_idx = 0usize;
-        let rap_views_per_phase;
-        let perm_trace_per_air = if let Some(phase_data) = rap_phase_seq_data {
+        /*let rap_views_per_phase;
+        let perm_trace_per_air =
+        if let Some(phase_data) = rap_phase_seq_data {
             assert_eq!(mvk_view.num_phases(), 1);
             assert_eq!(
                 mvk_view.num_challenges_in_phase(0),
@@ -238,44 +239,47 @@ impl<SC: StarkGenericConfig> hal::RapPartialProver<CpuBackend<SC>> for CpuDevice
             .collect_vec();
             rap_views_per_phase = vec![perm_views]; // 1 challenge phase
             phase_data.after_challenge_trace_per_air
-        } else {
-            assert_eq!(mvk_view.num_phases(), 0);
+        } else
+        {
+            // assert_eq!(mvk_view.num_phases(), 0);
             rap_views_per_phase = vec![];
             vec![None; num_airs]
-        };
+        };*/
 
         // Commit to permutation traces: this means only 1 challenge round right now
         // One shared commit for all permutation traces
         let committed_pcs_data_per_phase: Vec<(Com<SC>, PcsData<SC>)> =
             info_span!("perm_trace_commit")
                 .in_scope(|| {
-                    let (log_trace_heights, flattened_traces): (Vec<_>, Vec<_>) =
-                        perm_trace_per_air
-                            .into_iter()
-                            .flatten()
-                            .map(|perm_trace| {
-                                // SAFETY: `Challenge` is assumed to be extension field of `F`
-                                // with memory layout `[F; Challenge::DIMENSION]`
-                                let trace = unsafe { transmute_to_base(perm_trace) };
-                                let height = trace.height();
-                                let log_height: u8 = log2_strict_usize(height).try_into().unwrap();
-                                let domain = self.pcs().natural_domain_for_degree(height);
-                                (log_height, (domain, trace))
-                            })
-                            .collect();
-                    // Only commit if there are permutation traces
-                    if !flattened_traces.is_empty() {
-                        let (commit, data) = self.pcs().commit(flattened_traces);
-                        Some((commit, PcsData::new(Arc::new(data), log_trace_heights)))
-                    } else {
-                        None
-                    }
+                    // let (log_trace_heights, flattened_traces): (Vec<_>, Vec<_>) =
+                    //     perm_trace_per_air
+                    //         .into_iter()
+                    //         .flatten()
+                    //         .map(|perm_trace| {
+                    //             // SAFETY: `Challenge` is assumed to be extension field of `F`
+                    //             // with memory layout `[F; Challenge::DIMENSION]`
+                    //             let trace = unsafe { transmute_to_base(perm_trace) };
+                    //             let height = trace.height();
+                    //             let log_height: u8 =
+                    // log2_strict_usize(height).try_into().unwrap();
+                    //             let domain = self.pcs().natural_domain_for_degree(height);
+                    //             (log_height, (domain, trace))
+                    //         })
+                    //         .collect();
+                    // // Only commit if there are permutation traces
+                    // if !flattened_traces.is_empty() {
+                    //     let (commit, data) = self.pcs().commit(flattened_traces);
+                    //     Some((commit, PcsData::new(Arc::new(data), log_trace_heights)))
+                    // } else {
+                    //     None
+                    // }
+                    None
                 })
                 .into_iter()
                 .collect();
         let prover_view = ProverDataAfterRapPhases {
             committed_pcs_data_per_phase,
-            rap_views_per_phase,
+            rap_views_per_phase: vec![],
         };
         (rap_phase_seq_proof, prover_view)
     }
