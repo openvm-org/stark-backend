@@ -2,7 +2,7 @@ use std::borrow::BorrowMut;
 
 // Originally copied from p3-dft [src/radix_2_bowers.rs] to turn off rayon
 use p3_dft::{Butterfly, DifButterfly, DitButterfly, TwiddleFreeButterfly, TwoAdicSubgroupDft};
-use p3_field::{Field, PackedValue, Powers, TwoAdicField};
+use p3_field::{Field, PackedValue, Powers, PrimeCharacteristicRing, TwoAdicField};
 use p3_matrix::{
     dense::{DenseMatrix, DenseStorage, RowMajorMatrix, RowMajorMatrixViewMut},
     Matrix,
@@ -57,7 +57,11 @@ impl<F: TwoAdicField> TwoAdicSubgroupDft<F> for Radix2BowersSerial {
         shift: F,
     ) -> RowMajorMatrix<F> {
         let h = mat.height();
-        let h_inv = F::from_canonical_usize(h).inverse();
+        let log_h = log2_strict_usize(h);
+        // It's cheaper to use div_2exp_u64 as this usually avoids an inversion.
+        // It's also cheaper to work in the PrimeSubfield whenever possible.
+        let h_inv_subfield = F::PrimeSubfield::ONE.div_2exp_u64(log_h as u64);
+        let h_inv = F::from_prime_subfield(h_inv_subfield);
 
         bowers_g_t(&mut mat.as_view_mut());
 
@@ -139,10 +143,13 @@ fn butterfly_layer<F: Field, B: Butterfly<F>>(
 pub fn divide_by_height<F: Field, S: DenseStorage<F> + BorrowMut<[F]>>(
     mat: &mut DenseMatrix<F, S>,
 ) {
-    scale_slice_in_place(
-        F::from_canonical_usize(mat.height()).inverse(),
-        mat.values.borrow_mut(),
-    );
+    let h = mat.height();
+    let log_h = log2_strict_usize(h);
+    // It's cheaper to use div_2exp_u64 as this usually avoids an inversion.
+    // It's also cheaper to work in the PrimeSubfield whenever possible.
+    let h_inv_subfield = F::PrimeSubfield::ONE.div_2exp_u64(log_h as u64);
+    let h_inv = F::from_prime_subfield(h_inv_subfield);
+    scale_slice_in_place(h_inv, mat.values.borrow_mut());
 }
 
 pub fn scale_slice_in_place<F: Field>(s: F, slice: &mut [F]) {
