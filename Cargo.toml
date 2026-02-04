@@ -71,7 +71,6 @@ openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
 stark-backend-v2 = { path = "crates/stark-backend-v2", default-features = false }
 codec-derive = { path = "crates/stark-backend-v2/derive", default-features = false }
 
-<<<<<<< HEAD
 # Plonky3 - we pin the exact version since this dependency is security critical
 p3-air = { version = "=0.4.1", default-features = false }
 p3-field = { version = "=0.4.1", default-features = false }
@@ -87,6 +86,7 @@ p3-goldilocks = { version = "=0.4.1", default-features = false }
 p3-keccak = { version = "=0.4.1", default-features = false }
 p3-keccak-air = { version = "=0.4.1", default-features = false }
 p3-blake3 = { version = "=0.4.1", default-features = false }
+p3-interpolation = { version = "=0.4.1", default-features = false }
 p3-mds = { version = "=0.4.1", default-features = false }
 p3-merkle-tree = { version = "=0.4.1", default-features = false }
 p3-monty-31 = { version = "=0.4.1", default-features = false }
@@ -95,32 +95,6 @@ p3-poseidon2 = { version = "=0.4.1", default-features = false }
 p3-symmetric = { version = "=0.4.1", default-features = false }
 p3-uni-stark = { version = "=0.4.1", default-features = false }
 p3-maybe-rayon = { version = "=0.4.1", default-features = false } # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
-=======
-# Plonky3
-p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-interpolation = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-keccak = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-blake3 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-mds = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-monty-31 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-poseidon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false }
-p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "539bbc84085efb609f4f62cb03cf49588388abdb", default-features = false } # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
->>>>>>> a1d66495 (chore: add `stark-backend-v2` to workspace (#174))
 
 # Bn254 support
 p3-bn254 = { version = "=0.4.1", default-features = false }
