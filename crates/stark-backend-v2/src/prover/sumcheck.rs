@@ -350,6 +350,78 @@ where
     from_fn(|i| evals.iter().map(|eval| eval[i]).collect_vec())
 }
 
+/// Computes 4^k evaluations on {0,1,2,3}^k grid (including all-zeros point)
+/// for the fractional GKR sumcheck polynomial.
+pub fn gkr_block_sumcheck_poly_evals<EF: Field>(
+    eq_xis: &ColMajorMatrix<EF>,
+    pq_j_evals: &ColMajorMatrix<EF>,
+    lambda: EF,
+    k: usize,
+) -> Vec<EF> {
+    debug_assert!(k > 0);
+    debug_assert_eq!(eq_xis.width(), 1);
+    debug_assert_eq!(pq_j_evals.width(), 4);
+
+    fn sum_over_hypercube<EF: Field>(
+        eq_xis: &ColMajorMatrix<EF>,
+        pq_j_evals: &ColMajorMatrix<EF>,
+        lambda: EF,
+    ) -> EF {
+        let height = eq_xis.height();
+        let eq_col = eq_xis.column(0);
+        let p_j0 = pq_j_evals.column(0);
+        let q_j0 = pq_j_evals.column(1);
+        let p_j1 = pq_j_evals.column(2);
+        let q_j1 = pq_j_evals.column(3);
+
+        let mut sum = EF::ZERO;
+        for row in 0..height {
+            let eq_xi = eq_col[row];
+            let p_prev = p_j0[row] * q_j1[row] + p_j1[row] * q_j0[row];
+            let q_prev = q_j0[row] * q_j1[row];
+            sum += eq_xi * (p_prev + lambda * q_prev);
+        }
+        sum
+    }
+
+    /// Recursively evaluates the round polynomial on the grid {0,1,2,3}^k and
+    /// writes results into `out` in lexicographic order. `out` must have length 4^k.
+    fn eval_grid_0123<EF: Field>(
+        eq_xis: &ColMajorMatrix<EF>,
+        pq_j_evals: &ColMajorMatrix<EF>,
+        lambda: EF,
+        // Number of variables in this block.
+        k: usize,
+        idx: usize,
+        stride: usize,
+        out: &mut [EF],
+    ) {
+        if k == 0 {
+            out[idx] = sum_over_hypercube(eq_xis, pq_j_evals, lambda);
+            return;
+        }
+        for coord in 0..4 {
+            let r = EF::from_usize(coord);
+            let eq_fold = fold_mle_evals(eq_xis.clone(), r);
+            let pq_fold = fold_mle_evals(pq_j_evals.clone(), r);
+            eval_grid_0123(
+                &eq_fold,
+                &pq_fold,
+                lambda,
+                k - 1,
+                idx + coord * stride,
+                stride * 4,
+                out,
+            );
+        }
+    }
+
+    let grid_len = 4usize.pow(k as u32);
+    let mut grid = vec![EF::ZERO; grid_len];
+    eval_grid_0123(eq_xis, pq_j_evals, lambda, k, 0, 1, &mut grid);
+    grid
+}
+
 #[instrument(level = "trace", skip_all)]
 pub fn fold_mle_evals<EF: Field>(mat: ColMajorMatrix<EF>, r: EF) -> ColMajorMatrix<EF> {
     let height = mat.height();

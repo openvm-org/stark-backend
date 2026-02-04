@@ -4,8 +4,9 @@ use p3_field::PrimeCharacteristicRing;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    block_sumcheck_sizes,
     codec::{decode_into_vec, encode_iter, Decode, Encode},
-    Digest, EF, F,
+    gkr_block_len, Digest, EF, F,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,9 +57,9 @@ pub struct GkrProof {
     pub q0_claim: EF,
     /// The claims for p_j(xi, 0), p_j(xi, 1), q_j(xi, 0), and q_j(xi, 0) for each layer j > 0.
     pub claims_per_layer: Vec<GkrLayerClaims>,
-    /// The sumcheck polynomials for each layer, for each sumcheck round, given by their
-    /// evaluations on {1, 2, 3}.
-    pub sumcheck_polys: Vec<Vec<[EF; 3]>>,
+    /// Block sumcheck polynomials per layer. Each inner Vec has 4^k elements
+    /// where k is the block size for that block.
+    pub block_sumcheck_polys: Vec<Vec<Vec<EF>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
@@ -188,9 +189,22 @@ impl Encode for GkrProof {
         self.logup_pow_witness.encode(writer)?;
         self.q0_claim.encode(writer)?;
         self.claims_per_layer.encode(writer)?;
-        // We should know the length of sumcheck_polys and each nested vector based
-        // on the length of claims_per_layer.
-        encode_iter(self.sumcheck_polys.iter().flatten(), writer)?;
+        let num_rounds = self.claims_per_layer.len();
+        for (round_idx, blocks) in self.block_sumcheck_polys.iter().enumerate() {
+            let round = round_idx + 1;
+            debug_assert!(round < num_rounds);
+            let expected_blocks = block_sumcheck_sizes(round).count();
+            debug_assert_eq!(
+                blocks.len(),
+                expected_blocks,
+                "block_sumcheck_polys has unexpected number of blocks"
+            );
+            for (block, k) in blocks.iter().zip(block_sumcheck_sizes(round)) {
+                let expected_len = gkr_block_len(k);
+                debug_assert_eq!(block.len(), expected_len);
+                encode_iter(block.iter(), writer)?;
+            }
+        }
         Ok(())
     }
 }
@@ -368,18 +382,22 @@ impl Decode for GkrProof {
         let logup_pow_witness = F::decode(reader)?;
         let q0_claim = EF::decode(reader)?;
         let claims_per_layer = Vec::<GkrLayerClaims>::decode(reader)?;
-
-        let num_sumcheck_polys = claims_per_layer.len().saturating_sub(1);
-        let mut sumcheck_polys = Vec::with_capacity(num_sumcheck_polys);
-        for round_idx_minus_one in 0..num_sumcheck_polys {
-            sumcheck_polys.push(decode_into_vec(reader, round_idx_minus_one + 1)?);
+        let num_rounds = claims_per_layer.len();
+        let mut block_sumcheck_polys = Vec::with_capacity(num_rounds.saturating_sub(1));
+        for round in 1..num_rounds {
+            let mut blocks = Vec::new();
+            for k in block_sumcheck_sizes(round) {
+                let expected_len = gkr_block_len(k);
+                blocks.push(decode_into_vec(reader, expected_len)?);
+            }
+            block_sumcheck_polys.push(blocks);
         }
 
         Ok(Self {
             logup_pow_witness,
             q0_claim,
             claims_per_layer,
-            sumcheck_polys,
+            block_sumcheck_polys,
         })
     }
 }

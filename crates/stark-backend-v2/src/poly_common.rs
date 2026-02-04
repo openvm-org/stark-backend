@@ -550,6 +550,31 @@ pub fn interpolate_cubic_at_0123<F: Field>(evals: &[F; 4], x: F) -> F {
     ((p * x + q) * x + r) * x + evals[0]
 }
 
+/// Interpolates a polynomial given on {0,1,2,3}^k grid at the point `challenges`.
+/// Requires grid_evals.len() == 4^k and challenges.len() == k.
+/// Modifies grid_evals in place, result ends up in grid_evals[0].
+pub fn interpolate_multivariate_at_0123_grid<F: Field>(grid_evals: &mut [F], challenges: &[F]) {
+    let mut size = grid_evals.len();
+    let mut idx = 0;
+    while size > 1 {
+        let r = challenges[idx];
+        size /= 4;
+        for i in 0..size {
+            grid_evals[i] = interpolate_cubic_at_0123(
+                &[
+                    grid_evals[4 * i],
+                    grid_evals[4 * i + 1],
+                    grid_evals[4 * i + 2],
+                    grid_evals[4 * i + 3],
+                ],
+                r,
+            );
+        }
+        idx += 1;
+    }
+    debug_assert_eq!(idx, challenges.len());
+}
+
 pub struct ExpPowers2<T> {
     current: Option<T>,
 }

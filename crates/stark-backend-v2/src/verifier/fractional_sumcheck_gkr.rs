@@ -3,7 +3,8 @@ use thiserror::Error;
 use tracing::debug;
 
 use crate::{
-    poly_common::{eval_eq_mle, interpolate_cubic_at_0123, interpolate_linear_at_01},
+    block_sumcheck_sizes, gkr_block_len,
+    poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_multivariate_at_0123_grid},
     poseidon2::sponge::FiatShamirTranscript,
     proof::{GkrLayerClaims, GkrProof},
     EF,
@@ -26,18 +27,24 @@ pub enum GkrVerificationError {
     // TODO(ayush): remove these errors and make them debug asserts once proof shape verifier is
     // implemented
     #[error(
-        "Zero-round proof should have empty layers and sumcheck, got {claims_len} and {sumcheck_len}"
+        "Zero-round proof should have empty layers and block sumcheck, got {claims_len} and {block_sumcheck_len}"
     )]
     InvalidZeroRoundShape {
         claims_len: usize,
-        sumcheck_len: usize,
+        block_sumcheck_len: usize,
     },
     #[error("Expected {expected} layers, got {actual}")]
     IncorrectLayerCount { expected: usize, actual: usize },
-    #[error("Expected {expected} sumcheck polynomial entries, got {actual}")]
-    IncorrectSumcheckPolyCount { expected: usize, actual: usize },
-    #[error("Round {round} expected {expected} sumcheck sub-rounds, got {actual}")]
-    IncorrectSubroundCount {
+    #[error("Expected {expected} block sumcheck entries, got {actual}")]
+    IncorrectBlockSumcheckPolyCount { expected: usize, actual: usize },
+    #[error("Round {round} block {block} has invalid length {len}")]
+    InvalidBlockSumcheckPolyLen {
+        round: usize,
+        block: usize,
+        len: usize,
+    },
+    #[error("Round {round} expected {expected} sumcheck variables, got {actual}")]
+    IncorrectBlockVarCount {
         round: usize,
         expected: usize,
         actual: usize,
@@ -60,10 +67,10 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
 ) -> Result<(EF, EF, Vec<EF>), GkrVerificationError> {
     if total_rounds == 0 {
         // Check proof shape
-        if !proof.claims_per_layer.is_empty() || !proof.sumcheck_polys.is_empty() {
+        if !proof.claims_per_layer.is_empty() || !proof.block_sumcheck_polys.is_empty() {
             return Err(GkrVerificationError::InvalidZeroRoundShape {
                 claims_len: proof.claims_per_layer.len(),
-                sumcheck_len: proof.sumcheck_polys.len(),
+                block_sumcheck_len: proof.block_sumcheck_polys.len(),
             });
         }
         if proof.q0_claim != EF::ONE {
@@ -82,12 +89,12 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         });
     }
 
-    // Sumcheck polys: round j has j sub-rounds, so total = 0+1+2+...+(total_rounds-1)
+    // Block sumcheck polys: one entry per round j=1..total_rounds-1
     let expected_sumcheck_entries = total_rounds.saturating_sub(1);
-    if proof.sumcheck_polys.len() != expected_sumcheck_entries {
-        return Err(GkrVerificationError::IncorrectSumcheckPolyCount {
+    if proof.block_sumcheck_polys.len() != expected_sumcheck_entries {
+        return Err(GkrVerificationError::IncorrectBlockSumcheckPolyCount {
             expected: expected_sumcheck_entries,
-            actual: proof.sumcheck_polys.len(),
+            actual: proof.block_sumcheck_polys.len(),
         });
     }
 
@@ -131,7 +138,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
 
         // Run sumcheck protocol for this round (round j has j sub-rounds)
         let (new_claim, round_r, eq_at_r_prime) =
-            verify_gkr_sumcheck(proof, transcript, round, claim, &gkr_r)?;
+            verify_gkr_block_sumcheck(proof, transcript, round, claim, &gkr_r)?;
         debug_assert_eq!(eq_at_r_prime, eval_eq_mle(&gkr_r, &round_r));
 
         // Observe layer evaluation claims
@@ -162,14 +169,14 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
     Ok((numer_claim, denom_claim, gkr_r))
 }
 
-/// Verify sumcheck for a single GKR round.
+/// Verify block sumcheck for a single GKR round.
 ///
 /// Reduces evaluation of (p̂ⱼ₋₁ + λⱼ·q̂ⱼ₋₁)(ξ^{(j-1)}) to evaluations at the next layer.
 ///
 /// # Returns
 /// `(claim, ρ^{(j-1)}, eq(ξ^{(j-1)}, ρ^{(j-1)}))` where ρ^{(j-1)} is randomly sampled from the
 /// sumcheck protocol.
-fn verify_gkr_sumcheck<TS: FiatShamirTranscript>(
+fn verify_gkr_block_sumcheck<TS: FiatShamirTranscript>(
     proof: &GkrProof,
     transcript: &mut TS,
     round: usize,
@@ -178,7 +185,7 @@ fn verify_gkr_sumcheck<TS: FiatShamirTranscript>(
 ) -> Result<(EF, Vec<EF>, EF), GkrVerificationError> {
     debug_assert!(
         round > 0,
-        "verify_gkr_sumcheck should not be called for round 0"
+        "verify_gkr_block_sumcheck should not be called for round 0"
     );
     debug_assert_eq!(
         gkr_r.len(),
@@ -186,37 +193,83 @@ fn verify_gkr_sumcheck<TS: FiatShamirTranscript>(
         "gkr_r should have exactly round elements"
     );
 
-    // For round j, there are j sumcheck sub-rounds
-    let expected_subrounds = round;
-    let polys = &proof.sumcheck_polys[round - 1];
-    if polys.len() != expected_subrounds {
-        return Err(GkrVerificationError::IncorrectSubroundCount {
-            round,
-            expected: expected_subrounds,
-            actual: polys.len(),
-        });
-    }
+    let blocks = &proof.block_sumcheck_polys[round - 1];
     let mut gkr_r_prime = Vec::with_capacity(round);
     let mut eq = EF::ONE; // eq(ξ^{(j-1)}, ρ^{(j-1)}) computed incrementally
+    let mut sizes = block_sumcheck_sizes(round);
+    let mut consumed = 0usize;
 
-    for (sumcheck_round, poly_evals) in polys.iter().enumerate() {
-        debug!(gkr_round = round, %sumcheck_round, sum_claim = %claim);
-        // Observe s(1), s(2), s(3) where s is the sumcheck polynomial
-        for &eval in poly_evals {
+    for (block_idx, block_evals) in blocks.iter().enumerate() {
+        debug!(gkr_round = round, block = block_idx, sum_claim = %claim);
+
+        let Some(k) = sizes.next() else {
+            return Err(GkrVerificationError::IncorrectBlockVarCount {
+                round,
+                expected: round,
+                actual: round + 1,
+            });
+        };
+
+        let expected_len = gkr_block_len(k);
+        if block_evals.len() != expected_len {
+            return Err(GkrVerificationError::InvalidBlockSumcheckPolyLen {
+                round,
+                block: block_idx,
+                len: block_evals.len(),
+            });
+        }
+        let start_idx = consumed;
+        consumed += k;
+        if consumed > round {
+            return Err(GkrVerificationError::IncorrectBlockVarCount {
+                round,
+                expected: round,
+                actual: consumed,
+            });
+        }
+
+        // Observe all block evaluations
+        for &eval in block_evals {
             transcript.observe_ext(eval);
         }
 
-        let ri = transcript.sample_ext();
-        gkr_r_prime.push(ri);
-        debug!(gkr_round = round, %sumcheck_round, r_round = %ri);
+        // Sample k challenges
+        let mut challenges = Vec::with_capacity(k);
+        for _ in 0..k {
+            let ri = transcript.sample_ext();
+            challenges.push(ri);
+            gkr_r_prime.push(ri);
+        }
 
-        let ev0 = claim - poly_evals[0]; // s(0) = claim - s(1)
-        let evals = [ev0, poly_evals[0], poly_evals[1], poly_evals[2]];
-        claim = interpolate_cubic_at_0123(&evals, ri);
+        // Verify sumcheck relation: sum over {0,1}^k == claim
+        let boolean_sum = sum_at_boolean_points(block_evals, k);
+        if boolean_sum != claim {
+            return Err(GkrVerificationError::LayerConsistencyCheckFailed {
+                round,
+                expected: claim,
+                actual: boolean_sum,
+            });
+        }
+
+        // Interpolate at the sampled challenges
+        let mut grid_evals = block_evals.to_vec();
+        interpolate_multivariate_at_0123_grid(&mut grid_evals, &challenges);
+        claim = grid_evals[0];
 
         // Update eq incrementally: eq *= ξᵢ·rᵢ + (1-ξᵢ)·(1-rᵢ)
-        let xi = gkr_r[sumcheck_round];
-        eq *= xi * ri + (EF::ONE - xi) * (EF::ONE - ri);
+        for i in 0..k {
+            let xi = gkr_r[start_idx + i];
+            let ri = challenges[i];
+            eq *= xi * ri + (EF::ONE - xi) * (EF::ONE - ri);
+        }
+    }
+
+    if sizes.next().is_some() || consumed != round {
+        return Err(GkrVerificationError::IncorrectBlockVarCount {
+            round,
+            expected: round,
+            actual: consumed,
+        });
     }
 
     Ok((claim, gkr_r_prime, eq))
@@ -244,6 +297,31 @@ fn reduce_to_single_evaluation(claims: &GkrLayerClaims, mu: EF) -> (EF, EF) {
     (numer, denom)
 }
 
+/// Sums evaluations over all of {0,1}^k (including the origin).
+///
+/// `block_evals` contains values on the grid {0,1,2,3}^k (including origin at index 0),
+/// ordered lexicographically with coord_0 varying fastest, i.e. `index = sum_i coord_i * 4^i`.
+///
+/// The algorithm iterates boolean masks and maps each {0,1}^k point to its index via base-4
+/// positional weights 4^i.
+fn sum_at_boolean_points(block_evals: &[EF], k: usize) -> EF {
+    let mut sum = EF::ZERO;
+    for mask in 0..(1usize << k) {
+        let mut idx = 0usize;
+        let mut bit = mask;
+        let mut i = 0usize;
+        while bit != 0 {
+            if bit & 1 == 1 {
+                idx += 1 << (2 * i);
+            }
+            bit >>= 1;
+            i += 1;
+        }
+        sum += block_evals[idx];
+    }
+    sum
+}
+
 #[cfg(test)]
 mod tests {
     use openvm_stark_sdk::config::setup_tracing;
@@ -263,7 +341,7 @@ mod tests {
             logup_pow_witness: F::ZERO,
             q0_claim: EF::ONE,
             claims_per_layer: vec![],
-            sumcheck_polys: vec![],
+            block_sumcheck_polys: vec![],
         };
 
         let mut transcript = DuplexSponge::default();
@@ -286,7 +364,7 @@ mod tests {
             logup_pow_witness: F::ZERO,
             q0_claim: EF::ONE,
             claims_per_layer: vec![layer_claims.clone(), layer_claims],
-            sumcheck_polys: vec![],
+            block_sumcheck_polys: vec![],
         };
 
         let mut transcript = DuplexSponge::default();
@@ -294,8 +372,39 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            GkrVerificationError::IncorrectSumcheckPolyCount { .. }
+            GkrVerificationError::IncorrectBlockSumcheckPolyCount { .. }
         ));
+    }
+
+    #[test]
+    fn test_sum_at_boolean_points() {
+        let k = 3usize;
+        let grid_len = 4usize.pow(k as u32);
+        let mut grid = vec![EF::ZERO; grid_len];
+        for idx in 0..grid_len {
+            let mut tmp = idx;
+            let mut acc = 0u64;
+            for i in 0..k {
+                let coord = (tmp % 4) as u64;
+                acc += (i as u64 + 1) * (coord + 1);
+                tmp /= 4;
+            }
+            grid[idx] = EF::from_u64(acc);
+        }
+
+        let mut expected = EF::ZERO;
+        for mask in 0..(1usize << k) {
+            let mut idx = 0usize;
+            for i in 0..k {
+                if (mask >> i) & 1 == 1 {
+                    idx += 1 << (2 * i);
+                }
+            }
+            expected += grid[idx];
+        }
+
+        let actual = sum_at_boolean_points(&grid, k);
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -313,7 +422,7 @@ mod tests {
             logup_pow_witness: F::ZERO,
             q0_claim: EF::from_u64(12), // q0 = 3*4 = 12
             claims_per_layer: vec![layer1_claims],
-            sumcheck_polys: vec![],
+            block_sumcheck_polys: vec![],
         };
 
         let mut transcript = DuplexSponge::default();
@@ -346,7 +455,7 @@ mod tests {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
+            block_sumcheck_polys: frac_proof.block_sumcheck_polys,
         };
 
         let mut verifier_transcript = DuplexSponge::default();
@@ -392,7 +501,7 @@ mod tests {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
+            block_sumcheck_polys: frac_proof.block_sumcheck_polys,
         };
 
         let mut verifier_transcript = DuplexSponge::default();
@@ -454,7 +563,7 @@ mod tests {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
+            block_sumcheck_polys: frac_proof.block_sumcheck_polys,
         };
 
         let mut verifier_transcript = DuplexSponge::default();
@@ -492,7 +601,7 @@ mod tests {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
+            block_sumcheck_polys: frac_proof.block_sumcheck_polys,
         };
 
         let mut verifier_transcript = DuplexSponge::default();
@@ -520,7 +629,7 @@ mod tests {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
+            block_sumcheck_polys: frac_proof.block_sumcheck_polys,
         };
 
         let mut verifier_transcript = DuplexSponge::default();

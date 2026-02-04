@@ -5,11 +5,12 @@ use p3_util::log2_strict_usize;
 use tracing::{debug, instrument};
 
 use crate::{
+    block_sumcheck_sizes,
     poseidon2::sponge::FiatShamirTranscript,
     proof::GkrLayerClaims,
     prover::{
         poly::evals_eq_hypercube,
-        sumcheck::{fold_mle_evals, sumcheck_round_poly_evals},
+        sumcheck::{fold_mle_evals, gkr_block_sumcheck_poly_evals},
         ColMajorMatrix,
     },
     EF,
@@ -21,9 +22,9 @@ pub struct FracSumcheckProof<EF> {
     pub fractional_sum: (EF, EF),
     /// The claims for p_j(0, rho), p_j(1, rho), q_j(0, rho), and q_j(1, rho) for each layer j > 0.
     pub claims_per_layer: Vec<GkrLayerClaims>,
-    /// Sumcheck polynomials for each layer, for each sumcheck round, given by their evaluations on
-    /// {1, 2, 3}.
-    pub sumcheck_polys: Vec<Vec<[EF; 3]>>,
+    /// Block sumcheck polynomials per layer. Each inner-most Vec has 4^k - 1 elements
+    /// where k is the block size for that block, except maybe the last layer.
+    pub block_sumcheck_polys: Vec<Vec<Vec<EF>>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, derive_new::new)]
@@ -67,15 +68,15 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
             FracSumcheckProof {
                 fractional_sum: (EF::ZERO, EF::ONE),
                 claims_per_layer: vec![],
-                sumcheck_polys: vec![],
+                block_sumcheck_polys: vec![],
             },
             vec![],
         );
     }
     // total_rounds = l_skip + n_logup
     let total_rounds = log2_strict_usize(evals.len());
-    // sumcheck polys for layers j=2,...,total_rounds
-    let mut sumcheck_polys = Vec::with_capacity(total_rounds);
+    // block sumcheck polys for layers j=2,...,total_rounds
+    let mut block_sumcheck_polys = Vec::with_capacity(total_rounds);
 
     // segment tree: layer i=0,...,total_rounds starts at 2^i (index 0 unused)
     let mut tree_evals: Vec<Frac<EF>> = vec![Frac::default(); 2 << total_rounds];
@@ -140,42 +141,35 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
         let mut pq_j_evals = ColMajorMatrix::new(pq_j_evals, 4);
         let mut eq_xis = ColMajorMatrix::new(evals_eq_hypercube(&xi_prev), 1);
 
-        // Batch sumcheck where the round polynomials are evaluated at {1, 2, 3}
-        let (round_polys_eval, rho) = {
+        // Block sumcheck where the round polynomial is evaluated on {0,1,2,3}^k
+        let (round_blocks_eval, rho) = {
             let n = round;
-            let mut round_polys_eval = Vec::with_capacity(n);
+            let mut round_blocks_eval = Vec::with_capacity(n);
             let mut r_vec = Vec::with_capacity(n);
 
-            // Sumcheck rounds: apply fraction addition in projective coordinates to MLEs
-            for sumcheck_round in 0..n {
-                // Evaluate the univariate polynomial at {1, 2, 3}
-                // :projective fraction addition is degree 2, and then another +1 for eq
-                let [s_evals] = sumcheck_round_poly_evals(
-                    n - sumcheck_round,
-                    3,
-                    &[eq_xis.as_view(), pq_j_evals.as_view()],
-                    |_x, _y, row| {
-                        let eq_xi = row[0][0];
-                        let &[p_j0, q_j0, p_j1, q_j1] = row[1].as_slice().try_into().unwrap();
-                        let p_prev = p_j0 * q_j1 + p_j1 * q_j0;
-                        let q_prev = q_j0 * q_j1;
-                        // batch using lambda
-                        [eq_xi * (p_prev + lambda * q_prev)]
-                    },
-                );
-                let s_evals: [EF; 3] = s_evals.try_into().unwrap();
-                for &eval in &s_evals {
+            for (block_idx, k) in block_sumcheck_sizes(n).enumerate() {
+                let block_evals = gkr_block_sumcheck_poly_evals(&eq_xis, &pq_j_evals, lambda, k);
+                for &eval in &block_evals {
                     transcript.observe_ext(eval);
                 }
-                round_polys_eval.push(s_evals);
 
-                let r_round = transcript.sample_ext();
-                pq_j_evals = fold_mle_evals(pq_j_evals, r_round);
-                eq_xis = fold_mle_evals(eq_xis, r_round);
-                r_vec.push(r_round);
-                debug!(gkr_round = round, %sumcheck_round, %r_round);
+                for _ in 0..k {
+                    let r_round = transcript.sample_ext();
+                    r_vec.push(r_round);
+
+                    pq_j_evals = fold_mle_evals(pq_j_evals, r_round);
+                    eq_xis = fold_mle_evals(eq_xis, r_round);
+                }
+                debug!(
+                    gkr_round = round,
+                    block = block_idx,
+                    k,
+                    "block_sumcheck_round"
+                );
+
+                round_blocks_eval.push(block_evals);
             }
-            (round_polys_eval, r_vec)
+            (round_blocks_eval, r_vec)
         };
         claims_per_layer.push(GkrLayerClaims {
             p_xi_0: pq_j_evals.column(0)[0],
@@ -195,14 +189,14 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
         // Update ξ^{(j)} = (μ_j, ρ^{(j-1)})
         xi_prev = [vec![mu], rho].concat();
 
-        sumcheck_polys.push(round_polys_eval);
+        block_sumcheck_polys.push(round_blocks_eval);
     }
 
     (
         FracSumcheckProof {
             fractional_sum: (frac_sum.p, frac_sum.q),
             claims_per_layer,
-            sumcheck_polys,
+            block_sumcheck_polys,
         },
         xi_prev,
     )

@@ -36,6 +36,35 @@ pub const D_EF: usize = 4;
 pub const DIGEST_SIZE: usize = poseidon2::CHUNK;
 pub type Digest = [F; DIGEST_SIZE];
 
+/// GKR sumcheck block size (number of variables cleared per sumcheck round).
+pub const GKR_BLOCK_SIZE: usize = 2;
+
+/// Returns 4^k, the number of points in {0,1,2,3}^k.
+pub(crate) fn gkr_block_len(k: usize) -> usize {
+    debug_assert!(k > 0, "gkr_block_len expects k > 0");
+    let shift = 2usize
+        .checked_mul(k)
+        .expect("gkr_block_len overflow computing 2*k");
+    let shift_u32 = u32::try_from(shift).expect("gkr_block_len shift too large");
+    1usize
+        .checked_shl(shift_u32)
+        .expect("gkr_block_len overflow computing 4^k")
+}
+
+/// Yields block sizes that sum to `num_vars`, with each block size <= GKR_BLOCK_SIZE.
+pub(crate) fn block_sumcheck_sizes(num_vars: usize) -> impl Iterator<Item = usize> {
+    let mut remaining = num_vars;
+    std::iter::from_fn(move || {
+        if remaining == 0 {
+            None
+        } else {
+            let k = remaining.min(GKR_BLOCK_SIZE);
+            remaining -= k;
+            Some(k)
+        }
+    })
+}
+
 // TODO: remove after making SC generic in v2
 pub type SC = BabyBearPoseidon2Config;
 
