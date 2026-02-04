@@ -51,7 +51,7 @@ impl StarkFriEngine for GpuBabyBearPoseidon2Engine {
                     BabyBear::GENERATOR,
                     security_params.deep_ali_params,
                 ),
-                Some(FriLogUpPhaseGpu::new(log_up_params)),
+                Some(FriLogUpPhaseGpu::new(security_params.log_up_params)),
             ),
             config: config_from_perm(&perm, security_params),
             perm,
