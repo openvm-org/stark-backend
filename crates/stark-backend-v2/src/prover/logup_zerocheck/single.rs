@@ -117,7 +117,7 @@ impl<F: TwoAdicField> EvalHelper<'_, F> {
         self.interactions
             .iter()
             .map(|interaction| {
-                let b = F::from_canonical_u32(interaction.bus_index as u32 + 1);
+                let b = F::from_u32(interaction.bus_index as u32 + 1);
                 let msg_len = interaction.message.len();
                 assert!(msg_len <= beta_pows.len());
                 let denom = zip(&interaction.message, beta_pows).fold(

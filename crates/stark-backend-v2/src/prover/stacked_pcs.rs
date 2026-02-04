@@ -283,7 +283,7 @@ pub fn rs_code_matrix<F: TwoAdicField + Ord>(
             let mut coeffs = ple.coeffs;
             // Compute RS codeword on a prismalinear polynomial in coefficient form:
             // We use that the coefficients are in a basis that exactly corresponds to the standard
-            // monomial univariate basis. Hence RS codeword is just cosetDFT on the
+            // ith_basis_element univariate basis. Hence RS codeword is just cosetDFT on the
             // relevant smooth domain
             let dft = Radix2DitParallel::default();
             coeffs.resize(height.checked_shl(log_blowup as u32).unwrap(), F::ZERO);
@@ -355,7 +355,7 @@ mod poseidon2_merkle_tree {
                 .into_par_iter()
                 .map(|r| {
                     let hash_input: Vec<F> = Self::row_iter(&matrix, r)
-                        .flat_map(|ef| ef.as_base_slice().to_vec())
+                        .flat_map(|ef| ef.as_basis_coefficients_slice().to_vec())
                         .collect();
                     poseidon2_hash_slice(&hash_input)
                 })
@@ -446,7 +446,7 @@ mod poseidon2_merkle_tree {
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
-    use p3_field::FieldAlgebra;
+    use p3_field::PrimeCharacteristicRing;
 
     use super::*;
     use crate::{prover::ColMajorMatrix, F};
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn test_stacked_matrix_manual_0() {
         let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
-            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+            .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
             .map(|c| ColMajorMatrix::new(c, 1))
@@ -465,14 +465,14 @@ mod tests {
         assert_eq!(stacked_mat.width(), 2);
         assert_eq!(
             stacked_mat.values,
-            [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_canonical_u32).to_vec()
+            [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_u32).to_vec()
         );
     }
 
     #[test]
     fn test_stacked_matrix_manual_strided_0() {
         let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
-            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+            .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
             .map(|c| ColMajorMatrix::new(c, 1))
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(
             stacked_mat.values,
             [1, 2, 3, 4, 5, 0, 6, 0, 7, 0, 0, 0]
-                .map(F::from_canonical_u32)
+                .map(F::from_u32)
                 .to_vec()
         );
     }
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn test_stacked_matrix_manual_strided_1() {
         let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
-            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+            .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
             .map(|c| ColMajorMatrix::new(c, 1))
@@ -510,7 +510,7 @@ mod tests {
             ]
             .into_iter()
             .flatten()
-            .map(F::from_canonical_u32)
+            .map(F::from_u32)
             .collect_vec()
         );
     }

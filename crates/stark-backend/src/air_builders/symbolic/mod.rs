@@ -194,6 +194,8 @@ impl<F: Field> SymbolicRapBuilder<F> {
         }
     }
 
+    #[deprecated]
+    #[allow(deprecated)]
     pub fn params(&self) -> StarkVerifyingParams {
         let width = self.width();
         let num_exposed_values_after_challenge = self.num_exposed_values_after_challenge();
@@ -206,12 +208,17 @@ impl<F: Field> SymbolicRapBuilder<F> {
         }
     }
 
+    pub fn num_public_values(&self) -> usize {
+        self.public_values.len()
+    }
+
     pub fn width(&self) -> TraceWidth {
         let mut ret = self.trace_width.clone();
         ret.after_challenge = self.after_challenge.iter().map(|m| m.width()).collect();
         ret
     }
 
+    #[deprecated]
     pub fn num_exposed_values_after_challenge(&self) -> Vec<usize> {
         self.exposed_values_after_challenge
             .iter()
@@ -219,6 +226,7 @@ impl<F: Field> SymbolicRapBuilder<F> {
             .collect()
     }
 
+    #[deprecated]
     pub fn num_challenges_to_sample(&self) -> Vec<usize> {
         self.challenges.iter().map(|c| c.len()).collect()
     }

@@ -2,7 +2,7 @@ use openvm_stark_backend::air_builders::symbolic::{
     symbolic_expression::SymbolicEvaluator,
     symbolic_variable::{Entry, SymbolicVariable},
 };
-use p3_field::{ExtensionField, Field, FieldAlgebra, TwoAdicField};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 
 type ViewPair<'a, T> = &'a [(T, T)];
 
@@ -11,7 +11,7 @@ type ViewPair<'a, T> = &'a [(T, T)];
 /// but I don't like divisions of field extension elements.
 fn progression_exp_2<EF>(m: EF, l: usize) -> EF
 where
-    EF: FieldAlgebra + Copy,
+    EF: PrimeCharacteristicRing + Copy,
 {
     (0..l)
         .fold((m, EF::ONE), |(pow, sum), _| {
@@ -41,7 +41,7 @@ where
         l_skip: usize,
     ) -> Self {
         let omega = F::two_adic_generator(l_skip);
-        let inv = EF::from_base(F::from_canonical_usize(1 << l_skip).inverse());
+        let inv = EF::from(F::from_usize(1 << l_skip).inverse());
         let is_first_row = inv
             * progression_exp_2(rs[0], l_skip)
             * rs[1..].iter().fold(EF::ONE, |acc, &x| acc * (EF::ONE - x));
@@ -64,7 +64,7 @@ where
     EF: ExtensionField<F>,
 {
     fn eval_const(&self, c: F) -> EF {
-        EF::from_base(c)
+        EF::from(c)
     }
 
     fn eval_var(&self, symbolic_var: SymbolicVariable<F>) -> EF {
@@ -88,7 +88,7 @@ where
                     vp[index].1
                 }
             }
-            Entry::Public => EF::from_base(self.public_values[index]),
+            Entry::Public => EF::from(self.public_values[index]),
             _ => unimplemented!(),
         }
     }
