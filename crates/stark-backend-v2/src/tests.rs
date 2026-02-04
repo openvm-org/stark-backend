@@ -399,7 +399,7 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let _alpha = transcript.sample_ext();
     let _beta = transcript.sample_ext();
     let total_rounds = gkr_proof.claims_per_layer.len();
-    verify_gkr(&gkr_proof, &mut transcript, total_rounds)?;
+    let _ = verify_gkr(&gkr_proof, &mut transcript, total_rounds)?;
 
     Ok(())
 }

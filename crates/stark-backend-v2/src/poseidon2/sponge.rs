@@ -1,4 +1,4 @@
-use core::{array::from_fn, ops::Deref};
+use core::ops::Deref;
 
 use p3_baby_bear::Poseidon2BabyBear;
 use p3_challenger::CanObserve;
@@ -8,7 +8,7 @@ use p3_symmetric::Permutation;
 use tracing::instrument;
 
 use super::{poseidon2_perm, CHUNK, WIDTH};
-use crate::{Digest, D_EF, EF, F};
+use crate::{Digest, EF, F};
 
 pub trait FiatShamirTranscript: Clone + Send + Sync {
     fn observe(&mut self, value: F);
