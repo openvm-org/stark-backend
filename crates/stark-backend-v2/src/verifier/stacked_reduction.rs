@@ -1,7 +1,7 @@
 use std::iter::zip;
 
 use itertools::Itertools;
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use thiserror::Error;
 use tracing::{debug, instrument};
 
@@ -49,7 +49,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
      * way column_openings is (i.e. sorted by trace height).
      */
     let omega_order = omega_shift_pows.len();
-    let omega_order_f = F::from_canonical_usize(omega_order);
+    let omega_order_f = F::from_usize(omega_order);
 
     let t_claims_len = layouts
         .iter()
@@ -207,7 +207,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
 mod tests {
     use itertools::Itertools;
     use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
-    use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PrimeField32, TwoAdicField};
+    use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32, TwoAdicField};
     use p3_util::log2_ceil_usize;
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -239,7 +239,7 @@ mod tests {
         let mut sum = EF::ZERO;
         for i in 0..(1 << (N_STACK - round)) {
             let hypercube = (0..(N_STACK - round))
-                .map(|bit_idx| EF::from_canonical_usize((i >> bit_idx) & 1))
+                .map(|bit_idx| EF::from_usize((i >> bit_idx) & 1))
                 .collect_vec();
             let z = u
                 .iter()
@@ -260,7 +260,7 @@ mod tests {
 
     fn generate_random_linear_q(rng: &mut StdRng) -> impl Fn(&[EF]) -> EF {
         let coeffs = (0..=N_STACK)
-            .map(|_| EF::from_canonical_usize(rng.random_range(0usize..100)))
+            .map(|_| EF::from_usize(rng.random_range(0usize..100)))
             .collect_vec();
         move |vals: &[EF]| {
             coeffs
@@ -282,7 +282,7 @@ mod tests {
 
         let q = generate_random_linear_q(&mut rng);
         let r = (0..=N_STACK)
-            .map(|_| EF::from_canonical_u32(rng.random_range(0..F::ORDER_U32)))
+            .map(|_| EF::from_u32(rng.random_range(0..F::ORDER_U32)))
             .collect_vec();
         let n = slice.log_height() - L_SKIP;
         let b = (L_SKIP + n..L_SKIP + N_STACK)
@@ -291,10 +291,10 @@ mod tests {
         let mut u = vec![];
 
         let t = omega_pows.iter().fold(EF::ZERO, |acc, &omega| {
-            acc + compute_t::<false>(&q, &r, &b, &u, EF::from_base(omega), 0, L_SKIP)
+            acc + compute_t::<false>(&q, &r, &b, &u, EF::from(omega), 0, L_SKIP)
         });
         let t_rot = omega_pows.iter().fold(EF::ZERO, |acc, &omega| {
-            acc + compute_t::<true>(&q, &r, &b, &u, EF::from_base(omega), 0, L_SKIP)
+            acc + compute_t::<true>(&q, &r, &b, &u, EF::from(omega), 0, L_SKIP)
         });
         let column_openings = vec![vec![vec![(t, t_rot)]]];
 

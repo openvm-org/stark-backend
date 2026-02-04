@@ -4,7 +4,7 @@ use std::{
 };
 
 pub use codec_derive::{Decode, Encode};
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra, PrimeField32};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32};
 
 use crate::{D_EF, EF, F};
 
@@ -70,7 +70,7 @@ impl Encode for F {
 
 impl Encode for EF {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        let base_slice: &[F] = self.as_base_slice();
+        let base_slice: &[F] = self.as_basis_coefficients_slice();
         // Fixed length slice, so don't encode length
         for val in base_slice {
             val.encode(writer)?;
@@ -172,7 +172,7 @@ impl Decode for F {
         reader.read_exact(&mut bytes)?;
         let value = u32::from_le_bytes(bytes);
         if value < F::ORDER_U32 {
-            Ok(F::from_canonical_u32(value))
+            Ok(F::from_u32(value))
         } else {
             Err(io::Error::other(format!(
                 "Attempted read of {} into F >= F::ORDER_U32 {}",
@@ -189,7 +189,7 @@ impl Decode for EF {
         for val in &mut base_slice {
             *val = F::decode(reader)?;
         }
-        Ok(EF::from_base_slice(&base_slice))
+        Ok(EF::from_basis_coefficients_fn(|i| base_slice[i]))
     }
 }
 

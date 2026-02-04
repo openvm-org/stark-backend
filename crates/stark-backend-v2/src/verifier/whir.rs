@@ -1,7 +1,7 @@
 use core::iter::zip;
 
 use itertools::{izip, Itertools};
-use p3_field::{Field, FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, TwoAdicField};
 use thiserror::Error;
 use tracing::instrument;
 
@@ -172,7 +172,9 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
                 let merkle_proof = &codeword_merkle_proofs[whir_round - 1][query_idx];
                 let leaf_hashes = opened_values
                     .iter()
-                    .map(|opened_value| poseidon2_hash_slice(opened_value.as_base_slice()))
+                    .map(|opened_value| {
+                        poseidon2_hash_slice(opened_value.as_basis_coefficients_slice())
+                    })
                     .collect_vec();
                 let query_digest = poseidon2_tree_compress(leaf_hashes);
                 merkle_verify(
@@ -345,9 +347,12 @@ pub fn merkle_verify(
 mod tests {
     use itertools::Itertools;
     use openvm_stark_backend::prover::MatrixDimensions;
-    use openvm_stark_sdk::config::setup_tracing_with_log_level;
-    use p3_field::{Field, FieldAlgebra, TwoAdicField};
+    use openvm_stark_sdk::config::{
+        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
+    };
+    use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use test_case::test_case;
     use tracing::Level;
 
     use super::*;
@@ -365,7 +370,7 @@ mod tests {
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
         let z_prism: Vec<_> = (0..params.n_stack + 1)
-            .map(|_| EF::from_wrapped_u64(rng.random()))
+            .map(|_| EF::from_u64(rng.random()))
             .collect();
 
         let z_cube = {
@@ -478,104 +483,30 @@ mod tests {
         run_whir_test(params, pk, &ctx)
     }
 
-    #[test]
-    fn test_whir_single_fib_nstack_0() -> Result<(), VerifyWhirError> {
+    #[test_case(0, 1, 1, 0)]
+    #[test_case(2, 1, 1, 2)]
+    #[test_case(2, 1, 2, 0)]
+    #[test_case(2, 1, 3, 1)]
+    #[test_case(2, 1, 4, 0)]
+    #[test_case(2, 2, 4, 0)]
+    fn test_whir_single_fib(
+        n_stack: usize,
+        log_blowup: usize,
+        k_whir: usize,
+        log_final_poly_len: usize,
+    ) -> Result<(), VerifyWhirError> {
         setup_tracing_with_log_level(Level::DEBUG);
 
         let params = SystemParams {
             l_skip: 2,
-            n_stack: 0,
-            log_blowup: 1,
-            k_whir: 1,
+            n_stack,
+            log_blowup,
+            k_whir,
             num_whir_queries: 5,
-            log_final_poly_len: 0,
-            logup_pow_bits: 1,
+            log_final_poly_len,
+            logup: log_up_security_params_baby_bear_100_bits(),
             whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_nstack_2() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 1,
-            num_whir_queries: 5,
-            log_final_poly_len: 2,
-            logup_pow_bits: 1,
-            whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_kwhir_2() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 2,
-            num_whir_queries: 5,
-            log_final_poly_len: 0,
-            logup_pow_bits: 1,
-            whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_kwhir_3() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 3,
-            num_whir_queries: 5,
-            log_final_poly_len: 1,
-            logup_pow_bits: 1,
-            whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_kwhir_4() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 4,
-            num_whir_queries: 5,
-            log_final_poly_len: 0,
-            logup_pow_bits: 1,
-            whir_pow_bits: 0,
-        };
-        run_whir_fib_test(params)
-    }
-
-    #[test]
-    fn test_whir_single_fib_log_blowup_2() -> Result<(), VerifyWhirError> {
-        setup_tracing_with_log_level(Level::DEBUG);
-
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack: 2,
-            log_blowup: 1,
-            k_whir: 4,
-            num_whir_queries: 5,
-            log_final_poly_len: 0,
-            logup_pow_bits: 2,
-            whir_pow_bits: 0,
+            max_constraint_degree: 3,
         };
         run_whir_fib_test(params)
     }
@@ -584,10 +515,10 @@ mod tests {
     fn test_fold_single() {
         let mut rng = StdRng::seed_from_u64(0);
 
-        let a0 = EF::from_wrapped_u32(rng.random());
-        let a1 = EF::from_wrapped_u32(rng.random());
-        let alpha = EF::from_wrapped_u32(rng.random());
-        let x = F::from_wrapped_u32(rng.random());
+        let a0 = EF::from_u32(rng.random());
+        let a1 = EF::from_u32(rng.random());
+        let alpha = EF::from_u32(rng.random());
+        let x = F::from_u32(rng.random());
 
         let result = binary_k_fold(vec![a0, a1], &[alpha], x);
         assert_eq!(result, a0 + (alpha - x) * (a0 - a1) * x.double().inverse());
@@ -597,14 +528,14 @@ mod tests {
     fn test_fold_double() {
         let mut rng = StdRng::seed_from_u64(0);
 
-        let a0 = EF::from_wrapped_u32(rng.random());
-        let a1 = EF::from_wrapped_u32(rng.random());
-        let a2 = EF::from_wrapped_u32(rng.random());
-        let a3 = EF::from_wrapped_u32(rng.random());
-        let alpha0 = EF::from_wrapped_u32(rng.random());
-        let alpha1 = EF::from_wrapped_u32(rng.random());
+        let a0 = EF::from_u32(rng.random());
+        let a1 = EF::from_u32(rng.random());
+        let a2 = EF::from_u32(rng.random());
+        let a3 = EF::from_u32(rng.random());
+        let alpha0 = EF::from_u32(rng.random());
+        let alpha1 = EF::from_u32(rng.random());
 
-        let x = F::from_wrapped_u32(rng.random());
+        let x = F::from_u32(rng.random());
 
         let result = binary_k_fold(vec![a0, a1, a2, a3], &[alpha0, alpha1], x);
         let tw = F::two_adic_generator(2);
@@ -630,8 +561,9 @@ mod tests {
             k_whir: 2,
             num_whir_queries: 6,
             log_final_poly_len: 2,
-            logup_pow_bits: 1,
+            logup: log_up_security_params_baby_bear_100_bits(),
             whir_pow_bits: 1,
+            max_constraint_degree: 3,
         };
 
         let n_rows = 1 << (params.n_stack + params.l_skip);
@@ -644,7 +576,7 @@ mod tests {
         for _ in 0..num_commitments {
             let n_cols = (rng.random::<u64>() % 10 + 3) as usize;
             let data = (0..n_rows * n_cols)
-                .map(|_| F::from_wrapped_u64(rng.random()))
+                .map(|_| F::from_u64(rng.random()))
                 .collect_vec();
             let mat = ColMajorMatrix::new(data, n_cols);
 
@@ -709,8 +641,9 @@ mod tests {
             k_whir: 2,
             num_whir_queries: 6,
             log_final_poly_len: 4,
-            logup_pow_bits: 1,
+            logup: log_up_security_params_baby_bear_100_bits(),
             whir_pow_bits: 1,
+            max_constraint_degree: 3,
         };
 
         let n_rows = 1 << (params.n_stack + params.l_skip);
@@ -723,7 +656,7 @@ mod tests {
         for _ in 0..num_commitments {
             let n_cols = (rng.random::<u64>() % 10 + 3) as usize;
             let data = (0..n_rows * n_cols)
-                .map(|_| F::from_wrapped_u64(rng.random()))
+                .map(|_| F::from_u64(rng.random()))
                 .collect_vec();
             let mat = ColMajorMatrix::new(data, n_cols);
 

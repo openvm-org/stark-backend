@@ -87,6 +87,7 @@ p3-goldilocks = { version = "=0.4.1", default-features = false }
 p3-keccak = { version = "=0.4.1", default-features = false }
 p3-keccak-air = { version = "=0.4.1", default-features = false }
 p3-blake3 = { version = "=0.4.1", default-features = false }
+p3-interpolation = { version = "=0.4.1", default-features = false }
 p3-mds = { version = "=0.4.1", default-features = false }
 p3-merkle-tree = { version = "=0.4.1", default-features = false }
 p3-monty-31 = { version = "=0.4.1", default-features = false }

@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use p3_poseidon2::ExternalLayerConstants;
 
 mod instance_babybear;
@@ -27,7 +27,7 @@ pub fn horizen_round_consts_16() -> (ExternalLayerConstants<BabyBear, 16>, Vec<B
         .map(|round| {
             round
                 .iter()
-                .map(|&u32_canonical| BabyBear::from_wrapped_u32(u32_canonical))
+                .map(|&u32_canonical| BabyBear::from_u32(u32_canonical))
                 .collect()
         })
         .collect();
