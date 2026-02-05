@@ -6,7 +6,7 @@ use openvm_stark_backend::air_builders::symbolic::{
     symbolic_expression::SymbolicExpression,
     symbolic_variable::{Entry, SymbolicVariable},
 };
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use stark_backend_v2::keygen::types::StarkProvingKeyV2;
 
 use crate::{
@@ -215,9 +215,9 @@ impl InteractionEvalRules {
         let mut frac_pairs = Vec::with_capacity(num_interactions * 2);
         for interaction in interactions.iter() {
             let numer = interaction.count.clone();
-            let b = SymbolicExpression::from_canonical_u32(interaction.bus_index as u32 + 1);
+            let b = SymbolicExpression::from_u32(interaction.bus_index as u32 + 1);
             let betas = symbolic_challenges[1..].to_vec();
-            let mut denom = SymbolicExpression::from_canonical_u32(0);
+            let mut denom = SymbolicExpression::from_u32(0);
             for (j, expr) in interaction.message.iter().enumerate() {
                 denom += betas[j].clone() * expr.clone();
             }
