@@ -630,6 +630,26 @@ c[3] = t[3] - t[7] - 4·t[8]
 c[4] = t[4] - t[8]
 ```
 
+#### Multiplication Algorithm (Karatsuba 2+3 Split)
+
+Unlike Fp5 which uses PTX assembly for its binomial polynomial, Kb5's trinomial
+requires multiple coefficients in reduction (-1 and -4), making PTX less effective.
+Instead, we use **Karatsuba with a 2+3 split** to reduce multiplication count:
+
+**Split**: A = A0 + x²·A1, where A0 = (a₀, a₁) and A1 = (a₂, a₃, a₄)
+
+**Algorithm**:
+```cpp
+P0 = A0 × B0  // deg-1 × deg-1 = 3 muls (Karatsuba)
+P2 = A1 × B1  // deg-2 × deg-2 = 6 muls (Toom-2.5)
+P1 = (A0+A1) × (B0+B1) - P0 - P2  // 6 muls, cross term
+// Result: P0 + x²·P1 + x⁴·P2, then reduce
+```
+
+**Multiplication count**: 3 + 6 + 6 = **15 Kb muls** (vs 25 schoolbook = **40% reduction**)
+
+**Performance**: 81 Gops/s (+20% vs schoolbook at 68 Gops/s)
+
 #### Element Representation
 
 ```cpp
@@ -1017,7 +1037,7 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Field | Size | init | add | mul | inv |
 |-------|------|------|-----|-----|-----|
 | Kb | 4 B | 290 Gops/s | 3545 Gops/s | 1867 Gops/s | 45.4 Gops/s |
-| Kb5 | 20 B | 43 Gops/s | 1199 Gops/s | 68 Gops/s | 3.7 Gops/s |
+| Kb5 | 20 B | 43 Gops/s | 1199 Gops/s | **81 Gops/s** | 3.7 Gops/s |
 | Kb6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | **53 Gops/s** | 2.2 Gops/s |
 | Kb2x3 (2×3 tower) | 24 B | 36 Gops/s | 984 Gops/s | **62 Gops/s** | 3.2 Gops/s |
 | Kb3x2 (3×2 tower) | 24 B | 36 Gops/s | 993 Gops/s | 53 Gops/s | **10.1 Gops/s** |
@@ -1240,13 +1260,14 @@ Constants used:
 
 ## Optimizations Applied - Summary
 
-### Flat Extensions (Binomial Polynomials)
+### Flat Extensions (Binomial/Trinomial Polynomials)
 
-| Field | Operation | Before (ms) | After (ms) | Before (Gops/s) | After (Gops/s) | Speedup |
-|-------|-----------|-------------|------------|-----------------|----------------|---------|
-| **Fp5** | mul | 5.46 | 3.03 | 76.8 | 138.3 | **1.8×** |
-| **Fp5** | inv | 110.4 | 20.4 | 3.8 | 20.6 | **5.4×** |
-| **Fp6** | mul | 11.9 | 5.9 | 35.2 | 70.6 | **2.0×** |
+| Field | Operation | Before (ms) | After (ms) | Before (Gops/s) | After (Gops/s) | Speedup | Method |
+|-------|-----------|-------------|------------|-----------------|----------------|---------|--------|
+| **Fp5** | mul | 5.46 | 3.03 | 76.8 | 138.3 | **1.8×** | PTX assembly |
+| **Fp5** | inv | 110.4 | 20.4 | 3.8 | 20.6 | **5.4×** | Frobenius |
+| **Fp6** | mul | 11.9 | 5.9 | 35.2 | 70.6 | **2.0×** | PTX 2-product |
+| **Kb5** | mul | 6.2 | 5.2 | 68 | 81 | **1.2×** | Karatsuba 2+3 |
 
 ### Tower Fields (Base-Level PTX Optimization)
 

@@ -57,6 +57,45 @@ struct Kb5 {
     
     /// One element
     __device__ static Kb5 one() { return Kb5(Kb::one()); }
+
+    /// Multiply by 4 using additions (faster than full mul)
+    __device__ static inline Kb mulBy4(Kb x) {
+        Kb x2 = x + x;
+        return x2 + x2;
+    }
+
+    /// Multiply two degree-1 polynomials (a0 + a1*x)(b0 + b1*x)
+    __device__ static inline void mul_deg1(
+        Kb a0, Kb a1, Kb b0, Kb b1,
+        Kb& r0, Kb& r1, Kb& r2
+    ) {
+        Kb v0 = a0 * b0;
+        Kb v1 = a1 * b1;
+        Kb v01 = (a0 + a1) * (b0 + b1);
+        r0 = v0;
+        r1 = v01 - v0 - v1;
+        r2 = v1;
+    }
+
+    /// Multiply two degree-2 polynomials (a0 + a1*x + a2*x^2)(b0 + b1*x + b2*x^2)
+    /// Using Toom-2.5 (6 muls)
+    __device__ static inline void mul_deg2(
+        Kb a0, Kb a1, Kb a2, Kb b0, Kb b1, Kb b2,
+        Kb& r0, Kb& r1, Kb& r2, Kb& r3, Kb& r4
+    ) {
+        Kb v0 = a0 * b0;
+        Kb v1 = a1 * b1;
+        Kb v2 = a2 * b2;
+        Kb v01 = (a0 + a1) * (b0 + b1);
+        Kb v12 = (a1 + a2) * (b1 + b2);
+        Kb v02 = (a0 + a2) * (b0 + b2);
+
+        r0 = v0;
+        r1 = v01 - v0 - v1;
+        r2 = v02 - v0 - v2 + v1;
+        r3 = v12 - v1 - v2;
+        r4 = v2;
+    }
     
     /// Access coefficient
     __device__ Kb& operator[](int i) { return elems[i]; }
@@ -124,7 +163,7 @@ struct Kb5 {
     }
     
     /// Full extension field multiplication
-    /// Uses schoolbook multiplication + reduction mod (x^5 + x + 4)
+    /// Uses Karatsuba split (2+3) + reduction mod (x^5 + x + 4)
     /// 
     /// Reduction: α^5 = -α - 4
     /// For degree-8 product t0 + t1*α + ... + t8*α^8:
@@ -136,19 +175,42 @@ struct Kb5 {
     __device__ Kb5 operator*(Kb5 rhs) const {
         const Kb a0 = elems[0], a1 = elems[1], a2 = elems[2], a3 = elems[3], a4 = elems[4];
         const Kb b0 = rhs.elems[0], b1 = rhs.elems[1], b2 = rhs.elems[2], b3 = rhs.elems[3], b4 = rhs.elems[4];
-        
-        const Kb four(4);
-        
-        // Compute convolution products t[k] = sum_{i+j=k} a[i]*b[j]
-        Kb t0 = a0 * b0;
-        Kb t1 = a0 * b1 + a1 * b0;
-        Kb t2 = a0 * b2 + a1 * b1 + a2 * b0;
-        Kb t3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0;
-        Kb t4 = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0;
-        Kb t5 = a1 * b4 + a2 * b3 + a3 * b2 + a4 * b1;
-        Kb t6 = a2 * b4 + a3 * b3 + a4 * b2;
-        Kb t7 = a3 * b4 + a4 * b3;
-        Kb t8 = a4 * b4;
+
+        // Split: A = A0 + x^2*A1, where A0 = a0 + a1*x, A1 = a2 + a3*x + a4*x^2
+        // Same for B. Uses 15 Kb muls vs 25 schoolbook.
+        Kb p0_0, p0_1, p0_2;
+        mul_deg1(a0, a1, b0, b1, p0_0, p0_1, p0_2);
+
+        Kb p2_0, p2_1, p2_2, p2_3, p2_4;
+        mul_deg2(a2, a3, a4, b2, b3, b4, p2_0, p2_1, p2_2, p2_3, p2_4);
+
+        Kb s0 = a0 + a2;
+        Kb s1 = a1 + a3;
+        Kb s2 = a4;
+        Kb t0s = b0 + b2;
+        Kb t1s = b1 + b3;
+        Kb t2s = b4;
+
+        Kb p1_0, p1_1, p1_2, p1_3, p1_4;
+        mul_deg2(s0, s1, s2, t0s, t1s, t2s, p1_0, p1_1, p1_2, p1_3, p1_4);
+
+        // P1 = (A0+A1)(B0+B1) - P0 - P2
+        p1_0 = p1_0 - p0_0 - p2_0;
+        p1_1 = p1_1 - p0_1 - p2_1;
+        p1_2 = p1_2 - p0_2 - p2_2;
+        p1_3 = p1_3 - p2_3;
+        p1_4 = p1_4 - p2_4;
+
+        // Compose full product coefficients t0..t8
+        Kb t0 = p0_0;
+        Kb t1 = p0_1;
+        Kb t2 = p0_2 + p1_0;
+        Kb t3 = p1_1;
+        Kb t4 = p1_2 + p2_0;
+        Kb t5 = p1_3 + p2_1;
+        Kb t6 = p1_4 + p2_2;
+        Kb t7 = p2_3;
+        Kb t8 = p2_4;
         
         // Reduce: α^5 = -α - 4
         // c0 = t0 - 4*t5
@@ -156,10 +218,10 @@ struct Kb5 {
         // c2 = t2 - t6 - 4*t7
         // c3 = t3 - t7 - 4*t8
         // c4 = t4 - t8
-        Kb c0 = t0 - four * t5;
-        Kb c1 = t1 - t5 - four * t6;
-        Kb c2 = t2 - t6 - four * t7;
-        Kb c3 = t3 - t7 - four * t8;
+        Kb c0 = t0 - mulBy4(t5);
+        Kb c1 = t1 - t5 - mulBy4(t6);
+        Kb c2 = t2 - t6 - mulBy4(t7);
+        Kb c3 = t3 - t7 - mulBy4(t8);
         Kb c4 = t4 - t8;
         
         return Kb5(c0, c1, c2, c3, c4);
@@ -173,8 +235,6 @@ struct Kb5 {
     /// Squaring (optimized using symmetry)
     __device__ Kb5 square() const {
         const Kb a0 = elems[0], a1 = elems[1], a2 = elems[2], a3 = elems[3], a4 = elems[4];
-        
-        const Kb four(4);
         
         // Squares
         Kb a0sq = a0 * a0;
@@ -207,10 +267,10 @@ struct Kb5 {
         Kb t8 = a4sq;
         
         // Reduce
-        Kb c0 = t0 - four * t5;
-        Kb c1 = t1 - t5 - four * t6;
-        Kb c2 = t2 - t6 - four * t7;
-        Kb c3 = t3 - t7 - four * t8;
+        Kb c0 = t0 - mulBy4(t5);
+        Kb c1 = t1 - t5 - mulBy4(t6);
+        Kb c2 = t2 - t6 - mulBy4(t7);
+        Kb c3 = t3 - t7 - mulBy4(t8);
         Kb c4 = t4 - t8;
         
         return Kb5(c0, c1, c2, c3, c4);
@@ -266,14 +326,14 @@ __device__ inline Kb5 inv(Kb5 x) {
     }
     
     const Kb* a = x.elems;
-    const Kb neg_four = Kb(0) - Kb(4);
-    
     // Build augmented matrix [M | I] for Gauss-Jordan elimination
     // M is the multiplication matrix, I is identity
     // We'll solve M * result = e0 = (1, 0, 0, 0, 0)
     
     // Matrix storage: m[row][col], augmented with result column
     Kb m[5][6];
+    
+    const Kb neg_four = Kb(0) - Kb(4);
     
     // Precompute some terms
     Kb a0_m_a4 = a[0] - a[4];
