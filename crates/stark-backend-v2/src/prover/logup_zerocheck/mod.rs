@@ -421,7 +421,7 @@ where
         logup_pow_witness,
         q0_claim: frac_sum_proof.fractional_sum.1,
         claims_per_layer: frac_sum_proof.claims_per_layer,
-        sumcheck_polys: frac_sum_proof.sumcheck_polys,
+        block_sumcheck_polys: frac_sum_proof.block_sumcheck_polys,
     };
     (gkr_proof, batch_constraint_proof, r)
 }
