@@ -380,7 +380,7 @@ impl<F, Digest> StackedPcsDataGpu<F, Digest> {
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
-    use p3_field::FieldAlgebra;
+    use p3_field::PrimeCharacteristicRing;
     use stark_backend_v2::{
         prover::ColMajorMatrix,
         test_utils::{InteractionsFixture11, TestFixture},
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn test_stacked_matrix_manual_0() {
         let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
-            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+            .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
             .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
@@ -406,7 +406,7 @@ mod tests {
             transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
         assert_eq!(
             stacked_h_mat.values,
-            [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_canonical_u32).to_vec()
+            [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_u32).to_vec()
         );
     }
 
@@ -429,7 +429,7 @@ mod tests {
                 1, 3, 4, 2, 0, 545, 1, 0, 5, 4, 4, 5, 123, 889, 889, 456, 0, 3, 7, 546, 1, 5, 4,
                 889,
             ]
-            .map(F::from_canonical_u32),
+            .map(F::from_u32),
         );
         assert_eq!(stacked_h_mat.values, expected);
     }
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn test_stacked_matrix_manual_strided_0() {
         let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
-            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+            .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
             .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(
             stacked_h_mat.values,
             [1, 2, 3, 4, 5, 0, 6, 0, 7, 0, 0, 0]
-                .map(F::from_canonical_u32)
+                .map(F::from_u32)
                 .to_vec()
         );
     }
@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn test_stacked_matrix_manual_strided_1() {
         let columns = [vec![1, 2, 3, 4], vec![5, 6], vec![7]]
-            .map(|v| v.into_iter().map(F::from_canonical_u32).collect_vec());
+            .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
             .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
@@ -481,7 +481,7 @@ mod tests {
             ]
             .into_iter()
             .flatten()
-            .map(F::from_canonical_u32)
+            .map(F::from_u32)
             .collect_vec()
         );
     }

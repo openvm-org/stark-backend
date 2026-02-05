@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
 };
 use openvm_stark_backend::p3_util::log2_strict_usize;
-use p3_field::{ExtensionField, Field, FieldExtensionAlgebra};
+use p3_field::{ExtensionField, Field};
 use stark_backend_v2::{
     poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
@@ -47,7 +47,7 @@ where
     transcript.observe_ext(sum_claim);
 
     // Convert to extension field
-    let evals_ext: Vec<EF> = evals.iter().map(|&x| EF::from_base(x)).collect();
+    let evals_ext: Vec<EF> = evals.iter().map(|&x| EF::from(x)).collect();
 
     // Setup
     let mut current_height = 1 << n;
@@ -255,7 +255,7 @@ pub fn sumcheck_prismalinear_gpu(
     drop(d_s0_coeffs);
     let s0_coeffs_ext: Vec<EF> = s0_coeffs_host[0..=s_deg]
         .iter()
-        .map(|&x| EF::from_base(x))
+        .map(|&x| EF::from(x))
         .collect();
 
     // Step 7: Create polynomial and observe in transcript

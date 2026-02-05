@@ -1,7 +1,7 @@
 use std::mem::transmute;
 
 use itertools::Itertools;
-use p3_field::{ExtensionField, Field, FieldExtensionAlgebra, PrimeField64};
+use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeField64};
 use stark_backend_v2::utils::batch_multiplicative_inverse_serial;
 
 use crate::{D_EF, EF, F};
@@ -22,7 +22,7 @@ pub fn compute_barycentric_inv_lagrange_denoms<F: Field, EF: ExtensionField<F>>(
         .collect_vec();
     let mut inv_denoms = batch_multiplicative_inverse_serial(&denoms);
     let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
-    let denominator = F::from_canonical_usize(1 << l_skip);
+    let denominator = F::from_usize(1 << l_skip);
     let scale_factor = zerofier * denominator.inverse();
     for v in &mut inv_denoms {
         *v *= scale_factor;
@@ -39,7 +39,7 @@ pub fn reduce_raw_u64_to_ef(accum: &[u64]) -> Vec<EF> {
     accum
         .chunks_exact(D_EF)
         .map(|chunk| {
-            EF::from_base_fn(|i| {
+            EF::from_basis_coefficients_fn(|i| {
                 let monty_raw = (chunk[i] % F::ORDER_U64) as u32;
                 // SAFETY:
                 // - BabyBear has same memory layout as u32

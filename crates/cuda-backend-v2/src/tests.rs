@@ -8,7 +8,7 @@ use openvm_stark_sdk::config::{
     log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
     setup_tracing_with_log_level,
 };
-use p3_field::{FieldAlgebra, PrimeField32, TwoAdicField};
+use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use stark_backend_v2::{
     BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
@@ -60,7 +60,7 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
     assert!((F::ORDER_U32 - 1) % num_pts == 0);
 
     let evals = (0..num_pts)
-        .map(|_| F::from_canonical_u32(rng.random_range(0..F::ORDER_U32)))
+        .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
         .collect::<Vec<_>>();
     let mut prover_sponge_gpu = DuplexSpongeGpu::default();
     let mut verifier_sponge = DuplexSponge::default();
@@ -81,7 +81,7 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
     assert!((F::ORDER_U32 - 1) % num_pts == 0);
 
     let evals = (0..num_pts)
-        .map(|_| F::from_canonical_u32(rng.random_range(0..F::ORDER_U32)))
+        .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
         .collect::<Vec<_>>();
 
     let mut prover_sponge = DuplexSpongeGpu::default();
@@ -287,7 +287,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
             .into_iter()
             .cycle()
             .take(2 * sender_height)
-            .map(F::from_canonical_usize)
+            .map(F::from_usize)
             .collect(),
         2,
     );
@@ -296,7 +296,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
             .into_iter()
             .cycle()
             .take(4 * sender_height)
-            .map(F::from_canonical_usize)
+            .map(F::from_usize)
             .collect(),
         2,
     );

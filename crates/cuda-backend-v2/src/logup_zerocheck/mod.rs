@@ -25,7 +25,7 @@ use openvm_stark_backend::{
     prover::MatrixDimensions,
 };
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{Field, FieldAlgebra, TwoAdicField};
+use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::{log2_ceil_usize, log2_strict_usize};
 use rustc_hash::FxHashMap;
 use stark_backend_v2::{
@@ -236,7 +236,7 @@ pub fn prove_zerocheck_and_logup_gpu(
         }
         dft.idft_batch(s_evals)
     };
-    let skip_domain_size = F::from_canonical_usize(1 << l_skip);
+    let skip_domain_size = F::from_usize(1 << l_skip);
     // logup sum claims (sum_{\hat p}, sum_{\hat q}) per present AIR
     let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = (0..num_traces)
         .map(|trace_idx| {
@@ -330,7 +330,7 @@ pub fn prove_zerocheck_and_logup_gpu(
         let sp_round_evals = prover.sumcheck_polys_batch_eval(round, r[round - 1]);
         let batch_s = prover.compute_batch_s_poly(sp_round_evals, num_traces, round, &mu_pows);
         let batch_s_evals = (1..=s_deg)
-            .map(|i| batch_s.eval_at_point(EF::from_canonical_usize(i)))
+            .map(|i| batch_s.eval_at_point(EF::from_usize(i)))
             .collect_vec();
         for &eval in &batch_s_evals {
             transcript.observe_ext(eval);
@@ -826,7 +826,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                     evals.into_iter().map(|frac| (frac.p, frac.q)).unzip();
                 if n.is_negative() {
                     // normalize for lifting
-                    let norm_factor = F::from_canonical_u32(1 << n.unsigned_abs()).inverse();
+                    let norm_factor = F::from_u32(1 << n.unsigned_abs()).inverse();
                     for s in &mut numer {
                         *s *= norm_factor;
                     }
@@ -1014,7 +1014,7 @@ impl<'a> LogupZerocheckGpu<'a> {
 
             let n_lift = n.max(0) as usize;
             let norm_factor_denom = 1 << (-n).max(0);
-            let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+            let norm_factor = F::from_usize(norm_factor_denom).inverse();
             let has_preprocessed = pk.preprocessed_data.is_some();
             let first_main_idx = usize::from(has_preprocessed);
             let eq_xi_tree = &self.eq_xis[&n_lift];
@@ -1345,7 +1345,7 @@ impl<'a> LogupZerocheckGpu<'a> {
         }
         // s' has degree s_deg - 1
         let sp_head = UnivariatePoly::lagrange_interpolate(
-            &(0..s_deg).map(F::from_canonical_usize).collect_vec(),
+            &(0..s_deg).map(F::from_usize).collect_vec(),
             &sp_head_evals,
         );
         // eq(xi, X) = (2 * xi - 1) * X + (1 - xi)
