@@ -6,7 +6,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 use stark_backend_v2::{
     poseidon2::sponge::FiatShamirTranscript,

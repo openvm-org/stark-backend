@@ -9,7 +9,7 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::{p3_matrix::dense::RowMajorMatrix, prover::MatrixDimensions};
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{Field, FieldAlgebra, TwoAdicField};
+use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use stark_backend_v2::{
     dft::Radix2BowersSerial,
     poly_common::{

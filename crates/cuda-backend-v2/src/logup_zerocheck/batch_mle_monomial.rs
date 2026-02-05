@@ -4,7 +4,7 @@
 //! enabling efficient GPU kernel launches that process multiple traces in a single launch.
 
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use stark_backend_v2::prover::{DeviceMultiStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 use tracing::debug;
 
@@ -576,7 +576,7 @@ pub(crate) fn compute_logup_combinations(
     for (i, interaction) in interactions.iter().enumerate() {
         let beta_len = beta_pows_host[interaction.message.len()];
         let bus_idx = interaction.bus_index as u32;
-        bus_term_sum += beta_len * EF::from_canonical_u32(bus_idx + 1) * eq_3bs_host[i];
+        bus_term_sum += beta_len * EF::from_u32(bus_idx + 1) * eq_3bs_host[i];
     }
 
     Ok(LogupCombinations {
