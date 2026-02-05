@@ -263,11 +263,16 @@ struct Fp3x2 {
         return Fp3x2(c0 * rhs, c1 * rhs);
     }
     
-    // (a0 + a1*v) * (b0 + b1*v) = (a0*b0 + 11*a1*b1) + (a0*b1 + a1*b0)*v
+    // (a0 + a1*v) * (b0 + b1*v) = (a0*b0 + W*a1*b1) + (a0*b1 + a1*b0)*v
+    // Using Karatsuba: a0*b1 + a1*b0 = (a0+a1)*(b0+b1) - a0*b0 - a1*b1
+    // Reduces from 4 Fp3 muls to 3 Fp3 muls
     __device__ Fp3x2 operator*(Fp3x2 rhs) const {
         Fp3 a0b0 = c0 * rhs.c0;
         Fp3 a1b1 = c1 * rhs.c1;
-        Fp3 a0b1_a1b0 = c0 * rhs.c1 + c1 * rhs.c0;
+        Fp3 sum_a = c0 + c1;
+        Fp3 sum_b = rhs.c0 + rhs.c1;
+        Fp3 sum_prod = sum_a * sum_b;
+        Fp3 a0b1_a1b0 = sum_prod - a0b0 - a1b1;
         return Fp3x2(a0b0 + a1b1 * Fp(W), a0b1_a1b0);
     }
     

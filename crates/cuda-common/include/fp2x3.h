@@ -185,21 +185,31 @@ struct Fp2x3 {
     }
     
     // Full multiplication: (a0 + a1*v + a2*v²) * (b0 + b1*v + b2*v²)
-    // with reduction v³ = 2
+    // with reduction v³ = W
+    // Using Karatsuba-style: 6 Fp2 muls instead of 9
     __device__ Fp2x3 operator*(Fp2x3 rhs) const {
         Fp2 a0 = c0, a1 = c1, a2 = c2;
         Fp2 b0 = rhs.c0, b1 = rhs.c1, b2 = rhs.c2;
         
-        // Schoolbook: t[k] = sum_{i+j=k} a[i]*b[j]
-        Fp2 t0 = a0 * b0;
-        Fp2 t1 = a0 * b1 + a1 * b0;
-        Fp2 t2 = a0 * b2 + a1 * b1 + a2 * b0;
-        Fp2 t3 = a1 * b2 + a2 * b1;
-        Fp2 t4 = a2 * b2;
+        // Karatsuba for degree-3 polynomial multiplication
+        // 6 multiplications instead of 9
+        Fp2 v0 = a0 * b0;
+        Fp2 v1 = a1 * b1;
+        Fp2 v2 = a2 * b2;
+        Fp2 v01 = (a0 + a1) * (b0 + b1);
+        Fp2 v12 = (a1 + a2) * (b1 + b2);
+        Fp2 v02 = (a0 + a2) * (b0 + b2);
         
-        // Reduction: v³ = 2, so v³ → 2, v⁴ → 2v
-        // c0 = t0 + 2*t3
-        // c1 = t1 + 2*t4
+        // Reconstruct coefficients
+        Fp2 t0 = v0;
+        Fp2 t1 = v01 - v0 - v1;
+        Fp2 t2 = v02 - v0 - v2 + v1;
+        Fp2 t3 = v12 - v1 - v2;
+        Fp2 t4 = v2;
+        
+        // Reduction: v³ = W, so v³ → W, v⁴ → W*v
+        // c0 = t0 + W*t3
+        // c1 = t1 + W*t4
         // c2 = t2
         Fp w_val(W);
         return Fp2x3(

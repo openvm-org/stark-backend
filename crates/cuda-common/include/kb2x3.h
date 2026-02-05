@@ -194,16 +194,26 @@ struct Kb2x3 {
     
     // Full multiplication: (a0 + a1*v + a2*v²) * (b0 + b1*v + b2*v²)
     // with reduction v³ = (1+u)
+    // Using Karatsuba-style: 6 Kb2 muls instead of 9
     __device__ Kb2x3 operator*(Kb2x3 rhs) const {
         Kb2 a0 = c0, a1 = c1, a2 = c2;
         Kb2 b0 = rhs.c0, b1 = rhs.c1, b2 = rhs.c2;
         
-        // Schoolbook: t[k] = sum_{i+j=k} a[i]*b[j]
-        Kb2 t0 = a0 * b0;
-        Kb2 t1 = a0 * b1 + a1 * b0;
-        Kb2 t2 = a0 * b2 + a1 * b1 + a2 * b0;
-        Kb2 t3 = a1 * b2 + a2 * b1;
-        Kb2 t4 = a2 * b2;
+        // Karatsuba for degree-3 polynomial multiplication
+        // 6 multiplications instead of 9
+        Kb2 v0 = a0 * b0;
+        Kb2 v1 = a1 * b1;
+        Kb2 v2 = a2 * b2;
+        Kb2 v01 = (a0 + a1) * (b0 + b1);
+        Kb2 v12 = (a1 + a2) * (b1 + b2);
+        Kb2 v02 = (a0 + a2) * (b0 + b2);
+        
+        // Reconstruct coefficients
+        Kb2 t0 = v0;
+        Kb2 t1 = v01 - v0 - v1;
+        Kb2 t2 = v02 - v0 - v2 + v1;
+        Kb2 t3 = v12 - v1 - v2;
+        Kb2 t4 = v2;
         
         // Reduction: v³ = (1+u), v⁴ = (1+u)*v
         // c0 = t0 + (1+u)*t3

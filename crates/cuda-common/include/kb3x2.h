@@ -247,10 +247,15 @@ struct Kb3x2 {
     
     // Full multiplication: (a0 + a1*z) * (b0 + b1*z) with z² = 3
     // = (a0*b0 + 3*a1*b1) + (a0*b1 + a1*b0)*z
+    // Using Karatsuba: a0*b1 + a1*b0 = (a0+a1)*(b0+b1) - a0*b0 - a1*b1
+    // Reduces from 4 Kb3 muls to 3 Kb3 muls
     __device__ Kb3x2 operator*(Kb3x2 rhs) const {
         Kb3 a0b0 = c0 * rhs.c0;
         Kb3 a1b1 = c1 * rhs.c1;
-        Kb3 a0b1_a1b0 = c0 * rhs.c1 + c1 * rhs.c0;
+        Kb3 sum_a = c0 + c1;
+        Kb3 sum_b = rhs.c0 + rhs.c1;
+        Kb3 sum_prod = sum_a * sum_b;
+        Kb3 a0b1_a1b0 = sum_prod - a0b0 - a1b1;
         
         // 3*a1*b1 = a1*b1 + a1*b1 + a1*b1
         return Kb3x2(a0b0 + a1b1 + a1b1 + a1b1, a0b1_a1b0);

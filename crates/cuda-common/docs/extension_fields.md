@@ -1009,8 +1009,8 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | FpExt (Fp4) | 16 B | 53 Gops/s | 1328 Gops/s | 185 Gops/s | 41.3 Gops/s |
 | Fp5 (PTX+Frob) | 20 B | 43 Gops/s | 1199 Gops/s | **138 Gops/s** | **20.6 Gops/s** |
 | Fp6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 2.2 Gops/s |
-| Fp2x3 (2×3 tower) | 24 B | 36 Gops/s | 986 Gops/s | 42 Gops/s | 7.2 Gops/s |
-| Fp3x2 (3×2 tower) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 12.7 Gops/s |
+| Fp2x3 (2×3 tower) | 24 B | 36 Gops/s | 995 Gops/s | **68 Gops/s** | 10.8 Gops/s |
+| Fp3x2 (3×2 tower) | 24 B | 36 Gops/s | 995 Gops/s | **84 Gops/s** | **13.3 Gops/s** |
 
 #### KoalaBear Fields
 
@@ -1019,8 +1019,8 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Kb | 4 B | 290 Gops/s | 3545 Gops/s | 1867 Gops/s | 45.4 Gops/s |
 | Kb5 | 20 B | 43 Gops/s | 1199 Gops/s | 68 Gops/s | 3.7 Gops/s |
 | Kb6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | **53 Gops/s** | 2.2 Gops/s |
-| Kb2x3 (2×3 tower) | 24 B | 36 Gops/s | 987 Gops/s | 43 Gops/s | 6.6 Gops/s |
-| Kb3x2 (3×2 tower) | 24 B | 36 Gops/s | 986 Gops/s | 43 Gops/s | **10.1 Gops/s** |
+| Kb2x3 (2×3 tower) | 24 B | 36 Gops/s | 984 Gops/s | **62 Gops/s** | 3.2 Gops/s |
+| Kb3x2 (3×2 tower) | 24 B | 36 Gops/s | 993 Gops/s | 53 Gops/s | **10.1 Gops/s** |
 
 #### Goldilocks Fields
 
@@ -1046,13 +1046,13 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 
 | Implementation | Multiplication | Inversion | Best For |
 |---------------|----------------|-----------|----------|
-| Direct Fp6 | 49 Gops/s | 2.2 Gops/s | General purpose |
-| Fp2x3 (2×3 tower) | 42 Gops/s | 7.2 Gops/s | Inversion-heavy workloads |
-| Fp3x2 (3×2 tower) | 49 Gops/s | **12.7 Gops/s** | **Best overall** |
+| **Fp3x2 (3×2 tower)** | **84 Gops/s** | **13.3 Gops/s** | **Best overall** |
+| Fp2x3 (2×3 tower) | 68 Gops/s | 10.8 Gops/s | Alternative tower |
+| Direct Fp6 | 49 Gops/s | 9.0 Gops/s | Baseline |
 
-**Key findings**:
-- **Multiplication**: Direct Fp6 and Fp3x2 are equivalent (~49 Gops/s), Fp2x3 is ~15% slower
-- **Inversion**: Fp3x2 is **5.8× faster** than direct, Fp2x3 is **3.3× faster** than direct
+**Key findings** (after Karatsuba optimization):
+- **Multiplication**: Fp3x2 is **71% faster** than direct Fp6 (84 vs 49 Gops/s)
+- **Inversion**: Fp3x2 is **48% faster** than direct Fp6 (13.3 vs 9.0 Gops/s)
 - **Recommendation**: Use **Fp3x2** for best overall performance
 
 ### Fp6 vs Kb6 Comparison
@@ -1070,15 +1070,15 @@ The Kb6 trinomial `X⁶ + X³ + 1` has a special property: `α⁹ = 1`. This mea
 
 | Implementation | Multiplication | Inversion | Best For |
 |---------------|----------------|-----------|----------|
-| Direct Kb6 | **53 Gops/s** | 2.2 Gops/s | Multiplication-heavy |
-| Kb2x3 (2×3 tower) | 43 Gops/s | 6.6 Gops/s | Balanced workloads |
-| Kb3x2 (3×2 tower) | 43 Gops/s | **10.1 Gops/s** | Inversion-heavy |
+| **Kb2x3 (2×3 tower)** | **62 Gops/s** | 3.2 Gops/s | **Multiplication-heavy** |
+| Kb3x2 (3×2 tower) | 53 Gops/s | **10.1 Gops/s** | Inversion-heavy |
+| Direct Kb6 | 53 Gops/s | 2.2 Gops/s | Baseline |
 
-**Key findings for KoalaBear**:
-- **Multiplication**: Direct Kb6 is fastest (23% faster than towers) due to its add/sub-only reduction
+**Key findings for KoalaBear** (after Karatsuba optimization):
+- **Multiplication**: Kb2x3 is now fastest (17% faster than direct Kb6) thanks to Karatsuba
 - **Inversion**: Kb3x2 is **4.6× faster** than direct Kb6
-- **Trade-off**: Unlike BabyBear (where Fp3x2 matches direct Fp6 on multiplication), KoalaBear towers sacrifice multiplication speed for inversion speed
-- **Recommendation**: Use direct Kb6 for general workloads; consider Kb3x2 if inversion dominates
+- **Trade-off**: Karatsuba in towers now beats direct Kb6 for multiplication
+- **Recommendation**: Use Kb2x3 for multiplication-heavy workloads; Kb3x2 if inversion dominates
 
 ### Cross-Field Comparison (192-bit total)
 
@@ -1089,7 +1089,8 @@ Comparing fields with the same total size (24 bytes / 192 bits):
 | Fp6 | 32-bit | Degree 6 | 49 Gops/s | 2.2 Gops/s | Binomial X⁶-31 |
 | Fp3x2 | 32-bit | Tower 3×2 | 49 Gops/s | **12.7 Gops/s** | Best inv for BB |
 | Kb6 | 31-bit | Degree 6 | **53 Gops/s** | 2.2 Gops/s | Trinomial X⁶+X³+1 |
-| Kb3x2 | 31-bit | Tower 3×2 | 43 Gops/s | 10.1 Gops/s | |
+| Kb2x3 | 31-bit | Tower 2×3 | **62 Gops/s** | 3.2 Gops/s | Karatsuba mul |
+| Kb3x2 | 31-bit | Tower 3×2 | 53 Gops/s | 10.1 Gops/s | Best Kb inv |
 | **Gl3** | **64-bit** | **Degree 3** | **58.5 Gops/s** | 7.8 Gops/s | **Karatsuba mul** |
 
 **Key insight**: Gl3 achieves the **fastest multiplication** among all 192-bit extensions, despite using 64-bit base elements. This is because:
@@ -1223,10 +1224,11 @@ when summing 4+ products. Schoolbook fallback is used. This is a separate issue 
 
 ### Tower Fields (Base-Level PTX Optimization)
 
-PTX optimization applied to base fields (Fp2, Fp3, Kb2) propagates up to tower fields:
+PTX optimization applied to base fields (Fp2, Fp3, Kb2) propagates up to tower fields.
+These are pre-Karatsuba results (schoolbook multiplication at tower level):
 
-| Field | Base Optimized | Before (Gops/s) | After (Gops/s) | Speedup |
-|-------|----------------|-----------------|----------------|---------|
+| Field | Base Optimized | Before (Gops/s) | After PTX (Gops/s) | Speedup |
+|-------|----------------|-----------------|-------------------|---------|
 | **Fp2x3** | Fp2 | 42.5 | 54.6 | **1.28×** |
 | **Fp3x2** | Fp3 | 49.1 | 70.9 | **1.44×** |
 | **Kb2x3** | Kb2 | 42.5 | 50.8 | **1.20×** |
@@ -1234,6 +1236,59 @@ PTX optimization applied to base fields (Fp2, Fp3, Kb2) propagates up to tower f
 
 **Note**: Kb3x2 barely improved because Kb3 uses a trinomial polynomial (w³ + w + 4 = 0),
 which doesn't benefit from single-BETA PTX optimization.
+
+### Karatsuba Multiplication for Tower Fields
+
+Karatsuba-style multiplication reduces the number of base field multiplications at each tower level:
+
+| Field | Extension Type | Algorithm | Base Muls | Reduced To | Before (Gops/s) | After (Gops/s) | Speedup |
+|-------|---------------|-----------|-----------|------------|-----------------|----------------|---------|
+| **Fp2x3** | Cubic (Fp2 → Fp6) | Toom-2.5 | 9 Fp2 | 6 Fp2 | 54.6 | 68.0 | **+24.5%** |
+| **Fp3x2** | Quadratic (Fp3 → Fp6) | Karatsuba | 4 Fp3 | 3 Fp3 | 70.9 | 83.9 | **+18.3%** |
+| **Kb2x3** | Cubic (Kb2 → Kb6) | Toom-2.5 | 9 Kb2 | 6 Kb2 | 43.0 | 61.9 | **+44.0%** |
+| **Kb3x2** | Quadratic (Kb3 → Kb6) | Karatsuba | 4 Kb3 | 3 Kb3 | 43.0 | 53.1 | **+23.5%** |
+
+**Key observations**:
+- **Kb2x3 benefits most** (+44%) because its base Kb2 multiplication is relatively expensive (trinomial doesn't help PTX)
+- **Fp3x2 achieves highest throughput** (83.9 Gops/s) for degree-6 extensions, now 70% faster than direct Fp6
+- **Algorithmic improvements compound** with PTX base optimizations
+
+**Karatsuba for quadratic extension** (a₀ + a₁·z)(b₀ + b₁·z):
+```cpp
+// Schoolbook: 4 multiplications
+// c0 = a0*b0 + W*a1*b1
+// c1 = a0*b1 + a1*b0
+
+// Karatsuba: 3 multiplications
+v0 = a0 * b0;
+v1 = a1 * b1;
+v01 = (a0 + a1) * (b0 + b1);
+c0 = v0 + W * v1;
+c1 = v01 - v0 - v1;
+```
+
+**Toom-2.5 for cubic extension** (a₀ + a₁·v + a₂·v²)(b₀ + b₁·v + b₂·v²):
+```cpp
+// Schoolbook: 9 multiplications
+// Toom-2.5: 6 multiplications
+v0 = a0 * b0;
+v1 = a1 * b1;
+v2 = a2 * b2;
+v01 = (a0 + a1) * (b0 + b1);
+v12 = (a1 + a2) * (b1 + b2);
+v02 = (a0 + a2) * (b0 + b2);
+
+t0 = v0;
+t1 = v01 - v0 - v1;
+t2 = v02 - v0 - v2 + v1;
+t3 = v12 - v1 - v2;
+t4 = v2;
+
+// Apply reduction v³ = W
+c0 = t0 + W * t3;
+c1 = t1 + W * t4;
+c2 = t2;
+```
 
 ### Not Optimized (Trinomial Extensions)
 
