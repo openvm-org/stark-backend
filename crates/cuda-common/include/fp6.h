@@ -32,7 +32,8 @@ struct Fp6 {
     // Montgomery constants for PTX multiplication
     static constexpr uint32_t MOD  = 0x78000001;
     static constexpr uint32_t M    = 0x77ffffff;
-    static constexpr uint32_t BETA = 0x0FFFFFBE;  // (W << 32) % MOD
+    static constexpr uint32_t BETA = 0x0FFFFFBE;  // (W << 32) % MOD = 31 * 2^32 mod MOD
+    static constexpr uint32_t R2MOD = 0x0FFFFFFE; // 2^32 mod MOD (for 64-bit reduction)
     
     // ========================================================================
     // Constructors
@@ -138,160 +139,291 @@ struct Fp6 {
     
     /// Full extension field multiplication
     /// c[i] = t[i] + W*t[i+6] where t[k] = sum_{i+j=k} a[i]*b[j]
+    /// 
+    /// PTX Strategy: Use 64-bit accumulator to handle overflow when summing
+    /// Montgomery-reduced products. Each reduced product is < 2*MOD, and we 
+    /// sum up to 6 products (max sum < 12*MOD). The 64-bit sum is reduced
+    /// using: (acc_lo + acc_hi * 2^32) mod MOD = (acc_lo + acc_hi * R2MOD) mod MOD
     __device__ Fp6 operator*(Fp6 rhs) const {
         Fp6 ret;
         
-# if 0 && defined(__CUDA_ARCH__) && !defined(__clang__) && !defined(__clang_analyzer__)
-        // PTX multiplication disabled due to edge case overflow issues with 5+ products.
-        // The schoolbook multiplication provides correctness; potential optimization future work.
+# if defined(__CUDA_ARCH__) && !defined(__clang__) && !defined(__clang_analyzer__)
 #  ifdef __GNUC__
 #   define asm __asm__ __volatile__
 #  else
 #   define asm asm volatile
 #  endif
         // PTX assembly for Fp6 multiplication
-        // Operand mapping: %1=a0..%6=a5, %7=b0..%12=b5, %13=MOD, %14=M, %15=BETA
+        // Key insight: schoolbook computes ret[i] = sum(REDC(a*b)) + REDC(BETA * sum(REDC(a*b)))
+        // We must do Montgomery reduction BEFORE summing, then BETA multiply, then add.
+        // Operand mapping: %1=a0..%6=a5, %7=b0..%12=b5, %13=MOD, %14=M, %15=R2MOD, %16=BETA
         
+        // Helper macro for Montgomery reduction of single product
+        // Product in (lo, hi), result in hi after reduction
+        #define MONT_REDUCE() \
+            "mul.lo.u32 %m, %lo, %14;\n\t" \
+            "mad.lo.cc.u32 %lo, %m, %13, %lo;\n\t" \
+            "madc.hi.u32 %hi, %m, %13, %hi;\n\t"
+
         // ret[0] = a0*b0 + BETA*(a1*b5 + a2*b4 + a3*b3 + a4*b2 + a5*b1)
-        // Pattern from bb31_4_t: minimal reductions
-        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
-            "mul.lo.u32    %lo, %2, %12;     mul.hi.u32  %hi, %2, %12;\n\t"
-            "mad.lo.cc.u32 %lo, %3, %11, %lo; madc.hi.u32 %hi, %3, %11, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %4, %10, %lo; madc.hi.u32 %hi, %4, %10, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %5, %9, %lo; madc.hi.u32 %hi, %5, %9, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %6, %8, %lo; madc.hi.u32 %hi, %6, %8, %hi;\n\t"
-            // Double reduction for 5 products (hi < 2.35*MOD)
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %hi, %m, %13, %hi;\n\t"
-            // No reduction after Montgomery (like bb31_4_t)
-            "mul.lo.u32    %lo, %hi, %15;    mul.hi.u32  %hi, %hi, %15;\n\t"
-            "mad.lo.cc.u32 %lo, %1, %7, %lo; madc.hi.u32 %hi, %1, %7, %hi;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %0, %m, %13, %hi;\n\t"
-            "setp.ge.u32   %p, %0, %13;\n\t"
-            "@%p sub.u32   %0, %0, %13;\n\t"
+        asm("{ .reg.b32 %lo, %hi, %m, %acc_lo, %acc_hi, %t, %r_beta, %r_nb; .reg.pred %p;\n\t"
+            // === BETA part: 5 products ===
+            "mov.u32 %acc_lo, 0;\n\t"
+            "mov.u32 %acc_hi, 0;\n\t"
+            // a1*b5
+            "mul.lo.u32 %lo, %2, %12;\n\t" "mul.hi.u32 %hi, %2, %12;\n\t"
+            MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // a2*b4
+            "mul.lo.u32 %lo, %3, %11;\n\t" "mul.hi.u32 %hi, %3, %11;\n\t"
+            MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // a3*b3
+            "mul.lo.u32 %lo, %4, %10;\n\t" "mul.hi.u32 %hi, %4, %10;\n\t"
+            MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // a4*b2
+            "mul.lo.u32 %lo, %5, %9;\n\t" "mul.hi.u32 %hi, %5, %9;\n\t"
+            MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // a5*b1
+            "mul.lo.u32 %lo, %6, %8;\n\t" "mul.hi.u32 %hi, %6, %8;\n\t"
+            MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce 64-bit sum to 32-bit
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t"
+            "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t"
+            "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            // Reduce to < MOD
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            // Multiply by BETA and Montgomery reduce
+            "mul.lo.u32 %lo, %acc_lo, %16;\n\t"
+            "mul.hi.u32 %hi, %acc_lo, %16;\n\t"
+            MONT_REDUCE()
+            // Reduce hi to < MOD, store in r_beta
+            "setp.ge.u32 %p, %hi, %13;\n\t" "@%p sub.u32 %hi, %hi, %13;\n\t"
+            "mov.u32 %r_beta, %hi;\n\t"
+            // === Non-BETA part: a0*b0 ===
+            "mul.lo.u32 %lo, %1, %7;\n\t" "mul.hi.u32 %hi, %1, %7;\n\t"
+            MONT_REDUCE()
+            "setp.ge.u32 %p, %hi, %13;\n\t" "@%p sub.u32 %hi, %hi, %13;\n\t"
+            "mov.u32 %r_nb, %hi;\n\t"
+            // === Final sum ===
+            "add.u32 %0, %r_beta, %r_nb;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
             "}" : "=r"(ret.u[0])
                 : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]), "r"(u[5]),
                   "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]), "r"(rhs.u[5]),
-                  "r"(MOD), "r"(M), "r"(BETA));
+                  "r"(MOD), "r"(M), "r"(R2MOD), "r"(BETA));
 
         // ret[1] = a0*b1 + a1*b0 + BETA*(a2*b5 + a3*b4 + a4*b3 + a5*b2)
-        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
-            "mul.lo.u32    %lo, %3, %12;     mul.hi.u32  %hi, %3, %12;\n\t"
-            "mad.lo.cc.u32 %lo, %4, %11, %lo; madc.hi.u32 %hi, %4, %11, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %5, %10, %lo; madc.hi.u32 %hi, %5, %10, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %6, %9, %lo; madc.hi.u32 %hi, %6, %9, %hi;\n\t"
-            // Single reduction for 4 products (like bb31_4_t)
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %hi, %m, %13, %hi;\n\t"
-            "mul.lo.u32    %lo, %hi, %15;    mul.hi.u32  %hi, %hi, %15;\n\t"
-            "mad.lo.cc.u32 %lo, %1, %8, %lo; madc.hi.u32 %hi, %1, %8, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %2, %7, %lo; madc.hi.u32 %hi, %2, %7, %hi;\n\t"
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %0, %m, %13, %hi;\n\t"
-            "setp.ge.u32   %p, %0, %13;\n\t"
-            "@%p sub.u32   %0, %0, %13;\n\t"
+        asm("{ .reg.b32 %lo, %hi, %m, %acc_lo, %acc_hi, %t, %r_beta, %r_nb; .reg.pred %p;\n\t"
+            // === BETA part: 4 products ===
+            "mov.u32 %acc_lo, 0;\n\t" "mov.u32 %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %3, %12;\n\t" "mul.hi.u32 %hi, %3, %12;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %4, %11;\n\t" "mul.hi.u32 %hi, %4, %11;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %5, %10;\n\t" "mul.hi.u32 %hi, %5, %10;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %6, %9;\n\t" "mul.hi.u32 %hi, %6, %9;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce 64-bit to 32-bit
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t" "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t" "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            // BETA multiply + reduce
+            "mul.lo.u32 %lo, %acc_lo, %16;\n\t" "mul.hi.u32 %hi, %acc_lo, %16;\n\t" MONT_REDUCE()
+            "setp.ge.u32 %p, %hi, %13;\n\t" "@%p sub.u32 %hi, %hi, %13;\n\t"
+            "mov.u32 %r_beta, %hi;\n\t"
+            // === Non-BETA part: a0*b1 + a1*b0 (2 products) ===
+            "mov.u32 %acc_lo, 0;\n\t" "mov.u32 %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %1, %8;\n\t" "mul.hi.u32 %hi, %1, %8;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %2, %7;\n\t" "mul.hi.u32 %hi, %2, %7;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce (acc_hi max 1 for 2 products)
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t" "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t" "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "mov.u32 %r_nb, %acc_lo;\n\t"
+            // === Final sum ===
+            "add.u32 %0, %r_beta, %r_nb;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
             "}" : "=r"(ret.u[1])
                 : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]), "r"(u[5]),
                   "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]), "r"(rhs.u[5]),
-                  "r"(MOD), "r"(M), "r"(BETA));
+                  "r"(MOD), "r"(M), "r"(R2MOD), "r"(BETA));
 
         // ret[2] = a0*b2 + a1*b1 + a2*b0 + BETA*(a3*b5 + a4*b4 + a5*b3)
-        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
-            "mul.lo.u32    %lo, %4, %12;     mul.hi.u32  %hi, %4, %12;\n\t"
-            "mad.lo.cc.u32 %lo, %5, %11, %lo; madc.hi.u32 %hi, %5, %11, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %6, %10, %lo; madc.hi.u32 %hi, %6, %10, %hi;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %hi, %m, %13, %hi;\n\t"
-            "mul.lo.u32    %lo, %hi, %15;    mul.hi.u32  %hi, %hi, %15;\n\t"
-            "mad.lo.cc.u32 %lo, %1, %9, %lo; madc.hi.u32 %hi, %1, %9, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %2, %8, %lo; madc.hi.u32 %hi, %2, %8, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %3, %7, %lo; madc.hi.u32 %hi, %3, %7, %hi;\n\t"
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %0, %m, %13, %hi;\n\t"
-            "setp.ge.u32   %p, %0, %13;\n\t"
-            "@%p sub.u32   %0, %0, %13;\n\t"
+        asm("{ .reg.b32 %lo, %hi, %m, %acc_lo, %acc_hi, %t, %r_beta, %r_nb; .reg.pred %p;\n\t"
+            // === BETA part: 3 products ===
+            "mov.u32 %acc_lo, 0;\n\t" "mov.u32 %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %4, %12;\n\t" "mul.hi.u32 %hi, %4, %12;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %5, %11;\n\t" "mul.hi.u32 %hi, %5, %11;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %6, %10;\n\t" "mul.hi.u32 %hi, %6, %10;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce 64-bit to 32-bit with carry handling
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t" "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t" "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            // BETA multiply + reduce
+            "mul.lo.u32 %lo, %acc_lo, %16;\n\t" "mul.hi.u32 %hi, %acc_lo, %16;\n\t" MONT_REDUCE()
+            "setp.ge.u32 %p, %hi, %13;\n\t" "@%p sub.u32 %hi, %hi, %13;\n\t"
+            "mov.u32 %r_beta, %hi;\n\t"
+            // === Non-BETA part: a0*b2 + a1*b1 + a2*b0 (3 products) ===
+            "mov.u32 %acc_lo, 0;\n\t" "mov.u32 %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %1, %9;\n\t" "mul.hi.u32 %hi, %1, %9;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %2, %8;\n\t" "mul.hi.u32 %hi, %2, %8;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %3, %7;\n\t" "mul.hi.u32 %hi, %3, %7;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce 64-bit to 32-bit with carry handling
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t" "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t" "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "mov.u32 %r_nb, %acc_lo;\n\t"
+            // === Final sum ===
+            "add.u32 %0, %r_beta, %r_nb;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
             "}" : "=r"(ret.u[2])
                 : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]), "r"(u[5]),
                   "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]), "r"(rhs.u[5]),
-                  "r"(MOD), "r"(M), "r"(BETA));
+                  "r"(MOD), "r"(M), "r"(R2MOD), "r"(BETA));
 
         // ret[3] = a0*b3 + a1*b2 + a2*b1 + a3*b0 + BETA*(a4*b5 + a5*b4)
-        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
-            "mul.lo.u32    %lo, %5, %12;     mul.hi.u32  %hi, %5, %12;\n\t"
-            "mad.lo.cc.u32 %lo, %6, %11, %lo; madc.hi.u32 %hi, %6, %11, %hi;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %hi, %m, %13, %hi;\n\t"
-            "mul.lo.u32    %lo, %hi, %15;    mul.hi.u32  %hi, %hi, %15;\n\t"
-            "mad.lo.cc.u32 %lo, %1, %10, %lo; madc.hi.u32 %hi, %1, %10, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %2, %9, %lo; madc.hi.u32 %hi, %2, %9, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %3, %8, %lo; madc.hi.u32 %hi, %3, %8, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %4, %7, %lo; madc.hi.u32 %hi, %4, %7, %hi;\n\t"
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %0, %m, %13, %hi;\n\t"
-            "setp.ge.u32   %p, %0, %13;\n\t"
-            "@%p sub.u32   %0, %0, %13;\n\t"
+        asm("{ .reg.b32 %lo, %hi, %m, %acc_lo, %acc_hi, %t, %r_beta, %r_nb; .reg.pred %p;\n\t"
+            // === BETA part: 2 products ===
+            "mov.u32 %acc_lo, 0;\n\t" "mov.u32 %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %5, %12;\n\t" "mul.hi.u32 %hi, %5, %12;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %6, %11;\n\t" "mul.hi.u32 %hi, %6, %11;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce 64-bit to 32-bit with carry handling
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t" "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t" "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            // BETA multiply + reduce
+            "mul.lo.u32 %lo, %acc_lo, %16;\n\t" "mul.hi.u32 %hi, %acc_lo, %16;\n\t" MONT_REDUCE()
+            "setp.ge.u32 %p, %hi, %13;\n\t" "@%p sub.u32 %hi, %hi, %13;\n\t"
+            "mov.u32 %r_beta, %hi;\n\t"
+            // === Non-BETA part: 4 products ===
+            "mov.u32 %acc_lo, 0;\n\t" "mov.u32 %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %1, %10;\n\t" "mul.hi.u32 %hi, %1, %10;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %2, %9;\n\t" "mul.hi.u32 %hi, %2, %9;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %3, %8;\n\t" "mul.hi.u32 %hi, %3, %8;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %4, %7;\n\t" "mul.hi.u32 %hi, %4, %7;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce 64-bit to 32-bit with carry handling
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t" "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t" "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "mov.u32 %r_nb, %acc_lo;\n\t"
+            // === Final sum ===
+            "add.u32 %0, %r_beta, %r_nb;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
             "}" : "=r"(ret.u[3])
                 : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]), "r"(u[5]),
                   "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]), "r"(rhs.u[5]),
-                  "r"(MOD), "r"(M), "r"(BETA));
+                  "r"(MOD), "r"(M), "r"(R2MOD), "r"(BETA));
 
         // ret[4] = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 + BETA*(a5*b5)
-        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
-            "mul.lo.u32    %lo, %6, %12;     mul.hi.u32  %hi, %6, %12;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %hi, %m, %13, %hi;\n\t"
-            "mul.lo.u32    %lo, %hi, %15;    mul.hi.u32  %hi, %hi, %15;\n\t"
-            "mad.lo.cc.u32 %lo, %1, %11, %lo; madc.hi.u32 %hi, %1, %11, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %2, %10, %lo; madc.hi.u32 %hi, %2, %10, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %3, %9, %lo; madc.hi.u32 %hi, %3, %9, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %4, %8, %lo; madc.hi.u32 %hi, %4, %8, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %5, %7, %lo; madc.hi.u32 %hi, %5, %7, %hi;\n\t"
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %0, %m, %13, %hi;\n\t"
-            "setp.ge.u32   %p, %0, %13;\n\t"
-            "@%p sub.u32   %0, %0, %13;\n\t"
+        asm("{ .reg.b32 %lo, %hi, %m, %acc_lo, %acc_hi, %t, %r_beta, %r_nb; .reg.pred %p;\n\t"
+            // === BETA part: 1 product ===
+            "mul.lo.u32 %lo, %6, %12;\n\t" "mul.hi.u32 %hi, %6, %12;\n\t" MONT_REDUCE()
+            "setp.ge.u32 %p, %hi, %13;\n\t" "@%p sub.u32 %hi, %hi, %13;\n\t"
+            // BETA multiply + reduce
+            "mul.lo.u32 %lo, %hi, %16;\n\t" "mul.hi.u32 %hi, %hi, %16;\n\t" MONT_REDUCE()
+            "setp.ge.u32 %p, %hi, %13;\n\t" "@%p sub.u32 %hi, %hi, %13;\n\t"
+            "mov.u32 %r_beta, %hi;\n\t"
+            // === Non-BETA part: 5 products ===
+            "mov.u32 %acc_lo, 0;\n\t" "mov.u32 %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %1, %11;\n\t" "mul.hi.u32 %hi, %1, %11;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %2, %10;\n\t" "mul.hi.u32 %hi, %2, %10;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %3, %9;\n\t" "mul.hi.u32 %hi, %3, %9;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %4, %8;\n\t" "mul.hi.u32 %hi, %4, %8;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %5, %7;\n\t" "mul.hi.u32 %hi, %5, %7;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce 64-bit to 32-bit with carry handling
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t" "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t" "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "mov.u32 %r_nb, %acc_lo;\n\t"
+            // === Final sum ===
+            "add.u32 %0, %r_beta, %r_nb;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
+            "setp.ge.u32 %p, %0, %13;\n\t" "@%p sub.u32 %0, %0, %13;\n\t"
             "}" : "=r"(ret.u[4])
                 : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]), "r"(u[5]),
                   "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]), "r"(rhs.u[5]),
-                  "r"(MOD), "r"(M), "r"(BETA));
+                  "r"(MOD), "r"(M), "r"(R2MOD), "r"(BETA));
 
         // ret[5] = a0*b5 + a1*b4 + a2*b3 + a3*b2 + a4*b1 + a5*b0 (no BETA)
-        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
-            "mul.lo.u32    %lo, %1, %12;     mul.hi.u32  %hi, %1, %12;\n\t"
-            "mad.lo.cc.u32 %lo, %2, %11, %lo; madc.hi.u32 %hi, %2, %11, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %3, %10, %lo; madc.hi.u32 %hi, %3, %10, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %4, %9, %lo; madc.hi.u32 %hi, %4, %9, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %5, %8, %lo; madc.hi.u32 %hi, %5, %8, %hi;\n\t"
-            "mad.lo.cc.u32 %lo, %6, %7, %lo; madc.hi.u32 %hi, %6, %7, %hi;\n\t"
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "setp.ge.u32   %p, %hi, %13;\n\t"
-            "@%p sub.u32   %hi, %hi, %13;\n\t"
-            "mul.lo.u32    %m, %lo, %14;\n\t"
-            "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %0, %m, %13, %hi;\n\t"
-            "setp.ge.u32   %p, %0, %13;\n\t"
-            "@%p sub.u32   %0, %0, %13;\n\t"
+        asm("{ .reg.b32 %lo, %hi, %m, %acc_lo, %acc_hi, %t; .reg.pred %p;\n\t"
+            "mov.u32 %acc_lo, 0;\n\t" "mov.u32 %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %1, %12;\n\t" "mul.hi.u32 %hi, %1, %12;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %2, %11;\n\t" "mul.hi.u32 %hi, %2, %11;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %3, %10;\n\t" "mul.hi.u32 %hi, %3, %10;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %4, %9;\n\t" "mul.hi.u32 %hi, %4, %9;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %5, %8;\n\t" "mul.hi.u32 %hi, %5, %8;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            "mul.lo.u32 %lo, %6, %7;\n\t" "mul.hi.u32 %hi, %6, %7;\n\t" MONT_REDUCE()
+            "add.cc.u32 %acc_lo, %acc_lo, %hi;\n\t" "addc.u32 %acc_hi, %acc_hi, 0;\n\t"
+            // Reduce 64-bit to 32-bit
+            "mul.lo.u32 %t, %acc_hi, %15;\n\t"
+            "add.cc.u32 %acc_lo, %acc_lo, %t;\n\t" "addc.u32 %acc_hi, 0, 0;\n\t"
+            "setp.ne.u32 %p, %acc_hi, 0;\n\t" "@%p add.u32 %acc_lo, %acc_lo, %15;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "setp.ge.u32 %p, %acc_lo, %13;\n\t" "@%p sub.u32 %acc_lo, %acc_lo, %13;\n\t"
+            "mov.u32 %0, %acc_lo;\n\t"
             "}" : "=r"(ret.u[5])
                 : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]), "r"(u[5]),
                   "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]), "r"(rhs.u[5]),
-                  "r"(MOD), "r"(M), "r"(BETA));
+                  "r"(MOD), "r"(M), "r"(R2MOD), "r"(BETA));
+
+        #undef MONT_REDUCE
 #  undef asm
 # else
         // Fallback: schoolbook multiplication

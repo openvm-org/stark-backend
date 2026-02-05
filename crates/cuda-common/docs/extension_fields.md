@@ -1008,7 +1008,7 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Fp | 4 B | 309 Gops/s | 3544 Gops/s | 1872 Gops/s | 59.6 Gops/s |
 | FpExt (Fp4) | 16 B | 53 Gops/s | 1328 Gops/s | 185 Gops/s | 41.3 Gops/s |
 | Fp5 (PTX+Frob) | 20 B | 43 Gops/s | 1199 Gops/s | **138 Gops/s** | **20.6 Gops/s** |
-| Fp6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | 49 Gops/s | 2.2 Gops/s |
+| Fp6 (direct, PTX) | 24 B | 36 Gops/s | 994 Gops/s | 48 Gops/s | 9.0 Gops/s |
 | Fp2x3 (2×3 tower) | 24 B | 36 Gops/s | 995 Gops/s | **68 Gops/s** | 10.8 Gops/s |
 | Fp3x2 (3×2 tower) | 24 B | 36 Gops/s | 995 Gops/s | **84 Gops/s** | **13.3 Gops/s** |
 
@@ -1036,7 +1036,7 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Fp | 1.0× | 1.0× | 1.0× | 1.0× |
 | FpExt | 5.8× slower | 2.7× slower | 10.1× slower | 1.4× slower |
 | Fp5 (PTX+Frob) | 7.1× slower | 3.0× slower | **13.5× slower** | **2.9× slower** |
-| Fp6 (direct) | 8.6× slower | 3.6× slower | 38.3× slower | 26.6× slower |
+| Fp6 (direct, PTX) | 8.6× slower | 3.6× slower | 39× slower | 6.6× slower |
 | Fp2x3 | 8.6× slower | 3.6× slower | 44.0× slower | 8.2× slower |
 | Fp3x2 | 8.7× slower | 3.6× slower | 38.1× slower | 4.7× slower |
 | Gl | 1.7× slower | 2.9× slower | 2.8× slower | 5.7× slower |
@@ -1048,10 +1048,10 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 |---------------|----------------|-----------|----------|
 | **Fp3x2 (3×2 tower)** | **84 Gops/s** | **13.3 Gops/s** | **Best overall** |
 | Fp2x3 (2×3 tower) | 68 Gops/s | 10.8 Gops/s | Alternative tower |
-| Direct Fp6 | 49 Gops/s | 9.0 Gops/s | Baseline |
+| Direct Fp6 (with PTX) | 48 Gops/s | 9.0 Gops/s | PTX-optimized |
 
 **Key findings** (after Karatsuba optimization):
-- **Multiplication**: Fp3x2 is **71% faster** than direct Fp6 (84 vs 49 Gops/s)
+- **Multiplication**: Fp3x2 is **75% faster** than direct Fp6 (84 vs 48 Gops/s)
 - **Inversion**: Fp3x2 is **48% faster** than direct Fp6 (13.3 vs 9.0 Gops/s)
 - **Recommendation**: Use **Fp3x2** for best overall performance
 
@@ -1198,17 +1198,32 @@ asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
 **Performance results**:
 | Metric | Schoolbook (before) | PTX assembly (after) |
 |--------|---------------------|----------------------|
-| Time | 8.56 ms | 4.00 ms |
-| Throughput | 49.0 Gops/s | 104.9 Gops/s |
-| vs Fp | 36.3× slower | 17.0× slower |
-| **Speedup** | | **2.1×** |
+| Time | 11.2 ms | 8.7 ms |
+| Throughput | 37.2 Gops/s | 48.1 Gops/s |
+| vs Fp | 50× slower | 39× slower |
+| **Speedup** | | **~30%** |
+
+**Note**: The original PTX attempt achieved 104.9 Gops/s but failed verification due to
+fusing reductions incorrectly. The correct PTX uses separate Montgomery reductions,
+which requires more operations but produces correct results.
 
 **Fp6 Inversion (Frobenius-based)**: Now verified working with 0/1,000,000 failures.
 Previously failed (2/1024) due to incorrect Frobenius constants.
 Fix: Recalculated ω = 31^((p-1)/6) = 0x4E5D1534 as the primitive 6th root of unity.
 
-**Note**: PTX multiplication for Fp5/Fp6 is currently disabled due to accumulator overflow bug
-when summing 4+ products. Schoolbook fallback is used. This is a separate issue from inversion.
+**Fp6 PTX Multiplication**: Now verified working with 0/20,000,000 failures.
+The key insight for correct PTX implementation is that Montgomery reduction is **nonlinear**:
+- Schoolbook computes `REDC(a*b) + REDC(BETA * sum)` (reduce first, then sum)
+- Incorrect PTX computed `REDC(a*b + BETA*sum)` (sum first, then reduce)
+
+The fix required:
+1. **Separate reductions**: Montgomery-reduce each product before accumulating into 64-bit sum
+2. **Proper carry handling**: Use `add.cc.u32` + `addc.u32` for 64-to-32-bit reduction with R2MOD
+3. **Sufficient normalization**: Conditional subtractions to bring intermediate values below MOD
+
+Constants used:
+- `BETA = (31 << 32) % MOD = 0x0FFFFFBE` - for X⁶ - 31 reduction in Montgomery form
+- `R2MOD = 2^32 % MOD = 0x0FFFFFFE` - for 64-bit to 32-bit reduction
 
 ---
 
@@ -1220,7 +1235,7 @@ when summing 4+ products. Schoolbook fallback is used. This is a separate issue 
 |-------|-----------|-------------|------------|-----------------|----------------|---------|
 | **Fp5** | mul | 5.46 | 3.03 | 76.8 | 138.3 | **1.8×** |
 | **Fp5** | inv | 110.4 | 20.4 | 3.8 | 20.6 | **5.4×** |
-| **Fp6** | mul | 8.56 | 4.00 | 49.0 | 104.9 | **2.1×** |
+| **Fp6** | mul | 11.2 | 8.7 | 37.2 | 48.1 | **1.3×** |
 
 ### Tower Fields (Base-Level PTX Optimization)
 
