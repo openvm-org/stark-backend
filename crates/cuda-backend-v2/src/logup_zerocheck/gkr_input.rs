@@ -127,6 +127,11 @@ pub fn log_gkr_input_evals(
             .as_ref()
             .map(|m| m.buffer())
             .unwrap_or(&null_preprocessed);
+        let d_public_values = if air_ctx.public_values.is_empty() {
+            DeviceBuffer::<F>::new()
+        } else {
+            air_ctx.public_values.to_device().unwrap()
+        };
 
         let height = air_ctx.height();
         debug_assert_eq!(height, partitioned_main[0].height());
@@ -175,6 +180,7 @@ pub fn log_gkr_input_evals(
                 trace_output,
                 d_preprocessed,
                 &d_partition_ptrs,
+                &d_public_values,
                 d_challenges,
                 &intermediates,
                 &rules.inner.d_rules,
