@@ -149,6 +149,10 @@ struct Fp2x3 {
     Fp2 c0, c1, c2;  // c0 + c1*v + c2*v²
     
     static constexpr uint32_t W = 2;  // v³ = 2
+
+    __device__ static inline Fp2 mulByW(Fp2 x) {
+        return Fp2(x.elems[0] + x.elems[0], x.elems[1] + x.elems[1]);
+    }
     
     __device__ Fp2x3() : c0(), c1(), c2() {}
     __device__ Fp2x3(Fp a) : c0(a), c1(), c2() {}
@@ -211,10 +215,9 @@ struct Fp2x3 {
         // c0 = t0 + W*t3
         // c1 = t1 + W*t4
         // c2 = t2
-        Fp w_val(W);
         return Fp2x3(
-            t0 + t3 * w_val,
-            t1 + t4 * w_val,
+            t0 + mulByW(t3),
+            t1 + mulByW(t4),
             t2
         );
     }
@@ -236,10 +239,9 @@ struct Fp2x3 {
         Fp2 t3 = a1a2 + a1a2;
         Fp2 t4 = a2sq;
         
-        Fp w_val(W);
         return Fp2x3(
-            t0 + t3 * w_val,
-            t1 + t4 * w_val,
+            t0 + mulByW(t3),
+            t1 + mulByW(t4),
             t2
         );
     }
@@ -255,54 +257,31 @@ struct Fp2x3 {
 
 __device__ inline Fp2x3 operator*(Fp a, Fp2x3 b) { return b * a; }
 
-// Inversion using norm to Fp2, then to Fp
-// For a ∈ Fp6 = Fp2[v]/(v³-2), compute Norm_{Fp6/Fp2}(a) ∈ Fp2
-// Then inv(a) = a^(p²-1) * inv(Norm(a))
+// Inversion using adjugate formula for cubic extension v^3 = W
 __device__ inline Fp2x3 inv(Fp2x3 x) {
     if (x == Fp2x3::zero()) return Fp2x3::zero();
     
-    // For cubic extension Fp2[v]/(v³ - W):
-    // Norm(a0 + a1*v + a2*v²) = a0³ + W*a1³ + W²*a2³ - 3*W*a0*a1*a2
-    // But this is complex. Use Gaussian elimination instead (like Fp5/Fp6).
-    
-    // Alternative: use the formula for cubic extension inverse
-    // Let a = c0 + c1*v + c2*v², with v³ = W
-    // The inverse uses the matrix approach
-    
     Fp2 a0 = x.c0, a1 = x.c1, a2 = x.c2;
-    Fp2 W_val(Fp(Fp2x3::W));
     
-    // Build 3x3 matrix and solve via Gaussian elimination
-    // Matrix M where M * [b0, b1, b2]^T = [1, 0, 0]^T
-    // Row 0: [a0, W*a2, W*a1]
-    // Row 1: [a1, a0, W*a2]
-    // Row 2: [a2, a1, a0]
+    // c0 = a0^2 - W*a1*a2
+    // c1 = W*a2^2 - a0*a1
+    // c2 = a1^2 - a0*a2
+    Fp2 a0sq = a0.square();
+    Fp2 a1sq = a1.square();
+    Fp2 a2sq = a2.square();
+    Fp2 a1a2 = a1 * a2;
+    Fp2 a0a1 = a0 * a1;
+    Fp2 a0a2 = a0 * a2;
     
-    Fp2 m[3][4];
-    m[0][0] = a0; m[0][1] = W_val * a2; m[0][2] = W_val * a1; m[0][3] = Fp2::one();
-    m[1][0] = a1; m[1][1] = a0; m[1][2] = W_val * a2; m[1][3] = Fp2::zero();
-    m[2][0] = a2; m[2][1] = a1; m[2][2] = a0; m[2][3] = Fp2::zero();
+    Fp2 c0 = a0sq - Fp2x3::mulByW(a1a2);
+    Fp2 c1 = Fp2x3::mulByW(a2sq) - a0a1;
+    Fp2 c2 = a1sq - a0a2;
     
-    // Gaussian elimination
-    for (int col = 0; col < 3; col++) {
-        // Scale pivot row
-        Fp2 pivot_inv = inv(m[col][col]);
-        for (int j = col; j < 4; j++) {
-            m[col][j] = m[col][j] * pivot_inv;
-        }
-        
-        // Eliminate column in other rows
-        for (int row = 0; row < 3; row++) {
-            if (row != col) {
-                Fp2 factor = m[row][col];
-                for (int j = col; j < 4; j++) {
-                    m[row][j] = m[row][j] - factor * m[col][j];
-                }
-            }
-        }
-    }
+    // norm = a0*c0 + W*(a1*c2 + a2*c1)
+    Fp2 norm = a0 * c0 + Fp2x3::mulByW(a1 * c2 + a2 * c1);
+    Fp2 norm_inv = inv(norm);
     
-    return Fp2x3(m[0][3], m[1][3], m[2][3]);
+    return Fp2x3(c0 * norm_inv, c1 * norm_inv, c2 * norm_inv);
 }
 
 static_assert(sizeof(Fp2x3) == 24, "Fp2x3 must be 24 bytes");

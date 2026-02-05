@@ -1,1417 +1,270 @@
-# Extension Fields for CUDA: Design and Implementation
+# Extension Fields for CUDA
 
-This document describes the mathematical foundations and implementation details of finite field extensions used in our CUDA-accelerated proof system.
+CUDA-optimized finite field extensions for zero-knowledge proof systems.
 
 ## Table of Contents
 
-1. [Base Field: Baby Bear](#base-field-baby-bear)
-2. [Base Field: KoalaBear](#base-field-koalabear)
-3. [Base Field: Goldilocks](#base-field-goldilocks)
-4. [Extension Field Theory](#extension-field-theory)
-5. [Fp5 Implementation](#fp5-implementation)
-6. [Fp6 Implementation](#fp6-implementation)
-7. [Fp6 Tower Constructions](#fp6-tower-constructions)
-8. [KoalaBear Extensions](#koalabear-extensions)
-9. [Goldilocks Extensions](#goldilocks-extensions)
-10. [Benchmarking System](#benchmarking-system)
-11. [Performance Analysis](#performance-analysis)
+1. [Base Fields](#base-fields)
+2. [Extension Field Theory](#extension-field-theory)
+3. [Baby Bear Extensions](#baby-bear-extensions)
+4. [KoalaBear Extensions](#koalabear-extensions)
+5. [Goldilocks Extensions](#goldilocks-extensions)
+6. [Performance Summary](#performance-summary)
+7. [Change History](#change-history)
 
 ---
 
-## Base Field: Baby Bear
+## Base Fields
 
-### Definition
-
-Baby Bear is a prime field with:
+### Baby Bear (Fp)
 
 ```
-p = 2^31 - 2^27 + 1 = 2013265921 = 0x78000001
+p = 2^31 - 2^27 + 1 = 0x78000001
 ```
 
-### Key Properties
+| Property | Value |
+|----------|-------|
+| Size | 31 bits |
+| Two-adicity | 27 |
+| Montgomery R | 2^32 |
 
-| Property | Value | Significance |
-|----------|-------|--------------|
-| Size | 31 bits | Fits in `uint32_t` with room for lazy reduction |
-| Two-adicity | 27 | `p - 1 = 15 × 2^27`, excellent for FFT |
-| Form | `2^31 - 2^27 + 1` | Enables fast modular reduction |
-
-### Montgomery Representation
-
-All field elements are stored in Montgomery form for efficient multiplication:
+### KoalaBear (Kb)
 
 ```
-Mont(x) = x * R mod p,  where R = 2^32
+p = 2^31 - 2^24 + 1 = 0x7F000001
 ```
 
-Multiplication: `Mont(a) * Mont(b) → Mont(a*b)` via Montgomery reduction.
+| Property | Value |
+|----------|-------|
+| Size | 31 bits |
+| Two-adicity | 24 |
+| gcd(3, p-1) | **1** (every element is a cube) |
+| gcd(5, p-1) | **1** (every element is a 5th power) |
 
----
+**Important**: Binomial extensions `X^n - W` don't work for n=3,5,6. Must use trinomials.
 
-## Base Field: KoalaBear
-
-### Definition
-
-KoalaBear is a prime field with:
-
-```
-p = 2^31 - 2^24 + 1 = 2130706433 = 0x7F000001
-```
-
-### Key Properties
-
-| Property | Value | Significance |
-|----------|-------|--------------|
-| Size | 31 bits | Fits in `uint32_t` with room for lazy reduction |
-| Two-adicity | 24 | `p - 1 = 127 × 2^24`, good for FFT |
-| Form | `2^31 - 2^24 + 1` | Enables fast modular reduction |
-
-### Critical Difference from Baby Bear
-
-**KoalaBear has `gcd(3, p-1) = gcd(5, p-1) = 1`**, meaning:
-- The cube map `x → x³` is an **automorphism** (permutation) of `Fp*`
-- The 5th power map `x → x⁵` is also an **automorphism** of `Fp*`
-- **Every nonzero element is both a cube AND a 5th power**
-
-This has profound implications for extension field construction (see [KoalaBear Extensions](#koalabear-extensions)).
-
-### Montgomery Representation
-
-KoalaBear elements use Montgomery form with these constants:
+### Goldilocks (Gl)
 
 ```
-MOD = 0x7F000001  (the prime)
-M0  = 0x7EFFFFFF  (-p^{-1} mod 2^32)
-RR  = 0x17F7EFE4  (R² mod p, where R = 2^32)
-ONE = 0x01FFFFFE  (R mod p, i.e., 1 in Montgomery form)
+p = 2^64 - 2^32 + 1 = 0xFFFFFFFF00000001
 ```
 
----
-
-## Base Field: Goldilocks
-
-### Definition
-
-Goldilocks is a 64-bit prime field with:
-
-```
-p = 2^64 - 2^32 + 1 = 18446744069414584321 = 0xFFFFFFFF00000001
-```
-
-### Key Properties
-
-| Property | Value | Significance |
-|----------|-------|--------------|
-| Size | 64 bits | Requires `uint64_t` storage |
-| Two-adicity | 32 | `p - 1 = 2^32 × (2^32 - 1)`, excellent for FFT |
-| Form | `2^64 - 2^32 + 1` | Enables extremely fast modular reduction |
-
-### Why Goldilocks is Special
-
-The prime `p = 2^64 - 2^32 + 1` has the form `φ² - φ + 1` where `φ = 2^32`. This means:
-
-```
-2^64 ≡ 2^32 - 1 (mod p)
-```
-
-Multiplication reduction becomes very cheap: a 128-bit product can be reduced with just a few 32-bit additions/subtractions, avoiding expensive 64×64→128 multiplies for the reduction step.
-
-### Implementation (sppark)
-
-The implementation is based on [Supranational's sppark](https://github.com/supranational/sppark) library.
-
-**Key features**:
-- Uses PTX inline assembly for optimal register allocation
-- Montgomery-style lazy reduction
-- Optimized addition chain for inversion (Fermat's method)
-
-**Files**:
-- `include/ff/gl64_t.cuh` - Core 64-bit field implementation
-- `include/ff/pow.hpp` - Power function helper
-- `include/gl.h` - Wrapper class for consistent API
-
-### Performance Characteristics
-
-Goldilocks is remarkably efficient for a 64-bit field:
-
-| Operation | Goldilocks (64-bit) | BabyBear (32-bit) | Ratio |
-|-----------|---------------------|-------------------|-------|
-| add | 1216 Gops/s | 3540 Gops/s | 2.9× slower |
-| mul | 670 Gops/s | 1870 Gops/s | 2.8× slower |
-| inv | 10.5 Gops/s | 60 Gops/s | 5.7× slower |
-
-The ~2.8× slowdown for multiplication (vs 4× expected for 2× larger elements) demonstrates the efficiency of the Goldilocks reduction.
+| Property | Value |
+|----------|-------|
+| Size | 64 bits |
+| Two-adicity | 32 |
 
 ---
 
 ## Extension Field Theory
 
-### Binomial Extensions
+An extension `Fp[n] = Fp[x] / f(x)` where `f(x)` is irreducible of degree n.
 
-An extension field `Fp[n]` is constructed as:
+**Elements**: Polynomials of degree < n stored as coefficient arrays.
 
-```
-Fp[n] = Fp[x] / (x^n - W)
-```
+**Multiplication**: Polynomial multiplication followed by reduction mod f(x).
 
-where `x^n - W` is an irreducible polynomial over `Fp`.
-
-**Irreducibility condition**: For `x^n - W` to be irreducible, `W` must NOT be an n-th power in `Fp`.
-
-**Test**: `W` is an n-th power iff `W^((p-1)/n) ≡ 1 (mod p)`
-
-### Elements
-
-An element `a ∈ Fp[n]` is a polynomial of degree < n:
-
-```
-a = a₀ + a₁x + a₂x² + ... + aₙ₋₁xⁿ⁻¹
-```
-
-Stored as array `[a₀, a₁, ..., aₙ₋₁]` where each `aᵢ ∈ Fp`.
-
-### Arithmetic
-
-**Addition**: Component-wise
-```
-(a + b)[i] = a[i] + b[i]
-```
-
-**Multiplication**: Polynomial multiplication followed by reduction using `xⁿ = W`:
-```
-x^n → W
-x^(n+1) → W·x
-x^(n+k) → W·x^k
-```
-
-**Inversion**: Multiple approaches (see Fp5 section).
+**Inversion**: Gaussian elimination, norm-based, or Frobenius-based methods.
 
 ---
 
-## Fp5 Implementation
+## Baby Bear Extensions
 
-### Irreducible Polynomial Selection
+### Fp5 (Quintic Extension)
 
-For `Fp5 = Fp[x] / (x^5 - W)`, we need `W` that is NOT a 5th power in Baby Bear.
+**Polynomial**: `X^5 - 2`
 
-**Verification** (computed `W^((p-1)/5) mod p` where `(p-1)/5 = 402653184`):
+**Multiplication**: PTX assembly with BETA = (2 << 32) % MOD = 0x1FFFFFFC
+- Fused accumulation in 64-bit registers
+- Single Montgomery reduction per output coefficient
 
-| W | W^402653184 mod p | Is 5th power? | Status |
-|---|-------------------|---------------|--------|
-| 1 | 1 | Yes | ❌ Invalid |
-| 2 | 815036133 | No | ✅ **Optimal** |
-| 3 | 1956349769 | No | ✅ Valid |
-| 4 | 609564788 | No | ✅ Valid |
-| 5 | 1 | Yes | ❌ Invalid |
-
-**Result**: `W = 2` is the smallest valid choice.
-
-### Why W = 2 is Optimal
-
-1. **Smallest valid non-residue** - minimizes constant storage
-2. **Multiplication by 2 = addition** - `2·x = x + x` (no expensive multiply)
-3. **Efficient reduction** - the reduction step becomes additions only
-
-### Irreducible Polynomial
-
-```
-x^5 - 2
-```
-
-### Element Representation
-
+**Inversion**: Frobenius-based (only 1 Fp inversion needed)
 ```cpp
-struct Fp5 {
-    Fp elems[5];  // [a₀, a₁, a₂, a₃, a₄]
-    static constexpr uint32_t W = 2;
-};
+// N(a) = a × φ(a) × φ²(a) × φ³(a) × φ⁴(a) ∈ Fp
+// a⁻¹ = conjugate_product / N(a)
 ```
 
-Memory: 5 × 4 = 20 bytes per element.
+**Performance**: 118.0 Gops/s mul, 19.5 Gops/s inv
 
-### Multiplication Algorithm
+### Fp6 (Sextic Extension)
 
-**Schoolbook multiplication** with fused reduction:
+**Polynomial**: `X^6 - 31`
 
-Given `a, b ∈ Fp5`, compute `c = a · b`:
+**Multiplication**: PTX assembly with 2-product grouping
+- Groups 2 products per 64-bit accumulator before reducing
+- BETA = (31 << 32) % MOD = 0x0FFFFFBE
 
-1. Compute product coefficients `t[0..8]` (degree 8 polynomial)
-2. Reduce using `x^5 = 2`:
-   - `c[0] = t[0] + 2·t[5]`
-   - `c[1] = t[1] + 2·t[6]`
-   - `c[2] = t[2] + 2·t[7]`
-   - `c[3] = t[3] + 2·t[8]`
-   - `c[4] = t[4]`
+**Inversion**: Frobenius-based with ω = 31^((p-1)/6) = 0x4E5D1534
 
-**Optimization**: Since W=2, use `t[i] + t[i]` instead of `Fp(2) * t[i]`.
+**Performance**: 70.6 Gops/s mul, 11.6 Gops/s inv
 
-**Cost**: 25 Fp multiplications + ~28 Fp additions
-
-```cpp
-// Optimized: compute each result directly, fusing reduction
-Fp c0 = a0*b0;
-Fp t5_half = a1*b4 + a2*b3 + a3*b2 + a4*b1;
-c0 = c0 + t5_half + t5_half;  // +2·t5 via addition
-// ... similar for c1, c2, c3, c4
-```
-
-### Squaring Algorithm
-
-Uses symmetry: for `i ≠ j`, `aᵢaⱼ` appears twice in the product.
-
-**Cost**: 15 Fp multiplications (vs 25 for general multiply)
-
-### Inversion Algorithm
-
-**Approach**: Gaussian elimination on the multiplication matrix.
-
-For `a ∈ Fp5`, finding `a⁻¹` is equivalent to solving `M · b = e₀` where:
-- `M` is the 5×5 "multiply by a" matrix
-- `e₀ = (1, 0, 0, 0, 0)` is the multiplicative identity
-
-The matrix `M` for `a = a₀ + a₁x + a₂x² + a₃x³ + a₄x⁴`:
-
-```
-┌ a₀    W·a₄  W·a₃  W·a₂  W·a₁ ┐
-│ a₁    a₀    W·a₄  W·a₃  W·a₂ │
-│ a₂    a₁    a₀    W·a₄  W·a₃ │
-│ a₃    a₂    a₁    a₀    W·a₄ │
-└ a₄    a₃    a₂    a₁    a₀   ┘
-```
-
-**Algorithm**: Gauss-Jordan elimination with partial pivoting.
-
-**Cost**: O(n³) = O(125) Fp operations + 5 Fp inversions
-
-**Comparison with Fermat's method**:
-
-| Method | Operations | Fp5 Benchmark |
-|--------|------------|---------------|
-| Fermat (a^(p⁵-2)) | ~155 Fp5 squares + ~77 Fp5 muls ≈ 4250 Fp ops | ~1040 ms |
-| Gaussian elimination | ~125 Fp ops + 5 Fp inv | ~110 ms |
-| **Speedup** | | **~9.5×** |
-
-### Frobenius Endomorphism Note
-
-For Baby Bear: `p ≡ 1 (mod 5)` (since 2013265921 mod 5 = 1).
-
-This means the Frobenius map `φ(a) = a^p` is the **identity** on Fp5:
-```
-φ(a) = a
-```
-
-This simplifies some algorithms but means we can't use Frobenius for fast exponentiation shortcuts.
-
-### Correctness Verification
-
-The Fp5 implementation was verified using on-device tests with 1024 random elements:
-
-**Test 1: Multiplicative Inverse**
-```
-∀a ≠ 0: a · inv(a) = 1
-```
-A CUDA kernel computed `a * inv(a)` for each element and compared against `Fp5::one()`.
-Failures were counted via `atomicAdd`. Result: **0 failures**.
-
-**Test 2: Distributivity**
-```
-∀a, b, c: (a + b) · c = a·c + b·c
-```
-A CUDA kernel computed both sides independently and compared.
-Result: **0 failures**.
-
-These tests validate:
-- Addition correctness (used in distributivity LHS)
-- Multiplication correctness (both tests)
-- Inversion correctness (inverse test)
-- The irreducible polynomial choice (incorrect W would cause failures)
-
----
-
-## Fp6 Implementation
-
-### Irreducible Polynomial Selection
-
-For `Fp6 = Fp[x] / (x^6 - W)`, we need `W` that is:
-- **NOT a quadratic residue** (not a square in Fp)
-- **NOT a cubic residue** (not a cube in Fp)
-
-This is stricter than Fp5, which only required "not a 5th power."
-
-**Verification** (computed `W^((p-1)/2)` and `W^((p-1)/3)` mod p):
-
-| W | Is square? | Is cube? | Valid for Fp6? |
-|---|------------|----------|----------------|
-| 2 | Yes | No | ❌ |
-| 3 | Yes | No | ❌ |
-| 7 | Yes | No | ❌ |
-| 11 | No | Yes | ❌ |
-| 22 | No | No | ✅ First valid |
-| 31 | No | No | ✅ **Chosen** |
-
-### Why W = 31 was Chosen
-
-While W = 22 is the smallest valid choice, we chose **W = 31** for these reasons:
-
-1. **Conventional constant**: 31 is the multiplicative generator of Baby Bear, widely used in the ecosystem
-2. **Efficient reduction**: `31 = 2^5 - 1`, so `31·x = (x << 5) - x` (one subtraction vs three additions for W = 22)
-3. **Memorable**: As a well-known constant, it's easier to recognize and debug
-
-### Irreducible Polynomial
-
-```
-x^6 - 31
-```
-
-### Element Representation
-
-```cpp
-struct Fp6 {
-    Fp elems[6];  // [a₀, a₁, a₂, a₃, a₄, a₅]
-    static constexpr uint32_t W = 31;
-};
-```
-
-Memory: 6 × 4 = 24 bytes per element.
-
-### Multiplication Algorithm
-
-**Schoolbook multiplication** with fused reduction:
-
-Given `a, b ∈ Fp6`, compute `c = a · b`:
-
-1. Compute product coefficients `t[0..10]` (degree 10 polynomial)
-2. Reduce using `x^6 = 31`:
-   - `c[0] = t[0] + 31·t[6]`
-   - `c[1] = t[1] + 31·t[7]`
-   - `c[2] = t[2] + 31·t[8]`
-   - `c[3] = t[3] + 31·t[9]`
-   - `c[4] = t[4] + 31·t[10]`
-   - `c[5] = t[5]`
-
-**Cost**: 36 Fp multiplications + ~35 Fp additions
-
-### Squaring Algorithm
-
-Uses symmetry: for `i ≠ j`, `aᵢaⱼ` appears twice in the product.
-
-**Cost**: 21 Fp multiplications (vs 36 for general multiply)
-
-### Inversion Algorithm
-
-Same approach as Fp5: **Gaussian elimination** on the 6×6 multiplication matrix.
-
-**Cost**: O(n³) = O(216) Fp operations + 6 Fp inversions
-
-### Correctness Verification
-
-The Fp6 implementation was verified using on-device tests with 1024 random elements:
-
-**Test 1: Multiplicative Inverse**
-```
-∀a ≠ 0: a · inv(a) = 1
-```
-Result: **0 failures**.
-
-**Test 2: Distributivity**
-```
-∀a, b, c: (a + b) · c = a·c + b·c
-```
-Result: **0 failures**.
-
----
-
-## Fp6 Tower Constructions
-
-Instead of building Fp6 directly as `Fp[x]/(x^6 - W)`, we can construct it as a **tower of extensions**. This can improve performance, especially for inversion, by leveraging more efficient algorithms at each level.
-
-### Tower Options
-
-| Tower | Structure | Base → Level 1 → Level 2 |
-|-------|-----------|--------------------------|
-| **2×3** | Fp → Fp2 → Fp6 | Quadratic then cubic extension |
-| **3×2** | Fp → Fp3 → Fp6 | Cubic then quadratic extension |
-
-Both produce isomorphic fields with `p^6` elements, but arithmetic efficiency differs.
-
-### Choosing Tower Constants
-
-For each tower level, we need an irreducible polynomial. The key insight is that constants must remain non-residues when lifted to the extension field.
-
-#### Why Constants 11 and 2 Work for Both Towers
-
-**Constant 11 (non-square in Fp)**:
-- Test: `11^((p-1)/2) ≠ 1 (mod p)` ✓
-- In Fp3: If 11 were a square in Fp3, then `11 = a²` for some `a ∈ Fp3`. Taking the norm: `N(11) = N(a²) = N(a)² = 11³`. But `11³ = 11 · 11²` implies 11 is a square in Fp (contradiction).
-- Therefore 11 remains a non-square in both Fp and Fp3.
-
-**Constant 2 (non-cube in Fp)**:
-- Test: `2^((p-1)/3) ≠ 1 (mod p)` ✓
-- In Fp2: If 2 were a cube in Fp2, say `2 = a³`, then `N(2) = N(a³) = N(a)³ = 4`. We need `4 = b³` for some `b ∈ Fp`. But `4^((p-1)/3) ≠ 1 (mod p)`, so 4 is not a cube.
-- Therefore 2 remains a non-cube in both Fp and Fp2.
-
-### 2×3 Tower (Fp2x3)
+### Fp2x3 (2×3 Tower)
 
 **Construction**:
 ```
-Fp2 = Fp[u] / (u² - 11)      -- u² = 11
-Fp6 = Fp2[v] / (v³ - 2)      -- v³ = 2
+Fp2 = Fp[u] / (u² - 11)    -- PTX with BETA = 0x37FFFFE9
+Fp6 = Fp2[v] / (v³ - 2)    -- Toom-2.5 (6 muls instead of 9)
 ```
 
-**Element Representation**:
-```cpp
-struct Fp2_11 {
-    Fp c0, c1;  // c0 + c1·u where u² = 11
-    static constexpr uint32_t W = 11;
-};
+**mulByW**: `2×x = x + x` (addition only)
 
-struct Fp2x3 {
-    Fp2_11 c0, c1, c2;  // c0 + c1·v + c2·v² where v³ = 2
-    static constexpr uint32_t W = 2;  // for cubic extension
-};
-```
+**Inversion**: Adjugate formula (1 Fp2 inversion)
 
-Memory: 6 × 4 = 24 bytes (same as direct Fp6).
+**Performance**: 73.0 Gops/s mul, 23.6 Gops/s inv
 
-**Arithmetic**:
-
-*Fp2 Multiplication* (Karatsuba-style):
-```
-(a0 + a1·u)(b0 + b1·u) = (a0·b0 + 11·a1·b1) + (a0·b1 + a1·b0)·u
-```
-Cost: 3 Fp muls (using Karatsuba) or 4 Fp muls (schoolbook)
-
-*Fp2x3 Multiplication*:
-```
-(a0 + a1·v + a2·v²)(b0 + b1·v + b2·v²)
-```
-Reduce using `v³ = 2`:
-- `v³ → 2`
-- `v⁴ → 2v`
-
-Cost: 9 Fp2 muls + reductions
-
-*Fp2x3 Inversion* (via Gaussian elimination on 3×3 matrix over Fp2):
-```
-Solve M·x = e₀ where M is the "multiply by a" matrix over Fp2
-```
-Cost: O(27) Fp2 ops + 3 Fp2 inversions
-
-*Fp2 Inversion* (via norm):
-```
-(a + b·u)⁻¹ = (a - b·u) / (a² - 11·b²)
-```
-Cost: 2 Fp muls + 1 Fp square + 1 Fp sub + 1 Fp inv
-
-### 3×2 Tower (Fp3x2)
+### Fp3x2 (3×2 Tower) — Best Baby Bear mul
 
 **Construction**:
 ```
-Fp3 = Fp[u] / (u³ - 2)       -- u³ = 2
-Fp6 = Fp3[v] / (v² - 11)     -- v² = 11
+Fp3 = Fp[u] / (u³ - 2)     -- PTX with BETA = 0x1FFFFFFC
+Fp6 = Fp3[v] / (v² - 11)   -- Karatsuba (3 muls instead of 4)
 ```
 
-**Element Representation**:
-```cpp
-struct Fp3 {
-    Fp c0, c1, c2;  // c0 + c1·u + c2·u² where u³ = 2
-    static constexpr uint32_t W = 2;
-};
+**Inversion**: Norm-based (only 1 Fp3 inversion)
 
-struct Fp3x2 {
-    Fp3 c0, c1;  // c0 + c1·v where v² = 11
-    static constexpr uint32_t W = 11;  // for quadratic extension
-};
-```
-
-Memory: 6 × 4 = 24 bytes (same as direct Fp6).
-
-**Arithmetic**:
-
-*Fp3 Multiplication*:
-```
-(a0 + a1·u + a2·u²)(b0 + b1·u + b2·u²)
-```
-Reduce using `u³ = 2`:
-- `u³ → 2`
-- `u⁴ → 2u`
-- `u⁵ → 2u²`
-
-Cost: 9 Fp muls + reductions
-
-*Fp3x2 Multiplication* (Karatsuba-style):
-```
-(a0 + a1·v)(b0 + b1·v) = (a0·b0 + 11·a1·b1) + (a0·b1 + a1·b0)·v
-```
-Cost: 3 Fp3 muls (Karatsuba) = 27 Fp muls
-
-*Fp3x2 Inversion* (via norm to Fp3):
-```
-(a + b·v)⁻¹ = (a - b·v) / (a² - 11·b²)
-```
-Where `a² - 11·b²` is computed in Fp3, then inverted.
-
-Cost: 2 Fp3 muls + 1 Fp3 square + 1 Fp3 sub + 1 Fp3 inv
-
-*Fp3 Inversion* (Gaussian elimination on 3×3 matrix):
-```
-Solve M·x = e₀ where M is the "multiply by a" matrix over Fp
-```
-Cost: O(27) Fp ops + 3 Fp inversions
-
-### Why 3×2 Tower is Faster for Inversion
-
-The key difference is in how inversion cascades through the tower:
-
-| Tower | Inversion Strategy | Fp Inversions Required |
-|-------|-------------------|----------------------|
-| Direct Fp6 | 6×6 Gaussian elimination | 6 |
-| 2×3 (Fp2x3) | 3×3 over Fp2, then Fp2 inv via norm | 3 × (1 per Fp2 inv) = 3 |
-| 3×2 (Fp3x2) | Norm to Fp3, then 3×3 Gaussian | 3 |
-
-However, the **norm-based** approach in Fp3x2 requires fewer total operations:
-- Fp3x2: Compute norm (2 Fp3 muls + 1 Fp3 sq), then invert in Fp3
-- Fp2x3: Must do 3×3 Gaussian over Fp2, each Fp2 op costs 3-4 Fp ops
-
-**Benchmark result**: Fp3x2 inversion is **~5.6× faster** than direct Fp6 and **~1.8× faster** than Fp2x3.
-
-### Correctness Verification
-
-Both tower implementations were verified using on-device tests with 1024 random elements:
-
-**Fp2x3 (2×3 tower)**:
-- Multiplicative inverse test: **0 failures**
-- Distributivity test: **0 failures**
-
-**Fp3x2 (3×2 tower)**:
-- Multiplicative inverse test: **0 failures**
-- Distributivity test: **0 failures**
+**Performance**: **83.9 Gops/s** mul, **13.3 Gops/s** inv
 
 ---
 
 ## KoalaBear Extensions
 
-### Why Binomial Extensions Fail for KoalaBear
+### Kb5 (Quintic Extension)
 
-Unlike Baby Bear, KoalaBear **cannot use binomial extensions** `X^n - W` for degrees 3, 5, or 6.
+**Polynomial**: `X^5 + X + 4` (trinomial required)
 
-**Mathematical reason**: For a binomial `X^n - W` to be irreducible over `Fp`, the constant `W` must NOT be an n-th power in `Fp`.
+**Reduction**: `α^5 = -α - 4`
 
-For KoalaBear:
-- `gcd(3, p-1) = 1` → Every element is a cube → No irreducible `X³ - W`
-- `gcd(5, p-1) = 1` → Every element is a 5th power → No irreducible `X⁵ - W`
-- `gcd(6, p-1) = 2` → For `X⁶ - W` to be irreducible, W must not be a square or cube. But every element is a cube! → No irreducible `X⁶ - W`
-
-**Solution**: Use **sparse trinomials** instead of binomials.
-
-### Kb5: Quintic Extension
-
-#### Irreducible Polynomial
-
-```
-X⁵ + X + 4
-```
-
-This is the simplest sparse trinomial irreducible over KoalaBear.
-
-#### Reduction Rule
-
-Let `α` be a root, so `α⁵ + α + 4 = 0`. Then:
-```
-α⁵ = -α - 4
-```
-
-For a product giving coefficients `t[0..8]`:
-```
-c[0] = t[0] - 4·t[5]
-c[1] = t[1] - t[5] - 4·t[6]
-c[2] = t[2] - t[6] - 4·t[7]
-c[3] = t[3] - t[7] - 4·t[8]
-c[4] = t[4] - t[8]
-```
-
-#### Multiplication Algorithm (Karatsuba 2+3 Split)
-
-Unlike Fp5 which uses PTX assembly for its binomial polynomial, Kb5's trinomial
-requires multiple coefficients in reduction (-1 and -4), making PTX less effective.
-Instead, we use **Karatsuba with a 2+3 split** to reduce multiplication count:
-
-**Split**: A = A0 + x²·A1, where A0 = (a₀, a₁) and A1 = (a₂, a₃, a₄)
-
-**Algorithm**:
+**Multiplication**: Karatsuba 2+3 split (15 muls instead of 25)
 ```cpp
-P0 = A0 × B0  // deg-1 × deg-1 = 3 muls (Karatsuba)
-P2 = A1 × B1  // deg-2 × deg-2 = 6 muls (Toom-2.5)
-P1 = (A0+A1) × (B0+B1) - P0 - P2  // 6 muls, cross term
-// Result: P0 + x²·P1 + x⁴·P2, then reduce
+// Split: A = A0 + x²·A1, where A0 = (a₀,a₁), A1 = (a₂,a₃,a₄)
+P0 = A0 × B0    // 3 muls (Karatsuba)
+P2 = A1 × B1    // 6 muls (Toom-2.5)
+P1 = (A0+A1) × (B0+B1) - P0 - P2  // 6 muls
 ```
 
-**Multiplication count**: 3 + 6 + 6 = **15 Kb muls** (vs 25 schoolbook = **40% reduction**)
+**Inversion**: Gaussian elimination (5×5 matrix)
 
-**Performance**: 81 Gops/s (+20% vs schoolbook at 68 Gops/s)
+**Performance**: 81.6 Gops/s mul, 3.7 Gops/s inv
 
-#### Element Representation
+### Kb6 (Sextic Extension)
 
+**Polynomial**: `X^6 + X^3 + 1` (trinomial)
+
+**Reduction**: `α^6 = -α^3 - 1`, `α^9 = 1` (additions only!)
+
+**Multiplication**: Karatsuba 3+3 split (18 muls instead of 36)
 ```cpp
-struct Kb5 {
-    Kb elems[5];  // [a₀, a₁, a₂, a₃, a₄]
-};
-```
-
-Memory: 5 × 4 = 20 bytes per element.
-
-#### Inversion Algorithm
-
-**Gaussian elimination** on the 5×5 multiplication matrix over Kb.
-
-The matrix for `a = a₀ + a₁α + a₂α² + a₃α³ + a₄α⁴`:
-```
-┌ a₀        -4·a₄      -4·a₃      -4·a₂      -4·a₁     ┐
-│ a₁        a₀-a₄      -a₃-4·a₄   -a₂-4·a₃   -a₁-4·a₂  │
-│ a₂        a₁         a₀-a₄      -a₃-4·a₄   -a₂-4·a₃  │
-│ a₃        a₂         a₁         a₀-a₄      -a₃-4·a₄  │
-└ a₄        a₃         a₂         a₁         a₀-a₄     ┘
-```
-
-Cost: O(125) Kb operations + 5 Kb inversions
-
-#### Correctness Verification
-
-- Multiplicative inverse test (1024 elements): **0 failures**
-- Distributivity test (1024 elements): **0 failures**
-
-### Kb6: Sextic Extension
-
-#### Irreducible Polynomial
-
-```
-X⁶ + X³ + 1
-```
-
-This trinomial has a **remarkably efficient** reduction rule.
-
-#### Reduction Rule
-
-Let `α` be a root, so `α⁶ + α³ + 1 = 0`. Then:
-```
-α⁶ = -α³ - 1
-α⁷ = -α⁴ - α
-α⁸ = -α⁵ - α²
-α⁹ = 1       ← Key property!
-α¹⁰ = α
-```
-
-The fact that `α⁹ = 1` makes reduction extremely cheap.
-
-For a product giving coefficients `t[0..10]`:
-```
-c[0] = t[0] - t[6] + t[9]
-c[1] = t[1] - t[7] + t[10]
-c[2] = t[2] - t[8]
-c[3] = t[3] - t[6]
-c[4] = t[4] - t[7]
-c[5] = t[5] - t[8]
-```
-
-**Note**: This reduction uses **only additions and subtractions** - no multiplications by constants!
-
-#### Multiplication Algorithm (Karatsuba 3+3 Split)
-
-The polynomial x⁶ + x³ + 1 is perfectly suited for a **3+3 Karatsuba split**:
-
-**Split**: A = A0 + x³·A1, where A0 = (a₀, a₁, a₂) and A1 = (a₃, a₄, a₅)
-
-**Algorithm**:
-```cpp
-P0 = A0 × B0  // deg-2 × deg-2 = 6 muls (Toom-2.5)
-P1 = A1 × B1  // deg-2 × deg-2 = 6 muls (Toom-2.5)
+// Split: A = A0 + x³·A1, perfectly aligned with polynomial
+P0 = A0 × B0    // 6 muls (Toom-2.5)
+P1 = A1 × B1    // 6 muls
 P2 = (A0+A1) × (B0+B1)  // 6 muls
-
-// Karatsuba reconstruction with x⁶ = -x³ - 1
-D0 = P0 - P1           // constant term
-D1 = P2 - P0 - 2*P1    // coefficient of x³
-// Then reduce D1·x³ through D1·x⁷ using α⁶ = -α³ - 1, α⁷ = -α⁴ - α
 ```
 
-**Multiplication count**: 3 × 6 = **18 Kb muls** (vs 36 schoolbook = **50% reduction**)
+**Inversion**: Gaussian elimination (6×6 matrix)
 
-**Why 3+3 is optimal for x⁶ + x³ + 1**:
-1. x³ is exactly at the split point, making Karatsuba reconstruction align with reduction
-2. Reduction coefficients are all ±1, so no scalar multiplications needed
-3. Combined with Toom-2.5 for the degree-2 sub-products
+**Performance**: 68.1 Gops/s mul, 2.2 Gops/s inv
 
-**Performance**: 68 Gops/s (+29% vs previous schoolbook at 53 Gops/s)
-
-#### Element Representation
-
-```cpp
-struct Kb6 {
-    Kb elems[6];  // [a₀, a₁, a₂, a₃, a₄, a₅]
-};
-```
-
-Memory: 6 × 4 = 24 bytes per element.
-
-#### Inversion Algorithm
-
-**Gaussian elimination** on the 6×6 multiplication matrix over Kb.
-
-Cost: O(216) Kb operations + 6 Kb inversions
-
-#### Correctness Verification
-
-- Multiplicative inverse test (1024 elements): **0 failures**
-- Distributivity test (1024 elements): **0 failures**
-
-### KoalaBear vs Baby Bear Extension Comparison
-
-| Property | Baby Bear | KoalaBear |
-|----------|-----------|-----------|
-| gcd(3, p-1) | 3 | **1** |
-| gcd(5, p-1) | 5 | **1** |
-| X⁵ - W works? | Yes (W=2) | **No** |
-| X⁶ - W works? | Yes (W=31) | **No** |
-| Extension type | Binomial | **Trinomial** |
-| Fp5/Kb5 polynomial | X⁵ - 2 | X⁵ + X + 4 |
-| Fp6/Kb6 polynomial | X⁶ - 31 | X⁶ + X³ + 1 |
-| Reduction cost | Multiply by W | Add/sub only (Kb6) |
-
-### KoalaBear Tower Constructions
-
-Like Baby Bear, KoalaBear supports two tower constructions for degree-6 extensions.
-
-#### Kb2x3: 2×3 Tower
+### Kb2x3 (2×3 Tower)
 
 **Construction**:
 ```
-Kb2 = Kb[u] / (u² - 3)      -- u² = 3 (3 is smallest nonsquare in Kb)
-Kb6 = Kb2[v] / (v³ - (1+u)) -- v³ = 1+u
+Kb2 = Kb[u] / (u² - 3)       -- PTX with BETA = 0x05FFFFFA
+Kb6 = Kb2[v] / (v³ - (1+u))  -- Toom-2.5 (6 muls)
 ```
 
-**Why these constants**:
-- 3 is the smallest nonsquare in KoalaBear
-- (1+u) is not a cube in Kb2 (verified: gcd(3, p²-1) = 3, and norm(1+u)^((p²-1)/3) ≠ 1)
+**mulByW**: `(a₀ + a₁u)(1+u) = (a₀ + 3a₁) + (a₀ + a₁)u` — **3 additions only!**
 
-**Element representation**:
-```cpp
-struct Kb2 { Kb c0, c1; };       // c0 + c1*u
-struct Kb2x3 { Kb2 c0, c1, c2; }; // c0 + c1*v + c2*v²
-```
+**Inversion**: Adjugate formula (1 Kb2 inversion)
 
-**Reduction rules**:
-- `u² = 3`
-- `v³ = 1 + u`
-- `v⁴ = (1+u)*v`
-- `v⁵ = (1+u)*v²`
+**Performance**: **71.0 Gops/s** mul, **21.0 Gops/s** inv
 
-#### Kb3x2: 3×2 Tower
+### Kb3x2 (3×2 Tower)
 
 **Construction**:
 ```
-Kb3 = Kb[w] / (w³ + w + 4)  -- w³ = -w - 4 (trinomial, since binomial fails)
-Kb6 = Kb3[z] / (z² - 3)     -- z² = 3
+Kb3 = Kb[w] / (w³ + w + 4)   -- Toom-2.5 (6 muls)
+Kb6 = Kb3[z] / (z² - 3)      -- Karatsuba (3 muls)
 ```
 
-**Why trinomial for Kb3**:
-Since gcd(3, p-1) = 1, every element in Kb is a cube, so no binomial `w³ - W` is irreducible. We must use the trinomial `w³ + w + 4`.
-
-**Why 3 works for quadratic step**:
-Since deg(Kb3/Kb) = 3 is odd, an element is a square in Kb3 iff it was a square in Kb. Since 3 is nonsquare in Kb, it remains nonsquare in Kb3.
-
-**Element representation**:
+**Inversion**: Norm-based (only 1 Kb3 inversion)
 ```cpp
-struct Kb3 { Kb c0, c1, c2; };    // c0 + c1*w + c2*w²
-struct Kb3x2 { Kb3 c0, c1; };     // c0 + c1*z
+(a + bz)⁻¹ = (a - bz) / (a² - 3b²)
 ```
 
-**Reduction rules**:
-- `w³ = -w - 4`
-- `w⁴ = -w² - 4w`
-- `z² = 3`
-
-#### KoalaBear Tower vs BabyBear Tower Comparison
-
-| Property | BabyBear Towers | KoalaBear Towers |
-|----------|-----------------|------------------|
-| Quadratic constant | 11 | **3** (smaller) |
-| Cubic (2×3) | v³ = 2 (binomial) | v³ = 1+u (Kb2 element) |
-| Cubic (3×2) | u³ = 2 (binomial) | w³ = -w - 4 (trinomial) |
-| Kb3x2 inversion | Norm-based | Norm-based |
-| Kb2x3 inversion | 3×3 Gaussian over Kb2 | 3×3 Gaussian over Kb2 |
+**Performance**: 59.8 Gops/s mul, 10.3 Gops/s inv
 
 ---
 
 ## Goldilocks Extensions
 
-### Gl3: Cubic Extension
+### Gl3 (Cubic Extension)
 
-Goldilocks uses a cubic extension for many STARK protocols (e.g., Plonky2, Polygon zkEVM).
+**Polynomial**: `X³ - X - 1`
 
-#### Irreducible Polynomial
+**Reduction**: `α³ = α + 1`
 
-```
-X³ - X - 1
-```
+**Multiplication**: Karatsuba-style (6 muls instead of 9)
 
-This polynomial is irreducible over `Fp` (Goldilocks prime).
+**Inversion**: Direct norm formula (1 Gl inversion)
 
-#### Reduction Rule
-
-Let `α` be a root, so `α³ - α - 1 = 0`. Then:
-```
-α³ = α + 1
-α⁴ = α² + α
-α⁵ = α² + α + 1
-```
-
-#### Element Representation
-
-```cpp
-struct Gl3 {
-    Gl c[3];  // c[0] + c[1]·α + c[2]·α²
-};
-```
-
-Memory: 3 × 8 = 24 bytes per element.
-
-#### Multiplication Algorithm (Karatsuba-style)
-
-The implementation uses an optimized Karatsuba-style approach with only **6 base field multiplications** instead of the naive 9:
-
-```
-Given a = a₀ + a₁α + a₂α², b = b₀ + b₁α + b₂α²
-
-Compute:
-  A = (a₀ + a₁)(b₀ + b₁)
-  B = (a₀ + a₂)(b₀ + b₂)
-  C = (a₁ + a₂)(b₁ + b₂)
-  D = a₀ · b₀
-  E = a₁ · b₁
-  F = a₂ · b₂
-  G = D - E
-
-Result:
-  c₀ = C + G - F
-  c₁ = A + C - 2E - D
-  c₂ = B - G
-```
-
-**Cost**: 6 Gl multiplications + 14 Gl additions
-
-#### Inversion Algorithm (Direct Formula)
-
-The implementation uses a direct formula based on the norm, avoiding Gaussian elimination:
-
-```
-For a = a₀ + a₁α + a₂α², compute intermediate products:
-  aa = a₀², ac = a₀a₂, ba = a₁a₀, bb = a₁², bc = a₁a₂, cc = a₂²
-  aaa, aac, abc, abb, acc, bbb, bcc, ccc (various cubic terms)
-
-Compute norm:
-  t = 3·abc + abb - aaa - 2·aac - acc - bbb + bcc - ccc
-
-Result:
-  a⁻¹ = (i₁, i₂, i₃) where:
-  i₁ = (bc + bb - aa - 2·ac - cc) / t
-  i₂ = (ba - cc) / t
-  i₃ = (ac + cc - bb) / t
-```
-
-**Cost**: ~15 Gl multiplications + 1 Gl inversion
-
-#### Performance
-
-| Operation | Gl3 | Gl (base) | Ratio |
-|-----------|-----|-----------|-------|
-| add | 445 Gops/s | 1216 Gops/s | 2.7× slower |
-| mul | 58.5 Gops/s | 670 Gops/s | 11.4× slower |
-| inv | 7.8 Gops/s | 10.5 Gops/s | 1.3× slower |
-
-#### Comparison with BabyBear Degree-6 Extensions
-
-Interestingly, Gl3 (192-bit total) is competitive with Fp6 (192-bit total):
-
-| Field | Element Size | mul | inv |
-|-------|--------------|-----|-----|
-| Gl3 | 24 bytes | **58.5 Gops/s** | **7.8 Gops/s** |
-| Fp6 | 24 bytes | 49 Gops/s | 2.2 Gops/s |
-| Fp3x2 | 24 bytes | 49 Gops/s | 12.7 Gops/s |
-
-**Key findings**:
-- Gl3 multiplication is **19% faster** than Fp6 despite both being 192-bit fields
-- This is due to the Karatsuba-style algorithm (6 muls) vs schoolbook (36 muls for Fp6, though smaller muls)
-- Gl3 inversion is **3.5× faster** than direct Fp6, similar to Fp2x3 tower performance
-
-### Implementation Files
-
-- `include/gl.h` - Goldilocks base field wrapper
-- `include/gl3.h` - Cubic extension (based on Polygon's zisk)
-- `include/ff/gl64_t.cuh` - Core 64-bit arithmetic (from sppark)
-
-### Attribution
-
-The Goldilocks implementation is based on:
-- **sppark** (Supranational): Base field `gl64_t` with optimized PTX assembly
-- **zisk** (Polygon): Cubic extension formulas with Karatsuba multiplication
+**Performance**: 58.5 Gops/s mul, 7.8 Gops/s inv
 
 ---
 
-## Benchmarking System
+## Performance Summary
 
-### Architecture
+### Baby Bear Fields
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Rust Test Framework                       │
-│  benchmark.rs: FFI bindings, timing, result formatting       │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ extern "C" calls
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 CUDA Kernel Launchers                        │
-│  ext_field_bench.cu: {init,add,mul,inv}_{fp,fpext,fp5,...}  │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ kernel launches
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│               Templated CUDA Kernels                         │
-│  bench_init_kernel<T>, bench_add_kernel<T>, etc.            │
-└─────────────────────────────────────────────────────────────┘
-```
+| Field | mul | inv | Notes |
+|-------|-----|-----|-------|
+| Fp (base) | 1871 | 59.3 | |
+| Fp5 | 118.0 | 19.5 | PTX + Frobenius |
+| Fp6 | 70.6 | 11.6 | PTX 2-product |
+| Fp2x3 | 73.0 | 23.6 | Toom-2.5 + adjugate inv |
+| **Fp3x2** | **83.9** | **13.3** | **Best mul** |
 
-### Kernel Design
+### KoalaBear Fields
 
-Each benchmark kernel:
-1. Performs `reps` iterations of the operation per element
-2. Uses input data to prevent compiler optimization
-3. Writes result to prevent dead code elimination
+| Field | mul | inv | Notes |
+|-------|-----|-----|-------|
+| Kb (base) | 1869 | 45.5 | |
+| Kb5 | 81.6 | 3.7 | Karatsuba 2+3 |
+| Kb6 | 68.1 | 2.2 | Karatsuba 3+3 |
+| **Kb2x3** | **71.0** | **21.0** | **Best overall** |
+| Kb3x2 | 59.8 | 10.3 | Norm-based inv |
 
-```cpp
-template <typename T>
-__global__ void bench_mul_kernel(T* a, T* b, T* out, int n, int reps) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        T x = a[idx];
-        T y = b[idx];
-        for (int r = 0; r < reps; r++) {
-            x = x * y;
-        }
-        out[idx] = x;
-    }
-}
-```
+### Goldilocks Fields
 
-### Measurement Methodology
+| Field | mul | inv | Notes |
+|-------|-----|-----|-------|
+| Gl (base) | 666.9 | 10.5 | |
+| Gl3 | 58.4 | 7.8 | Karatsuba |
 
-1. **Warmup**: 3 iterations (excluded from timing)
-2. **Timed iterations**: 10 iterations (averaged)
-3. **Synchronization**: `cudaDeviceSynchronize()` after each kernel
-4. **Timing**: Rust `Instant::now()` around kernel + sync
+### Recommendations
 
-### Metrics
-
-**Throughput (Gops/s)**: Giga-operations per second
-
-```
-Gops/s = (num_elements × ops_per_element × reps) / (time_ns)
-```
-
-Where:
-- `num_elements`: Number of field elements (default: 2²² = 4M)
-- `ops_per_element`: Operations per element (100 for compute-bound ops)
-- `reps`: Repetitions inside kernel
-- `time_ns`: Average time in nanoseconds
-
-### Memory Layout
-
-Three device buffers per benchmark:
-1. `d_a`: First operand (initialized from random u32)
-2. `d_b`: Second operand (initialized from random u32)
-3. `d_out`: Result storage
-
-**Optimization**: `d_a` buffer reused for in-place initialization.
-
-### Launch Configuration
-
-```cpp
-constexpr int BENCH_BLOCK_SIZE = 256;
-
-inline void get_launch_config(int n, int& grid_size, int& block_size) {
-    block_size = BENCH_BLOCK_SIZE;
-    grid_size = (n + block_size - 1) / block_size;
-}
-```
+| Use Case | Baby Bear | KoalaBear |
+|----------|-----------|-----------|
+| **Multiplication-heavy** | Fp3x2 (83.9 Gops/s) | Kb2x3 (71.0 Gops/s) |
+| **Inversion-heavy** | Fp2x3 (23.6 Gops/s) | Kb2x3 (21.0 Gops/s) |
+| **Simple code** | Direct Fp6 | Direct Kb6 |
 
 ---
 
-## Performance Analysis
-
-### Benchmark Results (RTX series, 4M elements)
-
-#### Baby Bear Fields
-
-| Field | Size | init | add | mul | inv |
-|-------|------|------|-----|-----|-----|
-| Fp | 4 B | 309 Gops/s | 3544 Gops/s | 1872 Gops/s | 59.6 Gops/s |
-| FpExt (Fp4) | 16 B | 53 Gops/s | 1328 Gops/s | 185 Gops/s | 41.3 Gops/s |
-| Fp5 (PTX+Frob) | 20 B | 43 Gops/s | 1199 Gops/s | **138 Gops/s** | **20.6 Gops/s** |
-| Fp6 (direct, PTX) | 24 B | 36 Gops/s | 991 Gops/s | **71 Gops/s** | 11.6 Gops/s |
-| Fp2x3 (2×3 tower) | 24 B | 36 Gops/s | 995 Gops/s | **68 Gops/s** | 10.8 Gops/s |
-| Fp3x2 (3×2 tower) | 24 B | 36 Gops/s | 995 Gops/s | **84 Gops/s** | **13.3 Gops/s** |
-
-#### KoalaBear Fields
-
-| Field | Size | init | add | mul | inv |
-|-------|------|------|-----|-----|-----|
-| Kb | 4 B | 290 Gops/s | 3545 Gops/s | 1867 Gops/s | 45.4 Gops/s |
-| Kb5 | 20 B | 43 Gops/s | 1199 Gops/s | **81 Gops/s** | 3.7 Gops/s |
-| Kb6 (direct) | 24 B | 36 Gops/s | 983 Gops/s | **68 Gops/s** | 2.2 Gops/s |
-| Kb2x3 (2×3 tower) | 24 B | 36 Gops/s | 985 Gops/s | 62 Gops/s | 3.2 Gops/s |
-| Kb3x2 (3×2 tower) | 24 B | 36 Gops/s | 992 Gops/s | 57 Gops/s | **10.2 Gops/s** |
-
-#### Goldilocks Fields
-
-| Field | Size | init | add | mul | inv |
-|-------|------|------|-----|-----|-----|
-| Gl | 8 B | 180 Gops/s | 1216 Gops/s | 670 Gops/s | 10.5 Gops/s |
-| Gl3 | 24 B | 36 Gops/s | 445 Gops/s | 58.5 Gops/s | 7.8 Gops/s |
-
-### Relative Performance (vs Fp baseline)
-
-| Field | init | add | mul | inv |
-|-------|------|-----|-----|-----|
-| Fp | 1.0× | 1.0× | 1.0× | 1.0× |
-| FpExt | 5.8× slower | 2.7× slower | 10.1× slower | 1.4× slower |
-| Fp5 (PTX+Frob) | 7.1× slower | 3.0× slower | **13.5× slower** | **2.9× slower** |
-| Fp6 (direct, PTX) | 8.6× slower | 3.6× slower | 26× slower | 5.1× slower |
-| Fp2x3 | 8.6× slower | 3.6× slower | 44.0× slower | 8.2× slower |
-| Fp3x2 | 8.7× slower | 3.6× slower | 38.1× slower | 4.7× slower |
-| Gl | 1.7× slower | 2.9× slower | 2.8× slower | 5.7× slower |
-| Gl3 | 8.6× slower | 8.0× slower | 32.0× slower | 7.6× slower |
-
-### Fp6 Implementation Comparison
-
-| Implementation | Multiplication | Inversion | Best For |
-|---------------|----------------|-----------|----------|
-| **Fp3x2 (3×2 tower)** | **84 Gops/s** | **13.3 Gops/s** | **Best overall** |
-| Direct Fp6 (2-product PTX) | 71 Gops/s | 11.6 Gops/s | Simpler implementation |
-| Fp2x3 (2×3 tower) | 68 Gops/s | 10.8 Gops/s | Alternative tower |
-
-**Key findings** (after 2-product grouping optimization):
-- **Multiplication**: Fp3x2 is **18% faster** than direct Fp6 (84 vs 71 Gops/s)
-- **Inversion**: Fp3x2 is **15% faster** than direct Fp6 (13.3 vs 11.6 Gops/s)
-- **Direct Fp6 now competitive**: 2-product grouping closes the gap significantly
-- **Recommendation**: Use **Fp3x2** for best throughput, **Direct Fp6** for simpler code
-
-### Fp6 vs Kb6 Comparison
-
-| Metric | Fp6 (Baby Bear) | Kb6 (KoalaBear) | Notes |
-|--------|-----------------|-----------------|-------|
-| Polynomial | X⁶ - 31 | X⁶ + X³ + 1 | Binomial vs trinomial |
-| Reduction | Multiply by 31 | Add/sub only | Kb6 cheaper |
-| mul | 49 Gops/s | **53 Gops/s** | **8% faster** |
-| inv | 2.2 Gops/s | 2.2 Gops/s | Same |
-
-The Kb6 trinomial `X⁶ + X³ + 1` has a special property: `α⁹ = 1`. This means reduction from degree-10 terms only requires additions/subtractions, making Kb6 multiplication faster than Fp6 despite both being degree-6 extensions.
-
-### Kb6 Tower Implementation Comparison
-
-| Implementation | Multiplication | Inversion | Best For |
-|---------------|----------------|-----------|----------|
-| **Direct Kb6 (3+3 Karatsuba)** | **68 Gops/s** | 2.2 Gops/s | **Multiplication-heavy** |
-| Kb2x3 (2×3 tower) | 62 Gops/s | 3.2 Gops/s | Alternative |
-| Kb3x2 (3×2 tower) | 57 Gops/s | **10.2 Gops/s** | Inversion-heavy |
-
-**Key findings for KoalaBear** (after Karatsuba 3+3 optimization):
-- **Multiplication**: Direct Kb6 is now fastest (68 Gops/s) thanks to 3+3 split with x⁶+x³+1
-- **Inversion**: Kb3x2 is **4.6× faster** than direct Kb6 (norm-based vs Gaussian elimination)
-- **Trade-off**: Kb6 wins for mul (18 Kb muls), Kb3x2 wins for inv (1 Kb3 inversion)
-- **Recommendation**: Use Kb6 for multiplication-heavy workloads; Kb3x2 if inversion dominates
-
-### Cross-Field Comparison (192-bit total)
-
-Comparing fields with the same total size (24 bytes / 192 bits):
-
-| Field | Base | Extension | mul | inv | Notes |
-|-------|------|-----------|-----|-----|-------|
-| Fp6 | 32-bit | Degree 6 | 49 Gops/s | 2.2 Gops/s | Binomial X⁶-31 |
-| Fp3x2 | 32-bit | Tower 3×2 | 49 Gops/s | **12.7 Gops/s** | Best inv for BB |
-| Kb6 | 31-bit | Degree 6 | **68 Gops/s** | 2.2 Gops/s | Karatsuba 3+3 |
-| Kb2x3 | 31-bit | Tower 2×3 | 62 Gops/s | 3.2 Gops/s | Toom-2.5 mul |
-| Kb3x2 | 31-bit | Tower 3×2 | 57 Gops/s | **10.2 Gops/s** | Best Kb inv |
-| **Gl3** | **64-bit** | **Degree 3** | **58.5 Gops/s** | 7.8 Gops/s | **Karatsuba mul** |
-
-**Key insight**: Gl3 achieves the **fastest multiplication** among all 192-bit extensions, despite using 64-bit base elements. This is because:
-1. Only 6 base muls (Karatsuba) vs 36 for schoolbook Fp6
-2. The 64-bit Goldilocks prime allows very efficient reduction
-
-### Analysis
-
-**Addition**: Near-linear scaling with degree (expected: 4×, 5×, 6× for Fp4/Fp5/Fp6).
-
-**Multiplication**: Super-linear scaling due to:
-- Schoolbook: O(n²) multiplications (16, 25, 36 for Fp4/Fp5/Fp6)
-- FpExt uses optimized `bb31_4_t` with possible SIMD
-- Fp5/Fp6 use manual schoolbook
-
-**Inversion**:
-- Fp uses Fermat with optimized addition chain (~31 squares + 7 muls)
-- FpExt uses norm-based inversion (reduce to Fp inversion)
-- Fp5/Fp6 use Gaussian elimination (much faster than naive Fermat)
-
-### Optimization History
-
-#### Fp Inversion
-- **Before**: GCD-based (branch-heavy, warp divergence)
-- **After**: Fermat-based (`bb31_t::reciprocal()`)
-- **Speedup**: 3.16×
-
-#### Fp5 Inversion (Frobenius-based)
-
-**Before (Gaussian elimination)**: 5×5 matrix solve requiring 5 Fp inversions
-**After (Frobenius norm)**: Uses only 1 Fp inversion
-
-**Algorithm**:
-1. Compute Frobenius conjugates: φ(a), φ²(a), φ³(a), φ⁴(a) - each is 4 Fp muls
-2. Compute conjugate product: c = φ(a) * φ²(a) * φ³(a) * φ⁴(a) - 3 Fp5 muls
-3. Compute norm: N(a) = a * c ∈ Fp - 1 Fp5 mul (result is in base field)
-4. Return a⁻¹ = c / N(a) - 1 Fp inv + 5 Fp muls
-
-**Frobenius constants** (precomputed for p ≡ 1 mod 5):
-```cpp
-// FROB[i]^j = W^(i*j*k) where k = (p-1)/5
-static constexpr uint32_t FROB_TABLE[4][4] = {
-    {0x309476E5, 0x24553874, 0x749B8749, 0x267AC95F},
-    {0x24553874, 0x267AC95F, 0x309476E5, 0x749B8749},
-    {0x749B8749, 0x309476E5, 0x267AC95F, 0x24553874},
-    {0x267AC95F, 0x749B8749, 0x24553874, 0x309476E5},
-};
-```
-
-**Performance results**:
-| Metric | Gaussian (before) | Frobenius (after) |
-|--------|-------------------|-------------------|
-| Time | 110.4 ms | 20.4 ms |
-| Throughput | 3.8 Gops/s | 20.6 Gops/s |
-| vs Fp | 15.7× slower | 2.9× slower |
-| **Speedup** | | **5.4×** |
-
-#### Fp5 Multiplication (PTX Assembly Optimization)
-
-**Implementation**: Inline PTX assembly following the same pattern as `bb31_4_t` (FpExt).
-
-**Key optimizations**:
-1. **Raw uint32_t access** via union - avoids Fp wrapper overhead
-2. **Inline PTX instructions** - `mul.lo.u32`, `mul.hi.u32`, `mad.lo.cc.u32`, `madc.hi.u32`
-3. **Fused multiply-accumulate** - chains partial products efficiently in 64-bit accumulators
-4. **Inline Montgomery reduction** - reduces within the accumulation chain
-5. **BETA precomputation** - `BETA = (W << 32) % MOD = 0x1FFFFFFC` for efficient `x^5 = 2` reduction
-
-**Performance results**:
-| Metric | Schoolbook (before) | PTX assembly (after) |
-|--------|---------------------|----------------------|
-| Time | 5.46 ms | 3.03 ms |
-| Throughput | 76.8 Gops/s | 138.3 Gops/s |
-| vs Fp | 24.4× slower | 12.9× slower |
-| **Speedup** | | **1.8×** |
-
-**Backward compatibility**: Uses `#if defined(__CUDA_ARCH__) && !defined(__clang__)` to select PTX or fallback code.
-
-```cpp
-// Operand mapping for PTX:
-// %1=a0, %2=a1, %3=a2, %4=a3, %5=a4
-// %6=b0, %7=b1, %8=b2, %9=b3, %10=b4
-// %11=MOD, %12=M, %13=BETA
-
-// Example: ret[0] = a0*b0 + BETA*(a1*b4 + a2*b3 + a3*b2 + a4*b1)
-asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
-    "mul.lo.u32    %lo, %2, %10;     mul.hi.u32  %hi, %2, %10;\n\t"   // a1*b4
-    "mad.lo.cc.u32 %lo, %3, %9, %lo; madc.hi.u32 %hi, %3, %9, %hi;\n\t"  // +a2*b3
-    // ... more accumulation ...
-    "mul.lo.u32    %lo, %hi, %13;    mul.hi.u32  %hi, %hi, %13;\n\t"  // *BETA
-    "mad.lo.cc.u32 %lo, %1, %6, %lo; madc.hi.u32 %hi, %1, %6, %hi;\n\t"  // +a0*b0
-    // ... Montgomery reduction ...
-    "}" : "=r"(ret.u[0]) : ... );
-```
-
-#### Fp6 Multiplication (PTX Assembly with 2-Product Grouping)
-
-**Key Insight**: Montgomery reduction is valid when the input is < R×MOD = 2³²×MOD ≈ 8.6×10¹⁸.
-For Baby Bear, the sum of 2 products is < 2×MOD² ≈ 8.1×10¹⁸ < R×MOD, so we can accumulate
-2 products at 64-bit precision before reducing once.
-
-**Why 2-product grouping works**:
-```
-Each operand < MOD ≈ 2³¹
-Each product < MOD² ≈ 2⁶²
-Sum of 2 products < 2×MOD² ≈ 8.1×10¹⁸ < R×MOD ✓
-Sum of 3 products < 3×MOD² ≈ 12.2×10¹⁸ > R×MOD ❌
-```
-
-**Algorithm**: Group products into pairs, reduce once per group, then sum with modular additions:
-```cpp
-// Example for ret[0] = a0*b0 + BETA*(a1*b5 + a2*b4 + a3*b3 + a4*b2 + a5*b1)
-// BETA products: 5 terms → 2+2+1 groups (3 reductions instead of 5)
-
-// group1: (a1*b5 + a2*b4) as 64-bit, then MONT_REDUCE once
-mul.lo/hi %lo,%hi, a1, b5
-mad.lo/hi %lo,%hi, a2, b4, %lo,%hi  // accumulate at 64-bit
-MONT_REDUCE()  // single reduction for 2 products
-// result < 2*MOD, normalize with conditional subtraction
-
-// group2: (a3*b3 + a4*b2) → same pattern
-// group3: a5*b1 → single product, reduce
-// Sum groups modularly, multiply by BETA, add non-BETA part
-```
-
-**Performance results**:
-| Metric | Schoolbook | PTX (2-product grouping) |
-|--------|------------|--------------------------|
-| Time | 11.9 ms | 5.9 ms |
-| Throughput | 35.2 Gops/s | 70.6 Gops/s |
-| vs Fp | 53× slower | 26× slower |
-| **Speedup** | | **2.0×** |
-
-**Why this is optimal**:
-1. **~50% fewer Montgomery reductions**: 5 products → 3 reductions (2+2+1 groups)
-2. **No 64-bit accumulator overhead**: No R2MOD carry chain complexity
-3. **Simple modular sums**: Add normalized group results with conditional subtractions
-
-**Fp6 Inversion (Frobenius-based)**: Uses norm-based formula requiring only 1 Fp inversion.
-Frobenius constants: ω = 31^((p-1)/6) = 0x4E5D1534 (primitive 6th root of unity).
-
-Constants used:
-- `BETA = (31 << 32) % MOD = 0x0FFFFFBE` - for X⁶ - 31 reduction in Montgomery form
-
----
-
-## Optimizations Applied - Summary
-
-### Flat Extensions (Binomial/Trinomial Polynomials)
-
-| Field | Operation | Before (ms) | After (ms) | Before (Gops/s) | After (Gops/s) | Speedup | Method |
-|-------|-----------|-------------|------------|-----------------|----------------|---------|--------|
-| **Fp5** | mul | 5.46 | 3.03 | 76.8 | 138.3 | **1.8×** | PTX assembly |
-| **Fp5** | inv | 110.4 | 20.4 | 3.8 | 20.6 | **5.4×** | Frobenius |
-| **Fp6** | mul | 11.9 | 5.9 | 35.2 | 70.6 | **2.0×** | PTX 2-product |
-| **Kb5** | mul | 6.2 | 5.2 | 68 | 81 | **1.2×** | Karatsuba 2+3 |
-| **Kb6** | mul | 7.9 | 6.1 | 53 | 68 | **1.3×** | Karatsuba 3+3 |
-
-### Tower Fields (Base-Level PTX Optimization)
-
-PTX optimization applied to base fields (Fp2, Fp3, Kb2) propagates up to tower fields.
-These are pre-Karatsuba results (schoolbook multiplication at tower level):
-
-| Field | Base Optimized | Before (Gops/s) | After PTX (Gops/s) | Speedup |
-|-------|----------------|-----------------|-------------------|---------|
-| **Fp2x3** | Fp2 | 42.5 | 54.6 | **1.28×** |
-| **Fp3x2** | Fp3 | 49.1 | 70.9 | **1.44×** |
-| **Kb2x3** | Kb2 | 42.5 | 50.8 | **1.20×** |
-| **Kb3x2** | Kb3 (trinomial) | 42.5 | 42.8 | 1.01× |
-
-**Note**: Kb3x2 barely improved because Kb3 uses a trinomial polynomial (w³ + w + 4 = 0),
-which doesn't benefit from single-BETA PTX optimization.
-
-### Karatsuba Multiplication for Tower Fields
-
-Karatsuba-style multiplication reduces the number of base field multiplications at each tower level:
-
-| Field | Extension Type | Algorithm | Base Muls | Reduced To | Before (Gops/s) | After (Gops/s) | Speedup |
-|-------|---------------|-----------|-----------|------------|-----------------|----------------|---------|
-| **Fp2x3** | Cubic (Fp2 → Fp6) | Toom-2.5 | 9 Fp2 | 6 Fp2 | 54.6 | 68.0 | **+24.5%** |
-| **Fp3x2** | Quadratic (Fp3 → Fp6) | Karatsuba | 4 Fp3 | 3 Fp3 | 70.9 | 83.9 | **+18.3%** |
-| **Kb2x3** | Cubic (Kb2 → Kb6) | Toom-2.5 | 9 Kb2 | 6 Kb2 | 43.0 | 61.9 | **+44.0%** |
-| **Kb3x2** | Quadratic (Kb3 → Kb6) | Karatsuba | 4 Kb3 | 3 Kb3 | 43.0 | 56.5 | **+31.4%** |
-
-**Key observations**:
-- **Kb2x3 benefits most** (+44%) because its base Kb2 multiplication is relatively expensive (trinomial doesn't help PTX)
-- **Fp3x2 achieves highest throughput** (83.9 Gops/s) for degree-6 extensions, ~19% faster than direct Fp6 (70.6 Gops/s)
-- **Algorithmic improvements compound** with PTX base optimizations
-
-**Karatsuba for quadratic extension** (a₀ + a₁·z)(b₀ + b₁·z):
-```cpp
-// Schoolbook: 4 multiplications
-// c0 = a0*b0 + W*a1*b1
-// c1 = a0*b1 + a1*b0
-
-// Karatsuba: 3 multiplications
-v0 = a0 * b0;
-v1 = a1 * b1;
-v01 = (a0 + a1) * (b0 + b1);
-c0 = v0 + W * v1;
-c1 = v01 - v0 - v1;
-```
-
-**Toom-2.5 for cubic extension** (a₀ + a₁·v + a₂·v²)(b₀ + b₁·v + b₂·v²):
-```cpp
-// Schoolbook: 9 multiplications
-// Toom-2.5: 6 multiplications
-v0 = a0 * b0;
-v1 = a1 * b1;
-v2 = a2 * b2;
-v01 = (a0 + a1) * (b0 + b1);
-v12 = (a1 + a2) * (b1 + b2);
-v02 = (a0 + a2) * (b0 + b2);
-
-t0 = v0;
-t1 = v01 - v0 - v1;
-t2 = v02 - v0 - v2 + v1;
-t3 = v12 - v1 - v2;
-t4 = v2;
-
-// Apply reduction v³ = W
-c0 = t0 + W * t3;
-c1 = t1 + W * t4;
-c2 = t2;
-```
-
-### Not Optimized (Trinomial Extensions)
-
-| Field | Polynomial | Reason |
-|-------|------------|--------|
-| **Kb5** | X⁵ + X + 4 | Trinomial reduction requires multiple coefficients (-1, -4) |
-| **Kb6** | X⁶ + X³ + 1 | Trinomial reduction requires multiple coefficients (-1) |
-| **Kb3** | X³ + X + 4 | Base of Kb3x2, trinomial prevents efficient PTX |
-
-**Why binomial vs trinomial matters**:
-- Binomial (X^n - W): Reduction `x^n = W` allows single BETA multiplication
-- Trinomial (X^n + aX + b): Reduction requires subtractions with multiple coefficients
-
-**Why Frobenius works for binomial Fp5**:
-- For X⁵ - 2 with p ≡ 1 (mod 5): Frobenius is coefficient-wise scaling by precomputed constants
-- Norm computation: N(a) = a × φ(a) × φ²(a) × φ³(a) × φ⁴(a) ∈ Fp
-- Only 1 base field inversion needed instead of 5
-
-**Why Frobenius doesn't help for trinomial Kb5**:
-- For X⁵ + X + 4: Frobenius of x gives a full 5th-degree polynomial with large coefficients
-- Applying Frobenius requires matrix multiplication, not simple scaling
-- Gaussian elimination is simpler and comparable in cost
-
----
-
-## Future Work
-
-- [ ] Lazy reduction for Fp5/Fp6 multiplication
-- [ ] Batch inversion using Montgomery's trick
-
-### Karatsuba Multiplication - Analysis
-
-**Conclusion: Not beneficial for Fp5/Fp6 with PTX**
-
-Karatsuba reduces multiplication count from O(n²) to O(n^1.585):
-- Fp5: 25 → ~15 Fp muls, but +20 Fp additions
-- Fp6: 36 → ~18 Fp muls, but +24 Fp additions
-
-**Why current PTX is better for small degrees:**
-
-1. **Fused accumulation** - Current PTX chains partial products in 64-bit accumulators
-   with only ONE Montgomery reduction per output coefficient
-2. **Karatsuba breaks fusion** - Requires separate reduction for each Karatsuba sub-product
-3. **More intermediate values** - Increases register pressure and reduction count
-4. **Small n** - The O(n^1.585) vs O(n²) gap is minimal for n=5,6
-
-**When Karatsuba would help:**
-- Fp12 or higher (multiplication savings dominate)
-- Without PTX (when using high-level Fp operations)
-- Very large polynomial degrees
-
+## Change History
+
+| Field | Change | Impact |
+|-------|--------|--------|
+| Fp inversion | GCD → Fermat addition chain | +3.2× |
+| Fp5 mul | Schoolbook → PTX assembly | +1.8× |
+| Fp5 inv | Gaussian → Frobenius | +5.4× |
+| Fp6 mul | Schoolbook → PTX 2-product grouping | +2.0× |
+| Fp2/Fp3 | Schoolbook → PTX with BETA | +1.3-1.4× |
+| Fp2x3/Fp3x2 | Schoolbook → Toom-2.5/Karatsuba | +18-24% |
+| Fp2x3 inv | Gaussian → adjugate | +2.2× |
+| Kb5 mul | Schoolbook → Karatsuba 2+3 split | +20% |
+| Kb6 mul | Schoolbook → Karatsuba 3+3 split | +29% |
+| Kb2 | Schoolbook → PTX with BETA | +1.2× |
+| Kb2x3 | Added mulByW optimization | 3 adds vs 4 muls |
+| Kb2x3 inv | Gaussian → adjugate | +6.4× |
+| Kb3 | Schoolbook → Toom-2.5 | +33% |
+| Kb3x2 | Added Karatsuba + norm inversion | +31% mul, 4.6× inv |

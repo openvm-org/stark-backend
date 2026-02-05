@@ -47,6 +47,25 @@ struct Kb3 {
     __device__ static Kb3 zero() { return Kb3(); }
     __device__ static Kb3 one() { return Kb3(Kb::one()); }
     
+    /// Multiply two degree-2 polynomials (a0 + a1*x + a2*x^2)(b0 + b1*x + b2*x^2)
+    /// Using Toom-2.5 (6 muls)
+    __device__ static inline void mul_deg2(
+        Kb a0, Kb a1, Kb a2, Kb b0, Kb b1, Kb b2,
+        Kb& r0, Kb& r1, Kb& r2, Kb& r3, Kb& r4
+    ) {
+        Kb v0 = a0 * b0;
+        Kb v1 = a1 * b1;
+        Kb v2 = a2 * b2;
+        Kb v01 = (a0 + a1) * (b0 + b1);
+        Kb v12 = (a1 + a2) * (b1 + b2);
+        Kb v02 = (a0 + a2) * (b0 + b2);
+
+        r0 = v0;
+        r1 = v01 - v0 - v1;
+        r2 = v02 - v0 - v2 + v1;
+        r3 = v12 - v1 - v2;
+        r4 = v2;
+    }
     __device__ Kb3 operator+(Kb3 rhs) const {
         return Kb3(c0 + rhs.c0, c1 + rhs.c1, c2 + rhs.c2);
     }
@@ -66,16 +85,9 @@ struct Kb3 {
     // (a0 + a1*w + a2*w²) * (b0 + b1*w + b2*w²) with w³ = -w - 4
     // Schoolbook then reduce using w³ = -w - 4, w⁴ = -w² - 4w
     __device__ Kb3 operator*(Kb3 rhs) const {
-        Kb a0 = c0, a1 = c1, a2 = c2;
-        Kb b0 = rhs.c0, b1 = rhs.c1, b2 = rhs.c2;
-        
-        // Schoolbook convolution
-        Kb t0 = a0 * b0;
-        Kb t1 = a0 * b1 + a1 * b0;
-        Kb t2 = a0 * b2 + a1 * b1 + a2 * b0;
-        Kb t3 = a1 * b2 + a2 * b1;
-        Kb t4 = a2 * b2;
-        
+        Kb t0, t1, t2, t3, t4;
+        mul_deg2(c0, c1, c2, rhs.c0, rhs.c1, rhs.c2, t0, t1, t2, t3, t4);
+
         // Reduction: w³ = -w - 4, w⁴ = -w² - 4w
         // t3*w³ = t3*(-w - 4) = -t3*w - 4*t3
         // t4*w⁴ = t4*(-w² - 4w) = -t4*w² - 4*t4*w
@@ -84,8 +96,8 @@ struct Kb3 {
         // c1 = t1 - t3 - 4*t4
         // c2 = t2 - t4
         return Kb3(
-        t0 - Kb::mulBy4(t3),
-        t1 - t3 - Kb::mulBy4(t4),
+            t0 - Kb::mulBy4(t3),
+            t1 - t3 - Kb::mulBy4(t4),
             t2 - t4
         );
     }
