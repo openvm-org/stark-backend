@@ -1036,7 +1036,7 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Fp | 1.0× | 1.0× | 1.0× | 1.0× |
 | FpExt | 5.8× slower | 2.7× slower | 10.1× slower | 1.4× slower |
 | Fp5 (PTX+Frob) | 7.1× slower | 3.0× slower | **13.5× slower** | **2.9× slower** |
-| Fp6 (direct, PTX) | 8.6× slower | 3.6× slower | 39× slower | 6.6× slower |
+| Fp6 (direct, PTX) | 8.6× slower | 3.6× slower | 26× slower | 5.1× slower |
 | Fp2x3 | 8.6× slower | 3.6× slower | 44.0× slower | 8.2× slower |
 | Fp3x2 | 8.7× slower | 3.6× slower | 38.1× slower | 4.7× slower |
 | Gl | 1.7× slower | 2.9× slower | 2.8× slower | 5.7× slower |
@@ -1047,13 +1047,14 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Implementation | Multiplication | Inversion | Best For |
 |---------------|----------------|-----------|----------|
 | **Fp3x2 (3×2 tower)** | **84 Gops/s** | **13.3 Gops/s** | **Best overall** |
+| Direct Fp6 (2-product PTX) | 71 Gops/s | 11.6 Gops/s | Simpler implementation |
 | Fp2x3 (2×3 tower) | 68 Gops/s | 10.8 Gops/s | Alternative tower |
-| Direct Fp6 (with PTX) | 48 Gops/s | 9.0 Gops/s | PTX-optimized |
 
-**Key findings** (after Karatsuba optimization):
-- **Multiplication**: Fp3x2 is **75% faster** than direct Fp6 (84 vs 48 Gops/s)
-- **Inversion**: Fp3x2 is **48% faster** than direct Fp6 (13.3 vs 9.0 Gops/s)
-- **Recommendation**: Use **Fp3x2** for best overall performance
+**Key findings** (after 2-product grouping optimization):
+- **Multiplication**: Fp3x2 is **18% faster** than direct Fp6 (84 vs 71 Gops/s)
+- **Inversion**: Fp3x2 is **15% faster** than direct Fp6 (13.3 vs 11.6 Gops/s)
+- **Direct Fp6 now competitive**: 2-product grouping closes the gap significantly
+- **Recommendation**: Use **Fp3x2** for best throughput, **Direct Fp6** for simpler code
 
 ### Fp6 vs Kb6 Comparison
 
@@ -1186,44 +1187,54 @@ asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
     "}" : "=r"(ret.u[0]) : ... );
 ```
 
-#### Fp6 Multiplication (PTX Assembly Optimization)
+#### Fp6 Multiplication (PTX Assembly with 2-Product Grouping)
 
-**Implementation**: Same PTX pattern as Fp5, adapted for 6 coefficients (36 partial products).
+**Key Insight**: Montgomery reduction is valid when the input is < R×MOD = 2³²×MOD ≈ 8.6×10¹⁸.
+For Baby Bear, the sum of 2 products is < 2×MOD² ≈ 8.1×10¹⁸ < R×MOD, so we can accumulate
+2 products at 64-bit precision before reducing once.
 
-**Key differences from Fp5**:
-- 6 coefficients instead of 5 (more PTX blocks)
-- Uses `BETA = (31 << 32) % MOD = 0x0FFFFFBE` for X⁶ - 31 reduction
-- 6 output registers instead of 5
+**Why 2-product grouping works**:
+```
+Each operand < MOD ≈ 2³¹
+Each product < MOD² ≈ 2⁶²
+Sum of 2 products < 2×MOD² ≈ 8.1×10¹⁸ < R×MOD ✓
+Sum of 3 products < 3×MOD² ≈ 12.2×10¹⁸ > R×MOD ❌
+```
+
+**Algorithm**: Group products into pairs, reduce once per group, then sum with modular additions:
+```cpp
+// Example for ret[0] = a0*b0 + BETA*(a1*b5 + a2*b4 + a3*b3 + a4*b2 + a5*b1)
+// BETA products: 5 terms → 2+2+1 groups (3 reductions instead of 5)
+
+// group1: (a1*b5 + a2*b4) as 64-bit, then MONT_REDUCE once
+mul.lo/hi %lo,%hi, a1, b5
+mad.lo/hi %lo,%hi, a2, b4, %lo,%hi  // accumulate at 64-bit
+MONT_REDUCE()  // single reduction for 2 products
+// result < 2*MOD, normalize with conditional subtraction
+
+// group2: (a3*b3 + a4*b2) → same pattern
+// group3: a5*b1 → single product, reduce
+// Sum groups modularly, multiply by BETA, add non-BETA part
+```
 
 **Performance results**:
-| Metric | Schoolbook (before) | PTX assembly (after) |
-|--------|---------------------|----------------------|
-| Time | 11.2 ms | 8.7 ms |
-| Throughput | 37.2 Gops/s | 48.1 Gops/s |
-| vs Fp | 50× slower | 39× slower |
-| **Speedup** | | **~30%** |
+| Metric | Schoolbook | PTX (2-product grouping) |
+|--------|------------|--------------------------|
+| Time | 11.9 ms | 5.9 ms |
+| Throughput | 35.2 Gops/s | 70.6 Gops/s |
+| vs Fp | 53× slower | 26× slower |
+| **Speedup** | | **2.0×** |
 
-**Note**: The original PTX attempt achieved 104.9 Gops/s but failed verification due to
-fusing reductions incorrectly. The correct PTX uses separate Montgomery reductions,
-which requires more operations but produces correct results.
+**Why this is optimal**:
+1. **~50% fewer Montgomery reductions**: 5 products → 3 reductions (2+2+1 groups)
+2. **No 64-bit accumulator overhead**: No R2MOD carry chain complexity
+3. **Simple modular sums**: Add normalized group results with conditional subtractions
 
-**Fp6 Inversion (Frobenius-based)**: Now verified working with 0/1,000,000 failures.
-Previously failed (2/1024) due to incorrect Frobenius constants.
-Fix: Recalculated ω = 31^((p-1)/6) = 0x4E5D1534 as the primitive 6th root of unity.
-
-**Fp6 PTX Multiplication**: Now verified working with 0/20,000,000 failures.
-The key insight for correct PTX implementation is that Montgomery reduction is **nonlinear**:
-- Schoolbook computes `REDC(a*b) + REDC(BETA * sum)` (reduce first, then sum)
-- Incorrect PTX computed `REDC(a*b + BETA*sum)` (sum first, then reduce)
-
-The fix required:
-1. **Separate reductions**: Montgomery-reduce each product before accumulating into 64-bit sum
-2. **Proper carry handling**: Use `add.cc.u32` + `addc.u32` for 64-to-32-bit reduction with R2MOD
-3. **Sufficient normalization**: Conditional subtractions to bring intermediate values below MOD
+**Fp6 Inversion (Frobenius-based)**: Uses norm-based formula requiring only 1 Fp inversion.
+Frobenius constants: ω = 31^((p-1)/6) = 0x4E5D1534 (primitive 6th root of unity).
 
 Constants used:
 - `BETA = (31 << 32) % MOD = 0x0FFFFFBE` - for X⁶ - 31 reduction in Montgomery form
-- `R2MOD = 2^32 % MOD = 0x0FFFFFFE` - for 64-bit to 32-bit reduction
 
 ---
 
@@ -1235,7 +1246,7 @@ Constants used:
 |-------|-----------|-------------|------------|-----------------|----------------|---------|
 | **Fp5** | mul | 5.46 | 3.03 | 76.8 | 138.3 | **1.8×** |
 | **Fp5** | inv | 110.4 | 20.4 | 3.8 | 20.6 | **5.4×** |
-| **Fp6** | mul | 11.2 | 8.7 | 37.2 | 48.1 | **1.3×** |
+| **Fp6** | mul | 11.9 | 5.9 | 35.2 | 70.6 | **2.0×** |
 
 ### Tower Fields (Base-Level PTX Optimization)
 
@@ -1265,7 +1276,7 @@ Karatsuba-style multiplication reduces the number of base field multiplications 
 
 **Key observations**:
 - **Kb2x3 benefits most** (+44%) because its base Kb2 multiplication is relatively expensive (trinomial doesn't help PTX)
-- **Fp3x2 achieves highest throughput** (83.9 Gops/s) for degree-6 extensions, now 70% faster than direct Fp6
+- **Fp3x2 achieves highest throughput** (83.9 Gops/s) for degree-6 extensions, ~19% faster than direct Fp6 (70.6 Gops/s)
 - **Algorithmic improvements compound** with PTX base optimizations
 
 **Karatsuba for quadratic extension** (a₀ + a₁·z)(b₀ + b₁·z):
