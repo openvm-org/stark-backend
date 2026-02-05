@@ -106,6 +106,12 @@ public:
     /// Return a new Kb that is double of this value
     __device__ Kb doubled() const { return *this + *this; }
 
+    /// Multiply by 4 using additions
+    __device__ static inline Kb mulBy4(Kb x) {
+        Kb x2 = x + x;
+        return x2 + x2;
+    }
+
     /// Given an element x from a 31 bit field F_P compute x/2.
     static __device__ inline uint32_t halve_u32(uint32_t input) {
         uint32_t shr = input >> 1;

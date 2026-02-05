@@ -43,7 +43,7 @@ struct Kb3 {
     __device__ Kb3(Kb a0) : c0(a0), c1(), c2() {}
     __device__ Kb3(Kb a0, Kb a1, Kb a2) : c0(a0), c1(a1), c2(a2) {}
     __device__ explicit Kb3(uint32_t x) : c0(Kb(x)), c1(), c2() {}
-    
+
     __device__ static Kb3 zero() { return Kb3(); }
     __device__ static Kb3 one() { return Kb3(Kb::one()); }
     
@@ -83,10 +83,9 @@ struct Kb3 {
         // c0 = t0 - 4*t3
         // c1 = t1 - t3 - 4*t4
         // c2 = t2 - t4
-        Kb four = Kb(4);
         return Kb3(
-            t0 - four * t3,
-            t1 - t3 - four * t4,
+        t0 - Kb::mulBy4(t3),
+        t1 - t3 - Kb::mulBy4(t4),
             t2 - t4
         );
     }
@@ -107,10 +106,9 @@ struct Kb3 {
         Kb t3 = a1a2 + a1a2;
         Kb t4 = a2sq;
         
-        Kb four = Kb(4);
         return Kb3(
-            t0 - four * t3,
-            t1 - t3 - four * t4,
+        t0 - Kb::mulBy4(t3),
+        t1 - t3 - Kb::mulBy4(t4),
             t2 - t4
         );
     }
@@ -134,8 +132,6 @@ __device__ inline Kb3 inv(Kb3 x) {
     if (x == Kb3::zero()) return Kb3::zero();
     
     Kb a0 = x.c0, a1 = x.c1, a2 = x.c2;
-    Kb four = Kb(4);
-    Kb neg_four = Kb::zero() - four;
     
     // Build 3x4 augmented matrix [M | e0]
     // Column j is the result of a * w^j reduced mod (w³ + w + 4)
@@ -147,7 +143,7 @@ __device__ inline Kb3 inv(Kb3 x) {
     // Col 1: a * w, where w³ = -w - 4
     // a0*w + a1*w² + a2*w³ = a0*w + a1*w² + a2*(-w - 4)
     // = -4*a2 + (a0 - a2)*w + a1*w²
-    m[0][1] = neg_four * a2;
+    m[0][1] = Kb::zero() - Kb::mulBy4(a2);
     m[1][1] = a0 - a2;
     m[2][1] = a1;
     
@@ -155,8 +151,8 @@ __device__ inline Kb3 inv(Kb3 x) {
     // a0*w² + a1*w³ + a2*w⁴
     // = a0*w² + a1*(-w - 4) + a2*(-w² - 4w)
     // = -4*a1 + (-a1 - 4*a2)*w + (a0 - a2)*w²
-    m[0][2] = neg_four * a1;
-    m[1][2] = Kb::zero() - a1 - four * a2;
+    m[0][2] = Kb::zero() - Kb::mulBy4(a1);
+    m[1][2] = Kb::zero() - a1 - Kb::mulBy4(a2);
     m[2][2] = a0 - a2;
     
     // Augmented column (identity's first row)

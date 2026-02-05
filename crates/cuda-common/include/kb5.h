@@ -58,12 +58,6 @@ struct Kb5 {
     /// One element
     __device__ static Kb5 one() { return Kb5(Kb::one()); }
 
-    /// Multiply by 4 using additions (faster than full mul)
-    __device__ static inline Kb mulBy4(Kb x) {
-        Kb x2 = x + x;
-        return x2 + x2;
-    }
-
     /// Multiply two degree-1 polynomials (a0 + a1*x)(b0 + b1*x)
     __device__ static inline void mul_deg1(
         Kb a0, Kb a1, Kb b0, Kb b1,
@@ -218,10 +212,10 @@ struct Kb5 {
         // c2 = t2 - t6 - 4*t7
         // c3 = t3 - t7 - 4*t8
         // c4 = t4 - t8
-        Kb c0 = t0 - mulBy4(t5);
-        Kb c1 = t1 - t5 - mulBy4(t6);
-        Kb c2 = t2 - t6 - mulBy4(t7);
-        Kb c3 = t3 - t7 - mulBy4(t8);
+        Kb c0 = t0 - Kb::mulBy4(t5);
+        Kb c1 = t1 - t5 - Kb::mulBy4(t6);
+        Kb c2 = t2 - t6 - Kb::mulBy4(t7);
+        Kb c3 = t3 - t7 - Kb::mulBy4(t8);
         Kb c4 = t4 - t8;
         
         return Kb5(c0, c1, c2, c3, c4);
@@ -267,10 +261,10 @@ struct Kb5 {
         Kb t8 = a4sq;
         
         // Reduce
-        Kb c0 = t0 - mulBy4(t5);
-        Kb c1 = t1 - t5 - mulBy4(t6);
-        Kb c2 = t2 - t6 - mulBy4(t7);
-        Kb c3 = t3 - t7 - mulBy4(t8);
+        Kb c0 = t0 - Kb::mulBy4(t5);
+        Kb c1 = t1 - t5 - Kb::mulBy4(t6);
+        Kb c2 = t2 - t6 - Kb::mulBy4(t7);
+        Kb c3 = t3 - t7 - Kb::mulBy4(t8);
         Kb c4 = t4 - t8;
         
         return Kb5(c0, c1, c2, c3, c4);

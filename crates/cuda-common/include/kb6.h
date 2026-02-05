@@ -68,6 +68,26 @@ struct Kb6 {
     
     /// Get constant part (coefficient of α^0)
     __device__ Kb constPart() const { return elems[0]; }
+
+    /// Multiply two degree-2 polynomials (a0 + a1*x + a2*x^2)(b0 + b1*x + b2*x^2)
+    /// Using Toom-2.5 (6 muls)
+    __device__ static inline void mul_deg2(
+        Kb a0, Kb a1, Kb a2, Kb b0, Kb b1, Kb b2,
+        Kb& r0, Kb& r1, Kb& r2, Kb& r3, Kb& r4
+    ) {
+        Kb v0 = a0 * b0;
+        Kb v1 = a1 * b1;
+        Kb v2 = a2 * b2;
+        Kb v01 = (a0 + a1) * (b0 + b1);
+        Kb v12 = (a1 + a2) * (b1 + b2);
+        Kb v02 = (a0 + a2) * (b0 + b2);
+
+        r0 = v0;
+        r1 = v01 - v0 - v1;
+        r2 = v02 - v0 - v2 + v1;
+        r3 = v12 - v1 - v2;
+        r4 = v2;
+    }
     
     // ========================================================================
     // Addition / Subtraction (component-wise)
@@ -131,7 +151,7 @@ struct Kb6 {
     }
     
     /// Full extension field multiplication
-    /// Uses schoolbook multiplication + reduction mod (x^6 + x^3 + 1)
+    /// Uses Karatsuba split (3+3) + reduction mod (x^6 + x^3 + 1)
     /// 
     /// Reduction: α^6 = -α^3 - 1, α^7 = -α^4 - α, α^8 = -α^5 - α^2, α^9 = 1, α^10 = α
     /// For product t0..t10:
@@ -146,30 +166,52 @@ struct Kb6 {
         const Kb a3 = elems[3], a4 = elems[4], a5 = elems[5];
         const Kb b0 = rhs.elems[0], b1 = rhs.elems[1], b2 = rhs.elems[2];
         const Kb b3 = rhs.elems[3], b4 = rhs.elems[4], b5 = rhs.elems[5];
-        
-        // Compute convolution products t[k] = sum_{i+j=k} a[i]*b[j]
-        Kb t0 = a0 * b0;
-        Kb t1 = a0 * b1 + a1 * b0;
-        Kb t2 = a0 * b2 + a1 * b1 + a2 * b0;
-        Kb t3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0;
-        Kb t4 = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0;
-        Kb t5 = a0 * b5 + a1 * b4 + a2 * b3 + a3 * b2 + a4 * b1 + a5 * b0;
-        Kb t6 = a1 * b5 + a2 * b4 + a3 * b3 + a4 * b2 + a5 * b1;
-        Kb t7 = a2 * b5 + a3 * b4 + a4 * b3 + a5 * b2;
-        Kb t8 = a3 * b5 + a4 * b4 + a5 * b3;
-        Kb t9 = a4 * b5 + a5 * b4;
-        Kb t10 = a5 * b5;
-        
-        // Reduce using: c0 = t0 - t6 + t9, c1 = t1 - t7 + t10, c2 = t2 - t8
-        //               c3 = t3 - t6, c4 = t4 - t7, c5 = t5 - t8
-        return Kb6(
-            t0 - t6 + t9,
-            t1 - t7 + t10,
-            t2 - t8,
-            t3 - t6,
-            t4 - t7,
-            t5 - t8
-        );
+
+        // Split: A = A0 + x^3*A1, B = B0 + x^3*B1, where A0/B0 are degree-2
+        Kb p0_0, p0_1, p0_2, p0_3, p0_4;
+        mul_deg2(a0, a1, a2, b0, b1, b2, p0_0, p0_1, p0_2, p0_3, p0_4);
+
+        Kb p1_0, p1_1, p1_2, p1_3, p1_4;
+        mul_deg2(a3, a4, a5, b3, b4, b5, p1_0, p1_1, p1_2, p1_3, p1_4);
+
+        Kb s0 = a0 + a3;
+        Kb s1 = a1 + a4;
+        Kb s2 = a2 + a5;
+        Kb t0s = b0 + b3;
+        Kb t1s = b1 + b4;
+        Kb t2s = b2 + b5;
+
+        Kb p2_0, p2_1, p2_2, p2_3, p2_4;
+        mul_deg2(s0, s1, s2, t0s, t1s, t2s, p2_0, p2_1, p2_2, p2_3, p2_4);
+
+        // D0 = P0 - P1
+        Kb d0 = p0_0 - p1_0;
+        Kb d1 = p0_1 - p1_1;
+        Kb d2 = p0_2 - p1_2;
+        Kb d3 = p0_3 - p1_3;
+        Kb d4 = p0_4 - p1_4;
+
+        // D1 = P2 - P0 - 2*P1
+        Kb p1_0_tw = p1_0 + p1_0;
+        Kb p1_1_tw = p1_1 + p1_1;
+        Kb p1_2_tw = p1_2 + p1_2;
+        Kb p1_3_tw = p1_3 + p1_3;
+        Kb p1_4_tw = p1_4 + p1_4;
+        Kb e0 = p2_0 - p0_0 - p1_0_tw;
+        Kb e1 = p2_1 - p0_1 - p1_1_tw;
+        Kb e2 = p2_2 - p0_2 - p1_2_tw;
+        Kb e3 = p2_3 - p0_3 - p1_3_tw;
+        Kb e4 = p2_4 - p0_4 - p1_4_tw;
+
+        // Reduce: x^6 = -x^3 - 1, x^7 = -x^4 - x
+        Kb c0 = d0 - e3;
+        Kb c1 = d1 - e4;
+        Kb c2 = d2;
+        Kb c3 = d3 + e0 - e3;
+        Kb c4 = d4 + e1 - e4;
+        Kb c5 = e2;
+
+        return Kb6(c0, c1, c2, c3, c4, c5);
     }
     
     __device__ Kb6& operator*=(Kb6 rhs) {
@@ -177,58 +219,52 @@ struct Kb6 {
         return *this;
     }
     
-    /// Squaring (optimized using symmetry)
+    /// Squaring (Karatsuba split 3+3)
     __device__ Kb6 square() const {
         const Kb a0 = elems[0], a1 = elems[1], a2 = elems[2];
         const Kb a3 = elems[3], a4 = elems[4], a5 = elems[5];
-        
-        // Squares
-        Kb a0sq = a0 * a0;
-        Kb a1sq = a1 * a1;
-        Kb a2sq = a2 * a2;
-        Kb a3sq = a3 * a3;
-        Kb a4sq = a4 * a4;
-        Kb a5sq = a5 * a5;
-        
-        // Cross products (each appears twice)
-        Kb a0a1 = a0 * a1;
-        Kb a0a2 = a0 * a2;
-        Kb a0a3 = a0 * a3;
-        Kb a0a4 = a0 * a4;
-        Kb a0a5 = a0 * a5;
-        Kb a1a2 = a1 * a2;
-        Kb a1a3 = a1 * a3;
-        Kb a1a4 = a1 * a4;
-        Kb a1a5 = a1 * a5;
-        Kb a2a3 = a2 * a3;
-        Kb a2a4 = a2 * a4;
-        Kb a2a5 = a2 * a5;
-        Kb a3a4 = a3 * a4;
-        Kb a3a5 = a3 * a5;
-        Kb a4a5 = a4 * a5;
-        
-        // Convolution: t[k] = sum_{i+j=k} a[i]*a[j]
-        Kb t0 = a0sq;
-        Kb t1 = a0a1 + a0a1;
-        Kb t2 = a0a2 + a0a2 + a1sq;
-        Kb t3 = a0a3 + a0a3 + a1a2 + a1a2;
-        Kb t4 = a0a4 + a0a4 + a1a3 + a1a3 + a2sq;
-        Kb t5 = a0a5 + a0a5 + a1a4 + a1a4 + a2a3 + a2a3;
-        Kb t6 = a1a5 + a1a5 + a2a4 + a2a4 + a3sq;
-        Kb t7 = a2a5 + a2a5 + a3a4 + a3a4;
-        Kb t8 = a3a5 + a3a5 + a4sq;
-        Kb t9 = a4a5 + a4a5;
-        Kb t10 = a5sq;
-        
-        // Reduce
-        return Kb6(
-            t0 - t6 + t9,
-            t1 - t7 + t10,
-            t2 - t8,
-            t3 - t6,
-            t4 - t7,
-            t5 - t8
-        );
+
+        Kb p0_0, p0_1, p0_2, p0_3, p0_4;
+        mul_deg2(a0, a1, a2, a0, a1, a2, p0_0, p0_1, p0_2, p0_3, p0_4);
+
+        Kb p1_0, p1_1, p1_2, p1_3, p1_4;
+        mul_deg2(a3, a4, a5, a3, a4, a5, p1_0, p1_1, p1_2, p1_3, p1_4);
+
+        Kb s0 = a0 + a3;
+        Kb s1 = a1 + a4;
+        Kb s2 = a2 + a5;
+
+        Kb p2_0, p2_1, p2_2, p2_3, p2_4;
+        mul_deg2(s0, s1, s2, s0, s1, s2, p2_0, p2_1, p2_2, p2_3, p2_4);
+
+        // D0 = P0 - P1
+        Kb d0 = p0_0 - p1_0;
+        Kb d1 = p0_1 - p1_1;
+        Kb d2 = p0_2 - p1_2;
+        Kb d3 = p0_3 - p1_3;
+        Kb d4 = p0_4 - p1_4;
+
+        // D1 = P2 - P0 - 2*P1
+        Kb p1_0_tw = p1_0 + p1_0;
+        Kb p1_1_tw = p1_1 + p1_1;
+        Kb p1_2_tw = p1_2 + p1_2;
+        Kb p1_3_tw = p1_3 + p1_3;
+        Kb p1_4_tw = p1_4 + p1_4;
+        Kb e0 = p2_0 - p0_0 - p1_0_tw;
+        Kb e1 = p2_1 - p0_1 - p1_1_tw;
+        Kb e2 = p2_2 - p0_2 - p1_2_tw;
+        Kb e3 = p2_3 - p0_3 - p1_3_tw;
+        Kb e4 = p2_4 - p0_4 - p1_4_tw;
+
+        // Reduce: x^6 = -x^3 - 1, x^7 = -x^4 - x
+        Kb c0 = d0 - e3;
+        Kb c1 = d1 - e4;
+        Kb c2 = d2;
+        Kb c3 = d3 + e0 - e3;
+        Kb c4 = d4 + e1 - e4;
+        Kb c5 = e2;
+
+        return Kb6(c0, c1, c2, c3, c4, c5);
     }
     
     // ========================================================================

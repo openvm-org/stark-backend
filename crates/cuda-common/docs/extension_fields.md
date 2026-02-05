@@ -713,7 +713,34 @@ c[4] = t[4] - t[7]
 c[5] = t[5] - t[8]
 ```
 
-**Note**: This reduction uses **only additions and subtractions** - no multiplications by constants! This makes Kb6 multiplication faster than Fp6 (which requires multiplying by 31).
+**Note**: This reduction uses **only additions and subtractions** - no multiplications by constants!
+
+#### Multiplication Algorithm (Karatsuba 3+3 Split)
+
+The polynomial x⁶ + x³ + 1 is perfectly suited for a **3+3 Karatsuba split**:
+
+**Split**: A = A0 + x³·A1, where A0 = (a₀, a₁, a₂) and A1 = (a₃, a₄, a₅)
+
+**Algorithm**:
+```cpp
+P0 = A0 × B0  // deg-2 × deg-2 = 6 muls (Toom-2.5)
+P1 = A1 × B1  // deg-2 × deg-2 = 6 muls (Toom-2.5)
+P2 = (A0+A1) × (B0+B1)  // 6 muls
+
+// Karatsuba reconstruction with x⁶ = -x³ - 1
+D0 = P0 - P1           // constant term
+D1 = P2 - P0 - 2*P1    // coefficient of x³
+// Then reduce D1·x³ through D1·x⁷ using α⁶ = -α³ - 1, α⁷ = -α⁴ - α
+```
+
+**Multiplication count**: 3 × 6 = **18 Kb muls** (vs 36 schoolbook = **50% reduction**)
+
+**Why 3+3 is optimal for x⁶ + x³ + 1**:
+1. x³ is exactly at the split point, making Karatsuba reconstruction align with reduction
+2. Reduction coefficients are all ±1, so no scalar multiplications needed
+3. Combined with Toom-2.5 for the degree-2 sub-products
+
+**Performance**: 68 Gops/s (+29% vs previous schoolbook at 53 Gops/s)
 
 #### Element Representation
 
@@ -1028,7 +1055,7 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 | Fp | 4 B | 309 Gops/s | 3544 Gops/s | 1872 Gops/s | 59.6 Gops/s |
 | FpExt (Fp4) | 16 B | 53 Gops/s | 1328 Gops/s | 185 Gops/s | 41.3 Gops/s |
 | Fp5 (PTX+Frob) | 20 B | 43 Gops/s | 1199 Gops/s | **138 Gops/s** | **20.6 Gops/s** |
-| Fp6 (direct, PTX) | 24 B | 36 Gops/s | 994 Gops/s | 48 Gops/s | 9.0 Gops/s |
+| Fp6 (direct, PTX) | 24 B | 36 Gops/s | 991 Gops/s | **71 Gops/s** | 11.6 Gops/s |
 | Fp2x3 (2×3 tower) | 24 B | 36 Gops/s | 995 Gops/s | **68 Gops/s** | 10.8 Gops/s |
 | Fp3x2 (3×2 tower) | 24 B | 36 Gops/s | 995 Gops/s | **84 Gops/s** | **13.3 Gops/s** |
 
@@ -1038,9 +1065,9 @@ inline void get_launch_config(int n, int& grid_size, int& block_size) {
 |-------|------|------|-----|-----|-----|
 | Kb | 4 B | 290 Gops/s | 3545 Gops/s | 1867 Gops/s | 45.4 Gops/s |
 | Kb5 | 20 B | 43 Gops/s | 1199 Gops/s | **81 Gops/s** | 3.7 Gops/s |
-| Kb6 (direct) | 24 B | 36 Gops/s | 987 Gops/s | **53 Gops/s** | 2.2 Gops/s |
-| Kb2x3 (2×3 tower) | 24 B | 36 Gops/s | 984 Gops/s | **62 Gops/s** | 3.2 Gops/s |
-| Kb3x2 (3×2 tower) | 24 B | 36 Gops/s | 993 Gops/s | 53 Gops/s | **10.1 Gops/s** |
+| Kb6 (direct) | 24 B | 36 Gops/s | 983 Gops/s | **68 Gops/s** | 2.2 Gops/s |
+| Kb2x3 (2×3 tower) | 24 B | 36 Gops/s | 985 Gops/s | 62 Gops/s | 3.2 Gops/s |
+| Kb3x2 (3×2 tower) | 24 B | 36 Gops/s | 992 Gops/s | 57 Gops/s | **10.2 Gops/s** |
 
 #### Goldilocks Fields
 
@@ -1091,15 +1118,15 @@ The Kb6 trinomial `X⁶ + X³ + 1` has a special property: `α⁹ = 1`. This mea
 
 | Implementation | Multiplication | Inversion | Best For |
 |---------------|----------------|-----------|----------|
-| **Kb2x3 (2×3 tower)** | **62 Gops/s** | 3.2 Gops/s | **Multiplication-heavy** |
-| Kb3x2 (3×2 tower) | 53 Gops/s | **10.1 Gops/s** | Inversion-heavy |
-| Direct Kb6 | 53 Gops/s | 2.2 Gops/s | Baseline |
+| **Direct Kb6 (3+3 Karatsuba)** | **68 Gops/s** | 2.2 Gops/s | **Multiplication-heavy** |
+| Kb2x3 (2×3 tower) | 62 Gops/s | 3.2 Gops/s | Alternative |
+| Kb3x2 (3×2 tower) | 57 Gops/s | **10.2 Gops/s** | Inversion-heavy |
 
-**Key findings for KoalaBear** (after Karatsuba optimization):
-- **Multiplication**: Kb2x3 is now fastest (17% faster than direct Kb6) thanks to Karatsuba
-- **Inversion**: Kb3x2 is **4.6× faster** than direct Kb6
-- **Trade-off**: Karatsuba in towers now beats direct Kb6 for multiplication
-- **Recommendation**: Use Kb2x3 for multiplication-heavy workloads; Kb3x2 if inversion dominates
+**Key findings for KoalaBear** (after Karatsuba 3+3 optimization):
+- **Multiplication**: Direct Kb6 is now fastest (68 Gops/s) thanks to 3+3 split with x⁶+x³+1
+- **Inversion**: Kb3x2 is **4.6× faster** than direct Kb6 (norm-based vs Gaussian elimination)
+- **Trade-off**: Kb6 wins for mul (18 Kb muls), Kb3x2 wins for inv (1 Kb3 inversion)
+- **Recommendation**: Use Kb6 for multiplication-heavy workloads; Kb3x2 if inversion dominates
 
 ### Cross-Field Comparison (192-bit total)
 
@@ -1109,9 +1136,9 @@ Comparing fields with the same total size (24 bytes / 192 bits):
 |-------|------|-----------|-----|-----|-------|
 | Fp6 | 32-bit | Degree 6 | 49 Gops/s | 2.2 Gops/s | Binomial X⁶-31 |
 | Fp3x2 | 32-bit | Tower 3×2 | 49 Gops/s | **12.7 Gops/s** | Best inv for BB |
-| Kb6 | 31-bit | Degree 6 | **53 Gops/s** | 2.2 Gops/s | Trinomial X⁶+X³+1 |
-| Kb2x3 | 31-bit | Tower 2×3 | **62 Gops/s** | 3.2 Gops/s | Karatsuba mul |
-| Kb3x2 | 31-bit | Tower 3×2 | 53 Gops/s | 10.1 Gops/s | Best Kb inv |
+| Kb6 | 31-bit | Degree 6 | **68 Gops/s** | 2.2 Gops/s | Karatsuba 3+3 |
+| Kb2x3 | 31-bit | Tower 2×3 | 62 Gops/s | 3.2 Gops/s | Toom-2.5 mul |
+| Kb3x2 | 31-bit | Tower 3×2 | 57 Gops/s | **10.2 Gops/s** | Best Kb inv |
 | **Gl3** | **64-bit** | **Degree 3** | **58.5 Gops/s** | 7.8 Gops/s | **Karatsuba mul** |
 
 **Key insight**: Gl3 achieves the **fastest multiplication** among all 192-bit extensions, despite using 64-bit base elements. This is because:
@@ -1268,6 +1295,7 @@ Constants used:
 | **Fp5** | inv | 110.4 | 20.4 | 3.8 | 20.6 | **5.4×** | Frobenius |
 | **Fp6** | mul | 11.9 | 5.9 | 35.2 | 70.6 | **2.0×** | PTX 2-product |
 | **Kb5** | mul | 6.2 | 5.2 | 68 | 81 | **1.2×** | Karatsuba 2+3 |
+| **Kb6** | mul | 7.9 | 6.1 | 53 | 68 | **1.3×** | Karatsuba 3+3 |
 
 ### Tower Fields (Base-Level PTX Optimization)
 
@@ -1293,7 +1321,7 @@ Karatsuba-style multiplication reduces the number of base field multiplications 
 | **Fp2x3** | Cubic (Fp2 → Fp6) | Toom-2.5 | 9 Fp2 | 6 Fp2 | 54.6 | 68.0 | **+24.5%** |
 | **Fp3x2** | Quadratic (Fp3 → Fp6) | Karatsuba | 4 Fp3 | 3 Fp3 | 70.9 | 83.9 | **+18.3%** |
 | **Kb2x3** | Cubic (Kb2 → Kb6) | Toom-2.5 | 9 Kb2 | 6 Kb2 | 43.0 | 61.9 | **+44.0%** |
-| **Kb3x2** | Quadratic (Kb3 → Kb6) | Karatsuba | 4 Kb3 | 3 Kb3 | 43.0 | 53.1 | **+23.5%** |
+| **Kb3x2** | Quadratic (Kb3 → Kb6) | Karatsuba | 4 Kb3 | 3 Kb3 | 43.0 | 56.5 | **+31.4%** |
 
 **Key observations**:
 - **Kb2x3 benefits most** (+44%) because its base Kb2 multiplication is relatively expensive (trinomial doesn't help PTX)
