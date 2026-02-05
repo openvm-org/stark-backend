@@ -1,13 +1,12 @@
 use std::io::{Error, Read, Result, Write};
 
+use p3_field::FieldAlgebra;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     codec::{decode_into_vec, encode_iter, Decode, Encode},
     Digest, EF, F,
 };
-
-use p3_field::FieldAlgebra;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof {
