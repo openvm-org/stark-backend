@@ -4,7 +4,7 @@ use openvm_stark_backend::air_builders::symbolic::{
     SymbolicConstraints, SymbolicDagBuilder, SymbolicExpressionDag,
     symbolic_expression::SymbolicExpression,
 };
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use stark_backend_v2::prover::{DeviceStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 use tracing::{debug, warn};
 
@@ -188,7 +188,7 @@ pub fn evaluate_round0_interactions_gpu(
             numer_weights[count_rule_idx] += eq_3bs[interaction_idx];
             denom_sum_init += eq_3bs[interaction_idx]
                 * beta_pows[interaction.message.len()]
-                * F::from_canonical_u32(interaction.bus_index as u32 + 1);
+                * F::from_u32(interaction.bus_index as u32 + 1);
 
             for (message_idx, message) in interaction.message.iter().enumerate() {
                 let message_dag_idx =

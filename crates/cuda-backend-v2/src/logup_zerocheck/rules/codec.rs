@@ -136,7 +136,7 @@ impl<F: Field + PrimeField32> Codec for Source<F> {
             SOURCE_CONSTANT => {
                 // 16-bit src | 32-bit value
                 const CONSTANT_SHIFT: u64 = 16;
-                Source::Constant(F::from_canonical_u32((encoded >> CONSTANT_SHIFT) as u32))
+                Source::Constant(F::from_u32((encoded >> CONSTANT_SHIFT) as u32))
             }
             PREPROCESSED..=EXPOSED => Source::Var(SymbolicVariable::decode(encoded)),
             SOURCE_INTERMEDIATE => {

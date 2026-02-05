@@ -12,7 +12,7 @@ use openvm_cuda_common::{
     memory_manager::MemTracker,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::{FieldAlgebra, FieldExtensionAlgebra, TwoAdicField};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
 use stark_backend_v2::{
     SystemParams,
@@ -354,7 +354,7 @@ pub fn prove_whir_opening_gpu(
             debug_assert_eq!(base_coeffs.len(), D_EF * final_poly_len);
             let mut coeffs = Vec::with_capacity(final_poly_len);
             for i in 0..final_poly_len {
-                let coeff = EF::from_base_fn(|j| base_coeffs[j * final_poly_len + i]);
+                let coeff = EF::from_basis_coefficients_fn(|j| base_coeffs[j * final_poly_len + i]);
                 transcript.observe_ext(coeff);
                 coeffs.push(coeff);
             }
@@ -464,8 +464,8 @@ pub fn prove_whir_opening_gpu(
             .map_err(WhirProverError::MerkleTree)?
             .pop()
             .unwrap()
-            .into_iter() // We could transmute `rows` here, but we'll keep it safe for now
-            .map(|rows| rows.chunks_exact(D_EF).map(EF::from_base_slice).collect())
+            .into_iter()
+            .map(EF::reconstitute_from_base)
             .collect();
         }
         rs_tree = g_tree;
@@ -587,7 +587,7 @@ mod tests {
     use openvm_stark_sdk::config::{
         log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
     };
-    use p3_field::FieldAlgebra;
+    use p3_field::PrimeCharacteristicRing;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use stark_backend_v2::{
         BabyBearPoseidon2CpuEngineV2, EF, F, SystemParams, WhirConfig, WhirParams,
@@ -611,7 +611,7 @@ mod tests {
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
         let z_prism: Vec<_> = (0..params.n_stack + 1)
-            .map(|_| EF::from_wrapped_u64(rng.random()))
+            .map(|_| EF::from_u64(rng.random()))
             .collect();
 
         let z_cube = {
