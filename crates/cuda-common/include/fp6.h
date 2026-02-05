@@ -141,7 +141,9 @@ struct Fp6 {
     __device__ Fp6 operator*(Fp6 rhs) const {
         Fp6 ret;
         
-# if defined(__CUDA_ARCH__) && !defined(__clang__) && !defined(__clang_analyzer__)
+# if 0 && defined(__CUDA_ARCH__) && !defined(__clang__) && !defined(__clang_analyzer__)
+        // PTX multiplication disabled due to edge case overflow issues with 5+ products.
+        // The schoolbook multiplication provides correctness; potential optimization future work.
 #  ifdef __GNUC__
 #   define asm __asm__ __volatile__
 #  else
@@ -151,16 +153,21 @@ struct Fp6 {
         // Operand mapping: %1=a0..%6=a5, %7=b0..%12=b5, %13=MOD, %14=M, %15=BETA
         
         // ret[0] = a0*b0 + BETA*(a1*b5 + a2*b4 + a3*b3 + a4*b2 + a5*b1)
+        // Pattern from bb31_4_t: minimal reductions
         asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
             "mul.lo.u32    %lo, %2, %12;     mul.hi.u32  %hi, %2, %12;\n\t"
             "mad.lo.cc.u32 %lo, %3, %11, %lo; madc.hi.u32 %hi, %3, %11, %hi;\n\t"
             "mad.lo.cc.u32 %lo, %4, %10, %lo; madc.hi.u32 %hi, %4, %10, %hi;\n\t"
             "mad.lo.cc.u32 %lo, %5, %9, %lo; madc.hi.u32 %hi, %5, %9, %hi;\n\t"
             "mad.lo.cc.u32 %lo, %6, %8, %lo; madc.hi.u32 %hi, %6, %8, %hi;\n\t"
+            // Double reduction for 5 products (hi < 2.35*MOD)
+            "setp.ge.u32   %p, %hi, %13;\n\t"
+            "@%p sub.u32   %hi, %hi, %13;\n\t"
             "setp.ge.u32   %p, %hi, %13;\n\t"
             "@%p sub.u32   %hi, %hi, %13;\n\t"
             "mul.lo.u32    %m, %lo, %14;\n\t"
             "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %hi, %m, %13, %hi;\n\t"
+            // No reduction after Montgomery (like bb31_4_t)
             "mul.lo.u32    %lo, %hi, %15;    mul.hi.u32  %hi, %hi, %15;\n\t"
             "mad.lo.cc.u32 %lo, %1, %7, %lo; madc.hi.u32 %hi, %1, %7, %hi;\n\t"
             "mul.lo.u32    %m, %lo, %14;\n\t"
@@ -178,6 +185,9 @@ struct Fp6 {
             "mad.lo.cc.u32 %lo, %4, %11, %lo; madc.hi.u32 %hi, %4, %11, %hi;\n\t"
             "mad.lo.cc.u32 %lo, %5, %10, %lo; madc.hi.u32 %hi, %5, %10, %hi;\n\t"
             "mad.lo.cc.u32 %lo, %6, %9, %lo; madc.hi.u32 %hi, %6, %9, %hi;\n\t"
+            // Single reduction for 4 products (like bb31_4_t)
+            "setp.ge.u32   %p, %hi, %13;\n\t"
+            "@%p sub.u32   %hi, %hi, %13;\n\t"
             "mul.lo.u32    %m, %lo, %14;\n\t"
             "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %hi, %m, %13, %hi;\n\t"
             "mul.lo.u32    %lo, %hi, %15;    mul.hi.u32  %hi, %hi, %15;\n\t"
@@ -251,6 +261,8 @@ struct Fp6 {
             "mad.lo.cc.u32 %lo, %5, %7, %lo; madc.hi.u32 %hi, %5, %7, %hi;\n\t"
             "setp.ge.u32   %p, %hi, %13;\n\t"
             "@%p sub.u32   %hi, %hi, %13;\n\t"
+            "setp.ge.u32   %p, %hi, %13;\n\t"
+            "@%p sub.u32   %hi, %hi, %13;\n\t"
             "mul.lo.u32    %m, %lo, %14;\n\t"
             "mad.lo.cc.u32 %lo, %m, %13, %lo; madc.hi.u32 %0, %m, %13, %hi;\n\t"
             "setp.ge.u32   %p, %0, %13;\n\t"
@@ -268,6 +280,8 @@ struct Fp6 {
             "mad.lo.cc.u32 %lo, %4, %9, %lo; madc.hi.u32 %hi, %4, %9, %hi;\n\t"
             "mad.lo.cc.u32 %lo, %5, %8, %lo; madc.hi.u32 %hi, %5, %8, %hi;\n\t"
             "mad.lo.cc.u32 %lo, %6, %7, %lo; madc.hi.u32 %hi, %6, %7, %hi;\n\t"
+            "setp.ge.u32   %p, %hi, %13;\n\t"
+            "@%p sub.u32   %hi, %hi, %13;\n\t"
             "setp.ge.u32   %p, %hi, %13;\n\t"
             "@%p sub.u32   %hi, %hi, %13;\n\t"
             "mul.lo.u32    %m, %lo, %14;\n\t"
@@ -375,75 +389,75 @@ __device__ inline Fp6 pow(Fp6 base, uint32_t exp) {
     return result;
 }
 
-/// Inversion using Gaussian elimination on the multiplication matrix.
+/// Frobenius endomorphism: φ^power(a) = a^(p^power)
+/// For X^6 - W with p ≡ 1 (mod 6), φ(a_i * x^i) = FROB[i][power] * a_i * x^i
+/// where FROB[i][j] = ω^(i*j) and ω = W^((p-1)/6) is a primitive 6th root of unity.
+__device__ inline Fp6 frobenius(Fp6 a, int power) {
+    // Frobenius constants: ω^(i*j) for i=1..5, j=1..5
+    // ω = 31^((p-1)/6) = 31^335544320 mod p = 0x4E5D1534
+    // ω^2 = 0x4E5D1533, ω^3 = 0x78000000 = -1, ω^4 = 0x29A2EACD, ω^5 = 0x29A2EACE
+    static constexpr uint32_t FROB_TABLE[5][5] = {
+        {0x4E5D1534, 0x4E5D1533, 0x78000000, 0x29A2EACD, 0x29A2EACE},  // i=1
+        {0x4E5D1533, 0x29A2EACD, 0x00000001, 0x4E5D1533, 0x29A2EACD},  // i=2
+        {0x78000000, 0x00000001, 0x78000000, 0x00000001, 0x78000000},  // i=3
+        {0x29A2EACD, 0x4E5D1533, 0x00000001, 0x29A2EACD, 0x4E5D1533},  // i=4
+        {0x29A2EACE, 0x29A2EACD, 0x78000000, 0x4E5D1533, 0x4E5D1534},  // i=5
+    };
+    
+    int j = power - 1;  // 0-indexed for array access
+    return Fp6(
+        a.elems[0],
+        a.elems[1] * Fp(FROB_TABLE[0][j]),
+        a.elems[2] * Fp(FROB_TABLE[1][j]),
+        a.elems[3] * Fp(FROB_TABLE[2][j]),
+        a.elems[4] * Fp(FROB_TABLE[3][j]),
+        a.elems[5] * Fp(FROB_TABLE[4][j])
+    );
+}
+
+/// Inversion using Frobenius-based norm computation.
+/// 
+/// For a in Fp6, we use:
+///   N(a) = a * φ(a) * φ²(a) * φ³(a) * φ⁴(a) * φ⁵(a)  (norm, in Fp)
+///   a⁻¹ = φ(a) * φ²(a) * φ³(a) * φ⁴(a) * φ⁵(a) / N(a)
+/// 
+/// This requires only 1 base field inversion vs 6 for Gaussian elimination.
+/// Cost: 5 Frobenius (25 Fp muls) + 5 Fp6 muls + 1 Fp inv + 6 Fp muls
 __device__ inline Fp6 inv(Fp6 x) {
+    // Handle zero case
     if (x == Fp6::zero()) {
         return Fp6::zero();
     }
     
-    const Fp W_val(Fp6::W);
-    const Fp* a = x.elems;
+    // Compute Frobenius conjugates
+    Fp6 phi1 = frobenius(x, 1);  // φ(a)
+    Fp6 phi2 = frobenius(x, 2);  // φ²(a)
+    Fp6 phi3 = frobenius(x, 3);  // φ³(a)
+    Fp6 phi4 = frobenius(x, 4);  // φ⁴(a)
+    Fp6 phi5 = frobenius(x, 5);  // φ⁵(a)
     
-    Fp m[6][7];
+    // Compute conjugate product: c = φ(a) * φ²(a) * φ³(a) * φ⁴(a) * φ⁵(a)
+    // Use balanced tree: ((φ1 * φ2) * (φ3 * φ4)) * φ5
+    Fp6 c12 = phi1 * phi2;
+    Fp6 c34 = phi3 * phi4;
+    Fp6 c1234 = c12 * c34;
+    Fp6 conj = c1234 * phi5;
     
-    // Build augmented matrix [M | e0]
-    m[0][0] = a[0]; m[0][1] = W_val * a[5]; m[0][2] = W_val * a[4];
-    m[0][3] = W_val * a[3]; m[0][4] = W_val * a[2]; m[0][5] = W_val * a[1]; 
-    m[0][6] = Fp::one();
+    // Compute norm: N(a) = a * conj
+    // The result should be in Fp (all higher coefficients are 0)
+    Fp6 norm_full = x * conj;
+    Fp norm = norm_full.elems[0];  // Norm is in the base field
     
-    m[1][0] = a[1]; m[1][1] = a[0]; m[1][2] = W_val * a[5];
-    m[1][3] = W_val * a[4]; m[1][4] = W_val * a[3]; m[1][5] = W_val * a[2];
-    m[1][6] = Fp::zero();
-    
-    m[2][0] = a[2]; m[2][1] = a[1]; m[2][2] = a[0];
-    m[2][3] = W_val * a[5]; m[2][4] = W_val * a[4]; m[2][5] = W_val * a[3];
-    m[2][6] = Fp::zero();
-    
-    m[3][0] = a[3]; m[3][1] = a[2]; m[3][2] = a[1];
-    m[3][3] = a[0]; m[3][4] = W_val * a[5]; m[3][5] = W_val * a[4];
-    m[3][6] = Fp::zero();
-    
-    m[4][0] = a[4]; m[4][1] = a[3]; m[4][2] = a[2];
-    m[4][3] = a[1]; m[4][4] = a[0]; m[4][5] = W_val * a[5];
-    m[4][6] = Fp::zero();
-    
-    m[5][0] = a[5]; m[5][1] = a[4]; m[5][2] = a[3];
-    m[5][3] = a[2]; m[5][4] = a[1]; m[5][5] = a[0];
-    m[5][6] = Fp::zero();
-    
-    // Gaussian elimination with partial pivoting
-    for (int col = 0; col < 6; col++) {
-        int pivot_row = col;
-        for (int row = col + 1; row < 6; row++) {
-            if (m[row][col].asRaw() > m[pivot_row][col].asRaw()) {
-                pivot_row = row;
-            }
-        }
-        
-        if (pivot_row != col) {
-            for (int j = 0; j < 7; j++) {
-                Fp tmp = m[col][j];
-                m[col][j] = m[pivot_row][j];
-                m[pivot_row][j] = tmp;
-            }
-        }
-        
-        Fp pivot_inv = ::inv(m[col][col]);
-        for (int j = col; j < 7; j++) {
-            m[col][j] = m[col][j] * pivot_inv;
-        }
-        
-        for (int row = 0; row < 6; row++) {
-            if (row != col) {
-                Fp factor = m[row][col];
-                for (int j = col; j < 7; j++) {
-                    m[row][j] = m[row][j] - factor * m[col][j];
-                }
-            }
-        }
-    }
-    
-    return Fp6(m[0][6], m[1][6], m[2][6], m[3][6], m[4][6], m[5][6]);
+    // Compute inverse: a⁻¹ = conj / N(a)
+    Fp norm_inv = ::inv(norm);
+    return Fp6(
+        conj.elems[0] * norm_inv,
+        conj.elems[1] * norm_inv,
+        conj.elems[2] * norm_inv,
+        conj.elems[3] * norm_inv,
+        conj.elems[4] * norm_inv,
+        conj.elems[5] * norm_inv
+    );
 }
 
 static_assert(sizeof(Fp6) == 24, "Fp6 must be 24 bytes");

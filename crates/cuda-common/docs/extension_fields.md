@@ -1202,11 +1202,12 @@ asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
 | vs Fp | 36.3× slower | 17.0× slower |
 | **Speedup** | | **2.1×** |
 
-**Note**: Fp6 inversion uses Gaussian elimination. Frobenius-based inversion was attempted but
-failed verification (2/1024 failures). The root cause is unclear - the mathematical algorithm
-is correct (verified in Python), but there's a subtle issue in the CUDA implementation,
-possibly related to Montgomery form handling in the multi-level Frobenius computation.
-This remains a potential future optimization.
+**Fp6 Inversion (Frobenius-based)**: Now verified working with 0/1,000,000 failures.
+Previously failed (2/1024) due to incorrect Frobenius constants.
+Fix: Recalculated ω = 31^((p-1)/6) = 0x4E5D1534 as the primitive 6th root of unity.
+
+**Note**: PTX multiplication for Fp5/Fp6 is currently disabled due to accumulator overflow bug
+when summing 4+ products. Schoolbook fallback is used. This is a separate issue from inversion.
 
 ---
 

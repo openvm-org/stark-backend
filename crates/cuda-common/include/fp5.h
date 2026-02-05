@@ -140,12 +140,19 @@ struct Fp5 {
             "mad.lo.cc.u32 %lo, %3, %9, %lo; madc.hi.u32 %hi, %3, %9, %hi;\n\t"  // +a2*b3
             "mad.lo.cc.u32 %lo, %4, %8, %lo; madc.hi.u32 %hi, %4, %8, %hi;\n\t"  // +a3*b2
             "mad.lo.cc.u32 %lo, %5, %7, %lo; madc.hi.u32 %hi, %5, %7, %hi;\n\t"  // +a4*b1
+            // Double reduction for 4 products (hi can be up to ~1.88*MOD)
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "setp.ge.u32   %p, %hi, %11;\n\t"
             "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %m, %lo, %12;\n\t"
             "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %hi, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %lo, %hi, %13;    mul.hi.u32  %hi, %hi, %13;\n\t"  // *BETA
             "mad.lo.cc.u32 %lo, %1, %6, %lo; madc.hi.u32 %hi, %1, %6, %hi;\n\t"  // +a0*b0
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %m, %lo, %12;\n\t"
             "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
             "setp.ge.u32   %p, %0, %11;\n\t"
@@ -156,19 +163,32 @@ struct Fp5 {
                   "r"(MOD), "r"(M), "r"(BETA));
 
         // ret[1] = a0*b1 + a1*b0 + BETA * (a2*b4 + a3*b3 + a4*b2)
+        // After BETA part + 2 products, hi can be up to ~1.94*MOD, need double reduction
         asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
             "mul.lo.u32    %lo, %3, %10;     mul.hi.u32  %hi, %3, %10;\n\t"   // a2*b4
             "mad.lo.cc.u32 %lo, %4, %9, %lo; madc.hi.u32 %hi, %4, %9, %hi;\n\t"  // +a3*b3
             "mad.lo.cc.u32 %lo, %5, %8, %lo; madc.hi.u32 %hi, %5, %8, %hi;\n\t"  // +a4*b2
+            // Double reduction for 3 products (hi up to ~1.41*MOD)
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %m, %lo, %12;\n\t"
             "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %hi, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %lo, %hi, %13;    mul.hi.u32  %hi, %hi, %13;\n\t"  // *BETA
             "mad.lo.cc.u32 %lo, %1, %7, %lo; madc.hi.u32 %hi, %1, %7, %hi;\n\t"  // +a0*b1
             "mad.lo.cc.u32 %lo, %2, %6, %lo; madc.hi.u32 %hi, %2, %6, %hi;\n\t"  // +a1*b0
+            // Double reduction for hi up to ~1.94*MOD
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "setp.ge.u32   %p, %hi, %11;\n\t"
             "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %m, %lo, %12;\n\t"
             "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
             "setp.ge.u32   %p, %0, %11;\n\t"
             "@%p sub.u32   %0, %0, %11;\n\t"
             "}" : "=r"(ret.u[1])
@@ -177,6 +197,7 @@ struct Fp5 {
                   "r"(MOD), "r"(M), "r"(BETA));
 
         // ret[2] = a0*b2 + a1*b1 + a2*b0 + BETA * (a3*b4 + a4*b3)
+        // After BETA part + 3 products, hi can be up to ~2.41*MOD, need triple reduction
         asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
             "mul.lo.u32    %lo, %4, %10;     mul.hi.u32  %hi, %4, %10;\n\t"   // a3*b4
             "mad.lo.cc.u32 %lo, %5, %9, %lo; madc.hi.u32 %hi, %5, %9, %hi;\n\t"  // +a4*b3
@@ -186,10 +207,17 @@ struct Fp5 {
             "mad.lo.cc.u32 %lo, %1, %8, %lo; madc.hi.u32 %hi, %1, %8, %hi;\n\t"  // +a0*b2
             "mad.lo.cc.u32 %lo, %2, %7, %lo; madc.hi.u32 %hi, %2, %7, %hi;\n\t"  // +a1*b1
             "mad.lo.cc.u32 %lo, %3, %6, %lo; madc.hi.u32 %hi, %3, %6, %hi;\n\t"  // +a2*b0
+            // Triple reduction for hi up to ~2.41*MOD
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "setp.ge.u32   %p, %hi, %11;\n\t"
             "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %m, %lo, %12;\n\t"
             "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
             "setp.ge.u32   %p, %0, %11;\n\t"
             "@%p sub.u32   %0, %0, %11;\n\t"
             "}" : "=r"(ret.u[2])
@@ -198,6 +226,7 @@ struct Fp5 {
                   "r"(MOD), "r"(M), "r"(BETA));
 
         // ret[3] = a0*b3 + a1*b2 + a2*b1 + a3*b0 + BETA * (a4*b4)
+        // After BETA part + 4 products, hi can be up to ~2.88*MOD, need triple reduction
         asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
             "mul.lo.u32    %lo, %5, %10;     mul.hi.u32  %hi, %5, %10;\n\t"   // a4*b4
             "mul.lo.u32    %m, %lo, %12;\n\t"
@@ -207,10 +236,17 @@ struct Fp5 {
             "mad.lo.cc.u32 %lo, %2, %8, %lo; madc.hi.u32 %hi, %2, %8, %hi;\n\t"  // +a1*b2
             "mad.lo.cc.u32 %lo, %3, %7, %lo; madc.hi.u32 %hi, %3, %7, %hi;\n\t"  // +a2*b1
             "mad.lo.cc.u32 %lo, %4, %6, %lo; madc.hi.u32 %hi, %4, %6, %hi;\n\t"  // +a3*b0
+            // Triple reduction for hi up to ~2.88*MOD
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "setp.ge.u32   %p, %hi, %11;\n\t"
             "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %m, %lo, %12;\n\t"
             "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
             "setp.ge.u32   %p, %0, %11;\n\t"
             "@%p sub.u32   %0, %0, %11;\n\t"
             "}" : "=r"(ret.u[3])
@@ -219,16 +255,24 @@ struct Fp5 {
                   "r"(MOD), "r"(M), "r"(BETA));
 
         // ret[4] = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 (no BETA factor)
+        // 5 products, hi can be up to ~2.35*MOD, need triple reduction
         asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
             "mul.lo.u32    %lo, %1, %10;     mul.hi.u32  %hi, %1, %10;\n\t"   // a0*b4
             "mad.lo.cc.u32 %lo, %2, %9, %lo; madc.hi.u32 %hi, %2, %9, %hi;\n\t"  // +a1*b3
             "mad.lo.cc.u32 %lo, %3, %8, %lo; madc.hi.u32 %hi, %3, %8, %hi;\n\t"  // +a2*b2
             "mad.lo.cc.u32 %lo, %4, %7, %lo; madc.hi.u32 %hi, %4, %7, %hi;\n\t"  // +a3*b1
             "mad.lo.cc.u32 %lo, %5, %6, %lo; madc.hi.u32 %hi, %5, %6, %hi;\n\t"  // +a4*b0
+            // Triple reduction for hi up to ~2.35*MOD
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
             "setp.ge.u32   %p, %hi, %11;\n\t"
             "@%p sub.u32   %hi, %hi, %11;\n\t"
             "mul.lo.u32    %m, %lo, %12;\n\t"
             "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
             "setp.ge.u32   %p, %0, %11;\n\t"
             "@%p sub.u32   %0, %0, %11;\n\t"
             "}" : "=r"(ret.u[4])
