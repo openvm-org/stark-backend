@@ -19,6 +19,7 @@ __device__ __forceinline__ FpExt evaluate_dag_entry_gkr(
     uint32_t row_index,
     const Fp *d_preprocessed,
     const uint64_t *d_main,
+    const Fp *d_public_values,
     const FpExt *d_challenges,
     const FpExt *d_intermediates,
     const uint32_t intermediate_stride,
@@ -34,6 +35,9 @@ __device__ __forceinline__ FpExt evaluate_dag_entry_gkr(
         result = FpExt(d_main_fp[height * src.index + ((row_index + src.offset) % height)]);
         break;
     }
+    case ENTRY_PUBLIC:
+        result = FpExt(d_public_values[src.index]);
+        break;
     case ENTRY_CHALLENGE:
         result = d_challenges[src.index];
         break;
@@ -63,6 +67,7 @@ __global__ void evaluate_interactions_gkr_kernel(
     FracExt *__restrict__ d_fracs,
     const Fp *__restrict__ d_preprocessed,
     const uint64_t *__restrict__ d_main,
+    const Fp *__restrict__ d_public_values,
     const FpExt *__restrict__ d_challenges,
     const FpExt *__restrict__ d_intermediates,
     const Rule *__restrict__ d_rules,
@@ -104,6 +109,7 @@ __global__ void evaluate_interactions_gkr_kernel(
                             row,
                             d_preprocessed,
                             d_main,
+                            d_public_values,
                             d_challenges,
                             intermediates_ptr,
                             intermediate_stride,
@@ -123,6 +129,7 @@ __global__ void evaluate_interactions_gkr_kernel(
                             row,
                             d_preprocessed,
                             d_main,
+                            d_public_values,
                             d_challenges,
                             intermediates_ptr,
                             intermediate_stride,
@@ -137,6 +144,7 @@ __global__ void evaluate_interactions_gkr_kernel(
                                 row,
                                 d_preprocessed,
                                 d_main,
+                                d_public_values,
                                 d_challenges,
                                 intermediates_ptr,
                                 intermediate_stride,
@@ -150,6 +158,7 @@ __global__ void evaluate_interactions_gkr_kernel(
                                 row,
                                 d_preprocessed,
                                 d_main,
+                                d_public_values,
                                 d_challenges,
                                 intermediates_ptr,
                                 intermediate_stride,
@@ -163,6 +172,7 @@ __global__ void evaluate_interactions_gkr_kernel(
                                 row,
                                 d_preprocessed,
                                 d_main,
+                                d_public_values,
                                 d_challenges,
                                 intermediates_ptr,
                                 intermediate_stride,
@@ -208,6 +218,7 @@ extern "C" int _logup_gkr_input_eval(
     FracExt *d_fracs,
     const Fp *d_preprocessed,
     const uint64_t *d_main,
+    const Fp *d_public_values,
     const FpExt *d_challenges,
     const FpExt *d_intermediates,
     const Rule *d_rules,
@@ -224,6 +235,7 @@ extern "C" int _logup_gkr_input_eval(
             d_fracs,
             d_preprocessed,
             d_main,
+            d_public_values,
             d_challenges,
             d_intermediates,
             d_rules,
@@ -238,6 +250,7 @@ extern "C" int _logup_gkr_input_eval(
             d_fracs,
             d_preprocessed,
             d_main,
+            d_public_values,
             d_challenges,
             d_intermediates,
             d_rules,
