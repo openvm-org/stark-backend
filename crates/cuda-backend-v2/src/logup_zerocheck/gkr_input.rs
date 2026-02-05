@@ -3,7 +3,7 @@ use std::cmp::max;
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::{Field, FieldAlgebra};
+use p3_field::{Field, PrimeCharacteristicRing};
 use stark_backend_v2::prover::{
     DeviceMultiStarkProvingKeyV2, ProvingContextV2,
     fractional_sumcheck_gkr::Frac,
@@ -194,7 +194,7 @@ pub fn log_gkr_input_evals(
             debug_assert_eq!(lifted_height % height, 0);
             debug_assert!(!tmp.is_empty());
             let norm_factor_denom = lifted_height / height;
-            let norm_factor = F::from_canonical_usize(norm_factor_denom).inverse();
+            let norm_factor = F::from_usize(norm_factor_denom).inverse();
             unsafe {
                 // SAFETY: scaling within buffer length
                 frac_vector_scalar_multiply_ext_fp(

@@ -12,7 +12,7 @@ use openvm_cuda_common::{
     error::{CudaError, MemCopyError},
 };
 use openvm_stark_backend::p3_challenger::{CanObserve, CanSample};
-use p3_field::{FieldAlgebra, PrimeField32};
+use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 use stark_backend_v2::poseidon2::{CHUNK, WIDTH, poseidon2_perm, sponge::FiatShamirTranscript};
 
@@ -257,7 +257,7 @@ impl DuplexSpongeGpu {
             crate::cuda::sponge::sponge_grind(self.device.as_ptr(), bits as u32, F::ORDER_U32 - 1)?
         };
 
-        let witness = F::from_canonical_u32(witness_u32);
+        let witness = F::from_u32(witness_u32);
 
         // 3. Update host state to match (observe the witness + sample)
         // This is cheaper than syncing the full state back from device
@@ -298,7 +298,7 @@ impl FiatShamirTranscript for DuplexSpongeGpu {
 mod tests {
     use std::time::Instant;
 
-    use p3_field::FieldAlgebra;
+    use p3_field::PrimeCharacteristicRing;
     use stark_backend_v2::poseidon2::sponge::DuplexSponge;
 
     use super::*;
@@ -350,7 +350,7 @@ mod tests {
 
         // Test observe/sample sequence
         for i in 0..20 {
-            let val = F::from_canonical_u32(i * 42 + 17);
+            let val = F::from_u32(i * 42 + 17);
             device_state.observe(val);
             FiatShamirTranscript::observe(&mut duplex_sponge, val);
         }
@@ -363,7 +363,7 @@ mod tests {
 
         // Interleaved observe/sample
         for i in 0..5 {
-            let val = F::from_canonical_u32(i * 100);
+            let val = F::from_u32(i * 100);
             device_state.observe(val);
             FiatShamirTranscript::observe(&mut duplex_sponge, val);
 
@@ -387,7 +387,7 @@ mod tests {
 
         // Test that host operations match DuplexSponge
         for i in 0..10 {
-            let val = F::from_canonical_u32(i * 42 + 17);
+            let val = F::from_u32(i * 42 + 17);
             gpu_sponge.observe(val);
             FiatShamirTranscript::observe(&mut cpu_sponge, val);
         }
@@ -436,7 +436,7 @@ mod tests {
 
             // Add some initial state
             for _ in 0..5 {
-                let val = F::from_canonical_u32(seed);
+                let val = F::from_u32(seed);
                 seed += 228;
                 FiatShamirTranscript::observe(&mut cpu_sponge, val);
                 gpu_sponge.observe(val);
