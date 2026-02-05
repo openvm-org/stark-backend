@@ -8,7 +8,7 @@ use openvm_cuda_common::{
     error::CudaError,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 
 use crate::{
     EF, F, KernelError,
