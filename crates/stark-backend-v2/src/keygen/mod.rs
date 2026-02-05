@@ -241,17 +241,18 @@ impl AirKeygenBuilderV2 {
         } = self;
 
         let dag = SymbolicConstraintsDag::from(symbolic_constraints);
-        let max_rotation = dag.constraints.max_rotation(); // TODO: exclude unused vars?
+        let max_rotation = dag.constraints.max_rotation();
         debug_assert!(max_rotation <= 1);
+        let need_rot = max_rotation == 1;
         let vparams = StarkVerifyingParamsV2 {
             width,
             num_public_values,
-            need_rot: max_rotation == 1,
+            need_rot,
         };
         // Deprecated in v2:
         assert!(vparams.width.after_challenge.is_empty());
 
-        let unused_variables = find_unused_vars(&dag, &vparams.width);
+        let unused_variables = find_unused_vars(&dag, &vparams.width, need_rot);
         let vk = StarkVerifyingKeyV2 {
             preprocessed_data: preprocessed_vdata,
             params: vparams,
@@ -327,6 +328,7 @@ impl PrepKeygenDataV2 {
 pub(crate) fn find_unused_vars<F: Field>(
     constraints: &SymbolicConstraintsDag<F>,
     width: &TraceWidth,
+    need_rot: bool,
 ) -> Vec<SymbolicVariable<F>> {
     let preprocessed_width = width.preprocessed.unwrap_or(0);
     let mut preprocessed_present = vec![vec![false; 2]; preprocessed_width];
@@ -356,7 +358,7 @@ pub(crate) fn find_unused_vars<F: Field>(
     let mut missing = vec![];
     for (index, presents) in preprocessed_present.iter().enumerate() {
         for (offset, present) in presents.iter().enumerate() {
-            if !present {
+            if !present && (offset == 0 || need_rot) {
                 missing.push(SymbolicVariable::new(Entry::Preprocessed { offset }, index));
             }
         }
@@ -364,7 +366,7 @@ pub(crate) fn find_unused_vars<F: Field>(
     for (part_index, present_per_part) in main_present.iter().enumerate() {
         for (index, presents) in present_per_part.iter().enumerate() {
             for (offset, present) in presents.iter().enumerate() {
-                if !present {
+                if !present && (offset == 0 || need_rot) {
                     missing.push(SymbolicVariable::new(
                         Entry::Main { part_index, offset },
                         index,
