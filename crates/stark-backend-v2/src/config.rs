@@ -1,6 +1,23 @@
 use getset::Getters;
 use openvm_stark_backend::interaction::LogUpSecurityParameters;
+use p3_field::{BasedVectorSpace, ExtensionField, PrimeField};
 use serde::{Deserialize, Serialize};
+
+/// Trait that holds the associated types for the SWIRL protocol. These are the types needed by the
+/// verifier and must be independent of the prover backend.
+///
+/// This trait only holds the associated types and the struct implementing the trait does not hold
+/// the system parameters. System parameters are specified and stored separated in [SystemParams].
+pub trait StarkProtocolConfig {
+    /// The prime base field.
+    type F: PrimeField;
+    /// The extension field, used for random challenges.
+    type EF: ExtensionField<Self::F>;
+    /// Degree of the extension field.
+    const D_EF: usize = <Self::EF as BasedVectorSpace<Self::F>>::DIMENSION;
+    /// The digest type used for commitments.
+    type Digest;
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Getters)]
 pub struct SystemParams {
