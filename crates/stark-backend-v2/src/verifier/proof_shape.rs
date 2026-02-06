@@ -158,15 +158,6 @@ pub enum BatchProofShapeError {
         expected: usize,
         actual: usize,
     },
-    #[error(
-        "Column opening for AIR {air_idx} (part {part_idx}) should have {expected} values, but has {actual}"
-    )]
-    InvalidColumnOpeningLen {
-        air_idx: usize,
-        part_idx: usize,
-        expected: usize,
-        actual: usize,
-    },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
