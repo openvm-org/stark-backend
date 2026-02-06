@@ -17,7 +17,6 @@ cargo test
 cargo run --bin field_bench
 ```
 
-Note: Use debug mode for benchmarks (release mode has CUDA linking issues).
 
 ## Structure
 
@@ -182,9 +181,9 @@ Fp6 = Fp3[v] / (v² - 11)   -- Karatsuba (3 muls instead of 4)
 
 ### Kb5 (Quintic Extension)
 
-**Polynomial**: `X^5 + X + 4` (trinomial required)
+**Polynomial**: `X^5 + X^2 - 1` (Plonky3 trinomial)
 
-**Reduction**: `α^5 = -α - 4`
+**Reduction**: `α^5 = -α^2 + 1` (cleaner than `α^5 = -α - 4`)
 
 **Multiplication**: Karatsuba 2+3 split (15 muls instead of 25)
 ```cpp
@@ -196,7 +195,7 @@ P1 = (A0+A1) × (B0+B1) - P0 - P2  // 6 muls
 
 **Inversion**: Gaussian elimination (5×5 matrix)
 
-**Performance**: 81.6 Gops/s mul, 3.7 Gops/s inv
+**Performance**: 89.7 Gops/s mul, 3.7 Gops/s inv
 
 ### Kb6 (Sextic Extension)
 
@@ -314,6 +313,7 @@ Kb6 = Kb3[z] / (z² - 3)      -- Karatsuba (3 muls)
 | Fp2x3/Fp3x2 | Schoolbook → Toom-2.5/Karatsuba | +18-24% |
 | Fp2x3 inv | Gaussian → adjugate | +2.2× |
 | Kb5 mul | Schoolbook → Karatsuba 2+3 split | +20% |
+| Kb5 poly | `x^5 + x + 4` → `x^5 + x^2 - 1` (Plonky3) | 7.2% faster! |
 | Kb6 mul | Schoolbook → Karatsuba 3+3 split | +29% |
 | Kb2 | Schoolbook → PTX with BETA | +1.2× |
 | Kb2x3 | Added mulByW optimization | 3 adds vs 4 muls |
