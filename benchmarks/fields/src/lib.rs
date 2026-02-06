@@ -5,12 +5,9 @@
 //!
 //! Throughput is reported in Gops/s (Giga-operations per second = billion ops/sec).
 
-use std::ffi::c_void;
-use std::time::Instant;
+use std::{ffi::c_void, time::Instant};
 
-use openvm_cuda_common::d_buffer::DeviceBuffer;
-use openvm_cuda_common::copy::MemCopyH2D;
-use openvm_cuda_common::stream::current_stream_sync;
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::current_stream_sync};
 
 // ============================================================================
 // FFI Bindings
@@ -149,7 +146,7 @@ pub struct OpResult {
 #[derive(Clone)]
 pub struct FieldBenchResult {
     pub field_name: String,
-    pub bits: usize,           // bits of provable security
+    pub bits: usize, // bits of provable security
     pub u32s_per_element: usize,
     pub init: OpResult,
     pub add: OpResult,
@@ -160,7 +157,11 @@ pub struct FieldBenchResult {
 /// Print a table of benchmark results
 pub fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenchResult) {
     // Find max field name length for alignment
-    let max_name_len = results.iter().map(|r| r.field_name.len()).max().unwrap_or(10);
+    let max_name_len = results
+        .iter()
+        .map(|r| r.field_name.len())
+        .max()
+        .unwrap_or(10);
 
     // Table 1: Time (ms)
     println!("### Time (ms)");
@@ -170,9 +171,16 @@ pub fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenc
     print!("|{:-<width$}--|-----:|", "", width = max_name_len);
     println!("--------:|--------:|--------:|--------:|");
     for r in results {
-        print!("| {:width$} | {:>4} |", r.field_name, r.bits, width = max_name_len);
-        println!(" {:>7.3} | {:>7.3} | {:>7.3} | {:>7.3} |",
-            r.init.avg_time_ms, r.add.avg_time_ms, r.mul.avg_time_ms, r.inv.avg_time_ms);
+        print!(
+            "| {:width$} | {:>4} |",
+            r.field_name,
+            r.bits,
+            width = max_name_len
+        );
+        println!(
+            " {:>7.3} | {:>7.3} | {:>7.3} | {:>7.3} |",
+            r.init.avg_time_ms, r.add.avg_time_ms, r.mul.avg_time_ms, r.inv.avg_time_ms
+        );
     }
     println!();
 
@@ -184,9 +192,19 @@ pub fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenc
     print!("|{:-<width$}--|-----:|", "", width = max_name_len);
     println!("--------:|--------:|--------:|--------:|");
     for r in results {
-        print!("| {:width$} | {:>4} |", r.field_name, r.bits, width = max_name_len);
-        println!(" {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} |",
-            r.init.throughput_gops, r.add.throughput_gops, r.mul.throughput_gops, r.inv.throughput_gops);
+        print!(
+            "| {:width$} | {:>4} |",
+            r.field_name,
+            r.bits,
+            width = max_name_len
+        );
+        println!(
+            " {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} |",
+            r.init.throughput_gops,
+            r.add.throughput_gops,
+            r.mul.throughput_gops,
+            r.inv.throughput_gops
+        );
     }
     println!();
 
@@ -203,9 +221,16 @@ pub fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenc
         let mul_ratio = baseline.mul.throughput_gops / r.mul.throughput_gops;
         let inv_ratio = baseline.inv.throughput_gops / r.inv.throughput_gops;
 
-        print!("| {:width$} | {:>4} |", r.field_name, r.bits, width = max_name_len);
-        println!(" {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} |",
-            init_ratio, add_ratio, mul_ratio, inv_ratio);
+        print!(
+            "| {:width$} | {:>4} |",
+            r.field_name,
+            r.bits,
+            width = max_name_len
+        );
+        println!(
+            " {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} |",
+            init_ratio, add_ratio, mul_ratio, inv_ratio
+        );
     }
     println!();
 }
@@ -216,18 +241,26 @@ pub fn print_benchmark_tables(results: &[FieldBenchResult], baseline: &FieldBenc
 
 pub fn random_u32s(count: usize, seed: u64) -> Vec<u32> {
     let mut rng = seed;
-    (0..count).map(|_| {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        (rng >> 32) as u32
-    }).collect()
+    (0..count)
+        .map(|_| {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 32) as u32
+        })
+        .collect()
 }
 
 pub fn random_u64s(count: usize, seed: u64) -> Vec<u64> {
     let mut rng = seed;
-    (0..count).map(|_| {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        rng
-    }).collect()
+    (0..count)
+        .map(|_| {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            rng
+        })
+        .collect()
 }
 
 pub fn measure<F: FnMut()>(config: &BenchConfig, total_ops: u64, mut f: F) -> OpResult {
@@ -246,9 +279,13 @@ pub fn measure<F: FnMut()>(config: &BenchConfig, total_ops: u64, mut f: F) -> Op
     let elapsed = start.elapsed();
 
     let avg_time_ms = elapsed.as_secs_f64() * 1000.0 / config.bench_iters as f64;
-    let throughput_gops = (total_ops * config.bench_iters as u64) as f64 / elapsed.as_secs_f64() / 1e9;
+    let throughput_gops =
+        (total_ops * config.bench_iters as u64) as f64 / elapsed.as_secs_f64() / 1e9;
 
-    OpResult { avg_time_ms, throughput_gops }
+    OpResult {
+        avg_time_ms,
+        throughput_gops,
+    }
 }
 
 pub fn bench_fp(config: &BenchConfig) -> FieldBenchResult {
@@ -270,18 +307,42 @@ pub fn bench_fp(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_fp(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_fp(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_fp(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Fp".into(), bits: 31, u32s_per_element: 1, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Fp".into(),
+        bits: 31,
+        u32s_per_element: 1,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_fp4(config: &BenchConfig) -> FieldBenchResult {
@@ -301,18 +362,42 @@ pub fn bench_fp4(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_fp4(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_fp4(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_fp4(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_fp4(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_fp4(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Fp4".into(), bits: 124, u32s_per_element: 4, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Fp4".into(),
+        bits: 124,
+        u32s_per_element: 4,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
@@ -334,18 +419,42 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_fpext(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_fpext(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_fpext(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "FpExt".into(), bits: 124, u32s_per_element: 4, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "FpExt".into(),
+        bits: 124,
+        u32s_per_element: 4,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_fp5(config: &BenchConfig) -> FieldBenchResult {
@@ -367,18 +476,42 @@ pub fn bench_fp5(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_fp5(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_fp5(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_fp5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Fp5".into(), bits: 155, u32s_per_element: 5, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Fp5".into(),
+        bits: 155,
+        u32s_per_element: 5,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_fp6(config: &BenchConfig) -> FieldBenchResult {
@@ -400,18 +533,42 @@ pub fn bench_fp6(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_fp6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_fp6(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_fp6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_fp6(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_fp6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Fp6".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Fp6".into(),
+        bits: 186,
+        u32s_per_element: 6,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_fp2x3(config: &BenchConfig) -> FieldBenchResult {
@@ -431,18 +588,42 @@ pub fn bench_fp2x3(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_fp2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_fp2x3(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_fp2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_fp2x3(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_fp2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Fp2x3".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Fp2x3".into(),
+        bits: 186,
+        u32s_per_element: 6,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_fp3x2(config: &BenchConfig) -> FieldBenchResult {
@@ -462,18 +643,42 @@ pub fn bench_fp3x2(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_fp3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_fp3x2(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_fp3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_fp3x2(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_fp3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Fp3x2".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Fp3x2".into(),
+        bits: 186,
+        u32s_per_element: 6,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_kb(config: &BenchConfig) -> FieldBenchResult {
@@ -495,18 +700,42 @@ pub fn bench_kb(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_kb(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_kb(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_kb(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_kb(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_kb(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Kb".into(), bits: 31, u32s_per_element: 1, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Kb".into(),
+        bits: 31,
+        u32s_per_element: 1,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_kb5(config: &BenchConfig) -> FieldBenchResult {
@@ -527,18 +756,42 @@ pub fn bench_kb5(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_kb5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_kb5(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_kb5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_kb5(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_kb5(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Kb5".into(), bits: 155, u32s_per_element: 5, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Kb5".into(),
+        bits: 155,
+        u32s_per_element: 5,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_kb6(config: &BenchConfig) -> FieldBenchResult {
@@ -559,18 +812,42 @@ pub fn bench_kb6(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_kb6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_kb6(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_kb6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_kb6(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_kb6(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Kb6".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Kb6".into(),
+        bits: 186,
+        u32s_per_element: 6,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_kb2x3(config: &BenchConfig) -> FieldBenchResult {
@@ -591,18 +868,42 @@ pub fn bench_kb2x3(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_kb2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_kb2x3(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_kb2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_kb2x3(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_kb2x3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Kb2x3".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Kb2x3".into(),
+        bits: 186,
+        u32s_per_element: 6,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_kb3x2(config: &BenchConfig) -> FieldBenchResult {
@@ -623,18 +924,42 @@ pub fn bench_kb3x2(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_kb3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_kb3x2(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_kb3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_kb3x2(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
         cuda_check(unsafe { inv_kb3x2(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), n, reps) });
     });
 
-    FieldBenchResult { field_name: "Kb3x2".into(), bits: 186, u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Kb3x2".into(),
+        bits: 186,
+        u32s_per_element: 6,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_gl(config: &BenchConfig) -> FieldBenchResult {
@@ -658,11 +983,27 @@ pub fn bench_gl(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_gl(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_gl(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_gl(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_gl(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
@@ -670,7 +1011,15 @@ pub fn bench_gl(config: &BenchConfig) -> FieldBenchResult {
     });
 
     // u32s_per_element = 2 for Goldilocks (64-bit)
-    FieldBenchResult { field_name: "Gl".into(), bits: 64, u32s_per_element: 2, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Gl".into(),
+        bits: 64,
+        u32s_per_element: 2,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 pub fn bench_gl3(config: &BenchConfig) -> FieldBenchResult {
@@ -694,11 +1043,27 @@ pub fn bench_gl3(config: &BenchConfig) -> FieldBenchResult {
     let ops = n as u64 * reps as u64;
 
     let add = measure(config, ops, || {
-        cuda_check(unsafe { add_gl3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            add_gl3(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let mul = measure(config, ops, || {
-        cuda_check(unsafe { mul_gl3(d_out.as_mut_raw_ptr(), d_a.as_raw_ptr(), d_b.as_raw_ptr(), n, reps) });
+        cuda_check(unsafe {
+            mul_gl3(
+                d_out.as_mut_raw_ptr(),
+                d_a.as_raw_ptr(),
+                d_b.as_raw_ptr(),
+                n,
+                reps,
+            )
+        });
     });
 
     let inv = measure(config, ops, || {
@@ -706,7 +1071,15 @@ pub fn bench_gl3(config: &BenchConfig) -> FieldBenchResult {
     });
 
     // u32s_per_element = 6 for Gl3 (3 x 64-bit = 24 bytes)
-    FieldBenchResult { field_name: "Gl3".into(), bits: 192, u32s_per_element: 6, init, add, mul, inv }
+    FieldBenchResult {
+        field_name: "Gl3".into(),
+        bits: 192,
+        u32s_per_element: 6,
+        init,
+        add,
+        mul,
+        inv,
+    }
 }
 
 // ============================================================================
@@ -771,7 +1144,10 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     println!();
     println!("Elements: {}", config.num_elements);
     println!("Ops per element: {}", config.ops_per_element);
-    println!("Warmup: {}, Bench iters: {}", config.warmup_iters, config.bench_iters);
+    println!(
+        "Warmup: {}, Bench iters: {}",
+        config.warmup_iters, config.bench_iters
+    );
     println!();
 
     // Collect all BabyBear results
@@ -795,12 +1171,24 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
 
     // Combine all results and sort by bits (then by name for consistent ordering)
     let mut all_results = vec![
-        fp.clone(), fpext, fp5, fp6, fp2x3, fp3x2,
-        kb, kb5, kb6, kb2x3, kb3x2,
-        gl, gl3,
+        fp.clone(),
+        fpext,
+        fp5,
+        fp6,
+        fp2x3,
+        fp3x2,
+        kb,
+        kb5,
+        kb6,
+        kb2x3,
+        kb3x2,
+        gl,
+        gl3,
     ];
     all_results.sort_by(|a, b| {
-        a.bits.cmp(&b.bits).then_with(|| a.field_name.cmp(&b.field_name))
+        a.bits
+            .cmp(&b.bits)
+            .then_with(|| a.field_name.cmp(&b.field_name))
     });
     print_benchmark_tables(&all_results, &fp);
 
@@ -809,13 +1197,25 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
     println!();
     let p2_bb = bench_poseidon2_bb(config);
     let p2_kb = bench_poseidon2_kb(config);
-    println!("| {:15} | {:>10} | {:>12} |", "Permutation", "Time (ms)", "Gops/s");
+    println!(
+        "| {:15} | {:>10} | {:>12} |",
+        "Permutation", "Time (ms)", "Gops/s"
+    );
     println!("|{:-<17}|{:-<12}|{:-<14}|", "", "", "");
-    println!("| {:15} | {:>10.3} | {:>12.1} |", p2_bb.name, p2_bb.avg_time_ms, p2_bb.throughput_gops);
-    println!("| {:15} | {:>10.3} | {:>12.1} |", p2_kb.name, p2_kb.avg_time_ms, p2_kb.throughput_gops);
+    println!(
+        "| {:15} | {:>10.3} | {:>12.1} |",
+        p2_bb.name, p2_bb.avg_time_ms, p2_bb.throughput_gops
+    );
+    println!(
+        "| {:15} | {:>10.3} | {:>12.1} |",
+        p2_kb.name, p2_kb.avg_time_ms, p2_kb.throughput_gops
+    );
     if p2_bb.throughput_gops > 0.0 {
         println!();
-        println!("KB/BB speedup: {:.2}x", p2_kb.throughput_gops / p2_bb.throughput_gops);
+        println!(
+            "KB/BB speedup: {:.2}x",
+            p2_kb.throughput_gops / p2_bb.throughput_gops
+        );
     }
     println!();
 }

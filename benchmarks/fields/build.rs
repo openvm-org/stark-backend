@@ -7,7 +7,7 @@ fn main() {
         eprintln!("cargo:warning=CUDA is not available");
         exit(1);
     }
-    
+
     let builder = CudaBuilder::new()
         .library_name("ext_field_bench")
         .include_from_dep("DEP_CUDA_COMMON_INCLUDE")
