@@ -186,8 +186,7 @@ impl MultiStarkKeygenBuilderV2 {
         let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
         tracing::debug!("pre-vkey: {} bytes", vk_bytes.len());
         // Purely to get type compatibility and convenience, we hash using the native hash
-        let vk_pre_hash =
-            poseidon2_hash_slice(&vk_bytes.into_iter().map(F::from_u8).collect_vec());
+        let vk_pre_hash = poseidon2_hash_slice(&vk_bytes.into_iter().map(F::from_u8).collect_vec());
 
         Ok(MultiStarkProvingKeyV2 {
             params: self.config,

@@ -341,9 +341,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
                     .message
                     .iter()
                     .map(|expr| evaluator.eval_expr(expr))
-                    .chain(std::iter::once(EF::from_u16(
-                        interaction.bus_index + 1,
-                    )))
+                    .chain(std::iter::once(EF::from_u16(interaction.bus_index + 1)))
                     .zip(beta_logup.powers())
                     .fold(EF::ZERO, |acc, (x, y)| acc + x * y);
                 (num, denom)
