@@ -184,41 +184,32 @@ struct Fp3 {
     }
 };
 
-// Inversion for Fp3 using Gaussian elimination on 3x3 matrix
+/// Inversion for Fp3 using adjugate formula (1 Fp inv instead of 3).
+///
+/// For u³ = 2, the adjugate of the multiplication matrix gives:
+///   c₀ = a₀² - 2·a₁·a₂
+///   c₁ = 2·a₂² - a₀·a₁
+///   c₂ = a₁² - a₀·a₂
+///   det = a₀·c₀ + 2·(a₁·c₂ + a₂·c₁)
+/// Cost: 9 Fp muls + 1 Fp inv (branchless)
 __device__ inline Fp3 inv(Fp3 x) {
     if (x == Fp3::zero()) return Fp3::zero();
-    
+
     Fp a0 = x.elems[0], a1 = x.elems[1], a2 = x.elems[2];
-    Fp W_val(Fp3::W);
-    
-    // Matrix for multiplication by x:
-    // [a0, W*a2, W*a1]
-    // [a1, a0,   W*a2]
-    // [a2, a1,   a0  ]
-    
-    Fp m[3][4];
-    m[0][0] = a0; m[0][1] = W_val * a2; m[0][2] = W_val * a1; m[0][3] = Fp::one();
-    m[1][0] = a1; m[1][1] = a0; m[1][2] = W_val * a2; m[1][3] = Fp::zero();
-    m[2][0] = a2; m[2][1] = a1; m[2][2] = a0; m[2][3] = Fp::zero();
-    
-    // Gaussian elimination
-    for (int col = 0; col < 3; col++) {
-        Fp pivot_inv = ::inv(m[col][col]);
-        for (int j = col; j < 4; j++) {
-            m[col][j] = m[col][j] * pivot_inv;
-        }
-        
-        for (int row = 0; row < 3; row++) {
-            if (row != col) {
-                Fp factor = m[row][col];
-                for (int j = col; j < 4; j++) {
-                    m[row][j] = m[row][j] - factor * m[col][j];
-                }
-            }
-        }
-    }
-    
-    return Fp3(m[0][3], m[1][3], m[2][3]);
+
+    Fp a0a1 = a0 * a1;
+    Fp a0a2 = a0 * a2;
+    Fp a1a2 = a1 * a2;
+
+    Fp c0 = a0 * a0 - (a1a2 + a1a2);        // a₀² - 2·a₁·a₂
+    Fp c1 = a2 * a2 + a2 * a2 - a0a1;        // 2·a₂² - a₀·a₁
+    Fp c2 = a1 * a1 - a0a2;                  // a₁² - a₀·a₂
+
+    Fp t = a1 * c2 + a2 * c1;
+    Fp det = a0 * c0 + t + t;                // a₀·c₀ + 2·(a₁·c₂ + a₂·c₁)
+
+    Fp det_inv = ::inv(det);
+    return Fp3(c0 * det_inv, c1 * det_inv, c2 * det_inv);
 }
 
 // ============================================================================

@@ -134,80 +134,39 @@ struct Kb3 {
     }
 };
 
-// Inversion for Kb3 using Gaussian elimination
-// Multiplication matrix for a = a0 + a1*w + a2*w² with w³ = -w - 4:
-// Computing a*w^j for j = 0, 1, 2:
-//   j=0: [a0, a1, a2]
-//   j=1: [-4*a2, a0-a2, a1]
-//   j=2: [-4*a1, -4*a2-a1, a0-a2]
+/// Inversion for Kb3 using adjugate formula (1 Kb inv instead of 3).
+///
+/// For w³ = -w - 4, the multiplication matrix M has cofactors:
+///   c₀ = (a₀-a₂)² + a₁² + 4·a₁·a₂
+///   c₁ = -(a₀·a₁ + 4·a₂²)
+///   c₂ = a₁² + a₂² - a₀·a₂
+///   det = a₀·c₀ - 4·(a₂·c₁ + a₁·c₂)
+/// Cost: 9 Kb muls + 1 Kb inv (branchless)
 __device__ inline Kb3 inv(Kb3 x) {
     if (x == Kb3::zero()) return Kb3::zero();
-    
+
     Kb a0 = x.c0, a1 = x.c1, a2 = x.c2;
-    
-    // Build 3x4 augmented matrix [M | e0]
-    // Column j is the result of a * w^j reduced mod (w³ + w + 4)
-    Kb m[3][4];
-    
-    // Col 0: a * 1 = [a0, a1, a2]
-    m[0][0] = a0; m[1][0] = a1; m[2][0] = a2;
-    
-    // Col 1: a * w, where w³ = -w - 4
-    // a0*w + a1*w² + a2*w³ = a0*w + a1*w² + a2*(-w - 4)
-    // = -4*a2 + (a0 - a2)*w + a1*w²
-    m[0][1] = Kb::zero() - Kb::mulBy4(a2);
-    m[1][1] = a0 - a2;
-    m[2][1] = a1;
-    
-    // Col 2: a * w²
-    // a0*w² + a1*w³ + a2*w⁴
-    // = a0*w² + a1*(-w - 4) + a2*(-w² - 4w)
-    // = -4*a1 + (-a1 - 4*a2)*w + (a0 - a2)*w²
-    m[0][2] = Kb::zero() - Kb::mulBy4(a1);
-    m[1][2] = Kb::zero() - a1 - Kb::mulBy4(a2);
-    m[2][2] = a0 - a2;
-    
-    // Augmented column (identity's first row)
-    m[0][3] = Kb::one();
-    m[1][3] = Kb::zero();
-    m[2][3] = Kb::zero();
-    
-    // Gaussian elimination with partial pivoting
-    for (int col = 0; col < 3; col++) {
-        // Find non-zero pivot
-        int pivot_row = col;
-        while (pivot_row < 3 && m[pivot_row][col] == Kb::zero()) {
-            pivot_row++;
-        }
-        if (pivot_row >= 3) return Kb3::zero();  // Singular
-        
-        // Swap rows if needed
-        if (pivot_row != col) {
-            for (int j = 0; j < 4; j++) {
-                Kb tmp = m[col][j];
-                m[col][j] = m[pivot_row][j];
-                m[pivot_row][j] = tmp;
-            }
-        }
-        
-        // Scale pivot row
-        Kb pivot_inv = inv(m[col][col]);
-        for (int j = col; j < 4; j++) {
-            m[col][j] = m[col][j] * pivot_inv;
-        }
-        
-        // Eliminate column in other rows
-        for (int row = 0; row < 3; row++) {
-            if (row != col) {
-                Kb factor = m[row][col];
-                for (int j = col; j < 4; j++) {
-                    m[row][j] = m[row][j] - factor * m[col][j];
-                }
-            }
-        }
-    }
-    
-    return Kb3(m[0][3], m[1][3], m[2][3]);
+
+    // Precompute shared products
+    Kb a1sq = a1 * a1;
+    Kb a2sq = a2 * a2;
+    Kb a0a1 = a0 * a1;
+    Kb a0a2 = a0 * a2;
+    Kb a1a2 = a1 * a2;
+    Kb d = a0 - a2;
+    Kb dsq = d * d;          // (a₀ - a₂)²
+
+    // Adjugate cofactors (first row of cofactor matrix)
+    Kb c0 = dsq + a1sq + Kb::mulBy4(a1a2);             // (a₀-a₂)² + a₁² + 4·a₁·a₂
+    Kb c1 = Kb::zero() - a0a1 - Kb::mulBy4(a2sq);      // -(a₀·a₁ + 4·a₂²)
+    Kb c2 = a1sq + a2sq - a0a2;                         // a₁² + a₂² - a₀·a₂
+
+    // det = a₀·c₀ - 4·(a₂·c₁ + a₁·c₂)  (expansion along row 0)
+    Kb t = a2 * c1 + a1 * c2;
+    Kb det = a0 * c0 - Kb::mulBy4(t);
+
+    Kb det_inv = ::inv(det);
+    return Kb3(c0 * det_inv, c1 * det_inv, c2 * det_inv);
 }
 
 // ============================================================================

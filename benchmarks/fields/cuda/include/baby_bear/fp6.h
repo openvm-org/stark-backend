@@ -524,49 +524,34 @@ __device__ inline Fp6 frobenius(Fp6 a, int power) {
     );
 }
 
-/// Inversion using Frobenius-based norm computation.
-/// 
-/// For a in Fp6, we use:
-///   N(a) = a * φ(a) * φ²(a) * φ³(a) * φ⁴(a) * φ⁵(a)  (norm, in Fp)
-///   a⁻¹ = φ(a) * φ²(a) * φ³(a) * φ⁴(a) * φ⁵(a) / N(a)
-/// 
-/// This requires only 1 base field inversion vs 6 for Gaussian elimination.
-/// Cost: 5 Frobenius (25 Fp muls) + 5 Fp6 muls + 1 Fp inv + 6 Fp muls
+/// Inversion using Itoh-Tsujii with free φ³.
+///
+/// For x^6 - 31 with p ≡ 1 (mod 6): ω³ = 31^{(p-1)/2} = -1 (31 is not a QR),
+/// so φ³ just negates odd coefficients (zero multiplications).
+///
+/// Chain:  f12 = φ(x)·φ²(x),  f345 = φ³(f12)·φ³(x),  conj = f12·f345
+/// Cost: 2 Frobenius (10 Fp muls) + 3 Fp6 muls + partial norm + 1 Fp inv
 __device__ inline Fp6 inv(Fp6 x) {
-    // Handle zero case
-    if (x == Fp6::zero()) {
-        return Fp6::zero();
-    }
-    
-    // Compute Frobenius conjugates
-    Fp6 phi1 = frobenius(x, 1);  // φ(a)
-    Fp6 phi2 = frobenius(x, 2);  // φ²(a)
-    Fp6 phi3 = frobenius(x, 3);  // φ³(a)
-    Fp6 phi4 = frobenius(x, 4);  // φ⁴(a)
-    Fp6 phi5 = frobenius(x, 5);  // φ⁵(a)
-    
-    // Compute conjugate product: c = φ(a) * φ²(a) * φ³(a) * φ⁴(a) * φ⁵(a)
-    // Use balanced tree: ((φ1 * φ2) * (φ3 * φ4)) * φ5
-    Fp6 c12 = phi1 * phi2;
-    Fp6 c34 = phi3 * phi4;
-    Fp6 c1234 = c12 * c34;
-    Fp6 conj = c1234 * phi5;
-    
-    // Compute norm: N(a) = a * conj
-    // The result should be in Fp (all higher coefficients are 0)
-    Fp6 norm_full = x * conj;
-    Fp norm = norm_full.elems[0];  // Norm is in the base field
-    
-    // Compute inverse: a⁻¹ = conj / N(a)
+    if (x == Fp6::zero()) { return Fp6::zero(); }
+
+    Fp6 f1 = frobenius(x, 1);     // x^p
+    Fp6 f2 = frobenius(x, 2);     // x^{p²}
+    Fp6 f12 = f1 * f2;            // x^{p+p²}
+
+    // φ³ is free: (a₀,-a₁,a₂,-a₃,a₄,-a₅)
+    Fp6 f3_f12(f12[0], -f12[1], f12[2], -f12[3], f12[4], -f12[5]);  // x^{p⁴+p⁵}
+    Fp6 f3_x(x[0], -x[1], x[2], -x[3], x[4], -x[5]);              // x^{p³}
+
+    Fp6 f345 = f3_f12 * f3_x;    // x^{p³+p⁴+p⁵}
+    Fp6 conj = f12 * f345;        // x^{p+p²+p³+p⁴+p⁵}
+
+    // Partial norm: constant coefficient of x·conj
+    // For x^6 - W: c₀ = x₀c₀ + W·(x₁c₅ + x₂c₄ + x₃c₃ + x₄c₂ + x₅c₁)
+    Fp t = x[1]*conj[5] + x[2]*conj[4] + x[3]*conj[3] + x[4]*conj[2] + x[5]*conj[1];
+    Fp norm = x[0]*conj[0] + Fp6::mulByW(t);
+
     Fp norm_inv = ::inv(norm);
-    return Fp6(
-        conj.elems[0] * norm_inv,
-        conj.elems[1] * norm_inv,
-        conj.elems[2] * norm_inv,
-        conj.elems[3] * norm_inv,
-        conj.elems[4] * norm_inv,
-        conj.elems[5] * norm_inv
-    );
+    return conj * norm_inv;
 }
 
 static_assert(sizeof(Fp6) == 24, "Fp6 must be 24 bytes");

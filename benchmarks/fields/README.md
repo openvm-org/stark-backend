@@ -129,13 +129,13 @@ An extension `Fp[n] = Fp[x] / f(x)` where `f(x)` is irreducible of degree n.
 - Fused accumulation in 64-bit registers
 - Single Montgomery reduction per output coefficient
 
-**Inversion**: Frobenius-based (only 1 Fp inversion needed)
+**Inversion**: Frobenius norm (Itoh-Tsujii chain + partial norm)
 ```cpp
-// N(a) = a × φ(a) × φ²(a) × φ³(a) × φ⁴(a) ∈ Fp
-// a⁻¹ = conjugate_product / N(a)
+// f12 = φ(x)·φ²(x), f34 = φ²(f12), conj = f12·f34
+// 3 Frobenius + 2 Fp5 muls + partial norm + 1 Fp inv
 ```
 
-**Performance**: 118.0 Gops/s mul, 19.5 Gops/s inv
+**Performance**: 118.0 Gops/s mul, 23.8 Gops/s inv
 
 ### Fp6 (Sextic Extension)
 
@@ -145,9 +145,11 @@ An extension `Fp[n] = Fp[x] / f(x)` where `f(x)` is irreducible of degree n.
 - Groups 2 products per 64-bit accumulator before reducing
 - BETA = (31 << 32) % MOD = 0x0FFFFFBE
 
-**Inversion**: Frobenius-based with ω = 31^((p-1)/6) = 0x4E5D1534
+**Inversion**: Frobenius norm (Itoh-Tsujii chain, free φ³ + partial norm)
+- φ³ just negates odd coefficients (ω³ = -1, since 31 is not a QR)
+- 2 Frobenius + 3 Fp6 muls + partial norm + 1 Fp inv
 
-**Performance**: 70.6 Gops/s mul, 11.6 Gops/s inv
+**Performance**: 70.6 Gops/s mul, 14.2 Gops/s inv
 
 ### Fp2x3 (2×3 Tower)
 
@@ -171,9 +173,9 @@ Fp3 = Fp[u] / (u³ - 2)     -- PTX with BETA = 0x1FFFFFFC
 Fp6 = Fp3[v] / (v² - 11)   -- Karatsuba (3 muls instead of 4)
 ```
 
-**Inversion**: Norm-based (only 1 Fp3 inversion)
+**Inversion**: Norm to Fp3, then Fp3 adjugate (1 Fp inversion total)
 
-**Performance**: **83.9 Gops/s** mul, **13.3 Gops/s** inv
+**Performance**: **83.9 Gops/s** mul, **25.9 Gops/s** inv
 
 ---
 
@@ -238,12 +240,13 @@ Kb3 = Kb[w] / (w³ + w + 4)   -- Toom-2.5 (6 muls)
 Kb6 = Kb3[z] / (z² - 3)      -- Karatsuba (3 muls)
 ```
 
-**Inversion**: Norm-based (only 1 Kb3 inversion)
+**Inversion**: Norm to Kb3, then Kb3 adjugate (1 Kb inversion total)
 ```cpp
-(a + bz)⁻¹ = (a - bz) / (a² - 3b²)
+(a + bz)⁻¹ = (a - bz) / (a² - 3b²)   // norm to Kb3
+// Kb3 adjugate: 9 Kb muls + 1 Kb inv (branchless)
 ```
 
-**Performance**: 59.8 Gops/s mul, 10.3 Gops/s inv
+**Performance**: 59.9 Gops/s mul, 20.6 Gops/s inv
 
 ---
 
@@ -269,35 +272,35 @@ Kb6 = Kb3[z] / (z² - 3)      -- Karatsuba (3 muls)
 
 | Field | mul | inv | Notes |
 |-------|-----|-----|-------|
-| Fp (base) | 1871 | 59.3 | |
-| Fp5 | 118.0 | 19.5 | PTX + Frobenius |
-| Fp6 | 70.6 | 11.6 | PTX 2-product |
+| Fp (base) | 1871 | 59.6 | |
+| Fp5 | 118.0 | 23.8 | PTX + Itoh-Tsujii |
+| Fp6 | 70.6 | 14.2 | PTX + Itoh-Tsujii (free φ³) |
 | Fp2x3 | 73.0 | 23.6 | Toom-2.5 + adjugate inv |
-| **Fp3x2** | **83.9** | **13.3** | **Best mul** |
+| **Fp3x2** | **83.9** | **25.9** | **PTX + Karatsuba + adjugate inv** |
 
 ### KoalaBear Fields
 
 | Field | mul | inv | Notes |
 |-------|-----|-----|-------|
 | Kb (base) | 1869 | 45.5 | |
-| Kb5 | 88.7 | 11.9 | Karatsuba 2+3 + Frobenius inv |
-| Kb6 | 68.7 | 12.8 | Karatsuba 3+3 + Frobenius inv |
-| **Kb2x3** | **71.0** | **21.0** | **Best overall** |
-| Kb3x2 | 59.8 | 10.3 | Norm-based inv |
+| Kb5 | 89.0 | 11.9 | Karatsuba 2+3 + Frobenius inv |
+| Kb6 | 68.9 | 12.8 | Karatsuba 3+3 + Frobenius inv |
+| **Kb2x3** | **71.8** | **21.1** | **PTX + Toom-2.5 + adjugate inv** |
+| Kb3x2 | 59.9 | 20.6 | Toom-2.5 + adjugate inv |
 
 ### Goldilocks Fields
 
 | Field | mul | inv | Notes |
 |-------|-----|-----|-------|
-| Gl (base) | 666.9 | 10.5 | |
-| Gl3 | 58.4 | 7.8 | Karatsuba |
+| Gl (base) | 669.4 | 10.5 | |
+| Gl3 | 58.6 | 7.8 | Karatsuba |
 
 ### Recommendations
 
 | Use Case | Baby Bear | KoalaBear |
 |----------|-----------|-----------|
-| **Multiplication-heavy** | Fp3x2 (83.9 Gops/s) | Kb2x3 (71.0 Gops/s) |
-| **Inversion-heavy** | Fp2x3 (23.6 Gops/s) | Kb2x3 (21.0 Gops/s) |
+| **Multiplication-heavy** | Fp3x2 (83.9 Gops/s) | Kb2x3 (71.8 Gops/s) |
+| **Inversion-heavy** | Fp3x2 (25.9 Gops/s) | Kb2x3 (21.1 Gops/s) |
 | **Simple code** | Direct Fp6 | Direct Kb6 |
 
 ---
@@ -323,3 +326,7 @@ Kb6 = Kb3[z] / (z² - 3)      -- Karatsuba (3 muls)
 | Kb5 inv | Gaussian → Frobenius norm | +3.2× |
 | Kb6 inv | Gaussian → Frobenius norm (zero-mul Frobenius!) | +5.8× |
 | Kb3x2 | Added Karatsuba + norm inversion | +31% mul, 4.6× inv |
+| Fp5 inv | Naive Frobenius → Itoh-Tsujii chain | +1.22× |
+| Fp6 inv | Naive Frobenius → Itoh-Tsujii (free φ³) | +1.22× |
+| Fp3 inv | Gaussian elimination → adjugate formula | +1.95× (Fp3x2: 13.3→25.9) |
+| Kb3 inv | Gaussian elimination → adjugate formula | +1.98× (Kb3x2: 10.4→20.6) |

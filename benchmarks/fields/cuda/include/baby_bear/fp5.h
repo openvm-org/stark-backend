@@ -415,46 +415,33 @@ __device__ inline Fp5 frobenius(Fp5 a, int power) {
     );
 }
 
-/// Inversion using Frobenius-based norm computation.
-/// 
-/// For a in Fp5, we use:
-///   N(a) = a * φ(a) * φ²(a) * φ³(a) * φ⁴(a)  (norm, in Fp)
-///   a⁻¹ = φ(a) * φ²(a) * φ³(a) * φ⁴(a) / N(a)
-/// 
-/// This requires only 1 base field inversion vs 5 for Gaussian elimination.
-/// Cost: 4 Frobenius (16 Fp muls) + 4 Fp5 muls + 1 Fp inv + 5 Fp muls
+/// Inversion using Frobenius norm with Itoh-Tsujii chain.
+///
+/// For a in Fp5, N(a) = a * φ(a) * φ²(a) * φ³(a) * φ⁴(a) ∈ Fp.
+/// Then a⁻¹ = φ(a) * φ²(a) * φ³(a) * φ⁴(a) / N(a).
+///
+/// Itoh-Tsujii: f1=φ(a), f2=φ²(a), f12=f1*f2, f34=φ²(f12), conj=f12*f34
+/// Cost: 3 Frobenius (12 Fp muls) + 2 Fp5 muls + partial norm (5 Fp muls) + 1 Fp inv + 5 Fp muls
 __device__ inline Fp5 inv(Fp5 x) {
-    // Handle zero case
     if (x == Fp5::zero()) {
         return Fp5::zero();
     }
-    
-    // Compute Frobenius conjugates
-    Fp5 phi1 = frobenius(x, 1);  // φ(a)
-    Fp5 phi2 = frobenius(x, 2);  // φ²(a)
-    Fp5 phi3 = frobenius(x, 3);  // φ³(a)
-    Fp5 phi4 = frobenius(x, 4);  // φ⁴(a)
-    
-    // Compute conjugate product: c = φ(a) * φ²(a) * φ³(a) * φ⁴(a)
-    // Use ladder: c12 = φ(a) * φ²(a), c34 = φ³(a) * φ⁴(a), c = c12 * c34
-    Fp5 c12 = phi1 * phi2;
-    Fp5 c34 = phi3 * phi4;
-    Fp5 conj = c12 * c34;
-    
-    // Compute norm: N(a) = a * conj
-    // The result should be in Fp (all higher coefficients are 0)
-    Fp5 norm_full = x * conj;
-    Fp norm = norm_full.elems[0];  // Norm is in the base field
-    
-    // Compute inverse: a⁻¹ = conj / N(a)
+
+    // Itoh-Tsujii chain: compute conj = x^{p + p² + p³ + p⁴}
+    Fp5 f1 = frobenius(x, 1);     // x^p
+    Fp5 f2 = frobenius(x, 2);     // x^{p²}
+    Fp5 f12 = f1 * f2;            // x^{p + p²}
+    Fp5 f34 = frobenius(f12, 2);  // x^{p³ + p⁴}  (φ² applied to x^{p+p²})
+    Fp5 conj = f12 * f34;         // x^{p + p² + p³ + p⁴}
+
+    // Partial norm: N(x) = x * conj ∈ Fp (only constant coefficient needed)
+    // For x^5 - 2: c₀ = t0 + 2*t5
+    Fp t5 = x[1]*conj[4] + x[2]*conj[3] + x[3]*conj[2] + x[4]*conj[1];
+    Fp norm = x[0]*conj[0] + t5 + t5;
+
+    // a⁻¹ = conj / N(a)
     Fp norm_inv = ::inv(norm);
-    return Fp5(
-        conj.elems[0] * norm_inv,
-        conj.elems[1] * norm_inv,
-        conj.elems[2] * norm_inv,
-        conj.elems[3] * norm_inv,
-        conj.elems[4] * norm_inv
-    );
+    return conj * norm_inv;
 }
 
 static_assert(sizeof(Fp5) == 20, "Fp5 must be 20 bytes");
