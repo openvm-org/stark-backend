@@ -1,7 +1,10 @@
 use std::ffi::c_void;
 
 use openvm_benchmarks_fields::*;
-use openvm_cuda_common::{copy::{MemCopyD2H, MemCopyH2D}, d_buffer::DeviceBuffer};
+use openvm_cuda_common::{
+    copy::{MemCopyD2H, MemCopyH2D},
+    d_buffer::DeviceBuffer,
+};
 
 const TEST_ELEMENTS: usize = 1_000_000;
 
