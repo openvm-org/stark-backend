@@ -1,6 +1,6 @@
 use std::io::{Error, Read, Result, Write};
 
-use p3_field::FieldAlgebra;
+use p3_field::PrimeCharacteristicRing;
 use serde::{Deserialize, Serialize};
 
 use crate::{
