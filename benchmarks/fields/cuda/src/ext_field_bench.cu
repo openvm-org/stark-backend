@@ -15,19 +15,19 @@
  */
 
 #include "fp.h"
-#include "fp4.h"
 #include "fpext.h"
-#include "fp5.h"
-#include "fp6.h"
-#include "fp2x3.h"
-#include "fp3x2.h"
-#include "kb.h"
-#include "kb5.h"
-#include "kb6.h"
-#include "kb2x3.h"
-#include "kb3x2.h"
-#include "gl.h"
-#include "gl3.h"
+#include "baby_bear/fp4.h"
+#include "baby_bear/fp5.h"
+#include "baby_bear/fp6.h"
+#include "baby_bear/fp2x3.h"
+#include "baby_bear/fp3x2.h"
+#include "koala_bear/kb.h"
+#include "koala_bear/kb5.h"
+#include "koala_bear/kb6.h"
+#include "koala_bear/kb2x3.h"
+#include "koala_bear/kb3x2.h"
+#include "goldilocks/gl.h"
+#include "goldilocks/gl3.h"
 
 // ============================================================================
 // Launch Configuration

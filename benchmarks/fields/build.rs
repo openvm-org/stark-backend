@@ -9,7 +9,7 @@ fn main() {
     }
     
     let builder = CudaBuilder::new()
-        .library_name("openvm_benchmarks_fields")
+        .library_name("ext_field_bench")
         .include_from_dep("DEP_CUDA_COMMON_INCLUDE")
         .include("cuda/include")
         .files_from_glob("cuda/src/*.cu");

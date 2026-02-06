@@ -6,6 +6,7 @@ CUDA-optimized finite field extensions for zero-knowledge proof systems.
 
 ### Run Verification Tests
 
+Run verification tests (10 individual field tests):
 ```bash
 cargo test
 ```
@@ -23,23 +24,31 @@ Note: Use debug mode for benchmarks (release mode has CUDA linking issues).
 ```
 benchmarks/fields/
 ├── src/
-│   ├── lib.rs              # Benchmark infrastructure and verification functions
+│   ├── lib.rs              # Benchmark infrastructure and FFI bindings
 │   └── bin/
 │       └── field_bench.rs  # Benchmark binary
 ├── tests/
-│   └── verification.rs     # Verification test
+│   └── verification.rs     # Individual verification tests (10 tests)
 ├── cuda/
 │   ├── src/                # CUDA kernel implementations
 │   │   ├── ext_field_bench.cu
 │   │   └── verification.cu
-│   └── include/            # Field extension headers
-│       ├── fp*.h           # Baby Bear extensions
-│       ├── kb*.h           # KoalaBear extensions
-│       ├── gl*.h           # Goldilocks extensions
-│       └── ff/             # Field primitives
+│   └── include/            # Field extension headers (organized by type)
+│       ├── baby_bear/      # Baby Bear extensions (fp4, fp5, fp6, fp2x3, fp3x2)
+│       ├── koala_bear/     # KoalaBear extensions (kb, kb5, kb6, kb2x3, kb3x2)
+│       ├── goldilocks/     # Goldilocks extensions (gl, gl3)
+│       └── ff/             # Field primitives (imported from cuda-common)
 ├── build.rs                # CUDA build configuration
 └── Cargo.toml
 ```
+
+### Verification Tests
+
+Each field has an individual test that verifies:
+- **Inversion**: `a * inv(a) = 1` for 1M random elements
+- **Distributivity**: `(a + b) * c = a*c + b*c` for 1M random elements
+
+Tests run in parallel and report precise failure counts on error.
 
 ---
 

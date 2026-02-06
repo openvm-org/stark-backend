@@ -25,7 +25,7 @@ extern "C" {
     fn inv_fp(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
     // BabyBear quartic extension (simple implementation)
-    fn init_fp4(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_fp4(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_fp4(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
@@ -36,52 +36,52 @@ extern "C" {
     fn mul_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_fpext(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
-    fn init_fp5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_fp5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_fp5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
-    fn init_fp6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_fp6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_fp6(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
-    fn init_fp2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_fp2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_fp2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
-    fn init_fp3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_fp3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_fp3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
     // KoalaBear base field
-    fn init_kb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_kb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_kb(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
     // KoalaBear quintic extension (x^5 + x + 4)
-    fn init_kb5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_kb5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_kb5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
     // KoalaBear sextic extension (x^6 + x^3 + 1)
-    fn init_kb6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_kb6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_kb6(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
     // KoalaBear 2×3 tower (u²=3, v³=1+u)
-    fn init_kb2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_kb2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_kb2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 
     // KoalaBear 3×2 tower (w³=-w-4, z²=3)
-    fn init_kb3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    pub fn init_kb3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
     fn add_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_kb3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
@@ -97,37 +97,6 @@ extern "C" {
     fn add_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn mul_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
     fn inv_gl3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
-
-    // Verification kernels
-    pub fn verify_inv_fp4(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_fp4(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_fp5(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_fp5(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_fp6(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_fp6(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_fp2x3(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_fp2x3(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_fp3x2(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_fp3x2(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_kb(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_kb(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_kb5(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_kb5(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_kb6(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_kb6(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_kb2x3(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_kb2x3(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
-
-    pub fn verify_inv_kb3x2(failures: *mut u32, a: *const c_void, n: usize) -> i32;
-    pub fn verify_distrib_kb3x2(failures: *mut u32, a: *const c_void, b: *const c_void, c: *const c_void, n: usize) -> i32;
 }
 
 /// Check CUDA return code, panic on error
@@ -768,103 +737,4 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
         a.bits.cmp(&b.bits).then_with(|| a.field_name.cmp(&b.field_name))
     });
     print_benchmark_tables(&all_results, &fp);
-}
-
-// ============================================================================
-// Verification
-// ============================================================================
-
-/// Generic verification function for extension fields
-pub fn verify_field(
-    field_name: &str,
-    n: usize,
-    elems_per_field: usize,
-    init_fn: unsafe extern "C" fn(*mut c_void, *const u32, usize) -> i32,
-    inv_fn: unsafe extern "C" fn(*mut u32, *const c_void, usize) -> i32,
-    distrib_fn: unsafe extern "C" fn(*mut u32, *const c_void, *const c_void, *const c_void, usize) -> i32,
-) -> bool {
-    use openvm_cuda_common::copy::MemCopyD2H;
-
-    println!("  Testing {}...", field_name);
-
-    // Create test data
-    let d_a = random_u32s(n * elems_per_field, 11111).to_device().unwrap();
-    let d_b = random_u32s(n * elems_per_field, 22222).to_device().unwrap();
-    let d_c = random_u32s(n * elems_per_field, 33333).to_device().unwrap();
-
-    // Initialize
-    cuda_check(unsafe { init_fn(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
-    cuda_check(unsafe { init_fn(d_b.as_mut_raw_ptr(), d_b.as_ptr(), n) });
-    cuda_check(unsafe { init_fn(d_c.as_mut_raw_ptr(), d_c.as_ptr(), n) });
-    sync();
-
-    // Test 1: a * inv(a) = 1
-    let d_failures = vec![0u32].to_device().unwrap();
-    cuda_check(unsafe { inv_fn(d_failures.as_mut_raw_ptr() as *mut u32, d_a.as_raw_ptr(), n) });
-    sync();
-    let inv_failures = d_failures.to_host().unwrap();
-
-    // Test 2: Distributivity
-    let d_failures2 = vec![0u32].to_device().unwrap();
-    cuda_check(unsafe { distrib_fn(
-        d_failures2.as_mut_raw_ptr() as *mut u32,
-        d_a.as_raw_ptr(), d_b.as_raw_ptr(), d_c.as_raw_ptr(), n
-    ) });
-    sync();
-    let distrib_failures = d_failures2.to_host().unwrap();
-
-    let passed = inv_failures[0] == 0 && distrib_failures[0] == 0;
-    println!("    Inversion: {} failures, Distributivity: {} failures -> {}",
-             inv_failures[0], distrib_failures[0], if passed { "PASSED" } else { "FAILED" });
-
-    passed
-}
-
-/// Verify all extension field implementations
-pub fn verify_all_fields(num_elements: usize) -> bool {
-    println!("=== Extension Field Verification ===");
-    println!("Testing {} elements per field...", num_elements);
-    println!();
-
-    let mut all_passed = true;
-
-    // Use existing benchmark init functions for initialization
-    all_passed &= verify_field("Fp4 (simple)", num_elements, 4,
-        init_fp4, verify_inv_fp4, verify_distrib_fp4);
-
-    all_passed &= verify_field("Fp5", num_elements, 5,
-        init_fp5, verify_inv_fp5, verify_distrib_fp5);
-
-    all_passed &= verify_field("Fp6", num_elements, 6,
-        init_fp6, verify_inv_fp6, verify_distrib_fp6);
-
-    all_passed &= verify_field("Fp2x3 (2×3 tower)", num_elements, 6,
-        init_fp2x3, verify_inv_fp2x3, verify_distrib_fp2x3);
-
-    all_passed &= verify_field("Fp3x2 (3×2 tower)", num_elements, 6,
-        init_fp3x2, verify_inv_fp3x2, verify_distrib_fp3x2);
-
-    println!();
-    println!("=== KoalaBear Fields ===");
-    println!();
-
-    all_passed &= verify_field("Kb (KoalaBear base)", num_elements, 1,
-        init_kb, verify_inv_kb, verify_distrib_kb);
-
-    all_passed &= verify_field("Kb5 (KoalaBear quintic)", num_elements, 5,
-        init_kb5, verify_inv_kb5, verify_distrib_kb5);
-
-    all_passed &= verify_field("Kb6 (KoalaBear sextic)", num_elements, 6,
-        init_kb6, verify_inv_kb6, verify_distrib_kb6);
-
-    all_passed &= verify_field("Kb2x3 (KoalaBear 2×3 tower)", num_elements, 6,
-        init_kb2x3, verify_inv_kb2x3, verify_distrib_kb2x3);
-
-    all_passed &= verify_field("Kb3x2 (KoalaBear 3×2 tower)", num_elements, 6,
-        init_kb3x2, verify_inv_kb3x2, verify_distrib_kb3x2);
-
-    println!();
-    println!("Overall: {}", if all_passed { "ALL PASSED" } else { "SOME FAILED" });
-
-    all_passed
 }
