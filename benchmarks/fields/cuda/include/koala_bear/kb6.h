@@ -30,7 +30,8 @@
  * This reduction requires only additions/subtractions (no multiplications by constants),
  * making it very efficient on CUDA.
  * 
- * Multiplication matrix for inversion uses Gaussian elimination: O(216) Kb operations.
+ * Inversion via Frobenius norm (Itoh-Tsujii): branchless, 3 Kb6 muls + 8 Kb muls + 1 Kb inv.
+ * Key insight: x^6+x^3+1 = Φ₉(x), so α^9=1 and all Frobenius maps cost zero multiplications.
  */
 
 #pragma once
@@ -301,120 +302,57 @@ __device__ inline Kb6 pow(Kb6 base, uint32_t exp) {
     return result;
 }
 
-/// Inversion using Gaussian elimination on the multiplication matrix.
-/// 
-/// For trinomial x^6 + x^3 + 1, the multiplication matrix is derived from
-/// computing a(x) * x^j mod f(x) for j = 0..5.
-/// 
-/// The matrix columns (coefficients of a*α^j) are:
-/// Col 0: [a0, a1, a2, a3, a4, a5]
-/// Col 1: [-a5, a0, a1, a2-a5, a3, a4]
-/// Col 2: [-a4, -a5, a0, a1-a4, a2-a5, a3]
-/// Col 3: [-a3, -a4, -a5, a0-a3, a1-a4, a2-a5]
-/// Col 4: [a5-a2, -a3, -a4, -a2, a0-a3, a1-a4]
-/// Col 5: [a4-a1, a5-a2, -a3, -a1, -a2, a0-a3]
+/// Inversion using Frobenius norm (Itoh-Tsujii algorithm).
+///
+/// x^6 + x^3 + 1 = Φ₉(x) (9th cyclotomic polynomial), so α^9 = 1.
+/// Since p ≡ 2 (mod 9), the Frobenius endomorphisms map α to:
+///   φ:  α → α^p = α²     φ²: α → α^{p²} = α⁴     φ³: α → α^{p³} = α⁸
+///
+/// All three Frobenius maps have only 0/±1 entries: ZERO multiplications each!
+///
+/// Chain: f1=φ(x), f2=φ²(x), c=f1*f2=x^{p+p²}, d=x*c=x^{1+p+p²},
+///        e=φ³(d)=x^{p³+p⁴+p⁵}, conj=c*e=x^{p+p²+p³+p⁴+p⁵}
+///        N(x)=x*conj ∈ F_p, x⁻¹ = conj / N(x)
+///
+/// Cost: 3 Kb6 muls + 8 Kb muls (partial norm) + 1 Kb inv + 6 Kb muls (scale)
 __device__ inline Kb6 inv(Kb6 x) {
-    // Handle zero case
-    if (x == Kb6::zero()) {
-        return Kb6::zero();
-    }
-    
-    const Kb* a = x.elems;
-    
-    // Build augmented matrix [M | I] for Gauss-Jordan elimination
-    Kb m[6][7];
-    
-    // Precompute some terms
-    Kb neg_a1 = Kb::zero() - a[1];
-    Kb neg_a2 = Kb::zero() - a[2];
-    Kb neg_a3 = Kb::zero() - a[3];
-    Kb neg_a4 = Kb::zero() - a[4];
-    Kb neg_a5 = Kb::zero() - a[5];
-    Kb a0_m_a3 = a[0] - a[3];
-    Kb a1_m_a4 = a[1] - a[4];
-    Kb a2_m_a5 = a[2] - a[5];
-    Kb a4_m_a1 = a[4] - a[1];
-    Kb a5_m_a2 = a[5] - a[2];
-    
-    // Col 0: [a0, a1, a2, a3, a4, a5]
-    m[0][0] = a[0]; m[1][0] = a[1]; m[2][0] = a[2];
-    m[3][0] = a[3]; m[4][0] = a[4]; m[5][0] = a[5];
-    
-    // Col 1: [-a5, a0, a1, a2-a5, a3, a4]
-    m[0][1] = neg_a5; m[1][1] = a[0]; m[2][1] = a[1];
-    m[3][1] = a2_m_a5; m[4][1] = a[3]; m[5][1] = a[4];
-    
-    // Col 2: [-a4, -a5, a0, a1-a4, a2-a5, a3]
-    m[0][2] = neg_a4; m[1][2] = neg_a5; m[2][2] = a[0];
-    m[3][2] = a1_m_a4; m[4][2] = a2_m_a5; m[5][2] = a[3];
-    
-    // Col 3: [-a3, -a4, -a5, a0-a3, a1-a4, a2-a5]
-    m[0][3] = neg_a3; m[1][3] = neg_a4; m[2][3] = neg_a5;
-    m[3][3] = a0_m_a3; m[4][3] = a1_m_a4; m[5][3] = a2_m_a5;
-    
-    // Col 4: [a5-a2, -a3, -a4, -a2, a0-a3, a1-a4]
-    m[0][4] = a5_m_a2; m[1][4] = neg_a3; m[2][4] = neg_a4;
-    m[3][4] = neg_a2; m[4][4] = a0_m_a3; m[5][4] = a1_m_a4;
-    
-    // Col 5: [a4-a1, a5-a2, -a3, -a1, -a2, a0-a3]
-    m[0][5] = a4_m_a1; m[1][5] = a5_m_a2; m[2][5] = neg_a3;
-    m[3][5] = neg_a1; m[4][5] = neg_a2; m[5][5] = a0_m_a3;
-    
-    // Augmented column (e0 = [1, 0, 0, 0, 0, 0])
-    m[0][6] = Kb::one();
-    m[1][6] = Kb::zero();
-    m[2][6] = Kb::zero();
-    m[3][6] = Kb::zero();
-    m[4][6] = Kb::zero();
-    m[5][6] = Kb::zero();
-    
-    // Gaussian elimination with partial pivoting
-    for (int col = 0; col < 6; col++) {
-        // Find first non-zero pivot
-        int pivot_row = col;
-        while (pivot_row < 6 && m[pivot_row][col] == Kb::zero()) {
-            pivot_row++;
-        }
-        
-        if (pivot_row >= 6) {
-            return Kb6::zero();  // Singular (shouldn't happen)
-        }
-        
-        // Find largest raw value for stability
-        for (int row = pivot_row + 1; row < 6; row++) {
-            if (m[row][col] != Kb::zero() && m[row][col].asRaw() > m[pivot_row][col].asRaw()) {
-                pivot_row = row;
-            }
-        }
-        
-        // Swap rows if needed
-        if (pivot_row != col) {
-            for (int j = 0; j < 7; j++) {
-                Kb tmp = m[col][j];
-                m[col][j] = m[pivot_row][j];
-                m[pivot_row][j] = tmp;
-            }
-        }
-        
-        // Scale pivot row
-        Kb pivot_inv = ::inv(m[col][col]);
-        for (int j = col; j < 7; j++) {
-            m[col][j] = m[col][j] * pivot_inv;
-        }
-        
-        // Eliminate column in other rows
-        for (int row = 0; row < 6; row++) {
-            if (row != col) {
-                Kb factor = m[row][col];
-                for (int j = col; j < 7; j++) {
-                    m[row][j] = m[row][j] - factor * m[col][j];
-                }
-            }
-        }
-    }
-    
-    // Result is in the augmented column
-    return Kb6(m[0][6], m[1][6], m[2][6], m[3][6], m[4][6], m[5][6]);
+    if (x == Kb6::zero()) { return Kb6::zero(); }
+
+    const Kb a0 = x[0], a1 = x[1], a2 = x[2];
+    const Kb a3 = x[3], a4 = x[4], a5 = x[5];
+    const Kb z = Kb::zero();
+
+    // φ(x): α^k → α^{2k mod 9}, then reduce mod (α^6 + α^3 + 1)
+    // Result: [a₀-a₃, a₅, a₁-a₄, -a₃, a₂, -a₄]
+    Kb6 f1(a0 - a3, a5, a1 - a4, z - a3, a2, z - a4);
+
+    // φ²(x): α^k → α^{4k mod 9}
+    // Result: [a₀, -a₄, a₅-a₂, a₃, a₁-a₄, -a₂]
+    Kb6 f2(a0, z - a4, a5 - a2, a3, a1 - a4, z - a2);
+
+    // c = f1 * f2 = x^{p+p²}
+    Kb6 c = f1 * f2;
+
+    // d = x * c = x^{1+p+p²}
+    Kb6 d = x * c;
+
+    // φ³(d): α^k → α^{8k mod 9}
+    // Result: [d₀-d₃, -d₂, -d₁, -d₃, d₅-d₂, d₄-d₁]
+    Kb6 e(d[0] - d[3], z - d[2], z - d[1], z - d[3], d[5] - d[2], d[4] - d[1]);
+
+    // conj = c * e = x^{p+p²+p³+p⁴+p⁵}
+    Kb6 conj = c * e;
+
+    // Partial norm: N(x) = x * conj ∈ F_p (only constant coefficient needed)
+    // From reduction rule: c₀ = t0 - t6 + t9
+    Kb t0 = x[0] * conj[0];
+    Kb t6 = x[1]*conj[5] + x[2]*conj[4] + x[3]*conj[3] + x[4]*conj[2] + x[5]*conj[1];
+    Kb t9 = x[4]*conj[5] + x[5]*conj[4];
+    Kb norm = t0 - t6 + t9;
+
+    // x⁻¹ = conj / N(x)
+    Kb norm_inv = ::inv(norm);
+    return conj * norm_inv;
 }
 
 static_assert(sizeof(Kb6) == 24, "Kb6 must be 24 bytes");

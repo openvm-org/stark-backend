@@ -193,9 +193,9 @@ P2 = A1 × B1    // 6 muls (Toom-2.5)
 P1 = (A0+A1) × (B0+B1) - P0 - P2  // 6 muls
 ```
 
-**Inversion**: Gaussian elimination (5×5 matrix)
+**Inversion**: Frobenius norm (Itoh-Tsujii, 1 Kb inversion, branchless)
 
-**Performance**: 89.7 Gops/s mul, 3.7 Gops/s inv
+**Performance**: 88.7 Gops/s mul, 11.9 Gops/s inv
 
 ### Kb6 (Sextic Extension)
 
@@ -211,9 +211,10 @@ P1 = A1 × B1    // 6 muls
 P2 = (A0+A1) × (B0+B1)  // 6 muls
 ```
 
-**Inversion**: Gaussian elimination (6×6 matrix)
+**Inversion**: Frobenius norm (Itoh-Tsujii, 1 Kb inversion, branchless)
+- Φ₉(x) cyclotomic polynomial: all Frobenius maps cost zero multiplications!
 
-**Performance**: 68.1 Gops/s mul, 2.2 Gops/s inv
+**Performance**: 68.7 Gops/s mul, 12.8 Gops/s inv
 
 ### Kb2x3 (2×3 Tower)
 
@@ -279,8 +280,8 @@ Kb6 = Kb3[z] / (z² - 3)      -- Karatsuba (3 muls)
 | Field | mul | inv | Notes |
 |-------|-----|-----|-------|
 | Kb (base) | 1869 | 45.5 | |
-| Kb5 | 81.6 | 3.7 | Karatsuba 2+3 |
-| Kb6 | 68.1 | 2.2 | Karatsuba 3+3 |
+| Kb5 | 88.7 | 11.9 | Karatsuba 2+3 + Frobenius inv |
+| Kb6 | 68.7 | 12.8 | Karatsuba 3+3 + Frobenius inv |
 | **Kb2x3** | **71.0** | **21.0** | **Best overall** |
 | Kb3x2 | 59.8 | 10.3 | Norm-based inv |
 
@@ -319,4 +320,6 @@ Kb6 = Kb3[z] / (z² - 3)      -- Karatsuba (3 muls)
 | Kb2x3 | Added mulByW optimization | 3 adds vs 4 muls |
 | Kb2x3 inv | Gaussian → adjugate | +6.4× |
 | Kb3 | Schoolbook → Toom-2.5 | +33% |
+| Kb5 inv | Gaussian → Frobenius norm | +3.2× |
+| Kb6 inv | Gaussian → Frobenius norm (zero-mul Frobenius!) | +5.8× |
 | Kb3x2 | Added Karatsuba + norm inversion | +31% mul, 4.6× inv |

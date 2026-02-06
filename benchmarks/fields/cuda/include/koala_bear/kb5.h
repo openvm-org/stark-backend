@@ -22,7 +22,7 @@
  *   r3 = c3 - c6 + c8
  *   r4 = c4 - c7
  *
- * Inversion via Gaussian elimination: O(125) Kb operations.
+ * Inversion via Frobenius norm: branchless, ~101 Kb muls + 1 Kb inv.
  */
 
 #pragma once
@@ -294,118 +294,85 @@ __device__ inline Kb5 pow(Kb5 base, uint32_t exp) {
     return result;
 }
 
-/// Inversion using Gaussian elimination on the multiplication matrix.
+/// Apply a precomputed Frobenius matrix to a Kb5 element.
 ///
-/// For trinomial x^5 + x^2 - 1, we need to compute the multiplication matrix.
-/// α^5 = -α^2 + 1 gives us a cleaner structure than x^5 + x + 4.
+/// The matrix FROB[5][4] stores columns 1-4 of the Frobenius matrix in Montgomery form.
+/// Column 0 is always [1,0,0,0,0] (Frobenius fixes F_p).
+///
+/// result[i] = (i==0 ? a[0] : 0) + sum_{j=0}^{3} a[j+1] * FROB[i][j]
+__device__ static inline Kb5 applyFrob(const Kb5& a, const uint32_t FROB[5][4]) {
+    const Kb a1 = a.elems[1], a2 = a.elems[2], a3 = a.elems[3], a4 = a.elems[4];
+    return Kb5(
+        a.elems[0]
+            + a1 * Kb::fromRaw(FROB[0][0]) + a2 * Kb::fromRaw(FROB[0][1])
+            + a3 * Kb::fromRaw(FROB[0][2]) + a4 * Kb::fromRaw(FROB[0][3]),
+        a1 * Kb::fromRaw(FROB[1][0]) + a2 * Kb::fromRaw(FROB[1][1])
+            + a3 * Kb::fromRaw(FROB[1][2]) + a4 * Kb::fromRaw(FROB[1][3]),
+        a1 * Kb::fromRaw(FROB[2][0]) + a2 * Kb::fromRaw(FROB[2][1])
+            + a3 * Kb::fromRaw(FROB[2][2]) + a4 * Kb::fromRaw(FROB[2][3]),
+        a1 * Kb::fromRaw(FROB[3][0]) + a2 * Kb::fromRaw(FROB[3][1])
+            + a3 * Kb::fromRaw(FROB[3][2]) + a4 * Kb::fromRaw(FROB[3][3]),
+        a1 * Kb::fromRaw(FROB[4][0]) + a2 * Kb::fromRaw(FROB[4][1])
+            + a3 * Kb::fromRaw(FROB[4][2]) + a4 * Kb::fromRaw(FROB[4][3])
+    );
+}
+
+/// Inversion using Frobenius-based norm computation.
+///
+/// For a in Kb5, the norm N(a) = a * φ(a) * φ²(a) * φ³(a) * φ⁴(a) lies in F_p.
+/// Then a⁻¹ = φ(a) * φ²(a) * φ³(a) * φ⁴(a) / N(a).
+///
+/// Uses Itoh-Tsujii chain to minimize Kb5 multiplications:
+///   f1 = φ(a), f2 = φ²(a), f12 = f1*f2, f34 = φ²(f12), conj = f12*f34
+///
+/// Cost: 3 Frobenius (60 Kb muls) + 2 Kb5 muls (30) + partial mul (6) + 1 Kb inv + 5 Kb muls
+/// Total: ~101 Kb muls + 1 Kb inv, completely branchless.
 __device__ inline Kb5 inv(Kb5 x) {
-    // Handle zero case
     if (x == Kb5::zero()) {
         return Kb5::zero();
     }
 
-    const Kb* a = x.elems;
-    // Build augmented matrix [M | I] for Gauss-Jordan elimination
-    // M is the multiplication matrix, I is identity
-    // We'll solve M * result = e0 = (1, 0, 0, 0, 0)
+    // Frobenius matrix φ: x → x^p (Montgomery form)
+    // FROB1[i][j] = coefficient of α^i in α^{(j+1)*p}
+    // Precomputed for p = 2^31 - 2^24 + 1, f(x) = x^5 + x^2 - 1
+    static constexpr uint32_t FROB1[5][4] = {
+        {0x2D993495, 0x0A1C252C, 0x35FCAE15, 0x291099B3},
+        {0x0E0C91E5, 0x46D57E39, 0x182D4E41, 0x3A76433C},
+        {0x21A60922, 0x30149A86, 0x4C4C1CDF, 0x21B1646D},
+        {0x4BFF57A3, 0x3B2EE89F, 0x074FCCCB, 0x6EC65580},
+        {0x41B550BE, 0x3181252B, 0x4A813FF9, 0x378F06CD},
+    };
 
-    // Matrix storage: m[row][col], augmented with result column
-    Kb m[5][6];
+    // Frobenius matrix φ²: x → x^{p²} (Montgomery form)
+    // FROB2[i][j] = coefficient of α^i in α^{(j+1)*p²}
+    static constexpr uint32_t FROB2[5][4] = {
+        {0x2F967F25, 0x3A5B7141, 0x05199BB2, 0x0A6625F2},
+        {0x6D4725A6, 0x1CB6B2DE, 0x6151534A, 0x63ACAB5B},
+        {0x054D8645, 0x1D3EEBA6, 0x4CAAF8D4, 0x012C3E01},
+        {0x24FAD3E8, 0x61431217, 0x0A80037C, 0x65FF9494},
+        {0x21DCD21A, 0x00F7BF69, 0x5D72C28F, 0x66F9EB3C},
+    };
 
-    // For x^5 + x^2 - 1 (α^5 = -α^2 + 1), compute columns for a*α^j:
-    // Column 0 (a*1): [a0, a1, a2, a3, a4]
-    // Column 1 (a*α): multiply by α, use α^5 = -α^2 + 1
-    // Column 2 (a*α^2): multiply by α^2
-    // Column 3 (a*α^3): multiply by α^3
-    // Column 4 (a*α^4): multiply by α^4
+    // Itoh-Tsujii chain: compute conj = x^{p + p² + p³ + p⁴}
+    Kb5 f1 = applyFrob(x, FROB1);    // x^p
+    Kb5 f2 = applyFrob(x, FROB2);    // x^{p²}
+    Kb5 f12 = f1 * f2;               // x^{p + p²}
+    Kb5 f34 = applyFrob(f12, FROB2); // x^{p³ + p⁴}  (φ² applied to x^{p+p²})
+    Kb5 conj = f12 * f34;            // x^{p + p² + p³ + p⁴}
 
-    // Row 0 (coefficient of α^0)
-    m[0][0] = a[0];  // from a*1
-    m[0][1] = a[4];  // from a*α: a4*α^5 = a4*(-α^2+1) contributes a4 to constant term
-    m[0][2] = a[3];  // from a*α^2: a3*α^5 contributes a3
-    m[0][3] = a[2];  // from a*α^3: a2*α^5 contributes a2
-    m[0][4] = a[1] - a[4];  // from a*α^4: a1*α^5 - a4*α^8, where α^8 = α^3+α^2-1 contributes -a4
-    m[0][5] = Kb::one();
+    // Compute norm: N(x) = constant coefficient of x * conj (norm is in F_p)
+    // Using reduction rule α^5 = -α^2 + 1:
+    //   c0 = t0 + t5 - t8
+    //   t0 = x[0]*conj[0]
+    //   t5 = x[1]*conj[4] + x[2]*conj[3] + x[3]*conj[2] + x[4]*conj[1]
+    //   t8 = x[4]*conj[4]
+    Kb norm = x[0]*conj[0]
+            + x[1]*conj[4] + x[2]*conj[3] + x[3]*conj[2] + x[4]*conj[1]
+            - x[4]*conj[4];
 
-    // Row 1 (coefficient of α^1)
-    m[1][0] = a[1];  // from a*1
-    m[1][1] = a[0];  // from a*α: a0*α
-    m[1][2] = a[4];  // from a*α^2: a4*α^6 = a4*(-α^3+α) contributes a4 to α^1
-    m[1][3] = a[3];  // from a*α^3: a3*α^6 contributes a3
-    m[1][4] = a[2];  // from a*α^4: a2*α^6 contributes a2
-    m[1][5] = Kb::zero();
-
-    // Row 2 (coefficient of α^2)
-    m[2][0] = a[2];  // from a*1
-    m[2][1] = a[1] - a[4];  // from a*α: a1*α^2 + a4*α^5, α^5 = -α^2+1 contributes -a4 to α^2
-    m[2][2] = a[0] - a[3];  // from a*α^2: a0*α^2 + a3*α^5 contributes -a3 to α^2
-    m[2][3] = a[4] - a[2];  // from a*α^3: a4*α^7 = a4*(-α^4+α^2), a2*α^5 = a2*(-α^2+1)
-    m[2][4] = a[3] + a[4] - a[1];  // from a*α^4: complex term from α^8
-    m[2][5] = Kb::zero();
-
-    // Row 3 (coefficient of α^3)
-    m[3][0] = a[3];  // from a*1
-    m[3][1] = a[2];  // from a*α: a2*α^3
-    m[3][2] = a[1] - a[4];  // from a*α^2: a1*α^3 + a4*α^6, α^6 = -α^3+α contributes -a4
-    m[3][3] = a[0] - a[3];  // from a*α^3: a0*α^3 + a3*α^6 contributes -a3
-    m[3][4] = a[4] - a[2];  // from a*α^4: a4*α^7+a2*α^5 where α^7 = -α^4+α^2, α^8 contributes
-    m[3][5] = Kb::zero();
-
-    // Row 4 (coefficient of α^4)
-    m[4][0] = a[4];  // from a*1
-    m[4][1] = a[3];  // from a*α: a3*α^4
-    m[4][2] = a[2];  // from a*α^2: a2*α^4
-    m[4][3] = a[1] - a[4];  // from a*α^3: a1*α^4 + a4*α^7, α^7 = -α^4+α^2 contributes -a4
-    m[4][4] = a[0] - a[3];  // from a*α^4: a0*α^4 + a3*α^7 contributes -a3
-    m[4][5] = Kb::zero();
-
-    // Gaussian elimination with partial pivoting
-    for (int col = 0; col < 5; col++) {
-        // Find pivot
-        int pivot_row = col;
-        while (pivot_row < 5 && m[pivot_row][col] == Kb::zero()) {
-            pivot_row++;
-        }
-
-        if (pivot_row >= 5) {
-            return Kb5::zero();
-        }
-
-        // Pick best pivot for stability
-        for (int row = pivot_row + 1; row < 5; row++) {
-            if (m[row][col] != Kb::zero() && m[row][col].asRaw() > m[pivot_row][col].asRaw()) {
-                pivot_row = row;
-            }
-        }
-
-        // Swap rows
-        if (pivot_row != col) {
-            for (int j = 0; j < 6; j++) {
-                Kb tmp = m[col][j];
-                m[col][j] = m[pivot_row][j];
-                m[pivot_row][j] = tmp;
-            }
-        }
-
-        // Scale pivot row
-        Kb pivot_inv = ::inv(m[col][col]);
-        for (int j = col; j < 6; j++) {
-            m[col][j] = m[col][j] * pivot_inv;
-        }
-
-        // Eliminate column in other rows
-        for (int row = 0; row < 5; row++) {
-            if (row != col) {
-                Kb factor = m[row][col];
-                for (int j = col; j < 6; j++) {
-                    m[row][j] = m[row][j] - factor * m[col][j];
-                }
-            }
-        }
-    }
-
-    // Result is in the augmented column
-    return Kb5(m[0][5], m[1][5], m[2][5], m[3][5], m[4][5]);
+    // a⁻¹ = conj * N(a)⁻¹
+    Kb norm_inv = ::inv(norm);
+    return conj * norm_inv;
 }
 
 static_assert(sizeof(Kb5) == 20, "Kb5 must be 20 bytes");
