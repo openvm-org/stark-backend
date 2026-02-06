@@ -248,7 +248,6 @@ impl AirKeygenBuilderV2 {
             num_public_values,
             need_rot,
         };
-        // Deprecated in v2:
         assert!(vparams.width.after_challenge.is_empty());
 
         let unused_variables = find_unused_vars(&dag, &vparams.width, need_rot);

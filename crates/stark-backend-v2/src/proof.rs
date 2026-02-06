@@ -86,8 +86,14 @@ pub struct BatchConstraintProof {
     /// Per AIR **in sorted AIR order**, per AIR part, per column index in that part, openings for
     /// the prismalinear column polynomial and (optionally) its rotational convolution. All column
     /// openings are stored in a flat way, so only column openings or them interleaved with
-    /// rotations. The trace parts are ordered: [CommonMain (part 0), Preprocessed (if any),
-    /// Cached(0), Cached(1), ...]
+    /// rotations.
+    /// For example, if the rotated claims are included for a trace part, then the corresponding
+    /// list of openings will look like [col_1, rot_1, col_2, rot_2, ...], and should be treated
+    /// as "the i-th column's plain and rotated claims are (col_i, rot_i)".
+    /// Otherwise, it will look like [col_1, col_2, col_3, ...], and should be treated as "the
+    /// i-th column's plain and rotated claims are (col_i, 0)".
+    /// The trace parts are ordered: [CommonMain (part 0), Preprocessed (if any), Cached(0),
+    /// Cached(1), ...]
     pub column_openings: Vec<Vec<Vec<EF>>>,
 }
 
