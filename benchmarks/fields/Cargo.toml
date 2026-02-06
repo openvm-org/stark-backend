@@ -1,0 +1,14 @@
+[package]
+name = "openvm-benchmarks-fields"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "field_bench"
+path = "src/bin/field_bench.rs"
+
+[dependencies]
+openvm-cuda-common = { path = "../../crates/cuda-common" }
+
+[build-dependencies]
+openvm-cuda-builder = { path = "../../crates/cuda-builder" }

@@ -1,4 +1,3 @@
-pub mod benchmark;
 pub mod common;
 pub mod copy;
 pub mod d_buffer;

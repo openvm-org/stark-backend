@@ -8,7 +8,7 @@ repository = "https://github.com/openvm-org/"
 license = "MIT OR Apache-2.0"
 
 [workspace]
-members = ["crates/stark-backend", "crates/stark-sdk", "crates/cuda-common", "crates/cuda-backend", "crates/cuda-builder"]
+members = ["crates/stark-backend", "crates/stark-sdk", "crates/cuda-common", "crates/cuda-backend", "crates/cuda-builder", "benchmarks/fields"]
 # Only these build by default
 default-members = ["crates/stark-backend", "crates/stark-sdk"]
 resolver = "2"

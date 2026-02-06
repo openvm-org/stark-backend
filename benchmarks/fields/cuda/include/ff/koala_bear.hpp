@@ -19,7 +19,7 @@
 
 #ifdef __CUDACC__
 # include <cassert>
-# include "mont32_t.cuh"
+# include "ff/mont32_t.cuh"
 # define inline __device__ __forceinline__
 
 using kb31_base = mont32_t<31, 0x7F000001, 0x7EFFFFFF, 0x17F7EFE4, 0x01FFFFFE>;

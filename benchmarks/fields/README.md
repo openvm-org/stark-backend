@@ -1,6 +1,49 @@
-# Extension Fields for CUDA
+# Field Benchmarks
 
 CUDA-optimized finite field extensions for zero-knowledge proof systems.
+
+## Usage
+
+### Run Verification Tests
+
+```bash
+cargo test
+```
+
+### Run Benchmark
+
+```bash
+cargo run --bin field_bench
+```
+
+Note: Use debug mode for benchmarks (release mode has CUDA linking issues).
+
+## Structure
+
+```
+benchmarks/fields/
+├── src/
+│   ├── lib.rs              # Benchmark infrastructure and verification functions
+│   └── bin/
+│       └── field_bench.rs  # Benchmark binary
+├── tests/
+│   └── verification.rs     # Verification test
+├── cuda/
+│   ├── src/                # CUDA kernel implementations
+│   │   ├── ext_field_bench.cu
+│   │   └── verification.cu
+│   └── include/            # Field extension headers
+│       ├── fp*.h           # Baby Bear extensions
+│       ├── kb*.h           # KoalaBear extensions
+│       ├── gl*.h           # Goldilocks extensions
+│       └── ff/             # Field primitives
+├── build.rs                # CUDA build configuration
+└── Cargo.toml
+```
+
+---
+
+# Extension Fields for CUDA
 
 ## Table of Contents
 
