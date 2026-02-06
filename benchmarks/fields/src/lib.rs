@@ -99,6 +99,15 @@ extern "C" {
     fn inv_gl3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
 }
 
+// Poseidon2 benchmark kernels
+#[link(name = "ext_field_bench")]
+extern "C" {
+    fn init_poseidon2_bb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn run_poseidon2_bb(states: *mut c_void, n: usize, reps: i32) -> i32;
+    fn init_poseidon2_kb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
+    fn run_poseidon2_kb(states: *mut c_void, n: usize, reps: i32) -> i32;
+}
+
 /// Check CUDA return code, panic on error
 pub fn cuda_check(code: i32) {
     assert!(code == 0, "CUDA error: {}", code);
@@ -700,6 +709,63 @@ pub fn bench_gl3(config: &BenchConfig) -> FieldBenchResult {
     FieldBenchResult { field_name: "Gl3".into(), bits: 192, u32s_per_element: 6, init, add, mul, inv }
 }
 
+// ============================================================================
+// Poseidon2 Benchmark
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct Poseidon2BenchResult {
+    pub name: String,
+    pub avg_time_ms: f64,
+    pub throughput_gops: f64,
+}
+
+pub fn bench_poseidon2_bb(config: &BenchConfig) -> Poseidon2BenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+
+    // 16 u32s per poseidon2 state
+    let d_states = random_u32s(n * 16, 55555).to_device().unwrap();
+
+    // Initialize: raw u32 -> Fp field elements
+    cuda_check(unsafe { init_poseidon2_bb(d_states.as_mut_raw_ptr(), d_states.as_ptr(), n) });
+    sync();
+
+    let ops = n as u64 * reps as u64;
+    let result = measure(config, ops, || {
+        cuda_check(unsafe { run_poseidon2_bb(d_states.as_mut_raw_ptr(), n, reps) });
+    });
+
+    Poseidon2BenchResult {
+        name: "BB Poseidon2".into(),
+        avg_time_ms: result.avg_time_ms,
+        throughput_gops: result.throughput_gops,
+    }
+}
+
+pub fn bench_poseidon2_kb(config: &BenchConfig) -> Poseidon2BenchResult {
+    let n = config.num_elements;
+    let reps = config.ops_per_element;
+
+    // 16 u32s per poseidon2 state
+    let d_states = random_u32s(n * 16, 66666).to_device().unwrap();
+
+    // Initialize: raw u32 -> Kb field elements
+    cuda_check(unsafe { init_poseidon2_kb(d_states.as_mut_raw_ptr(), d_states.as_ptr(), n) });
+    sync();
+
+    let ops = n as u64 * reps as u64;
+    let result = measure(config, ops, || {
+        cuda_check(unsafe { run_poseidon2_kb(d_states.as_mut_raw_ptr(), n, reps) });
+    });
+
+    Poseidon2BenchResult {
+        name: "KB Poseidon2".into(),
+        avg_time_ms: result.avg_time_ms,
+        throughput_gops: result.throughput_gops,
+    }
+}
+
 pub fn run_all_benchmarks(config: &BenchConfig) {
     println!("=== Extension Field Benchmark ===");
     println!();
@@ -737,4 +803,19 @@ pub fn run_all_benchmarks(config: &BenchConfig) {
         a.bits.cmp(&b.bits).then_with(|| a.field_name.cmp(&b.field_name))
     });
     print_benchmark_tables(&all_results, &fp);
+
+    // Poseidon2 benchmarks
+    println!("### Poseidon2 Permutation");
+    println!();
+    let p2_bb = bench_poseidon2_bb(config);
+    let p2_kb = bench_poseidon2_kb(config);
+    println!("| {:15} | {:>10} | {:>12} |", "Permutation", "Time (ms)", "Gops/s");
+    println!("|{:-<17}|{:-<12}|{:-<14}|", "", "", "");
+    println!("| {:15} | {:>10.3} | {:>12.1} |", p2_bb.name, p2_bb.avg_time_ms, p2_bb.throughput_gops);
+    println!("| {:15} | {:>10.3} | {:>12.1} |", p2_kb.name, p2_kb.avg_time_ms, p2_kb.throughput_gops);
+    if p2_bb.throughput_gops > 0.0 {
+        println!();
+        println!("KB/BB speedup: {:.2}x", p2_kb.throughput_gops / p2_bb.throughput_gops);
+    }
+    println!();
 }

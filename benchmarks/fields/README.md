@@ -31,10 +31,11 @@ benchmarks/fields/
 ├── cuda/
 │   ├── src/                # CUDA kernel implementations
 │   │   ├── ext_field_bench.cu
+│   │   ├── poseidon2_bench.cu
 │   │   └── verification.cu
 │   └── include/            # Field extension headers (organized by type)
 │       ├── baby_bear/      # Baby Bear extensions (fp4, fp5, fp6, fp2x3, fp3x2)
-│       ├── koala_bear/     # KoalaBear extensions (kb, kb5, kb6, kb2x3, kb3x2)
+│       ├── koala_bear/     # KoalaBear extensions (kb, kb5, kb6, kb2x3, kb3x2, poseidon2_kb)
 │       ├── goldilocks/     # Goldilocks extensions (gl, gl3)
 │       └── ff/             # Field primitives (imported from cuda-common)
 ├── build.rs                # CUDA build configuration
@@ -302,6 +303,25 @@ Kb6 = Kb3[z] / (z² - 3)      -- Karatsuba (3 muls)
 | **Multiplication-heavy** | Fp3x2 (83.9 Gops/s) | Kb2x3 (71.8 Gops/s) |
 | **Inversion-heavy** | Fp3x2 (25.9 Gops/s) | Kb2x3 (21.1 Gops/s) |
 | **Simple code** | Direct Fp6 | Direct Kb6 |
+
+---
+
+## KoalaBear Poseidon2
+
+KoalaBear Poseidon2 implementation in `koala_bear/poseidon2_kb.cuh`.
+
+Key differences from BabyBear:
+- **S-box**: x^3 (2 muls) vs x^7 (4 muls) — gcd(3, p-1) = 1 for KoalaBear
+- **Partial rounds**: 20 vs 13
+- **S-box mul count**: BB = 8×16×4 + 13×4 = 564, KB = 8×16×2 + 20×2 = 296 (47% fewer)
+- **Constants**: From Plonky3 `p3-koala-bear` crate
+
+| Permutation | Gops/s | Speedup |
+|---|---|---|
+| BB Poseidon2 (x^7, 13 partial) | 2.0 | — |
+| KB Poseidon2 (x^3, 20 partial) | 2.2 | 1.11× |
+
+Both kernels are fully ALU-bound (60-66% ALU utilization, <0.2% memory busy).
 
 ---
 
