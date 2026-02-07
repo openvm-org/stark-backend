@@ -261,6 +261,7 @@ mod tests {
         setup_tracing();
         let proof = GkrProof {
             logup_pow_witness: F::ZERO,
+            tensor_logup: None,
             q0_claim: EF::ONE,
             claims_per_layer: vec![],
             sumcheck_polys: vec![],
@@ -284,6 +285,7 @@ mod tests {
 
         let proof2 = GkrProof {
             logup_pow_witness: F::ZERO,
+            tensor_logup: None,
             q0_claim: EF::ONE,
             claims_per_layer: vec![layer_claims.clone(), layer_claims],
             sumcheck_polys: vec![],
@@ -311,6 +313,7 @@ mod tests {
         // p0 = 1*4 + 2*3 = 10 (non-zero)
         let proof = GkrProof {
             logup_pow_witness: F::ZERO,
+            tensor_logup: None,
             q0_claim: EF::from_u64(12), // q0 = 3*4 = 12
             claims_per_layer: vec![layer1_claims],
             sumcheck_polys: vec![],
@@ -344,6 +347,7 @@ mod tests {
 
         let gkr_proof = GkrProof {
             logup_pow_witness: F::ZERO,
+            tensor_logup: None,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
             sumcheck_polys: frac_proof.sumcheck_polys,
@@ -390,6 +394,7 @@ mod tests {
 
         let gkr_proof = GkrProof {
             logup_pow_witness: F::ZERO,
+            tensor_logup: None,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
             sumcheck_polys: frac_proof.sumcheck_polys,
@@ -452,6 +457,7 @@ mod tests {
 
         let gkr_proof = GkrProof {
             logup_pow_witness: F::ZERO,
+            tensor_logup: None,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
             sumcheck_polys: frac_proof.sumcheck_polys,
@@ -490,6 +496,7 @@ mod tests {
 
         let gkr_proof = GkrProof {
             logup_pow_witness: F::ZERO,
+            tensor_logup: None,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
             sumcheck_polys: frac_proof.sumcheck_polys,
@@ -518,6 +525,7 @@ mod tests {
 
         let gkr_proof = GkrProof {
             logup_pow_witness: F::ZERO,
+            tensor_logup: None,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
             sumcheck_polys: frac_proof.sumcheck_polys,

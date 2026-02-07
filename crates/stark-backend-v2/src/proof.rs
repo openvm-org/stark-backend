@@ -46,6 +46,8 @@ pub struct GkrProof {
     // TODO[jpw]: I'm not sure this is concepturally the place to put it, but recursion gkr module
     // samples alpha,beta
     pub logup_pow_witness: F,
+    /// Tensor-logup metadata. Present iff tensor logup mode is enabled.
+    pub tensor_logup: Option<TensorLogupProof>,
     /// The denominator of the root layer.
     ///
     /// Note that the numerator claim is always zero, so we don't include it in
@@ -58,6 +60,13 @@ pub struct GkrProof {
     /// The sumcheck polynomials for each layer, for each sumcheck round, given by their
     /// evaluations on {1, 2, 3}.
     pub sumcheck_polys: Vec<Vec<[EF; 3]>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+pub struct TensorLogupProof {
+    pub running_sum_commit: Digest,
+    pub v_curr: EF,
+    pub v_prev: EF,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
@@ -132,7 +141,7 @@ pub struct WhirProof {
 
 /// Codec version should change only when proof system or proof format changes.
 /// It does correspond to the main openvm version (which may change more frequently).
-pub(crate) const CODEC_VERSION: u32 = 2;
+pub(crate) const CODEC_VERSION: u32 = 3;
 
 // TODO: custom encode/decode for Proof that takes in a vk
 impl Encode for Proof {
@@ -167,6 +176,10 @@ impl Encode for Proof {
 impl Encode for GkrProof {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         self.logup_pow_witness.encode(writer)?;
+        self.tensor_logup.is_some().encode(writer)?;
+        if let Some(tensor_logup) = &self.tensor_logup {
+            tensor_logup.encode(writer)?;
+        }
         self.q0_claim.encode(writer)?;
         self.claims_per_layer.encode(writer)?;
         // We should know the length of sumcheck_polys and each nested vector based
@@ -347,6 +360,10 @@ impl Decode for Proof {
 impl Decode for GkrProof {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let logup_pow_witness = F::decode(reader)?;
+        let has_tensor_logup = bool::decode(reader)?;
+        let tensor_logup = has_tensor_logup
+            .then(|| TensorLogupProof::decode(reader))
+            .transpose()?;
         let q0_claim = EF::decode(reader)?;
         let claims_per_layer = Vec::<GkrLayerClaims>::decode(reader)?;
 
@@ -358,6 +375,7 @@ impl Decode for GkrProof {
 
         Ok(Self {
             logup_pow_witness,
+            tensor_logup,
             q0_claim,
             claims_per_layer,
             sumcheck_polys,
@@ -505,6 +523,7 @@ impl Decode for WhirProof {
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
+    use test_case::test_case;
 
     use super::*;
     use crate::{
@@ -513,7 +532,7 @@ mod tests {
             test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
             PreprocessedFibFixture, TestFixture,
         },
-        BabyBearPoseidon2CpuEngineV2, SystemParams,
+        BabyBearPoseidon2CpuEngineV2, LogupMode, SystemParams,
     };
 
     fn test_proof_encode_decode<Fx: TestFixture>(fx: Fx, params: SystemParams) -> Result<()> {
@@ -541,6 +560,17 @@ mod tests {
     fn test_interactions_proof_encode_decode() -> Result<()> {
         let fx = InteractionsFixture11;
         let params = test_system_params_small(2, 5, 3);
+        test_proof_encode_decode(fx, params)
+    }
+
+    #[test_case(0)]
+    #[test_case(1)]
+    #[test_case(3)]
+    #[test_case(16 ; "with large n_grid clamped")]
+    fn test_tensor_interactions_proof_encode_decode(n_grid: usize) -> Result<()> {
+        let fx = InteractionsFixture11;
+        let mut params = test_system_params_small(2, 5, 3);
+        params.logup_mode = LogupMode::Tensor { n_grid };
         test_proof_encode_decode(fx, params)
     }
 

@@ -380,7 +380,7 @@ mod tests {
         },
         test_utils::{test_whir_config_small, DuplexSpongeValidator, FibFixture, TestFixture},
         verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
-        WhirConfig, WhirRoundConfig, EF, F,
+        LogupMode, WhirConfig, WhirRoundConfig, EF, F,
     };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
@@ -517,6 +517,7 @@ mod tests {
             log_blowup,
             whir,
             logup: log_up_security_params_baby_bear_100_bits(),
+            logup_mode: LogupMode::Classic,
             max_constraint_degree: 3,
         };
         run_whir_fib_test(params)
@@ -583,6 +584,7 @@ mod tests {
             log_blowup: 1,
             whir: whir_test_config(2),
             logup: log_up_security_params_baby_bear_100_bits(),
+            logup_mode: LogupMode::Classic,
             max_constraint_degree: 3,
         };
 
@@ -657,6 +659,7 @@ mod tests {
             log_blowup: 1,
             whir: whir_test_config(2),
             logup: log_up_security_params_baby_bear_100_bits(),
+            logup_mode: LogupMode::Classic,
             max_constraint_degree: 3,
         };
 

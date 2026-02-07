@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     calculate_n_logup, keygen::types::MultiStarkVerifyingKey0V2, proof::Proof,
-    prover::stacked_pcs::StackedLayout,
+    prover::stacked_pcs::StackedLayout, LogupMode,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -79,6 +79,10 @@ pub enum ProofShapeVDataError {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum GkrProofShapeError {
+    #[error("tensor_logup should be present in tensor mode")]
+    MissingTensorLogup,
+    #[error("tensor_logup should be absent in classic mode")]
+    UnexpectedTensorLogup,
     #[error(
         "claims_per_layer should have num_gkr_rounds = {expected} claims, but it has {actual}"
     )]
@@ -385,6 +389,19 @@ pub fn verify_proof_shape(
     } else {
         l_skip + n_logup
     };
+
+    match mvk.params.logup_mode {
+        LogupMode::Classic => {
+            if proof.gkr_proof.tensor_logup.is_some() {
+                return ProofShapeError::invalid_gkr(GkrProofShapeError::UnexpectedTensorLogup);
+            }
+        }
+        LogupMode::Tensor { .. } => {
+            if proof.gkr_proof.tensor_logup.is_none() {
+                return ProofShapeError::invalid_gkr(GkrProofShapeError::MissingTensorLogup);
+            }
+        }
+    }
 
     if proof.gkr_proof.claims_per_layer.len() != num_gkr_rounds {
         return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidClaimsPerLayer {

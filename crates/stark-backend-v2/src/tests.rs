@@ -32,7 +32,8 @@ use crate::{
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
     },
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirRoundConfig, F,
+    BabyBearPoseidon2CpuEngineV2, LogupMode, StarkEngineV2, SystemParams, WhirConfig,
+    WhirRoundConfig, F,
 };
 
 #[test]
@@ -130,6 +131,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
             log_blowup,
             whir,
             logup: log_up_security_params_baby_bear_100_bits(),
+            logup_mode: LogupMode::Classic,
             max_constraint_degree: 3,
         };
         let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
@@ -137,6 +139,76 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
         verify_proof_shape(&vk.inner, &proof)?;
     }
     Ok(())
+}
+
+#[test]
+fn test_classic_mode_has_no_tensor_logup_data() {
+    setup_tracing();
+    let params = test_system_params_small(2, 8, 3);
+    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let fx = InteractionsFixture11;
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    assert!(proof.gkr_proof.tensor_logup.is_none());
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test]
+fn test_tensor_mode_has_tensor_logup_data() {
+    setup_tracing();
+    let mut params = test_system_params_small(2, 8, 3);
+    params.logup_mode = LogupMode::Tensor { n_grid: 3 };
+    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let fx = InteractionsFixture11;
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    assert!(proof.gkr_proof.tensor_logup.is_some());
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test_case(0)]
+#[test_case(1)]
+#[test_case(2)]
+#[test_case(3)]
+#[test_case(8 ; "with runtime clamp at n_stack")]
+#[test_case(32 ; "with large n_grid clamped")]
+fn test_tensor_mode_interactions_n_grid_variants(n_grid: usize) {
+    setup_tracing();
+    let mut params = test_system_params_small(2, 8, 3);
+    params.logup_mode = LogupMode::Tensor { n_grid };
+    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let fx = InteractionsFixture11;
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    assert!(proof.gkr_proof.tensor_logup.is_some());
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test]
+fn test_tensor_mode_zero_interactions_clamped() {
+    setup_tracing();
+    let mut params = test_system_params_small(2, 8, 3);
+    params.logup_mode = LogupMode::Tensor { n_grid: 8 };
+    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let fx = FibFixture::new(0, 1, 1 << 2);
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    let tensor = proof.gkr_proof.tensor_logup.as_ref().unwrap();
+    assert_eq!(tensor.v_curr, tensor.v_prev);
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test_case(0)]
+#[test_case(1)]
+#[test_case(2)]
+#[test_case(8)]
+#[test_case(64 ; "with large n_grid clamped")]
+fn test_tensor_mode_zero_interactions_n_grid_variants(n_grid: usize) {
+    setup_tracing();
+    let mut params = test_system_params_small(2, 8, 3);
+    params.logup_mode = LogupMode::Tensor { n_grid };
+    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let fx = FibFixture::new(0, 1, 1 << 2);
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    let tensor = proof.gkr_proof.tensor_logup.as_ref().unwrap();
+    assert_eq!(tensor.v_curr, tensor.v_prev);
+    engine.verify(&vk, &proof).unwrap();
 }
 
 #[test_case(4)]

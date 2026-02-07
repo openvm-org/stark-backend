@@ -1,11 +1,15 @@
 //! Batch sumcheck for ZeroCheck constraints and sumcheck for LogUp input layer MLEs
 
-use std::{cmp::max, iter::zip};
+use std::{
+    cmp::max,
+    iter::zip,
+    mem::{align_of, size_of, ManuallyDrop},
+};
 
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{Field, PrimeCharacteristicRing};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -16,12 +20,12 @@ use crate::{
     dft::Radix2BowersSerial,
     poly_common::{eq_sharp_uni_poly, eq_uni_poly, UnivariatePoly},
     poseidon2::sponge::FiatShamirTranscript,
-    proof::{BatchConstraintProof, GkrProof},
+    proof::{BatchConstraintProof, GkrProof, TensorLogupProof},
     prover::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
-        stacked_pcs::StackedLayout,
+        stacked_pcs::{stacked_commit, StackedLayout},
         sumcheck::sumcheck_round0_deg,
-        CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixView, ProvingContextV2,
+        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixView, ProvingContextV2,
     },
     EF, F,
 };
@@ -33,6 +37,64 @@ mod single;
 
 pub use cpu::LogupZerocheckCpu;
 pub use single::*;
+
+fn eval_mle_from_hypercube(evals: &[EF], point: &[EF]) -> EF {
+    if evals.is_empty() {
+        return EF::ZERO;
+    }
+    if point.is_empty() {
+        return evals[0];
+    }
+    let mut cur = evals.to_vec();
+    for &r in point {
+        let next_len = cur.len() >> 1;
+        for i in 0..next_len {
+            let x0 = cur[i << 1];
+            let x1 = cur[(i << 1) + 1];
+            cur[i] = x0 + (x1 - x0) * r;
+        }
+        cur.truncate(next_len);
+    }
+    cur[0]
+}
+
+fn tensor_running_sum(evals: &[Frac<EF>], n_grid: usize, b_block: usize) -> Vec<EF> {
+    let grid_size = 1 << n_grid;
+    let block_size = 1 << b_block;
+    if evals.is_empty() {
+        return vec![EF::ZERO; grid_size];
+    }
+    debug_assert_eq!(evals.len(), grid_size * block_size);
+    let mut running = Vec::with_capacity(grid_size);
+    let mut acc = EF::ZERO;
+    for x in 0..grid_size {
+        let start = x * block_size;
+        let end = start + block_size;
+        let partial = evals[start..end]
+            .iter()
+            .map(|frac| frac.p * frac.q.inverse())
+            .sum::<EF>();
+        acc += partial;
+        running.push(acc);
+    }
+    running
+}
+
+/// # Safety
+/// Assumes extension element memory layout is `[F; EF::DIMENSION]`.
+unsafe fn ext_col_major_to_base(ext_matrix: ColMajorMatrix<EF>) -> ColMajorMatrix<F> {
+    let dim = <EF as BasedVectorSpace<F>>::DIMENSION;
+    debug_assert_eq!(align_of::<EF>(), align_of::<F>());
+    debug_assert_eq!(size_of::<EF>(), size_of::<F>() * dim);
+
+    let width = ext_matrix.width() * dim;
+    let mut values = ManuallyDrop::new(ext_matrix.values);
+    let len = values.len() * dim;
+    let cap = values.capacity() * dim;
+    let ptr = values.as_mut_ptr();
+    let base_values = Vec::from_raw_parts(ptr as *mut F, len, cap);
+    ColMajorMatrix::new(base_values, width)
+}
 
 #[instrument(level = "info", skip_all)]
 pub fn prove_zerocheck_and_logup<TS>(
@@ -160,6 +222,43 @@ where
         // Prevent division by zero:
         evals.par_iter_mut().for_each(|frac| frac.q += alpha_logup);
         evals
+    };
+
+    let tensor_logup = if mpk.params.is_tensor_logup() {
+        let total_rounds = l_skip + n_logup;
+        let split = mpk.params.effective_tensor_split(total_rounds);
+        let running_sum = tensor_running_sum(&gkr_input_evals, split.n_grid_eff, split.b_block);
+        let running_sum_trace = ColMajorMatrix::new(running_sum.clone(), 1);
+        // SAFETY: `EF` has contiguous basis-coefficient layout over `F`.
+        let running_sum_trace_base = unsafe { ext_col_major_to_base(running_sum_trace) };
+        let (running_sum_commit, _running_sum_data) = stacked_commit(
+            mpk.params.l_skip,
+            mpk.params.n_stack,
+            mpk.params.log_blowup,
+            mpk.params.k_whir(),
+            &[&running_sum_trace_base],
+        );
+        transcript.observe_commit(running_sum_commit);
+
+        let r_grid = (0..split.n_grid_eff)
+            .map(|_| transcript.sample_ext())
+            .collect_vec();
+        let v_curr = eval_mle_from_hypercube(&running_sum, &r_grid);
+        let mut r_grid_prev = r_grid.clone();
+        if let Some(first) = r_grid_prev.first_mut() {
+            *first -= EF::ONE;
+        }
+        let v_prev = eval_mle_from_hypercube(&running_sum, &r_grid_prev);
+        transcript.observe_ext(v_curr);
+        transcript.observe_ext(v_prev);
+
+        Some(TensorLogupProof {
+            running_sum_commit,
+            v_curr,
+            v_prev,
+        })
+    } else {
+        None
     };
 
     let (frac_sum_proof, mut xi) = fractional_sumcheck(transcript, &gkr_input_evals, true);
@@ -419,6 +518,7 @@ where
     };
     let gkr_proof = GkrProof {
         logup_pow_witness,
+        tensor_logup,
         q0_claim: frac_sum_proof.fractional_sum.1,
         claims_per_layer: frac_sum_proof.claims_per_layer,
         sumcheck_polys: frac_sum_proof.sumcheck_polys,

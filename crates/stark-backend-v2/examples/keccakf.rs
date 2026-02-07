@@ -20,7 +20,7 @@ use stark_backend_v2::{
     poseidon2::sponge::DuplexSponge,
     prover::{AirProvingContextV2, DeviceDataTransporterV2, ProvingContextV2},
     verifier::verify,
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
+    BabyBearPoseidon2CpuEngineV2, LogupMode, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
 };
 use tracing::info_span;
 
@@ -60,6 +60,7 @@ fn main() -> eyre::Result<()> {
         log_blowup,
         whir,
         logup: log_up_security_params_baby_bear_100_bits(),
+        logup_mode: LogupMode::Classic,
         max_constraint_degree: 3,
     };
 

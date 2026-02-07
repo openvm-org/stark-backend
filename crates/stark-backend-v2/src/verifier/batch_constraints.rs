@@ -48,6 +48,12 @@ pub enum BatchConstraintError {
 
     #[error("Claims are inconsistent")]
     InconsistentClaims,
+
+    #[error("Tensor-logup proof data is missing")]
+    MissingTensorLogupProof,
+
+    #[error("Tensor-logup proof data is unexpected in classic mode")]
+    UnexpectedTensorLogupProof,
 }
 
 /// `public_values` should be in vkey (air_idx) order, including non-present AIRs.
@@ -91,6 +97,21 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         .sum::<u64>();
     let n_logup: usize = calculate_n_logup(l_skip, total_interactions);
     debug!(%n_logup);
+    if mvk.params.is_tensor_logup() {
+        let tensor = gkr_proof
+            .tensor_logup
+            .as_ref()
+            .ok_or(BatchConstraintError::MissingTensorLogupProof)?;
+        transcript.observe_commit(tensor.running_sum_commit);
+        let split = mvk.params.effective_tensor_split(l_skip + n_logup);
+        for _ in 0..split.n_grid_eff {
+            let _ = transcript.sample_ext();
+        }
+        transcript.observe_ext(tensor.v_curr);
+        transcript.observe_ext(tensor.v_prev);
+    } else if gkr_proof.tensor_logup.is_some() {
+        return Err(BatchConstraintError::UnexpectedTensorLogupProof);
+    }
 
     let mut xi = Vec::new();
     let mut p_xi_claim = EF::ZERO;
@@ -330,9 +351,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
                     .message
                     .iter()
                     .map(|expr| evaluator.eval_expr(expr))
-                    .chain(std::iter::once(EF::from_u16(
-                        interaction.bus_index + 1,
-                    )))
+                    .chain(std::iter::once(EF::from_u16(interaction.bus_index + 1)))
                     .zip(beta_logup.powers())
                     .fold(EF::ZERO, |acc, (x, y)| acc + x * y);
                 (num, denom)

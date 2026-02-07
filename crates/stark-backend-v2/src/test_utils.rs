@@ -37,7 +37,8 @@ use crate::{
         CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver,
         ProvingContextV2, TraceCommitterV2,
     },
-    BabyBearPoseidon2CpuEngineV2, ChipV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams, F,
+    BabyBearPoseidon2CpuEngineV2, ChipV2, LogupMode, StarkEngineV2, SystemParams, WhirConfig,
+    WhirParams, F,
 };
 
 #[allow(clippy::type_complexity)]
@@ -511,6 +512,7 @@ pub fn test_system_params_small_with_poly_len(
         log_blowup,
         whir: test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len),
         logup: log_up_security_params_baby_bear_100_bits(),
+        logup_mode: LogupMode::Classic,
         max_constraint_degree,
     }
 }

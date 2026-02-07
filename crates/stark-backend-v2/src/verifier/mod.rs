@@ -201,7 +201,7 @@ mod tests {
             InteractionsFixture11, PreprocessedFibFixture, TestFixture,
         },
         verifier::{verify, VerifierError},
-        BabyBearPoseidon2CpuEngineV2, SystemParams, WhirConfig, WhirParams,
+        BabyBearPoseidon2CpuEngineV2, LogupMode, SystemParams, WhirConfig, WhirParams,
     };
 
     #[test_case(2, 10)]
@@ -226,6 +226,7 @@ mod tests {
             log_blowup,
             whir,
             logup: log_up_security_params_baby_bear_100_bits(),
+            logup_mode: LogupMode::Classic,
             max_constraint_degree: 3,
         };
         let fib = FibFixture::new(0, 1, 1 << log_trace_degree);

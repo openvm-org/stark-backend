@@ -2,6 +2,22 @@ use getset::Getters;
 use openvm_stark_backend::interaction::LogUpSecurityParameters;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogupMode {
+    Classic,
+    /// `n_grid` is the configured outer-grid dimension for tensor logup. The effective split is
+    /// clamped at runtime based on the actual logup dimension and `n_stack`.
+    Tensor {
+        n_grid: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TensorSplit {
+    pub n_grid_eff: usize,
+    pub b_block: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Getters)]
 pub struct SystemParams {
     pub l_skip: usize,
@@ -11,6 +27,7 @@ pub struct SystemParams {
     #[getset(get = "pub")]
     pub whir: WhirConfig,
     pub logup: LogUpSecurityParameters,
+    pub logup_mode: LogupMode,
     /// Global max constraint degree enforced across all AIR and Interaction constraints
     pub max_constraint_degree: usize,
 }
@@ -22,6 +39,33 @@ impl SystemParams {
 
     pub fn k_whir(&self) -> usize {
         self.whir.k
+    }
+
+    #[inline]
+    pub fn is_tensor_logup(&self) -> bool {
+        matches!(self.logup_mode, LogupMode::Tensor { .. })
+    }
+
+    #[inline]
+    pub fn tensor_n_grid_configured(&self) -> Option<usize> {
+        match self.logup_mode {
+            LogupMode::Classic => None,
+            LogupMode::Tensor { n_grid } => Some(n_grid),
+        }
+    }
+
+    /// Runtime effective tensor split, clamped so it always stays in-bounds.
+    #[inline]
+    pub fn effective_tensor_split(&self, total_rounds: usize) -> TensorSplit {
+        let n_grid_eff = self
+            .tensor_n_grid_configured()
+            .unwrap_or_default()
+            .min(total_rounds)
+            .min(self.n_stack);
+        TensorSplit {
+            n_grid_eff,
+            b_block: total_rounds.saturating_sub(n_grid_eff),
+        }
     }
 
     #[inline]
