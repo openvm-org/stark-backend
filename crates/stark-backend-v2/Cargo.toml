@@ -35,7 +35,7 @@ eyre.workspace = true
 derivative.workspace = true
 
 [dev-dependencies]
-rand.workspace = true
+rand = "0.9" # don't use workspace version as it's older
 p3-keccak-air.workspace = true
 test-case.workspace = true
 
