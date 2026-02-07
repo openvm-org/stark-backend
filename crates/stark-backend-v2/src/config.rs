@@ -1,6 +1,6 @@
 use getset::Getters;
 use openvm_stark_backend::interaction::LogUpSecurityParameters;
-use p3_field::{BasedVectorSpace, ExtensionField, PrimeField};
+use p3_field::{BasedVectorSpace, ExtensionField, PrimeField64, TwoAdicField};
 use serde::{Deserialize, Serialize};
 
 /// Trait that holds the associated types for the SWIRL protocol. These are the types needed by the
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// the system parameters. System parameters are specified and stored separated in [SystemParams].
 pub trait StarkProtocolConfig {
     /// The prime base field.
-    type F: PrimeField;
+    type F: TwoAdicField + PrimeField64;
     /// The extension field, used for random challenges.
     type EF: ExtensionField<Self::F>;
     /// Degree of the extension field.

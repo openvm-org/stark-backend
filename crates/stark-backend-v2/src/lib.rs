@@ -16,6 +16,7 @@ pub mod poly_common;
 pub mod poseidon2;
 pub mod proof;
 pub mod prover;
+mod transcript;
 pub mod utils;
 pub mod v1_shims;
 pub mod verifier;
@@ -28,6 +29,7 @@ mod tests;
 pub use chip::*;
 pub use config::*;
 pub use engine::*;
+pub use transcript::*;
 
 pub type F = BabyBear;
 pub type EF = BinomialExtensionField<BabyBear, D_EF>;
