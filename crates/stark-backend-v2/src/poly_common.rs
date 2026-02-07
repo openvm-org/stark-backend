@@ -3,7 +3,7 @@ use std::{iter::zip, ops::Mul};
 
 use itertools::Itertools;
 use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
-use p3_field::{ExtensionField, Field, FieldAlgebra, TwoAdicField, batch_multiplicative_inverse};
+use p3_field::{batch_multiplicative_inverse, ExtensionField, Field, FieldAlgebra, TwoAdicField};
 use p3_util::log2_ceil_usize;
 use tracing::instrument;
 
@@ -472,7 +472,7 @@ mod tests {
     use itertools::Itertools;
     use p3_field::{FieldAlgebra, TwoAdicField};
     use p3_util::log2_ceil_usize;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
     use crate::{EF, F};
