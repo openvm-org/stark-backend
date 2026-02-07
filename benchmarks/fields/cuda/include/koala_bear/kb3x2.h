@@ -1,0 +1,264 @@
+/*
+ * Kb3x2 - Sextic Extension via 3×2 Tower for KoalaBear
+ * 
+ * Tower construction: Kb → Kb3 → Kb6
+ *   Kb3 = Kb[w] / (w³ + w + 4)  where w³ = -w - 4 (trinomial, since binomial fails)
+ *   Kb6 = Kb3[z] / (z² - 3)    where z² = 3
+ * 
+ * Why trinomial for Kb3:
+ *   KoalaBear has gcd(3, p-1) = 1, so the cube map is an automorphism.
+ *   Every element is a cube → no binomial w³ = W is irreducible.
+ *   w³ + w + 4 is irreducible (verified: no roots in Kb).
+ * 
+ * Why 3 works for quadratic step:
+ *   3 is nonsquare in Kb. Since deg(Kb3/Kb) = 3 is odd, an element is a
+ *   square in Kb3 iff it was a square in Kb. So 3 remains nonsquare in Kb3.
+ * 
+ * Element representation:
+ *   A Kb6 element is: a0 + a1*z  where each ai ∈ Kb3
+ *   Each Kb3 element is: b0 + b1*w + b2*w²  where bi ∈ Kb
+ *   
+ * Total storage: 6 Kb elements (24 bytes)
+ * 
+ * Reduction rules:
+ *   w³ = -w - 4
+ *   w⁴ = -w² - 4w
+ *   z² = 3
+ */
+
+#pragma once
+
+#include "kb.h"
+
+// ============================================================================
+// Kb3 = Kb[w] / (w³ + w + 4)
+// ============================================================================
+
+struct Kb3 {
+    Kb c0, c1, c2;  // c0 + c1*w + c2*w²
+    
+    // Reduction: w³ = -w - 4
+    
+    __device__ Kb3() : c0(), c1(), c2() {}
+    __device__ Kb3(Kb a0) : c0(a0), c1(), c2() {}
+    __device__ Kb3(Kb a0, Kb a1, Kb a2) : c0(a0), c1(a1), c2(a2) {}
+    __device__ explicit Kb3(uint32_t x) : c0(Kb(x)), c1(), c2() {}
+
+    __device__ static Kb3 zero() { return Kb3(); }
+    __device__ static Kb3 one() { return Kb3(Kb::one()); }
+    
+    /// Multiply two degree-2 polynomials (a0 + a1*x + a2*x^2)(b0 + b1*x + b2*x^2)
+    /// Using Toom-2.5 (6 muls)
+    __device__ static inline void mul_deg2(
+        Kb a0, Kb a1, Kb a2, Kb b0, Kb b1, Kb b2,
+        Kb& r0, Kb& r1, Kb& r2, Kb& r3, Kb& r4
+    ) {
+        Kb v0 = a0 * b0;
+        Kb v1 = a1 * b1;
+        Kb v2 = a2 * b2;
+        Kb v01 = (a0 + a1) * (b0 + b1);
+        Kb v12 = (a1 + a2) * (b1 + b2);
+        Kb v02 = (a0 + a2) * (b0 + b2);
+
+        r0 = v0;
+        r1 = v01 - v0 - v1;
+        r2 = v02 - v0 - v2 + v1;
+        r3 = v12 - v1 - v2;
+        r4 = v2;
+    }
+    __device__ Kb3 operator+(Kb3 rhs) const {
+        return Kb3(c0 + rhs.c0, c1 + rhs.c1, c2 + rhs.c2);
+    }
+    
+    __device__ Kb3 operator-(Kb3 rhs) const {
+        return Kb3(c0 - rhs.c0, c1 - rhs.c1, c2 - rhs.c2);
+    }
+    
+    __device__ Kb3 operator-() const {
+        return Kb3(-c0, -c1, -c2);
+    }
+    
+    __device__ Kb3 operator*(Kb rhs) const {
+        return Kb3(c0 * rhs, c1 * rhs, c2 * rhs);
+    }
+    
+    // (a0 + a1*w + a2*w²) * (b0 + b1*w + b2*w²) with w³ = -w - 4
+    // Schoolbook then reduce using w³ = -w - 4, w⁴ = -w² - 4w
+    __device__ Kb3 operator*(Kb3 rhs) const {
+        Kb t0, t1, t2, t3, t4;
+        mul_deg2(c0, c1, c2, rhs.c0, rhs.c1, rhs.c2, t0, t1, t2, t3, t4);
+
+        // Reduction: w³ = -w - 4, w⁴ = -w² - 4w
+        // t3*w³ = t3*(-w - 4) = -t3*w - 4*t3
+        // t4*w⁴ = t4*(-w² - 4w) = -t4*w² - 4*t4*w
+        // 
+        // c0 = t0 - 4*t3
+        // c1 = t1 - t3 - 4*t4
+        // c2 = t2 - t4
+        return Kb3(
+            t0 - Kb::mulBy4(t3),
+            t1 - t3 - Kb::mulBy4(t4),
+            t2 - t4
+        );
+    }
+    
+    __device__ Kb3 square() const {
+        Kb a0 = c0, a1 = c1, a2 = c2;
+        
+        Kb a0sq = a0 * a0;
+        Kb a1sq = a1 * a1;
+        Kb a2sq = a2 * a2;
+        Kb a0a1 = a0 * a1;
+        Kb a0a2 = a0 * a2;
+        Kb a1a2 = a1 * a2;
+        
+        Kb t0 = a0sq;
+        Kb t1 = a0a1 + a0a1;
+        Kb t2 = a0a2 + a0a2 + a1sq;
+        Kb t3 = a1a2 + a1a2;
+        Kb t4 = a2sq;
+        
+        return Kb3(
+        t0 - Kb::mulBy4(t3),
+        t1 - t3 - Kb::mulBy4(t4),
+            t2 - t4
+        );
+    }
+    
+    __device__ bool operator==(Kb3 rhs) const {
+        return c0 == rhs.c0 && c1 == rhs.c1 && c2 == rhs.c2;
+    }
+    
+    __device__ bool operator!=(Kb3 rhs) const {
+        return !(*this == rhs);
+    }
+};
+
+/// Inversion for Kb3 using adjugate formula (1 Kb inv instead of 3).
+///
+/// For w³ = -w - 4, the multiplication matrix M has cofactors:
+///   c₀ = (a₀-a₂)² + a₁² + 4·a₁·a₂
+///   c₁ = -(a₀·a₁ + 4·a₂²)
+///   c₂ = a₁² + a₂² - a₀·a₂
+///   det = a₀·c₀ - 4·(a₂·c₁ + a₁·c₂)
+/// Cost: 9 Kb muls + 1 Kb inv (branchless)
+__device__ inline Kb3 inv(Kb3 x) {
+    if (x == Kb3::zero()) return Kb3::zero();
+
+    Kb a0 = x.c0, a1 = x.c1, a2 = x.c2;
+
+    // Precompute shared products
+    Kb a1sq = a1 * a1;
+    Kb a2sq = a2 * a2;
+    Kb a0a1 = a0 * a1;
+    Kb a0a2 = a0 * a2;
+    Kb a1a2 = a1 * a2;
+    Kb d = a0 - a2;
+    Kb dsq = d * d;          // (a₀ - a₂)²
+
+    // Adjugate cofactors (first row of cofactor matrix)
+    Kb c0 = dsq + a1sq + Kb::mulBy4(a1a2);             // (a₀-a₂)² + a₁² + 4·a₁·a₂
+    Kb c1 = Kb::zero() - a0a1 - Kb::mulBy4(a2sq);      // -(a₀·a₁ + 4·a₂²)
+    Kb c2 = a1sq + a2sq - a0a2;                         // a₁² + a₂² - a₀·a₂
+
+    // det = a₀·c₀ - 4·(a₂·c₁ + a₁·c₂)  (expansion along row 0)
+    Kb t = a2 * c1 + a1 * c2;
+    Kb det = a0 * c0 - Kb::mulBy4(t);
+
+    Kb det_inv = ::inv(det);
+    return Kb3(c0 * det_inv, c1 * det_inv, c2 * det_inv);
+}
+
+// ============================================================================
+// Kb3x2 = Kb3[z] / (z² - 3)
+// ============================================================================
+
+struct Kb3x2 {
+    Kb3 c0, c1;  // c0 + c1*z
+    
+    static constexpr uint32_t W = 3;  // z² = 3
+    
+    __device__ Kb3x2() : c0(), c1() {}
+    __device__ Kb3x2(Kb a) : c0(a), c1() {}
+    __device__ Kb3x2(Kb3 a0) : c0(a0), c1() {}
+    __device__ Kb3x2(Kb3 a0, Kb3 a1) : c0(a0), c1(a1) {}
+    __device__ explicit Kb3x2(uint32_t x) : c0(Kb(x)), c1() {}
+    
+    // Construct from 6 Kb elements (for initialization from raw data)
+    __device__ Kb3x2(Kb a0, Kb a1, Kb a2, Kb a3, Kb a4, Kb a5)
+        : c0(a0, a1, a2), c1(a3, a4, a5) {}
+    
+    __device__ static Kb3x2 zero() { return Kb3x2(); }
+    __device__ static Kb3x2 one() { return Kb3x2(Kb3::one()); }
+    
+    __device__ Kb3x2 operator+(Kb3x2 rhs) const {
+        return Kb3x2(c0 + rhs.c0, c1 + rhs.c1);
+    }
+    
+    __device__ Kb3x2 operator-(Kb3x2 rhs) const {
+        return Kb3x2(c0 - rhs.c0, c1 - rhs.c1);
+    }
+    
+    __device__ Kb3x2 operator-() const {
+        return Kb3x2(-c0, -c1);
+    }
+    
+    __device__ Kb3x2 operator*(Kb rhs) const {
+        return Kb3x2(c0 * rhs, c1 * rhs);
+    }
+    
+    // Multiply by Kb3 scalar
+    __device__ Kb3x2 operator*(Kb3 rhs) const {
+        return Kb3x2(c0 * rhs, c1 * rhs);
+    }
+    
+    // Full multiplication: (a0 + a1*z) * (b0 + b1*z) with z² = 3
+    // = (a0*b0 + 3*a1*b1) + (a0*b1 + a1*b0)*z
+    // Using Karatsuba: a0*b1 + a1*b0 = (a0+a1)*(b0+b1) - a0*b0 - a1*b1
+    // Reduces from 4 Kb3 muls to 3 Kb3 muls
+    __device__ Kb3x2 operator*(Kb3x2 rhs) const {
+        Kb3 a0b0 = c0 * rhs.c0;
+        Kb3 a1b1 = c1 * rhs.c1;
+        Kb3 sum_a = c0 + c1;
+        Kb3 sum_b = rhs.c0 + rhs.c1;
+        Kb3 sum_prod = sum_a * sum_b;
+        Kb3 a0b1_a1b0 = sum_prod - a0b0 - a1b1;
+        
+        // 3*a1*b1 = a1*b1 + a1*b1 + a1*b1
+        return Kb3x2(a0b0 + a1b1 + a1b1 + a1b1, a0b1_a1b0);
+    }
+    
+    __device__ Kb3x2 square() const {
+        // (a0 + a1*z)² = (a0² + 3*a1²) + 2*a0*a1*z
+        Kb3 a0sq = c0.square();
+        Kb3 a1sq = c1.square();
+        Kb3 a0a1 = c0 * c1;
+        
+        return Kb3x2(a0sq + a1sq + a1sq + a1sq, a0a1 + a0a1);
+    }
+    
+    __device__ bool operator==(Kb3x2 rhs) const {
+        return c0 == rhs.c0 && c1 == rhs.c1;
+    }
+    
+    __device__ bool operator!=(Kb3x2 rhs) const {
+        return !(*this == rhs);
+    }
+};
+
+__device__ inline Kb3x2 operator*(Kb a, Kb3x2 b) { return b * a; }
+
+// Inversion using norm to Kb3: (a + b*z)^(-1) = (a - b*z) / (a² - 3*b²)
+// where a² - 3*b² is computed in Kb3, then inverted
+__device__ inline Kb3x2 inv(Kb3x2 x) {
+    if (x == Kb3x2::zero()) return Kb3x2::zero();
+    
+    Kb3 a = x.c0, b = x.c1;
+    Kb3 bsq = b.square();
+    Kb3 norm = a.square() - bsq - bsq - bsq;  // a² - 3*b²
+    Kb3 norm_inv = inv(norm);
+    
+    return Kb3x2(a * norm_inv, (Kb3::zero() - b) * norm_inv);
+}
+
+static_assert(sizeof(Kb3x2) == 24, "Kb3x2 must be 24 bytes");
