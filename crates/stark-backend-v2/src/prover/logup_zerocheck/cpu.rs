@@ -152,7 +152,8 @@ impl<'a> LogupZerocheckCpu<'a> {
                         }
                     }
                 }
-                let needs_next = rotation > 0;
+                let needs_next = pk.vk.params.need_rot;
+                debug_assert_eq!(needs_next, rotation > 0);
                 let symbolic_constraints = SymbolicConstraints::from(&pk.vk.symbolic_constraints);
                 EvalHelper {
                     constraints_dag: &pk.vk.symbolic_constraints.constraints,
@@ -598,34 +599,47 @@ impl<'a> LogupZerocheckCpu<'a> {
         }
     }
 
-    pub fn into_column_openings(mut self) -> Vec<Vec<Vec<(EF, EF)>>> {
+    pub fn into_column_openings(&mut self) -> Vec<Vec<Vec<EF>>> {
         let num_airs_present = self.mat_evals_per_trace.len();
         let mut column_openings = Vec::with_capacity(num_airs_present);
         // At the end, we've folded all MLEs so they only have one row equal to evaluation at `\vec
         // r`.
-        for mut mat_evals in take(&mut self.mat_evals_per_trace) {
-            // Order of mats is:
-            // - preprocessed (if has_preprocessed),
-            // - preprocessed_rot (if has_preprocessed),
-            // - cached(0), cached(0)_rot, ...
-            // - common_main
-            // - common_main_rot
-            // For column openings, we pop common_main, common_main_rot and put it at the front
-            assert_eq!(mat_evals.len() % 2, 0); // always include rot for now
-            let common_main_rot = mat_evals.pop().unwrap();
-            let common_main = mat_evals.pop().unwrap();
-            let openings_of_air = iter::once(&[common_main, common_main_rot] as &[_])
-                .chain(mat_evals.chunks_exact(2))
-                .map(|pair| {
-                    zip(pair[0].columns(), pair[1].columns())
-                        .map(|(claim, claim_rot)| {
-                            assert_eq!(claim.len(), 1);
-                            assert_eq!(claim_rot.len(), 1);
-                            (claim[0], claim_rot[0])
-                        })
-                        .collect_vec()
-                })
-                .collect_vec();
+        for (helper, mut mat_evals) in self
+            .eval_helpers
+            .iter()
+            .zip(take(&mut self.mat_evals_per_trace))
+        {
+            // For column openings, we pop common_main (and common_main_rot when present) and put it
+            // at the front.
+            let openings_of_air: Vec<Vec<EF>> = if helper.needs_next {
+                let common_main_rot = mat_evals.pop().unwrap();
+                let common_main = mat_evals.pop().unwrap();
+                iter::once(&[common_main, common_main_rot] as &[_])
+                    .chain(mat_evals.chunks_exact(2))
+                    .map(|pair| {
+                        zip(pair[0].columns(), pair[1].columns())
+                            .flat_map(|(claim, claim_rot)| {
+                                assert_eq!(claim.len(), 1);
+                                assert_eq!(claim_rot.len(), 1);
+                                [claim[0], claim_rot[0]]
+                            })
+                            .collect_vec()
+                    })
+                    .collect_vec()
+            } else {
+                let common_main = mat_evals.pop().unwrap();
+                iter::once(common_main)
+                    .chain(mat_evals.into_iter())
+                    .map(|mat| {
+                        mat.columns()
+                            .map(|claim| {
+                                assert_eq!(claim.len(), 1);
+                                claim[0]
+                            })
+                            .collect_vec()
+                    })
+                    .collect_vec()
+            };
             column_openings.push(openings_of_air);
         }
         column_openings
