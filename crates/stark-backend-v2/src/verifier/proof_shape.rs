@@ -464,6 +464,8 @@ pub fn verify_proof_shape(
     }
 
     for (part_openings, &(air_idx, vk, _)) in batch_proof.column_openings.iter().zip(&per_trace) {
+        let need_rot = mvk.per_air[air_idx].params.need_rot;
+        let openings_per_col = if need_rot { 2 } else { 1 };
         if part_openings.len() != vk.num_parts() {
             return ProofShapeError::invalid_batch_constraint(
                 BatchProofShapeError::InvalidColumnOpeningsPerAir {
@@ -472,7 +474,7 @@ pub fn verify_proof_shape(
                     actual: part_openings.len(),
                 },
             );
-        } else if part_openings[0].len() != vk.params.width.common_main {
+        } else if part_openings[0].len() != vk.params.width.common_main * openings_per_col {
             return ProofShapeError::invalid_batch_constraint(
                 BatchProofShapeError::InvalidColumnOpeningsPerAirMain {
                     air_idx,
@@ -481,7 +483,7 @@ pub fn verify_proof_shape(
                 },
             );
         } else if let Some(preprocessed_width) = &vk.params.width.preprocessed {
-            if part_openings[1].len() != *preprocessed_width {
+            if part_openings[1].len() != *preprocessed_width * openings_per_col {
                 return ProofShapeError::invalid_batch_constraint(
                     BatchProofShapeError::InvalidColumnOpeningsPerAirPreprocessed {
                         air_idx,
@@ -498,7 +500,7 @@ pub fn verify_proof_shape(
             .zip(&vk.params.width.cached_mains)
             .enumerate()
         {
-            if col_opening.len() != width {
+            if col_opening.len() != width * openings_per_col {
                 return ProofShapeError::invalid_batch_constraint(
                     BatchProofShapeError::InvalidColumnOpeningsPerAirCached {
                         air_idx,
