@@ -33,7 +33,10 @@ where
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
 
-        let (local, next) = (main.row_slice(0).expect("window should have two elements"), main.row_slice(1).expect("window should have two elements"));
+        let (local, next) = (
+            main.row_slice(0).expect("window should have two elements"),
+            main.row_slice(1).expect("window should have two elements"),
+        );
         let mut local: Vec<<AB as AirBuilder>::Expr> =
             (*local).iter().map(|v| (*v).into()).collect_vec();
         let mut next: Vec<<AB as AirBuilder>::Expr> =
