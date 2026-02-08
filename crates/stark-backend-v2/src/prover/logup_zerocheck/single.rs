@@ -39,20 +39,29 @@ impl<'a> EvalHelper<'a, crate::F> {
         &self,
         ctx: &'a AirProvingContextV2<CpuBackendV2>,
     ) -> Vec<(StridedColMajorMatrixView<'a, crate::F>, bool)> {
-        let mut mats = Vec::with_capacity(
-            2 * (usize::from(self.has_preprocessed()) + 1 + ctx.cached_mains.len()),
-        );
+        let base_mats = usize::from(self.has_preprocessed()) + 1 + ctx.cached_mains.len();
+        let mut mats = Vec::with_capacity(if self.needs_next {
+            2 * base_mats
+        } else {
+            base_mats
+        });
         if let Some(mat) = self.preprocessed_trace {
             mats.push((mat, false));
-            mats.push((mat, true));
+            if self.needs_next {
+                mats.push((mat, true));
+            }
         }
         for cd in ctx.cached_mains.iter() {
             let trace_view = cd.data.mat_view(0);
             mats.push((trace_view, false));
-            mats.push((trace_view, true));
+            if self.needs_next {
+                mats.push((trace_view, true));
+            }
         }
         mats.push((ctx.common_main.as_view().into(), false));
-        mats.push((ctx.common_main.as_view().into(), true));
+        if self.needs_next {
+            mats.push((ctx.common_main.as_view().into(), true));
+        }
         mats
     }
 }
@@ -148,10 +157,20 @@ impl<F: TwoAdicField> EvalHelper<'_, F> {
         row_parts: &[Vec<FF>],
     ) -> ProverConstraintEvaluator<'_, F, FF> {
         let sels = &row_parts[0];
-        let mut view_pairs = row_parts[1..]
-            .chunks_exact(2)
-            .map(|pair| ViewPair::new(&pair[0], self.needs_next.then(|| &pair[1][..])))
-            .collect_vec();
+        let mut view_pairs = if self.needs_next {
+            let mut chunks = row_parts[1..].chunks_exact(2);
+            let pairs = chunks
+                .by_ref()
+                .map(|pair| ViewPair::new(&pair[0], Some(&pair[1][..])))
+                .collect_vec();
+            debug_assert!(chunks.remainder().is_empty());
+            pairs
+        } else {
+            row_parts[1..]
+                .iter()
+                .map(|part| ViewPair::new(part, None))
+                .collect_vec()
+        };
         let mut preprocessed = None;
         if self.has_preprocessed() {
             preprocessed = Some(view_pairs.remove(0));
