@@ -186,8 +186,7 @@ impl MultiStarkKeygenBuilderV2 {
         let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
         tracing::debug!("pre-vkey: {} bytes", vk_bytes.len());
         // Purely to get type compatibility and convenience, we hash using the native hash
-        let vk_pre_hash =
-            poseidon2_hash_slice(&vk_bytes.into_iter().map(F::from_u8).collect_vec());
+        let vk_pre_hash = poseidon2_hash_slice(&vk_bytes.into_iter().map(F::from_u8).collect_vec());
 
         Ok(MultiStarkProvingKeyV2 {
             params: self.config,
@@ -218,12 +217,8 @@ impl AirKeygenBuilderV2 {
         let air_name = self.air.name();
 
         let symbolic_builder = self.get_symbolic_builder();
-        let vparams = StarkVerifyingParamsV2 {
-            width: symbolic_builder.width(),
-            num_public_values: symbolic_builder.num_public_values(),
-        };
-        // Deprecated in v2:
-        assert!(vparams.width.after_challenge.is_empty());
+        let width = symbolic_builder.width();
+        let num_public_values = symbolic_builder.num_public_values();
 
         let symbolic_constraints = symbolic_builder.constraints();
         let constraint_degree = symbolic_constraints.max_constraint_degree();
@@ -245,7 +240,17 @@ impl AirKeygenBuilderV2 {
         } = self;
 
         let dag = SymbolicConstraintsDag::from(symbolic_constraints);
-        let unused_variables = find_unused_vars(&dag, &vparams.width);
+        let max_rotation = dag.constraints.max_rotation();
+        debug_assert!(max_rotation <= 1);
+        let need_rot = max_rotation == 1;
+        let vparams = StarkVerifyingParamsV2 {
+            width,
+            num_public_values,
+            need_rot,
+        };
+        assert!(vparams.width.after_challenge.is_empty());
+
+        let unused_variables = find_unused_vars(&dag, &vparams.width, need_rot);
         let vk = StarkVerifyingKeyV2 {
             preprocessed_data: preprocessed_vdata,
             params: vparams,
@@ -321,6 +326,7 @@ impl PrepKeygenDataV2 {
 pub(crate) fn find_unused_vars<F: Field>(
     constraints: &SymbolicConstraintsDag<F>,
     width: &TraceWidth,
+    need_rot: bool,
 ) -> Vec<SymbolicVariable<F>> {
     let preprocessed_width = width.preprocessed.unwrap_or(0);
     let mut preprocessed_present = vec![vec![false; 2]; preprocessed_width];
@@ -350,7 +356,7 @@ pub(crate) fn find_unused_vars<F: Field>(
     let mut missing = vec![];
     for (index, presents) in preprocessed_present.iter().enumerate() {
         for (offset, present) in presents.iter().enumerate() {
-            if !present {
+            if !present && (offset == 0 || need_rot) {
                 missing.push(SymbolicVariable::new(Entry::Preprocessed { offset }, index));
             }
         }
@@ -358,7 +364,7 @@ pub(crate) fn find_unused_vars<F: Field>(
     for (part_index, present_per_part) in main_present.iter().enumerate() {
         for (index, presents) in present_per_part.iter().enumerate() {
             for (offset, present) in presents.iter().enumerate() {
-                if !present {
+                if !present && (offset == 0 || need_rot) {
                     missing.push(SymbolicVariable::new(
                         Entry::Main { part_index, offset },
                         index,

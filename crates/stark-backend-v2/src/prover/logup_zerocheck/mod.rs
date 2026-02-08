@@ -16,7 +16,7 @@ use crate::{
     dft::Radix2BowersSerial,
     poly_common::{eq_sharp_uni_poly, eq_uni_poly, UnivariatePoly},
     poseidon2::sponge::FiatShamirTranscript,
-    proof::{BatchConstraintProof, GkrProof},
+    proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         stacked_pcs::StackedLayout,
@@ -395,17 +395,17 @@ where
     let column_openings = prover.into_column_openings();
 
     // Observe common main openings first, and then preprocessed/cached
-    for openings in &column_openings {
-        for (claim, claim_rot) in &openings[0] {
-            transcript.observe_ext(*claim);
-            transcript.observe_ext(*claim_rot);
+    for (helper, openings) in prover.eval_helpers.iter().zip(column_openings.iter()) {
+        for (claim, claim_rot) in column_openings_by_rot(&openings[0], helper.needs_next) {
+            transcript.observe_ext(claim);
+            transcript.observe_ext(claim_rot);
         }
     }
-    for openings in &column_openings {
+    for (helper, openings) in prover.eval_helpers.iter().zip(column_openings.iter()) {
         for part in openings.iter().skip(1) {
-            for (claim, claim_rot) in part {
-                transcript.observe_ext(*claim);
-                transcript.observe_ext(*claim_rot);
+            for (claim, claim_rot) in column_openings_by_rot(part, helper.needs_next) {
+                transcript.observe_ext(claim);
+                transcript.observe_ext(claim_rot);
             }
         }
     }
