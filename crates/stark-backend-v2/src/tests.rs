@@ -468,3 +468,51 @@ fn test_matrix_stacking_overflow() {
     let (vk, proof) = fx.keygen_and_prove(&engine);
     engine.verify(&vk, &proof).unwrap();
 }
+
+// =========================================================================
+// Data-parallel GKR tests (n_logup_grid > 0)
+// =========================================================================
+
+fn test_engine_with_grid(n_logup_grid: usize) -> BabyBearPoseidon2CpuEngineV2<DuplexSponge> {
+    setup_tracing();
+    let mut params = test_system_params_small(2, 8, 3);
+    params.n_logup_grid = n_logup_grid;
+    BabyBearPoseidon2CpuEngineV2::new(params)
+}
+
+#[test_case(1 ; "n_logup_grid=1")]
+#[test_case(2 ; "n_logup_grid=2")]
+#[test_case(10 ; "n_logup_grid=10 clamped")]
+fn test_interactions_with_grid(n_logup_grid: usize) {
+    let engine = test_engine_with_grid(n_logup_grid);
+    let fx = InteractionsFixture11;
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test_case(3, 1 ; "log3_grid1")]
+#[test_case(3, 3 ; "log3_grid3")]
+#[test_case(3, 10 ; "log3_grid_clamped")]
+#[test_case(2, 1 ; "log2_grid1")]
+#[test_case(1, 1 ; "log1_grid1")]
+#[test_case(0, 1 ; "log0_grid1")]
+fn test_multi_interaction_with_grid(log_trace_degree: usize, n_logup_grid: usize) {
+    let engine = test_engine_with_grid(n_logup_grid);
+    let fx = SelfInteractionFixture {
+        widths: vec![4, 7, 8, 8, 10, 100],
+        log_height: log_trace_degree,
+        bus_index: 4,
+    };
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
+}
+
+#[test_case(3, 1 ; "log3_grid1")]
+#[test_case(3, 3 ; "log3_grid3")]
+#[test_case(2, 2 ; "log2_grid2")]
+fn test_mixture_with_grid(log_trace_degree: usize, n_logup_grid: usize) {
+    let engine = test_engine_with_grid(n_logup_grid);
+    let fx = MixtureFixture::standard(log_trace_degree, engine.config().clone());
+    let (vk, proof) = fx.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap();
+}

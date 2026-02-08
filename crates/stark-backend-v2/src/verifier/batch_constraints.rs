@@ -103,7 +103,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     let mut q_xi_claim = alpha_logup;
     if total_interactions > 0 {
         (p_xi_claim, q_xi_claim, xi) =
-            verify_gkr(gkr_proof, transcript, l_skip + n_logup, n_grid)?;
+            verify_gkr(gkr_proof, transcript, l_skip + n_logup - n_grid, n_grid)?;
         debug_assert_eq!(xi.len(), l_skip + n_logup);
     }
 

@@ -90,7 +90,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         }
         // Add p_g/q_g to sum_p/sum_q
         sum_p = sum_p * q_g + p_g * sum_q;
-        sum_q = sum_q * q_g;
+        sum_q *= q_g;
     }
     if sum_p != EF::ZERO {
         return Err(GkrVerificationError::GridSumCheckFailed { actual: sum_p });
@@ -769,5 +769,173 @@ mod tests {
         let (_p_xi, _q_xi, xi) = result.unwrap();
         // xi should have 1 element (xi_grid only, no gkr_r)
         assert_eq!(xi.len(), 1);
+    }
+
+    /// Integration test: prover + verifier with n_grid=1 and 4 fractions (2 block rounds, 2 grid points).
+    #[test]
+    fn test_gkr_grid_1_integration() {
+        setup_tracing();
+        let fractions = vec![
+            Frac {
+                p: EF::from_u64(3),
+                q: EF::ONE,
+            },
+            Frac {
+                p: -EF::from_u64(3),
+                q: EF::ONE,
+            },
+            Frac {
+                p: EF::from_u64(7),
+                q: EF::from_u64(2),
+            },
+            Frac {
+                p: -EF::from_u64(7),
+                q: EF::from_u64(2),
+            },
+        ];
+
+        let n_grid = 1; // 2 grid points, each with block_size=2
+        let total_rounds = p3_util::log2_strict_usize(fractions.len());
+
+        let mut prover_transcript = DuplexSponge::default();
+        let (frac_proof, xi) =
+            fractional_sumcheck(&mut prover_transcript, &fractions, true, n_grid);
+
+        assert_eq!(xi.len(), total_rounds);
+        assert_eq!(frac_proof.grid_claims.len(), 2);
+
+        let gkr_proof = gkr_proof_from_frac(&frac_proof);
+        let mut verifier_transcript = DuplexSponge::default();
+        let total_rounds_block = total_rounds - n_grid;
+        let result =
+            verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds_block, n_grid);
+        assert!(
+            result.is_ok(),
+            "Grid integration (n_grid=1) failed: {:?}",
+            result.err()
+        );
+        let (_numer_claim, denom_claim, v_xi) = result.unwrap();
+        // With n_grid > 0, numer_claim is sum_g p_g * eq(xi_grid, g),
+        // which is generally non-zero (individual p_g can be non-zero).
+        assert_ne!(denom_claim, EF::ZERO);
+        assert_eq!(v_xi, xi);
+    }
+
+    /// Integration test: prover + verifier with n_grid=2 and 8 fractions (1 block round, 4 grid points).
+    #[test]
+    fn test_gkr_grid_2_integration() {
+        setup_tracing();
+        // 8 fractions => total_rounds_full=3. With n_grid=2 => 4 grid points, block_size=2.
+        let fractions = vec![
+            Frac {
+                p: EF::from_u64(1),
+                q: EF::ONE,
+            },
+            Frac {
+                p: -EF::from_u64(1),
+                q: EF::ONE,
+            },
+            Frac {
+                p: EF::from_u64(2),
+                q: EF::from_u64(3),
+            },
+            Frac {
+                p: -EF::from_u64(2),
+                q: EF::from_u64(3),
+            },
+            Frac {
+                p: EF::from_u64(5),
+                q: EF::from_u64(7),
+            },
+            Frac {
+                p: -EF::from_u64(5),
+                q: EF::from_u64(7),
+            },
+            Frac {
+                p: EF::from_u64(4),
+                q: EF::from_u64(2),
+            },
+            Frac {
+                p: -EF::from_u64(4),
+                q: EF::from_u64(2),
+            },
+        ];
+
+        let n_grid = 2;
+        let total_rounds_full = p3_util::log2_strict_usize(fractions.len());
+
+        let mut prover_transcript = DuplexSponge::default();
+        let (frac_proof, xi) =
+            fractional_sumcheck(&mut prover_transcript, &fractions, true, n_grid);
+
+        assert_eq!(xi.len(), total_rounds_full);
+        assert_eq!(frac_proof.grid_claims.len(), 4);
+
+        let gkr_proof = gkr_proof_from_frac(&frac_proof);
+        let mut verifier_transcript = DuplexSponge::default();
+        let total_rounds_block = total_rounds_full - n_grid;
+        let result =
+            verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds_block, n_grid);
+        assert!(
+            result.is_ok(),
+            "Grid integration (n_grid=2) failed: {:?}",
+            result.err()
+        );
+        let (_numer_claim, denom_claim, v_xi) = result.unwrap();
+        assert_ne!(denom_claim, EF::ZERO);
+        assert_eq!(v_xi, xi);
+    }
+
+    /// Integration test: n_grid equals total_rounds_full (all rounds are grid, block has 1 element).
+    #[test]
+    fn test_gkr_grid_all_grid_rounds() {
+        setup_tracing();
+        // 4 fractions, n_grid=2 => 4 grid points, block_size=1
+        // Each grid point is a single fraction => no GKR rounds needed
+        let fractions = vec![
+            Frac {
+                p: EF::from_u64(10),
+                q: EF::from_u64(3),
+            },
+            Frac {
+                p: -EF::from_u64(10),
+                q: EF::from_u64(3),
+            },
+            Frac {
+                p: EF::from_u64(1),
+                q: EF::ONE,
+            },
+            Frac {
+                p: -EF::from_u64(1),
+                q: EF::ONE,
+            },
+        ];
+
+        let n_grid = 2;
+        let total_rounds_full = p3_util::log2_strict_usize(fractions.len());
+        assert_eq!(total_rounds_full, n_grid);
+
+        let mut prover_transcript = DuplexSponge::default();
+        let (frac_proof, xi) =
+            fractional_sumcheck(&mut prover_transcript, &fractions, true, n_grid);
+
+        assert_eq!(xi.len(), total_rounds_full);
+        assert_eq!(frac_proof.grid_claims.len(), 4);
+        assert!(frac_proof.claims_per_layer.is_empty());
+        assert!(frac_proof.sumcheck_polys.is_empty());
+
+        let gkr_proof = gkr_proof_from_frac(&frac_proof);
+        let mut verifier_transcript = DuplexSponge::default();
+        let total_rounds_block = total_rounds_full - n_grid; // == 0
+        let result =
+            verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds_block, n_grid);
+        assert!(
+            result.is_ok(),
+            "Grid all-grid-rounds verification failed: {:?}",
+            result.err()
+        );
+        let (_numer_claim, denom_claim, v_xi) = result.unwrap();
+        assert_ne!(denom_claim, EF::ZERO);
+        assert_eq!(v_xi, xi);
     }
 }
