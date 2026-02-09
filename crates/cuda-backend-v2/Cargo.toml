@@ -7,7 +7,6 @@ description = "OpenVM CUDA prover backend V2"
 
 [dependencies]
 stark-backend-v2.workspace = true
-
 openvm-stark-backend.workspace = true
 openvm-cuda-common.workspace = true
 openvm-cuda-backend.workspace = true
