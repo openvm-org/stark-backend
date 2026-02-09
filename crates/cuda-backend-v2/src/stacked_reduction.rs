@@ -279,8 +279,8 @@ impl StackedReductionGpu {
             StackedPcsData2::from_raw(Arc::new(common_main_pcs_data), common_main_traces)
         };
         let mut stacked_per_commit = vec![common_main_stacked];
-        for (air_idx, air_ctx) in ctx.per_trace {
-            for committed in mpk.per_air[air_idx]
+        for (air_idx, air_ctx) in ctx.per_trace.iter() {
+            for committed in mpk.per_air[*air_idx]
                 .preprocessed_data
                 .iter()
                 .chain(air_ctx.cached_mains.iter())
@@ -298,6 +298,22 @@ impl StackedReductionGpu {
                 .iter()
                 .all(|d| d.layout().height() == 1 << (l_skip + n_stack))
         );
+
+        let need_rot_per_trace = ctx
+            .per_trace
+            .iter()
+            .map(|(air_idx, _)| mpk.per_air[*air_idx].vk.params.need_rot)
+            .collect_vec();
+        let mut need_rot_per_commit = vec![need_rot_per_trace];
+        for (air_idx, air_ctx) in ctx.per_trace.iter() {
+            let need_rot = mpk.per_air[*air_idx].vk.params.need_rot;
+            if mpk.per_air[*air_idx].preprocessed_data.is_some() {
+                need_rot_per_commit.push(vec![need_rot]);
+            }
+            for _ in &air_ctx.cached_mains {
+                need_rot_per_commit.push(vec![need_rot]);
+            }
+        }
         let q_widths = stacked_per_commit
             .iter()
             .map(|d| d.layout().width() as u32)
@@ -305,23 +321,25 @@ impl StackedReductionGpu {
         let q_width_max = *q_widths.iter().max().unwrap();
         let d_q_widths = q_widths.to_device().unwrap();
 
-        let total_num_col_openings = stacked_per_commit
+        let total_num_cols: usize = stacked_per_commit
             .iter()
-            .map(|d| d.layout().sorted_cols.len() * 2) // 2 for [plain, rotated]
+            .map(|d| d.layout().sorted_cols.len())
             .sum();
-        let lambda_pows = lambda.powers().take(total_num_col_openings).collect_vec();
-        let d_lambda_pows = lambda_pows.to_device().unwrap();
-
-        let mut unstacked_cols = Vec::with_capacity(total_num_col_openings);
+        let mut unstacked_cols = Vec::with_capacity(total_num_cols);
+        let mut need_rot_per_col = Vec::with_capacity(total_num_cols);
         let mut ht_diff_idxs = Vec::new();
         let mut trace_ptrs = Vec::new();
         for (commit_idx, stacked) in stacked_per_commit.iter().enumerate() {
             let layout = stacked.layout();
-            for (trace, &idx) in zip_eq(&stacked.traces, &layout.mat_starts) {
+            let need_rot_for_commit = &need_rot_per_commit[commit_idx];
+            debug_assert_eq!(need_rot_for_commit.len(), layout.mat_starts.len());
+            for (mat_idx, (trace, &idx)) in zip_eq(&stacked.traces, &layout.mat_starts).enumerate()
+            {
                 debug_assert_ne!(trace.width(), 0);
                 debug_assert_ne!(trace.height(), 0);
                 ht_diff_idxs.push(unstacked_cols.len());
                 trace_ptrs.push((trace.buffer().as_ptr(), trace.height(), trace.width()));
+                let need_rot = need_rot_for_commit[mat_idx];
                 for j in 0..trace.width() {
                     let (_, _j, s) = layout.sorted_cols[idx + j];
                     debug_assert_eq!(_j, j);
@@ -332,11 +350,24 @@ impl StackedReductionGpu {
                         stacked_row_idx: s.row_idx as u32,
                         stacked_col_idx: s.col_idx as u32,
                     });
+                    need_rot_per_col.push(need_rot);
                 }
             }
         }
-        debug_assert_eq!(unstacked_cols.len(), total_num_col_openings / 2);
+        debug_assert_eq!(unstacked_cols.len(), total_num_cols);
         ht_diff_idxs.push(unstacked_cols.len());
+
+        let lambda_pows_used = lambda.powers().take(total_num_cols * 2).collect_vec();
+        let mut lambda_pows = vec![EF::ZERO; total_num_cols * 2];
+        for (col_idx, need_rot) in need_rot_per_col.into_iter().enumerate() {
+            let lambda_eq_idx = 2 * col_idx;
+            let lambda_rot_idx = 2 * col_idx + 1;
+            lambda_pows[lambda_eq_idx] = lambda_pows_used[lambda_eq_idx];
+            if need_rot {
+                lambda_pows[lambda_rot_idx] = lambda_pows_used[lambda_rot_idx];
+            }
+        }
+        let d_lambda_pows = lambda_pows.to_device().unwrap();
 
         let d_unstacked_cols = unstacked_cols.to_device().unwrap(); // TODO: handle error
         let max_window_len = ht_diff_idxs

@@ -36,7 +36,7 @@ use stark_backend_v2::{
         eval_eq_uni, eval_eq_uni_at_one,
     },
     poseidon2::sponge::FiatShamirTranscript,
-    proof::{BatchConstraintProof, GkrProof},
+    proof::{BatchConstraintProof, GkrProof, column_openings_by_rot},
     prover::{
         ColMajorMatrix, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
         fractional_sumcheck_gkr::Frac, stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
@@ -88,6 +88,16 @@ use round0::evaluate_round0_constraints_gpu;
 /// This ratio can be tuned. Currently it is set to prefer the monomial kernel except for the
 /// Poseidon2Air where the DAG node size is much smaller than number of monomials.
 const DAG_FALLBACK_MONOMIAL_RATIO: usize = 2;
+
+#[inline]
+pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
+    if need_rot {
+        debug_assert_eq!(mat_width % 2, 0, "rotated matrices should have even width");
+        (mat_width / 2) as u32
+    } else {
+        mat_width as u32
+    }
+}
 
 #[instrument(level = "info", skip_all)]
 pub fn prove_zerocheck_and_logup_gpu(
@@ -348,18 +358,23 @@ pub fn prove_zerocheck_and_logup_gpu(
 
     let column_openings = prover.into_column_openings();
 
+    let need_rot_per_trace = ctx
+        .per_trace
+        .iter()
+        .map(|(air_idx, _)| mpk.per_air[*air_idx].vk.params.need_rot)
+        .collect::<Vec<_>>();
     // Observe common main openings first, and then preprocessed/cached
-    for openings in &column_openings {
-        for (claim, claim_rot) in &openings[0] {
-            transcript.observe_ext(*claim);
-            transcript.observe_ext(*claim_rot);
+    for (need_rot, openings) in need_rot_per_trace.iter().zip(column_openings.iter()) {
+        for (claim, claim_rot) in column_openings_by_rot(&openings[0], *need_rot) {
+            transcript.observe_ext(claim);
+            transcript.observe_ext(claim_rot);
         }
     }
-    for openings in &column_openings {
+    for (need_rot, openings) in need_rot_per_trace.iter().zip(column_openings.iter()) {
         for part in openings.iter().skip(1) {
-            for (claim, claim_rot) in part {
-                transcript.observe_ext(*claim);
-                transcript.observe_ext(*claim_rot);
+            for (claim, claim_rot) in column_openings_by_rot(part, *need_rot) {
+                transcript.observe_ext(claim);
+                transcript.observe_ext(claim_rot);
             }
         }
     }
@@ -425,6 +440,7 @@ pub struct LogupZerocheckGpu<'a> {
     air_indices_per_trace: Vec<usize>,
     zerocheck_tilde_evals: Vec<EF>,
     logup_tilde_evals: Vec<[EF; 2]>,
+    needs_next_per_trace: Vec<bool>,
 
     trace_interactions: Vec<Option<TraceInteractionMeta>>,
     // round0: Round0Buffers,
@@ -504,6 +520,12 @@ impl<'a> LogupZerocheckGpu<'a> {
         // Collect interaction metadata for GPU execution (evaluations still run on CPU for now).
         let trace_interactions = collect_trace_interactions(pk, ctx, &interactions_layout);
 
+        let needs_next_per_trace = ctx
+            .per_trace
+            .iter()
+            .map(|(air_idx, _)| pk.per_air[*air_idx].vk.params.need_rot)
+            .collect::<Vec<_>>();
+
         Self {
             alpha_logup,
             beta_pows,
@@ -551,6 +573,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 .collect_vec(),
             zerocheck_tilde_evals: vec![EF::ZERO; num_airs_present],
             logup_tilde_evals: vec![[EF::ZERO; 2]; num_airs_present],
+            needs_next_per_trace,
             trace_interactions,
             pk,
             prev_s_eval: EF::ZERO,
@@ -874,6 +897,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             .iter()
             .map(|(air_idx, air_ctx)| {
                 let air_pk = &self.pk.per_air[*air_idx];
+                let need_rot = air_pk.vk.params.need_rot;
                 let mut results: Vec<DeviceMatrix<EF>> = Vec::new();
 
                 // Preprocessed (if exists)
@@ -884,6 +908,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                         &self.d_omega_skip_pows,
                         trace,
                         &d_inv_lagrange_denoms_r0,
+                        need_rot,
                     )
                     .unwrap();
                     results.push(folded);
@@ -897,6 +922,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                         &self.d_omega_skip_pows,
                         trace,
                         &d_inv_lagrange_denoms_r0,
+                        need_rot,
                     )
                     .unwrap();
                     results.push(folded);
@@ -909,6 +935,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                     &self.d_omega_skip_pows,
                     trace,
                     &d_inv_lagrange_denoms_r0,
+                    need_rot,
                 )
                 .unwrap();
                 mem_limit = mem_limit.saturating_sub(folded.buffer().len() * size_of::<EF>());
@@ -1016,6 +1043,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             let norm_factor_denom = 1 << (-n).max(0);
             let norm_factor = F::from_usize(norm_factor_denom).inverse();
             let has_preprocessed = pk.preprocessed_data.is_some();
+            let need_rot = pk.vk.params.need_rot;
             let first_main_idx = usize::from(has_preprocessed);
             let eq_xi_tree = &self.eq_xis[&n_lift];
 
@@ -1026,7 +1054,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                     let prep_ptr = if has_preprocessed {
                         MainMatrixPtrs {
                             data: mats[0].buffer().as_ptr(),
-                            air_width: mats[0].width() as u32 / 2,
+                            air_width: air_width_for_mat(need_rot, mats[0].width()),
                         }
                     } else {
                         MainMatrixPtrs {
@@ -1038,7 +1066,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                         .iter()
                         .map(|m| MainMatrixPtrs {
                             data: m.buffer().as_ptr(),
-                            air_width: m.width() as u32 / 2,
+                            air_width: air_width_for_mat(need_rot, m.width()),
                         })
                         .collect_vec();
                     let main_ptrs_dev = main_ptrs
@@ -1116,7 +1144,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                             .buffer()
                             .as_ptr()
                             .wrapping_add(widths_so_far * interpolated_height),
-                        air_width: mats[0].width() as u32 / 2,
+                        air_width: air_width_for_mat(need_rot, mats[0].width()),
                     }
                 } else {
                     MainMatrixPtrs {
@@ -1124,7 +1152,9 @@ impl<'a> LogupZerocheckGpu<'a> {
                         air_width: 0,
                     }
                 };
-                widths_so_far += 2 * prep_ptr.air_width as usize;
+                if has_preprocessed {
+                    widths_so_far += mats[0].width();
+                }
                 let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
                     .iter()
                     .map(|m| {
@@ -1133,7 +1163,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                                 .buffer()
                                 .as_ptr()
                                 .wrapping_add(widths_so_far * interpolated_height),
-                            air_width: m.width() as u32 / 2,
+                            air_width: air_width_for_mat(need_rot, m.width()),
                         };
                         widths_so_far += m.width();
                         main_ptr
@@ -1467,16 +1497,20 @@ impl<'a> LogupZerocheckGpu<'a> {
         level = "debug",
         skip_all
     )]
-    fn into_column_openings(mut self) -> Vec<Vec<Vec<(EF, EF)>>> {
+    fn into_column_openings(mut self) -> Vec<Vec<Vec<EF>>> {
         let num_airs_present = self.mat_evals_per_trace.len();
         let mut column_openings = Vec::with_capacity(num_airs_present);
 
         // At the end, we've folded all MLEs so they only have one row equal to evaluation at `\vec
         // r`.
-        for mat_evals in std::mem::take(&mut self.mat_evals_per_trace) {
+        for (&need_rot, mat_evals) in self
+            .needs_next_per_trace
+            .iter()
+            .zip(std::mem::take(&mut self.mat_evals_per_trace))
+        {
             // GPU matrices are doubled-width (original + rotated), so we need to split them
             // First, copy all matrices to host and split them
-            let mut split_mats: Vec<ColMajorMatrix<EF>> = mat_evals
+            let mut split_mats: Vec<Option<ColMajorMatrix<EF>>> = mat_evals
                 .into_iter()
                 .flat_map(|mat| {
                     let mat_host = transport_matrix_d2h_col_major(&mat)
@@ -1484,25 +1518,35 @@ impl<'a> LogupZerocheckGpu<'a> {
                     let width = mat_host.width();
                     let height = mat_host.height();
                     debug_assert_eq!(height, 1, "Matrices should have height=1 after folding");
-                    debug_assert_eq!(
-                        width % 2,
-                        0,
-                        "GPU matrices should have doubled width (original + rotated)"
-                    );
-                    let air_width = width / 2;
+                    let air_width = if need_rot {
+                        debug_assert_eq!(
+                            width % 2,
+                            0,
+                            "GPU matrices should have doubled width (original + rotated)"
+                        );
+                        width / 2
+                    } else {
+                        width
+                    };
 
                     // Split doubled-width matrix into original and rotated parts
                     let values = &mat_host.values;
                     let orig: Vec<EF> = (0..air_width)
                         .map(|col| values[col * height]) // height=1, so values[col]
                         .collect();
-                    let rot: Vec<EF> = (air_width..width)
-                        .map(|col| values[col * height]) // height=1, so values[col]
-                        .collect();
+                    let rot: Option<Vec<EF>> = if need_rot {
+                        Some(
+                            (air_width..width)
+                                .map(|col| values[col * height]) // height=1, so values[col]
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    };
 
                     vec![
-                        ColMajorMatrix::new(orig, air_width),
-                        ColMajorMatrix::new(rot, air_width),
+                        Some(ColMajorMatrix::new(orig, air_width)),
+                        rot.map(|mat| ColMajorMatrix::new(mat, air_width)),
                     ]
                 })
                 .collect();
@@ -1525,13 +1569,24 @@ impl<'a> LogupZerocheckGpu<'a> {
             let openings_of_air = iter::once(&[common_main, common_main_rot] as &[_])
                 .chain(split_mats.chunks_exact(2))
                 .map(|pair| {
-                    std::iter::zip(pair[0].columns(), pair[1].columns())
-                        .map(|(claim, claim_rot)| {
-                            assert_eq!(claim.len(), 1);
-                            assert_eq!(claim_rot.len(), 1);
-                            (claim[0], claim_rot[0])
-                        })
-                        .collect_vec()
+                    let plains = pair[0].as_ref().unwrap();
+                    if let Some(rots) = pair[1].as_ref() {
+                        std::iter::zip(plains.columns(), rots.columns())
+                            .flat_map(|(claim, claim_rot)| {
+                                assert_eq!(claim.len(), 1);
+                                assert_eq!(claim_rot.len(), 1);
+                                [claim[0], claim_rot[0]]
+                            })
+                            .collect_vec()
+                    } else {
+                        plains
+                            .columns()
+                            .map(|claim| {
+                                assert_eq!(claim.len(), 1);
+                                claim[0]
+                            })
+                            .collect_vec()
+                    }
                 })
                 .collect_vec();
             column_openings.push(openings_of_air);
