@@ -150,6 +150,45 @@ pub fn evals_eq_hypercube<F: Field>(x: &[F]) -> Vec<F> {
     out
 }
 
+/// Given vector `omega` in `F^n`, populates `out` with `g_omega(b)` for `b` on hypercube `H_n`.
+///
+/// For boolean `b_i ∈ {0,1}` the per-coordinate kernel is:
+/// - `g_i(0) = 1 - 2 * omega_i`
+/// - `g_i(1) = omega_i`
+///
+/// The output ordering matches [`evals_eq_hypercube`]: mask bit `i` corresponds to `omega[i]`.
+pub fn evals_g_hypercube<F: Field>(omega: &[F]) -> Vec<F> {
+    let n = omega.len();
+    let mut out = F::zero_vec(1 << n);
+    out[0] = F::ONE;
+    for (i, &omega_i) in omega.iter().enumerate() {
+        let w0 = F::ONE - omega_i.double();
+        let w1 = omega_i;
+        let (los, his) = out[..2 << i].split_at_mut(1 << i);
+        los.par_iter_mut()
+            .zip(his.par_iter_mut())
+            .for_each(|(lo, hi)| {
+                let prev = *lo;
+                *hi = prev * w1;
+                *lo = prev * w0;
+            })
+    }
+    out
+}
+
+/// Evaluate `g_omega(x)` at arbitrary (not necessarily boolean) `x`.
+///
+/// ```text
+/// g_omega(x) = ∏_i ((1 - 2*omega_i) * (1 - x_i) + omega_i * x_i)
+/// ```
+pub fn eval_g_mle<F: Field>(omega: &[F], x: &[F]) -> F {
+    debug_assert_eq!(omega.len(), x.len());
+    zip(omega, x).fold(F::ONE, |acc, (&omega_i, &x_i)| {
+        let w0 = F::ONE - omega_i.double();
+        acc * (w0 * (F::ONE - x_i) + omega_i * x_i)
+    })
+}
+
 pub fn evals_eq_hypercube_serial<F: Field>(x: &[F]) -> Vec<F> {
     let n = x.len();
     let mut out = F::zero_vec(1 << n);
@@ -289,6 +328,42 @@ impl<F: TwoAdicField> Ple<F> {
     }
 }
 
+/// Convert evaluations of a prismalinear polynomial on `D × {0,1}^n` into the RS coefficient
+/// vector for **eval-to-coeff** encoding.
+///
+/// - `|D| = 2^l_skip`, and `evals` must be ordered so the lower `l_skip` bits of the index select
+///   the point in `D`, and higher bits select the boolean assignment.
+/// - The output ordering matches the same convention: `idx = z_mask + (1 << l_skip) * x_mask`.
+///
+/// This avoids computing full prismalinear monomial coefficients in the boolean variables (which
+/// would later be re-zeta-transformed), by:
+/// 1) Performing an iDFT in `Z` for each boolean assignment.
+/// 2) Applying the subset-zeta transform only over the `Z`-mask bits.
+pub fn eval_to_coeff_rs_message<F: TwoAdicField>(l_skip: usize, evals: &[F]) -> Vec<F> {
+    assert!(!evals.is_empty(), "Evaluations cannot be empty");
+    let prism_dim = log2_strict_usize(evals.len());
+    assert!(
+        prism_dim >= l_skip,
+        "Total variables must be at least l_skip"
+    );
+
+    let chunk_len = 1usize << l_skip;
+    let mut buf: Vec<_> = evals
+        .par_chunks_exact(chunk_len)
+        .flat_map(|chunk| {
+            let dft = Radix2Bowers;
+            dft.idft(chunk.to_vec())
+        })
+        .collect();
+
+    // For each fixed boolean assignment, convert Z-monomial coefficients into hypercube
+    // evaluations over the Z-bit variables.
+    buf.par_chunks_exact_mut(chunk_len)
+        .for_each(Mle::coeffs_to_evals_inplace);
+
+    buf
+}
+
 pub struct MleMatrix<F> {
     pub columns: Vec<Mle<F>>,
 }
@@ -316,5 +391,79 @@ impl<F: TwoAdicField> PleMatrix<F> {
             .map(|j| Ple::from_evaluations(l_skip, evals.column(j)))
             .collect();
         Self { columns }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use p3_field::PrimeCharacteristicRing;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    use super::*;
+    use crate::F;
+
+    #[test]
+    fn test_evals_g_hypercube_matches_naive() {
+        let mut rng = StdRng::seed_from_u64(0);
+
+        for n in 0..=10usize {
+            let omega = (0..n)
+                .map(|_| F::from_u64(rng.random()))
+                .collect::<Vec<_>>();
+            let evals = evals_g_hypercube(&omega);
+            assert_eq!(evals.len(), 1 << n);
+
+            for mask in 0..(1usize << n) {
+                let mut expected = F::ONE;
+                for i in 0..n {
+                    expected *= if (mask >> i) & 1 == 0 {
+                        F::ONE - omega[i].double()
+                    } else {
+                        omega[i]
+                    };
+                }
+                assert_eq!(evals[mask], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_decoder_kernel_identity() {
+        let mut rng = StdRng::seed_from_u64(1);
+
+        for m in 0..=10usize {
+            let a = (0..(1usize << m))
+                .map(|_| F::from_u64(rng.random()))
+                .collect::<Vec<_>>();
+
+            // RS coefficients under eval-to-coeff encoding are the hypercube evaluations of f.
+            let mut rs_coeffs = a.clone();
+            Mle::coeffs_to_evals_inplace(&mut rs_coeffs);
+
+            // WHIR works with the associated MLE HatF whose coefficients are `rs_coeffs`.
+            // We need HatF evaluations on the hypercube.
+            let mut hatf_evals = rs_coeffs.clone();
+            Mle::coeffs_to_evals_inplace(&mut hatf_evals);
+
+            let omega = (0..m)
+                .map(|_| F::from_u64(rng.random()))
+                .collect::<Vec<_>>();
+
+            let g_evals = evals_g_hypercube(&omega);
+            let lhs = zip(&hatf_evals, &g_evals).fold(F::ZERO, |acc, (&f, &g)| acc + f * g);
+
+            // Naive evaluation of f(omega) from its coefficient table.
+            let rhs = a.iter().enumerate().fold(F::ZERO, |acc, (mask, &coeff)| {
+                let mut term = coeff;
+                for i in 0..m {
+                    if (mask >> i) & 1 == 1 {
+                        term *= omega[i];
+                    }
+                }
+                acc + term
+            });
+
+            assert_eq!(lhs, rhs);
+        }
     }
 }

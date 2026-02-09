@@ -11,7 +11,7 @@ use crate::{
         poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress, FiatShamirTranscript,
     },
     proof::WhirProof,
-    prover::poly::Mle,
+    prover::poly::eval_g_mle,
     Digest, SystemParams, EF, F,
 };
 
@@ -240,15 +240,32 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     //
     // If we let u' = u[..t] and u'' = u[t..], then by factoring we can rewrite the term
     //
-    //   sum_{b in H_{m-t}} f(b) eq(u, alpha || b) = eq(u', alpha) *
-    //                                               sum_{b in H_{m-t}} f(b) eq(u'', b)
-    //                                             = eq(u', alpha) * f(u'').
+    //   sum_{b in H_{m-t}} f(b) g(u, alpha || b) = g(u', alpha) *
+    //                                              sum_{b in H_{m-t}} f(b) g(u'', b).
+    //
+    // For multilinear f with coefficient table `c[S]`, we have the identity:
+    //   sum_{b} f(b) g(u'', b) = sum_{S} c[S] eq(u'', S),
+    // i.e. it is the MLE of the table `c` evaluated at `u''`.
     //
     // Similar algebra allows us to control the terms with eq(pow(z_i)). Note that here we actually
     // end up with f(pow(z_i^{2^p})) for some power p, which is a univariate evaluation.
     let t = k_whir * num_whir_rounds;
-    let f = Mle::from_coeffs(final_poly.clone());
-    let mut acc = eval_eq_mle(&alphas[..t], &u[..t]) * f.eval_at_point_inplace(&u[t..]);
+    let prefix = eval_g_mle(&u[..t], &alphas[..t]);
+    let suffix_sum = {
+        // Evaluate the multilinear extension of the table `final_poly` (interpreted as hypercube
+        // evaluations) at `u[t..]`.
+        let mut buf = final_poly.clone();
+        let mut len = buf.len();
+        for &uj in u[t..].iter().rev() {
+            len >>= 1;
+            let (lo, hi) = buf.split_at_mut(len);
+            for i in 0..len {
+                lo[i] = lo[i] * (EF::ONE - uj) + hi[i] * uj;
+            }
+        }
+        buf[0]
+    };
+    let mut acc = prefix * suffix_sum;
     let mut j = k_whir;
     for i in 0..num_whir_rounds {
         let zis = &zs[i];
