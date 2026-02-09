@@ -61,7 +61,8 @@ impl<EF: Field> Add<Frac<EF>> for Frac<EF> {
 /// `total_rounds_block = total_rounds_full - n_grid`.
 ///
 /// Each grid point gets its own independent segment tree and GKR claims.
-/// The sumcheck batches across all grid points using gamma powers.
+/// The sumcheck batches across all grid points using weight vectors initialized
+/// from geometric progressions of ρ_p, ρ_q.
 ///
 /// # Arguments
 /// * `transcript` - The Fiat-Shamir transcript
@@ -164,6 +165,29 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
     let mut sumcheck_polys: Vec<Vec<[EF; 3]>> =
         Vec::with_capacity(total_rounds_block.saturating_sub(1));
 
+    // Vectorized GKR Setup: sample rho_p, rho_q and initialize weight vectors
+    let rho_p: EF = transcript.sample_ext();
+    let rho_q: EF = transcript.sample_ext();
+    debug!(%rho_p, %rho_q);
+    let mut omega_p: Vec<EF> = {
+        let mut v = Vec::with_capacity(n_grid_size);
+        let mut cur = EF::ONE;
+        for _ in 0..n_grid_size {
+            v.push(cur);
+            cur *= rho_p;
+        }
+        v
+    };
+    let mut omega_q: Vec<EF> = {
+        let mut v = Vec::with_capacity(n_grid_size);
+        let mut cur = EF::ONE;
+        for _ in 0..n_grid_size {
+            v.push(cur);
+            cur *= rho_q;
+        }
+        v
+    };
+
     // =========================================================================
     // Round j=1 (special: 0 sumcheck sub-rounds)
     // =========================================================================
@@ -190,6 +214,17 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
     // Sample mu_1 for reduction to single evaluation point
     let mu_1 = transcript.sample_ext();
     debug!(gkr_round = 0, mu = %mu_1);
+
+    // Weight update for round 1
+    for (g, claims) in claims_per_layer[0].iter().enumerate() {
+        let cp0 = omega_p[g] * claims.q_xi_1;
+        let cp1 = omega_p[g] * claims.q_xi_0;
+        let cq0 = omega_p[g] * claims.p_xi_1 + omega_q[g] * claims.q_xi_1;
+        let cq1 = omega_p[g] * claims.p_xi_0 + omega_q[g] * claims.q_xi_0;
+        omega_p[g] = (EF::ONE - mu_1) * cp0 + mu_1 * cp1;
+        omega_q[g] = (EF::ONE - mu_1) * cq0 + mu_1 * cq1;
+    }
+
     let mut xi_prev = vec![mu_1];
 
     // =========================================================================
@@ -198,21 +233,6 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
     for round in 1..total_rounds_block {
         // Number of hypercube points per grid point at this layer
         let eval_size = 1 << round;
-
-        // Sample gamma_j for batching across grid points and p/q
-        let gamma = transcript.sample_ext();
-        debug!(gkr_round = round, %gamma);
-
-        // Precompute gamma powers: gamma^0, gamma^1, ..., gamma^{2*n_grid_size - 1}
-        let gamma_pows: Vec<EF> = {
-            let mut pows = Vec::with_capacity(2 * n_grid_size);
-            let mut cur = EF::ONE;
-            for _ in 0..2 * n_grid_size {
-                pows.push(cur);
-                cur *= gamma;
-            }
-            pows
-        };
 
         // Build columns: for each grid point g, 4 columns (p_j_g_0, q_j_g_0, p_j_g_1, q_j_g_1).
         // Total pq columns: 4 * n_grid_size. Plus 1 eq_xis column.
@@ -240,12 +260,13 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
             for sumcheck_round in 0..n {
                 // The combined sumcheck polynomial sums over all grid points:
                 //   s(X) = sum_g [eq(xi_prev, Y) * (
-                //     gamma^{2g} * (p_g_0 * q_g_1 + p_g_1 * q_g_0)
-                //     + gamma^{2g+1} * (q_g_0 * q_g_1)
+                //     omega_p[g] * (p_g_0 * q_g_1 + p_g_1 * q_g_0)
+                //     + omega_q[g] * (q_g_0 * q_g_1)
                 //   )]
                 // This is degree 3 in each Y_i (eq is degree 1, cross-term is degree 2).
                 let n_gs = n_grid_size; // capture for closure
-                let gp = &gamma_pows;
+                let op = &omega_p;
+                let oq = &omega_q;
                 let [s_evals] = sumcheck_round_poly_evals(
                     n - sumcheck_round,
                     3,
@@ -262,7 +283,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
                             let q_j1 = pq_row[base + 3];
                             let p_cross = p_j0 * q_j1 + p_j1 * q_j0;
                             let q_cross = q_j0 * q_j1;
-                            val += gp[2 * g] * p_cross + gp[2 * g + 1] * q_cross;
+                            val += op[g] * p_cross + oq[g] * q_cross;
                         }
                         [eq_xi * val]
                     },
@@ -307,6 +328,17 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
         // Sample mu for reduction to single evaluation point
         let mu = transcript.sample_ext();
         debug!(gkr_round = round, %mu);
+
+        // Weight update
+        let layer_ref = claims_per_layer.last().unwrap();
+        for (g, claims) in layer_ref.iter().enumerate() {
+            let cp0 = omega_p[g] * claims.q_xi_1;
+            let cp1 = omega_p[g] * claims.q_xi_0;
+            let cq0 = omega_p[g] * claims.p_xi_1 + omega_q[g] * claims.q_xi_1;
+            let cq1 = omega_p[g] * claims.p_xi_0 + omega_q[g] * claims.q_xi_0;
+            omega_p[g] = (EF::ONE - mu) * cp0 + mu * cp1;
+            omega_q[g] = (EF::ONE - mu) * cq0 + mu * cq1;
+        }
 
         // Update xi_prev = (mu, rho)
         xi_prev = [vec![mu], rho].concat();

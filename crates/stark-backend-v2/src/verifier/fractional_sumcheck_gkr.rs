@@ -18,8 +18,6 @@ pub enum GkrVerificationError {
     GridDenominatorZero { index: usize },
     #[error("Grid sum check failed: numerator should be zero, got {actual}")]
     GridSumCheckFailed { actual: EF },
-    #[error("Zero-check failed: numerator at root should be zero, got {actual}")]
-    ZeroCheckFailed { actual: EF },
     #[error("Layer consistency check failed at round {round}: expected {expected}, got {actual}")]
     LayerConsistencyCheckFailed {
         round: usize,
@@ -136,6 +134,32 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         });
     }
 
+    // Vectorized GKR Setup: sample rho_p, rho_q and initialize weight vectors
+    let rho_p: EF = transcript.sample_ext();
+    let rho_q: EF = transcript.sample_ext();
+    debug!(%rho_p, %rho_q);
+    let mut omega_p: Vec<EF> = {
+        let mut v = Vec::with_capacity(n_grid_size);
+        let mut cur = EF::ONE;
+        for _ in 0..n_grid_size {
+            v.push(cur);
+            cur *= rho_p;
+        }
+        v
+    };
+    let mut omega_q: Vec<EF> = {
+        let mut v = Vec::with_capacity(n_grid_size);
+        let mut cur = EF::ONE;
+        for _ in 0..n_grid_size {
+            v.push(cur);
+            cur *= rho_q;
+        }
+        v
+    };
+    let mut claim: EF = (0..n_grid_size)
+        .map(|g| omega_p[g] * proof.grid_claims[g].0 + omega_q[g] * proof.grid_claims[g].1)
+        .sum();
+
     // Step 4: Round j=1 (direct check, no sumcheck)
     // Verify shape: claims_per_layer[0] must have n_grid_size entries
     let layer_claims_vec = &proof.claims_per_layer[0];
@@ -152,48 +176,51 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         observe_layer_claims(transcript, claims);
     }
 
-    // Verify per-grid-point root consistency:
-    // For each g: p_cross_g should equal grid_claims[g].0
-    //             q_cross_g should equal grid_claims[g].1
-    for (g, claims) in layer_claims_vec.iter().enumerate() {
-        let (p_cross_g, q_cross_g) = compute_recursive_relations(claims);
-        let (expected_p, expected_q) = proof.grid_claims[g];
-        if p_cross_g != expected_p || q_cross_g != expected_q {
-            return Err(GkrVerificationError::ZeroCheckFailed {
-                actual: p_cross_g - expected_p,
-            });
-        }
+    // Batched gate check: claim == Σ_g (ω_p[g] * G_p[g] + ω_q[g] * G_q[g])
+    let gate_sum: EF = layer_claims_vec
+        .iter()
+        .enumerate()
+        .map(|(g, claims)| {
+            let (p_cross, q_cross) = compute_recursive_relations(claims);
+            omega_p[g] * p_cross + omega_q[g] * q_cross
+        })
+        .sum();
+    if claim != gate_sum {
+        return Err(GkrVerificationError::LayerConsistencyCheckFailed {
+            round: 0,
+            expected: claim,
+            actual: gate_sum,
+        });
     }
 
     // Sample mu_1, reduce per-grid claims to single eval point
     let mu_1 = transcript.sample_ext();
     debug!(gkr_round = 0, %mu_1);
 
-    // Per-grid numer/denom claims via linear interpolation
+    // Per-grid numer/denom claims via linear interpolation + weight update
     let mut numer_claims: Vec<EF> = Vec::with_capacity(n_grid_size);
     let mut denom_claims: Vec<EF> = Vec::with_capacity(n_grid_size);
-    for claims in layer_claims_vec {
+    for (g, claims) in layer_claims_vec.iter().enumerate() {
         let (n, d) = reduce_to_single_evaluation(claims, mu_1);
         numer_claims.push(n);
         denom_claims.push(d);
+        // Weight update
+        let cp0 = omega_p[g] * claims.q_xi_1;
+        let cp1 = omega_p[g] * claims.q_xi_0;
+        let cq0 = omega_p[g] * claims.p_xi_1 + omega_q[g] * claims.q_xi_1;
+        let cq1 = omega_p[g] * claims.p_xi_0 + omega_q[g] * claims.q_xi_0;
+        omega_p[g] = (EF::ONE - mu_1) * cp0 + mu_1 * cp1;
+        omega_q[g] = (EF::ONE - mu_1) * cq0 + mu_1 * cq1;
     }
+    // Update claim for next round
+    claim = (0..n_grid_size)
+        .map(|g| omega_p[g] * numer_claims[g] + omega_q[g] * denom_claims[g])
+        .sum();
     let mut gkr_r = vec![mu_1];
 
     // Step 5: Rounds j=2,...,total_rounds (with sumcheck)
     for round in 1..total_rounds {
-        // Sample gamma_j for batching
-        let gamma_j = transcript.sample_ext();
-        debug!(gkr_round = round, %gamma_j);
-        let gamma_pows = gamma_powers(gamma_j, 2 * n_grid_size);
-
-        // Compute batched claim
-        let claim: EF = (0..n_grid_size)
-            .map(|g| {
-                gamma_pows[2 * g] * numer_claims[g] + gamma_pows[2 * g + 1] * denom_claims[g]
-            })
-            .sum();
-
-        // Run sumcheck protocol for this round
+        // Run sumcheck protocol for this round using current claim
         let (new_claim, round_r, eq_at_r_prime) =
             verify_gkr_sumcheck(proof, transcript, round, claim, &gkr_r)?;
         debug_assert_eq!(eq_at_r_prime, eval_eq_mle(&gkr_r, &round_r));
@@ -211,13 +238,13 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
             observe_layer_claims(transcript, claims);
         }
 
-        // Compute batched recursive from layer claims
+        // Batched gate check with weights
         let batched_recursive: EF = layer_claims_vec
             .iter()
             .enumerate()
             .map(|(g, claims)| {
-                let (p_cross_g, q_cross_g) = compute_recursive_relations(claims);
-                gamma_pows[2 * g] * p_cross_g + gamma_pows[2 * g + 1] * q_cross_g
+                let (p_cross, q_cross) = compute_recursive_relations(claims);
+                omega_p[g] * p_cross + omega_q[g] * q_cross
             })
             .sum();
 
@@ -231,19 +258,32 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
             });
         }
 
-        // Sample mu, reduce claims
+        // Sample mu, reduce claims + weight update
         let mu = transcript.sample_ext();
         debug!(gkr_round = round, %mu);
         numer_claims.clear();
         denom_claims.clear();
-        for claims in layer_claims_vec {
+        for (g, claims) in layer_claims_vec.iter().enumerate() {
             let (n, d) = reduce_to_single_evaluation(claims, mu);
             numer_claims.push(n);
             denom_claims.push(d);
+            // Weight update
+            let cp0 = omega_p[g] * claims.q_xi_1;
+            let cp1 = omega_p[g] * claims.q_xi_0;
+            let cq0 = omega_p[g] * claims.p_xi_1 + omega_q[g] * claims.q_xi_1;
+            let cq1 = omega_p[g] * claims.p_xi_0 + omega_q[g] * claims.q_xi_0;
+            omega_p[g] = (EF::ONE - mu) * cp0 + mu * cp1;
+            omega_q[g] = (EF::ONE - mu) * cq0 + mu * cq1;
         }
+        // Update claim for next round
+        claim = (0..n_grid_size)
+            .map(|g| omega_p[g] * numer_claims[g] + omega_q[g] * denom_claims[g])
+            .sum();
         // Update evaluation point: gkr_r = (mu, round_r)
         gkr_r = std::iter::once(mu).chain(round_r).collect();
     }
+
+    let _ = claim; // claim propagation ends here; final values are in numer_claims/denom_claims
 
     // Step 6: Grid check
     // Per-grid evaluation claims are (numer_claims[g], denom_claims[g]) at xi_block = gkr_r
@@ -290,17 +330,6 @@ fn grid_check<TS: FiatShamirTranscript>(
     let xi: Vec<EF> = gkr_r.into_iter().chain(xi_grid).collect();
 
     (p_xi, q_xi, xi)
-}
-
-/// Compute powers of gamma: gamma^0, gamma^1, ..., gamma^{count-1}
-fn gamma_powers(gamma: EF, count: usize) -> Vec<EF> {
-    let mut pows = Vec::with_capacity(count);
-    let mut cur = EF::ONE;
-    for _ in 0..count {
-        pows.push(cur);
-        cur *= gamma;
-    }
-    pows
 }
 
 /// Verify sumcheck for a single GKR round.
@@ -462,9 +491,10 @@ mod tests {
         // p_cross = 1*4 + 2*3 = 10 (non-zero)
         // q_cross = 3*4 = 12
         // grid_claims: single grid point with (p=0, q=12)
-        // batched_claim = gamma^0 * 0 + gamma^1 * 12 = 12*gamma
-        // batched_recursive = gamma^0 * 10 + gamma^1 * 12 = 10 + 12*gamma
-        // These won't match because 10 != 0
+        // With vectorized GKR: omega_p=[1], omega_q=[1] (rho^0=1)
+        // claim = 1*0 + 1*12 = 12
+        // gate_sum = 1*10 + 1*12 = 22
+        // claim != gate_sum => LayerConsistencyCheckFailed
         let proof = GkrProof {
             logup_pow_witness: F::ZERO,
             grid_claims: vec![(EF::ZERO, EF::from_u64(12))],
@@ -477,7 +507,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            GkrVerificationError::ZeroCheckFailed { .. }
+            GkrVerificationError::LayerConsistencyCheckFailed { .. }
         ));
     }
 
