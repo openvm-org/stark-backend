@@ -15,13 +15,15 @@ pub fn fold_ple_evals_rotate(
     d_omega_skip_pows: &DeviceBuffer<F>,
     trace_evals: &DeviceMatrix<F>,
     d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
+    need_rot: bool,
 ) -> Result<DeviceMatrix<EF>, FoldPleError> {
     let width = trace_evals.width();
     let height = trace_evals.height();
     let num_x = max(height >> l_skip, 1);
-    let folded_buf = DeviceBuffer::<EF>::with_capacity(num_x * width * 2);
+    let out_width = width * if need_rot { 2 } else { 1 };
+    let folded_buf = DeviceBuffer::<EF>::with_capacity(num_x * out_width);
     // SAFETY:
-    // - We allocated `folded_buf` for `num_x * width * 2` elements.
+    // - We allocated `folded_buf` for `num_x * width * (1 or 2)` elements.
     // - `trace_evals` is `height x width` unlighted matrix
     unsafe {
         fold_ple_evals_gpu(
@@ -33,17 +35,19 @@ pub fn fold_ple_evals_rotate(
             false,
         )?;
 
-        // Fold the rotation from evals
-        fold_ple_evals_gpu(
-            l_skip,
-            d_omega_skip_pows,
-            trace_evals,
-            folded_buf.as_mut_ptr().add(num_x * width),
-            d_inv_lagrange_denoms_r0,
-            true,
-        )?;
+        if need_rot {
+            // Fold the rotation from evals
+            fold_ple_evals_gpu(
+                l_skip,
+                d_omega_skip_pows,
+                trace_evals,
+                folded_buf.as_mut_ptr().add(num_x * width),
+                d_inv_lagrange_denoms_r0,
+                true,
+            )?;
+        }
     }
-    let folded = DeviceMatrix::new(Arc::new(folded_buf), num_x, width * 2);
+    let folded = DeviceMatrix::new(Arc::new(folded_buf), num_x, out_width);
     Ok(folded)
 }
 
