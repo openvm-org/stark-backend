@@ -134,25 +134,28 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         });
     }
 
-    // Vectorized GKR Setup: sample rho_p, rho_q and initialize weight vectors
-    let rho_p: EF = transcript.sample_ext();
-    let rho_q: EF = transcript.sample_ext();
-    debug!(%rho_p, %rho_q);
+    // Vectorized GKR Setup: sample gamma and initialize weight vectors using
+    // interleaved powers: omega_p[g] = gamma^{2g}, omega_q[g] = gamma^{2g+1}.
+    // This ensures omega_p[0]=1 != omega_q[0]=gamma, so p and q are always
+    // independently bound (avoiding the soundness issue of equal weights at g=0).
+    let gamma: EF = transcript.sample_ext();
+    debug!(%gamma);
+    let gamma_sq = gamma * gamma;
     let mut omega_p: Vec<EF> = {
         let mut v = Vec::with_capacity(n_grid_size);
-        let mut cur = EF::ONE;
+        let mut cur = EF::ONE; // gamma^0
         for _ in 0..n_grid_size {
             v.push(cur);
-            cur *= rho_p;
+            cur *= gamma_sq; // gamma^0, gamma^2, gamma^4, ...
         }
         v
     };
     let mut omega_q: Vec<EF> = {
         let mut v = Vec::with_capacity(n_grid_size);
-        let mut cur = EF::ONE;
+        let mut cur = gamma; // gamma^1
         for _ in 0..n_grid_size {
             v.push(cur);
-            cur *= rho_q;
+            cur *= gamma_sq; // gamma^1, gamma^3, gamma^5, ...
         }
         v
     };
@@ -334,7 +337,8 @@ fn grid_check<TS: FiatShamirTranscript>(
 
 /// Verify sumcheck for a single GKR round.
 ///
-/// Reduces evaluation of (p̂ⱼ₋₁ + λⱼ·q̂ⱼ₋₁)(ξ^{(j-1)}) to evaluations at the next layer.
+/// Reduces the batched claim Σ_g (ω_p[g]·p̂ⱼ₋₁,g + ω_q[g]·q̂ⱼ₋₁,g)(ξ^{(j-1)})
+/// to evaluations at the next layer.
 ///
 /// # Returns
 /// `(claim, ρ^{(j-1)}, eq(ξ^{(j-1)}, ρ^{(j-1)}))` where ρ^{(j-1)} is randomly sampled from the

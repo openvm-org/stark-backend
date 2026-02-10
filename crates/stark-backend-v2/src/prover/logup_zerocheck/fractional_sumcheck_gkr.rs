@@ -62,7 +62,7 @@ impl<EF: Field> Add<Frac<EF>> for Frac<EF> {
 ///
 /// Each grid point gets its own independent segment tree and GKR claims.
 /// The sumcheck batches across all grid points using weight vectors initialized
-/// from geometric progressions of ρ_p, ρ_q.
+/// from interleaved powers of a single challenge γ: ω_p[g] = γ^{2g}, ω_q[g] = γ^{2g+1}.
 ///
 /// # Arguments
 /// * `transcript` - The Fiat-Shamir transcript
@@ -165,25 +165,28 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
     let mut sumcheck_polys: Vec<Vec<[EF; 3]>> =
         Vec::with_capacity(total_rounds_block.saturating_sub(1));
 
-    // Vectorized GKR Setup: sample rho_p, rho_q and initialize weight vectors
-    let rho_p: EF = transcript.sample_ext();
-    let rho_q: EF = transcript.sample_ext();
-    debug!(%rho_p, %rho_q);
+    // Vectorized GKR Setup: sample gamma and initialize weight vectors using
+    // interleaved powers: omega_p[g] = gamma^{2g}, omega_q[g] = gamma^{2g+1}.
+    // This ensures omega_p[0]=1 != omega_q[0]=gamma, so p and q are always
+    // independently bound (avoiding the soundness issue of equal weights at g=0).
+    let gamma: EF = transcript.sample_ext();
+    debug!(%gamma);
+    let gamma_sq = gamma * gamma;
     let mut omega_p: Vec<EF> = {
         let mut v = Vec::with_capacity(n_grid_size);
-        let mut cur = EF::ONE;
+        let mut cur = EF::ONE; // gamma^0
         for _ in 0..n_grid_size {
             v.push(cur);
-            cur *= rho_p;
+            cur *= gamma_sq; // gamma^0, gamma^2, gamma^4, ...
         }
         v
     };
     let mut omega_q: Vec<EF> = {
         let mut v = Vec::with_capacity(n_grid_size);
-        let mut cur = EF::ONE;
+        let mut cur = gamma; // gamma^1
         for _ in 0..n_grid_size {
             v.push(cur);
-            cur *= rho_q;
+            cur *= gamma_sq; // gamma^1, gamma^3, gamma^5, ...
         }
         v
     };
