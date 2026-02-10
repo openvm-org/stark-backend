@@ -150,20 +150,21 @@ pub fn evals_eq_hypercube<F: Field>(x: &[F]) -> Vec<F> {
     out
 }
 
-/// Given vector `omega` in `F^n`, populates `out` with `g_omega(b)` for `b` on hypercube `H_n`.
+/// Given vector `u_tilde` in `F^n`, populates `out` with `mobius_eq_kernel(u_tilde, b)` for
+/// `b` on hypercube `H_n`.
 ///
 /// For boolean `b_i ∈ {0,1}` the per-coordinate kernel is:
-/// - `g_i(0) = 1 - 2 * omega_i`
-/// - `g_i(1) = omega_i`
+/// - `K_i(0) = 1 - 2 * u_tilde_i`
+/// - `K_i(1) = u_tilde_i`
 ///
 /// The output ordering matches [`evals_eq_hypercube`]: mask bit `i` corresponds to `omega[i]`.
-pub fn evals_g_hypercube<F: Field>(omega: &[F]) -> Vec<F> {
-    let n = omega.len();
+pub fn mobius_eq_evals_hypercube<F: Field>(u_tilde: &[F]) -> Vec<F> {
+    let n = u_tilde.len();
     let mut out = F::zero_vec(1 << n);
     out[0] = F::ONE;
-    for (i, &omega_i) in omega.iter().enumerate() {
-        let w0 = F::ONE - omega_i.double();
-        let w1 = omega_i;
+    for (i, &u_i) in u_tilde.iter().enumerate() {
+        let w0 = F::ONE - u_i.double();
+        let w1 = u_i;
         let (los, his) = out[..2 << i].split_at_mut(1 << i);
         los.par_iter_mut()
             .zip(his.par_iter_mut())
@@ -390,14 +391,14 @@ mod tests {
     use crate::F;
 
     #[test]
-    fn test_evals_g_hypercube_matches_naive() {
+    fn test_mobius_eq_evals_hypercube_matches_naive() {
         let mut rng = StdRng::seed_from_u64(0);
 
         for n in 0..=10usize {
             let omega = (0..n)
                 .map(|_| F::from_u64(rng.random()))
                 .collect::<Vec<_>>();
-            let evals = evals_g_hypercube(&omega);
+            let evals = mobius_eq_evals_hypercube(&omega);
             assert_eq!(evals.len(), 1 << n);
 
             for mask in 0..(1usize << n) {
@@ -436,7 +437,7 @@ mod tests {
                 .map(|_| F::from_u64(rng.random()))
                 .collect::<Vec<_>>();
 
-            let g_evals = evals_g_hypercube(&omega);
+            let g_evals = mobius_eq_evals_hypercube(&omega);
             let lhs = zip(&hatf_evals, &g_evals).fold(F::ZERO, |acc, (&f, &g)| acc + f * g);
 
             // Naive evaluation of f(omega) from its coefficient table.

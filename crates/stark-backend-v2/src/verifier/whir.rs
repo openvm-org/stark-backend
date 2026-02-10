@@ -6,7 +6,9 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    poly_common::{eval_eq_mle, eval_g_mle, horner_eval, interpolate_quadratic_at_012, Squarable},
+    poly_common::{
+        eval_eq_mle, eval_mobius_eq_mle, horner_eval, interpolate_quadratic_at_012, Squarable,
+    },
     poseidon2::sponge::{
         poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress, FiatShamirTranscript,
     },
@@ -249,7 +251,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     // Similar algebra allows us to control the terms with eq(pow(z_i)). Note that here we actually
     // end up with f(pow(z_i^{2^p})) for some power p, which is a univariate evaluation.
     let t = k_whir * num_whir_rounds;
-    let prefix = eval_g_mle(&u[..t], &alphas[..t]);
+    let prefix = eval_mobius_eq_mle(&u[..t], &alphas[..t]);
     let suffix_sum = {
         // Evaluate the multilinear extension of the table `final_poly` (interpreted as hypercube
         // evaluations) at `u[t..]`.

@@ -28,16 +28,16 @@ where
     })
 }
 
-/// Evaluate `g_omega(x)` at an arbitrary point `x`:
+/// Evaluate `mobius_eq_poly(u_tilde)` at an arbitrary point `x`.
 ///
 /// ```text
-/// g_omega(x) = ∏_i ((1 - 2*omega_i) * (1 - x_i) + omega_i * x_i)
+/// mobius_eq_poly(u_tilde)(x) = ∏_i ((1 - 2*u_tilde_i) * (1 - x_i) + u_tilde_i * x_i)
 /// ```
-pub fn eval_g_mle<F: Field>(omega: &[F], x: &[F]) -> F {
-    debug_assert_eq!(omega.len(), x.len());
-    zip(omega, x).fold(F::ONE, |acc, (&omega_i, &x_i)| {
-        let w0 = F::ONE - omega_i.double();
-        acc * (w0 * (F::ONE - x_i) + omega_i * x_i)
+pub fn eval_mobius_eq_mle<F: Field>(u: &[F], x: &[F]) -> F {
+    debug_assert_eq!(u.len(), x.len());
+    zip(u, x).fold(F::ONE, |acc, (&u_i, &x_i)| {
+        let w0 = F::ONE - u_i.double();
+        acc * (w0 * (F::ONE - x_i) + u_i * x_i)
     })
 }
 

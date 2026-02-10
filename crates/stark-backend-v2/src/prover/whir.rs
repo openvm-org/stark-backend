@@ -13,7 +13,7 @@ use crate::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
     prover::{
-        poly::{eval_to_coeff_rs_message, evals_eq_hypercube, evals_g_hypercube, Mle},
+        poly::{eval_to_coeff_rs_message, evals_eq_hypercube, mobius_eq_evals_hypercube, Mle},
         stacked_pcs::{MerkleTree, StackedPcsData},
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
@@ -24,8 +24,9 @@ pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
     /// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables,
     /// at a single vector `u \in \Fext^n`.
     ///
-    /// This means applying WHIR with weight polynomial `\hat{w}(Z, \vec X) = Z * g_u(\vec X)`
-    /// where `g` is the decoder kernel for eval-to-coeff RS encoding.
+    /// This means applying WHIR with weight polynomial
+    /// `\hat{w}(Z, \vec X) = Z * mobius_eq_poly(u)(\vec X)`, where `mobius_eq_poly(u)` is the
+    /// Möbius-adjusted equality polynomial for eval-to-coeff RS encoding.
     ///
     /// The matrices in `common_main_pcs_data` and `pre_cached_pcs_data_per_commit` must all have
     /// the same height.
@@ -111,7 +112,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
 
     // We assume `\hat{w}` in a WHIR round is always multilinear and maintain its
     // evaluations on `H_m`.
-    let mut w_evals = evals_g_hypercube(u);
+    let mut w_evals = mobius_eq_evals_hypercube(u);
 
     let mut whir_sumcheck_polys: Vec<[EF; 2]> = Vec::with_capacity(num_sumcheck_rounds);
     let mut codeword_commits = vec![];
