@@ -6,12 +6,11 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    poly_common::{eval_eq_mle, horner_eval, interpolate_quadratic_at_012, Squarable},
+    poly_common::{eval_eq_mle, eval_g_mle, horner_eval, interpolate_quadratic_at_012, Squarable},
     poseidon2::sponge::{
         poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress, FiatShamirTranscript,
     },
     proof::WhirProof,
-    prover::poly::eval_g_mle,
     Digest, SystemParams, EF, F,
 };
 

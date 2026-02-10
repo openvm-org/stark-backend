@@ -28,6 +28,19 @@ where
     })
 }
 
+/// Evaluate `g_omega(x)` at an arbitrary point `x`:
+///
+/// ```text
+/// g_omega(x) = ∏_i ((1 - 2*omega_i) * (1 - x_i) + omega_i * x_i)
+/// ```
+pub fn eval_g_mle<F: Field>(omega: &[F], x: &[F]) -> F {
+    debug_assert_eq!(omega.len(), x.len());
+    zip(omega, x).fold(F::ONE, |acc, (&omega_i, &x_i)| {
+        let w0 = F::ONE - omega_i.double();
+        acc * (w0 * (F::ONE - x_i) + omega_i * x_i)
+    })
+}
+
 /// Let D be univariate skip domain, the subgroup of `F^*` of order `l_skip`.
 ///
 /// Computes the polynomial ```text

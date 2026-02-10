@@ -176,19 +176,6 @@ pub fn evals_g_hypercube<F: Field>(omega: &[F]) -> Vec<F> {
     out
 }
 
-/// Evaluate `g_omega(x)` at arbitrary (not necessarily boolean) `x`.
-///
-/// ```text
-/// g_omega(x) = ∏_i ((1 - 2*omega_i) * (1 - x_i) + omega_i * x_i)
-/// ```
-pub fn eval_g_mle<F: Field>(omega: &[F], x: &[F]) -> F {
-    debug_assert_eq!(omega.len(), x.len());
-    zip(omega, x).fold(F::ONE, |acc, (&omega_i, &x_i)| {
-        let w0 = F::ONE - omega_i.double();
-        acc * (w0 * (F::ONE - x_i) + omega_i * x_i)
-    })
-}
-
 pub fn evals_eq_hypercube_serial<F: Field>(x: &[F]) -> Vec<F> {
     let n = x.len();
     let mut out = F::zero_vec(1 << n);
