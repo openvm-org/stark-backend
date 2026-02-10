@@ -401,16 +401,16 @@ mod tests {
             let evals = evals_mobius_eq_hypercube(&omega);
             assert_eq!(evals.len(), 1 << n);
 
-            for mask in 0..(1usize << n) {
+            for (mask, &eval) in evals.iter().enumerate() {
                 let mut expected = F::ONE;
-                for i in 0..n {
+                for (i, &w) in omega.iter().enumerate() {
                     expected *= if (mask >> i) & 1 == 0 {
-                        F::ONE - omega[i].double()
+                        F::ONE - w.double()
                     } else {
-                        omega[i]
+                        w
                     };
                 }
-                assert_eq!(evals[mask], expected);
+                assert_eq!(eval, expected);
             }
         }
     }
@@ -443,9 +443,9 @@ mod tests {
             // Naive evaluation of f(omega) from its coefficient table.
             let rhs = a.iter().enumerate().fold(F::ZERO, |acc, (mask, &coeff)| {
                 let mut term = coeff;
-                for i in 0..m {
+                for (i, &w) in omega.iter().enumerate() {
                     if (mask >> i) & 1 == 1 {
-                        term *= omega[i];
+                        term *= w;
                     }
                 }
                 acc + term
