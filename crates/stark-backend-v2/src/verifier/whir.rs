@@ -240,9 +240,10 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     // where || denotes concatenation.
     //
     // If we let u' = u[..t] and u'' = u[t..], then by factoring we can rewrite the term
-    //
-    //   sum_{b in H_{m-t}} f(b) mobius_eq(u, alpha || b) = mobius_eq(u', alpha) *
-    //                                                       sum_{b in H_{m-t}} f(b) mobius_eq(u'', b).
+    // ```text
+    // sum_{b in H_{m-t}} f(b) mobius_eq(u, alpha || b) = mobius_eq(u', alpha) *
+    //                                                    sum_{b in H_{m-t}} f(b) mobius_eq(u'',b)
+    // ```
     //
     // For multilinear f with coefficient table `c[S]`, we have the identity:
     //   sum_{b} f(b) g(u'', b) = sum_{S} c[S] eq(u'', S),
