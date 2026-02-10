@@ -28,7 +28,8 @@ use crate::{
         stacked_pcs::{stacked_commit, StackedPcsData},
         ColMajorMatrix,
     },
-    Digest, SystemParams, F,
+    baby_bear_poseidon2::{Digest, F},
+    SystemParams,
 };
 
 pub mod types;

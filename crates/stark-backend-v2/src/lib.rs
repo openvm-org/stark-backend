@@ -1,10 +1,8 @@
 // TODO[TEMP]: remove once we make traits generic in SC
 pub use openvm_stark_sdk;
-use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
-use p3_baby_bear::BabyBear;
-use p3_field::extension::BinomialExtensionField;
 use p3_util::log2_ceil_u64;
 
+pub mod baby_bear_poseidon2;
 mod chip;
 pub mod codec;
 mod config;
@@ -30,16 +28,6 @@ pub use chip::*;
 pub use config::*;
 pub use engine::*;
 pub use transcript::*;
-
-pub type F = BabyBear;
-pub type EF = BinomialExtensionField<BabyBear, D_EF>;
-pub const D_EF: usize = 4;
-
-pub const DIGEST_SIZE: usize = poseidon2::CHUNK;
-pub type Digest = [F; DIGEST_SIZE];
-
-// TODO: remove after making SC generic in v2
-pub type SC = BabyBearPoseidon2Config;
 
 /// Common utility function for computing `n_logup` parameter in terms of `total_interactions`,
 /// which is the sum of interaction message counts across all traces, using the lifted trace

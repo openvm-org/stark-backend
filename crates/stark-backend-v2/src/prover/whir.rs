@@ -16,8 +16,11 @@ use crate::{
         stacked_pcs::{MerkleTree, StackedPcsData},
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
-    Digest, FiatShamirTranscript, WhirConfig, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
+    FiatShamirTranscript, WhirConfig,
 };
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
     /// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables,
@@ -38,7 +41,7 @@ pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
     ) -> WhirProof;
 }
 
-impl<TS: FiatShamirTranscript<F, EF, Digest>> WhirProver<CpuBackendV2, CpuDeviceV2, TS>
+impl<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>> WhirProver<CpuBackendV2<SCV2>, CpuDeviceV2, TS>
     for CpuDeviceV2
 {
     #[instrument(level = "info", skip_all)]
@@ -66,7 +69,7 @@ impl<TS: FiatShamirTranscript<F, EF, Digest>> WhirProver<CpuBackendV2, CpuDevice
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn prove_whir_opening<TS: FiatShamirTranscript<F, EF, Digest>>(
+pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     transcript: &mut TS,
     l_skip: usize,
     log_blowup: usize,

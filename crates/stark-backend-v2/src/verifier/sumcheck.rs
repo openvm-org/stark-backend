@@ -4,10 +4,11 @@ use tracing::debug;
 
 use crate::{
     prover::sumcheck::{SumcheckCubeProof, SumcheckPrismProof},
-    Digest, FiatShamirTranscript, EF,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF},
+    FiatShamirTranscript,
 };
 
-pub fn verify_sumcheck_multilinear<F: Field, TS: FiatShamirTranscript<crate::F, EF, Digest>>(
+pub fn verify_sumcheck_multilinear<F: Field, TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     transcript: &mut TS,
     proof: &SumcheckCubeProof<EF>,
 ) -> Result<(), String>
@@ -46,7 +47,7 @@ where
     Ok(())
 }
 
-pub fn verify_sumcheck_prismalinear<F: Field, TS: FiatShamirTranscript<crate::F, EF, Digest>>(
+pub fn verify_sumcheck_prismalinear<F: Field, TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     transcript: &mut TS,
     l_skip: usize,
     proof: &SumcheckPrismProof<EF>,

@@ -12,7 +12,8 @@ use crate::{
     },
     poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress},
     proof::WhirProof,
-    Digest, FiatShamirTranscript, SystemParams, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
+    FiatShamirTranscript, SystemParams,
 };
 
 #[inline]
@@ -28,7 +29,7 @@ fn ensure(cond: bool, err: VerifyWhirError) -> Result<(), VerifyWhirError> {
 ///
 /// Assumes that all inputs have already been checked to have the correct sizes.
 #[instrument(level = "debug", skip_all)]
-pub fn verify_whir<TS: FiatShamirTranscript<F, EF, Digest>>(
+pub fn verify_whir<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     transcript: &mut TS,
     params: &SystemParams,
     whir_proof: &WhirProof,
@@ -385,8 +386,11 @@ mod tests {
         },
         test_utils::{test_whir_config_small, DuplexSpongeValidator, FibFixture, TestFixture},
         verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
-        WhirConfig, WhirRoundConfig, EF, F,
+        WhirConfig, WhirRoundConfig,
     };
+    use crate::baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F};
+
+    type SCV2 = BabyBearPoseidon2ConfigV2;
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
         let z_prism: Vec<_> = (0..params.n_stack + 1)
@@ -425,8 +429,8 @@ mod tests {
 
     fn run_whir_test(
         params: SystemParams,
-        pk: DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-        ctx: &ProvingContextV2<CpuBackendV2>,
+        pk: DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
+        ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
     ) -> Result<(), VerifyWhirError> {
         let (common_main_commit, common_main_pcs_data) = {
             let traces = ctx

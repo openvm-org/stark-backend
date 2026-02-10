@@ -14,7 +14,8 @@ use crate::{
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         whir::{verify_whir, VerifyWhirError},
     },
-    Digest, FiatShamirTranscript, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, F},
+    FiatShamirTranscript,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -43,7 +44,7 @@ pub mod stacked_reduction;
 pub mod sumcheck;
 pub mod whir;
 
-pub fn verify<TS: FiatShamirTranscript<F, EF, Digest>>(
+pub fn verify<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     mvk: &MultiStarkVerifyingKeyV2,
     proof: &Proof,
     transcript: &mut TS,

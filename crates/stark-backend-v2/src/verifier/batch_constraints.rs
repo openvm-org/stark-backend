@@ -20,7 +20,8 @@ use crate::{
         evaluator::VerifierConstraintEvaluator,
         fractional_sumcheck_gkr::{verify_gkr, GkrVerificationError},
     },
-    Digest, FiatShamirTranscript, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+    FiatShamirTranscript,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -52,7 +53,7 @@ pub enum BatchConstraintError {
 /// `public_values` should be in vkey (air_idx) order, including non-present AIRs.
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip_all)]
-pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript<F, EF, Digest>>(
+pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     transcript: &mut TS,
     mvk: &MultiStarkVerifyingKey0V2,
     public_values: &[Vec<F>],

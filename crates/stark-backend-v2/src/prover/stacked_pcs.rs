@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
+    baby_bear_poseidon2::{Digest, F},
     prover::{
         col_maj_idx, poly::eval_to_coeff_rs_message, ColMajorMatrix, MatrixView,
         StridedColMajorMatrixView,
     },
-    Digest, F,
 };
 
 #[derive(Clone, Serialize, Deserialize, Debug, CopyGetters)]
@@ -380,8 +380,8 @@ mod poseidon2_merkle_tree {
 
     use super::*;
     use crate::{
+        baby_bear_poseidon2::{Digest, F},
         poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice},
-        Digest, F,
     };
 
     impl<EF> MerkleTree<EF, Digest>
@@ -496,7 +496,7 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
-    use crate::{prover::ColMajorMatrix, F};
+    use crate::{baby_bear_poseidon2::F, prover::ColMajorMatrix};
 
     #[test]
     fn test_stacked_matrix_manual_0() {

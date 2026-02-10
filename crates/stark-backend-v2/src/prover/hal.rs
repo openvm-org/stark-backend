@@ -12,6 +12,7 @@ use openvm_stark_backend::prover::MatrixDimensions;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
     keygen::types::MultiStarkProvingKeyV2,
     prover::{
         stacked_pcs::StackedPcsData, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
@@ -19,6 +20,8 @@ use crate::{
     },
     SystemParams,
 };
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 /// Associated types needed by the prover, in the form of buffers and views,
 /// specific to a specific hardware backend.
@@ -135,10 +138,10 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
 
     fn transport_committed_trace_data_to_device(
         &self,
-        committed_trace: &CommittedTraceDataV2<CpuBackendV2>,
+        committed_trace: &CommittedTraceDataV2<CpuBackendV2<SCV2>>,
     ) -> CommittedTraceDataV2<PB>
     where
-        PB: ProverBackendV2<Val = crate::F, Commitment = crate::Digest>,
+        PB: ProverBackendV2<Val = F, Commitment = Digest>,
     {
         let trace = self.transport_matrix_to_device(&committed_trace.trace);
         let data = self.transport_pcs_data_to_device(committed_trace.data.as_ref());
@@ -152,10 +155,10 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
 
     fn transport_proving_ctx_to_device(
         &self,
-        ctx: &ProvingContextV2<CpuBackendV2>,
+        ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
     ) -> ProvingContextV2<PB>
     where
-        PB: ProverBackendV2<Val = crate::F, Commitment = crate::Digest>,
+        PB: ProverBackendV2<Val = F, Commitment = Digest>,
     {
         let per_trace = ctx
             .per_trace

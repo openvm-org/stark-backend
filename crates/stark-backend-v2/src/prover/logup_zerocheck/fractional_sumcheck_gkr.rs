@@ -11,7 +11,8 @@ use crate::{
         sumcheck::{fold_mle_evals, sumcheck_round_poly_evals},
         ColMajorMatrix,
     },
-    Digest, FiatShamirTranscript, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF},
+    FiatShamirTranscript,
 };
 
 /// Proof for fractional sumcheck protocol
@@ -56,7 +57,7 @@ impl<EF: Field> Add<Frac<EF>> for Frac<EF> {
 /// # Returns
 /// The fractional sumcheck proof and the final random evaluation vector.
 #[instrument(level = "info", skip_all)]
-pub fn fractional_sumcheck<TS: FiatShamirTranscript<F, EF, Digest>>(
+pub fn fractional_sumcheck<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     transcript: &mut TS,
     evals: &[Frac<EF>],
     assert_zero: bool,

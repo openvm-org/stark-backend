@@ -32,8 +32,9 @@ use crate::{
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
     },
+    baby_bear_poseidon2::F,
     BabyBearPoseidon2CpuEngineV2, FiatShamirTranscript, StarkEngineV2, SystemParams, WhirConfig,
-    WhirRoundConfig, F,
+    WhirRoundConfig,
 };
 
 #[test]

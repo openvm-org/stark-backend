@@ -12,7 +12,7 @@ use openvm_stark_backend::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{prover::stacked_pcs::StackedPcsData, Digest, SystemParams, F};
+use crate::{baby_bear_poseidon2::{Digest, F}, prover::stacked_pcs::StackedPcsData, SystemParams};
 
 #[derive(Error, Debug)]
 pub enum KeygenError {

@@ -7,7 +7,8 @@ use crate::{
     keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2},
     proof::TraceVData,
     prover::ProverBackendV2,
-    Digest, SystemParams,
+    baby_bear_poseidon2::{Digest, F},
+    SystemParams,
 };
 
 /// The committed trace data for a single trace matrix. This type is used to store prover data for
@@ -99,7 +100,7 @@ impl<PB: ProverBackendV2> CommittedTraceDataV2<PB> {
 
 impl<PB> DeviceMultiStarkProvingKeyV2<PB>
 where
-    PB: ProverBackendV2<Val = crate::F, Commitment = Digest>,
+    PB: ProverBackendV2<Val = F, Commitment = Digest>,
 {
     pub fn get_vk(&self) -> MultiStarkVerifyingKeyV2 {
         let per_air = self.per_air.iter().map(|pk| pk.vk.clone()).collect();

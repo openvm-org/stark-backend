@@ -14,6 +14,8 @@ use crate::prover::{
     AirProvingContextV2, CpuBackendV2, StridedColMajorMatrixView,
 };
 
+type SCV2 = crate::baby_bear_poseidon2::BabyBearPoseidon2ConfigV2;
+
 /// For a single AIR
 pub struct EvalHelper<'a, F> {
     /// AIR constraints
@@ -27,7 +29,7 @@ pub struct EvalHelper<'a, F> {
     pub constraint_degree: u8,
 }
 
-impl<'a> EvalHelper<'a, crate::F> {
+impl<'a> EvalHelper<'a, crate::baby_bear_poseidon2::F> {
     /// Returns list of (ref to column-major matrix, is_rot) pairs in the order:
     /// - (if has_preprocessed) (preprocessed, false), (preprocessed, true)
     /// - (cached_0, false), (cached_0, true), ..., (cached_{m-1}, false), (cached_{m-1}, true)
@@ -37,8 +39,8 @@ impl<'a> EvalHelper<'a, crate::F> {
     /// in the future for perf.
     pub fn view_mats(
         &self,
-        ctx: &'a AirProvingContextV2<CpuBackendV2>,
-    ) -> Vec<(StridedColMajorMatrixView<'a, crate::F>, bool)> {
+        ctx: &'a AirProvingContextV2<CpuBackendV2<SCV2>>,
+    ) -> Vec<(StridedColMajorMatrixView<'a, crate::baby_bear_poseidon2::F>, bool)> {
         let base_mats = usize::from(self.has_preprocessed()) + 1 + ctx.cached_mains.len();
         let mut mats = Vec::with_capacity(if self.needs_next {
             2 * base_mats

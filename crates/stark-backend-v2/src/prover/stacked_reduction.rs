@@ -20,8 +20,11 @@ use crate::{
         },
         ColMajorMatrix, ColMajorMatrixView, CpuBackendV2, CpuDeviceV2, MatrixView, ProverBackendV2,
     },
-    Digest, FiatShamirTranscript, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
+    FiatShamirTranscript,
 };
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 /// Helper trait for proving the reduction of column opening claims and column rotation opening
 /// claims to opening claims of column polynomials of the stacked matrix.
@@ -73,7 +76,7 @@ pub fn prove_stacked_opening_reduction<'a, PB, PD, TS, SRP>(
 ) -> (StackingProof, Vec<PB::Challenge>)
 where
     PB: ProverBackendV2<Val = F, Challenge = EF>,
-    TS: FiatShamirTranscript<F, EF, Digest>,
+    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>,
     SRP: StackedReductionProver<'a, PB, PD>,
 {
     // Batching randomness
@@ -152,7 +155,7 @@ struct TraceViewMeta {
     lambda_rot_idx: Option<usize>,
 }
 
-impl<'a> StackedReductionProver<'a, CpuBackendV2, CpuDeviceV2> for StackedReductionCpu<'a> {
+impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for StackedReductionCpu<'a> {
     fn new(
         device: &CpuDeviceV2,
         stacked_per_commit: Vec<&'a StackedPcsData<F, Digest>>,

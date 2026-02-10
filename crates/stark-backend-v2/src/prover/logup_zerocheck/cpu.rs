@@ -28,8 +28,10 @@ use crate::{
         },
         ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
     },
-    EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
 };
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 pub struct LogupZerocheckCpu<'a> {
     pub alpha_logup: EF,
@@ -72,8 +74,8 @@ pub struct LogupZerocheckCpu<'a> {
 
 impl<'a> LogupZerocheckCpu<'a> {
     pub fn new(
-        pk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-        ctx: &ProvingContextV2<CpuBackendV2>,
+        pk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
+        ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: EF,
@@ -210,7 +212,7 @@ impl<'a> LogupZerocheckCpu<'a> {
     /// form for uniformity and debugging since this interpolation is inexpensive.
     pub fn sumcheck_uni_round0_polys(
         &mut self,
-        ctx: &ProvingContextV2<CpuBackendV2>,
+        ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
         lambda: EF,
     ) -> Vec<UnivariatePoly<EF>> {
         let n_logup = self.n_logup;
@@ -395,7 +397,7 @@ impl<'a> LogupZerocheckCpu<'a> {
     /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
     /// Folding _could_ directly mutate inplace the trace matrices in `ctx` as they will not be
     /// needed after this.
-    pub fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<CpuBackendV2>, r_0: EF) {
+    pub fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<CpuBackendV2<SCV2>>, r_0: EF) {
         let l_skip = self.l_skip;
         // "Fold" all PLE evaluations by interpolating and evaluating at `r_0`.
         // NOTE: after this folding, \hat{T} and \hat{T_{rot}} will be treated as completely

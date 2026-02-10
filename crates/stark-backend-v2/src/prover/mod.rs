@@ -8,7 +8,8 @@ use tracing::{info, info_span, instrument};
 use crate::prover::metrics::trace_metrics;
 use crate::{
     proof::{BatchConstraintProof, GkrProof, Proof, StackingProof, TraceVData, WhirProof},
-    Digest, FiatShamirTranscript, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
+    FiatShamirTranscript,
 };
 
 mod cpu_backend;
@@ -44,7 +45,7 @@ where
     PD::Artifacts: Into<PD::OpeningPoints>,
     PD::PartialProof: Into<(GkrProof, BatchConstraintProof)>,
     PD::OpeningProof: Into<(StackingProof, WhirProof)>,
-    TS: FiatShamirTranscript<F, EF, Digest>,
+    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>,
 {
     type Proof = Proof;
     type ProvingKeyView<'a>

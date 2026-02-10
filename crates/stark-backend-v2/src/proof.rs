@@ -4,8 +4,8 @@ use p3_field::PrimeCharacteristicRing;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    baby_bear_poseidon2::{Digest, EF, F},
     codec::{decode_into_vec, encode_iter, Decode, Encode},
-    Digest, EF, F,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

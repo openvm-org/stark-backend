@@ -12,7 +12,8 @@ use crate::{
     },
     proof::{column_openings_by_rot, StackingProof},
     prover::stacked_pcs::StackedLayout,
-    Digest, FiatShamirTranscript, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+    FiatShamirTranscript,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -27,7 +28,7 @@ pub enum StackedReductionError {
 /// `has_preprocessed` must be per present trace in sorted AIR order.
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip_all)]
-pub fn verify_stacked_reduction<TS: FiatShamirTranscript<F, EF, Digest>>(
+pub fn verify_stacked_reduction<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     transcript: &mut TS,
     proof: &StackingProof,
     layouts: &[StackedLayout],

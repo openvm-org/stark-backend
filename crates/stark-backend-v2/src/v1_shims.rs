@@ -16,7 +16,8 @@ use crate::{
         stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
         CpuBackendV2, ProverBackendV2, ProvingContextV2,
     },
-    ChipV2, SystemParams, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, F},
+    ChipV2, SystemParams,
 };
 
 type SC = BabyBearPoseidon2Config;
@@ -96,7 +97,7 @@ where
     }
 }
 
-impl V1Compat for CpuBackendV2 {
+impl V1Compat for CpuBackendV2<BabyBearPoseidon2ConfigV2> {
     type V1 = CpuBackend<SC>;
 
     fn dummy_matrix() -> Self::Matrix {
@@ -110,7 +111,7 @@ impl V1Compat for CpuBackendV2 {
     fn convert_committed_trace(
         params: &SystemParams,
         matrix: Arc<RowMajorMatrix<F>>,
-    ) -> CommittedTraceDataV2<CpuBackendV2> {
+    ) -> CommittedTraceDataV2<CpuBackendV2<BabyBearPoseidon2ConfigV2>> {
         let trace = ColMajorMatrix::from_row_major(&matrix);
         let (commitment, data) = stacked_commit(
             params.l_skip,

@@ -5,10 +5,11 @@
 
 use std::marker::PhantomData;
 
-use openvm_stark_backend::{config::StarkGenericConfig, prover::Prover, AirRef};
+use openvm_stark_backend::{prover::Prover, AirRef};
 use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
 
 use crate::{
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
     debug::debug_impl,
     keygen::{
         types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
@@ -22,7 +23,7 @@ use crate::{
         ProverDeviceV2, ProvingContextV2,
     },
     verifier::{verify, VerifierError},
-    Digest, FiatShamirTranscript, SystemParams, EF, F,
+    FiatShamirTranscript, StarkProtocolConfig, SystemParams,
 };
 
 /// Data for verifying a Stark proof.
@@ -43,14 +44,18 @@ where
     <Self::PD as OpeningProverV2<Self::PB, Self::TS>>::OpeningProof:
         Into<(StackingProof, WhirProof)>,
 {
-    type SC: StarkGenericConfig<
-        Pcs = <BabyBearPoseidon2Config as StarkGenericConfig>::Pcs,
-        Challenge = <BabyBearPoseidon2Config as StarkGenericConfig>::Challenge,
-        Challenger = <BabyBearPoseidon2Config as StarkGenericConfig>::Challenger,
+    type SC: StarkProtocolConfig;
+    type PB: ProverBackendV2<
+        Val = <Self::SC as StarkProtocolConfig>::F,
+        Challenge = <Self::SC as StarkProtocolConfig>::EF,
+        Commitment = <Self::SC as StarkProtocolConfig>::Digest,
     >;
-    type PB: ProverBackendV2<Val = crate::F, Challenge = crate::EF, Commitment = crate::Digest>;
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
-    type TS: FiatShamirTranscript<F, EF, Digest> + Default;
+    // TODO[jpw]: remove the concrete `FiatShamirTranscript<BabyBearPoseidon2ConfigV2>` bound
+    // once internal prover/verifier functions are made generic in SC (Phase 2).
+    type TS: FiatShamirTranscript<Self::SC>
+        + FiatShamirTranscript<BabyBearPoseidon2ConfigV2>
+        + Default;
 
     fn config(&self) -> &SystemParams {
         self.device().config()
@@ -87,7 +92,10 @@ where
         &self,
         pk: &DeviceMultiStarkProvingKeyV2<Self::PB>,
         ctx: ProvingContextV2<Self::PB>,
-    ) -> Proof {
+    ) -> Proof
+    where
+        Self::PB: ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
+    {
         let mut prover = self.prover();
         prover.prove(pk, ctx)
     }
@@ -100,7 +108,7 @@ where
     /// The indexing of AIR ID in `ctx` should be consistent with the order of `airs`. In
     /// particular, `airs` should correspond to the global proving key with all AIRs, including ones
     /// not present in the `ctx`.
-    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>);
+    fn debug(&self, airs: &[AirRef<BabyBearPoseidon2Config>], ctx: &ProvingContextV2<Self::PB>);
 
     /// Runs a single end-to-end test for a given set of chips and traces partitions.
     /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
@@ -108,7 +116,10 @@ where
         &self,
         airs: Vec<AirRef<BabyBearPoseidon2Config>>,
         ctxs: Vec<AirProvingContextV2<Self::PB>>,
-    ) -> Result<VerificationDataV2, VerifierError> {
+    ) -> Result<VerificationDataV2, VerifierError>
+    where
+        Self::PB: ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
+    {
         let (pk, vk) = self.keygen(&airs);
         let device = self.prover().device;
         let d_pk = device.transport_pk_to_device(&pk);
@@ -135,10 +146,10 @@ impl<TS> BabyBearPoseidon2CpuEngineV2<TS> {
 
 impl<TS> StarkEngineV2 for BabyBearPoseidon2CpuEngineV2<TS>
 where
-    TS: FiatShamirTranscript<F, EF, Digest> + Default,
+    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2> + Default,
 {
-    type SC = BabyBearPoseidon2Config;
-    type PB = CpuBackendV2;
+    type SC = BabyBearPoseidon2ConfigV2;
+    type PB = CpuBackendV2<BabyBearPoseidon2ConfigV2>;
     type PD = CpuDeviceV2;
     type TS = TS;
 
@@ -150,10 +161,10 @@ where
         &self,
         transcript: TS,
     ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
-        CoordinatorV2::new(CpuBackendV2, self.device.clone(), transcript)
+        CoordinatorV2::new(CpuBackendV2::new(), self.device.clone(), transcript)
     }
 
-    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>) {
+    fn debug(&self, airs: &[AirRef<BabyBearPoseidon2Config>], ctx: &ProvingContextV2<Self::PB>) {
         debug_impl::<Self::PB, Self::PD>(self.config().clone(), self.device(), airs, ctx);
     }
 }
@@ -165,7 +176,7 @@ pub trait StarkWhirEngine: StarkEngineV2 {
 
 impl<TS> StarkWhirEngine for BabyBearPoseidon2CpuEngineV2<TS>
 where
-    TS: FiatShamirTranscript<F, EF, Digest> + Default,
+    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2> + Default,
 {
     fn new(params: SystemParams) -> Self {
         Self::new(params)

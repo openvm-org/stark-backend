@@ -6,7 +6,7 @@ use p3_field::PrimeCharacteristicRing;
 use p3_symmetric::Permutation;
 
 use super::{poseidon2_perm, CHUNK, WIDTH};
-use crate::{Digest, FiatShamirTranscript, EF, F};
+use crate::{baby_bear_poseidon2::{Digest, F, BabyBearPoseidon2ConfigV2}, FiatShamirTranscript};
 
 pub trait TranscriptHistory {
     fn len(&self) -> usize;
@@ -144,7 +144,7 @@ impl Default for DuplexSponge {
     }
 }
 
-impl FiatShamirTranscript<F, EF, Digest> for DuplexSponge {
+impl FiatShamirTranscript<BabyBearPoseidon2ConfigV2> for DuplexSponge {
     fn observe(&mut self, value: F) {
         self.state[self.absorb_idx] = value;
         self.absorb_idx += 1;
@@ -251,9 +251,9 @@ impl Default for DuplexSpongeRecorder {
     }
 }
 
-impl FiatShamirTranscript<F, EF, Digest> for DuplexSpongeRecorder {
+impl FiatShamirTranscript<BabyBearPoseidon2ConfigV2> for DuplexSpongeRecorder {
     fn observe(&mut self, x: F) {
-        <DuplexSponge as FiatShamirTranscript<F, EF, Digest>>::observe(&mut self.inner, x);
+        <DuplexSponge as FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>::observe(&mut self.inner, x);
         self.log.push_observe(x);
         if self.inner.last_op_perm {
             self.log.push_perm_result(self.inner.state);
@@ -303,7 +303,7 @@ impl<'a> ReadOnlyTranscript<'a> {
     }
 }
 
-impl FiatShamirTranscript<F, EF, Digest> for ReadOnlyTranscript<'_> {
+impl FiatShamirTranscript<BabyBearPoseidon2ConfigV2> for ReadOnlyTranscript<'_> {
     #[inline]
     fn observe(&mut self, value: F) {
         debug_assert!(

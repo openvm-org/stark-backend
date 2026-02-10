@@ -5,7 +5,8 @@ use tracing::debug;
 use crate::{
     poly_common::{eval_eq_mle, interpolate_cubic_at_0123, interpolate_linear_at_01},
     proof::{GkrLayerClaims, GkrProof},
-    Digest, FiatShamirTranscript, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF},
+    FiatShamirTranscript,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -52,7 +53,7 @@ pub enum GkrVerificationError {
 ///
 /// # Returns
 /// `(p̂(ξ), q̂(ξ), ξ)` where ξ ∈ F_ext^{ℓ+n_logup} is the random evaluation point.
-pub fn verify_gkr<TS: FiatShamirTranscript<F, EF, Digest>>(
+pub fn verify_gkr<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     proof: &GkrProof,
     transcript: &mut TS,
     total_rounds: usize,
@@ -168,7 +169,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript<F, EF, Digest>>(
 /// # Returns
 /// `(claim, ρ^{(j-1)}, eq(ξ^{(j-1)}, ρ^{(j-1)}))` where ρ^{(j-1)} is randomly sampled from the
 /// sumcheck protocol.
-fn verify_gkr_sumcheck<TS: FiatShamirTranscript<F, EF, Digest>>(
+fn verify_gkr_sumcheck<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     proof: &GkrProof,
     transcript: &mut TS,
     round: usize,
@@ -222,7 +223,7 @@ fn verify_gkr_sumcheck<TS: FiatShamirTranscript<F, EF, Digest>>(
 }
 
 /// Observes layer claims in the transcript.
-fn observe_layer_claims<TS: FiatShamirTranscript<F, EF, Digest>>(
+fn observe_layer_claims<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     transcript: &mut TS,
     claims: &GkrLayerClaims,
 ) {
@@ -255,7 +256,7 @@ mod tests {
         poseidon2::sponge::DuplexSponge,
         proof::{GkrLayerClaims, GkrProof},
         prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
-        F,
+        baby_bear_poseidon2::F,
     };
 
     #[test]

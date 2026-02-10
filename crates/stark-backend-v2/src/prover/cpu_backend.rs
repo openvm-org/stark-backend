@@ -1,5 +1,7 @@
 //! CPU [ProverBackend] trait implementation.
 
+use std::marker::PhantomData;
+
 use getset::Getters;
 use itertools::Itertools;
 
@@ -16,11 +18,27 @@ use crate::{
         DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MultiRapProver, OpeningProverV2,
         ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
     },
-    Digest, FiatShamirTranscript, SystemParams, D_EF, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, D_EF, EF, F},
+    FiatShamirTranscript, SystemParams,
 };
+use crate::StarkProtocolConfig;
 
 #[derive(Clone, Copy)]
-pub struct CpuBackendV2;
+pub struct CpuBackendV2<SC: StarkProtocolConfig>(PhantomData<SC>);
+
+impl<SC: StarkProtocolConfig> CpuBackendV2<SC> {
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<SC: StarkProtocolConfig> Default for CpuBackendV2<SC> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 #[derive(Clone, Getters, derive_new::new)]
 pub struct CpuDeviceV2 {
@@ -28,7 +46,7 @@ pub struct CpuDeviceV2 {
     config: SystemParams,
 }
 
-impl ProverBackendV2 for CpuBackendV2 {
+impl ProverBackendV2 for CpuBackendV2<SCV2> {
     const CHALLENGE_EXT_DEGREE: u8 = D_EF as u8;
 
     type Val = F;
@@ -39,13 +57,13 @@ impl ProverBackendV2 for CpuBackendV2 {
     type PcsData = StackedPcsData<F, Digest>;
 }
 
-impl<TS: FiatShamirTranscript<F, EF, Digest>> ProverDeviceV2<CpuBackendV2, TS> for CpuDeviceV2 {
+impl<TS: FiatShamirTranscript<SCV2>> ProverDeviceV2<CpuBackendV2<SCV2>, TS> for CpuDeviceV2 {
     fn config(&self) -> &SystemParams {
         &self.config
     }
 }
 
-impl TraceCommitterV2<CpuBackendV2> for CpuDeviceV2 {
+impl TraceCommitterV2<CpuBackendV2<SCV2>> for CpuDeviceV2 {
     fn commit(&self, traces: &[&ColMajorMatrix<F>]) -> (Digest, StackedPcsData<F, Digest>) {
         stacked_commit(
             self.config.l_skip,
@@ -57,7 +75,7 @@ impl TraceCommitterV2<CpuBackendV2> for CpuDeviceV2 {
     }
 }
 
-impl<TS: FiatShamirTranscript<F, EF, Digest>> MultiRapProver<CpuBackendV2, TS> for CpuDeviceV2 {
+impl<TS: FiatShamirTranscript<SCV2>> MultiRapProver<CpuBackendV2<SCV2>, TS> for CpuDeviceV2 {
     type PartialProof = (GkrProof, BatchConstraintProof);
     /// The random opening point `r` where the batch constraint sumcheck reduces to evaluation
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
@@ -66,8 +84,8 @@ impl<TS: FiatShamirTranscript<F, EF, Digest>> MultiRapProver<CpuBackendV2, TS> f
     fn prove_rap_constraints(
         &self,
         transcript: &mut TS,
-        mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-        ctx: &ProvingContextV2<CpuBackendV2>,
+        mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
+        ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
         _common_main_pcs_data: &StackedPcsData<F, Digest>,
     ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
         let (gkr_proof, batch_constraint_proof, r) =
@@ -76,7 +94,7 @@ impl<TS: FiatShamirTranscript<F, EF, Digest>> MultiRapProver<CpuBackendV2, TS> f
     }
 }
 
-impl<TS: FiatShamirTranscript<F, EF, Digest>> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2 {
+impl<TS: FiatShamirTranscript<SCV2>> OpeningProverV2<CpuBackendV2<SCV2>, TS> for CpuDeviceV2 {
     type OpeningProof = (StackingProof, WhirProof);
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<EF>;
@@ -84,8 +102,8 @@ impl<TS: FiatShamirTranscript<F, EF, Digest>> OpeningProverV2<CpuBackendV2, TS> 
     fn prove_openings(
         &self,
         transcript: &mut TS,
-        mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-        ctx: ProvingContextV2<CpuBackendV2>,
+        mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
+        ctx: ProvingContextV2<CpuBackendV2<SCV2>>,
         common_main_pcs_data: StackedPcsData<F, Digest>,
         r: Vec<EF>,
     ) -> (StackingProof, WhirProof) {
@@ -151,11 +169,11 @@ impl<TS: FiatShamirTranscript<F, EF, Digest>> OpeningProverV2<CpuBackendV2, TS> 
     }
 }
 
-impl DeviceDataTransporterV2<CpuBackendV2> for CpuDeviceV2 {
+impl DeviceDataTransporterV2<CpuBackendV2<SCV2>> for CpuDeviceV2 {
     fn transport_pk_to_device(
         &self,
         mpk: &MultiStarkProvingKeyV2,
-    ) -> DeviceMultiStarkProvingKeyV2<CpuBackendV2> {
+    ) -> DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>> {
         let per_air = mpk
             .per_air
             .iter()

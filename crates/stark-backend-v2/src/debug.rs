@@ -19,12 +19,16 @@ use crate::{
         ColMajorMatrix, DeviceDataTransporterV2, ProverBackendV2, ProvingContextV2,
         StridedColMajorMatrixView,
     },
-    SystemParams, SC,
+    SystemParams,
 };
+
+use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
+
+type SC = BabyBearPoseidon2Config;
 
 // TODO[jpw]: move into StarkEngineV2::debug default implementation after `SC` is made generic.
 /// `airs` should be the full list of all AIRs, not just used AIRs.
-pub fn debug_impl<PB: ProverBackendV2<Val = crate::F>, PD: DeviceDataTransporterV2<PB>>(
+pub fn debug_impl<PB: ProverBackendV2<Val = crate::baby_bear_poseidon2::F>, PD: DeviceDataTransporterV2<PB>>(
     config: SystemParams,
     device: &PD,
     airs: &[AirRef<SC>],
@@ -36,7 +40,7 @@ pub fn debug_impl<PB: ProverBackendV2<Val = crate::F>, PD: DeviceDataTransporter
     }
     let pk = keygen_builder.generate_pk().unwrap();
 
-    let transpose = |mat: ColMajorMatrix<crate::F>| {
+    let transpose = |mat: ColMajorMatrix<crate::baby_bear_poseidon2::F>| {
         let row_major = StridedColMajorMatrixView::from(mat.as_view()).to_row_major_matrix();
         Arc::new(row_major)
     };
@@ -76,7 +80,7 @@ pub fn debug_impl<PB: ProverBackendV2<Val = crate::F>, PD: DeviceDataTransporter
 pub fn debug_constraints_and_interactions(
     airs: &[AirRef<SC>],
     pk: &[&StarkProvingKeyV2],
-    inputs: &[AirProofRawInput<crate::F>],
+    inputs: &[AirProofRawInput<crate::baby_bear_poseidon2::F>],
 ) {
     USE_DEBUG_BUILDER.with(|debug| {
         if *debug.lock().unwrap() {

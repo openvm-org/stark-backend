@@ -22,8 +22,11 @@ use crate::{
         sumcheck::sumcheck_round0_deg,
         CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixView, ProvingContextV2,
     },
-    Digest, FiatShamirTranscript, EF, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+    FiatShamirTranscript,
 };
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 mod cpu;
 mod evaluator;
@@ -36,11 +39,11 @@ pub use single::*;
 #[instrument(level = "info", skip_all)]
 pub fn prove_zerocheck_and_logup<TS>(
     transcript: &mut TS,
-    mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2>,
-    ctx: &ProvingContextV2<CpuBackendV2>,
+    mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
+    ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
 ) -> (GkrProof, BatchConstraintProof, Vec<EF>)
 where
-    TS: FiatShamirTranscript<F, EF, Digest>,
+    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>,
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
