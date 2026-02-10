@@ -85,6 +85,9 @@ pub enum MemoryError {
     #[error("Failed to acquire memory manager lock")]
     LockError,
 
+    #[error("Memory manager not available")]
+    ManagerUnavailable,
+
     #[error("Invalid memory size: {size}")]
     InvalidMemorySize { size: usize },
 

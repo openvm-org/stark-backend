@@ -38,6 +38,10 @@ pub fn device_memory_used() -> usize {
 
 #[ctor::ctor]
 fn init() {
+    if !crate::common::cuda_available() {
+        tracing::warn!("CUDA not available; memory manager disabled");
+        return;
+    }
     let _ = MEMORY_MANAGER.set(Mutex::new(MemoryManager::new()));
     tracing::info!("Memory manager initialized at program start");
 }
@@ -139,7 +143,9 @@ impl Default for MemoryManager {
 }
 
 pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
-    let manager = MEMORY_MANAGER.get().unwrap();
+    let manager = MEMORY_MANAGER
+        .get()
+        .ok_or(MemoryError::ManagerUnavailable)?;
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
     manager.d_malloc(size)
 }
@@ -148,7 +154,9 @@ pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
 /// The pointer `ptr` must be a valid, previously allocated device pointer.
 /// The caller must ensure that `ptr` is not used after this function is called.
 pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
-    let manager = MEMORY_MANAGER.get().unwrap();
+    let manager = MEMORY_MANAGER
+        .get()
+        .ok_or(MemoryError::ManagerUnavailable)?;
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
     manager.d_free(ptr)
 }
