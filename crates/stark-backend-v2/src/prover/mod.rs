@@ -7,9 +7,8 @@ use tracing::{info, info_span, instrument};
 #[cfg(feature = "metrics")]
 use crate::prover::metrics::trace_metrics;
 use crate::{
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof, Proof, StackingProof, TraceVData, WhirProof},
-    Digest, EF, F,
+    Digest, FiatShamirTranscript, EF, F,
 };
 
 mod cpu_backend;
@@ -45,7 +44,7 @@ where
     PD::Artifacts: Into<PD::OpeningPoints>,
     PD::PartialProof: Into<(GkrProof, BatchConstraintProof)>,
     PD::OpeningProof: Into<(StackingProof, WhirProof)>,
-    TS: FiatShamirTranscript,
+    TS: FiatShamirTranscript<F, EF, Digest>,
 {
     type Proof = Proof;
     type ProvingKeyView<'a>

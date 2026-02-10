@@ -7,7 +7,6 @@ use thiserror::Error;
 use crate::{
     keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2},
     poly_common::Squarable,
-    poseidon2::sponge::FiatShamirTranscript,
     proof::Proof,
     verifier::{
         batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
@@ -15,7 +14,7 @@ use crate::{
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         whir::{verify_whir, VerifyWhirError},
     },
-    F,
+    Digest, FiatShamirTranscript, EF, F,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -44,7 +43,7 @@ pub mod stacked_reduction;
 pub mod sumcheck;
 pub mod whir;
 
-pub fn verify<TS: FiatShamirTranscript>(
+pub fn verify<TS: FiatShamirTranscript<F, EF, Digest>>(
     mvk: &MultiStarkVerifyingKeyV2,
     proof: &Proof,
     transcript: &mut TS,

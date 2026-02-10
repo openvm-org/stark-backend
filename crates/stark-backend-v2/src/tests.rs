@@ -12,7 +12,7 @@ use test_case::test_case;
 use tracing::{debug, Level};
 
 use crate::{
-    poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
+    poseidon2::sponge::DuplexSponge,
     prover::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
@@ -32,7 +32,8 @@ use crate::{
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
     },
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirRoundConfig, F,
+    BabyBearPoseidon2CpuEngineV2, FiatShamirTranscript, StarkEngineV2, SystemParams, WhirConfig,
+    WhirRoundConfig, F,
 };
 
 #[test]

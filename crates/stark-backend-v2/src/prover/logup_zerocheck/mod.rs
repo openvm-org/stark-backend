@@ -15,7 +15,6 @@ use crate::{
     calculate_n_logup,
     dft::Radix2BowersSerial,
     poly_common::{eq_sharp_uni_poly, eq_uni_poly, UnivariatePoly},
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
@@ -23,7 +22,7 @@ use crate::{
         sumcheck::sumcheck_round0_deg,
         CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixView, ProvingContextV2,
     },
-    EF, F,
+    Digest, FiatShamirTranscript, EF, F,
 };
 
 mod cpu;
@@ -41,7 +40,7 @@ pub fn prove_zerocheck_and_logup<TS>(
     ctx: &ProvingContextV2<CpuBackendV2>,
 ) -> (GkrProof, BatchConstraintProof, Vec<EF>)
 where
-    TS: FiatShamirTranscript,
+    TS: FiatShamirTranscript<F, EF, Digest>,
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;

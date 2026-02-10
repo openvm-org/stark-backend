@@ -28,16 +28,15 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
-    poseidon2::sponge::{
-        DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory, TranscriptLog,
-    },
+    poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory, TranscriptLog},
     proof::Proof,
     prover::{
         stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
         CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver,
         ProvingContextV2, TraceCommitterV2,
     },
-    BabyBearPoseidon2CpuEngineV2, ChipV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams, F,
+    BabyBearPoseidon2CpuEngineV2, ChipV2, Digest, FiatShamirTranscript, StarkEngineV2,
+    SystemParams, WhirConfig, WhirParams, EF, F,
 };
 
 #[allow(clippy::type_complexity)]
@@ -557,7 +556,7 @@ impl DuplexSpongeValidator {
     }
 }
 
-impl FiatShamirTranscript for DuplexSpongeValidator {
+impl FiatShamirTranscript<F, EF, Digest> for DuplexSpongeValidator {
     fn observe(&mut self, x: F) {
         debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
         assert!(!self.log.samples()[self.idx]);
@@ -575,6 +574,12 @@ impl FiatShamirTranscript for DuplexSpongeValidator {
         self.idx += 1;
         assert_eq!(x, exp_x);
         x
+    }
+
+    fn observe_commit(&mut self, digest: Digest) {
+        for x in digest {
+            self.observe(x);
+        }
     }
 }
 

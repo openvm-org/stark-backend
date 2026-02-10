@@ -15,13 +15,12 @@ use crate::{
     calculate_n_logup,
     keygen::types::MultiStarkVerifyingKey0V2,
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     verifier::{
         evaluator::VerifierConstraintEvaluator,
         fractional_sumcheck_gkr::{verify_gkr, GkrVerificationError},
     },
-    EF, F,
+    Digest, FiatShamirTranscript, EF, F,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -53,7 +52,7 @@ pub enum BatchConstraintError {
 /// `public_values` should be in vkey (air_idx) order, including non-present AIRs.
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip_all)]
-pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
+pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript<F, EF, Digest>>(
     transcript: &mut TS,
     mvk: &MultiStarkVerifyingKey0V2,
     public_values: &[Vec<F>],

@@ -3,12 +3,11 @@ use p3_util::log2_strict_usize;
 use tracing::debug;
 
 use crate::{
-    poseidon2::sponge::FiatShamirTranscript,
     prover::sumcheck::{SumcheckCubeProof, SumcheckPrismProof},
-    EF,
+    Digest, FiatShamirTranscript, EF,
 };
 
-pub fn verify_sumcheck_multilinear<F: Field, TS: FiatShamirTranscript>(
+pub fn verify_sumcheck_multilinear<F: Field, TS: FiatShamirTranscript<crate::F, EF, Digest>>(
     transcript: &mut TS,
     proof: &SumcheckCubeProof<EF>,
 ) -> Result<(), String>
@@ -47,7 +46,7 @@ where
     Ok(())
 }
 
-pub fn verify_sumcheck_prismalinear<F: Field, TS: FiatShamirTranscript>(
+pub fn verify_sumcheck_prismalinear<F: Field, TS: FiatShamirTranscript<crate::F, EF, Digest>>(
     transcript: &mut TS,
     l_skip: usize,
     proof: &SumcheckPrismProof<EF>,

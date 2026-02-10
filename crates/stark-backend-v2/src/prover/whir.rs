@@ -10,14 +10,13 @@ use tracing::instrument;
 
 use crate::{
     poly_common::Squarable,
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
     prover::{
         poly::{eval_to_coeff_rs_message, evals_eq_hypercube, evals_mobius_eq_hypercube, Mle},
         stacked_pcs::{MerkleTree, StackedPcsData},
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
-    Digest, WhirConfig, EF, F,
+    Digest, FiatShamirTranscript, WhirConfig, EF, F,
 };
 
 pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
@@ -39,7 +38,9 @@ pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
     ) -> WhirProof;
 }
 
-impl<TS: FiatShamirTranscript> WhirProver<CpuBackendV2, CpuDeviceV2, TS> for CpuDeviceV2 {
+impl<TS: FiatShamirTranscript<F, EF, Digest>> WhirProver<CpuBackendV2, CpuDeviceV2, TS>
+    for CpuDeviceV2
+{
     #[instrument(level = "info", skip_all)]
     fn prove_whir(
         &self,
@@ -65,7 +66,7 @@ impl<TS: FiatShamirTranscript> WhirProver<CpuBackendV2, CpuDeviceV2, TS> for Cpu
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn prove_whir_opening<TS: FiatShamirTranscript>(
+pub fn prove_whir_opening<TS: FiatShamirTranscript<F, EF, Digest>>(
     transcript: &mut TS,
     l_skip: usize,
     log_blowup: usize,

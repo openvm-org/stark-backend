@@ -4,9 +4,8 @@ use tracing::debug;
 
 use crate::{
     poly_common::{eval_eq_mle, interpolate_cubic_at_0123, interpolate_linear_at_01},
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{GkrLayerClaims, GkrProof},
-    EF,
+    Digest, FiatShamirTranscript, EF, F,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -53,7 +52,7 @@ pub enum GkrVerificationError {
 ///
 /// # Returns
 /// `(p̂(ξ), q̂(ξ), ξ)` where ξ ∈ F_ext^{ℓ+n_logup} is the random evaluation point.
-pub fn verify_gkr<TS: FiatShamirTranscript>(
+pub fn verify_gkr<TS: FiatShamirTranscript<F, EF, Digest>>(
     proof: &GkrProof,
     transcript: &mut TS,
     total_rounds: usize,
@@ -169,7 +168,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
 /// # Returns
 /// `(claim, ρ^{(j-1)}, eq(ξ^{(j-1)}, ρ^{(j-1)}))` where ρ^{(j-1)} is randomly sampled from the
 /// sumcheck protocol.
-fn verify_gkr_sumcheck<TS: FiatShamirTranscript>(
+fn verify_gkr_sumcheck<TS: FiatShamirTranscript<F, EF, Digest>>(
     proof: &GkrProof,
     transcript: &mut TS,
     round: usize,
@@ -223,7 +222,10 @@ fn verify_gkr_sumcheck<TS: FiatShamirTranscript>(
 }
 
 /// Observes layer claims in the transcript.
-fn observe_layer_claims<TS: FiatShamirTranscript>(transcript: &mut TS, claims: &GkrLayerClaims) {
+fn observe_layer_claims<TS: FiatShamirTranscript<F, EF, Digest>>(
+    transcript: &mut TS,
+    claims: &GkrLayerClaims,
+) {
     transcript.observe_ext(claims.p_xi_0);
     transcript.observe_ext(claims.q_xi_0);
     transcript.observe_ext(claims.p_xi_1);

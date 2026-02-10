@@ -10,11 +10,9 @@ use crate::{
         eval_eq_mle, eval_mle_evals_at_point, eval_mobius_eq_mle, horner_eval,
         interpolate_quadratic_at_012, Squarable,
     },
-    poseidon2::sponge::{
-        poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress, FiatShamirTranscript,
-    },
+    poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress},
     proof::WhirProof,
-    Digest, SystemParams, EF, F,
+    Digest, FiatShamirTranscript, SystemParams, EF, F,
 };
 
 #[inline]
@@ -30,7 +28,7 @@ fn ensure(cond: bool, err: VerifyWhirError) -> Result<(), VerifyWhirError> {
 ///
 /// Assumes that all inputs have already been checked to have the correct sizes.
 #[instrument(level = "debug", skip_all)]
-pub fn verify_whir<TS: FiatShamirTranscript>(
+pub fn verify_whir<TS: FiatShamirTranscript<F, EF, Digest>>(
     transcript: &mut TS,
     params: &SystemParams,
     whir_proof: &WhirProof,
@@ -153,7 +151,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
 
         let omega = F::two_adic_generator(log_rs_domain_size);
         for (query_idx, index) in query_indices.into_iter().enumerate() {
-            let zi_root = omega.exp_u64(index as u64);
+            let zi_root = omega.exp_u64(index);
             let zi = zi_root.exp_power_of_2(k_whir);
 
             let yi = if is_initial_round {
@@ -172,7 +170,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
                         .collect_vec();
                     let query_digest = poseidon2_tree_compress(leaf_hashes);
                     let merkle_proof = &merkle_proofs[query_idx];
-                    merkle_verify(commit, index, query_digest, merkle_proof)?;
+                    merkle_verify(commit, index as u32, query_digest, merkle_proof)?;
 
                     for c in 0..width {
                         let mu_pow = mu_pow_iter.next().unwrap(); // ok; mu_pows has total_width length
@@ -194,7 +192,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
                 let query_digest = poseidon2_tree_compress(leaf_hashes);
                 merkle_verify(
                     codeword_commits[whir_round - 1],
-                    index,
+                    index as u32,
                     query_digest,
                     merkle_proof,
                 )?;

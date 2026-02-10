@@ -6,7 +6,6 @@ use itertools::Itertools;
 use crate::{
     keygen::types::MultiStarkProvingKeyV2,
     poly_common::Squarable,
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
         prove_zerocheck_and_logup,
@@ -17,7 +16,7 @@ use crate::{
         DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MultiRapProver, OpeningProverV2,
         ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
     },
-    Digest, SystemParams, D_EF, EF, F,
+    Digest, FiatShamirTranscript, SystemParams, D_EF, EF, F,
 };
 
 #[derive(Clone, Copy)]
@@ -40,7 +39,7 @@ impl ProverBackendV2 for CpuBackendV2 {
     type PcsData = StackedPcsData<F, Digest>;
 }
 
-impl<TS: FiatShamirTranscript> ProverDeviceV2<CpuBackendV2, TS> for CpuDeviceV2 {
+impl<TS: FiatShamirTranscript<F, EF, Digest>> ProverDeviceV2<CpuBackendV2, TS> for CpuDeviceV2 {
     fn config(&self) -> &SystemParams {
         &self.config
     }
@@ -58,7 +57,7 @@ impl TraceCommitterV2<CpuBackendV2> for CpuDeviceV2 {
     }
 }
 
-impl<TS: FiatShamirTranscript> MultiRapProver<CpuBackendV2, TS> for CpuDeviceV2 {
+impl<TS: FiatShamirTranscript<F, EF, Digest>> MultiRapProver<CpuBackendV2, TS> for CpuDeviceV2 {
     type PartialProof = (GkrProof, BatchConstraintProof);
     /// The random opening point `r` where the batch constraint sumcheck reduces to evaluation
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
@@ -77,7 +76,7 @@ impl<TS: FiatShamirTranscript> MultiRapProver<CpuBackendV2, TS> for CpuDeviceV2 
     }
 }
 
-impl<TS: FiatShamirTranscript> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2 {
+impl<TS: FiatShamirTranscript<F, EF, Digest>> OpeningProverV2<CpuBackendV2, TS> for CpuDeviceV2 {
     type OpeningProof = (StackingProof, WhirProof);
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<EF>;

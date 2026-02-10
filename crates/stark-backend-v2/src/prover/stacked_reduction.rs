@@ -10,7 +10,6 @@ use tracing::{debug, instrument};
 
 use crate::{
     poly_common::{eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, UnivariatePoly},
-    poseidon2::sponge::FiatShamirTranscript,
     proof::StackingProof,
     prover::{
         poly::evals_eq_hypercube,
@@ -21,7 +20,7 @@ use crate::{
         },
         ColMajorMatrix, ColMajorMatrixView, CpuBackendV2, CpuDeviceV2, MatrixView, ProverBackendV2,
     },
-    Digest, EF, F,
+    Digest, FiatShamirTranscript, EF, F,
 };
 
 /// Helper trait for proving the reduction of column opening claims and column rotation opening
@@ -74,7 +73,7 @@ pub fn prove_stacked_opening_reduction<'a, PB, PD, TS, SRP>(
 ) -> (StackingProof, Vec<PB::Challenge>)
 where
     PB: ProverBackendV2<Val = F, Challenge = EF>,
-    TS: FiatShamirTranscript,
+    TS: FiatShamirTranscript<F, EF, Digest>,
     SRP: StackedReductionProver<'a, PB, PD>,
 {
     // Batching randomness

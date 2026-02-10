@@ -14,7 +14,7 @@ use crate::{
         types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
         MultiStarkKeygenBuilderV2,
     },
-    poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
+    poseidon2::sponge::DuplexSponge,
     proof::*,
     prover::{
         AirProvingContextV2, CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
@@ -22,7 +22,7 @@ use crate::{
         ProverDeviceV2, ProvingContextV2,
     },
     verifier::{verify, VerifierError},
-    SystemParams,
+    Digest, FiatShamirTranscript, SystemParams, EF, F,
 };
 
 /// Data for verifying a Stark proof.
@@ -50,7 +50,7 @@ where
     >;
     type PB: ProverBackendV2<Val = crate::F, Challenge = crate::EF, Commitment = crate::Digest>;
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
-    type TS: FiatShamirTranscript + Default;
+    type TS: FiatShamirTranscript<F, EF, Digest> + Default;
 
     fn config(&self) -> &SystemParams {
         self.device().config()
@@ -135,7 +135,7 @@ impl<TS> BabyBearPoseidon2CpuEngineV2<TS> {
 
 impl<TS> StarkEngineV2 for BabyBearPoseidon2CpuEngineV2<TS>
 where
-    TS: FiatShamirTranscript + Default,
+    TS: FiatShamirTranscript<F, EF, Digest> + Default,
 {
     type SC = BabyBearPoseidon2Config;
     type PB = CpuBackendV2;
@@ -165,7 +165,7 @@ pub trait StarkWhirEngine: StarkEngineV2 {
 
 impl<TS> StarkWhirEngine for BabyBearPoseidon2CpuEngineV2<TS>
 where
-    TS: FiatShamirTranscript + Default,
+    TS: FiatShamirTranscript<F, EF, Digest> + Default,
 {
     fn new(params: SystemParams) -> Self {
         Self::new(params)

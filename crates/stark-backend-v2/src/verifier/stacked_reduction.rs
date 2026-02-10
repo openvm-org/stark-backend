@@ -10,10 +10,9 @@ use crate::{
         eval_eq_mle, eval_eq_prism, eval_in_uni, eval_rot_kernel_prism, horner_eval,
         interpolate_quadratic_at_012,
     },
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{column_openings_by_rot, StackingProof},
     prover::stacked_pcs::StackedLayout,
-    EF, F,
+    Digest, FiatShamirTranscript, EF, F,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -28,7 +27,7 @@ pub enum StackedReductionError {
 /// `has_preprocessed` must be per present trace in sorted AIR order.
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip_all)]
-pub fn verify_stacked_reduction<TS: FiatShamirTranscript>(
+pub fn verify_stacked_reduction<TS: FiatShamirTranscript<F, EF, Digest>>(
     transcript: &mut TS,
     proof: &StackingProof,
     layouts: &[StackedLayout],

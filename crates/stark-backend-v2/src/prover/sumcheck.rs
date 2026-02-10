@@ -16,9 +16,8 @@ use tracing::{debug, instrument, trace};
 use crate::{
     dft::Radix2BowersSerial,
     poly_common::UnivariatePoly,
-    poseidon2::sponge::FiatShamirTranscript,
     prover::{ColMajorMatrix, ColMajorMatrixView, MatrixView, StridedColMajorMatrixView},
-    EF,
+    Digest, FiatShamirTranscript, EF,
 };
 
 /// The univariate skip round 0: we want to compute the univariate polynomial `s(Z) = sum_{x \in
@@ -426,7 +425,7 @@ pub struct SumcheckPrismProof<EF> {
 //
 // NOTE[jpw]: we currently fix EF for the transcript, but the evaluations in F can be either base
 // field or extension field
-pub fn sumcheck_multilinear<F: Field, TS: FiatShamirTranscript>(
+pub fn sumcheck_multilinear<F: Field, TS: FiatShamirTranscript<crate::F, EF, Digest>>(
     transcript: &mut TS,
     evals: &[F],
 ) -> (SumcheckCubeProof<EF>, Vec<EF>)
@@ -498,7 +497,7 @@ where
 // field or extension field.
 // - for simplicity, the transcript observes `sum_claim` and `s_0` as valued in `EF`. More
 //   fine-grained approaches may observe in `F`.
-pub fn sumcheck_prismalinear<F, TS: FiatShamirTranscript>(
+pub fn sumcheck_prismalinear<F, TS: FiatShamirTranscript<crate::F, EF, Digest>>(
     transcript: &mut TS,
     l_skip: usize,
     evals: &[F],
