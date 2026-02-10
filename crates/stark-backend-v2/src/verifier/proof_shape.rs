@@ -79,9 +79,7 @@ pub enum ProofShapeVDataError {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum GkrProofShapeError {
-    #[error(
-        "grid_claims should have n_grid_size = {expected} claims, but it has {actual}"
-    )]
+    #[error("grid_claims should have n_grid_size = {expected} claims, but it has {actual}")]
     InvalidGridClaims { expected: usize, actual: usize },
     #[error(
         "claims_per_layer should have num_gkr_rounds = {expected} layers, but it has {actual}"
@@ -402,7 +400,12 @@ pub fn verify_proof_shape(
         l_skip + n_logup_block
     };
 
-    if proof.gkr_proof.grid_claims.len() != (if total_interactions == 0 { 0 } else { n_grid_size })
+    if proof.gkr_proof.grid_claims.len()
+        != (if total_interactions == 0 {
+            0
+        } else {
+            n_grid_size
+        })
     {
         return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidGridClaims {
             expected: if total_interactions == 0 {

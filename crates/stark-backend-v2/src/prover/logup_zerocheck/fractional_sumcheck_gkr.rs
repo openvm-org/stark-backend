@@ -69,9 +69,8 @@ impl<EF: Field> Add<Frac<EF>> for Frac<EF> {
 /// * `evals` - list of `(p, q)` pairs of fractions in projective coordinates representing
 ///   evaluations on the hypercube `H_{total_rounds_full}`
 /// * `assert_zero` - Whether to assert that the fractional sum is zero.
-/// * `n_grid` - The effective grid dimension. The caller should compute
-///   `min(n_logup, n_logup_grid)`. When 0, there is one grid point and
-///   behavior matches the single-instance case.
+/// * `n_grid` - The effective grid dimension. The caller should compute `min(n_logup,
+///   n_logup_grid)`. When 0, there is one grid point and behavior matches the single-instance case.
 ///
 /// # Returns
 /// The fractional sumcheck proof and the final random evaluation vector
@@ -111,9 +110,8 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
     for g in 0..n_grid_size {
         let mut tree: Vec<Frac<EF>> = vec![Frac::default(); tree_size];
         let block_start = g * block_size;
-        tree[(1 << total_rounds_block)..].copy_from_slice(
-            &evals[block_start..block_start + block_size],
-        );
+        tree[(1 << total_rounds_block)..]
+            .copy_from_slice(&evals[block_start..block_start + block_size]);
         for node_idx in (1..(1 << total_rounds_block)).rev() {
             tree[node_idx] = tree[2 * node_idx] + tree[2 * node_idx + 1];
         }
@@ -121,8 +119,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
     }
 
     // Compute per-grid-point root claims: grid_claims[g] = (tree_g[1].p, tree_g[1].q)
-    let grid_claims: Vec<(EF, EF)> =
-        trees.iter().map(|tree| (tree[1].p, tree[1].q)).collect();
+    let grid_claims: Vec<(EF, EF)> = trees.iter().map(|tree| (tree[1].p, tree[1].q)).collect();
 
     // Check assert_zero condition: sum of p_g/q_g = 0 in projective coordinates.
     // This means the projective sum of all grid roots should have p = 0.
@@ -160,8 +157,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
         );
     }
 
-    let mut claims_per_layer: Vec<Vec<GkrLayerClaims>> =
-        Vec::with_capacity(total_rounds_block);
+    let mut claims_per_layer: Vec<Vec<GkrLayerClaims>> = Vec::with_capacity(total_rounds_block);
     let mut sumcheck_polys: Vec<Vec<[EF; 3]>> =
         Vec::with_capacity(total_rounds_block.saturating_sub(1));
 

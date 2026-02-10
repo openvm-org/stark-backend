@@ -167,8 +167,7 @@ where
     } else {
         0
     };
-    let (frac_sum_proof, mut xi) =
-        fractional_sumcheck(transcript, &gkr_input_evals, true, n_grid);
+    let (frac_sum_proof, mut xi) = fractional_sumcheck(transcript, &gkr_input_evals, true, n_grid);
 
     // Sample more for `\xi` in the edge case that some AIRs don't have interactions
     let n_global = max(n_max, n_logup);

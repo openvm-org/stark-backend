@@ -5,8 +5,8 @@ use tracing::debug;
 use crate::{
     poly_common::{eval_eq_mle, interpolate_cubic_at_0123, interpolate_linear_at_01},
     poseidon2::sponge::FiatShamirTranscript,
-    prover::poly::evals_eq_hypercube_serial,
     proof::{GkrLayerClaims, GkrProof},
+    prover::poly::evals_eq_hypercube_serial,
     EF,
 };
 
@@ -114,8 +114,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
             });
         }
         // Go directly to grid check with grid claims as evaluation claims
-        let (p_xi, q_xi, xi) =
-            grid_check(transcript, &proof.grid_claims, n_grid, vec![]);
+        let (p_xi, q_xi, xi) = grid_check(transcript, &proof.grid_claims, n_grid, vec![]);
         return Ok((p_xi, q_xi, xi));
     }
 
@@ -290,10 +289,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
 
     // Step 6: Grid check
     // Per-grid evaluation claims are (numer_claims[g], denom_claims[g]) at xi_block = gkr_r
-    let eval_claims: Vec<(EF, EF)> = numer_claims
-        .into_iter()
-        .zip(denom_claims)
-        .collect();
+    let eval_claims: Vec<(EF, EF)> = numer_claims.into_iter().zip(denom_claims).collect();
 
     let (p_xi, q_xi, xi) = grid_check(transcript, &eval_claims, n_grid, gkr_r);
     Ok((p_xi, q_xi, xi))
@@ -430,7 +426,8 @@ mod tests {
         F,
     };
 
-    /// Helper to build a GkrProof from a FracSumcheckProof for testing (single grid point, n_grid=0).
+    /// Helper to build a GkrProof from a FracSumcheckProof for testing (single grid point,
+    /// n_grid=0).
     fn gkr_proof_from_frac(frac_proof: &FracSumcheckProof<EF>) -> GkrProof {
         GkrProof {
             logup_pow_witness: F::ZERO,
@@ -805,7 +802,8 @@ mod tests {
         assert_eq!(xi.len(), 1);
     }
 
-    /// Integration test: prover + verifier with n_grid=1 and 4 fractions (2 block rounds, 2 grid points).
+    /// Integration test: prover + verifier with n_grid=1 and 4 fractions (2 block rounds, 2 grid
+    /// points).
     #[test]
     fn test_gkr_grid_1_integration() {
         setup_tracing();
@@ -841,8 +839,12 @@ mod tests {
         let gkr_proof = gkr_proof_from_frac(&frac_proof);
         let mut verifier_transcript = DuplexSponge::default();
         let total_rounds_block = total_rounds - n_grid;
-        let result =
-            verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds_block, n_grid);
+        let result = verify_gkr(
+            &gkr_proof,
+            &mut verifier_transcript,
+            total_rounds_block,
+            n_grid,
+        );
         assert!(
             result.is_ok(),
             "Grid integration (n_grid=1) failed: {:?}",
@@ -855,7 +857,8 @@ mod tests {
         assert_eq!(v_xi, xi);
     }
 
-    /// Integration test: prover + verifier with n_grid=2 and 8 fractions (1 block round, 4 grid points).
+    /// Integration test: prover + verifier with n_grid=2 and 8 fractions (1 block round, 4 grid
+    /// points).
     #[test]
     fn test_gkr_grid_2_integration() {
         setup_tracing();
@@ -908,8 +911,12 @@ mod tests {
         let gkr_proof = gkr_proof_from_frac(&frac_proof);
         let mut verifier_transcript = DuplexSponge::default();
         let total_rounds_block = total_rounds_full - n_grid;
-        let result =
-            verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds_block, n_grid);
+        let result = verify_gkr(
+            &gkr_proof,
+            &mut verifier_transcript,
+            total_rounds_block,
+            n_grid,
+        );
         assert!(
             result.is_ok(),
             "Grid integration (n_grid=2) failed: {:?}",
@@ -920,7 +927,8 @@ mod tests {
         assert_eq!(v_xi, xi);
     }
 
-    /// Integration test: n_grid equals total_rounds_full (all rounds are grid, block has 1 element).
+    /// Integration test: n_grid equals total_rounds_full (all rounds are grid, block has 1
+    /// element).
     #[test]
     fn test_gkr_grid_all_grid_rounds() {
         setup_tracing();
@@ -961,8 +969,12 @@ mod tests {
         let gkr_proof = gkr_proof_from_frac(&frac_proof);
         let mut verifier_transcript = DuplexSponge::default();
         let total_rounds_block = total_rounds_full - n_grid; // == 0
-        let result =
-            verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds_block, n_grid);
+        let result = verify_gkr(
+            &gkr_proof,
+            &mut verifier_transcript,
+            total_rounds_block,
+            n_grid,
+        );
         assert!(
             result.is_ok(),
             "Grid all-grid-rounds verification failed: {:?}",
