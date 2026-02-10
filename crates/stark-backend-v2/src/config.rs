@@ -8,15 +8,22 @@ use serde::{Deserialize, Serialize};
 ///
 /// This trait only holds the associated types and the struct implementing the trait does not hold
 /// the system parameters. System parameters are specified and stored separated in [SystemParams].
+///
+/// The trait has an **implicit** associated Fiat-Shamir transcript type, including the hash used.
+/// There is no explicit associated type because the concrete implementation of the transcript may
+/// differ between prover and verifier and the verifier may further employ different implementations
+/// for logging or debugging purposes. The trait controlling concrete implementations of the
+/// transcript is specified by [`FiatShamirTranscript`](crate::FiatShamirTranscript).
 pub trait StarkProtocolConfig {
     /// The prime base field.
     type F: TwoAdicField + PrimeField64;
     /// The extension field, used for random challenges.
     type EF: ExtensionField<Self::F>;
+    /// The digest type used for commitments.
+    type Digest: Copy + Send + Sync;
+
     /// Degree of the extension field.
     const D_EF: usize = <Self::EF as BasedVectorSpace<Self::F>>::DIMENSION;
-    /// The digest type used for commitments.
-    type Digest;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Getters)]
