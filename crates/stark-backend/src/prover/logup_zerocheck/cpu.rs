@@ -276,6 +276,10 @@ where
         //
         // PERF[jpw]: I think it's better to not save these and just
         // interpolate directly using the formulas for selectors
+        let omega_skip_pows = SC::F::two_adic_generator(l_skip)
+            .powers()
+            .take(1 << l_skip)
+            .collect_vec();
         self.sels_per_trace_base = self
             .n_per_trace
             .iter()
@@ -284,10 +288,12 @@ where
                 let height = 1 << log_height;
                 let lifted_height = height.max(1 << l_skip);
                 let mut mat = SC::F::zero_vec(3 * lifted_height);
-                mat[lifted_height..2 * lifted_height].fill(SC::F::ONE);
+                for i in 0..lifted_height {
+                    mat[lifted_height + i] =
+                        super::is_transition_value(i, l_skip, n, &omega_skip_pows);
+                }
                 for i in (0..lifted_height).step_by(height) {
                     mat[i] = SC::F::ONE; // is_first
-                    mat[lifted_height + i + height - 1] = SC::F::ZERO; // is_transition
                     mat[2 * lifted_height + i + height - 1] = SC::F::ONE; // is_last
                 }
                 ColMajorMatrix::new(mat, 3)

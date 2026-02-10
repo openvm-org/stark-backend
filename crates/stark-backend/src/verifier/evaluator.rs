@@ -26,6 +26,7 @@ pub(super) struct VerifierConstraintEvaluator<'a, F, EF> {
     pub partitioned_main: &'a [ViewPair<'a, EF>],
     pub is_first_row: EF,
     pub is_last_row: EF,
+    pub is_transition: EF,
     pub public_values: &'a [F],
 }
 
@@ -49,11 +50,19 @@ where
         let is_last_row = inv
             * progression_exp_2(rs[0] * omega, l_skip)
             * rs[1..].iter().fold(EF::ONE, |acc, &x| acc * x);
+        let is_transition = if l_skip > 0 {
+            let omega_z = EF::from(omega) * rs[0];
+            let eq_x = rs[1..].iter().fold(EF::ONE, |acc, &x| acc * x);
+            omega_z - eq_x
+        } else {
+            EF::ZERO
+        };
         Self {
             preprocessed,
             partitioned_main,
             is_first_row,
             is_last_row,
+            is_transition,
             public_values,
         }
     }
@@ -103,6 +112,6 @@ where
     }
 
     fn eval_is_transition(&self) -> EF {
-        EF::ONE - self.is_last_row
+        self.is_transition
     }
 }

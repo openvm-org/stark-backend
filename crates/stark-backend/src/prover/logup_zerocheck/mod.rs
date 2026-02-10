@@ -33,6 +33,26 @@ mod single;
 pub use cpu::LogupZerocheckCpu;
 pub use single::*;
 
+fn is_transition_value<F: PrimeCharacteristicRing + Copy>(
+    row: usize,
+    l_skip: usize,
+    n: isize,
+    omega_pows: &[F],
+) -> F {
+    let mask = (1usize << l_skip) - 1;
+    let step = if n < 0 { 1usize << (-n as usize) } else { 1 };
+    let z_idx = row & (mask / step);
+    let omega_z = omega_pows[((z_idx + 1) * step) & mask];
+    let eq_x = if n >= 0 {
+        let n = n as usize;
+        let x_idx = row >> l_skip;
+        F::from_bool(x_idx + 1 == (1usize << n))
+    } else {
+        F::ONE
+    };
+    omega_z - eq_x
+}
+
 #[instrument(level = "info", skip_all)]
 pub fn prove_zerocheck_and_logup<SC: StarkProtocolConfig, TS>(
     transcript: &mut TS,
@@ -93,6 +113,10 @@ where
     // Compute logup input layer: these are the evaluations of \hat{p}, \hat{q} on the hypercube
     // `H_{l_skip + n_logup}`
     let has_interactions = !prover.interactions_layout.sorted_cols.is_empty();
+    let omega_skip_pows = SC::F::two_adic_generator(l_skip)
+        .powers()
+        .take(1 << l_skip)
+        .collect_vec();
     let gkr_input_evals = if !has_interactions {
         vec![]
     } else {
@@ -111,8 +135,10 @@ where
                     .into_par_iter()
                     .map(|i| {
                         let mut row_parts = Vec::with_capacity(mats.len() + 1);
+                        let log_height = log2_strict_usize(height);
+                        let n = log_height as isize - l_skip as isize;
                         let is_first = SC::F::from_bool(i == 0);
-                        let is_transition = SC::F::from_bool(i != height - 1);
+                        let is_transition = is_transition_value(i, l_skip, n, &omega_skip_pows);
                         let is_last = SC::F::from_bool(i == height - 1);
                         let sels = vec![is_first, is_transition, is_last];
                         row_parts.push(sels);
