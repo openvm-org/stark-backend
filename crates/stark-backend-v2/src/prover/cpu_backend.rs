@@ -7,7 +7,6 @@ use itertools::Itertools;
 use p3_field::{ExtensionField, TwoAdicField};
 
 use crate::{
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
     keygen::types::MultiStarkProvingKeyV2,
     poly_common::Squarable,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
@@ -190,11 +189,11 @@ where
     }
 }
 
-impl DeviceDataTransporterV2<CpuBackendV2<BabyBearPoseidon2ConfigV2>> for CpuDeviceV2 {
+impl<SC: StarkProtocolConfig> DeviceDataTransporterV2<SC, CpuBackendV2<SC>> for CpuDeviceV2 {
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKeyV2<BabyBearPoseidon2ConfigV2>,
-    ) -> DeviceMultiStarkProvingKeyV2<CpuBackendV2<BabyBearPoseidon2ConfigV2>> {
+        mpk: &MultiStarkProvingKeyV2<SC>,
+    ) -> DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>> {
         let per_air = mpk
             .per_air
             .iter()
@@ -224,21 +223,21 @@ impl DeviceDataTransporterV2<CpuBackendV2<BabyBearPoseidon2ConfigV2>> for CpuDev
         )
     }
 
-    fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<F>) -> ColMajorMatrix<F> {
+    fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<SC::F>) -> ColMajorMatrix<SC::F> {
         matrix.clone()
     }
 
     fn transport_pcs_data_to_device(
         &self,
-        pcs_data: &StackedPcsData<F, Digest>,
-    ) -> StackedPcsData<F, Digest> {
+        pcs_data: &StackedPcsData<SC::F, SC::Digest>,
+    ) -> StackedPcsData<SC::F, SC::Digest> {
         pcs_data.clone()
     }
 
     fn transport_matrix_from_device_to_host(
         &self,
-        matrix: &ColMajorMatrix<F>,
-    ) -> ColMajorMatrix<F> {
+        matrix: &ColMajorMatrix<SC::F>,
+    ) -> ColMajorMatrix<SC::F> {
         matrix.clone()
     }
 }

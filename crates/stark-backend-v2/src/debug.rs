@@ -29,12 +29,19 @@ type SC = BabyBearPoseidon2Config;
 
 // TODO[jpw]: move into StarkEngineV2::debug default implementation after `SC` is made generic.
 /// `airs` should be the full list of all AIRs, not just used AIRs.
-pub fn debug_impl<PB: ProverBackendV2<Val = crate::baby_bear_poseidon2::F>, PD: DeviceDataTransporterV2<PB>>(
+pub fn debug_impl<PB, PD>(
     config: SystemParams,
     device: &PD,
     airs: &[AirRef<SC>],
     ctx: &ProvingContextV2<PB>,
-) {
+)
+where
+    PB: ProverBackendV2<
+        Val = crate::baby_bear_poseidon2::F,
+        Challenge = crate::baby_bear_poseidon2::EF,
+        Commitment = crate::baby_bear_poseidon2::Digest,
+    >,
+    PD: DeviceDataTransporterV2<BabyBearPoseidon2ConfigV2, PB>, {
     let mut keygen_builder = MultiStarkKeygenBuilderV2::new(config);
     for air in airs {
         keygen_builder.add_air(air.clone());

@@ -47,7 +47,7 @@ where
         Challenge = <Self::SC as StarkProtocolConfig>::EF,
         Commitment = <Self::SC as StarkProtocolConfig>::Digest,
     >;
-    type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
+    type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::SC, Self::PB>;
     type TS: FiatShamirTranscript<Self::SC> + Default;
 
     fn config(&self) -> &SystemParams {
