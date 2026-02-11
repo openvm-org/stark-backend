@@ -41,6 +41,23 @@ pub fn eval_mobius_eq_mle<F: Field>(u: &[F], x: &[F]) -> F {
     })
 }
 
+/// Evaluate the MLE defined by its hypercube evaluations at an arbitrary point, in place.
+///
+/// `evals` has length `2^n` and contains `f(b)` for each `b ∈ {0,1}^n`.
+/// Returns `f(x)` where `x = x[0..n]`.
+pub fn eval_mle_evals_at_point<F: Field>(evals: &mut [F], x: &[F]) -> F {
+    debug_assert_eq!(evals.len(), 1 << x.len());
+    let mut len = evals.len();
+    for &xj in x.iter().rev() {
+        len >>= 1;
+        let (lo, hi) = evals.split_at_mut(len);
+        for i in 0..len {
+            lo[i] = lo[i] * (F::ONE - xj) + hi[i] * xj;
+        }
+    }
+    evals[0]
+}
+
 /// Let D be univariate skip domain, the subgroup of `F^*` of order `l_skip`.
 ///
 /// Computes the polynomial ```text
