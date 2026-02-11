@@ -81,7 +81,7 @@ pub enum WhirProverError {
     CustomBatchIntt(CudaError),
     #[error("evals_eq_hypercube: {0}")]
     EvalEq(KernelError),
-    #[error("whir_sumcheck_mle_round [whir_round={whir_round}, round={round}]: {error}")]
+    #[error("whir_sumcheck_coeff_moments_round [whir_round={whir_round}, round={round}]: {error}")]
     SumcheckMleRound {
         error: CudaError,
         whir_round: usize,
@@ -95,8 +95,6 @@ pub enum WhirProverError {
     },
     #[error("split_ext_poly_to_base_col_major_matrix [whir_round={whir_round}]: {error}")]
     SplitExtPoly { error: CudaError, whir_round: usize },
-    #[error("mle_evals_to_coeffs_inplace [whir_round={whir_round}]: {error}")]
-    MleEvalToCoeff { error: CudaError, whir_round: usize },
     #[error("batch_expand_pad [whir_round={whir_round}]: {error}")]
     BatchExpandPad { error: CudaError, whir_round: usize },
     #[error("eval_poly_ext_at_point_from_base [whir_round={whir_round}]: {error}")]
@@ -104,20 +102,8 @@ pub enum WhirProverError {
         error: KernelError,
         whir_round: usize,
     },
-    #[error("eq_hypercube_stage_ext [whir_round={whir_round}, step={step}]: {error}")]
-    EqHypercubeStageExt {
-        error: CudaError,
-        whir_round: usize,
-        step: u32,
-    },
-    #[error("batch_eq_hypercube_stage [whir_round={whir_round}, step={step}]: {error}")]
-    BatchEqHypercubeStage {
-        error: CudaError,
-        whir_round: usize,
-        step: u32,
-    },
-    #[error("w_evals_accumulate [whir_round={whir_round}]: {error}")]
-    WEvalsAccumulate { error: CudaError, whir_round: usize },
+    #[error("w_moments_accumulate [whir_round={whir_round}]: {error}")]
+    WMomentsAccumulate { error: CudaError, whir_round: usize },
     #[error("Folding grind error: {0}")]
     FoldingGrind(GrindError),
     #[error("Query phase grind error: {0}")]
