@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
-    prover::{col_maj_idx, poly::Ple, ColMajorMatrix, MatrixView, StridedColMajorMatrixView},
+    prover::{
+        col_maj_idx, poly::eval_to_coeff_rs_message, ColMajorMatrix, MatrixView,
+        StridedColMajorMatrixView,
+    },
     Digest, F,
 };
 
@@ -324,12 +327,11 @@ pub fn rs_code_matrix<F: TwoAdicField + Ord>(
         .values
         .par_chunks_exact(height)
         .map(|column_evals| {
-            let ple = Ple::from_evaluations(l_skip, column_evals);
-            let mut coeffs = ple.coeffs;
-            // Compute RS codeword on a prismalinear polynomial in coefficient form:
-            // We use that the coefficients are in a basis that exactly corresponds to the standard
-            // ith_basis_element univariate basis. Hence RS codeword is just cosetDFT on the
-            // relevant smooth domain
+            // Convert column evaluations on `D × {0,1}^n` directly into the eval-to-coeff RS
+            // coefficient vector, avoiding redundant interpolation work.
+            let mut coeffs = eval_to_coeff_rs_message(l_skip, column_evals);
+
+            // Compute RS codeword on the resulting univariate polynomial in coefficient form.
             let dft = Radix2DitParallel::default();
             coeffs.resize(height.checked_shl(log_blowup as u32).unwrap(), F::ZERO);
             dft.dft(coeffs)
