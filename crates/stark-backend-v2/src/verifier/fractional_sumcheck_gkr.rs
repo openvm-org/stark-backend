@@ -1,3 +1,6 @@
+use std::{iter::zip, mem};
+
+use itertools::Itertools;
 use p3_field::PrimeCharacteristicRing;
 use thiserror::Error;
 use tracing::debug;
@@ -56,8 +59,9 @@ pub enum GkrVerificationError {
 /// Reduces the fractional sum to evaluation claims on the input layer polynomials
 /// p_hat(xi) and q_hat(xi) at a random point xi.
 ///
-/// The argument `total_rounds` is l_skip + n_logup_block (NOT the full n_logup).
-/// The argument `n_grid` is the effective grid dimension n'_grid.
+/// The argument `n_block` is the total number of outer GKR rounds.
+/// The argument `n_grid` is the effective grid dimension.
+/// It is assumed that `n_block + n_grid = l_skip + n_logup`.
 ///
 /// # Returns
 /// `(p_hat(xi), q_hat(xi), xi)` where xi = concat(gkr_r, xi_grid).
@@ -65,15 +69,15 @@ pub enum GkrVerificationError {
 pub fn verify_gkr<TS: FiatShamirTranscript>(
     proof: &GkrProof,
     transcript: &mut TS,
-    total_rounds: usize,
+    n_block: usize,
     n_grid: usize,
 ) -> Result<(EF, EF, Vec<EF>), GkrVerificationError> {
-    let n_grid_size = 1usize << n_grid;
+    let grid_size = 1usize << n_grid;
 
     // Step 2: Verify grid claims
-    if proof.grid_claims.len() != n_grid_size {
+    if proof.grid_claims.len() != grid_size {
         return Err(GkrVerificationError::GridClaimCountMismatch {
-            expected: n_grid_size,
+            expected: grid_size,
             actual: proof.grid_claims.len(),
         });
     }
@@ -82,7 +86,15 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
     // Frac addition: (p1/q1) + (p2/q2) = (p1*q2 + p2*q1) / (q1*q2)
     let mut sum_p = EF::ZERO;
     let mut sum_q = EF::ONE;
+    // Observe grid claims in transcript.
+    // assert_zero=true and the first p is not observed because it can be derived as -q_0 *
+    // (sum_{i>1} p_i / q_i).
     for (g, &(p_g, q_g)) in proof.grid_claims.iter().enumerate() {
+        if g != 0 {
+            transcript.observe_ext(p_g);
+        }
+        transcript.observe_ext(q_g);
+
         if q_g == EF::ZERO {
             return Err(GkrVerificationError::GridDenominatorZero { index: g });
         }
@@ -94,19 +106,8 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         return Err(GkrVerificationError::GridSumCheckFailed { actual: sum_p });
     }
 
-    // Observe grid claims in transcript.
-    // When there is only one grid point (n_grid=0), p=0 is implicit and not observed.
-    // When there are multiple grid points, individual p_g values are non-zero
-    // and must be observed to bind them before xi_grid is sampled.
-    for &(p_g, q_g) in &proof.grid_claims {
-        if n_grid_size > 1 {
-            transcript.observe_ext(p_g);
-        }
-        transcript.observe_ext(q_g);
-    }
-
-    // Step 3: If total_rounds == 0, GKR is skipped; evaluation claims are grid claims themselves
-    if total_rounds == 0 {
+    // Step 3: If n_block == 0, GKR is skipped; evaluation claims are grid claims themselves
+    if n_block == 0 {
         if !proof.claims_per_layer.is_empty() || !proof.sumcheck_polys.is_empty() {
             return Err(GkrVerificationError::InvalidZeroRoundShape {
                 claims_len: proof.claims_per_layer.len(),
@@ -119,13 +120,13 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
     }
 
     // Verify proof shape
-    if proof.claims_per_layer.len() != total_rounds {
+    if proof.claims_per_layer.len() != n_block {
         return Err(GkrVerificationError::IncorrectLayerCount {
-            expected: total_rounds,
+            expected: n_block,
             actual: proof.claims_per_layer.len(),
         });
     }
-    let expected_sumcheck_entries = total_rounds.saturating_sub(1);
+    let expected_sumcheck_entries = n_block.saturating_sub(1);
     if proof.sumcheck_polys.len() != expected_sumcheck_entries {
         return Err(GkrVerificationError::IncorrectSumcheckPolyCount {
             expected: expected_sumcheck_entries,
@@ -133,42 +134,13 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         });
     }
 
-    // Vectorized GKR Setup: sample gamma and initialize weight vectors using
-    // interleaved powers: omega_p[g] = gamma^{2g}, omega_q[g] = gamma^{2g+1}.
-    // This ensures omega_p[0]=1 != omega_q[0]=gamma, so p and q are always
-    // independently bound (avoiding the soundness issue of equal weights at g=0).
-    let gamma: EF = transcript.sample_ext();
-    debug!(%gamma);
-    let gamma_sq = gamma * gamma;
-    let mut omega_p: Vec<EF> = {
-        let mut v = Vec::with_capacity(n_grid_size);
-        let mut cur = EF::ONE; // gamma^0
-        for _ in 0..n_grid_size {
-            v.push(cur);
-            cur *= gamma_sq; // gamma^0, gamma^2, gamma^4, ...
-        }
-        v
-    };
-    let mut omega_q: Vec<EF> = {
-        let mut v = Vec::with_capacity(n_grid_size);
-        let mut cur = gamma; // gamma^1
-        for _ in 0..n_grid_size {
-            v.push(cur);
-            cur *= gamma_sq; // gamma^1, gamma^3, gamma^5, ...
-        }
-        v
-    };
-    let mut claim: EF = (0..n_grid_size)
-        .map(|g| omega_p[g] * proof.grid_claims[g].0 + omega_q[g] * proof.grid_claims[g].1)
-        .sum();
-
-    // Step 4: Round j=1 (direct check, no sumcheck)
+    // Step 4: Handle round 0 (no sumcheck, direct tree evaluation)
     // Verify shape: claims_per_layer[0] must have n_grid_size entries
     let layer_claims_vec = &proof.claims_per_layer[0];
-    if layer_claims_vec.len() != n_grid_size {
+    if layer_claims_vec.len() != grid_size {
         return Err(GkrVerificationError::IncorrectLayerGridSize {
             layer: 0,
-            expected: n_grid_size,
+            expected: grid_size,
             actual: layer_claims_vec.len(),
         });
     }
@@ -179,20 +151,22 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
     }
 
     // Batched gate check: claim == Σ_g (ω_p[g] * G_p[g] + ω_q[g] * G_q[g])
-    let gate_sum: EF = layer_claims_vec
-        .iter()
-        .enumerate()
-        .map(|(g, claims)| {
-            let (p_cross, q_cross) = compute_recursive_relations(claims);
-            omega_p[g] * p_cross + omega_q[g] * q_cross
-        })
-        .sum();
-    if claim != gate_sum {
-        return Err(GkrVerificationError::LayerConsistencyCheckFailed {
-            round: 0,
-            expected: claim,
-            actual: gate_sum,
-        });
+    for (claims, &v_g) in layer_claims_vec.iter().zip(&proof.grid_claims) {
+        let (p_cross, q_cross) = compute_recursive_relations(claims);
+        if p_cross != v_g.0 {
+            return Err(GkrVerificationError::LayerConsistencyCheckFailed {
+                round: 0,
+                expected: v_g.0,
+                actual: p_cross,
+            });
+        }
+        if q_cross != v_g.1 {
+            return Err(GkrVerificationError::LayerConsistencyCheckFailed {
+                round: 0,
+                expected: v_g.1,
+                actual: q_cross,
+            });
+        }
     }
 
     // Sample mu_1, reduce per-grid claims to single eval point
@@ -200,39 +174,38 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
     debug!(gkr_round = 0, %mu_1);
 
     // Per-grid numer/denom claims via linear interpolation + weight update
-    let mut numer_claims: Vec<EF> = Vec::with_capacity(n_grid_size);
-    let mut denom_claims: Vec<EF> = Vec::with_capacity(n_grid_size);
-    for (g, claims) in layer_claims_vec.iter().enumerate() {
-        let (n, d) = reduce_to_single_evaluation(claims, mu_1);
-        numer_claims.push(n);
-        denom_claims.push(d);
-        // Weight update
-        let cp0 = omega_p[g] * claims.q_xi_1;
-        let cp1 = omega_p[g] * claims.q_xi_0;
-        let cq0 = omega_p[g] * claims.p_xi_1 + omega_q[g] * claims.q_xi_1;
-        let cq1 = omega_p[g] * claims.p_xi_0 + omega_q[g] * claims.q_xi_0;
-        omega_p[g] = (EF::ONE - mu_1) * cp0 + mu_1 * cp1;
-        omega_q[g] = (EF::ONE - mu_1) * cq0 + mu_1 * cq1;
+    let mut eval_claims: Vec<(EF, EF)> = Vec::with_capacity(grid_size);
+    for claims in layer_claims_vec.iter() {
+        let v = reduce_to_single_evaluation(claims, mu_1);
+        eval_claims.push(v);
     }
-    // Update claim for next round
-    claim = (0..n_grid_size)
-        .map(|g| omega_p[g] * numer_claims[g] + omega_q[g] * denom_claims[g])
-        .sum();
-    let mut gkr_r = vec![mu_1];
+    let mut xi_block = vec![mu_1];
 
-    // Step 5: Rounds j=2,...,total_rounds (with sumcheck)
-    for round in 1..total_rounds {
+    // Step 5: Handle rounds 1..n_block (with sumcheck)
+    for round in 1..n_block {
+        // Sample batching challenge λⱼ
+        let lambda = transcript.sample_ext();
+        debug!(gkr_round = round, %lambda);
+        let lambda_pows = lambda.powers().take(2 * grid_size).collect_vec();
+        let claim = zip(
+            &lambda_pows,
+            mem::take(&mut eval_claims)
+                .into_iter()
+                .flat_map(|(v_p, v_q)| [v_p, v_q]),
+        )
+        .map(|(&lambda_pow, v)| lambda_pow * v)
+        .sum::<EF>();
         // Run sumcheck protocol for this round using current claim
         let (new_claim, round_r, eq_at_r_prime) =
-            verify_gkr_sumcheck(proof, transcript, round, claim, &gkr_r)?;
-        debug_assert_eq!(eq_at_r_prime, eval_eq_mle(&gkr_r, &round_r));
+            verify_gkr_sumcheck(proof, transcript, round, claim, &xi_block)?;
+        debug_assert_eq!(eq_at_r_prime, eval_eq_mle(&xi_block, &round_r));
 
         // Read layer claims for all grid points
         let layer_claims_vec = &proof.claims_per_layer[round];
-        if layer_claims_vec.len() != n_grid_size {
+        if layer_claims_vec.len() != grid_size {
             return Err(GkrVerificationError::IncorrectLayerGridSize {
                 layer: round,
-                expected: n_grid_size,
+                expected: grid_size,
                 actual: layer_claims_vec.len(),
             });
         }
@@ -246,7 +219,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
             .enumerate()
             .map(|(g, claims)| {
                 let (p_cross, q_cross) = compute_recursive_relations(claims);
-                omega_p[g] * p_cross + omega_q[g] * q_cross
+                lambda_pows[2 * g] * p_cross + lambda_pows[2 * g + 1] * q_cross
             })
             .sum();
 
@@ -263,38 +236,21 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         // Sample mu, reduce claims + weight update
         let mu = transcript.sample_ext();
         debug!(gkr_round = round, %mu);
-        numer_claims.clear();
-        denom_claims.clear();
-        for (g, claims) in layer_claims_vec.iter().enumerate() {
-            let (n, d) = reduce_to_single_evaluation(claims, mu);
-            numer_claims.push(n);
-            denom_claims.push(d);
-            // Weight update
-            let cp0 = omega_p[g] * claims.q_xi_1;
-            let cp1 = omega_p[g] * claims.q_xi_0;
-            let cq0 = omega_p[g] * claims.p_xi_1 + omega_q[g] * claims.q_xi_1;
-            let cq1 = omega_p[g] * claims.p_xi_0 + omega_q[g] * claims.q_xi_0;
-            omega_p[g] = (EF::ONE - mu) * cp0 + mu * cp1;
-            omega_q[g] = (EF::ONE - mu) * cq0 + mu * cq1;
+        for claims in layer_claims_vec.iter() {
+            let v = reduce_to_single_evaluation(claims, mu);
+            eval_claims.push(v);
         }
-        // Update claim for next round
-        claim = (0..n_grid_size)
-            .map(|g| omega_p[g] * numer_claims[g] + omega_q[g] * denom_claims[g])
-            .sum();
         // Update evaluation point: gkr_r = (mu, round_r)
-        gkr_r = std::iter::once(mu).chain(round_r).collect();
+        xi_block = std::iter::once(mu).chain(round_r).collect();
     }
 
-    let _ = claim; // claim propagation ends here; final values are in numer_claims/denom_claims
-
     // Step 6: Grid check
-    // Per-grid evaluation claims are (numer_claims[g], denom_claims[g]) at xi_block = gkr_r
-    let eval_claims: Vec<(EF, EF)> = numer_claims.into_iter().zip(denom_claims).collect();
-
-    let (p_xi, q_xi, xi) = grid_check(transcript, &eval_claims, n_grid, gkr_r);
+    let (p_xi, q_xi, xi) = grid_check(transcript, &eval_claims, n_grid, xi_block);
     Ok((p_xi, q_xi, xi))
 }
 
+// NOTE: this is O(2^n_grid). We can make it O(n_grid) by introducing another small sumcheck, but
+// for small n_grid, direct evaluation is likely faster.
 /// Performs the grid check: combines per-grid-point evaluation claims into a single
 /// evaluation claim using eq(xi_grid, g) weights.
 ///
@@ -305,10 +261,10 @@ fn grid_check<TS: FiatShamirTranscript>(
     transcript: &mut TS,
     eval_claims: &[(EF, EF)],
     n_grid: usize,
-    gkr_r: Vec<EF>,
+    xi_block: Vec<EF>,
 ) -> (EF, EF, Vec<EF>) {
-    let n_grid_size = 1usize << n_grid;
-    debug_assert_eq!(eval_claims.len(), n_grid_size);
+    let grid_size = 1usize << n_grid;
+    debug_assert_eq!(eval_claims.len(), grid_size);
 
     // Sample xi_grid (n_grid random elements)
     let xi_grid: Vec<EF> = (0..n_grid).map(|_| transcript.sample_ext()).collect();
@@ -320,13 +276,13 @@ fn grid_check<TS: FiatShamirTranscript>(
     // q_xi = sum_g v_{q,g} * eq(xi_grid, g)
     let mut p_xi = EF::ZERO;
     let mut q_xi = EF::ZERO;
-    for (g, &(v_p_g, v_q_g)) in eval_claims.iter().enumerate() {
-        p_xi += v_p_g * eq_evals[g];
-        q_xi += v_q_g * eq_evals[g];
+    for (&(v_p_g, v_q_g), eq_g) in eval_claims.iter().zip(eq_evals) {
+        p_xi += v_p_g * eq_g;
+        q_xi += v_q_g * eq_g;
     }
 
     // xi = concat(gkr_r, xi_grid)  [block dimensions first, then grid dimensions]
-    let xi: Vec<EF> = gkr_r.into_iter().chain(xi_grid).collect();
+    let xi: Vec<EF> = xi_block.into_iter().chain(xi_grid).collect();
 
     (p_xi, q_xi, xi)
 }

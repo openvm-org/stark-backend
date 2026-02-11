@@ -391,49 +391,45 @@ pub fn verify_proof_shape(
     });
     let n_logup = calculate_n_logup(l_skip, total_interactions);
     let n_logup_grid = mvk.params.n_logup_grid;
-    let n_grid = n_logup.min(n_logup_grid);
-    let n_logup_block = n_logup - n_grid;
-    let n_grid_size = 1usize << n_grid;
-    let num_gkr_rounds = if total_interactions == 0 {
+    // total number of GKR rounds without early stopping
+    let total_gkr_rounds = if total_interactions == 0 {
         0
     } else {
-        l_skip + n_logup_block
+        l_skip + n_logup
+    };
+    let n_grid = total_gkr_rounds.min(n_logup_grid);
+    let n_block = total_gkr_rounds - n_grid;
+    let grid_size = 1usize << n_grid;
+    let expected_num_grid_claims = if total_interactions == 0 {
+        0
+    } else {
+        grid_size
     };
 
-    if proof.gkr_proof.grid_claims.len()
-        != (if total_interactions == 0 {
-            0
-        } else {
-            n_grid_size
-        })
-    {
+    if proof.gkr_proof.grid_claims.len() != expected_num_grid_claims {
         return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidGridClaims {
-            expected: if total_interactions == 0 {
-                0
-            } else {
-                n_grid_size
-            },
+            expected: expected_num_grid_claims,
             actual: proof.gkr_proof.grid_claims.len(),
         });
     }
 
-    if proof.gkr_proof.claims_per_layer.len() != num_gkr_rounds {
+    if proof.gkr_proof.claims_per_layer.len() != n_block {
         return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidClaimsPerLayer {
-            expected: num_gkr_rounds,
+            expected: n_block,
             actual: proof.gkr_proof.claims_per_layer.len(),
         });
-    } else if proof.gkr_proof.sumcheck_polys.len() != num_gkr_rounds.saturating_sub(1) {
+    } else if proof.gkr_proof.sumcheck_polys.len() != n_block.saturating_sub(1) {
         return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidSumcheckPolys {
-            expected: num_gkr_rounds.saturating_sub(1),
+            expected: n_block.saturating_sub(1),
             actual: proof.gkr_proof.sumcheck_polys.len(),
         });
     }
 
     for (layer, layer_claims) in proof.gkr_proof.claims_per_layer.iter().enumerate() {
-        if layer_claims.len() != n_grid_size {
+        if layer_claims.len() != grid_size {
             return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidClaimsPerLayerGrid {
                 layer,
-                expected: n_grid_size,
+                expected: grid_size,
                 actual: layer_claims.len(),
             });
         }

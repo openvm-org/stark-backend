@@ -54,11 +54,11 @@ impl<EF: Field> Add<Frac<EF>> for Frac<EF> {
 
 /// Runs the data-parallel fractional sumcheck protocol using GKR layered circuit.
 ///
-/// The evaluations `evals` has length `2^{total_rounds_full}` where
-/// `total_rounds_full = l_skip + n_logup`. The parameter `n_grid` specifies the
+/// The evaluations `evals` has length `2^{total_rounds}` where
+/// `total_rounds = l_skip + n_logup`. The parameter `n_grid` specifies the
 /// grid dimension: the evaluations are split into `n_grid_size = 2^{n_grid}` blocks
 /// of size `block_size = 2^{total_rounds_block}` where
-/// `total_rounds_block = total_rounds_full - n_grid`.
+/// `total_rounds_block = total_rounds - n_grid`.
 ///
 /// Each grid point gets its own independent segment tree and GKR claims.
 /// The sumcheck batches across all grid points using weight vectors initialized
@@ -67,21 +67,21 @@ impl<EF: Field> Add<Frac<EF>> for Frac<EF> {
 /// # Arguments
 /// * `transcript` - The Fiat-Shamir transcript
 /// * `evals` - list of `(p, q)` pairs of fractions in projective coordinates representing
-///   evaluations on the hypercube `H_{total_rounds_full}`
+///   evaluations on the hypercube `H_{total_rounds}`
 /// * `assert_zero` - Whether to assert that the fractional sum is zero.
-/// * `n_grid` - The effective grid dimension. The caller should compute `min(n_logup,
-///   n_logup_grid)`. When 0, there is one grid point and behavior matches the single-instance case.
+/// * `n_logup_grid` - The system parameter for grid dimension, used to specify "early stopping" for
+///   GKR. The effective grid dimension `n_grid` will be set to `min(total_rounds, n_logup_grid)`.
+///   When `n_grid = 0`, there is one grid point and behavior matches GKR without early stopping.
 ///
 /// # Returns
 /// The fractional sumcheck proof and the final random evaluation vector
-/// xi = (xi_block, xi_grid) of length `total_rounds_full = total_rounds_block + n_grid`.
-/// When `n_grid = 0`, xi_grid is empty and xi = xi_block.
+/// xi = (xi_block, xi_grid) of length `total_rounds`.
 #[instrument(level = "info", skip_all)]
 pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
     transcript: &mut TS,
     evals: &[Frac<EF>],
     assert_zero: bool,
-    n_grid: usize,
+    n_logup_grid: usize,
 ) -> (FracSumcheckProof<EF>, Vec<EF>) {
     if evals.is_empty() {
         return (
@@ -94,56 +94,53 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
         );
     }
 
-    let total_rounds_full = log2_strict_usize(evals.len());
-    debug_assert!(
-        n_grid <= total_rounds_full,
-        "n_grid ({n_grid}) must be <= total_rounds_full ({total_rounds_full})"
-    );
-    let n_grid_size = 1usize << n_grid;
-    let total_rounds_block = total_rounds_full - n_grid;
-    let block_size = 1usize << total_rounds_block;
+    // total_rounds is total number of outer GKR rounds without early stopping
+    let total_rounds = log2_strict_usize(evals.len());
+    // We borrow the (grid, block) terminology from CUDA
+    let n_grid = n_logup_grid.min(total_rounds);
+    let grid_size = 1usize << n_grid;
+    let n_block = total_rounds - n_grid;
 
     // Build per-grid-point segment trees.
     // Each tree has (2 << total_rounds_block) entries with index 0 unused.
-    let tree_size = 2 << total_rounds_block;
-    let mut trees: Vec<Vec<Frac<EF>>> = Vec::with_capacity(n_grid_size);
-    for g in 0..n_grid_size {
-        let mut tree: Vec<Frac<EF>> = vec![Frac::default(); tree_size];
-        let block_start = g * block_size;
-        tree[(1 << total_rounds_block)..]
-            .copy_from_slice(&evals[block_start..block_start + block_size]);
-        for node_idx in (1..(1 << total_rounds_block)).rev() {
-            tree[node_idx] = tree[2 * node_idx] + tree[2 * node_idx + 1];
-        }
-        trees.push(tree);
+    // segment tree: layer i=0,...,total_rounds starts at 2^i
+    let mut tree_evals: Vec<Frac<EF>> = vec![Frac::default(); 2 << total_rounds];
+    tree_evals[(1 << total_rounds)..].copy_from_slice(evals);
+    // indices 0..2^n_grid will be unused
+    for node_idx in (grid_size..(1 << total_rounds)).rev() {
+        tree_evals[node_idx] = tree_evals[2 * node_idx] + tree_evals[2 * node_idx + 1];
     }
 
     // Compute per-grid-point root claims: grid_claims[g] = (tree_g[1].p, tree_g[1].q)
-    let grid_claims: Vec<(EF, EF)> = trees.iter().map(|tree| (tree[1].p, tree[1].q)).collect();
+    let grid_claims: Vec<(EF, EF)> = tree_evals
+        .iter()
+        .skip(grid_size)
+        .take(grid_size)
+        .map(|frac| (frac.p, frac.q))
+        .collect();
 
     // Check assert_zero condition: sum of p_g/q_g = 0 in projective coordinates.
     // This means the projective sum of all grid roots should have p = 0.
+    #[cfg(debug_assertions)]
     if assert_zero {
-        let total_sum = trees
+        let total_sum = grid_claims
             .iter()
-            .map(|tree| tree[1])
-            .reduce(|a, b| a + b)
-            .unwrap();
-        assert_eq!(total_sum.p, EF::ZERO, "fractional sum zero-check failed");
+            .map(|&(p, q)| p * q.inverse())
+            .sum::<EF>();
+        assert_eq!(total_sum, EF::ZERO, "fractional sum zero-check failed");
     }
 
     // Observe grid claims in transcript.
-    // When assert_zero=true and there is only one grid point, p=0 is implicit
-    // and not observed. When there are multiple grid points, individual p_g values
-    // are non-zero and must be observed to bind them before xi_grid is sampled.
-    for &(p_g, q_g) in &grid_claims {
-        if !assert_zero || n_grid_size > 1 {
+    // When assert_zero=true and the first p is not observed because it can be derived as -q_0 *
+    // (sum_{i>1} p_i / q_i).
+    for (g, &(p_g, q_g)) in grid_claims.iter().enumerate() {
+        if !assert_zero || g != 0 {
             transcript.observe_ext(p_g);
         }
         transcript.observe_ext(q_g);
     }
 
-    if total_rounds_block == 0 {
+    if n_block == 0 {
         // No GKR rounds needed; the grid claims are the leaf evaluations themselves.
         // Sample xi_grid for the grid check
         let xi_grid: Vec<EF> = (0..n_grid).map(|_| transcript.sample_ext()).collect();
@@ -156,89 +153,61 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
             xi_grid, // xi_block is empty, so xi = xi_grid
         );
     }
+    // claims_per_layer[n_block][n_grid]
+    let mut claims_per_layer: Vec<Vec<GkrLayerClaims>> = Vec::with_capacity(n_block);
+    let mut sumcheck_polys: Vec<Vec<[EF; 3]>> = Vec::with_capacity(n_block.saturating_sub(1));
 
-    let mut claims_per_layer: Vec<Vec<GkrLayerClaims>> = Vec::with_capacity(total_rounds_block);
-    let mut sumcheck_polys: Vec<Vec<[EF; 3]>> =
-        Vec::with_capacity(total_rounds_block.saturating_sub(1));
+    // Process each GKR round: `j = round + 1` goes from `1, ..., n_block`
 
-    // Vectorized GKR Setup: sample gamma and initialize weight vectors using
-    // interleaved powers: omega_p[g] = gamma^{2g}, omega_q[g] = gamma^{2g+1}.
-    // This ensures omega_p[0]=1 != omega_q[0]=gamma, so p and q are always
-    // independently bound (avoiding the soundness issue of equal weights at g=0).
-    let gamma: EF = transcript.sample_ext();
-    debug!(%gamma);
-    let gamma_sq = gamma * gamma;
-    let mut omega_p: Vec<EF> = {
-        let mut v = Vec::with_capacity(n_grid_size);
-        let mut cur = EF::ONE; // gamma^0
-        for _ in 0..n_grid_size {
-            v.push(cur);
-            cur *= gamma_sq; // gamma^0, gamma^2, gamma^4, ...
-        }
-        v
-    };
-    let mut omega_q: Vec<EF> = {
-        let mut v = Vec::with_capacity(n_grid_size);
-        let mut cur = gamma; // gamma^1
-        for _ in 0..n_grid_size {
-            v.push(cur);
-            cur *= gamma_sq; // gamma^1, gamma^3, gamma^5, ...
-        }
-        v
-    };
+    // Round `j = 1` is special since "sumcheck" is directly checked by verifier
+    let layer_1_claims: Vec<GkrLayerClaims> = (grid_size..2 * grid_size)
+        .map(|g_idx| {
+            let p_xi_0 = tree_evals[2 * g_idx].p;
+            let q_xi_0 = tree_evals[2 * g_idx].q;
+            let p_xi_1 = tree_evals[2 * g_idx + 1].p;
+            let q_xi_1 = tree_evals[2 * g_idx + 1].q;
 
-    // =========================================================================
-    // Round j=1 (special: 0 sumcheck sub-rounds)
-    // =========================================================================
-    // For each grid point g, layer 1 claims come from tree nodes 2 and 3.
-    let layer_1_claims: Vec<GkrLayerClaims> = trees
-        .iter()
-        .map(|tree| GkrLayerClaims {
-            p_xi_0: tree[2].p,
-            q_xi_0: tree[2].q,
-            p_xi_1: tree[3].p,
-            q_xi_1: tree[3].q,
+            transcript.observe_ext(p_xi_0);
+            transcript.observe_ext(q_xi_0);
+            transcript.observe_ext(p_xi_1);
+            transcript.observe_ext(q_xi_1);
+
+            GkrLayerClaims {
+                p_xi_0,
+                q_xi_0,
+                p_xi_1,
+                q_xi_1,
+            }
         })
         .collect();
-
-    // Observe all layer-1 claims
-    for claims in &layer_1_claims {
-        transcript.observe_ext(claims.p_xi_0);
-        transcript.observe_ext(claims.q_xi_0);
-        transcript.observe_ext(claims.p_xi_1);
-        transcript.observe_ext(claims.q_xi_1);
-    }
     claims_per_layer.push(layer_1_claims);
-
     // Sample mu_1 for reduction to single evaluation point
     let mu_1 = transcript.sample_ext();
     debug!(gkr_round = 0, mu = %mu_1);
-
-    // Weight update for round 1
-    for (g, claims) in claims_per_layer[0].iter().enumerate() {
-        let cp0 = omega_p[g] * claims.q_xi_1;
-        let cp1 = omega_p[g] * claims.q_xi_0;
-        let cq0 = omega_p[g] * claims.p_xi_1 + omega_q[g] * claims.q_xi_1;
-        let cq1 = omega_p[g] * claims.p_xi_0 + omega_q[g] * claims.q_xi_0;
-        omega_p[g] = (EF::ONE - mu_1) * cp0 + mu_1 * cp1;
-        omega_q[g] = (EF::ONE - mu_1) * cq0 + mu_1 * cq1;
-    }
-
+    // ξ^{(j-1)}
     let mut xi_prev = vec![mu_1];
 
-    // =========================================================================
-    // Rounds j=2,...,total_rounds_block (with sumcheck)
-    // =========================================================================
-    for round in 1..total_rounds_block {
+    for round in 1..n_block {
         // Number of hypercube points per grid point at this layer
         let eval_size = 1 << round;
+        // We apply batch sumcheck to the polynomials
+        // ```text
+        // \eq(ξ^{(j-1)}, Y) (\hat p_j(0, Y, g) \hat q_j(1, Y, g) + \hat p_j(1, Y, g) \hat q_j(0, Y, g))
+        // \eq(ξ^{(j-1)}, Y) (\hat q_j(0, Y, g) \hat q_j(1, Y, g))
+        // ```
+        // over all g in 0..grid_size
+        // Note: these are polynomials of degree 3 in each Y_i coordinate.
+
+        // Sample λ_j for batching
+        let lambda = transcript.sample_ext();
+        debug!(gkr_round = round, %lambda);
 
         // Build columns: for each grid point g, 4 columns (p_j_g_0, q_j_g_0, p_j_g_1, q_j_g_1).
         // Total pq columns: 4 * n_grid_size. Plus 1 eq_xis column.
-        let num_pq_cols = 4 * n_grid_size;
+        let num_pq_cols = 4 * grid_size;
         let mut pq_j_evals = EF::zero_vec(num_pq_cols * eval_size);
-        for (g, tree) in trees.iter().enumerate() {
-            let segment = &tree[2 * eval_size..4 * eval_size];
+        for g in 0..grid_size {
+            let segment = &tree_evals[(grid_size + g) << (round + 1)..][..2 * eval_size];
             let col_base = 4 * g;
             for x in 0..eval_size {
                 pq_j_evals[(col_base) * eval_size + x] = segment[2 * x].p;
@@ -259,13 +228,10 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
             for sumcheck_round in 0..n {
                 // The combined sumcheck polynomial sums over all grid points:
                 //   s(X) = sum_g [eq(xi_prev, Y) * (
-                //     omega_p[g] * (p_g_0 * q_g_1 + p_g_1 * q_g_0)
-                //     + omega_q[g] * (q_g_0 * q_g_1)
+                //     lambda^{2*g} * (p_0g * q_1g + p_1g * q_0g)
+                //     + lambda^{2*g+1} * (q_0g * q_1g)
                 //   )]
                 // This is degree 3 in each Y_i (eq is degree 1, cross-term is degree 2).
-                let n_gs = n_grid_size; // capture for closure
-                let op = &omega_p;
-                let oq = &omega_q;
                 let [s_evals] = sumcheck_round_poly_evals(
                     n - sumcheck_round,
                     3,
@@ -274,7 +240,8 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
                         let eq_xi = row[0][0];
                         let pq_row = row[1].as_slice();
                         let mut val = EF::ZERO;
-                        for g in 0..n_gs {
+                        let mut lambda_pow = EF::ONE;
+                        for g in 0..grid_size {
                             let base = 4 * g;
                             let p_j0 = pq_row[base];
                             let q_j0 = pq_row[base + 1];
@@ -282,7 +249,10 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
                             let q_j1 = pq_row[base + 3];
                             let p_cross = p_j0 * q_j1 + p_j1 * q_j0;
                             let q_cross = q_j0 * q_j1;
-                            val += op[g] * p_cross + oq[g] * q_cross;
+                            let lambda_p = lambda_pow;
+                            lambda_pow *= lambda;
+                            val += lambda_p * p_cross + lambda_pow * q_cross;
+                            lambda_pow *= lambda;
                         }
                         [eq_xi * val]
                     },
@@ -303,7 +273,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
         };
 
         // Read off per-grid claims from folded columns
-        let layer_claims: Vec<GkrLayerClaims> = (0..n_grid_size)
+        let layer_claims: Vec<GkrLayerClaims> = (0..grid_size)
             .map(|g| {
                 let base = 4 * g;
                 GkrLayerClaims {
@@ -328,18 +298,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript>(
         let mu = transcript.sample_ext();
         debug!(gkr_round = round, %mu);
 
-        // Weight update
-        let layer_ref = claims_per_layer.last().unwrap();
-        for (g, claims) in layer_ref.iter().enumerate() {
-            let cp0 = omega_p[g] * claims.q_xi_1;
-            let cp1 = omega_p[g] * claims.q_xi_0;
-            let cq0 = omega_p[g] * claims.p_xi_1 + omega_q[g] * claims.q_xi_1;
-            let cq1 = omega_p[g] * claims.p_xi_0 + omega_q[g] * claims.q_xi_0;
-            omega_p[g] = (EF::ONE - mu) * cp0 + mu * cp1;
-            omega_q[g] = (EF::ONE - mu) * cq0 + mu * cq1;
-        }
-
-        // Update xi_prev = (mu, rho)
+        // Update ξ^{(j)} = (μ_j, ρ^{(j-1)})
         xi_prev = [vec![mu], rho].concat();
 
         sumcheck_polys.push(round_polys_eval);

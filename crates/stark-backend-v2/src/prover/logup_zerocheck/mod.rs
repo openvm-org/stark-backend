@@ -162,12 +162,10 @@ where
         evals
     };
 
-    let n_grid = if has_interactions {
-        n_logup.min(mpk.params.n_logup_grid)
-    } else {
-        0
-    };
-    let (frac_sum_proof, mut xi) = fractional_sumcheck(transcript, &gkr_input_evals, true, n_grid);
+    debug_assert!(has_interactions || n_logup == 0);
+    // Effective grid dimension
+    let (frac_sum_proof, mut xi) =
+        fractional_sumcheck(transcript, &gkr_input_evals, true, mpk.params.n_logup_grid);
 
     // Sample more for `\xi` in the edge case that some AIRs don't have interactions
     let n_global = max(n_max, n_logup);
