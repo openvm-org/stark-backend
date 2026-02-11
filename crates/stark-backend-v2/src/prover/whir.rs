@@ -13,7 +13,7 @@ use crate::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
     prover::{
-        poly::{evals_eq_hypercube, Mle, Ple},
+        poly::{eval_to_coeff_rs_message, evals_eq_hypercube, evals_mobius_eq_hypercube, Mle},
         stacked_pcs::{MerkleTree, StackedPcsData},
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
@@ -24,7 +24,9 @@ pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
     /// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables,
     /// at a single vector `u \in \Fext^n`.
     ///
-    /// This means applying WHIR with weight polynomial `\hat{w}(Z, \vec X) = Z * eq(\vec X, u)`.
+    /// This means applying WHIR with weight polynomial
+    /// `\hat{w}(Z, \vec X) = Z * mobius_eq_poly(u)(\vec X)`, where `mobius_eq_poly(u)` is the
+    /// Möbius-adjusted equality polynomial for eval-to-coeff RS encoding.
     ///
     /// The matrices in `common_main_pcs_data` and `pre_cached_pcs_data_per_commit` must all have
     /// the same height.
@@ -89,7 +91,9 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
         .par_iter()
         .flat_map(|(mat, _)| {
             mat.par_columns().map(|col| {
-                let mut x = Ple::from_evaluations(l_skip, col).coeffs;
+                // Convert column evaluations directly into eval-to-coeff RS coefficients, then
+                // interpret them as MLE coefficients of HatF and compute HatF hypercube evals.
+                let mut x = eval_to_coeff_rs_message(l_skip, col);
                 Mle::coeffs_to_evals_inplace(&mut x);
                 x
             })
@@ -108,7 +112,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript>(
 
     // We assume `\hat{w}` in a WHIR round is always multilinear and maintain its
     // evaluations on `H_m`.
-    let mut w_evals = evals_eq_hypercube(u);
+    let mut w_evals = evals_mobius_eq_hypercube(u);
 
     let mut whir_sumcheck_polys: Vec<[EF; 2]> = Vec::with_capacity(num_sumcheck_rounds);
     let mut codeword_commits = vec![];
