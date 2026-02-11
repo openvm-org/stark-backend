@@ -15,22 +15,32 @@ extern "C" {
         skip_domain: u32,
     ) -> i32;
 
-    pub fn _whir_sumcheck_required_temp_buffer_size(height: u32) -> u32;
+    pub fn _whir_sumcheck_coeff_moments_required_temp_buffer_size(height: u32) -> u32;
 
-    fn _whir_sumcheck_mle_round(
-        f_evals: *const EF,
-        w_evals: *const EF,
+    fn _whir_sumcheck_coeff_moments_round(
+        f_coeffs: *const EF,
+        w_moments: *const EF,
         output: *mut EF,
         tmp_block_sums: *mut EF,
         height: u32,
     ) -> i32;
 
-    fn _w_evals_accumulate(
-        w_evals: *const EF,
-        eq_z0: *const EF,
-        eq_zs: *const F,
+    fn _whir_fold_coeffs_and_moments(
+        f_coeffs: *const EF,
+        w_moments: *const EF,
+        f_folded_coeffs: *mut EF,
+        w_folded_moments: *mut EF,
+        alpha: EF,
+        height: u32,
+    ) -> i32;
+
+    fn _w_moments_accumulate(
+        w_moments: *const EF,
+        z0_pows2: *const EF,
+        z_pows2: *const F,
         gamma: EF,
         num_queries: u32,
+        log_height: u32,
         height: u32,
     ) -> i32;
 }
@@ -57,65 +67,91 @@ pub unsafe fn whir_algebraic_batch_traces(
     ))
 }
 
-/// Performs a sumcheck round in WHIR on the evaluations of `f` and `w` on the hypercube.
-/// Writes the evaluations of the univariate polynomial `s` at `{1, 2}` to `output`.
-/// The `tmp_block_sums` buffer is used for intermediate storage by the kernel.
+/// Performs a WHIR sumcheck round with `f` in coefficient form and `w` in moment form.
 ///
 /// # Safety
-/// - `f_evals` and `w_evals` are the same length, which is a power of two.
+/// - `f_coeffs` and `w_moments` are the same length, which is a power of two.
 /// - `output` has length at least 2.
-/// - `tmp_block_sums` has length at least `num_blocks * 2` where `num_blocks = (height /
-///   2).div_ceil(threads_per_block)`. Note that `threads_per_blocks` is by default `1024` but this
-///   depends on the kernel launcher configuration.
-pub unsafe fn whir_sumcheck_mle_round(
-    f_evals: &DeviceBuffer<EF>,
-    w_evals: &DeviceBuffer<EF>,
+/// - `tmp_block_sums` has length at least
+///   `_whir_sumcheck_coeff_moments_required_temp_buffer_size(height)`.
+pub unsafe fn whir_sumcheck_coeff_moments_round(
+    f_coeffs: &DeviceBuffer<EF>,
+    w_moments: &DeviceBuffer<EF>,
     output: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
     height: u32,
 ) -> Result<(), CudaError> {
-    debug_assert!(f_evals.len() >= height as usize);
-    debug_assert!(w_evals.len() >= height as usize);
+    debug_assert!(f_coeffs.len() >= height as usize);
+    debug_assert!(w_moments.len() >= height as usize);
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _whir_sumcheck_required_temp_buffer_size(height);
+        let required = _whir_sumcheck_coeff_moments_required_temp_buffer_size(height);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
         );
     }
-    check(_whir_sumcheck_mle_round(
-        f_evals.as_ptr(),
-        w_evals.as_ptr(),
+    check(_whir_sumcheck_coeff_moments_round(
+        f_coeffs.as_ptr(),
+        w_moments.as_ptr(),
         output.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
         height,
     ))
 }
 
-/// Special algebraic batching to update `w_evals` in place for WHIR.
+/// Folds `f` (coefficient form) and `w` (moment form) for one WHIR round.
 ///
 /// # Safety
-/// - `w_evals` has length `height`.
-/// - `eq_z0` has length `height`.
-/// - `eq_zs` has length `height * num_queries` and is a column major matrix of eq evaluations.
-pub unsafe fn w_evals_accumulate(
-    w_evals: &mut DeviceBuffer<EF>,
-    eq_z0: &DeviceBuffer<EF>,
-    eq_zs: &DeviceBuffer<F>,
+/// - `f_coeffs` and `w_moments` have length `height`, which is a power of two.
+/// - `f_folded_coeffs` and `w_folded_moments` have length `height / 2`.
+pub unsafe fn whir_fold_coeffs_and_moments(
+    f_coeffs: &DeviceBuffer<EF>,
+    w_moments: &DeviceBuffer<EF>,
+    f_folded_coeffs: &mut DeviceBuffer<EF>,
+    w_folded_moments: &mut DeviceBuffer<EF>,
+    alpha: EF,
+    height: u32,
+) -> Result<(), CudaError> {
+    debug_assert!(f_coeffs.len() >= height as usize);
+    debug_assert!(w_moments.len() >= height as usize);
+    debug_assert!(f_folded_coeffs.len() >= (height as usize / 2));
+    debug_assert!(w_folded_moments.len() >= (height as usize / 2));
+    check(_whir_fold_coeffs_and_moments(
+        f_coeffs.as_ptr(),
+        w_moments.as_ptr(),
+        f_folded_coeffs.as_mut_ptr(),
+        w_folded_moments.as_mut_ptr(),
+        alpha,
+        height,
+    ))
+}
+
+/// Updates WHIR moment vector in place by adding gamma-weighted query terms.
+///
+/// # Safety
+/// - `w_moments` has length `height = 2^log_height`.
+/// - `z0_pows2` has length `log_height`.
+/// - `z_pows2` has length `num_queries * log_height`.
+pub unsafe fn w_moments_accumulate(
+    w_moments: &mut DeviceBuffer<EF>,
+    z0_pows2: &DeviceBuffer<EF>,
+    z_pows2: &DeviceBuffer<F>,
     gamma: EF,
     num_queries: u32,
+    log_height: u32,
 ) -> Result<(), CudaError> {
-    let height = w_evals.len();
-    debug_assert_eq!(eq_zs.len(), height * num_queries as usize);
-    debug_assert_eq!(eq_z0.len(), height);
-    check(_w_evals_accumulate(
-        w_evals.as_mut_ptr(),
-        eq_z0.as_ptr(),
-        eq_zs.as_ptr(),
+    let height = w_moments.len();
+    debug_assert_eq!(z0_pows2.len(), log_height as usize);
+    debug_assert_eq!(z_pows2.len(), num_queries as usize * log_height as usize);
+    check(_w_moments_accumulate(
+        w_moments.as_mut_ptr(),
+        z0_pows2.as_ptr(),
+        z_pows2.as_ptr(),
         gamma,
         num_queries,
+        log_height,
         height as u32,
     ))
 }

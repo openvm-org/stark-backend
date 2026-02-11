@@ -21,7 +21,7 @@ use crate::{
         },
         poly::{
             eq_hypercube_interleaved_stage_ext, eq_hypercube_nonoverlapping_stage_ext,
-            eq_hypercube_stage_ext,
+            eq_hypercube_stage_ext, mobius_eq_hypercube_stage_ext,
         },
         sumcheck::fold_mle_column,
     },
@@ -223,6 +223,35 @@ pub unsafe fn evals_eq_hypercube(out: &mut DeviceBuffer<EF>, xs: &[EF]) -> Resul
     for (i, &x_i) in xs.iter().enumerate() {
         let step = 1 << i;
         eq_hypercube_stage_ext(out.as_mut_ptr(), x_i, step).map_err(KernelError::Kernel)?;
+    }
+    Ok(())
+}
+
+/// Given vector `u_tilde` in `F^n`, populates `out` with `mobius_eq(u_tilde, y)` for `y` on
+/// hypercube `H_n`.
+///
+/// The Möbius-adjusted equality kernel is defined as:
+/// ```text
+///     mobius_eq(u_tilde, y) = \prod_{i=0}^{n-1} ((1 - 2*u_tilde_i)(1 - y_i) + u_tilde_i * y_i).
+/// ```
+///
+/// Note: This function launches `n` CUDA kernels.
+///
+/// # Safety
+/// - `n` is set to the length of `omega`.
+/// - `out` must have length `>= 2^n`.
+pub unsafe fn evals_mobius_eq_hypercube(
+    out: &mut DeviceBuffer<EF>,
+    omega: &[EF],
+) -> Result<(), KernelError> {
+    let n = omega.len();
+    assert!(out.len() >= 1 << n);
+    // Use memcpy instead of memset since EF will be in Montgomery form.
+    [EF::ONE].copy_to(out).map_err(KernelError::MemCopy)?;
+
+    for (i, &omega_i) in omega.iter().enumerate() {
+        let step = 1 << i;
+        mobius_eq_hypercube_stage_ext(out.as_mut_ptr(), omega_i, step).map_err(KernelError::Kernel)?;
     }
     Ok(())
 }
