@@ -73,20 +73,18 @@ __global__ void whir_algebraic_batch_traces_kernel(
     }
 }
 
-// Computes round of sumcheck on the polynomial `\hat{f} * \hat{w}` where
-// `\hat{f}, \hat{w}` are multlinear. Hence the `s` poly has degree 2.
+// Computes one WHIR sumcheck round using:
+// - `f` in MLE coefficient form
+// - `w` in moment form: m[T] = sum_{x superset T} w(x)
 //
-// Inputs:
-// - `f_evals`, `w_evals`: evaluations of `\hat{f}, \hat{w}` on hypercube
-//
-// Memory layout: Column-major matrices with height = 2^n
-// - For each y: reads indices [2*y, 2*y+1] (even/odd pairs)
-// - Outputs partial sums per block, final reduction done in separate kernel
-__global__ void whir_sumcheck_mle_round_kernel(
-    const FpExt *f_evals,
-    const FpExt *w_evals,
-    FpExt *block_sums,    // Output: [gridDim.x][S_DEG] partial sums
-    const uint32_t height // = 2^n
+// For X in {1,2}, this evaluates
+// s(X) = sum_y f(X,y) * w(X,y)
+// with pairwise formulas derived from coefficient/moment slices.
+__global__ void whir_sumcheck_coeff_moments_round_kernel(
+    const FpExt *f_coeffs,
+    const FpExt *w_moments,
+    FpExt *block_sums,
+    const uint32_t height
 ) {
     extern __shared__ char smem[];
     FpExt *shared = (FpExt *)smem;
@@ -95,47 +93,113 @@ __global__ void whir_sumcheck_mle_round_kernel(
 
     FpExt local_sums[S_DEG];
 
-// Initialize accumulators
 #pragma unroll
     for (int i = 0; i < S_DEG; i++) {
         local_sums[i] = FpExt(0);
     }
 
-    // Map phase: each thread processes multiple y values
     for (int y = blockIdx.x * blockDim.x + threadIdx.x; y < half_height;
          y += gridDim.x * blockDim.x) {
+        int idx0 = y << 1;
+        int idx1 = idx0 + 1;
 
-        // For each evaluation point X in {1, 2, ..., d}
-        for (int x_int = 1; x_int <= S_DEG; x_int++) {
-            Fp x = Fp(x_int);
-            FpExt f_0 = f_evals[y << 1];
-            FpExt f_1 = f_evals[(y << 1) + 1];
-            FpExt f_x = f_0 + (f_1 - f_0) * x;
-            FpExt w_0 = w_evals[y << 1];
-            FpExt w_1 = w_evals[(y << 1) + 1];
-            FpExt w_x = w_0 + (w_1 - w_0) * x;
-            local_sums[x_int - 1] = f_x * w_x;
-        }
+        FpExt c0 = f_coeffs[idx0];
+        FpExt c1 = f_coeffs[idx1];
+        FpExt m0 = w_moments[idx0];
+        FpExt m1 = w_moments[idx1];
+
+        // X = 1:
+        // f_1 = c0 + c1
+        // w_1 moments reduce to m1
+        FpExt f_1 = c0 + c1;
+        FpExt term_1 = f_1 * m1;
+
+        // X = 2:
+        // f_2 = c0 + 2*c1
+        // w_2 moments: -m0 + 3*m1
+        FpExt f_2 = c0 + c1 + c1;
+        FpExt m_2 = m1 * Fp(3) - m0;
+        FpExt term_2 = f_2 * m_2;
+
+        local_sums[0] += term_1;
+        local_sums[1] += term_2;
     }
 
-    // Reduce phase: for each x_int
 #pragma unroll
     for (int idx = 0; idx < S_DEG; idx++) {
         FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
-
         if (threadIdx.x == 0) {
             block_sums[blockIdx.x * S_DEG + idx] = reduced;
         }
-        __syncthreads(); // Needed before reusing shared memory
+        __syncthreads();
     }
 }
 
-__global__ void w_evals_accumulate_kernel(
-    FpExt *w_evals,
-    const FpExt *eq_z0,
-    const Fp *eq_zs,
+// Folds both:
+// - `f` in MLE coefficient form
+// - `w` in moment form m[T] = sum_{x superset T} w(x)
+__global__ void whir_fold_coeffs_and_moments_kernel(
+    const FpExt *f_coeffs,
+    const FpExt *w_moments,
+    FpExt *f_folded_coeffs,
+    FpExt *w_folded_moments,
+    FpExt alpha,
+    uint32_t half_height
+) {
+    uint32_t y = blockIdx.x * blockDim.x + threadIdx.x;
+    if (y >= half_height) {
+        return;
+    }
+
+    uint32_t idx0 = y << 1;
+    uint32_t idx1 = idx0 + 1;
+
+    FpExt c0 = f_coeffs[idx0];
+    FpExt c1 = f_coeffs[idx1];
+    f_folded_coeffs[y] = c0 + alpha * c1;
+
+    FpExt m0 = w_moments[idx0];
+    FpExt m1 = w_moments[idx1];
+    FpExt one_minus_alpha = FpExt(Fp(1)) - alpha;
+    FpExt two_alpha_minus_one = alpha + alpha - FpExt(Fp(1));
+    w_folded_moments[y] = one_minus_alpha * m0 + two_alpha_minus_one * m1;
+}
+
+__device__ __forceinline__ FpExt whir_pow_from_pows2_ext(
+    const FpExt *pows2,
+    uint32_t log_height,
+    uint32_t exponent
+) {
+    FpExt acc = FpExt(Fp(1));
+    for (uint32_t bit = 0; bit < log_height; bit++) {
+        if (exponent & (1u << bit)) {
+            acc *= pows2[bit];
+        }
+    }
+    return acc;
+}
+
+__device__ __forceinline__ Fp whir_pow_from_pows2_base(
+    const Fp *pows2,
+    uint32_t log_height,
+    uint32_t exponent
+) {
+    Fp acc = Fp(1);
+    for (uint32_t bit = 0; bit < log_height; bit++) {
+        if (exponent & (1u << bit)) {
+            acc *= pows2[bit];
+        }
+    }
+    return acc;
+}
+
+__global__ void w_moments_accumulate_kernel(
+    FpExt *w_moments,
+    const FpExt *z0_pows2, // [log_height], where z0_pows2[i] = z0^(2^i)
+    const Fp *z_pows2,     // [num_queries][log_height], row-major
     FpExt gamma,
-    uint32_t num_queries, // Width of eq_zs
+    uint32_t num_queries,
+    uint32_t log_height,
     uint32_t height
 ) {
     size_t row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -143,14 +207,17 @@ __global__ void w_evals_accumulate_kernel(
         return;
     }
 
-    // NOTE(perf): Depending on the number of columns, we may want to use shared memory to reduce this sum.
-    w_evals[row] += gamma * eq_z0[row];
+    uint32_t exponent = static_cast<uint32_t>(row);
+
+    FpExt acc = gamma * whir_pow_from_pows2_ext(z0_pows2, log_height, exponent);
     FpExt gamma_pow = gamma;
-    for (int i = 0; i < num_queries; i++) {
+    for (uint32_t i = 0; i < num_queries; i++) {
         gamma_pow *= gamma;
-        Fp eq_zi = eq_zs[i * height + row];
-        w_evals[row] += gamma_pow * eq_zi;
+        const Fp *query_pows2 = z_pows2 + i * log_height;
+        Fp z_i_pow = whir_pow_from_pows2_base(query_pows2, log_height, exponent);
+        acc += gamma_pow * z_i_pow;
     }
+    w_moments[row] += acc;
 }
 
 // ============================================================================
@@ -172,58 +239,71 @@ extern "C" int _whir_algebraic_batch_traces(
     return CHECK_KERNEL();
 }
 
-inline std::pair<dim3, dim3> whir_sumcheck_launch_params(uint32_t height) {
-    return kernel_launch_params(height >> 1);
+inline std::pair<dim3, dim3> whir_sumcheck_coeff_moments_launch_params(uint32_t height) {
+    return kernel_launch_params(height >> 1, 256);
 }
 
-extern "C" uint32_t _whir_sumcheck_required_temp_buffer_size(uint32_t height) {
-    auto [grid, block] = whir_sumcheck_launch_params(height);
+extern "C" uint32_t _whir_sumcheck_coeff_moments_required_temp_buffer_size(uint32_t height) {
+    auto [grid, block] = whir_sumcheck_coeff_moments_launch_params(height);
     return grid.x * S_DEG;
 }
 
-extern "C" int _whir_sumcheck_mle_round(
-    const FpExt *f_evals,
-    const FpExt *w_evals,
+extern "C" int _whir_sumcheck_coeff_moments_round(
+    const FpExt *f_coeffs,
+    const FpExt *w_moments,
     FpExt *output,         // Output: [d=2] final results
     FpExt *tmp_block_sums, // Temporary buffer: [num_blocks * d]
     const uint32_t height
 ) {
-    auto [grid, block] = whir_sumcheck_launch_params(height);
+    auto [grid, block] = whir_sumcheck_coeff_moments_launch_params(height);
     unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
 
-    // Launch main kernel - writes to tmp_block_sums
-    whir_sumcheck_mle_round_kernel<<<grid, block, shmem_bytes>>>(
-        f_evals, w_evals, tmp_block_sums, height
+    whir_sumcheck_coeff_moments_round_kernel<<<grid, block, shmem_bytes>>>(
+        f_coeffs, w_moments, tmp_block_sums, height
     );
 
     int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
-    // Launch final reduction kernel - reads from tmp_block_sums, writes to output
     auto num_blocks = grid.x;
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
-    // d = 2, WD = 1 so we have gridDim.x = 2 for exactly 2 blocks
     sumcheck::static_final_reduce_block_sums<S_DEG>
         <<<S_DEG, reduce_block, reduce_shmem>>>(tmp_block_sums, output, num_blocks);
 
     return CHECK_KERNEL();
 }
 
-extern "C" int _w_evals_accumulate(
-    FpExt *w_evals,
-    const FpExt *eq_z0,
-    const Fp *eq_zs,
-    FpExt gamma,
-    uint32_t num_queries,
+extern "C" int _whir_fold_coeffs_and_moments(
+    const FpExt *f_coeffs,
+    const FpExt *w_moments,
+    FpExt *f_folded_coeffs,
+    FpExt *w_folded_moments,
+    FpExt alpha,
     uint32_t height
 ) {
-    auto [grid, block] = kernel_launch_params(height);
+    auto [grid, block] = kernel_launch_params(height >> 1);
+    whir_fold_coeffs_and_moments_kernel<<<grid, block>>>(
+        f_coeffs, w_moments, f_folded_coeffs, w_folded_moments, alpha, height >> 1
+    );
+    return CHECK_KERNEL();
+}
 
-    w_evals_accumulate_kernel<<<grid, block>>>(w_evals, eq_z0, eq_zs, gamma, num_queries, height);
-
+extern "C" int _w_moments_accumulate(
+    FpExt *w_moments,
+    const FpExt *z0_pows2,
+    const Fp *z_pows2,
+    FpExt gamma,
+    uint32_t num_queries,
+    uint32_t log_height,
+    uint32_t height
+) {
+    auto [grid, block] = kernel_launch_params(height, 256);
+    w_moments_accumulate_kernel<<<grid, block>>>(
+        w_moments, z0_pows2, z_pows2, gamma, num_queries, log_height, height
+    );
     return CHECK_KERNEL();
 }
