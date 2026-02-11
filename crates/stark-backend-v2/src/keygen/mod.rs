@@ -19,40 +19,39 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, F},
     keygen::types::{
         KeygenError, MultiStarkProvingKeyV2, MultiStarkVerifyingKey0V2, StarkProvingKeyV2,
         StarkVerifyingKeyV2, StarkVerifyingParamsV2, VerifierSinglePreprocessedData,
     },
-    poseidon2::sponge::{poseidon2_hash_slice, Poseidon2Hasher},
+    merkle::MerkleHasher,
+    poseidon2::sponge::Poseidon2Hasher,
     prover::{
         stacked_pcs::{stacked_commit, StackedPcsData},
         ColMajorMatrix,
     },
-    SystemParams,
+    StarkProtocolConfig, SystemParams,
 };
 
 type SCV2 = BabyBearPoseidon2ConfigV2;
 
 pub mod types;
 
-type SC = BabyBearPoseidon2Config;
-
-struct AirKeygenBuilderV2 {
+struct AirKeygenBuilderV2<SC: StarkProtocolConfig> {
     pub is_required: bool,
-    air: AirRef<SC>,
-    prep_keygen_data: PrepKeygenDataV2,
+    air: AirRef<BabyBearPoseidon2Config>,
+    prep_keygen_data: PrepKeygenDataV2<SC>,
 }
 
 /// Stateful builder to create multi-stark proving and verifying keys
 /// for system of multiple RAPs with multiple multi-matrix commitments
-pub struct MultiStarkKeygenBuilderV2 {
+pub struct MultiStarkKeygenBuilderV2<SC: StarkProtocolConfig> {
     pub config: SystemParams,
     /// Information for partitioned AIRs.
-    partitioned_airs: Vec<AirKeygenBuilderV2>,
+    partitioned_airs: Vec<AirKeygenBuilderV2<SC>>,
 }
 
-impl MultiStarkKeygenBuilderV2 {
+impl MultiStarkKeygenBuilderV2<SCV2> {
     pub fn new(config: SystemParams) -> Self {
         Self {
             config,
@@ -62,16 +61,16 @@ impl MultiStarkKeygenBuilderV2 {
 
     /// Default way to add a single Interactive AIR.
     /// Returns `air_id`
-    pub fn add_air(&mut self, air: AirRef<SC>) -> usize {
+    pub fn add_air(&mut self, air: AirRef<BabyBearPoseidon2Config>) -> usize {
         self.add_air_impl(air, false)
     }
 
-    pub fn add_required_air(&mut self, air: AirRef<SC>) -> usize {
+    pub fn add_required_air(&mut self, air: AirRef<BabyBearPoseidon2Config>) -> usize {
         self.add_air_impl(air, true)
     }
 
     #[instrument(level = "debug", skip_all, fields(name = air.name(), is_required = is_required))]
-    fn add_air_impl(&mut self, air: AirRef<SC>, is_required: bool) -> usize {
+    fn add_air_impl(&mut self, air: AirRef<BabyBearPoseidon2Config>, is_required: bool) -> usize {
         self.partitioned_airs
             .push(AirKeygenBuilderV2::new(&self.config, air, is_required));
         self.partitioned_airs.len() - 1
@@ -189,7 +188,8 @@ impl MultiStarkKeygenBuilderV2 {
         let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
         tracing::debug!("pre-vkey: {} bytes", vk_bytes.len());
         // Purely to get type compatibility and convenience, we hash using the native hash
-        let vk_pre_hash = poseidon2_hash_slice(&vk_bytes.into_iter().map(F::from_u8).collect_vec());
+        let vk_pre_hash =
+            Poseidon2Hasher::hash_slice(&vk_bytes.into_iter().map(F::from_u8).collect_vec());
 
         Ok(MultiStarkProvingKeyV2 {
             params: self.config,
@@ -201,8 +201,8 @@ impl MultiStarkKeygenBuilderV2 {
     }
 }
 
-impl AirKeygenBuilderV2 {
-    pub fn new(config: &SystemParams, air: AirRef<SC>, is_required: bool) -> Self {
+impl AirKeygenBuilderV2<SCV2> {
+    pub fn new(config: &SystemParams, air: AirRef<BabyBearPoseidon2Config>, is_required: bool) -> Self {
         let prep_keygen_data = PrepKeygenDataV2::new(config, air.as_ref());
         Self {
             is_required,
@@ -282,13 +282,13 @@ impl AirKeygenBuilderV2 {
     }
 }
 
-pub(super) struct PrepKeygenDataV2 {
-    pub verifier_data: Option<VerifierSinglePreprocessedData<Digest>>,
-    pub prover_data: Option<Arc<StackedPcsData<F, Digest>>>,
+pub(super) struct PrepKeygenDataV2<SC: StarkProtocolConfig> {
+    pub verifier_data: Option<VerifierSinglePreprocessedData<SC::Digest>>,
+    pub prover_data: Option<Arc<StackedPcsData<SC::F, SC::Digest>>>,
 }
 
-impl PrepKeygenDataV2 {
-    fn new(params: &SystemParams, air: &dyn AnyRap<SC>) -> PrepKeygenDataV2 {
+impl PrepKeygenDataV2<SCV2> {
+    fn new(params: &SystemParams, air: &dyn AnyRap<BabyBearPoseidon2Config>) -> Self {
         let preprocessed_trace = BaseAir::<F>::preprocessed_trace(air);
         let vpdata_opt = preprocessed_trace.map(|trace| {
             let trace = ColMajorMatrix::from_row_major(&trace);
@@ -309,18 +309,20 @@ impl PrepKeygenDataV2 {
             (vdata, pdata)
         });
         if let Some((vdata, pdata)) = vpdata_opt {
-            PrepKeygenDataV2 {
+            Self {
                 prover_data: Some(pdata),
                 verifier_data: Some(vdata),
             }
         } else {
-            PrepKeygenDataV2 {
+            Self {
                 prover_data: None,
                 verifier_data: None,
             }
         }
     }
+}
 
+impl<SC: StarkProtocolConfig> PrepKeygenDataV2<SC> {
     fn width(&self) -> Option<usize> {
         self.prover_data.as_ref().map(|d| d.mat_view(0).width())
     }
