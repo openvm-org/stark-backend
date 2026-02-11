@@ -47,17 +47,16 @@ pub struct GkrProof {
     // TODO[jpw]: I'm not sure this is concepturally the place to put it, but recursion gkr module
     // samples alpha,beta
     pub logup_pow_witness: F,
-    /// The denominator of the root layer.
-    ///
-    /// Note that the numerator claim is always zero, so we don't include it in
-    /// the proof. Despite that the numerator is zero, the representation of the
-    /// denominator is important for the verification procedure and thus must be
-    /// provided.
-    pub q0_claim: EF,
-    /// The claims for p_j(xi, 0), p_j(xi, 1), q_j(xi, 0), and q_j(xi, 0) for each layer j > 0.
-    pub claims_per_layer: Vec<GkrLayerClaims>,
+    /// Per grid point g in H_{n'_grid}, the claimed (numerator, denominator) of the inner
+    /// fractional sum. Length is 2^{n'_grid}. When n'_grid=0, this has a single entry.
+    /// The verifier checks that sum_g p_g/q_g = 0.
+    pub grid_claims: Vec<(EF, EF)>,
+    /// Per GKR layer j > 0, per grid point g, the claims for
+    /// p_j(0, rho), p_j(1, rho), q_j(0, rho), q_j(1, rho).
+    /// Outer length is total_rounds (= l_skip + n_logup_block), inner length is n_grid_size.
+    pub claims_per_layer: Vec<Vec<GkrLayerClaims>>,
     /// The sumcheck polynomials for each layer, for each sumcheck round, given by their
-    /// evaluations on {1, 2, 3}.
+    /// evaluations on {1, 2, 3}. Layer j (1-indexed, starting from 2) has j-1 sumcheck sub-rounds.
     pub sumcheck_polys: Vec<Vec<[EF; 3]>>,
 }
 
@@ -186,10 +185,26 @@ impl Encode for Proof {
 impl Encode for GkrProof {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         self.logup_pow_witness.encode(writer)?;
-        self.q0_claim.encode(writer)?;
-        self.claims_per_layer.encode(writer)?;
-        // We should know the length of sumcheck_polys and each nested vector based
-        // on the length of claims_per_layer.
+        // Encode grid_claims: length + (p, q) pairs
+        self.grid_claims.len().encode(writer)?;
+        for &(p, q) in &self.grid_claims {
+            p.encode(writer)?;
+            q.encode(writer)?;
+        }
+        // Encode total_rounds (outer length of claims_per_layer)
+        let total_rounds = self.claims_per_layer.len();
+        total_rounds.encode(writer)?;
+        if total_rounds > 0 {
+            // n_grid_size is the inner length (same for all layers)
+            let n_grid_size = self.claims_per_layer[0].len();
+            n_grid_size.encode(writer)?;
+            for layer_claims in &self.claims_per_layer {
+                for claim in layer_claims {
+                    claim.encode(writer)?;
+                }
+            }
+        }
+        // Sumcheck polys: total_rounds - 1 entries, entry j has j+1 sub-rounds
         encode_iter(self.sumcheck_polys.iter().flatten(), writer)?;
         Ok(())
     }
@@ -366,10 +381,29 @@ impl Decode for Proof {
 impl Decode for GkrProof {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let logup_pow_witness = F::decode(reader)?;
-        let q0_claim = EF::decode(reader)?;
-        let claims_per_layer = Vec::<GkrLayerClaims>::decode(reader)?;
-
-        let num_sumcheck_polys = claims_per_layer.len().saturating_sub(1);
+        // Decode grid_claims
+        let n_grid_size_claims = usize::decode(reader)?;
+        let mut grid_claims = Vec::with_capacity(n_grid_size_claims);
+        for _ in 0..n_grid_size_claims {
+            let p = EF::decode(reader)?;
+            let q = EF::decode(reader)?;
+            grid_claims.push((p, q));
+        }
+        // Decode claims_per_layer
+        let total_rounds = usize::decode(reader)?;
+        let mut claims_per_layer = Vec::with_capacity(total_rounds);
+        if total_rounds > 0 {
+            let n_grid_size = usize::decode(reader)?;
+            for _ in 0..total_rounds {
+                let mut layer = Vec::with_capacity(n_grid_size);
+                for _ in 0..n_grid_size {
+                    layer.push(GkrLayerClaims::decode(reader)?);
+                }
+                claims_per_layer.push(layer);
+            }
+        }
+        // Decode sumcheck polys
+        let num_sumcheck_polys = total_rounds.saturating_sub(1);
         let mut sumcheck_polys = Vec::with_capacity(num_sumcheck_polys);
         for round_idx_minus_one in 0..num_sumcheck_polys {
             sumcheck_polys.push(decode_into_vec(reader, round_idx_minus_one + 1)?);
@@ -377,7 +411,7 @@ impl Decode for GkrProof {
 
         Ok(Self {
             logup_pow_witness,
-            q0_claim,
+            grid_claims,
             claims_per_layer,
             sumcheck_polys,
         })

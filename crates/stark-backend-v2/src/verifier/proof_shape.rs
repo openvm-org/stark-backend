@@ -80,9 +80,21 @@ pub enum ProofShapeVDataError {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum GkrProofShapeError {
     #[error(
-        "claims_per_layer should have num_gkr_rounds = {expected} claims, but it has {actual}"
+        "grid_claims should have n_grid_size = {expected} claims, but it has {actual}"
+    )]
+    InvalidGridClaims { expected: usize, actual: usize },
+    #[error(
+        "claims_per_layer should have num_gkr_rounds = {expected} layers, but it has {actual}"
     )]
     InvalidClaimsPerLayer { expected: usize, actual: usize },
+    #[error(
+        "claims_per_layer[{layer}] should have n_grid_size = {expected} claims, but it has {actual}"
+    )]
+    InvalidClaimsPerLayerGrid {
+        layer: usize,
+        expected: usize,
+        actual: usize,
+    },
     #[error(
         "sumcheck_polys should have num_gkr_rounds.saturating_sub(1) = {expected} polynomials, but it has {actual}"
     )]
@@ -380,11 +392,27 @@ pub fn verify_proof_shape(
         acc + ((vk.num_interactions() as u64) << max(vdata.log_height, l_skip))
     });
     let n_logup = calculate_n_logup(l_skip, total_interactions);
+    let n_logup_grid = mvk.params.n_logup_grid;
+    let n_grid = n_logup.min(n_logup_grid);
+    let n_logup_block = n_logup - n_grid;
+    let n_grid_size = 1usize << n_grid;
     let num_gkr_rounds = if total_interactions == 0 {
         0
     } else {
-        l_skip + n_logup
+        l_skip + n_logup_block
     };
+
+    if proof.gkr_proof.grid_claims.len() != (if total_interactions == 0 { 0 } else { n_grid_size })
+    {
+        return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidGridClaims {
+            expected: if total_interactions == 0 {
+                0
+            } else {
+                n_grid_size
+            },
+            actual: proof.gkr_proof.grid_claims.len(),
+        });
+    }
 
     if proof.gkr_proof.claims_per_layer.len() != num_gkr_rounds {
         return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidClaimsPerLayer {
@@ -396,6 +424,16 @@ pub fn verify_proof_shape(
             expected: num_gkr_rounds.saturating_sub(1),
             actual: proof.gkr_proof.sumcheck_polys.len(),
         });
+    }
+
+    for (layer, layer_claims) in proof.gkr_proof.claims_per_layer.iter().enumerate() {
+        if layer_claims.len() != n_grid_size {
+            return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidClaimsPerLayerGrid {
+                layer,
+                expected: n_grid_size,
+                actual: layer_claims.len(),
+            });
+        }
     }
 
     for (i, poly) in proof.gkr_proof.sumcheck_polys.iter().enumerate() {

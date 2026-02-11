@@ -525,6 +525,7 @@ mod tests {
             whir,
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
+            n_logup_grid: 0,
         };
         run_whir_fib_test(params)
     }
@@ -591,6 +592,7 @@ mod tests {
             whir: whir_test_config(2),
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
+            n_logup_grid: 0,
         };
 
         let n_rows = 1 << (params.n_stack + params.l_skip);
@@ -665,6 +667,7 @@ mod tests {
             whir: whir_test_config(2),
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
+            n_logup_grid: 0,
         };
 
         let n_rows = 1 << (params.n_stack + params.l_skip);

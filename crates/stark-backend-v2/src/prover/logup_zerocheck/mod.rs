@@ -162,7 +162,13 @@ where
         evals
     };
 
-    let (frac_sum_proof, mut xi) = fractional_sumcheck(transcript, &gkr_input_evals, true);
+    let n_grid = if has_interactions {
+        n_logup.min(mpk.params.n_logup_grid)
+    } else {
+        0
+    };
+    let (frac_sum_proof, mut xi) =
+        fractional_sumcheck(transcript, &gkr_input_evals, true, n_grid);
 
     // Sample more for `\xi` in the edge case that some AIRs don't have interactions
     let n_global = max(n_max, n_logup);
@@ -419,7 +425,7 @@ where
     };
     let gkr_proof = GkrProof {
         logup_pow_witness,
-        q0_claim: frac_sum_proof.fractional_sum.1,
+        grid_claims: frac_sum_proof.grid_claims,
         claims_per_layer: frac_sum_proof.claims_per_layer,
         sumcheck_polys: frac_sum_proof.sumcheck_polys,
     };

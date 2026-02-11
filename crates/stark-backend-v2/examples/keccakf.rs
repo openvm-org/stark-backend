@@ -61,6 +61,7 @@ fn main() -> eyre::Result<()> {
         whir,
         logup: log_up_security_params_baby_bear_100_bits(),
         max_constraint_degree: 3,
+        n_logup_grid: 0,
     };
 
     run_with_metric_collection("OUTPUT_PATH", || -> eyre::Result<()> {

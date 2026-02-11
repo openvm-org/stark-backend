@@ -512,6 +512,7 @@ pub fn test_system_params_small_with_poly_len(
         whir: test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len),
         logup: log_up_security_params_baby_bear_100_bits(),
         max_constraint_degree,
+        n_logup_grid: 0,
     }
 }
 

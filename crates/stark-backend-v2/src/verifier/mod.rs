@@ -248,6 +248,7 @@ mod tests {
             whir,
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
+            n_logup_grid: 0,
         };
         let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
 

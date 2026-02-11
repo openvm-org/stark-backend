@@ -131,6 +131,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
             whir,
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
+            n_logup_grid: 0,
         };
         let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
         let (vk, proof) = InteractionsFixture11.keygen_and_prove(&engine);
@@ -403,7 +404,7 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let _alpha = transcript.sample_ext();
     let _beta = transcript.sample_ext();
     let total_rounds = gkr_proof.claims_per_layer.len();
-    let _ = verify_gkr(&gkr_proof, &mut transcript, total_rounds)?;
+    let _ = verify_gkr(&gkr_proof, &mut transcript, total_rounds, 0)?;
 
     Ok(())
 }

@@ -5,18 +5,21 @@ use tracing::debug;
 use crate::{
     poly_common::{eval_eq_mle, interpolate_cubic_at_0123, interpolate_linear_at_01},
     poseidon2::sponge::FiatShamirTranscript,
+    prover::poly::evals_eq_hypercube_serial,
     proof::{GkrLayerClaims, GkrProof},
     EF,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum GkrVerificationError {
-    #[error("Zero-round proof: q0_claim should be 1, got {actual}")]
-    InvalidZeroRoundValue { actual: EF },
+    #[error("Grid claim count mismatch: expected {expected}, got {actual}")]
+    GridClaimCountMismatch { expected: usize, actual: usize },
+    #[error("Grid denominator is zero at index {index}")]
+    GridDenominatorZero { index: usize },
+    #[error("Grid sum check failed: numerator should be zero, got {actual}")]
+    GridSumCheckFailed { actual: EF },
     #[error("Zero-check failed: numerator at root should be zero, got {actual}")]
     ZeroCheckFailed { actual: EF },
-    #[error("Denominator consistency check failed at root: expected {expected}, got {actual}")]
-    RootConsistencyCheckFailed { expected: EF, actual: EF },
     #[error("Layer consistency check failed at round {round}: expected {expected}, got {actual}")]
     LayerConsistencyCheckFailed {
         round: usize,
@@ -42,36 +45,80 @@ pub enum GkrVerificationError {
         expected: usize,
         actual: usize,
     },
+    #[error("Layer {layer} has {actual} grid claims, expected {expected}")]
+    IncorrectLayerGridSize {
+        layer: usize,
+        expected: usize,
+        actual: usize,
+    },
 }
 
-/// Verifies the GKR protocol for fractional sumcheck.
+/// Verifies the data-parallel GKR protocol for fractional sumcheck with grid check.
 ///
-/// Reduces the fractional sum ∑_{y ∈ H_{ℓ+n_logup}} p̂(y)/q̂(y) = 0 to evaluation claims
-/// on the input layer polynomials p̂(ξ) and q̂(ξ) at a random point ξ.
+/// Reduces the fractional sum to evaluation claims on the input layer polynomials
+/// p_hat(xi) and q_hat(xi) at a random point xi.
 ///
-/// The argument `total_rounds` must equal `ℓ+n_logup`.
+/// The argument `total_rounds` is l_skip + n_logup_block (NOT the full n_logup).
+/// The argument `n_grid` is the effective grid dimension n'_grid.
 ///
 /// # Returns
-/// `(p̂(ξ), q̂(ξ), ξ)` where ξ ∈ F_ext^{ℓ+n_logup} is the random evaluation point.
+/// `(p_hat(xi), q_hat(xi), xi)` where xi = concat(gkr_r, xi_grid).
+/// Block dimensions come first (gkr_r), grid dimensions last (xi_grid).
 pub fn verify_gkr<TS: FiatShamirTranscript>(
     proof: &GkrProof,
     transcript: &mut TS,
     total_rounds: usize,
+    n_grid: usize,
 ) -> Result<(EF, EF, Vec<EF>), GkrVerificationError> {
+    let n_grid_size = 1usize << n_grid;
+
+    // Step 2: Verify grid claims
+    if proof.grid_claims.len() != n_grid_size {
+        return Err(GkrVerificationError::GridClaimCountMismatch {
+            expected: n_grid_size,
+            actual: proof.grid_claims.len(),
+        });
+    }
+
+    // Check all q_g != 0 and compute sum of p_g/q_g = 0 via fraction addition
+    // Frac addition: (p1/q1) + (p2/q2) = (p1*q2 + p2*q1) / (q1*q2)
+    let mut sum_p = EF::ZERO;
+    let mut sum_q = EF::ONE;
+    for (g, &(p_g, q_g)) in proof.grid_claims.iter().enumerate() {
+        if q_g == EF::ZERO {
+            return Err(GkrVerificationError::GridDenominatorZero { index: g });
+        }
+        // Add p_g/q_g to sum_p/sum_q
+        sum_p = sum_p * q_g + p_g * sum_q;
+        sum_q = sum_q * q_g;
+    }
+    if sum_p != EF::ZERO {
+        return Err(GkrVerificationError::GridSumCheckFailed { actual: sum_p });
+    }
+
+    // Observe grid claims in transcript.
+    // When there is only one grid point (n_grid=0), p=0 is implicit and not observed.
+    // When there are multiple grid points, individual p_g values are non-zero
+    // and must be observed to bind them before xi_grid is sampled.
+    for &(p_g, q_g) in &proof.grid_claims {
+        if n_grid_size > 1 {
+            transcript.observe_ext(p_g);
+        }
+        transcript.observe_ext(q_g);
+    }
+
+    // Step 3: If total_rounds == 0, GKR is skipped; evaluation claims are grid claims themselves
     if total_rounds == 0 {
-        // Check proof shape
         if !proof.claims_per_layer.is_empty() || !proof.sumcheck_polys.is_empty() {
             return Err(GkrVerificationError::InvalidZeroRoundShape {
                 claims_len: proof.claims_per_layer.len(),
                 sumcheck_len: proof.sumcheck_polys.len(),
             });
         }
-        if proof.q0_claim != EF::ONE {
-            return Err(GkrVerificationError::InvalidZeroRoundValue {
-                actual: proof.q0_claim,
-            });
-        }
-        return Ok((EF::ZERO, EF::ONE, vec![]));
+        // Go directly to grid check with grid claims as evaluation claims
+        let (p_xi, q_xi, xi) =
+            grid_check(transcript, &proof.grid_claims, n_grid, vec![]);
+        return Ok((p_xi, q_xi, xi));
     }
 
     // Verify proof shape
@@ -81,8 +128,6 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
             actual: proof.claims_per_layer.len(),
         });
     }
-
-    // Sumcheck polys: round j has j sub-rounds, so total = 0+1+2+...+(total_rounds-1)
     let expected_sumcheck_entries = total_rounds.saturating_sub(1);
     if proof.sumcheck_polys.len() != expected_sumcheck_entries {
         return Err(GkrVerificationError::IncorrectSumcheckPolyCount {
@@ -91,58 +136,93 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         });
     }
 
-    transcript.observe_ext(proof.q0_claim);
-
-    // Handle round 0 (no sumcheck, direct tree evaluation)
-    let layer_claims = &proof.claims_per_layer[0];
-    observe_layer_claims(transcript, layer_claims);
-
-    // Compute recursive relations for layer 1 → 0
-    let (p_cross_term, q_cross_term) = compute_recursive_relations(layer_claims);
-
-    // Zero-check: p̂₀ must be zero
-    if p_cross_term != EF::ZERO {
-        return Err(GkrVerificationError::ZeroCheckFailed {
-            actual: p_cross_term,
+    // Step 4: Round j=1 (direct check, no sumcheck)
+    // Verify shape: claims_per_layer[0] must have n_grid_size entries
+    let layer_claims_vec = &proof.claims_per_layer[0];
+    if layer_claims_vec.len() != n_grid_size {
+        return Err(GkrVerificationError::IncorrectLayerGridSize {
+            layer: 0,
+            expected: n_grid_size,
+            actual: layer_claims_vec.len(),
         });
     }
 
-    // Verify q0 consistency
-    if q_cross_term != proof.q0_claim {
-        return Err(GkrVerificationError::RootConsistencyCheckFailed {
-            expected: proof.q0_claim,
-            actual: q_cross_term,
-        });
+    // Observe all per-grid layer claims
+    for claims in layer_claims_vec {
+        observe_layer_claims(transcript, claims);
     }
 
-    // Sample μ₁ and reduce to single evaluation
-    let mu = transcript.sample_ext();
-    debug!(gkr_round = 0, %mu);
-    let (mut numer_claim, mut denom_claim) = reduce_to_single_evaluation(layer_claims, mu);
-    debug!(%numer_claim, %denom_claim);
-    let mut gkr_r = vec![mu];
+    // Verify per-grid-point root consistency:
+    // For each g: p_cross_g should equal grid_claims[g].0
+    //             q_cross_g should equal grid_claims[g].1
+    for (g, claims) in layer_claims_vec.iter().enumerate() {
+        let (p_cross_g, q_cross_g) = compute_recursive_relations(claims);
+        let (expected_p, expected_q) = proof.grid_claims[g];
+        if p_cross_g != expected_p || q_cross_g != expected_q {
+            return Err(GkrVerificationError::ZeroCheckFailed {
+                actual: p_cross_g - expected_p,
+            });
+        }
+    }
 
-    // Handle rounds 1..total_rounds with sumcheck
+    // Sample mu_1, reduce per-grid claims to single eval point
+    let mu_1 = transcript.sample_ext();
+    debug!(gkr_round = 0, %mu_1);
+
+    // Per-grid numer/denom claims via linear interpolation
+    let mut numer_claims: Vec<EF> = Vec::with_capacity(n_grid_size);
+    let mut denom_claims: Vec<EF> = Vec::with_capacity(n_grid_size);
+    for claims in layer_claims_vec {
+        let (n, d) = reduce_to_single_evaluation(claims, mu_1);
+        numer_claims.push(n);
+        denom_claims.push(d);
+    }
+    let mut gkr_r = vec![mu_1];
+
+    // Step 5: Rounds j=2,...,total_rounds (with sumcheck)
     for round in 1..total_rounds {
-        // Sample batching challenge λⱼ
-        let lambda = transcript.sample_ext();
-        debug!(gkr_round = round, %lambda);
-        let claim = numer_claim + lambda * denom_claim;
+        // Sample gamma_j for batching
+        let gamma_j = transcript.sample_ext();
+        debug!(gkr_round = round, %gamma_j);
+        let gamma_pows = gamma_powers(gamma_j, 2 * n_grid_size);
 
-        // Run sumcheck protocol for this round (round j has j sub-rounds)
+        // Compute batched claim
+        let claim: EF = (0..n_grid_size)
+            .map(|g| {
+                gamma_pows[2 * g] * numer_claims[g] + gamma_pows[2 * g + 1] * denom_claims[g]
+            })
+            .sum();
+
+        // Run sumcheck protocol for this round
         let (new_claim, round_r, eq_at_r_prime) =
             verify_gkr_sumcheck(proof, transcript, round, claim, &gkr_r)?;
         debug_assert_eq!(eq_at_r_prime, eval_eq_mle(&gkr_r, &round_r));
 
-        // Observe layer evaluation claims
-        let layer_claims = &proof.claims_per_layer[round];
-        observe_layer_claims(transcript, layer_claims);
+        // Read layer claims for all grid points
+        let layer_claims_vec = &proof.claims_per_layer[round];
+        if layer_claims_vec.len() != n_grid_size {
+            return Err(GkrVerificationError::IncorrectLayerGridSize {
+                layer: round,
+                expected: n_grid_size,
+                actual: layer_claims_vec.len(),
+            });
+        }
+        for claims in layer_claims_vec {
+            observe_layer_claims(transcript, claims);
+        }
 
-        // Compute recursive relations
-        let (p_cross_term, q_cross_term) = compute_recursive_relations(layer_claims);
+        // Compute batched recursive from layer claims
+        let batched_recursive: EF = layer_claims_vec
+            .iter()
+            .enumerate()
+            .map(|(g, claims)| {
+                let (p_cross_g, q_cross_g) = compute_recursive_relations(claims);
+                gamma_pows[2 * g] * p_cross_g + gamma_pows[2 * g + 1] * q_cross_g
+            })
+            .sum();
 
-        // Verify consistency
-        let expected_claim = (p_cross_term + lambda * q_cross_term) * eq_at_r_prime;
+        // Check: batched_recursive * eq_at_r_prime == new_claim
+        let expected_claim = batched_recursive * eq_at_r_prime;
         if expected_claim != new_claim {
             return Err(GkrVerificationError::LayerConsistencyCheckFailed {
                 round,
@@ -151,15 +231,76 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
             });
         }
 
-        // Sample μⱼ and reduce to single evaluation
+        // Sample mu, reduce claims
         let mu = transcript.sample_ext();
         debug!(gkr_round = round, %mu);
-        (numer_claim, denom_claim) = reduce_to_single_evaluation(layer_claims, mu);
-        // Update evaluation point: ξ^{(j)} = (μⱼ, ρ^{(j-1)})
+        numer_claims.clear();
+        denom_claims.clear();
+        for claims in layer_claims_vec {
+            let (n, d) = reduce_to_single_evaluation(claims, mu);
+            numer_claims.push(n);
+            denom_claims.push(d);
+        }
+        // Update evaluation point: gkr_r = (mu, round_r)
         gkr_r = std::iter::once(mu).chain(round_r).collect();
     }
 
-    Ok((numer_claim, denom_claim, gkr_r))
+    // Step 6: Grid check
+    // Per-grid evaluation claims are (numer_claims[g], denom_claims[g]) at xi_block = gkr_r
+    let eval_claims: Vec<(EF, EF)> = numer_claims
+        .into_iter()
+        .zip(denom_claims)
+        .collect();
+
+    let (p_xi, q_xi, xi) = grid_check(transcript, &eval_claims, n_grid, gkr_r);
+    Ok((p_xi, q_xi, xi))
+}
+
+/// Performs the grid check: combines per-grid-point evaluation claims into a single
+/// evaluation claim using eq(xi_grid, g) weights.
+///
+/// Returns (p_xi, q_xi, xi) where xi = concat(gkr_r, xi_grid).
+/// The block dimensions (gkr_r) come first, matching the LSB-first MLE convention
+/// used throughout the codebase.
+fn grid_check<TS: FiatShamirTranscript>(
+    transcript: &mut TS,
+    eval_claims: &[(EF, EF)],
+    n_grid: usize,
+    gkr_r: Vec<EF>,
+) -> (EF, EF, Vec<EF>) {
+    let n_grid_size = 1usize << n_grid;
+    debug_assert_eq!(eval_claims.len(), n_grid_size);
+
+    // Sample xi_grid (n_grid random elements)
+    let xi_grid: Vec<EF> = (0..n_grid).map(|_| transcript.sample_ext()).collect();
+
+    // Compute eq(xi_grid, g) for all g in {0,1}^n_grid
+    let eq_evals = evals_eq_hypercube_serial(&xi_grid);
+
+    // p_xi = sum_g v_{p,g} * eq(xi_grid, g)
+    // q_xi = sum_g v_{q,g} * eq(xi_grid, g)
+    let mut p_xi = EF::ZERO;
+    let mut q_xi = EF::ZERO;
+    for (g, &(v_p_g, v_q_g)) in eval_claims.iter().enumerate() {
+        p_xi += v_p_g * eq_evals[g];
+        q_xi += v_q_g * eq_evals[g];
+    }
+
+    // xi = concat(gkr_r, xi_grid)  [block dimensions first, then grid dimensions]
+    let xi: Vec<EF> = gkr_r.into_iter().chain(xi_grid).collect();
+
+    (p_xi, q_xi, xi)
+}
+
+/// Compute powers of gamma: gamma^0, gamma^1, ..., gamma^{count-1}
+fn gamma_powers(gamma: EF, count: usize) -> Vec<EF> {
+    let mut pows = Vec::with_capacity(count);
+    let mut cur = EF::ONE;
+    for _ in 0..count {
+        pows.push(cur);
+        cur *= gamma;
+    }
+    pows
 }
 
 /// Verify sumcheck for a single GKR round.
@@ -252,23 +393,33 @@ mod tests {
     use crate::{
         poseidon2::sponge::DuplexSponge,
         proof::{GkrLayerClaims, GkrProof},
-        prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
+        prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac, FracSumcheckProof},
         F,
     };
+
+    /// Helper to build a GkrProof from a FracSumcheckProof for testing (single grid point, n_grid=0).
+    fn gkr_proof_from_frac(frac_proof: &FracSumcheckProof<EF>) -> GkrProof {
+        GkrProof {
+            logup_pow_witness: F::ZERO,
+            grid_claims: frac_proof.grid_claims.clone(),
+            claims_per_layer: frac_proof.claims_per_layer.clone(),
+            sumcheck_polys: frac_proof.sumcheck_polys.clone(),
+        }
+    }
 
     #[test]
     fn test_multiple_rounds_shape() {
         setup_tracing();
         let proof = GkrProof {
             logup_pow_witness: F::ZERO,
-            q0_claim: EF::ONE,
+            grid_claims: vec![(EF::ZERO, EF::ONE)],
             claims_per_layer: vec![],
             sumcheck_polys: vec![],
         };
 
         let mut transcript = DuplexSponge::default();
 
-        let result = verify_gkr(&proof, &mut transcript, 2);
+        let result = verify_gkr(&proof, &mut transcript, 2, 0);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -284,13 +435,13 @@ mod tests {
 
         let proof2 = GkrProof {
             logup_pow_witness: F::ZERO,
-            q0_claim: EF::ONE,
-            claims_per_layer: vec![layer_claims.clone(), layer_claims],
+            grid_claims: vec![(EF::ZERO, EF::ONE)],
+            claims_per_layer: vec![vec![layer_claims.clone()], vec![layer_claims]],
             sumcheck_polys: vec![],
         };
 
         let mut transcript = DuplexSponge::default();
-        let result = verify_gkr(&proof2, &mut transcript, 2);
+        let result = verify_gkr(&proof2, &mut transcript, 2, 0);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -308,16 +459,21 @@ mod tests {
             q_xi_1: EF::from_u64(4),
         };
 
-        // p0 = 1*4 + 2*3 = 10 (non-zero)
+        // p_cross = 1*4 + 2*3 = 10 (non-zero)
+        // q_cross = 3*4 = 12
+        // grid_claims: single grid point with (p=0, q=12)
+        // batched_claim = gamma^0 * 0 + gamma^1 * 12 = 12*gamma
+        // batched_recursive = gamma^0 * 10 + gamma^1 * 12 = 10 + 12*gamma
+        // These won't match because 10 != 0
         let proof = GkrProof {
             logup_pow_witness: F::ZERO,
-            q0_claim: EF::from_u64(12), // q0 = 3*4 = 12
-            claims_per_layer: vec![layer1_claims],
+            grid_claims: vec![(EF::ZERO, EF::from_u64(12))],
+            claims_per_layer: vec![vec![layer1_claims]],
             sumcheck_polys: vec![],
         };
 
         let mut transcript = DuplexSponge::default();
-        let result = verify_gkr(&proof, &mut transcript, 1);
+        let result = verify_gkr(&proof, &mut transcript, 1, 0);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -340,18 +496,15 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true, 0);
 
-        let gkr_proof = GkrProof {
-            logup_pow_witness: F::ZERO,
-            q0_claim: frac_proof.fractional_sum.1,
-            claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
-        };
+        let gkr_proof = gkr_proof_from_frac(&frac_proof);
 
         let mut verifier_transcript = DuplexSponge::default();
+        // Observe grid claims (matching prover which observes q0_claim)
+
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds);
+        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds, 0);
 
         assert!(
             result.is_ok(),
@@ -386,18 +539,14 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true, 0);
 
-        let gkr_proof = GkrProof {
-            logup_pow_witness: F::ZERO,
-            q0_claim: frac_proof.fractional_sum.1,
-            claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
-        };
+        let gkr_proof = gkr_proof_from_frac(&frac_proof);
 
         let mut verifier_transcript = DuplexSponge::default();
+
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds);
+        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds, 0);
 
         assert!(
             result.is_ok(),
@@ -448,18 +597,14 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true, 0);
 
-        let gkr_proof = GkrProof {
-            logup_pow_witness: F::ZERO,
-            q0_claim: frac_proof.fractional_sum.1,
-            claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
-        };
+        let gkr_proof = gkr_proof_from_frac(&frac_proof);
 
         let mut verifier_transcript = DuplexSponge::default();
+
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds);
+        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds, 0);
 
         assert!(
             result.is_ok(),
@@ -486,18 +631,14 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true, 0);
 
-        let gkr_proof = GkrProof {
-            logup_pow_witness: F::ZERO,
-            q0_claim: frac_proof.fractional_sum.1,
-            claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
-        };
+        let gkr_proof = gkr_proof_from_frac(&frac_proof);
 
         let mut verifier_transcript = DuplexSponge::default();
+
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds);
+        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds, 0);
 
         assert!(
             result.is_ok(),
@@ -511,29 +652,122 @@ mod tests {
     #[test]
     fn test_gkr_empty_case() {
         setup_tracing();
+        // When fractions is empty, the prover returns empty grid_claims.
+        // In the full protocol, verify_gkr is NOT called when total_interactions == 0.
+        // This test verifies that the prover produces the expected empty proof.
         let fractions = vec![];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true, 0);
 
-        let gkr_proof = GkrProof {
+        assert!(frac_proof.grid_claims.is_empty());
+        assert!(frac_proof.claims_per_layer.is_empty());
+        assert!(frac_proof.sumcheck_polys.is_empty());
+    }
+
+    #[test]
+    fn test_grid_claim_count_mismatch() {
+        setup_tracing();
+        let proof = GkrProof {
             logup_pow_witness: F::ZERO,
-            q0_claim: frac_proof.fractional_sum.1,
-            claims_per_layer: frac_proof.claims_per_layer,
-            sumcheck_polys: frac_proof.sumcheck_polys,
+            grid_claims: vec![(EF::ZERO, EF::ONE), (EF::ZERO, EF::ONE)],
+            claims_per_layer: vec![],
+            sumcheck_polys: vec![],
         };
 
-        let mut verifier_transcript = DuplexSponge::default();
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, 0);
+        let mut transcript = DuplexSponge::default();
+        // n_grid=0 => expects 1 grid claim, but we have 2
+        let result = verify_gkr(&proof, &mut transcript, 0, 0);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GkrVerificationError::GridClaimCountMismatch {
+                expected: 1,
+                actual: 2
+            }
+        ));
+    }
 
-        assert!(
-            result.is_ok(),
-            "Empty case verification failed: {:?}",
-            result.err()
-        );
-        let (numer_claim, denom_claim, gkr_r) = result.unwrap();
-        assert_eq!(numer_claim, EF::ZERO);
-        assert_eq!(denom_claim, EF::ONE);
-        assert_eq!(gkr_r, vec![]);
+    #[test]
+    fn test_grid_denominator_zero() {
+        setup_tracing();
+        let proof = GkrProof {
+            logup_pow_witness: F::ZERO,
+            grid_claims: vec![(EF::ZERO, EF::ZERO)],
+            claims_per_layer: vec![],
+            sumcheck_polys: vec![],
+        };
+
+        let mut transcript = DuplexSponge::default();
+        let result = verify_gkr(&proof, &mut transcript, 0, 0);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GkrVerificationError::GridDenominatorZero { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn test_grid_sum_nonzero() {
+        setup_tracing();
+        // Two grid points: 1/1 and 1/1 => sum = 2 != 0
+        let proof = GkrProof {
+            logup_pow_witness: F::ZERO,
+            grid_claims: vec![(EF::ONE, EF::ONE), (EF::ONE, EF::ONE)],
+            claims_per_layer: vec![],
+            sumcheck_polys: vec![],
+        };
+
+        let mut transcript = DuplexSponge::default();
+        let result = verify_gkr(&proof, &mut transcript, 0, 1);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GkrVerificationError::GridSumCheckFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_grid_check_trivial_n_grid_0() {
+        setup_tracing();
+        // n_grid=0, single grid point, total_rounds=0
+        // Grid check should be trivial: eq evaluation = 1, xi_grid = empty
+        let proof = GkrProof {
+            logup_pow_witness: F::ZERO,
+            grid_claims: vec![(EF::ZERO, EF::ONE)],
+            claims_per_layer: vec![],
+            sumcheck_polys: vec![],
+        };
+
+        let mut transcript = DuplexSponge::default();
+        let result = verify_gkr(&proof, &mut transcript, 0, 0);
+        assert!(result.is_ok());
+        let (p_xi, q_xi, xi) = result.unwrap();
+        assert_eq!(p_xi, EF::ZERO);
+        assert_eq!(q_xi, EF::ONE);
+        assert_eq!(xi, vec![]);
+    }
+
+    #[test]
+    fn test_grid_check_multiple_grid_points_zero_rounds() {
+        setup_tracing();
+        // n_grid=1, 2 grid points, total_rounds=0
+        // Grid claims sum to zero: 3/2 + (-3)/2 = 0
+        let proof = GkrProof {
+            logup_pow_witness: F::ZERO,
+            grid_claims: vec![
+                (EF::from_u64(3), EF::from_u64(2)),
+                (-EF::from_u64(3), EF::from_u64(2)),
+            ],
+            claims_per_layer: vec![],
+            sumcheck_polys: vec![],
+        };
+
+        let mut transcript = DuplexSponge::default();
+        let result = verify_gkr(&proof, &mut transcript, 0, 1);
+        assert!(result.is_ok());
+        let (_p_xi, _q_xi, xi) = result.unwrap();
+        // xi should have 1 element (xi_grid only, no gkr_r)
+        assert_eq!(xi.len(), 1);
     }
 }

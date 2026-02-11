@@ -92,11 +92,18 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     let n_logup: usize = calculate_n_logup(l_skip, total_interactions);
     debug!(%n_logup);
 
+    let n_grid = if total_interactions > 0 {
+        n_logup.min(mvk.params.n_logup_grid)
+    } else {
+        0
+    };
+
     let mut xi = Vec::new();
     let mut p_xi_claim = EF::ZERO;
     let mut q_xi_claim = alpha_logup;
     if total_interactions > 0 {
-        (p_xi_claim, q_xi_claim, xi) = verify_gkr(gkr_proof, transcript, l_skip + n_logup)?;
+        (p_xi_claim, q_xi_claim, xi) =
+            verify_gkr(gkr_proof, transcript, l_skip + n_logup, n_grid)?;
         debug_assert_eq!(xi.len(), l_skip + n_logup);
     }
 

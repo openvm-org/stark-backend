@@ -13,6 +13,11 @@ pub struct SystemParams {
     pub logup: LogUpSecurityParameters,
     /// Global max constraint degree enforced across all AIR and Interaction constraints
     pub max_constraint_degree: usize,
+    /// The LogUp grid dimension n_{logup,grid} >= 0 which determines the number of parallel GKR
+    /// instances. The effective grid dimension is min(n_logup, n_logup_grid).
+    /// When 0, the protocol reduces to the classic single-instance GKR.
+    #[serde(default)]
+    pub n_logup_grid: usize,
 }
 
 impl SystemParams {
