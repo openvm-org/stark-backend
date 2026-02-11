@@ -438,8 +438,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             let mobius_eq_evals = evals_mobius_eq_hypercube(&u_tilde);
-            let lhs = zip(&hatf_evals, &mobius_eq_evals)
-                .fold(F::ZERO, |acc, (&f, &g)| acc + f * g);
+            let lhs = zip(&hatf_evals, &mobius_eq_evals).fold(F::ZERO, |acc, (&f, &g)| acc + f * g);
 
             // Naive evaluation of f(u_tilde) from its coefficient table.
             let rhs = a.iter().enumerate().fold(F::ZERO, |acc, (mask, &coeff)| {
