@@ -234,7 +234,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
 
     // Here we perform the final WHIR check, which requires us to compute
     //
-    //  sum_{b in H_{m-t}} f(b) (eq(u, alpha || b) +
+    //  sum_{b in H_{m-t}} f(b) (mobius_eq(u, alpha || b) +
     //                           sum_i sum_j gamma_{i,j} eq(pow(z_i) alpha[ki..] || b)),
     //
     // where || denotes concatenation.
@@ -246,7 +246,7 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
     // ```
     //
     // For multilinear f with coefficient table `c[S]`, we have the identity:
-    //   sum_{b} f(b) g(u'', b) = sum_{S} c[S] eq(u'', S),
+    //   sum_{b} f(b) mobius_eq(u'', b) = sum_{S} c[S] eq(u'', S),
     // i.e. it is the MLE of the table `c` evaluated at `u''`.
     //
     // Similar algebra allows us to control the terms with eq(pow(z_i)). Note that here we actually

@@ -157,7 +157,7 @@ pub fn evals_eq_hypercube<F: Field>(x: &[F]) -> Vec<F> {
 /// - `K_i(0) = 1 - 2 * u_tilde_i`
 /// - `K_i(1) = u_tilde_i`
 ///
-/// The output ordering matches [`evals_eq_hypercube`]: mask bit `i` corresponds to `omega[i]`.
+/// The output ordering matches [`evals_eq_hypercube`]: mask bit `i` corresponds to `u_tilde[i]`.
 pub fn evals_mobius_eq_hypercube<F: Field>(u_tilde: &[F]) -> Vec<F> {
     let n = u_tilde.len();
     let mut out = F::zero_vec(1 << n);
@@ -395,15 +395,15 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
 
         for n in 0..=10usize {
-            let omega = (0..n)
+            let u_tilde = (0..n)
                 .map(|_| F::from_u64(rng.random()))
                 .collect::<Vec<_>>();
-            let evals = evals_mobius_eq_hypercube(&omega);
+            let evals = evals_mobius_eq_hypercube(&u_tilde);
             assert_eq!(evals.len(), 1 << n);
 
             for (mask, &eval) in evals.iter().enumerate() {
                 let mut expected = F::ONE;
-                for (i, &w) in omega.iter().enumerate() {
+                for (i, &w) in u_tilde.iter().enumerate() {
                     expected *= if (mask >> i) & 1 == 0 {
                         F::ONE - w.double()
                     } else {
@@ -433,17 +433,18 @@ mod tests {
             let mut hatf_evals = rs_coeffs.clone();
             Mle::coeffs_to_evals_inplace(&mut hatf_evals);
 
-            let omega = (0..m)
+            let u_tilde = (0..m)
                 .map(|_| F::from_u64(rng.random()))
                 .collect::<Vec<_>>();
 
-            let g_evals = evals_mobius_eq_hypercube(&omega);
-            let lhs = zip(&hatf_evals, &g_evals).fold(F::ZERO, |acc, (&f, &g)| acc + f * g);
+            let mobius_eq_evals = evals_mobius_eq_hypercube(&u_tilde);
+            let lhs = zip(&hatf_evals, &mobius_eq_evals)
+                .fold(F::ZERO, |acc, (&f, &g)| acc + f * g);
 
-            // Naive evaluation of f(omega) from its coefficient table.
+            // Naive evaluation of f(u_tilde) from its coefficient table.
             let rhs = a.iter().enumerate().fold(F::ZERO, |acc, (mask, &coeff)| {
                 let mut term = coeff;
-                for (i, &w) in omega.iter().enumerate() {
+                for (i, &w) in u_tilde.iter().enumerate() {
                     if (mask >> i) & 1 == 1 {
                         term *= w;
                     }
