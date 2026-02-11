@@ -191,13 +191,13 @@ impl Encode for GkrProof {
             p.encode(writer)?;
             q.encode(writer)?;
         }
-        // Encode total_rounds (outer length of claims_per_layer)
-        let total_rounds = self.claims_per_layer.len();
-        total_rounds.encode(writer)?;
-        if total_rounds > 0 {
-            // n_grid_size is the inner length (same for all layers)
-            let n_grid_size = self.claims_per_layer[0].len();
-            n_grid_size.encode(writer)?;
+        // Encode n_block (outer length of claims_per_layer)
+        let n_block = self.claims_per_layer.len();
+        n_block.encode(writer)?;
+        if n_block > 0 {
+            // grid_size is the inner length (same for all layers)
+            let grid_size = self.claims_per_layer[0].len();
+            grid_size.encode(writer)?;
             for layer_claims in &self.claims_per_layer {
                 for claim in layer_claims {
                     claim.encode(writer)?;
@@ -390,20 +390,20 @@ impl Decode for GkrProof {
             grid_claims.push((p, q));
         }
         // Decode claims_per_layer
-        let total_rounds = usize::decode(reader)?;
-        let mut claims_per_layer = Vec::with_capacity(total_rounds);
-        if total_rounds > 0 {
-            let n_grid_size = usize::decode(reader)?;
-            for _ in 0..total_rounds {
-                let mut layer = Vec::with_capacity(n_grid_size);
-                for _ in 0..n_grid_size {
+        let n_block = usize::decode(reader)?;
+        let mut claims_per_layer = Vec::with_capacity(n_block);
+        if n_block > 0 {
+            let grid_size = usize::decode(reader)?;
+            for _ in 0..n_block {
+                let mut layer = Vec::with_capacity(grid_size);
+                for _ in 0..grid_size {
                     layer.push(GkrLayerClaims::decode(reader)?);
                 }
                 claims_per_layer.push(layer);
             }
         }
         // Decode sumcheck polys
-        let num_sumcheck_polys = total_rounds.saturating_sub(1);
+        let num_sumcheck_polys = n_block.saturating_sub(1);
         let mut sumcheck_polys = Vec::with_capacity(num_sumcheck_polys);
         for round_idx_minus_one in 0..num_sumcheck_polys {
             sumcheck_polys.push(decode_into_vec(reader, round_idx_minus_one + 1)?);
