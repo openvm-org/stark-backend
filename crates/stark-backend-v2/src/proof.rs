@@ -150,8 +150,8 @@ pub struct WhirProof {
 // ==================== Encode implementations ====================
 
 /// Codec version should change only when proof system or proof format changes.
-/// It does correspond to the main openvm version (which may change more frequently).
-pub(crate) const CODEC_VERSION: u32 = 2;
+/// It does _not_ correspond to the main openvm version (which may change more frequently).
+pub(crate) const CODEC_VERSION: u32 = 3;
 
 // TODO: custom encode/decode for Proof that takes in a vk
 impl Encode for Proof {
