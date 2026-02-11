@@ -6,12 +6,14 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    poly_common::{eval_eq_mle, horner_eval, interpolate_quadratic_at_012, Squarable},
+    poly_common::{
+        eval_eq_mle, eval_mle_evals_at_point, eval_mobius_eq_mle, horner_eval,
+        interpolate_quadratic_at_012, Squarable,
+    },
     poseidon2::sponge::{
         poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress, FiatShamirTranscript,
     },
     proof::WhirProof,
-    prover::poly::Mle,
     Digest, SystemParams, EF, F,
 };
 
@@ -233,22 +235,27 @@ pub fn verify_whir<TS: FiatShamirTranscript>(
 
     // Here we perform the final WHIR check, which requires us to compute
     //
-    //  sum_{b in H_{m-t}} f(b) (eq(u, alpha || b) +
+    //  sum_{b in H_{m-t}} f(b) (mobius_eq(u, alpha || b) +
     //                           sum_i sum_j gamma_{i,j} eq(pow(z_i) alpha[ki..] || b)),
     //
     // where || denotes concatenation.
     //
     // If we let u' = u[..t] and u'' = u[t..], then by factoring we can rewrite the term
+    // ```text
+    // sum_{b in H_{m-t}} f(b) mobius_eq(u, alpha || b) = mobius_eq(u', alpha) *
+    //                                                    sum_{b in H_{m-t}} f(b) mobius_eq(u'',b)
+    // ```
     //
-    //   sum_{b in H_{m-t}} f(b) eq(u, alpha || b) = eq(u', alpha) *
-    //                                               sum_{b in H_{m-t}} f(b) eq(u'', b)
-    //                                             = eq(u', alpha) * f(u'').
+    // For multilinear f with coefficient table `c[S]`, we have the identity:
+    //   sum_{b} f(b) mobius_eq(u'', b) = sum_{S} c[S] eq(u'', S),
+    // i.e. it is the MLE of the table `c` evaluated at `u''`.
     //
     // Similar algebra allows us to control the terms with eq(pow(z_i)). Note that here we actually
     // end up with f(pow(z_i^{2^p})) for some power p, which is a univariate evaluation.
     let t = k_whir * num_whir_rounds;
-    let f = Mle::from_coeffs(final_poly.clone());
-    let mut acc = eval_eq_mle(&alphas[..t], &u[..t]) * f.eval_at_point_inplace(&u[t..]);
+    let prefix = eval_mobius_eq_mle(&u[..t], &alphas[..t]);
+    let suffix_sum = eval_mle_evals_at_point(&mut final_poly.clone(), &u[t..]);
+    let mut acc = prefix * suffix_sum;
     let mut j = k_whir;
     for i in 0..num_whir_rounds {
         let zis = &zs[i];
