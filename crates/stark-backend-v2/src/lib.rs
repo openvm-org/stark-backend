@@ -1,18 +1,40 @@
-// TODO[TEMP]: remove once we make traits generic in SC
-pub use openvm_stark_sdk;
+//! Backend for proving and verifying mixed-matrix STARKs.
+//! The backend is designed to be modular and compatible with different hardware implementations.
+//! The backend provides prover and verifier implementations of the SWIRL proof system.
+//!
+//! The aim is to support different circuit representations and permutation/lookup arguments.
+
+// Re-export all Plonky3 crates
+pub use p3_air;
+pub use p3_challenger;
+pub use p3_field;
+pub use p3_matrix;
+pub use p3_maybe_rayon;
+pub use p3_symmetric;
+pub use p3_util;
 use p3_util::log2_ceil_u64;
 
+/// AIR builders for prover and verifier, including support for cross-matrix permutation arguments.
+pub mod air_builders;
+mod any_air;
 pub mod baby_bear_poseidon2;
+/// Trait for stateful chip that owns trace generation
 mod chip;
 pub mod codec;
+/// STARK Protocol configuration trait
 mod config;
 pub mod debug;
 pub mod dft;
+/// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
 mod engine;
+/// Log-up permutation argument implementation as RAP.
+pub mod interaction;
+/// Proving and verifying key generation
 pub mod keygen;
 pub mod merkle;
 pub mod poly_common;
 pub mod poseidon2;
+/// Definition of the STARK proof struct.
 pub mod proof;
 pub mod prover;
 mod transcript;
@@ -25,11 +47,22 @@ pub mod test_utils;
 #[cfg(test)]
 mod tests;
 
+pub use any_air::*;
 pub use chip::*;
 pub use config::*;
 pub use engine::*;
 pub use merkle::*;
 pub use transcript::*;
+
+// Use jemalloc as global allocator for performance
+#[cfg(all(feature = "jemalloc", unix, not(test)))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// Use mimalloc as global allocator
+#[cfg(all(feature = "mimalloc", not(test)))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Common utility function for computing `n_logup` parameter in terms of `total_interactions`,
 /// which is the sum of interaction message counts across all traces, using the lifted trace

@@ -1,12 +1,12 @@
 use core::fmt::Debug;
 
 use getset::Getters;
-use openvm_stark_backend::interaction::LogUpSecurityParameters;
 use p3_field::{BasedVectorSpace, ExtensionField, PrimeField64, TwoAdicField};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     codec::{Decode, Encode},
+    interaction::LogUpSecurityParameters,
     merkle::MerkleHasher,
 };
 
@@ -44,6 +44,9 @@ pub trait StarkProtocolConfig: 'static {
     /// Degree of the extension field.
     const D_EF: usize = <Self::EF as BasedVectorSpace<Self::F>>::DIMENSION;
 }
+
+/// Type alias for backwards compatibility. New implementations should use `SC::F`.
+pub type Val<SC> = <SC as StarkProtocolConfig>::F;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Getters)]
 pub struct SystemParams {

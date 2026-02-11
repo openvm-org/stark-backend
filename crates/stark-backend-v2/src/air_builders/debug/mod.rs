@@ -11,8 +11,7 @@ use super::{symbolic::SymbolicConstraints, PartitionedAirBuilder, ViewPair};
 use crate::{
     config::{StarkGenericConfig, Val},
     interaction::{Interaction, InteractionBuilder, RapPhaseSeqKind},
-    keygen::types::StarkProvingKey,
-    rap::{AnyRap, PermutationAirBuilderWithExposedValues},
+    rap::AnyAir,
 };
 
 mod check_constraints;
@@ -31,7 +30,7 @@ thread_local! {
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn debug_constraints_and_interactions<SC: StarkGenericConfig>(
-    airs: &[Arc<dyn AnyRap<SC>>],
+    airs: &[Arc<dyn AnyAir<SC>>],
     pk: &[StarkProvingKey<SC>],
     main_views_per_air: &[Vec<RowMajorMatrixView<'_, Val<SC>>>],
     public_values_per_air: &[Vec<Val<SC>>],

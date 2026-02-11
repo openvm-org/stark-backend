@@ -3,11 +3,9 @@ name = "stark-backend-v2"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-description = "Proof system v2"
+description = "Multi-matrix STARK backend for the SWIRL proof system"
 
 [dependencies]
-openvm-stark-backend.workspace = true
-openvm-stark-sdk.workspace = true
 codec-derive.workspace = true
 
 p3-air.workspace = true
@@ -25,7 +23,11 @@ p3-util.workspace = true
 itertools.workspace = true
 rayon.workspace = true
 hex-literal.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = [
+    "derive",
+    "alloc",
+    "rc",
+] }
 derive-new.workspace = true
 tracing.workspace = true
 getset.workspace = true
@@ -36,14 +38,20 @@ derivative.workspace = true
 bitcode.workspace = true
 metrics = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
+
+mimalloc = { version = "0.1.43", optional = true }
+
 [dev-dependencies]
-rand = "0.9" # don't use workspace version as it's older
+rand.workspace = true
 p3-keccak-air.workspace = true
 test-case.workspace = true
 
 [features]
 default = ["parallel", "metrics"]
-parallel = ["p3-maybe-rayon/parallel", "openvm-stark-backend/parallel"]
-jemalloc = ["openvm-stark-backend/jemalloc"]
-metrics = ["dep:metrics", "openvm-stark-backend/metrics"]
+parallel = ["p3-maybe-rayon/parallel"]
+jemalloc = ["dep:tikv-jemallocator"]
+jemalloc-prof = ["jemalloc", "tikv-jemallocator?/profiling"]
+metrics = ["dep:metrics"]
 test-utils = []

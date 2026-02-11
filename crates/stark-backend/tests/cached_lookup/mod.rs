@@ -7,9 +7,6 @@ use openvm_stark_sdk::{
     engine::StarkFriEngine,
 };
 
-mod instrumented;
-pub mod prove;
-
 // Lookup table is cached, everything else (including counts) is committed together
 pub fn prove_and_verify_indexless_lookups(
     sender: Vec<(u32, Vec<u32>)>,

@@ -1,5 +1,3 @@
-// Copied from v1
-// TODO[jpw]: remove duplication
 use std::any::Any;
 
 use crate::prover::{AirProvingContextV2, ProverBackendV2};
