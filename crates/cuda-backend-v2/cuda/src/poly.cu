@@ -123,6 +123,19 @@ __global__ void eq_hypercube_stage_ext_kernel(FpExt *__restrict__ out, FpExt x_i
     out[y] -= hi; // out[y] = out[y] * (FpExt(Fp(1)) - x_i), saves a multiplication
 }
 
+// Inplace update for Möbius-adjusted equality kernel.
+// K_i(0) = 1 - 2*u_tilde_i, K_i(1) = u_tilde_i
+// Insert u_tilde_i from the back
+__global__ void mobius_eq_hypercube_stage_ext_kernel(FpExt *__restrict__ out, FpExt omega_i, uint32_t step) {
+    size_t y = blockIdx.x * blockDim.x + threadIdx.x;
+    if (y >= step)
+        return;
+    FpExt prev = out[y];
+    FpExt hi = prev * omega_i;
+    out[y | step] = hi;
+    out[y] = prev - hi - hi; // prev * (1 - 2*omega_i)
+}
+
 // Same as eq_hypercube_stage_ext_kernel but does not modify in-place
 // Insert x_i from the back
 __global__ void eq_hypercube_nonoverlapping_stage_ext_kernel(
@@ -222,6 +235,12 @@ extern "C" int _algebraic_batch_matrices(
 extern "C" int _eq_hypercube_stage_ext(FpExt *out, FpExt x_i, uint32_t step) {
     auto [grid, block] = kernel_launch_params(step);
     eq_hypercube_stage_ext_kernel<<<grid, block>>>(out, x_i, step);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _mobius_eq_hypercube_stage_ext(FpExt *out, FpExt omega_i, uint32_t step) {
+    auto [grid, block] = kernel_launch_params(step);
+    mobius_eq_hypercube_stage_ext_kernel<<<grid, block>>>(out, omega_i, step);
     return CHECK_KERNEL();
 }
 

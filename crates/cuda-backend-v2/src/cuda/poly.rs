@@ -19,6 +19,8 @@ extern "C" {
 
     fn _eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32) -> i32;
 
+    fn _mobius_eq_hypercube_stage_ext(out: *mut EF, omega_i: EF, step: u32) -> i32;
+
     fn _eq_hypercube_nonoverlapping_stage_ext(
         out: *mut EF,
         input: *const EF,
@@ -90,6 +92,23 @@ pub unsafe fn algebraic_batch_matrices(
 /// - `out` is **device** pointer with length `>= 2 * step`.
 pub unsafe fn eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32) -> Result<(), CudaError> {
     check(_eq_hypercube_stage_ext(out, x_i, step))
+}
+
+/// Performs an in-place update for the Möbius-adjusted equality kernel:
+/// ```text
+/// out[i + step] = out[i] * u_tilde_i
+/// out[i] = out[i] * (1 - 2 * u_tilde_i)
+/// ```
+/// for `i` in `0..step`.
+///
+/// # Safety
+/// - `out` is **device** pointer with length `>= 2 * step`.
+pub unsafe fn mobius_eq_hypercube_stage_ext(
+    out: *mut EF,
+    omega_i: EF,
+    step: u32,
+) -> Result<(), CudaError> {
+    check(_mobius_eq_hypercube_stage_ext(out, omega_i, step))
 }
 
 /// Performs an update of:
