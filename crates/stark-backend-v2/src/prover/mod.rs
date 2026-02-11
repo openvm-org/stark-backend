@@ -8,8 +8,7 @@ use tracing::{info, info_span, instrument};
 use crate::prover::metrics::trace_metrics;
 use crate::{
     proof::{BatchConstraintProof, GkrProof, Proof, StackingProof, TraceVData, WhirProof},
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
-    FiatShamirTranscript,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 
 mod cpu_backend;
@@ -30,24 +29,35 @@ pub use logup_zerocheck::*;
 pub use matrix::*;
 pub use types::*;
 
-#[derive(derive_new::new)]
-pub struct CoordinatorV2<PB: ProverBackendV2, PD, TS> {
+pub struct CoordinatorV2<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
     pub backend: PB,
     pub device: PD,
     pub(crate) transcript: TS,
+    _sc: std::marker::PhantomData<SC>,
 }
 
-impl<PB, PD, TS> Prover for CoordinatorV2<PB, PD, TS>
+impl<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> CoordinatorV2<SC, PB, PD, TS> {
+    pub fn new(backend: PB, device: PD, transcript: TS) -> Self {
+        Self {
+            backend,
+            device,
+            transcript,
+            _sc: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<SC, PB, PD, TS> Prover for CoordinatorV2<SC, PB, PD, TS>
 where
-    // TODO[jpw]: make generic in F, EF, Commitment
-    PB: ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
+    SC: StarkProtocolConfig,
+    PB: ProverBackendV2<Val = SC::F, Challenge = SC::EF, Commitment = SC::Digest>,
     PD: ProverDeviceV2<PB, TS>,
     PD::Artifacts: Into<PD::OpeningPoints>,
-    PD::PartialProof: Into<(GkrProof, BatchConstraintProof)>,
-    PD::OpeningProof: Into<(StackingProof, WhirProof)>,
-    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>,
+    PD::PartialProof: Into<(GkrProof<SC>, BatchConstraintProof<SC>)>,
+    PD::OpeningProof: Into<(StackingProof<SC>, WhirProof<SC>)>,
+    TS: FiatShamirTranscript<SC>,
 {
-    type Proof = Proof;
+    type Proof = Proof<SC>;
     type ProvingKeyView<'a>
         = &'a DeviceMultiStarkProvingKeyV2<PB>
     where
@@ -94,15 +104,15 @@ where
             self.device.commit(&traces)
         };
 
-        let mut trace_vdata: Vec<Option<TraceVData>> = vec![None; mpk.per_air.len()];
-        let mut public_values: Vec<Vec<F>> = vec![Vec::new(); mpk.per_air.len()];
+        let mut trace_vdata: Vec<Option<TraceVData<SC>>> = vec![None; mpk.per_air.len()];
+        let mut public_values: Vec<Vec<SC::F>> = vec![Vec::new(); mpk.per_air.len()];
 
         // Hypercube dimension per trace (present AIR)
         for (air_id, air_ctx) in &ctx.per_trace {
             let trace_height = air_ctx.common_main.height();
             let log_height = log2_strict_usize(trace_height);
 
-            trace_vdata[*air_id] = Some(TraceVData {
+            trace_vdata[*air_id] = Some(TraceVData::<SC> {
                 log_height,
                 cached_commitments: air_ctx
                     .cached_mains
@@ -113,7 +123,7 @@ where
             public_values[*air_id] = air_ctx.public_values.clone();
         }
         #[cfg(feature = "metrics")]
-        trace_metrics(mpk, &trace_vdata).emit();
+        trace_metrics::<SC, _>(mpk, &trace_vdata).emit();
 
         // Only observe commits for present AIRs.
         // Commitments order:
@@ -127,13 +137,13 @@ where
 
         for (trace_vdata, pvs, pk) in izip!(&trace_vdata, &public_values, &mpk.per_air) {
             if !pk.vk.is_required {
-                transcript.observe(F::from_bool(trace_vdata.is_some()));
+                transcript.observe(SC::F::from_bool(trace_vdata.is_some()));
             }
             if let Some(trace_vdata) = trace_vdata {
                 if let Some(cd) = &pk.preprocessed_data {
                     transcript.observe_commit(cd.commitment);
                 } else {
-                    transcript.observe(F::from_usize(trace_vdata.log_height));
+                    transcript.observe(SC::F::from_usize(trace_vdata.log_height));
                 }
                 for commit in &trace_vdata.cached_commitments {
                     transcript.observe_commit(*commit);
@@ -155,7 +165,7 @@ where
         let (gkr_proof, batch_constraint_proof) = constraints_proof.into();
         let (stacking_proof, whir_proof) = opening_proof.into();
 
-        Proof {
+        Proof::<SC> {
             public_values,
             trace_vdata,
             common_main_commit,

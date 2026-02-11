@@ -124,7 +124,7 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
     /// Transport the proving key to the device, filtering for only the provided `air_ids`.
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKeyV2,
+        mpk: &MultiStarkProvingKeyV2<SCV2>,
     ) -> DeviceMultiStarkProvingKeyV2<PB>;
 
     fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<PB::Val>) -> PB::Matrix;

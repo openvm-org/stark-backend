@@ -1,7 +1,7 @@
 use std::iter::zip;
 
 use itertools::Itertools;
-use p3_field::PrimeCharacteristicRing;
+use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use thiserror::Error;
 use tracing::{debug, instrument};
 
@@ -12,12 +12,11 @@ use crate::{
     },
     proof::{column_openings_by_rot, StackingProof},
     prover::stacked_pcs::StackedLayout,
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
-    FiatShamirTranscript,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
-pub enum StackedReductionError {
+pub enum StackedReductionError<EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq> {
     #[error("s_0 does not match s_0 polynomial evaluation sum: {s_0} != {s_0_sum_eval}")]
     S0Mismatch { s_0: EF, s_0_sum_eval: EF },
 
@@ -28,17 +27,20 @@ pub enum StackedReductionError {
 /// `has_preprocessed` must be per present trace in sorted AIR order.
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip_all)]
-pub fn verify_stacked_reduction<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
+pub fn verify_stacked_reduction<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
-    proof: &StackingProof,
+    proof: &StackingProof<SC>,
     layouts: &[StackedLayout],
     need_rot_per_commit: &[Vec<bool>],
     l_skip: usize,
     n_stack: usize,
-    column_openings: &Vec<Vec<Vec<EF>>>,
-    r: &[EF],
-    omega_shift_pows: &[F],
-) -> Result<Vec<EF>, StackedReductionError> {
+    column_openings: &Vec<Vec<Vec<SC::EF>>>,
+    r: &[SC::EF],
+    omega_shift_pows: &[SC::F],
+) -> Result<Vec<SC::EF>, StackedReductionError<SC::EF>>
+where
+    SC::EF: TwoAdicField,
+{
     /*
      * SETUP
      *
@@ -50,7 +52,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript<BabyBearPoseidon2Config
      * way column_openings is (i.e. sorted by trace height).
      */
     let omega_order = omega_shift_pows.len();
-    let omega_order_f = F::from_usize(omega_order);
+    let omega_order_f = SC::F::from_usize(omega_order);
 
     debug_assert_eq!(layouts.len(), need_rot_per_commit.len());
     let mut lambda_idx = 0usize;
@@ -108,13 +110,13 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript<BabyBearPoseidon2Config
      */
     let s_0 = zip(&t_claims, &lambda_sqr_powers)
         .map(|(&t_i, &lambda_i)| (t_i.0 + t_i.1 * lambda) * lambda_i)
-        .sum::<EF>();
+        .sum::<SC::EF>();
     let s_0_sum_eval = proof
         .univariate_round_coeffs
         .iter()
         .step_by(omega_order)
         .copied()
-        .sum::<EF>()
+        .sum::<SC::EF>()
         * omega_order_f;
 
     if s_0 != s_0_sum_eval {
@@ -125,7 +127,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript<BabyBearPoseidon2Config
         transcript.observe_ext(*coeffs);
     }
 
-    let mut u = vec![EF::ZERO; n_stack + 1];
+    let mut u = vec![SC::EF::ZERO; n_stack + 1];
     u[0] = transcript.sample_ext();
     debug!(round = 0, u_round = %u[0]);
 
@@ -167,7 +169,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript<BabyBearPoseidon2Config
     let mut q_coeffs = proof
         .stacking_openings
         .iter()
-        .map(|vec| vec![EF::ZERO; vec.len()])
+        .map(|vec| vec![SC::EF::ZERO; vec.len()])
         .collect_vec();
 
     layouts
@@ -185,7 +187,7 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript<BabyBearPoseidon2Config
                     let n = s.log_height() as isize - l_skip as isize;
                     let n_lift = n.max(0) as usize;
                     let b = (l_skip + n_lift..l_skip + n_stack)
-                        .map(|j| F::from_bool((s.row_idx >> j) & 1 == 1))
+                        .map(|j| SC::F::from_bool((s.row_idx >> j) & 1 == 1))
                         .collect_vec();
                     let eq_mle = eval_eq_mle(&u[n_lift + 1..], &b);
                     let ind = eval_in_uni(l_skip, n, u[0]);
@@ -208,12 +210,12 @@ pub fn verify_stacked_reduction<TS: FiatShamirTranscript<BabyBearPoseidon2Config
         });
 
     let final_sum = q_coeffs.iter().zip(proof.stacking_openings.iter()).fold(
-        EF::ZERO,
+        SC::EF::ZERO,
         |acc, (q_coeff_vec, q_j_vec)| {
             acc + q_coeff_vec
                 .iter()
                 .zip(q_j_vec.iter())
-                .fold(EF::ZERO, |acc, (&q_coeff, &q_j)| {
+                .fold(SC::EF::ZERO, |acc, (&q_coeff, &q_j)| {
                     transcript.observe_ext(q_j);
                     acc + (q_coeff * q_j)
                 })
@@ -236,14 +238,20 @@ mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
-    use crate::{poseidon2::sponge::DuplexSponge, prover::stacked_pcs::StackedSlice};
+    use crate::{
+        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+        poseidon2::sponge::DuplexSponge,
+        prover::stacked_pcs::StackedSlice,
+    };
+
+    type SCV2 = BabyBearPoseidon2ConfigV2;
 
     const N_STACK: usize = 4;
     const L_SKIP: usize = 2;
 
     struct StackedReductionTestCase {
         pub transcript: DuplexSponge,
-        pub proof: StackingProof,
+        pub proof: StackingProof<SCV2>,
         pub layouts: Vec<StackedLayout>,
         pub need_rot_per_commit: Vec<Vec<bool>>,
         pub column_openings: Vec<Vec<Vec<EF>>>,
@@ -361,7 +369,7 @@ mod tests {
         let q_at_u = q(&u);
         transcript.observe_ext(q_at_u);
 
-        let proof = StackingProof {
+        let proof = StackingProof::<SCV2> {
             univariate_round_coeffs,
             sumcheck_round_polys,
             stacking_openings: vec![vec![q_at_u]],
@@ -381,7 +389,7 @@ mod tests {
     #[test]
     fn verify_single_column_test() {
         let mut test_case = generate_single_column_test_case();
-        verify_stacked_reduction(
+        verify_stacked_reduction::<SCV2, _>(
             &mut test_case.transcript,
             &test_case.proof,
             &test_case.layouts,
@@ -399,7 +407,7 @@ mod tests {
     fn single_column_univariate_round_negative_test() {
         let mut test_case = generate_single_column_test_case();
         test_case.proof.univariate_round_coeffs[0] += EF::ONE;
-        verify_stacked_reduction(
+        verify_stacked_reduction::<SCV2, _>(
             &mut test_case.transcript,
             &test_case.proof,
             &test_case.layouts,
@@ -417,7 +425,7 @@ mod tests {
     fn single_column_sumcheck_rounds_negative_test() {
         let mut test_case = generate_single_column_test_case();
         test_case.proof.sumcheck_round_polys[N_STACK - 1][0] += EF::ONE;
-        verify_stacked_reduction(
+        verify_stacked_reduction::<SCV2, _>(
             &mut test_case.transcript,
             &test_case.proof,
             &test_case.layouts,
@@ -435,7 +443,7 @@ mod tests {
     fn single_column_stacking_openings_negative_test() {
         let mut test_case = generate_single_column_test_case();
         test_case.proof.stacking_openings[0][0] += EF::ONE;
-        verify_stacked_reduction(
+        verify_stacked_reduction::<SCV2, _>(
             &mut test_case.transcript,
             &test_case.proof,
             &test_case.layouts,

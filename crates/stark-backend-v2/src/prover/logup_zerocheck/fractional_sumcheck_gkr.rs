@@ -11,19 +11,18 @@ use crate::{
         sumcheck::{fold_mle_evals, sumcheck_round_poly_evals},
         ColMajorMatrix,
     },
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF},
-    FiatShamirTranscript,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 
 /// Proof for fractional sumcheck protocol
-pub struct FracSumcheckProof<EF> {
+pub struct FracSumcheckProof<SC: StarkProtocolConfig> {
     /// The fractional sum p_0 / q_0
-    pub fractional_sum: (EF, EF),
+    pub fractional_sum: (SC::EF, SC::EF),
     /// The claims for p_j(0, rho), p_j(1, rho), q_j(0, rho), and q_j(1, rho) for each layer j > 0.
-    pub claims_per_layer: Vec<GkrLayerClaims>,
+    pub claims_per_layer: Vec<GkrLayerClaims<SC>>,
     /// Sumcheck polynomials for each layer, for each sumcheck round, given by their evaluations on
     /// {1, 2, 3}.
-    pub sumcheck_polys: Vec<Vec<[EF; 3]>>,
+    pub sumcheck_polys: Vec<Vec<[SC::EF; 3]>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, derive_new::new)]
@@ -57,15 +56,15 @@ impl<EF: Field> Add<Frac<EF>> for Frac<EF> {
 /// # Returns
 /// The fractional sumcheck proof and the final random evaluation vector.
 #[instrument(level = "info", skip_all)]
-pub fn fractional_sumcheck<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
+pub fn fractional_sumcheck<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
-    evals: &[Frac<EF>],
+    evals: &[Frac<SC::EF>],
     assert_zero: bool,
-) -> (FracSumcheckProof<EF>, Vec<EF>) {
+) -> (FracSumcheckProof<SC>, Vec<SC::EF>) {
     if evals.is_empty() {
         return (
             FracSumcheckProof {
-                fractional_sum: (EF::ZERO, EF::ONE),
+                fractional_sum: (SC::EF::ZERO, SC::EF::ONE),
                 claims_per_layer: vec![],
                 sumcheck_polys: vec![],
             },
@@ -78,7 +77,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     let mut sumcheck_polys = Vec::with_capacity(total_rounds);
 
     // segment tree: layer i=0,...,total_rounds starts at 2^i (index 0 unused)
-    let mut tree_evals: Vec<Frac<EF>> = vec![Frac::default(); 2 << total_rounds];
+    let mut tree_evals: Vec<Frac<SC::EF>> = vec![Frac::default(); 2 << total_rounds];
     tree_evals[(1 << total_rounds)..].copy_from_slice(evals);
 
     for node_idx in (1..(1 << total_rounds)).rev() {
@@ -86,20 +85,20 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     }
     let frac_sum = tree_evals[1];
     if assert_zero {
-        assert_eq!(frac_sum.p, EF::ZERO);
+        assert_eq!(frac_sum.p, SC::EF::ZERO);
     } else {
         transcript.observe_ext(frac_sum.p);
     }
     transcript.observe_ext(frac_sum.q);
 
     // Index i is for layer i+1
-    let mut claims_per_layer: Vec<GkrLayerClaims> = Vec::with_capacity(total_rounds);
+    let mut claims_per_layer: Vec<GkrLayerClaims<SC>> = Vec::with_capacity(total_rounds);
 
     // Process each GKR round
     // `j = round + 1` goes from `1, ..., total_rounds`
     //
     // Round `j = 1` is special since "sumcheck" is directly checked by verifier
-    claims_per_layer.push(GkrLayerClaims {
+    claims_per_layer.push(GkrLayerClaims::<SC> {
         p_xi_0: tree_evals[2].p,
         q_xi_0: tree_evals[2].q,
         p_xi_1: tree_evals[3].p,
@@ -129,7 +128,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
 
         // Columns are p_j0, q_j0, p_j1, q_j1
         // PERF: use a view instead of re-allocating memory
-        let mut pq_j_evals = EF::zero_vec(4 * eval_size);
+        let mut pq_j_evals = SC::EF::zero_vec(4 * eval_size);
         let segment = &tree_evals[2 * eval_size..4 * eval_size];
         for x in 0..eval_size {
             pq_j_evals[x] = segment[2 * x].p;
@@ -163,7 +162,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
                         [eq_xi * (p_prev + lambda * q_prev)]
                     },
                 );
-                let s_evals: [EF; 3] = s_evals.try_into().unwrap();
+                let s_evals: [SC::EF; 3] = s_evals.try_into().unwrap();
                 for &eval in &s_evals {
                     transcript.observe_ext(eval);
                 }
@@ -177,7 +176,7 @@ pub fn fractional_sumcheck<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
             }
             (round_polys_eval, r_vec)
         };
-        claims_per_layer.push(GkrLayerClaims {
+        claims_per_layer.push(GkrLayerClaims::<SC> {
             p_xi_0: pq_j_evals.column(0)[0],
             q_xi_0: pq_j_evals.column(1)[0],
             p_xi_1: pq_j_evals.column(2)[0],

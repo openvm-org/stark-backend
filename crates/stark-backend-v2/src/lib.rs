@@ -10,6 +10,7 @@ pub mod debug;
 pub mod dft;
 mod engine;
 pub mod keygen;
+pub mod merkle;
 pub mod poly_common;
 pub mod poseidon2;
 pub mod proof;
@@ -27,6 +28,7 @@ mod tests;
 pub use chip::*;
 pub use config::*;
 pub use engine::*;
+pub use merkle::*;
 pub use transcript::*;
 
 /// Common utility function for computing `n_logup` parameter in terms of `total_interactions`,

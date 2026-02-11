@@ -14,6 +14,7 @@ use openvm_stark_backend::{
 };
 
 use crate::{
+    baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
     keygen::{types::StarkProvingKeyV2, MultiStarkKeygenBuilderV2},
     prover::{
         ColMajorMatrix, DeviceDataTransporterV2, ProverBackendV2, ProvingContextV2,
@@ -25,6 +26,7 @@ use crate::{
 use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
 
 type SC = BabyBearPoseidon2Config;
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 // TODO[jpw]: move into StarkEngineV2::debug default implementation after `SC` is made generic.
 /// `airs` should be the full list of all AIRs, not just used AIRs.
@@ -79,7 +81,7 @@ pub fn debug_impl<PB: ProverBackendV2<Val = crate::baby_bear_poseidon2::F>, PD: 
 #[allow(clippy::too_many_arguments)]
 pub fn debug_constraints_and_interactions(
     airs: &[AirRef<SC>],
-    pk: &[&StarkProvingKeyV2],
+    pk: &[&StarkProvingKeyV2<SCV2>],
     inputs: &[AirProofRawInput<crate::baby_bear_poseidon2::F>],
 ) {
     USE_DEBUG_BUILDER.with(|debug| {

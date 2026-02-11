@@ -17,12 +17,12 @@ use crate::{
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
     baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
-    FiatShamirTranscript, WhirConfig,
+    FiatShamirTranscript, StarkProtocolConfig, WhirConfig,
 };
 
 type SCV2 = BabyBearPoseidon2ConfigV2;
 
-pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
+pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
     /// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables,
     /// at a single vector `u \in \Fext^n`.
     ///
@@ -38,10 +38,10 @@ pub trait WhirProver<PB: ProverBackendV2, PD, TS> {
         common_main_pcs_data: PB::PcsData,
         pre_cached_pcs_data_per_commit: Vec<Arc<PB::PcsData>>,
         u_cube: &[PB::Challenge],
-    ) -> WhirProof;
+    ) -> WhirProof<SC>;
 }
 
-impl<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>> WhirProver<CpuBackendV2<SCV2>, CpuDeviceV2, TS>
+impl<TS: FiatShamirTranscript<SCV2>> WhirProver<SCV2, CpuBackendV2<SCV2>, CpuDeviceV2, TS>
     for CpuDeviceV2
 {
     #[instrument(level = "info", skip_all)]
@@ -51,13 +51,13 @@ impl<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>> WhirProver<CpuBackendV
         common_main_pcs_data: StackedPcsData<F, Digest>,
         pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsData<F, Digest>>>,
         u_cube: &[EF],
-    ) -> WhirProof {
+    ) -> WhirProof<SCV2> {
         let params = self.config();
         let committed_mats = once(&common_main_pcs_data)
             .chain(pre_cached_pcs_data_per_commit.iter().map(|d| d.as_ref()))
             .map(|d| (&d.matrix, &d.tree))
             .collect_vec();
-        prove_whir_opening(
+        prove_whir_opening::<SCV2, _>(
             transcript,
             params.l_skip,
             params.log_blowup,
@@ -69,14 +69,20 @@ impl<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>> WhirProver<CpuBackendV
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
+pub fn prove_whir_opening<SC, TS>(
     transcript: &mut TS,
     l_skip: usize,
     log_blowup: usize,
     whir_params: &WhirConfig,
-    committed_mats: &[(&ColMajorMatrix<F>, &MerkleTree<F, Digest>)],
-    u: &[EF],
-) -> WhirProof {
+    committed_mats: &[(&ColMajorMatrix<SC::F>, &MerkleTree<SC::F, SC::Digest>)],
+    u: &[SC::EF],
+) -> WhirProof<SC>
+where
+    SC: StarkProtocolConfig,
+    SC::F: TwoAdicField + Ord,
+    SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
+    TS: FiatShamirTranscript<SC>,
+{
     // Sample randomness for algebraic batching.
     // We batch the codewords for \hat{q}_j together _before_ applying WHIR.
     let mu = transcript.sample_ext();
@@ -91,7 +97,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     let num_whir_rounds = whir_params.num_whir_rounds();
     let num_sumcheck_rounds = whir_params.num_sumcheck_rounds();
 
-    let mles: Vec<Vec<F>> = committed_mats
+    let mles: Vec<Vec<SC::F>> = committed_mats
         .par_iter()
         .flat_map(|(mat, _)| {
             mat.par_columns().map(|col| {
@@ -110,7 +116,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
         .map(|i| {
             mles.iter()
                 .zip(mu_powers.iter())
-                .fold(EF::ZERO, |acc, (mle_j, mu_j)| acc + *mu_j * mle_j[i])
+                .fold(SC::EF::ZERO, |acc, (mle_j, mu_j)| acc + *mu_j * mle_j[i])
         })
         .collect();
 
@@ -118,14 +124,14 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
     // evaluations on `H_m`.
     let mut w_evals = evals_mobius_eq_hypercube(u);
 
-    let mut whir_sumcheck_polys: Vec<[EF; 2]> = Vec::with_capacity(num_sumcheck_rounds);
+    let mut whir_sumcheck_polys: Vec<[SC::EF; 2]> = Vec::with_capacity(num_sumcheck_rounds);
     let mut codeword_commits = vec![];
     let mut ood_values = vec![];
     // per commitment, per whir query, per column
-    let mut initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>> = vec![vec![]; committed_mats.len()];
-    let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof>> = vec![vec![]; committed_mats.len()];
-    let mut codeword_opened_values: Vec<Vec<Vec<EF>>> = Vec::with_capacity(num_whir_rounds - 1);
-    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof>> = Vec::with_capacity(num_whir_rounds - 1);
+    let mut initial_round_opened_rows: Vec<Vec<Vec<Vec<SC::F>>>> = vec![vec![]; committed_mats.len()];
+    let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>> = vec![vec![]; committed_mats.len()];
+    let mut codeword_opened_values: Vec<Vec<Vec<SC::EF>>> = Vec::with_capacity(num_whir_rounds - 1);
+    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>> = Vec::with_capacity(num_whir_rounds - 1);
     let mut folding_pow_witnesses = Vec::with_capacity(num_sumcheck_rounds);
     let mut query_phase_pow_witnesses = Vec::with_capacity(num_whir_rounds);
     let mut rs_tree = None;
@@ -141,7 +147,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
             let s_deg = 2;
             let s_evals = (1..=s_deg)
                 .map(|x| {
-                    let x = F::from_usize(x);
+                    let x = SC::F::from_usize(x);
                     let hypercube_dim = m - round - 1;
                     (0..(1usize << hypercube_dim))
                         .map(|y| {
@@ -153,7 +159,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
                             let w_x = w_0 + (w_1 - w_0) * x;
                             f_x * w_x
                         })
-                        .fold(EF::ZERO, |acc, x| acc + x)
+                        .fold(SC::EF::ZERO, |acc, x| acc + x)
                 })
                 .collect_vec();
 
@@ -188,10 +194,10 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
             let dft = Radix2DitParallel::default();
             let mut g_coeffs = g_mle.coeffs().to_vec();
             debug_assert_eq!(g_coeffs.len(), 1 << (m - k_whir));
-            g_coeffs.resize(1 << (log_rs_domain_size - 1), EF::ZERO);
+            g_coeffs.resize(1 << (log_rs_domain_size - 1), SC::EF::ZERO);
             // `g: \mathcal{L}^{(2)} \to \mathbb F`
             let g_rs = dft.dft(g_coeffs);
-            let g_tree = MerkleTree::new(ColMajorMatrix::new(g_rs, 1), 1 << k_whir);
+            let g_tree = MerkleTree::new::<SC::H>(ColMajorMatrix::new(g_rs, 1), 1 << k_whir);
             let g_commit = g_tree.root();
             transcript.observe_commit(g_commit);
             codeword_commits.push(g_commit);
@@ -213,7 +219,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
         };
 
         // omega is generator of RS domain `\mathcal{L}^{(2^k)}`
-        let omega = F::two_adic_generator(log_rs_domain_size - k_whir);
+        let omega = SC::F::two_adic_generator(log_rs_domain_size - k_whir);
         let num_queries = round_params.num_queries;
         let mut query_indices = Vec::with_capacity(num_queries);
         query_phase_pow_witnesses.push(transcript.grind(whir_params.query_phase_pow_bits));
@@ -253,7 +259,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
                     initial_round_merkle_proofs[com_idx].push(proof);
                 }
             } else {
-                let tree: &MerkleTree<EF, Digest> = rs_tree.as_ref().unwrap();
+                let tree: &MerkleTree<SC::EF, SC::Digest> = rs_tree.as_ref().unwrap();
                 assert_eq!(tree.backing_matrix.width(), 1);
                 let opened_rows = tree
                     .get_opened_rows(index)
@@ -276,9 +282,9 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
 
         if !is_last_round {
             // Update \hat{w}
-            w_evals_accumulate::<EF, EF>(&mut w_evals, z_0.unwrap(), gamma);
+            w_evals_accumulate::<SC::EF, SC::EF>(&mut w_evals, z_0.unwrap(), gamma);
             for (z_i, gamma_pow) in zs.into_iter().zip(gamma.powers().skip(2)) {
-                w_evals_accumulate::<F, EF>(&mut w_evals, z_i, gamma_pow);
+                w_evals_accumulate::<SC::F, SC::EF>(&mut w_evals, z_i, gamma_pow);
             }
         }
 
@@ -286,7 +292,7 @@ pub fn prove_whir_opening<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
         log_rs_domain_size -= 1;
     }
 
-    WhirProof {
+    WhirProof::<SC> {
         whir_sumcheck_polys,
         codeword_commits,
         ood_values,

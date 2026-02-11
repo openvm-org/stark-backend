@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     parizip,
     prover::MatrixDimensions,
 };
-use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 
@@ -26,63 +26,67 @@ use crate::{
             batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round0_deg,
             sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
-        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
+        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProverBackendV2,
+        ProvingContextV2, StridedColMajorMatrixView,
     },
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+    StarkProtocolConfig,
 };
 
-type SCV2 = BabyBearPoseidon2ConfigV2;
-
-pub struct LogupZerocheckCpu<'a> {
-    pub alpha_logup: EF,
-    pub beta_pows: Vec<EF>,
+pub struct LogupZerocheckCpu<'a, SC: StarkProtocolConfig> {
+    pub alpha_logup: SC::EF,
+    pub beta_pows: Vec<SC::EF>,
 
     pub l_skip: usize,
     pub n_logup: usize,
     pub n_max: usize,
 
-    pub omega_skip: F,
-    pub omega_skip_pows: Vec<F>,
+    pub omega_skip: SC::F,
+    pub omega_skip_pows: Vec<SC::F>,
 
     pub interactions_layout: StackedLayout,
-    pub(crate) eval_helpers: Vec<EvalHelper<'a, F>>,
+    pub(crate) eval_helpers: Vec<EvalHelper<'a, SC::F>>,
     /// Max constraint degree across constraints and interactions
     pub constraint_degree: usize,
     pub n_per_trace: Vec<isize>,
     max_num_constraints: usize,
 
     // Available after GKR:
-    pub xi: Vec<EF>,
-    lambda_pows: Vec<EF>,
+    pub xi: Vec<SC::EF>,
+    lambda_pows: Vec<SC::EF>,
     // T -> segment tree of eq(xi[j..1+n_T]) for j=1..=n_T in _reverse_ layout
-    eq_xi_per_trace: Vec<Vec<EF>>,
-    eq_3b_per_trace: Vec<Vec<EF>>,
-    sels_per_trace_base: Vec<ColMajorMatrix<F>>,
+    eq_xi_per_trace: Vec<Vec<SC::EF>>,
+    eq_3b_per_trace: Vec<Vec<SC::EF>>,
+    sels_per_trace_base: Vec<ColMajorMatrix<SC::F>>,
     // After univariate round 0:
-    pub mat_evals_per_trace: Vec<Vec<ColMajorMatrix<EF>>>,
-    pub sels_per_trace: Vec<ColMajorMatrix<EF>>,
+    pub mat_evals_per_trace: Vec<Vec<ColMajorMatrix<SC::EF>>>,
+    pub sels_per_trace: Vec<ColMajorMatrix<SC::EF>>,
     // Stores \hat{f}(\vec r_n) * r_{n+1} .. r_{round-1} for polys f that are "done" in the batch
     // sumcheck
-    pub(crate) zerocheck_tilde_evals: Vec<EF>,
-    pub(crate) logup_tilde_evals: Vec<[EF; 2]>,
+    pub(crate) zerocheck_tilde_evals: Vec<SC::EF>,
+    pub(crate) logup_tilde_evals: Vec<[SC::EF; 2]>,
 
     // In round `j`, contains `s_{j-1}(r_{j-1})`
-    pub(crate) prev_s_eval: EF,
-    pub(crate) eq_ns: Vec<EF>,
-    pub(crate) eq_sharp_ns: Vec<EF>,
+    pub(crate) prev_s_eval: SC::EF,
+    pub(crate) eq_ns: Vec<SC::EF>,
+    pub(crate) eq_sharp_ns: Vec<SC::EF>,
 }
 
-impl<'a> LogupZerocheckCpu<'a> {
+impl<'a, SC: StarkProtocolConfig> LogupZerocheckCpu<'a, SC>
+where
+    SC::F: TwoAdicField,
+    SC::EF: TwoAdicField + ExtensionField<SC::F>,
+    CpuBackendV2<SC>: ProverBackendV2<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
+{
     pub fn new(
-        pk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
-        ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
+        pk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>>,
+        ctx: &ProvingContextV2<CpuBackendV2<SC>>,
         n_logup: usize,
         interactions_layout: StackedLayout,
-        alpha_logup: EF,
-        beta_logup: EF,
+        alpha_logup: SC::EF,
+        beta_logup: SC::EF,
     ) -> Self {
         let l_skip = pk.params.l_skip;
-        let omega_skip = F::two_adic_generator(l_skip);
+        let omega_skip = SC::F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
         let num_airs_present = ctx.per_trace.len();
 
@@ -111,19 +115,19 @@ impl<'a> LogupZerocheckCpu<'a> {
             .collect_vec();
         let n_max: usize = n_per_trace[0].max(0) as usize;
 
-        let eval_helpers: Vec<EvalHelper<F>> = ctx
+        let eval_helpers: Vec<EvalHelper<SC::F>> = ctx
             .per_trace
             .iter()
             .map(|(air_idx, air_ctx)| {
                 let pk = &pk.per_air[*air_idx];
                 let constraints = &pk.vk.symbolic_constraints.constraints;
                 let public_values = air_ctx.public_values.clone();
-                let preprocessed_trace =
-                    pk.preprocessed_data.as_ref().map(|cd| cd.data.mat_view(0));
-                let partitioned_main_trace = air_ctx
+                let preprocessed_trace: Option<StridedColMajorMatrixView<'_, SC::F>> =
+                    pk.preprocessed_data.as_ref().map(|cd| cd.trace.as_view().into());
+                let partitioned_main_trace: Vec<StridedColMajorMatrixView<'_, SC::F>> = air_ctx
                     .cached_mains
                     .iter()
-                    .map(|cd| cd.data.mat_view(0))
+                    .map(|cd| cd.trace.as_view().into())
                     .chain(iter::once(air_ctx.common_main.as_view().into()))
                     .collect_vec();
                 let constraint_degree = pk.vk.max_constraint_degree;
@@ -174,8 +178,8 @@ impl<'a> LogupZerocheckCpu<'a> {
             .max()
             .unwrap_or(0);
 
-        let zerocheck_tilde_evals = vec![EF::ZERO; num_airs_present];
-        let logup_tilde_evals = vec![[EF::ZERO; 2]; num_airs_present];
+        let zerocheck_tilde_evals = vec![SC::EF::ZERO; num_airs_present];
+        let logup_tilde_evals = vec![[SC::EF::ZERO; 2]; num_airs_present];
         Self {
             alpha_logup,
             beta_pows,
@@ -198,7 +202,7 @@ impl<'a> LogupZerocheckCpu<'a> {
             sels_per_trace: vec![],
             zerocheck_tilde_evals,
             logup_tilde_evals,
-            prev_s_eval: EF::ZERO,
+            prev_s_eval: SC::EF::ZERO,
             eq_ns: Vec::with_capacity(n_max + 1),
             eq_sharp_ns: Vec::with_capacity(n_max + 1),
         }
@@ -212,9 +216,9 @@ impl<'a> LogupZerocheckCpu<'a> {
     /// form for uniformity and debugging since this interpolation is inexpensive.
     pub fn sumcheck_uni_round0_polys(
         &mut self,
-        ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
-        lambda: EF,
-    ) -> Vec<UnivariatePoly<EF>> {
+        ctx: &ProvingContextV2<CpuBackendV2<SC>>,
+        lambda: SC::EF,
+    ) -> Vec<UnivariatePoly<SC::EF>> {
         let n_logup = self.n_logup;
         let l_skip = self.l_skip;
         let xi = &self.xi;
@@ -234,7 +238,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                 if helper.interactions.is_empty() {
                     return vec![];
                 }
-                let mut b_vec = vec![F::ZERO; n_logup - n_lift];
+                let mut b_vec = vec![SC::F::ZERO; n_logup - n_lift];
                 (0..helper.interactions.len())
                     .map(|i| {
                         // PERF[jpw]: interactions_layout.get is linear
@@ -243,7 +247,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                         debug_assert!(stacked_idx.trailing_zeros() as usize >= n_lift + l_skip);
                         let mut b_int = stacked_idx >> (l_skip + n_lift);
                         for b in &mut b_vec {
-                            *b = F::from_bool(b_int & 1 == 1);
+                            *b = SC::F::from_bool(b_int & 1 == 1);
                             b_int >>= 1;
                         }
                         eval_eq_mle(&xi[l_skip + n_lift..l_skip + n_logup], &b_vec)
@@ -280,12 +284,12 @@ impl<'a> LogupZerocheckCpu<'a> {
                 let log_height = l_skip.checked_add_signed(n).unwrap();
                 let height = 1 << log_height;
                 let lifted_height = height.max(1 << l_skip);
-                let mut mat = F::zero_vec(3 * lifted_height);
-                mat[lifted_height..2 * lifted_height].fill(F::ONE);
+                let mut mat = SC::F::zero_vec(3 * lifted_height);
+                mat[lifted_height..2 * lifted_height].fill(SC::F::ONE);
                 for i in (0..lifted_height).step_by(height) {
-                    mat[i] = F::ONE; // is_first
-                    mat[lifted_height + i + height - 1] = F::ZERO; // is_transition
-                    mat[2 * lifted_height + i + height - 1] = F::ONE; // is_last
+                    mat[i] = SC::F::ONE; // is_first
+                    mat[lifted_height + i + height - 1] = SC::F::ZERO; // is_transition
+                    mat[2 * lifted_height + i + height - 1] = SC::F::ONE; // is_last
                 }
                 ColMajorMatrix::new(mat, 3)
             })
@@ -323,7 +327,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                     |z, x, row_parts| {
                         let eq = eq_xi[x];
                         let constraint_eval = helper.acc_constraints(row_parts, &self.lambda_pows);
-                        let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
+                        let zerofier = z.exp_power_of_2(l_skip) - SC::F::ONE;
                         [eq * constraint_eval * zerofier.inverse()]
                     },
                 );
@@ -331,7 +335,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                 let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_deg);
                 let coeffs = (0..=sp_0_deg)
                     .map(|i| {
-                        let mut c = -*q.coeffs().get(i).unwrap_or(&EF::ZERO);
+                        let mut c = -*q.coeffs().get(i).unwrap_or(&SC::EF::ZERO);
                         if i >= 1 << l_skip {
                             c += q.coeffs()[i - (1 << l_skip)];
                         }
@@ -339,8 +343,8 @@ impl<'a> LogupZerocheckCpu<'a> {
                     })
                     .collect_vec();
                 debug_assert_eq!(
-                    coeffs.iter().step_by(1 << l_skip).copied().sum::<EF>(),
-                    EF::ZERO,
+                    coeffs.iter().step_by(1 << l_skip).copied().sum::<SC::EF>(),
+                    SC::EF::ZERO,
                     "Zerocheck sum is not zero for air_id: {}",
                     ctx.per_trace[trace_idx].0
                 );
@@ -369,7 +373,7 @@ impl<'a> LogupZerocheckCpu<'a> {
                 let mut parts = vec![(sels.into(), false)];
                 parts.extend_from_slice(mats);
                 let norm_factor_denom = 1 << l_skip.saturating_sub(log_height);
-                let norm_factor = F::from_usize(norm_factor_denom).inverse();
+                let norm_factor = SC::F::from_usize(norm_factor_denom).inverse();
 
                 // degree is constraint_degree + 1 due to eq term
                 let [mut numer, denom] = sumcheck_uni_round0_poly(
@@ -397,7 +401,7 @@ impl<'a> LogupZerocheckCpu<'a> {
     /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
     /// Folding _could_ directly mutate inplace the trace matrices in `ctx` as they will not be
     /// needed after this.
-    pub fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<CpuBackendV2<SCV2>>, r_0: EF) {
+    pub fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<CpuBackendV2<SC>>, r_0: SC::EF) {
         let l_skip = self.l_skip;
         // "Fold" all PLE evaluations by interpolating and evaluating at `r_0`.
         // NOTE: after this folding, \hat{T} and \hat{T_{rot}} will be treated as completely
@@ -430,10 +434,10 @@ impl<'a> LogupZerocheckCpu<'a> {
     /// Returns length `3 * num_airs_present` polynomials, each polynomial either evaluated at
     /// `1,...,deg(s')` or at `1` if a linear term (terms in front-loaded sumcheck that have reached
     /// exhaustion)
-    pub fn sumcheck_polys_eval(&mut self, round: usize, r_prev: EF) -> Vec<Vec<EF>> {
+    pub fn sumcheck_polys_eval(&mut self, round: usize, r_prev: SC::EF) -> Vec<Vec<SC::EF>> {
         // sp = s'
         let sp_deg = self.constraint_degree;
-        let sp_zerocheck_evals: Vec<Vec<EF>> = parizip!(
+        let sp_zerocheck_evals: Vec<Vec<SC::EF>> = parizip!(
             &self.eval_helpers,
             &mut self.zerocheck_tilde_evals,
             &self.n_per_trace,
@@ -476,7 +480,7 @@ impl<'a> LogupZerocheckCpu<'a> {
         })
         .collect();
 
-        let sp_logup_evals: Vec<Vec<EF>> = parizip!(
+        let sp_logup_evals: Vec<Vec<SC::EF>> = parizip!(
             &self.eval_helpers,
             &mut self.logup_tilde_evals,
             &self.n_per_trace,
@@ -487,11 +491,11 @@ impl<'a> LogupZerocheckCpu<'a> {
         )
         .flat_map(|(helper, tilde_eval, &n, mats, sels, eq_xi_tree, eq_3bs)| {
             if helper.interactions.is_empty() {
-                return [vec![EF::ZERO; sp_deg], vec![EF::ZERO; sp_deg]];
+                return [vec![SC::EF::ZERO; sp_deg], vec![SC::EF::ZERO; sp_deg]];
             }
             let n_lift = n.max(0) as usize;
             let norm_factor_denom = 1 << (-n).max(0);
-            let norm_factor = F::from_usize(norm_factor_denom).inverse();
+            let norm_factor = SC::F::from_usize(norm_factor_denom).inverse();
             if round > n_lift {
                 if round == n_lift + 1 {
                     // Evaluate \hat{f}(\vec r_n)
@@ -539,7 +543,7 @@ impl<'a> LogupZerocheckCpu<'a> {
             .collect()
     }
 
-    pub fn fold_mle_evals(&mut self, round: usize, r_round: EF) {
+    pub fn fold_mle_evals(&mut self, round: usize, r_round: SC::EF) {
         self.mat_evals_per_trace = take(&mut self.mat_evals_per_trace)
             .into_iter()
             .map(|mats| batch_fold_mle_evals(mats, r_round))
@@ -601,7 +605,7 @@ impl<'a> LogupZerocheckCpu<'a> {
         }
     }
 
-    pub fn into_column_openings(&mut self) -> Vec<Vec<Vec<EF>>> {
+    pub fn into_column_openings(&mut self) -> Vec<Vec<Vec<SC::EF>>> {
         let num_airs_present = self.mat_evals_per_trace.len();
         let mut column_openings = Vec::with_capacity(num_airs_present);
         // At the end, we've folded all MLEs so they only have one row equal to evaluation at `\vec
@@ -613,7 +617,7 @@ impl<'a> LogupZerocheckCpu<'a> {
         {
             // For column openings, we pop common_main (and common_main_rot when present) and put it
             // at the front.
-            let openings_of_air: Vec<Vec<EF>> = if helper.needs_next {
+            let openings_of_air: Vec<Vec<SC::EF>> = if helper.needs_next {
                 let common_main_rot = mat_evals.pop().unwrap();
                 let common_main = mat_evals.pop().unwrap();
                 iter::once(&[common_main, common_main_rot] as &[_])

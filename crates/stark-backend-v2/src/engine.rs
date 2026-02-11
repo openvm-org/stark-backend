@@ -1,7 +1,4 @@
 // Replace engine.rs in v1
-// TODO[jpw]: everything is currently assuming fixed types for:
-// - F, EF, Digest, SystemParams
-// We will make these generic in the future
 
 use std::marker::PhantomData;
 
@@ -9,7 +6,7 @@ use openvm_stark_backend::{prover::Prover, AirRef};
 use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
 
 use crate::{
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
+    baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
     debug::debug_impl,
     keygen::{
         types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
@@ -26,11 +23,13 @@ use crate::{
     FiatShamirTranscript, StarkProtocolConfig, SystemParams,
 };
 
+type SCV2 = BabyBearPoseidon2ConfigV2;
+
 /// Data for verifying a Stark proof.
 #[derive(Debug)]
-pub struct VerificationDataV2 {
-    pub vk: MultiStarkVerifyingKeyV2,
-    pub proof: Proof,
+pub struct VerificationDataV2<SC: StarkProtocolConfig> {
+    pub vk: MultiStarkVerifyingKeyV2<SC>,
+    pub proof: Proof<SC>,
 }
 
 /// A helper trait to collect the different steps in multi-trace STARK
@@ -40,9 +39,9 @@ where
     <Self::PD as MultiRapProver<Self::PB, Self::TS>>::Artifacts:
         Into<<Self::PD as OpeningProverV2<Self::PB, Self::TS>>::OpeningPoints>,
     <Self::PD as MultiRapProver<Self::PB, Self::TS>>::PartialProof:
-        Into<(GkrProof, BatchConstraintProof)>,
+        Into<(GkrProof<Self::SC>, BatchConstraintProof<Self::SC>)>,
     <Self::PD as OpeningProverV2<Self::PB, Self::TS>>::OpeningProof:
-        Into<(StackingProof, WhirProof)>,
+        Into<(StackingProof<Self::SC>, WhirProof<Self::SC>)>,
 {
     type SC: StarkProtocolConfig;
     type PB: ProverBackendV2<
@@ -51,11 +50,7 @@ where
         Commitment = <Self::SC as StarkProtocolConfig>::Digest,
     >;
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::PB>;
-    // TODO[jpw]: remove the concrete `FiatShamirTranscript<BabyBearPoseidon2ConfigV2>` bound
-    // once internal prover/verifier functions are made generic in SC (Phase 2).
-    type TS: FiatShamirTranscript<Self::SC>
-        + FiatShamirTranscript<BabyBearPoseidon2ConfigV2>
-        + Default;
+    type TS: FiatShamirTranscript<Self::SC> + Default;
 
     fn config(&self) -> &SystemParams {
         self.device().config()
@@ -68,16 +63,16 @@ where
     fn prover_from_transcript(
         &self,
         transcript: Self::TS,
-    ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS>;
+    ) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS>;
 
-    fn prover(&self) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
+    fn prover(&self) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS> {
         self.prover_from_transcript(Self::TS::default())
     }
 
     fn keygen(
         &self,
         airs: &[AirRef<BabyBearPoseidon2Config>],
-    ) -> (MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2) {
+    ) -> (MultiStarkProvingKeyV2<SCV2>, MultiStarkVerifyingKeyV2<SCV2>) {
         let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config().clone());
         for air in airs {
             keygen_builder.add_air(air.clone());
@@ -92,17 +87,28 @@ where
         &self,
         pk: &DeviceMultiStarkProvingKeyV2<Self::PB>,
         ctx: ProvingContextV2<Self::PB>,
-    ) -> Proof
+    ) -> Proof<Self::SC>
     where
-        Self::PB: ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
+        Self::PB: ProverBackendV2<
+            Val = <Self::SC as StarkProtocolConfig>::F,
+            Challenge = <Self::SC as StarkProtocolConfig>::EF,
+            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
+        >,
     {
         let mut prover = self.prover();
         prover.prove(pk, ctx)
     }
 
-    fn verify(&self, vk: &MultiStarkVerifyingKeyV2, proof: &Proof) -> Result<(), VerifierError> {
+    fn verify(
+        &self,
+        vk: &MultiStarkVerifyingKeyV2<Self::SC>,
+        proof: &Proof<Self::SC>,
+    ) -> Result<(), VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
+    where
+        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
+    {
         let mut transcript = Self::TS::default();
-        verify(vk, proof, &mut transcript)
+        verify::<Self::SC, _>(vk, proof, &mut transcript)
     }
 
     /// The indexing of AIR ID in `ctx` should be consistent with the order of `airs`. In
@@ -116,18 +122,17 @@ where
         &self,
         airs: Vec<AirRef<BabyBearPoseidon2Config>>,
         ctxs: Vec<AirProvingContextV2<Self::PB>>,
-    ) -> Result<VerificationDataV2, VerifierError>
+    ) -> Result<
+        VerificationDataV2<Self::SC>,
+        VerifierError<<Self::SC as StarkProtocolConfig>::EF>,
+    >
     where
-        Self::PB: ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
-    {
-        let (pk, vk) = self.keygen(&airs);
-        let device = self.prover().device;
-        let d_pk = device.transport_pk_to_device(&pk);
-        let ctx = ProvingContextV2::new(ctxs.into_iter().enumerate().collect());
-        let proof = self.prove(&d_pk, ctx);
-        self.verify(&vk, &proof)?;
-        Ok(VerificationDataV2 { vk, proof })
-    }
+        Self::PB: ProverBackendV2<
+            Val = <Self::SC as StarkProtocolConfig>::F,
+            Challenge = <Self::SC as StarkProtocolConfig>::EF,
+            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
+        >,
+        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField;
 }
 
 pub struct BabyBearPoseidon2CpuEngineV2<TS = DuplexSponge> {
@@ -160,12 +165,37 @@ where
     fn prover_from_transcript(
         &self,
         transcript: TS,
-    ) -> CoordinatorV2<Self::PB, Self::PD, Self::TS> {
+    ) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS> {
         CoordinatorV2::new(CpuBackendV2::new(), self.device.clone(), transcript)
     }
 
     fn debug(&self, airs: &[AirRef<BabyBearPoseidon2Config>], ctx: &ProvingContextV2<Self::PB>) {
         debug_impl::<Self::PB, Self::PD>(self.config().clone(), self.device(), airs, ctx);
+    }
+
+    fn run_test(
+        &self,
+        airs: Vec<AirRef<BabyBearPoseidon2Config>>,
+        ctxs: Vec<AirProvingContextV2<Self::PB>>,
+    ) -> Result<
+        VerificationDataV2<Self::SC>,
+        VerifierError<<Self::SC as StarkProtocolConfig>::EF>,
+    >
+    where
+        Self::PB: ProverBackendV2<
+            Val = <Self::SC as StarkProtocolConfig>::F,
+            Challenge = <Self::SC as StarkProtocolConfig>::EF,
+            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
+        >,
+        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
+    {
+        let (pk, vk) = self.keygen(&airs);
+        let device = self.prover().device;
+        let d_pk = device.transport_pk_to_device(&pk);
+        let ctx = ProvingContextV2::new(ctxs.into_iter().enumerate().collect());
+        let proof = self.prove(&d_pk, ctx);
+        self.verify(&vk, &proof)?;
+        Ok(VerificationDataV2 { vk, proof })
     }
 }
 

@@ -19,18 +19,20 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
     keygen::types::{
         KeygenError, MultiStarkProvingKeyV2, MultiStarkVerifyingKey0V2, StarkProvingKeyV2,
         StarkVerifyingKeyV2, StarkVerifyingParamsV2, VerifierSinglePreprocessedData,
     },
-    poseidon2::sponge::poseidon2_hash_slice,
+    poseidon2::sponge::{poseidon2_hash_slice, Poseidon2Hasher},
     prover::{
         stacked_pcs::{stacked_commit, StackedPcsData},
         ColMajorMatrix,
     },
-    baby_bear_poseidon2::{Digest, F},
     SystemParams,
 };
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 pub mod types;
 
@@ -77,7 +79,7 @@ impl MultiStarkKeygenBuilderV2 {
 
     /// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
-    pub fn generate_pk(self) -> Result<MultiStarkProvingKeyV2, KeygenError> {
+    pub fn generate_pk(self) -> Result<MultiStarkProvingKeyV2<SCV2>, KeygenError> {
         let max_constraint_degree = self.config.max_constraint_degree;
         let pk_per_air: Vec<_> = self
             .partitioned_airs
@@ -176,7 +178,7 @@ impl MultiStarkKeygenBuilderV2 {
             threshold: log_up_security_params.max_interaction_count,
         });
 
-        let pre_vk: MultiStarkVerifyingKey0V2 = MultiStarkVerifyingKey0V2 {
+        let pre_vk: MultiStarkVerifyingKey0V2<SCV2> = MultiStarkVerifyingKey0V2 {
             params: self.config.clone(),
             per_air: pk_per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: trace_height_constraints.clone(),
@@ -214,7 +216,7 @@ impl AirKeygenBuilderV2 {
     pub fn generate_pk(
         self,
         max_constraint_degree: usize,
-    ) -> Result<StarkProvingKeyV2, KeygenError> {
+    ) -> Result<StarkProvingKeyV2<SCV2>, KeygenError> {
         let air_name = self.air.name();
 
         let symbolic_builder = self.get_symbolic_builder();
@@ -290,7 +292,7 @@ impl PrepKeygenDataV2 {
         let preprocessed_trace = BaseAir::<F>::preprocessed_trace(air);
         let vpdata_opt = preprocessed_trace.map(|trace| {
             let trace = ColMajorMatrix::from_row_major(&trace);
-            let (commit, data) = stacked_commit(
+            let (commit, data) = stacked_commit::<Poseidon2Hasher>(
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,

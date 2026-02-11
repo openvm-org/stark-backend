@@ -1,7 +1,14 @@
+use core::fmt::Debug;
+
 use getset::Getters;
 use openvm_stark_backend::interaction::LogUpSecurityParameters;
 use p3_field::{BasedVectorSpace, ExtensionField, PrimeField64, TwoAdicField};
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    codec::{Decode, Encode},
+    merkle::MerkleHasher,
+};
 
 /// Trait that holds the associated types for the SWIRL protocol. These are the types needed by the
 /// verifier and must be independent of the prover backend.
@@ -14,13 +21,25 @@ use serde::{Deserialize, Serialize};
 /// differ between prover and verifier and the verifier may further employ different implementations
 /// for logging or debugging purposes. The trait controlling concrete implementations of the
 /// transcript is specified by [`FiatShamirTranscript`](crate::FiatShamirTranscript).
-pub trait StarkProtocolConfig {
+pub trait StarkProtocolConfig: 'static {
     /// The prime base field.
-    type F: TwoAdicField + PrimeField64;
+    type F: TwoAdicField + PrimeField64 + Encode + Decode;
     /// The extension field, used for random challenges.
-    type EF: ExtensionField<Self::F>;
+    type EF: ExtensionField<Self::F> + Encode + Decode;
     /// The digest type used for commitments.
-    type Digest: Copy + Send + Sync;
+    type Digest: Copy
+        + Send
+        + Sync
+        + Debug
+        + Default
+        + PartialEq
+        + Eq
+        + Serialize
+        + for<'de> Deserialize<'de>
+        + Encode
+        + Decode;
+    /// The Merkle tree hasher.
+    type H: MerkleHasher<F = Self::F, Digest = Self::Digest>;
 
     /// Degree of the extension field.
     const D_EF: usize = <Self::EF as BasedVectorSpace<Self::F>>::DIMENSION;

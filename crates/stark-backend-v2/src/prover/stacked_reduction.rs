@@ -8,6 +8,8 @@ use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use tracing::{debug, instrument};
 
+use p3_field::ExtensionField;
+
 use crate::{
     poly_common::{eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, UnivariatePoly},
     proof::StackingProof,
@@ -20,11 +22,8 @@ use crate::{
         },
         ColMajorMatrix, ColMajorMatrixView, CpuBackendV2, CpuDeviceV2, MatrixView, ProverBackendV2,
     },
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
-    FiatShamirTranscript,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
-
-type SCV2 = BabyBearPoseidon2ConfigV2;
 
 /// Helper trait for proving the reduction of column opening claims and column rotation opening
 /// claims to opening claims of column polynomials of the stacked matrix.
@@ -66,17 +65,18 @@ pub trait StackedReductionProver<'a, PB: ProverBackendV2, PD> {
 /// The `stacked_matrix, stacked_layout` should be the result of stacking the `traces` with
 /// parameters `l_skip` and `n_stack`.
 #[instrument(level = "info", skip_all)]
-pub fn prove_stacked_opening_reduction<'a, PB, PD, TS, SRP>(
+pub fn prove_stacked_opening_reduction<'a, SC, PB, PD, TS, SRP>(
     device: &'a PD,
     transcript: &mut TS,
     n_stack: usize,
     stacked_per_commit: Vec<&'a PB::PcsData>,
     need_rot_per_commit: Vec<Vec<bool>>,
     r: &[PB::Challenge],
-) -> (StackingProof, Vec<PB::Challenge>)
+) -> (StackingProof<SC>, Vec<PB::Challenge>)
 where
-    PB: ProverBackendV2<Val = F, Challenge = EF>,
-    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>,
+    SC: StarkProtocolConfig,
+    PB: ProverBackendV2<Val = SC::F, Challenge = SC::EF>,
+    TS: FiatShamirTranscript<SC>,
     SRP: StackedReductionProver<'a, PB, PD>,
 {
     // Batching randomness
@@ -119,7 +119,7 @@ where
             transcript.observe_ext(claim);
         }
     }
-    let proof = StackingProof {
+    let proof = StackingProof::<SC> {
         univariate_round_coeffs: s_0.0,
         sumcheck_round_polys,
         stacking_openings,
@@ -127,25 +127,25 @@ where
     (proof, u_vec)
 }
 
-pub struct StackedReductionCpu<'a> {
+pub struct StackedReductionCpu<'a, SC: StarkProtocolConfig> {
     l_skip: usize,
-    omega_skip: F,
+    omega_skip: SC::F,
 
-    r_0: EF,
-    lambda_pows: Vec<EF>,
-    eq_const: EF,
+    r_0: SC::EF,
+    lambda_pows: Vec<SC::EF>,
+    eq_const: SC::EF,
 
-    stacked_per_commit: Vec<&'a StackedPcsData<F, Digest>>,
+    stacked_per_commit: Vec<&'a StackedPcsData<SC::F, SC::Digest>>,
     trace_views: Vec<TraceViewMeta>,
     ht_diff_idxs: Vec<usize>,
 
-    eq_r_per_lht: HashMap<usize, ColMajorMatrix<EF>>,
+    eq_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>>,
 
     // After round 0:
-    k_rot_r_per_lht: HashMap<usize, ColMajorMatrix<EF>>,
-    q_evals: Vec<ColMajorMatrix<EF>>,
+    k_rot_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>>,
+    q_evals: Vec<ColMajorMatrix<SC::EF>>,
     /// Stores eq(u[1+n_T..round-1], b_{T,j}[..round-n_T-1])
-    eq_ub_per_trace: Vec<EF>,
+    eq_ub_per_trace: Vec<SC::EF>,
 }
 
 struct TraceViewMeta {
@@ -155,16 +155,27 @@ struct TraceViewMeta {
     lambda_rot_idx: Option<usize>,
 }
 
-impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for StackedReductionCpu<'a> {
+impl<'a, SC: StarkProtocolConfig> StackedReductionProver<'a, CpuBackendV2<SC>, CpuDeviceV2>
+    for StackedReductionCpu<'a, SC>
+where
+    SC::F: TwoAdicField,
+    SC::EF: TwoAdicField + ExtensionField<SC::F>,
+    CpuBackendV2<SC>: ProverBackendV2<
+        Val = SC::F,
+        Challenge = SC::EF,
+        PcsData = StackedPcsData<SC::F, SC::Digest>,
+        Matrix = ColMajorMatrix<SC::F>,
+    >,
+{
     fn new(
         device: &CpuDeviceV2,
-        stacked_per_commit: Vec<&'a StackedPcsData<F, Digest>>,
+        stacked_per_commit: Vec<&'a StackedPcsData<SC::F, SC::Digest>>,
         need_rot_per_commit: Vec<Vec<bool>>,
-        r: &[EF],
-        lambda: EF,
+        r: &[SC::EF],
+        lambda: SC::EF,
     ) -> Self {
         let l_skip = device.config().l_skip;
-        let omega_skip = F::two_adic_generator(l_skip);
+        let omega_skip = SC::F::two_adic_generator(l_skip);
 
         let mut trace_views = Vec::new();
         let mut lambda_idx = 0usize;
@@ -191,7 +202,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
         let lambda_pows = lambda.powers().take(lambda_idx).collect_vec();
 
         let mut ht_diff_idxs = Vec::new();
-        let mut eq_r_per_lht: HashMap<usize, ColMajorMatrix<EF>> = HashMap::new();
+        let mut eq_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>> = HashMap::new();
         let mut last_height = 0;
         for (i, tv) in trace_views.iter().enumerate() {
             let n_lift = tv.slice.log_height().saturating_sub(l_skip);
@@ -206,7 +217,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
         ht_diff_idxs.push(trace_views.len());
 
         let eq_const = eval_eq_uni_at_one(l_skip, r[0] * omega_skip);
-        let eq_ub_per_trace = vec![EF::ONE; trace_views.len()];
+        let eq_ub_per_trace = vec![SC::EF::ONE; trace_views.len()];
 
         Self {
             l_skip,
@@ -224,7 +235,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
         }
     }
 
-    fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<EF> {
+    fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<SC::EF> {
         let l_skip = self.l_skip;
         let omega_skip = self.omega_skip;
         // +1 from eq term
@@ -296,7 +307,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
                     let eq = eq_uni_r0 * eq_cube;
                     let k_rot =
                         eq_uni_r0_rot * eq_cube + self.eq_const * eq_uni_1 * (k_rot_cube - eq_cube);
-                    zip(t_window, evals).fold([EF::ZERO; 2], |mut acc, (tv, eval)| {
+                    zip(t_window, evals).fold([SC::EF::ZERO; 2], |mut acc, (tv, eval)| {
                         let q = eval[0];
                         acc[0] += self.lambda_pows[tv.lambda_eq_idx] * eq * q * ind;
                         if let Some(rot_idx) = tv.lambda_rot_idx {
@@ -308,12 +319,12 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
             })
             .collect();
         let s_0_coeffs = (0..=s_0_deg)
-            .map(|i| s_0_polys.iter().map(|evals| evals.coeffs()[i]).sum::<EF>())
+            .map(|i| s_0_polys.iter().map(|evals| evals.coeffs()[i]).sum::<SC::EF>())
             .collect_vec();
         UnivariatePoly::new(s_0_coeffs)
     }
 
-    fn fold_ple_evals(&mut self, u_0: EF) {
+    fn fold_ple_evals(&mut self, u_0: SC::EF) {
         let l_skip = self.l_skip;
         let r_0 = self.r_0;
         let omega_skip = self.omega_skip;
@@ -362,7 +373,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
             .collect();
     }
 
-    fn batch_sumcheck_poly_eval(&mut self, round: usize, _u_prev: EF) -> [EF; 2] {
+    fn batch_sumcheck_poly_eval(&mut self, round: usize, _u_prev: SC::EF) -> [SC::EF; 2] {
         let l_skip = self.l_skip;
         let s_deg = 2;
         // We want to compute algebraic batching, via \lambda,
@@ -414,7 +425,7 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
                     evals
                         .iter()
                         .enumerate()
-                        .fold([EF::ZERO; 2], |mut acc, (i, eval)| {
+                        .fold([SC::EF::ZERO; 2], |mut acc, (i, eval)| {
                             let t_idx = window[0] + i;
                             let tv = &self.trace_views[t_idx];
                             let q = eval[0];
@@ -422,15 +433,15 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
                             let (eq, k_rot) = if round > n_lift {
                                 // Extra contribution of eq(X, b_{T,j}[round-n_T-1])
                                 let b = (tv.slice.row_idx >> (l_skip + round - 1)) & 1;
-                                eq_ub *= eval_eq_mle(&[x], &[F::from_bool(b == 1)]);
+                                eq_ub *= eval_eq_mle(&[x], &[SC::F::from_bool(b == 1)]);
                                 debug_assert_eq!(y, 0);
                                 (eq_rs[0] * eq_ub, k_rot_rs[0] * eq_ub)
                             } else {
                                 // linearly interpolate eq(-, r[..1+n_T]), \kappa_\rot(-,
                                 // r[..1+n_T])
-                                let eq_r = eq_rs[y << 1] * (EF::ONE - x) + eq_rs[(y << 1) + 1] * x;
+                                let eq_r = eq_rs[y << 1] * (SC::EF::ONE - x) + eq_rs[(y << 1) + 1] * x;
                                 let k_rot_r =
-                                    k_rot_rs[y << 1] * (EF::ONE - x) + k_rot_rs[(y << 1) + 1] * x;
+                                    k_rot_rs[y << 1] * (SC::EF::ONE - x) + k_rot_rs[(y << 1) + 1] * x;
                                 (eq_r * eq_ub, k_rot_r * eq_ub)
                             };
                             acc[0] += self.lambda_pows[tv.lambda_eq_idx] * q * eq;
@@ -442,10 +453,10 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
                 })
             })
             .collect();
-        from_fn(|i| s_evals.iter().map(|evals| evals[i]).sum::<EF>())
+        from_fn(|i| s_evals.iter().map(|evals| evals[i]).sum::<SC::EF>())
     }
 
-    fn fold_mle_evals(&mut self, round: usize, u_round: EF) {
+    fn fold_mle_evals(&mut self, round: usize, u_round: SC::EF) {
         let l_skip = self.l_skip;
         self.q_evals = batch_fold_mle_evals(take(&mut self.q_evals), u_round);
         self.eq_r_per_lht = take(&mut self.eq_r_per_lht)
@@ -463,12 +474,12 @@ impl<'a> StackedReductionProver<'a, CpuBackendV2<SCV2>, CpuDeviceV2> for Stacked
                 // Folding above did nothing, and we update the eq(u[1+n_T..=round],
                 // b_{T,j}[..=round-n_T-1]) value
                 let b = (s.row_idx >> (l_skip + round - 1)) & 1;
-                *eq_ub *= eval_eq_mle(&[u_round], &[F::from_bool(b == 1)]);
+                *eq_ub *= eval_eq_mle(&[u_round], &[SC::F::from_bool(b == 1)]);
             }
         }
     }
 
-    fn into_stacked_openings(self) -> Vec<Vec<EF>> {
+    fn into_stacked_openings(self) -> Vec<Vec<SC::EF>> {
         self.q_evals
             .into_iter()
             .map(|q| {

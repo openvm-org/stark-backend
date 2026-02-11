@@ -8,8 +8,10 @@ use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
+use p3_field::ExtensionField;
+
 use crate::{
-    baby_bear_poseidon2::{Digest, F},
+    merkle::MerkleHasher,
     prover::{
         col_maj_idx, poly::eval_to_coeff_rs_message, ColMajorMatrix, MatrixView,
         StridedColMajorMatrixView,
@@ -113,16 +115,20 @@ impl<F, Digest: Clone> StackedPcsData<F, Digest> {
 }
 
 #[instrument(level = "info", skip_all)]
-pub fn stacked_commit(
+pub fn stacked_commit<H: MerkleHasher>(
     l_skip: usize,
     n_stack: usize,
     log_blowup: usize,
     k_whir: usize,
-    traces: &[&ColMajorMatrix<F>],
-) -> (Digest, StackedPcsData<F, Digest>) {
+    traces: &[&ColMajorMatrix<H::F>],
+) -> (H::Digest, StackedPcsData<H::F, H::Digest>)
+where
+    H::F: TwoAdicField + Ord,
+    H::Digest: Clone + Serialize + for<'de> Deserialize<'de>,
+{
     let (q_trace, layout) = stacked_matrix(l_skip, n_stack, traces);
     let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace);
-    let tree = MerkleTree::new(rs_matrix, 1 << k_whir);
+    let tree = MerkleTree::new::<H>(rs_matrix, 1 << k_whir);
     let root = tree.root();
     let data = StackedPcsData::new(layout, q_trace, tree);
     (root, data)
@@ -375,118 +381,114 @@ impl<F, Digest: Clone> MerkleTree<F, Digest> {
     }
 }
 
-mod poseidon2_merkle_tree {
-    use p3_field::ExtensionField;
-
-    use super::*;
-    use crate::{
-        baby_bear_poseidon2::{Digest, F},
-        poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice},
-    };
-
-    impl<EF> MerkleTree<EF, Digest>
+impl<EF: Field + Send + Sync + Copy, Digest> MerkleTree<EF, Digest>
+where
+    Digest: Copy + Send + Sync + Eq + core::fmt::Debug,
+{
+    #[instrument(name = "merkle_tree", skip_all)]
+    pub fn new<H: MerkleHasher<Digest = Digest>>(
+        matrix: ColMajorMatrix<EF>,
+        rows_per_query: usize,
+    ) -> Self
     where
-        EF: ExtensionField<F>,
+        EF: ExtensionField<H::F>,
     {
-        #[instrument(name = "merkle_tree", skip_all)]
-        pub fn new(matrix: ColMajorMatrix<EF>, rows_per_query: usize) -> Self {
-            let height = matrix.height();
-            assert!(height > 0);
-            assert!(rows_per_query.is_power_of_two());
-            let num_leaves = height.next_power_of_two();
-            assert!(
-                rows_per_query <= num_leaves,
-                "rows_per_query ({rows_per_query}) must not exceed the number of Merkle leaves ({num_leaves})"
-            );
-            let row_hashes: Vec<_> = (0..num_leaves)
+        let height = matrix.height();
+        assert!(height > 0);
+        assert!(rows_per_query.is_power_of_two());
+        let num_leaves = height.next_power_of_two();
+        assert!(
+            rows_per_query <= num_leaves,
+            "rows_per_query ({rows_per_query}) must not exceed the number of Merkle leaves ({num_leaves})"
+        );
+        let row_hashes: Vec<_> = (0..num_leaves)
+            .into_par_iter()
+            .map(|r| {
+                let hash_input: Vec<H::F> = Self::row_iter(&matrix, r)
+                    .flat_map(|ef| ef.as_basis_coefficients_slice().to_vec())
+                    .collect();
+                H::hash_slice(&hash_input)
+            })
+            .collect();
+
+        let query_stride = num_leaves / rows_per_query;
+        let mut query_digest_layer = row_hashes;
+        // For the first log2(rows_per_query) layers, we hash in `query_stride` pairs and don't
+        // need to store the digest layers
+        for _ in 0..log2_strict_usize(rows_per_query) {
+            let prev_layer = query_digest_layer;
+            query_digest_layer = (0..prev_layer.len() / 2)
                 .into_par_iter()
-                .map(|r| {
-                    let hash_input: Vec<F> = Self::row_iter(&matrix, r)
-                        .flat_map(|ef| ef.as_basis_coefficients_slice().to_vec())
-                        .collect();
-                    poseidon2_hash_slice(&hash_input)
+                .map(|i| {
+                    let x = i / query_stride;
+                    let y = i % query_stride;
+                    let left = prev_layer[2 * x * query_stride + y];
+                    let right = prev_layer[(2 * x + 1) * query_stride + y];
+                    H::compress(left, right)
                 })
                 .collect();
-
-            let query_stride = num_leaves / rows_per_query;
-            let mut query_digest_layer = row_hashes;
-            // For the first log2(rows_per_query) layers, we hash in `query_stride` pairs and don't
-            // need to store the digest layers
-            for _ in 0..log2_strict_usize(rows_per_query) {
-                let prev_layer = query_digest_layer;
-                query_digest_layer = (0..prev_layer.len() / 2)
-                    .into_par_iter()
-                    .map(|i| {
-                        let x = i / query_stride;
-                        let y = i % query_stride;
-                        let left = prev_layer[2 * x * query_stride + y];
-                        let right = prev_layer[(2 * x + 1) * query_stride + y];
-                        poseidon2_compress(left, right)
-                    })
-                    .collect();
-            }
-
-            let mut digest_layers = vec![query_digest_layer];
-            while digest_layers.last().unwrap().len() > 1 {
-                let prev_layer = digest_layers.last().unwrap();
-                let layer: Vec<_> = prev_layer
-                    .par_chunks_exact(2)
-                    .map(|pair| poseidon2_compress(pair[0], pair[1]))
-                    .collect();
-                digest_layers.push(layer);
-            }
-
-            Self {
-                backing_matrix: matrix,
-                digest_layers,
-                rows_per_query,
-            }
         }
 
-        /// # Safety
-        /// - Caller must ensure that `digest_layers` are correctly constructed Merkle hashes for
-        ///   the Merkle tree.
-        pub unsafe fn from_raw_parts(
-            backing_matrix: ColMajorMatrix<EF>,
-            digest_layers: Vec<Vec<Digest>>,
-            rows_per_query: usize,
-        ) -> Self {
-            Self {
-                backing_matrix,
-                digest_layers,
-                rows_per_query,
-            }
+        let mut digest_layers = vec![query_digest_layer];
+        while digest_layers.last().unwrap().len() > 1 {
+            let prev_layer = digest_layers.last().unwrap();
+            let layer: Vec<_> = prev_layer
+                .par_chunks_exact(2)
+                .map(|pair| H::compress(pair[0], pair[1]))
+                .collect();
+            digest_layers.push(layer);
         }
 
-        /// Returns the ordered set of opened rows for the given query index.
-        /// The rows are { query_idx + t * query_stride() } for t in 0..rows_per_query.
-        pub fn get_opened_rows(&self, index: usize) -> Vec<Vec<EF>> {
-            let query_stride = self.query_stride();
-            assert!(
-                index < query_stride,
-                "index {index} out of bounds for query_stride {query_stride}"
+        Self {
+            backing_matrix: matrix,
+            digest_layers,
+            rows_per_query,
+        }
+    }
+
+    /// # Safety
+    /// - Caller must ensure that `digest_layers` are correctly constructed Merkle hashes for
+    ///   the Merkle tree.
+    pub unsafe fn from_raw_parts(
+        backing_matrix: ColMajorMatrix<EF>,
+        digest_layers: Vec<Vec<Digest>>,
+        rows_per_query: usize,
+    ) -> Self {
+        Self {
+            backing_matrix,
+            digest_layers,
+            rows_per_query,
+        }
+    }
+
+    /// Returns the ordered set of opened rows for the given query index.
+    /// The rows are { query_idx + t * query_stride() } for t in 0..rows_per_query.
+    pub fn get_opened_rows(&self, index: usize) -> Vec<Vec<EF>> {
+        let query_stride = self.query_stride();
+        assert!(
+            index < query_stride,
+            "index {index} out of bounds for query_stride {query_stride}"
+        );
+
+        let rows_per_query = self.rows_per_query;
+        let width = self.backing_matrix.width();
+        let mut preimage = Vec::with_capacity(rows_per_query);
+        for row_offset in 0..rows_per_query {
+            let row_idx = row_offset * query_stride + index;
+            let row = Self::row_iter(&self.backing_matrix, row_idx).collect_vec();
+            debug_assert_eq!(
+                row.len(),
+                width,
+                "row width mismatch: expected {width}, got {}",
+                row.len()
             );
-
-            let rows_per_query = self.rows_per_query;
-            let width = self.backing_matrix.width();
-            let mut preimage = Vec::with_capacity(rows_per_query);
-            for row_offset in 0..rows_per_query {
-                let row_idx = row_offset * query_stride + index;
-                let row = Self::row_iter(&self.backing_matrix, row_idx).collect_vec();
-                debug_assert_eq!(
-                    row.len(),
-                    width,
-                    "row width mismatch: expected {width}, got {}",
-                    row.len()
-                );
-                preimage.push(row);
-            }
-            preimage
+            preimage.push(row);
         }
+        preimage
+    }
 
-        fn row_iter(matrix: &ColMajorMatrix<EF>, index: usize) -> impl Iterator<Item = EF> + '_ {
-            (0..matrix.width()).map(move |c| matrix.get(index, c).copied().unwrap_or(EF::ZERO))
-        }
+    fn row_iter(matrix: &ColMajorMatrix<EF>, index: usize) -> impl Iterator<Item = EF> + '_ {
+        (0..matrix.width()).map(move |c| matrix.get(index, c).copied().unwrap_or(EF::ZERO))
     }
 }
 

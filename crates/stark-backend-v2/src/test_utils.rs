@@ -28,14 +28,14 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
-    poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory, TranscriptLog},
+    poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory, TranscriptLog},
     proof::Proof,
     prover::{
         stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
         CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver,
         ProvingContextV2, TraceCommitterV2,
     },
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
     BabyBearPoseidon2CpuEngineV2, ChipV2, FiatShamirTranscript, StarkEngineV2, SystemParams,
     WhirConfig, WhirParams,
 };
@@ -92,27 +92,25 @@ pub trait TestFixture {
     fn keygen<E: StarkEngineV2>(
         &self,
         engine: &E,
-    ) -> (MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2) {
+    ) -> (MultiStarkProvingKeyV2<SCV2>, MultiStarkVerifyingKeyV2<SCV2>) {
         engine.keygen(&self.airs())
     }
 
-    fn prove<E: StarkEngineV2>(&self, engine: &E, pk: &MultiStarkProvingKeyV2) -> Proof
-    where
-        E::PB: crate::prover::ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
-    {
+    fn prove<E: StarkEngineV2<SC = SCV2>>(
+        &self,
+        engine: &E,
+        pk: &MultiStarkProvingKeyV2<SCV2>,
+    ) -> Proof<SCV2> {
         self.prove_from_transcript(engine, pk, &mut E::TS::default())
     }
 
     /// Prove using CPU tracegen and transport to device.
-    fn prove_from_transcript<E: StarkEngineV2>(
+    fn prove_from_transcript<E: StarkEngineV2<SC = SCV2>>(
         &self,
         engine: &E,
-        pk: &MultiStarkProvingKeyV2,
+        pk: &MultiStarkProvingKeyV2<SCV2>,
         transcript: &mut E::TS,
-    ) -> Proof
-    where
-        E::PB: crate::prover::ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
-    {
+    ) -> Proof<SCV2> {
         let ctx = self.generate_proving_ctx();
         let device = engine.device();
         let d_pk = device.transport_pk_to_device(pk);
@@ -123,10 +121,10 @@ pub trait TestFixture {
         proof
     }
 
-    fn keygen_and_prove<E: StarkEngineV2>(&self, engine: &E) -> (MultiStarkVerifyingKeyV2, Proof)
-    where
-        E::PB: crate::prover::ProverBackendV2<Val = F, Challenge = EF, Commitment = Digest>,
-    {
+    fn keygen_and_prove<E: StarkEngineV2<SC = SCV2>>(
+        &self,
+        engine: &E,
+    ) -> (MultiStarkVerifyingKeyV2<SCV2>, Proof<SCV2>) {
         let (pk, vk) = self.keygen(engine);
         let proof = self.prove(engine, &pk);
         (vk, proof)
@@ -321,7 +319,7 @@ impl TestFixture for CachedFixture11 {
                 (receiver_trace, receiver_cached_trace),
             ]
             .map(|(common, cached)| {
-                let (commit, data) = stacked_commit(
+                let (commit, data) = stacked_commit::<Poseidon2Hasher>(
                     params.l_skip,
                     params.n_stack,
                     params.log_blowup,

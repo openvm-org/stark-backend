@@ -1,20 +1,21 @@
 use core::iter::zip;
 
 use itertools::{izip, Itertools};
-use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, TwoAdicField};
+use p3_field::{BasedVectorSpace, ExtensionField, PrimeCharacteristicRing, TwoAdicField};
 use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
+    merkle::MerkleHasher,
     poly_common::{
         eval_eq_mle, eval_mle_evals_at_point, eval_mobius_eq_mle, horner_eval,
         interpolate_quadratic_at_012, Squarable,
     },
-    poseidon2::sponge::{poseidon2_compress, poseidon2_hash_slice, poseidon2_tree_compress},
     proof::WhirProof,
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
-    FiatShamirTranscript, SystemParams,
+    FiatShamirTranscript, StarkProtocolConfig, SystemParams,
 };
+
+type H<SC> = <SC as StarkProtocolConfig>::H;
 
 #[inline]
 fn ensure(cond: bool, err: VerifyWhirError) -> Result<(), VerifyWhirError> {
@@ -29,13 +30,13 @@ fn ensure(cond: bool, err: VerifyWhirError) -> Result<(), VerifyWhirError> {
 ///
 /// Assumes that all inputs have already been checked to have the correct sizes.
 #[instrument(level = "debug", skip_all)]
-pub fn verify_whir<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
+pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
     params: &SystemParams,
-    whir_proof: &WhirProof,
-    stacking_openings: &[Vec<EF>],
-    commitments: &[Digest],
-    u: &[EF],
+    whir_proof: &WhirProof<SC>,
+    stacking_openings: &[Vec<SC::EF>],
+    commitments: &[SC::Digest],
+    u: &[SC::EF],
 ) -> Result<(), VerifyWhirError> {
     let widths = stacking_openings
         .iter()
@@ -75,7 +76,7 @@ pub fn verify_whir<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
         .iter()
         .flatten()
         .zip(mu_pows.iter())
-        .fold(EF::ZERO, |acc, (&opening, &mu_pow)| acc + mu_pow * opening);
+        .fold(SC::EF::ZERO, |acc, (&opening, &mu_pow)| acc + mu_pow * opening);
 
     let mut gammas = Vec::with_capacity(num_whir_rounds);
     let mut zs = Vec::with_capacity(num_whir_rounds);
@@ -150,13 +151,13 @@ pub fn verify_whir<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
         let mut zs_round = Vec::with_capacity(num_queries);
         let mut ys_round = Vec::with_capacity(num_queries);
 
-        let omega = F::two_adic_generator(log_rs_domain_size);
+        let omega = SC::F::two_adic_generator(log_rs_domain_size);
         for (query_idx, index) in query_indices.into_iter().enumerate() {
             let zi_root = omega.exp_u64(index);
             let zi = zi_root.exp_power_of_2(k_whir);
 
             let yi = if is_initial_round {
-                let mut codeword_vals = vec![EF::ZERO; 1 << k_whir];
+                let mut codeword_vals = vec![SC::EF::ZERO; 1 << k_whir];
                 let mut mu_pow_iter = mu_pows.iter();
                 for (&commit, &width, opened_rows_per_query, merkle_proofs) in izip!(
                     commitments,
@@ -167,11 +168,11 @@ pub fn verify_whir<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
                     let opened_rows = &opened_rows_per_query[query_idx];
                     let leaf_hashes = opened_rows
                         .iter()
-                        .map(|opened_row| poseidon2_hash_slice(opened_row))
+                        .map(|opened_row| H::<SC>::hash_slice(opened_row))
                         .collect_vec();
-                    let query_digest = poseidon2_tree_compress(leaf_hashes);
+                    let query_digest = H::<SC>::tree_compress(leaf_hashes);
                     let merkle_proof = &merkle_proofs[query_idx];
-                    merkle_verify(commit, index as u32, query_digest, merkle_proof)?;
+                    merkle_verify::<H<SC>>(commit, index as u32, query_digest, merkle_proof)?;
 
                     for c in 0..width {
                         let mu_pow = mu_pow_iter.next().unwrap(); // ok; mu_pows has total_width length
@@ -180,24 +181,24 @@ pub fn verify_whir<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
                         }
                     }
                 }
-                binary_k_fold(codeword_vals, &alphas_round, zi_root)
+                binary_k_fold::<SC::F, SC::EF>(codeword_vals, &alphas_round, zi_root)
             } else {
                 let opened_values = codeword_opened_values[whir_round - 1][query_idx].clone();
                 let merkle_proof = &codeword_merkle_proofs[whir_round - 1][query_idx];
                 let leaf_hashes = opened_values
                     .iter()
                     .map(|opened_value| {
-                        poseidon2_hash_slice(opened_value.as_basis_coefficients_slice())
+                        H::<SC>::hash_slice(opened_value.as_basis_coefficients_slice())
                     })
                     .collect_vec();
-                let query_digest = poseidon2_tree_compress(leaf_hashes);
-                merkle_verify(
+                let query_digest = H::<SC>::tree_compress(leaf_hashes);
+                merkle_verify::<H<SC>>(
                     codeword_commits[whir_round - 1],
                     index as u32,
                     query_digest,
                     merkle_proof,
                 )?;
-                binary_k_fold(opened_values, &alphas_round, zi_root)
+                binary_k_fold::<SC::F, SC::EF>(opened_values, &alphas_round, zi_root)
             };
             zs_round.push(zi);
             ys_round.push(yi);
@@ -267,7 +268,7 @@ pub fn verify_whir<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
             let (z0_pow_max, z0_pow_left) = z0_pow.split_last().unwrap();
             acc += gamma
                 * eval_eq_mle(alpha_slc, z0_pow_left)
-                * horner_eval::<EF, EF, EF>(final_poly, *z0_pow_max);
+                * horner_eval::<SC::EF, SC::EF, SC::EF>(final_poly, *z0_pow_max);
         }
 
         debug_assert_eq!(zis.len(), params.whir.rounds[i].num_queries);
@@ -276,7 +277,7 @@ pub fn verify_whir<TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>(
             let (zi_pow_max, zi_pow_left) = zi_pow.split_last().unwrap();
             acc += gamma_pow
                 * eval_eq_mle(alpha_slc, zi_pow_left)
-                * horner_eval::<EF, F, EF>(final_poly, *zi_pow_max);
+                * horner_eval::<SC::EF, SC::F, SC::EF>(final_poly, *zi_pow_max);
         }
         j += k_whir;
     }
@@ -312,7 +313,7 @@ pub enum VerifyWhirError {
 ///
 /// If `values = [f(x), f(ωx), …, f(ω^{2^k-1}x)]`, then
 /// `binary_k_fold(values, alphas, x)` returns `g_k(x^{2^k})`.
-pub fn binary_k_fold(mut values: Vec<EF>, alphas: &[EF], x: F) -> EF {
+pub fn binary_k_fold<F: TwoAdicField, EF: ExtensionField<F>>(mut values: Vec<EF>, alphas: &[EF], x: F) -> EF {
     let n = values.len();
     let k = alphas.len();
     debug_assert_eq!(n, 1 << k);
@@ -342,18 +343,18 @@ pub fn binary_k_fold(mut values: Vec<EF>, alphas: &[EF], x: F) -> EF {
     values[0]
 }
 
-pub fn merkle_verify(
-    root: Digest,
+pub fn merkle_verify<H: MerkleHasher>(
+    root: H::Digest,
     mut idx: u32,
-    leaf_hash: Digest,
-    merkle_proof: &[Digest],
+    leaf_hash: H::Digest,
+    merkle_proof: &[H::Digest],
 ) -> Result<(), VerifyWhirError> {
     let mut cur = leaf_hash;
     for &sibling in merkle_proof {
         cur = if idx & 1 == 0 {
-            poseidon2_compress(cur, sibling)
+            H::compress(cur, sibling)
         } else {
-            poseidon2_compress(sibling, cur)
+            H::compress(sibling, cur)
         };
         idx >>= 1;
     }
@@ -378,8 +379,9 @@ mod tests {
 
     use super::*;
     use crate::{
+        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
         poly_common::Squarable,
-        poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, TranscriptHistory},
+        poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory},
         prover::{
             poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening, ColMajorMatrix,
             CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
@@ -388,7 +390,6 @@ mod tests {
         verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
         WhirConfig, WhirRoundConfig,
     };
-    use crate::baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F};
 
     type SCV2 = BabyBearPoseidon2ConfigV2;
 
@@ -437,7 +438,7 @@ mod tests {
                 .common_main_traces()
                 .map(|(_, trace)| trace)
                 .collect_vec();
-            stacked_commit(
+            stacked_commit::<Poseidon2Hasher>(
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
@@ -466,7 +467,7 @@ mod tests {
 
         let mut prover_sponge = DuplexSpongeRecorder::default();
 
-        let proof = prove_whir_opening(
+        let proof = prove_whir_opening::<SCV2, _>(
             &mut prover_sponge,
             params.l_skip,
             params.log_blowup,
@@ -481,7 +482,7 @@ mod tests {
             .collect_vec();
 
         let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
-        verify_whir(
+        verify_whir::<SCV2, _>(
             &mut verifier_sponge,
             &params,
             &proof,
@@ -609,7 +610,7 @@ mod tests {
                 .collect_vec();
             let mat = ColMajorMatrix::new(data, n_cols);
 
-            let (commit, pcs_data) = stacked_commit(
+            let (commit, pcs_data) = stacked_commit::<Poseidon2Hasher>(
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
@@ -629,7 +630,7 @@ mod tests {
         let mut prover_sponge = DuplexSpongeRecorder::default();
 
         let committed_mats = matrices.iter().zip(trees.iter()).collect_vec();
-        let proof = prove_whir_opening(
+        let proof = prove_whir_opening::<SCV2, _>(
             &mut prover_sponge,
             params.l_skip,
             params.log_blowup,
@@ -644,7 +645,7 @@ mod tests {
             .collect();
 
         let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
-        verify_whir(
+        verify_whir::<SCV2, _>(
             &mut verifier_sponge,
             &params,
             &proof,
@@ -683,7 +684,7 @@ mod tests {
                 .collect_vec();
             let mat = ColMajorMatrix::new(data, n_cols);
 
-            let (commit, pcs_data) = stacked_commit(
+            let (commit, pcs_data) = stacked_commit::<Poseidon2Hasher>(
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
@@ -704,7 +705,7 @@ mod tests {
         let mut verifier_sponge = DuplexSponge::default();
 
         let committed_mats = matrices.iter().zip(trees.iter()).collect_vec();
-        let proof = prove_whir_opening(
+        let proof = prove_whir_opening::<SCV2, _>(
             &mut prover_sponge,
             params.l_skip,
             params.log_blowup,
@@ -722,7 +723,7 @@ mod tests {
         stacking_openings[1][2] = EF::ONE;
 
         assert!(matches!(
-            verify_whir(
+            verify_whir::<SCV2, _>(
                 &mut verifier_sponge,
                 &params,
                 &proof,

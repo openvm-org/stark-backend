@@ -8,6 +8,7 @@ use itertools::Itertools;
 use crate::{
     keygen::types::MultiStarkProvingKeyV2,
     poly_common::Squarable,
+    poseidon2::sponge::Poseidon2Hasher,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
         prove_zerocheck_and_logup,
@@ -18,10 +19,9 @@ use crate::{
         DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MultiRapProver, OpeningProverV2,
         ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
     },
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, D_EF, EF, F},
-    FiatShamirTranscript, SystemParams,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
+    FiatShamirTranscript, StarkProtocolConfig, SystemParams,
 };
-use crate::StarkProtocolConfig;
 
 #[derive(Clone, Copy)]
 pub struct CpuBackendV2<SC: StarkProtocolConfig>(PhantomData<SC>);
@@ -46,15 +46,15 @@ pub struct CpuDeviceV2 {
     config: SystemParams,
 }
 
-impl ProverBackendV2 for CpuBackendV2<SCV2> {
-    const CHALLENGE_EXT_DEGREE: u8 = D_EF as u8;
+impl<SC: StarkProtocolConfig> ProverBackendV2 for CpuBackendV2<SC> {
+    const CHALLENGE_EXT_DEGREE: u8 = SC::D_EF as u8;
 
-    type Val = F;
-    type Challenge = EF;
-    type Commitment = Digest;
-    type Matrix = ColMajorMatrix<F>;
+    type Val = SC::F;
+    type Challenge = SC::EF;
+    type Commitment = SC::Digest;
+    type Matrix = ColMajorMatrix<SC::F>;
     type OtherAirData = ();
-    type PcsData = StackedPcsData<F, Digest>;
+    type PcsData = StackedPcsData<SC::F, SC::Digest>;
 }
 
 impl<TS: FiatShamirTranscript<SCV2>> ProverDeviceV2<CpuBackendV2<SCV2>, TS> for CpuDeviceV2 {
@@ -65,7 +65,7 @@ impl<TS: FiatShamirTranscript<SCV2>> ProverDeviceV2<CpuBackendV2<SCV2>, TS> for 
 
 impl TraceCommitterV2<CpuBackendV2<SCV2>> for CpuDeviceV2 {
     fn commit(&self, traces: &[&ColMajorMatrix<F>]) -> (Digest, StackedPcsData<F, Digest>) {
-        stacked_commit(
+        stacked_commit::<Poseidon2Hasher>(
             self.config.l_skip,
             self.config.n_stack,
             self.config.log_blowup,
@@ -76,7 +76,7 @@ impl TraceCommitterV2<CpuBackendV2<SCV2>> for CpuDeviceV2 {
 }
 
 impl<TS: FiatShamirTranscript<SCV2>> MultiRapProver<CpuBackendV2<SCV2>, TS> for CpuDeviceV2 {
-    type PartialProof = (GkrProof, BatchConstraintProof);
+    type PartialProof = (GkrProof<SCV2>, BatchConstraintProof<SCV2>);
     /// The random opening point `r` where the batch constraint sumcheck reduces to evaluation
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
     type Artifacts = Vec<EF>;
@@ -87,15 +87,15 @@ impl<TS: FiatShamirTranscript<SCV2>> MultiRapProver<CpuBackendV2<SCV2>, TS> for 
         mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
         ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
         _common_main_pcs_data: &StackedPcsData<F, Digest>,
-    ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
+    ) -> ((GkrProof<SCV2>, BatchConstraintProof<SCV2>), Vec<EF>) {
         let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup(transcript, mpk, ctx);
+            prove_zerocheck_and_logup::<SCV2, _>(transcript, mpk, ctx);
         ((gkr_proof, batch_constraint_proof), r)
     }
 }
 
 impl<TS: FiatShamirTranscript<SCV2>> OpeningProverV2<CpuBackendV2<SCV2>, TS> for CpuDeviceV2 {
-    type OpeningProof = (StackingProof, WhirProof);
+    type OpeningProof = (StackingProof<SCV2>, WhirProof<SCV2>);
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<EF>;
 
@@ -106,7 +106,7 @@ impl<TS: FiatShamirTranscript<SCV2>> OpeningProverV2<CpuBackendV2<SCV2>, TS> for
         ctx: ProvingContextV2<CpuBackendV2<SCV2>>,
         common_main_pcs_data: StackedPcsData<F, Digest>,
         r: Vec<EF>,
-    ) -> (StackingProof, WhirProof) {
+    ) -> (StackingProof<SCV2>, WhirProof<SCV2>) {
         let params = &self.config;
 
         let need_rot_per_trace = ctx
@@ -143,7 +143,7 @@ impl<TS: FiatShamirTranscript<SCV2>> OpeningProverV2<CpuBackendV2<SCV2>, TS> for
             }
         }
         let (stacking_proof, u_prisma) =
-            prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
+            prove_stacked_opening_reduction::<SCV2, _, _, _, StackedReductionCpu<SCV2>>(
                 self,
                 transcript,
                 self.config.n_stack,
@@ -172,7 +172,7 @@ impl<TS: FiatShamirTranscript<SCV2>> OpeningProverV2<CpuBackendV2<SCV2>, TS> for
 impl DeviceDataTransporterV2<CpuBackendV2<SCV2>> for CpuDeviceV2 {
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKeyV2,
+        mpk: &MultiStarkProvingKeyV2<SCV2>,
     ) -> DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>> {
         let per_air = mpk
             .per_air

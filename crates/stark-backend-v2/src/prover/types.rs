@@ -7,8 +7,7 @@ use crate::{
     keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2},
     proof::TraceVData,
     prover::ProverBackendV2,
-    baby_bear_poseidon2::{Digest, F},
-    SystemParams,
+    StarkProtocolConfig, SystemParams,
 };
 
 /// The committed trace data for a single trace matrix. This type is used to store prover data for
@@ -73,14 +72,14 @@ pub struct AirProvingContextV2<PB: ProverBackendV2> {
 }
 
 /// Proof on the host, with respect to the host types in the generic `PB`.
-pub struct HostProof<PB: ProverBackendV2, ConstraintsProof, OpeningProof> {
+pub struct HostProof<SC: StarkProtocolConfig, PB: ProverBackendV2, ConstraintsProof, OpeningProof> {
     /// The commitment to the data in common_main.
     pub common_main_commit: PB::Commitment,
 
     /// For each AIR in vkey order, the corresponding trace shape, or None if
     /// the trace is empty. In a valid proof, if `vk.per_air[i].is_required`,
     /// then `trace_vdata[i]` must be `Some(_)`.
-    pub trace_vdata: Vec<Option<TraceVData>>,
+    pub trace_vdata: Vec<Option<TraceVData<SC>>>,
 
     /// For each AIR in vkey order, the public values. Public values should be empty if the AIR has
     /// an empty trace.
@@ -98,11 +97,11 @@ impl<PB: ProverBackendV2> CommittedTraceDataV2<PB> {
     }
 }
 
-impl<PB> DeviceMultiStarkProvingKeyV2<PB>
-where
-    PB: ProverBackendV2<Val = F, Commitment = Digest>,
-{
-    pub fn get_vk(&self) -> MultiStarkVerifyingKeyV2 {
+impl<PB: ProverBackendV2> DeviceMultiStarkProvingKeyV2<PB> {
+    pub fn get_vk<SC>(&self) -> MultiStarkVerifyingKeyV2<SC>
+    where
+        SC: StarkProtocolConfig<F = PB::Val, Digest = PB::Commitment>,
+    {
         let per_air = self.per_air.iter().map(|pk| pk.vk.clone()).collect();
         let inner = MultiStarkVerifyingKey0V2 {
             params: self.params.clone(),
@@ -111,7 +110,7 @@ where
         };
         MultiStarkVerifyingKeyV2 {
             inner,
-            pre_hash: self.vk_pre_hash,
+            pre_hash: self.vk_pre_hash.clone(),
         }
     }
 }

@@ -6,7 +6,7 @@ use p3_field::PrimeCharacteristicRing;
 use p3_symmetric::Permutation;
 
 use super::{poseidon2_perm, CHUNK, WIDTH};
-use crate::{baby_bear_poseidon2::{Digest, F, BabyBearPoseidon2ConfigV2}, FiatShamirTranscript};
+use crate::{baby_bear_poseidon2::{Digest, F, BabyBearPoseidon2ConfigV2}, merkle::MerkleHasher, FiatShamirTranscript};
 
 pub trait TranscriptHistory {
     fn len(&self) -> usize;
@@ -232,6 +232,23 @@ pub fn poseidon2_tree_compress(mut hashes: Vec<Digest>) -> Digest {
         hashes = next;
     }
     hashes.pop().unwrap()
+}
+
+/// Concrete [`MerkleHasher`] implementation using Poseidon2 over BabyBear.
+#[derive(Clone, Copy, Debug)]
+pub struct Poseidon2Hasher;
+
+impl MerkleHasher for Poseidon2Hasher {
+    type F = F;
+    type Digest = Digest;
+
+    fn hash_slice(vals: &[F]) -> Digest {
+        poseidon2_hash_slice(vals)
+    }
+
+    fn compress(left: Digest, right: Digest) -> Digest {
+        poseidon2_compress(left, right)
+    }
 }
 
 #[derive(Clone)]

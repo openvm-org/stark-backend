@@ -1,35 +1,52 @@
 use std::io::{Error, Read, Result, Write};
 
+use derivative::Derivative;
 use p3_field::PrimeCharacteristicRing;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     baby_bear_poseidon2::{Digest, EF, F},
     codec::{decode_into_vec, encode_iter, Decode, Encode},
+    StarkProtocolConfig,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Proof {
+#[derive(Derivative, Serialize, Deserialize)]
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = "")
+)]
+#[serde(bound = "")]
+pub struct Proof<SC: StarkProtocolConfig> {
     /// The commitment to the data in common_main.
-    pub common_main_commit: Digest,
+    pub common_main_commit: SC::Digest,
 
     /// For each AIR in vkey order, the corresponding trace shape, or None if
     /// the trace is empty. In a valid proof, if `vk.per_air[i].is_required`,
     /// then `trace_vdata[i]` must be `Some(_)`.
-    pub trace_vdata: Vec<Option<TraceVData>>,
+    pub trace_vdata: Vec<Option<TraceVData<SC>>>,
 
     /// For each AIR in vkey order, the public values. Public values should be empty if the AIR has
     /// an empty trace.
-    pub public_values: Vec<Vec<F>>,
+    pub public_values: Vec<Vec<SC::F>>,
 
-    pub gkr_proof: GkrProof,
-    pub batch_constraint_proof: BatchConstraintProof,
-    pub stacking_proof: StackingProof,
-    pub whir_proof: WhirProof,
+    pub gkr_proof: GkrProof<SC>,
+    pub batch_constraint_proof: BatchConstraintProof<SC>,
+    pub stacking_proof: StackingProof<SC>,
+    pub whir_proof: WhirProof<SC>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize, Encode, Decode)]
-pub struct TraceVData {
+#[derive(Derivative, Serialize, Deserialize, Encode, Decode)]
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = ""),
+    Default(bound = "")
+)]
+#[serde(bound = "")]
+pub struct TraceVData<SC: StarkProtocolConfig> {
     /// The base 2 logarithm of the trace height. This should be a nonnegative integer and is
     /// allowed to be `< l_skip`.
     ///
@@ -39,49 +56,70 @@ pub struct TraceVData {
     /// The cached commitments used.
     ///
     /// The length must match the value in the vkey.
-    pub cached_commitments: Vec<Digest>,
+    pub cached_commitments: Vec<SC::Digest>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GkrProof {
+#[derive(Derivative, Serialize, Deserialize)]
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = "")
+)]
+#[serde(bound = "")]
+pub struct GkrProof<SC: StarkProtocolConfig> {
     // TODO[jpw]: I'm not sure this is concepturally the place to put it, but recursion gkr module
     // samples alpha,beta
-    pub logup_pow_witness: F,
+    pub logup_pow_witness: SC::F,
     /// The denominator of the root layer.
     ///
     /// Note that the numerator claim is always zero, so we don't include it in
     /// the proof. Despite that the numerator is zero, the representation of the
     /// denominator is important for the verification procedure and thus must be
     /// provided.
-    pub q0_claim: EF,
+    pub q0_claim: SC::EF,
     /// The claims for p_j(xi, 0), p_j(xi, 1), q_j(xi, 0), and q_j(xi, 0) for each layer j > 0.
-    pub claims_per_layer: Vec<GkrLayerClaims>,
+    pub claims_per_layer: Vec<GkrLayerClaims<SC>>,
     /// The sumcheck polynomials for each layer, for each sumcheck round, given by their
     /// evaluations on {1, 2, 3}.
-    pub sumcheck_polys: Vec<Vec<[EF; 3]>>,
+    pub sumcheck_polys: Vec<Vec<[SC::EF; 3]>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
-pub struct GkrLayerClaims {
-    pub p_xi_0: EF,
-    pub p_xi_1: EF,
-    pub q_xi_0: EF,
-    pub q_xi_1: EF,
+#[derive(Derivative, Serialize, Deserialize, Encode, Decode)]
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = "")
+)]
+#[serde(bound = "")]
+pub struct GkrLayerClaims<SC: StarkProtocolConfig> {
+    pub p_xi_0: SC::EF,
+    pub p_xi_1: SC::EF,
+    pub q_xi_0: SC::EF,
+    pub q_xi_1: SC::EF,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BatchConstraintProof {
+#[derive(Derivative, Serialize, Deserialize)]
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = "")
+)]
+#[serde(bound = "")]
+pub struct BatchConstraintProof<SC: StarkProtocolConfig> {
     /// The terms \textnormal{sum}_{\hat{p}, T, I} as defined in Protocol 3.4.6, per present AIR
     /// **in sorted AIR order**.
-    pub numerator_term_per_air: Vec<EF>,
+    pub numerator_term_per_air: Vec<SC::EF>,
     /// The terms \textnormal{sum}_{\hat{q}, T, I} as defined in Protocol 3.4.6, per present AIR
     /// **in sorted AIR order**.
-    pub denominator_term_per_air: Vec<EF>,
+    pub denominator_term_per_air: Vec<SC::EF>,
 
     /// Polynomial for initial round, given by `(vk.d + 1) * (2^{l_skip} - 1) + 1` coefficients.
-    pub univariate_round_coeffs: Vec<EF>,
+    pub univariate_round_coeffs: Vec<SC::EF>,
     /// For rounds `1, ..., n_max`; evaluations on `{1, ..., vk.d + 1}`.
-    pub sumcheck_round_polys: Vec<Vec<EF>>,
+    pub sumcheck_round_polys: Vec<Vec<SC::EF>>,
 
     /// Per AIR **in sorted AIR order**, per AIR part, per column index in that part, openings for
     /// the prismalinear column polynomial and (optionally) its rotational convolution. All column
@@ -94,10 +132,10 @@ pub struct BatchConstraintProof {
     /// i-th column's plain and rotated claims are (col_i, 0)".
     /// The trace parts are ordered: [CommonMain (part 0), Preprocessed (if any), Cached(0),
     /// Cached(1), ...]
-    pub column_openings: Vec<Vec<Vec<EF>>>,
+    pub column_openings: Vec<Vec<Vec<SC::EF>>>,
 }
 
-pub fn column_openings_by_rot<'a>(
+pub fn column_openings_by_rot<'a, EF: PrimeCharacteristicRing + Copy + 'a>(
     openings: &'a [EF],
     need_rot: bool,
 ) -> Box<dyn Iterator<Item = (EF, EF)> + 'a> {
@@ -108,43 +146,57 @@ pub fn column_openings_by_rot<'a>(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StackingProof {
+#[derive(Derivative, Serialize, Deserialize)]
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = "")
+)]
+#[serde(bound = "")]
+pub struct StackingProof<SC: StarkProtocolConfig> {
     /// Polynomial for round 0, given by `2 * (2^{l_skip} - 1) + 1` coefficients.
-    pub univariate_round_coeffs: Vec<EF>,
+    pub univariate_round_coeffs: Vec<SC::EF>,
     /// Rounds 1, ..., n_stack; evaluations at {1, 2}.
-    pub sumcheck_round_polys: Vec<[EF; 2]>,
+    pub sumcheck_round_polys: Vec<[SC::EF; 2]>,
     /// Per commit, per column.
-    pub stacking_openings: Vec<Vec<EF>>,
+    pub stacking_openings: Vec<Vec<SC::EF>>,
 }
 
-pub type MerkleProof = Vec<Digest>;
+pub type MerkleProof<Digest> = Vec<Digest>;
 
 /// WHIR polynomial opening proof for multiple polynomials of the same height, committed to in
 /// multiple commitments.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WhirProof {
+#[derive(Derivative, Serialize, Deserialize)]
+#[derivative(
+    Clone(bound = ""),
+    Debug(bound = ""),
+    PartialEq(bound = ""),
+    Eq(bound = "")
+)]
+#[serde(bound = "")]
+pub struct WhirProof<SC: StarkProtocolConfig> {
     /// Per sumcheck round; evaluations on {1, 2}. This list is "flattened" with respect to the
     /// WHIR rounds.
-    pub whir_sumcheck_polys: Vec<[EF; 2]>,
+    pub whir_sumcheck_polys: Vec<[SC::EF; 2]>,
     /// The codeword commits after each fold, except the final round.
-    pub codeword_commits: Vec<Digest>,
+    pub codeword_commits: Vec<SC::Digest>,
     /// The out-of-domain values "y0" per round, except the final round.
-    pub ood_values: Vec<EF>,
+    pub ood_values: Vec<SC::EF>,
     /// For each sumcheck round, the folding PoW witness. Length is `num_whir_sumcheck_rounds =
     /// num_whir_rounds * k_whir`.
-    pub folding_pow_witnesses: Vec<F>,
+    pub folding_pow_witnesses: Vec<SC::F>,
     /// For each WHIR round, the query phase PoW witness. Length is `num_whir_rounds`.
-    pub query_phase_pow_witnesses: Vec<F>,
+    pub query_phase_pow_witnesses: Vec<SC::F>,
     /// For the initial round: per committed matrix, per in-domain query.
     // num_commits x num_queries x (1 << k) x stacking_width[i]
-    pub initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>>,
-    pub initial_round_merkle_proofs: Vec<Vec<MerkleProof>>,
+    pub initial_round_opened_rows: Vec<Vec<Vec<Vec<SC::F>>>>,
+    pub initial_round_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>>,
     /// Per non-initial round, per in-domain-query.
-    pub codeword_opened_values: Vec<Vec<Vec<EF>>>,
-    pub codeword_merkle_proofs: Vec<Vec<MerkleProof>>,
+    pub codeword_opened_values: Vec<Vec<Vec<SC::EF>>>,
+    pub codeword_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>>,
     /// Coefficients of the polynomial after the final round.
-    pub final_poly: Vec<EF>,
+    pub final_poly: Vec<SC::EF>,
 }
 
 // ==================== Encode implementations ====================
@@ -153,8 +205,12 @@ pub struct WhirProof {
 /// It does _not_ correspond to the main openvm version (which may change more frequently).
 pub(crate) const CODEC_VERSION: u32 = 3;
 
+// Encode/Decode impls use concrete BabyBear types for now.
+// They will be genericized when the codec traits are made generic.
+type ConcreteSC = crate::baby_bear_poseidon2::BabyBearPoseidon2ConfigV2;
+
 // TODO: custom encode/decode for Proof that takes in a vk
-impl Encode for Proof {
+impl Encode for Proof<ConcreteSC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         // We explicitly implement Encode for Proof to add CODEC_VERSION
         CODEC_VERSION.encode(writer)?;
@@ -183,7 +239,7 @@ impl Encode for Proof {
     }
 }
 
-impl Encode for GkrProof {
+impl Encode for GkrProof<ConcreteSC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         self.logup_pow_witness.encode(writer)?;
         self.q0_claim.encode(writer)?;
@@ -195,7 +251,7 @@ impl Encode for GkrProof {
     }
 }
 
-impl Encode for BatchConstraintProof {
+impl Encode for BatchConstraintProof<ConcreteSC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         // Length of numerator_term_per_air is number of present AIRs
         self.numerator_term_per_air.encode(writer)?;
@@ -221,7 +277,7 @@ impl Encode for BatchConstraintProof {
     }
 }
 
-impl Encode for StackingProof {
+impl Encode for StackingProof<ConcreteSC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         self.univariate_round_coeffs.encode(writer)?;
         self.sumcheck_round_polys.encode(writer)?;
@@ -229,7 +285,7 @@ impl Encode for StackingProof {
     }
 }
 
-impl Encode for WhirProof {
+impl Encode for WhirProof<ConcreteSC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         self.whir_sumcheck_polys.encode(writer)?;
         let num_whir_sumcheck_rounds = self.whir_sumcheck_polys.len();
@@ -319,7 +375,7 @@ impl Encode for WhirProof {
 
 // ==================== Decode implementations ====================
 
-impl Decode for Proof {
+impl Decode for Proof<ConcreteSC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         // We explicitly implement Decode for Proof to check CODEC_VERSION
         let codec_version = u32::decode(reader)?;
@@ -363,11 +419,11 @@ impl Decode for Proof {
     }
 }
 
-impl Decode for GkrProof {
+impl Decode for GkrProof<ConcreteSC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let logup_pow_witness = F::decode(reader)?;
         let q0_claim = EF::decode(reader)?;
-        let claims_per_layer = Vec::<GkrLayerClaims>::decode(reader)?;
+        let claims_per_layer = Vec::<GkrLayerClaims<ConcreteSC>>::decode(reader)?;
 
         let num_sumcheck_polys = claims_per_layer.len().saturating_sub(1);
         let mut sumcheck_polys = Vec::with_capacity(num_sumcheck_polys);
@@ -384,7 +440,7 @@ impl Decode for GkrProof {
     }
 }
 
-impl Decode for BatchConstraintProof {
+impl Decode for BatchConstraintProof<ConcreteSC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let numerator_term_per_air = Vec::<EF>::decode(reader)?;
         let num_present_airs = numerator_term_per_air.len();
@@ -416,7 +472,7 @@ impl Decode for BatchConstraintProof {
     }
 }
 
-impl Decode for StackingProof {
+impl Decode for StackingProof<ConcreteSC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         Ok(Self {
             univariate_round_coeffs: Vec::<EF>::decode(reader)?,
@@ -426,7 +482,7 @@ impl Decode for StackingProof {
     }
 }
 
-impl Decode for WhirProof {
+impl Decode for WhirProof<ConcreteSC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let whir_sumcheck_polys = Vec::<[EF; 2]>::decode(reader)?;
         let num_whir_sumcheck_rounds = whir_sumcheck_polys.len();
@@ -543,7 +599,7 @@ mod tests {
         let mut proof_bytes = Vec::new();
         proof.encode(&mut proof_bytes).unwrap();
 
-        let decoded_proof = Proof::decode(&mut &proof_bytes[..]).unwrap();
+        let decoded_proof = Proof::<ConcreteSC>::decode(&mut &proof_bytes[..]).unwrap();
         assert_eq!(proof, decoded_proof);
         Ok(())
     }

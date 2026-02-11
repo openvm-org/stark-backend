@@ -5,7 +5,7 @@ use std::{cmp::max, iter::zip};
 use itertools::Itertools;
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{Field, PrimeCharacteristicRing};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -20,13 +20,11 @@ use crate::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
-        CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixView, ProvingContextV2,
+        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixView,
+        ProverBackendV2, ProvingContextV2,
     },
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
-    FiatShamirTranscript,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
-
-type SCV2 = BabyBearPoseidon2ConfigV2;
 
 mod cpu;
 mod evaluator;
@@ -37,13 +35,16 @@ pub use cpu::LogupZerocheckCpu;
 pub use single::*;
 
 #[instrument(level = "info", skip_all)]
-pub fn prove_zerocheck_and_logup<TS>(
+pub fn prove_zerocheck_and_logup<SC: StarkProtocolConfig, TS>(
     transcript: &mut TS,
-    mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
-    ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
-) -> (GkrProof, BatchConstraintProof, Vec<EF>)
+    mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>>,
+    ctx: &ProvingContextV2<CpuBackendV2<SC>>,
+) -> (GkrProof<SC>, BatchConstraintProof<SC>, Vec<SC::EF>)
 where
-    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2>,
+    TS: FiatShamirTranscript<SC>,
+    SC::F: TwoAdicField,
+    SC::EF: TwoAdicField + ExtensionField<SC::F>,
+    CpuBackendV2<SC>: ProverBackendV2<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
@@ -111,9 +112,9 @@ where
                     .into_par_iter()
                     .map(|i| {
                         let mut row_parts = Vec::with_capacity(mats.len() + 1);
-                        let is_first = F::from_bool(i == 0);
-                        let is_transition = F::from_bool(i != height - 1);
-                        let is_last = F::from_bool(i == height - 1);
+                        let is_first = SC::F::from_bool(i == 0);
+                        let is_transition = SC::F::from_bool(i != height - 1);
+                        let is_last = SC::F::from_bool(i == height - 1);
                         let sels = vec![is_first, is_transition, is_last];
                         row_parts.push(sels);
                         for (mat, is_rot) in &mats {
@@ -143,7 +144,7 @@ where
             debug_assert_eq!(1 << s.log_height(), s.len(0));
             debug_assert_eq!(s.len(0) % height, 0);
             let norm_factor_denom = s.len(0) / height;
-            let norm_factor = F::from_usize(norm_factor_denom).inverse();
+            let norm_factor = SC::F::from_usize(norm_factor_denom).inverse();
             // We need to fill `evals` with the logup evaluations on the lifted trace, which is
             // the same as cyclic repeating of the unlifted evaluations
             evals[s.row_idx..s.row_idx + s.len(0)]
@@ -164,7 +165,7 @@ where
         evals
     };
 
-    let (frac_sum_proof, mut xi) = fractional_sumcheck(transcript, &gkr_input_evals, true);
+    let (frac_sum_proof, mut xi) = fractional_sumcheck::<SC, _>(transcript, &gkr_input_evals, true);
 
     // Sample more for `\xi` in the edge case that some AIRs don't have interactions
     let n_global = max(n_max, n_logup);
@@ -192,11 +193,11 @@ where
     let s_0_logup_polys = {
         let eq_sharp_uni = eq_sharp_uni_poly(&prover.xi[..l_skip]);
         let mut eq_coeffs = eq_sharp_uni.into_coeffs();
-        eq_coeffs.resize(large_uni_domain, EF::ZERO);
+        eq_coeffs.resize(large_uni_domain, SC::EF::ZERO);
         let eq_evals = dft.dft(eq_coeffs);
 
         let width = 2 * num_traces;
-        let mut sp_coeffs_mat = EF::zero_vec(width * large_uni_domain);
+        let mut sp_coeffs_mat = SC::EF::zero_vec(width * large_uni_domain);
         for (i, coeffs) in sp_0_polys[..2 * num_traces].iter().enumerate() {
             // NOTE: coeffs could have length longer than `sp_0_deg + 1` due to coset evaluation,
             // but trailing coefficients should be zero.
@@ -218,7 +219,7 @@ where
         dft.idft_batch(s_evals)
     };
 
-    let skip_domain_size = F::from_usize(1 << l_skip);
+    let skip_domain_size = SC::F::from_usize(1 << l_skip);
     // logup sum claims (sum_{\hat p}, sum_{\hat q}) per present AIR
     let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = (0..num_traces)
         .map(|trace_idx| {
@@ -233,7 +234,7 @@ where
                             .values
                             .get_unchecked(j * 2 * num_traces + 2 * trace_idx + is_denom)
                     })
-                    .sum::<EF>()
+                    .sum::<SC::EF>()
                     * skip_domain_size
             });
             transcript.observe_ext(sum_claim_p);
@@ -248,17 +249,17 @@ where
     let mu_pows = mu.powers().take(3 * num_traces).collect_vec();
 
     let s_0_zc_poly = {
-        let eq_uni = eq_uni_poly::<F, _>(l_skip, prover.xi[0]);
+        let eq_uni = eq_uni_poly::<SC::F, _>(l_skip, prover.xi[0]);
         let mut eq_coeffs = eq_uni.into_coeffs();
-        eq_coeffs.resize(large_uni_domain, EF::ZERO);
+        eq_coeffs.resize(large_uni_domain, SC::EF::ZERO);
         let eq_evals = dft.dft(eq_coeffs);
 
-        let mut sp_coeffs = EF::zero_vec(large_uni_domain);
+        let mut sp_coeffs = SC::EF::zero_vec(large_uni_domain);
         let mus = &mu_pows[2 * num_traces..];
         let polys = &sp_0_polys[2 * num_traces..];
         for (j, batch_coeff) in sp_coeffs.iter_mut().enumerate().take(sp_0_deg + 1) {
             for (&mu, poly) in zip(mus, polys) {
-                *batch_coeff += mu * *poly.coeffs().get(j).unwrap_or(&EF::ZERO);
+                *batch_coeff += mu * *poly.coeffs().get(j).unwrap_or(&SC::EF::ZERO);
             }
         }
         let mut s_evals = dft.dft(sp_coeffs);
@@ -279,7 +280,7 @@ where
             let coeff = batched_zc
                 + zip(&mu_pows, logup_row)
                     .map(|(&mu_j, &x)| mu_j * x)
-                    .sum::<EF>();
+                    .sum::<SC::EF>();
             transcript.observe_ext(coeff);
             coeff
         })
@@ -322,9 +323,9 @@ where
             .find_position(|&&n| round as isize > n)
             .map(|(i, _)| i)
             .unwrap_or(num_traces);
-        let mut sp_head_zc = vec![EF::ZERO; constraint_degree];
-        let mut sp_head_logup = vec![EF::ZERO; constraint_degree];
-        let mut sp_tail = EF::ZERO;
+        let mut sp_head_zc = vec![SC::EF::ZERO; constraint_degree];
+        let mut sp_head_logup = vec![SC::EF::ZERO; constraint_degree];
+        let mut sp_tail = SC::EF::ZERO;
         for trace_idx in 0..num_traces {
             let zc_idx = 2 * num_traces + trace_idx;
             let numer_idx = 2 * trace_idx;
@@ -342,7 +343,7 @@ where
             }
         }
         // With eq(xi,r) contributions
-        let mut sp_head_evals = vec![EF::ZERO; s_deg];
+        let mut sp_head_evals = vec![SC::EF::ZERO; s_deg];
         for i in 0..constraint_degree {
             sp_head_evals[i + 1] = prover.eq_ns[round - 1] * sp_head_zc[i]
                 + prover.eq_sharp_ns[round - 1] * sp_head_logup[i];
@@ -351,14 +352,14 @@ where
         // We use that s_j(0) + s_j(1) = s_{j-1}(r_{j-1})
         let xi_cur = prover.xi[l_skip + round - 1];
         {
-            let eq_xi_0 = EF::ONE - xi_cur;
+            let eq_xi_0 = SC::EF::ONE - xi_cur;
             let eq_xi_1 = xi_cur;
             sp_head_evals[0] =
                 (prover.prev_s_eval - eq_xi_1 * sp_head_evals[1] - sp_tail) * eq_xi_0.inverse();
         }
         // s' has degree s_deg - 1
         let sp_head = UnivariatePoly::lagrange_interpolate(
-            &(0..s_deg).map(F::from_usize).collect_vec(),
+            &(0..s_deg).map(SC::F::from_usize).collect_vec(),
             &sp_head_evals,
         );
         // eq(xi, X) = (2 * xi - 1) * X + (1 - xi)
@@ -366,8 +367,8 @@ where
         // s(X) has degree s_deg
         let batch_s = {
             let mut coeffs = sp_head.into_coeffs();
-            coeffs.push(EF::ZERO);
-            let b = EF::ONE - xi_cur;
+            coeffs.push(SC::EF::ZERO);
+            let b = SC::EF::ONE - xi_cur;
             let a = xi_cur - b;
             for i in (0..s_deg).rev() {
                 coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1];
@@ -377,7 +378,7 @@ where
             UnivariatePoly::new(coeffs)
         };
         let batch_s_evals = (1..=s_deg)
-            .map(|i| batch_s.eval_at_point(EF::from_usize(i)))
+            .map(|i| batch_s.eval_at_point(SC::EF::from_usize(i)))
             .collect_vec();
         for &eval in &batch_s_evals {
             transcript.observe_ext(eval);
@@ -412,14 +413,14 @@ where
         }
     }
 
-    let batch_constraint_proof = BatchConstraintProof {
+    let batch_constraint_proof = BatchConstraintProof::<SC> {
         numerator_term_per_air,
         denominator_term_per_air,
         univariate_round_coeffs: s_0_poly.into_coeffs(),
         sumcheck_round_polys,
         column_openings,
     };
-    let gkr_proof = GkrProof {
+    let gkr_proof = GkrProof::<SC> {
         logup_pow_witness,
         q0_claim: frac_sum_proof.fractional_sum.1,
         claims_per_layer: frac_sum_proof.claims_per_layer,
