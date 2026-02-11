@@ -21,8 +21,6 @@ use crate::{
     SystemParams,
 };
 
-type SCV2 = BabyBearPoseidon2ConfigV2;
-
 /// Associated types needed by the prover, in the form of buffers and views,
 /// specific to a specific hardware backend.
 ///
@@ -124,7 +122,7 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
     /// Transport the proving key to the device, filtering for only the provided `air_ids`.
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKeyV2<SCV2>,
+        mpk: &MultiStarkProvingKeyV2<BabyBearPoseidon2ConfigV2>,
     ) -> DeviceMultiStarkProvingKeyV2<PB>;
 
     fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<PB::Val>) -> PB::Matrix;
@@ -138,7 +136,7 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
 
     fn transport_committed_trace_data_to_device(
         &self,
-        committed_trace: &CommittedTraceDataV2<CpuBackendV2<SCV2>>,
+        committed_trace: &CommittedTraceDataV2<CpuBackendV2<BabyBearPoseidon2ConfigV2>>,
     ) -> CommittedTraceDataV2<PB>
     where
         PB: ProverBackendV2<Val = F, Commitment = Digest>,
@@ -155,7 +153,7 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
 
     fn transport_proving_ctx_to_device(
         &self,
-        ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
+        ctx: &ProvingContextV2<CpuBackendV2<BabyBearPoseidon2ConfigV2>>,
     ) -> ProvingContextV2<PB>
     where
         PB: ProverBackendV2<Val = F, Commitment = Digest>,

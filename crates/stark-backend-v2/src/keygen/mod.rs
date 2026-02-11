@@ -33,7 +33,6 @@ use crate::{
     StarkProtocolConfig, SystemParams,
 };
 
-type SCV2 = BabyBearPoseidon2ConfigV2;
 
 pub mod types;
 
@@ -51,7 +50,7 @@ pub struct MultiStarkKeygenBuilderV2<SC: StarkProtocolConfig> {
     partitioned_airs: Vec<AirKeygenBuilderV2<SC>>,
 }
 
-impl MultiStarkKeygenBuilderV2<SCV2> {
+impl MultiStarkKeygenBuilderV2<BabyBearPoseidon2ConfigV2> {
     pub fn new(config: SystemParams) -> Self {
         Self {
             config,
@@ -78,7 +77,7 @@ impl MultiStarkKeygenBuilderV2<SCV2> {
 
     /// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
-    pub fn generate_pk(self) -> Result<MultiStarkProvingKeyV2<SCV2>, KeygenError> {
+    pub fn generate_pk(self) -> Result<MultiStarkProvingKeyV2<BabyBearPoseidon2ConfigV2>, KeygenError> {
         let max_constraint_degree = self.config.max_constraint_degree;
         let pk_per_air: Vec<_> = self
             .partitioned_airs
@@ -177,7 +176,7 @@ impl MultiStarkKeygenBuilderV2<SCV2> {
             threshold: log_up_security_params.max_interaction_count,
         });
 
-        let pre_vk: MultiStarkVerifyingKey0V2<SCV2> = MultiStarkVerifyingKey0V2 {
+        let pre_vk: MultiStarkVerifyingKey0V2<BabyBearPoseidon2ConfigV2> = MultiStarkVerifyingKey0V2 {
             params: self.config.clone(),
             per_air: pk_per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: trace_height_constraints.clone(),
@@ -201,7 +200,7 @@ impl MultiStarkKeygenBuilderV2<SCV2> {
     }
 }
 
-impl AirKeygenBuilderV2<SCV2> {
+impl AirKeygenBuilderV2<BabyBearPoseidon2ConfigV2> {
     pub fn new(config: &SystemParams, air: AirRef<BabyBearPoseidon2Config>, is_required: bool) -> Self {
         let prep_keygen_data = PrepKeygenDataV2::new(config, air.as_ref());
         Self {
@@ -216,7 +215,7 @@ impl AirKeygenBuilderV2<SCV2> {
     pub fn generate_pk(
         self,
         max_constraint_degree: usize,
-    ) -> Result<StarkProvingKeyV2<SCV2>, KeygenError> {
+    ) -> Result<StarkProvingKeyV2<BabyBearPoseidon2ConfigV2>, KeygenError> {
         let air_name = self.air.name();
 
         let symbolic_builder = self.get_symbolic_builder();
@@ -287,7 +286,7 @@ pub(super) struct PrepKeygenDataV2<SC: StarkProtocolConfig> {
     pub prover_data: Option<Arc<StackedPcsData<SC::F, SC::Digest>>>,
 }
 
-impl PrepKeygenDataV2<SCV2> {
+impl PrepKeygenDataV2<BabyBearPoseidon2ConfigV2> {
     fn new(params: &SystemParams, air: &dyn AnyRap<BabyBearPoseidon2Config>) -> Self {
         let preprocessed_trace = BaseAir::<F>::preprocessed_trace(air);
         let vpdata_opt = preprocessed_trace.map(|trace| {

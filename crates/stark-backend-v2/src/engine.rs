@@ -23,8 +23,6 @@ use crate::{
     FiatShamirTranscript, StarkProtocolConfig, SystemParams,
 };
 
-type SCV2 = BabyBearPoseidon2ConfigV2;
-
 /// Data for verifying a Stark proof.
 #[derive(Debug)]
 pub struct VerificationDataV2<SC: StarkProtocolConfig> {
@@ -72,7 +70,7 @@ where
     fn keygen(
         &self,
         airs: &[AirRef<BabyBearPoseidon2Config>],
-    ) -> (MultiStarkProvingKeyV2<SCV2>, MultiStarkVerifyingKeyV2<SCV2>) {
+    ) -> (MultiStarkProvingKeyV2<BabyBearPoseidon2ConfigV2>, MultiStarkVerifyingKeyV2<BabyBearPoseidon2ConfigV2>) {
         let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config().clone());
         for air in airs {
             keygen_builder.add_air(air.clone());

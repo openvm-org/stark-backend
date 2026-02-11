@@ -16,11 +16,8 @@ use crate::{
         stacked_pcs::{MerkleTree, StackedPcsData},
         ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
     },
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, EF, F},
     FiatShamirTranscript, StarkProtocolConfig, WhirConfig,
 };
-
-type SCV2 = BabyBearPoseidon2ConfigV2;
 
 pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
     /// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables,
@@ -41,23 +38,27 @@ pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
     ) -> WhirProof<SC>;
 }
 
-impl<TS: FiatShamirTranscript<SCV2>> WhirProver<SCV2, CpuBackendV2<SCV2>, CpuDeviceV2, TS>
-    for CpuDeviceV2
+impl<SC, TS> WhirProver<SC, CpuBackendV2<SC>, CpuDeviceV2, TS> for CpuDeviceV2
+where
+    SC: StarkProtocolConfig,
+    SC::F: TwoAdicField + Ord,
+    SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
+    TS: FiatShamirTranscript<SC>,
 {
     #[instrument(level = "info", skip_all)]
     fn prove_whir(
         &self,
         transcript: &mut TS,
-        common_main_pcs_data: StackedPcsData<F, Digest>,
-        pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsData<F, Digest>>>,
-        u_cube: &[EF],
-    ) -> WhirProof<SCV2> {
+        common_main_pcs_data: StackedPcsData<SC::F, SC::Digest>,
+        pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsData<SC::F, SC::Digest>>>,
+        u_cube: &[SC::EF],
+    ) -> WhirProof<SC> {
         let params = self.config();
         let committed_mats = once(&common_main_pcs_data)
             .chain(pre_cached_pcs_data_per_commit.iter().map(|d| d.as_ref()))
             .map(|d| (&d.matrix, &d.tree))
             .collect_vec();
-        prove_whir_opening::<SCV2, _>(
+        prove_whir_opening::<SC, _>(
             transcript,
             params.l_skip,
             params.log_blowup,
