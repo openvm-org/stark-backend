@@ -59,9 +59,10 @@ pub enum GkrVerificationError {
 /// Reduces the fractional sum to evaluation claims on the input layer polynomials
 /// p_hat(xi) and q_hat(xi) at a random point xi.
 ///
-/// The argument `n_block` is the total number of outer GKR rounds.
-/// The argument `n_grid` is the effective grid dimension.
-/// It is assumed that `n_block + n_grid = l_skip + n_logup`.
+/// The argument `total_gkr_rounds` is the total number of GKR rounds (block + grid).
+/// The argument `n_logup_grid` is the system parameter to configure early stopping. Note that
+/// `n_logup_grid` may be larger than `total_gkr_rounds`. The effective grid dimension is
+/// `min(total_gkr_rounds, n_logup_grid)`.
 ///
 /// # Returns
 /// `(p_hat(xi), q_hat(xi), xi)` where xi = concat(gkr_r, xi_grid).
@@ -69,9 +70,11 @@ pub enum GkrVerificationError {
 pub fn verify_gkr<TS: FiatShamirTranscript>(
     proof: &GkrProof,
     transcript: &mut TS,
-    n_block: usize,
-    n_grid: usize,
+    total_gkr_rounds: usize,
+    n_logup_grid: usize,
 ) -> Result<(EF, EF, Vec<EF>), GkrVerificationError> {
+    let n_grid = total_gkr_rounds.min(n_logup_grid);
+    let n_block = total_gkr_rounds - n_grid;
     let grid_size = 1usize << n_grid;
 
     // Step 2: Verify grid claims
@@ -663,7 +666,7 @@ mod tests {
         };
 
         let mut transcript = DuplexSponge::default();
-        // n_grid=0 => expects 1 grid claim, but we have 2
+        // total_gkr_rounds=0, n_logup_grid=0 => expects 1 grid claim, but we have 2
         let result = verify_gkr(&proof, &mut transcript, 0, 0);
         assert!(result.is_err());
         assert!(matches!(
@@ -706,7 +709,7 @@ mod tests {
         };
 
         let mut transcript = DuplexSponge::default();
-        let result = verify_gkr(&proof, &mut transcript, 0, 1);
+        let result = verify_gkr(&proof, &mut transcript, 1, 1);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -738,7 +741,7 @@ mod tests {
     #[test]
     fn test_grid_check_multiple_grid_points_zero_rounds() {
         setup_tracing();
-        // n_grid=1, 2 grid points, total_rounds=0
+        // n_logup_grid=1, 2 grid points, total_gkr_rounds=1 (all grid)
         // Grid claims sum to zero: 3/2 + (-3)/2 = 0
         let proof = GkrProof {
             logup_pow_witness: F::ZERO,
@@ -751,7 +754,7 @@ mod tests {
         };
 
         let mut transcript = DuplexSponge::default();
-        let result = verify_gkr(&proof, &mut transcript, 0, 1);
+        let result = verify_gkr(&proof, &mut transcript, 1, 1);
         assert!(result.is_ok());
         let (_p_xi, _q_xi, xi) = result.unwrap();
         // xi should have 1 element (xi_grid only, no gkr_r)
@@ -794,13 +797,7 @@ mod tests {
 
         let gkr_proof = gkr_proof_from_frac(&frac_proof);
         let mut verifier_transcript = DuplexSponge::default();
-        let total_rounds_block = total_rounds - n_grid;
-        let result = verify_gkr(
-            &gkr_proof,
-            &mut verifier_transcript,
-            total_rounds_block,
-            n_grid,
-        );
+        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds, n_grid);
         assert!(
             result.is_ok(),
             "Grid integration (n_grid=1) failed: {:?}",
@@ -866,11 +863,10 @@ mod tests {
 
         let gkr_proof = gkr_proof_from_frac(&frac_proof);
         let mut verifier_transcript = DuplexSponge::default();
-        let total_rounds_block = total_rounds_full - n_grid;
         let result = verify_gkr(
             &gkr_proof,
             &mut verifier_transcript,
-            total_rounds_block,
+            total_rounds_full,
             n_grid,
         );
         assert!(
@@ -924,11 +920,10 @@ mod tests {
 
         let gkr_proof = gkr_proof_from_frac(&frac_proof);
         let mut verifier_transcript = DuplexSponge::default();
-        let total_rounds_block = total_rounds_full - n_grid; // == 0
         let result = verify_gkr(
             &gkr_proof,
             &mut verifier_transcript,
-            total_rounds_block,
+            total_rounds_full,
             n_grid,
         );
         assert!(
