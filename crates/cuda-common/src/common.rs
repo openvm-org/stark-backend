@@ -31,10 +31,6 @@ pub fn set_device() -> Result<i32, CudaError> {
     Ok(device)
 }
 
-pub fn cuda_available() -> bool {
-    set_device().is_ok()
-}
-
 pub fn reset_device() -> Result<(), CudaError> {
     check(unsafe { cudaDeviceReset() })
 }

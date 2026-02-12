@@ -25,8 +25,7 @@ pub(super) struct VerifierConstraintEvaluator<'a, F, EF> {
     pub partitioned_main: &'a [ViewPair<'a, EF>],
     pub is_first_row: EF,
     pub is_last_row: EF,
-    pub omega_z: EF,
-    pub eq_x: EF,
+    pub is_transition: EF,
     pub public_values: &'a [F],
 }
 
@@ -57,8 +56,7 @@ where
             partitioned_main,
             is_first_row,
             is_last_row,
-            omega_z,
-            eq_x,
+            is_transition: omega_z - eq_x,
             public_values,
         }
     }
@@ -108,6 +106,6 @@ where
     }
 
     fn eval_is_transition(&self) -> EF {
-        self.omega_z - self.eq_x
+        self.is_transition
     }
 }
