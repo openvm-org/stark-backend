@@ -682,7 +682,7 @@ mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
-    use crate::{EF, F};
+    use crate::baby_bear_poseidon2::{EF, F};
 
     #[test]
     fn test_lagrange_interpolation_round_trip() {
