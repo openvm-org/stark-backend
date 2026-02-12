@@ -5,8 +5,7 @@ use p3_field::PrimeCharacteristicRing;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    baby_bear_poseidon2::{Digest, EF, F},
-    codec::{decode_into_vec, encode_iter, Decode, Encode},
+    codec::{DecodableConfig, Decode, EncodableConfig, Encode},
     StarkProtocolConfig,
 };
 
@@ -37,7 +36,7 @@ pub struct Proof<SC: StarkProtocolConfig> {
     pub whir_proof: WhirProof<SC>,
 }
 
-#[derive(Derivative, Serialize, Deserialize, Encode, Decode)]
+#[derive(Derivative, Serialize, Deserialize)]
 #[derivative(
     Clone(bound = ""),
     Debug(bound = ""),
@@ -85,7 +84,7 @@ pub struct GkrProof<SC: StarkProtocolConfig> {
     pub sumcheck_polys: Vec<Vec<[SC::EF; 3]>>,
 }
 
-#[derive(Derivative, Serialize, Deserialize, Encode, Decode)]
+#[derive(Derivative, Serialize, Deserialize)]
 #[derivative(
     Clone(bound = ""),
     Debug(bound = ""),
@@ -201,20 +200,32 @@ pub struct WhirProof<SC: StarkProtocolConfig> {
 
 // ==================== Encode implementations ====================
 
+impl<SC: EncodableConfig> Encode for TraceVData<SC> {
+    fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
+        self.log_height.encode(writer)?;
+        SC::encode_digest_slice(&self.cached_commitments, writer)
+    }
+}
+
+impl<SC: EncodableConfig> Encode for GkrLayerClaims<SC> {
+    fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
+        SC::encode_extension_field(&self.p_xi_0, writer)?;
+        SC::encode_extension_field(&self.p_xi_1, writer)?;
+        SC::encode_extension_field(&self.q_xi_0, writer)?;
+        SC::encode_extension_field(&self.q_xi_1, writer)?;
+        Ok(())
+    }
+}
+
 /// Codec version should change only when proof system or proof format changes.
 /// It does _not_ correspond to the main openvm version (which may change more frequently).
 pub(crate) const CODEC_VERSION: u32 = 3;
 
-// Encode/Decode impls use concrete BabyBear types for now.
-// They will be genericized when the codec traits are made generic.
-type ConcreteSC = crate::baby_bear_poseidon2::BabyBearPoseidon2ConfigV2;
-
-// TODO: custom encode/decode for Proof that takes in a vk
-impl Encode for Proof<ConcreteSC> {
+impl<SC: EncodableConfig> Encode for Proof<SC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         // We explicitly implement Encode for Proof to add CODEC_VERSION
         CODEC_VERSION.encode(writer)?;
-        self.common_main_commit.encode(writer)?;
+        SC::encode_digest(&self.common_main_commit, writer)?;
 
         // We encode trace_vdata by encoding the number of AIRs, encoding a bitmap of
         // which AIRs are present, and then encoding each present TraceVData.
@@ -231,7 +242,11 @@ impl Encode for Proof<ConcreteSC> {
             vdata.encode(writer)?;
         }
 
-        self.public_values.encode(writer)?;
+        // public_values: Vec<Vec<SC::F>>
+        self.public_values.len().encode(writer)?;
+        for pv in &self.public_values {
+            SC::encode_base_field_slice(pv, writer)?;
+        }
         self.gkr_proof.encode(writer)?;
         self.batch_constraint_proof.encode(writer)?;
         self.stacking_proof.encode(writer)?;
@@ -239,25 +254,29 @@ impl Encode for Proof<ConcreteSC> {
     }
 }
 
-impl Encode for GkrProof<ConcreteSC> {
+impl<SC: EncodableConfig> Encode for GkrProof<SC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        self.logup_pow_witness.encode(writer)?;
-        self.q0_claim.encode(writer)?;
+        SC::encode_base_field(&self.logup_pow_witness, writer)?;
+        SC::encode_extension_field(&self.q0_claim, writer)?;
         self.claims_per_layer.encode(writer)?;
         // We should know the length of sumcheck_polys and each nested vector based
         // on the length of claims_per_layer.
-        encode_iter(self.sumcheck_polys.iter().flatten(), writer)?;
+        for round in &self.sumcheck_polys {
+            for arr in round {
+                SC::encode_extension_field_iter(arr.iter(), writer)?;
+            }
+        }
         Ok(())
     }
 }
 
-impl Encode for BatchConstraintProof<ConcreteSC> {
+impl<SC: EncodableConfig> Encode for BatchConstraintProof<SC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
         // Length of numerator_term_per_air is number of present AIRs
-        self.numerator_term_per_air.encode(writer)?;
-        encode_iter(self.denominator_term_per_air.iter(), writer)?;
+        SC::encode_extension_field_slice(&self.numerator_term_per_air, writer)?;
+        SC::encode_extension_field_iter(self.denominator_term_per_air.iter(), writer)?;
 
-        self.univariate_round_coeffs.encode(writer)?;
+        SC::encode_extension_field_slice(&self.univariate_round_coeffs, writer)?;
 
         // Each nested vector should be the same length
         let n_max = self.sumcheck_round_polys.len();
@@ -265,34 +284,52 @@ impl Encode for BatchConstraintProof<ConcreteSC> {
         if n_max > 0 {
             self.sumcheck_round_polys[0].len().encode(writer)?;
             for round_polys in &self.sumcheck_round_polys {
-                encode_iter(round_polys.iter(), writer)?;
+                SC::encode_extension_field_iter(round_polys.iter(), writer)?;
             }
         }
 
         // There is one outer vector per present AIR
+        // column_openings: Vec<Vec<Vec<SC::EF>>>
         for part_col_openings in &self.column_openings {
-            part_col_openings.encode(writer)?;
+            // part_col_openings: Vec<Vec<SC::EF>>
+            part_col_openings.len().encode(writer)?;
+            for col_opening in part_col_openings {
+                SC::encode_extension_field_slice(col_opening, writer)?;
+            }
         }
         Ok(())
     }
 }
 
-impl Encode for StackingProof<ConcreteSC> {
+impl<SC: EncodableConfig> Encode for StackingProof<SC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        self.univariate_round_coeffs.encode(writer)?;
-        self.sumcheck_round_polys.encode(writer)?;
-        self.stacking_openings.encode(writer)
+        SC::encode_extension_field_slice(&self.univariate_round_coeffs, writer)?;
+        // sumcheck_round_polys: Vec<[SC::EF; 2]>
+        self.sumcheck_round_polys.len().encode(writer)?;
+        for arr in &self.sumcheck_round_polys {
+            SC::encode_extension_field_iter(arr.iter(), writer)?;
+        }
+        // stacking_openings: Vec<Vec<SC::EF>>
+        self.stacking_openings.len().encode(writer)?;
+        for opening in &self.stacking_openings {
+            SC::encode_extension_field_slice(opening, writer)?;
+        }
+        Ok(())
     }
 }
 
-impl Encode for WhirProof<ConcreteSC> {
+impl<SC: EncodableConfig> Encode for WhirProof<SC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        self.whir_sumcheck_polys.encode(writer)?;
+        // whir_sumcheck_polys: Vec<[SC::EF; 2]>
+        self.whir_sumcheck_polys.len().encode(writer)?;
+        for arr in &self.whir_sumcheck_polys {
+            SC::encode_extension_field_iter(arr.iter(), writer)?;
+        }
         let num_whir_sumcheck_rounds = self.whir_sumcheck_polys.len();
 
         // Each length can be derived from num_whir_rounds
-        self.codeword_commits.encode(writer)?;
-        encode_iter(self.ood_values.iter(), writer)?;
+        SC::encode_digest_slice(&self.codeword_commits, writer)?;
+        SC::encode_extension_field_iter(self.ood_values.iter(), writer)?;
         let num_whir_rounds = self.codeword_commits.len() + 1;
         if !num_whir_sumcheck_rounds.is_multiple_of(num_whir_rounds) {
             return Err(Error::new(
@@ -301,8 +338,8 @@ impl Encode for WhirProof<ConcreteSC> {
             ));
         }
         assert_eq!(num_whir_rounds, self.query_phase_pow_witnesses.len());
-        encode_iter(self.folding_pow_witnesses.iter(), writer)?;
-        encode_iter(self.query_phase_pow_witnesses.iter(), writer)?;
+        SC::encode_base_field_iter(self.folding_pow_witnesses.iter(), writer)?;
+        SC::encode_base_field_iter(self.query_phase_pow_witnesses.iter(), writer)?;
 
         let num_commits = self.initial_round_opened_rows.len();
         assert!(num_commits > 0);
@@ -330,7 +367,9 @@ impl Encode for WhirProof<ConcreteSC> {
                 .collect();
 
             // Encode widths (length is implicit via num_commits).
-            encode_iter(widths.iter(), writer)?;
+            for w in &widths {
+                w.encode(writer)?;
+            }
 
             // Encode all opened row values (no per-row length prefixes).
             for (commit_rows, &width) in self.initial_round_opened_rows.iter().zip(&widths) {
@@ -338,15 +377,16 @@ impl Encode for WhirProof<ConcreteSC> {
                 for query_rows in commit_rows {
                     for row in query_rows {
                         debug_assert_eq!(row.len(), width);
-                        encode_iter(row.iter(), writer)?;
+                        SC::encode_base_field_iter(row.iter(), writer)?;
                     }
                 }
             }
 
-            encode_iter(
-                self.initial_round_merkle_proofs.iter().flatten().flatten(),
-                writer,
-            )?;
+            for merkle_proofs in &self.initial_round_merkle_proofs {
+                for proof in merkle_proofs {
+                    SC::encode_digest_iter(proof.iter(), writer)?;
+                }
+            }
         }
 
         // Length of outer vector is num_whir_rounds
@@ -354,7 +394,9 @@ impl Encode for WhirProof<ConcreteSC> {
             let num_queries = non_init_round.len();
             num_queries.encode(writer)?;
             // Length of nested vector is num_whir_queries, then k_whir_exp.
-            encode_iter(non_init_round.iter().flatten(), writer)?;
+            for query_vals in non_init_round {
+                SC::encode_extension_field_iter(query_vals.iter(), writer)?;
+            }
         }
 
         // Length of outer vector is num_whir_rounds, then num_whir_queries. Each
@@ -364,18 +406,39 @@ impl Encode for WhirProof<ConcreteSC> {
             first_merkle_depth = self.codeword_merkle_proofs[0][0].len();
         }
         first_merkle_depth.encode(writer)?;
-        encode_iter(
-            self.codeword_merkle_proofs.iter().flatten().flatten(),
-            writer,
-        )?;
+        for round_proofs in &self.codeword_merkle_proofs {
+            for proof in round_proofs {
+                SC::encode_digest_iter(proof.iter(), writer)?;
+            }
+        }
 
-        self.final_poly.encode(writer)
+        SC::encode_extension_field_slice(&self.final_poly, writer)
     }
 }
 
 // ==================== Decode implementations ====================
 
-impl Decode for Proof<ConcreteSC> {
+impl<SC: DecodableConfig> Decode for TraceVData<SC> {
+    fn decode<R: Read>(reader: &mut R) -> Result<Self> {
+        Ok(Self {
+            log_height: usize::decode(reader)?,
+            cached_commitments: SC::decode_digest_vec(reader)?,
+        })
+    }
+}
+
+impl<SC: DecodableConfig> Decode for GkrLayerClaims<SC> {
+    fn decode<R: Read>(reader: &mut R) -> Result<Self> {
+        Ok(Self {
+            p_xi_0: SC::decode_extension_field(reader)?,
+            p_xi_1: SC::decode_extension_field(reader)?,
+            q_xi_0: SC::decode_extension_field(reader)?,
+            q_xi_1: SC::decode_extension_field(reader)?,
+        })
+    }
+}
+
+impl<SC: DecodableConfig> Decode for Proof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         // We explicitly implement Decode for Proof to check CODEC_VERSION
         let codec_version = u32::decode(reader)?;
@@ -385,7 +448,7 @@ impl Decode for Proof<ConcreteSC> {
                 CODEC_VERSION, codec_version
             )));
         }
-        let common_main_commit = Digest::decode(reader)?;
+        let common_main_commit = SC::decode_digest(reader)?;
 
         let num_airs = usize::decode(reader)?;
         let bitmap_len = num_airs.div_ceil(8);
@@ -407,10 +470,17 @@ impl Decode for Proof<ConcreteSC> {
             }
         }
 
+        // public_values: Vec<Vec<SC::F>>
+        let num_pvs = usize::decode(reader)?;
+        let mut public_values = Vec::with_capacity(num_pvs);
+        for _ in 0..num_pvs {
+            public_values.push(SC::decode_base_field_vec(reader)?);
+        }
+
         Ok(Self {
             common_main_commit,
             trace_vdata,
-            public_values: Vec::<Vec<F>>::decode(reader)?,
+            public_values,
             gkr_proof: GkrProof::decode(reader)?,
             batch_constraint_proof: BatchConstraintProof::decode(reader)?,
             stacking_proof: StackingProof::decode(reader)?,
@@ -419,16 +489,25 @@ impl Decode for Proof<ConcreteSC> {
     }
 }
 
-impl Decode for GkrProof<ConcreteSC> {
+impl<SC: DecodableConfig> Decode for GkrProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let logup_pow_witness = F::decode(reader)?;
-        let q0_claim = EF::decode(reader)?;
-        let claims_per_layer = Vec::<GkrLayerClaims<ConcreteSC>>::decode(reader)?;
+        let logup_pow_witness = SC::decode_base_field(reader)?;
+        let q0_claim = SC::decode_extension_field(reader)?;
+        let claims_per_layer = Vec::<GkrLayerClaims<SC>>::decode(reader)?;
 
         let num_sumcheck_polys = claims_per_layer.len().saturating_sub(1);
         let mut sumcheck_polys = Vec::with_capacity(num_sumcheck_polys);
         for round_idx_minus_one in 0..num_sumcheck_polys {
-            sumcheck_polys.push(decode_into_vec(reader, round_idx_minus_one + 1)?);
+            let n = round_idx_minus_one + 1;
+            let mut round = Vec::with_capacity(n);
+            for _ in 0..n {
+                round.push([
+                    SC::decode_extension_field(reader)?,
+                    SC::decode_extension_field(reader)?,
+                    SC::decode_extension_field(reader)?,
+                ]);
+            }
+            sumcheck_polys.push(round);
         }
 
         Ok(Self {
@@ -440,26 +519,33 @@ impl Decode for GkrProof<ConcreteSC> {
     }
 }
 
-impl Decode for BatchConstraintProof<ConcreteSC> {
+impl<SC: DecodableConfig> Decode for BatchConstraintProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let numerator_term_per_air = Vec::<EF>::decode(reader)?;
+        let numerator_term_per_air = SC::decode_extension_field_vec(reader)?;
         let num_present_airs = numerator_term_per_air.len();
-        let denominator_term_per_air = decode_into_vec(reader, num_present_airs)?;
+        let denominator_term_per_air = SC::decode_extension_field_n(reader, num_present_airs)?;
 
-        let univariate_round_coeffs = Vec::<EF>::decode(reader)?;
+        let univariate_round_coeffs = SC::decode_extension_field_vec(reader)?;
 
         let n_max = usize::decode(reader)?;
         let mut sumcheck_round_polys = Vec::with_capacity(n_max);
         if n_max > 0 {
             let max_degree_plus_one = usize::decode(reader)?;
             for _ in 0..n_max {
-                sumcheck_round_polys.push(decode_into_vec(reader, max_degree_plus_one)?);
+                sumcheck_round_polys
+                    .push(SC::decode_extension_field_n(reader, max_degree_plus_one)?);
             }
         }
 
         let mut column_openings = Vec::with_capacity(num_present_airs);
         for _ in 0..num_present_airs {
-            column_openings.push(Vec::<Vec<EF>>::decode(reader)?);
+            // Vec<Vec<SC::EF>>: length-prefixed outer, then each inner
+            let num_parts = usize::decode(reader)?;
+            let mut parts = Vec::with_capacity(num_parts);
+            for _ in 0..num_parts {
+                parts.push(SC::decode_extension_field_vec(reader)?);
+            }
+            column_openings.push(parts);
         }
 
         Ok(Self {
@@ -472,21 +558,45 @@ impl Decode for BatchConstraintProof<ConcreteSC> {
     }
 }
 
-impl Decode for StackingProof<ConcreteSC> {
+impl<SC: DecodableConfig> Decode for StackingProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
+        let univariate_round_coeffs = SC::decode_extension_field_vec(reader)?;
+        // sumcheck_round_polys: Vec<[SC::EF; 2]>
+        let num_rounds = usize::decode(reader)?;
+        let mut sumcheck_round_polys = Vec::with_capacity(num_rounds);
+        for _ in 0..num_rounds {
+            sumcheck_round_polys.push([
+                SC::decode_extension_field(reader)?,
+                SC::decode_extension_field(reader)?,
+            ]);
+        }
+        // stacking_openings: Vec<Vec<SC::EF>>
+        let num_openings = usize::decode(reader)?;
+        let mut stacking_openings = Vec::with_capacity(num_openings);
+        for _ in 0..num_openings {
+            stacking_openings.push(SC::decode_extension_field_vec(reader)?);
+        }
         Ok(Self {
-            univariate_round_coeffs: Vec::<EF>::decode(reader)?,
-            sumcheck_round_polys: Vec::<[EF; 2]>::decode(reader)?,
-            stacking_openings: Vec::<Vec<EF>>::decode(reader)?,
+            univariate_round_coeffs,
+            sumcheck_round_polys,
+            stacking_openings,
         })
     }
 }
 
-impl Decode for WhirProof<ConcreteSC> {
+impl<SC: DecodableConfig> Decode for WhirProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let whir_sumcheck_polys = Vec::<[EF; 2]>::decode(reader)?;
-        let num_whir_sumcheck_rounds = whir_sumcheck_polys.len();
-        let codeword_commits = Vec::<Digest>::decode(reader)?;
+        // whir_sumcheck_polys: Vec<[SC::EF; 2]>
+        let num_whir_sumcheck_rounds = usize::decode(reader)?;
+        let mut whir_sumcheck_polys = Vec::with_capacity(num_whir_sumcheck_rounds);
+        for _ in 0..num_whir_sumcheck_rounds {
+            whir_sumcheck_polys.push([
+                SC::decode_extension_field(reader)?,
+                SC::decode_extension_field(reader)?,
+            ]);
+        }
+
+        let codeword_commits = SC::decode_digest_vec(reader)?;
         let num_whir_rounds = codeword_commits.len() + 1;
         if num_whir_sumcheck_rounds % num_whir_rounds != 0 {
             return Err(Error::new(
@@ -495,9 +605,9 @@ impl Decode for WhirProof<ConcreteSC> {
             ));
         }
         let k_whir = num_whir_sumcheck_rounds / num_whir_rounds;
-        let ood_values = decode_into_vec(reader, num_whir_rounds - 1)?;
-        let folding_pow_witnesses = decode_into_vec(reader, num_whir_sumcheck_rounds)?;
-        let query_phase_pow_witnesses = decode_into_vec(reader, num_whir_rounds)?;
+        let ood_values = SC::decode_extension_field_n(reader, num_whir_rounds - 1)?;
+        let folding_pow_witnesses = SC::decode_base_field_n(reader, num_whir_sumcheck_rounds)?;
+        let query_phase_pow_witnesses = SC::decode_base_field_n(reader, num_whir_rounds)?;
 
         let num_commits = usize::decode(reader)?;
         assert!(num_commits > 0);
@@ -522,7 +632,7 @@ impl Decode for WhirProof<ConcreteSC> {
                 // Each query has k_whir_exp rows. Each row is a fixed-width list of F elements.
                 let mut rows = Vec::with_capacity(k_whir_exp);
                 for _ in 0..k_whir_exp {
-                    rows.push(decode_into_vec(reader, width)?);
+                    rows.push(SC::decode_base_field_n(reader, width)?);
                 }
                 opened_rows.push(rows);
             }
@@ -533,7 +643,7 @@ impl Decode for WhirProof<ConcreteSC> {
         for _ in 0..num_commits {
             let mut merkle_proofs = Vec::with_capacity(initial_num_whir_queries);
             for _ in 0..initial_num_whir_queries {
-                merkle_proofs.push(decode_into_vec(reader, merkle_depth)?);
+                merkle_proofs.push(SC::decode_digest_n(reader, merkle_depth)?);
             }
             initial_round_merkle_proofs.push(merkle_proofs);
         }
@@ -543,7 +653,7 @@ impl Decode for WhirProof<ConcreteSC> {
             let num_queries = usize::decode(reader)?;
             let mut opened_values = Vec::with_capacity(num_queries);
             for _ in 0..num_queries {
-                opened_values.push(decode_into_vec(reader, k_whir_exp)?);
+                opened_values.push(SC::decode_extension_field_n(reader, k_whir_exp)?);
             }
             codeword_opened_values.push(opened_values);
         }
@@ -554,13 +664,13 @@ impl Decode for WhirProof<ConcreteSC> {
             let num_queries = opened_values.len();
             let mut merkle_proof: Vec<_> = Vec::with_capacity(num_queries);
             for _ in 0..num_queries {
-                merkle_proof.push(decode_into_vec(reader, merkle_depth)?);
+                merkle_proof.push(SC::decode_digest_n(reader, merkle_depth)?);
             }
             codeword_merkle_proofs.push(merkle_proof);
             merkle_depth -= 1;
         }
 
-        let final_poly = Vec::<EF>::decode(reader)?;
+        let final_poly = SC::decode_extension_field_vec(reader)?;
 
         Ok(Self {
             whir_sumcheck_polys,
@@ -583,6 +693,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
         poseidon2::sponge::DuplexSpongeRecorder,
         test_utils::{
             test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
@@ -590,6 +701,8 @@ mod tests {
         },
         BabyBearPoseidon2CpuEngineV2, SystemParams,
     };
+
+    type ConcreteSC = BabyBearPoseidon2ConfigV2;
 
     fn test_proof_encode_decode<Fx: TestFixture>(fx: Fx, params: SystemParams) -> Result<()> {
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);

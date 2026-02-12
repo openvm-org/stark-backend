@@ -4,9 +4,9 @@ use std::{
 };
 
 pub use codec_derive::{Decode, Encode};
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32};
+use p3_field::{BasedVectorSpace, PrimeField32};
 
-use crate::baby_bear_poseidon2::{D_EF, EF, F};
+use crate::StarkProtocolConfig;
 
 /// Hardware and language independent encoding.
 /// Uses the Writer pattern for more efficient encoding without intermediate buffers.
@@ -31,6 +31,131 @@ pub trait Decode: Sized {
     fn decode_from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut reader = Cursor::new(bytes);
         Self::decode(&mut reader)
+    }
+}
+
+/// [StarkProtocolConfig] that has encodable associated types.
+/// This is a separate trait to avoid Rust's orphan rule.
+pub trait EncodableConfig: StarkProtocolConfig {
+    fn encode_base_field<W: Write>(val: &Self::F, writer: &mut W) -> Result<()>;
+
+    fn encode_extension_field<W: Write>(val: &Self::EF, writer: &mut W) -> Result<()>;
+
+    fn encode_digest<W: Write>(val: &Self::Digest, writer: &mut W) -> Result<()>;
+
+    /// Encode each element from an iterator (no length prefix).
+    fn encode_base_field_iter<'a, W: Write>(
+        iter: impl Iterator<Item = &'a Self::F>,
+        writer: &mut W,
+    ) -> Result<()>
+    where
+        Self::F: 'a,
+    {
+        for val in iter {
+            Self::encode_base_field(val, writer)?;
+        }
+        Ok(())
+    }
+
+    /// Encode each element from an iterator (no length prefix).
+    fn encode_extension_field_iter<'a, W: Write>(
+        iter: impl Iterator<Item = &'a Self::EF>,
+        writer: &mut W,
+    ) -> Result<()>
+    where
+        Self::EF: 'a,
+    {
+        for val in iter {
+            Self::encode_extension_field(val, writer)?;
+        }
+        Ok(())
+    }
+
+    /// Encode each element from an iterator (no length prefix).
+    fn encode_digest_iter<'a, W: Write>(
+        iter: impl Iterator<Item = &'a Self::Digest>,
+        writer: &mut W,
+    ) -> Result<()>
+    where
+        Self::Digest: 'a,
+    {
+        for val in iter {
+            Self::encode_digest(val, writer)?;
+        }
+        Ok(())
+    }
+
+    /// Encode length-prefixed slice of base field elements.
+    fn encode_base_field_slice<W: Write>(vals: &[Self::F], writer: &mut W) -> Result<()> {
+        vals.len().encode(writer)?;
+        Self::encode_base_field_iter(vals.iter(), writer)
+    }
+
+    /// Encode length-prefixed slice of extension field elements.
+    fn encode_extension_field_slice<W: Write>(vals: &[Self::EF], writer: &mut W) -> Result<()> {
+        vals.len().encode(writer)?;
+        Self::encode_extension_field_iter(vals.iter(), writer)
+    }
+
+    /// Encode length-prefixed slice of digests.
+    fn encode_digest_slice<W: Write>(vals: &[Self::Digest], writer: &mut W) -> Result<()> {
+        vals.len().encode(writer)?;
+        Self::encode_digest_iter(vals.iter(), writer)
+    }
+}
+
+/// [StarkProtocolConfig] that has decodable associated types.
+/// This is a separate trait to avoid Rust's orphan rule.
+pub trait DecodableConfig: StarkProtocolConfig {
+    fn decode_base_field<R: Read>(reader: &mut R) -> Result<Self::F>;
+
+    fn decode_extension_field<R: Read>(reader: &mut R) -> Result<Self::EF>;
+
+    fn decode_digest<R: Read>(reader: &mut R) -> Result<Self::Digest>;
+
+    /// Decode `n` base field elements (known length, no length prefix).
+    fn decode_base_field_n<R: Read>(reader: &mut R, n: usize) -> Result<Vec<Self::F>> {
+        let mut vec = Vec::with_capacity(n);
+        for _ in 0..n {
+            vec.push(Self::decode_base_field(reader)?);
+        }
+        Ok(vec)
+    }
+
+    /// Decode `n` extension field elements (known length, no length prefix).
+    fn decode_extension_field_n<R: Read>(reader: &mut R, n: usize) -> Result<Vec<Self::EF>> {
+        let mut vec = Vec::with_capacity(n);
+        for _ in 0..n {
+            vec.push(Self::decode_extension_field(reader)?);
+        }
+        Ok(vec)
+    }
+
+    /// Decode `n` digests (known length, no length prefix).
+    fn decode_digest_n<R: Read>(reader: &mut R, n: usize) -> Result<Vec<Self::Digest>> {
+        let mut vec = Vec::with_capacity(n);
+        for _ in 0..n {
+            vec.push(Self::decode_digest(reader)?);
+        }
+        Ok(vec)
+    }
+
+    /// Decode a length-prefixed vector of base field elements.
+    fn decode_base_field_vec<R: Read>(reader: &mut R) -> Result<Vec<Self::F>> {
+        let len = usize::decode(reader)?;
+        Self::decode_base_field_n(reader, len)
+    }
+
+    /// Decode a length-prefixed vector of extension field elements.
+    fn decode_extension_field_vec<R: Read>(reader: &mut R) -> Result<Vec<Self::EF>> {
+        let len = usize::decode(reader)?;
+        Self::decode_extension_field_n(reader, len)
+    }
+
+    /// Decode a length-prefixed vector of digests.
+    fn decode_digest_vec<R: Read>(reader: &mut R) -> Result<Vec<Self::Digest>> {
+        let len = usize::decode(reader)?;
+        Self::decode_digest_n(reader, len)
     }
 }
 
@@ -62,21 +187,52 @@ impl Encode for usize {
     }
 }
 
-impl Encode for F {
-    fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writer.write_all(&self.as_canonical_u32().to_le_bytes())
+// ==================== Generic field codec helpers ====================
+
+/// Encode a `PrimeField32` element as 4 little-endian bytes of its canonical u32 value.
+pub fn encode_prime_field32<F: PrimeField32, W: Write>(val: &F, writer: &mut W) -> Result<()> {
+    writer.write_all(&val.as_canonical_u32().to_le_bytes())
+}
+
+/// Decode a `PrimeField32` element from 4 little-endian bytes.
+pub fn decode_prime_field32<F: PrimeField32, R: Read>(reader: &mut R) -> Result<F> {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes)?;
+    let value = u32::from_le_bytes(bytes);
+    if value < F::ORDER_U32 {
+        Ok(F::from_u32(value))
+    } else {
+        Err(io::Error::other(format!(
+            "Attempted read of {} into F >= F::ORDER_U32 {}",
+            value,
+            F::ORDER_U32
+        )))
     }
 }
 
-impl Encode for EF {
-    fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        let base_slice: &[F] = self.as_basis_coefficients_slice();
-        // Fixed length slice, so don't encode length
-        for val in base_slice {
-            val.encode(writer)?;
-        }
-        Ok(())
+/// Encode an extension field element by encoding each basis coefficient.
+pub fn encode_extension_field32<F: PrimeField32, EF: BasedVectorSpace<F>, W: Write>(
+    val: &EF,
+    writer: &mut W,
+) -> Result<()> {
+    let base_slice: &[F] = val.as_basis_coefficients_slice();
+    for v in base_slice {
+        encode_prime_field32(v, writer)?;
     }
+    Ok(())
+}
+
+/// Decode an extension field element by decoding each basis coefficient.
+pub fn decode_extension_field32<F: PrimeField32, EF: BasedVectorSpace<F>, R: Read>(
+    reader: &mut R,
+) -> Result<EF> {
+    let d = <EF as BasedVectorSpace<F>>::DIMENSION;
+    let mut base_vec = Vec::with_capacity(d);
+    for _ in 0..d {
+        base_vec.push(decode_prime_field32(reader)?);
+    }
+    EF::from_basis_coefficients_slice(&base_vec)
+        .ok_or(io::Error::other("from_basis_coefficients_slice failed"))
 }
 
 // ==================== Encode helpers ====================
@@ -163,33 +319,6 @@ impl Decode for usize {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let val = u32::decode(reader)?;
         Ok(val as usize)
-    }
-}
-
-impl Decode for F {
-    fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let mut bytes = [0u8; 4];
-        reader.read_exact(&mut bytes)?;
-        let value = u32::from_le_bytes(bytes);
-        if value < F::ORDER_U32 {
-            Ok(F::from_u32(value))
-        } else {
-            Err(io::Error::other(format!(
-                "Attempted read of {} into F >= F::ORDER_U32 {}",
-                value,
-                F::ORDER_U32
-            )))
-        }
-    }
-}
-
-impl Decode for EF {
-    fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let mut base_slice = [F::ZERO; D_EF];
-        for val in &mut base_slice {
-            *val = F::decode(reader)?;
-        }
-        Ok(EF::from_basis_coefficients_fn(|i| base_slice[i]))
     }
 }
 
