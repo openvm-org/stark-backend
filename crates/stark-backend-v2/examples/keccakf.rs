@@ -17,6 +17,7 @@ use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use stark_backend_v2::{
+    baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
     poseidon2::sponge::DuplexSponge,
     prover::{AirProvingContextV2, DeviceDataTransporterV2, ProvingContextV2},
     verifier::verify,
@@ -84,7 +85,7 @@ fn main() -> eyre::Result<()> {
         let d_pk = engine.device().transport_pk_to_device(&pk);
         let proof = engine.prove(&d_pk, ProvingContextV2::new(vec![(air_idx, air_ctx)]));
 
-        verify(&vk, &proof, &mut DuplexSponge::default())
+        verify::<BabyBearPoseidon2ConfigV2, _>(&vk, &proof, &mut DuplexSponge::default())
             .map_err(|e| eyre!("Proof failed to verify: {e}"))
     })
 }

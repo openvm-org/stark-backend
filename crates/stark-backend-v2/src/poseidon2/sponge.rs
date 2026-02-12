@@ -2,63 +2,11 @@ use core::ops::Deref;
 
 use p3_baby_bear::Poseidon2BabyBear;
 use p3_challenger::CanObserve;
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32};
-use p3_maybe_rayon::prelude::*;
+use p3_field::PrimeCharacteristicRing;
 use p3_symmetric::Permutation;
-use tracing::instrument;
 
 use super::{poseidon2_perm, CHUNK, WIDTH};
-use crate::{Digest, EF, F};
-
-pub trait FiatShamirTranscript: Clone + Send + Sync {
-    fn observe(&mut self, value: F);
-    fn sample(&mut self) -> F;
-
-    fn observe_commit(&mut self, digest: [F; CHUNK]) {
-        for x in digest {
-            self.observe(x);
-        }
-    }
-
-    fn observe_ext(&mut self, value: EF) {
-        // for i in 0..D
-        for &base_val in value.as_basis_coefficients_slice() {
-            self.observe(base_val);
-        }
-    }
-
-    fn sample_ext(&mut self) -> EF {
-        EF::from_basis_coefficients_fn(|_| self.sample())
-    }
-
-    fn sample_bits(&mut self, bits: usize) -> u32 {
-        assert!(bits < (u32::BITS as usize));
-        assert!((1 << bits) < F::ORDER_U32);
-        let rand_f: F = self.sample();
-        let rand_u32 = rand_f.as_canonical_u32();
-        rand_u32 & ((1 << bits) - 1)
-    }
-
-    #[must_use]
-    fn check_witness(&mut self, bits: usize, witness: F) -> bool {
-        self.observe(witness);
-        self.sample_bits(bits) == 0
-    }
-
-    #[instrument(name = "grind_pow", skip_all)]
-    fn grind(&mut self, bits: usize) -> F {
-        assert!(bits < (u32::BITS as usize));
-        assert!((1u32 << bits) < F::ORDER_U32);
-
-        let witness = (0..F::ORDER_U32)
-            .into_par_iter()
-            .map(F::from_u32)
-            .find_any(|witness| self.clone().check_witness(bits, *witness))
-            .expect("failed to find PoW witness");
-        assert!(self.check_witness(bits, witness));
-        witness
-    }
-}
+use crate::{baby_bear_poseidon2::{Digest, F, BabyBearPoseidon2ConfigV2}, merkle::MerkleHasher, FiatShamirTranscript};
 
 pub trait TranscriptHistory {
     fn len(&self) -> usize;
@@ -196,7 +144,7 @@ impl Default for DuplexSponge {
     }
 }
 
-impl FiatShamirTranscript for DuplexSponge {
+impl FiatShamirTranscript<BabyBearPoseidon2ConfigV2> for DuplexSponge {
     fn observe(&mut self, value: F) {
         self.state[self.absorb_idx] = value;
         self.absorb_idx += 1;
@@ -217,6 +165,12 @@ impl FiatShamirTranscript for DuplexSponge {
         }
         self.sample_idx -= 1;
         self.state[self.sample_idx]
+    }
+
+    fn observe_commit(&mut self, digest: [F; CHUNK]) {
+        for x in digest {
+            FiatShamirTranscript::observe(self, x);
+        }
     }
 }
 
@@ -280,6 +234,23 @@ pub fn poseidon2_tree_compress(mut hashes: Vec<Digest>) -> Digest {
     hashes.pop().unwrap()
 }
 
+/// Concrete [`MerkleHasher`] implementation using Poseidon2 over BabyBear.
+#[derive(Clone, Copy, Debug)]
+pub struct Poseidon2Hasher;
+
+impl MerkleHasher for Poseidon2Hasher {
+    type F = F;
+    type Digest = Digest;
+
+    fn hash_slice(vals: &[F]) -> Digest {
+        poseidon2_hash_slice(vals)
+    }
+
+    fn compress(left: Digest, right: Digest) -> Digest {
+        poseidon2_compress(left, right)
+    }
+}
+
 #[derive(Clone)]
 pub struct DuplexSpongeRecorder {
     pub inner: DuplexSponge,
@@ -297,9 +268,9 @@ impl Default for DuplexSpongeRecorder {
     }
 }
 
-impl FiatShamirTranscript for DuplexSpongeRecorder {
+impl FiatShamirTranscript<BabyBearPoseidon2ConfigV2> for DuplexSpongeRecorder {
     fn observe(&mut self, x: F) {
-        <DuplexSponge as FiatShamirTranscript>::observe(&mut self.inner, x);
+        <DuplexSponge as FiatShamirTranscript<BabyBearPoseidon2ConfigV2>>::observe(&mut self.inner, x);
         self.log.push_observe(x);
         if self.inner.last_op_perm {
             self.log.push_perm_result(self.inner.state);
@@ -313,6 +284,12 @@ impl FiatShamirTranscript for DuplexSpongeRecorder {
             self.log.push_perm_result(self.inner.state);
         }
         x
+    }
+
+    fn observe_commit(&mut self, digest: [F; CHUNK]) {
+        for x in digest {
+            self.observe(x);
+        }
     }
 }
 
@@ -343,7 +320,7 @@ impl<'a> ReadOnlyTranscript<'a> {
     }
 }
 
-impl FiatShamirTranscript for ReadOnlyTranscript<'_> {
+impl FiatShamirTranscript<BabyBearPoseidon2ConfigV2> for ReadOnlyTranscript<'_> {
     #[inline]
     fn observe(&mut self, value: F) {
         debug_assert!(
@@ -371,6 +348,12 @@ impl FiatShamirTranscript for ReadOnlyTranscript<'_> {
         self.position += 1;
         value
     }
+
+    fn observe_commit(&mut self, digest: [F; CHUNK]) {
+        for x in digest {
+            self.observe(x);
+        }
+    }
 }
 
 impl TranscriptHistory for ReadOnlyTranscript<'_> {
@@ -390,12 +373,12 @@ mod test {
     use p3_challenger::{CanObserve, CanSample};
     use p3_field::PrimeCharacteristicRing;
 
-    use crate::poseidon2::{
-        poseidon2_perm,
-        sponge::{
-            DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, ReadOnlyTranscript,
-            TranscriptHistory,
+    use crate::{
+        poseidon2::{
+            poseidon2_perm,
+            sponge::{DuplexSponge, DuplexSpongeRecorder, ReadOnlyTranscript, TranscriptHistory},
         },
+        FiatShamirTranscript,
     };
 
     #[test]
@@ -407,13 +390,13 @@ mod test {
 
         for i in 0..5 {
             for _ in 0..(i + 1) * i {
-                let a: BabyBear = challenger.sample();
+                let a: BabyBear = CanSample::sample(&mut challenger);
                 let b = sponge.sample();
                 assert_eq!(a, b);
             }
 
             for j in 0..i * i {
-                challenger.observe(BabyBear::from_usize(j));
+                CanObserve::observe(&mut challenger, BabyBear::from_usize(j));
                 FiatShamirTranscript::observe(&mut sponge, BabyBear::from_usize(j));
             }
         }

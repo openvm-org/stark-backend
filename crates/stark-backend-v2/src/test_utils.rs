@@ -28,17 +28,19 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use crate::{
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
-    poseidon2::sponge::{
-        DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory, TranscriptLog,
-    },
+    poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory, TranscriptLog},
     proof::Proof,
     prover::{
         stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
         CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver,
         ProvingContextV2, TraceCommitterV2,
     },
-    BabyBearPoseidon2CpuEngineV2, ChipV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
+    BabyBearPoseidon2CpuEngineV2, ChipV2, FiatShamirTranscript, StarkEngineV2, SystemParams,
+    WhirConfig, WhirParams,
 };
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 #[allow(clippy::type_complexity)]
 pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
@@ -85,26 +87,30 @@ fn get_conditional_fib_number(mut a: u32, mut b: u32, sels: &[bool]) -> u32 {
 pub trait TestFixture {
     fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>>;
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2>;
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>>;
 
     fn keygen<E: StarkEngineV2>(
         &self,
         engine: &E,
-    ) -> (MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2) {
+    ) -> (MultiStarkProvingKeyV2<SCV2>, MultiStarkVerifyingKeyV2<SCV2>) {
         engine.keygen(&self.airs())
     }
 
-    fn prove<E: StarkEngineV2>(&self, engine: &E, pk: &MultiStarkProvingKeyV2) -> Proof {
+    fn prove<E: StarkEngineV2<SC = SCV2>>(
+        &self,
+        engine: &E,
+        pk: &MultiStarkProvingKeyV2<SCV2>,
+    ) -> Proof<SCV2> {
         self.prove_from_transcript(engine, pk, &mut E::TS::default())
     }
 
     /// Prove using CPU tracegen and transport to device.
-    fn prove_from_transcript<E: StarkEngineV2>(
+    fn prove_from_transcript<E: StarkEngineV2<SC = SCV2>>(
         &self,
         engine: &E,
-        pk: &MultiStarkProvingKeyV2,
+        pk: &MultiStarkProvingKeyV2<SCV2>,
         transcript: &mut E::TS,
-    ) -> Proof {
+    ) -> Proof<SCV2> {
         let ctx = self.generate_proving_ctx();
         let device = engine.device();
         let d_pk = device.transport_pk_to_device(pk);
@@ -115,7 +121,10 @@ pub trait TestFixture {
         proof
     }
 
-    fn keygen_and_prove<E: StarkEngineV2>(&self, engine: &E) -> (MultiStarkVerifyingKeyV2, Proof) {
+    fn keygen_and_prove<E: StarkEngineV2<SC = SCV2>>(
+        &self,
+        engine: &E,
+    ) -> (MultiStarkVerifyingKeyV2<SCV2>, Proof<SCV2>) {
         let (pk, vk) = self.keygen(engine);
         let proof = self.prove(engine, &pk);
         (vk, proof)
@@ -163,7 +172,7 @@ impl TestFixture for FibFixture {
         vec![air; self.num_airs]
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
         use dummy_airs::fib_air::trace::generate_trace_rows;
         let f_n = get_fib_number(self.a, self.b, self.n);
         let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);
@@ -197,7 +206,7 @@ impl TestFixture for InteractionsFixture11 {
         any_rap_arc_vec!(sender_air, receiver_air)
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
         // Default traces
         // Sender (2 columns: Mul, Val):
         //   0    1
@@ -257,7 +266,7 @@ impl TestFixture for CachedFixture11 {
         any_rap_arc_vec!(sender_air, receiver_air)
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
         // Default traces
         // Sender (2 columns: Mul, Val):
         //   0    1
@@ -310,7 +319,7 @@ impl TestFixture for CachedFixture11 {
                 (receiver_trace, receiver_cached_trace),
             ]
             .map(|(common, cached)| {
-                let (commit, data) = stacked_commit(
+                let (commit, data) = stacked_commit::<Poseidon2Hasher>(
                     params.l_skip,
                     params.n_stack,
                     params.log_blowup,
@@ -349,7 +358,7 @@ impl TestFixture for PreprocessedFibFixture {
         vec![air]
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
         use openvm_stark_sdk::dummy_airs::fib_selector_air::trace::generate_trace_rows;
         let trace = generate_trace_rows(self.a, self.b, &self.sels);
         let f_n = get_conditional_fib_number(self.a, self.b, &self.sels);
@@ -381,7 +390,7 @@ impl TestFixture for SelfInteractionFixture {
             .collect_vec()
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
         let per_trace = self
             .widths
             .iter()
@@ -422,7 +431,7 @@ impl MixtureFixtureEnum {
         }
     }
 
-    fn generate_air_proving_ctxs(&self) -> Vec<AirProvingContextV2<CpuBackendV2>> {
+    fn generate_air_proving_ctxs(&self) -> Vec<AirProvingContextV2<CpuBackendV2<SCV2>>> {
         use crate::test_utils::MixtureFixtureEnum::*;
         let ctx = match self {
             FibFixture(fx) => fx.generate_proving_ctx(),
@@ -464,7 +473,7 @@ impl TestFixture for MixtureFixture {
         self.fxs.iter().flat_map(|fx| fx.airs()).collect_vec()
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
         let per_trace = self
             .fxs
             .iter()
@@ -557,7 +566,7 @@ impl DuplexSpongeValidator {
     }
 }
 
-impl FiatShamirTranscript for DuplexSpongeValidator {
+impl FiatShamirTranscript<BabyBearPoseidon2ConfigV2> for DuplexSpongeValidator {
     fn observe(&mut self, x: F) {
         debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
         assert!(!self.log.samples()[self.idx]);
@@ -575,6 +584,12 @@ impl FiatShamirTranscript for DuplexSpongeValidator {
         self.idx += 1;
         assert_eq!(x, exp_x);
         x
+    }
+
+    fn observe_commit(&mut self, digest: Digest) {
+        for x in digest {
+            self.observe(x);
+        }
     }
 }
 
