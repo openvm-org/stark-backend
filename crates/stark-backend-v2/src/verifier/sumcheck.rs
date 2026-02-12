@@ -1,20 +1,16 @@
-use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
+use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 use tracing::debug;
 
 use crate::{
-    poseidon2::sponge::FiatShamirTranscript,
     prover::sumcheck::{SumcheckCubeProof, SumcheckPrismProof},
-    EF,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 
-pub fn verify_sumcheck_multilinear<F: Field, TS: FiatShamirTranscript>(
+pub fn verify_sumcheck_multilinear<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
-    proof: &SumcheckCubeProof<EF>,
-) -> Result<(), String>
-where
-    EF: ExtensionField<F>,
-{
+    proof: &SumcheckCubeProof<SC::EF>,
+) -> Result<(), String> {
     let SumcheckCubeProof {
         sum_claim,
         round_polys_eval,
@@ -47,14 +43,11 @@ where
     Ok(())
 }
 
-pub fn verify_sumcheck_prismalinear<F: Field, TS: FiatShamirTranscript>(
+pub fn verify_sumcheck_prismalinear<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
     l_skip: usize,
-    proof: &SumcheckPrismProof<EF>,
-) -> Result<(), String>
-where
-    EF: ExtensionField<F>,
-{
+    proof: &SumcheckPrismProof<SC::EF>,
+) -> Result<(), String> {
     let SumcheckPrismProof {
         sum_claim,
         s_0,
@@ -78,11 +71,11 @@ where
     let r_0 = transcript.sample_ext();
     debug!(round = 0, r_round = %r_0);
 
-    if *sum_claim != s_0.0[0] * EF::from_usize(s_0.0.len()) {
+    if *sum_claim != s_0.0[0] * SC::EF::from_usize(s_0.0.len()) {
         return Err(format!(
             "`sum_claim` does not equal the sum of `s_0` at all the roots of unity: {} != {}",
             *sum_claim,
-            s_0.0[0] * EF::from_usize(s_0.0.len())
+            s_0.0[0] * SC::EF::from_usize(s_0.0.len())
         ));
     }
 

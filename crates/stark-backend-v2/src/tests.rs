@@ -12,7 +12,7 @@ use test_case::test_case;
 use tracing::{debug, Level};
 
 use crate::{
-    poseidon2::sponge::{DuplexSponge, FiatShamirTranscript},
+    poseidon2::sponge::{DuplexSponge, Poseidon2Hasher},
     prover::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
@@ -32,8 +32,12 @@ use crate::{
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
     },
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirRoundConfig, F,
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+    BabyBearPoseidon2CpuEngineV2, FiatShamirTranscript, StarkEngineV2, SystemParams, WhirConfig,
+    WhirRoundConfig,
 };
+
+type SCV2 = BabyBearPoseidon2ConfigV2;
 
 #[test]
 fn test_plain_multilinear_sumcheck() -> Result<(), String> {
@@ -49,8 +53,8 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = DuplexSponge::default();
     let mut verifier_sponge = DuplexSponge::default();
 
-    let (proof, _) = sumcheck_multilinear(&mut prover_sponge, &evals);
-    verify_sumcheck_multilinear::<F, _>(&mut verifier_sponge, &proof)
+    let (proof, _) = sumcheck_multilinear::<SCV2, _, _>(&mut prover_sponge, &evals);
+    verify_sumcheck_multilinear::<SCV2, _>(&mut verifier_sponge, &proof)
 }
 
 #[test]
@@ -70,8 +74,8 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = DuplexSponge::default();
     let mut verifier_sponge = DuplexSponge::default();
 
-    let (proof, _) = sumcheck_prismalinear(&mut prover_sponge, l_skip, &evals);
-    verify_sumcheck_prismalinear::<F, _>(&mut verifier_sponge, l_skip, &proof)
+    let (proof, _) = sumcheck_prismalinear::<SCV2, _, _>(&mut prover_sponge, l_skip, &evals);
+    verify_sumcheck_prismalinear::<SCV2, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
 #[test]
@@ -145,7 +149,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
 #[test_case(0 ; "when log_height is zero")]
 fn test_batch_sumcheck_zero_interactions(
     log_trace_degree: usize,
-) -> Result<(), BatchConstraintError> {
+) -> Result<(), BatchConstraintError<EF>> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_engine_small();
@@ -173,7 +177,7 @@ fn test_batch_sumcheck_zero_interactions(
     let ((gkr_proof, batch_proof), _) =
         prove_up_to_batch_constraints(&engine, &mut prover_sponge, &pk, ctx);
 
-    let r = verify_zerocheck_and_logup(
+    let r = verify_zerocheck_and_logup::<SCV2, _>(
         &mut verifier_sponge,
         &vk.inner,
         &pvs,
@@ -191,7 +195,7 @@ fn test_batch_sumcheck_zero_interactions(
 #[test_case(2 ; "when log_height equals l_skip")]
 #[test_case(1 ; "when log_height less than l_skip")]
 #[test_case(0 ; "when log_height is zero")]
-fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), StackedReductionError> {
+fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), StackedReductionError<EF>> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_engine_small();
@@ -206,7 +210,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
     ctx.sort_for_stacking();
 
     let (_, common_main_pcs_data) = {
-        stacked_commit(
+        stacked_commit::<Poseidon2Hasher>(
             params.l_skip,
             params.n_stack,
             params.log_blowup,
@@ -231,7 +235,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
 
     let need_rot = pk.per_air[ctx.per_trace[0].0].vk.params.need_rot;
     let need_rot_per_commit = vec![vec![need_rot]];
-    let (stacking_proof, _) = prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
+    let (stacking_proof, _) = prove_stacked_opening_reduction::<SCV2, _, _, _, StackedReductionCpu<SCV2>>(
         device,
         &mut DuplexSponge::default(),
         params.n_stack,
@@ -242,7 +246,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
 
     debug!(?batch_proof.column_openings);
 
-    let u_prism = verify_stacked_reduction(
+    let u_prism = verify_stacked_reduction::<SCV2, _>(
         &mut DuplexSponge::default(),
         &stacking_proof,
         &[common_main_pcs_data.layout],
@@ -403,7 +407,7 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let _alpha = transcript.sample_ext();
     let _beta = transcript.sample_ext();
     let total_rounds = gkr_proof.claims_per_layer.len();
-    let _ = verify_gkr(&gkr_proof, &mut transcript, total_rounds)?;
+    let _ = verify_gkr::<SCV2, _>(&gkr_proof, &mut transcript, total_rounds)?;
 
     Ok(())
 }
@@ -441,7 +445,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
     let ((gkr_proof, batch_proof), _) =
         prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
     let mut transcript = DuplexSponge::default();
-    verify_zerocheck_and_logup(
+    verify_zerocheck_and_logup::<SCV2, _>(
         &mut transcript,
         &vk.inner,
         &pvs,
