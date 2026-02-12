@@ -7,16 +7,16 @@ use p3_matrix::dense::RowMajorMatrix;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
 
+use self::dummy_airs::{
+    fib_air::air::FibonacciAir,
+    fib_selector_air::air::FibonacciSelectorAir,
+    interaction::{
+        dummy_interaction_air::DummyInteractionAir,
+        self_interaction_air::{SelfInteractionAir, SelfInteractionChip},
+    },
+};
 use crate::{
     baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
-    dummy_airs::{
-        fib_air::air::FibonacciAir,
-        fib_selector_air::air::FibonacciSelectorAir,
-        interaction::{
-            dummy_interaction_air::DummyInteractionAir,
-            self_interaction_air::{SelfInteractionAir, SelfInteractionChip},
-        },
-    },
     interaction::{BusIndex, LogUpSecurityParameters},
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
     poseidon2::sponge::{
@@ -31,6 +31,8 @@ use crate::{
     AirRef, BabyBearPoseidon2CpuEngineV2, ChipV2, FiatShamirTranscript, StarkEngineV2,
     SystemParams, WhirConfig, WhirParams,
 };
+
+pub mod dummy_airs;
 
 type SCV2 = BabyBearPoseidon2ConfigV2;
 
@@ -64,6 +66,7 @@ pub fn log_up_security_params_baby_bear_100_bits() -> LogUpSecurityParameters {
     params
 }
 
+// TODO: move to stark-sdk
 /// Macro to create a `Vec<AirRef<SC>>` from a list of AIRs.
 #[macro_export]
 macro_rules! any_air_arc_vec {
@@ -203,7 +206,7 @@ impl TestFixture for FibFixture {
     }
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
-        use crate::dummy_airs::fib_air::trace::generate_trace_rows;
+        use crate::test_utils::dummy_airs::fib_air::trace::generate_trace_rows;
         let f_n = get_fib_number(self.a, self.b, self.n);
         let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);
 
@@ -359,7 +362,7 @@ impl TestFixture for PreprocessedFibFixture {
     }
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
-        use crate::dummy_airs::fib_selector_air::trace::generate_trace_rows;
+        use crate::test_utils::dummy_airs::fib_selector_air::trace::generate_trace_rows;
         let trace = generate_trace_rows(self.a, self.b, &self.sels);
         let f_n = get_conditional_fib_number(self.a, self.b, &self.sels);
         let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);

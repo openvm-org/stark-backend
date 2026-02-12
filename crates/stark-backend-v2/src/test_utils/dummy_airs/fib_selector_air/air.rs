@@ -10,7 +10,7 @@ use crate::{
 };
 
 use super::columns::FibonacciSelectorCols;
-use crate::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
+use crate::test_utils::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
 
 pub struct FibonacciSelectorAir {
     sels: Vec<bool>,

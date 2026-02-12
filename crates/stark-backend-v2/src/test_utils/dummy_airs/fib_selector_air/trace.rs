@@ -1,7 +1,7 @@
 use p3_field::PrimeField32;
 use p3_matrix::dense::RowMajorMatrix;
 
-use crate::dummy_airs::fib_air::columns::NUM_FIBONACCI_COLS;
+use crate::test_utils::dummy_airs::fib_air::columns::NUM_FIBONACCI_COLS;
 
 /// sels contain boolean selectors to enable the fibonacci gate
 pub fn generate_trace_rows<F: PrimeField32>(a: u32, b: u32, sels: &[bool]) -> RowMajorMatrix<F> {

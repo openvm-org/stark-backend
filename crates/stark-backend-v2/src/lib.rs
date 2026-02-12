@@ -31,7 +31,9 @@ mod engine;
 pub mod interaction;
 /// Proving and verifying key generation
 pub mod keygen;
+/// Merkle hasher trait definition
 pub mod merkle;
+/// Common polynomial utilities shared by prover and verifier
 pub mod poly_common;
 pub mod poseidon2;
 /// Definition of the STARK proof struct.
@@ -42,8 +44,6 @@ pub mod utils;
 pub mod verifier;
 
 #[cfg(any(test, feature = "test-utils"))]
-pub mod dummy_airs;
-#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 #[cfg(test)]
 mod tests;
@@ -52,7 +52,6 @@ pub use any_air::*;
 pub use chip::*;
 pub use config::*;
 pub use engine::*;
-pub use merkle::*;
 pub use transcript::*;
 
 // Use jemalloc as global allocator for performance

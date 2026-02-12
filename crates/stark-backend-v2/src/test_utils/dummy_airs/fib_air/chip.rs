@@ -5,7 +5,7 @@ use p3_matrix::Matrix;
 
 use super::trace::generate_trace_rows;
 use crate::{
-    dummy_airs::fib_air::air::FibonacciAir,
+    test_utils::dummy_airs::fib_air::air::FibonacciAir,
     prover::{AirProvingContextV2, ColMajorMatrix, CpuBackendV2},
     AirRef, ChipV2, StarkProtocolConfig,
 };
