@@ -8,8 +8,6 @@ pub use p3_koala_bear;
 
 pub mod bench;
 pub mod config;
-/// Verifier cost estimation
-pub mod cost_estimate;
 pub mod dummy_airs;
 pub mod engine;
 #[cfg(feature = "metrics")]

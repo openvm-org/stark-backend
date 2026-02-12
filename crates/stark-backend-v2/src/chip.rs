@@ -22,24 +22,3 @@ impl<R, PB: ProverBackendV2, C: ChipV2<R, PB> + 'static> AnyChip<R, PB> for C {
         self
     }
 }
-
-// impl<R, PB: ProverBackendV2, C: ChipV2<R, PB>> ChipV2<R, PB> for RefCell<C> {
-//     fn generate_proving_ctx(&self, records: R) -> AirProvingContextV2<PB> {
-//         self.borrow().generate_proving_ctx(records)
-//     }
-// }
-// impl<R, PB: ProverBackendV2, C: ChipV2<R, PB>> ChipV2<R, PB> for Rc<C> {
-//     fn generate_proving_ctx(&self, records: R) -> AirProvingContextV2<PB> {
-//         self.as_ref().generate_proving_ctx(records)
-//     }
-// }
-// impl<R, PB: ProverBackendV2, C: ChipV2<R, PB>> ChipV2<R, PB> for Arc<C> {
-//     fn generate_proving_ctx(&self, records: R) -> AirProvingContextV2<PB> {
-//         self.as_ref().generate_proving_ctx(records)
-//     }
-// }
-// impl<R, PB: ProverBackendV2, C: ChipV2<R, PB>> ChipV2<R, PB> for Mutex<C> {
-//     fn generate_proving_ctx(&self, records: R) -> AirProvingContextV2<PB> {
-//         self.lock().unwrap().generate_proving_ctx(records)
-//     }
-// }
