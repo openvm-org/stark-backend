@@ -6,7 +6,7 @@ use std::{
 pub use codec_derive::{Decode, Encode};
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32};
 
-use crate::{D_EF, EF, F};
+use crate::baby_bear_poseidon2::{D_EF, EF, F};
 
 /// Hardware and language independent encoding.
 /// Uses the Writer pattern for more efficient encoding without intermediate buffers.

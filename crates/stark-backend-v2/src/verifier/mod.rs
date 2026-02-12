@@ -7,7 +7,6 @@ use thiserror::Error;
 use crate::{
     keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2},
     poly_common::Squarable,
-    poseidon2::sponge::FiatShamirTranscript,
     proof::Proof,
     verifier::{
         batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
@@ -15,11 +14,11 @@ use crate::{
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         whir::{verify_whir, VerifyWhirError},
     },
-    F,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
-pub enum VerifierError {
+pub enum VerifierError<EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq> {
     #[error("Trace heights are too large")]
     TraceHeightsTooLarge,
 
@@ -27,10 +26,10 @@ pub enum VerifierError {
     ProofShapeError(#[from] ProofShapeError),
 
     #[error("Batch constraint verification failed: {0}")]
-    BatchConstraintError(#[from] BatchConstraintError),
+    BatchConstraintError(#[from] BatchConstraintError<EF>),
 
     #[error("Stacked reduction verification failed: {0}")]
-    StackedReductionError(#[from] StackedReductionError),
+    StackedReductionError(#[from] StackedReductionError<EF>),
 
     #[error("Whir verification failed: {0}")]
     WhirError(#[from] VerifyWhirError),
@@ -44,11 +43,14 @@ pub mod stacked_reduction;
 pub mod sumcheck;
 pub mod whir;
 
-pub fn verify<TS: FiatShamirTranscript>(
-    mvk: &MultiStarkVerifyingKeyV2,
-    proof: &Proof,
+pub fn verify<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
+    mvk: &MultiStarkVerifyingKeyV2<SC>,
+    proof: &Proof<SC>,
     transcript: &mut TS,
-) -> Result<(), VerifierError> {
+) -> Result<(), VerifierError<SC::EF>>
+where
+    SC::EF: p3_field::TwoAdicField,
+{
     let &Proof {
         common_main_commit,
         trace_vdata,
@@ -98,7 +100,7 @@ pub fn verify<TS: FiatShamirTranscript>(
         }
     }
 
-    let omega_skip = F::two_adic_generator(l_skip);
+    let omega_skip = SC::F::two_adic_generator(l_skip);
     let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
 
     // Preamble
@@ -109,13 +111,13 @@ pub fn verify<TS: FiatShamirTranscript>(
         let is_air_present = trace_vdata.is_some();
 
         if !avk.is_required {
-            transcript.observe(F::from_bool(is_air_present));
+            transcript.observe(SC::F::from_bool(is_air_present));
         }
         if let Some(trace_vdata) = trace_vdata {
             if let Some(pdata) = avk.preprocessed_data.as_ref() {
                 transcript.observe_commit(pdata.commit);
             } else {
-                transcript.observe(F::from_usize(trace_vdata.log_height));
+                transcript.observe(SC::F::from_usize(trace_vdata.log_height));
             }
             debug_assert_eq!(
                 avk.params.width.cached_mains.len(),
@@ -131,13 +133,13 @@ pub fn verify<TS: FiatShamirTranscript>(
         }
     }
 
-    let layouts = verify_proof_shape(mvk, proof)?;
+    let layouts = verify_proof_shape::<SC>(mvk, proof)?;
 
     let n_per_trace: Vec<isize> = trace_id_to_air_id
         .iter()
         .map(|&air_id| trace_vdata[air_id].as_ref().unwrap().log_height as isize - l_skip as isize)
         .collect();
-    let r = verify_zerocheck_and_logup(
+    let r = verify_zerocheck_and_logup::<SC, TS>(
         transcript,
         mvk,
         public_values,
@@ -168,7 +170,7 @@ pub fn verify<TS: FiatShamirTranscript>(
         }
     }
 
-    let u_prism = verify_stacked_reduction(
+    let u_prism = verify_stacked_reduction::<SC, TS>(
         transcript,
         stacking_proof,
         &layouts,
@@ -195,7 +197,7 @@ pub fn verify<TS: FiatShamirTranscript>(
         commits.extend(&trace_vdata[air_id].as_ref().unwrap().cached_commitments);
     }
 
-    verify_whir(
+    verify_whir::<SC, TS>(
         transcript,
         params,
         whir_proof,
@@ -216,6 +218,7 @@ mod tests {
     use tracing::Level;
 
     use crate::{
+        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF},
         poseidon2::sponge::{DuplexSpongeRecorder, TranscriptHistory},
         test_utils::{
             test_system_params_small, CachedFixture11, DuplexSpongeValidator, FibFixture,
@@ -225,11 +228,13 @@ mod tests {
         BabyBearPoseidon2CpuEngineV2, SystemParams, WhirConfig, WhirParams,
     };
 
+    type SCV2 = BabyBearPoseidon2ConfigV2;
+
     #[test_case(2, 10)]
     #[test_case(2, 1; "where log_trace_degree=1 less than l_skip=2")]
     #[test_case(2, 0; "where log_trace_degree=0 less than l_skip=2")]
     #[test_case(3, 2; "where log_trace_degree=2 less than l_skip=3")]
-    fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError> {
+    fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError<EF>> {
         setup_tracing_with_log_level(Level::DEBUG);
 
         let n_stack = 8;
@@ -257,7 +262,7 @@ mod tests {
         let proof = fib.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-        verify(&vk, &proof, &mut validator_sponge)
+        verify::<SCV2, _>(&vk, &proof, &mut validator_sponge)
     }
 
     #[test_case(2, 8, 3)]
@@ -266,7 +271,7 @@ mod tests {
         l_skip: usize,
         n_stack: usize,
         k_whir: usize,
-    ) -> Result<(), VerifierError> {
+    ) -> Result<(), VerifierError<EF>> {
         let params = test_system_params_small(l_skip, n_stack, k_whir);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
         let fx = InteractionsFixture11;
@@ -276,7 +281,7 @@ mod tests {
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-        verify(&vk, &proof, &mut validator_sponge)
+        verify::<SCV2, _>(&vk, &proof, &mut validator_sponge)
     }
 
     #[test_case(2, 8, 3)]
@@ -286,7 +291,7 @@ mod tests {
         l_skip: usize,
         n_stack: usize,
         k_whir: usize,
-    ) -> Result<(), VerifierError> {
+    ) -> Result<(), VerifierError<EF>> {
         setup_tracing_with_log_level(Level::DEBUG);
         let params = test_system_params_small(l_skip, n_stack, k_whir);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params.clone());
@@ -297,7 +302,7 @@ mod tests {
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-        verify(&vk, &proof, &mut validator_sponge)
+        verify::<SCV2, _>(&vk, &proof, &mut validator_sponge)
     }
 
     #[test_case(2, 8, 3)]
@@ -306,7 +311,7 @@ mod tests {
         l_skip: usize,
         n_stack: usize,
         k_whir: usize,
-    ) -> Result<(), VerifierError> {
+    ) -> Result<(), VerifierError<EF>> {
         use itertools::Itertools;
         let params = test_system_params_small(l_skip, n_stack, k_whir);
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
@@ -320,6 +325,6 @@ mod tests {
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-        verify(&vk, &proof, &mut validator_sponge)
+        verify::<SCV2, _>(&vk, &proof, &mut validator_sponge)
     }
 }

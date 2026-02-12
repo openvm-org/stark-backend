@@ -15,22 +15,21 @@ use crate::{
     calculate_n_logup,
     keygen::types::MultiStarkVerifyingKey0V2,
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     verifier::{
         evaluator::VerifierConstraintEvaluator,
         fractional_sumcheck_gkr::{verify_gkr, GkrVerificationError},
     },
-    EF, F,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 
 #[derive(Error, Debug, PartialEq, Eq)]
-pub enum BatchConstraintError {
+pub enum BatchConstraintError<EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq> {
     #[error("Invalid logup_pow_witness")]
     InvalidLogupPowWitness,
 
     #[error("GKR verification failed: {0}")]
-    GkrVerificationFailed(#[from] GkrVerificationError),
+    GkrVerificationFailed(#[from] GkrVerificationError<EF>),
 
     #[error("GKR numerator evaluation claim {claim} does not match")]
     GkrNumeratorMismatch { claim: EF },
@@ -53,16 +52,16 @@ pub enum BatchConstraintError {
 /// `public_values` should be in vkey (air_idx) order, including non-present AIRs.
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip_all)]
-pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
+pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
-    mvk: &MultiStarkVerifyingKey0V2,
-    public_values: &[Vec<F>],
-    gkr_proof: &GkrProof,
-    batch_proof: &BatchConstraintProof,
+    mvk: &MultiStarkVerifyingKey0V2<SC>,
+    public_values: &[Vec<SC::F>],
+    gkr_proof: &GkrProof<SC>,
+    batch_proof: &BatchConstraintProof<SC>,
     trace_id_to_air_id: &[usize],
     n_per_trace: &[isize],
-    omega_skip_pows: &[F],
-) -> Result<Vec<EF>, BatchConstraintError> {
+    omega_skip_pows: &[SC::F],
+) -> Result<Vec<SC::EF>, BatchConstraintError<SC::EF>> {
     let l_skip = mvk.params.l_skip;
     // let num_airs_present = mvk.per_air.len();
     let BatchConstraintProof {
@@ -93,10 +92,10 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     debug!(%n_logup);
 
     let mut xi = Vec::new();
-    let mut p_xi_claim = EF::ZERO;
+    let mut p_xi_claim = SC::EF::ZERO;
     let mut q_xi_claim = alpha_logup;
     if total_interactions > 0 {
-        (p_xi_claim, q_xi_claim, xi) = verify_gkr(gkr_proof, transcript, l_skip + n_logup)?;
+        (p_xi_claim, q_xi_claim, xi) = verify_gkr::<SC, TS>(gkr_proof, transcript, l_skip + n_logup)?;
         debug_assert_eq!(xi.len(), l_skip + n_logup);
     }
 
@@ -118,7 +117,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         transcript.observe_ext(sum_claim_p);
         transcript.observe_ext(sum_claim_q);
     }
-    if p_xi_claim != EF::ZERO {
+    if p_xi_claim != SC::EF::ZERO {
         return Err(BatchConstraintError::GkrNumeratorMismatch { claim: p_xi_claim });
     }
     if q_xi_claim != alpha_logup {
@@ -129,8 +128,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
     let mu = transcript.sample_ext();
     debug!(%mu);
 
-    let mut sum_claim = EF::ZERO;
-    let mut cur_mu_pow = EF::ONE;
+    let mut sum_claim = SC::EF::ZERO;
+    let mut cur_mu_pow = SC::EF::ONE;
     for (&sum_claim_p, &sum_claim_q) in zip(numerator_term_per_air, denominator_term_per_air) {
         sum_claim += sum_claim_p * cur_mu_pow;
         cur_mu_pow *= mu;
@@ -156,8 +155,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         .iter()
         .step_by(1 << l_skip)
         .copied()
-        .sum::<EF>()
-        * EF::from_usize(1 << l_skip);
+        .sum::<SC::EF>()
+        * SC::EF::from_usize(1 << l_skip);
     if sum_claim != sum_univ_domain_s_0 {
         return Err(BatchConstraintError::SumClaimMismatch {
             sum_claim,
@@ -179,18 +178,18 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         let s_0 = cur_sum - s_1;
         let batch_s_evals = iter::once(&s_0).chain(batch_s_evals).collect_vec();
 
-        let mut factorials = vec![F::ONE; s_deg + 1];
+        let mut factorials = vec![SC::F::ONE; s_deg + 1];
         for i in 1..=s_deg {
-            factorials[i] = factorials[i - 1] * F::from_usize(i);
+            factorials[i] = factorials[i - 1] * SC::F::from_usize(i);
         }
         let invfact = batch_multiplicative_inverse(&factorials);
 
         let r = transcript.sample_ext();
-        let mut pref_product = vec![EF::ONE; s_deg + 1];
-        let mut suf_product = vec![EF::ONE; s_deg + 1];
+        let mut pref_product = vec![SC::EF::ONE; s_deg + 1];
+        let mut suf_product = vec![SC::EF::ONE; s_deg + 1];
         for i in 0..s_deg {
-            pref_product[i + 1] = pref_product[i] * (r - EF::from_usize(i));
-            suf_product[i + 1] = suf_product[i] * (EF::from_usize(s_deg - i) - r);
+            pref_product[i + 1] = pref_product[i] * (r - SC::EF::from_usize(i));
+            suf_product[i + 1] = suf_product[i] * (SC::EF::from_usize(s_deg - i) - r);
         }
         cur_sum = (0..=s_deg)
             .map(|i| {
@@ -200,7 +199,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
                     * invfact[i]
                     * invfact[s_deg - i]
             })
-            .sum::<EF>();
+            .sum::<SC::EF>();
 
         debug!(round = round + 1, r_round = %r);
         rs.push(r);
@@ -218,14 +217,14 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
                 return vec![];
             }
             let n_lift = n.max(0) as usize;
-            let mut b_vec = vec![F::ZERO; n_logup - n_lift];
+            let mut b_vec = vec![SC::F::ZERO; n_logup - n_lift];
             (0..interactions.len())
                 .map(|_| {
                     debug_assert!(stacked_idx < 1 << (l_skip + n_logup));
                     debug_assert!(stacked_idx.trailing_zeros() as usize >= l_skip + n_lift);
                     let mut b_int = stacked_idx >> (l_skip + n_lift);
                     for b in &mut b_vec {
-                        *b = F::from_bool(b_int & 1 == 1);
+                        *b = SC::F::from_bool(b_int & 1 == 1);
                         b_int >>= 1;
                     }
                     stacked_idx += 1 << (l_skip + n_lift);
@@ -236,8 +235,8 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         .collect_vec();
 
     // 8. Compute `eq_ns` and `eq_sharp_ns`
-    let mut eq_ns = vec![EF::ONE; n_max + 1];
-    let mut eq_sharp_ns = vec![EF::ONE; n_max + 1];
+    let mut eq_ns = vec![SC::EF::ONE; n_max + 1];
+    let mut eq_sharp_ns = vec![SC::EF::ONE; n_max + 1];
     eq_ns[0] = eval_eq_uni(l_skip, xi[0], r_0);
     eq_sharp_ns[0] = eval_eq_sharp_uni(omega_skip_pows, &xi[..l_skip], r_0);
     debug_assert_eq!(rs.len(), n_max + 1);
@@ -308,12 +307,12 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
             (
                 l_skip.wrapping_add_signed(n),
                 &[rs[0].exp_power_of_2(-n as usize)] as &[_],
-                F::from_usize(1 << n.unsigned_abs()).inverse(),
+                SC::F::from_usize(1 << n.unsigned_abs()).inverse(),
             )
         } else {
-            (l_skip, &rs[..=(n as usize)], F::ONE)
+            (l_skip, &rs[..=(n as usize)], SC::F::ONE)
         };
-        let evaluator = VerifierConstraintEvaluator::<F, EF>::new(
+        let evaluator = VerifierConstraintEvaluator::<SC::F, SC::EF>::new(
             preprocessed.as_deref(),
             &part_main_slices,
             &public_values[air_idx],
@@ -325,7 +324,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         let nodes = evaluator.eval_nodes(&constraints.nodes);
         let expr = zip(lambda.powers(), &constraints.constraint_idx)
             .map(|(lambda_pow, idx)| nodes[*idx] * lambda_pow)
-            .sum::<EF>();
+            .sum::<SC::EF>();
         debug!(%trace_idx, %expr, %air_idx, "constraints_eval");
         let eq_xi_r = eq_ns[n_lift];
         debug!(%trace_idx, %eq_xi_r);
@@ -341,15 +340,15 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
                     .message
                     .iter()
                     .map(|expr| evaluator.eval_expr(expr))
-                    .chain(std::iter::once(EF::from_u16(interaction.bus_index + 1)))
+                    .chain(std::iter::once(SC::EF::from_u16(interaction.bus_index + 1)))
                     .zip(beta_logup.powers())
-                    .fold(EF::ZERO, |acc, (x, y)| acc + x * y);
+                    .fold(SC::EF::ZERO, |acc, (x, y)| acc + x * y);
                 (num, denom)
             })
             .collect_vec();
         let eq_3bs = &eq_3b_per_trace[trace_idx];
-        let mut num = EF::ZERO;
-        let mut denom = EF::ZERO;
+        let mut num = SC::EF::ZERO;
+        let mut denom = SC::EF::ZERO;
         for (&eq_3b, (n, d)) in eq_3bs.iter().zip_eq(cur_interactions_evals.iter()) {
             num += eq_3b * *n;
             denom += eq_3b * *d;
@@ -363,7 +362,7 @@ pub fn verify_zerocheck_and_logup<TS: FiatShamirTranscript>(
         .chain(constraints_evals.iter())
         .zip(mu.powers())
         .map(|(x, y)| *x * y)
-        .sum::<EF>();
+        .sum::<SC::EF>();
     if cur_sum != evaluated_claim {
         return Err(BatchConstraintError::InconsistentClaims);
     }

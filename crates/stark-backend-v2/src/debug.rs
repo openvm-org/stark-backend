@@ -14,29 +14,41 @@ use openvm_stark_backend::{
 };
 
 use crate::{
+    baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
     keygen::{types::StarkProvingKeyV2, MultiStarkKeygenBuilderV2},
     prover::{
         ColMajorMatrix, DeviceDataTransporterV2, ProverBackendV2, ProvingContextV2,
         StridedColMajorMatrixView,
     },
-    SystemParams, SC,
+    SystemParams,
 };
+
+use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
+
+type SC = BabyBearPoseidon2Config;
 
 // TODO[jpw]: move into StarkEngineV2::debug default implementation after `SC` is made generic.
 /// `airs` should be the full list of all AIRs, not just used AIRs.
-pub fn debug_impl<PB: ProverBackendV2<Val = crate::F>, PD: DeviceDataTransporterV2<PB>>(
+pub fn debug_impl<PB, PD>(
     config: SystemParams,
     device: &PD,
     airs: &[AirRef<SC>],
     ctx: &ProvingContextV2<PB>,
-) {
+)
+where
+    PB: ProverBackendV2<
+        Val = crate::baby_bear_poseidon2::F,
+        Challenge = crate::baby_bear_poseidon2::EF,
+        Commitment = crate::baby_bear_poseidon2::Digest,
+    >,
+    PD: DeviceDataTransporterV2<BabyBearPoseidon2ConfigV2, PB>, {
     let mut keygen_builder = MultiStarkKeygenBuilderV2::new(config);
     for air in airs {
         keygen_builder.add_air(air.clone());
     }
     let pk = keygen_builder.generate_pk().unwrap();
 
-    let transpose = |mat: ColMajorMatrix<crate::F>| {
+    let transpose = |mat: ColMajorMatrix<crate::baby_bear_poseidon2::F>| {
         let row_major = StridedColMajorMatrixView::from(mat.as_view()).to_row_major_matrix();
         Arc::new(row_major)
     };
@@ -75,8 +87,8 @@ pub fn debug_impl<PB: ProverBackendV2<Val = crate::F>, PD: DeviceDataTransporter
 #[allow(clippy::too_many_arguments)]
 pub fn debug_constraints_and_interactions(
     airs: &[AirRef<SC>],
-    pk: &[&StarkProvingKeyV2],
-    inputs: &[AirProofRawInput<crate::F>],
+    pk: &[&StarkProvingKeyV2<BabyBearPoseidon2ConfigV2>],
+    inputs: &[AirProofRawInput<crate::baby_bear_poseidon2::F>],
 ) {
     USE_DEBUG_BUILDER.with(|debug| {
         if *debug.lock().unwrap() {
