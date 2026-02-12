@@ -16,9 +16,8 @@ use tracing::{debug, instrument, trace};
 use crate::{
     dft::Radix2BowersSerial,
     poly_common::UnivariatePoly,
-    poseidon2::sponge::FiatShamirTranscript,
     prover::{ColMajorMatrix, ColMajorMatrixView, MatrixView, StridedColMajorMatrixView},
-    EF,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 
 /// The univariate skip round 0: we want to compute the univariate polynomial `s(Z) = sum_{x \in
@@ -426,12 +425,12 @@ pub struct SumcheckPrismProof<EF> {
 //
 // NOTE[jpw]: we currently fix EF for the transcript, but the evaluations in F can be either base
 // field or extension field
-pub fn sumcheck_multilinear<F: Field, TS: FiatShamirTranscript>(
+pub fn sumcheck_multilinear<SC: StarkProtocolConfig, F: Field, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
     evals: &[F],
-) -> (SumcheckCubeProof<EF>, Vec<EF>)
+) -> (SumcheckCubeProof<SC::EF>, Vec<SC::EF>)
 where
-    EF: ExtensionField<F>,
+    SC::EF: ExtensionField<F>,
 {
     let n = log2_strict_usize(evals.len());
     let mut round_polys_eval = Vec::with_capacity(n);
@@ -439,8 +438,8 @@ where
 
     // Working copy of evaluations that gets folded after each round
     // PERF[jpw]: the first round should be treated specially in the case F is the base field
-    let mut current_evals = ColMajorMatrix::new(evals.iter().map(|&x| EF::from(x)).collect(), 1);
-    let sum_claim: EF = evals.iter().fold(F::ZERO, |acc, &x| acc + x).into();
+    let mut current_evals = ColMajorMatrix::new(evals.iter().map(|&x| SC::EF::from(x)).collect(), 1);
+    let sum_claim: SC::EF = evals.iter().fold(F::ZERO, |acc, &x| acc + x).into();
     transcript.observe_ext(sum_claim);
 
     // Sumcheck rounds:
@@ -453,7 +452,6 @@ where
                 [evals[0][0]]
             });
 
-        println!("CPU s: {:?}", s);
         assert_eq!(s.len(), 1);
         transcript.observe_ext(s[0]);
         round_polys_eval.push(s);
@@ -498,14 +496,14 @@ where
 // field or extension field.
 // - for simplicity, the transcript observes `sum_claim` and `s_0` as valued in `EF`. More
 //   fine-grained approaches may observe in `F`.
-pub fn sumcheck_prismalinear<F, TS: FiatShamirTranscript>(
+pub fn sumcheck_prismalinear<SC: StarkProtocolConfig, F, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
     l_skip: usize,
     evals: &[F],
-) -> (SumcheckPrismProof<EF>, Vec<EF>)
+) -> (SumcheckPrismProof<SC::EF>, Vec<SC::EF>)
 where
     F: TwoAdicField,
-    EF: ExtensionField<F>,
+    SC::EF: ExtensionField<F> + TwoAdicField,
 {
     let prism_dim = log2_strict_usize(evals.len());
     assert!(prism_dim >= l_skip);
@@ -514,7 +512,7 @@ where
     let mut round_polys_eval = Vec::with_capacity(n);
     let mut r = Vec::with_capacity(n + 1);
 
-    let sum_claim: EF = evals.iter().copied().sum::<F>().into();
+    let sum_claim: SC::EF = evals.iter().copied().sum::<F>().into();
     transcript.observe_ext(sum_claim);
     let current_evals = ColMajorMatrix::new(evals.to_vec(), 1);
     let [s_0] = sumcheck_uni_round0_poly(
@@ -528,7 +526,7 @@ where
         s_0.0
             .into_iter()
             .map(|x| {
-                let ext = EF::from(x);
+                let ext = SC::EF::from(x);
                 transcript.observe_ext(ext);
                 ext
             })
@@ -555,7 +553,7 @@ where
             cur_sum = %current_evals
                 .values
                 .iter()
-                .fold(EF::ZERO, |acc, x| acc + *x)
+                .fold(SC::EF::ZERO, |acc, x| acc + *x)
         );
         let [s] = sumcheck_round_poly_evals(
             n + 1 - round,

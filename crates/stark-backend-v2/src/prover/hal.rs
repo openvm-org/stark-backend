@@ -17,7 +17,7 @@ use crate::{
         stacked_pcs::StackedPcsData, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
         CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
     },
-    SystemParams,
+    StarkProtocolConfig, SystemParams,
 };
 
 /// Associated types needed by the prover, in the form of buffers and views,
@@ -117,29 +117,30 @@ pub trait OpeningProverV2<PB: ProverBackendV2, TS> {
 }
 
 /// Trait to manage data transport of prover types from host to device.
-pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
+pub trait DeviceDataTransporterV2<SC, PB>
+where
+    SC: StarkProtocolConfig,
+    PB: ProverBackendV2<Val = SC::F, Challenge = SC::EF, Commitment = SC::Digest>,
+{
     /// Transport the proving key to the device, filtering for only the provided `air_ids`.
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKeyV2,
+        mpk: &MultiStarkProvingKeyV2<SC>,
     ) -> DeviceMultiStarkProvingKeyV2<PB>;
 
-    fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<PB::Val>) -> PB::Matrix;
+    fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<SC::F>) -> PB::Matrix;
 
     /// The `commitment` and `prover_data` are assumed to have been previously computed from the
     /// `trace`.
     fn transport_pcs_data_to_device(
         &self,
-        pcs_data: &StackedPcsData<PB::Val, PB::Commitment>,
+        pcs_data: &StackedPcsData<SC::F, SC::Digest>,
     ) -> PB::PcsData;
 
     fn transport_committed_trace_data_to_device(
         &self,
-        committed_trace: &CommittedTraceDataV2<CpuBackendV2>,
-    ) -> CommittedTraceDataV2<PB>
-    where
-        PB: ProverBackendV2<Val = crate::F, Commitment = crate::Digest>,
-    {
+        committed_trace: &CommittedTraceDataV2<CpuBackendV2<SC>>,
+    ) -> CommittedTraceDataV2<PB> {
         let trace = self.transport_matrix_to_device(&committed_trace.trace);
         let data = self.transport_pcs_data_to_device(committed_trace.data.as_ref());
 
@@ -152,11 +153,8 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
 
     fn transport_proving_ctx_to_device(
         &self,
-        ctx: &ProvingContextV2<CpuBackendV2>,
-    ) -> ProvingContextV2<PB>
-    where
-        PB: ProverBackendV2<Val = crate::F, Commitment = crate::Digest>,
-    {
+        ctx: &ProvingContextV2<CpuBackendV2<SC>>,
+    ) -> ProvingContextV2<PB> {
         let per_trace = ctx
             .per_trace
             .iter()
@@ -184,5 +182,5 @@ pub trait DeviceDataTransporterV2<PB: ProverBackendV2> {
 
     /// Transport a device matrix to host. This should only be used for testing / debugging
     /// purposes.
-    fn transport_matrix_from_device_to_host(&self, matrix: &PB::Matrix) -> ColMajorMatrix<PB::Val>;
+    fn transport_matrix_from_device_to_host(&self, matrix: &PB::Matrix) -> ColMajorMatrix<SC::F>;
 }

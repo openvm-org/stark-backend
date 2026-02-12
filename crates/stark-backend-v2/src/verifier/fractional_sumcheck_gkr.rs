@@ -4,13 +4,12 @@ use tracing::debug;
 
 use crate::{
     poly_common::{eval_eq_mle, interpolate_cubic_at_0123, interpolate_linear_at_01},
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{GkrLayerClaims, GkrProof},
-    EF,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum GkrVerificationError {
+pub enum GkrVerificationError<EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq> {
     #[error("Zero-round proof: q0_claim should be 1, got {actual}")]
     InvalidZeroRoundValue { actual: EF },
     #[error("Zero-check failed: numerator at root should be zero, got {actual}")]
@@ -53,11 +52,11 @@ pub enum GkrVerificationError {
 ///
 /// # Returns
 /// `(p̂(ξ), q̂(ξ), ξ)` where ξ ∈ F_ext^{ℓ+n_logup} is the random evaluation point.
-pub fn verify_gkr<TS: FiatShamirTranscript>(
-    proof: &GkrProof,
+pub fn verify_gkr<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
+    proof: &GkrProof<SC>,
     transcript: &mut TS,
     total_rounds: usize,
-) -> Result<(EF, EF, Vec<EF>), GkrVerificationError> {
+) -> Result<(SC::EF, SC::EF, Vec<SC::EF>), GkrVerificationError<SC::EF>> {
     if total_rounds == 0 {
         // Check proof shape
         if !proof.claims_per_layer.is_empty() || !proof.sumcheck_polys.is_empty() {
@@ -66,12 +65,12 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
                 sumcheck_len: proof.sumcheck_polys.len(),
             });
         }
-        if proof.q0_claim != EF::ONE {
+        if proof.q0_claim != SC::EF::ONE {
             return Err(GkrVerificationError::InvalidZeroRoundValue {
                 actual: proof.q0_claim,
             });
         }
-        return Ok((EF::ZERO, EF::ONE, vec![]));
+        return Ok((SC::EF::ZERO, SC::EF::ONE, vec![]));
     }
 
     // Verify proof shape
@@ -95,13 +94,13 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
 
     // Handle round 0 (no sumcheck, direct tree evaluation)
     let layer_claims = &proof.claims_per_layer[0];
-    observe_layer_claims(transcript, layer_claims);
+    observe_layer_claims::<SC, TS>(transcript, layer_claims);
 
     // Compute recursive relations for layer 1 → 0
-    let (p_cross_term, q_cross_term) = compute_recursive_relations(layer_claims);
+    let (p_cross_term, q_cross_term) = compute_recursive_relations::<SC>(layer_claims);
 
     // Zero-check: p̂₀ must be zero
-    if p_cross_term != EF::ZERO {
+    if p_cross_term != SC::EF::ZERO {
         return Err(GkrVerificationError::ZeroCheckFailed {
             actual: p_cross_term,
         });
@@ -118,7 +117,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
     // Sample μ₁ and reduce to single evaluation
     let mu = transcript.sample_ext();
     debug!(gkr_round = 0, %mu);
-    let (mut numer_claim, mut denom_claim) = reduce_to_single_evaluation(layer_claims, mu);
+    let (mut numer_claim, mut denom_claim) = reduce_to_single_evaluation::<SC>(layer_claims, mu);
     debug!(%numer_claim, %denom_claim);
     let mut gkr_r = vec![mu];
 
@@ -131,15 +130,15 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
 
         // Run sumcheck protocol for this round (round j has j sub-rounds)
         let (new_claim, round_r, eq_at_r_prime) =
-            verify_gkr_sumcheck(proof, transcript, round, claim, &gkr_r)?;
+            verify_gkr_sumcheck::<SC, TS>(proof, transcript, round, claim, &gkr_r)?;
         debug_assert_eq!(eq_at_r_prime, eval_eq_mle(&gkr_r, &round_r));
 
         // Observe layer evaluation claims
         let layer_claims = &proof.claims_per_layer[round];
-        observe_layer_claims(transcript, layer_claims);
+        observe_layer_claims::<SC, TS>(transcript, layer_claims);
 
         // Compute recursive relations
-        let (p_cross_term, q_cross_term) = compute_recursive_relations(layer_claims);
+        let (p_cross_term, q_cross_term) = compute_recursive_relations::<SC>(layer_claims);
 
         // Verify consistency
         let expected_claim = (p_cross_term + lambda * q_cross_term) * eq_at_r_prime;
@@ -154,7 +153,7 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
         // Sample μⱼ and reduce to single evaluation
         let mu = transcript.sample_ext();
         debug!(gkr_round = round, %mu);
-        (numer_claim, denom_claim) = reduce_to_single_evaluation(layer_claims, mu);
+        (numer_claim, denom_claim) = reduce_to_single_evaluation::<SC>(layer_claims, mu);
         // Update evaluation point: ξ^{(j)} = (μⱼ, ρ^{(j-1)})
         gkr_r = std::iter::once(mu).chain(round_r).collect();
     }
@@ -169,13 +168,13 @@ pub fn verify_gkr<TS: FiatShamirTranscript>(
 /// # Returns
 /// `(claim, ρ^{(j-1)}, eq(ξ^{(j-1)}, ρ^{(j-1)}))` where ρ^{(j-1)} is randomly sampled from the
 /// sumcheck protocol.
-fn verify_gkr_sumcheck<TS: FiatShamirTranscript>(
-    proof: &GkrProof,
+fn verify_gkr_sumcheck<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
+    proof: &GkrProof<SC>,
     transcript: &mut TS,
     round: usize,
-    mut claim: EF,
-    gkr_r: &[EF],
-) -> Result<(EF, Vec<EF>, EF), GkrVerificationError> {
+    mut claim: SC::EF,
+    gkr_r: &[SC::EF],
+) -> Result<(SC::EF, Vec<SC::EF>, SC::EF), GkrVerificationError<SC::EF>> {
     debug_assert!(
         round > 0,
         "verify_gkr_sumcheck should not be called for round 0"
@@ -197,7 +196,7 @@ fn verify_gkr_sumcheck<TS: FiatShamirTranscript>(
         });
     }
     let mut gkr_r_prime = Vec::with_capacity(round);
-    let mut eq = EF::ONE; // eq(ξ^{(j-1)}, ρ^{(j-1)}) computed incrementally
+    let mut eq = SC::EF::ONE; // eq(ξ^{(j-1)}, ρ^{(j-1)}) computed incrementally
 
     for (sumcheck_round, poly_evals) in polys.iter().enumerate() {
         debug!(gkr_round = round, %sumcheck_round, sum_claim = %claim);
@@ -216,14 +215,17 @@ fn verify_gkr_sumcheck<TS: FiatShamirTranscript>(
 
         // Update eq incrementally: eq *= ξᵢ·rᵢ + (1-ξᵢ)·(1-rᵢ)
         let xi = gkr_r[sumcheck_round];
-        eq *= xi * ri + (EF::ONE - xi) * (EF::ONE - ri);
+        eq *= xi * ri + (SC::EF::ONE - xi) * (SC::EF::ONE - ri);
     }
 
     Ok((claim, gkr_r_prime, eq))
 }
 
 /// Observes layer claims in the transcript.
-fn observe_layer_claims<TS: FiatShamirTranscript>(transcript: &mut TS, claims: &GkrLayerClaims) {
+fn observe_layer_claims<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
+    transcript: &mut TS,
+    claims: &GkrLayerClaims<SC>,
+) {
     transcript.observe_ext(claims.p_xi_0);
     transcript.observe_ext(claims.q_xi_0);
     transcript.observe_ext(claims.p_xi_1);
@@ -231,14 +233,14 @@ fn observe_layer_claims<TS: FiatShamirTranscript>(transcript: &mut TS, claims: &
 }
 
 /// Computes recursive relations from layer claims.
-fn compute_recursive_relations(claims: &GkrLayerClaims) -> (EF, EF) {
+fn compute_recursive_relations<SC: StarkProtocolConfig>(claims: &GkrLayerClaims<SC>) -> (SC::EF, SC::EF) {
     let p_cross_term = claims.p_xi_0 * claims.q_xi_1 + claims.p_xi_1 * claims.q_xi_0;
     let q_cross_term = claims.q_xi_0 * claims.q_xi_1;
     (p_cross_term, q_cross_term)
 }
 
 /// Reduces claims to a single evaluation point using linear interpolation.
-fn reduce_to_single_evaluation(claims: &GkrLayerClaims, mu: EF) -> (EF, EF) {
+fn reduce_to_single_evaluation<SC: StarkProtocolConfig>(claims: &GkrLayerClaims<SC>, mu: SC::EF) -> (SC::EF, SC::EF) {
     let numer = interpolate_linear_at_01(&[claims.p_xi_0, claims.p_xi_1], mu);
     let denom = interpolate_linear_at_01(&[claims.q_xi_0, claims.q_xi_1], mu);
     (numer, denom)
@@ -253,13 +255,15 @@ mod tests {
         poseidon2::sponge::DuplexSponge,
         proof::{GkrLayerClaims, GkrProof},
         prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
-        F,
+        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
     };
+
+    type SCV2 = BabyBearPoseidon2ConfigV2;
 
     #[test]
     fn test_multiple_rounds_shape() {
         setup_tracing();
-        let proof = GkrProof {
+        let proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
             q0_claim: EF::ONE,
             claims_per_layer: vec![],
@@ -268,21 +272,21 @@ mod tests {
 
         let mut transcript = DuplexSponge::default();
 
-        let result = verify_gkr(&proof, &mut transcript, 2);
+        let result = verify_gkr::<SCV2, _>(&proof, &mut transcript, 2);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
             GkrVerificationError::IncorrectLayerCount { .. }
         ));
 
-        let layer_claims = GkrLayerClaims {
+        let layer_claims = GkrLayerClaims::<SCV2> {
             p_xi_0: EF::ZERO,
             p_xi_1: EF::ZERO,
             q_xi_0: EF::ONE,
             q_xi_1: EF::ONE,
         };
 
-        let proof2 = GkrProof {
+        let proof2 = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
             q0_claim: EF::ONE,
             claims_per_layer: vec![layer_claims.clone(), layer_claims],
@@ -290,7 +294,7 @@ mod tests {
         };
 
         let mut transcript = DuplexSponge::default();
-        let result = verify_gkr(&proof2, &mut transcript, 2);
+        let result = verify_gkr::<SCV2, _>(&proof2, &mut transcript, 2);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -301,7 +305,7 @@ mod tests {
     #[test]
     fn test_gkr_base_layer_numerator_zero() {
         setup_tracing();
-        let layer1_claims = GkrLayerClaims {
+        let layer1_claims = GkrLayerClaims::<SCV2> {
             p_xi_0: EF::from_u64(1), // Non-zero
             p_xi_1: EF::from_u64(2),
             q_xi_0: EF::from_u64(3),
@@ -309,7 +313,7 @@ mod tests {
         };
 
         // p0 = 1*4 + 2*3 = 10 (non-zero)
-        let proof = GkrProof {
+        let proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
             q0_claim: EF::from_u64(12), // q0 = 3*4 = 12
             claims_per_layer: vec![layer1_claims],
@@ -317,7 +321,7 @@ mod tests {
         };
 
         let mut transcript = DuplexSponge::default();
-        let result = verify_gkr(&proof, &mut transcript, 1);
+        let result = verify_gkr::<SCV2, _>(&proof, &mut transcript, 1);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -340,9 +344,9 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
-        let gkr_proof = GkrProof {
+        let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
@@ -351,7 +355,7 @@ mod tests {
 
         let mut verifier_transcript = DuplexSponge::default();
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds);
+        let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
 
         assert!(
             result.is_ok(),
@@ -386,9 +390,9 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
-        let gkr_proof = GkrProof {
+        let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
@@ -397,7 +401,7 @@ mod tests {
 
         let mut verifier_transcript = DuplexSponge::default();
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds);
+        let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
 
         assert!(
             result.is_ok(),
@@ -448,9 +452,9 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
-        let gkr_proof = GkrProof {
+        let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
@@ -459,7 +463,7 @@ mod tests {
 
         let mut verifier_transcript = DuplexSponge::default();
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds);
+        let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
 
         assert!(
             result.is_ok(),
@@ -486,9 +490,9 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
-        let gkr_proof = GkrProof {
+        let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
@@ -497,7 +501,7 @@ mod tests {
 
         let mut verifier_transcript = DuplexSponge::default();
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, total_rounds);
+        let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
 
         assert!(
             result.is_ok(),
@@ -514,9 +518,9 @@ mod tests {
         let fractions = vec![];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
-        let gkr_proof = GkrProof {
+        let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
             q0_claim: frac_proof.fractional_sum.1,
             claims_per_layer: frac_proof.claims_per_layer,
@@ -524,7 +528,7 @@ mod tests {
         };
 
         let mut verifier_transcript = DuplexSponge::default();
-        let result = verify_gkr(&gkr_proof, &mut verifier_transcript, 0);
+        let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, 0);
 
         assert!(
             result.is_ok(),

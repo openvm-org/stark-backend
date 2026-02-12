@@ -8,6 +8,7 @@ use tracing::{debug, info};
 use crate::{
     proof::TraceVData,
     prover::{DeviceMultiStarkProvingKeyV2, ProverBackendV2},
+    StarkProtocolConfig,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -73,9 +74,9 @@ impl Display for SingleTraceMetrics {
 }
 
 /// heights are the trace heights for each air
-pub fn trace_metrics<PB: ProverBackendV2>(
+pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackendV2>(
     mpk: &DeviceMultiStarkProvingKeyV2<PB>,
-    trace_vdata: &[Option<TraceVData>],
+    trace_vdata: &[Option<TraceVData<SC>>],
 ) -> TraceMetrics {
     let heights = trace_vdata
         .iter()

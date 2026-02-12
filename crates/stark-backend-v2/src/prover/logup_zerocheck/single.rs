@@ -11,7 +11,8 @@ use p3_field::{ExtensionField, TwoAdicField};
 
 use crate::prover::{
     logup_zerocheck::evaluator::{ProverConstraintEvaluator, ViewPair},
-    AirProvingContextV2, CpuBackendV2, StridedColMajorMatrixView,
+    AirProvingContextV2, ProverBackendV2, StridedColMajorMatrixView,
+    ColMajorMatrix,
 };
 
 /// For a single AIR
@@ -27,7 +28,7 @@ pub struct EvalHelper<'a, F> {
     pub constraint_degree: u8,
 }
 
-impl<'a> EvalHelper<'a, crate::F> {
+impl<'a, F: TwoAdicField> EvalHelper<'a, F> {
     /// Returns list of (ref to column-major matrix, is_rot) pairs in the order:
     /// - (if has_preprocessed) (preprocessed, false), (preprocessed, true)
     /// - (cached_0, false), (cached_0, true), ..., (cached_{m-1}, false), (cached_{m-1}, true)
@@ -35,10 +36,13 @@ impl<'a> EvalHelper<'a, crate::F> {
     ///
     /// Note: currently every matrix returns both non-rotated and rotated versions. This will change
     /// in the future for perf.
-    pub fn view_mats(
+    pub fn view_mats<PB>(
         &self,
-        ctx: &'a AirProvingContextV2<CpuBackendV2>,
-    ) -> Vec<(StridedColMajorMatrixView<'a, crate::F>, bool)> {
+        ctx: &'a AirProvingContextV2<PB>,
+    ) -> Vec<(StridedColMajorMatrixView<'a, F>, bool)>
+    where
+        PB: ProverBackendV2<Val = F, Matrix = ColMajorMatrix<F>>,
+    {
         let base_mats = usize::from(self.has_preprocessed()) + 1 + ctx.cached_mains.len();
         let mut mats = Vec::with_capacity(if self.needs_next {
             2 * base_mats
@@ -52,7 +56,7 @@ impl<'a> EvalHelper<'a, crate::F> {
             }
         }
         for cd in ctx.cached_mains.iter() {
-            let trace_view = cd.data.mat_view(0);
+            let trace_view: StridedColMajorMatrixView<'a, F> = cd.trace.as_view().into();
             mats.push((trace_view, false));
             if self.needs_next {
                 mats.push((trace_view, true));
@@ -64,9 +68,7 @@ impl<'a> EvalHelper<'a, crate::F> {
         }
         mats
     }
-}
 
-impl<F: TwoAdicField> EvalHelper<'_, F> {
     pub fn has_preprocessed(&self) -> bool {
         self.preprocessed_trace.is_some()
     }
