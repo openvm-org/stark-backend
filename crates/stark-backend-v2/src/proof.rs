@@ -537,7 +537,7 @@ mod tests {
 
     fn test_proof_encode_decode<Fx: TestFixture>(fx: Fx, params: SystemParams) -> Result<()> {
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
-        let pk = fx.keygen(&engine).0;
+        let (pk, vk) = fx.keygen(&engine);
         let proof = fx.prove_from_transcript(&engine, &pk, &mut DuplexSpongeRecorder::default());
 
         let mut proof_bytes = Vec::new();
@@ -545,6 +545,12 @@ mod tests {
 
         let decoded_proof = Proof::decode(&mut &proof_bytes[..]).unwrap();
         assert_eq!(proof, decoded_proof);
+
+        // VK-based codec roundtrip
+        let proof_bytes_vk = proof.encode_to_bytes_using_vk(&vk.inner).unwrap();
+        let decoded_proof_vk =
+            Proof::decode_from_bytes_using_vk(&vk.inner, &proof_bytes_vk).unwrap();
+        assert_eq!(proof, decoded_proof_vk);
         Ok(())
     }
 

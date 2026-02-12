@@ -7,6 +7,7 @@ use p3_util::log2_ceil_u64;
 
 mod chip;
 pub mod codec;
+pub mod codec_vk;
 mod config;
 pub mod debug;
 pub mod dft;
