@@ -12,12 +12,11 @@ use crate::{
     calculate_n_logup,
     codec::{decode_into_vec, encode_iter, Decode, Encode},
     keygen::types::{MultiStarkVerifyingKey0V2, StarkVerifyingKeyV2},
+    proof::{
+        BatchConstraintProof, GkrLayerClaims, GkrProof, Proof, StackingProof, TraceVData, WhirProof,
+    },
     prover::stacked_pcs::StackedLayout,
     Digest, EF, F,
-};
-
-use crate::proof::{
-    BatchConstraintProof, GkrLayerClaims, GkrProof, Proof, StackingProof, TraceVData, WhirProof,
 };
 
 /// VK-based codec version.
@@ -27,16 +26,11 @@ use crate::proof::{
 /// verifying key and the trace vdata bitmap.
 pub(crate) const CODEC_VERSION_VK: u32 = 0;
 
+#[allow(clippy::type_complexity)]
 fn per_trace_sorted<'a>(
     mvk: &'a MultiStarkVerifyingKey0V2,
     trace_vdata: &'a [Option<TraceVData>],
-) -> Result<
-    Vec<(
-        usize,
-        &'a crate::keygen::types::StarkVerifyingKeyV2<F, Digest>,
-        &'a TraceVData,
-    )>,
-> {
+) -> Result<Vec<(usize, &'a StarkVerifyingKeyV2<F, Digest>, &'a TraceVData)>> {
     use std::cmp::Reverse;
 
     if trace_vdata.len() != mvk.per_air.len() {
