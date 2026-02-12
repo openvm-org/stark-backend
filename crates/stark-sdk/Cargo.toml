@@ -6,34 +6,18 @@ edition.workspace = true
 description = "SDK for production and testing usage of STARKs."
 
 [dependencies]
-openvm-stark-backend = { workspace = true }
+stark-backend-v2 = { workspace = true }
 
-p3-dft = { workspace = true }
-p3-merkle-tree = { workspace = true }
-p3-fri = { workspace = true }
 p3-baby-bear = { workspace = true }
-p3-koala-bear = { workspace = true }
-p3-bn254 = { workspace = true }
-p3-goldilocks = { workspace = true }
-p3-poseidon2 = { workspace = true }
-p3-poseidon = { workspace = true }
-p3-symmetric = { workspace = true }
-p3-blake3 = { workspace = true }
-p3-keccak = { workspace = true }
+p3-field = { workspace = true }
 
-zkhash = { workspace = true }
-ff = { workspace = true }
+hex-literal.workspace = true
 itertools.workspace = true
 tracing.workspace = true
-derivative.workspace = true
 serde = { workspace = true, features = ["alloc"] }
-rand.workspace = true
-num-bigint = { version = "0.4", default-features = false }
-metrics.workspace = true
 serde_json.workspace = true
-static_assertions.workspace = true
-toml.workspace = true
-derive_more = { workspace = true, features = ["display"] }
+rand.workspace = true
+metrics = { workspace = true, optional = true }
 dashmap.workspace = true
 tracing-subscriber = { workspace = true, features = ["std", "env-filter"] }
 tracing-forest = { workspace = true, features = ["ansi", "smallvec"] }
@@ -47,17 +31,20 @@ tokio = { workspace = true, features = [
   "rt-multi-thread",
 ], optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs"], optional = true }
+eyre.workspace = true
+static_assertions.workspace = true
 
 [dev-dependencies]
 p3-keccak-air = { workspace = true }
+zkhash = { workspace = true }
 
 [features]
-default = ["parallel"]
-parallel = ["openvm-stark-backend/parallel"]
-mimalloc = ["openvm-stark-backend/mimalloc"]
-jemalloc = ["openvm-stark-backend/jemalloc"]
-jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
-metrics = ["openvm-stark-backend/metrics"]
+default = ["parallel", "metrics"]
+parallel = ["stark-backend-v2/parallel"]
+mimalloc = ["stark-backend-v2/mimalloc"]
+jemalloc = ["stark-backend-v2/jemalloc"]
+jemalloc-prof = ["stark-backend-v2/jemalloc-prof"]
+metrics = ["dep:metrics", "stark-backend-v2/metrics"]
 prometheus = [
   "metrics",
   "dep:metrics-exporter-prometheus",

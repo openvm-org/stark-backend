@@ -1,22 +1,18 @@
-// Replace engine.rs in v1
-
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 use itertools::Itertools;
 
 use crate::{
     air_builders::debug::{debug_constraints_and_interactions, AirProofRawInput},
-    baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
     keygen::{
         types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
         MultiStarkKeygenBuilderV2,
     },
-    poseidon2::sponge::DuplexSponge,
     proof::*,
     prover::{
-        AirProvingContextV2, ColMajorMatrix, CoordinatorV2, CpuBackendV2, CpuDeviceV2,
-        DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2,
-        Prover, ProverBackendV2, ProverDeviceV2, ProvingContextV2, StridedColMajorMatrixView,
+        AirProvingContextV2, ColMajorMatrix, CoordinatorV2, DeviceDataTransporterV2,
+        DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2, Prover, ProverBackendV2,
+        ProverDeviceV2, ProvingContextV2, StridedColMajorMatrixView,
     },
     verifier::{verify, VerifierError},
     AirRef, FiatShamirTranscript, StarkProtocolConfig, SystemParams,
@@ -173,73 +169,7 @@ where
         <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField;
 }
 
-pub struct BabyBearPoseidon2CpuEngineV2<TS = DuplexSponge> {
-    device: CpuDeviceV2,
-    _transcript: PhantomData<TS>,
-}
-
-impl<TS> BabyBearPoseidon2CpuEngineV2<TS> {
-    pub fn new(params: SystemParams) -> Self {
-        Self {
-            device: CpuDeviceV2::new(params),
-            _transcript: PhantomData,
-        }
-    }
-}
-
-impl<TS> StarkEngineV2 for BabyBearPoseidon2CpuEngineV2<TS>
-where
-    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2> + Default,
-{
-    type SC = BabyBearPoseidon2ConfigV2;
-    type PB = CpuBackendV2<BabyBearPoseidon2ConfigV2>;
-    type PD = CpuDeviceV2;
-    type TS = TS;
-
-    fn device(&self) -> &Self::PD {
-        &self.device
-    }
-
-    fn prover_from_transcript(
-        &self,
-        transcript: TS,
-    ) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS> {
-        CoordinatorV2::new(CpuBackendV2::new(), self.device.clone(), transcript)
-    }
-
-    fn run_test(
-        &self,
-        airs: Vec<AirRef<Self::SC>>,
-        ctxs: Vec<AirProvingContextV2<Self::PB>>,
-    ) -> Result<VerificationDataV2<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
-    where
-        Self::PB: ProverBackendV2<
-            Val = <Self::SC as StarkProtocolConfig>::F,
-            Challenge = <Self::SC as StarkProtocolConfig>::EF,
-            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
-        >,
-        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
-    {
-        let (pk, vk) = self.keygen(&airs);
-        let device = self.prover().device;
-        let d_pk = device.transport_pk_to_device(&pk);
-        let ctx = ProvingContextV2::new(ctxs.into_iter().enumerate().collect());
-        let proof = self.prove(&d_pk, ctx);
-        self.verify(&vk, &proof)?;
-        Ok(VerificationDataV2 { vk, proof })
-    }
-}
-
-// TODO[jpw]: move to stark-sdk
-pub trait StarkWhirEngine: StarkEngineV2 {
+/// [StarkEngineV2] that can be constructed from only system parameters.
+pub trait DefaultStarkEngine: StarkEngineV2 {
     fn new(params: SystemParams) -> Self;
-}
-
-impl<TS> StarkWhirEngine for BabyBearPoseidon2CpuEngineV2<TS>
-where
-    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2> + Default,
-{
-    fn new(params: SystemParams) -> Self {
-        Self::new(params)
-    }
 }

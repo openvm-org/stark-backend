@@ -4,11 +4,7 @@ use getset::Getters;
 use p3_field::{BasedVectorSpace, ExtensionField, PrimeField64, TwoAdicField};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    codec::{Decode, Encode},
-    interaction::LogUpSecurityParameters,
-    merkle::MerkleHasher,
-};
+use crate::{interaction::LogUpSecurityParameters, merkle::MerkleHasher};
 
 /// Trait that holds the associated types for the SWIRL protocol. These are the types needed by the
 /// verifier and must be independent of the prover backend.
@@ -23,9 +19,9 @@ use crate::{
 /// transcript is specified by [`FiatShamirTranscript`](crate::FiatShamirTranscript).
 pub trait StarkProtocolConfig: 'static {
     /// The prime base field.
-    type F: TwoAdicField + PrimeField64 + Encode + Decode;
+    type F: TwoAdicField + PrimeField64;
     /// The extension field, used for random challenges.
-    type EF: ExtensionField<Self::F> + Encode + Decode;
+    type EF: ExtensionField<Self::F>;
     /// The digest type used for commitments.
     type Digest: Copy
         + Send
@@ -35,9 +31,7 @@ pub trait StarkProtocolConfig: 'static {
         + PartialEq
         + Eq
         + Serialize
-        + for<'de> Deserialize<'de>
-        + Encode
-        + Decode;
+        + for<'de> Deserialize<'de>;
     /// The Merkle tree hasher.
     type H: MerkleHasher<F = Self::F, Digest = Self::Digest>;
 

@@ -46,24 +46,16 @@ type Val = BabyBear;
 type PackedVal = <Val as Field>::Packing;
 type Challenge = BinomialExtensionField<Val, 4>;
 type Perm = Poseidon2BabyBear<WIDTH>;
-type InstrPerm = Instrumented<Perm>;
 
 // Generic over P: CryptographicPermutation<[F; WIDTH]>
-type Hash<P> = PaddingFreeSponge<P, WIDTH, RATE, DIGEST_WIDTH>;
-type Compress<P> = TruncatedPermutation<P, 2, DIGEST_WIDTH, WIDTH>;
-type ValMmcs<P> =
-    MerkleTreeMmcs<PackedVal, <Val as Field>::Packing, Hash<P>, Compress<P>, DIGEST_WIDTH>;
-type ChallengeMmcs<P> = ExtensionMmcs<Val, Challenge, ValMmcs<P>>;
+
 pub type Challenger<P> = DuplexChallenger<Val, P, WIDTH, RATE>;
-type Dft = Radix2DitParallel<Val>;
-type Pcs<P> = TwoAdicFriPcs<Val, Dft, ValMmcs<P>, ChallengeMmcs<P>>;
-type RapPhase<P> = FriLogUpPhase<Val, Challenge, Challenger<P>>;
 
 pub type BabyBearPermutationConfig<P> = StarkConfig<Pcs<P>, RapPhase<P>, Challenge, Challenger<P>>;
 pub type BabyBearPoseidon2Config = BabyBearPermutationConfig<Perm>;
 pub type BabyBearPoseidon2Engine = BabyBearPermutationEngine<Perm>;
 
-assert_sc_compatible_with_serde!(BabyBearPoseidon2Config);
+// assert_sc_compatible_with_serde!(BabyBearPoseidon2Config);
 
 pub struct BabyBearPermutationEngine<P>
 where

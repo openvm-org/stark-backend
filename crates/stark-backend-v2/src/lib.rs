@@ -17,7 +17,6 @@ use p3_util::log2_ceil_u64;
 /// AIR builders for prover and verifier, including support for cross-matrix permutation arguments.
 pub mod air_builders;
 mod any_air;
-pub mod baby_bear_poseidon2;
 /// Trait for stateful chip that owns trace generation
 mod chip;
 pub mod codec;
@@ -34,7 +33,6 @@ pub mod keygen;
 pub mod merkle;
 /// Common polynomial utilities shared by prover and verifier
 pub mod poly_common;
-pub mod poseidon2;
 /// Definition of the STARK proof struct.
 pub mod proof;
 pub mod prover;

@@ -34,6 +34,7 @@ pub mod utils;
 pub mod verifier;
 
 pub use chip::{AnyChip, Chip, ChipUsageGetter};
+pub use engine::StarkEngineV2;
 pub use rap::AirRef;
 
 // Use jemalloc as global allocator for performance

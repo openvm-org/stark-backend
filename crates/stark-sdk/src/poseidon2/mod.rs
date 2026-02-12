@@ -4,7 +4,6 @@ use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_field::PrimeCharacteristicRing;
 use p3_poseidon2::ExternalLayerConstants;
 
-mod instance_babybear;
 pub mod sponge;
 
 pub use instance_babybear::*;
