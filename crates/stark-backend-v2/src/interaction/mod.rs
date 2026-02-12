@@ -1,16 +1,14 @@
 use std::fmt::Debug;
 
 use p3_air::AirBuilder;
-use p3_challenger::CanObserve;
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_util::log2_ceil_usize;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::air_builders::symbolic::symbolic_expression::SymbolicExpression;
 
 /// Interaction debugging tools
 pub mod debug;
-mod utils;
 
 // Must be a type smaller than u32 to make BusIndex p - 1 unrepresentable.
 pub type BusIndex = u16;

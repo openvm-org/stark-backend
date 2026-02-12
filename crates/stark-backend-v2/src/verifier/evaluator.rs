@@ -1,4 +1,4 @@
-use openvm_stark_backend::air_builders::symbolic::{
+use crate::air_builders::symbolic::{
     symbolic_expression::SymbolicEvaluator,
     symbolic_variable::{Entry, SymbolicVariable},
 };

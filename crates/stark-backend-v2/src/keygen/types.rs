@@ -6,14 +6,52 @@
 use std::sync::Arc;
 
 use derivative::Derivative;
-use openvm_stark_backend::{
-    air_builders::symbolic::{symbolic_variable::SymbolicVariable, SymbolicConstraintsDag},
-    keygen::types::{LinearConstraint, TraceWidth},
-};
+use crate::air_builders::symbolic::{symbolic_variable::SymbolicVariable, SymbolicConstraintsDag};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{prover::stacked_pcs::StackedPcsData, StarkProtocolConfig, SystemParams};
+
+/// Widths of different parts of trace matrix
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TraceWidth {
+    pub preprocessed: Option<usize>,
+    pub cached_mains: Vec<usize>,
+    pub common_main: usize,
+    /// Width counted by extension field elements, _not_ base field elements
+    pub after_challenge: Vec<usize>,
+}
+
+impl TraceWidth {
+    /// Returns the widths of all main traces, including the common main trace if it exists.
+    pub fn main_widths(&self) -> Vec<usize> {
+        let mut ret = self.cached_mains.clone();
+        if self.common_main != 0 {
+            ret.push(self.common_main);
+        }
+        ret
+    }
+
+    /// Returns the width of the main trace, i.e., the sum of all cached main widths and the common
+    /// main width.
+    pub fn main_width(&self) -> usize {
+        self.cached_mains.iter().sum::<usize>() + self.common_main
+    }
+
+    /// Total width of the trace matrix, including the preprocessed width, main width, and
+    /// after-challenge widths.
+    pub fn total_width(&self, ext_degree: usize) -> usize {
+        self.preprocessed.unwrap_or(0)
+            + self.main_width()
+            + self.after_challenge.iter().sum::<usize>() * ext_degree
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LinearConstraint {
+    pub coefficients: Vec<u32>,
+    pub threshold: u32,
+}
 
 #[derive(Error, Debug)]
 pub enum KeygenError {

@@ -1,11 +1,10 @@
 use getset::CopyGetters;
-use openvm_stark_backend::{
-    p3_matrix::{dense::RowMajorMatrix, Matrix},
-    prover::MatrixDimensions,
-};
 use p3_field::Field;
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::prover::MatrixDimensions;
 
 /// Trait to consolidate different virtual matrices that may not be backed by an in-memory matrix
 /// with a standard column-major or row-major layout.
@@ -64,14 +63,6 @@ impl<F> ColMajorMatrix<F> {
             values,
             width,
             height,
-        }
-    }
-
-    pub(crate) fn dummy() -> Self {
-        Self {
-            values: vec![],
-            width: 0,
-            height: 0,
         }
     }
 

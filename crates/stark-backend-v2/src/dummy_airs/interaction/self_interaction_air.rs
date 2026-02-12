@@ -1,15 +1,12 @@
-use std::sync::Arc;
-
 use itertools::{fold, Itertools};
-use openvm_stark_backend::{
-    config::{StarkGenericConfig, Val},
+use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
+use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
+
+use crate::{
     interaction::{BusIndex, InteractionBuilder},
-    p3_air::{Air, AirBuilder, BaseAir},
-    p3_field::{PrimeCharacteristicRing, PrimeField32},
-    p3_matrix::{dense::RowMajorMatrix, Matrix},
-    prover::{cpu::CpuBackend, types::AirProvingContext},
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
-    Chip,
+    prover::{AirProvingContextV2, ColMajorMatrix, CpuBackendV2},
+    ChipV2, PartitionedBaseAir, StarkProtocolConfig,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -76,15 +73,16 @@ pub struct SelfInteractionChip {
     pub log_height: usize,
 }
 
-impl<SC: StarkGenericConfig> Chip<(), CpuBackend<SC>> for SelfInteractionChip {
-    fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
+impl<SC: StarkProtocolConfig> ChipV2<(), CpuBackendV2<SC>> for SelfInteractionChip {
+    fn generate_proving_ctx(&self, _: ()) -> AirProvingContextV2<CpuBackendV2<SC>> {
         assert!(self.width > 0);
-        let mut trace = vec![Val::<SC>::ZERO; (1 << self.log_height) * self.width];
+        let mut trace = vec![SC::F::ZERO; (1 << self.log_height) * self.width];
         for (row_idx, chunk) in trace.chunks_mut(self.width).enumerate() {
             for (i, val) in chunk.iter_mut().enumerate() {
-                *val = Val::<SC>::from_usize((row_idx + i) % self.width);
+                *val = SC::F::from_usize((row_idx + i) % self.width);
             }
         }
-        AirProvingContext::simple_no_pis(Arc::new(RowMajorMatrix::new(trace, self.width)))
+        let rm = RowMajorMatrix::new(trace, self.width);
+        AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&rm))
     }
 }

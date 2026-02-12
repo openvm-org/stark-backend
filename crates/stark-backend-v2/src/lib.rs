@@ -39,9 +39,10 @@ pub mod proof;
 pub mod prover;
 mod transcript;
 pub mod utils;
-pub mod v1_shims;
 pub mod verifier;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod dummy_airs;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 #[cfg(test)]

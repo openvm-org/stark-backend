@@ -211,9 +211,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use openvm_stark_sdk::config::{
-        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
-    };
+    use crate::test_utils::{log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level};
     use test_case::test_case;
     use tracing::Level;
 

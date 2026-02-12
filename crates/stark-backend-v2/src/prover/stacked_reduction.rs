@@ -3,7 +3,7 @@
 use std::{array::from_fn, collections::HashMap, iter::zip, mem::take};
 
 use itertools::Itertools;
-use openvm_stark_backend::prover::MatrixDimensions;
+use crate::prover::MatrixDimensions;
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use tracing::{debug, instrument};

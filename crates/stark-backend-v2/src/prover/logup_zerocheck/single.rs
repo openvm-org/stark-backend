@@ -3,7 +3,7 @@
 use std::iter::zip;
 
 use itertools::Itertools;
-use openvm_stark_backend::{
+use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicExpressionDag},
     interaction::SymbolicInteraction,
 };

@@ -1,46 +1,76 @@
 use std::sync::Arc;
 
 use itertools::Itertools;
-use openvm_stark_backend::{
-    interaction::BusIndex,
-    prover::{MatrixDimensions, Prover},
-    AirRef,
-};
-pub use openvm_stark_sdk::dummy_airs::fib_air::air::FibonacciAir;
-use openvm_stark_sdk::{
-    any_rap_arc_vec,
-    config::{
-        baby_bear_poseidon2::BabyBearPoseidon2Config,
-        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
-    },
+use p3_baby_bear::BabyBear;
+use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_matrix::dense::RowMajorMatrix;
+use tracing::Level;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
+
+use crate::{
+    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
     dummy_airs::{
-        self,
+        fib_air::air::FibonacciAir,
         fib_selector_air::air::FibonacciSelectorAir,
         interaction::{
             dummy_interaction_air::DummyInteractionAir,
             self_interaction_air::{SelfInteractionAir, SelfInteractionChip},
         },
     },
-};
-use p3_baby_bear::BabyBear;
-use p3_field::{PrimeCharacteristicRing, PrimeField32};
-use p3_matrix::dense::RowMajorMatrix;
-
-use crate::{
+    interaction::{BusIndex, LogUpSecurityParameters},
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
-    poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory, TranscriptLog},
+    poseidon2::sponge::{
+        DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory, TranscriptLog,
+    },
     proof::Proof,
     prover::{
         stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
-        CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver,
-        ProvingContextV2, TraceCommitterV2,
+        CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions,
+        MultiRapProver, Prover, ProvingContextV2, TraceCommitterV2,
     },
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
-    BabyBearPoseidon2CpuEngineV2, ChipV2, FiatShamirTranscript, StarkEngineV2, SystemParams,
-    WhirConfig, WhirParams,
+    AirRef, BabyBearPoseidon2CpuEngineV2, ChipV2, FiatShamirTranscript, StarkEngineV2,
+    SystemParams, WhirConfig, WhirParams,
 };
 
 type SCV2 = BabyBearPoseidon2ConfigV2;
+
+// TODO: move to stark-sdk
+/// Set up tracing with INFO level.
+pub fn setup_tracing() {
+    setup_tracing_with_log_level(Level::INFO);
+}
+
+// TODO: move to stark-sdk
+/// Set up tracing with a specified log level.
+pub fn setup_tracing_with_log_level(level: Level) {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("{},p3_=warn", level)));
+    let _ = Registry::default()
+        .with(env_filter)
+        .with(tracing_forest::ForestLayer::default())
+        .try_init();
+}
+
+// TODO: move to stark-sdk
+/// Returns LogUp security parameters for BabyBear with ~100 bits of security.
+pub fn log_up_security_params_baby_bear_100_bits() -> LogUpSecurityParameters {
+    use p3_field::extension::BinomialExtensionField;
+    let params = LogUpSecurityParameters {
+        max_interaction_count: BabyBear::ORDER_U32,
+        log_max_message_length: 7,
+        pow_bits: 18,
+    };
+    assert!(params.bits_of_security::<BinomialExtensionField<BabyBear, 4>>() >= 100);
+    params
+}
+
+/// Macro to create a `Vec<AirRef<SC>>` from a list of AIRs.
+#[macro_export]
+macro_rules! any_air_arc_vec {
+    ($($air:expr),+ $(,)?) => {
+        vec![$(std::sync::Arc::new($air) as $crate::AirRef<_>),+]
+    };
+}
 
 #[allow(clippy::type_complexity)]
 pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
@@ -85,11 +115,11 @@ fn get_conditional_fib_number(mut a: u32, mut b: u32, sels: &[bool]) -> u32 {
 /// Trait for object responsible for generating the collection of AIRs and trace matrices for a
 /// single test case.
 pub trait TestFixture {
-    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>>;
+    fn airs(&self) -> Vec<AirRef<SCV2>>;
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>>;
 
-    fn keygen<E: StarkEngineV2>(
+    fn keygen<E: StarkEngineV2<SC = SCV2>>(
         &self,
         engine: &E,
     ) -> (MultiStarkProvingKeyV2<SCV2>, MultiStarkVerifyingKeyV2<SCV2>) {
@@ -167,13 +197,13 @@ impl FibFixture {
 }
 
 impl TestFixture for FibFixture {
-    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+    fn airs(&self) -> Vec<AirRef<SCV2>> {
         let air = Arc::new(FibonacciAir);
         vec![air; self.num_airs]
     }
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
-        use dummy_airs::fib_air::trace::generate_trace_rows;
+        use crate::dummy_airs::fib_air::trace::generate_trace_rows;
         let f_n = get_fib_number(self.a, self.b, self.n);
         let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);
 
@@ -200,19 +230,13 @@ impl TestFixture for FibFixture {
 pub struct InteractionsFixture11;
 
 impl TestFixture for InteractionsFixture11 {
-    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+    fn airs(&self) -> Vec<AirRef<SCV2>> {
         let sender_air = DummyInteractionAir::new(1, true, 0);
         let receiver_air = DummyInteractionAir::new(1, false, 0);
-        any_rap_arc_vec!(sender_air, receiver_air)
+        any_air_arc_vec!(sender_air, receiver_air)
     }
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
-        // Default traces
-        // Sender (2 columns: Mul, Val):
-        //   0    1
-        //   7    4
-        //   3    5
-        // 546  889
         let sender_trace = RowMajorMatrix::new(
             [0, 1, 3, 5, 7, 4, 546, 889]
                 .into_iter()
@@ -221,15 +245,6 @@ impl TestFixture for InteractionsFixture11 {
             2,
         );
 
-        // Receiver (2 columns: Mul, Val):
-        //   1    5
-        //   3    4
-        //   4    4
-        //   2    5
-        //   0  123
-        // 545  889
-        //   1  889
-        //   0  456
         let receiver_trace = RowMajorMatrix::new(
             [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 1, 889, 0, 456]
                 .into_iter()
@@ -260,19 +275,13 @@ pub struct CachedFixture11 {
 }
 
 impl TestFixture for CachedFixture11 {
-    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+    fn airs(&self) -> Vec<AirRef<SCV2>> {
         let sender_air = DummyInteractionAir::new(1, true, 0).partition();
         let receiver_air = DummyInteractionAir::new(1, false, 0).partition();
-        any_rap_arc_vec!(sender_air, receiver_air)
+        any_air_arc_vec!(sender_air, receiver_air)
     }
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
-        // Default traces
-        // Sender (2 columns: Mul, Val):
-        //   0    1
-        //   3    5
-        //   7    4
-        // 546  889
         let sender_trace = ColMajorMatrix::new(
             [0, 3, 7, 546]
                 .into_iter()
@@ -288,15 +297,6 @@ impl TestFixture for CachedFixture11 {
             1,
         );
 
-        // Receiver (2 columns: Mul, Val):
-        //   1    5
-        //   3    4
-        //   4    4
-        //   2    5
-        //   0  123
-        // 545  889
-        //   1  889
-        //   0  456
         let receiver_trace = ColMajorMatrix::new(
             [1, 3, 4, 2, 0, 545, 1, 0]
                 .into_iter()
@@ -353,13 +353,13 @@ pub struct PreprocessedFibFixture {
 }
 
 impl TestFixture for PreprocessedFibFixture {
-    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+    fn airs(&self) -> Vec<AirRef<SCV2>> {
         let air = Arc::new(FibonacciSelectorAir::new(self.sels.clone(), false));
         vec![air]
     }
 
     fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
-        use openvm_stark_sdk::dummy_airs::fib_selector_air::trace::generate_trace_rows;
+        use crate::dummy_airs::fib_selector_air::trace::generate_trace_rows;
         let trace = generate_trace_rows(self.a, self.b, &self.sels);
         let f_n = get_conditional_fib_number(self.a, self.b, &self.sels);
         let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);
@@ -378,14 +378,14 @@ pub struct SelfInteractionFixture {
 }
 
 impl TestFixture for SelfInteractionFixture {
-    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+    fn airs(&self) -> Vec<AirRef<SCV2>> {
         self.widths
             .iter()
             .map(|&width| {
                 Arc::new(SelfInteractionAir {
                     width,
                     bus_index: self.bus_index,
-                }) as AirRef<BabyBearPoseidon2Config>
+                }) as AirRef<SCV2>
             })
             .collect_vec()
     }
@@ -399,7 +399,7 @@ impl TestFixture for SelfInteractionFixture {
                     width,
                     log_height: self.log_height,
                 };
-                chip.generate_proving_ctx(())
+                ChipV2::<(), CpuBackendV2<SCV2>>::generate_proving_ctx(&chip, ())
             })
             .enumerate()
             .collect_vec();
@@ -420,7 +420,7 @@ pub enum MixtureFixtureEnum {
 }
 
 impl MixtureFixtureEnum {
-    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+    fn airs(&self) -> Vec<AirRef<SCV2>> {
         use crate::test_utils::MixtureFixtureEnum::*;
         match self {
             FibFixture(fx) => fx.airs(),
@@ -469,7 +469,7 @@ impl MixtureFixture {
 }
 
 impl TestFixture for MixtureFixture {
-    fn airs(&self) -> Vec<AirRef<BabyBearPoseidon2Config>> {
+    fn airs(&self) -> Vec<AirRef<SCV2>> {
         self.fxs.iter().flat_map(|fx| fx.airs()).collect_vec()
     }
 
@@ -513,7 +513,6 @@ pub fn test_system_params_small_with_poly_len(
 ) -> SystemParams {
     assert!(log_final_poly_len < l_skip + n_stack);
     let log_blowup = 1;
-    // Use all different numbers
     SystemParams {
         l_skip,
         n_stack,

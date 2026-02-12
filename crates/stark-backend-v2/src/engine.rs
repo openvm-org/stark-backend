@@ -2,9 +2,6 @@
 
 use std::marker::PhantomData;
 
-use openvm_stark_backend::{prover::Prover, AirRef};
-use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
-
 use crate::{
     baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
     debug::debug_impl,
@@ -16,11 +13,11 @@ use crate::{
     proof::*,
     prover::{
         AirProvingContextV2, CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
-        DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2, ProverBackendV2,
+        DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2, Prover, ProverBackendV2,
         ProverDeviceV2, ProvingContextV2,
     },
     verifier::{verify, VerifierError},
-    FiatShamirTranscript, StarkProtocolConfig, SystemParams,
+    AirRef, FiatShamirTranscript, StarkProtocolConfig, SystemParams,
 };
 
 /// Data for verifying a Stark proof.
@@ -69,8 +66,8 @@ where
 
     fn keygen(
         &self,
-        airs: &[AirRef<BabyBearPoseidon2Config>],
-    ) -> (MultiStarkProvingKeyV2<BabyBearPoseidon2ConfigV2>, MultiStarkVerifyingKeyV2<BabyBearPoseidon2ConfigV2>) {
+        airs: &[AirRef<Self::SC>],
+    ) -> (MultiStarkProvingKeyV2<Self::SC>, MultiStarkVerifyingKeyV2<Self::SC>) {
         let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config().clone());
         for air in airs {
             keygen_builder.add_air(air.clone());
@@ -112,13 +109,13 @@ where
     /// The indexing of AIR ID in `ctx` should be consistent with the order of `airs`. In
     /// particular, `airs` should correspond to the global proving key with all AIRs, including ones
     /// not present in the `ctx`.
-    fn debug(&self, airs: &[AirRef<BabyBearPoseidon2Config>], ctx: &ProvingContextV2<Self::PB>);
+    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>);
 
     /// Runs a single end-to-end test for a given set of chips and traces partitions.
     /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
     fn run_test(
         &self,
-        airs: Vec<AirRef<BabyBearPoseidon2Config>>,
+        airs: Vec<AirRef<Self::SC>>,
         ctxs: Vec<AirProvingContextV2<Self::PB>>,
     ) -> Result<
         VerificationDataV2<Self::SC>,
@@ -167,13 +164,13 @@ where
         CoordinatorV2::new(CpuBackendV2::new(), self.device.clone(), transcript)
     }
 
-    fn debug(&self, airs: &[AirRef<BabyBearPoseidon2Config>], ctx: &ProvingContextV2<Self::PB>) {
-        debug_impl::<Self::PB, Self::PD>(self.config().clone(), self.device(), airs, ctx);
+    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>) {
+        debug_impl::<Self::SC, Self::PB, Self::PD>(self.config().clone(), self.device(), airs, ctx);
     }
 
     fn run_test(
         &self,
-        airs: Vec<AirRef<BabyBearPoseidon2Config>>,
+        airs: Vec<AirRef<Self::SC>>,
         ctxs: Vec<AirProvingContextV2<Self::PB>>,
     ) -> Result<
         VerificationDataV2<Self::SC>,

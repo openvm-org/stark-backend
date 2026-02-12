@@ -4,7 +4,8 @@ use std::iter;
 
 use itertools::Itertools;
 use p3_air::{
-    AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder, PermutationAirBuilder,
+    Air, AirBuilder, AirBuilderWithPublicValues, BaseAirWithPublicValues, ExtensionBuilder,
+    PairBuilder, PermutationAirBuilder,
 };
 use p3_field::Field;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
@@ -18,8 +19,7 @@ use self::{
 use super::PartitionedAirBuilder;
 use crate::{
     interaction::{Interaction, InteractionBuilder, SymbolicInteraction},
-    keygen::types::{StarkVerifyingParams, TraceWidth},
-    rap::{BaseAirWithPublicValues, PermutationAirBuilderWithExposedValues, Rap},
+    keygen::types::TraceWidth,
 };
 
 mod dag;
@@ -108,7 +108,7 @@ pub fn get_symbolic_builder<F, R>(
 ) -> SymbolicRapBuilder<F>
 where
     F: Field,
-    R: Rap<SymbolicRapBuilder<F>> + BaseAirWithPublicValues<F> + ?Sized,
+    R: Air<SymbolicRapBuilder<F>> + BaseAirWithPublicValues<F> + ?Sized,
 {
     let mut builder = SymbolicRapBuilder::new(
         width,
@@ -116,7 +116,7 @@ where
         num_challenges_to_sample,
         num_exposed_values_after_challenge,
     );
-    Rap::eval(rap, &mut builder);
+    Air::eval(rap, &mut builder);
     builder
 }
 
@@ -191,20 +191,6 @@ impl<F: Field> SymbolicRapBuilder<F> {
         SymbolicConstraints {
             constraints: self.constraints,
             interactions: self.interactions,
-        }
-    }
-
-    #[deprecated]
-    #[allow(deprecated)]
-    pub fn params(&self) -> StarkVerifyingParams {
-        let width = self.width();
-        let num_exposed_values_after_challenge = self.num_exposed_values_after_challenge();
-        let num_challenges_to_sample = self.num_challenges_to_sample();
-        StarkVerifyingParams {
-            width,
-            num_public_values: self.public_values.len(),
-            num_exposed_values_after_challenge,
-            num_challenges_to_sample,
         }
     }
 
@@ -352,15 +338,6 @@ impl<F: Field> PermutationAirBuilder for SymbolicRapBuilder<F> {
 
     fn permutation_randomness(&self) -> &[Self::RandomVar] {
         self.challenges
-            .first()
-            .map(|c| c.as_slice())
-            .expect("Challenge phase not supported")
-    }
-}
-
-impl<F: Field> PermutationAirBuilderWithExposedValues for SymbolicRapBuilder<F> {
-    fn permutation_exposed_values(&self) -> &[Self::VarEF] {
-        self.exposed_values_after_challenge
             .first()
             .map(|c| c.as_slice())
             .expect("Challenge phase not supported")

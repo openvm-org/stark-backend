@@ -1,9 +1,4 @@
 use itertools::Itertools;
-use openvm_stark_backend::prover::MatrixDimensions;
-use openvm_stark_sdk::config::{
-    log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
-    setup_tracing_with_log_level,
-};
 use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_strict_usize;
@@ -17,11 +12,12 @@ use crate::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
         sumcheck::{sumcheck_multilinear, sumcheck_prismalinear},
-        AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MultiRapProver,
-        ProvingContextV2,
+        AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MatrixDimensions,
+        MultiRapProver, ProvingContextV2,
     },
     test_utils::{
-        prove_up_to_batch_constraints, test_engine_small, test_system_params_small,
+        log_up_security_params_baby_bear_100_bits, prove_up_to_batch_constraints, setup_tracing,
+        setup_tracing_with_log_level, test_engine_small, test_system_params_small,
         CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture, PreprocessedFibFixture,
         SelfInteractionFixture, TestFixture,
     },

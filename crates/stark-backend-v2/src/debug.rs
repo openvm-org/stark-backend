@@ -4,51 +4,52 @@
 use std::sync::Arc;
 
 use itertools::{izip, Itertools};
-use openvm_stark_backend::{
+use p3_matrix::dense::RowMajorMatrix;
+
+use crate::{
     air_builders::{
         debug::{check_constraints, check_logup, USE_DEBUG_BUILDER},
         symbolic::SymbolicConstraints,
     },
-    prover::types::AirProofRawInput,
-    AirRef,
-};
-
-use crate::{
-    baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
     keygen::{types::StarkProvingKeyV2, MultiStarkKeygenBuilderV2},
     prover::{
         ColMajorMatrix, DeviceDataTransporterV2, ProverBackendV2, ProvingContextV2,
         StridedColMajorMatrixView,
     },
-    SystemParams,
+    AirRef, StarkProtocolConfig, SystemParams,
 };
 
-use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
-
-type SC = BabyBearPoseidon2Config;
+/// Raw input data for debugging a single AIR.
+pub struct AirProofRawInput<F> {
+    pub cached_mains: Vec<Arc<RowMajorMatrix<F>>>,
+    pub common_main: Option<Arc<RowMajorMatrix<F>>>,
+    pub public_values: Vec<F>,
+}
 
 // TODO[jpw]: move into StarkEngineV2::debug default implementation after `SC` is made generic.
 /// `airs` should be the full list of all AIRs, not just used AIRs.
-pub fn debug_impl<PB, PD>(
+pub fn debug_impl<SC, PB, PD>(
     config: SystemParams,
     device: &PD,
     airs: &[AirRef<SC>],
     ctx: &ProvingContextV2<PB>,
 )
 where
+    SC: StarkProtocolConfig,
     PB: ProverBackendV2<
-        Val = crate::baby_bear_poseidon2::F,
-        Challenge = crate::baby_bear_poseidon2::EF,
-        Commitment = crate::baby_bear_poseidon2::Digest,
+        Val = SC::F,
+        Challenge = SC::EF,
+        Commitment = SC::Digest,
     >,
-    PD: DeviceDataTransporterV2<BabyBearPoseidon2ConfigV2, PB>, {
+    PD: DeviceDataTransporterV2<SC, PB>,
+{
     let mut keygen_builder = MultiStarkKeygenBuilderV2::new(config);
     for air in airs {
         keygen_builder.add_air(air.clone());
     }
     let pk = keygen_builder.generate_pk().unwrap();
 
-    let transpose = |mat: ColMajorMatrix<crate::baby_bear_poseidon2::F>| {
+    let transpose = |mat: ColMajorMatrix<SC::F>| {
         let row_major = StridedColMajorMatrixView::from(mat.as_view()).to_row_major_matrix();
         Arc::new(row_major)
     };
@@ -85,10 +86,10 @@ where
 /// phase constraints for implementation simplicity.
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-pub fn debug_constraints_and_interactions(
+pub fn debug_constraints_and_interactions<SC: StarkProtocolConfig>(
     airs: &[AirRef<SC>],
-    pk: &[&StarkProvingKeyV2<BabyBearPoseidon2ConfigV2>],
-    inputs: &[AirProofRawInput<crate::baby_bear_poseidon2::F>],
+    pk: &[&StarkProvingKeyV2<SC>],
+    inputs: &[AirProofRawInput<SC::F>],
 ) {
     USE_DEBUG_BUILDER.with(|debug| {
         if *debug.lock().unwrap() {

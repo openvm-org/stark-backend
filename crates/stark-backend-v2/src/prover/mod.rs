@@ -1,5 +1,4 @@
 use itertools::{izip, Itertools};
-use openvm_stark_backend::prover::{MatrixDimensions, Prover};
 use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 use tracing::{info, info_span, instrument};
@@ -28,6 +27,24 @@ pub use hal::*;
 pub use logup_zerocheck::*;
 pub use matrix::*;
 pub use types::*;
+
+/// Trait for STARK/SNARK proving at the highest abstraction level.
+pub trait Prover {
+    type ProvingKeyView<'a>
+    where
+        Self: 'a;
+    type ProvingContext<'a>
+    where
+        Self: 'a;
+    type Proof;
+
+    /// The prover should own the challenger, whose state mutates during proving.
+    fn prove<'a>(
+        &'a mut self,
+        pk: Self::ProvingKeyView<'a>,
+        ctx: Self::ProvingContext<'a>,
+    ) -> Self::Proof;
+}
 
 pub struct CoordinatorV2<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
     pub backend: PB,

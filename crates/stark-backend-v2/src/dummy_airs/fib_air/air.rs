@@ -1,10 +1,9 @@
 use std::borrow::Borrow;
 
-use openvm_stark_backend::{
-    p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir},
-    p3_matrix::Matrix,
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
-};
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues};
+use p3_matrix::Matrix;
+
+use crate::PartitionedBaseAir;
 
 use super::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
 

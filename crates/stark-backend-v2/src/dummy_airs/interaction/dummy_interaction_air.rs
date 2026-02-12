@@ -6,22 +6,19 @@
 
 use std::{iter, sync::Arc};
 
-use derivative::Derivative;
 use itertools::izip;
-use openvm_stark_backend::{
+use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
+use p3_field::PrimeCharacteristicRing;
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
+
+use crate::{
     air_builders::PartitionedAirBuilder,
-    config::{StarkGenericConfig, Val},
     interaction::{BusIndex, InteractionBuilder},
-    p3_air::{Air, BaseAir},
-    p3_field::PrimeCharacteristicRing,
-    p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::{
-        cpu::{CpuBackend, CpuDevice},
-        types::{AirProvingContext, CommittedTraceData},
-        TraceCommitter,
+        stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
+        CpuBackendV2,
     },
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
-    AirRef, Chip, ChipUsageGetter,
+    AirRef, ChipV2, PartitionedBaseAir, StarkProtocolConfig, SystemParams,
 };
 
 pub struct DummyInteractionCols;
@@ -127,10 +124,8 @@ impl<AB: InteractionBuilder + PartitionedAirBuilder> Air<AB> for DummyInteractio
 
 /// Note: in principle, committing cached trace is out of scope of a chip. But this chip is for
 /// usually testing, so we support it for convenience.
-#[derive(Derivative)]
-#[derivative(Clone(bound = ""))]
-pub struct DummyInteractionChip<SC: StarkGenericConfig> {
-    device: Option<CpuDevice<SC>>,
+pub struct DummyInteractionChip {
+    params: Option<SystemParams>,
     data: Option<DummyInteractionData>,
     pub air: DummyInteractionAir,
 }
@@ -141,27 +136,24 @@ pub struct DummyInteractionData {
     pub fields: Vec<Vec<u32>>,
 }
 
-impl<SC: StarkGenericConfig> DummyInteractionChip<SC>
-where
-    Val<SC>: PrimeCharacteristicRing,
-{
+impl DummyInteractionChip {
     pub fn new_without_partition(field_width: usize, is_send: bool, bus_index: BusIndex) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index);
         Self {
-            device: None,
+            params: None,
             data: None,
             air,
         }
     }
     pub fn new_with_partition(
-        device: CpuDevice<SC>,
+        params: SystemParams,
         field_width: usize,
         is_send: bool,
         bus_index: BusIndex,
     ) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index).partition();
         Self {
-            device: Some(device),
+            params: Some(params),
             data: None,
             air,
         }
@@ -175,14 +167,35 @@ where
         assert!(fields.iter().all(|r| r.len() == w));
         self.data = Some(data);
     }
-    pub fn air(&self) -> AirRef<SC> {
+    pub fn air<SC: StarkProtocolConfig>(&self) -> AirRef<SC> {
         Arc::new(self.air)
     }
+}
 
-    fn generate_traces_with_partition(
+impl<SC: StarkProtocolConfig> ChipV2<(), CpuBackendV2<SC>> for DummyInteractionChip
+where
+    SC::F: PrimeCharacteristicRing,
+{
+    fn generate_proving_ctx(&self, _: ()) -> AirProvingContextV2<CpuBackendV2<SC>> {
+        assert!(self.data.is_some());
+        let data = self.data.clone().unwrap();
+        if self.air.partition {
+            self.generate_traces_with_partition::<SC>(data)
+        } else {
+            let trace = self.generate_traces_without_partition::<SC>(data);
+            AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&trace))
+        }
+    }
+}
+
+impl DummyInteractionChip {
+    fn generate_traces_with_partition<SC: StarkProtocolConfig>(
         &self,
         data: DummyInteractionData,
-    ) -> AirProvingContext<CpuBackend<SC>> {
+    ) -> AirProvingContextV2<CpuBackendV2<SC>>
+    where
+        SC::F: PrimeCharacteristicRing,
+    {
         let DummyInteractionData {
             mut count,
             mut fields,
@@ -195,34 +208,43 @@ where
         let h = h.next_power_of_two();
         count.resize(h, 0);
         fields.resize(h, vec![0; w]);
-        let common_main_val: Vec<_> = count.into_iter().map(Val::<SC>::from_u32).collect();
+        let common_main_val: Vec<_> = count.into_iter().map(SC::F::from_u32).collect();
         let cached_trace_val: Vec<_> = fields
             .into_iter()
             .flatten()
-            .map(Val::<SC>::from_u32)
+            .map(SC::F::from_u32)
             .collect();
-        let cached_trace = Arc::new(RowMajorMatrix::new(cached_trace_val, w));
-        let (commit, data) = self
-            .device
-            .as_ref()
-            .unwrap()
-            .commit(std::slice::from_ref(&cached_trace));
+        let cached_trace_rm = RowMajorMatrix::new(cached_trace_val, w);
+        let cached_trace = ColMajorMatrix::from_row_major(&cached_trace_rm);
 
-        AirProvingContext {
-            cached_mains: vec![CommittedTraceData {
+        let params = self.params.as_ref().expect("params required for partition");
+        let (commit, data) = stacked_commit::<SC::H>(
+            params.l_skip,
+            params.n_stack,
+            params.log_blowup,
+            params.k_whir(),
+            &[&cached_trace],
+        );
+
+        let common_main_rm = RowMajorMatrix::new(common_main_val, 1);
+        AirProvingContextV2 {
+            cached_mains: vec![CommittedTraceDataV2 {
                 commitment: commit,
-                data,
                 trace: cached_trace,
+                data: Arc::new(data),
             }],
-            common_main: Some(Arc::new(RowMajorMatrix::new(common_main_val, 1))),
+            common_main: ColMajorMatrix::from_row_major(&common_main_rm),
             public_values: vec![],
         }
     }
 
-    fn generate_traces_without_partition(
+    fn generate_traces_without_partition<SC: StarkProtocolConfig>(
         &self,
         data: DummyInteractionData,
-    ) -> RowMajorMatrix<Val<SC>> {
+    ) -> RowMajorMatrix<SC::F>
+    where
+        SC::F: PrimeCharacteristicRing,
+    {
         let DummyInteractionData { count, fields } = data;
         let h = count.len();
         assert_eq!(fields.len(), h);
@@ -233,38 +255,8 @@ where
             .flat_map(|(count, fields)| iter::once(count).chain(fields))
             .chain(iter::repeat(0))
             .take((w + 1) * h.next_power_of_two())
-            .map(Val::<SC>::from_u32)
+            .map(SC::F::from_u32)
             .collect();
         RowMajorMatrix::new(common_main_val, w + 1)
-    }
-}
-
-impl<SC: StarkGenericConfig> Chip<(), CpuBackend<SC>> for DummyInteractionChip<SC> {
-    fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
-        assert!(self.data.is_some());
-        let data = self.data.clone().unwrap();
-        if self.air.partition {
-            self.generate_traces_with_partition(data)
-        } else {
-            let trace = self.generate_traces_without_partition(data);
-            AirProvingContext::simple_no_pis(Arc::new(trace))
-        }
-    }
-}
-
-impl<SC: StarkGenericConfig> ChipUsageGetter for DummyInteractionChip<SC> {
-    fn air_name(&self) -> String {
-        "DummyInteractionAir".to_string()
-    }
-    fn current_trace_height(&self) -> usize {
-        if let Some(data) = &self.data {
-            data.count.len()
-        } else {
-            0
-        }
-    }
-
-    fn trace_width(&self) -> usize {
-        self.air.field_width + 1
     }
 }

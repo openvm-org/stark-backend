@@ -3,7 +3,7 @@
 use std::{cmp::max, iter::zip};
 
 use itertools::Itertools;
-use openvm_stark_backend::prover::MatrixDimensions;
+use crate::prover::MatrixDimensions;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;

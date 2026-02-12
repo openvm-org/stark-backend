@@ -35,7 +35,9 @@ cfg-if.workspace = true
 thiserror.workspace = true
 eyre.workspace = true
 derivative.workspace = true
-bitcode.workspace = true
+bitcode = { workspace = true, features = ["serde"] }
+rustc-hash.workspace = true
+serde_json.workspace = true
 metrics = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -47,6 +49,8 @@ mimalloc = { version = "0.1.43", optional = true }
 rand.workspace = true
 p3-keccak-air.workspace = true
 test-case.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-forest = { workspace = true }
 
 [features]
 default = ["parallel", "metrics"]

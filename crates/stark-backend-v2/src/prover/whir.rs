@@ -1,7 +1,6 @@
 use std::{iter::once, sync::Arc};
 
 use itertools::Itertools;
-use openvm_stark_backend::prover::MatrixDimensions;
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
@@ -14,7 +13,7 @@ use crate::{
     prover::{
         poly::{eval_to_coeff_rs_message, evals_eq_hypercube, evals_mobius_eq_hypercube, Mle},
         stacked_pcs::{MerkleTree, StackedPcsData},
-        ColMajorMatrix, CpuBackendV2, CpuDeviceV2, ProverBackendV2,
+        ColMajorMatrix, CpuBackendV2, CpuDeviceV2, MatrixDimensions, ProverBackendV2,
     },
     FiatShamirTranscript, StarkProtocolConfig, WhirConfig,
 };
@@ -69,7 +68,7 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn prove_whir_opening<SC, TS>(
     transcript: &mut TS,
     l_skip: usize,
@@ -129,10 +128,13 @@ where
     let mut codeword_commits = vec![];
     let mut ood_values = vec![];
     // per commitment, per whir query, per column
-    let mut initial_round_opened_rows: Vec<Vec<Vec<Vec<SC::F>>>> = vec![vec![]; committed_mats.len()];
-    let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>> = vec![vec![]; committed_mats.len()];
+    let mut initial_round_opened_rows: Vec<Vec<Vec<Vec<SC::F>>>> =
+        vec![vec![]; committed_mats.len()];
+    let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>> =
+        vec![vec![]; committed_mats.len()];
     let mut codeword_opened_values: Vec<Vec<Vec<SC::EF>>> = Vec::with_capacity(num_whir_rounds - 1);
-    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>> = Vec::with_capacity(num_whir_rounds - 1);
+    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>> =
+        Vec::with_capacity(num_whir_rounds - 1);
     let mut folding_pow_witnesses = Vec::with_capacity(num_sumcheck_rounds);
     let mut query_phase_pow_witnesses = Vec::with_capacity(num_whir_rounds);
     let mut rs_tree = None;

@@ -368,10 +368,13 @@ impl TranscriptHistory for ReadOnlyTranscript<'_> {
 
 #[cfg(test)]
 mod test {
-    use openvm_stark_sdk::config::baby_bear_poseidon2::Challenger;
     use p3_baby_bear::BabyBear;
-    use p3_challenger::{CanObserve, CanSample};
+    use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
     use p3_field::PrimeCharacteristicRing;
+
+    use super::{CHUNK, WIDTH};
+
+    type Challenger = DuplexChallenger<BabyBear, p3_baby_bear::Poseidon2BabyBear<WIDTH>, WIDTH, CHUNK>;
 
     use crate::{
         poseidon2::{

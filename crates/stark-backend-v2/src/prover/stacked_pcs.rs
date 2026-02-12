@@ -1,6 +1,6 @@
 use getset::{CopyGetters, Getters};
 use itertools::Itertools;
-use openvm_stark_backend::prover::MatrixDimensions;
+use crate::prover::MatrixDimensions;
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
 use p3_field::{Field, TwoAdicField};
 use p3_maybe_rayon::prelude::*;

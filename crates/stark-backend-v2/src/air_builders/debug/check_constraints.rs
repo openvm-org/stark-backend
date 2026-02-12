@@ -1,17 +1,17 @@
 use itertools::izip;
-use p3_air::BaseAir;
+use p3_air::{Air, BaseAir};
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair, Matrix};
 use p3_maybe_rayon::prelude::*;
 
 use crate::{
     air_builders::debug::DebugConstraintBuilder,
-    config::{StarkGenericConfig, Val},
+    config::{StarkProtocolConfig, Val},
     interaction::{
         debug::{generate_logical_interactions, LogicalInteractions},
-        RapPhaseSeqKind, SymbolicInteraction,
+        SymbolicInteraction,
     },
-    rap::{PartitionedBaseAir, Rap},
+    PartitionedBaseAir,
 };
 
 /// Check that all constraints vanish on the subgroup.
@@ -23,11 +23,11 @@ pub fn check_constraints<R, SC>(
     partitioned_main: &[RowMajorMatrixView<Val<SC>>],
     public_values: &[Val<SC>],
 ) where
-    R: for<'a> Rap<DebugConstraintBuilder<'a, SC>>
+    R: for<'a> Air<DebugConstraintBuilder<'a, SC>>
         + BaseAir<Val<SC>>
         + PartitionedBaseAir<Val<SC>>
         + ?Sized,
-    SC: StarkGenericConfig,
+    SC: StarkProtocolConfig,
 {
     let height = partitioned_main[0].height();
     assert!(partitioned_main.iter().all(|mat| mat.height() == height));
@@ -68,14 +68,10 @@ pub fn check_constraints<R, SC>(
                 RowMajorMatrixView::new_row(preprocessed_next.as_slice()),
             ),
             partitioned_main,
-            after_challenge: vec![], // unreachable
-            challenges: &[],         // unreachable
             public_values,
-            exposed_values_after_challenge: &[], // unreachable
             is_first_row: Val::<SC>::ZERO,
             is_last_row: Val::<SC>::ZERO,
             is_transition: Val::<SC>::ONE,
-            rap_phase_seq_kind: RapPhaseSeqKind::FriLogUp, // unused
             has_common_main: rap.common_main_width() > 0,
         };
         if i == 0 {

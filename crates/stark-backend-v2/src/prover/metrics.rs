@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use itertools::zip_eq;
-use openvm_stark_backend::keygen::types::TraceWidth;
+use crate::keygen::types::TraceWidth;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 

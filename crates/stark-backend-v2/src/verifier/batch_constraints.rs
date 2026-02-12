@@ -4,7 +4,7 @@ use std::{
 };
 
 use itertools::Itertools;
-use openvm_stark_backend::air_builders::symbolic::{
+use crate::air_builders::symbolic::{
     symbolic_expression::SymbolicEvaluator, SymbolicConstraints,
 };
 use p3_field::{batch_multiplicative_inverse, Field, PrimeCharacteristicRing};

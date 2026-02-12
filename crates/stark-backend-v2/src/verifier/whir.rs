@@ -368,9 +368,9 @@ pub fn merkle_verify<H: MerkleHasher>(
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
-    use openvm_stark_backend::prover::MatrixDimensions;
-    use openvm_stark_sdk::config::{
-        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
+    use crate::{
+        prover::MatrixDimensions,
+        test_utils::{log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level},
     };
     use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
     use rand::{rngs::StdRng, Rng, SeedableRng};

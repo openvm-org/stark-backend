@@ -1,7 +1,8 @@
 use std::{cmp::Reverse, sync::Arc};
 
 use derivative::Derivative;
-use openvm_stark_backend::{keygen::types::LinearConstraint, prover::MatrixDimensions};
+use crate::keygen::types::LinearConstraint;
+use crate::prover::MatrixDimensions;
 
 use crate::{
     keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2},

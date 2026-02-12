@@ -2,7 +2,7 @@ use std::array::from_fn;
 
 use cfg_if::cfg_if;
 use itertools::Itertools;
-use openvm_stark_backend::prover::MatrixDimensions;
+use crate::prover::MatrixDimensions;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{
     batch_multiplicative_inverse, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField,

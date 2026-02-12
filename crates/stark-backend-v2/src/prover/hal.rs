@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use openvm_stark_backend::prover::MatrixDimensions;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
@@ -19,6 +18,11 @@ use crate::{
     },
     StarkProtocolConfig, SystemParams,
 };
+
+pub trait MatrixDimensions {
+    fn height(&self) -> usize;
+    fn width(&self) -> usize;
+}
 
 /// Associated types needed by the prover, in the form of buffers and views,
 /// specific to a specific hardware backend.

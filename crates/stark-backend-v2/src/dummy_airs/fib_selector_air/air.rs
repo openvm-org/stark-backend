@@ -1,11 +1,12 @@
 use std::borrow::Borrow;
 
-use openvm_stark_backend::{
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues, PairBuilder};
+use p3_field::{Field, PrimeCharacteristicRing};
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
+
+use crate::{
     interaction::{InteractionBuilder, LookupBus},
-    p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, PairBuilder},
-    p3_field::{Field, PrimeCharacteristicRing},
-    p3_matrix::{dense::RowMajorMatrix, Matrix},
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    PartitionedBaseAir,
 };
 
 use super::columns::FibonacciSelectorCols;

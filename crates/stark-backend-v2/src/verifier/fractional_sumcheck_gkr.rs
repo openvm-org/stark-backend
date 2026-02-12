@@ -52,6 +52,7 @@ pub enum GkrVerificationError<EF: core::fmt::Debug + core::fmt::Display + Partia
 ///
 /// # Returns
 /// `(p̂(ξ), q̂(ξ), ξ)` where ξ ∈ F_ext^{ℓ+n_logup} is the random evaluation point.
+#[allow(clippy::type_complexity)]
 pub fn verify_gkr<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     proof: &GkrProof<SC>,
     transcript: &mut TS,
@@ -168,6 +169,7 @@ pub fn verify_gkr<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
 /// # Returns
 /// `(claim, ρ^{(j-1)}, eq(ξ^{(j-1)}, ρ^{(j-1)}))` where ρ^{(j-1)} is randomly sampled from the
 /// sumcheck protocol.
+#[allow(clippy::type_complexity)]
 fn verify_gkr_sumcheck<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     proof: &GkrProof<SC>,
     transcript: &mut TS,
@@ -233,14 +235,19 @@ fn observe_layer_claims<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
 }
 
 /// Computes recursive relations from layer claims.
-fn compute_recursive_relations<SC: StarkProtocolConfig>(claims: &GkrLayerClaims<SC>) -> (SC::EF, SC::EF) {
+fn compute_recursive_relations<SC: StarkProtocolConfig>(
+    claims: &GkrLayerClaims<SC>,
+) -> (SC::EF, SC::EF) {
     let p_cross_term = claims.p_xi_0 * claims.q_xi_1 + claims.p_xi_1 * claims.q_xi_0;
     let q_cross_term = claims.q_xi_0 * claims.q_xi_1;
     (p_cross_term, q_cross_term)
 }
 
 /// Reduces claims to a single evaluation point using linear interpolation.
-fn reduce_to_single_evaluation<SC: StarkProtocolConfig>(claims: &GkrLayerClaims<SC>, mu: SC::EF) -> (SC::EF, SC::EF) {
+fn reduce_to_single_evaluation<SC: StarkProtocolConfig>(
+    claims: &GkrLayerClaims<SC>,
+    mu: SC::EF,
+) -> (SC::EF, SC::EF) {
     let numer = interpolate_linear_at_01(&[claims.p_xi_0, claims.p_xi_1], mu);
     let denom = interpolate_linear_at_01(&[claims.q_xi_0, claims.q_xi_1], mu);
     (numer, denom)
@@ -248,14 +255,13 @@ fn reduce_to_single_evaluation<SC: StarkProtocolConfig>(claims: &GkrLayerClaims<
 
 #[cfg(test)]
 mod tests {
-    use openvm_stark_sdk::config::setup_tracing;
-
     use super::*;
     use crate::{
+        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
         poseidon2::sponge::DuplexSponge,
         proof::{GkrLayerClaims, GkrProof},
         prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
-        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+        test_utils::setup_tracing,
     };
 
     type SCV2 = BabyBearPoseidon2ConfigV2;
@@ -344,7 +350,8 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) =
+            fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
         let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
@@ -390,7 +397,8 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) =
+            fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
         let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
@@ -452,7 +460,8 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) =
+            fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
         let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
@@ -490,7 +499,8 @@ mod tests {
         ];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) =
+            fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
         let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,
@@ -518,7 +528,8 @@ mod tests {
         let fractions = vec![];
 
         let mut prover_transcript = DuplexSponge::default();
-        let (frac_proof, _xi) = fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
+        let (frac_proof, _xi) =
+            fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
         let gkr_proof = GkrProof::<SCV2> {
             logup_pow_witness: F::ZERO,

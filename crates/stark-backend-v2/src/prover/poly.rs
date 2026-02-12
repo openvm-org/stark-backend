@@ -2,7 +2,7 @@ use core::ops::Mul;
 use std::iter::zip;
 
 use getset::Getters;
-use openvm_stark_backend::prover::MatrixDimensions;
+use crate::prover::MatrixDimensions;
 use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
 use p3_field::{ExtensionField, Field, TwoAdicField};
 use p3_maybe_rayon::prelude::*;

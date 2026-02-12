@@ -5,7 +5,7 @@ use std::{
 };
 
 use itertools::Itertools;
-use openvm_stark_backend::{
+use crate::{
     air_builders::symbolic::{
         symbolic_variable::Entry, SymbolicConstraints, SymbolicExpressionNode,
     },
