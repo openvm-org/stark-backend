@@ -1,19 +1,16 @@
 use getset::{CopyGetters, Getters};
 use itertools::Itertools;
-use crate::prover::MatrixDimensions;
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
-use p3_field::{Field, TwoAdicField};
+use p3_field::{ExtensionField, Field, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use p3_field::ExtensionField;
-
 use crate::{
-    merkle::MerkleHasher,
+    hasher::MerkleHasher,
     prover::{
-        col_maj_idx, poly::eval_to_coeff_rs_message, ColMajorMatrix, MatrixView,
+        col_maj_idx, poly::eval_to_coeff_rs_message, ColMajorMatrix, MatrixDimensions, MatrixView,
         StridedColMajorMatrixView,
     },
 };
@@ -116,6 +113,7 @@ impl<F, Digest: Clone> StackedPcsData<F, Digest> {
 
 #[instrument(level = "info", skip_all)]
 pub fn stacked_commit<H: MerkleHasher>(
+    hasher: &H,
     l_skip: usize,
     n_stack: usize,
     log_blowup: usize,
@@ -124,11 +122,11 @@ pub fn stacked_commit<H: MerkleHasher>(
 ) -> (H::Digest, StackedPcsData<H::F, H::Digest>)
 where
     H::F: TwoAdicField + Ord,
-    H::Digest: Clone + Serialize + for<'de> Deserialize<'de>,
+    H::Digest: Copy,
 {
     let (q_trace, layout) = stacked_matrix(l_skip, n_stack, traces);
     let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace);
-    let tree = MerkleTree::new::<H>(rs_matrix, 1 << k_whir);
+    let tree = MerkleTree::new(hasher, rs_matrix, 1 << k_whir);
     let root = tree.root();
     let data = StackedPcsData::new(layout, q_trace, tree);
     (root, data)
@@ -381,12 +379,13 @@ impl<F, Digest: Clone> MerkleTree<F, Digest> {
     }
 }
 
-impl<EF: Field + Send + Sync + Copy, Digest> MerkleTree<EF, Digest>
+impl<EF: Field, Digest> MerkleTree<EF, Digest>
 where
-    Digest: Copy + Send + Sync + Eq + core::fmt::Debug,
+    Digest: Copy + Send + Sync,
 {
     #[instrument(name = "merkle_tree", skip_all)]
     pub fn new<H: MerkleHasher<Digest = Digest>>(
+        hasher: &H,
         matrix: ColMajorMatrix<EF>,
         rows_per_query: usize,
     ) -> Self
@@ -407,7 +406,7 @@ where
                 let hash_input: Vec<H::F> = Self::row_iter(&matrix, r)
                     .flat_map(|ef| ef.as_basis_coefficients_slice().to_vec())
                     .collect();
-                H::hash_slice(&hash_input)
+                hasher.hash_slice(&hash_input)
             })
             .collect();
 
@@ -424,7 +423,7 @@ where
                     let y = i % query_stride;
                     let left = prev_layer[2 * x * query_stride + y];
                     let right = prev_layer[(2 * x + 1) * query_stride + y];
-                    H::compress(left, right)
+                    hasher.compress(left, right)
                 })
                 .collect();
         }
@@ -434,7 +433,7 @@ where
             let prev_layer = digest_layers.last().unwrap();
             let layer: Vec<_> = prev_layer
                 .par_chunks_exact(2)
-                .map(|pair| H::compress(pair[0], pair[1]))
+                .map(|pair| hasher.compress(pair[0], pair[1]))
                 .collect();
             digest_layers.push(layer);
         }
@@ -447,8 +446,8 @@ where
     }
 
     /// # Safety
-    /// - Caller must ensure that `digest_layers` are correctly constructed Merkle hashes for
-    ///   the Merkle tree.
+    /// - Caller must ensure that `digest_layers` are correctly constructed Merkle hashes for the
+    ///   Merkle tree.
     pub unsafe fn from_raw_parts(
         backing_matrix: ColMajorMatrix<EF>,
         digest_layers: Vec<Vec<Digest>>,

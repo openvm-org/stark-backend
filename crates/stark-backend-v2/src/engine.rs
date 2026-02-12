@@ -45,8 +45,10 @@ where
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::SC, Self::PB>;
     type TS: FiatShamirTranscript<Self::SC> + Default;
 
-    fn config(&self) -> &SystemParams {
-        self.device().config()
+    fn config(&self) -> &Self::SC;
+
+    fn params(&self) -> &SystemParams {
+        self.config().params()
     }
 
     fn device(&self) -> &Self::PD;
@@ -93,6 +95,7 @@ where
         prover.prove(pk, ctx)
     }
 
+    /// Verifies using a default instantiation of the Fiat-Shamir transcript.
     fn verify(
         &self,
         vk: &MultiStarkVerifyingKeyV2<Self::SC>,
@@ -102,7 +105,7 @@ where
         <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
     {
         let mut transcript = Self::TS::default();
-        verify::<Self::SC, _>(vk, proof, &mut transcript)
+        verify(self.config(), vk, proof, &mut transcript)
     }
 
     /// The indexing of AIR ID in `ctx` should be consistent with the order of `airs`. In

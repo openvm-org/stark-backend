@@ -6,16 +6,14 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    merkle::MerkleHasher,
+    hasher::MerkleHasher,
     poly_common::{
         eval_eq_mle, eval_mle_evals_at_point, eval_mobius_eq_mle, horner_eval,
         interpolate_quadratic_at_012, Squarable,
     },
     proof::WhirProof,
-    FiatShamirTranscript, StarkProtocolConfig, SystemParams,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
-
-type H<SC> = <SC as StarkProtocolConfig>::H;
 
 #[inline]
 fn ensure(cond: bool, err: VerifyWhirError) -> Result<(), VerifyWhirError> {
@@ -32,12 +30,13 @@ fn ensure(cond: bool, err: VerifyWhirError) -> Result<(), VerifyWhirError> {
 #[instrument(level = "debug", skip_all)]
 pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
-    params: &SystemParams,
+    config: &SC,
     whir_proof: &WhirProof<SC>,
     stacking_openings: &[Vec<SC::EF>],
     commitments: &[SC::Digest],
     u: &[SC::EF],
 ) -> Result<(), VerifyWhirError> {
+    let params = config.params();
     let widths = stacking_openings
         .iter()
         .map(|v| v.len())
@@ -76,7 +75,9 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
         .iter()
         .flatten()
         .zip(mu_pows.iter())
-        .fold(SC::EF::ZERO, |acc, (&opening, &mu_pow)| acc + mu_pow * opening);
+        .fold(SC::EF::ZERO, |acc, (&opening, &mu_pow)| {
+            acc + mu_pow * opening
+        });
 
     let mut gammas = Vec::with_capacity(num_whir_rounds);
     let mut zs = Vec::with_capacity(num_whir_rounds);
@@ -151,6 +152,7 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
         let mut zs_round = Vec::with_capacity(num_queries);
         let mut ys_round = Vec::with_capacity(num_queries);
 
+        let hasher = config.hasher();
         let omega = SC::F::two_adic_generator(log_rs_domain_size);
         for (query_idx, index) in query_indices.into_iter().enumerate() {
             let zi_root = omega.exp_u64(index);
@@ -168,11 +170,11 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
                     let opened_rows = &opened_rows_per_query[query_idx];
                     let leaf_hashes = opened_rows
                         .iter()
-                        .map(|opened_row| H::<SC>::hash_slice(opened_row))
+                        .map(|opened_row| hasher.hash_slice(opened_row))
                         .collect_vec();
-                    let query_digest = H::<SC>::tree_compress(leaf_hashes);
+                    let query_digest = hasher.tree_compress(leaf_hashes);
                     let merkle_proof = &merkle_proofs[query_idx];
-                    merkle_verify::<H<SC>>(commit, index as u32, query_digest, merkle_proof)?;
+                    merkle_verify(hasher, commit, index as u32, query_digest, merkle_proof)?;
 
                     for c in 0..width {
                         let mu_pow = mu_pow_iter.next().unwrap(); // ok; mu_pows has total_width length
@@ -188,11 +190,12 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
                 let leaf_hashes = opened_values
                     .iter()
                     .map(|opened_value| {
-                        H::<SC>::hash_slice(opened_value.as_basis_coefficients_slice())
+                        hasher.hash_slice(opened_value.as_basis_coefficients_slice())
                     })
                     .collect_vec();
-                let query_digest = H::<SC>::tree_compress(leaf_hashes);
-                merkle_verify::<H<SC>>(
+                let query_digest = hasher.tree_compress(leaf_hashes);
+                merkle_verify(
+                    hasher,
                     codeword_commits[whir_round - 1],
                     index as u32,
                     query_digest,
@@ -313,7 +316,11 @@ pub enum VerifyWhirError {
 ///
 /// If `values = [f(x), f(ωx), …, f(ω^{2^k-1}x)]`, then
 /// `binary_k_fold(values, alphas, x)` returns `g_k(x^{2^k})`.
-pub fn binary_k_fold<F: TwoAdicField, EF: ExtensionField<F>>(mut values: Vec<EF>, alphas: &[EF], x: F) -> EF {
+pub fn binary_k_fold<F: TwoAdicField, EF: ExtensionField<F>>(
+    mut values: Vec<EF>,
+    alphas: &[EF],
+    x: F,
+) -> EF {
     let n = values.len();
     let k = alphas.len();
     debug_assert_eq!(n, 1 << k);
@@ -344,17 +351,21 @@ pub fn binary_k_fold<F: TwoAdicField, EF: ExtensionField<F>>(mut values: Vec<EF>
 }
 
 pub fn merkle_verify<H: MerkleHasher>(
+    hasher: &H,
     root: H::Digest,
     mut idx: u32,
     leaf_hash: H::Digest,
     merkle_proof: &[H::Digest],
-) -> Result<(), VerifyWhirError> {
+) -> Result<(), VerifyWhirError>
+where
+    H::Digest: Eq,
+{
     let mut cur = leaf_hash;
     for &sibling in merkle_proof {
         cur = if idx & 1 == 0 {
-            H::compress(cur, sibling)
+            hasher.compress(cur, sibling)
         } else {
-            H::compress(sibling, cur)
+            hasher.compress(sibling, cur)
         };
         idx >>= 1;
     }
@@ -368,10 +379,6 @@ pub fn merkle_verify<H: MerkleHasher>(
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
-    use crate::{
-        prover::MatrixDimensions,
-        test_utils::{log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level},
-    };
     use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use test_case::test_case;
@@ -381,12 +388,17 @@ mod tests {
     use crate::{
         baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
         poly_common::Squarable,
-        poseidon2::sponge::{DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory},
+        poseidon2::sponge::{
+            DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory,
+        },
         prover::{
             poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening, ColMajorMatrix,
-            CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
+            CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions, ProvingContextV2,
         },
-        test_utils::{test_whir_config_small, DuplexSpongeValidator, FibFixture, TestFixture},
+        test_utils::{
+            log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
+            test_whir_config_small, DuplexSpongeValidator, FibFixture, TestFixture,
+        },
         verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
         WhirConfig, WhirRoundConfig,
     };

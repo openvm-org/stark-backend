@@ -3,12 +3,9 @@
 use std::{array::from_fn, collections::HashMap, iter::zip, mem::take};
 
 use itertools::Itertools;
-use crate::prover::MatrixDimensions;
-use p3_field::{PrimeCharacteristicRing, TwoAdicField};
+use p3_field::{ExtensionField, PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use tracing::{debug, instrument};
-
-use p3_field::ExtensionField;
 
 use crate::{
     poly_common::{eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, UnivariatePoly},
@@ -20,7 +17,8 @@ use crate::{
             batch_fold_mle_evals, fold_mle_evals, fold_ple_evals, sumcheck_round0_deg,
             sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
-        ColMajorMatrix, ColMajorMatrixView, CpuBackendV2, CpuDeviceV2, MatrixView, ProverBackendV2,
+        ColMajorMatrix, ColMajorMatrixView, CpuBackendV2, CpuDeviceV2, MatrixDimensions,
+        MatrixView, ProverBackendV2,
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
@@ -155,7 +153,7 @@ struct TraceViewMeta {
     lambda_rot_idx: Option<usize>,
 }
 
-impl<'a, SC: StarkProtocolConfig> StackedReductionProver<'a, CpuBackendV2<SC>, CpuDeviceV2>
+impl<'a, SC: StarkProtocolConfig> StackedReductionProver<'a, CpuBackendV2<SC>, CpuDeviceV2<SC>>
     for StackedReductionCpu<'a, SC>
 where
     SC::F: TwoAdicField,
@@ -168,13 +166,13 @@ where
     >,
 {
     fn new(
-        device: &CpuDeviceV2,
+        device: &CpuDeviceV2<SC>,
         stacked_per_commit: Vec<&'a StackedPcsData<SC::F, SC::Digest>>,
         need_rot_per_commit: Vec<Vec<bool>>,
         r: &[SC::EF],
         lambda: SC::EF,
     ) -> Self {
-        let l_skip = device.config().l_skip;
+        let l_skip = device.params().l_skip;
         let omega_skip = SC::F::two_adic_generator(l_skip);
 
         let mut trace_views = Vec::new();
@@ -319,7 +317,12 @@ where
             })
             .collect();
         let s_0_coeffs = (0..=s_0_deg)
-            .map(|i| s_0_polys.iter().map(|evals| evals.coeffs()[i]).sum::<SC::EF>())
+            .map(|i| {
+                s_0_polys
+                    .iter()
+                    .map(|evals| evals.coeffs()[i])
+                    .sum::<SC::EF>()
+            })
             .collect_vec();
         UnivariatePoly::new(s_0_coeffs)
     }
@@ -439,9 +442,10 @@ where
                             } else {
                                 // linearly interpolate eq(-, r[..1+n_T]), \kappa_\rot(-,
                                 // r[..1+n_T])
-                                let eq_r = eq_rs[y << 1] * (SC::EF::ONE - x) + eq_rs[(y << 1) + 1] * x;
-                                let k_rot_r =
-                                    k_rot_rs[y << 1] * (SC::EF::ONE - x) + k_rot_rs[(y << 1) + 1] * x;
+                                let eq_r =
+                                    eq_rs[y << 1] * (SC::EF::ONE - x) + eq_rs[(y << 1) + 1] * x;
+                                let k_rot_r = k_rot_rs[y << 1] * (SC::EF::ONE - x)
+                                    + k_rot_rs[(y << 1) + 1] * x;
                                 (eq_r * eq_ub, k_rot_r * eq_ub)
                             };
                             acc[0] += self.lambda_pows[tv.lambda_eq_idx] * q * eq;

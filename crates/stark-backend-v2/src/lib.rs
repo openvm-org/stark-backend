@@ -25,12 +25,12 @@ mod config;
 pub mod dft;
 /// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
 mod engine;
+/// Protocol hasher trait definition.
+pub mod hasher;
 /// Log-up permutation argument implementation as RAP.
 pub mod interaction;
 /// Proving and verifying key generation
 pub mod keygen;
-/// Merkle hasher trait definition
-pub mod merkle;
 /// Common polynomial utilities shared by prover and verifier
 pub mod poly_common;
 /// Definition of the STARK proof struct.

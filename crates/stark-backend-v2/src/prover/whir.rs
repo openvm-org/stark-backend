@@ -37,7 +37,7 @@ pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
     ) -> WhirProof<SC>;
 }
 
-impl<SC, TS> WhirProver<SC, CpuBackendV2<SC>, CpuDeviceV2, TS> for CpuDeviceV2
+impl<SC, TS> WhirProver<SC, CpuBackendV2<SC>, CpuDeviceV2<SC>, TS> for CpuDeviceV2<SC>
 where
     SC: StarkProtocolConfig,
     SC::F: TwoAdicField + Ord,
@@ -52,13 +52,14 @@ where
         pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsData<SC::F, SC::Digest>>>,
         u_cube: &[SC::EF],
     ) -> WhirProof<SC> {
-        let params = self.config();
+        let params = self.params();
         let committed_mats = once(&common_main_pcs_data)
             .chain(pre_cached_pcs_data_per_commit.iter().map(|d| d.as_ref()))
             .map(|d| (&d.matrix, &d.tree))
             .collect_vec();
         prove_whir_opening::<SC, _>(
             transcript,
+            self.config().hasher(),
             params.l_skip,
             params.log_blowup,
             &params.whir,
@@ -71,6 +72,7 @@ where
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn prove_whir_opening<SC, TS>(
     transcript: &mut TS,
+    hasher: &SC::Hasher,
     l_skip: usize,
     log_blowup: usize,
     whir_params: &WhirConfig,
@@ -200,7 +202,7 @@ where
             g_coeffs.resize(1 << (log_rs_domain_size - 1), SC::EF::ZERO);
             // `g: \mathcal{L}^{(2)} \to \mathbb F`
             let g_rs = dft.dft(g_coeffs);
-            let g_tree = MerkleTree::new::<SC::H>(ColMajorMatrix::new(g_rs, 1), 1 << k_whir);
+            let g_tree = MerkleTree::new(hasher, ColMajorMatrix::new(g_rs, 1), 1 << k_whir);
             let g_commit = g_tree.root();
             transcript.observe_commit(g_commit);
             codeword_commits.push(g_commit);

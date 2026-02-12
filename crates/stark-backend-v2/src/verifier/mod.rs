@@ -19,6 +19,8 @@ use crate::{
 
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum VerifierError<EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq> {
+    #[error("Protocol and VerifyingKey has mismatch in SystemParams")]
+    SystemParamsMismatch,
     #[error("Trace heights are too large")]
     TraceHeightsTooLarge,
 
@@ -44,6 +46,7 @@ pub mod sumcheck;
 pub mod whir;
 
 pub fn verify<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
+    config: &SC,
     mvk: &MultiStarkVerifyingKeyV2<SC>,
     proof: &Proof<SC>,
     transcript: &mut TS,
@@ -51,6 +54,9 @@ pub fn verify<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
 where
     SC::EF: p3_field::TwoAdicField,
 {
+    if config.params() != &mvk.inner.params {
+        return Err(VerifierError::SystemParamsMismatch);
+    }
     let &Proof {
         common_main_commit,
         trace_vdata,
@@ -199,7 +205,7 @@ where
 
     verify_whir::<SC, TS>(
         transcript,
-        params,
+        config,
         whir_proof,
         &stacking_proof.stacking_openings,
         &commits,
@@ -211,7 +217,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level};
     use test_case::test_case;
     use tracing::Level;
 
@@ -219,6 +224,7 @@ mod tests {
         baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF},
         poseidon2::sponge::{DuplexSpongeRecorder, TranscriptHistory},
         test_utils::{
+            log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
             test_system_params_small, CachedFixture11, DuplexSpongeValidator, FibFixture,
             InteractionsFixture11, PreprocessedFibFixture, TestFixture,
         },
@@ -232,7 +238,10 @@ mod tests {
     #[test_case(2, 1; "where log_trace_degree=1 less than l_skip=2")]
     #[test_case(2, 0; "where log_trace_degree=0 less than l_skip=2")]
     #[test_case(3, 2; "where log_trace_degree=2 less than l_skip=3")]
-    fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError<EF>> {
+    fn test_fib_air_roundtrip(
+        l_skip: usize,
+        log_trace_degree: usize,
+    ) -> Result<(), VerifierError<EF>> {
         setup_tracing_with_log_level(Level::DEBUG);
 
         let n_stack = 8;
@@ -260,7 +269,7 @@ mod tests {
         let proof = fib.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-        verify::<SCV2, _>(&vk, &proof, &mut validator_sponge)
+        verify(engine.config(), &vk, &proof, &mut validator_sponge)
     }
 
     #[test_case(2, 8, 3)]
@@ -279,7 +288,7 @@ mod tests {
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-        verify::<SCV2, _>(&vk, &proof, &mut validator_sponge)
+        verify(engine.config(), &vk, &proof, &mut validator_sponge)
     }
 
     #[test_case(2, 8, 3)]
@@ -300,7 +309,7 @@ mod tests {
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-        verify::<SCV2, _>(&vk, &proof, &mut validator_sponge)
+        verify(engine.config(), &vk, &proof, &mut validator_sponge)
     }
 
     #[test_case(2, 8, 3)]
@@ -323,6 +332,6 @@ mod tests {
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-        verify::<SCV2, _>(&vk, &proof, &mut validator_sponge)
+        verify(engine.config(), &vk, &proof, &mut validator_sponge)
     }
 }

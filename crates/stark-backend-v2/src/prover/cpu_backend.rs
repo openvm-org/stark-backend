@@ -38,9 +38,15 @@ impl<SC: StarkProtocolConfig> Default for CpuBackendV2<SC> {
 }
 
 #[derive(Clone, Getters, derive_new::new)]
-pub struct CpuDeviceV2 {
+pub struct CpuDeviceV2<SC> {
     #[getset(get = "pub")]
-    config: SystemParams,
+    config: SC,
+}
+
+impl<SC: StarkProtocolConfig> CpuDeviceV2<SC> {
+    pub fn params(&self) -> &SystemParams {
+        self.config.params()
+    }
 }
 
 impl<SC: StarkProtocolConfig> ProverBackendV2 for CpuBackendV2<SC> {
@@ -54,19 +60,16 @@ impl<SC: StarkProtocolConfig> ProverBackendV2 for CpuBackendV2<SC> {
     type PcsData = StackedPcsData<SC::F, SC::Digest>;
 }
 
-impl<SC, TS> ProverDeviceV2<CpuBackendV2<SC>, TS> for CpuDeviceV2
+impl<SC, TS> ProverDeviceV2<CpuBackendV2<SC>, TS> for CpuDeviceV2<SC>
 where
     SC: StarkProtocolConfig,
     SC::F: Ord,
     SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
     TS: FiatShamirTranscript<SC>,
 {
-    fn config(&self) -> &SystemParams {
-        &self.config
-    }
 }
 
-impl<SC: StarkProtocolConfig> TraceCommitterV2<CpuBackendV2<SC>> for CpuDeviceV2
+impl<SC: StarkProtocolConfig> TraceCommitterV2<CpuBackendV2<SC>> for CpuDeviceV2<SC>
 where
     SC::F: Ord,
 {
@@ -74,17 +77,18 @@ where
         &self,
         traces: &[&ColMajorMatrix<SC::F>],
     ) -> (SC::Digest, StackedPcsData<SC::F, SC::Digest>) {
-        stacked_commit::<SC::H>(
-            self.config.l_skip,
-            self.config.n_stack,
-            self.config.log_blowup,
-            self.config.k_whir(),
+        stacked_commit(
+            self.config().hasher(),
+            self.params().l_skip,
+            self.params().n_stack,
+            self.params().log_blowup,
+            self.params().k_whir(),
             traces,
         )
     }
 }
 
-impl<SC, TS> MultiRapProver<CpuBackendV2<SC>, TS> for CpuDeviceV2
+impl<SC, TS> MultiRapProver<CpuBackendV2<SC>, TS> for CpuDeviceV2<SC>
 where
     SC: StarkProtocolConfig,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
@@ -108,7 +112,7 @@ where
     }
 }
 
-impl<SC, TS> OpeningProverV2<CpuBackendV2<SC>, TS> for CpuDeviceV2
+impl<SC, TS> OpeningProverV2<CpuBackendV2<SC>, TS> for CpuDeviceV2<SC>
 where
     SC: StarkProtocolConfig,
     SC::F: Ord,
@@ -127,7 +131,7 @@ where
         common_main_pcs_data: StackedPcsData<SC::F, SC::Digest>,
         r: Vec<SC::EF>,
     ) -> (StackingProof<SC>, WhirProof<SC>) {
-        let params = &self.config;
+        let params = self.params();
 
         let need_rot_per_trace = ctx
             .per_trace
@@ -166,7 +170,7 @@ where
             prove_stacked_opening_reduction::<SC, _, _, _, StackedReductionCpu<SC>>(
                 self,
                 transcript,
-                self.config.n_stack,
+                params.n_stack,
                 stacked_per_commit,
                 need_rot_per_commit,
                 &r,
@@ -189,7 +193,7 @@ where
     }
 }
 
-impl<SC: StarkProtocolConfig> DeviceDataTransporterV2<SC, CpuBackendV2<SC>> for CpuDeviceV2 {
+impl<SC: StarkProtocolConfig> DeviceDataTransporterV2<SC, CpuBackendV2<SC>> for CpuDeviceV2<SC> {
     fn transport_pk_to_device(
         &self,
         mpk: &MultiStarkProvingKeyV2<SC>,

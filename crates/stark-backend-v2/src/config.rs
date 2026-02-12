@@ -4,7 +4,7 @@ use getset::Getters;
 use p3_field::{BasedVectorSpace, ExtensionField, PrimeField64, TwoAdicField};
 use serde::{Deserialize, Serialize};
 
-use crate::{interaction::LogUpSecurityParameters, merkle::MerkleHasher};
+use crate::{hasher::MerkleHasher, interaction::LogUpSecurityParameters};
 
 /// Trait that holds the associated types for the SWIRL protocol. These are the types needed by the
 /// verifier and must be independent of the prover backend.
@@ -17,7 +17,7 @@ use crate::{interaction::LogUpSecurityParameters, merkle::MerkleHasher};
 /// differ between prover and verifier and the verifier may further employ different implementations
 /// for logging or debugging purposes. The trait controlling concrete implementations of the
 /// transcript is specified by [`FiatShamirTranscript`](crate::FiatShamirTranscript).
-pub trait StarkProtocolConfig: 'static {
+pub trait StarkProtocolConfig: 'static + Clone + Send + Sync {
     /// The prime base field.
     type F: TwoAdicField + PrimeField64;
     /// The extension field, used for random challenges.
@@ -32,11 +32,15 @@ pub trait StarkProtocolConfig: 'static {
         + Eq
         + Serialize
         + for<'de> Deserialize<'de>;
-    /// The Merkle tree hasher.
-    type H: MerkleHasher<F = Self::F, Digest = Self::Digest>;
+    /// The merkle tree hasher used by the polynomial commitment scheme.
+    type Hasher: MerkleHasher<F = Self::F, Digest = Self::Digest>;
 
     /// Degree of the extension field.
     const D_EF: usize = <Self::EF as BasedVectorSpace<Self::F>>::DIMENSION;
+
+    fn params(&self) -> &SystemParams;
+
+    fn hasher(&self) -> &Self::Hasher;
 }
 
 /// Type alias for backwards compatibility. New implementations should use `SC::F`.

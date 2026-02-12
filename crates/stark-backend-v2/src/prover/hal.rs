@@ -16,7 +16,7 @@ use crate::{
         stacked_pcs::StackedPcsData, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
         CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
     },
-    StarkProtocolConfig, SystemParams,
+    StarkProtocolConfig,
 };
 
 pub trait MatrixDimensions {
@@ -61,7 +61,6 @@ pub trait ProverBackendV2 {
 pub trait ProverDeviceV2<PB: ProverBackendV2, TS>:
     TraceCommitterV2<PB> + MultiRapProver<PB, TS> + OpeningProverV2<PB, TS>
 {
-    fn config(&self) -> &SystemParams;
 }
 
 /// Provides functionality for committing to a batch of trace matrices, possibly of different

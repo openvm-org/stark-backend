@@ -209,16 +209,12 @@ impl DummyInteractionChip {
         count.resize(h, 0);
         fields.resize(h, vec![0; w]);
         let common_main_val: Vec<_> = count.into_iter().map(SC::F::from_u32).collect();
-        let cached_trace_val: Vec<_> = fields
-            .into_iter()
-            .flatten()
-            .map(SC::F::from_u32)
-            .collect();
+        let cached_trace_val: Vec<_> = fields.into_iter().flatten().map(SC::F::from_u32).collect();
         let cached_trace_rm = RowMajorMatrix::new(cached_trace_val, w);
         let cached_trace = ColMajorMatrix::from_row_major(&cached_trace_rm);
 
         let params = self.params.as_ref().expect("params required for partition");
-        let (commit, data) = stacked_commit::<SC::H>(
+        let (commit, data) = stacked_commit::<SC::Hasher>(
             params.l_skip,
             params.n_stack,
             params.log_blowup,

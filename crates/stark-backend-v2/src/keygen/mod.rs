@@ -12,12 +12,12 @@ use crate::{
         symbolic_variable::{Entry, SymbolicVariable},
         SymbolicConstraintsDag, SymbolicExpressionNode, SymbolicRapBuilder,
     },
+    hasher::MerkleHasher,
     keygen::types::{
         KeygenError, LinearConstraint, MultiStarkProvingKeyV2, MultiStarkVerifyingKey0V2,
         StarkProvingKeyV2, StarkVerifyingKeyV2, StarkVerifyingParamsV2, TraceWidth,
         VerifierSinglePreprocessedData,
     },
-    merkle::MerkleHasher,
     prover::{
         stacked_pcs::{stacked_commit, StackedPcsData},
         ColMajorMatrix, MatrixDimensions,
@@ -36,17 +36,21 @@ struct AirKeygenBuilderV2<SC: StarkProtocolConfig> {
 /// Stateful builder to create multi-stark proving and verifying keys
 /// for system of multiple RAPs with multiple multi-matrix commitments
 pub struct MultiStarkKeygenBuilderV2<SC: StarkProtocolConfig> {
-    pub config: SystemParams,
+    pub config: SC,
     /// Information for partitioned AIRs.
     partitioned_airs: Vec<AirKeygenBuilderV2<SC>>,
 }
 
 impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
-    pub fn new(config: SystemParams) -> Self {
+    pub fn new(config: SC) -> Self {
         Self {
             config,
             partitioned_airs: vec![],
         }
+    }
+
+    pub fn params(&self) -> &SystemParams {
+        self.config.params()
     }
 
     /// Default way to add a single Interactive AIR.
@@ -69,7 +73,8 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
     /// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
     pub fn generate_pk(self) -> Result<MultiStarkProvingKeyV2<SC>, KeygenError> {
-        let max_constraint_degree = self.config.max_constraint_degree;
+        let params = self.params().clone();
+        let max_constraint_degree = params.max_constraint_degree;
         let pk_per_air: Vec<_> = self
             .partitioned_airs
             .into_iter()
@@ -132,7 +137,7 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
             for interaction in &constraints.interactions {
                 // Also make sure that this of interaction is valid given the security params.
                 // +1 because of the bus
-                let max_msg_len = self.config.logup.max_message_length();
+                let max_msg_len = params.logup.max_message_length();
                 // plus one because of the bus
                 let total_message_length = interaction.message.len() + 1;
                 assert!(
@@ -159,7 +164,7 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
             .map(|(_, constraint)| constraint)
             .collect_vec();
 
-        let log_up_security_params = self.config.logup;
+        let log_up_security_params = params.logup;
 
         // Add a constraint for the total number of interactions.
         trace_height_constraints.push(LinearConstraint {
@@ -168,7 +173,7 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
         });
 
         let pre_vk: MultiStarkVerifyingKey0V2<SC> = MultiStarkVerifyingKey0V2 {
-            params: self.config.clone(),
+            params: params.clone(),
             per_air: pk_per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: trace_height_constraints.clone(),
         };
@@ -178,11 +183,13 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
         let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
         tracing::debug!("pre-vkey: {} bytes", vk_bytes.len());
         // Purely to get type compatibility and convenience, we hash using the native hash
-        let vk_pre_hash =
-            SC::H::hash_slice(&vk_bytes.into_iter().map(SC::F::from_u8).collect_vec());
+        let vk_pre_hash = self
+            .config
+            .hasher()
+            .hash_slice(&vk_bytes.into_iter().map(SC::F::from_u8).collect_vec());
 
         Ok(MultiStarkProvingKeyV2 {
-            params: self.config,
+            params,
             per_air: pk_per_air,
             trace_height_constraints,
             max_constraint_degree,
@@ -192,8 +199,9 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
 }
 
 impl<SC: StarkProtocolConfig> AirKeygenBuilderV2<SC> {
-    pub fn new(config: &SystemParams, air: AirRef<SC>, is_required: bool) -> Self {
-        let prep_keygen_data = PrepKeygenDataV2::new(config, air.as_ref());
+    pub fn new(config: &SC, air: AirRef<SC>, is_required: bool) -> Self {
+        let prep_keygen_data =
+            PrepKeygenDataV2::new(config.hasher(), config.params(), air.as_ref());
         Self {
             is_required,
             air,
@@ -278,11 +286,12 @@ pub(super) struct PrepKeygenDataV2<SC: StarkProtocolConfig> {
 }
 
 impl<SC: StarkProtocolConfig> PrepKeygenDataV2<SC> {
-    fn new(params: &SystemParams, air: &dyn AnyAir<SC>) -> Self {
+    fn new(hasher: &SC::Hasher, params: &SystemParams, air: &dyn AnyAir<SC>) -> Self {
         let preprocessed_trace = BaseAir::<SC::F>::preprocessed_trace(air);
         let vpdata_opt = preprocessed_trace.map(|trace| {
             let trace = ColMajorMatrix::from_row_major(&trace);
-            let (commit, data) = stacked_commit::<SC::H>(
+            let (commit, data) = stacked_commit(
+                hasher,
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
