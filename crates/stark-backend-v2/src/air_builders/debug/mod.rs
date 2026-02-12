@@ -14,7 +14,9 @@ use crate::{
 
 mod check_constraints;
 
-pub use check_constraints::*;
+pub use check_constraints::{
+    check_constraints, check_logup, debug_constraints_and_interactions, AirProofRawInput,
+};
 
 use crate::interaction::BusIndex;
 

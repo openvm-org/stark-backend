@@ -1,10 +1,13 @@
 // Replace engine.rs in v1
 
 use std::marker::PhantomData;
+use std::sync::Arc;
+
+use itertools::Itertools;
 
 use crate::{
+    air_builders::debug::{debug_constraints_and_interactions, AirProofRawInput},
     baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
-    debug::debug_impl,
     keygen::{
         types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
         MultiStarkKeygenBuilderV2,
@@ -12,9 +15,9 @@ use crate::{
     poseidon2::sponge::DuplexSponge,
     proof::*,
     prover::{
-        AirProvingContextV2, CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
-        DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2, Prover, ProverBackendV2,
-        ProverDeviceV2, ProvingContextV2,
+        AirProvingContextV2, ColMajorMatrix, CoordinatorV2, CpuBackendV2, CpuDeviceV2,
+        DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2,
+        Prover, ProverBackendV2, ProverDeviceV2, ProvingContextV2, StridedColMajorMatrixView,
     },
     verifier::{verify, VerifierError},
     AirRef, FiatShamirTranscript, StarkProtocolConfig, SystemParams,
@@ -109,7 +112,45 @@ where
     /// The indexing of AIR ID in `ctx` should be consistent with the order of `airs`. In
     /// particular, `airs` should correspond to the global proving key with all AIRs, including ones
     /// not present in the `ctx`.
-    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>);
+    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>) {
+        let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config().clone());
+        for air in airs {
+            keygen_builder.add_air(air.clone());
+        }
+        let pk = keygen_builder.generate_pk().unwrap();
+
+        let transpose = |mat: ColMajorMatrix<<Self::SC as StarkProtocolConfig>::F>| {
+            let row_major =
+                StridedColMajorMatrixView::from(mat.as_view()).to_row_major_matrix();
+            Arc::new(row_major)
+        };
+        let (inputs, used_airs, used_pks): (Vec<_>, Vec<_>, Vec<_>) = ctx
+            .per_trace
+            .iter()
+            .map(|(air_id, air_ctx)| {
+                let common_main =
+                    self.device().transport_matrix_from_device_to_host(&air_ctx.common_main);
+                let cached_mains = air_ctx
+                    .cached_mains
+                    .iter()
+                    .map(|cd| transpose(self.device().transport_matrix_from_device_to_host(&cd.trace)))
+                    .collect_vec();
+                let common_main = Some(transpose(common_main));
+                let public_values = air_ctx.public_values.clone();
+                (
+                    AirProofRawInput {
+                        cached_mains,
+                        common_main,
+                        public_values,
+                    },
+                    airs[*air_id].clone(),
+                    &pk.per_air[*air_id],
+                )
+            })
+            .multiunzip();
+
+        debug_constraints_and_interactions(&used_airs, &used_pks, &inputs);
+    }
 
     /// Runs a single end-to-end test for a given set of chips and traces partitions.
     /// This includes proving/verifying key generation, creating a proof, and verifying the proof.
@@ -162,10 +203,6 @@ where
         transcript: TS,
     ) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS> {
         CoordinatorV2::new(CpuBackendV2::new(), self.device.clone(), transcript)
-    }
-
-    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>) {
-        debug_impl::<Self::SC, Self::PB, Self::PD>(self.config().clone(), self.device(), airs, ctx);
     }
 
     fn run_test(

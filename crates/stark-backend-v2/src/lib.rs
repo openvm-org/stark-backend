@@ -23,7 +23,6 @@ mod chip;
 pub mod codec;
 /// STARK Protocol configuration trait
 mod config;
-pub mod debug;
 pub mod dft;
 /// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
 mod engine;
