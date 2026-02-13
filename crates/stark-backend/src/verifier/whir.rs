@@ -42,9 +42,15 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
         .map(|v| v.len())
         .collect::<Vec<_>>();
 
+    // Check proof-of-work before μ batching challenge
+    if !transcript.check_witness(params.whir.mu_pow_bits, whir_proof.mu_pow_witness) {
+        return Err(VerifyWhirError::MuPoWInvalid);
+    }
+
     let mu = transcript.sample_ext();
 
     let WhirProof {
+        mu_pow_witness: _, // Already checked above
         whir_sumcheck_polys,
         codeword_commits,
         ood_values,
@@ -291,6 +297,8 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
 pub enum VerifyWhirError {
     #[error("final polynomial has wrong degree")]
     FinalPolyDegree,
+    #[error("μ batching proof-of-work witness check failed")]
+    MuPoWInvalid,
     #[error("folding proof-of-work witness check failed")]
     FoldingPoWInvalid,
     #[error("query phase proof-of-work witness check failed")]

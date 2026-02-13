@@ -175,6 +175,8 @@ pub type MerkleProof<Digest> = Vec<Digest>;
 )]
 #[serde(bound = "")]
 pub struct WhirProof<SC: StarkProtocolConfig> {
+    /// Proof-of-work witness for μ batching challenge.
+    pub mu_pow_witness: SC::F,
     /// Per sumcheck round; evaluations on {1, 2}. This list is "flattened" with respect to the
     /// WHIR rounds.
     pub whir_sumcheck_polys: Vec<[SC::EF; 2]>,
@@ -320,6 +322,7 @@ impl<SC: EncodableConfig> Encode for StackingProof<SC> {
 
 impl<SC: EncodableConfig> Encode for WhirProof<SC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
+        SC::encode_base_field(&self.mu_pow_witness, writer)?;
         // whir_sumcheck_polys: Vec<[SC::EF; 2]>
         self.whir_sumcheck_polys.len().encode(writer)?;
         for arr in &self.whir_sumcheck_polys {
@@ -586,6 +589,7 @@ impl<SC: DecodableConfig> Decode for StackingProof<SC> {
 
 impl<SC: DecodableConfig> Decode for WhirProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
+        let mu_pow_witness = SC::decode_base_field(reader)?;
         // whir_sumcheck_polys: Vec<[SC::EF; 2]>
         let num_whir_sumcheck_rounds = usize::decode(reader)?;
         let mut whir_sumcheck_polys = Vec::with_capacity(num_whir_sumcheck_rounds);
@@ -673,6 +677,7 @@ impl<SC: DecodableConfig> Decode for WhirProof<SC> {
         let final_poly = SC::decode_extension_field_vec(reader)?;
 
         Ok(Self {
+            mu_pow_witness,
             whir_sumcheck_polys,
             codeword_commits,
             ood_values,
