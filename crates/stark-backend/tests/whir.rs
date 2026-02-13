@@ -1,11 +1,5 @@
 use itertools::Itertools;
-use openvm_stark_sdk::{
-    config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},
-    utils::setup_tracing_with_log_level,
-};
-use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
-use rand::{rngs::StdRng, Rng, SeedableRng};
-use stark_backend_v2::{
+use openvm_stark_backend::{
     duplex_sponge::DuplexSpongeValidator,
     poly_common::Squarable,
     prover::{
@@ -18,6 +12,12 @@ use stark_backend_v2::{
     DefaultStarkEngine, StarkEngineV2, StarkProtocolConfig, SystemParams, TranscriptHistory,
     WhirConfig, WhirRoundConfig,
 };
+use openvm_stark_sdk::{
+    config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},
+    utils::setup_tracing_with_log_level,
+};
+use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use test_case::test_case;
 use tracing::Level;
 

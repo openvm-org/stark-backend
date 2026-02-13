@@ -1,8 +1,8 @@
-use p3_baby_bear::BabyBear;
-use stark_backend_v2::{
+use openvm_stark_backend::{
     interaction::LogUpSecurityParameters,
     p3_field::{extension::BinomialExtensionField, PrimeField32},
 };
+use p3_baby_bear::BabyBear;
 
 pub fn log_up_security_params_baby_bear_100_bits() -> LogUpSecurityParameters {
     let params = LogUpSecurityParameters {

@@ -1,16 +1,16 @@
 use itertools::Itertools;
-use openvm_stark_sdk::config::baby_bear_poseidon2::*;
-use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
-use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
-use p3_util::log2_ceil_usize;
-use rand::{rngs::StdRng, Rng, SeedableRng};
-use stark_backend_v2::{
+use openvm_stark_backend::{
     poly_common::{eval_eq_mle, eval_eq_prism, eval_rot_kernel_prism},
     proof::StackingProof,
     prover::stacked_pcs::{StackedLayout, StackedSlice},
     verifier::stacked_reduction::verify_stacked_reduction,
     FiatShamirTranscript,
 };
+use openvm_stark_sdk::config::baby_bear_poseidon2::*;
+use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
+use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
+use p3_util::log2_ceil_usize;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 type SC = BabyBearPoseidon2ConfigV2;
 

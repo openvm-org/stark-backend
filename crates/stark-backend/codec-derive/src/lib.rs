@@ -3,13 +3,13 @@ use quote::{format_ident, quote};
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 fn codec_crate_root() -> proc_macro2::TokenStream {
-    match proc_macro_crate::crate_name("stark-backend-v2") {
+    match proc_macro_crate::crate_name("openvm-stark-backend") {
         Ok(proc_macro_crate::FoundCrate::Itself) => quote!(crate),
         Ok(proc_macro_crate::FoundCrate::Name(name)) => {
             let ident = format_ident!("{}", name);
             quote!(::#ident)
         }
-        Err(_) => quote!(::stark_backend_v2),
+        Err(_) => quote!(::openvm_stark_backend),
     }
 }
 

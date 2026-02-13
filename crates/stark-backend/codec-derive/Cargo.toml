@@ -1,5 +1,5 @@
 [package]
-name = "codec-derive"
+name = "openvm-codec-derive"
 description = "Procedural macros for encoding and decoding."
 version.workspace = true
 authors.workspace = true

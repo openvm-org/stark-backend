@@ -1,5 +1,5 @@
+pub use openvm_stark_backend;
 pub use p3_baby_bear;
-pub use stark_backend_v2;
 
 pub mod bench;
 pub mod config;

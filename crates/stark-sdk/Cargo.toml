@@ -6,7 +6,7 @@ edition.workspace = true
 description = "SDK for production and testing usage of STARKs."
 
 [dependencies]
-stark-backend-v2 = { workspace = true }
+openvm-stark-backend = { workspace = true }
 
 p3-baby-bear = { workspace = true }
 p3-field = { workspace = true }
@@ -42,11 +42,11 @@ zkhash = { workspace = true }
 
 [features]
 default = ["parallel", "metrics"]
-parallel = ["stark-backend-v2/parallel"]
-mimalloc = ["stark-backend-v2/mimalloc"]
-jemalloc = ["stark-backend-v2/jemalloc"]
-jemalloc-prof = ["stark-backend-v2/jemalloc-prof"]
-metrics = ["dep:metrics", "stark-backend-v2/metrics"]
+parallel = ["openvm-stark-backend/parallel"]
+mimalloc = ["openvm-stark-backend/mimalloc"]
+jemalloc = ["openvm-stark-backend/jemalloc"]
+jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
+metrics = ["dep:metrics", "openvm-stark-backend/metrics"]
 prometheus = [
   "metrics",
   "dep:metrics-exporter-prometheus",

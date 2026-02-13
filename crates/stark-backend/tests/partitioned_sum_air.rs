@@ -6,12 +6,7 @@ use std::{
 };
 
 use itertools::Itertools;
-use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
-use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
-use p3_field::PrimeCharacteristicRing;
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
-use rand::{rngs::StdRng, Rng, SeedableRng};
-use stark_backend_v2::{
+use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
     prover::{
         stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
@@ -19,6 +14,11 @@ use stark_backend_v2::{
     utils::disable_debug_builder,
     DefaultStarkEngine, PartitionedBaseAir, StarkEngineV2, StarkProtocolConfig,
 };
+use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
+use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
+use p3_field::PrimeCharacteristicRing;
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 /// AIR with partitioned main trace: common_main has `x` (width 1), cached_main has `y` (width w).
 /// Constrains x == y_0 + ... + y_{w-1}.
@@ -61,11 +61,11 @@ impl<AB: PartitionedAirBuilder> Air<AB> for SumAir {
 fn prove_and_verify_sum_air(
     x: Vec<F>,
     ys: Vec<Vec<F>>,
-) -> Result<(), stark_backend_v2::verifier::VerifierError<EF>> {
+) -> Result<(), openvm_stark_backend::verifier::VerifierError<EF>> {
     assert_eq!(x.len(), ys.len());
 
     let engine: BabyBearPoseidon2CpuEngineV2<DuplexSponge> =
-        DefaultStarkEngine::new(stark_backend_v2::test_utils::default_test_params_small());
+        DefaultStarkEngine::new(openvm_stark_backend::test_utils::default_test_params_small());
     let config = engine.config();
     let params = config.params();
 

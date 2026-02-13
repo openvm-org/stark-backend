@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use eyre::eyre;
+use openvm_stark_backend::DefaultStarkEngine;
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::BabyBearPoseidon2CpuEngineV2,
         log_up_params::log_up_security_params_baby_bear_100_bits,
     },
-    stark_backend_v2::{
+    openvm_stark_backend::{
         p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues},
         p3_field::Field,
         prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
@@ -17,7 +18,6 @@ use openvm_stark_sdk::{
 };
 use p3_keccak_air::KeccakAir;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use stark_backend_v2::DefaultStarkEngine;
 use tracing::info_span;
 
 const NUM_PERMUTATIONS: usize = 1 << 10;

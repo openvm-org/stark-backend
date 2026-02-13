@@ -9,21 +9,19 @@ license = "MIT OR Apache-2.0"
 
 [workspace]
 members = [
-    # "crates/stark-backend",
+    "crates/stark-backend",
+    "crates/stark-backend/codec-derive",
     "crates/stark-sdk",
     # "crates/cuda-common",
     # "crates/cuda-backend",
     # "crates/cuda-builder",
-    "crates/stark-backend-v2",
-    "crates/stark-backend-v2/derive",
     "benchmarks/fields"
 ]
 # Only these build by default
 default-members = [
-    # "crates/stark-backend",
+    "crates/stark-backend",
+    "crates/stark-backend/codec-derive",
     "crates/stark-sdk",
-    "crates/stark-backend-v2",
-    "crates/stark-backend-v2/derive",
 ]
 resolver = "2"
 
@@ -64,13 +62,12 @@ lto = "thin"
 
 [workspace.dependencies]
 # OpenVM
-# openvm-stark-backend = { path = "crates/stark-backend", default-features = false }
+openvm-stark-backend = { path = "crates/stark-backend", default-features = false }
+openvm-codec-derive = { path = "crates/stark-backend/codec-derive", default-features = false }
 openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
 openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
 openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
-stark-backend-v2 = { path = "crates/stark-backend-v2", default-features = false }
-codec-derive = { path = "crates/stark-backend-v2/derive", default-features = false }
 
 # Plonky3 - we pin the exact version since this dependency is security critical
 p3-air = { version = "=0.4.1", default-features = false }

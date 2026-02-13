@@ -4,9 +4,7 @@ use std::{
     sync::OnceLock,
 };
 
-use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
-use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
-use stark_backend_v2::{
+use openvm_stark_backend::{
     codec::{
         decode_extension_field32, decode_prime_field32, encode_extension_field32,
         encode_prime_field32, DecodableConfig, EncodableConfig,
@@ -22,6 +20,8 @@ use stark_backend_v2::{
     AirRef, DefaultStarkEngine, FiatShamirTranscript, StarkEngineV2, StarkProtocolConfig,
     SystemParams, TranscriptLog, VerificationDataV2,
 };
+use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
 const RATE: usize = 8;
 /// permutation width

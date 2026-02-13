@@ -3,7 +3,7 @@ use std::{
     io::{self, Cursor, Read, Result, Write},
 };
 
-pub use codec_derive::{Decode, Encode};
+pub use openvm_codec_derive::{Decode, Encode};
 use p3_field::{BasedVectorSpace, PrimeField32};
 
 use crate::StarkProtocolConfig;

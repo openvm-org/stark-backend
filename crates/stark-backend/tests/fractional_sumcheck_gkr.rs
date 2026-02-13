@@ -1,10 +1,10 @@
-use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
-use p3_field::PrimeCharacteristicRing;
-use stark_backend_v2::{
+use openvm_stark_backend::{
     proof::{GkrLayerClaims, GkrProof},
     prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
     verifier::fractional_sumcheck_gkr::{verify_gkr, GkrVerificationError},
 };
+use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
+use p3_field::PrimeCharacteristicRing;
 
 type SC = BabyBearPoseidon2ConfigV2;
 

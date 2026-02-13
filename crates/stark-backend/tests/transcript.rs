@@ -1,7 +1,7 @@
+use openvm_stark_backend::{FiatShamirTranscript, ReadOnlyTranscript, TranscriptHistory};
 use openvm_stark_sdk::{config::baby_bear_poseidon2::*, p3_baby_bear::BabyBear};
 use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
 use p3_field::PrimeCharacteristicRing;
-use stark_backend_v2::{FiatShamirTranscript, ReadOnlyTranscript, TranscriptHistory};
 
 type SC = BabyBearPoseidon2ConfigV2;
 
