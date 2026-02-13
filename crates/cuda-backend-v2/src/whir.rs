@@ -11,14 +11,14 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, TwoAdicField};
-use p3_util::log2_strict_usize;
-use stark_backend_v2::{
+use openvm_stark_backend::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
+    prover::MatrixDimensions,
     SystemParams,
 };
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, TwoAdicField};
+use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
@@ -524,12 +524,7 @@ mod tests {
     use std::sync::Arc;
 
     use itertools::Itertools;
-    use openvm_stark_sdk::config::{
-        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
-    };
-    use p3_field::PrimeCharacteristicRing;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
-    use stark_backend_v2::{
+    use openvm_stark_backend::{
         keygen::types::MultiStarkProvingKeyV2,
         poly_common::Squarable,
         poseidon2::sponge::DuplexSponge,
@@ -541,6 +536,11 @@ mod tests {
         verifier::whir::{verify_whir, VerifyWhirError},
         BabyBearPoseidon2CpuEngineV2, SystemParams, WhirConfig, WhirParams, EF, F,
     };
+    use openvm_stark_sdk::config::{
+        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
+    };
+    use p3_field::PrimeCharacteristicRing;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use test_case::test_case;
     use tracing::Level;
 

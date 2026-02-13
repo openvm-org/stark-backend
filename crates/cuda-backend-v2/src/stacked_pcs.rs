@@ -8,15 +8,17 @@ use openvm_cuda_backend::{
     ntt::batch_ntt,
 };
 use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer, memory_manager::MemTracker};
-use openvm_stark_backend::{p3_util::log2_strict_usize, prover::MatrixDimensions};
-use stark_backend_v2::prover::stacked_pcs::StackedLayout;
+use openvm_stark_backend::{
+    p3_util::log2_strict_usize,
+    prover::{stacked_pcs::StackedLayout, MatrixDimensions},
+};
 use tracing::instrument;
 
 use crate::{
-    Digest, F, GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError,
     cuda::{batch_ntt_small::batch_ntt_small, matrix::batch_expand_pad_wide},
     merkle_tree::MerkleTreeGpu,
-    poly::{PleMatrix, mle_interpolate_stages},
+    poly::{mle_interpolate_stages, PleMatrix},
+    Digest, GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError, F,
 };
 
 #[derive(Getters)]
@@ -244,15 +246,12 @@ pub fn rs_code_matrix(
                 width as u16,
                 codeword_height as u32,
                 log_blowup as u32,
-                0,                      // start_log_step
-                l_skip as u32 - 1,      // end_log_step (inclusive)
-                false,                  // coeffs to evals (NOT eval to coeff)
-                false,                  // natural order
+                0,                 // start_log_step
+                l_skip as u32 - 1, // end_log_step (inclusive)
+                false,             // coeffs to evals (NOT eval to coeff)
+                false,             // natural order
             )
-            .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d {
-                error,
-                step: 1,
-            })?;
+            .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d { error, step: 1 })?;
         }
     }
 
@@ -319,14 +318,14 @@ impl<F, Digest> StackedPcsDataGpu<F, Digest> {
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
-    use p3_field::PrimeCharacteristicRing;
-    use stark_backend_v2::{
+    use openvm_stark_backend::{
         prover::ColMajorMatrix,
         test_utils::{InteractionsFixture11, TestFixture},
     };
+    use p3_field::PrimeCharacteristicRing;
 
     use super::*;
-    use crate::{F, transport_matrix_d2h_col_major, transport_matrix_h2d_col_major};
+    use crate::{transport_matrix_d2h_col_major, transport_matrix_h2d_col_major, F};
 
     #[test]
     fn test_stacked_matrix_manual_0() {

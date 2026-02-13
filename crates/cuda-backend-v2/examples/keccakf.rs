@@ -7,7 +7,11 @@ use eyre::eyre;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
+    poseidon2::sponge::DuplexSponge,
+    prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
+    verifier::verify,
+    StarkEngineV2, SystemParams, WhirConfig, WhirParams,
 };
 use openvm_stark_sdk::{
     bench::run_with_metric_collection,
@@ -15,13 +19,7 @@ use openvm_stark_sdk::{
 };
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
-use rand::{Rng, SeedableRng, rngs::StdRng};
-use stark_backend_v2::{
-    StarkEngineV2, SystemParams, WhirConfig, WhirParams,
-    poseidon2::sponge::DuplexSponge,
-    prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
-    verifier::verify,
-};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use tracing::trace_span;
 
 const NUM_PERMUTATIONS: usize = 1 << 10;

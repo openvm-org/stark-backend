@@ -1,14 +1,14 @@
 use openvm_cuda_common::d_buffer::DeviceBuffer;
-use stark_backend_v2::prover::fractional_sumcheck_gkr::Frac;
+use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use tracing::debug;
 
 use crate::{
-    ConstraintOnlyRules, EF, F, InteractionEvalRules,
     cuda::logup_zerocheck::{
-        _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
+        MainMatrixPtrs, _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
         _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size,
-        MainMatrixPtrs, logup_eval_mle, zerocheck_eval_mle,
+        logup_eval_mle, zerocheck_eval_mle,
     },
+    ConstraintOnlyRules, InteractionEvalRules, EF, F,
 };
 
 // We interpolate first, so access to vars is free and doesn't need to be buffered

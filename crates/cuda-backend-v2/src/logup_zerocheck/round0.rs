@@ -1,22 +1,24 @@
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
-use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicConstraints, SymbolicDagBuilder, SymbolicExpressionDag,
-    symbolic_expression::SymbolicExpression,
+use openvm_stark_backend::{
+    air_builders::symbolic::{
+        symbolic_expression::SymbolicExpression, SymbolicConstraints, SymbolicDagBuilder,
+        SymbolicExpressionDag,
+    },
+    prover::{fractional_sumcheck_gkr::Frac, DeviceStarkProvingKeyV2},
 };
 use p3_field::PrimeCharacteristicRing;
-use stark_backend_v2::prover::{DeviceStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 use tracing::{debug, warn};
 
 use super::errors::Round0EvalError;
 use crate::{
-    EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
         _logup_r0_intermediates_buffer_size, _logup_r0_temp_sums_buffer_size,
         _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
         logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints,
     },
-    logup_zerocheck::rules::{SymbolicRulesGpuV2, codec::Codec},
+    logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpuV2},
+    GpuBackendV2, EF, F,
 };
 
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.

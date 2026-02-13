@@ -4,13 +4,13 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
 };
-use openvm_stark_backend::p3_util::log2_strict_usize;
-use p3_field::{ExtensionField, Field};
-use stark_backend_v2::{
+use openvm_stark_backend::{
+    p3_util::log2_strict_usize,
     poly_common::UnivariatePoly,
     poseidon2::sponge::FiatShamirTranscript,
     prover::sumcheck::{SumcheckCubeProof, SumcheckPrismProof},
 };
+use p3_field::{ExtensionField, Field};
 use tracing::{debug, info_span, instrument};
 
 use crate::{

@@ -2,22 +2,21 @@ use std::cmp::max;
 
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
-use openvm_stark_backend::prover::MatrixDimensions;
-use p3_field::{Field, PrimeCharacteristicRing};
-use stark_backend_v2::prover::{
-    DeviceMultiStarkProvingKeyV2, ProvingContextV2,
+use openvm_stark_backend::prover::{
     fractional_sumcheck_gkr::Frac,
     stacked_pcs::{StackedLayout, StackedSlice},
+    DeviceMultiStarkProvingKeyV2, MatrixDimensions, ProvingContextV2,
 };
+use p3_field::{Field, PrimeCharacteristicRing};
 use tracing::instrument;
 
 use super::errors::InteractionGpuError;
 use crate::{
-    EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
         frac_add_alpha, frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
         logup_gkr_input_eval,
     },
+    GpuBackendV2, EF, F,
 };
 
 const TASK_SIZE: u32 = 65536;

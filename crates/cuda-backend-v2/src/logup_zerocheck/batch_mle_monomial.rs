@@ -4,19 +4,19 @@
 //! enabling efficient GPU kernel launches that process multiple traces in a single launch.
 
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
+use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKeyV2};
 use p3_field::PrimeCharacteristicRing;
-use stark_backend_v2::prover::{DeviceMultiStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
 use tracing::debug;
 
 use crate::{
-    EF, GpuBackendV2,
     cuda::logup_zerocheck::{
-        BlockCtx, EvalCoreCtx, LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
         logup_monomial_batched, precompute_lambda_combinations,
         precompute_logup_denom_combinations, precompute_logup_numer_combinations,
-        zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
+        zerocheck_monomial_batched, zerocheck_monomial_par_y_batched, BlockCtx, EvalCoreCtx,
+        LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
     },
     logup_zerocheck::batch_mle::TraceCtx,
+    GpuBackendV2, EF,
 };
 
 const THREADS_PER_BLOCK: u32 = 256;

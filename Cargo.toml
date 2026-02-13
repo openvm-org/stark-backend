@@ -12,9 +12,9 @@ members = [
     "crates/stark-backend",
     "crates/stark-backend/codec-derive",
     "crates/stark-sdk",
-    # "crates/cuda-common",
-    # "crates/cuda-backend",
-    # "crates/cuda-builder",
+    "crates/cuda-common",
+    "crates/cuda-backend-v2",
+    "crates/cuda-builder",
     "benchmarks/fields"
 ]
 # Only these build by default
@@ -67,7 +67,7 @@ openvm-codec-derive = { path = "crates/stark-backend/codec-derive", default-feat
 openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
 openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
-openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
+cuda-backend-v2 = { path = "crates/cuda-backend-v2", default-features = false }
 
 # Plonky3 - we pin the exact version since this dependency is security critical
 p3-air = { version = "=0.4.1", default-features = false }
@@ -96,7 +96,7 @@ p3-maybe-rayon = { version = "=0.4.1", default-features = false } # the "paralle
 
 # Bn254 support
 p3-bn254 = { version = "=0.4.1", default-features = false }
-zkhash = { git = "https://github.com/HorizenLabs/poseidon2.git", rev = "bb476b9" }
+zkhash = { git = "https://github.com/HorizenLabs/poseidon2.git", rev = "bb476b9" } # dev-dependency only
 ff = { version = "0.13.0", default-features = false }
 
 rayon = "1.10"
@@ -132,8 +132,6 @@ rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 hex = { version = "0.4.3", default-features = false }
 hex-literal = "1.0.0"
 bitcode = "0.6.5"
-bincode = "2.0.1"
-bincode_derive = "2.0.1"
 clap = { version = "4.4", features = ["derive"] }
 glob = "0.3.2"
 bytesize = "2.0"

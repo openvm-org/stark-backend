@@ -1,8 +1,8 @@
 use std::mem::transmute;
 
 use itertools::Itertools;
+use openvm_stark_backend::utils::batch_multiplicative_inverse_serial;
 use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeField64};
-use stark_backend_v2::utils::batch_multiplicative_inverse_serial;
 
 use crate::{D_EF, EF, F};
 
@@ -17,7 +17,11 @@ pub fn compute_barycentric_inv_lagrange_denoms<F: Field, EF: ExtensionField<F>>(
         .iter()
         .map(|&w_i| {
             let denom = z - w_i;
-            if denom.is_zero() { EF::ONE } else { denom }
+            if denom.is_zero() {
+                EF::ONE
+            } else {
+                denom
+            }
         })
         .collect_vec();
     let mut inv_denoms = batch_multiplicative_inverse_serial(&denoms);

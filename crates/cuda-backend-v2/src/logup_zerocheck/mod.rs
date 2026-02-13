@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use itertools::{Itertools, izip};
+use itertools::{izip, Itertools};
 use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
@@ -21,33 +21,30 @@ use openvm_cuda_common::{
     memory_manager::MemTracker,
 };
 use openvm_stark_backend::{
-    air_builders::symbolic::SymbolicConstraints, p3_matrix::dense::RowMajorMatrix,
-    prover::MatrixDimensions,
+    air_builders::symbolic::SymbolicConstraints,
+    calculate_n_logup,
+    dft::Radix2BowersSerial,
+    p3_matrix::dense::RowMajorMatrix,
+    poly_common::{
+        eq_sharp_uni_poly, eq_uni_poly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni,
+        eval_eq_uni_at_one, UnivariatePoly,
+    },
+    poseidon2::sponge::FiatShamirTranscript,
+    proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
+    prover::{
+        fractional_sumcheck_gkr::Frac, stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
+        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, MatrixDimensions, ProvingContextV2,
+    },
 };
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::{log2_ceil_usize, log2_strict_usize};
 use rustc_hash::FxHashMap;
-use stark_backend_v2::{
-    calculate_n_logup,
-    dft::Radix2BowersSerial,
-    poly_common::{
-        UnivariatePoly, eq_sharp_uni_poly, eq_uni_poly, eval_eq_mle, eval_eq_sharp_uni,
-        eval_eq_uni, eval_eq_uni_at_one,
-    },
-    poseidon2::sponge::FiatShamirTranscript,
-    proof::{BatchConstraintProof, GkrProof, column_openings_by_rot},
-    prover::{
-        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
-        fractional_sumcheck_gkr::Frac, stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
-    },
-};
 use tracing::{debug, info, info_span, instrument};
 
 use crate::{
-    EF, F, GpuBackendV2,
     cuda::{
-        logup_zerocheck::{MainMatrixPtrs, fold_selectors_round0, interpolate_columns_gpu},
+        logup_zerocheck::{fold_selectors_round0, interpolate_columns_gpu, MainMatrixPtrs},
         sumcheck::batch_fold_mle,
     },
     gpu_backend::transport_matrix_d2h_col_major,
@@ -58,6 +55,7 @@ use crate::{
     poly::EqEvalLayers,
     sponge::DuplexSpongeGpu,
     utils::compute_barycentric_inv_lagrange_denoms,
+    GpuBackendV2, EF, F,
 };
 
 pub(crate) mod batch_mle;
@@ -72,15 +70,14 @@ mod mle_round;
 mod round0;
 pub(crate) mod rules;
 
-use batch_mle::{TraceCtx, evaluate_logup_batched};
+use batch_mle::{evaluate_logup_batched, TraceCtx};
 use batch_mle_monomial::{
-    LogupCombinations, LogupMonomialBatch, ZerocheckMonomialBatch, ZerocheckMonomialParYBatch,
     compute_lambda_combinations, compute_logup_combinations, get_num_monomials,
-    get_zerocheck_rules_len, trace_has_monomials,
+    get_zerocheck_rules_len, trace_has_monomials, LogupCombinations, LogupMonomialBatch,
+    ZerocheckMonomialBatch, ZerocheckMonomialParYBatch,
 };
 pub use errors::*;
-pub use fractional::fractional_sumcheck_gpu;
-pub use fractional::make_synthetic_leaves;
+pub use fractional::{fractional_sumcheck_gpu, make_synthetic_leaves};
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use round0::evaluate_round0_constraints_gpu;
 

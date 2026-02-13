@@ -1,21 +1,23 @@
 //! Defines the symbolic rule data to precompute and store in the GPU proving key
 use itertools::Itertools;
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::MemCopyError};
-use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicConstraints, SymbolicDagBuilder, SymbolicExpressionDag,
-    symbolic_expression::SymbolicExpression,
-    symbolic_variable::{Entry, SymbolicVariable},
+use openvm_stark_backend::{
+    air_builders::symbolic::{
+        symbolic_expression::SymbolicExpression,
+        symbolic_variable::{Entry, SymbolicVariable},
+        SymbolicConstraints, SymbolicDagBuilder, SymbolicExpressionDag,
+    },
+    keygen::types::StarkProvingKeyV2,
 };
 use p3_field::PrimeCharacteristicRing;
-use stark_backend_v2::keygen::types::StarkProvingKeyV2;
 
 use crate::{
-    F,
-    logup_zerocheck::rules::{SymbolicRulesGpuV2, codec::Codec},
+    logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpuV2},
     monomial::{
         ExpandedInteractionMonomials, ExpandedMonomials, InteractionMonomialTerm, LambdaTerm,
         MonomialHeader, PackedVar,
     },
+    F,
 };
 
 pub struct AirDataGpu {

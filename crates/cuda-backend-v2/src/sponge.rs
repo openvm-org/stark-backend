@@ -11,10 +11,12 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::{CudaError, MemCopyError},
 };
-use openvm_stark_backend::p3_challenger::{CanObserve, CanSample};
+use openvm_stark_backend::{
+    p3_challenger::{CanObserve, CanSample},
+    poseidon2::{poseidon2_perm, sponge::FiatShamirTranscript, CHUNK, WIDTH},
+};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
-use stark_backend_v2::poseidon2::{CHUNK, WIDTH, poseidon2_perm, sponge::FiatShamirTranscript};
 
 use crate::F;
 
@@ -23,7 +25,7 @@ use crate::F;
 /// This struct is `#[repr(C)]` to ensure ABI compatibility with the CUDA kernel.
 /// The state layout matches the Poseidon2 duplex sponge with overwrite mode.
 ///
-/// This struct implements the same logic as `DuplexSponge` from stark_backend_v2,
+/// This struct implements the same logic as `DuplexSponge` from openvm_stark_backend,
 /// but with public fields so we can sync state to/from GPU.
 #[repr(C)]
 #[derive(Clone, Debug)]
@@ -91,7 +93,7 @@ impl FiatShamirTranscript for DeviceSpongeState {
 /// GPU-accelerated duplex sponge that maintains state on both host and device.
 ///
 /// The host-side state uses [`DeviceSpongeState`] which matches the behavior of
-/// `DuplexSponge` from stark_backend_v2 (and `p3_challenger::DuplexChallenger`).
+/// `DuplexSponge` from openvm_stark_backend (and `p3_challenger::DuplexChallenger`).
 /// The device-side state is stored in GPU memory for CUDA kernel operations.
 ///
 /// # State Synchronization
@@ -298,8 +300,8 @@ impl FiatShamirTranscript for DuplexSpongeGpu {
 mod tests {
     use std::time::Instant;
 
+    use openvm_stark_backend::poseidon2::sponge::DuplexSponge;
     use p3_field::PrimeCharacteristicRing;
-    use stark_backend_v2::poseidon2::sponge::DuplexSponge;
 
     use super::*;
 

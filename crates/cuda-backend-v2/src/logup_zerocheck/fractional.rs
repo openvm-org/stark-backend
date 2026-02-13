@@ -2,31 +2,31 @@ use std::{array::from_fn, convert::TryInto, env, ffi::c_void, mem::transmute};
 
 use openvm_cuda_backend::cuda::ntt::bit_rev_frac_ext;
 use openvm_cuda_common::{
-    copy::{MemCopyD2H, cuda_memcpy},
+    copy::{cuda_memcpy, MemCopyD2H},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use p3_field::{Field, PrimeCharacteristicRing};
-use p3_util::log2_strict_usize;
-use stark_backend_v2::{
+use openvm_stark_backend::{
     poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
     poseidon2::sponge::FiatShamirTranscript,
     proof::GkrLayerClaims,
     prover::fractional_sumcheck_gkr::{Frac, FracSumcheckProof},
 };
+use p3_field::{Field, PrimeCharacteristicRing};
+use p3_util::log2_strict_usize;
 use tracing::{debug_span, instrument};
 
 use super::errors::FractionalSumcheckError;
 use crate::{
-    EF,
     cuda::logup_zerocheck::{
         _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, fold_ef_frac_columns_inplace,
         frac_build_tree_layer, frac_compute_round, frac_compute_round_and_fold,
-        frac_compute_round_and_fold_inplace, frac_compute_round_and_revert,
-        frac_multifold_raw, frac_precompute_m_build_raw, frac_precompute_m_eval_round_raw,
+        frac_compute_round_and_fold_inplace, frac_compute_round_and_revert, frac_multifold_raw,
+        frac_precompute_m_build_raw, frac_precompute_m_eval_round_raw,
     },
     poly::SqrtEqLayers,
     sponge::DuplexSpongeGpu,
+    EF,
 };
 
 const GKR_S_DEG: usize = 3;
@@ -1105,7 +1105,7 @@ fn reconstruct_s_evals(
 /// Generate random fractional leaves on device for benchmarking.
 pub fn make_synthetic_leaves(n: usize) -> Result<DeviceBuffer<Frac<EF>>, FractionalSumcheckError> {
     use openvm_cuda_common::copy::cuda_memcpy;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     let size = 1usize << n;
     let mut rng = StdRng::seed_from_u64(42);
@@ -1128,8 +1128,8 @@ mod tests {
     use openvm_cuda_common::{memory_manager::MemTracker, stream::current_stream_sync};
 
     use super::{
-        DuplexSpongeGpu, EF, FractionalSumcheckError, GkrRoundStrategy,
-        fractional_sumcheck_gpu, make_synthetic_leaves,
+        fractional_sumcheck_gpu, make_synthetic_leaves, DuplexSpongeGpu, FractionalSumcheckError,
+        GkrRoundStrategy, EF,
     };
 
     /// Run fractional sumcheck with a given round strategy and return the proof + final randomness.
@@ -1206,4 +1206,3 @@ mod tests {
         Ok(())
     }
 }
-

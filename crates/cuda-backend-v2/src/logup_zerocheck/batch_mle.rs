@@ -7,19 +7,19 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
 };
-use stark_backend_v2::prover::{DeviceMultiStarkProvingKeyV2, fractional_sumcheck_gkr::Frac};
+use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKeyV2};
 
 use crate::{
-    EF, F, GpuBackendV2,
     cuda::logup_zerocheck::{
+        BlockCtx, EvalCoreCtx, LogupCtx, MainMatrixPtrs, ZerocheckCtx,
         _logup_batch_mle_intermediates_buffer_size, _zerocheck_batch_mle_intermediates_buffer_size,
-        BlockCtx, EvalCoreCtx, LogupCtx, MainMatrixPtrs, ZerocheckCtx, logup_batch_eval_mle,
-        zerocheck_batch_eval_mle,
+        logup_batch_eval_mle, zerocheck_batch_eval_mle,
     },
     logup_zerocheck::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
         mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
     },
+    GpuBackendV2, EF, F,
 };
 
 const MAX_THREADS_PER_BLOCK: u32 = 128;

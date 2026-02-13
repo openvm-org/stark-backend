@@ -1,49 +1,47 @@
-//! Tests copied from stark-backend-v2 crate and then modified to use GPU backend.
+//! Tests copied from openvm-stark-backend crate and then modified to use GPU backend.
 use itertools::Itertools;
 use openvm_cuda_backend::prelude::F;
 use openvm_stark_backend::{
-    p3_matrix::dense::RowMajorMatrix, p3_util::log2_strict_usize, prover::MatrixDimensions,
+    p3_matrix::dense::RowMajorMatrix,
+    p3_util::log2_strict_usize,
+    poseidon2::sponge::{
+        DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory,
+    },
+    prover::{
+        stacked_pcs::stacked_commit,
+        stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
+        AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MatrixDimensions,
+        MultiRapProver, ProvingContextV2,
+    },
+    test_utils::{
+        default_test_params_small, prove_up_to_batch_constraints, test_system_params_small,
+        CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11, MixtureFixture,
+        PreprocessedFibFixture, SelfInteractionFixture, TestFixture,
+    },
+    verifier::{
+        batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
+        fractional_sumcheck_gkr::verify_gkr,
+        proof_shape::{verify_proof_shape, ProofShapeError},
+        stacked_reduction::{verify_stacked_reduction, StackedReductionError},
+        sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
+        verify, VerifierError,
+    },
+    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
+    WhirRoundConfig,
 };
 use openvm_stark_sdk::config::{
     log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
     setup_tracing_with_log_level,
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
-use rand::{Rng, SeedableRng, rngs::StdRng};
-use stark_backend_v2::{
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
-    WhirRoundConfig,
-    poseidon2::sponge::{
-        DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory,
-    },
-    prover::{
-        AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MultiRapProver,
-        ProvingContextV2,
-        stacked_pcs::stacked_commit,
-        stacked_reduction::{StackedReductionCpu, prove_stacked_opening_reduction},
-    },
-    test_utils::{
-        CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11, MixtureFixture,
-        PreprocessedFibFixture, SelfInteractionFixture, TestFixture, default_test_params_small,
-        prove_up_to_batch_constraints, test_system_params_small,
-    },
-    verifier::{
-        VerifierError,
-        batch_constraints::{BatchConstraintError, verify_zerocheck_and_logup},
-        fractional_sumcheck_gkr::verify_gkr,
-        proof_shape::{ProofShapeError, verify_proof_shape},
-        stacked_reduction::{StackedReductionError, verify_stacked_reduction},
-        sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
-        verify,
-    },
-};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use test_case::test_case;
-use tracing::{Level, debug};
+use tracing::{debug, Level};
 
 use crate::{
-    BabyBearPoseidon2GpuEngineV2,
     sponge::DuplexSpongeGpu,
     sumcheck::{sumcheck_multilinear_gpu, sumcheck_prismalinear_gpu},
+    BabyBearPoseidon2GpuEngineV2,
 };
 
 pub fn test_gpu_engine_small() -> BabyBearPoseidon2GpuEngineV2 {
@@ -600,20 +598,20 @@ fn test_matrix_stacking_overflow() {
 #[test]
 fn test_monomial_vs_dag_equivalence() {
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
-    use p3_util::log2_strict_usize;
-    use stark_backend_v2::{
+    use openvm_stark_backend::{
         poly_common::eval_eq_uni_at_one, test_utils::prove_up_to_batch_constraints,
     };
+    use p3_util::log2_strict_usize;
 
     use crate::{
-        EF,
-        cuda::logup_zerocheck::{MainMatrixPtrs, fold_selectors_round0, interpolate_columns_gpu},
+        cuda::logup_zerocheck::{fold_selectors_round0, interpolate_columns_gpu, MainMatrixPtrs},
         logup_zerocheck::{
             batch_mle::{TraceCtx, ZerocheckMleBatchBuilder},
-            batch_mle_monomial::{ZerocheckMonomialBatch, compute_lambda_combinations},
+            batch_mle_monomial::{compute_lambda_combinations, ZerocheckMonomialBatch},
             fold_ple::fold_ple_evals_rotate,
         },
         poly::EqEvalSegments,
+        EF,
     };
 
     setup_tracing_with_log_level(Level::DEBUG);

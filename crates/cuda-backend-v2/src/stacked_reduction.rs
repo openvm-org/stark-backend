@@ -1,40 +1,39 @@
 use std::{array::from_fn, cmp::max, ffi::c_void, iter::zip, mem, sync::Arc};
 
-use itertools::{Itertools, zip_eq};
+use itertools::{zip_eq, Itertools};
 use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
+    copy::{cuda_memcpy, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
-use openvm_stark_backend::{p3_matrix::dense::RowMajorMatrix, prover::MatrixDimensions};
-use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{PrimeCharacteristicRing, TwoAdicField};
-use stark_backend_v2::{
+use openvm_stark_backend::{
     dft::Radix2BowersSerial,
+    p3_matrix::dense::RowMajorMatrix,
     poly_common::{
-        Squarable, UnivariatePoly, eq_uni_poly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one,
-        eval_in_uni,
+        eq_uni_poly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, Squarable,
+        UnivariatePoly,
     },
     poseidon2::sponge::FiatShamirTranscript,
     proof::StackingProof,
     prover::{
-        DeviceMultiStarkProvingKeyV2, ProvingContextV2, stacked_pcs::StackedLayout,
-        sumcheck::sumcheck_round0_deg,
+        stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKeyV2,
+        MatrixDimensions, ProvingContextV2,
     },
 };
+use p3_dft::TwoAdicSubgroupDft;
+use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use tracing::{debug, info_span, instrument};
 
 use crate::{
-    D_EF, Digest, EF, F, GpuBackendV2, GpuDeviceV2, ProverError,
     cuda::{
         batch_ntt_small::ensure_device_ntt_twiddles_initialized,
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
-            _stacked_reduction_r0_required_temp_buffer_size, NUM_G,
-            initialize_k_rot_from_eq_segments, stacked_reduction_fold_ple,
-            stacked_reduction_sumcheck_mle_round, stacked_reduction_sumcheck_mle_round_degenerate,
-            stacked_reduction_sumcheck_round0,
+            _stacked_reduction_r0_required_temp_buffer_size, initialize_k_rot_from_eq_segments,
+            stacked_reduction_fold_ple, stacked_reduction_sumcheck_mle_round,
+            stacked_reduction_sumcheck_mle_round_degenerate, stacked_reduction_sumcheck_round0,
+            NUM_G,
         },
         sumcheck::{fold_mle, triangular_fold_mle},
     },
@@ -42,6 +41,7 @@ use crate::{
     sponge::DuplexSpongeGpu,
     stacked_pcs::StackedPcsDataGpu,
     utils::{compute_barycentric_inv_lagrange_denoms, reduce_raw_u64_to_ef},
+    Digest, GpuBackendV2, GpuDeviceV2, ProverError, D_EF, EF, F,
 };
 
 /// Degree of the sumcheck polynomial for stacked reduction.
@@ -293,11 +293,9 @@ impl StackedReductionGpu {
             }
         }
 
-        debug_assert!(
-            stacked_per_commit
-                .iter()
-                .all(|d| d.layout().height() == 1 << (l_skip + n_stack))
-        );
+        debug_assert!(stacked_per_commit
+            .iter()
+            .all(|d| d.layout().height() == 1 << (l_skip + n_stack)));
 
         let need_rot_per_trace = ctx
             .per_trace

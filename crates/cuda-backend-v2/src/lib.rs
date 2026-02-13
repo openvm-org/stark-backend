@@ -25,4 +25,4 @@ pub use pkey::*;
 #[cfg(test)]
 mod tests;
 
-pub use stark_backend_v2::{D_EF, DIGEST_SIZE, Digest, EF, F}; // re-export in preparation for generic F in stark-backend
+pub use openvm_stark_backend::{Digest, DIGEST_SIZE, D_EF, EF, F}; // re-export in preparation for generic F in stark-backend

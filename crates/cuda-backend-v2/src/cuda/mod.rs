@@ -2,7 +2,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
-use stark_backend_v2::prover::fractional_sumcheck_gkr::Frac;
+use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 
 use crate::{EF, F};
 
@@ -77,7 +77,7 @@ pub mod sumcheck {
         ) -> i32;
 
         fn _triangular_fold_mle(output: *mut EF, input: *const EF, r: EF, output_max_n: u32)
-        -> i32;
+            -> i32;
     }
 
     pub unsafe fn sumcheck_mle_round(

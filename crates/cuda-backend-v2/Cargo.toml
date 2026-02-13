@@ -6,10 +6,8 @@ edition.workspace = true
 description = "OpenVM CUDA prover backend V2"
 
 [dependencies]
-stark-backend-v2.workspace = true
 openvm-stark-backend.workspace = true
 openvm-cuda-common.workspace = true
-openvm-cuda-backend.workspace = true
 
 itertools.workspace = true
 derive-new.workspace = true
@@ -29,17 +27,17 @@ p3-symmetric = { workspace = true }
 [build-dependencies]
 openvm-cuda-builder.workspace = true
 
-[[bin]]
-name = "bench"
-path = "src/bin/bench.rs"
-
 [dev-dependencies]
-stark-backend-v2 = { workspace = true, features = ["test-utils"] }
+openvm-stark-backend = { workspace = true, features = ["test-utils"] }
 openvm-stark-sdk.workspace = true
 p3-keccak-air.workspace = true
 eyre.workspace = true
 test-case.workspace = true
 
 [features]
-default = ["stark-backend-v2/parallel"] # TODO: remove this once no longer using cpu rayon
+default = ["openvm-stark-backend/parallel"] # TODO: remove this once no longer using cpu rayon
 touchemall = ["openvm-cuda-common/touchemall"]
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"

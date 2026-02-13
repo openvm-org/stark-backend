@@ -1,12 +1,11 @@
 use openvm_cuda_backend::prelude::SC;
-use openvm_stark_backend::AirRef;
-use stark_backend_v2::{
-    StarkEngineV2, StarkWhirEngine, SystemParams,
+use openvm_stark_backend::{
     debug::debug_impl,
     prover::{CoordinatorV2, ProvingContextV2},
+    AirRef, StarkEngineV2, StarkWhirEngine, SystemParams,
 };
 
-use crate::{GpuBackendV2, GpuDeviceV2, sponge::DuplexSpongeGpu};
+use crate::{sponge::DuplexSpongeGpu, GpuBackendV2, GpuDeviceV2};
 
 pub struct BabyBearPoseidon2GpuEngineV2 {
     device: GpuDeviceV2,

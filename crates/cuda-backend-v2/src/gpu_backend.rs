@@ -3,38 +3,38 @@ use std::{cmp::max, fmt::Debug, sync::Arc};
 use itertools::Itertools;
 use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D, cuda_memcpy},
+    copy::{cuda_memcpy, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::MemCopyError,
     memory_manager::MemTracker,
     stream::current_stream_sync,
 };
-use openvm_stark_backend::prover::hal::MatrixDimensions;
-use stark_backend_v2::{
-    SystemParams,
+use openvm_stark_backend::{
     keygen::types::MultiStarkProvingKeyV2,
     poly_common::Squarable,
     proof::*,
     prover::{
+        hal::MatrixDimensions,
+        stacked_pcs::{MerkleTree, StackedPcsData},
         AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
         DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MatrixView,
         MultiRapProver, OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2,
         TraceCommitterV2,
-        stacked_pcs::{MerkleTree, StackedPcsData},
     },
+    SystemParams,
 };
 use tracing::{debug, instrument};
 
 use crate::{
-    AirDataGpu, D_EF, Digest, EF, F, GpuDeviceV2, GpuProverConfig, ProverError,
     cuda::matrix::collapse_strided_matrix,
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
     sponge::DuplexSpongeGpu,
-    stacked_pcs::{StackedPcsDataGpu, stacked_commit},
+    stacked_pcs::{stacked_commit, StackedPcsDataGpu},
     stacked_reduction::prove_stacked_opening_reduction_gpu,
     whir::prove_whir_opening_gpu,
+    AirDataGpu, Digest, GpuDeviceV2, GpuProverConfig, ProverError, D_EF, EF, F,
 };
 
 #[derive(Clone, Copy)]
@@ -220,12 +220,11 @@ pub fn transport_and_unstack_single_data_h2d(
     d: &StackedPcsData<F, Digest>,
     prover_config: &GpuProverConfig,
 ) -> Result<CommittedTraceDataV2<GpuBackendV2>, ProverError> {
-    debug_assert!(
-        d.layout
-            .sorted_cols
-            .iter()
-            .all(|(mat_idx, _, _)| *mat_idx == 0)
-    );
+    debug_assert!(d
+        .layout
+        .sorted_cols
+        .iter()
+        .all(|(mat_idx, _, _)| *mat_idx == 0));
     let l_skip = d.layout.l_skip();
     let trace_view = d.mat_view(0);
     let height = trace_view.height();
@@ -443,9 +442,9 @@ mod v1_shims {
     use std::sync::Arc;
 
     use openvm_cuda_backend::{base::DeviceMatrix, prover_backend::GpuBackend};
-    use stark_backend_v2::{SystemParams, prover::CommittedTraceDataV2, v1_shims::V1Compat};
+    use openvm_stark_backend::{prover::CommittedTraceDataV2, v1_shims::V1Compat, SystemParams};
 
-    use crate::{F, GpuBackendV2, GpuProverConfig, stacked_pcs::stacked_commit};
+    use crate::{stacked_pcs::stacked_commit, GpuBackendV2, GpuProverConfig, F};
 
     impl V1Compat for GpuBackendV2 {
         type V1 = GpuBackend;
