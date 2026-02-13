@@ -1,3 +1,8 @@
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::Arc,
+};
+
 use itertools::Itertools;
 use openvm_stark_sdk::{
     config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},
@@ -8,6 +13,8 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_strict_usize;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use stark_backend_v2::{
+    any_air_arc_vec,
+    keygen::types::LinearConstraint,
     prover::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
@@ -16,10 +23,19 @@ use stark_backend_v2::{
         MultiRapProver, ProvingContextV2,
     },
     test_utils::{
-        default_test_params_small, prove_up_to_batch_constraints, test_system_params_small,
-        CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture, PreprocessedFibFixture,
-        SelfInteractionFixture, TestFixture,
+        default_test_params_small,
+        dummy_airs::{
+            fib_air::air::FibonacciAir,
+            fib_selector_air::air::FibonacciSelectorAir,
+            interaction::dummy_interaction_air::{
+                DummyInteractionAir, DummyInteractionChip, DummyInteractionData,
+            },
+        },
+        prove_up_to_batch_constraints, test_system_params_small, CachedFixture11, FibFixture,
+        InteractionsFixture11, MixtureFixture, PreprocessedFibFixture, SelfInteractionFixture,
+        TestFixture,
     },
+    utils::disable_debug_builder,
     verifier::{
         batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
         fractional_sumcheck_gkr::verify_gkr,
@@ -28,8 +44,8 @@ use stark_backend_v2::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    DefaultStarkEngine, FiatShamirTranscript, StarkEngineV2, StarkProtocolConfig, SystemParams,
-    TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
+    AirRef, ChipV2, DefaultStarkEngine, FiatShamirTranscript, StarkEngineV2, StarkProtocolConfig,
+    SystemParams, TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use test_case::test_case;
 use tracing::{debug, Level};
@@ -581,4 +597,413 @@ fn test_matrix_stacking_overflow() {
     };
     let (vk, proof) = fx.keygen_and_prove(&engine);
     engine.verify(&vk, &proof).unwrap();
+}
+
+#[test]
+fn test_optional_air() {
+    setup_tracing();
+
+    let engine = test_engine_small();
+    let config = engine.config().clone();
+
+    let fib_air = Arc::new(FibonacciAir) as AirRef<SC>;
+    let send_chip1: DummyInteractionChip<SC> =
+        DummyInteractionChip::new_without_partition(1, true, 0);
+    let send_chip2: DummyInteractionChip<SC> =
+        DummyInteractionChip::new_with_partition(config.clone(), 1, true, 0);
+    let recv_chip1: DummyInteractionChip<SC> =
+        DummyInteractionChip::new_without_partition(1, false, 0);
+
+    let airs = vec![
+        fib_air,
+        send_chip1.air(),
+        send_chip2.air(),
+        recv_chip1.air(),
+    ];
+    let (pk, _vk) = engine.keygen(&airs);
+    let d_pk = engine.device().transport_pk_to_device(&pk);
+
+    // Case 1: All AIRs are present.
+    {
+        let fib = FibFixture::new(0, 1, 8);
+        let fib_air_ctx = fib
+            .generate_proving_ctx()
+            .per_trace
+            .into_iter()
+            .next()
+            .unwrap()
+            .1;
+
+        let mut s1: DummyInteractionChip<SC> =
+            DummyInteractionChip::new_without_partition(1, true, 0);
+        s1.load_data(DummyInteractionData {
+            count: vec![1, 2, 4],
+            fields: vec![vec![1], vec![2], vec![3]],
+        });
+        let mut s2: DummyInteractionChip<SC> =
+            DummyInteractionChip::new_with_partition(config.clone(), 1, true, 0);
+        s2.load_data(DummyInteractionData {
+            count: vec![1, 2, 8],
+            fields: vec![vec![1], vec![2], vec![3]],
+        });
+        let mut r1: DummyInteractionChip<SC> =
+            DummyInteractionChip::new_without_partition(1, false, 0);
+        r1.load_data(DummyInteractionData {
+            count: vec![2, 4, 12],
+            fields: vec![vec![1], vec![2], vec![3]],
+        });
+
+        let ctx = ProvingContextV2::new(vec![
+            (0, fib_air_ctx),
+            (1, ChipV2::generate_proving_ctx(&s1, ())),
+            (2, ChipV2::generate_proving_ctx(&s2, ())),
+            (3, ChipV2::generate_proving_ctx(&r1, ())),
+        ]);
+        let proof = engine.prove(&d_pk, ctx);
+        engine.verify(&pk.get_vk(), &proof).unwrap();
+    }
+
+    // Case 2: Only send_chip1 and recv_chip1 present (fib and send_chip2 omitted).
+    {
+        let mut s1: DummyInteractionChip<SC> =
+            DummyInteractionChip::new_without_partition(1, true, 0);
+        s1.load_data(DummyInteractionData {
+            count: vec![1, 2, 4],
+            fields: vec![vec![1], vec![2], vec![3]],
+        });
+        let mut r1: DummyInteractionChip<SC> =
+            DummyInteractionChip::new_without_partition(1, false, 0);
+        r1.load_data(DummyInteractionData {
+            count: vec![1, 2, 4],
+            fields: vec![vec![1], vec![2], vec![3]],
+        });
+
+        let ctx = ProvingContextV2::new(vec![
+            (1, ChipV2::generate_proving_ctx(&s1, ())),
+            (3, ChipV2::generate_proving_ctx(&r1, ())),
+        ]);
+        let proof = engine.prove(&d_pk, ctx);
+        engine.verify(&pk.get_vk(), &proof).unwrap();
+    }
+
+    // Case 3: Negative - unbalanced interactions (prover may panic or verifier may reject).
+    {
+        disable_debug_builder();
+        let mut r1: DummyInteractionChip<SC> =
+            DummyInteractionChip::new_without_partition(1, false, 0);
+        r1.load_data(DummyInteractionData {
+            count: vec![1, 2, 4],
+            fields: vec![vec![1], vec![2], vec![3]],
+        });
+
+        let d_pk = &d_pk;
+        let pk = &pk;
+        let engine = &engine;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = ProvingContextV2::new(vec![(3, ChipV2::generate_proving_ctx(&r1, ()))]);
+            let proof = engine.prove(d_pk, ctx);
+            engine.verify(&pk.get_vk(), &proof)
+        }));
+        assert!(result.is_err() || result.unwrap().is_err());
+    }
+}
+
+#[test]
+fn test_vkey_methods() {
+    setup_tracing();
+
+    let engine = test_engine_small();
+    let fib_air = FibonacciAir;
+    let send_air = DummyInteractionAir::new(1, true, 0);
+    let recv_air = DummyInteractionAir::new(1, false, 0);
+
+    let airs = any_air_arc_vec![fib_air, send_air, recv_air];
+    let (_pk, vk) = engine.keygen(&airs);
+
+    // Check per-air VK count
+    assert_eq!(vk.inner.per_air.len(), 3);
+
+    // Check main widths: FibonacciAir=2 columns, DummyInteractionAir=2 columns (count + 1 field)
+    assert_eq!(vk.inner.per_air[0].params.width.main_width(), 2);
+    assert_eq!(vk.inner.per_air[1].params.width.main_width(), 2);
+    assert_eq!(vk.inner.per_air[2].params.width.main_width(), 2);
+
+    // Check interaction counts
+    assert_eq!(vk.inner.per_air[0].num_interactions(), 0);
+    assert_eq!(vk.inner.per_air[1].num_interactions(), 1);
+    assert_eq!(vk.inner.per_air[2].num_interactions(), 1);
+}
+
+#[test]
+fn test_interaction_trace_height_constraints() {
+    let log_trace_degree = 3;
+    let n = 1usize << log_trace_degree;
+    let sels: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+    let fib_air = FibonacciSelectorAir::new(sels, true);
+    let mut sender_air = DummyInteractionAir::new(1, true, 0);
+    sender_air.count_weight = 3;
+    let mut sender_air_2 = DummyInteractionAir::new(1, true, 0);
+    sender_air_2.count_weight = 1;
+    let mut sender_air_3 = DummyInteractionAir::new(1, true, 1);
+    sender_air_3.count_weight = 7;
+
+    let engine = test_engine_small();
+    let airs: Vec<AirRef<SC>> = vec![
+        Arc::new(fib_air),
+        Arc::new(sender_air),
+        Arc::new(sender_air_2),
+        Arc::new(sender_air_3),
+    ];
+    let (_pk, vk) = engine.keygen(&airs);
+
+    assert_eq!(vk.inner.trace_height_constraints.len(), 3);
+
+    // Bus 0: fib_air has count_weight=0 (via LookupBus), sender_air=3, sender_air_2=1, sender_air_3
+    // is on bus 1
+    assert_eq!(
+        vk.inner.trace_height_constraints[0],
+        LinearConstraint {
+            coefficients: vec![0, 3, 1, 0],
+            threshold: F::ORDER_U32,
+        }
+    );
+    // Bus 1: only sender_air_3 with count_weight=7
+    assert_eq!(
+        vk.inner.trace_height_constraints[1],
+        LinearConstraint {
+            coefficients: vec![0, 0, 0, 7],
+            threshold: F::ORDER_U32,
+        }
+    );
+    // Total interactions constraint: 1 interaction per AIR
+    assert_eq!(
+        vk.inner.trace_height_constraints[2],
+        LinearConstraint {
+            coefficients: vec![1, 1, 1, 1],
+            threshold: engine.params().logup.max_interaction_count,
+        }
+    );
+}
+
+#[test]
+fn test_interaction_multi_rows_neg() {
+    setup_tracing();
+
+    let sender_trace = RowMajorMatrix::new(
+        [0, 1, 3, 5, 7, 4, 546, 0]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let sender_air = DummyInteractionAir::new(1, true, 0);
+
+    // count of 0 is 545 != 546 in sender
+    let receiver_trace = RowMajorMatrix::new(
+        [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 0, 0, 0, 0, 456]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let receiver_air = DummyInteractionAir::new(1, false, 0);
+
+    disable_debug_builder();
+    let engine = test_engine_small();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        engine.run_test(
+            any_air_arc_vec![sender_air, receiver_air],
+            vec![
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace)),
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+            ],
+        )
+    }));
+    assert!(result.is_err() || result.unwrap().is_err());
+}
+
+#[test]
+fn test_interaction_all_zero_sender() {
+    setup_tracing();
+
+    let sender_trace = RowMajorMatrix::new(
+        [0, 1, 0, 5, 0, 4, 0, 889]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let sender_air = DummyInteractionAir::new(1, true, 0);
+
+    let engine = test_engine_small();
+    engine
+        .run_test(
+            any_air_arc_vec![sender_air],
+            vec![AirProvingContextV2::simple_no_pis(
+                ColMajorMatrix::from_row_major(&sender_trace),
+            )],
+        )
+        .expect("Verification failed");
+}
+
+#[test]
+fn test_interaction_multi_senders() {
+    setup_tracing();
+
+    let sender_trace1 = RowMajorMatrix::new(
+        [0, 1, 3, 5, 6, 4, 333, 889]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let sender_trace2 =
+        RowMajorMatrix::new([1, 4, 213, 889].into_iter().map(F::from_usize).collect(), 2);
+    let sender_air = DummyInteractionAir::new(1, true, 0);
+
+    let receiver_trace = RowMajorMatrix::new(
+        [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 1, 889, 0, 456]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let receiver_air = DummyInteractionAir::new(1, false, 0);
+
+    let engine = test_engine_small();
+    engine
+        .run_test(
+            any_air_arc_vec![sender_air, sender_air, receiver_air],
+            vec![
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+            ],
+        )
+        .expect("Verification failed");
+}
+
+#[test]
+fn test_interaction_multi_senders_neg() {
+    setup_tracing();
+
+    // Changed 6→5 for sender1 so sums don't balance
+    let sender_trace1 = RowMajorMatrix::new(
+        [0, 1, 3, 5, 5, 4, 333, 889]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let sender_trace2 =
+        RowMajorMatrix::new([1, 4, 213, 889].into_iter().map(F::from_usize).collect(), 2);
+    let sender_air = DummyInteractionAir::new(1, true, 0);
+
+    let receiver_trace = RowMajorMatrix::new(
+        [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 1, 889, 0, 456]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let receiver_air = DummyInteractionAir::new(1, false, 0);
+
+    disable_debug_builder();
+    let engine = test_engine_small();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        engine.run_test(
+            any_air_arc_vec![sender_air, sender_air, receiver_air],
+            vec![
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+            ],
+        )
+    }));
+    assert!(result.is_err() || result.unwrap().is_err());
+}
+
+#[test]
+fn test_interaction_multi_sender_receiver() {
+    setup_tracing();
+
+    let sender_trace1 = RowMajorMatrix::new(
+        [0, 1, 3, 5, 6, 4, 333, 889]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let sender_trace2 =
+        RowMajorMatrix::new([1, 4, 213, 889].into_iter().map(F::from_usize).collect(), 2);
+    let sender_air = DummyInteractionAir::new(1, true, 0);
+
+    let receiver_trace1 = RowMajorMatrix::new(
+        [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 0, 289, 0, 456]
+            .into_iter()
+            .map(F::from_usize)
+            .collect(),
+        2,
+    );
+    let receiver_trace2 = RowMajorMatrix::new([1, 889].into_iter().map(F::from_usize).collect(), 2);
+    let receiver_air = DummyInteractionAir::new(1, false, 0);
+
+    let engine = test_engine_small();
+    engine
+        .run_test(
+            any_air_arc_vec![sender_air, sender_air, receiver_air, receiver_air],
+            vec![
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(
+                    &receiver_trace1,
+                )),
+                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(
+                    &receiver_trace2,
+                )),
+            ],
+        )
+        .expect("Verification failed");
+}
+
+#[test]
+fn test_interaction_cached_trace_neg() {
+    setup_tracing();
+
+    let engine = test_engine_small();
+    let config = engine.config().clone();
+
+    let mut sender_chip: DummyInteractionChip<SC> =
+        DummyInteractionChip::new_without_partition(2, true, 0);
+    sender_chip.load_data(DummyInteractionData {
+        count: vec![0, 7, 3, 546],
+        fields: vec![vec![1, 1], vec![4, 2], vec![5, 1], vec![889, 4]],
+    });
+
+    // field [889, 4] has count 545 != 546 in sender
+    let mut receiver_chip: DummyInteractionChip<SC> =
+        DummyInteractionChip::new_with_partition(config, 2, false, 0);
+    receiver_chip.load_data(DummyInteractionData {
+        count: vec![1, 3, 4, 2, 0, 545, 1, 0],
+        fields: vec![
+            vec![5, 1],
+            vec![4, 2],
+            vec![4, 2],
+            vec![5, 1],
+            vec![123, 3],
+            vec![889, 4],
+            vec![889, 10], // changed from [889, 4] to cause mismatch
+            vec![456, 5],
+        ],
+    });
+
+    let airs = vec![receiver_chip.air(), sender_chip.air()];
+    let ctxs = vec![
+        ChipV2::generate_proving_ctx(&receiver_chip, ()),
+        ChipV2::generate_proving_ctx(&sender_chip, ()),
+    ];
+
+    disable_debug_builder();
+    let result = catch_unwind(AssertUnwindSafe(|| engine.run_test(airs, ctxs)));
+    assert!(result.is_err() || result.unwrap().is_err());
 }

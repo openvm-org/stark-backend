@@ -45,6 +45,8 @@ pub trait StarkProtocolConfig: 'static + Clone + Send + Sync {
 
 /// Type alias for backwards compatibility. New implementations should use `SC::F`.
 pub type Val<SC> = <SC as StarkProtocolConfig>::F;
+/// Type alias for backwards compatibility. New implementations should use `SC::Digest`.
+pub type Com<SC> = <SC as StarkProtocolConfig>::Digest;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Getters)]
 pub struct SystemParams {
