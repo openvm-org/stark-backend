@@ -5,14 +5,14 @@ use itertools::Itertools;
 use crate::{
     air_builders::debug::{debug_constraints_and_interactions, AirProofRawInput},
     keygen::{
-        types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
-        MultiStarkKeygenBuilderV2,
+        types::{MultiStarkProvingKey, MultiStarkVerifyingKey},
+        MultiStarkKeygenBuilder,
     },
     proof::*,
     prover::{
-        AirProvingContextV2, ColMajorMatrix, CoordinatorV2, DeviceDataTransporterV2,
-        DeviceMultiStarkProvingKeyV2, MultiRapProver, OpeningProverV2, Prover, ProverBackendV2,
-        ProverDeviceV2, ProvingContextV2, StridedColMajorMatrixView,
+        AirProvingContext, ColMajorMatrix, Coordinator, DeviceDataTransporter,
+        DeviceMultiStarkProvingKey, MultiRapProver, OpeningProver, Prover, ProverBackend,
+        ProverDevice, ProvingContext, StridedColMajorMatrixView,
     },
     verifier::{verify, VerifierError},
     AirRef, FiatShamirTranscript, StarkProtocolConfig, SystemParams,
@@ -20,29 +20,29 @@ use crate::{
 
 /// Data for verifying a Stark proof.
 #[derive(Debug)]
-pub struct VerificationDataV2<SC: StarkProtocolConfig> {
-    pub vk: MultiStarkVerifyingKeyV2<SC>,
+pub struct VerificationData<SC: StarkProtocolConfig> {
+    pub vk: MultiStarkVerifyingKey<SC>,
     pub proof: Proof<SC>,
 }
 
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving.
-pub trait StarkEngineV2
+pub trait StarkEngine
 where
     <Self::PD as MultiRapProver<Self::PB, Self::TS>>::Artifacts:
-        Into<<Self::PD as OpeningProverV2<Self::PB, Self::TS>>::OpeningPoints>,
+        Into<<Self::PD as OpeningProver<Self::PB, Self::TS>>::OpeningPoints>,
     <Self::PD as MultiRapProver<Self::PB, Self::TS>>::PartialProof:
         Into<(GkrProof<Self::SC>, BatchConstraintProof<Self::SC>)>,
-    <Self::PD as OpeningProverV2<Self::PB, Self::TS>>::OpeningProof:
+    <Self::PD as OpeningProver<Self::PB, Self::TS>>::OpeningProof:
         Into<(StackingProof<Self::SC>, WhirProof<Self::SC>)>,
 {
     type SC: StarkProtocolConfig;
-    type PB: ProverBackendV2<
+    type PB: ProverBackend<
         Val = <Self::SC as StarkProtocolConfig>::F,
         Challenge = <Self::SC as StarkProtocolConfig>::EF,
         Commitment = <Self::SC as StarkProtocolConfig>::Digest,
     >;
-    type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::SC, Self::PB>;
+    type PD: ProverDevice<Self::PB, Self::TS> + DeviceDataTransporter<Self::SC, Self::PB>;
     type TS: FiatShamirTranscript<Self::SC>;
 
     fn config(&self) -> &Self::SC;
@@ -59,9 +59,9 @@ where
     fn prover_from_transcript(
         &self,
         transcript: Self::TS,
-    ) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS>;
+    ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS>;
 
-    fn prover(&self) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS> {
+    fn prover(&self) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
         let transcript = self.initial_transcript();
         self.prover_from_transcript(transcript)
     }
@@ -70,10 +70,10 @@ where
         &self,
         airs: &[AirRef<Self::SC>],
     ) -> (
-        MultiStarkProvingKeyV2<Self::SC>,
-        MultiStarkVerifyingKeyV2<Self::SC>,
+        MultiStarkProvingKey<Self::SC>,
+        MultiStarkVerifyingKey<Self::SC>,
     ) {
-        let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config().clone());
+        let mut keygen_builder = MultiStarkKeygenBuilder::new(self.config().clone());
         for air in airs {
             keygen_builder.add_air(air.clone());
         }
@@ -85,11 +85,11 @@ where
 
     fn prove(
         &self,
-        pk: &DeviceMultiStarkProvingKeyV2<Self::PB>,
-        ctx: ProvingContextV2<Self::PB>,
+        pk: &DeviceMultiStarkProvingKey<Self::PB>,
+        ctx: ProvingContext<Self::PB>,
     ) -> Proof<Self::SC>
     where
-        Self::PB: ProverBackendV2<
+        Self::PB: ProverBackend<
             Val = <Self::SC as StarkProtocolConfig>::F,
             Challenge = <Self::SC as StarkProtocolConfig>::EF,
             Commitment = <Self::SC as StarkProtocolConfig>::Digest,
@@ -102,7 +102,7 @@ where
     /// Verifies using a default instantiation of the Fiat-Shamir transcript.
     fn verify(
         &self,
-        vk: &MultiStarkVerifyingKeyV2<Self::SC>,
+        vk: &MultiStarkVerifyingKey<Self::SC>,
         proof: &Proof<Self::SC>,
     ) -> Result<(), VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
     where
@@ -115,8 +115,8 @@ where
     /// The indexing of AIR ID in `ctx` should be consistent with the order of `airs`. In
     /// particular, `airs` should correspond to the global proving key with all AIRs, including ones
     /// not present in the `ctx`.
-    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContextV2<Self::PB>) {
-        let mut keygen_builder = MultiStarkKeygenBuilderV2::new(self.config().clone());
+    fn debug(&self, airs: &[AirRef<Self::SC>], ctx: &ProvingContext<Self::PB>) {
+        let mut keygen_builder = MultiStarkKeygenBuilder::new(self.config().clone());
         for air in airs {
             keygen_builder.add_air(air.clone());
         }
@@ -165,10 +165,10 @@ where
     fn run_test(
         &self,
         airs: Vec<AirRef<Self::SC>>,
-        ctxs: Vec<AirProvingContextV2<Self::PB>>,
-    ) -> Result<VerificationDataV2<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
+        ctxs: Vec<AirProvingContext<Self::PB>>,
+    ) -> Result<VerificationData<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
     where
-        Self::PB: ProverBackendV2<
+        Self::PB: ProverBackend<
             Val = <Self::SC as StarkProtocolConfig>::F,
             Challenge = <Self::SC as StarkProtocolConfig>::EF,
             Commitment = <Self::SC as StarkProtocolConfig>::Digest,
@@ -176,8 +176,8 @@ where
         <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField;
 }
 
-/// [StarkEngineV2] that can be constructed from only system parameters. In particular, the
+/// [StarkEngine] that can be constructed from only system parameters. In particular, the
 /// transcript and hasher must have a default configuration.
-pub trait DefaultStarkEngine: StarkEngineV2 {
+pub trait DefaultStarkEngine: StarkEngine {
     fn new(params: SystemParams) -> Self;
 }

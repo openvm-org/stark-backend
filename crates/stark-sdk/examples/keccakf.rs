@@ -6,14 +6,14 @@ use eyre::eyre;
 use openvm_stark_backend::DefaultStarkEngine;
 use openvm_stark_sdk::{
     config::{
-        baby_bear_poseidon2::BabyBearPoseidon2CpuEngineV2,
+        baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
         log_up_params::log_up_security_params_baby_bear_100_bits,
     },
     openvm_stark_backend::{
         p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues},
         p3_field::Field,
-        prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
-        PartitionedBaseAir, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
+        prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
+        PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
     },
 };
 use p3_keccak_air::KeccakAir;
@@ -62,7 +62,7 @@ fn main() -> eyre::Result<()> {
     let mut rng = StdRng::seed_from_u64(42);
     let air = TestAir(KeccakAir {});
 
-    let engine: BabyBearPoseidon2CpuEngineV2 = DefaultStarkEngine::new(params);
+    let engine: BabyBearPoseidon2CpuEngine = DefaultStarkEngine::new(params);
     let (pk, vk) = engine.keygen(&[Arc::new(air)]);
 
     let inputs = (0..NUM_PERMUTATIONS)
@@ -72,9 +72,9 @@ fn main() -> eyre::Result<()> {
         p3_keccak_air::generate_trace_rows::<openvm_stark_sdk::p3_baby_bear::BabyBear>(inputs, 0)
     });
 
-    let trace_ctx = AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&trace));
+    let trace_ctx = AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&trace));
     let d_pk = engine.device().transport_pk_to_device(&pk);
-    let proof = engine.prove(&d_pk, ProvingContextV2::new(vec![(0, trace_ctx)]));
+    let proof = engine.prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]));
 
     engine
         .verify(&vk, &proof)

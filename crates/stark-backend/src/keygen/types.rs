@@ -1,4 +1,4 @@
-// NOTE[jpw]: copied from stark-backend but renamed for V2, now generic in SC
+// NOTE[jpw]: copied from stark-backend but renamed for , now generic in SC
 
 // Keygen API for STARK backend
 // Changes:
@@ -6,11 +6,14 @@
 use std::sync::Arc;
 
 use derivative::Derivative;
-use crate::air_builders::symbolic::{symbolic_variable::SymbolicVariable, SymbolicConstraintsDag};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{prover::stacked_pcs::StackedPcsData, StarkProtocolConfig, SystemParams};
+use crate::{
+    air_builders::symbolic::{symbolic_variable::SymbolicVariable, SymbolicConstraintsDag},
+    prover::stacked_pcs::StackedPcsData,
+    StarkProtocolConfig, SystemParams,
+};
 
 /// Widths of different parts of trace matrix
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,7 +68,7 @@ pub enum KeygenError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]
-pub struct StarkVerifyingParamsV2 {
+pub struct StarkVerifyingParams {
     /// Trace sub-matrix widths
     pub width: TraceWidth,
     /// Number of public values for this STARK only
@@ -93,11 +96,11 @@ pub struct VerifierSinglePreprocessedData<Digest> {
 /// Verifying key for a single STARK (corresponding to single AIR matrix)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]
-pub struct StarkVerifyingKeyV2<F, Digest> {
+pub struct StarkVerifyingKey<F, Digest> {
     /// Preprocessed trace data, if any
     pub preprocessed_data: Option<VerifierSinglePreprocessedData<Digest>>,
     /// Parameters of the STARK
-    pub params: StarkVerifyingParamsV2,
+    pub params: StarkVerifyingParams,
     /// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.
     pub symbolic_constraints: SymbolicConstraintsDag<F>,
@@ -116,10 +119,10 @@ pub struct StarkVerifyingKeyV2<F, Digest> {
 #[derive(Derivative, Serialize, Deserialize)]
 #[derivative(Clone(bound = ""), Debug(bound = ""))]
 #[serde(bound = "")]
-pub struct MultiStarkVerifyingKeyV2<SC: StarkProtocolConfig> {
+pub struct MultiStarkVerifyingKey<SC: StarkProtocolConfig> {
     /// All parts of the verifying key needed by the verifier, except
     /// the `pre_hash` used to initialize the Fiat-Shamir transcript.
-    pub inner: MultiStarkVerifyingKey0V2<SC>,
+    pub inner: MultiStarkVerifyingKey0<SC>,
     /// The hash of all other parts of the verifying key. The Fiat-Shamir hasher will
     /// initialize by observing this hash.
     pub pre_hash: SC::Digest,
@@ -130,9 +133,9 @@ pub struct MultiStarkVerifyingKeyV2<SC: StarkProtocolConfig> {
 #[derive(Derivative, Serialize, Deserialize)]
 #[derivative(Clone(bound = ""), Debug(bound = ""))]
 #[serde(bound = "")]
-pub struct MultiStarkVerifyingKey0V2<SC: StarkProtocolConfig> {
+pub struct MultiStarkVerifyingKey0<SC: StarkProtocolConfig> {
     pub params: SystemParams,
-    pub per_air: Vec<StarkVerifyingKeyV2<SC::F, SC::Digest>>,
+    pub per_air: Vec<StarkVerifyingKey<SC::F, SC::Digest>>,
     pub trace_height_constraints: Vec<LinearConstraint>,
 }
 
@@ -140,11 +143,11 @@ pub struct MultiStarkVerifyingKey0V2<SC: StarkProtocolConfig> {
 #[derive(Derivative, Serialize, Deserialize)]
 #[derivative(Clone(bound = ""))]
 #[serde(bound = "")]
-pub struct StarkProvingKeyV2<SC: StarkProtocolConfig> {
+pub struct StarkProvingKey<SC: StarkProtocolConfig> {
     /// Type name of the AIR, for display purposes only
     pub air_name: String,
     /// Verifying key
-    pub vk: StarkVerifyingKeyV2<SC::F, SC::Digest>,
+    pub vk: StarkVerifyingKey<SC::F, SC::Digest>,
     /// Prover only data for preprocessed trace
     pub preprocessed_data: Option<Arc<StackedPcsData<SC::F, SC::Digest>>>,
 }
@@ -156,8 +159,8 @@ pub struct StarkProvingKeyV2<SC: StarkProtocolConfig> {
 #[derive(Derivative, Serialize, Deserialize)]
 #[derivative(Clone(bound = ""))]
 #[serde(bound = "")]
-pub struct MultiStarkProvingKeyV2<SC: StarkProtocolConfig> {
-    pub per_air: Vec<StarkProvingKeyV2<SC>>,
+pub struct MultiStarkProvingKey<SC: StarkProtocolConfig> {
+    pub per_air: Vec<StarkProvingKey<SC>>,
     pub trace_height_constraints: Vec<LinearConstraint>,
     /// Maximum degree of constraints across all AIRs
     pub max_constraint_degree: usize,
@@ -166,7 +169,7 @@ pub struct MultiStarkProvingKeyV2<SC: StarkProtocolConfig> {
     pub vk_pre_hash: SC::Digest,
 }
 
-impl<Val, Com> StarkVerifyingKeyV2<Val, Com> {
+impl<Val, Com> StarkVerifyingKey<Val, Com> {
     pub fn num_cached_mains(&self) -> usize {
         self.params.width.cached_mains.len()
     }
@@ -195,16 +198,16 @@ impl<Val, Com> StarkVerifyingKeyV2<Val, Com> {
     }
 }
 
-impl<SC: StarkProtocolConfig> MultiStarkProvingKeyV2<SC> {
-    pub fn get_vk(&self) -> MultiStarkVerifyingKeyV2<SC> {
-        MultiStarkVerifyingKeyV2 {
+impl<SC: StarkProtocolConfig> MultiStarkProvingKey<SC> {
+    pub fn get_vk(&self) -> MultiStarkVerifyingKey<SC> {
+        MultiStarkVerifyingKey {
             inner: self.get_vk0(),
             pre_hash: self.vk_pre_hash,
         }
     }
 
-    fn get_vk0(&self) -> MultiStarkVerifyingKey0V2<SC> {
-        MultiStarkVerifyingKey0V2 {
+    fn get_vk0(&self) -> MultiStarkVerifyingKey0<SC> {
+        MultiStarkVerifyingKey0 {
             params: self.params.clone(),
             per_air: self.per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: self.trace_height_constraints.clone(),
@@ -212,14 +215,14 @@ impl<SC: StarkProtocolConfig> MultiStarkProvingKeyV2<SC> {
     }
 }
 
-impl<SC: StarkProtocolConfig> MultiStarkVerifyingKeyV2<SC> {
+impl<SC: StarkProtocolConfig> MultiStarkVerifyingKey<SC> {
     /// Global maximum constraint degree across all AIRs and Interactions.
     pub fn max_constraint_degree(&self) -> usize {
         self.inner.max_constraint_degree()
     }
 }
 
-impl<SC: StarkProtocolConfig> MultiStarkVerifyingKey0V2<SC> {
+impl<SC: StarkProtocolConfig> MultiStarkVerifyingKey0<SC> {
     pub fn max_constraint_degree(&self) -> usize {
         self.params.max_constraint_degree
     }

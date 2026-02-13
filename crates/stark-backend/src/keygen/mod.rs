@@ -14,8 +14,8 @@ use crate::{
     },
     hasher::MerkleHasher,
     keygen::types::{
-        KeygenError, LinearConstraint, MultiStarkProvingKeyV2, MultiStarkVerifyingKey0V2,
-        StarkProvingKeyV2, StarkVerifyingKeyV2, StarkVerifyingParamsV2, TraceWidth,
+        KeygenError, LinearConstraint, MultiStarkProvingKey, MultiStarkVerifyingKey0,
+        StarkProvingKey, StarkVerifyingKey, StarkVerifyingParams, TraceWidth,
         VerifierSinglePreprocessedData,
     },
     prover::{
@@ -27,21 +27,21 @@ use crate::{
 
 pub mod types;
 
-struct AirKeygenBuilderV2<SC: StarkProtocolConfig> {
+struct AirKeygenBuilder<SC: StarkProtocolConfig> {
     pub is_required: bool,
     air: AirRef<SC>,
-    prep_keygen_data: PrepKeygenDataV2<SC>,
+    prep_keygen_data: PrepKeygenData<SC>,
 }
 
 /// Stateful builder to create multi-stark proving and verifying keys
 /// for system of multiple RAPs with multiple multi-matrix commitments
-pub struct MultiStarkKeygenBuilderV2<SC: StarkProtocolConfig> {
+pub struct MultiStarkKeygenBuilder<SC: StarkProtocolConfig> {
     pub config: SC,
     /// Information for partitioned AIRs.
-    partitioned_airs: Vec<AirKeygenBuilderV2<SC>>,
+    partitioned_airs: Vec<AirKeygenBuilder<SC>>,
 }
 
-impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
+impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
     pub fn new(config: SC) -> Self {
         Self {
             config,
@@ -66,13 +66,13 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
     #[instrument(level = "debug", skip_all, fields(name = air.name(), is_required = is_required))]
     fn add_air_impl(&mut self, air: AirRef<SC>, is_required: bool) -> usize {
         self.partitioned_airs
-            .push(AirKeygenBuilderV2::new(&self.config, air, is_required));
+            .push(AirKeygenBuilder::new(&self.config, air, is_required));
         self.partitioned_airs.len() - 1
     }
 
     /// Consume the builder and generate proving key.
     /// The verifying key can be obtained from the proving key.
-    pub fn generate_pk(self) -> Result<MultiStarkProvingKeyV2<SC>, KeygenError> {
+    pub fn generate_pk(self) -> Result<MultiStarkProvingKey<SC>, KeygenError> {
         let params = self.params().clone();
         let max_constraint_degree = params.max_constraint_degree;
         let pk_per_air: Vec<_> = self
@@ -172,7 +172,7 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
             threshold: log_up_security_params.max_interaction_count,
         });
 
-        let pre_vk: MultiStarkVerifyingKey0V2<SC> = MultiStarkVerifyingKey0V2 {
+        let pre_vk: MultiStarkVerifyingKey0<SC> = MultiStarkVerifyingKey0 {
             params: params.clone(),
             per_air: pk_per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: trace_height_constraints.clone(),
@@ -188,7 +188,7 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
             .hasher()
             .hash_slice(&vk_bytes.into_iter().map(SC::F::from_u8).collect_vec());
 
-        Ok(MultiStarkProvingKeyV2 {
+        Ok(MultiStarkProvingKey {
             params,
             per_air: pk_per_air,
             trace_height_constraints,
@@ -198,10 +198,9 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilderV2<SC> {
     }
 }
 
-impl<SC: StarkProtocolConfig> AirKeygenBuilderV2<SC> {
+impl<SC: StarkProtocolConfig> AirKeygenBuilder<SC> {
     pub fn new(config: &SC, air: AirRef<SC>, is_required: bool) -> Self {
-        let prep_keygen_data =
-            PrepKeygenDataV2::new(config.hasher(), config.params(), air.as_ref());
+        let prep_keygen_data = PrepKeygenData::new(config.hasher(), config.params(), air.as_ref());
         Self {
             is_required,
             air,
@@ -214,7 +213,7 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilderV2<SC> {
     pub fn generate_pk(
         self,
         max_constraint_degree: usize,
-    ) -> Result<StarkProvingKeyV2<SC>, KeygenError> {
+    ) -> Result<StarkProvingKey<SC>, KeygenError> {
         let air_name = self.air.name();
 
         let symbolic_builder = self.get_symbolic_builder();
@@ -233,7 +232,7 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilderV2<SC> {
 
         let Self {
             prep_keygen_data:
-                PrepKeygenDataV2 {
+                PrepKeygenData {
                     verifier_data: preprocessed_vdata,
                     prover_data: prep_prover_data,
                 },
@@ -244,7 +243,7 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilderV2<SC> {
         let max_rotation = dag.constraints.max_rotation();
         debug_assert!(max_rotation <= 1);
         let need_rot = max_rotation == 1;
-        let vparams = StarkVerifyingParamsV2 {
+        let vparams = StarkVerifyingParams {
             width,
             num_public_values,
             need_rot,
@@ -252,7 +251,7 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilderV2<SC> {
         assert!(vparams.width.after_challenge.is_empty());
 
         let unused_variables = find_unused_vars(&dag, &vparams.width, need_rot);
-        let vk = StarkVerifyingKeyV2 {
+        let vk = StarkVerifyingKey {
             preprocessed_data: preprocessed_vdata,
             params: vparams,
             symbolic_constraints: dag,
@@ -262,7 +261,7 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilderV2<SC> {
             is_required: self.is_required,
             unused_variables,
         };
-        Ok(StarkProvingKeyV2 {
+        Ok(StarkProvingKey {
             air_name,
             vk,
             preprocessed_data: prep_prover_data,
@@ -280,12 +279,12 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilderV2<SC> {
     }
 }
 
-pub(super) struct PrepKeygenDataV2<SC: StarkProtocolConfig> {
+pub(super) struct PrepKeygenData<SC: StarkProtocolConfig> {
     pub verifier_data: Option<VerifierSinglePreprocessedData<SC::Digest>>,
     pub prover_data: Option<Arc<StackedPcsData<SC::F, SC::Digest>>>,
 }
 
-impl<SC: StarkProtocolConfig> PrepKeygenDataV2<SC> {
+impl<SC: StarkProtocolConfig> PrepKeygenData<SC> {
     fn new(hasher: &SC::Hasher, params: &SystemParams, air: &dyn AnyAir<SC>) -> Self {
         let preprocessed_trace = BaseAir::<SC::F>::preprocessed_trace(air);
         let vpdata_opt = preprocessed_trace.map(|trace| {

@@ -13,12 +13,12 @@ use crate::{
     prover::{
         poly::{eval_to_coeff_rs_message, evals_eq_hypercube, evals_mobius_eq_hypercube, Mle},
         stacked_pcs::{MerkleTree, StackedPcsData},
-        ColMajorMatrix, CpuBackendV2, CpuDeviceV2, MatrixDimensions, ProverBackendV2,
+        ColMajorMatrix, CpuBackend, CpuDevice, MatrixDimensions, ProverBackend,
     },
     FiatShamirTranscript, StarkProtocolConfig, WhirConfig,
 };
 
-pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
+pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackend, PD, TS> {
     /// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables,
     /// at a single vector `u \in \Fext^n`.
     ///
@@ -37,7 +37,7 @@ pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
     ) -> WhirProof<SC>;
 }
 
-impl<SC, TS> WhirProver<SC, CpuBackendV2<SC>, CpuDeviceV2<SC>, TS> for CpuDeviceV2<SC>
+impl<SC, TS> WhirProver<SC, CpuBackend<SC>, CpuDevice<SC>, TS> for CpuDevice<SC>
 where
     SC: StarkProtocolConfig,
     SC::F: TwoAdicField + Ord,

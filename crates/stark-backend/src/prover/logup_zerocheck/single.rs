@@ -3,16 +3,15 @@
 use std::iter::zip;
 
 use itertools::Itertools;
+use p3_field::{ExtensionField, TwoAdicField};
+
 use crate::{
     air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicExpressionDag},
     interaction::SymbolicInteraction,
-};
-use p3_field::{ExtensionField, TwoAdicField};
-
-use crate::prover::{
-    logup_zerocheck::evaluator::{ProverConstraintEvaluator, ViewPair},
-    AirProvingContextV2, ProverBackendV2, StridedColMajorMatrixView,
-    ColMajorMatrix,
+    prover::{
+        logup_zerocheck::evaluator::{ProverConstraintEvaluator, ViewPair},
+        AirProvingContext, ColMajorMatrix, ProverBackend, StridedColMajorMatrixView,
+    },
 };
 
 /// For a single AIR
@@ -38,10 +37,10 @@ impl<'a, F: TwoAdicField> EvalHelper<'a, F> {
     /// in the future for perf.
     pub fn view_mats<PB>(
         &self,
-        ctx: &'a AirProvingContextV2<PB>,
+        ctx: &'a AirProvingContext<PB>,
     ) -> Vec<(StridedColMajorMatrixView<'a, F>, bool)>
     where
-        PB: ProverBackendV2<Val = F, Matrix = ColMajorMatrix<F>>,
+        PB: ProverBackend<Val = F, Matrix = ColMajorMatrix<F>>,
     {
         let base_mats = usize::from(self.has_preprocessed()) + 1 + ctx.cached_mains.len();
         let mut mats = Vec::with_capacity(if self.needs_next {

@@ -12,7 +12,7 @@ use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 use p3_util::log2_ceil_usize;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
-type SC = BabyBearPoseidon2ConfigV2;
+type SC = BabyBearPoseidon2Config;
 
 const N_STACK: usize = 4;
 const L_SKIP: usize = 2;

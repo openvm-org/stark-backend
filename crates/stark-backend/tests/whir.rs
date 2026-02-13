@@ -4,12 +4,12 @@ use openvm_stark_backend::{
     poly_common::Squarable,
     prover::{
         poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening, ColMajorMatrix,
-        CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions,
-        ProvingContextV2,
+        CpuBackend, DeviceDataTransporter, DeviceMultiStarkProvingKey, MatrixDimensions,
+        ProvingContext,
     },
     test_utils::{test_whir_config_small, FibFixture, TestFixture},
     verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
-    DefaultStarkEngine, StarkEngineV2, StarkProtocolConfig, SystemParams, TranscriptHistory,
+    DefaultStarkEngine, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory,
     WhirConfig, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
@@ -21,7 +21,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use test_case::test_case;
 use tracing::Level;
 
-type SC = BabyBearPoseidon2ConfigV2;
+type SC = BabyBearPoseidon2Config;
 
 fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
     let z_prism: Vec<_> = (0..params.n_stack + 1)
@@ -60,8 +60,8 @@ fn stacking_openings_for_matrix(
 
 fn run_whir_test(
     config: &SC,
-    pk: DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>>,
-    ctx: &ProvingContextV2<CpuBackendV2<SC>>,
+    pk: DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+    ctx: &ProvingContext<CpuBackend<SC>>,
 ) -> Result<(), VerifyWhirError> {
     let params = config.params();
     let (common_main_commit, common_main_pcs_data) = {
@@ -127,7 +127,7 @@ fn run_whir_test(
 }
 
 fn run_whir_fib_test(params: SystemParams) -> Result<(), VerifyWhirError> {
-    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params.clone());
+    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
     let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
     let (pk, _vk) = fib.keygen(&engine);
     let pk = engine.device().transport_pk_to_device(&pk);
@@ -225,7 +225,7 @@ fn test_whir_multiple_commitments() -> Result<(), VerifyWhirError> {
         logup: log_up_security_params_baby_bear_100_bits(),
         max_constraint_degree: 3,
     };
-    let config = BabyBearPoseidon2ConfigV2::default_from_params(params);
+    let config = BabyBearPoseidon2Config::default_from_params(params);
     let params = config.params();
 
     let n_rows = 1 << (params.n_stack + params.l_skip);
@@ -304,7 +304,7 @@ fn test_whir_multiple_commitments_negative() {
         logup: log_up_security_params_baby_bear_100_bits(),
         max_constraint_degree: 3,
     };
-    let config = BabyBearPoseidon2ConfigV2::default_from_params(params);
+    let config = BabyBearPoseidon2Config::default_from_params(params);
     let params = config.params();
 
     let n_rows = 1 << (params.n_stack + params.l_skip);

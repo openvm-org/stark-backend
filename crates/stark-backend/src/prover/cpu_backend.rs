@@ -7,7 +7,7 @@ use itertools::Itertools;
 use p3_field::{ExtensionField, TwoAdicField};
 
 use crate::{
-    keygen::types::MultiStarkProvingKeyV2,
+    keygen::types::MultiStarkProvingKey,
     poly_common::Squarable,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
@@ -15,41 +15,41 @@ use crate::{
         stacked_pcs::{stacked_commit, StackedPcsData},
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
         whir::WhirProver,
-        ColMajorMatrix, CommittedTraceDataV2, DeviceDataTransporterV2,
-        DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MultiRapProver, OpeningProverV2,
-        ProverBackendV2, ProverDeviceV2, ProvingContextV2, TraceCommitterV2,
+        ColMajorMatrix, CommittedTraceData, DeviceDataTransporter, DeviceMultiStarkProvingKey,
+        DeviceStarkProvingKey, MultiRapProver, OpeningProver, ProverBackend, ProverDevice,
+        ProvingContext, TraceCommitter,
     },
     FiatShamirTranscript, StarkProtocolConfig, SystemParams,
 };
 
 #[derive(Clone, Copy)]
-pub struct CpuBackendV2<SC: StarkProtocolConfig>(PhantomData<SC>);
+pub struct CpuBackend<SC: StarkProtocolConfig>(PhantomData<SC>);
 
-impl<SC: StarkProtocolConfig> CpuBackendV2<SC> {
+impl<SC: StarkProtocolConfig> CpuBackend<SC> {
     pub fn new() -> Self {
         Self(PhantomData)
     }
 }
 
-impl<SC: StarkProtocolConfig> Default for CpuBackendV2<SC> {
+impl<SC: StarkProtocolConfig> Default for CpuBackend<SC> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[derive(Clone, Getters, derive_new::new)]
-pub struct CpuDeviceV2<SC> {
+pub struct CpuDevice<SC> {
     #[getset(get = "pub")]
     config: SC,
 }
 
-impl<SC: StarkProtocolConfig> CpuDeviceV2<SC> {
+impl<SC: StarkProtocolConfig> CpuDevice<SC> {
     pub fn params(&self) -> &SystemParams {
         self.config.params()
     }
 }
 
-impl<SC: StarkProtocolConfig> ProverBackendV2 for CpuBackendV2<SC> {
+impl<SC: StarkProtocolConfig> ProverBackend for CpuBackend<SC> {
     const CHALLENGE_EXT_DEGREE: u8 = SC::D_EF as u8;
 
     type Val = SC::F;
@@ -60,7 +60,7 @@ impl<SC: StarkProtocolConfig> ProverBackendV2 for CpuBackendV2<SC> {
     type PcsData = StackedPcsData<SC::F, SC::Digest>;
 }
 
-impl<SC, TS> ProverDeviceV2<CpuBackendV2<SC>, TS> for CpuDeviceV2<SC>
+impl<SC, TS> ProverDevice<CpuBackend<SC>, TS> for CpuDevice<SC>
 where
     SC: StarkProtocolConfig,
     SC::F: Ord,
@@ -69,7 +69,7 @@ where
 {
 }
 
-impl<SC: StarkProtocolConfig> TraceCommitterV2<CpuBackendV2<SC>> for CpuDeviceV2<SC>
+impl<SC: StarkProtocolConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<SC>
 where
     SC::F: Ord,
 {
@@ -88,7 +88,7 @@ where
     }
 }
 
-impl<SC, TS> MultiRapProver<CpuBackendV2<SC>, TS> for CpuDeviceV2<SC>
+impl<SC, TS> MultiRapProver<CpuBackend<SC>, TS> for CpuDevice<SC>
 where
     SC: StarkProtocolConfig,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
@@ -102,8 +102,8 @@ where
     fn prove_rap_constraints(
         &self,
         transcript: &mut TS,
-        mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>>,
-        ctx: &ProvingContextV2<CpuBackendV2<SC>>,
+        mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+        ctx: &ProvingContext<CpuBackend<SC>>,
         _common_main_pcs_data: &StackedPcsData<SC::F, SC::Digest>,
     ) -> ((GkrProof<SC>, BatchConstraintProof<SC>), Vec<SC::EF>) {
         let (gkr_proof, batch_constraint_proof, r) =
@@ -112,7 +112,7 @@ where
     }
 }
 
-impl<SC, TS> OpeningProverV2<CpuBackendV2<SC>, TS> for CpuDeviceV2<SC>
+impl<SC, TS> OpeningProver<CpuBackend<SC>, TS> for CpuDevice<SC>
 where
     SC: StarkProtocolConfig,
     SC::F: Ord,
@@ -126,8 +126,8 @@ where
     fn prove_openings(
         &self,
         transcript: &mut TS,
-        mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>>,
-        ctx: ProvingContextV2<CpuBackendV2<SC>>,
+        mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+        ctx: ProvingContext<CpuBackend<SC>>,
         common_main_pcs_data: StackedPcsData<SC::F, SC::Digest>,
         r: Vec<SC::EF>,
     ) -> (StackingProof<SC>, WhirProof<SC>) {
@@ -193,24 +193,24 @@ where
     }
 }
 
-impl<SC: StarkProtocolConfig> DeviceDataTransporterV2<SC, CpuBackendV2<SC>> for CpuDeviceV2<SC> {
+impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuDevice<SC> {
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKeyV2<SC>,
-    ) -> DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>> {
+        mpk: &MultiStarkProvingKey<SC>,
+    ) -> DeviceMultiStarkProvingKey<CpuBackend<SC>> {
         let per_air = mpk
             .per_air
             .iter()
             .map(|pk| {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
                     let trace = d.mat_view(0).to_matrix();
-                    CommittedTraceDataV2 {
+                    CommittedTraceData {
                         commitment: d.commit(),
                         trace,
                         data: d.clone(),
                     }
                 });
-                DeviceStarkProvingKeyV2 {
+                DeviceStarkProvingKey {
                     air_name: pk.air_name.clone(),
                     vk: pk.vk.clone(),
                     preprocessed_data,
@@ -218,7 +218,7 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporterV2<SC, CpuBackendV2<SC>> for 
                 }
             })
             .collect();
-        DeviceMultiStarkProvingKeyV2::new(
+        DeviceMultiStarkProvingKey::new(
             per_air,
             mpk.trace_height_constraints.clone(),
             mpk.max_constraint_degree,

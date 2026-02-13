@@ -5,7 +5,7 @@ use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use thiserror::Error;
 
 use crate::{
-    keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2},
+    keygen::types::{MultiStarkVerifyingKey, MultiStarkVerifyingKey0},
     poly_common::Squarable,
     proof::Proof,
     verifier::{
@@ -47,7 +47,7 @@ pub mod whir;
 
 pub fn verify<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     config: &SC,
-    mvk: &MultiStarkVerifyingKeyV2<SC>,
+    mvk: &MultiStarkVerifyingKey<SC>,
     proof: &Proof<SC>,
     transcript: &mut TS,
 ) -> Result<(), VerifierError<SC::EF>>
@@ -66,11 +66,11 @@ where
         stacking_proof,
         whir_proof,
     } = &proof;
-    let &MultiStarkVerifyingKeyV2 {
+    let &MultiStarkVerifyingKey {
         inner: mvk,
         pre_hash: mvk_pre_hash,
     } = &mvk;
-    let &MultiStarkVerifyingKey0V2 {
+    let &MultiStarkVerifyingKey0 {
         params,
         per_air,
         trace_height_constraints,

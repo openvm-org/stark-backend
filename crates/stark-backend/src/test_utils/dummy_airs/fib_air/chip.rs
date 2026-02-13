@@ -4,9 +4,9 @@ use p3_matrix::Matrix;
 
 use super::trace::generate_trace_rows;
 use crate::{
-    prover::{AirProvingContextV2, ColMajorMatrix, CpuBackendV2},
+    prover::{AirProvingContext, ColMajorMatrix, CpuBackend},
     test_utils::dummy_airs::fib_air::air::FibonacciAir,
-    AirRef, ChipV2, StarkProtocolConfig,
+    AirRef, Chip, StarkProtocolConfig,
 };
 
 #[derive(Clone, Debug)]
@@ -30,15 +30,15 @@ impl FibonacciChip {
     }
 }
 
-impl<SC: StarkProtocolConfig> ChipV2<(), CpuBackendV2<SC>> for FibonacciChip {
-    fn generate_proving_ctx(&self, _: ()) -> AirProvingContextV2<CpuBackendV2<SC>> {
+impl<SC: StarkProtocolConfig> Chip<(), CpuBackend<SC>> for FibonacciChip {
+    fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
         let common_main = generate_trace_rows::<SC::F>(self.a, self.b, self.n);
         let a = common_main.get(0, 0).expect("matrix index out of bounds");
         let b = common_main.get(0, 1).expect("matrix index out of bounds");
         let last_val = common_main
             .get(self.n - 1, 1)
             .expect("matrix index out of bounds");
-        AirProvingContextV2::simple(
+        AirProvingContext::simple(
             ColMajorMatrix::from_row_major(&common_main),
             vec![a, b, last_val],
         )

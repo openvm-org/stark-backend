@@ -3,7 +3,11 @@ use std::sync::Arc;
 use itertools::{izip, Itertools};
 use p3_air::{Air, BaseAir};
 use p3_field::{Field, PrimeCharacteristicRing};
-use p3_matrix::{dense::RowMajorMatrix, dense::RowMajorMatrixView, stack::VerticalPair, Matrix};
+use p3_matrix::{
+    dense::{RowMajorMatrix, RowMajorMatrixView},
+    stack::VerticalPair,
+    Matrix,
+};
 use p3_maybe_rayon::prelude::*;
 
 use crate::{
@@ -16,7 +20,7 @@ use crate::{
         debug::{generate_logical_interactions, LogicalInteractions},
         SymbolicInteraction,
     },
-    keygen::types::StarkProvingKeyV2,
+    keygen::types::StarkProvingKey,
     AirRef, PartitionedBaseAir,
 };
 
@@ -151,7 +155,7 @@ pub fn check_logup<F: Field>(
 #[allow(clippy::too_many_arguments)]
 pub fn debug_constraints_and_interactions<SC: StarkProtocolConfig>(
     airs: &[AirRef<SC>],
-    pk: &[&StarkProvingKeyV2<SC>],
+    pk: &[&StarkProvingKey<SC>],
     inputs: &[AirProofRawInput<SC::F>],
 ) {
     USE_DEBUG_BUILDER.with(|debug| {

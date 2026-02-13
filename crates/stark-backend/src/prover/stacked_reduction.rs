@@ -17,8 +17,8 @@ use crate::{
             batch_fold_mle_evals, fold_mle_evals, fold_ple_evals, sumcheck_round0_deg,
             sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
-        ColMajorMatrix, ColMajorMatrixView, CpuBackendV2, CpuDeviceV2, MatrixDimensions,
-        MatrixView, ProverBackendV2,
+        ColMajorMatrix, ColMajorMatrixView, CpuBackend, CpuDevice, MatrixDimensions, MatrixView,
+        ProverBackend,
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
@@ -27,7 +27,7 @@ use crate::{
 /// claims to opening claims of column polynomials of the stacked matrix.
 ///
 /// Returns the reduction proof and the random vector `u` of length `1 + n_stack`.
-pub trait StackedReductionProver<'a, PB: ProverBackendV2, PD> {
+pub trait StackedReductionProver<'a, PB: ProverBackend, PD> {
     /// We only provide a view to the stacked `PcsData` per commitment because the WHIR prover will
     /// still use the PLE evaluations of the stacked matrices later. The order of
     /// `stacked_per_commit` is `common_main, preprocessed for trace_idx=0 (if any), cached_0 for
@@ -73,7 +73,7 @@ pub fn prove_stacked_opening_reduction<'a, SC, PB, PD, TS, SRP>(
 ) -> (StackingProof<SC>, Vec<PB::Challenge>)
 where
     SC: StarkProtocolConfig,
-    PB: ProverBackendV2<Val = SC::F, Challenge = SC::EF>,
+    PB: ProverBackend<Val = SC::F, Challenge = SC::EF>,
     TS: FiatShamirTranscript<SC>,
     SRP: StackedReductionProver<'a, PB, PD>,
 {
@@ -153,12 +153,12 @@ struct TraceViewMeta {
     lambda_rot_idx: Option<usize>,
 }
 
-impl<'a, SC: StarkProtocolConfig> StackedReductionProver<'a, CpuBackendV2<SC>, CpuDeviceV2<SC>>
+impl<'a, SC: StarkProtocolConfig> StackedReductionProver<'a, CpuBackend<SC>, CpuDevice<SC>>
     for StackedReductionCpu<'a, SC>
 where
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    CpuBackendV2<SC>: ProverBackendV2<
+    CpuBackend<SC>: ProverBackend<
         Val = SC::F,
         Challenge = SC::EF,
         PcsData = StackedPcsData<SC::F, SC::Digest>,
@@ -166,7 +166,7 @@ where
     >,
 {
     fn new(
-        device: &CpuDeviceV2<SC>,
+        device: &CpuDevice<SC>,
         stacked_per_commit: Vec<&'a StackedPcsData<SC::F, SC::Digest>>,
         need_rot_per_commit: Vec<Vec<bool>>,
         r: &[SC::EF],

@@ -13,12 +13,12 @@ use openvm_stark_backend::{
     hasher::Hasher,
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
     prover::{
-        AirProvingContextV2, CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
-        ProverBackendV2, ProvingContextV2,
+        AirProvingContext, Coordinator, CpuBackend, CpuDevice, DeviceDataTransporter,
+        ProverBackend, ProvingContext,
     },
     verifier::VerifierError,
-    AirRef, DefaultStarkEngine, FiatShamirTranscript, StarkEngineV2, StarkProtocolConfig,
-    SystemParams, TranscriptLog, VerificationDataV2,
+    AirRef, DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig,
+    SystemParams, TranscriptLog, VerificationData,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
 use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
@@ -35,7 +35,7 @@ type Hash<P> = PaddingFreeSponge<P, WIDTH, RATE, DIGEST_SIZE>;
 type Compress<P> = TruncatedPermutation<P, 2, CHUNK, WIDTH>;
 type PermHasher<P> = Hasher<F, Digest, Hash<P>, Compress<P>>;
 // Defined below
-type SC = BabyBearPoseidon2ConfigV2;
+type SC = BabyBearPoseidon2Config;
 
 // Convenience type aliases
 pub type F = BabyBear;
@@ -47,12 +47,12 @@ pub type DuplexSpongeRecorder = duplex_sponge::DuplexSpongeRecorder<F, Perm, WID
 pub type DuplexSpongeValidator = duplex_sponge::DuplexSpongeValidator<F, Perm, WIDTH, RATE>;
 
 #[derive(Clone, Debug, derive_new::new)]
-pub struct BabyBearPoseidon2ConfigV2 {
+pub struct BabyBearPoseidon2Config {
     params: SystemParams,
     hasher: PermHasher<Perm>,
 }
 
-impl StarkProtocolConfig for BabyBearPoseidon2ConfigV2 {
+impl StarkProtocolConfig for BabyBearPoseidon2Config {
     type F = F;
     type EF = EF;
     type Digest = Digest;
@@ -67,7 +67,7 @@ impl StarkProtocolConfig for BabyBearPoseidon2ConfigV2 {
     }
 }
 
-impl BabyBearPoseidon2ConfigV2 {
+impl BabyBearPoseidon2Config {
     pub fn default_from_params(params: SystemParams) -> Self {
         let perm = default_babybear_poseidon2_16();
         let hasher = Hasher::new(
@@ -78,7 +78,7 @@ impl BabyBearPoseidon2ConfigV2 {
     }
 }
 
-impl EncodableConfig for BabyBearPoseidon2ConfigV2 {
+impl EncodableConfig for BabyBearPoseidon2Config {
     fn encode_base_field<W: Write>(val: &F, writer: &mut W) -> io::Result<()> {
         encode_prime_field32(val, writer)
     }
@@ -95,7 +95,7 @@ impl EncodableConfig for BabyBearPoseidon2ConfigV2 {
     }
 }
 
-impl DecodableConfig for BabyBearPoseidon2ConfigV2 {
+impl DecodableConfig for BabyBearPoseidon2Config {
     fn decode_base_field<R: Read>(reader: &mut R) -> io::Result<F> {
         decode_prime_field32(reader)
     }
@@ -113,18 +113,18 @@ impl DecodableConfig for BabyBearPoseidon2ConfigV2 {
     }
 }
 
-pub struct BabyBearPoseidon2CpuEngineV2<TS = DuplexSponge> {
-    device: CpuDeviceV2<SC>,
+pub struct BabyBearPoseidon2CpuEngine<TS = DuplexSponge> {
+    device: CpuDevice<SC>,
     _transcript: PhantomData<TS>,
 }
 
-impl<TS> StarkEngineV2 for BabyBearPoseidon2CpuEngineV2<TS>
+impl<TS> StarkEngine for BabyBearPoseidon2CpuEngine<TS>
 where
     TS: FiatShamirTranscript<SC> + From<Perm>,
 {
     type SC = SC;
-    type PB = CpuBackendV2<SC>;
-    type PD = CpuDeviceV2<SC>;
+    type PB = CpuBackend<SC>;
+    type PD = CpuDevice<SC>;
     type TS = TS;
 
     fn config(&self) -> &SC {
@@ -142,17 +142,17 @@ where
     fn prover_from_transcript(
         &self,
         transcript: TS,
-    ) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS> {
-        CoordinatorV2::new(CpuBackendV2::new(), self.device.clone(), transcript)
+    ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
+        Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
     }
 
     fn run_test(
         &self,
         airs: Vec<AirRef<Self::SC>>,
-        ctxs: Vec<AirProvingContextV2<Self::PB>>,
-    ) -> Result<VerificationDataV2<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
+        ctxs: Vec<AirProvingContext<Self::PB>>,
+    ) -> Result<VerificationData<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
     where
-        Self::PB: ProverBackendV2<
+        Self::PB: ProverBackend<
             Val = <Self::SC as StarkProtocolConfig>::F,
             Challenge = <Self::SC as StarkProtocolConfig>::EF,
             Commitment = <Self::SC as StarkProtocolConfig>::Digest,
@@ -162,21 +162,21 @@ where
         let (pk, vk) = self.keygen(&airs);
         let device = self.prover().device;
         let d_pk = device.transport_pk_to_device(&pk);
-        let ctx = ProvingContextV2::new(ctxs.into_iter().enumerate().collect());
+        let ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
         let proof = self.prove(&d_pk, ctx);
         self.verify(&vk, &proof)?;
-        Ok(VerificationDataV2 { vk, proof })
+        Ok(VerificationData { vk, proof })
     }
 }
 
-impl<TS> DefaultStarkEngine for BabyBearPoseidon2CpuEngineV2<TS>
+impl<TS> DefaultStarkEngine for BabyBearPoseidon2CpuEngine<TS>
 where
-    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2> + From<Perm>,
+    TS: FiatShamirTranscript<BabyBearPoseidon2Config> + From<Perm>,
 {
     fn new(params: SystemParams) -> Self {
-        let config = BabyBearPoseidon2ConfigV2::default_from_params(params);
+        let config = BabyBearPoseidon2Config::default_from_params(params);
         Self {
-            device: CpuDeviceV2::new(config),
+            device: CpuDevice::new(config),
             _transcript: PhantomData,
         }
     }

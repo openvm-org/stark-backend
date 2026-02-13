@@ -46,14 +46,14 @@ pub trait Prover {
     ) -> Self::Proof;
 }
 
-pub struct CoordinatorV2<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> {
+pub struct Coordinator<SC: StarkProtocolConfig, PB: ProverBackend, PD, TS> {
     pub backend: PB,
     pub device: PD,
     pub(crate) transcript: TS,
     _sc: std::marker::PhantomData<SC>,
 }
 
-impl<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> CoordinatorV2<SC, PB, PD, TS> {
+impl<SC: StarkProtocolConfig, PB: ProverBackend, PD, TS> Coordinator<SC, PB, PD, TS> {
     pub fn new(backend: PB, device: PD, transcript: TS) -> Self {
         Self {
             backend,
@@ -64,11 +64,11 @@ impl<SC: StarkProtocolConfig, PB: ProverBackendV2, PD, TS> CoordinatorV2<SC, PB,
     }
 }
 
-impl<SC, PB, PD, TS> Prover for CoordinatorV2<SC, PB, PD, TS>
+impl<SC, PB, PD, TS> Prover for Coordinator<SC, PB, PD, TS>
 where
     SC: StarkProtocolConfig,
-    PB: ProverBackendV2<Val = SC::F, Challenge = SC::EF, Commitment = SC::Digest>,
-    PD: ProverDeviceV2<PB, TS>,
+    PB: ProverBackend<Val = SC::F, Challenge = SC::EF, Commitment = SC::Digest>,
+    PD: ProverDevice<PB, TS>,
     PD::Artifacts: Into<PD::OpeningPoints>,
     PD::PartialProof: Into<(GkrProof<SC>, BatchConstraintProof<SC>)>,
     PD::OpeningProof: Into<(StackingProof<SC>, WhirProof<SC>)>,
@@ -76,12 +76,12 @@ where
 {
     type Proof = Proof<SC>;
     type ProvingKeyView<'a>
-        = &'a DeviceMultiStarkProvingKeyV2<PB>
+        = &'a DeviceMultiStarkProvingKey<PB>
     where
         Self: 'a;
 
     type ProvingContext<'a>
-        = ProvingContextV2<PB>
+        = ProvingContext<PB>
     where
         Self: 'a;
 
@@ -99,8 +99,8 @@ where
     )]
     fn prove<'a>(
         &'a mut self,
-        mpk: &'a DeviceMultiStarkProvingKeyV2<PB>,
-        unsorted_ctx: ProvingContextV2<PB>,
+        mpk: &'a DeviceMultiStarkProvingKey<PB>,
+        unsorted_ctx: ProvingContext<PB>,
     ) -> Self::Proof {
         let transcript = &mut self.transcript;
         transcript.observe_commit(mpk.vk_pre_hash);

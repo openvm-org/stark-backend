@@ -2,8 +2,8 @@
 // Keep from v1:
 // - MatrixDimensions
 //
-// Changed ProverBackendV2 to remove Challenger(=Transcript) and non-essential types. Only keep the
-// types you really need for interfaces. Protocol specific types moved to ProverDeviceV2 (possibly
+// Changed ProverBackend to remove Challenger(=Transcript) and non-essential types. Only keep the
+// types you really need for interfaces. Protocol specific types moved to ProverDevice (possibly
 // could be renamed ProtocolProver)
 
 use std::sync::Arc;
@@ -11,10 +11,10 @@ use std::sync::Arc;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
-    keygen::types::MultiStarkProvingKeyV2,
+    keygen::types::MultiStarkProvingKey,
     prover::{
-        stacked_pcs::StackedPcsData, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
-        CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProvingContextV2,
+        stacked_pcs::StackedPcsData, AirProvingContext, ColMajorMatrix, CommittedTraceData,
+        CpuBackend, DeviceMultiStarkProvingKey, ProvingContext,
     },
     StarkProtocolConfig,
 };
@@ -28,7 +28,7 @@ pub trait MatrixDimensions {
 /// specific to a specific hardware backend.
 ///
 /// Memory allocation and copying is not handled by this trait.
-pub trait ProverBackendV2 {
+pub trait ProverBackend {
     /// Extension field degree for the challenge field `Self::Challenge` over base field
     /// `Self::Val`.
     const CHALLENGE_EXT_DEGREE: u8;
@@ -58,14 +58,14 @@ pub trait ProverBackendV2 {
     type PcsData: Send + Sync;
 }
 
-pub trait ProverDeviceV2<PB: ProverBackendV2, TS>:
-    TraceCommitterV2<PB> + MultiRapProver<PB, TS> + OpeningProverV2<PB, TS>
+pub trait ProverDevice<PB: ProverBackend, TS>:
+    TraceCommitter<PB> + MultiRapProver<PB, TS> + OpeningProver<PB, TS>
 {
 }
 
 /// Provides functionality for committing to a batch of trace matrices, possibly of different
 /// heights.
-pub trait TraceCommitterV2<PB: ProverBackendV2> {
+pub trait TraceCommitter<PB: ProverBackend> {
     fn commit(&self, traces: &[&PB::Matrix]) -> (PB::Commitment, PB::PcsData);
 }
 
@@ -77,7 +77,7 @@ pub trait TraceCommitterV2<PB: ProverBackendV2> {
 ///
 /// This trait is _not_ responsible for committing to the trace matrices or for proving polynomial
 /// openings with respect to the committed trace matrices.
-pub trait MultiRapProver<PB: ProverBackendV2, TS> {
+pub trait MultiRapProver<PB: ProverBackend, TS> {
     /// The partial proof is the proof that the trace matrices satisfy all constraints assuming that
     /// certain polynomial opening claims are validated. In other words, it is a proof that reduces
     /// the constraint satisfaction claim to certain polynomial opening claims.
@@ -89,8 +89,8 @@ pub trait MultiRapProver<PB: ProverBackendV2, TS> {
     fn prove_rap_constraints(
         &self,
         transcript: &mut TS,
-        mpk: &DeviceMultiStarkProvingKeyV2<PB>,
-        ctx: &ProvingContextV2<PB>,
+        mpk: &DeviceMultiStarkProvingKey<PB>,
+        ctx: &ProvingContext<PB>,
         common_main_pcs_data: &PB::PcsData,
     ) -> (Self::PartialProof, Self::Artifacts);
 }
@@ -99,7 +99,7 @@ pub trait MultiRapProver<PB: ProverBackendV2, TS> {
 /// collection of points. The opening point may be the same across polynomials. The polynomials may
 /// be defined over different domains and are hence of "mixed" nature. The polynomials are already
 /// committed and provided in their committed form.
-pub trait OpeningProverV2<PB: ProverBackendV2, TS> {
+pub trait OpeningProver<PB: ProverBackend, TS> {
     /// PCS opening proof on host. This should not be a reference.
     type OpeningProof: Clone + Send + Sync + Serialize + DeserializeOwned;
     type OpeningPoints;
@@ -112,24 +112,24 @@ pub trait OpeningProverV2<PB: ProverBackendV2, TS> {
     fn prove_openings(
         &self,
         transcript: &mut TS,
-        mpk: &DeviceMultiStarkProvingKeyV2<PB>,
-        ctx: ProvingContextV2<PB>,
+        mpk: &DeviceMultiStarkProvingKey<PB>,
+        ctx: ProvingContext<PB>,
         common_main_pcs_data: PB::PcsData,
         points: Self::OpeningPoints,
     ) -> Self::OpeningProof;
 }
 
 /// Trait to manage data transport of prover types from host to device.
-pub trait DeviceDataTransporterV2<SC, PB>
+pub trait DeviceDataTransporter<SC, PB>
 where
     SC: StarkProtocolConfig,
-    PB: ProverBackendV2<Val = SC::F, Challenge = SC::EF, Commitment = SC::Digest>,
+    PB: ProverBackend<Val = SC::F, Challenge = SC::EF, Commitment = SC::Digest>,
 {
     /// Transport the proving key to the device, filtering for only the provided `air_ids`.
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKeyV2<SC>,
-    ) -> DeviceMultiStarkProvingKeyV2<PB>;
+        mpk: &MultiStarkProvingKey<SC>,
+    ) -> DeviceMultiStarkProvingKey<PB>;
 
     fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<SC::F>) -> PB::Matrix;
 
@@ -142,12 +142,12 @@ where
 
     fn transport_committed_trace_data_to_device(
         &self,
-        committed_trace: &CommittedTraceDataV2<CpuBackendV2<SC>>,
-    ) -> CommittedTraceDataV2<PB> {
+        committed_trace: &CommittedTraceData<CpuBackend<SC>>,
+    ) -> CommittedTraceData<PB> {
         let trace = self.transport_matrix_to_device(&committed_trace.trace);
         let data = self.transport_pcs_data_to_device(committed_trace.data.as_ref());
 
-        CommittedTraceDataV2 {
+        CommittedTraceData {
             commitment: committed_trace.commitment,
             trace,
             data: Arc::new(data),
@@ -156,8 +156,8 @@ where
 
     fn transport_proving_ctx_to_device(
         &self,
-        ctx: &ProvingContextV2<CpuBackendV2<SC>>,
-    ) -> ProvingContextV2<PB> {
+        ctx: &ProvingContext<CpuBackend<SC>>,
+    ) -> ProvingContext<PB> {
         let per_trace = ctx
             .per_trace
             .iter()
@@ -168,7 +168,7 @@ where
                     .iter()
                     .map(|cd| self.transport_committed_trace_data_to_device(cd))
                     .collect();
-                let trace_ctx_gpu = AirProvingContextV2::new(
+                let trace_ctx_gpu = AirProvingContext::new(
                     cached_mains,
                     common_main,
                     trace_ctx.public_values.clone(),
@@ -176,7 +176,7 @@ where
                 (*air_idx, trace_ctx_gpu)
             })
             .collect();
-        ProvingContextV2::new(per_trace)
+        ProvingContext::new(per_trace)
     }
 
     // ==================================================================================

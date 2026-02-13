@@ -4,16 +4,14 @@ use std::{
 };
 
 use itertools::Itertools;
-use crate::air_builders::symbolic::{
-    symbolic_expression::SymbolicEvaluator, SymbolicConstraints,
-};
 use p3_field::{batch_multiplicative_inverse, Field, PrimeCharacteristicRing};
 use thiserror::Error;
 use tracing::{debug, instrument};
 
 use crate::{
+    air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
     calculate_n_logup,
-    keygen::types::MultiStarkVerifyingKey0V2,
+    keygen::types::MultiStarkVerifyingKey0,
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     verifier::{
@@ -54,7 +52,7 @@ pub enum BatchConstraintError<EF: core::fmt::Debug + core::fmt::Display + Partia
 #[instrument(level = "debug", skip_all)]
 pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
-    mvk: &MultiStarkVerifyingKey0V2<SC>,
+    mvk: &MultiStarkVerifyingKey0<SC>,
     public_values: &[Vec<SC::F>],
     gkr_proof: &GkrProof<SC>,
     batch_proof: &BatchConstraintProof<SC>,
@@ -95,7 +93,8 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
     let mut p_xi_claim = SC::EF::ZERO;
     let mut q_xi_claim = alpha_logup;
     if total_interactions > 0 {
-        (p_xi_claim, q_xi_claim, xi) = verify_gkr::<SC, TS>(gkr_proof, transcript, l_skip + n_logup)?;
+        (p_xi_claim, q_xi_claim, xi) =
+            verify_gkr::<SC, TS>(gkr_proof, transcript, l_skip + n_logup)?;
         debug_assert_eq!(xi.len(), l_skip + n_logup);
     }
 

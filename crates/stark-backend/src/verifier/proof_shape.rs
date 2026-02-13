@@ -4,7 +4,7 @@ use itertools::{izip, Itertools};
 use thiserror::Error;
 
 use crate::{
-    calculate_n_logup, keygen::types::MultiStarkVerifyingKey0V2, proof::Proof,
+    calculate_n_logup, keygen::types::MultiStarkVerifyingKey0, proof::Proof,
     prover::stacked_pcs::StackedLayout, StarkProtocolConfig,
 };
 
@@ -304,7 +304,7 @@ pub enum WhirProofShapeError {
 }
 
 pub fn verify_proof_shape<SC: StarkProtocolConfig>(
-    mvk: &MultiStarkVerifyingKey0V2<SC>,
+    mvk: &MultiStarkVerifyingKey0<SC>,
     proof: &Proof<SC>,
 ) -> Result<Vec<StackedLayout>, ProofShapeError> {
     // TRACE HEIGHTS AND PUBLIC VALUES

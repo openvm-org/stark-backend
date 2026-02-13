@@ -11,8 +11,8 @@ use openvm_stark_backend::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
         sumcheck::{sumcheck_multilinear, sumcheck_prismalinear},
-        AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MatrixDimensions,
-        MultiRapProver, ProvingContextV2,
+        AirProvingContext, ColMajorMatrix, DeviceDataTransporter, MatrixDimensions, MultiRapProver,
+        ProvingContext,
     },
     test_utils::{
         default_test_params_small,
@@ -36,7 +36,7 @@ use openvm_stark_backend::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    AirRef, ChipV2, DefaultStarkEngine, FiatShamirTranscript, StarkEngineV2, StarkProtocolConfig,
+    AirRef, Chip, DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig,
     SystemParams, TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
@@ -50,9 +50,9 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use test_case::test_case;
 use tracing::{debug, Level};
 
-type SC = BabyBearPoseidon2ConfigV2;
+type SC = BabyBearPoseidon2Config;
 
-pub fn test_engine_small() -> BabyBearPoseidon2CpuEngineV2<DuplexSponge> {
+pub fn test_engine_small() -> BabyBearPoseidon2CpuEngine<DuplexSponge> {
     setup_tracing();
     DefaultStarkEngine::new(default_test_params_small())
 }
@@ -154,7 +154,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
         };
-        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+        let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params);
         let (vk, proof) = InteractionsFixture11.keygen_and_prove(&engine);
         verify_proof_shape(&vk.inner, &proof)?;
     }
@@ -221,7 +221,7 @@ fn test_stacked_opening_reduction(
     let engine = test_engine_small();
     let params = engine.config().params().clone();
 
-    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params);
     let config = engine.config();
     let params = config.params();
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
@@ -335,7 +335,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
         .map(|(air_idx, trace)| {
             (
                 air_idx,
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&trace)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&trace)),
             )
         })
         .collect();
@@ -343,7 +343,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
 
     // 6. Update air_ids in fib context and combine contexts
     per_trace.push((per_trace.len(), fib_ctx));
-    let combined_ctx = ProvingContextV2::new(per_trace).into_sorted();
+    let combined_ctx = ProvingContext::new(per_trace).into_sorted();
 
     let proof = engine.prove(&combined_pk, combined_ctx);
     engine.verify(&combined_pk.get_vk(), &proof).unwrap();
@@ -375,7 +375,7 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
     };
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
 
-    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::new(params);
     let (pk, vk) = fib.keygen(&engine);
     let mut recorder = default_duplex_sponge_recorder();
     let proof = fib.prove_from_transcript(&engine, &pk, &mut recorder);
@@ -393,7 +393,7 @@ fn test_dummy_interactions_roundtrip(
     k_whir: usize,
 ) -> Result<(), VerifierError<EF>> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
-    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::new(params);
     let fx = InteractionsFixture11;
     let (pk, vk) = fx.keygen(&engine);
 
@@ -414,7 +414,7 @@ fn test_cached_trace_roundtrip(
 ) -> Result<(), VerifierError<EF>> {
     setup_tracing_with_log_level(Level::DEBUG);
     let params = test_system_params_small(l_skip, n_stack, k_whir);
-    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::new(params);
     let fx = CachedFixture11::new(engine.config().clone());
     let (pk, vk) = fx.keygen(&engine);
 
@@ -434,7 +434,7 @@ fn test_preprocessed_trace_roundtrip(
 ) -> Result<(), VerifierError<EF>> {
     use itertools::Itertools;
     let params = test_system_params_small(l_skip, n_stack, k_whir);
-    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::new(params);
     let log_trace_degree = 8;
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
@@ -589,7 +589,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
 fn test_matrix_stacking_overflow() {
     setup_tracing();
     let params = test_system_params_small(3, 5, 3);
-    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params);
     let fx = SelfInteractionFixture {
         widths: vec![4, 7, 8, 8, 10],
         log_height: 1,
@@ -653,11 +653,11 @@ fn test_optional_air() {
             fields: vec![vec![1], vec![2], vec![3]],
         });
 
-        let ctx = ProvingContextV2::new(vec![
+        let ctx = ProvingContext::new(vec![
             (0, fib_air_ctx),
-            (1, ChipV2::generate_proving_ctx(&s1, ())),
-            (2, ChipV2::generate_proving_ctx(&s2, ())),
-            (3, ChipV2::generate_proving_ctx(&r1, ())),
+            (1, Chip::generate_proving_ctx(&s1, ())),
+            (2, Chip::generate_proving_ctx(&s2, ())),
+            (3, Chip::generate_proving_ctx(&r1, ())),
         ]);
         let proof = engine.prove(&d_pk, ctx);
         engine.verify(&pk.get_vk(), &proof).unwrap();
@@ -678,9 +678,9 @@ fn test_optional_air() {
             fields: vec![vec![1], vec![2], vec![3]],
         });
 
-        let ctx = ProvingContextV2::new(vec![
-            (1, ChipV2::generate_proving_ctx(&s1, ())),
-            (3, ChipV2::generate_proving_ctx(&r1, ())),
+        let ctx = ProvingContext::new(vec![
+            (1, Chip::generate_proving_ctx(&s1, ())),
+            (3, Chip::generate_proving_ctx(&r1, ())),
         ]);
         let proof = engine.prove(&d_pk, ctx);
         engine.verify(&pk.get_vk(), &proof).unwrap();
@@ -700,7 +700,7 @@ fn test_optional_air() {
         let pk = &pk;
         let engine = &engine;
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let ctx = ProvingContextV2::new(vec![(3, ChipV2::generate_proving_ctx(&r1, ()))]);
+            let ctx = ProvingContext::new(vec![(3, Chip::generate_proving_ctx(&r1, ()))]);
             let proof = engine.prove(d_pk, ctx);
             engine.verify(&pk.get_vk(), &proof)
         }));
@@ -814,8 +814,8 @@ fn test_interaction_multi_rows_neg() {
         engine.run_test(
             any_air_arc_vec![sender_air, receiver_air],
             vec![
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace)),
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
             ],
         )
     }));
@@ -839,7 +839,7 @@ fn test_interaction_all_zero_sender() {
     engine
         .run_test(
             any_air_arc_vec![sender_air],
-            vec![AirProvingContextV2::simple_no_pis(
+            vec![AirProvingContext::simple_no_pis(
                 ColMajorMatrix::from_row_major(&sender_trace),
             )],
         )
@@ -875,9 +875,9 @@ fn test_interaction_multi_senders() {
         .run_test(
             any_air_arc_vec![sender_air, sender_air, receiver_air],
             vec![
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
             ],
         )
         .expect("Verification failed");
@@ -914,9 +914,9 @@ fn test_interaction_multi_senders_neg() {
         engine.run_test(
             any_air_arc_vec![sender_air, sender_air, receiver_air],
             vec![
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
             ],
         )
     }));
@@ -953,14 +953,10 @@ fn test_interaction_multi_sender_receiver() {
         .run_test(
             any_air_arc_vec![sender_air, sender_air, receiver_air, receiver_air],
             vec![
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(
-                    &receiver_trace1,
-                )),
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(
-                    &receiver_trace2,
-                )),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace1)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace2)),
             ],
         )
         .expect("Verification failed");
@@ -999,8 +995,8 @@ fn test_interaction_cached_trace_neg() {
 
     let airs = vec![receiver_chip.air(), sender_chip.air()];
     let ctxs = vec![
-        ChipV2::generate_proving_ctx(&receiver_chip, ()),
-        ChipV2::generate_proving_ctx(&sender_chip, ()),
+        Chip::generate_proving_ctx(&receiver_chip, ()),
+        Chip::generate_proving_ctx(&sender_chip, ()),
     ];
 
     disable_debug_builder();

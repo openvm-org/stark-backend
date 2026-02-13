@@ -4,10 +4,10 @@ use derivative::Derivative;
 
 use crate::{
     keygen::types::{
-        LinearConstraint, MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2,
+        LinearConstraint, MultiStarkVerifyingKey, MultiStarkVerifyingKey0, StarkVerifyingKey,
     },
     proof::TraceVData,
-    prover::{MatrixDimensions, ProverBackendV2},
+    prover::{MatrixDimensions, ProverBackend},
     StarkProtocolConfig, SystemParams,
 };
 
@@ -15,7 +15,7 @@ use crate::{
 /// both preprocessed trace and cached trace.
 #[derive(Derivative)]
 #[derivative(Clone(bound = "PB::Matrix: Clone"))]
-pub struct CommittedTraceDataV2<PB: ProverBackendV2> {
+pub struct CommittedTraceData<PB: ProverBackend> {
     /// The polynomial commitment.
     pub commitment: PB::Commitment,
     /// The trace matrix, unstacked, in evaluation form.
@@ -29,8 +29,8 @@ pub struct CommittedTraceDataV2<PB: ProverBackendV2> {
 ///
 /// Ordering is always by AIR ID and includes all AIRs, including ones that may have empty traces.
 #[derive(derive_new::new)]
-pub struct DeviceMultiStarkProvingKeyV2<PB: ProverBackendV2> {
-    pub per_air: Vec<DeviceStarkProvingKeyV2<PB>>,
+pub struct DeviceMultiStarkProvingKey<PB: ProverBackend> {
+    pub per_air: Vec<DeviceStarkProvingKey<PB>>,
     pub trace_height_constraints: Vec<LinearConstraint>,
     /// Maximum degree of constraints across all AIRs
     pub max_constraint_degree: usize,
@@ -40,24 +40,24 @@ pub struct DeviceMultiStarkProvingKeyV2<PB: ProverBackendV2> {
 
 /// The proving key after prover-specific data has been transferred to device. The host data (e.g.,
 /// vkey) is owned by this struct.
-pub struct DeviceStarkProvingKeyV2<PB: ProverBackendV2> {
+pub struct DeviceStarkProvingKey<PB: ProverBackend> {
     /// Type name of the AIR, for display purposes only
     pub air_name: String,
-    pub vk: StarkVerifyingKeyV2<PB::Val, PB::Commitment>,
+    pub vk: StarkVerifyingKey<PB::Val, PB::Commitment>,
     /// Prover only data for preprocessed trace
-    pub preprocessed_data: Option<CommittedTraceDataV2<PB>>,
+    pub preprocessed_data: Option<CommittedTraceData<PB>>,
     pub other_data: PB::OtherAirData,
 }
 
 #[derive(derive_new::new)]
-pub struct ProvingContextV2<PB: ProverBackendV2> {
-    /// For each AIR with non-empty trace, the pair of (AIR ID, [AirProvingContextV2]), where AIR
+pub struct ProvingContext<PB: ProverBackend> {
+    /// For each AIR with non-empty trace, the pair of (AIR ID, [AirProvingContext]), where AIR
     /// ID is with respect to the vkey ordering.
-    pub per_trace: Vec<(usize, AirProvingContextV2<PB>)>,
+    pub per_trace: Vec<(usize, AirProvingContext<PB>)>,
 }
 
 #[derive(derive_new::new)]
-pub struct AirProvingContextV2<PB: ProverBackendV2> {
+pub struct AirProvingContext<PB: ProverBackend> {
     /// Cached main trace matrices as `PcsData`. The original trace matrix should be extractable as
     /// a view from the `PcsData`. The `PcsData` should also contain the commitment value. Cached
     /// trace commitments have a single matrix per commitment.
@@ -65,7 +65,7 @@ pub struct AirProvingContextV2<PB: ProverBackendV2> {
     /// The `PcsData` is kept inside an `Arc` to emphasize that this data is cached and may be
     /// shared between multiple proving contexts. In particular, it is not typically safe to mutate
     /// the data during a proving job.
-    pub cached_mains: Vec<CommittedTraceDataV2<PB>>,
+    pub cached_mains: Vec<CommittedTraceData<PB>>,
     /// Common main trace matrix
     pub common_main: PB::Matrix,
     /// Public values
@@ -73,7 +73,7 @@ pub struct AirProvingContextV2<PB: ProverBackendV2> {
 }
 
 /// Proof on the host, with respect to the host types in the generic `PB`.
-pub struct HostProof<SC: StarkProtocolConfig, PB: ProverBackendV2, ConstraintsProof, OpeningProof> {
+pub struct HostProof<SC: StarkProtocolConfig, PB: ProverBackend, ConstraintsProof, OpeningProof> {
     /// The commitment to the data in common_main.
     pub common_main_commit: PB::Commitment,
 
@@ -91,33 +91,33 @@ pub struct HostProof<SC: StarkProtocolConfig, PB: ProverBackendV2, ConstraintsPr
     pub opening_proof: OpeningProof,
 }
 
-impl<PB: ProverBackendV2> CommittedTraceDataV2<PB> {
+impl<PB: ProverBackend> CommittedTraceData<PB> {
     #[inline(always)]
     pub fn height(&self) -> usize {
         self.trace.height()
     }
 }
 
-impl<PB: ProverBackendV2> DeviceMultiStarkProvingKeyV2<PB> {
-    pub fn get_vk<SC>(&self) -> MultiStarkVerifyingKeyV2<SC>
+impl<PB: ProverBackend> DeviceMultiStarkProvingKey<PB> {
+    pub fn get_vk<SC>(&self) -> MultiStarkVerifyingKey<SC>
     where
         SC: StarkProtocolConfig<F = PB::Val, Digest = PB::Commitment>,
     {
         let per_air = self.per_air.iter().map(|pk| pk.vk.clone()).collect();
-        let inner = MultiStarkVerifyingKey0V2 {
+        let inner = MultiStarkVerifyingKey0 {
             params: self.params.clone(),
             per_air,
             trace_height_constraints: self.trace_height_constraints.clone(),
         };
-        MultiStarkVerifyingKeyV2 {
+        MultiStarkVerifyingKey {
             inner,
             pre_hash: self.vk_pre_hash.clone(),
         }
     }
 }
 
-impl<PB: ProverBackendV2> IntoIterator for ProvingContextV2<PB> {
-    type Item = (usize, AirProvingContextV2<PB>);
+impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
+    type Item = (usize, AirProvingContext<PB>);
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -125,7 +125,7 @@ impl<PB: ProverBackendV2> IntoIterator for ProvingContextV2<PB> {
     }
 }
 
-impl<PB: ProverBackendV2> ProvingContextV2<PB> {
+impl<PB: ProverBackend> ProvingContext<PB> {
     pub fn common_main_traces(&self) -> impl Iterator<Item = (usize, &PB::Matrix)> {
         self.per_trace
             .iter()
@@ -148,7 +148,7 @@ impl<PB: ProverBackendV2> ProvingContextV2<PB> {
     }
 }
 
-impl<PB: ProverBackendV2> AirProvingContextV2<PB> {
+impl<PB: ProverBackend> AirProvingContext<PB> {
     pub fn simple(common_main_trace: PB::Matrix, public_values: Vec<PB::Val>) -> Self {
         Self::new(vec![], common_main_trace, public_values)
     }

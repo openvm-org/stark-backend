@@ -23,8 +23,8 @@ use crate::{
             batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round0_deg,
             sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
-        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions,
-        ProverBackendV2, ProvingContextV2, StridedColMajorMatrixView,
+        ColMajorMatrix, CpuBackend, DeviceMultiStarkProvingKey, MatrixDimensions, ProverBackend,
+        ProvingContext, StridedColMajorMatrixView,
     },
     StarkProtocolConfig,
 };
@@ -72,11 +72,11 @@ impl<'a, SC: StarkProtocolConfig> LogupZerocheckCpu<'a, SC>
 where
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    CpuBackendV2<SC>: ProverBackendV2<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
+    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
 {
     pub fn new(
-        pk: &'a DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>>,
-        ctx: &ProvingContextV2<CpuBackendV2<SC>>,
+        pk: &'a DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+        ctx: &ProvingContext<CpuBackend<SC>>,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: SC::EF,
@@ -215,7 +215,7 @@ where
     /// form for uniformity and debugging since this interpolation is inexpensive.
     pub fn sumcheck_uni_round0_polys(
         &mut self,
-        ctx: &ProvingContextV2<CpuBackendV2<SC>>,
+        ctx: &ProvingContext<CpuBackend<SC>>,
         lambda: SC::EF,
     ) -> Vec<UnivariatePoly<SC::EF>> {
         let n_logup = self.n_logup;
@@ -400,7 +400,7 @@ where
     /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
     /// Folding _could_ directly mutate inplace the trace matrices in `ctx` as they will not be
     /// needed after this.
-    pub fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<CpuBackendV2<SC>>, r_0: SC::EF) {
+    pub fn fold_ple_evals(&mut self, ctx: &ProvingContext<CpuBackend<SC>>, r_0: SC::EF) {
         let l_skip = self.l_skip;
         // "Fold" all PLE evaluations by interpolating and evaluating at `r_0`.
         // NOTE: after this folding, \hat{T} and \hat{T_{rot}} will be treated as completely

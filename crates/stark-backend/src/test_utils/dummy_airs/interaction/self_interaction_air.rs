@@ -5,8 +5,8 @@ use p3_matrix::{dense::RowMajorMatrix, Matrix};
 
 use crate::{
     interaction::{BusIndex, InteractionBuilder},
-    prover::{AirProvingContextV2, ColMajorMatrix, CpuBackendV2},
-    ChipV2, PartitionedBaseAir, StarkProtocolConfig,
+    prover::{AirProvingContext, ColMajorMatrix, CpuBackend},
+    Chip, PartitionedBaseAir, StarkProtocolConfig,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -70,8 +70,8 @@ pub struct SelfInteractionChip {
     pub log_height: usize,
 }
 
-impl<SC: StarkProtocolConfig> ChipV2<(), CpuBackendV2<SC>> for SelfInteractionChip {
-    fn generate_proving_ctx(&self, _: ()) -> AirProvingContextV2<CpuBackendV2<SC>> {
+impl<SC: StarkProtocolConfig> Chip<(), CpuBackend<SC>> for SelfInteractionChip {
+    fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
         assert!(self.width > 0);
         let mut trace = vec![SC::F::ZERO; (1 << self.log_height) * self.width];
         for (row_idx, chunk) in trace.chunks_mut(self.width).enumerate() {
@@ -80,6 +80,6 @@ impl<SC: StarkProtocolConfig> ChipV2<(), CpuBackendV2<SC>> for SelfInteractionCh
             }
         }
         let rm = RowMajorMatrix::new(trace, self.width);
-        AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&rm))
+        AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&rm))
     }
 }

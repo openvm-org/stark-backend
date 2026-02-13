@@ -15,10 +15,10 @@ use crate::{
     air_builders::PartitionedAirBuilder,
     interaction::{BusIndex, InteractionBuilder},
     prover::{
-        stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
-        CpuBackendV2,
+        stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData,
+        CpuBackend,
     },
-    AirRef, ChipV2, PartitionedBaseAir, StarkProtocolConfig,
+    AirRef, Chip, PartitionedBaseAir, StarkProtocolConfig,
 };
 
 pub struct DummyInteractionCols;
@@ -175,15 +175,15 @@ impl<SC> DummyInteractionChip<SC> {
     }
 }
 
-impl<SC: StarkProtocolConfig> ChipV2<(), CpuBackendV2<SC>> for DummyInteractionChip<SC> {
-    fn generate_proving_ctx(&self, _: ()) -> AirProvingContextV2<CpuBackendV2<SC>> {
+impl<SC: StarkProtocolConfig> Chip<(), CpuBackend<SC>> for DummyInteractionChip<SC> {
+    fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
         assert!(self.data.is_some());
         let data = self.data.clone().unwrap();
         if self.air.partition {
             self.generate_traces_with_partition(data)
         } else {
             let trace = self.generate_traces_without_partition(data);
-            AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&trace))
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&trace))
         }
     }
 }
@@ -192,7 +192,7 @@ impl<SC: StarkProtocolConfig> DummyInteractionChip<SC> {
     pub fn generate_traces_with_partition(
         &self,
         data: DummyInteractionData,
-    ) -> AirProvingContextV2<CpuBackendV2<SC>> {
+    ) -> AirProvingContext<CpuBackend<SC>> {
         let DummyInteractionData {
             mut count,
             mut fields,
@@ -222,8 +222,8 @@ impl<SC: StarkProtocolConfig> DummyInteractionChip<SC> {
         );
 
         let common_main_rm = RowMajorMatrix::new(common_main_val, 1);
-        AirProvingContextV2 {
-            cached_mains: vec![CommittedTraceDataV2 {
+        AirProvingContext {
+            cached_mains: vec![CommittedTraceData {
                 commitment: commit,
                 trace: cached_trace,
                 data: Arc::new(data),

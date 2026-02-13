@@ -1,13 +1,13 @@
 use std::fmt::Display;
 
 use itertools::zip_eq;
-use crate::keygen::types::TraceWidth;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::{
+    keygen::types::TraceWidth,
     proof::TraceVData,
-    prover::{DeviceMultiStarkProvingKeyV2, ProverBackendV2},
+    prover::{DeviceMultiStarkProvingKey, ProverBackend},
     StarkProtocolConfig,
 };
 
@@ -74,8 +74,8 @@ impl Display for SingleTraceMetrics {
 }
 
 /// heights are the trace heights for each air
-pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackendV2>(
-    mpk: &DeviceMultiStarkProvingKeyV2<PB>,
+pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackend>(
+    mpk: &DeviceMultiStarkProvingKey<PB>,
     trace_vdata: &[Option<TraceVData<SC>>],
 ) -> TraceMetrics {
     let heights = trace_vdata

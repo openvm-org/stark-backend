@@ -12,13 +12,13 @@ use openvm_stark_backend::{
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::*;
 
-type ConcreteSC = BabyBearPoseidon2ConfigV2;
+type ConcreteSC = BabyBearPoseidon2Config;
 
 fn test_proof_encode_decode<Fx: TestFixture<ConcreteSC>>(
     fx: Fx,
     params: SystemParams,
 ) -> io::Result<()> {
-    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::new(params);
     let pk = fx.keygen(&engine).0;
     let proof = fx.prove_from_transcript(&engine, &pk, &mut default_duplex_sponge_recorder());
 
@@ -48,7 +48,7 @@ fn test_interactions_proof_encode_decode() -> io::Result<()> {
 #[test]
 fn test_cached_proof_encode_decode() -> io::Result<()> {
     let params = test_system_params_small(2, 5, 3);
-    let config = BabyBearPoseidon2ConfigV2::default_from_params(params.clone());
+    let config = BabyBearPoseidon2Config::default_from_params(params.clone());
     let fx = CachedFixture11::new(config);
     test_proof_encode_decode(fx, params)
 }

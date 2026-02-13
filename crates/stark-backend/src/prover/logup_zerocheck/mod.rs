@@ -19,8 +19,8 @@ use crate::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
-        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions, MatrixView,
-        ProverBackendV2, ProvingContextV2,
+        ColMajorMatrix, CpuBackend, DeviceMultiStarkProvingKey, MatrixDimensions, MatrixView,
+        ProverBackend, ProvingContext,
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
@@ -36,14 +36,14 @@ pub use single::*;
 #[instrument(level = "info", skip_all)]
 pub fn prove_zerocheck_and_logup<SC: StarkProtocolConfig, TS>(
     transcript: &mut TS,
-    mpk: &DeviceMultiStarkProvingKeyV2<CpuBackendV2<SC>>,
-    ctx: &ProvingContextV2<CpuBackendV2<SC>>,
+    mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+    ctx: &ProvingContext<CpuBackend<SC>>,
 ) -> (GkrProof<SC>, BatchConstraintProof<SC>, Vec<SC::EF>)
 where
     TS: FiatShamirTranscript<SC>,
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    CpuBackendV2<SC>: ProverBackendV2<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
+    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;

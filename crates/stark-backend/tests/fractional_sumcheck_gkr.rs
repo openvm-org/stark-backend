@@ -6,7 +6,7 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
 use p3_field::PrimeCharacteristicRing;
 
-type SC = BabyBearPoseidon2ConfigV2;
+type SC = BabyBearPoseidon2Config;
 
 #[test]
 fn test_multiple_rounds_shape() {

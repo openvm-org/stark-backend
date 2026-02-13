@@ -3,7 +3,7 @@ use openvm_stark_sdk::{config::baby_bear_poseidon2::*, p3_baby_bear::BabyBear};
 use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
 use p3_field::PrimeCharacteristicRing;
 
-type SC = BabyBearPoseidon2ConfigV2;
+type SC = BabyBearPoseidon2Config;
 
 const WIDTH: usize = 16;
 const CHUNK: usize = 8;
@@ -20,13 +20,13 @@ fn test_sponge() {
     for i in 0..5 {
         for _ in 0..(i + 1) * i {
             let a: BabyBear = CanSample::sample(&mut challenger);
-            let b = FiatShamirTranscript::<BabyBearPoseidon2ConfigV2>::sample(&mut sponge);
+            let b = FiatShamirTranscript::<BabyBearPoseidon2Config>::sample(&mut sponge);
             assert_eq!(a, b);
         }
 
         for j in 0..i * i {
             CanObserve::observe(&mut challenger, BabyBear::from_usize(j));
-            FiatShamirTranscript::<BabyBearPoseidon2ConfigV2>::observe(
+            FiatShamirTranscript::<BabyBearPoseidon2Config>::observe(
                 &mut sponge,
                 BabyBear::from_usize(j),
             );

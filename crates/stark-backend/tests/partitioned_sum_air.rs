@@ -8,11 +8,9 @@ use std::{
 use itertools::Itertools;
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
-    prover::{
-        stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
-    },
+    prover::{stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData},
     utils::disable_debug_builder,
-    DefaultStarkEngine, PartitionedBaseAir, StarkEngineV2, StarkProtocolConfig,
+    DefaultStarkEngine, PartitionedBaseAir, StarkEngine, StarkProtocolConfig,
 };
 use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
 use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
@@ -64,7 +62,7 @@ fn prove_and_verify_sum_air(
 ) -> Result<(), openvm_stark_backend::verifier::VerifierError<EF>> {
     assert_eq!(x.len(), ys.len());
 
-    let engine: BabyBearPoseidon2CpuEngineV2<DuplexSponge> =
+    let engine: BabyBearPoseidon2CpuEngine<DuplexSponge> =
         DefaultStarkEngine::new(openvm_stark_backend::test_utils::default_test_params_small());
     let config = engine.config();
     let params = config.params();
@@ -85,8 +83,8 @@ fn prove_and_verify_sum_air(
         &[&y_trace],
     );
 
-    let trace_ctx = AirProvingContextV2 {
-        cached_mains: vec![CommittedTraceDataV2 {
+    let trace_ctx = AirProvingContext {
+        cached_mains: vec![CommittedTraceData {
             commitment: commit,
             trace: y_trace,
             data: Arc::new(data),
