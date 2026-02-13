@@ -1,4 +1,4 @@
-name: Stark Backend Tests
+name: CPU Tests
 
 on:
   push:
@@ -17,12 +17,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  stark-backend:
+  tests:
     name: stark-backend crate tests
     runs-on:
       - runs-on=${{ github.run_id }}/runner=16cpu-linux-arm64
 
     steps:
+      - uses: runs-on/action@v2
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         env:
@@ -30,7 +31,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
 
-      - name: Run tests
+      - name: Run stark-backend tests
         working-directory: crates/stark-backend
+        run: |
+          cargo nextest run
+
+      - name: Run stark-sdk tests
+        working-directory: crates/stark-sdk
         run: |
           cargo nextest run

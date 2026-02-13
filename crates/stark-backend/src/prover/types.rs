@@ -1,54 +1,41 @@
-use std::sync::Arc;
+use std::{cmp::Reverse, sync::Arc};
 
 use derivative::Derivative;
-use itertools::Itertools;
-use p3_field::Field;
-use p3_matrix::dense::RowMajorMatrix;
-use serde::{Deserialize, Serialize};
 
-use super::hal::ProverBackend;
 use crate::{
-    config::{Com, RapPhaseSeqPartialProof, StarkGenericConfig, Val},
-    keygen::types::{LinearConstraint, StarkVerifyingKey},
-    proof::{AirProofData, Commitments, OpeningProof, Proof},
+    keygen::types::{
+        LinearConstraint, MultiStarkVerifyingKey, MultiStarkVerifyingKey0, StarkVerifyingKey,
+    },
+    proof::TraceVData,
+    prover::{MatrixDimensions, ProverBackend},
+    StarkProtocolConfig, SystemParams,
 };
 
-/// A view of the proving key after it has been transferred to device. The view is filtered for only
-/// the proving keys corresponding to specific `air_ids`.
-pub struct DeviceMultiStarkProvingKeyView<'a, PB: ProverBackend> {
-    pub(super) air_ids: Vec<usize>,
-    pub per_air: Vec<&'a DeviceStarkProvingKey<PB>>,
-    /// Each [LinearConstraint] is indexed by AIR ID.
-    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in
-    /// `per_air`.
-    pub trace_height_constraints: &'a [LinearConstraint],
-    pub vk_pre_hash: &'a PB::Commitment,
+/// The committed trace data for a single trace matrix. This type is used to store prover data for
+/// both preprocessed trace and cached trace.
+#[derive(Derivative)]
+#[derivative(Clone(bound = "PB::Matrix: Clone"))]
+pub struct CommittedTraceData<PB: ProverBackend> {
+    /// The polynomial commitment.
+    pub commitment: PB::Commitment,
+    /// The trace matrix, unstacked, in evaluation form.
+    pub trace: PB::Matrix,
+    /// The PCS data for a single committed trace matrix.
+    pub data: Arc<PB::PcsData>,
 }
 
 /// The proving key for a circuit consisting of multiple AIRs, after prover-specific data has been
 /// transferred to device. The host data (e.g., vkey) is owned by this struct.
+///
+/// Ordering is always by AIR ID and includes all AIRs, including ones that may have empty traces.
 #[derive(derive_new::new)]
 pub struct DeviceMultiStarkProvingKey<PB: ProverBackend> {
     pub per_air: Vec<DeviceStarkProvingKey<PB>>,
-    /// Each [LinearConstraint] is indexed by AIR ID.
-    /// **Caution**: the linear constraints are **not** filtered for only the AIRs appearing in
-    /// `per_air`.
     pub trace_height_constraints: Vec<LinearConstraint>,
+    /// Maximum degree of constraints across all AIRs
+    pub max_constraint_degree: usize,
+    pub params: SystemParams,
     pub vk_pre_hash: PB::Commitment,
-}
-
-impl<PB: ProverBackend> DeviceMultiStarkProvingKey<PB> {
-    pub fn view(&self, air_ids: Vec<usize>) -> DeviceMultiStarkProvingKeyView<'_, PB> {
-        let deduped: Vec<_> = air_ids.iter().dedup().collect();
-        assert_eq!(deduped.len(), air_ids.len(), "Duplicate AIR IDs found");
-        let per_air = air_ids.iter().map(|&id| &self.per_air[id]).collect();
-        DeviceMultiStarkProvingKeyView {
-            air_ids,
-            per_air,
-            trace_height_constraints: &self.trace_height_constraints,
-            vk_pre_hash: &self.vk_pre_hash,
-        }
-    }
 }
 
 /// The proving key after prover-specific data has been transferred to device. The host data (e.g.,
@@ -58,45 +45,74 @@ pub struct DeviceStarkProvingKey<PB: ProverBackend> {
     pub air_name: String,
     pub vk: StarkVerifyingKey<PB::Val, PB::Commitment>,
     /// Prover only data for preprocessed trace
-    pub preprocessed_data: Option<SingleCommitPreimage<PB::Matrix, PB::PcsData>>,
-    /// Additional configuration or preprocessed data for the RAP phases
-    pub rap_partial_pk: PB::RapPartialProvingKey,
-}
-
-/// A view of an already committed trace, together with a reference to the
-/// preimage of the commitment.
-///
-/// The PCS may commit to multiple matrices at once, so `matrix_idx` provides
-/// the index of this matrix within the commitment.
-#[derive(Clone)]
-pub struct SingleCommitPreimage<Matrix, PcsData> {
-    pub trace: Matrix,
-    pub data: PcsData,
-    pub matrix_idx: u32,
-}
-
-/// Commitment to a single trace matrix, together with the trace matrix and prover data.
-#[derive(Derivative)]
-#[derivative(Clone(bound = "PB::Matrix: Clone, PB::PcsData: Clone"))]
-pub struct CommittedTraceData<PB: ProverBackend> {
-    pub commitment: PB::Commitment,
-    pub trace: PB::Matrix,
-    pub data: PB::PcsData,
+    pub preprocessed_data: Option<CommittedTraceData<PB>>,
+    pub other_data: PB::OtherAirData,
 }
 
 #[derive(derive_new::new)]
 pub struct ProvingContext<PB: ProverBackend> {
-    /// (AIR id, AIR input)
-    pub per_air: Vec<(usize, AirProvingContext<PB>)>,
+    /// For each AIR with non-empty trace, the pair of (AIR ID, [AirProvingContext]), where AIR
+    /// ID is with respect to the vkey ordering.
+    pub per_trace: Vec<(usize, AirProvingContext<PB>)>,
 }
 
-impl<PB: ProverBackend> ProvingContext<PB> {
-    pub fn into_air_proving_ctx_vec(self) -> Vec<AirProvingContext<PB>> {
-        self.per_air.into_iter().map(|(_, x)| x).collect()
-    }
+#[derive(derive_new::new)]
+pub struct AirProvingContext<PB: ProverBackend> {
+    /// Cached main trace matrices as `PcsData`. The original trace matrix should be extractable as
+    /// a view from the `PcsData`. The `PcsData` should also contain the commitment value. Cached
+    /// trace commitments have a single matrix per commitment.
+    ///
+    /// The `PcsData` is kept inside an `Arc` to emphasize that this data is cached and may be
+    /// shared between multiple proving contexts. In particular, it is not typically safe to mutate
+    /// the data during a proving job.
+    pub cached_mains: Vec<CommittedTraceData<PB>>,
+    /// Common main trace matrix
+    pub common_main: PB::Matrix,
+    /// Public values
+    pub public_values: Vec<PB::Val>,
+}
 
-    pub fn air_ids(&self) -> Vec<usize> {
-        self.per_air.iter().map(|(id, _)| *id).collect()
+/// Proof on the host, with respect to the host types in the generic `PB`.
+pub struct HostProof<SC: StarkProtocolConfig, PB: ProverBackend, ConstraintsProof, OpeningProof> {
+    /// The commitment to the data in common_main.
+    pub common_main_commit: PB::Commitment,
+
+    /// For each AIR in vkey order, the corresponding trace shape, or None if
+    /// the trace is empty. In a valid proof, if `vk.per_air[i].is_required`,
+    /// then `trace_vdata[i]` must be `Some(_)`.
+    pub trace_vdata: Vec<Option<TraceVData<SC>>>,
+
+    /// For each AIR in vkey order, the public values. Public values should be empty if the AIR has
+    /// an empty trace.
+    pub public_values: Vec<Vec<PB::Val>>,
+
+    pub constraints_proof: ConstraintsProof,
+    /// Opening proof for multiple polynomials over mixed sized domains
+    pub opening_proof: OpeningProof,
+}
+
+impl<PB: ProverBackend> CommittedTraceData<PB> {
+    #[inline(always)]
+    pub fn height(&self) -> usize {
+        self.trace.height()
+    }
+}
+
+impl<PB: ProverBackend> DeviceMultiStarkProvingKey<PB> {
+    pub fn get_vk<SC>(&self) -> MultiStarkVerifyingKey<SC>
+    where
+        SC: StarkProtocolConfig<F = PB::Val, Digest = PB::Commitment>,
+    {
+        let per_air = self.per_air.iter().map(|pk| pk.vk.clone()).collect();
+        let inner = MultiStarkVerifyingKey0 {
+            params: self.params.clone(),
+            per_air,
+            trace_height_constraints: self.trace_height_constraints.clone(),
+        };
+        MultiStarkVerifyingKey {
+            inner,
+            pre_hash: self.vk_pre_hash.clone(),
+        }
     }
 }
 
@@ -105,157 +121,43 @@ impl<PB: ProverBackend> IntoIterator for ProvingContext<PB> {
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.per_air.into_iter()
+        self.per_trace.into_iter()
     }
 }
 
-/// Necessary context for proving a single AIR.
-/// Consists of the trace and public values (witness and instance data) as well as
-/// cached prover data from cached traces (already committed traces).
-///
-/// Public values: for each AIR, a separate list of public values.
-/// The prover can support global public values that are shared among all AIRs,
-/// but we currently split public values per-AIR for modularity.
-#[derive(Derivative, derive_new::new)]
-#[derivative(Clone(bound = "PB::Matrix: Clone, PB::PcsData: Clone"))]
-pub struct AirProvingContext<PB: ProverBackend> {
-    /// Cached main trace matrices with commitments. One matrix per commitment.
-    // Note[jpw]: The cached data should have a lifetime since it may outlive a single proof
-    // invocation. But for now it's easier to assume `cached_mains` are owned, and any sharing
-    // is done via smart pointers.
-    pub cached_mains: Vec<CommittedTraceData<PB>>,
-    /// Common main trace matrix
-    pub common_main: Option<PB::Matrix>,
-    /// Public values
-    // [jpw] This is on host for now because it seems more convenient for the challenger to be on
-    // host.
-    pub public_values: Vec<PB::Val>,
-}
+impl<PB: ProverBackend> ProvingContext<PB> {
+    pub fn common_main_traces(&self) -> impl Iterator<Item = (usize, &PB::Matrix)> {
+        self.per_trace
+            .iter()
+            .map(|(air_idx, trace_ctx)| (*air_idx, &trace_ctx.common_main))
+    }
 
-/// A view of just the AIR, without any preprocessed or after challenge columns.
-/// The AIR's main trace is horizontally partitioned into multiple matrices,
-/// where each matrix can belong to a separate matrix commitment.
-///
-/// The generic `T` may be either just the trace matrix view or the LDE matrix view.
-pub struct AirView<T, Val> {
-    /// Main trace data, horizontally partitioned into multiple matrices
-    pub partitioned_main: Vec<T>,
-    /// Public values
-    pub public_values: Vec<Val>,
-}
+    // Returns `self` with the trace data sorted to be descending in height for column stacking. For
+    // equal heights, traces are sorted in ascending order of AIR index.
+    pub fn into_sorted(mut self) -> Self {
+        self.sort_for_stacking();
+        self
+    }
 
-pub struct PairView<T, Val> {
-    /// Log_2 of the trace domain size (i.e., height of matrices)
-    pub log_trace_height: u8,
-    /// Preprocessed trace data, if any
-    pub preprocessed: Option<T>,
-    /// Main trace data, horizontally partitioned into multiple matrices
-    pub partitioned_main: Vec<T>,
-    /// Public values
-    pub public_values: Vec<Val>,
-}
-
-/// The full RAP trace consists of horizontal concatenation of multiple matrices of the same height:
-/// - preprocessed trace matrix
-/// - the main trace matrix is horizontally partitioned into multiple matrices, where each matrix
-///   can belong to a separate matrix commitment.
-/// - after each round of challenges, a trace matrix for trace allowed to use those challenges
-///
-/// Each of these matrices is allowed to be in a separate commitment.
-///
-/// Only the main trace matrix is allowed to be partitioned, so that different parts may belong to
-/// different commitments. We do not see any use cases where the `preprocessed` or `after_challenge`
-/// matrices need to be partitioned.
-///
-/// The generic `T` may be either just the trace matrix view or the LDE matrix view.
-pub struct RapView<T, Val, Challenge> {
-    /// Log_2 of the trace domain size (i.e., height of matrices)
-    pub log_trace_height: u8,
-    /// Preprocessed trace data, if any
-    pub preprocessed: Option<T>,
-    /// Main trace data, horizontally partitioned into multiple matrices
-    pub partitioned_main: Vec<T>,
-    /// Public values
-    pub public_values: Vec<Val>,
-    /// `per_phase[i]` is a view which is calculated after sampling challenges
-    /// which depend on observing commitments to `pair` and `per_phase[..i]`.
-    pub per_phase: Vec<RapSinglePhaseView<T, Challenge>>,
-}
-
-#[derive(Clone)]
-pub struct RapSinglePhaseView<T, Challenge> {
-    /// `None` if this RAP does not use this phase.
-    pub inner: Option<T>,
-    /// The challenges sampled in this phase
-    pub challenges: Vec<Challenge>,
-    /// These are extension field values exposed to the verifier after this phase.
-    /// They are like public values, except that they depend on randomness.
-    pub exposed_values: Vec<Challenge>,
-}
-
-impl<T, Challenge> Default for RapSinglePhaseView<T, Challenge> {
-    fn default() -> Self {
-        Self {
-            inner: None,
-            challenges: Vec::new(),
-            exposed_values: Vec::new(),
-        }
+    // Stable sort the trace data to be descending in height: this is needed for stacking. For
+    // equal heights, sort in ascending order of AIR index.
+    pub fn sort_for_stacking(&mut self) {
+        self.per_trace.sort_by_key(|(air_idx, trace_ctx)| {
+            (Reverse(trace_ctx.common_main.height()), *air_idx)
+        });
     }
 }
 
-#[derive(derive_new::new)]
-pub struct ProverDataAfterRapPhases<PB: ProverBackend> {
-    /// For each challenge phase **after** the main phase,
-    /// the commitment and preimage (there should never be a reason to have more than one).
-    /// This may be empty if challenge phases do not require additional trace commitments.
-    pub committed_pcs_data_per_phase: Vec<(PB::Commitment, PB::PcsData)>,
-    /// For each challenge phase, for each RAP,
-    /// the challenge, and exposed values for the RAP.
-    /// The indexing is `rap_views_per_phase[phase_idx][rap_idx]`.
-    pub rap_views_per_phase: Vec<Vec<RapSinglePhaseView<usize, PB::Challenge>>>,
-}
-
-/// The full proof for multiple RAPs where trace matrices are committed into
-/// multiple commitments, where each commitment is multi-matrix.
-///
-/// Includes the quotient commitments and FRI opening proofs for the constraints as well.
-#[derive(Serialize, Deserialize, Derivative)]
-#[serde(bound = "")]
-#[derivative(Clone(bound = ""))]
-pub struct HalProof<PB: ProverBackend> {
-    /// The PCS commitments
-    pub commitments: Commitments<PB::Commitment>,
-    /// Opening proofs separated by partition, but this may change
-    pub opening: PB::OpeningProof,
-    /// Proof data for each AIR
-    pub per_air: Vec<AirProofData<PB::Val, PB::Challenge>>,
-    /// Partial proof for rap phase if it exists
-    pub rap_partial_proof: PB::RapPartialProof,
-}
-
-impl<PB, SC: StarkGenericConfig> From<HalProof<PB>> for Proof<SC>
-where
-    PB: ProverBackend<Val = Val<SC>, Challenge = SC::Challenge, Commitment = Com<SC>>,
-    PB::OpeningProof: Into<OpeningProof<SC>>,
-    PB::RapPartialProof: Into<Option<RapPhaseSeqPartialProof<SC>>>,
-{
-    fn from(proof: HalProof<PB>) -> Self {
-        Proof {
-            commitments: proof.commitments,
-            opening: proof.opening.into(),
-            per_air: proof.per_air,
-            rap_phase_seq_proof: proof.rap_partial_proof.into(),
-        }
+impl<PB: ProverBackend> AirProvingContext<PB> {
+    pub fn simple(common_main_trace: PB::Matrix, public_values: Vec<PB::Val>) -> Self {
+        Self::new(vec![], common_main_trace, public_values)
     }
-}
+    pub fn simple_no_pis(common_main_trace: PB::Matrix) -> Self {
+        Self::simple(common_main_trace, vec![])
+    }
 
-/// Raw input for proving a single AIR. For DEBUG use only.
-#[derive(Clone, Debug)]
-pub struct AirProofRawInput<F: Field> {
-    /// Cached main trace matrices
-    pub cached_mains: Vec<Arc<RowMajorMatrix<F>>>,
-    /// Common main trace matrix
-    pub common_main: Option<Arc<RowMajorMatrix<F>>>,
-    /// Public values
-    pub public_values: Vec<F>,
+    /// Return the height of the main trace.
+    pub fn height(&self) -> usize {
+        self.common_main.height()
+    }
 }

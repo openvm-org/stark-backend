@@ -1,17 +1,19 @@
 pub use openvm_stark_backend;
 pub use p3_baby_bear;
-pub use p3_blake3;
-pub use p3_bn254;
-pub use p3_goldilocks;
-pub use p3_keccak;
-pub use p3_koala_bear;
 
 pub mod bench;
 pub mod config;
-/// Verifier cost estimation
-pub mod cost_estimate;
-pub mod dummy_airs;
-pub mod engine;
 #[cfg(feature = "metrics")]
 pub mod metrics_tracing;
 pub mod utils;
+
+// #[macro_export]
+// macro_rules! assert_sc_compatible_with_serde {
+//     ($sc:ty) => {
+//         static_assertions::assert_impl_all!
+// ($crate::openvm_stark_backend::keygen::types::MultiStarkProvingKey<$sc>: serde::Serialize,
+// serde::de::DeserializeOwned);         static_assertions::assert_impl_all!
+// ($crate::openvm_stark_backend::keygen::types::MultiStarkVerifyingKey<$sc>: serde::Serialize,
+// serde::de::DeserializeOwned);         static_assertions::assert_impl_all!
+// ($crate::openvm_stark_backend::Proof<$sc>: serde::Serialize, serde::de::DeserializeOwned);     };
+// }

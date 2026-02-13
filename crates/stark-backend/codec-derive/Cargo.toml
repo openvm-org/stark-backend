@@ -1,0 +1,15 @@
+[package]
+name = "openvm-codec-derive"
+description = "Procedural macros for encoding and decoding."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0"
+syn = { version = "2.0", features = ["parsing", "full"] }
+proc-macro-crate = "1.2"
+proc-macro2 = "1.0"
