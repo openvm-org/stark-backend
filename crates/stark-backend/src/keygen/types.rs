@@ -1,16 +1,18 @@
+// NOTE[jpw]: copied from stark-backend but renamed for , now generic in SC
+
 // Keygen API for STARK backend
 // Changes:
 // - All AIRs can be optional
 use std::sync::Arc;
 
 use derivative::Derivative;
-use p3_matrix::dense::RowMajorMatrix;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
-    air_builders::symbolic::SymbolicConstraintsDag,
-    config::{Com, PcsProverData, RapPartialProvingKey, StarkGenericConfig, Val},
-    interaction::RapPhaseSeqKind,
+    air_builders::symbolic::{symbolic_variable::SymbolicVariable, SymbolicConstraintsDag},
+    prover::stacked_pcs::StackedPcsData,
+    StarkProtocolConfig, SystemParams,
 };
 
 /// Widths of different parts of trace matrix
@@ -48,6 +50,22 @@ impl TraceWidth {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LinearConstraint {
+    pub coefficients: Vec<u32>,
+    pub threshold: u32,
+}
+
+#[derive(Error, Debug)]
+pub enum KeygenError {
+    #[error("Max constraint degree exceeded for AIR {name}: {degree} > {max_degree}")]
+    MaxConstraintDegreeExceeded {
+        name: String,
+        degree: usize,
+        max_degree: usize,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]
 pub struct StarkVerifyingParams {
@@ -55,38 +73,43 @@ pub struct StarkVerifyingParams {
     pub width: TraceWidth,
     /// Number of public values for this STARK only
     pub num_public_values: usize,
-    /// Number of values to expose to verifier in each trace challenge phase
-    pub num_exposed_values_after_challenge: Vec<usize>,
-    /// For only this RAP, how many challenges are needed in each trace challenge phase
-    pub num_challenges_to_sample: Vec<usize>,
+    /// A flag indicating whether at least one rotated variable is used in any
+    /// of the constraints and/or interactions across all trace parts (common,
+    /// preprocessed if there is one, all cached).
+    pub need_rot: bool,
 }
 
 /// Verifier data for preprocessed trace for a single AIR.
 ///
 /// Currently assumes each AIR has it's own preprocessed commitment
-#[derive(Clone, Serialize, Deserialize)]
-pub struct VerifierSinglePreprocessedData<Com> {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifierSinglePreprocessedData<Digest> {
     /// Commitment to the preprocessed trace.
-    pub commit: Com,
+    pub commit: Digest,
+    /// The hypercube dimension of the preprocessed data _before stacking_ (log_height -
+    /// vk.l_skip).
+    pub hypercube_dim: isize,
+    /// The width of the data after stacking.
+    pub stacking_width: usize,
 }
 
 /// Verifying key for a single STARK (corresponding to single AIR matrix)
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[repr(C)]
-pub struct StarkVerifyingKey<Val, Com> {
+pub struct StarkVerifyingKey<F, Digest> {
     /// Preprocessed trace data, if any
-    pub preprocessed_data: Option<VerifierSinglePreprocessedData<Com>>,
+    pub preprocessed_data: Option<VerifierSinglePreprocessedData<Digest>>,
     /// Parameters of the STARK
     pub params: StarkVerifyingParams,
     /// Symbolic constraints of the AIR in all challenge phases. This is
     /// a serialization of the constraints in the AIR.
-    pub symbolic_constraints: SymbolicConstraintsDag<Val>,
-    /// The factor to multiply the trace degree by to get the degree of the quotient polynomial.
-    /// Determined from the max constraint degree of the AIR constraints. This is equivalently
-    /// the number of chunks the quotient polynomial is split into.
-    pub quotient_degree: u8,
+    pub symbolic_constraints: SymbolicConstraintsDag<F>,
+    /// The maximum degree of any polynomial (constraint or interaction) for this AIR.
     pub max_constraint_degree: u8,
-    pub rap_phase_seq_kind: RapPhaseSeqKind,
+    /// True means this AIR must have non-empty trace.
+    pub is_required: bool,
+    /// Symbolic variables referenced unreferenced by the AIR.
+    pub unused_variables: Vec<SymbolicVariable<F>>,
 }
 
 /// Common verifying key for multiple AIRs.
@@ -94,78 +117,56 @@ pub struct StarkVerifyingKey<Val, Com> {
 /// This struct contains the necessary data for the verifier to verify proofs generated for
 /// multiple AIRs using a single verifying key.
 #[derive(Derivative, Serialize, Deserialize)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-#[serde(bound(
-    serialize = "Com<SC>: Serialize",
-    deserialize = "Com<SC>: Deserialize<'de>"
-))]
-pub struct MultiStarkVerifyingKey<SC: StarkGenericConfig> {
+#[derivative(Clone(bound = ""), Debug(bound = ""))]
+#[serde(bound = "")]
+pub struct MultiStarkVerifyingKey<SC: StarkProtocolConfig> {
     /// All parts of the verifying key needed by the verifier, except
     /// the `pre_hash` used to initialize the Fiat-Shamir transcript.
     pub inner: MultiStarkVerifyingKey0<SC>,
     /// The hash of all other parts of the verifying key. The Fiat-Shamir hasher will
     /// initialize by observing this hash.
-    pub pre_hash: Com<SC>,
+    pub pre_hash: SC::Digest,
 }
 
 /// Everything in [MultiStarkVerifyingKey] except the `pre_hash` used to initialize the Fiat-Shamir
 /// transcript.
 #[derive(Derivative, Serialize, Deserialize)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-#[serde(bound(
-    serialize = "Com<SC>: Serialize",
-    deserialize = "Com<SC>: Deserialize<'de>"
-))]
-pub struct MultiStarkVerifyingKey0<SC: StarkGenericConfig> {
-    pub per_air: Vec<StarkVerifyingKey<Val<SC>, Com<SC>>>,
+#[derivative(Clone(bound = ""), Debug(bound = ""))]
+#[serde(bound = "")]
+pub struct MultiStarkVerifyingKey0<SC: StarkProtocolConfig> {
+    pub params: SystemParams,
+    pub per_air: Vec<StarkVerifyingKey<SC::F, SC::Digest>>,
     pub trace_height_constraints: Vec<LinearConstraint>,
-    pub log_up_pow_bits: usize,
-    pub deep_pow_bits: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct LinearConstraint {
-    pub coefficients: Vec<u32>,
-    pub threshold: u32,
 }
 
 /// Proving key for a single STARK (corresponding to single AIR matrix)
-#[derive(Serialize, Deserialize, Derivative)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-#[serde(bound(
-    serialize = "PcsProverData<SC>: Serialize",
-    deserialize = "PcsProverData<SC>: Deserialize<'de>"
-))]
-pub struct StarkProvingKey<SC: StarkGenericConfig> {
+#[derive(Derivative, Serialize, Deserialize)]
+#[derivative(Clone(bound = ""))]
+#[serde(bound = "")]
+pub struct StarkProvingKey<SC: StarkProtocolConfig> {
     /// Type name of the AIR, for display purposes only
     pub air_name: String,
     /// Verifying key
-    pub vk: StarkVerifyingKey<Val<SC>, Com<SC>>,
+    pub vk: StarkVerifyingKey<SC::F, SC::Digest>,
     /// Prover only data for preprocessed trace
-    pub preprocessed_data: Option<ProverOnlySinglePreprocessedData<SC>>,
-    /// Partial proving key for RAP partial proving in challenge phases
-    pub rap_partial_pk: RapPartialProvingKey<SC>,
+    pub preprocessed_data: Option<Arc<StackedPcsData<SC::F, SC::Digest>>>,
 }
 
 /// Common proving key for multiple AIRs.
 ///
 /// This struct contains the necessary data for the prover to generate proofs for multiple AIRs
 /// using a single proving key.
-#[derive(Serialize, Deserialize, Derivative)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-#[serde(bound(
-    serialize = "PcsProverData<SC>: Serialize",
-    deserialize = "PcsProverData<SC>: Deserialize<'de>"
-))]
-pub struct MultiStarkProvingKey<SC: StarkGenericConfig> {
+#[derive(Derivative, Serialize, Deserialize)]
+#[derivative(Clone(bound = ""))]
+#[serde(bound = "")]
+pub struct MultiStarkProvingKey<SC: StarkProtocolConfig> {
     pub per_air: Vec<StarkProvingKey<SC>>,
     pub trace_height_constraints: Vec<LinearConstraint>,
     /// Maximum degree of constraints across all AIRs
     pub max_constraint_degree: usize,
-    pub log_up_pow_bits: usize,
-    pub deep_pow_bits: usize,
+    pub params: SystemParams,
     /// See [MultiStarkVerifyingKey]
-    pub vk_pre_hash: Com<SC>,
+    pub vk_pre_hash: SC::Digest,
 }
 
 impl<Val, Com> StarkVerifyingKey<Val, Com> {
@@ -173,61 +174,56 @@ impl<Val, Com> StarkVerifyingKey<Val, Com> {
         self.params.width.cached_mains.len()
     }
 
-    pub fn has_common_main(&self) -> bool {
-        self.params.width.common_main != 0
+    pub fn num_parts(&self) -> usize {
+        1 + self.num_cached_mains() + (self.preprocessed_data.is_some() as usize)
     }
 
     pub fn has_interaction(&self) -> bool {
         !self.symbolic_constraints.interactions.is_empty()
     }
+
+    pub fn num_interactions(&self) -> usize {
+        self.symbolic_constraints.interactions.len()
+    }
+
+    /// Converts from a main part index (as used by the constraint DAG) to the
+    /// commitment part indexing scheme that includes preprocessed trace.
+    pub fn dag_main_part_index_to_commit_index(&self, index: usize) -> usize {
+        // In the dag, common main is the final part index.
+        if index == self.num_cached_mains() {
+            0
+        } else {
+            index + 1 + self.preprocessed_data.is_some() as usize
+        }
+    }
 }
 
-impl<SC: StarkGenericConfig> MultiStarkProvingKey<SC> {
+impl<SC: StarkProtocolConfig> MultiStarkProvingKey<SC> {
     pub fn get_vk(&self) -> MultiStarkVerifyingKey<SC> {
         MultiStarkVerifyingKey {
             inner: self.get_vk0(),
-            pre_hash: self.vk_pre_hash.clone(),
+            pre_hash: self.vk_pre_hash,
         }
     }
 
     fn get_vk0(&self) -> MultiStarkVerifyingKey0<SC> {
         MultiStarkVerifyingKey0 {
+            params: self.params.clone(),
             per_air: self.per_air.iter().map(|pk| pk.vk.clone()).collect(),
             trace_height_constraints: self.trace_height_constraints.clone(),
-            log_up_pow_bits: self.log_up_pow_bits,
-            deep_pow_bits: self.deep_pow_bits,
         }
     }
 }
-impl<SC: StarkGenericConfig> MultiStarkVerifyingKey<SC> {
-    pub fn num_challenges_per_phase(&self) -> Vec<usize> {
-        self.full_view().num_challenges_per_phase()
-    }
 
-    pub fn main_widths(&self) -> Vec<usize> {
-        self.full_view().main_widths()
-    }
-
-    pub fn total_widths(&self) -> Vec<usize> {
-        self.full_view().total_widths::<SC::Challenge>()
-    }
-
-    pub fn num_interactions(&self) -> Vec<usize> {
-        self.full_view().num_interactions()
+impl<SC: StarkProtocolConfig> MultiStarkVerifyingKey<SC> {
+    /// Global maximum constraint degree across all AIRs and Interactions.
+    pub fn max_constraint_degree(&self) -> usize {
+        self.inner.max_constraint_degree()
     }
 }
 
-/// Prover only data for preprocessed trace for a single AIR.
-/// Currently assumes each AIR has it's own preprocessed commitment
-#[derive(Serialize, Deserialize, Derivative)]
-#[derivative(Clone(bound = "Com<SC>: Clone"))]
-#[serde(bound(
-    serialize = "PcsProverData<SC>: Serialize",
-    deserialize = "PcsProverData<SC>: Deserialize<'de>"
-))]
-pub struct ProverOnlySinglePreprocessedData<SC: StarkGenericConfig> {
-    /// Preprocessed trace matrix.
-    pub trace: Arc<RowMajorMatrix<Val<SC>>>,
-    /// Prover data, such as a Merkle tree, for the trace commitment.
-    pub data: Arc<PcsProverData<SC>>,
+impl<SC: StarkProtocolConfig> MultiStarkVerifyingKey0<SC> {
+    pub fn max_constraint_degree(&self) -> usize {
+        self.params.max_constraint_degree
+    }
 }

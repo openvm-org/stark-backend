@@ -4,8 +4,12 @@ use itertools::zip_eq;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use super::hal::ProverBackend;
-use crate::{keygen::types::TraceWidth, prover::types::DeviceMultiStarkProvingKeyView};
+use crate::{
+    keygen::types::TraceWidth,
+    proof::TraceVData,
+    prover::{DeviceMultiStarkProvingKey, ProverBackend},
+    StarkProtocolConfig,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceMetrics {
@@ -24,11 +28,10 @@ pub struct SingleTraceMetrics {
     /// The after challenge width is adjusted to be in terms of **base field** elements.
     pub width: TraceWidth,
     pub cells: TraceCells,
+    // TODO[jpw]: update this calculation accordingly
     /// Omitting preprocessed trace, the total base field cells from main and after challenge
     /// traces.
     pub total_cells: usize,
-    /// Base field cells for evaluation of quotient polynomial on the quotient domain
-    pub quotient_poly_cells: usize,
 }
 
 /// Trace cells, counted in terms of number of **base field** elements.
@@ -71,13 +74,13 @@ impl Display for SingleTraceMetrics {
 }
 
 /// heights are the trace heights for each air
-pub fn trace_metrics<PB: ProverBackend>(
-    mpk: &DeviceMultiStarkProvingKeyView<PB>,
-    log_trace_heights: &[u8],
+pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackend>(
+    mpk: &DeviceMultiStarkProvingKey<PB>,
+    trace_vdata: &[Option<TraceVData<SC>>],
 ) -> TraceMetrics {
-    let heights = log_trace_heights
+    let heights = trace_vdata
         .iter()
-        .map(|&h| 1usize << h)
+        .map(|vdata| vdata.as_ref().map(|v| 1 << v.log_height).unwrap_or(0))
         .collect::<Vec<_>>();
     let trace_height_inequalities = mpk
         .trace_height_constraints
@@ -86,27 +89,25 @@ pub fn trace_metrics<PB: ProverBackend>(
             let weighted_sum = heights
                 .iter()
                 .enumerate()
-                .map(|(j, h)| {
-                    let air_id = mpk.air_ids[j];
-                    (trace_height_constraint.coefficients[air_id] as usize) * h
-                })
+                .map(|(air_idx, h)| (trace_height_constraint.coefficients[air_idx] as usize) * h)
                 .sum::<usize>();
             (weighted_sum, trace_height_constraint.threshold as usize)
         })
         .collect::<Vec<_>>();
-    let per_air: Vec<_> = zip_eq(mpk.air_ids.iter().copied(), zip_eq(&mpk.per_air, heights))
-        .map(|(air_id, (pk, height))| {
+    let per_air: Vec<_> = zip_eq(&mpk.per_air, heights)
+        .enumerate()
+        .filter(|(_, (_, height))| *height > 0)
+        .map(|(air_idx, (pk, height))| {
             let air_name = &pk.air_name;
-            let mut width = pk.vk.params.width.clone();
+            let width = pk.vk.params.width.clone();
+            let mut interaction_width = pk.vk.num_interactions();
             let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
-            for w in &mut width.after_challenge {
-                *w *= ext_degree;
-            }
+            interaction_width *= ext_degree;
             let cells = TraceCells {
                 preprocessed: width.preprocessed.map(|w| w * height),
                 cached_mains: width.cached_mains.iter().map(|w| w * height).collect(),
                 common_main: width.common_main * height,
-                after_challenge: width.after_challenge.iter().map(|w| w * height).collect(),
+                after_challenge: vec![interaction_width * height],
             };
             let total_cells = cells
                 .cached_mains
@@ -116,12 +117,11 @@ pub fn trace_metrics<PB: ProverBackend>(
                 .sum::<usize>();
             SingleTraceMetrics {
                 air_name: air_name.to_string(),
-                air_id,
+                air_id: air_idx,
                 height,
                 width,
                 cells,
                 total_cells,
-                quotient_poly_cells: height * (pk.vk.quotient_degree as usize) * ext_degree,
             }
         })
         .collect();
@@ -162,16 +162,6 @@ pub fn trace_metrics<PB: ProverBackend>(
                 .per_air
                 .iter()
                 .map(|m| m.cells.after_challenge.iter().sum::<usize>())
-                .sum::<usize>()
-        )
-    );
-    info!(
-        "quotient_poly_cells = {}",
-        format_number_with_underscores(
-            metrics
-                .per_air
-                .iter()
-                .map(|m| m.quotient_poly_cells)
                 .sum::<usize>()
         )
     );

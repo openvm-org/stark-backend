@@ -1,157 +1,208 @@
-//! [StarkGenericConfig](config::StarkGenericConfig) and associated types. Originally taken from
-//! Plonky3 under MIT license.
+use core::fmt::Debug;
 
-use std::marker::PhantomData;
+use getset::Getters;
+use p3_field::{BasedVectorSpace, ExtensionField, PrimeField64, TwoAdicField};
+use serde::{Deserialize, Serialize};
 
-use p3_challenger::{CanObserve, CanSample, FieldChallenger, GrindingChallenger};
-use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::{ExtensionField, Field};
+use crate::{hasher::MerkleHasher, interaction::LogUpSecurityParameters};
 
-use crate::interaction::RapPhaseSeq;
+/// Trait that holds the associated types for the SWIRL protocol. These are the types needed by the
+/// verifier and must be independent of the prover backend.
+///
+/// This trait only holds the associated types and the struct implementing the trait does not hold
+/// the system parameters. System parameters are specified and stored separated in [SystemParams].
+///
+/// The trait has an **implicit** associated Fiat-Shamir transcript type, including the hash used.
+/// There is no explicit associated type because the concrete implementation of the transcript may
+/// differ between prover and verifier and the verifier may further employ different implementations
+/// for logging or debugging purposes. The trait controlling concrete implementations of the
+/// transcript is specified by [`FiatShamirTranscript`](crate::FiatShamirTranscript).
+pub trait StarkProtocolConfig: 'static + Clone + Send + Sync {
+    /// The prime base field.
+    type F: TwoAdicField + PrimeField64;
+    /// The extension field, used for random challenges.
+    type EF: ExtensionField<Self::F>;
+    /// The digest type used for commitments.
+    type Digest: Copy
+        + Send
+        + Sync
+        + Debug
+        + Default
+        + PartialEq
+        + Eq
+        + Serialize
+        + for<'de> Deserialize<'de>;
+    /// The merkle tree hasher used by the polynomial commitment scheme.
+    type Hasher: MerkleHasher<F = Self::F, Digest = Self::Digest>;
 
-/// Based on [p3_uni_stark::StarkGenericConfig].
-pub trait StarkGenericConfig
-where
-    Domain<Self>: Send + Sync,
-    Com<Self>: Send + Sync,
-    PcsProof<Self>: Send + Sync,
-    PcsProverData<Self>: Send + Sync,
-    RapPhaseSeqPartialProof<Self>: Send + Sync,
-    RapPartialProvingKey<Self>: Send + Sync,
-{
-    /// The PCS used to commit to trace polynomials.
-    type Pcs: Pcs<Self::Challenge, Self::Challenger>;
+    /// Degree of the extension field.
+    const D_EF: usize = <Self::EF as BasedVectorSpace<Self::F>>::DIMENSION;
 
-    /// The RAP challenge phases used to establish, e.g., that interactions are balanced.
-    type RapPhaseSeq: RapPhaseSeq<Val<Self>, Self::Challenge, Self::Challenger>;
+    fn params(&self) -> &SystemParams;
 
-    /// The field from which most random challenges are drawn.
-    type Challenge: ExtensionField<Val<Self>> + Send + Sync;
-
-    /// The challenger (Fiat-Shamir) implementation used.
-    type Challenger: FieldChallenger<Val<Self>>
-        + CanObserve<<Self::Pcs as Pcs<Self::Challenge, Self::Challenger>>::Commitment>
-        + CanSample<Self::Challenge>
-        + GrindingChallenger<Witness = Val<Self>>;
-
-    fn pcs(&self) -> &Self::Pcs;
-
-    fn rap_phase_seq(&self) -> &Self::RapPhaseSeq;
-
-    fn deep_ali_params(&self) -> DeepAliParameters;
+    fn hasher(&self) -> &Self::Hasher;
 }
 
-pub type Val<SC> = <Domain<SC> as PolynomialSpace>::Val;
+/// Type alias for backwards compatibility. New implementations should use `SC::F`.
+pub type Val<SC> = <SC as StarkProtocolConfig>::F;
+/// Type alias for backwards compatibility. New implementations should use `SC::Digest`.
+pub type Com<SC> = <SC as StarkProtocolConfig>::Digest;
 
-pub type Com<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Commitment;
-
-pub type PcsProverData<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::ProverData;
-
-pub type PcsProof<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Proof;
-
-pub type PcsError<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Error;
-
-pub type Domain<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Domain;
-
-pub type RapPhaseSeqPartialProof<SC> = <<SC as StarkGenericConfig>::RapPhaseSeq as RapPhaseSeq<
-    Val<SC>,
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::PartialProof;
-
-pub type RapPartialProvingKey<SC> = <<SC as StarkGenericConfig>::RapPhaseSeq as RapPhaseSeq<
-    Val<SC>,
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::PartialProvingKey;
-
-pub type RapPhaseSeqError<SC> = <<SC as StarkGenericConfig>::RapPhaseSeq as RapPhaseSeq<
-    Val<SC>,
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Error;
-
-pub type PackedVal<SC> = <Val<SC> as Field>::Packing;
-
-pub type PackedChallenge<SC> =
-    <<SC as StarkGenericConfig>::Challenge as ExtensionField<Val<SC>>>::ExtensionPacking;
-
-#[derive(Debug)]
-pub struct StarkConfig<Pcs, RapPhaseSeq, Challenge, Challenger> {
-    pcs: Pcs,
-    _challenger: Challenger,
-    rap_phase: RapPhaseSeq,
-    deep_ali_params: DeepAliParameters,
-    _phantom: PhantomData<(Challenge, Challenger)>,
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Getters)]
+pub struct SystemParams {
+    pub l_skip: usize,
+    pub n_stack: usize,
+    /// `-log_2` of the rate for the initial Reed-Solomon code.
+    pub log_blowup: usize,
+    #[getset(get = "pub")]
+    pub whir: WhirConfig,
+    pub logup: LogUpSecurityParameters,
+    /// Global max constraint degree enforced across all AIR and Interaction constraints
+    pub max_constraint_degree: usize,
 }
 
-impl<Pcs, RapPhaseSeq, Challenge, Challenger> StarkConfig<Pcs, RapPhaseSeq, Challenge, Challenger> {
-    pub const fn new(
-        pcs: Pcs,
-        _challenger: Challenger,
-        rap_phase: RapPhaseSeq,
-        deep_ali_params: DeepAliParameters,
+impl SystemParams {
+    pub fn logup_pow_bits(&self) -> usize {
+        self.logup.pow_bits
+    }
+
+    pub fn k_whir(&self) -> usize {
+        self.whir.k
+    }
+
+    #[inline]
+    pub fn log_stacked_height(&self) -> usize {
+        self.l_skip + self.n_stack
+    }
+
+    #[inline]
+    pub fn log_final_poly_len(&self) -> usize {
+        self.whir.log_final_poly_len(self.log_stacked_height())
+    }
+
+    #[inline]
+    pub fn num_whir_rounds(&self) -> usize {
+        self.whir.num_whir_rounds()
+    }
+
+    #[inline]
+    pub fn num_whir_sumcheck_rounds(&self) -> usize {
+        self.whir.num_sumcheck_rounds()
+    }
+}
+
+/// Configurable parameters that are used to determine the [WhirConfig] for a target security level.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WhirParams {
+    pub k: usize,
+    /// WHIR rounds will stop as soon as `log2` of the final polynomial length is `<=
+    /// log_final_poly_len`.
+    pub log_final_poly_len: usize,
+    pub query_phase_pow_bits: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WhirConfig {
+    /// Constant folding factor. This means that `2^k` terms are folded per round.
+    pub k: usize,
+    pub rounds: Vec<WhirRoundConfig>,
+    /// Number of bits of grinding for the query phase of each WHIR round.
+    /// The PoW bits can vary per round, but for simplicity we use the same number for all rounds.
+    pub query_phase_pow_bits: usize,
+    /// Number of bits of grinding before sampling folding randomness in each WHIR round.
+    /// The folding PoW bits can vary per round, but for simplicity (and efficiency of the
+    /// recursion circuit) we use the same number for all rounds.
+    pub folding_pow_bits: usize,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WhirRoundConfig {
+    pub num_queries: usize,
+}
+
+/// Defines the soundness type for the proof system.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SoundnessType {
+    /// Unique decoding guarantees a single valid witness.
+    UniqueDecoding,
+}
+
+impl WhirConfig {
+    /// Sets parameters targeting 100-bits of provable security, with grinding, using the unique
+    /// decoding regime.
+    pub fn new(
+        log_blowup: usize,
+        log_stacked_height: usize,
+        whir_params: WhirParams,
+        security_bits: usize,
     ) -> Self {
+        let query_phase_pow_bits = whir_params.query_phase_pow_bits;
+        let protocol_security_level = security_bits.saturating_sub(query_phase_pow_bits);
+        let k_whir = whir_params.k;
+        let num_rounds = log_stacked_height
+            .saturating_sub(whir_params.log_final_poly_len)
+            .div_ceil(k_whir);
+        let mut log_inv_rate = log_blowup;
+
+        // A safe setting for BabyBear and ~200 columns
+        // TODO[jpw]: use rbr_soundness_queries_combination
+        const FOLDING_POW_BITS: usize = 10;
+
+        let mut round_parameters = Vec::with_capacity(num_rounds);
+        for _round in 0..num_rounds {
+            // Queries are set w.r.t. to old rate, while the rest to the new rate
+            let next_rate = log_inv_rate + (k_whir - 1);
+
+            let num_queries = Self::queries(
+                SoundnessType::UniqueDecoding,
+                protocol_security_level,
+                log_inv_rate,
+            );
+            round_parameters.push(WhirRoundConfig { num_queries });
+
+            log_inv_rate = next_rate;
+        }
+
         Self {
-            pcs,
-            _challenger,
-            rap_phase,
-            deep_ali_params,
-            _phantom: PhantomData,
+            k: k_whir,
+            rounds: round_parameters,
+            query_phase_pow_bits,
+            folding_pow_bits: FOLDING_POW_BITS,
         }
     }
-}
 
-impl<Pcs, Rps, Challenge, Challenger> StarkGenericConfig
-    for StarkConfig<Pcs, Rps, Challenge, Challenger>
-where
-    Challenge: ExtensionField<<Pcs::Domain as PolynomialSpace>::Val>,
-    Pcs: p3_commit::Pcs<Challenge, Challenger>,
-    Pcs::Domain: Send + Sync,
-    Pcs::Commitment: Send + Sync,
-    Pcs::ProverData: Send + Sync,
-    Pcs::Proof: Send + Sync,
-    Rps: RapPhaseSeq<<Pcs::Domain as PolynomialSpace>::Val, Challenge, Challenger>,
-    Rps::PartialProof: Send + Sync,
-    Rps::PartialProvingKey: Send + Sync,
-    Challenger: FieldChallenger<<Pcs::Domain as PolynomialSpace>::Val>
-        + CanObserve<<Pcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment>
-        + CanSample<Challenge>
-        + GrindingChallenger<Witness = <Pcs::Domain as PolynomialSpace>::Val>,
-{
-    type Pcs = Pcs;
-    type RapPhaseSeq = Rps;
-    type Challenge = Challenge;
-    type Challenger = Challenger;
+    #[inline]
+    pub fn log_final_poly_len(&self, log_stacked_height: usize) -> usize {
+        log_stacked_height - self.num_whir_rounds() * self.k
+    }
 
-    fn pcs(&self) -> &Self::Pcs {
-        &self.pcs
+    pub fn num_whir_rounds(&self) -> usize {
+        self.rounds.len()
     }
-    fn rap_phase_seq(&self) -> &Self::RapPhaseSeq {
-        &self.rap_phase
-    }
-    fn deep_ali_params(&self) -> DeepAliParameters {
-        self.deep_ali_params
-    }
-}
 
-#[derive(Copy, Clone, Debug, derive_new::new)]
-pub struct DeepAliParameters {
-    /// The number of proof-of-work bits for the DEEP proof-of-work phase.
-    pub deep_pow_bits: usize,
+    #[inline]
+    pub fn num_sumcheck_rounds(&self) -> usize {
+        self.num_whir_rounds() * self.k
+    }
+
+    /// Pure function to calculate the number of queries necessary for a given WHIR round.
+    /// - `protocol_security_level` refers to the target bits of security without grinding.
+    /// - `log_inv_rate` is the log blowup for the WHIR round we want to calculate the number of
+    ///   queries for.
+    // Source: https://github.com/WizardOfMenlo/whir/blob/cf1599b56ff50e09142ebe6d2e2fbd86875c9986/src/whir/parameters.rs#L457
+    pub fn queries(
+        soundness_type: SoundnessType,
+        protocol_security_level: usize,
+        log_inv_rate: usize,
+    ) -> usize {
+        let num_queries_f = match soundness_type {
+            SoundnessType::UniqueDecoding => {
+                let rate = 1. / f64::from(1 << log_inv_rate);
+                let denom = (0.5 * (1. + rate)).log2();
+
+                -(protocol_security_level as f64) / denom
+            }
+        };
+        num_queries_f.ceil() as usize
+    }
 }
