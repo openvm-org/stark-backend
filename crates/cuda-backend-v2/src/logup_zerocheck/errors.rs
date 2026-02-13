@@ -45,8 +45,6 @@ pub enum FractionalSumcheckError {
     ComputeRound(CudaError),
     #[error("frac_fold_columns: {0}")]
     FoldColumns(CudaError),
-    #[error("frac_extract_claims: {0}")]
-    ExtractClaims(CudaError),
     #[error("evals_eq_hypercube: {0}")]
     EvalEqHypercube(KernelError),
     #[error("grind error: {0}")]

@@ -355,6 +355,30 @@ impl EqEvalLayers<EF> {
         }
         Ok(Self { layers })
     }
+
+    /// Creates a new `EqEvalLayers` instance with `layers.len() = x.len() + 1`.
+    ///
+    /// Inserts `x_i` from the back for each layer. This matches behavior of
+    /// [`EqEvalSegments::new`].
+    pub fn new<'a>(n: usize, x: impl IntoIterator<Item = &'a EF>) -> Result<Self, KernelError> {
+        let mut layers = Vec::with_capacity(n + 1);
+        let layer_0 = [EF::ONE].to_device().map_err(KernelError::MemCopy)?;
+        layers.push(layer_0);
+        for (i, &x_i) in x.into_iter().enumerate() {
+            let step = 1 << i;
+            let buffer = DeviceBuffer::with_capacity(2 * step);
+            // SAFETY:
+            // - `buffer` has length `2^{i+1}`
+            unsafe {
+                let dst = buffer.as_mut_ptr();
+                let src = layers.last().unwrap().as_ptr();
+                eq_hypercube_nonoverlapping_stage_ext(dst, src, x_i, step as u32)
+                    .map_err(KernelError::Kernel)?;
+            }
+            layers.push(buffer);
+        }
+        Ok(Self { layers })
+    }
 }
 
 /// Square-root decomposition of hypercube equality buffer for memory optimization.
@@ -404,5 +428,58 @@ impl SqrtHyperBuffer {
         };
         self.size /= 2;
         Ok(())
+    }
+}
+
+/// Square-root decomposition using pre-computed eq evaluation layers.
+///
+/// Instead of folding columns on GPU, we pre-compute all layers of eq evaluations
+/// and simply drop the highest layer each round (no GPU work needed).
+pub struct SqrtEqLayers {
+    /// Layers for `xi[(n + 1) / 2..]`. Layers insert `xi_i` from the front, so `low` contains the
+    /// latter half of `xi`.
+    pub low: EqEvalLayers<EF>,
+    /// Layers for `xi[..(n + 1) / 2]`.
+    /// Layers: [ eq(xi[j..(n+1)/2], ..) ] for j = (0..(n+1)/2).rev()
+    pub high: EqEvalLayers<EF>,
+}
+
+impl SqrtEqLayers {
+    /// Build layers from `xi` values.
+    ///
+    /// This is meant to match behavior of [SqrtHyperBuffer::from_xi] but with layers.
+    ///
+    /// Example: This means `[a,b,c,d]` should be sent to `low: [[d], [d, c]], high: [[b], [b, a]]`.
+    pub fn from_xi(xi: &[EF]) -> Result<Self, KernelError> {
+        let n = xi.len();
+        let low_n = n / 2;
+        let high_n = n - low_n;
+
+        let low = EqEvalLayers::new(low_n, xi[high_n..].iter().rev())?;
+        let high = EqEvalLayers::new(high_n, xi[..high_n].iter().rev())?;
+
+        Ok(Self { low, high })
+    }
+
+    pub fn max_n(&self) -> usize {
+        self.low_n() + self.high_n()
+    }
+
+    pub fn low_n(&self) -> usize {
+        self.low.layers.len() - 1
+    }
+
+    pub fn high_n(&self) -> usize {
+        self.high.layers.len() - 1
+    }
+
+    /// Drop the highest layer. Drops from high first, then low. This corresponding to `pop_front`
+    /// from `xi`.
+    pub fn drop_layer(&mut self) {
+        if self.high.layers.len() > 1 {
+            self.high.layers.pop();
+        } else if self.low.layers.len() > 1 {
+            self.low.layers.pop();
+        }
     }
 }

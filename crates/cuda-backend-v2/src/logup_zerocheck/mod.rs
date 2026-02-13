@@ -79,7 +79,8 @@ use batch_mle_monomial::{
     get_zerocheck_rules_len, trace_has_monomials,
 };
 pub use errors::*;
-use fractional::fractional_sumcheck_gpu;
+pub use fractional::fractional_sumcheck_gpu;
+pub use fractional::make_synthetic_leaves;
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use round0::evaluate_round0_constraints_gpu;
 
