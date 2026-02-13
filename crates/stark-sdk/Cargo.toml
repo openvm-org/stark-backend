@@ -33,6 +33,7 @@ tokio = { workspace = true, features = [
 rustls = { workspace = true, features = ["aws-lc-rs"], optional = true }
 eyre.workspace = true
 static_assertions.workspace = true
+derive-new.workspace = true
 
 [dev-dependencies]
 p3-keccak-air = { workspace = true }

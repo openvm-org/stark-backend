@@ -9,7 +9,6 @@ description = "Multi-matrix STARK backend for the SWIRL proof system"
 codec-derive.workspace = true
 
 p3-air.workspace = true
-p3-baby-bear.workspace = true
 p3-challenger.workspace = true
 p3-poseidon2.workspace = true
 p3-dft.workspace = true
@@ -47,6 +46,7 @@ mimalloc = { version = "0.1.43", optional = true }
 
 [dev-dependencies]
 rand.workspace = true
+p3-baby-bear.workspace = true
 p3-keccak-air.workspace = true
 test-case.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

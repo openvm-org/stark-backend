@@ -6,7 +6,6 @@ pub mod config;
 mod engine;
 #[cfg(feature = "metrics")]
 pub mod metrics_tracing;
-pub use stark_backend_v2::poseidon2;
 pub mod utils;
 
 pub use engine::*;

@@ -16,15 +16,9 @@ use p3_util::log2_ceil_u64;
 
 /// AIR builders for prover and verifier, including support for cross-matrix permutation arguments.
 pub mod air_builders;
-mod any_air;
-/// Trait for stateful chip that owns trace generation
-mod chip;
 pub mod codec;
-/// STARK Protocol configuration trait
-mod config;
 pub mod dft;
-/// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
-mod engine;
+pub mod duplex_sponge;
 /// Protocol hasher trait definition.
 pub mod hasher;
 /// Log-up permutation argument implementation as RAP.
@@ -36,7 +30,6 @@ pub mod poly_common;
 /// Definition of the STARK proof struct.
 pub mod proof;
 pub mod prover;
-mod transcript;
 pub mod utils;
 pub mod verifier;
 
@@ -45,6 +38,15 @@ pub mod test_utils;
 #[cfg(test)]
 mod tests;
 
+mod any_air;
+/// Trait for stateful chip that owns trace generation
+mod chip;
+/// STARK Protocol configuration trait
+mod config;
+/// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
+mod engine;
+/// Fiat-Shamir transcript trait definition.
+mod transcript;
 pub use any_air::*;
 pub use chip::*;
 pub use config::*;

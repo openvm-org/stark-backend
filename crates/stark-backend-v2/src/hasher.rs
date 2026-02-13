@@ -2,7 +2,7 @@ use std::{fmt::Debug, marker::PhantomData};
 
 use derivative::Derivative;
 use p3_field::Field;
-use p3_symmetric::{CompressionFunction, CryptographicHasher};
+use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
 
 /// Trait abstracting Merkle tree hash operations. This trait is used as part of the definition of
 /// the [`StarkProtocolConfig`](crate::StarkProtocolConfig).
@@ -37,6 +37,8 @@ pub trait MerkleHasher: 'static + Clone + Send + Sync {
 /// [MerkleHasher] implementation built from a cryptographic hash function and a compression
 /// function. This struct is intended for use by the protocol verifier. Prover backends may use
 /// independent but functionally equivalent implementations.
+///
+/// The compression function does not need to be collision-resistant and only needs to be a pseudo-cryptographic function: <https://eprint.iacr.org/2026/089>.
 #[derive(Derivative, derive_new::new)]
 #[derivative(
     Clone(bound = "H: Clone, C: Clone"),
@@ -53,7 +55,7 @@ where
     F: Field,
     Digest: 'static + Copy + Send + Sync,
     H: 'static + Send + Sync + CryptographicHasher<F, Digest>,
-    C: 'static + Send + Sync + CompressionFunction<Digest, 2>,
+    C: 'static + Send + Sync + PseudoCompressionFunction<Digest, 2>,
 {
     type F = F;
     type Digest = Digest;

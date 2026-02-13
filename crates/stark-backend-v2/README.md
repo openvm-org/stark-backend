@@ -1,7 +1,3 @@
-Reference implementation only.
+# stark-backend
 
-This crate is intended to be either moved into `openvm-stark-backend` or a separate performance-oriented implementation will be directly added to `openvm-stark-backend`.
-
-# References
-
-- https://github.com/starkware-libs/stwo
+This crate provides the traits and CPU implementation of the SWIRL protocol. All traits and implementations in this crate **must** be generic to the field. Concrete specializations should be provided in the `openvm-stark-sdk` crate. The latter is imported as a dev-dependency for concrete instantiations during testing.

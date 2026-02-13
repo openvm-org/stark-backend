@@ -1,4 +1,5 @@
-use p3_challenger::{CanObserve, CanSample};
+use std::ops::Deref;
+
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField64};
 use p3_maybe_rayon::prelude::*;
 use tracing::instrument;
@@ -58,20 +59,119 @@ where
     }
 }
 
-impl<SC, T> FiatShamirTranscript<SC> for T
-where
-    SC: StarkProtocolConfig,
-    T: CanObserve<SC::F> + CanObserve<SC::Digest> + CanSample<SC::F> + Clone + Send + Sync,
-{
-    fn observe(&mut self, value: SC::F) {
-        CanObserve::observe(self, value);
+pub trait TranscriptHistory {
+    type F;
+    type State;
+
+    fn len(&self) -> usize;
+    fn into_log(self) -> TranscriptLog<Self::F, Self::State>;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Log of transcript history
+#[derive(Clone, Debug)]
+pub struct TranscriptLog<F, State> {
+    /// Every sampled or observed value F
+    values: Vec<F>,
+    /// True iff values[tidx] was a sampled value
+    is_sample: Vec<bool>,
+    /// Sponge state after every permutation; note that not all implementations of
+    /// TranscriptHistory will define this
+    perm_results: Vec<State>,
+}
+
+impl<F, State> Default for TranscriptLog<F, State> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            is_sample: Vec::new(),
+            perm_results: Vec::new(),
+        }
+    }
+}
+
+impl<F: Clone, State> TranscriptLog<F, State> {
+    pub fn new(values: Vec<F>, is_sample: Vec<bool>) -> Self {
+        debug_assert_eq!(values.len(), is_sample.len());
+        Self {
+            values,
+            is_sample,
+            perm_results: vec![],
+        }
     }
 
-    fn sample(&mut self) -> SC::F {
-        CanSample::sample(self)
+    pub fn values(&self) -> &[F] {
+        &self.values
     }
 
-    fn observe_commit(&mut self, digest: SC::Digest) {
-        CanObserve::observe(self, digest);
+    pub fn values_mut(&mut self) -> &mut [F] {
+        &mut self.values
+    }
+
+    pub fn samples(&self) -> &[bool] {
+        &self.is_sample
+    }
+
+    pub fn samples_mut(&mut self) -> &mut [bool] {
+        &mut self.is_sample
+    }
+
+    pub fn push_observe(&mut self, value: F) {
+        self.values.push(value);
+        self.is_sample.push(false);
+    }
+
+    pub fn push_sample(&mut self, value: F) {
+        self.values.push(value);
+        self.is_sample.push(true);
+    }
+
+    pub fn push_perm_result(&mut self, state: State) {
+        self.perm_results.push(state);
+    }
+
+    pub fn extend_observe(&mut self, values: &[F]) {
+        self.values.extend_from_slice(values);
+        self.is_sample
+            .extend(core::iter::repeat_n(false, values.len()));
+    }
+
+    pub fn extend_sample(&mut self, values: &[F]) {
+        self.values.extend_from_slice(values);
+        self.is_sample
+            .extend(core::iter::repeat_n(true, values.len()));
+    }
+
+    pub fn extend_with_flags(&mut self, values: &[F], sample_flags: &[bool]) {
+        debug_assert_eq!(values.len(), sample_flags.len());
+        self.values.extend_from_slice(values);
+        self.is_sample.extend(sample_flags.iter().copied());
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn into_parts(self) -> (Vec<F>, Vec<bool>) {
+        (self.values, self.is_sample)
+    }
+
+    pub fn perm_results(&self) -> &Vec<State> {
+        &self.perm_results
+    }
+}
+
+impl<F, State> Deref for TranscriptLog<F, State> {
+    type Target = [F];
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
     }
 }
