@@ -40,6 +40,9 @@ where
 
     #[must_use]
     fn check_witness(&mut self, bits: usize, witness: SC::F) -> bool {
+        if bits == 0 {
+            return true;
+        }
         self.observe(witness);
         self.sample_bits(bits) == 0
     }
@@ -48,6 +51,10 @@ where
     fn grind(&mut self, bits: usize) -> SC::F {
         assert!(bits < (u32::BITS as usize));
         assert!((1 << bits) < SC::F::ORDER_U64);
+        // Trivial case: 0 bits mean no PoW is required and any witness is valid.
+        if bits == 0 {
+            return SC::F::ZERO;
+        }
 
         let witness = (0..SC::F::ORDER_U64)
             .into_par_iter()
