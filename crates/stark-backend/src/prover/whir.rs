@@ -85,6 +85,10 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
     TS: FiatShamirTranscript<SC>,
 {
+    // Proof-of-work grinding before μ batching challenge.
+    // This amplifies soundness of the initial batching step.
+    let mu_pow_witness = transcript.grind(whir_params.mu_pow_bits);
+
     // Sample randomness for algebraic batching.
     // We batch the codewords for \hat{q}_j together _before_ applying WHIR.
     let mu = transcript.sample_ext();
@@ -298,6 +302,7 @@ where
     }
 
     WhirProof::<SC> {
+        mu_pow_witness,
         whir_sumcheck_polys,
         codeword_commits,
         ood_values,
