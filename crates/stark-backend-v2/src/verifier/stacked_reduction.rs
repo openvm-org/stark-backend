@@ -239,8 +239,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
-        poseidon2::sponge::DuplexSponge,
+        test_utils::{
+            baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+            default_duplex_sponge, DuplexSponge,
+        },
         prover::stacked_pcs::StackedSlice,
     };
 
@@ -331,8 +333,8 @@ mod tests {
         });
         let column_openings = vec![vec![vec![t, t_rot]]];
 
-        let mut transcript = DuplexSponge::default();
-        let lambda = transcript.sample_ext();
+        let mut transcript = default_duplex_sponge();
+        let lambda = FiatShamirTranscript::<SCV2>::sample_ext(&mut transcript);
 
         let s_0_deg = 2 * ((1 << L_SKIP) - 1);
         let log_dft_size = log2_ceil_usize(s_0_deg + 1);
@@ -349,11 +351,11 @@ mod tests {
         let univariate_round_coeffs = Radix2Bowers.coset_idft(univariate_round_evals, EF::ONE);
 
         for coeffs in &univariate_round_coeffs {
-            transcript.observe_ext(*coeffs);
+            FiatShamirTranscript::<SCV2>::observe_ext(&mut transcript, *coeffs);
         }
 
         let mut sumcheck_round_polys = vec![];
-        u.push(transcript.sample_ext());
+        u.push(FiatShamirTranscript::<SCV2>::sample_ext(&mut transcript));
         for round in 1..=N_STACK {
             sumcheck_round_polys.push([
                 compute_t::<false>(&q, &r, &b, &u, EF::ONE, round, L_SKIP)
@@ -361,13 +363,19 @@ mod tests {
                 compute_t::<false>(&q, &r, &b, &u, EF::TWO, round, L_SKIP)
                     + lambda * compute_t::<true>(&q, &r, &b, &u, EF::TWO, round, L_SKIP),
             ]);
-            transcript.observe_ext(sumcheck_round_polys[round - 1][0]);
-            transcript.observe_ext(sumcheck_round_polys[round - 1][1]);
-            u.push(transcript.sample_ext());
+            FiatShamirTranscript::<SCV2>::observe_ext(
+                &mut transcript,
+                sumcheck_round_polys[round - 1][0],
+            );
+            FiatShamirTranscript::<SCV2>::observe_ext(
+                &mut transcript,
+                sumcheck_round_polys[round - 1][1],
+            );
+            u.push(FiatShamirTranscript::<SCV2>::sample_ext(&mut transcript));
         }
 
         let q_at_u = q(&u);
-        transcript.observe_ext(q_at_u);
+        FiatShamirTranscript::<SCV2>::observe_ext(&mut transcript, q_at_u);
 
         let proof = StackingProof::<SCV2> {
             univariate_round_coeffs,
@@ -376,7 +384,7 @@ mod tests {
         };
 
         StackedReductionTestCase {
-            transcript: DuplexSponge::default(),
+            transcript: default_duplex_sponge(),
             proof,
             layouts: vec![layout],
             need_rot_per_commit: vec![vec![true]],

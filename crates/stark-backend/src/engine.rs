@@ -152,17 +152,17 @@ where
         let device = self.prover().device;
         let proof_inputs = ctx
             .iter()
-            .map(|air_ctx| {
-                let cached_mains = air_ctx
+            .map(|trace_ctx| {
+                let cached_mains = trace_ctx
                     .cached_mains
                     .iter()
                     .map(|pre| device.transport_matrix_from_device_to_host(&pre.trace))
                     .collect_vec();
-                let common_main = air_ctx
+                let common_main = trace_ctx
                     .common_main
                     .as_ref()
                     .map(|m| device.transport_matrix_from_device_to_host(m));
-                let public_values = air_ctx.public_values.clone();
+                let public_values = trace_ctx.public_values.clone();
                 AirProofRawInput {
                     cached_mains,
                     common_main,

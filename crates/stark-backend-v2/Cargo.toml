@@ -46,6 +46,7 @@ tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1.43", optional = true }
 
 [dev-dependencies]
+openvm-stark-sdk.workspace = true # dev-dependency is not circular
 rand.workspace = true
 p3-baby-bear.workspace = true
 p3-keccak-air.workspace = true

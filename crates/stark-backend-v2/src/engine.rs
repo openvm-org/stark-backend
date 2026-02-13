@@ -129,11 +129,11 @@ where
         let (inputs, used_airs, used_pks): (Vec<_>, Vec<_>, Vec<_>) = ctx
             .per_trace
             .iter()
-            .map(|(air_id, air_ctx)| {
+            .map(|(air_id, trace_ctx)| {
                 let common_main = self
                     .device()
-                    .transport_matrix_from_device_to_host(&air_ctx.common_main);
-                let cached_mains = air_ctx
+                    .transport_matrix_from_device_to_host(&trace_ctx.common_main);
+                let cached_mains = trace_ctx
                     .cached_mains
                     .iter()
                     .map(|cd| {
@@ -144,7 +144,7 @@ where
                     })
                     .collect_vec();
                 let common_main = Some(transpose(common_main));
-                let public_values = air_ctx.public_values.clone();
+                let public_values = trace_ctx.public_values.clone();
                 (
                     AirProofRawInput {
                         cached_mains,

@@ -1,13 +1,13 @@
 use std::{cmp::Reverse, sync::Arc};
 
 use derivative::Derivative;
-use crate::keygen::types::LinearConstraint;
-use crate::prover::MatrixDimensions;
 
 use crate::{
-    keygen::types::{MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2},
+    keygen::types::{
+        LinearConstraint, MultiStarkVerifyingKey0V2, MultiStarkVerifyingKeyV2, StarkVerifyingKeyV2,
+    },
     proof::TraceVData,
-    prover::ProverBackendV2,
+    prover::{MatrixDimensions, ProverBackendV2},
     StarkProtocolConfig, SystemParams,
 };
 
@@ -129,7 +129,7 @@ impl<PB: ProverBackendV2> ProvingContextV2<PB> {
     pub fn common_main_traces(&self) -> impl Iterator<Item = (usize, &PB::Matrix)> {
         self.per_trace
             .iter()
-            .map(|(air_idx, air_ctx)| (*air_idx, &air_ctx.common_main))
+            .map(|(air_idx, trace_ctx)| (*air_idx, &trace_ctx.common_main))
     }
 
     // Returns `self` with the trace data sorted to be descending in height for column stacking. For
@@ -142,8 +142,9 @@ impl<PB: ProverBackendV2> ProvingContextV2<PB> {
     // Stable sort the trace data to be descending in height: this is needed for stacking. For
     // equal heights, sort in ascending order of AIR index.
     pub fn sort_for_stacking(&mut self) {
-        self.per_trace
-            .sort_by_key(|(air_idx, air_ctx)| (Reverse(air_ctx.common_main.height()), *air_idx));
+        self.per_trace.sort_by_key(|(air_idx, trace_ctx)| {
+            (Reverse(trace_ctx.common_main.height()), *air_idx)
+        });
     }
 }
 

@@ -257,8 +257,10 @@ fn reduce_to_single_evaluation<SC: StarkProtocolConfig>(
 mod tests {
     use super::*;
     use crate::{
-        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
-        poseidon2::sponge::DuplexSponge,
+        test_utils::{
+            baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
+            default_duplex_sponge,
+        },
         proof::{GkrLayerClaims, GkrProof},
         prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         test_utils::setup_tracing,
@@ -276,7 +278,7 @@ mod tests {
             sumcheck_polys: vec![],
         };
 
-        let mut transcript = DuplexSponge::default();
+        let mut transcript = default_duplex_sponge();
 
         let result = verify_gkr::<SCV2, _>(&proof, &mut transcript, 2);
         assert!(result.is_err());
@@ -299,7 +301,7 @@ mod tests {
             sumcheck_polys: vec![],
         };
 
-        let mut transcript = DuplexSponge::default();
+        let mut transcript = default_duplex_sponge();
         let result = verify_gkr::<SCV2, _>(&proof2, &mut transcript, 2);
         assert!(result.is_err());
         assert!(matches!(
@@ -326,7 +328,7 @@ mod tests {
             sumcheck_polys: vec![],
         };
 
-        let mut transcript = DuplexSponge::default();
+        let mut transcript = default_duplex_sponge();
         let result = verify_gkr::<SCV2, _>(&proof, &mut transcript, 1);
         assert!(result.is_err());
         assert!(matches!(
@@ -349,7 +351,7 @@ mod tests {
             },
         ];
 
-        let mut prover_transcript = DuplexSponge::default();
+        let mut prover_transcript = default_duplex_sponge();
         let (frac_proof, _xi) =
             fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
@@ -360,7 +362,7 @@ mod tests {
             sumcheck_polys: frac_proof.sumcheck_polys,
         };
 
-        let mut verifier_transcript = DuplexSponge::default();
+        let mut verifier_transcript = default_duplex_sponge();
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
         let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
 
@@ -396,7 +398,7 @@ mod tests {
             },
         ];
 
-        let mut prover_transcript = DuplexSponge::default();
+        let mut prover_transcript = default_duplex_sponge();
         let (frac_proof, _xi) =
             fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
@@ -407,7 +409,7 @@ mod tests {
             sumcheck_polys: frac_proof.sumcheck_polys,
         };
 
-        let mut verifier_transcript = DuplexSponge::default();
+        let mut verifier_transcript = default_duplex_sponge();
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
         let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
 
@@ -459,7 +461,7 @@ mod tests {
             },
         ];
 
-        let mut prover_transcript = DuplexSponge::default();
+        let mut prover_transcript = default_duplex_sponge();
         let (frac_proof, _xi) =
             fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
@@ -470,7 +472,7 @@ mod tests {
             sumcheck_polys: frac_proof.sumcheck_polys,
         };
 
-        let mut verifier_transcript = DuplexSponge::default();
+        let mut verifier_transcript = default_duplex_sponge();
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
         let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
 
@@ -498,7 +500,7 @@ mod tests {
             },
         ];
 
-        let mut prover_transcript = DuplexSponge::default();
+        let mut prover_transcript = default_duplex_sponge();
         let (frac_proof, _xi) =
             fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
@@ -509,7 +511,7 @@ mod tests {
             sumcheck_polys: frac_proof.sumcheck_polys,
         };
 
-        let mut verifier_transcript = DuplexSponge::default();
+        let mut verifier_transcript = default_duplex_sponge();
         let total_rounds = p3_util::log2_strict_usize(fractions.len());
         let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
 
@@ -527,7 +529,7 @@ mod tests {
         setup_tracing();
         let fractions = vec![];
 
-        let mut prover_transcript = DuplexSponge::default();
+        let mut prover_transcript = default_duplex_sponge();
         let (frac_proof, _xi) =
             fractional_sumcheck::<SCV2, _>(&mut prover_transcript, &fractions, true);
 
@@ -538,7 +540,7 @@ mod tests {
             sumcheck_polys: frac_proof.sumcheck_polys,
         };
 
-        let mut verifier_transcript = DuplexSponge::default();
+        let mut verifier_transcript = default_duplex_sponge();
         let result = verify_gkr::<SCV2, _>(&gkr_proof, &mut verifier_transcript, 0);
 
         assert!(

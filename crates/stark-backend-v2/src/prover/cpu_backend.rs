@@ -143,11 +143,11 @@ where
         let pre_cached_pcs_data_per_commit: Vec<_> = ctx
             .per_trace
             .iter()
-            .flat_map(|(air_idx, air_ctx)| {
+            .flat_map(|(air_idx, trace_ctx)| {
                 mpk.per_air[*air_idx]
                     .preprocessed_data
                     .iter()
-                    .chain(&air_ctx.cached_mains)
+                    .chain(&trace_ctx.cached_mains)
                     .map(|cd| cd.data.clone())
             })
             .collect();
@@ -157,12 +157,12 @@ where
             stacked_per_commit.push(data);
         }
         let mut need_rot_per_commit = vec![need_rot_per_trace];
-        for (air_idx, air_ctx) in &ctx.per_trace {
+        for (air_idx, trace_ctx) in &ctx.per_trace {
             let need_rot = mpk.per_air[*air_idx].vk.params.need_rot;
             if mpk.per_air[*air_idx].preprocessed_data.is_some() {
                 need_rot_per_commit.push(vec![need_rot]);
             }
-            for _ in &air_ctx.cached_mains {
+            for _ in &trace_ctx.cached_mains {
                 need_rot_per_commit.push(vec![need_rot]);
             }
         }

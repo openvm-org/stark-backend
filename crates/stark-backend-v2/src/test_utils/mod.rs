@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use itertools::Itertools;
-use p3_baby_bear::BabyBear;
-use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::dense::RowMajorMatrix;
-use tracing::Level;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
 
 use self::dummy_airs::{
     fib_air::air::FibonacciAir,
@@ -16,57 +13,19 @@ use self::dummy_airs::{
     },
 };
 use crate::{
-    baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, Digest, F},
     interaction::{BusIndex, LogUpSecurityParameters},
     keygen::types::{MultiStarkProvingKeyV2, MultiStarkVerifyingKeyV2},
-    poseidon2::sponge::{
-        DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory, TranscriptLog,
-    },
     proof::Proof,
     prover::{
         stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
         CpuBackendV2, DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions,
         MultiRapProver, Prover, ProvingContextV2, TraceCommitterV2,
     },
-    AirRef, BabyBearPoseidon2CpuEngineV2, ChipV2, FiatShamirTranscript, StarkEngineV2,
-    SystemParams, WhirConfig, WhirParams,
+    AirRef, ChipV2, StarkEngineV2, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
 };
 
 pub mod dummy_airs;
 
-type SCV2 = BabyBearPoseidon2ConfigV2;
-
-// TODO: move to stark-sdk
-/// Set up tracing with INFO level.
-pub fn setup_tracing() {
-    setup_tracing_with_log_level(Level::INFO);
-}
-
-// TODO: move to stark-sdk
-/// Set up tracing with a specified log level.
-pub fn setup_tracing_with_log_level(level: Level) {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("{},p3_=warn", level)));
-    let _ = Registry::default()
-        .with(env_filter)
-        .with(tracing_forest::ForestLayer::default())
-        .try_init();
-}
-
-// TODO: move to stark-sdk
-/// Returns LogUp security parameters for BabyBear with ~100 bits of security.
-pub fn log_up_security_params_baby_bear_100_bits() -> LogUpSecurityParameters {
-    use p3_field::extension::BinomialExtensionField;
-    let params = LogUpSecurityParameters {
-        max_interaction_count: BabyBear::ORDER_U32,
-        log_max_message_length: 7,
-        pow_bits: 18,
-    };
-    assert!(params.bits_of_security::<BinomialExtensionField<BabyBear, 4>>() >= 100);
-    params
-}
-
-// TODO: move to stark-sdk
 /// Macro to create a `Vec<AirRef<SC>>` from a list of AIRs.
 #[macro_export]
 macro_rules! any_air_arc_vec {
@@ -75,7 +34,6 @@ macro_rules! any_air_arc_vec {
     };
 }
 
-#[allow(clippy::type_complexity)]
 pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
     engine: &E,
     transcript: &mut E::TS,
@@ -95,19 +53,19 @@ pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
         .prove_rap_constraints(transcript, pk, &ctx, &common_main_pcs_data)
 }
 
-fn get_fib_number(mut a: u32, mut b: u32, n: usize) -> u32 {
+fn get_fib_number<F: PrimeField64>(mut a: u64, mut b: u64, n: usize) -> u64 {
     for _ in 0..n - 1 {
-        let c = (a + b) % BabyBear::ORDER_U32;
+        let c = (a + b) % F::ORDER_U64;
         a = b;
         b = c;
     }
     b
 }
 
-fn get_conditional_fib_number(mut a: u32, mut b: u32, sels: &[bool]) -> u32 {
+fn get_conditional_fib_number<F: PrimeField64>(mut a: u64, mut b: u64, sels: &[bool]) -> u64 {
     for &s in sels[0..sels.len() - 1].iter() {
         if s {
-            let c = (a + b) % BabyBear::ORDER_U32;
+            let c = (a + b) % F::ORDER_U64;
             a = b;
             b = c;
         }
@@ -117,33 +75,33 @@ fn get_conditional_fib_number(mut a: u32, mut b: u32, sels: &[bool]) -> u32 {
 
 /// Trait for object responsible for generating the collection of AIRs and trace matrices for a
 /// single test case.
-pub trait TestFixture {
-    fn airs(&self) -> Vec<AirRef<SCV2>>;
+pub trait TestFixture<SC: StarkProtocolConfig> {
+    fn airs(&self) -> Vec<AirRef<SC>>;
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>>;
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SC>>;
 
-    fn keygen<E: StarkEngineV2<SC = SCV2>>(
+    fn keygen<E: StarkEngineV2<SC = SC>>(
         &self,
         engine: &E,
-    ) -> (MultiStarkProvingKeyV2<SCV2>, MultiStarkVerifyingKeyV2<SCV2>) {
+    ) -> (MultiStarkProvingKeyV2<SC>, MultiStarkVerifyingKeyV2<SC>) {
         engine.keygen(&self.airs())
     }
 
-    fn prove<E: StarkEngineV2<SC = SCV2>>(
+    fn prove<E: StarkEngineV2<SC = SC>>(
         &self,
         engine: &E,
-        pk: &MultiStarkProvingKeyV2<SCV2>,
-    ) -> Proof<SCV2> {
-        self.prove_from_transcript(engine, pk, &mut E::TS::default())
+        pk: &MultiStarkProvingKeyV2<SC>,
+    ) -> Proof<SC> {
+        self.prove_from_transcript(engine, pk, &mut engine.initial_transcript())
     }
 
     /// Prove using CPU tracegen and transport to device.
-    fn prove_from_transcript<E: StarkEngineV2<SC = SCV2>>(
+    fn prove_from_transcript<E: StarkEngineV2<SC = SC>>(
         &self,
         engine: &E,
-        pk: &MultiStarkProvingKeyV2<SCV2>,
+        pk: &MultiStarkProvingKeyV2<SC>,
         transcript: &mut E::TS,
-    ) -> Proof<SCV2> {
+    ) -> Proof<SC> {
         let ctx = self.generate_proving_ctx();
         let device = engine.device();
         let d_pk = device.transport_pk_to_device(pk);
@@ -154,10 +112,10 @@ pub trait TestFixture {
         proof
     }
 
-    fn keygen_and_prove<E: StarkEngineV2<SC = SCV2>>(
+    fn keygen_and_prove<E: StarkEngineV2<SC = SC>>(
         &self,
         engine: &E,
-    ) -> (MultiStarkVerifyingKeyV2<SCV2>, Proof<SCV2>) {
+    ) -> (MultiStarkVerifyingKeyV2<SC>, Proof<SC>) {
         let (pk, vk) = self.keygen(engine);
         let proof = self.prove(engine, &pk);
         (vk, proof)
@@ -165,15 +123,15 @@ pub trait TestFixture {
 }
 
 pub struct FibFixture {
-    pub a: u32,
-    pub b: u32,
+    pub a: u64,
+    pub b: u64,
     pub n: usize,
     pub num_airs: usize,
     pub empty_air_indices: Vec<usize>,
 }
 
 impl FibFixture {
-    pub fn new(a: u32, b: u32, n: usize) -> Self {
+    pub fn new(a: u64, b: u64, n: usize) -> Self {
         FibFixture {
             a,
             b,
@@ -183,7 +141,7 @@ impl FibFixture {
         }
     }
 
-    pub fn new_with_num_airs(a: u32, b: u32, n: usize, num_airs: usize) -> Self {
+    pub fn new_with_num_airs(a: u64, b: u64, n: usize, num_airs: usize) -> Self {
         FibFixture {
             a,
             b,
@@ -199,16 +157,16 @@ impl FibFixture {
     }
 }
 
-impl TestFixture for FibFixture {
-    fn airs(&self) -> Vec<AirRef<SCV2>> {
+impl<SC: StarkProtocolConfig> TestFixture<SC> for FibFixture {
+    fn airs(&self) -> Vec<AirRef<SC>> {
         let air = Arc::new(FibonacciAir);
         vec![air; self.num_airs]
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SC>> {
         use crate::test_utils::dummy_airs::fib_air::trace::generate_trace_rows;
-        let f_n = get_fib_number(self.a, self.b, self.n);
-        let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);
+        let f_n = get_fib_number::<SC::F>(self.a, self.b, self.n);
+        let pis = [self.a, self.b, f_n].map(SC::F::from_u64);
 
         ProvingContextV2::new(
             (0..self.num_airs)
@@ -217,7 +175,7 @@ impl TestFixture for FibFixture {
                     (
                         i,
                         AirProvingContextV2::simple(
-                            ColMajorMatrix::from_row_major(&generate_trace_rows::<F>(
+                            ColMajorMatrix::from_row_major(&generate_trace_rows::<SC::F>(
                                 self.a, self.b, self.n,
                             )),
                             pis.to_vec(),
@@ -232,18 +190,18 @@ impl TestFixture for FibFixture {
 /// Interactions fixture with 1 sender and 1 receiver
 pub struct InteractionsFixture11;
 
-impl TestFixture for InteractionsFixture11 {
-    fn airs(&self) -> Vec<AirRef<SCV2>> {
+impl<SC: StarkProtocolConfig> TestFixture<SC> for InteractionsFixture11 {
+    fn airs(&self) -> Vec<AirRef<SC>> {
         let sender_air = DummyInteractionAir::new(1, true, 0);
         let receiver_air = DummyInteractionAir::new(1, false, 0);
         any_air_arc_vec!(sender_air, receiver_air)
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SC>> {
         let sender_trace = RowMajorMatrix::new(
             [0, 1, 3, 5, 7, 4, 546, 889]
                 .into_iter()
-                .map(BabyBear::from_usize)
+                .map(SC::F::from_usize)
                 .collect(),
             2,
         );
@@ -251,7 +209,7 @@ impl TestFixture for InteractionsFixture11 {
         let receiver_trace = RowMajorMatrix::new(
             [1, 5, 3, 4, 4, 4, 2, 5, 0, 123, 545, 889, 1, 889, 0, 456]
                 .into_iter()
-                .map(BabyBear::from_usize)
+                .map(SC::F::from_usize)
                 .collect(),
             2,
         );
@@ -273,56 +231,52 @@ impl TestFixture for InteractionsFixture11 {
 
 /// Dummy interaction AIRs with cached trace: 1 sender, 1 receiver
 #[derive(derive_new::new)]
-pub struct CachedFixture11 {
-    pub params: SystemParams,
+pub struct CachedFixture11<SC> {
+    pub config: SC,
 }
 
-impl TestFixture for CachedFixture11 {
-    fn airs(&self) -> Vec<AirRef<SCV2>> {
+impl<SC: StarkProtocolConfig> TestFixture<SC> for CachedFixture11<SC> {
+    fn airs(&self) -> Vec<AirRef<SC>> {
         let sender_air = DummyInteractionAir::new(1, true, 0).partition();
         let receiver_air = DummyInteractionAir::new(1, false, 0).partition();
         any_air_arc_vec!(sender_air, receiver_air)
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SC>> {
         let sender_trace = ColMajorMatrix::new(
-            [0, 3, 7, 546]
-                .into_iter()
-                .map(BabyBear::from_usize)
-                .collect(),
+            [0, 3, 7, 546].into_iter().map(SC::F::from_usize).collect(),
             1,
         );
         let sender_cached_trace = ColMajorMatrix::new(
-            [1, 5, 4, 889]
-                .into_iter()
-                .map(BabyBear::from_usize)
-                .collect(),
+            [1, 5, 4, 889].into_iter().map(SC::F::from_usize).collect(),
             1,
         );
 
         let receiver_trace = ColMajorMatrix::new(
             [1, 3, 4, 2, 0, 545, 1, 0]
                 .into_iter()
-                .map(BabyBear::from_usize)
+                .map(SC::F::from_usize)
                 .collect(),
             1,
         );
         let receiver_cached_trace = ColMajorMatrix::new(
             [5, 4, 4, 5, 123, 889, 889, 456]
                 .into_iter()
-                .map(BabyBear::from_usize)
+                .map(SC::F::from_usize)
                 .collect(),
             1,
         );
 
-        let params = &self.params;
+        let config = &self.config;
+        let params = config.params();
         ProvingContextV2::new(
             [
                 (sender_trace, sender_cached_trace),
                 (receiver_trace, receiver_cached_trace),
             ]
             .map(|(common, cached)| {
-                let (commit, data) = stacked_commit::<Poseidon2Hasher>(
+                let (commit, data) = stacked_commit(
+                    config.hasher(),
                     params.l_skip,
                     params.n_stack,
                     params.log_blowup,
@@ -350,22 +304,22 @@ impl TestFixture for CachedFixture11 {
 
 #[derive(derive_new::new)]
 pub struct PreprocessedFibFixture {
-    pub a: u32,
-    pub b: u32,
+    pub a: u64,
+    pub b: u64,
     pub sels: Vec<bool>,
 }
 
-impl TestFixture for PreprocessedFibFixture {
-    fn airs(&self) -> Vec<AirRef<SCV2>> {
+impl<SC: StarkProtocolConfig> TestFixture<SC> for PreprocessedFibFixture {
+    fn airs(&self) -> Vec<AirRef<SC>> {
         let air = Arc::new(FibonacciSelectorAir::new(self.sels.clone(), false));
         vec![air]
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SC>> {
         use crate::test_utils::dummy_airs::fib_selector_air::trace::generate_trace_rows;
-        let trace = generate_trace_rows(self.a, self.b, &self.sels);
-        let f_n = get_conditional_fib_number(self.a, self.b, &self.sels);
-        let pis = [self.a, self.b, f_n].map(BabyBear::from_u32);
+        let trace = generate_trace_rows::<SC::F>(self.a, self.b, &self.sels);
+        let f_n = get_conditional_fib_number::<SC::F>(self.a, self.b, &self.sels);
+        let pis = [self.a, self.b, f_n].map(SC::F::from_u64);
 
         let single_ctx =
             AirProvingContextV2::simple(ColMajorMatrix::from_row_major(&trace), pis.to_vec());
@@ -380,20 +334,20 @@ pub struct SelfInteractionFixture {
     pub bus_index: BusIndex,
 }
 
-impl TestFixture for SelfInteractionFixture {
-    fn airs(&self) -> Vec<AirRef<SCV2>> {
+impl<SC: StarkProtocolConfig> TestFixture<SC> for SelfInteractionFixture {
+    fn airs(&self) -> Vec<AirRef<SC>> {
         self.widths
             .iter()
             .map(|&width| {
                 Arc::new(SelfInteractionAir {
                     width,
                     bus_index: self.bus_index,
-                }) as AirRef<SCV2>
+                }) as AirRef<SC>
             })
             .collect_vec()
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SC>> {
         let per_trace = self
             .widths
             .iter()
@@ -402,7 +356,7 @@ impl TestFixture for SelfInteractionFixture {
                     width,
                     log_height: self.log_height,
                 };
-                ChipV2::<(), CpuBackendV2<SCV2>>::generate_proving_ctx(&chip, ())
+                ChipV2::<(), CpuBackendV2<SC>>::generate_proving_ctx(&chip, ())
             })
             .enumerate()
             .collect_vec();
@@ -410,20 +364,20 @@ impl TestFixture for SelfInteractionFixture {
     }
 }
 
-pub struct MixtureFixture {
-    pub fxs: Vec<MixtureFixtureEnum>,
+pub struct MixtureFixture<SC> {
+    pub fxs: Vec<MixtureFixtureEnum<SC>>,
 }
 
-pub enum MixtureFixtureEnum {
+pub enum MixtureFixtureEnum<SC> {
     FibFixture(FibFixture),
     InteractionsFixture11(InteractionsFixture11),
-    CachedFixture11(CachedFixture11),
+    CachedFixture11(CachedFixture11<SC>),
     PreprocessedFibFixture(PreprocessedFibFixture),
     SelfInteractionFixture(SelfInteractionFixture),
 }
 
-impl MixtureFixtureEnum {
-    fn airs(&self) -> Vec<AirRef<SCV2>> {
+impl<SC: StarkProtocolConfig> MixtureFixtureEnum<SC> {
+    fn airs(&self) -> Vec<AirRef<SC>> {
         use crate::test_utils::MixtureFixtureEnum::*;
         match self {
             FibFixture(fx) => fx.airs(),
@@ -434,7 +388,7 @@ impl MixtureFixtureEnum {
         }
     }
 
-    fn generate_air_proving_ctxs(&self) -> Vec<AirProvingContextV2<CpuBackendV2<SCV2>>> {
+    fn generate_air_proving_ctxs(&self) -> Vec<AirProvingContextV2<CpuBackendV2<SC>>> {
         use crate::test_utils::MixtureFixtureEnum::*;
         let ctx = match self {
             FibFixture(fx) => fx.generate_proving_ctx(),
@@ -445,24 +399,24 @@ impl MixtureFixtureEnum {
         };
         ctx.per_trace
             .into_iter()
-            .map(|(_, air_ctx)| air_ctx)
+            .map(|(_, trace_ctx)| trace_ctx)
             .collect_vec()
     }
 }
 
-impl MixtureFixture {
-    pub fn new(fxs: Vec<MixtureFixtureEnum>) -> Self {
+impl<SC> MixtureFixture<SC> {
+    pub fn new(fxs: Vec<MixtureFixtureEnum<SC>>) -> Self {
         Self { fxs }
     }
 
-    pub fn standard(log_height: usize, params: SystemParams) -> Self {
+    pub fn standard(log_height: usize, config: SC) -> Self {
         let height = 1usize << log_height;
         let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
         let widths = vec![4, 7, 8, 8, 10, 100];
         Self::new(vec![
             MixtureFixtureEnum::FibFixture(FibFixture::new(8, 8, height)),
             MixtureFixtureEnum::InteractionsFixture11(InteractionsFixture11),
-            MixtureFixtureEnum::CachedFixture11(CachedFixture11::new(params)),
+            MixtureFixtureEnum::CachedFixture11(CachedFixture11::new(config)),
             MixtureFixtureEnum::PreprocessedFibFixture(PreprocessedFibFixture::new(7, 3, sels)),
             MixtureFixtureEnum::SelfInteractionFixture(SelfInteractionFixture::new(
                 widths, log_height, 5,
@@ -471,12 +425,12 @@ impl MixtureFixture {
     }
 }
 
-impl TestFixture for MixtureFixture {
-    fn airs(&self) -> Vec<AirRef<SCV2>> {
+impl<SC: StarkProtocolConfig> TestFixture<SC> for MixtureFixture<SC> {
+    fn airs(&self) -> Vec<AirRef<SC>> {
         self.fxs.iter().flat_map(|fx| fx.airs()).collect_vec()
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SCV2>> {
+    fn generate_proving_ctx(&self) -> ProvingContextV2<CpuBackendV2<SC>> {
         let per_trace = self
             .fxs
             .iter()
@@ -521,7 +475,11 @@ pub fn test_system_params_small_with_poly_len(
         n_stack,
         log_blowup,
         whir: test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len),
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: LogUpSecurityParameters {
+            max_interaction_count: 1 << 30,
+            log_max_message_length: 7,
+            pow_bits: 2,
+        },
         max_constraint_degree,
     }
 }
@@ -543,79 +501,4 @@ pub fn test_whir_config_small(
 
 pub fn default_test_params_small() -> SystemParams {
     test_system_params_small(2, 8, 3)
-}
-
-pub fn test_engine_small() -> BabyBearPoseidon2CpuEngineV2<DuplexSponge> {
-    setup_tracing();
-    BabyBearPoseidon2CpuEngineV2::new(default_test_params_small())
-}
-
-#[derive(Clone)]
-pub struct DuplexSpongeValidator {
-    pub inner: DuplexSpongeRecorder,
-    pub idx: usize,
-    log: TranscriptLog,
-}
-
-impl DuplexSpongeValidator {
-    pub fn new(log: TranscriptLog) -> Self {
-        debug_assert_eq!(log.len(), log.samples().len());
-        Self {
-            inner: Default::default(),
-            idx: 0,
-            log,
-        }
-    }
-}
-
-impl FiatShamirTranscript<BabyBearPoseidon2ConfigV2> for DuplexSpongeValidator {
-    fn observe(&mut self, x: F) {
-        debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
-        assert!(!self.log.samples()[self.idx]);
-        let exp_x = self.log[self.idx];
-        assert_eq!(x, exp_x);
-        self.idx += 1;
-        self.inner.observe(x);
-    }
-
-    fn sample(&mut self) -> F {
-        debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
-        assert!(self.log.samples()[self.idx]);
-        let x = self.inner.sample();
-        let exp_x = self.log[self.idx];
-        self.idx += 1;
-        assert_eq!(x, exp_x);
-        x
-    }
-
-    fn observe_commit(&mut self, digest: Digest) {
-        for x in digest {
-            self.observe(x);
-        }
-    }
-}
-
-impl TranscriptHistory for DuplexSpongeValidator {
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn into_log(self) -> TranscriptLog {
-        debug_assert_eq!(self.inner.len(), self.log.len());
-        debug_assert_eq!(
-            self.inner.len(),
-            self.idx,
-            "transcript replay ended with {} of {} entries consumed",
-            self.idx,
-            self.inner.len()
-        );
-        debug_assert_eq!(
-            self.log.len(),
-            self.idx,
-            "transcript replay ended with {} of {} entries consumed",
-            self.idx,
-            self.log.len()
-        );
-        self.inner.into_log()
-    }
 }

@@ -161,19 +161,19 @@ where
         let per_trace = ctx
             .per_trace
             .iter()
-            .map(|(air_idx, air_ctx)| {
-                let common_main = self.transport_matrix_to_device(&air_ctx.common_main);
-                let cached_mains = air_ctx
+            .map(|(air_idx, trace_ctx)| {
+                let common_main = self.transport_matrix_to_device(&trace_ctx.common_main);
+                let cached_mains = trace_ctx
                     .cached_mains
                     .iter()
                     .map(|cd| self.transport_committed_trace_data_to_device(cd))
                     .collect();
-                let air_ctx_gpu = AirProvingContextV2::new(
+                let trace_ctx_gpu = AirProvingContextV2::new(
                     cached_mains,
                     common_main,
-                    air_ctx.public_values.clone(),
+                    trace_ctx.public_values.clone(),
                 );
-                (*air_idx, air_ctx_gpu)
+                (*air_idx, trace_ctx_gpu)
             })
             .collect();
         ProvingContextV2::new(per_trace)

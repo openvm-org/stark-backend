@@ -124,19 +124,19 @@ where
         let mut public_values: Vec<Vec<SC::F>> = vec![Vec::new(); mpk.per_air.len()];
 
         // Hypercube dimension per trace (present AIR)
-        for (air_id, air_ctx) in &ctx.per_trace {
-            let trace_height = air_ctx.common_main.height();
+        for (air_id, trace_ctx) in &ctx.per_trace {
+            let trace_height = trace_ctx.common_main.height();
             let log_height = log2_strict_usize(trace_height);
 
             trace_vdata[*air_id] = Some(TraceVData::<SC> {
                 log_height,
-                cached_commitments: air_ctx
+                cached_commitments: trace_ctx
                     .cached_mains
                     .iter()
                     .map(|cd| cd.commitment)
                     .collect(),
             });
-            public_values[*air_id] = air_ctx.public_values.clone();
+            public_values[*air_id] = trace_ctx.public_values.clone();
         }
         #[cfg(feature = "metrics")]
         trace_metrics::<SC, _>(mpk, &trace_vdata).emit();

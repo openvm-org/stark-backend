@@ -243,36 +243,46 @@ mod test {
     use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
     use p3_field::PrimeCharacteristicRing;
 
-    use super::{CHUNK, WIDTH};
+    use crate::{
+        test_utils::{
+            baby_bear_poseidon2::{self, BabyBearPoseidon2ConfigV2},
+            default_duplex_sponge, default_duplex_sponge_recorder,
+        },
+        FiatShamirTranscript, TranscriptHistory,
+    };
+
+    type SCV2 = BabyBearPoseidon2ConfigV2;
+
+    const WIDTH: usize = 16;
+    const CHUNK: usize = 8;
 
     type Challenger =
         DuplexChallenger<BabyBear, p3_baby_bear::Poseidon2BabyBear<WIDTH>, WIDTH, CHUNK>;
 
-    use crate::{
-        poseidon2::{
-            poseidon2_perm,
-            sponge::{DuplexSponge, DuplexSpongeRecorder, ReadOnlyTranscript, TranscriptHistory},
-        },
-        FiatShamirTranscript,
-    };
+    type ReadOnlyTranscript<'a> =
+        super::ReadOnlyTranscript<'a, BabyBear, [BabyBear; WIDTH]>;
 
     #[test]
     fn test_sponge() {
-        let perm = poseidon2_perm();
+        let perm = baby_bear_poseidon2::poseidon2_perm();
 
         let mut challenger = Challenger::new(perm.clone());
-        let mut sponge = DuplexSponge::default();
+        let mut sponge = default_duplex_sponge();
 
         for i in 0..5 {
             for _ in 0..(i + 1) * i {
                 let a: BabyBear = CanSample::sample(&mut challenger);
-                let b = sponge.sample();
+                let b =
+                    FiatShamirTranscript::<BabyBearPoseidon2ConfigV2>::sample(&mut sponge);
                 assert_eq!(a, b);
             }
 
             for j in 0..i * i {
                 CanObserve::observe(&mut challenger, BabyBear::from_usize(j));
-                FiatShamirTranscript::observe(&mut sponge, BabyBear::from_usize(j));
+                FiatShamirTranscript::<BabyBearPoseidon2ConfigV2>::observe(
+                    &mut sponge,
+                    BabyBear::from_usize(j),
+                );
             }
         }
     }
@@ -280,31 +290,31 @@ mod test {
     #[test]
     fn test_read_only_transcript() {
         // Record a sequence of operations
-        let mut recorder = DuplexSpongeRecorder::default();
-        recorder.observe(BabyBear::from_u32(42));
-        recorder.observe(BabyBear::from_u32(100));
-        let s1 = recorder.sample();
-        recorder.observe(BabyBear::from_u32(200));
-        let s2 = recorder.sample();
-        let s3 = recorder.sample();
+        let mut recorder = default_duplex_sponge_recorder();
+        FiatShamirTranscript::<SCV2>::observe(&mut recorder, BabyBear::from_u32(42));
+        FiatShamirTranscript::<SCV2>::observe(&mut recorder, BabyBear::from_u32(100));
+        let s1 = FiatShamirTranscript::<SCV2>::sample(&mut recorder);
+        FiatShamirTranscript::<SCV2>::observe(&mut recorder, BabyBear::from_u32(200));
+        let s2 = FiatShamirTranscript::<SCV2>::sample(&mut recorder);
+        let s3 = FiatShamirTranscript::<SCV2>::sample(&mut recorder);
 
         let log = recorder.into_log();
 
         // Replay from start
         let mut replay = ReadOnlyTranscript::new(&log, 0);
-        replay.observe(BabyBear::from_u32(42));
-        replay.observe(BabyBear::from_u32(100));
-        assert_eq!(replay.sample(), s1);
-        replay.observe(BabyBear::from_u32(200));
-        assert_eq!(replay.sample(), s2);
-        assert_eq!(replay.sample(), s3);
+        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(42));
+        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(100));
+        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay), s1);
+        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(200));
+        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay), s2);
+        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay), s3);
         assert_eq!(replay.len(), 6);
 
         // Replay from middle
         let mut replay2 = ReadOnlyTranscript::new(&log, 2);
-        assert_eq!(replay2.sample(), s1);
-        replay2.observe(BabyBear::from_u32(200));
-        assert_eq!(replay2.sample(), s2);
+        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay2), s1);
+        FiatShamirTranscript::<SCV2>::observe(&mut replay2, BabyBear::from_u32(200));
+        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay2), s2);
         assert_eq!(replay2.len(), 5);
     }
 
@@ -312,23 +322,23 @@ mod test {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "expected observe at 0")]
     fn test_read_only_transcript_wrong_operation() {
-        let mut recorder = DuplexSpongeRecorder::default();
-        let _ = recorder.sample();
+        let mut recorder = default_duplex_sponge_recorder();
+        let _ = FiatShamirTranscript::<SCV2>::sample(&mut recorder);
         let log = recorder.into_log();
 
         let mut replay = ReadOnlyTranscript::new(&log, 0);
-        replay.observe(BabyBear::from_u32(42)); // Should panic
+        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(42)); // Should panic
     }
 
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "value mismatch at 0")]
     fn test_read_only_transcript_wrong_value() {
-        let mut recorder = DuplexSpongeRecorder::default();
-        recorder.observe(BabyBear::from_u32(42));
+        let mut recorder = default_duplex_sponge_recorder();
+        FiatShamirTranscript::<SCV2>::observe(&mut recorder, BabyBear::from_u32(42));
         let log = recorder.into_log();
 
         let mut replay = ReadOnlyTranscript::new(&log, 0);
-        replay.observe(BabyBear::from_u32(99)); // Should panic
+        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(99)); // Should panic
     }
 }

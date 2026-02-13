@@ -40,6 +40,7 @@ pub fn run_with_metric_collection<R>(
     let snapshotter = recorder.snapshotter();
     let recorder = TracingContextLayer::all().layer(recorder);
     // Install the registry as the global recorder
+    #[cfg(feature = "metrics")]
     metrics::set_global_recorder(recorder).unwrap();
     let res = f();
 

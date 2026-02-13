@@ -388,7 +388,7 @@ mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
-    use crate::baby_bear_poseidon2::F;
+    use crate::test_utils::baby_bear_poseidon2::F;
 
     #[test]
     fn test_evals_mobius_eq_hypercube_matches_naive() {

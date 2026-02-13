@@ -497,7 +497,7 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
-    use crate::{baby_bear_poseidon2::F, prover::ColMajorMatrix};
+    use crate::{test_utils::baby_bear_poseidon2::F, prover::ColMajorMatrix};
 
     #[test]
     fn test_stacked_matrix_manual_0() {

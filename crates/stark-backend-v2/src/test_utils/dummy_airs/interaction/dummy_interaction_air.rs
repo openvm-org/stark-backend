@@ -18,7 +18,7 @@ use crate::{
         stacked_pcs::stacked_commit, AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2,
         CpuBackendV2,
     },
-    AirRef, ChipV2, PartitionedBaseAir, StarkProtocolConfig, SystemParams,
+    AirRef, ChipV2, PartitionedBaseAir, StarkProtocolConfig,
 };
 
 pub struct DummyInteractionCols;
@@ -123,9 +123,9 @@ impl<AB: InteractionBuilder + PartitionedAirBuilder> Air<AB> for DummyInteractio
 }
 
 /// Note: in principle, committing cached trace is out of scope of a chip. But this chip is for
-/// usually testing, so we support it for convenience.
-pub struct DummyInteractionChip {
-    params: Option<SystemParams>,
+/// testing, so we support it for convenience.
+pub struct DummyInteractionChip<SC> {
+    config: Option<SC>,
     data: Option<DummyInteractionData>,
     pub air: DummyInteractionAir,
 }
@@ -136,24 +136,24 @@ pub struct DummyInteractionData {
     pub fields: Vec<Vec<u32>>,
 }
 
-impl DummyInteractionChip {
+impl<SC> DummyInteractionChip<SC> {
     pub fn new_without_partition(field_width: usize, is_send: bool, bus_index: BusIndex) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index);
         Self {
-            params: None,
+            config: None,
             data: None,
             air,
         }
     }
     pub fn new_with_partition(
-        params: SystemParams,
+        config: SC,
         field_width: usize,
         is_send: bool,
         bus_index: BusIndex,
     ) -> Self {
         let air = DummyInteractionAir::new(field_width, is_send, bus_index).partition();
         Self {
-            params: Some(params),
+            config: Some(config),
             data: None,
             air,
         }
@@ -167,35 +167,32 @@ impl DummyInteractionChip {
         assert!(fields.iter().all(|r| r.len() == w));
         self.data = Some(data);
     }
-    pub fn air<SC: StarkProtocolConfig>(&self) -> AirRef<SC> {
+    pub fn air(&self) -> AirRef<SC>
+    where
+        SC: StarkProtocolConfig,
+    {
         Arc::new(self.air)
     }
 }
 
-impl<SC: StarkProtocolConfig> ChipV2<(), CpuBackendV2<SC>> for DummyInteractionChip
-where
-    SC::F: PrimeCharacteristicRing,
-{
+impl<SC: StarkProtocolConfig> ChipV2<(), CpuBackendV2<SC>> for DummyInteractionChip<SC> {
     fn generate_proving_ctx(&self, _: ()) -> AirProvingContextV2<CpuBackendV2<SC>> {
         assert!(self.data.is_some());
         let data = self.data.clone().unwrap();
         if self.air.partition {
-            self.generate_traces_with_partition::<SC>(data)
+            self.generate_traces_with_partition(data)
         } else {
-            let trace = self.generate_traces_without_partition::<SC>(data);
+            let trace = self.generate_traces_without_partition(data);
             AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&trace))
         }
     }
 }
 
-impl DummyInteractionChip {
-    fn generate_traces_with_partition<SC: StarkProtocolConfig>(
+impl<SC: StarkProtocolConfig> DummyInteractionChip<SC> {
+    pub fn generate_traces_with_partition(
         &self,
         data: DummyInteractionData,
-    ) -> AirProvingContextV2<CpuBackendV2<SC>>
-    where
-        SC::F: PrimeCharacteristicRing,
-    {
+    ) -> AirProvingContextV2<CpuBackendV2<SC>> {
         let DummyInteractionData {
             mut count,
             mut fields,
@@ -213,8 +210,10 @@ impl DummyInteractionChip {
         let cached_trace_rm = RowMajorMatrix::new(cached_trace_val, w);
         let cached_trace = ColMajorMatrix::from_row_major(&cached_trace_rm);
 
-        let params = self.params.as_ref().expect("params required for partition");
-        let (commit, data) = stacked_commit::<SC::Hasher>(
+        let config = self.config.as_ref().expect("params required for partition");
+        let params = config.params();
+        let (commit, data) = stacked_commit(
+            config.hasher(),
             params.l_skip,
             params.n_stack,
             params.log_blowup,
@@ -234,13 +233,10 @@ impl DummyInteractionChip {
         }
     }
 
-    fn generate_traces_without_partition<SC: StarkProtocolConfig>(
+    fn generate_traces_without_partition(
         &self,
         data: DummyInteractionData,
-    ) -> RowMajorMatrix<SC::F>
-    where
-        SC::F: PrimeCharacteristicRing,
-    {
+    ) -> RowMajorMatrix<SC::F> {
         let DummyInteractionData { count, fields } = data;
         let h = count.len();
         assert_eq!(fields.len(), h);

@@ -3,7 +3,6 @@
 use std::{cmp::max, iter::zip};
 
 use itertools::Itertools;
-use crate::prover::MatrixDimensions;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
@@ -20,7 +19,7 @@ use crate::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
-        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixView,
+        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions, MatrixView,
         ProverBackendV2, ProvingContextV2,
     },
     FiatShamirTranscript, StarkProtocolConfig,
@@ -58,11 +57,11 @@ where
     let interactions_meta: Vec<_> = ctx
         .per_trace
         .iter()
-        .map(|(air_idx, air_ctx)| {
+        .map(|(air_idx, trace_ctx)| {
             let pk = &mpk.per_air[*air_idx];
 
             let num_interactions = pk.vk.symbolic_constraints.interactions.len();
-            let height = air_ctx.common_main.height();
+            let height = trace_ctx.common_main.height();
             let log_height = log2_strict_usize(height);
             let log_lifted_height = log_height.max(l_skip);
             total_interactions += (num_interactions as u64) << log_lifted_height;

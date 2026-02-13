@@ -693,13 +693,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
-        poseidon2::sponge::DuplexSpongeRecorder,
         test_utils::{
-            test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
-            PreprocessedFibFixture, TestFixture,
+            baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, BabyBearPoseidon2CpuEngineV2},
+            default_duplex_sponge_recorder, test_system_params_small, CachedFixture11, FibFixture,
+            InteractionsFixture11, PreprocessedFibFixture, TestFixture,
         },
-        BabyBearPoseidon2CpuEngineV2, SystemParams,
+        DefaultStarkEngine, SystemParams,
     };
 
     type ConcreteSC = BabyBearPoseidon2ConfigV2;
@@ -707,7 +706,7 @@ mod tests {
     fn test_proof_encode_decode<Fx: TestFixture>(fx: Fx, params: SystemParams) -> Result<()> {
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
         let pk = fx.keygen(&engine).0;
-        let proof = fx.prove_from_transcript(&engine, &pk, &mut DuplexSpongeRecorder::default());
+        let proof = fx.prove_from_transcript(&engine, &pk, &mut default_duplex_sponge_recorder());
 
         let mut proof_bytes = Vec::new();
         proof.encode(&mut proof_bytes).unwrap();
@@ -735,7 +734,8 @@ mod tests {
     #[test]
     fn test_cached_proof_encode_decode() -> Result<()> {
         let params = test_system_params_small(2, 5, 3);
-        let fx = CachedFixture11::new(params.clone());
+        let config = BabyBearPoseidon2ConfigV2::default_from_params(params.clone());
+        let fx = CachedFixture11::new(config);
         test_proof_encode_decode(fx, params)
     }
 

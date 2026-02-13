@@ -1,6 +1,6 @@
 use itertools::{fold, Itertools};
 use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
-use p3_field::{PrimeCharacteristicRing, PrimeField32};
+use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 
 use crate::{
@@ -23,10 +23,7 @@ impl<F> BaseAir<F> for SelfInteractionAir {
 impl<F> BaseAirWithPublicValues<F> for SelfInteractionAir {}
 impl<F> PartitionedBaseAir<F> for SelfInteractionAir {}
 
-impl<AB: AirBuilder + InteractionBuilder> Air<AB> for SelfInteractionAir
-where
-    AB::F: PrimeField32,
-{
+impl<AB: AirBuilder + InteractionBuilder> Air<AB> for SelfInteractionAir {
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
 

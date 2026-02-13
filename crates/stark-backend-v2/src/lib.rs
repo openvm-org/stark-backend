@@ -36,7 +36,7 @@ pub mod verifier;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 #[cfg(test)]
-mod tests;
+pub mod tests;
 
 mod any_air;
 /// Trait for stateful chip that owns trace generation

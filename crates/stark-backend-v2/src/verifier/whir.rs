@@ -384,22 +384,20 @@ mod tests {
     use test_case::test_case;
     use tracing::Level;
 
-    use super::*;
     use crate::{
-        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF, F},
         poly_common::Squarable,
-        poseidon2::sponge::{
-            DuplexSponge, DuplexSpongeRecorder, Poseidon2Hasher, TranscriptHistory,
-        },
         prover::{
             poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening, ColMajorMatrix,
             CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions, ProvingContextV2,
         },
         test_utils::{
+            baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, BabyBearPoseidon2CpuEngineV2, EF, F},
+            default_duplex_sponge, default_duplex_sponge_recorder,
             log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
-            test_whir_config_small, DuplexSpongeValidator, FibFixture, TestFixture,
+            test_whir_config_small, DuplexSponge, DuplexSpongeValidator, FibFixture, TestFixture,
         },
         verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
+        DefaultStarkEngine, StarkEngineV2, StarkProtocolConfig, SystemParams, TranscriptHistory,
         WhirConfig, WhirRoundConfig,
     };
 
@@ -441,16 +439,18 @@ mod tests {
     }
 
     fn run_whir_test(
-        params: SystemParams,
+        config: &SCV2,
         pk: DeviceMultiStarkProvingKeyV2<CpuBackendV2<SCV2>>,
         ctx: &ProvingContextV2<CpuBackendV2<SCV2>>,
     ) -> Result<(), VerifyWhirError> {
+        let params = config.params();
         let (common_main_commit, common_main_pcs_data) = {
             let traces = ctx
                 .common_main_traces()
                 .map(|(_, trace)| trace)
                 .collect_vec();
-            stacked_commit::<Poseidon2Hasher>(
+            stacked_commit(
+                config.hasher(),
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
@@ -461,11 +461,11 @@ mod tests {
 
         let mut commits = vec![common_main_commit];
         let mut committed_mats = vec![(&common_main_pcs_data.matrix, &common_main_pcs_data.tree)];
-        for (air_id, air_ctx) in &ctx.per_trace {
+        for (air_id, trace_ctx) in &ctx.per_trace {
             let pcs_datas = pk.per_air[*air_id]
                 .preprocessed_data
                 .iter()
-                .chain(&air_ctx.cached_mains);
+                .chain(&trace_ctx.cached_mains);
             for cd in pcs_datas {
                 let data = &cd.data;
                 committed_mats.push((&data.matrix, &data.tree));
@@ -475,12 +475,13 @@ mod tests {
 
         let mut rng = StdRng::seed_from_u64(0);
 
-        let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
+        let (z_prism, z_cube) = generate_random_z(params, &mut rng);
 
-        let mut prover_sponge = DuplexSpongeRecorder::default();
+        let mut prover_sponge = default_duplex_sponge_recorder();
 
         let proof = prove_whir_opening::<SCV2, _>(
             &mut prover_sponge,
+            config.hasher(),
             params.l_skip,
             params.log_blowup,
             params.whir(),
@@ -490,13 +491,13 @@ mod tests {
 
         let stacking_openings = committed_mats
             .iter()
-            .map(|(matrix, _)| stacking_openings_for_matrix(&params, &z_prism, matrix))
+            .map(|(matrix, _)| stacking_openings_for_matrix(params, &z_prism, matrix))
             .collect_vec();
 
         let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
         verify_whir::<SCV2, _>(
             &mut verifier_sponge,
-            &params,
+            config,
             &proof,
             &stacking_openings,
             &commits,
@@ -505,16 +506,13 @@ mod tests {
     }
 
     fn run_whir_fib_test(params: SystemParams) -> Result<(), VerifyWhirError> {
-        use crate::{
-            poseidon2::sponge::DuplexSponge, prover::DeviceDataTransporterV2,
-            BabyBearPoseidon2CpuEngineV2, StarkEngineV2,
-        };
+        use crate::prover::DeviceDataTransporterV2;
         let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params.clone());
         let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
         let (pk, _vk) = fib.keygen(&engine);
         let pk = engine.device().transport_pk_to_device(&pk);
         let ctx = fib.generate_proving_ctx();
-        run_whir_test(params, pk, &ctx)
+        run_whir_test(engine.config(), pk, &ctx)
     }
 
     #[test_case(0, 1, 1, 0)]
@@ -607,6 +605,8 @@ mod tests {
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
         };
+        let config = BabyBearPoseidon2ConfigV2::default_from_params(params);
+        let params = config.params();
 
         let n_rows = 1 << (params.n_stack + params.l_skip);
 
@@ -622,7 +622,8 @@ mod tests {
                 .collect_vec();
             let mat = ColMajorMatrix::new(data, n_cols);
 
-            let (commit, pcs_data) = stacked_commit::<Poseidon2Hasher>(
+            let (commit, pcs_data) = stacked_commit(
+                config.hasher(),
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
@@ -637,13 +638,14 @@ mod tests {
 
         debug_assert_eq!(matrices[0].height(), 1 << (params.n_stack + params.l_skip));
 
-        let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
+        let (z_prism, z_cube) = generate_random_z(params, &mut rng);
 
-        let mut prover_sponge = DuplexSpongeRecorder::default();
+        let mut prover_sponge = default_duplex_sponge_recorder();
 
         let committed_mats = matrices.iter().zip(trees.iter()).collect_vec();
         let proof = prove_whir_opening::<SCV2, _>(
             &mut prover_sponge,
+            config.hasher(),
             params.l_skip,
             params.log_blowup,
             params.whir(),
@@ -653,13 +655,13 @@ mod tests {
 
         let stacking_openings: Vec<Vec<EF>> = matrices
             .iter()
-            .map(|mat| stacking_openings_for_matrix(&params, &z_prism, mat))
+            .map(|mat| stacking_openings_for_matrix(params, &z_prism, mat))
             .collect();
 
         let mut verifier_sponge = DuplexSpongeValidator::new(prover_sponge.into_log());
         verify_whir::<SCV2, _>(
             &mut verifier_sponge,
-            &params,
+            &config,
             &proof,
             &stacking_openings,
             &commits,
@@ -681,6 +683,8 @@ mod tests {
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
         };
+        let config = BabyBearPoseidon2ConfigV2::default_from_params(params);
+        let params = config.params();
 
         let n_rows = 1 << (params.n_stack + params.l_skip);
 
@@ -696,7 +700,8 @@ mod tests {
                 .collect_vec();
             let mat = ColMajorMatrix::new(data, n_cols);
 
-            let (commit, pcs_data) = stacked_commit::<Poseidon2Hasher>(
+            let (commit, pcs_data) = stacked_commit(
+                config.hasher(),
                 params.l_skip,
                 params.n_stack,
                 params.log_blowup,
@@ -711,14 +716,15 @@ mod tests {
 
         debug_assert_eq!(matrices[0].height(), 1 << (params.n_stack + params.l_skip));
 
-        let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
+        let (z_prism, z_cube) = generate_random_z(params, &mut rng);
 
-        let mut prover_sponge = DuplexSponge::default();
-        let mut verifier_sponge = DuplexSponge::default();
+        let mut prover_sponge = default_duplex_sponge();
+        let mut verifier_sponge = default_duplex_sponge();
 
         let committed_mats = matrices.iter().zip(trees.iter()).collect_vec();
         let proof = prove_whir_opening::<SCV2, _>(
             &mut prover_sponge,
+            config.hasher(),
             params.l_skip,
             params.log_blowup,
             params.whir(),
@@ -728,7 +734,7 @@ mod tests {
 
         let mut stacking_openings: Vec<Vec<EF>> = matrices
             .iter()
-            .map(|mat| stacking_openings_for_matrix(&params, &z_prism, mat))
+            .map(|mat| stacking_openings_for_matrix(params, &z_prism, mat))
             .collect();
 
         // change an opening to test soundness
@@ -737,7 +743,7 @@ mod tests {
         assert!(matches!(
             verify_whir::<SCV2, _>(
                 &mut verifier_sponge,
-                &params,
+                &config,
                 &proof,
                 &stacking_openings,
                 &commits,

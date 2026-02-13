@@ -221,18 +221,16 @@ mod tests {
     use tracing::Level;
 
     use crate::{
-        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, EF},
-        poseidon2::sponge::{DuplexSpongeRecorder, TranscriptHistory},
         test_utils::{
-            log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
-            test_system_params_small, CachedFixture11, DuplexSpongeValidator, FibFixture,
-            InteractionsFixture11, PreprocessedFibFixture, TestFixture,
+            baby_bear_poseidon2::{BabyBearPoseidon2CpuEngineV2, EF},
+            default_duplex_sponge_recorder, log_up_security_params_baby_bear_100_bits,
+            setup_tracing_with_log_level, test_system_params_small, CachedFixture11,
+            DuplexSpongeValidator, FibFixture, InteractionsFixture11, PreprocessedFibFixture,
+            TestFixture,
         },
         verifier::{verify, VerifierError},
-        BabyBearPoseidon2CpuEngineV2, SystemParams, WhirConfig, WhirParams,
+        DefaultStarkEngine, StarkEngineV2, SystemParams, TranscriptHistory, WhirConfig, WhirParams,
     };
-
-    type SCV2 = BabyBearPoseidon2ConfigV2;
 
     #[test_case(2, 10)]
     #[test_case(2, 1; "where log_trace_degree=1 less than l_skip=2")]
@@ -265,7 +263,7 @@ mod tests {
 
         let engine = BabyBearPoseidon2CpuEngineV2::new(params);
         let (pk, vk) = fib.keygen(&engine);
-        let mut recorder = DuplexSpongeRecorder::default();
+        let mut recorder = default_duplex_sponge_recorder();
         let proof = fib.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
@@ -284,7 +282,7 @@ mod tests {
         let fx = InteractionsFixture11;
         let (pk, vk) = fx.keygen(&engine);
 
-        let mut recorder = DuplexSpongeRecorder::default();
+        let mut recorder = default_duplex_sponge_recorder();
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
@@ -301,11 +299,11 @@ mod tests {
     ) -> Result<(), VerifierError<EF>> {
         setup_tracing_with_log_level(Level::DEBUG);
         let params = test_system_params_small(l_skip, n_stack, k_whir);
-        let engine = BabyBearPoseidon2CpuEngineV2::new(params.clone());
-        let fx = CachedFixture11::new(params);
+        let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+        let fx = CachedFixture11::new(engine.config().clone());
         let (pk, vk) = fx.keygen(&engine);
 
-        let mut recorder = DuplexSpongeRecorder::default();
+        let mut recorder = default_duplex_sponge_recorder();
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
@@ -328,7 +326,7 @@ mod tests {
         let fx = PreprocessedFibFixture::new(0, 1, sels);
         let (pk, vk) = fx.keygen(&engine);
 
-        let mut recorder = DuplexSpongeRecorder::default();
+        let mut recorder = default_duplex_sponge_recorder();
         let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
         let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());

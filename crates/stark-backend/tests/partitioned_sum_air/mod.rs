@@ -46,7 +46,7 @@ fn prove_and_verify_sum_air(x: Vec<Val>, ys: Vec<Vec<Val>>) -> Result<(), Verifi
     // Demonstrate y is cached
     let (y_com, y_data) = prover.device.commit(std::slice::from_ref(&y_trace));
     // Load x normally
-    let air_ctx = AirProvingContext {
+    let trace_ctx = AirProvingContext {
         cached_mains: vec![CommittedTraceData {
             commitment: y_com,
             trace: y_trace,
@@ -55,7 +55,7 @@ fn prove_and_verify_sum_air(x: Vec<Val>, ys: Vec<Vec<Val>>) -> Result<(), Verifi
         common_main: Some(Arc::new(x_trace)),
         public_values: vec![],
     };
-    let ctx = ProvingContext::new(vec![(air_id, air_ctx)]);
+    let ctx = ProvingContext::new(vec![(air_id, trace_ctx)]);
 
     engine.prove_then_verify(&pk, ctx).map(|_| ())
 }

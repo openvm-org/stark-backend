@@ -5,18 +5,15 @@ use std::{
 };
 
 use itertools::Itertools;
-use crate::{
-    air_builders::symbolic::{
-        symbolic_variable::Entry, SymbolicConstraints, SymbolicExpressionNode,
-    },
-    parizip,
-    prover::MatrixDimensions,
-};
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 
 use crate::{
+    air_builders::symbolic::{
+        symbolic_variable::Entry, SymbolicConstraints, SymbolicExpressionNode,
+    },
+    parizip,
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
     prover::{
         logup_zerocheck::EvalHelper,
@@ -26,8 +23,8 @@ use crate::{
             batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round0_deg,
             sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
-        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, ProverBackendV2,
-        ProvingContextV2, StridedColMajorMatrixView,
+        ColMajorMatrix, CpuBackendV2, DeviceMultiStarkProvingKeyV2, MatrixDimensions,
+        ProverBackendV2, ProvingContextV2, StridedColMajorMatrixView,
     },
     StarkProtocolConfig,
 };
@@ -118,17 +115,19 @@ where
         let eval_helpers: Vec<EvalHelper<SC::F>> = ctx
             .per_trace
             .iter()
-            .map(|(air_idx, air_ctx)| {
+            .map(|(air_idx, trace_ctx)| {
                 let pk = &pk.per_air[*air_idx];
                 let constraints = &pk.vk.symbolic_constraints.constraints;
-                let public_values = air_ctx.public_values.clone();
-                let preprocessed_trace: Option<StridedColMajorMatrixView<'_, SC::F>> =
-                    pk.preprocessed_data.as_ref().map(|cd| cd.trace.as_view().into());
-                let partitioned_main_trace: Vec<StridedColMajorMatrixView<'_, SC::F>> = air_ctx
+                let public_values = trace_ctx.public_values.clone();
+                let preprocessed_trace: Option<StridedColMajorMatrixView<'_, SC::F>> = pk
+                    .preprocessed_data
+                    .as_ref()
+                    .map(|cd| cd.trace.as_view().into());
+                let partitioned_main_trace: Vec<StridedColMajorMatrixView<'_, SC::F>> = trace_ctx
                     .cached_mains
                     .iter()
                     .map(|cd| cd.trace.as_view().into())
-                    .chain(iter::once(air_ctx.common_main.as_view().into()))
+                    .chain(iter::once(trace_ctx.common_main.as_view().into()))
                     .collect_vec();
                 let constraint_degree = pk.vk.max_constraint_degree;
                 // Scan constraints to see if we need `next` row and also check index bounds

@@ -72,9 +72,9 @@ fn main() -> eyre::Result<()> {
         p3_keccak_air::generate_trace_rows::<openvm_stark_sdk::p3_baby_bear::BabyBear>(inputs, 0)
     });
 
-    let air_ctx = AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&trace));
+    let trace_ctx = AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&trace));
     let d_pk = engine.device().transport_pk_to_device(&pk);
-    let proof = engine.prove(&d_pk, ProvingContextV2::new(vec![(0, air_ctx)]));
+    let proof = engine.prove(&d_pk, ProvingContextV2::new(vec![(0, trace_ctx)]));
 
     engine
         .verify(&vk, &proof)
