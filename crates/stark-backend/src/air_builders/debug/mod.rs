@@ -1,8 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use p3_air::{
-    AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder,
-};
+use p3_air::{AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder, PairBuilder};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 

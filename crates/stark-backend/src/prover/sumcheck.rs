@@ -2,7 +2,6 @@ use std::array::from_fn;
 
 use cfg_if::cfg_if;
 use itertools::Itertools;
-use crate::prover::MatrixDimensions;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{
     batch_multiplicative_inverse, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField,
@@ -16,7 +15,9 @@ use tracing::{debug, instrument, trace};
 use crate::{
     dft::Radix2BowersSerial,
     poly_common::UnivariatePoly,
-    prover::{ColMajorMatrix, ColMajorMatrixView, MatrixView, StridedColMajorMatrixView},
+    prover::{
+        ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, MatrixView, StridedColMajorMatrixView,
+    },
     FiatShamirTranscript, StarkProtocolConfig,
 };
 
@@ -438,7 +439,8 @@ where
 
     // Working copy of evaluations that gets folded after each round
     // PERF[jpw]: the first round should be treated specially in the case F is the base field
-    let mut current_evals = ColMajorMatrix::new(evals.iter().map(|&x| SC::EF::from(x)).collect(), 1);
+    let mut current_evals =
+        ColMajorMatrix::new(evals.iter().map(|&x| SC::EF::from(x)).collect(), 1);
     let sum_claim: SC::EF = evals.iter().fold(F::ZERO, |acc, &x| acc + x).into();
     transcript.observe_ext(sum_claim);
 

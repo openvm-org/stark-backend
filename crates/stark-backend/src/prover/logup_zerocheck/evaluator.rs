@@ -1,8 +1,9 @@
+use p3_field::{ExtensionField, Field};
+
 use crate::air_builders::symbolic::{
     symbolic_expression::SymbolicEvaluator,
     symbolic_variable::{Entry, SymbolicVariable},
 };
-use p3_field::{ExtensionField, Field};
 
 pub(super) struct ViewPair<T> {
     pub(super) local: *const T,

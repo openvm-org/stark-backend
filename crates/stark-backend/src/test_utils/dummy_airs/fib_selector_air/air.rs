@@ -1,16 +1,17 @@
 use std::borrow::Borrow;
 
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues, PairBuilder};
+use p3_air::{
+    Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues, PairBuilder,
+};
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 
+use super::columns::FibonacciSelectorCols;
 use crate::{
     interaction::{InteractionBuilder, LookupBus},
+    test_utils::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS},
     PartitionedBaseAir,
 };
-
-use super::columns::FibonacciSelectorCols;
-use crate::test_utils::dummy_airs::fib_air::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
 
 pub struct FibonacciSelectorAir {
     sels: Vec<bool>,

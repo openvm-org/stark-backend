@@ -3,9 +3,8 @@ use std::borrow::Borrow;
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues};
 use p3_matrix::Matrix;
 
-use crate::PartitionedBaseAir;
-
 use super::columns::{FibonacciCols, NUM_FIBONACCI_COLS};
+use crate::PartitionedBaseAir;
 
 #[derive(Clone, Copy)]
 pub struct FibonacciAir;

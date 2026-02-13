@@ -1,8 +1,9 @@
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
+
 use crate::air_builders::symbolic::{
     symbolic_expression::SymbolicEvaluator,
     symbolic_variable::{Entry, SymbolicVariable},
 };
-use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 
 type ViewPair<'a, T> = &'a [(T, T)];
 
