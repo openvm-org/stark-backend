@@ -11,6 +11,7 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::{
     keygen::types::MultiStarkProvingKeyV2,
+    p3_matrix::dense::RowMajorMatrix,
     poly_common::Squarable,
     proof::*,
     prover::{
@@ -213,6 +214,24 @@ pub fn transport_matrix_h2d_col_major<T>(
     ))
 }
 
+pub fn transport_matrix_h2d_row(
+    matrix: &RowMajorMatrix<F>,
+) -> Result<DeviceMatrix<F>, MemCopyError> {
+    let data = matrix.values.as_slice();
+    let input_buffer = data.to_device().unwrap();
+    let output = DeviceMatrix::<F>::with_capacity(matrix.height(), matrix.width());
+    unsafe {
+        matrix_transpose::<F>(
+            output.buffer(),
+            &input_buffer,
+            matrix.width(),
+            matrix.height(),
+        )?;
+    }
+    assert_eq!(output.strong_count(), 1);
+    output
+}
+
 /// `d` must be the stacked pcs data of a single trace matrix.
 /// This function will transport `d` to device and then unstack it (allocating device memory) to
 /// return `CommittedTraceDataV2<F, Digest>`.
@@ -397,6 +416,24 @@ pub fn transport_matrix_d2h_col_major<T>(
 ) -> Result<ColMajorMatrix<T>, MemCopyError> {
     let values_host = matrix.buffer().to_host()?;
     Ok(ColMajorMatrix::new(values_host, matrix.width()))
+}
+
+pub fn transport_matrix_d2h_row_major<T>(
+    matrix: &DeviceMatrix<T>,
+) -> Result<RowMajorMatrix<T>, MemCopyError> {
+    let matrix_buffer = DeviceBuffer::<T>::with_capacity(matrix.height() * matrix.width());
+    unsafe {
+        matrix_transpose::<T>(
+            &matrix_buffer,
+            matrix.buffer(),
+            matrix.height(),
+            matrix.width(),
+        )?;
+    }
+    Ok(RowMajorMatrix::<T>::new(
+        matrix_buffer.to_host()?,
+        matrix.width(),
+    ))
 }
 
 /// For debugging purposes only.

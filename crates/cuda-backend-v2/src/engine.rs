@@ -44,3 +44,26 @@ impl StarkWhirEngine for BabyBearPoseidon2GpuEngineV2 {
         Self::new(params)
     }
 }
+
+// #[cfg(feature = "touchemall")]
+// pub fn check_trace_validity(proving_ctx: &AirProvingContext<GpuBackend>, name: &str) {
+//     use openvm_cuda_common::copy::MemCopyD2H;
+//     use openvm_stark_backend::prover::hal::MatrixDimensions;
+
+//     use crate::types::F;
+
+//     let trace = proving_ctx.common_main.as_ref().unwrap();
+//     let height = trace.height();
+//     let width = trace.width();
+//     let trace = trace.to_host().unwrap();
+//     for r in 0..height {
+//         for c in 0..width {
+//             let value = trace[c * height + r];
+//             let value_u32 = unsafe { *(&value as *const F as *const u32) };
+//             assert!(
+//                 value_u32 != 0xffffffff,
+//                 "potentially untouched value at ({r}, {c}) of a trace of size {height}x{width} for air {name}"
+//             );
+//         }
+//     }
+// }

@@ -37,6 +37,7 @@ test-case.workspace = true
 [features]
 default = ["openvm-stark-backend/parallel"] # TODO: remove this once no longer using cpu rayon
 touchemall = ["openvm-cuda-common/touchemall"]
+test-utils = ["openvm-stark-backend/test-utils"]
 
 [[bin]]
 name = "bench"

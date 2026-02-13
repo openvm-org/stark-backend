@@ -13,6 +13,8 @@ pub mod sponge;
 pub mod stacked_pcs;
 pub mod stacked_reduction;
 mod sumcheck;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 pub mod utils;
 pub mod whir;
 

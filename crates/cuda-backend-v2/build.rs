@@ -1,6 +1,6 @@
 use std::process::exit;
 
-use openvm_cuda_builder::{CudaBuilder, cuda_available};
+use openvm_cuda_builder::{cuda_available, CudaBuilder};
 
 fn main() {
     if !cuda_available() {
@@ -16,9 +16,16 @@ fn main() {
 
     common
         .clone()
-        .library_name("cuda-backend-v2")
+        .library_name("cuda-backend")
         .watch("cuda")
         .include("cuda/include")
         .files_from_glob("cuda/src/**/*.cu")
+        .build();
+
+    common
+        .clone()
+        .library_name("supra_ntt")
+        .include("cuda/supra/include")
+        .files_from_glob("cuda/supra/*.cu")
         .build();
 }
