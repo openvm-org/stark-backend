@@ -494,10 +494,11 @@ where
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
+    use openvm_stark_sdk::config::baby_bear_poseidon2::*;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
-    use crate::{test_utils::baby_bear_poseidon2::F, prover::ColMajorMatrix};
+    use crate::prover::ColMajorMatrix;
 
     #[test]
     fn test_stacked_matrix_manual_0() {

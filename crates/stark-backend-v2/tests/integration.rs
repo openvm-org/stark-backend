@@ -1,15 +1,13 @@
 use itertools::Itertools;
-use openvm_stark_sdk::config::baby_bear_poseidon2::{
-    BabyBearPoseidon2ConfigV2, BabyBearPoseidon2CpuEngineV2, EF, F,
+use openvm_stark_sdk::{
+    config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},
+    utils::{setup_tracing, setup_tracing_with_log_level},
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_strict_usize;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use test_case::test_case;
-use tracing::{debug, Level};
-
-use crate::{
+use stark_backend_v2::{
     prover::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
@@ -18,12 +16,9 @@ use crate::{
         MultiRapProver, ProvingContextV2,
     },
     test_utils::{
-        baby_bear_poseidon2::{BabyBearPoseidon2ConfigV2, BabyBearPoseidon2CpuEngineV2, EF, F},
-        default_duplex_sponge, log_up_security_params_baby_bear_100_bits,
-        prove_up_to_batch_constraints, setup_tracing, setup_tracing_with_log_level,
-        test_engine_small, test_system_params_small, CachedFixture11, DuplexSponge, FibFixture,
-        InteractionsFixture11, MixtureFixture, PreprocessedFibFixture, SelfInteractionFixture,
-        TestFixture,
+        default_test_params_small, prove_up_to_batch_constraints, test_system_params_small,
+        CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture, PreprocessedFibFixture,
+        SelfInteractionFixture, TestFixture,
     },
     verifier::{
         batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
@@ -31,16 +26,19 @@ use crate::{
         proof_shape::{verify_proof_shape, ProofShapeError},
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
+        verify, VerifierError,
     },
     DefaultStarkEngine, FiatShamirTranscript, StarkEngineV2, StarkProtocolConfig, SystemParams,
-    WhirConfig, WhirRoundConfig,
+    TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
 };
+use test_case::test_case;
+use tracing::{debug, Level};
 
 type SC = BabyBearPoseidon2ConfigV2;
 
 pub fn test_engine_small() -> BabyBearPoseidon2CpuEngineV2<DuplexSponge> {
     setup_tracing();
-    BabyBearPoseidon2CpuEngineV2::new(default_test_params_small())
+    DefaultStarkEngine::new(default_test_params_small())
 }
 
 #[test]
@@ -57,8 +55,8 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = default_duplex_sponge();
     let mut verifier_sponge = default_duplex_sponge();
 
-    let (proof, _) = sumcheck_multilinear::<SCV2, _, _>(&mut prover_sponge, &evals);
-    verify_sumcheck_multilinear::<SCV2, _>(&mut verifier_sponge, &proof)
+    let (proof, _) = sumcheck_multilinear::<SC, _, _>(&mut prover_sponge, &evals);
+    verify_sumcheck_multilinear::<SC, _>(&mut verifier_sponge, &proof)
 }
 
 #[test]
@@ -78,8 +76,8 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = default_duplex_sponge();
     let mut verifier_sponge = default_duplex_sponge();
 
-    let (proof, _) = sumcheck_prismalinear::<SCV2, _, _>(&mut prover_sponge, l_skip, &evals);
-    verify_sumcheck_prismalinear::<SCV2, _>(&mut verifier_sponge, l_skip, &proof)
+    let (proof, _) = sumcheck_prismalinear::<SC, _, _>(&mut prover_sponge, l_skip, &evals);
+    verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
 #[test]
@@ -181,7 +179,7 @@ fn test_batch_sumcheck_zero_interactions(
     let ((gkr_proof, batch_proof), _) =
         prove_up_to_batch_constraints(&engine, &mut prover_sponge, &pk, ctx);
 
-    let r = verify_zerocheck_and_logup::<SCV2, _>(
+    let r = verify_zerocheck_and_logup::<SC, _>(
         &mut verifier_sponge,
         &vk.inner,
         &pvs,
@@ -244,19 +242,18 @@ fn test_stacked_opening_reduction(
 
     let need_rot = pk.per_air[ctx.per_trace[0].0].vk.params.need_rot;
     let need_rot_per_commit = vec![vec![need_rot]];
-    let (stacking_proof, _) =
-        prove_stacked_opening_reduction::<SCV2, _, _, _, StackedReductionCpu<SCV2>>(
-            device,
-            &mut default_duplex_sponge(),
-            params.n_stack,
-            vec![&common_main_pcs_data],
-            need_rot_per_commit.clone(),
-            &r,
-        );
+    let (stacking_proof, _) = prove_stacked_opening_reduction::<SC, _, _, _, StackedReductionCpu<SC>>(
+        device,
+        &mut default_duplex_sponge(),
+        params.n_stack,
+        vec![&common_main_pcs_data],
+        need_rot_per_commit.clone(),
+        &r,
+    );
 
     debug!(?batch_proof.column_openings);
 
-    let u_prism = verify_stacked_reduction::<SCV2, _>(
+    let u_prism = verify_stacked_reduction::<SC, _>(
         &mut default_duplex_sponge(),
         &stacking_proof,
         &[common_main_pcs_data.layout],
@@ -270,6 +267,7 @@ fn test_stacked_opening_reduction(
     assert_eq!(u_prism.len(), params.n_stack + 1);
     Ok(())
 }
+
 #[test_case(3)]
 #[test_case(2 ; "when fib log_height equals l_skip")]
 #[test_case(1 ; "when fib log_height less than l_skip")]
@@ -333,6 +331,105 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
 
     let proof = engine.prove(&combined_pk, combined_ctx);
     engine.verify(&combined_pk.get_vk(), &proof).unwrap();
+}
+
+#[test_case(2, 10)]
+#[test_case(2, 1; "where log_trace_degree=1 less than l_skip=2")]
+#[test_case(2, 0; "where log_trace_degree=0 less than l_skip=2")]
+#[test_case(3, 2; "where log_trace_degree=2 less than l_skip=3")]
+fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError<EF>> {
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let n_stack = 8;
+    let k_whir = 4;
+    let whir_params = WhirParams {
+        k: k_whir,
+        log_final_poly_len: k_whir,
+        query_phase_pow_bits: 1,
+    };
+    let log_blowup = 1;
+    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 80);
+    let params = SystemParams {
+        l_skip,
+        n_stack,
+        log_blowup,
+        whir,
+        logup: log_up_security_params_baby_bear_100_bits(),
+        max_constraint_degree: 3,
+    };
+    let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
+
+    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let (pk, vk) = fib.keygen(&engine);
+    let mut recorder = default_duplex_sponge_recorder();
+    let proof = fib.prove_from_transcript(&engine, &pk, &mut recorder);
+
+    let mut validator_sponge =
+        DuplexSpongeValidator::new(poseidon2_perm().clone(), recorder.into_log());
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
+}
+
+#[test_case(2, 8, 3)]
+#[test_case(5, 5, 4)]
+fn test_dummy_interactions_roundtrip(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+) -> Result<(), VerifierError<EF>> {
+    let params = test_system_params_small(l_skip, n_stack, k_whir);
+    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let fx = InteractionsFixture11;
+    let (pk, vk) = fx.keygen(&engine);
+
+    let mut recorder = default_duplex_sponge_recorder();
+    let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
+
+    let mut validator_sponge = default_duplex_sponge_validator(recorder.into_log());
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
+}
+
+#[test_case(2, 8, 3)]
+#[test_case(5, 5, 4)]
+#[test_case(5, 8, 3)]
+fn test_cached_trace_roundtrip(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+) -> Result<(), VerifierError<EF>> {
+    setup_tracing_with_log_level(Level::DEBUG);
+    let params = test_system_params_small(l_skip, n_stack, k_whir);
+    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let fx = CachedFixture11::new(engine.config().clone());
+    let (pk, vk) = fx.keygen(&engine);
+
+    let mut recorder = default_duplex_sponge_recorder();
+    let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
+
+    let mut validator_sponge = default_duplex_sponge_validator(recorder.into_log());
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
+}
+
+#[test_case(2, 8, 3)]
+#[test_case(5, 5, 4)]
+fn test_preprocessed_trace_roundtrip(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+) -> Result<(), VerifierError<EF>> {
+    use itertools::Itertools;
+    let params = test_system_params_small(l_skip, n_stack, k_whir);
+    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let log_trace_degree = 8;
+    let height = 1 << log_trace_degree;
+    let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
+    let fx = PreprocessedFibFixture::new(0, 1, sels);
+    let (pk, vk) = fx.keygen(&engine);
+
+    let mut recorder = default_duplex_sponge_recorder();
+    let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
+
+    let mut validator_sponge = default_duplex_sponge_validator(recorder.into_log());
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
 }
 
 #[test]
@@ -413,15 +510,15 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let ((gkr_proof, _), _) = prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
 
     let mut transcript = default_duplex_sponge();
-    assert!(FiatShamirTranscript::<SCV2>::check_witness(
+    assert!(FiatShamirTranscript::<SC>::check_witness(
         &mut transcript,
         params.logup.pow_bits,
         gkr_proof.logup_pow_witness
     ));
-    let _alpha = FiatShamirTranscript::<SCV2>::sample_ext(&mut transcript);
-    let _beta = FiatShamirTranscript::<SCV2>::sample_ext(&mut transcript);
+    let _alpha = FiatShamirTranscript::<SC>::sample_ext(&mut transcript);
+    let _beta = FiatShamirTranscript::<SC>::sample_ext(&mut transcript);
     let total_rounds = gkr_proof.claims_per_layer.len();
-    let _ = verify_gkr::<SCV2, _>(&gkr_proof, &mut transcript, total_rounds)?;
+    let _ = verify_gkr::<SC, _>(&gkr_proof, &mut transcript, total_rounds)?;
 
     Ok(())
 }
@@ -455,11 +552,11 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
         .take(1 << l_skip)
         .collect_vec();
 
-    let mut transcript = default_duplex_sponge();
+    let mut transcript = engine.initial_transcript();
     let ((gkr_proof, batch_proof), _) =
         prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
     let mut transcript = default_duplex_sponge();
-    verify_zerocheck_and_logup::<SCV2, _>(
+    verify_zerocheck_and_logup::<SC, _>(
         &mut transcript,
         &vk.inner,
         &pvs,

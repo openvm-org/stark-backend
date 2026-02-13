@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField64};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField, PrimeField64};
 use p3_maybe_rayon::prelude::*;
 use tracing::instrument;
 
@@ -180,5 +180,80 @@ impl<F, State> Deref for TranscriptLog<F, State> {
 
     fn deref(&self) -> &Self::Target {
         &self.values
+    }
+}
+
+/// Read-only transcript that replays a recorded log.
+#[derive(Clone, Debug)]
+pub struct ReadOnlyTranscript<'a, F, State> {
+    log: &'a TranscriptLog<F, State>,
+    position: usize,
+}
+
+impl<'a, F, State> ReadOnlyTranscript<'a, F, State> {
+    pub fn new(log: &'a TranscriptLog<F, State>, start_idx: usize) -> Self {
+        debug_assert!(start_idx <= log.len(), "start index out of bounds");
+        Self {
+            log,
+            position: start_idx,
+        }
+    }
+}
+
+impl<SC, F, const WIDTH: usize, const RATE: usize> FiatShamirTranscript<SC>
+    for ReadOnlyTranscript<'_, F, [F; WIDTH]>
+where
+    F: PrimeField,
+    SC: StarkProtocolConfig<F = F, Digest = [F; RATE]>,
+{
+    #[inline]
+    fn observe(&mut self, value: F) {
+        debug_assert!(
+            !self.log.samples()[self.position],
+            "expected observe at {}",
+            self.position
+        );
+        debug_assert_eq!(
+            self.log.values()[self.position],
+            value,
+            "value mismatch at {}",
+            self.position
+        );
+        self.position += 1;
+    }
+
+    #[inline]
+    fn sample(&mut self) -> F {
+        debug_assert!(
+            self.log.samples()[self.position],
+            "expected sample at {}",
+            self.position
+        );
+        let value = self.log.values()[self.position];
+        self.position += 1;
+        value
+    }
+
+    fn observe_commit(&mut self, digest: [F; RATE]) {
+        for x in digest {
+            FiatShamirTranscript::<SC>::observe(self, x);
+        }
+    }
+}
+
+impl<F, State> TranscriptHistory for ReadOnlyTranscript<'_, F, State>
+where
+    F: Clone,
+    State: Clone,
+{
+    type F = F;
+    type State = State;
+
+    fn len(&self) -> usize {
+        self.position
+    }
+
+    fn into_log(self) -> TranscriptLog<F, State> {
+        self.log.clone()
     }
 }

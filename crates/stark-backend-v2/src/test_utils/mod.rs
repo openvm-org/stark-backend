@@ -34,6 +34,7 @@ macro_rules! any_air_arc_vec {
     };
 }
 
+#[allow(clippy::type_complexity)]
 pub fn prove_up_to_batch_constraints<E: StarkEngineV2>(
     engine: &E,
     transcript: &mut E::TS,

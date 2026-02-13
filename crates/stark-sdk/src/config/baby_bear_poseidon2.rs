@@ -20,7 +20,7 @@ use stark_backend_v2::{
     },
     verifier::VerifierError,
     AirRef, DefaultStarkEngine, FiatShamirTranscript, StarkEngineV2, StarkProtocolConfig,
-    SystemParams, VerificationDataV2,
+    SystemParams, TranscriptLog, VerificationDataV2,
 };
 
 const RATE: usize = 8;
@@ -43,6 +43,8 @@ pub type EF = BinomialExtensionField<BabyBear, 4>;
 pub const D_EF: usize = 4;
 pub type Digest = [F; DIGEST_SIZE];
 pub type DuplexSponge = duplex_sponge::DuplexSponge<F, Perm, WIDTH, RATE>;
+pub type DuplexSpongeRecorder = duplex_sponge::DuplexSpongeRecorder<F, Perm, WIDTH, RATE>;
+pub type DuplexSpongeValidator = duplex_sponge::DuplexSpongeValidator<F, Perm, WIDTH, RATE>;
 
 #[derive(Clone, Debug, derive_new::new)]
 pub struct BabyBearPoseidon2ConfigV2 {
@@ -198,6 +200,20 @@ pub fn poseidon2_compress_with_capacity(
         state[..CHUNK].try_into().unwrap(),
         state[CHUNK..].try_into().unwrap(),
     )
+}
+
+pub fn default_duplex_sponge() -> DuplexSponge {
+    DuplexSponge::from(poseidon2_perm().clone())
+}
+
+pub fn default_duplex_sponge_recorder() -> DuplexSpongeRecorder {
+    DuplexSpongeRecorder::from(poseidon2_perm().clone())
+}
+
+pub fn default_duplex_sponge_validator(
+    logs: TranscriptLog<F, [F; WIDTH]>,
+) -> DuplexSpongeValidator {
+    DuplexSpongeValidator::new(poseidon2_perm().clone(), logs)
 }
 
 #[cfg(test)]

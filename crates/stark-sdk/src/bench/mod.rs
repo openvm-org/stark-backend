@@ -2,18 +2,19 @@ use std::{collections::BTreeMap, ffi::OsStr};
 
 #[cfg(feature = "prometheus")]
 use metrics_exporter_prometheus::PrometheusBuilder;
-use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
+use metrics_tracing_context::MetricsLayer;
 use metrics_util::{
     debugging::{DebugValue, DebuggingRecorder, Snapshot},
-    layers::Layer,
     CompositeKey, MetricKind,
 };
 use serde_json::json;
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
-
 #[cfg(feature = "metrics")]
-use crate::metrics_tracing::TimingMetricsLayer;
+use {
+    crate::metrics_tracing::TimingMetricsLayer, metrics_tracing_context::TracingContextLayer,
+    metrics_util::layers::Layer,
+};
 
 /// Run a function with metric collection enabled. The metrics will be written to a file specified
 /// by an environment variable which name is `output_path_envar`.
@@ -38,10 +39,12 @@ pub fn run_with_metric_collection<R>(
     // Prepare metrics.
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
-    let recorder = TracingContextLayer::all().layer(recorder);
-    // Install the registry as the global recorder
     #[cfg(feature = "metrics")]
-    metrics::set_global_recorder(recorder).unwrap();
+    {
+        let recorder = TracingContextLayer::all().layer(recorder);
+        // Install the registry as the global recorder
+        metrics::set_global_recorder(recorder).unwrap();
+    }
     let res = f();
 
     if let Ok(file) = file {

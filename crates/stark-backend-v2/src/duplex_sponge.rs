@@ -142,7 +142,7 @@ where
 
     fn observe_commit(&mut self, digest: [F; RATE]) {
         for x in digest {
-            FiatShamirTranscript::<SC>::observe(&mut self.inner, x);
+            FiatShamirTranscript::<SC>::observe(self, x);
         }
     }
 }
@@ -162,55 +162,52 @@ impl<F, P, const WIDTH: usize, const RATE: usize> TranscriptHistory
     }
 }
 
-/// Read-only transcript that replays a recorded log.
-#[derive(Clone, Debug)]
-pub struct ReadOnlyTranscript<'a, F, State> {
-    log: &'a TranscriptLog<F, State>,
-    position: usize,
+/// [DuplexSpongeRecorder] that checks the live transcript logs against a provided transcript log.
+/// For testing usage.
+#[derive(Clone)]
+pub struct DuplexSpongeValidator<F, P, const WIDTH: usize, const RATE: usize> {
+    pub inner: DuplexSpongeRecorder<F, P, WIDTH, RATE>,
+    pub idx: usize,
+    log: TranscriptLog<F, [F; WIDTH]>,
 }
 
-impl<'a, F, State> ReadOnlyTranscript<'a, F, State> {
-    pub fn new(log: &'a TranscriptLog<F, State>, start_idx: usize) -> Self {
-        debug_assert!(start_idx <= log.len(), "start index out of bounds");
+impl<F: Default + Copy, P, const WIDTH: usize, const RATE: usize>
+    DuplexSpongeValidator<F, P, WIDTH, RATE>
+{
+    pub fn new(perm: P, log: TranscriptLog<F, [F; WIDTH]>) -> Self {
+        debug_assert_eq!(log.len(), log.samples().len());
         Self {
+            inner: perm.into(),
+            idx: 0,
             log,
-            position: start_idx,
         }
     }
 }
 
-impl<SC, F, const WIDTH: usize, const RATE: usize> FiatShamirTranscript<SC>
-    for ReadOnlyTranscript<'_, F, [F; WIDTH]>
+impl<SC, F, P, const WIDTH: usize, const RATE: usize> FiatShamirTranscript<SC>
+    for DuplexSpongeValidator<F, P, WIDTH, RATE>
 where
     F: PrimeField,
-    SC: StarkProtocolConfig<F = F, Digest = [F; RATE]>,
+    SC: StarkProtocolConfig<Digest = [F; RATE], F = F>,
+    P: CryptographicPermutation<[F; WIDTH]> + Send + Sync,
 {
-    #[inline]
-    fn observe(&mut self, value: F) {
-        debug_assert!(
-            !self.log.samples()[self.position],
-            "expected observe at {}",
-            self.position
-        );
-        debug_assert_eq!(
-            self.log.values()[self.position],
-            value,
-            "value mismatch at {}",
-            self.position
-        );
-        self.position += 1;
+    fn observe(&mut self, x: F) {
+        debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
+        assert!(!self.log.samples()[self.idx]);
+        let exp_x = self.log[self.idx];
+        assert_eq!(x, exp_x);
+        self.idx += 1;
+        FiatShamirTranscript::<SC>::observe(&mut self.inner, x);
     }
 
-    #[inline]
     fn sample(&mut self) -> F {
-        debug_assert!(
-            self.log.samples()[self.position],
-            "expected sample at {}",
-            self.position
-        );
-        let value = self.log.values()[self.position];
-        self.position += 1;
-        value
+        debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
+        assert!(self.log.samples()[self.idx]);
+        let x = FiatShamirTranscript::<SC>::sample(&mut self.inner);
+        let exp_x = self.log[self.idx];
+        self.idx += 1;
+        assert_eq!(x, exp_x);
+        x
     }
 
     fn observe_commit(&mut self, digest: [F; RATE]) {
@@ -220,125 +217,32 @@ where
     }
 }
 
-impl<F, State> TranscriptHistory for ReadOnlyTranscript<'_, F, State>
-where
-    F: Clone,
-    State: Clone,
+impl<F, P, const WIDTH: usize, const RATE: usize> TranscriptHistory
+    for DuplexSpongeValidator<F, P, WIDTH, RATE>
 {
     type F = F;
-    type State = State;
+    type State = [F; WIDTH];
 
     fn len(&self) -> usize {
-        self.position
+        self.inner.len()
     }
 
-    fn into_log(self) -> TranscriptLog<F, State> {
-        self.log.clone()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use p3_baby_bear::BabyBear;
-    use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
-    use p3_field::PrimeCharacteristicRing;
-
-    use crate::{
-        test_utils::{
-            baby_bear_poseidon2::{self, BabyBearPoseidon2ConfigV2},
-            default_duplex_sponge, default_duplex_sponge_recorder,
-        },
-        FiatShamirTranscript, TranscriptHistory,
-    };
-
-    type SCV2 = BabyBearPoseidon2ConfigV2;
-
-    const WIDTH: usize = 16;
-    const CHUNK: usize = 8;
-
-    type Challenger =
-        DuplexChallenger<BabyBear, p3_baby_bear::Poseidon2BabyBear<WIDTH>, WIDTH, CHUNK>;
-
-    type ReadOnlyTranscript<'a> =
-        super::ReadOnlyTranscript<'a, BabyBear, [BabyBear; WIDTH]>;
-
-    #[test]
-    fn test_sponge() {
-        let perm = baby_bear_poseidon2::poseidon2_perm();
-
-        let mut challenger = Challenger::new(perm.clone());
-        let mut sponge = default_duplex_sponge();
-
-        for i in 0..5 {
-            for _ in 0..(i + 1) * i {
-                let a: BabyBear = CanSample::sample(&mut challenger);
-                let b =
-                    FiatShamirTranscript::<BabyBearPoseidon2ConfigV2>::sample(&mut sponge);
-                assert_eq!(a, b);
-            }
-
-            for j in 0..i * i {
-                CanObserve::observe(&mut challenger, BabyBear::from_usize(j));
-                FiatShamirTranscript::<BabyBearPoseidon2ConfigV2>::observe(
-                    &mut sponge,
-                    BabyBear::from_usize(j),
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_read_only_transcript() {
-        // Record a sequence of operations
-        let mut recorder = default_duplex_sponge_recorder();
-        FiatShamirTranscript::<SCV2>::observe(&mut recorder, BabyBear::from_u32(42));
-        FiatShamirTranscript::<SCV2>::observe(&mut recorder, BabyBear::from_u32(100));
-        let s1 = FiatShamirTranscript::<SCV2>::sample(&mut recorder);
-        FiatShamirTranscript::<SCV2>::observe(&mut recorder, BabyBear::from_u32(200));
-        let s2 = FiatShamirTranscript::<SCV2>::sample(&mut recorder);
-        let s3 = FiatShamirTranscript::<SCV2>::sample(&mut recorder);
-
-        let log = recorder.into_log();
-
-        // Replay from start
-        let mut replay = ReadOnlyTranscript::new(&log, 0);
-        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(42));
-        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(100));
-        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay), s1);
-        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(200));
-        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay), s2);
-        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay), s3);
-        assert_eq!(replay.len(), 6);
-
-        // Replay from middle
-        let mut replay2 = ReadOnlyTranscript::new(&log, 2);
-        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay2), s1);
-        FiatShamirTranscript::<SCV2>::observe(&mut replay2, BabyBear::from_u32(200));
-        assert_eq!(FiatShamirTranscript::<SCV2>::sample(&mut replay2), s2);
-        assert_eq!(replay2.len(), 5);
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "expected observe at 0")]
-    fn test_read_only_transcript_wrong_operation() {
-        let mut recorder = default_duplex_sponge_recorder();
-        let _ = FiatShamirTranscript::<SCV2>::sample(&mut recorder);
-        let log = recorder.into_log();
-
-        let mut replay = ReadOnlyTranscript::new(&log, 0);
-        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(42)); // Should panic
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "value mismatch at 0")]
-    fn test_read_only_transcript_wrong_value() {
-        let mut recorder = default_duplex_sponge_recorder();
-        FiatShamirTranscript::<SCV2>::observe(&mut recorder, BabyBear::from_u32(42));
-        let log = recorder.into_log();
-
-        let mut replay = ReadOnlyTranscript::new(&log, 0);
-        FiatShamirTranscript::<SCV2>::observe(&mut replay, BabyBear::from_u32(99)); // Should panic
+    fn into_log(self) -> TranscriptLog<F, [F; WIDTH]> {
+        debug_assert_eq!(self.inner.len(), self.log.len());
+        debug_assert_eq!(
+            self.inner.len(),
+            self.idx,
+            "transcript replay ended with {} of {} entries consumed",
+            self.idx,
+            self.inner.len()
+        );
+        debug_assert_eq!(
+            self.log.len(),
+            self.idx,
+            "transcript replay ended with {} of {} entries consumed",
+            self.idx,
+            self.log.len()
+        );
+        self.inner.into_log()
     }
 }

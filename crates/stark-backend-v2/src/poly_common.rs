@@ -677,12 +677,12 @@ mod tests {
     use std::iter::zip;
 
     use itertools::Itertools;
+    use openvm_stark_sdk::config::baby_bear_poseidon2::*;
     use p3_field::{PrimeCharacteristicRing, TwoAdicField};
     use p3_util::{log2_ceil_usize, log2_strict_usize};
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
-    use crate::test_utils::baby_bear_poseidon2::{EF, F};
 
     #[test]
     fn test_lagrange_interpolation_round_trip() {

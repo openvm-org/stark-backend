@@ -2,7 +2,6 @@ use core::ops::Mul;
 use std::iter::zip;
 
 use getset::Getters;
-use crate::prover::MatrixDimensions;
 use p3_dft::{Radix2Bowers, TwoAdicSubgroupDft};
 use p3_field::{ExtensionField, Field, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
@@ -10,7 +9,7 @@ use p3_util::log2_strict_usize;
 
 use crate::{
     poly_common::eval_eq_uni,
-    prover::{ColMajorMatrix, ColMajorMatrixView},
+    prover::{ColMajorMatrix, ColMajorMatrixView, MatrixDimensions},
 };
 
 /// Multilinear extension polynomial, in coefficient form.
@@ -384,11 +383,11 @@ impl<F: TwoAdicField> PleMatrix<F> {
 
 #[cfg(test)]
 mod tests {
+    use openvm_stark_sdk::config::baby_bear_poseidon2::*;
     use p3_field::PrimeCharacteristicRing;
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
-    use crate::test_utils::baby_bear_poseidon2::F;
 
     #[test]
     fn test_evals_mobius_eq_hypercube_matches_naive() {
