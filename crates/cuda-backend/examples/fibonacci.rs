@@ -57,8 +57,9 @@ fn main() {
         GpuBabyBearPoseidon2Engine::new(FriParameters::standard_with_100_bits_security(LOG_BLOWUP));
     let gpu_trace = gpu_engine.device().transport_matrix_to_device(&cpu_trace);
 
-    let cpu_air_ctx = AirProvingContext::<CpuBackend<SC>>::simple(cpu_trace, public_values.clone());
-    let gpu_air_ctx = AirProvingContext::<GpuBackend>::simple(gpu_trace, public_values);
+    let cpu_trace_ctx =
+        AirProvingContext::<CpuBackend<SC>>::simple(cpu_trace, public_values.clone());
+    let gpu_trace_ctx = AirProvingContext::<GpuBackend>::simple(gpu_trace, public_values);
 
     let mut keygen_builder = gpu_engine.keygen_builder();
     let air_ids = gpu_engine.set_up_keygen_builder(&mut keygen_builder, &airs);
@@ -66,8 +67,8 @@ fn main() {
     let vk = pk_host.get_vk();
     let pk = gpu_engine.device().transport_pk_to_device(&pk_host);
     // engine.debug(&airs, &pk.per_air, &air_proof_inputs);
-    let cpu_ctx = ProvingContext::new(zip_eq(air_ids.clone(), vec![cpu_air_ctx]).collect());
-    let gpu_ctx = ProvingContext::new(zip_eq(air_ids, vec![gpu_air_ctx]).collect());
+    let cpu_ctx = ProvingContext::new(zip_eq(air_ids.clone(), vec![cpu_trace_ctx]).collect());
+    let gpu_ctx = ProvingContext::new(zip_eq(air_ids, vec![gpu_trace_ctx]).collect());
 
     // CPU    // CPU
     println!("\nStarting CPU proof");
