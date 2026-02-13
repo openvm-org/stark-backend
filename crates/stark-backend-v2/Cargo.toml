@@ -10,7 +10,6 @@ codec-derive.workspace = true
 
 p3-air.workspace = true
 p3-challenger.workspace = true
-p3-poseidon2.workspace = true
 p3-dft.workspace = true
 p3-field.workspace = true
 p3-interpolation.workspace = true
@@ -18,7 +17,6 @@ p3-matrix.workspace = true
 p3-maybe-rayon.workspace = true
 p3-symmetric.workspace = true
 p3-util.workspace = true
-p3-baby-bear = { workspace = true, optional = true }
 
 itertools.workspace = true
 rayon.workspace = true
@@ -48,11 +46,7 @@ mimalloc = { version = "0.1.43", optional = true }
 [dev-dependencies]
 openvm-stark-sdk.workspace = true # dev-dependency is not circular
 rand.workspace = true
-p3-baby-bear.workspace = true
-p3-keccak-air.workspace = true
 test-case.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-tracing-forest = { workspace = true }
 
 [features]
 default = ["parallel", "metrics"]
@@ -60,4 +54,4 @@ parallel = ["p3-maybe-rayon/parallel"]
 jemalloc = ["dep:tikv-jemallocator"]
 jemalloc-prof = ["jemalloc", "tikv-jemallocator?/profiling"]
 metrics = ["dep:metrics"]
-test-utils = ["dep:p3-baby-bear"]
+test-utils = []
