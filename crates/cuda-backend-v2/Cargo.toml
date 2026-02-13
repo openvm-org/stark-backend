@@ -3,7 +3,7 @@ name = "cuda-backend-v2"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-description = "OpenVM CUDA prover backend V2"
+description = "OpenVM CUDA prover backend for the SWIRL proof system"
 
 [dependencies]
 openvm-stark-backend.workspace = true

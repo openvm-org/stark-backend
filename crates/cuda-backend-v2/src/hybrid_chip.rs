@@ -12,14 +12,6 @@ use openvm_stark_backend::{
 
 use crate::{data_transporter::transport_matrix_to_device, prover_backend::GpuBackend, types::SC};
 
-/// A struct that has the same memory layout as `uint2` to be used in FFI functions
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
-pub struct UInt2 {
-    pub x: u32,
-    pub y: u32,
-}
-
 pub fn get_empty_air_proving_ctx<PB: ProverBackend>() -> AirProvingContext<PB> {
     AirProvingContext {
         cached_mains: vec![],

@@ -176,6 +176,39 @@ __global__ void poseidon2_strided_compress_layer_kernel(
     }
 }
 
+/*
+query[0][0,...layers-1]
+query[1][0,...layers-1]
+...
+query[k][0,...layers-1]
+*/
+__global__ void query_digest_layers(
+    Fp *d_digest_matrix,          // Fp*, also Digest: CELLS_OUT=8 Fp elements
+    const uint64_t *d_layers_ptr, // array of Digest layers
+    uint64_t *d_indices,          // uint64_t*, indices to query, size = num_query * num_layer
+    uint64_t num_query,           // e.g. 100
+    uint64_t num_layer
+) // e.g. 23
+{
+    const uint32_t ELEM_PER_DIGEST = CELLS_OUT; // 8 * Fp
+    uint64_t gidx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t layer_idx = gidx / ELEM_PER_DIGEST;
+    uint64_t elem_offset = gidx % ELEM_PER_DIGEST; // thread group: [0,..7]
+    uint64_t query_idx = blockIdx.y;               // [0, num_query -1]
+    if (layer_idx >= num_layer) {                  // [0, layers - 1]
+        return;
+    }
+
+    Fp *d_layer = (Fp *)d_layers_ptr[layer_idx];
+    uint64_t digest_offset = d_indices[query_idx * num_layer + layer_idx];
+    Fp digest_elem = d_layer[digest_offset * ELEM_PER_DIGEST + elem_offset];
+    // now each thread get 1/ELEM_PER_DIGEST of the digest
+
+    uint64_t output_query_offset = query_idx * num_layer * ELEM_PER_DIGEST;
+    uint64_t output_layer_offset = layer_idx * ELEM_PER_DIGEST + elem_offset;
+    d_digest_matrix[output_query_offset + output_layer_offset] = digest_elem;
+}
+
 // LAUNCHERS
 
 extern "C" int _poseidon2_compressing_row_hashes(
@@ -238,5 +271,23 @@ extern "C" int _poseidon2_adjacent_compress_layer(
 ) {
     auto [grid, block] = kernel_launch_params(output_size);
     poseidon2_strided_compress_layer_kernel<<<grid, block>>>(output, prev_layer, output_size, 1);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _query_digest_layers(
+    Fp *d_digest_matrix,
+    const uint64_t *d_layers_ptr,
+    uint64_t *d_indices,
+    uint64_t num_query,
+    uint64_t num_layer
+) {
+    const size_t QUERY_DIGEST_THREADS = 128;
+    const size_t DIGEST_WIDTH = 8;
+
+    auto block = QUERY_DIGEST_THREADS;
+    dim3 grid = dim3(div_ceil(num_layer * DIGEST_WIDTH, block), num_query);
+    query_digest_layers<<<grid, block>>>(
+        d_digest_matrix, d_layers_ptr, d_indices, num_query, num_layer
+    );
     return CHECK_KERNEL();
 }

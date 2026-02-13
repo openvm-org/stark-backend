@@ -1,8 +1,41 @@
-use openvm_cuda_common::error::CudaError;
+use openvm_cuda_common::{
+    d_buffer::DeviceBuffer,
+    error::{CudaError, KernelError},
+};
 
-use crate::F;
+use crate::{EF, F};
 
 extern "C" {
+    fn _matrix_transpose_fp(
+        output: *mut F,
+        input: *const F,
+        col_size: usize,
+        row_size: usize,
+    ) -> i32;
+
+    fn _matrix_transpose_fpext(
+        output: *mut EF,
+        input: *const EF,
+        col_size: usize,
+        row_size: usize,
+    ) -> i32;
+
+    fn _matrix_get_rows_fp(
+        output: *mut F,
+        input: *const F,
+        row_indices: *const u32,
+        matrix_width: u64,
+        matrix_height: u64,
+        row_indices_len: u32,
+    ) -> i32;
+
+    fn _split_ext_to_base_col_major_matrix(
+        d_matrix: *mut F,
+        d_poly: *const EF,
+        poly_len: u64,
+        matrix_height: u32,
+    ) -> i32;
+
     fn _batch_rotate_pad(
         out: *mut F,
         input: *const F,
@@ -28,6 +61,14 @@ extern "C" {
         stride: u32,
     ) -> i32;
 
+    fn _batch_expand_pad(
+        output: *mut F,
+        input: *const F,
+        poly_count: u32,
+        out_size: u32,
+        in_size: u32,
+    ) -> i32;
+
     fn _batch_expand_pad_wide(
         out: *mut F,
         input: *const F,
@@ -35,6 +76,61 @@ extern "C" {
         padded_height: u32,
         height: u32,
     ) -> i32;
+}
+
+pub unsafe fn matrix_transpose_fp(
+    output: &mut DeviceBuffer<F>,
+    input: &DeviceBuffer<F>,
+    width: usize,
+    height: usize,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_matrix_transpose_fp(
+        output.as_mut_ptr(),
+        input.as_ptr(),
+        width,
+        height,
+    ))
+}
+
+pub unsafe fn matrix_transpose_fpext(
+    output: &mut DeviceBuffer<EF>,
+    input: &DeviceBuffer<EF>,
+    width: usize,
+    height: usize,
+) -> Result<(), CudaError> {
+    _matrix_transpose_fpext(output.as_mut_ptr(), input.as_ptr(), width, height)
+}
+
+pub unsafe fn matrix_get_rows_fp_kernel<F>(
+    output: &mut DeviceBuffer<F>,
+    input: &DeviceBuffer<F>,
+    row_indices: &DeviceBuffer<u32>,
+    matrix_width: u64,
+    matrix_height: u64,
+    row_indices_len: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_matrix_get_rows_fp(
+        output.as_mut_ptr(),
+        input.as_ptr(),
+        row_indices.as_ptr(),
+        matrix_width,
+        matrix_height,
+        row_indices_len,
+    ))
+}
+
+pub unsafe fn split_ext_to_base_col_major_matrix(
+    d_matrix: &mut DeviceBuffer<F>,
+    d_poly: &DeviceBuffer<EF>,
+    poly_len: u64,
+    matrix_height: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_split_ext_to_base_col_major_matrix(
+        d_matrix.as_mut_ptr(),
+        d_poly.as_ptr(),
+        poly_len,
+        matrix_height,
+    ))
 }
 
 /// This kernel has the effect of rotating `input` column-wise as a `height x width` matrix, where
@@ -109,6 +205,18 @@ pub unsafe fn collapse_strided_matrix(
 ) -> Result<(), CudaError> {
     CudaError::from_result(_collapse_strided_matrix(
         output, input, width, height, stride,
+    ))
+}
+
+pub unsafe fn batch_expand_pad(
+    output: *mut F,
+    input: *const F,
+    poly_count: u32,
+    out_size: u32,
+    in_size: u32,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_batch_expand_pad(
+        output, input, poly_count, out_size, in_size,
     ))
 }
 

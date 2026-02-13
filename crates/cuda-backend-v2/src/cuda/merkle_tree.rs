@@ -31,6 +31,14 @@ extern "C" {
         prev_layer: *const Digest,
         output_size: usize,
     ) -> i32;
+
+    fn _query_digest_layers(
+        d_digest_matrix: *mut F,
+        d_layers_ptr: *const u64,
+        d_indices: *const u64,
+        num_query: u64,
+        num_layer: u64,
+    ) -> i32;
 }
 
 /// Computes row hashes of `matrix` of dimensions `width` x `height` using Poseidon2 and then takes
@@ -132,5 +140,21 @@ pub unsafe fn poseidon2_adjacent_compress_layer(
         output.as_mut_ptr(),
         prev_layer.as_ptr(),
         output_size,
+    ))
+}
+
+pub unsafe fn query_digest_layers(
+    d_digest_matrix: &mut DeviceBuffer<F>,
+    d_layers_ptr: &DeviceBuffer<u64>,
+    d_indices: &DeviceBuffer<u64>,
+    num_query: u64,
+    num_layer: u64,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_query_digest_layers(
+        d_digest_matrix.as_mut_ptr(),
+        d_layers_ptr.as_ptr(),
+        d_indices.as_ptr(),
+        num_query,
+        num_layer,
     ))
 }

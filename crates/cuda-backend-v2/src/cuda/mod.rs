@@ -12,6 +12,7 @@ pub mod logup_zerocheck;
 pub mod matrix;
 pub mod merkle_tree;
 pub mod mle_interpolate;
+pub mod ntt;
 pub mod poly;
 pub mod sponge;
 pub mod stacked_reduction;
@@ -207,5 +208,60 @@ pub mod sumcheck {
             r,
             output_max_n as u32,
         ))
+    }
+}
+
+// relate to prefix.cu
+pub mod prefix {
+    use super::*;
+
+    extern "C" {
+        fn _prefix_scan_block_ext(
+            d_inout: *mut std::ffi::c_void,
+            length: u64,
+            round_stride: u64,
+            block_num: u64,
+        ) -> i32;
+
+        fn _prefix_scan_block_downsweep_ext(
+            d_inout: *mut std::ffi::c_void,
+            length: u64,
+            round_stride: u64,
+        ) -> i32;
+
+        fn _prefix_scan_epilogue_ext(d_inout: *mut std::ffi::c_void, length: u64) -> i32;
+    }
+
+    pub unsafe fn prefix_scan_block_ext<T>(
+        d_inout: &DeviceBuffer<T>,
+        length: u64,
+        round_stride: u64,
+        block_num: u64,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_prefix_scan_block_ext(
+            d_inout.as_mut_raw_ptr(),
+            length,
+            round_stride,
+            block_num,
+        ))
+    }
+
+    pub unsafe fn prefix_scan_block_downsweep_ext<T>(
+        d_inout: &DeviceBuffer<T>,
+        length: u64,
+        round_stride: u64,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_prefix_scan_block_downsweep_ext(
+            d_inout.as_mut_raw_ptr(),
+            length,
+            round_stride,
+        ))
+    }
+
+    pub unsafe fn prefix_scan_epilogue_ext<T>(
+        d_inout: &DeviceBuffer<T>,
+        length: u64,
+    ) -> Result<(), CudaError> {
+        CudaError::from_result(_prefix_scan_epilogue_ext(d_inout.as_mut_raw_ptr(), length))
     }
 }
