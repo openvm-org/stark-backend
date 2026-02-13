@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader, PackedVar},
-    poly::SqrtHyperBuffer,
+    poly::SqrtEqLayers,
 };
 
 #[repr(C)]
@@ -106,9 +106,8 @@ extern "C" {
         eq_xi_low: *const EF,
         eq_xi_high: *const EF,
         pq_buffer: *const Frac<EF>,
-        eq_size: usize,
+        num_x: usize,
         eq_low_cap: usize,
-        pq_size: usize,
         lambda: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
@@ -120,9 +119,8 @@ extern "C" {
         eq_xi_low: *const EF,
         eq_xi_high: *const EF,
         layer: *mut Frac<EF>,
-        eq_size: usize,
+        num_x: usize,
         eq_low_cap: usize,
-        pq_size: usize,
         lambda: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
@@ -164,6 +162,39 @@ extern "C" {
         r_prev: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
+    ) -> i32;
+
+    fn _frac_precompute_m_build(
+        pq: *const Frac<EF>,
+        rem_n: usize,
+        w: usize,
+        lambda: EF,
+        r_prev: EF,
+        inline_fold: bool,
+        eq_tail_low: *const EF,
+        eq_tail_high: *const EF,
+        eq_tail_low_cap: usize,
+        tail_tile: usize,
+        partial_out: *mut EF,
+        partial_len: usize,
+        m_total: *mut EF,
+    ) -> i32;
+
+    fn _frac_precompute_m_eval_round(
+        m_total: *const EF,
+        w: usize,
+        t: usize,
+        eq_r_prefix: *const EF,
+        eq_suffix: *const EF,
+        out: *mut EF,
+    ) -> i32;
+
+    fn _frac_multifold(
+        src: *const Frac<EF>,
+        dst: *mut Frac<EF>,
+        rem_n: usize,
+        w: usize,
+        eq_r_window: *const EF,
     ) -> i32;
 
     fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
@@ -501,31 +532,36 @@ pub unsafe fn frac_build_tree_layer(
     ))
 }
 
+// `eq_xi` will not store evaluations for the first hypercube coordinate because the prover factors
+// out the first eq term.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_compute_round(
-    eq_xi: &SqrtHyperBuffer,
+    eq_xi: &SqrtEqLayers,
     pq_buffer: &DeviceBuffer<Frac<EF>>,
-    pq_size: usize,
+    num_x: usize,
     lambda: EF,
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
 ) -> Result<(), CudaError> {
+    let low_n = eq_xi.low_n();
+    let high_n = eq_xi.high_n();
+    debug_assert_eq!(2 << (low_n + high_n), num_x);
+    debug_assert!(pq_buffer.len() >= 2 * num_x);
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(eq_xi.size as u32);
+        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap());
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
         );
     }
     CudaError::from_result(_frac_compute_round(
-        eq_xi.low.as_ptr(),
-        eq_xi.high.as_ptr(),
+        eq_xi.low.get_ptr(low_n),
+        eq_xi.high.get_ptr(high_n),
         pq_buffer.as_ptr(),
-        eq_xi.size,
-        eq_xi.low_capacity,
-        pq_size,
+        num_x,
+        1 << low_n,
         lambda,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
@@ -541,30 +577,32 @@ pub unsafe fn frac_compute_round(
 /// This eliminates one kernel launch per outer round.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_compute_round_and_revert(
-    eq_xi: &SqrtHyperBuffer,
+    eq_xi: &SqrtEqLayers,
     layer: &mut DeviceBuffer<Frac<EF>>,
-    pq_size: usize,
+    num_x: usize,
     lambda: EF,
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
 ) -> Result<(), CudaError> {
+    let low_n = eq_xi.low_n();
+    let high_n = eq_xi.high_n();
+    debug_assert_eq!(2 << (low_n + high_n), num_x);
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(eq_xi.size as u32);
+        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap());
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
         );
-        assert!(layer.len() >= pq_size, "layer too small for pq_size");
+        assert!(layer.len() >= 2 * num_x, "layer too small for pq_size");
     }
     CudaError::from_result(_frac_compute_round_and_revert(
-        eq_xi.low.as_ptr(),
-        eq_xi.high.as_ptr(),
+        eq_xi.low.get_ptr(low_n),
+        eq_xi.high.get_ptr(high_n),
         layer.as_mut_ptr(),
-        eq_xi.size,
-        eq_xi.low_capacity,
-        pq_size,
+        num_x,
+        1 << low_n,
         lambda,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
@@ -604,16 +642,16 @@ pub unsafe fn fold_ef_frac_columns_inplace(
 /// Fused compute round + fold kernel.
 ///
 /// Reads from pre-fold `src_pq_buffer` (size `src_pq_size`), performs fold-on-the-fly using
-/// `r_prev`, computes sumcheck polynomial evaluations, and writes folded output to `dst_pq_buffer`
-/// (size `src_pq_size/2`).
+/// `r_prev`, computes s' polynomial evaluations (degree 2), and writes folded output to
+/// `dst_pq_buffer` (size `src_pq_size/2`).
 ///
 /// This fuses the fold operation into the next round's compute, eliminating one kernel launch per
 /// inner round and reducing memory traffic.
 ///
-/// The eq_xi buffer should have size `src_pq_size / 2` (post-fold eq_size).
+/// The eq_xi layers should have max_n = log2(src_pq_size / 4) = log2(post-fold num_x).
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_compute_round_and_fold(
-    eq_xi: &SqrtHyperBuffer,
+    eq_xi: &SqrtEqLayers,
     src_pq_buffer: &DeviceBuffer<Frac<EF>>,
     dst_pq_buffer: &mut DeviceBuffer<Frac<EF>>,
     src_pq_size: usize,
@@ -622,12 +660,16 @@ pub unsafe fn frac_compute_round_and_fold(
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
 ) -> Result<(), CudaError> {
+    let low_n = eq_xi.low_n();
+    let high_n = eq_xi.high_n();
+    // Post-fold: num_x = src_pq_size / 4
+    let num_x = src_pq_size >> 2;
+    debug_assert_eq!(2 << (low_n + high_n), num_x);
     #[cfg(debug_assertions)]
     {
         assert!(src_pq_size > 2, "src_pq_size must be > 2");
         let pq_size = src_pq_size >> 1;
-        let eq_size = pq_size >> 1;
-        assert!(eq_size > 0, "eq_size must be > 0");
+        assert!(num_x > 0, "num_x must be > 0");
         assert!(
             src_pq_buffer.len() >= src_pq_size,
             "src_pq_buffer too small: {} < {}",
@@ -640,27 +682,20 @@ pub unsafe fn frac_compute_round_and_fold(
             dst_pq_buffer.len(),
             pq_size
         );
-        // eq_xi.size should be the post-fold eq_size
-        assert!(
-            eq_xi.size == eq_size,
-            "eq_xi.size mismatch: {} != {}",
-            eq_xi.size,
-            eq_size
-        );
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(eq_size as u32);
+        let required = _frac_compute_round_temp_buffer_size(num_x as u32);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
         );
     }
     CudaError::from_result(_frac_compute_round_and_fold(
-        eq_xi.low.as_ptr(),
-        eq_xi.high.as_ptr(),
+        eq_xi.low.get_ptr(low_n),
+        eq_xi.high.get_ptr(high_n),
         src_pq_buffer.as_ptr(),
         dst_pq_buffer.as_mut_ptr(),
         src_pq_size,
-        eq_xi.low_capacity,
+        1 << low_n,
         lambda,
         r_prev,
         out_device.as_mut_ptr(),
@@ -677,7 +712,7 @@ pub unsafe fn frac_compute_round_and_fold(
 /// buffer, so there are no cross-thread conflicts. The second half is read-only.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_compute_round_and_fold_inplace(
-    eq_xi: &SqrtHyperBuffer,
+    eq_xi: &SqrtEqLayers,
     pq_buffer: &mut DeviceBuffer<Frac<EF>>,
     src_pq_size: usize,
     lambda: EF,
@@ -685,43 +720,104 @@ pub unsafe fn frac_compute_round_and_fold_inplace(
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
 ) -> Result<(), CudaError> {
+    let low_n = eq_xi.low_n();
+    let high_n = eq_xi.high_n();
+    // Post-fold: num_x = src_pq_size / 4
+    let num_x = src_pq_size >> 2;
+    debug_assert_eq!(2 << (low_n + high_n), num_x);
     #[cfg(debug_assertions)]
     {
         assert!(src_pq_size > 2, "src_pq_size must be > 2");
-        let pq_size = src_pq_size >> 1;
-        let eq_size = pq_size >> 1;
-        assert!(eq_size > 0, "eq_size must be > 0");
+        assert!(num_x > 0, "num_x must be > 0");
         assert!(
             pq_buffer.len() >= src_pq_size,
             "pq_buffer too small: {} < {}",
             pq_buffer.len(),
             src_pq_size
         );
-        // eq_xi.size should be the post-fold eq_size
-        assert!(
-            eq_xi.size == eq_size,
-            "eq_xi.size mismatch: {} != {}",
-            eq_xi.size,
-            eq_size
-        );
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(eq_size as u32);
+        let required = _frac_compute_round_temp_buffer_size(num_x as u32);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
         );
     }
     CudaError::from_result(_frac_compute_round_and_fold_inplace(
-        eq_xi.low.as_ptr(),
-        eq_xi.high.as_ptr(),
+        eq_xi.low.get_ptr(low_n),
+        eq_xi.high.get_ptr(high_n),
         pq_buffer.as_mut_ptr(),
         src_pq_size,
-        eq_xi.low_capacity,
+        1 << low_n,
         lambda,
         r_prev,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_precompute_m_build_raw(
+    pq: *const Frac<EF>,
+    rem_n: usize,
+    w: usize,
+    lambda: EF,
+    r_prev: EF,
+    inline_fold: bool,
+    eq_tail_low: *const EF,
+    eq_tail_high: *const EF,
+    eq_tail_low_cap: usize,
+    tail_tile: usize,
+    partial_out: *mut EF,
+    partial_len: usize,
+    m_total: *mut EF,
+) -> Result<(), CudaError> {
+    debug_assert!(rem_n > 0);
+    debug_assert!(w > 0 && w <= rem_n);
+    debug_assert!(eq_tail_low_cap.is_power_of_two());
+    debug_assert!(tail_tile > 0);
+    CudaError::from_result(_frac_precompute_m_build(
+        pq,
+        rem_n,
+        w,
+        lambda,
+        r_prev,
+        inline_fold,
+        eq_tail_low,
+        eq_tail_high,
+        eq_tail_low_cap,
+        tail_tile,
+        partial_out,
+        partial_len,
+        m_total,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_precompute_m_eval_round_raw(
+    m_total: *const EF,
+    w: usize,
+    t: usize,
+    eq_r_prefix: *const EF,
+    eq_suffix: *const EF,
+    out: *mut EF,
+) -> Result<(), CudaError> {
+    debug_assert!(w > 0);
+    debug_assert!(t < w);
+    CudaError::from_result(_frac_precompute_m_eval_round(
+        m_total, w, t, eq_r_prefix, eq_suffix, out,
+    ))
+}
+
+pub unsafe fn frac_multifold_raw(
+    src: *const Frac<EF>,
+    dst: *mut Frac<EF>,
+    rem_n: usize,
+    w: usize,
+    eq_r_window: *const EF,
+) -> Result<(), CudaError> {
+    debug_assert!(rem_n > 0);
+    debug_assert!(w > 0 && w <= rem_n);
+    CudaError::from_result(_frac_multifold(src, dst, rem_n, w, eq_r_window))
 }
 
 #[allow(clippy::too_many_arguments)]
