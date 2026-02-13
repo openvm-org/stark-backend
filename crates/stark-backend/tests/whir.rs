@@ -206,6 +206,7 @@ fn whir_test_config(k_whir: usize) -> WhirConfig {
             WhirRoundConfig { num_queries: 6 },
             WhirRoundConfig { num_queries: 5 },
         ],
+        mu_pow_bits: 1,
         query_phase_pow_bits: 1,
         folding_pow_bits: 1,
     }
