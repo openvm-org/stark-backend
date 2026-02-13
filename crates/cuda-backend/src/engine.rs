@@ -116,8 +116,8 @@ impl StarkEngine for GpuBabyBearPoseidon2Engine {
         let mpk_view = pk.view(ctx.air_ids());
         #[cfg(feature = "touchemall")]
         {
-            for (air_id, air_ctx) in ctx.per_air.iter() {
-                check_trace_validity(air_ctx, &pk.per_air[*air_id].air_name);
+            for (air_id, trace_ctx) in ctx.per_air.iter() {
+                check_trace_validity(trace_ctx, &pk.per_air[*air_id].air_name);
             }
         }
         let mut prover = self.prover();
