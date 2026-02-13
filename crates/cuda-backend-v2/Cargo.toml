@@ -17,6 +17,7 @@ tracing.workspace = true
 thiserror.workspace = true
 getset.workspace = true
 rustc-hash.workspace = true
+rand.workspace = true
 
 # Plonky3
 p3-field = { workspace = true }
@@ -28,11 +29,14 @@ p3-symmetric = { workspace = true }
 [build-dependencies]
 openvm-cuda-builder.workspace = true
 
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
 [dev-dependencies]
 stark-backend-v2 = { workspace = true, features = ["test-utils"] }
 openvm-stark-sdk.workspace = true
 p3-keccak-air.workspace = true
-rand.workspace = true
 eyre.workspace = true
 test-case.workspace = true
 
