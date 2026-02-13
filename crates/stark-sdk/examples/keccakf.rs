@@ -5,21 +5,19 @@ use std::sync::Arc;
 use eyre::eyre;
 use openvm_stark_sdk::{
     config::{
-        baby_bear_poseidon2::BabyBearPoseidon2ConfigV2,
+        baby_bear_poseidon2::BabyBearPoseidon2CpuEngineV2,
         log_up_params::log_up_security_params_baby_bear_100_bits,
     },
-    poseidon2::sponge::DuplexSponge,
     stark_backend_v2::{
         p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues},
         p3_field::Field,
         prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
-        verifier::verify,
         PartitionedBaseAir, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
     },
-    BabyBearPoseidon2CpuEngineV2,
 };
 use p3_keccak_air::KeccakAir;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use stark_backend_v2::DefaultStarkEngine;
 use tracing::info_span;
 
 const NUM_PERMUTATIONS: usize = 1 << 10;
@@ -64,7 +62,7 @@ fn main() -> eyre::Result<()> {
     let mut rng = StdRng::seed_from_u64(42);
     let air = TestAir(KeccakAir {});
 
-    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+    let engine: BabyBearPoseidon2CpuEngineV2 = DefaultStarkEngine::new(params);
     let (pk, vk) = engine.keygen(&[Arc::new(air)]);
 
     let inputs = (0..NUM_PERMUTATIONS)
@@ -78,6 +76,7 @@ fn main() -> eyre::Result<()> {
     let d_pk = engine.device().transport_pk_to_device(&pk);
     let proof = engine.prove(&d_pk, ProvingContextV2::new(vec![(0, air_ctx)]));
 
-    verify::<BabyBearPoseidon2ConfigV2, _>(&vk, &proof, &mut DuplexSponge::default())
+    engine
+        .verify(&vk, &proof)
         .map_err(|e| eyre!("Proof failed to verify: {e}"))
 }

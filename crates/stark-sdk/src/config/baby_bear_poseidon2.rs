@@ -1,15 +1,26 @@
-use std::io::{self, Read, Write};
+use std::{
+    io::{self, Read, Write},
+    marker::PhantomData,
+    sync::OnceLock,
+};
 
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
-use p3_field::extension::BinomialExtensionField;
+use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 use stark_backend_v2::{
     codec::{
         decode_extension_field32, decode_prime_field32, encode_extension_field32,
         encode_prime_field32, DecodableConfig, EncodableConfig,
     },
+    duplex_sponge,
     hasher::Hasher,
-    p3_symmetric::{PaddingFreeSponge, TruncatedPermutation},
-    StarkProtocolConfig, SystemParams,
+    p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
+    prover::{
+        AirProvingContextV2, CoordinatorV2, CpuBackendV2, CpuDeviceV2, DeviceDataTransporterV2,
+        ProverBackendV2, ProvingContextV2,
+    },
+    verifier::VerifierError,
+    AirRef, DefaultStarkEngine, FiatShamirTranscript, StarkEngineV2, StarkProtocolConfig,
+    SystemParams, VerificationDataV2,
 };
 
 const RATE: usize = 8;
@@ -23,12 +34,15 @@ type Perm = Poseidon2BabyBear<WIDTH>;
 type Hash<P> = PaddingFreeSponge<P, WIDTH, RATE, DIGEST_SIZE>;
 type Compress<P> = TruncatedPermutation<P, 2, CHUNK, WIDTH>;
 type PermHasher<P> = Hasher<F, Digest, Hash<P>, Compress<P>>;
+// Defined below
+type SC = BabyBearPoseidon2ConfigV2;
 
 // Convenience type aliases
 pub type F = BabyBear;
 pub type EF = BinomialExtensionField<BabyBear, 4>;
 pub const D_EF: usize = 4;
 pub type Digest = [F; DIGEST_SIZE];
+pub type DuplexSponge = duplex_sponge::DuplexSponge<F, Perm, WIDTH, RATE>;
 
 #[derive(Clone, Debug, derive_new::new)]
 pub struct BabyBearPoseidon2ConfigV2 {
@@ -48,6 +62,17 @@ impl StarkProtocolConfig for BabyBearPoseidon2ConfigV2 {
 
     fn hasher(&self) -> &Self::Hasher {
         &self.hasher
+    }
+}
+
+impl BabyBearPoseidon2ConfigV2 {
+    pub fn default_from_params(params: SystemParams) -> Self {
+        let perm = default_babybear_poseidon2_16();
+        let hasher = Hasher::new(
+            PaddingFreeSponge::new(perm.clone()),
+            TruncatedPermutation::new(perm),
+        );
+        Self::new(params, hasher)
     }
 }
 
@@ -86,6 +111,81 @@ impl DecodableConfig for BabyBearPoseidon2ConfigV2 {
     }
 }
 
+pub struct BabyBearPoseidon2CpuEngineV2<TS = DuplexSponge> {
+    device: CpuDeviceV2<SC>,
+    _transcript: PhantomData<TS>,
+}
+
+impl<TS> StarkEngineV2 for BabyBearPoseidon2CpuEngineV2<TS>
+where
+    TS: FiatShamirTranscript<SC> + From<Perm>,
+{
+    type SC = SC;
+    type PB = CpuBackendV2<SC>;
+    type PD = CpuDeviceV2<SC>;
+    type TS = TS;
+
+    fn config(&self) -> &SC {
+        self.device.config()
+    }
+
+    fn device(&self) -> &Self::PD {
+        &self.device
+    }
+
+    fn initial_transcript(&self) -> Self::TS {
+        TS::from(default_babybear_poseidon2_16())
+    }
+
+    fn prover_from_transcript(
+        &self,
+        transcript: TS,
+    ) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS> {
+        CoordinatorV2::new(CpuBackendV2::new(), self.device.clone(), transcript)
+    }
+
+    fn run_test(
+        &self,
+        airs: Vec<AirRef<Self::SC>>,
+        ctxs: Vec<AirProvingContextV2<Self::PB>>,
+    ) -> Result<VerificationDataV2<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
+    where
+        Self::PB: ProverBackendV2<
+            Val = <Self::SC as StarkProtocolConfig>::F,
+            Challenge = <Self::SC as StarkProtocolConfig>::EF,
+            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
+        >,
+        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
+    {
+        let (pk, vk) = self.keygen(&airs);
+        let device = self.prover().device;
+        let d_pk = device.transport_pk_to_device(&pk);
+        let ctx = ProvingContextV2::new(ctxs.into_iter().enumerate().collect());
+        let proof = self.prove(&d_pk, ctx);
+        self.verify(&vk, &proof)?;
+        Ok(VerificationDataV2 { vk, proof })
+    }
+}
+
+impl<TS> DefaultStarkEngine for BabyBearPoseidon2CpuEngineV2<TS>
+where
+    TS: FiatShamirTranscript<BabyBearPoseidon2ConfigV2> + From<Perm>,
+{
+    fn new(params: SystemParams) -> Self {
+        let config = BabyBearPoseidon2ConfigV2::default_from_params(params);
+        Self {
+            device: CpuDeviceV2::new(config),
+            _transcript: PhantomData,
+        }
+    }
+}
+
+// Fixed Poseidon2 configuration
+pub fn poseidon2_perm() -> &'static Poseidon2BabyBear<WIDTH> {
+    static PERM: OnceLock<Poseidon2BabyBear<WIDTH>> = OnceLock::new();
+    PERM.get_or_init(default_babybear_poseidon2_16)
+}
+
 pub fn poseidon2_compress_with_capacity(
     left: [F; CHUNK],
     right: [F; CHUNK],
@@ -102,20 +202,22 @@ pub fn poseidon2_compress_with_capacity(
 
 #[cfg(test)]
 mod poseidon2_constant_tests {
-    use super::*;
+    use p3_baby_bear::{
+        BABYBEAR_RC16_EXTERNAL_FINAL, BABYBEAR_RC16_EXTERNAL_INITIAL, BABYBEAR_RC16_INTERNAL,
+    };
+    use zkhash::{
+        ark_ff::PrimeField as _, fields::babybear::FpBabyBear as HorizenBabyBear,
+        poseidon2::poseidon2_instance_babybear::RC16,
+    };
 
-    /// Uses HorizenLabs Poseidon2 round constants, but plonky3 Mat4 and also
-    /// with a p3 Monty reduction factor.
-    pub fn default_perm() -> Perm {
-        let (external_constants, internal_constants) = horizen_round_consts_16();
-        Perm::new(external_constants, internal_constants)
-    }
+    use super::*;
 
     fn horizen_to_p3(horizen_babybear: HorizenBabyBear) -> BabyBear {
         BabyBear::from_u64(horizen_babybear.into_bigint().0[0])
     }
 
-    pub fn horizen_round_consts_16() -> (ExternalLayerConstants<BabyBear, 16>, Vec<BabyBear>) {
+    pub fn horizen_round_consts_16() -> ((Vec<[BabyBear; 16]>, Vec<[BabyBear; 16]>), Vec<BabyBear>)
+    {
         let p3_rc16: Vec<Vec<BabyBear>> = RC16
             .iter()
             .map(|round| {
@@ -144,9 +246,16 @@ mod poseidon2_constant_tests {
             .iter()
             .map(|round| round[0])
             .collect();
-        (
-            ExternalLayerConstants::new(initial, terminal),
-            internal_round_constants,
-        )
+        ((initial, terminal), internal_round_constants)
+    }
+
+    /// Uses HorizenLabs Poseidon2 round constants, but plonky3 Mat4 and also
+    /// with a p3 Monty reduction factor.
+    #[test]
+    fn test_horizen_p3_rc_equality() {
+        let ((external_initial, external_terminal), internal_constants) = horizen_round_consts_16();
+        assert_eq!(external_initial, BABYBEAR_RC16_EXTERNAL_INITIAL.to_vec());
+        assert_eq!(external_terminal, BABYBEAR_RC16_EXTERNAL_FINAL.to_vec());
+        assert_eq!(internal_constants, BABYBEAR_RC16_INTERNAL.to_vec());
     }
 }

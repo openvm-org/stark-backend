@@ -25,8 +25,10 @@ pub struct DuplexSponge<F, P, const WIDTH: usize, const RATE: usize> {
     last_op_perm: bool,
 }
 
-impl<F: Default + Copy, P, const WIDTH: usize, const RATE: usize> DuplexSponge<F, P, WIDTH, RATE> {
-    pub fn new(perm: P) -> Self {
+impl<F: Default + Copy, P, const WIDTH: usize, const RATE: usize> From<P>
+    for DuplexSponge<F, P, WIDTH, RATE>
+{
+    fn from(perm: P) -> Self {
         Self {
             perm,
             state: [F::default(); WIDTH],
@@ -103,11 +105,11 @@ pub struct DuplexSpongeRecorder<F, P, const WIDTH: usize, const RATE: usize> {
     pub log: TranscriptLog<F, [F; WIDTH]>,
 }
 
-impl<F: Default + Copy, P, const WIDTH: usize, const RATE: usize>
-    DuplexSpongeRecorder<F, P, WIDTH, RATE>
+impl<F: Default + Copy, P, const WIDTH: usize, const RATE: usize> From<P>
+    for DuplexSpongeRecorder<F, P, WIDTH, RATE>
 {
-    pub fn new(perm: P) -> Self {
-        let inner = DuplexSponge::new(perm);
+    fn from(perm: P) -> Self {
+        let inner = DuplexSponge::from(perm);
         let mut log = TranscriptLog::default();
         log.push_perm_result([F::default(); WIDTH]);
         Self { inner, log }

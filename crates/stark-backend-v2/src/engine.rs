@@ -26,7 +26,7 @@ pub struct VerificationDataV2<SC: StarkProtocolConfig> {
 }
 
 /// A helper trait to collect the different steps in multi-trace STARK
-/// keygen and proving. Currently this trait is CPU specific.
+/// keygen and proving.
 pub trait StarkEngineV2
 where
     <Self::PD as MultiRapProver<Self::PB, Self::TS>>::Artifacts:
@@ -43,7 +43,7 @@ where
         Commitment = <Self::SC as StarkProtocolConfig>::Digest,
     >;
     type PD: ProverDeviceV2<Self::PB, Self::TS> + DeviceDataTransporterV2<Self::SC, Self::PB>;
-    type TS: FiatShamirTranscript<Self::SC> + Default;
+    type TS: FiatShamirTranscript<Self::SC>;
 
     fn config(&self) -> &Self::SC;
 
@@ -53,13 +53,17 @@ where
 
     fn device(&self) -> &Self::PD;
 
+    /// Creates transcript with a deterministic initial state.
+    fn initial_transcript(&self) -> Self::TS;
+
     fn prover_from_transcript(
         &self,
         transcript: Self::TS,
     ) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS>;
 
     fn prover(&self) -> CoordinatorV2<Self::SC, Self::PB, Self::PD, Self::TS> {
-        self.prover_from_transcript(Self::TS::default())
+        let transcript = self.initial_transcript();
+        self.prover_from_transcript(transcript)
     }
 
     fn keygen(
@@ -104,7 +108,7 @@ where
     where
         <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
     {
-        let mut transcript = Self::TS::default();
+        let mut transcript = self.initial_transcript();
         verify(self.config(), vk, proof, &mut transcript)
     }
 
@@ -172,7 +176,8 @@ where
         <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField;
 }
 
-/// [StarkEngineV2] that can be constructed from only system parameters.
+/// [StarkEngineV2] that can be constructed from only system parameters. In particular, the
+/// transcript and hasher must have a default configuration.
 pub trait DefaultStarkEngine: StarkEngineV2 {
     fn new(params: SystemParams) -> Self;
 }

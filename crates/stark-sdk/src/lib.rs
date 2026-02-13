@@ -3,12 +3,9 @@ pub use stark_backend_v2;
 
 pub mod bench;
 pub mod config;
-mod engine;
 #[cfg(feature = "metrics")]
 pub mod metrics_tracing;
 pub mod utils;
-
-pub use engine::*;
 
 /// Macro to create a `Vec<AirRef<SC>>` from a list of AIRs.
 #[macro_export]
