@@ -15,14 +15,13 @@ use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
 use stark_backend_v2::{
-    SystemParams,
     poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
+    SystemParams,
 };
 use tracing::instrument;
 
 use crate::{
-    D_EF, Digest, EF, F, WhirProverError,
     cuda::{
         batch_ntt_small::batch_ntt_small,
         mle_interpolate::mle_interpolate_stage_ext,
@@ -38,6 +37,7 @@ use crate::{
     sponge::DuplexSpongeGpu,
     stacked_pcs::rs_code_matrix,
     stacked_reduction::StackedPcsData2,
+    Digest, WhirProverError, D_EF, EF, F,
 };
 
 #[repr(C)]
@@ -74,15 +74,16 @@ pub fn prove_whir_opening_gpu(
     let log_final_poly_len = params.log_final_poly_len();
 
     let height = stacked_per_commit[0].layout().height();
-    debug_assert!(
-        stacked_per_commit
-            .iter()
-            .all(|d| d.layout().height() == height)
-    );
+    debug_assert!(stacked_per_commit
+        .iter()
+        .all(|d| d.layout().height() == height));
     let mut m = log2_strict_usize(height);
     assert_eq!(m, u.len());
     debug_assert!(m >= l_skip);
 
+    // Proof-of-work grinding before μ batching challenge.
+    // This amplifies soundness of the initial batching step.
+    let mu_pow_witness = transcript.grind(whir_params.mu_pow_bits);
     // Sample randomness for algebraic batching.
     // We batch the codewords for \hat{q}_j together _before_ applying WHIR.
     let mu = transcript.sample_ext();
@@ -504,6 +505,7 @@ pub fn prove_whir_opening_gpu(
 
     mem.emit_metrics();
     Ok(WhirProof {
+        mu_pow_witness,
         whir_sumcheck_polys,
         codeword_commits,
         ood_values,
@@ -526,25 +528,25 @@ mod tests {
         log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
     };
     use p3_field::PrimeCharacteristicRing;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use stark_backend_v2::{
-        BabyBearPoseidon2CpuEngineV2, EF, F, SystemParams, WhirConfig, WhirParams,
         keygen::types::MultiStarkProvingKeyV2,
         poly_common::Squarable,
         poseidon2::sponge::DuplexSponge,
         prover::{
-            ColMajorMatrix, CpuBackendV2, DeviceDataTransporterV2, ProvingContextV2, poly::Ple,
-            stacked_pcs::stacked_commit,
+            poly::Ple, stacked_pcs::stacked_commit, ColMajorMatrix, CpuBackendV2,
+            DeviceDataTransporterV2, ProvingContextV2,
         },
         test_utils::{FibFixture, TestFixture},
-        verifier::whir::{VerifyWhirError, verify_whir},
+        verifier::whir::{verify_whir, VerifyWhirError},
+        BabyBearPoseidon2CpuEngineV2, SystemParams, WhirConfig, WhirParams, EF, F,
     };
     use test_case::test_case;
     use tracing::Level;
 
     use crate::{
-        GpuDeviceV2, sponge::DuplexSpongeGpu, stacked_reduction::StackedPcsData2,
-        whir::prove_whir_opening_gpu,
+        sponge::DuplexSpongeGpu, stacked_reduction::StackedPcsData2, whir::prove_whir_opening_gpu,
+        GpuDeviceV2,
     };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
