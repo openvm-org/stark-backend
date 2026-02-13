@@ -143,6 +143,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
         let whir = WhirConfig {
             k: k_whir,
             rounds,
+            mu_pow_bits: 1,
             query_phase_pow_bits: 1,
             folding_pow_bits: 1,
         };
