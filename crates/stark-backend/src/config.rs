@@ -106,6 +106,8 @@ pub struct WhirConfig {
     /// Constant folding factor. This means that `2^k` terms are folded per round.
     pub k: usize,
     pub rounds: Vec<WhirRoundConfig>,
+    /// Number of bits of grinding before sampling the μ batching challenge.
+    pub mu_pow_bits: usize,
     /// Number of bits of grinding for the query phase of each WHIR round.
     /// The PoW bits can vary per round, but for simplicity we use the same number for all rounds.
     pub query_phase_pow_bits: usize,
@@ -163,9 +165,12 @@ impl WhirConfig {
             log_inv_rate = next_rate;
         }
 
+        const MU_POW_BITS: usize = 20;
+
         Self {
             k: k_whir,
             rounds: round_parameters,
+            mu_pow_bits: MU_POW_BITS,
             query_phase_pow_bits,
             folding_pow_bits: FOLDING_POW_BITS,
         }
