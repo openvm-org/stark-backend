@@ -232,6 +232,7 @@ mod poseidon2_constant_tests {
         BabyBear::from_u64(horizen_babybear.into_bigint().0[0])
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn horizen_round_consts_16() -> ((Vec<[BabyBear; 16]>, Vec<[BabyBear; 16]>), Vec<BabyBear>)
     {
         let p3_rc16: Vec<Vec<BabyBear>> = RC16
