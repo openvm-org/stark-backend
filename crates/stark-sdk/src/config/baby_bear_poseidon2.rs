@@ -1,327 +1,278 @@
-use std::{any::type_name, sync::Arc};
+use std::{
+    io::{self, Read, Write},
+    marker::PhantomData,
+    sync::OnceLock,
+};
 
 use openvm_stark_backend::{
-    config::StarkConfig,
-    interaction::fri_log_up::FriLogUpPhase,
-    keygen::MultiStarkKeygenBuilder,
-    p3_challenger::DuplexChallenger,
-    p3_commit::ExtensionMmcs,
-    p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing},
+    codec::{
+        decode_extension_field32, decode_prime_field32, encode_extension_field32,
+        encode_prime_field32, DecodableConfig, EncodableConfig,
+    },
+    duplex_sponge,
+    hasher::Hasher,
+    p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
     prover::{
-        cpu::{CpuBackend, CpuDevice},
-        MultiTraceStarkProver,
+        AirProvingContext, Coordinator, CpuBackend, CpuDevice, DeviceDataTransporter,
+        ProverBackend, ProvingContext,
     },
+    verifier::VerifierError,
+    AirRef, DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig,
+    SystemParams, TranscriptLog, VerificationData,
 };
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
-use p3_dft::Radix2DitParallel;
-use p3_fri::{FriParameters as P3FriParameters, TwoAdicFriPcs};
-use p3_merkle_tree::MerkleTreeMmcs;
-use p3_poseidon2::ExternalLayerConstants;
-use p3_symmetric::{CryptographicPermutation, PaddingFreeSponge, TruncatedPermutation};
-use rand::{rngs::StdRng, SeedableRng};
-use zkhash::{
-    ark_ff::PrimeField as _, fields::babybear::FpBabyBear as HorizenBabyBear,
-    poseidon2::poseidon2_instance_babybear::RC16,
-};
-
-use super::{
-    instrument::{HashStatistics, InstrumentCounter, Instrumented, StarkHashStatistics},
-    FriParameters,
-};
-use crate::{
-    assert_sc_compatible_with_serde,
-    config::fri_params::{
-        SecurityParameters, MAX_BATCH_SIZE_LOG_BLOWUP_1, MAX_BATCH_SIZE_LOG_BLOWUP_2,
-        MAX_NUM_CONSTRAINTS,
-    },
-    engine::{StarkEngine, StarkEngineWithHashInstrumentation, StarkFriEngine},
-};
+use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
 const RATE: usize = 8;
-// permutation width
+/// permutation width
 const WIDTH: usize = 16; // rate + capacity
-const DIGEST_WIDTH: usize = 8;
+pub const CHUNK: usize = 8;
+pub const DIGEST_SIZE: usize = CHUNK;
 
-type Val = BabyBear;
-type PackedVal = <Val as Field>::Packing;
-type Challenge = BinomialExtensionField<Val, 4>;
 type Perm = Poseidon2BabyBear<WIDTH>;
-type InstrPerm = Instrumented<Perm>;
-
 // Generic over P: CryptographicPermutation<[F; WIDTH]>
-type Hash<P> = PaddingFreeSponge<P, WIDTH, RATE, DIGEST_WIDTH>;
-type Compress<P> = TruncatedPermutation<P, 2, DIGEST_WIDTH, WIDTH>;
-type ValMmcs<P> =
-    MerkleTreeMmcs<PackedVal, <Val as Field>::Packing, Hash<P>, Compress<P>, DIGEST_WIDTH>;
-type ChallengeMmcs<P> = ExtensionMmcs<Val, Challenge, ValMmcs<P>>;
-pub type Challenger<P> = DuplexChallenger<Val, P, WIDTH, RATE>;
-type Dft = Radix2DitParallel<Val>;
-type Pcs<P> = TwoAdicFriPcs<Val, Dft, ValMmcs<P>, ChallengeMmcs<P>>;
-type RapPhase<P> = FriLogUpPhase<Val, Challenge, Challenger<P>>;
+type Hash<P> = PaddingFreeSponge<P, WIDTH, RATE, DIGEST_SIZE>;
+type Compress<P> = TruncatedPermutation<P, 2, CHUNK, WIDTH>;
+type PermHasher<P> = Hasher<F, Digest, Hash<P>, Compress<P>>;
+// Defined below
+type SC = BabyBearPoseidon2Config;
 
-pub type BabyBearPermutationConfig<P> = StarkConfig<Pcs<P>, RapPhase<P>, Challenge, Challenger<P>>;
-pub type BabyBearPoseidon2Config = BabyBearPermutationConfig<Perm>;
-pub type BabyBearPoseidon2Engine = BabyBearPermutationEngine<Perm>;
+// Convenience type aliases
+pub type F = BabyBear;
+pub type EF = BinomialExtensionField<BabyBear, 4>;
+pub const D_EF: usize = 4;
+pub type Digest = [F; DIGEST_SIZE];
+pub type DuplexSponge = duplex_sponge::DuplexSponge<F, Perm, WIDTH, RATE>;
+pub type DuplexSpongeRecorder = duplex_sponge::DuplexSpongeRecorder<F, Perm, WIDTH, RATE>;
+pub type DuplexSpongeValidator = duplex_sponge::DuplexSpongeValidator<F, Perm, WIDTH, RATE>;
 
-assert_sc_compatible_with_serde!(BabyBearPoseidon2Config);
-
-pub struct BabyBearPermutationEngine<P>
-where
-    P: CryptographicPermutation<[Val; WIDTH]>
-        + CryptographicPermutation<[PackedVal; WIDTH]>
-        + Clone,
-{
-    pub fri_params: FriParameters,
-    pub device: CpuDevice<BabyBearPermutationConfig<P>>,
-    pub perm: P,
-    pub max_constraint_degree: usize,
+#[derive(Clone, Debug, derive_new::new)]
+pub struct BabyBearPoseidon2Config {
+    params: SystemParams,
+    hasher: PermHasher<Perm>,
 }
 
-impl<P> StarkEngine for BabyBearPermutationEngine<P>
-where
-    P: CryptographicPermutation<[Val; WIDTH]>
-        + CryptographicPermutation<[PackedVal; WIDTH]>
-        + Clone,
-{
-    type SC = BabyBearPermutationConfig<P>;
-    type PB = CpuBackend<Self::SC>;
-    type PD = CpuDevice<Self::SC>;
+impl StarkProtocolConfig for BabyBearPoseidon2Config {
+    type F = F;
+    type EF = EF;
+    type Digest = Digest;
+    type Hasher = PermHasher<Perm>;
 
-    fn config(&self) -> &BabyBearPermutationConfig<P> {
-        &self.device.config
+    fn params(&self) -> &SystemParams {
+        &self.params
     }
 
-    fn device(&self) -> &CpuDevice<BabyBearPermutationConfig<P>> {
+    fn hasher(&self) -> &Self::Hasher {
+        &self.hasher
+    }
+}
+
+impl BabyBearPoseidon2Config {
+    pub fn default_from_params(params: SystemParams) -> Self {
+        let perm = default_babybear_poseidon2_16();
+        let hasher = Hasher::new(
+            PaddingFreeSponge::new(perm.clone()),
+            TruncatedPermutation::new(perm),
+        );
+        Self::new(params, hasher)
+    }
+}
+
+impl EncodableConfig for BabyBearPoseidon2Config {
+    fn encode_base_field<W: Write>(val: &F, writer: &mut W) -> io::Result<()> {
+        encode_prime_field32(val, writer)
+    }
+
+    fn encode_extension_field<W: Write>(val: &EF, writer: &mut W) -> io::Result<()> {
+        encode_extension_field32::<Self::F, _, _>(val, writer)
+    }
+
+    fn encode_digest<W: Write>(digest: &Self::Digest, writer: &mut W) -> io::Result<()> {
+        for val in digest {
+            encode_prime_field32(val, writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl DecodableConfig for BabyBearPoseidon2Config {
+    fn decode_base_field<R: Read>(reader: &mut R) -> io::Result<F> {
+        decode_prime_field32(reader)
+    }
+
+    fn decode_extension_field<R: Read>(reader: &mut R) -> io::Result<EF> {
+        decode_extension_field32::<F, _, _>(reader)
+    }
+
+    fn decode_digest<R: Read>(reader: &mut R) -> io::Result<Digest> {
+        let mut result = Digest::default();
+        for val in &mut result {
+            *val = decode_prime_field32(reader)?;
+        }
+        Ok(result)
+    }
+}
+
+pub struct BabyBearPoseidon2CpuEngine<TS = DuplexSponge> {
+    device: CpuDevice<SC>,
+    _transcript: PhantomData<TS>,
+}
+
+impl<TS> StarkEngine for BabyBearPoseidon2CpuEngine<TS>
+where
+    TS: FiatShamirTranscript<SC> + From<Perm>,
+{
+    type SC = SC;
+    type PB = CpuBackend<SC>;
+    type PD = CpuDevice<SC>;
+    type TS = TS;
+
+    fn config(&self) -> &SC {
+        self.device.config()
+    }
+
+    fn device(&self) -> &Self::PD {
         &self.device
     }
 
-    fn keygen_builder(&self) -> MultiStarkKeygenBuilder<'_, Self::SC> {
-        let mut builder = MultiStarkKeygenBuilder::new(self.config());
-        builder.set_max_constraint_degree(self.max_constraint_degree);
-        let max_batch_size = if self.fri_params.log_blowup == 1 {
-            MAX_BATCH_SIZE_LOG_BLOWUP_1
-        } else {
-            MAX_BATCH_SIZE_LOG_BLOWUP_2
-        };
-        builder.max_batch_size = Some(max_batch_size);
-        builder.max_num_constraints = Some(MAX_NUM_CONSTRAINTS);
-
-        builder
+    fn initial_transcript(&self) -> Self::TS {
+        TS::from(default_babybear_poseidon2_16())
     }
 
-    fn prover(&self) -> MultiTraceStarkProver<BabyBearPermutationConfig<P>> {
-        MultiTraceStarkProver::new(
-            CpuBackend::default(),
-            self.device.clone(),
-            self.new_challenger(),
-        )
+    fn prover_from_transcript(
+        &self,
+        transcript: TS,
+    ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
+        Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
     }
 
-    fn max_constraint_degree(&self) -> Option<usize> {
-        Some(self.max_constraint_degree)
-    }
-
-    fn new_challenger(&self) -> Challenger<P> {
-        Challenger::new(self.perm.clone())
+    fn run_test(
+        &self,
+        airs: Vec<AirRef<Self::SC>>,
+        ctxs: Vec<AirProvingContext<Self::PB>>,
+    ) -> Result<VerificationData<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
+    where
+        Self::PB: ProverBackend<
+            Val = <Self::SC as StarkProtocolConfig>::F,
+            Challenge = <Self::SC as StarkProtocolConfig>::EF,
+            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
+        >,
+        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
+    {
+        let (pk, vk) = self.keygen(&airs);
+        let device = self.prover().device;
+        let d_pk = device.transport_pk_to_device(&pk);
+        let ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
+        let proof = self.prove(&d_pk, ctx);
+        self.verify(&vk, &proof)?;
+        Ok(VerificationData { vk, proof })
     }
 }
 
-impl<P> StarkEngineWithHashInstrumentation for BabyBearPermutationEngine<Instrumented<P>>
+impl<TS> DefaultStarkEngine for BabyBearPoseidon2CpuEngine<TS>
 where
-    P: CryptographicPermutation<[Val; WIDTH]>
-        + CryptographicPermutation<[PackedVal; WIDTH]>
-        + Clone,
+    TS: FiatShamirTranscript<BabyBearPoseidon2Config> + From<Perm>,
 {
-    fn clear_instruments(&mut self) {
-        self.perm.input_lens_by_type.lock().unwrap().clear();
-    }
-    fn stark_hash_statistics<T>(&self, custom: T) -> StarkHashStatistics<T> {
-        let counter = self.perm.input_lens_by_type.lock().unwrap();
-        let permutations = counter.iter().fold(0, |total, (name, lens)| {
-            if name == type_name::<[Val; WIDTH]>() {
-                let count: usize = lens.iter().sum();
-                println!("Permutation: {name}, Count: {count}");
-                total + count
-            } else {
-                panic!("Permutation type not yet supported: {}", name);
-            }
-        });
-
-        StarkHashStatistics {
-            name: type_name::<P>().to_string(),
-            stats: HashStatistics { permutations },
-            fri_params: self.fri_params,
-            custom,
+    fn new(params: SystemParams) -> Self {
+        let config = BabyBearPoseidon2Config::default_from_params(params);
+        Self {
+            device: CpuDevice::new(config),
+            _transcript: PhantomData,
         }
     }
 }
 
-/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-pub fn default_engine() -> BabyBearPoseidon2Engine {
-    default_engine_impl(FriParameters::standard_fast())
+// Fixed Poseidon2 configuration
+pub fn poseidon2_perm() -> &'static Poseidon2BabyBear<WIDTH> {
+    static PERM: OnceLock<Poseidon2BabyBear<WIDTH>> = OnceLock::new();
+    PERM.get_or_init(default_babybear_poseidon2_16)
 }
 
-/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-fn default_engine_impl(fri_params: FriParameters) -> BabyBearPoseidon2Engine {
-    let perm = default_perm();
-    let security_params = SecurityParameters::new_baby_bear_100_bits(fri_params);
-    engine_from_perm(perm, security_params)
-}
-
-/// `pcs_log_degree` is the upper bound on the log_2(PCS polynomial degree).
-pub fn default_config(perm: &Perm) -> BabyBearPoseidon2Config {
-    config_from_perm(perm, SecurityParameters::standard_fast())
-}
-
-pub fn engine_from_perm<P>(
-    perm: P,
-    security_params: SecurityParameters,
-) -> BabyBearPermutationEngine<P>
-where
-    P: CryptographicPermutation<[Val; WIDTH]>
-        + CryptographicPermutation<[PackedVal; WIDTH]>
-        + Clone,
-{
-    let fri_params = security_params.fri_params;
-    let max_constraint_degree = fri_params.max_constraint_degree();
-    let config = config_from_perm(&perm, security_params);
-    BabyBearPermutationEngine {
-        device: CpuDevice::new(Arc::new(config), fri_params.log_blowup),
-        perm,
-        fri_params,
-        max_constraint_degree,
-    }
-}
-
-pub fn config_from_perm<P>(
-    perm: &P,
-    security_params: SecurityParameters,
-) -> BabyBearPermutationConfig<P>
-where
-    P: CryptographicPermutation<[Val; WIDTH]>
-        + CryptographicPermutation<[PackedVal; WIDTH]>
-        + Clone,
-{
-    let hash = Hash::new(perm.clone());
-    let compress = Compress::new(perm.clone());
-    let val_mmcs = ValMmcs::new(hash, compress);
-    let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
-    let dft = Dft::default();
-    let SecurityParameters {
-        fri_params,
-        log_up_params,
-        deep_ali_params,
-    } = security_params;
-    let fri_config = P3FriParameters {
-        log_blowup: fri_params.log_blowup,
-        log_final_poly_len: fri_params.log_final_poly_len,
-        num_queries: fri_params.num_queries,
-        commit_proof_of_work_bits: fri_params.commit_proof_of_work_bits,
-        query_proof_of_work_bits: fri_params.query_proof_of_work_bits,
-        mmcs: challenge_mmcs,
-    };
-    let pcs = Pcs::new(dft, val_mmcs, fri_config);
-    let challenger = Challenger::new(perm.clone());
-    let rap_phase = FriLogUpPhase::new(log_up_params, fri_params.log_blowup);
-    BabyBearPermutationConfig::new(pcs, challenger, rap_phase, deep_ali_params)
-}
-
-/// Uses HorizenLabs Poseidon2 round constants, but plonky3 Mat4 and also
-/// with a p3 Monty reduction factor.
-pub fn default_perm() -> Perm {
-    let (external_constants, internal_constants) = horizen_round_consts_16();
-    Perm::new(external_constants, internal_constants)
-}
-
-pub fn random_perm() -> Perm {
-    let seed = [42; 32];
-    let mut rng = StdRng::from_seed(seed);
-    Perm::new_from_rng_128(&mut rng)
-}
-
-pub fn random_instrumented_perm() -> InstrPerm {
-    let perm = random_perm();
-    Instrumented::new(perm)
-}
-
-fn horizen_to_p3(horizen_babybear: HorizenBabyBear) -> BabyBear {
-    BabyBear::from_u64(horizen_babybear.into_bigint().0[0])
-}
-
-pub fn horizen_round_consts_16() -> (ExternalLayerConstants<BabyBear, 16>, Vec<BabyBear>) {
-    let p3_rc16: Vec<Vec<BabyBear>> = RC16
-        .iter()
-        .map(|round| {
-            round
-                .iter()
-                .map(|babybear| horizen_to_p3(*babybear))
-                .collect()
-        })
-        .collect();
-
-    let rounds_f = 8;
-    let rounds_p = 13;
-    let rounds_f_beginning = rounds_f / 2;
-    let p_end = rounds_f_beginning + rounds_p;
-    let initial: Vec<[BabyBear; 16]> = p3_rc16[..rounds_f_beginning]
-        .iter()
-        .cloned()
-        .map(|round| round.try_into().unwrap())
-        .collect();
-    let terminal: Vec<[BabyBear; 16]> = p3_rc16[p_end..]
-        .iter()
-        .cloned()
-        .map(|round| round.try_into().unwrap())
-        .collect();
-    let internal_round_constants: Vec<BabyBear> = p3_rc16[rounds_f_beginning..p_end]
-        .iter()
-        .map(|round| round[0])
-        .collect();
+pub fn poseidon2_compress_with_capacity(
+    left: [F; CHUNK],
+    right: [F; CHUNK],
+) -> ([F; CHUNK], [F; CHUNK]) {
+    let mut state = [F::ZERO; WIDTH];
+    state[..CHUNK].copy_from_slice(&left);
+    state[CHUNK..].copy_from_slice(&right);
+    poseidon2_perm().permute_mut(&mut state);
     (
-        ExternalLayerConstants::new(initial, terminal),
-        internal_round_constants,
+        state[..CHUNK].try_into().unwrap(),
+        state[CHUNK..].try_into().unwrap(),
     )
 }
 
-/// Logs hash count statistics to stdout and returns as struct.
-/// Count of 1 corresponds to a Poseidon2 permutation with rate RATE that outputs OUT field elements
-#[allow(dead_code)]
-pub fn print_hash_counts(hash_counter: &InstrumentCounter, compress_counter: &InstrumentCounter) {
-    let hash_counter = hash_counter.lock().unwrap();
-    let mut hash_count = 0;
-    hash_counter.iter().for_each(|(name, lens)| {
-        if name == type_name::<(Val, [Val; DIGEST_WIDTH])>() {
-            let count = lens.iter().fold(0, |count, len| count + len.div_ceil(RATE));
-            println!("Hash: {name}, Count: {count}");
-            hash_count += count;
-        } else {
-            panic!("Hash type not yet supported: {}", name);
-        }
-    });
-    drop(hash_counter);
-    let compress_counter = compress_counter.lock().unwrap();
-    let mut compress_count = 0;
-    compress_counter.iter().for_each(|(name, lens)| {
-        if name == type_name::<[Val; DIGEST_WIDTH]>() {
-            let count = lens.iter().fold(0, |count, len| {
-                // len should always be N=2 for TruncatedPermutation
-                count + (DIGEST_WIDTH * len).div_ceil(WIDTH)
-            });
-            println!("Compress: {name}, Count: {count}");
-            compress_count += count;
-        } else {
-            panic!("Compress type not yet supported: {}", name);
-        }
-    });
-    let total_count = hash_count + compress_count;
-    println!("Total Count: {total_count}");
+pub fn default_duplex_sponge() -> DuplexSponge {
+    DuplexSponge::from(poseidon2_perm().clone())
 }
 
-impl StarkFriEngine for BabyBearPoseidon2Engine {
-    fn new(fri_params: FriParameters) -> Self {
-        default_engine_impl(fri_params)
+pub fn default_duplex_sponge_recorder() -> DuplexSpongeRecorder {
+    DuplexSpongeRecorder::from(poseidon2_perm().clone())
+}
+
+pub fn default_duplex_sponge_validator(
+    logs: TranscriptLog<F, [F; WIDTH]>,
+) -> DuplexSpongeValidator {
+    DuplexSpongeValidator::new(poseidon2_perm().clone(), logs)
+}
+
+#[cfg(test)]
+mod poseidon2_constant_tests {
+    use p3_baby_bear::{
+        BABYBEAR_RC16_EXTERNAL_FINAL, BABYBEAR_RC16_EXTERNAL_INITIAL, BABYBEAR_RC16_INTERNAL,
+    };
+    use zkhash::{
+        ark_ff::PrimeField as _, fields::babybear::FpBabyBear as HorizenBabyBear,
+        poseidon2::poseidon2_instance_babybear::RC16,
+    };
+
+    use super::*;
+
+    fn horizen_to_p3(horizen_babybear: HorizenBabyBear) -> BabyBear {
+        BabyBear::from_u64(horizen_babybear.into_bigint().0[0])
     }
-    fn fri_params(&self) -> FriParameters {
-        self.fri_params
+
+    #[allow(clippy::type_complexity)]
+    pub fn horizen_round_consts_16() -> ((Vec<[BabyBear; 16]>, Vec<[BabyBear; 16]>), Vec<BabyBear>)
+    {
+        let p3_rc16: Vec<Vec<BabyBear>> = RC16
+            .iter()
+            .map(|round| {
+                round
+                    .iter()
+                    .map(|babybear| horizen_to_p3(*babybear))
+                    .collect()
+            })
+            .collect();
+
+        let rounds_f = 8;
+        let rounds_p = 13;
+        let rounds_f_beginning = rounds_f / 2;
+        let p_end = rounds_f_beginning + rounds_p;
+        let initial: Vec<[BabyBear; 16]> = p3_rc16[..rounds_f_beginning]
+            .iter()
+            .cloned()
+            .map(|round| round.try_into().unwrap())
+            .collect();
+        let terminal: Vec<[BabyBear; 16]> = p3_rc16[p_end..]
+            .iter()
+            .cloned()
+            .map(|round| round.try_into().unwrap())
+            .collect();
+        let internal_round_constants: Vec<BabyBear> = p3_rc16[rounds_f_beginning..p_end]
+            .iter()
+            .map(|round| round[0])
+            .collect();
+        ((initial, terminal), internal_round_constants)
+    }
+
+    /// Uses HorizenLabs Poseidon2 round constants, but plonky3 Mat4 and also
+    /// with a p3 Monty reduction factor.
+    #[test]
+    fn test_horizen_p3_rc_equality() {
+        let ((external_initial, external_terminal), internal_constants) = horizen_round_consts_16();
+        assert_eq!(external_initial, BABYBEAR_RC16_EXTERNAL_INITIAL.to_vec());
+        assert_eq!(external_terminal, BABYBEAR_RC16_EXTERNAL_FINAL.to_vec());
+        assert_eq!(internal_constants, BABYBEAR_RC16_INTERNAL.to_vec());
     }
 }
