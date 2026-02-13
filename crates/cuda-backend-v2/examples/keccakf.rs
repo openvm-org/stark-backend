@@ -2,16 +2,16 @@
 
 use std::sync::Arc;
 
-use cuda_backend_v2::BabyBearPoseidon2GpuEngineV2;
+use cuda_backend_v2::BabyBearPoseidon2GpuEngine;
 use eyre::eyre;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
     poseidon2::sponge::DuplexSponge,
-    prover::{AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, ProvingContextV2},
+    prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
     rap::{BaseAirWithPublicValues, PartitionedBaseAir},
     verifier::verify,
-    StarkEngineV2, SystemParams, WhirConfig, WhirParams,
+    StarkEngine, SystemParams, WhirConfig, WhirParams,
 };
 use openvm_stark_sdk::{
     bench::run_with_metric_collection,
@@ -65,7 +65,7 @@ fn main() -> eyre::Result<()> {
         let mut rng = StdRng::seed_from_u64(42);
         let air = TestAir(KeccakAir {});
 
-        let engine = BabyBearPoseidon2GpuEngineV2::new(params);
+        let engine = BabyBearPoseidon2GpuEngine::new(params);
         let (pk, vk) = engine.keygen(&[Arc::new(air)]);
         let air_idx = 0;
 
@@ -77,9 +77,9 @@ fn main() -> eyre::Result<()> {
         let device = engine.device();
         let d_trace = device.transport_matrix_to_device(&ColMajorMatrix::from_row_major(&trace));
 
-        let air_ctx = AirProvingContextV2::simple_no_pis(d_trace);
+        let air_ctx = AirProvingContext::simple_no_pis(d_trace);
         let d_pk = device.transport_pk_to_device(&pk);
-        let proof = engine.prove(&d_pk, ProvingContextV2::new(vec![(air_idx, air_ctx)]));
+        let proof = engine.prove(&d_pk, ProvingContext::new(vec![(air_idx, air_ctx)]));
 
         verify(&vk, &proof, &mut DuplexSponge::default())
             .map_err(|e| eyre!("Proof failed to verify: {e}"))

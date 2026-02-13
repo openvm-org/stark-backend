@@ -4,7 +4,7 @@
 //! enabling efficient GPU kernel launches that process multiple traces in a single launch.
 
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
-use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKeyV2};
+use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
 use tracing::debug;
 
@@ -16,7 +16,7 @@ use crate::{
         LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
     },
     logup_zerocheck::batch_mle::TraceCtx,
-    GpuBackendV2, EF,
+    GpuBackend, EF,
 };
 
 const THREADS_PER_BLOCK: u32 = 256;
@@ -26,7 +26,7 @@ const THREADS_PER_BLOCK: u32 = 256;
 /// A trace is eligible if it has constraints and the AIR has expanded monomials.
 pub(crate) fn trace_has_monomials(
     trace: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
 ) -> bool {
     trace.has_constraints
         && pk.per_air[trace.air_idx]
@@ -40,7 +40,7 @@ pub(crate) fn trace_has_monomials(
 /// Get the number of monomials for a trace. Returns 0 if the trace has no monomials.
 pub(crate) fn get_num_monomials(
     trace: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
 ) -> u32 {
     pk.per_air[trace.air_idx]
         .other_data
@@ -53,7 +53,7 @@ pub(crate) fn get_num_monomials(
 /// Get the rules_len for a trace's zerocheck DAG.
 pub(crate) fn get_zerocheck_rules_len(
     trace: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
 ) -> usize {
     pk.per_air[trace.air_idx]
         .other_data
@@ -70,7 +70,7 @@ pub(crate) fn get_zerocheck_rules_len(
 ///
 /// The AIR must have nonempty monomials.
 pub(crate) fn compute_lambda_combinations(
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
     air_idx: usize,
     lambda_pows: &DeviceBuffer<EF>,
 ) -> Result<DeviceBuffer<EF>, CudaError> {
@@ -119,7 +119,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
     /// Panics if `traces` is empty or if `lambda_combinations` length doesn't match.
     pub fn new(
         traces: impl IntoIterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         lambda_combinations: &[&DeviceBuffer<EF>],
     ) -> Self {
         let traces: Vec<_> = traces.into_iter().collect();
@@ -302,7 +302,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         traces: impl IntoIterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         lambda_combinations: &[&DeviceBuffer<EF>],
         sm_count: u32,
         num_x: u32,
@@ -514,7 +514,7 @@ pub struct LogupCombinations {
 ///
 /// The AIR must have nonempty interaction monomials.
 pub(crate) fn compute_logup_combinations(
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
     air_idx: usize,
     d_beta_pows: &DeviceBuffer<EF>,
     d_eq_3bs: &DeviceBuffer<EF>,
@@ -613,7 +613,7 @@ impl<'a> LogupMonomialBatch<'a> {
     /// Panics if `traces` is empty or if `logup_combinations` length doesn't match.
     pub fn new(
         traces: impl IntoIterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         logup_combinations: &[&LogupCombinations],
     ) -> Self {
         let traces: Vec<_> = traces.into_iter().collect();

@@ -5,7 +5,7 @@ use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
 use openvm_stark_backend::prover::{
     fractional_sumcheck_gkr::Frac,
     stacked_pcs::{StackedLayout, StackedSlice},
-    DeviceMultiStarkProvingKeyV2, MatrixDimensions, ProvingContextV2,
+    DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
 };
 use p3_field::{Field, PrimeCharacteristicRing};
 use tracing::instrument;
@@ -16,7 +16,7 @@ use crate::{
         frac_add_alpha, frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
         logup_gkr_input_eval,
     },
-    GpuBackendV2, EF, F,
+    GpuBackend, EF, F,
 };
 
 const TASK_SIZE: u32 = 65536;
@@ -31,8 +31,8 @@ pub struct TraceInteractionMeta {
 
 // TODO[jpw]: revisit if this function is needed
 pub fn collect_trace_interactions(
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-    ctx: &ProvingContextV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    ctx: &ProvingContext<GpuBackend>,
     layout: &StackedLayout,
 ) -> Vec<Option<TraceInteractionMeta>> {
     // Pre-group layout slices by trace to avoid repeated scans later.
@@ -87,8 +87,8 @@ pub fn collect_trace_interactions(
 #[instrument(name = "prover.rap_constraints.logup_gkr.input_evals", skip_all)]
 pub fn log_gkr_input_evals(
     trace_interactions: &[Option<TraceInteractionMeta>],
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-    ctx: &ProvingContextV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    ctx: &ProvingContext<GpuBackend>,
     l_skip: usize,
     alpha_logup: EF,
     d_challenges: &DeviceBuffer<EF>,

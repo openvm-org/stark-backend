@@ -525,16 +525,16 @@ mod tests {
 
     use itertools::Itertools;
     use openvm_stark_backend::{
-        keygen::types::MultiStarkProvingKeyV2,
+        keygen::types::MultiStarkProvingKey,
         poly_common::Squarable,
         poseidon2::sponge::DuplexSponge,
         prover::{
-            poly::Ple, stacked_pcs::stacked_commit, ColMajorMatrix, CpuBackendV2,
-            DeviceDataTransporterV2, ProvingContextV2,
+            poly::Ple, stacked_pcs::stacked_commit, ColMajorMatrix, CpuBackend,
+            DeviceDataTransporter, ProvingContext,
         },
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
-        BabyBearPoseidon2CpuEngineV2, SystemParams, WhirConfig, WhirParams, EF, F,
+        BabyBearPoseidon2CpuEngine, SystemParams, WhirConfig, WhirParams, EF, F,
     };
     use openvm_stark_sdk::config::{
         log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
@@ -546,7 +546,7 @@ mod tests {
 
     use crate::{
         sponge::DuplexSpongeGpu, stacked_reduction::StackedPcsData2, whir::prove_whir_opening_gpu,
-        GpuDeviceV2,
+        GpuDevice,
     };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
@@ -586,10 +586,10 @@ mod tests {
 
     fn run_whir_test(
         params: SystemParams,
-        pk: MultiStarkProvingKeyV2,
-        ctx: ProvingContextV2<CpuBackendV2>,
+        pk: MultiStarkProvingKey,
+        ctx: ProvingContext<CpuBackend>,
     ) -> Result<(), VerifyWhirError> {
-        let device = GpuDeviceV2::new(params.clone());
+        let device = GpuDevice::new(params.clone());
         let mut rng = StdRng::seed_from_u64(0);
         let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
 
@@ -659,7 +659,7 @@ mod tests {
     }
 
     fn run_whir_fib_test(params: SystemParams) -> Result<(), VerifyWhirError> {
-        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params.clone());
+        let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
         let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
         let (pk, _vk) = fib.keygen(&engine);
         let ctx = fib.generate_proving_ctx();

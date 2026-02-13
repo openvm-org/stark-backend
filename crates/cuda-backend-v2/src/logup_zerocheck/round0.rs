@@ -5,7 +5,7 @@ use openvm_stark_backend::{
         symbolic_expression::SymbolicExpression, SymbolicConstraints, SymbolicDagBuilder,
         SymbolicExpressionDag,
     },
-    prover::{fractional_sumcheck_gkr::Frac, DeviceStarkProvingKeyV2},
+    prover::{fractional_sumcheck_gkr::Frac, DeviceStarkProvingKey},
 };
 use p3_field::PrimeCharacteristicRing;
 use tracing::{debug, warn};
@@ -17,8 +17,8 @@ use crate::{
         _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
         logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints,
     },
-    logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpuV2},
-    GpuBackendV2, EF, F,
+    logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpu},
+    GpuBackend, EF, F,
 };
 
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
@@ -27,7 +27,7 @@ use crate::{
 /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_round0_constraints_gpu(
-    pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceStarkProvingKey<GpuBackend>,
     selectors_cube: &DeviceBuffer<F>,
     main_parts: &DeviceBuffer<*const F>,
     public_values: &DeviceBuffer<F>,
@@ -128,7 +128,7 @@ pub fn evaluate_round0_constraints_gpu(
 /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_round0_interactions_gpu(
-    pk: &DeviceStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceStarkProvingKey<GpuBackend>,
     symbolic: &SymbolicConstraints<F>,
     selectors_cube: &DeviceBuffer<F>,
     main_parts: &DeviceBuffer<*const F>,
@@ -176,7 +176,7 @@ pub fn evaluate_round0_interactions_gpu(
             nodes: dag_builder.nodes,
             constraint_idx: sorted_used_dag_idxs,
         };
-        let rules = SymbolicRulesGpuV2::new(&dag, true);
+        let rules = SymbolicRulesGpu::new(&dag, true);
         let mut numer_weights = vec![EF::ZERO; rules.rules.len()];
         let mut denom_weights = vec![EF::ZERO; rules.rules.len()];
         let mut denom_sum_init = EF::ZERO;

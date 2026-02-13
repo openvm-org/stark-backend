@@ -17,8 +17,8 @@ use openvm_stark_backend::{
     poseidon2::sponge::FiatShamirTranscript,
     proof::StackingProof,
     prover::{
-        stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKeyV2,
-        MatrixDimensions, ProvingContextV2,
+        stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKey,
+        MatrixDimensions, ProvingContext,
     },
 };
 use p3_dft::TwoAdicSubgroupDft;
@@ -41,7 +41,7 @@ use crate::{
     sponge::DuplexSpongeGpu,
     stacked_pcs::StackedPcsDataGpu,
     utils::{compute_barycentric_inv_lagrange_denoms, reduce_raw_u64_to_ef},
-    Digest, GpuBackendV2, GpuDeviceV2, ProverError, D_EF, EF, F,
+    Digest, GpuBackend, GpuDevice, ProverError, D_EF, EF, F,
 };
 
 /// Degree of the sumcheck polynomial for stacked reduction.
@@ -177,10 +177,10 @@ impl StackedReductionGpu {
     fields(phase = "prover")
 )]
 pub fn prove_stacked_opening_reduction_gpu(
-    device: &GpuDeviceV2,
+    device: &GpuDevice,
     transcript: &mut DuplexSpongeGpu,
-    mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-    ctx: ProvingContextV2<GpuBackendV2>,
+    mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    ctx: ProvingContext<GpuBackend>,
     common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
     r: &[EF],
 ) -> Result<(StackingProof, Vec<EF>, Vec<StackedPcsData2>), ProverError> {
@@ -249,8 +249,8 @@ pub fn prove_stacked_opening_reduction_gpu(
 impl StackedReductionGpu {
     #[instrument("stacked_reduction_new", level = "debug", skip_all)]
     fn new(
-        mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-        ctx: ProvingContextV2<GpuBackendV2>,
+        mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
+        ctx: ProvingContext<GpuBackend>,
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
         r: &[EF],
         lambda: EF,

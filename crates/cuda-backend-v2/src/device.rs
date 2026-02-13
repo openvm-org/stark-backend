@@ -7,7 +7,7 @@ use crate::cuda::{
 };
 
 #[derive(Clone, Getters, CopyGetters)]
-pub struct GpuDeviceV2 {
+pub struct GpuDevice {
     #[getset(get = "pub")]
     pub(crate) config: SystemParams,
     pub(crate) prover_config: GpuProverConfig,
@@ -22,7 +22,7 @@ pub struct GpuProverConfig {
     pub cache_rs_code_matrix: bool,
 }
 
-impl GpuDeviceV2 {
+impl GpuDevice {
     pub fn new(config: SystemParams) -> Self {
         ensure_device_ntt_twiddles_initialized();
 

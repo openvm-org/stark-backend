@@ -7,6 +7,7 @@ description = "OpenVM CUDA prover backend for the SWIRL proof system"
 
 [dependencies]
 openvm-stark-backend.workspace = true
+openvm-stark-sdk.workspace = true
 openvm-cuda-common.workspace = true
 
 itertools.workspace = true
@@ -29,7 +30,6 @@ openvm-cuda-builder.workspace = true
 
 [dev-dependencies]
 openvm-stark-backend = { workspace = true, features = ["test-utils"] }
-openvm-stark-sdk.workspace = true
 p3-keccak-air.workspace = true
 eyre.workspace = true
 test-case.workspace = true

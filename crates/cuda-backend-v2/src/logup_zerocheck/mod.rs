@@ -29,12 +29,12 @@ use openvm_stark_backend::{
         eq_sharp_uni_poly, eq_uni_poly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni,
         eval_eq_uni_at_one, UnivariatePoly,
     },
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
         fractional_sumcheck_gkr::Frac, stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
-        ColMajorMatrix, DeviceMultiStarkProvingKeyV2, MatrixDimensions, ProvingContextV2,
+        ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
     },
+    FiatShamirTranscript,
 };
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
@@ -55,7 +55,7 @@ use crate::{
     poly::EqEvalLayers,
     sponge::DuplexSpongeGpu,
     utils::compute_barycentric_inv_lagrange_denoms,
-    GpuBackendV2, EF, F,
+    GpuBackend, EF, F,
 };
 
 pub(crate) mod batch_mle;
@@ -100,8 +100,8 @@ pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
 #[instrument(level = "info", skip_all)]
 pub fn prove_zerocheck_and_logup_gpu(
     transcript: &mut DuplexSpongeGpu,
-    mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-    ctx: &ProvingContextV2<GpuBackendV2>,
+    mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    ctx: &ProvingContext<GpuBackend>,
     save_memory: bool,
     monomial_num_y_threshold: u32,
     sm_count: u32,
@@ -442,7 +442,7 @@ pub struct LogupZerocheckGpu<'a> {
 
     trace_interactions: Vec<Option<TraceInteractionMeta>>,
     // round0: Round0Buffers,
-    pk: &'a DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &'a DeviceMultiStarkProvingKey<GpuBackend>,
 
     // In round `j`, contains `s_{j-1}(r_{j-1})`
     pub(crate) prev_s_eval: EF,
@@ -460,8 +460,8 @@ pub struct LogupZerocheckGpu<'a> {
 impl<'a> LogupZerocheckGpu<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        pk: &'a DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-        ctx: &ProvingContextV2<GpuBackendV2>,
+        pk: &'a DeviceMultiStarkProvingKey<GpuBackend>,
+        ctx: &ProvingContext<GpuBackend>,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: EF,
@@ -590,7 +590,7 @@ impl<'a> LogupZerocheckGpu<'a> {
     #[instrument(name = "prover.rap_constraints.ple_round0", level = "info", skip_all)]
     fn sumcheck_uni_round0_polys(
         &mut self,
-        ctx: &ProvingContextV2<GpuBackendV2>,
+        ctx: &ProvingContext<GpuBackend>,
         lambda: EF,
     ) -> Vec<UnivariatePoly<EF>> {
         self.mem
@@ -882,7 +882,7 @@ impl<'a> LogupZerocheckGpu<'a> {
 
     // Note: there are no gpu sync points in this function, so span does not indicate kernel times
     #[instrument(name = "LogupZerocheck::fold_ple_evals", level = "debug", skip_all)]
-    fn fold_ple_evals(&mut self, ctx: &ProvingContextV2<GpuBackendV2>, r_0: EF) {
+    fn fold_ple_evals(&mut self, ctx: &ProvingContext<GpuBackend>, r_0: EF) {
         let l_skip = self.l_skip;
         let inv_lagrange_denoms_r0 =
             compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, r_0);

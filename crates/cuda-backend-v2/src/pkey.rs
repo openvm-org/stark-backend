@@ -7,12 +7,12 @@ use openvm_stark_backend::{
         symbolic_variable::{Entry, SymbolicVariable},
         SymbolicConstraints, SymbolicDagBuilder, SymbolicExpressionDag,
     },
-    keygen::types::StarkProvingKeyV2,
+    keygen::types::StarkProvingKey,
 };
 use p3_field::PrimeCharacteristicRing;
 
 use crate::{
-    logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpuV2},
+    logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpu},
     monomial::{
         ExpandedInteractionMonomials, ExpandedMonomials, InteractionMonomialTerm, LambdaTerm,
         MonomialHeader, PackedVar,
@@ -82,7 +82,7 @@ fn to_device_or_empty<T>(data: &[T]) -> Result<DeviceBuffer<T>, MemCopyError> {
 }
 
 impl AirDataGpu {
-    pub fn new(pk: &StarkProvingKeyV2) -> Result<Self, MemCopyError> {
+    pub fn new(pk: &StarkProvingKey) -> Result<Self, MemCopyError> {
         let dag = &pk.vk.symbolic_constraints;
         let symbolic_constraints = SymbolicConstraints::from(dag);
         let interaction_rules = InteractionEvalRules::new(&symbolic_constraints)?;
@@ -247,7 +247,7 @@ impl InteractionEvalRules {
             };
             (dag, pair_idxs)
         };
-        let rules = SymbolicRulesGpuV2::new(&dag, false);
+        let rules = SymbolicRulesGpu::new(&dag, false);
         // Build used_nodes with duplicates, preserving order from constraint_idx
         let used_nodes = dag
             .constraint_idx
@@ -289,7 +289,7 @@ impl<const BUFFER_VARS: bool> ConstraintOnlyRules<BUFFER_VARS> {
             });
         }
 
-        let rules = SymbolicRulesGpuV2::new(dag, BUFFER_VARS);
+        let rules = SymbolicRulesGpu::new(dag, BUFFER_VARS);
         // Build used_nodes with duplicates, preserving order from constraint_idx
         let used_nodes = dag
             .constraint_idx

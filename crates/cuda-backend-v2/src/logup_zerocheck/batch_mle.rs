@@ -7,7 +7,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
 };
-use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKeyV2};
+use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 
 use crate::{
     cuda::logup_zerocheck::{
@@ -19,7 +19,7 @@ use crate::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
         mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
     },
-    GpuBackendV2, EF, F,
+    GpuBackend, EF, F,
 };
 
 const MAX_THREADS_PER_BLOCK: u32 = 128;
@@ -122,7 +122,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
     /// builds all block and zerocheck contexts, and uploads them to the device.
     pub fn new(
         traces: impl Iterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         num_x: u32,
     ) -> Self {
         let traces: Vec<&TraceCtx> = traces.filter(|t| t.has_constraints).collect();
@@ -264,7 +264,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
     /// builds all block and logup contexts, and uploads them to the device.
     pub fn new(
         traces: impl Iterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         d_challenges_ptr: *const EF,
         num_x: u32,
     ) -> Self {
@@ -405,7 +405,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
 
 pub(crate) fn evaluate_zerocheck_batched<'a>(
     traces: impl IntoIterator<Item = &'a TraceCtx>,
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
     lambda_pows: &DeviceBuffer<EF>,
     num_x: u32,
     zc_out: &mut [Vec<EF>],
@@ -494,7 +494,7 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
 
 pub(crate) fn evaluate_logup_batched(
     traces: &[TraceCtx],
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
     d_challenges_ptr: *const EF,
     num_x: u32,
     monomial_num_y_threshold: u32,
@@ -617,7 +617,7 @@ pub(crate) fn evaluate_logup_batched(
 /// Evaluate logup for a single trace using non-batch kernel.
 fn evaluate_single_logup(
     t: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
+    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
     d_challenges_ptr: *const EF,
     num_x: u32,
     logup_out: &mut [Vec<EF>; 2],

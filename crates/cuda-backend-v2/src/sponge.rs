@@ -5,7 +5,6 @@
 
 use std::ffi::c_void;
 
-use openvm_cuda_backend::types::Challenger;
 use openvm_cuda_common::{
     copy::cuda_memcpy,
     d_buffer::DeviceBuffer,
@@ -13,12 +12,13 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::{
     p3_challenger::{CanObserve, CanSample},
-    poseidon2::{poseidon2_perm, sponge::FiatShamirTranscript, CHUNK, WIDTH},
+    FiatShamirTranscript,
 };
+use p3_baby_bear::{default_babybear_poseidon2_16, Poseidon2BabyBear};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 
-use crate::F;
+use crate::types::{Challenger, Digest, CHUNK, F, SC, WIDTH};
 
 /// Device-side sponge state, matching the CUDA `DeviceSpongeState` struct.
 ///
@@ -36,6 +36,8 @@ pub struct DeviceSpongeState {
     pub absorb_idx: u32,
     /// Current sample position (0 <= sample_idx <= CHUNK)
     pub sample_idx: u32,
+    /// Permutation
+    perm: Poseidon2BabyBear<WIDTH>,
 }
 
 impl Default for DeviceSpongeState {
@@ -44,6 +46,7 @@ impl Default for DeviceSpongeState {
             state: [F::default(); WIDTH],
             absorb_idx: 0,
             sample_idx: 0,
+            perm: default_babybear_poseidon2_16(),
         }
     }
 }
@@ -57,7 +60,7 @@ impl DeviceSpongeState {
         self.state[self.absorb_idx as usize] = value;
         self.absorb_idx += 1;
         if self.absorb_idx == CHUNK as u32 {
-            poseidon2_perm().permute_mut(&mut self.state);
+            self.perm.permute_mut(&mut self.state);
             self.absorb_idx = 0;
             self.sample_idx = CHUNK as u32;
         }
@@ -69,7 +72,7 @@ impl DeviceSpongeState {
     #[inline]
     pub fn sample(&mut self) -> F {
         if self.absorb_idx != 0 || self.sample_idx == 0 {
-            poseidon2_perm().permute_mut(&mut self.state);
+            self.perm.permute_mut(&mut self.state);
             self.absorb_idx = 0;
             self.sample_idx = CHUNK as u32;
         }
@@ -78,7 +81,7 @@ impl DeviceSpongeState {
     }
 }
 
-impl FiatShamirTranscript for DeviceSpongeState {
+impl FiatShamirTranscript<SC> for DeviceSpongeState {
     #[inline]
     fn observe(&mut self, value: F) {
         DeviceSpongeState::observe(self, value);
@@ -87,6 +90,13 @@ impl FiatShamirTranscript for DeviceSpongeState {
     #[inline]
     fn sample(&mut self) -> F {
         DeviceSpongeState::sample(self)
+    }
+
+    #[inline]
+    fn observe_commit(&mut self, digest: Digest) {
+        for x in digest {
+            self.observe(x);
+        }
     }
 }
 
@@ -154,7 +164,7 @@ impl DuplexSpongeGpu {
     /// Create a new GPU-accelerated duplex sponge with default (zeroed) state.
     pub fn new() -> Self {
         Self {
-            host: Challenger::new(poseidon2_perm().clone()),
+            host: Challenger::new(default_babybear_poseidon2_16()),
             device: DeviceBuffer::new(),
         }
     }
@@ -284,7 +294,7 @@ pub enum GrindError {
     WitnessNotFound,
 }
 
-impl FiatShamirTranscript for DuplexSpongeGpu {
+impl FiatShamirTranscript<SC> for DuplexSpongeGpu {
     #[inline]
     fn observe(&mut self, value: F) {
         self.host.observe(value);
@@ -293,6 +303,13 @@ impl FiatShamirTranscript for DuplexSpongeGpu {
     #[inline]
     fn sample(&mut self) -> F {
         self.host.sample()
+    }
+
+    #[inline]
+    fn observe_commit(&mut self, digest: Digest) {
+        for x in digest {
+            self.observe(x);
+        }
     }
 }
 

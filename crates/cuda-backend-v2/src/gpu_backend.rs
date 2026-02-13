@@ -1,7 +1,6 @@
 use std::{cmp::max, fmt::Debug, sync::Arc};
 
 use itertools::Itertools;
-use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{cuda_memcpy, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -10,38 +9,37 @@ use openvm_cuda_common::{
     stream::current_stream_sync,
 };
 use openvm_stark_backend::{
-    keygen::types::MultiStarkProvingKeyV2,
+    keygen::types::MultiStarkProvingKey,
     p3_matrix::dense::RowMajorMatrix,
     poly_common::Squarable,
     proof::*,
     prover::{
-        hal::MatrixDimensions,
         stacked_pcs::{MerkleTree, StackedPcsData},
-        AirProvingContextV2, ColMajorMatrix, CommittedTraceDataV2, CpuBackendV2,
-        DeviceDataTransporterV2, DeviceMultiStarkProvingKeyV2, DeviceStarkProvingKeyV2, MatrixView,
-        MultiRapProver, OpeningProverV2, ProverBackendV2, ProverDeviceV2, ProvingContextV2,
-        TraceCommitterV2,
+        AirProvingContext, ColMajorMatrix, CommittedTraceData, CpuBackend, DeviceDataTransporter,
+        DeviceMultiStarkProvingKey, DeviceStarkProvingKey, MatrixDimensions, MatrixView,
+        MultiRapProver, OpeningProver, ProverBackend, ProverDevice, ProvingContext, TraceCommitter,
     },
-    SystemParams,
 };
 use tracing::{debug, instrument};
 
 use crate::{
-    cuda::matrix::collapse_strided_matrix,
+    base::DeviceMatrix,
+    cuda::matrix::{collapse_strided_matrix, matrix_transpose_fp},
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
+    prelude::{Digest, D_EF, EF, F, SC},
     sponge::DuplexSpongeGpu,
     stacked_pcs::{stacked_commit, StackedPcsDataGpu},
     stacked_reduction::prove_stacked_opening_reduction_gpu,
     whir::prove_whir_opening_gpu,
-    AirDataGpu, Digest, GpuDeviceV2, GpuProverConfig, ProverError, D_EF, EF, F,
+    AirDataGpu, GpuDevice, GpuProverConfig, ProverError,
 };
 
 #[derive(Clone, Copy)]
-pub struct GpuBackendV2;
+pub struct GpuBackend;
 
-impl ProverBackendV2 for GpuBackendV2 {
+impl ProverBackend for GpuBackend {
     const CHALLENGE_EXT_DEGREE: u8 = D_EF as u8;
 
     type Val = F;
@@ -52,13 +50,9 @@ impl ProverBackendV2 for GpuBackendV2 {
     type OtherAirData = AirDataGpu;
 }
 
-impl ProverDeviceV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
-    fn config(&self) -> &SystemParams {
-        self.config()
-    }
-}
+impl ProverDevice<GpuBackend, DuplexSpongeGpu> for GpuDevice {}
 
-impl TraceCommitterV2<GpuBackendV2> for GpuDeviceV2 {
+impl TraceCommitter<GpuBackend> for GpuDevice {
     fn commit(&self, traces: &[&DeviceMatrix<F>]) -> (Digest, StackedPcsDataGpu<F, Digest>) {
         stacked_commit(
             self.config.l_skip,
@@ -72,8 +66,8 @@ impl TraceCommitterV2<GpuBackendV2> for GpuDeviceV2 {
     }
 }
 
-impl MultiRapProver<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
-    type PartialProof = (GkrProof, BatchConstraintProof);
+impl MultiRapProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
+    type PartialProof = (GkrProof<SC>, BatchConstraintProof<SC>);
     /// The random opening point `r` where the batch constraint sumcheck reduces to evaluation
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
     type Artifacts = Vec<EF>;
@@ -82,10 +76,10 @@ impl MultiRapProver<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
     fn prove_rap_constraints(
         &self,
         transcript: &mut DuplexSpongeGpu,
-        mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-        ctx: &ProvingContextV2<GpuBackendV2>,
+        mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
+        ctx: &ProvingContext<GpuBackend>,
         _common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
-    ) -> ((GkrProof, BatchConstraintProof), Vec<EF>) {
+    ) -> ((GkrProof<SC>, BatchConstraintProof<SC>), Vec<EF>) {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
         let save_memory = self.config.log_blowup == 1;
         // Threshold for monomial evaluation path based on proof type:
@@ -105,8 +99,8 @@ impl MultiRapProver<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
     }
 }
 
-impl OpeningProverV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
-    type OpeningProof = (StackingProof, WhirProof);
+impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
+    type OpeningProof = (StackingProof<SC>, WhirProof<SC>);
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<EF>;
 
@@ -114,11 +108,11 @@ impl OpeningProverV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
     fn prove_openings(
         &self,
         transcript: &mut DuplexSpongeGpu,
-        mpk: &DeviceMultiStarkProvingKeyV2<GpuBackendV2>,
-        ctx: ProvingContextV2<GpuBackendV2>,
+        mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
+        ctx: ProvingContext<GpuBackend>,
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
         r: Vec<EF>,
-    ) -> (StackingProof, WhirProof) {
+    ) -> (StackingProof<SC>, WhirProof<SC>) {
         let mut mem = MemTracker::start_and_reset_peak("prover.openings");
         let params = self.config();
         let (stacking_proof, u_prisma, stacked_per_commit) = prove_stacked_opening_reduction_gpu(
@@ -146,11 +140,11 @@ impl OpeningProverV2<GpuBackendV2, DuplexSpongeGpu> for GpuDeviceV2 {
     }
 }
 
-impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
+impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKeyV2,
-    ) -> DeviceMultiStarkProvingKeyV2<GpuBackendV2> {
+        mpk: &MultiStarkProvingKey<SC>,
+    ) -> DeviceMultiStarkProvingKey<GpuBackend> {
         let per_air = mpk
             .per_air
             .iter()
@@ -166,7 +160,7 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
                     .unwrap_or(0);
                 debug!(air = %pk.air_name, num_monomials, "monomial expansion");
 
-                DeviceStarkProvingKeyV2 {
+                DeviceStarkProvingKey {
                     air_name: pk.air_name.clone(),
                     vk: pk.vk.clone(),
                     preprocessed_data,
@@ -177,7 +171,7 @@ impl DeviceDataTransporterV2<GpuBackendV2> for GpuDeviceV2 {
         // Synchronize in case the proving key is shared between threads/streams
         current_stream_sync().unwrap();
 
-        DeviceMultiStarkProvingKeyV2::new(
+        DeviceMultiStarkProvingKey::new(
             per_air,
             mpk.trace_height_constraints.clone(),
             mpk.max_constraint_degree,
@@ -221,7 +215,7 @@ pub fn transport_matrix_h2d_row(
     let input_buffer = data.to_device().unwrap();
     let output = DeviceMatrix::<F>::with_capacity(matrix.height(), matrix.width());
     unsafe {
-        matrix_transpose::<F>(
+        matrix_transpose_fp(
             output.buffer(),
             &input_buffer,
             matrix.width(),
@@ -234,11 +228,11 @@ pub fn transport_matrix_h2d_row(
 
 /// `d` must be the stacked pcs data of a single trace matrix.
 /// This function will transport `d` to device and then unstack it (allocating device memory) to
-/// return `CommittedTraceDataV2<F, Digest>`.
+/// return `CommittedTraceData<F, Digest>`.
 pub fn transport_and_unstack_single_data_h2d(
     d: &StackedPcsData<F, Digest>,
     prover_config: &GpuProverConfig,
-) -> Result<CommittedTraceDataV2<GpuBackendV2>, ProverError> {
+) -> Result<CommittedTraceData<GpuBackend>, ProverError> {
     debug_assert!(d
         .layout
         .sorted_cols
@@ -299,7 +293,7 @@ pub fn transport_and_unstack_single_data_h2d(
     // Sanity check. Not a strong assert because we transport the merkle tree
     // instead of recomputing it above.
     assert_eq!(d_data.tree.root(), d.commit());
-    Ok(CommittedTraceDataV2 {
+    Ok(CommittedTraceData {
         commitment: d.commit(),
         trace: DeviceMatrix::new(Arc::new(trace_buffer), height, width),
         data: Arc::new(d_data),
@@ -354,14 +348,14 @@ pub fn transport_pcs_data_h2d(
 }
 
 pub fn transport_air_proving_ctx_to_device(
-    cpu_ctx: AirProvingContextV2<CpuBackendV2>,
-) -> AirProvingContextV2<GpuBackendV2> {
+    cpu_ctx: AirProvingContext<CpuBackend<SC>>,
+) -> AirProvingContext<GpuBackend> {
     assert!(
         cpu_ctx.cached_mains.is_empty(),
         "CPU to GPU transfer of cached traces not supported"
     );
     let trace = transport_matrix_h2d_col_major(&cpu_ctx.common_main).unwrap();
-    AirProvingContextV2 {
+    AirProvingContext {
         cached_mains: vec![],
         common_main: trace,
         public_values: cpu_ctx.public_values,
@@ -369,21 +363,21 @@ pub fn transport_air_proving_ctx_to_device(
 }
 
 pub fn transport_proving_ctx_to_host(
-    gpu_ctx: ProvingContextV2<GpuBackendV2>,
+    gpu_ctx: ProvingContext<GpuBackend>,
     l_skip: usize,
-) -> ProvingContextV2<CpuBackendV2> {
+) -> ProvingContext<CpuBackend<SC>> {
     let per_trace = gpu_ctx
         .per_trace
         .into_iter()
         .map(|(i, ctx)| (i, transport_air_proving_ctx_to_host(ctx, l_skip)))
         .collect_vec();
-    ProvingContextV2 { per_trace }
+    ProvingContext { per_trace }
 }
 
 pub fn transport_air_proving_ctx_to_host(
-    gpu_ctx: AirProvingContextV2<GpuBackendV2>,
+    gpu_ctx: AirProvingContext<GpuBackend>,
     l_skip: usize,
-) -> AirProvingContextV2<CpuBackendV2> {
+) -> AirProvingContext<CpuBackend<SC>> {
     let trace = transport_matrix_d2h_col_major(&gpu_ctx.common_main).unwrap();
     let cached_mains = gpu_ctx
         .cached_mains
@@ -393,7 +387,7 @@ pub fn transport_air_proving_ctx_to_host(
             // GpuProverConfig fields cache_stacked_matrix and cache_rs_code_matrix are set
             // to be true.
             let evals_matrix = mat.data.matrix.as_ref().unwrap().to_evals(l_skip).unwrap();
-            CommittedTraceDataV2::<CpuBackendV2> {
+            CommittedTraceData::<CpuBackend> {
                 commitment: mat.commitment,
                 trace: transport_matrix_d2h_col_major(&mat.trace).unwrap(),
                 data: Arc::new(StackedPcsData {
@@ -404,7 +398,7 @@ pub fn transport_air_proving_ctx_to_host(
             }
         })
         .collect_vec();
-    AirProvingContextV2 {
+    AirProvingContext {
         cached_mains,
         common_main: trace,
         public_values: gpu_ctx.public_values,
@@ -423,7 +417,7 @@ pub fn transport_matrix_d2h_row_major<T>(
 ) -> Result<RowMajorMatrix<T>, MemCopyError> {
     let matrix_buffer = DeviceBuffer::<T>::with_capacity(matrix.height() * matrix.width());
     unsafe {
-        matrix_transpose::<T>(
+        matrix_transpose_fp(
             &matrix_buffer,
             matrix.buffer(),
             matrix.height(),
@@ -471,47 +465,6 @@ pub fn assert_eq_host_and_device_matrix_col_maj<T: Clone + Send + Sync + Partial
                 r,
                 c
             );
-        }
-    }
-}
-
-mod v1_shims {
-    use std::sync::Arc;
-
-    use openvm_cuda_backend::{base::DeviceMatrix, prover_backend::GpuBackend};
-    use openvm_stark_backend::{prover::CommittedTraceDataV2, v1_shims::V1Compat, SystemParams};
-
-    use crate::{stacked_pcs::stacked_commit, GpuBackendV2, GpuProverConfig, F};
-
-    impl V1Compat for GpuBackendV2 {
-        type V1 = GpuBackend;
-
-        fn dummy_matrix() -> DeviceMatrix<F> {
-            DeviceMatrix::dummy()
-        }
-
-        fn convert_trace(matrix: DeviceMatrix<F>) -> DeviceMatrix<F> {
-            matrix
-        }
-
-        fn convert_committed_trace(
-            params: &SystemParams,
-            matrix: DeviceMatrix<F>,
-        ) -> CommittedTraceDataV2<GpuBackendV2> {
-            let (commitment, data) = stacked_commit(
-                params.l_skip,
-                params.n_stack,
-                params.log_blowup,
-                params.k_whir(),
-                &[&matrix],
-                GpuProverConfig::default(),
-            )
-            .unwrap();
-            CommittedTraceDataV2 {
-                commitment,
-                data: Arc::new(data),
-                trace: matrix,
-            }
         }
     }
 }

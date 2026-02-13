@@ -10,8 +10,8 @@ use openvm_stark_backend::{
     prover::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
-        AirProvingContextV2, ColMajorMatrix, DeviceDataTransporterV2, MatrixDimensions,
-        MultiRapProver, ProvingContextV2,
+        AirProvingContext, ColMajorMatrix, DeviceDataTransporter, MatrixDimensions, MultiRapProver,
+        ProvingContext,
     },
     test_utils::{
         default_test_params_small, prove_up_to_batch_constraints, test_system_params_small,
@@ -26,8 +26,7 @@ use openvm_stark_backend::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    BabyBearPoseidon2CpuEngineV2, StarkEngineV2, SystemParams, WhirConfig, WhirParams,
-    WhirRoundConfig,
+    BabyBearPoseidon2CpuEngine, StarkEngine, SystemParams, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::config::{
     log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
@@ -41,12 +40,12 @@ use tracing::{debug, Level};
 use crate::{
     sponge::DuplexSpongeGpu,
     sumcheck::{sumcheck_multilinear_gpu, sumcheck_prismalinear_gpu},
-    BabyBearPoseidon2GpuEngineV2,
+    BabyBearPoseidon2GpuEngine,
 };
 
-pub fn test_gpu_engine_small() -> BabyBearPoseidon2GpuEngineV2 {
+pub fn test_gpu_engine_small() -> BabyBearPoseidon2GpuEngine {
     setup_tracing();
-    BabyBearPoseidon2GpuEngineV2::new(default_test_params_small())
+    BabyBearPoseidon2GpuEngine::new(default_test_params_small())
 }
 
 #[test]
@@ -147,7 +146,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
         };
-        let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params);
+        let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params);
         let (vk, proof) = InteractionsFixture11.keygen_and_prove(&engine);
         verify_proof_shape(&vk.inner, &proof)?;
     }
@@ -212,7 +211,7 @@ fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), Stacked
     let engine = test_gpu_engine_small();
     let params = engine.config();
 
-    let engine = BabyBearPoseidon2CpuEngineV2::<DuplexSponge>::new(params.clone());
+    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, _vk) = fib.keygen(&engine);
     let pk = engine.device().transport_pk_to_device(&pk);
@@ -323,7 +322,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
         .map(|(air_idx, trace)| {
             (
                 air_idx,
-                AirProvingContextV2::simple_no_pis(ColMajorMatrix::from_row_major(&trace)),
+                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&trace)),
             )
         })
         .collect();
@@ -333,7 +332,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
     per_trace.push((per_trace.len(), fib_ctx));
     let combined_ctx = engine
         .device()
-        .transport_proving_ctx_to_device(&ProvingContextV2::new(per_trace))
+        .transport_proving_ctx_to_device(&ProvingContext::new(per_trace))
         .into_sorted();
 
     let proof = engine.prove(&combined_pk, combined_ctx);
@@ -367,7 +366,7 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
     };
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
 
-    let engine = BabyBearPoseidon2GpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2GpuEngine::new(params);
     let (pk, vk) = fib.keygen(&engine);
     let mut prover_sponge = DuplexSpongeGpu::default();
     let proof = fib.prove_from_transcript(&engine, &pk, &mut prover_sponge);
@@ -384,7 +383,7 @@ fn test_dummy_interactions_roundtrip(
     k_whir: usize,
 ) -> Result<(), VerifierError> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
-    let engine = BabyBearPoseidon2GpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2GpuEngine::new(params);
     let fx = InteractionsFixture11;
     let (pk, vk) = fx.keygen(&engine);
 
@@ -405,7 +404,7 @@ fn test_cached_trace_roundtrip(
     k_whir: usize,
 ) -> Result<(), VerifierError> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
-    let engine = BabyBearPoseidon2GpuEngineV2::new(params.clone());
+    let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
     let fx = CachedFixture11::new(params);
     let (pk, vk) = fx.keygen(&engine);
 
@@ -424,7 +423,7 @@ fn test_preprocessed_trace_roundtrip(
     k_whir: usize,
 ) -> Result<(), VerifierError> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
-    let engine = BabyBearPoseidon2CpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::new(params);
     let log_trace_degree = 8;
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
@@ -581,7 +580,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
 fn test_matrix_stacking_overflow() {
     setup_tracing();
     let params = test_system_params_small(3, 5, 3);
-    let engine = BabyBearPoseidon2GpuEngineV2::new(params);
+    let engine = BabyBearPoseidon2GpuEngine::new(params);
     let fx = SelfInteractionFixture {
         widths: vec![4, 7, 8, 8, 10],
         log_height: 1,

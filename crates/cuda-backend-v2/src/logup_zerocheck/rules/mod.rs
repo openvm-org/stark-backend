@@ -6,7 +6,7 @@ use std::{cmp::Ordering, collections::BinaryHeap};
 use getset::Getters;
 use itertools::Itertools;
 use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicExpressionDag, SymbolicExpressionNode, symbolic_variable::SymbolicVariable,
+    symbolic_variable::SymbolicVariable, SymbolicExpressionDag, SymbolicExpressionNode,
 };
 use p3_field::{Field, PrimeField32};
 use rustc_hash::FxHashMap;
@@ -95,7 +95,7 @@ impl PartialOrd for BufferEntry {
 }
 
 #[derive(Debug, Clone)]
-pub struct SymbolicRulesGpuV2<F> {
+pub struct SymbolicRulesGpu<F> {
     /// Vector consisting of rules to be sequentially evaluated in a single GPU thread.
     pub rules: Vec<RuleWithFlag<F>>,
     /// Number of `F` elements in the intermediate buffer required for rule evaluation.
@@ -312,7 +312,7 @@ impl<'a, F: Field> SymbolicRulesBuilder<'a, F> {
         }
     }
 
-    pub fn to_rules(&self) -> SymbolicRulesGpuV2<F> {
+    pub fn to_rules(&self) -> SymbolicRulesGpu<F> {
         let dag_idx_to_source = |idx: usize, use_idx: usize| {
             match &self.dag_nodes[idx] {
                 // Leaf nodes don't need buffer_idx lookup
@@ -414,7 +414,7 @@ impl<'a, F: Field> SymbolicRulesBuilder<'a, F> {
             })
             .collect::<Vec<_>>();
 
-        SymbolicRulesGpuV2 {
+        SymbolicRulesGpu {
             rules,
             buffer_size: self.buffer.len(),
             dag_idx_to_rule_idx,
@@ -422,7 +422,7 @@ impl<'a, F: Field> SymbolicRulesBuilder<'a, F> {
     }
 }
 
-impl<F: Field + PrimeField32> SymbolicRulesGpuV2<F> {
+impl<F: Field + PrimeField32> SymbolicRulesGpu<F> {
     pub fn new(dag: &SymbolicExpressionDag<F>, buffer_vars: bool) -> Self {
         let mut builder = SymbolicRulesBuilder::new(dag, buffer_vars);
         builder.set_range(0, dag.nodes.len());
