@@ -12,13 +12,9 @@ use openvm_stark_backend::{
     duplex_sponge,
     hasher::Hasher,
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
-    prover::{
-        AirProvingContext, Coordinator, CpuBackend, CpuDevice, DeviceDataTransporter,
-        ProverBackend, ProvingContext,
-    },
-    verifier::VerifierError,
-    AirRef, DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig,
-    SystemParams, TranscriptLog, VerificationData,
+    prover::{Coordinator, CpuBackend, CpuDevice},
+    DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
+    TranscriptLog,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
 use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
@@ -144,28 +140,6 @@ where
         transcript: TS,
     ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
         Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
-    }
-
-    fn run_test(
-        &self,
-        airs: Vec<AirRef<Self::SC>>,
-        ctxs: Vec<AirProvingContext<Self::PB>>,
-    ) -> Result<VerificationData<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
-    where
-        Self::PB: ProverBackend<
-            Val = <Self::SC as StarkProtocolConfig>::F,
-            Challenge = <Self::SC as StarkProtocolConfig>::EF,
-            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
-        >,
-        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
-    {
-        let (pk, vk) = self.keygen(&airs);
-        let device = self.prover().device;
-        let d_pk = device.transport_pk_to_device(&pk);
-        let ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
-        let proof = self.prove(&d_pk, ctx);
-        self.verify(&vk, &proof)?;
-        Ok(VerificationData { vk, proof })
     }
 }
 

@@ -1,255 +1,338 @@
-use std::{cmp::Reverse, collections::HashMap, sync::Arc};
+use std::array::from_fn;
 
 use itertools::Itertools;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
-    error::CudaError,
+    memory_manager::MemTracker,
 };
-use openvm_stark_backend::prover::hal::MatrixDimensions;
-use p3_symmetric::Hash;
-use p3_util::{log2_ceil_usize, log2_strict_usize};
-use tracing::debug_span;
+use openvm_stark_backend::prover::MatrixDimensions;
+use p3_util::log2_strict_usize;
+use tracing::instrument;
 
 use crate::{
-    base::DeviceMatrix, cuda::kernels::poseidon2::*, gpu_device::GpuDevice, lde::GpuLde, prelude::F,
+    base::DeviceMatrix,
+    cuda::{
+        matrix::matrix_get_rows_fp_kernel,
+        merkle_tree::{
+            poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
+            poseidon2_compressing_row_hashes_ext, query_digest_layers,
+        },
+    },
+    prelude::{Digest, DIGEST_SIZE, EF, F},
+    MerkleTreeError,
 };
 
-const DIGEST_WIDTH: usize = 8;
-type H = [F; DIGEST_WIDTH];
-
-#[derive(Clone)]
-pub struct GpuMerkleTree<LDE: GpuLde> {
-    pub(crate) leaves: Vec<LDE>,
-    pub(crate) digest_layers: Vec<Arc<DeviceBuffer<H>>>,
+pub struct MerkleTreeGpu<F, Digest> {
+    /// The matrix that is used to form the leaves of the Merkle tree, which are
+    /// in turn hashed into the bottom digest layer.
+    ///
+    /// This matrix is optionally cached depending on the prover configuration:
+    /// - Caching increases the peak GPU memory but avoids a recomputation of MLE eval-to-coeffs,
+    ///   batch_expand, and forward NTT.
+    /// - Not caching pays a performance penalty due to the above recomputation.
+    pub(crate) backing_matrix: Option<DeviceMatrix<F>>,
+    pub(crate) digest_layers: Vec<DeviceBuffer<Digest>>,
+    pub(crate) rows_per_query: usize,
+    pub(crate) root: Digest,
 }
 
-impl<LDE: GpuLde> GpuMerkleTree<LDE> {
-    pub fn new(leaves: Vec<LDE>, _gpu_device: &GpuDevice) -> Result<Self, CudaError> {
-        assert!(!leaves.is_empty(), "No matrices given?");
+impl<F, Digest> MerkleTreeGpu<F, Digest> {
+    pub fn root(&self) -> Digest
+    where
+        Digest: Clone,
+    {
+        self.root.clone()
+    }
 
-        let mut matrices_largest_first = leaves
-            .iter()
-            .sorted_by_key(|m| Reverse(m.height()))
-            .peekable();
+    pub fn query_stride(&self) -> usize {
+        self.digest_layers[0].len()
+    }
 
-        let max_height = matrices_largest_first.peek().unwrap().height();
+    pub fn proof_depth(&self) -> usize {
+        self.digest_layers.len() - 1
+    }
+}
 
-        let digests = Arc::new(DeviceBuffer::<H>::with_capacity(max_height));
-        {
-            let tallest_matrices = matrices_largest_first
-                .peeking_take_while(|m| m.height() == max_height)
-                .map(|m| m.take_lde(m.height()))
-                .collect_vec();
-
-            Self::hash_matrices(&digests, &tallest_matrices).unwrap();
+// Base field merkle tree
+impl MerkleTreeGpu<F, Digest> {
+    #[instrument(name = "merkle_tree", skip_all)]
+    pub fn new(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, MerkleTreeError> {
+        let mem = MemTracker::start("prover.merkle_tree");
+        let height = matrix.height();
+        assert!(height.is_power_of_two());
+        let k = log2_strict_usize(rows_per_query);
+        assert!(
+            rows_per_query <= height,
+            "rows_per_query ({rows_per_query}) must not exceed height ({height})"
+        );
+        let query_stride = height / rows_per_query;
+        let mut query_digest_layer = DeviceBuffer::<Digest>::with_capacity(query_stride);
+        // SAFETY: query_digest_layer properly allocated
+        unsafe {
+            poseidon2_compressing_row_hashes(
+                &mut query_digest_layer,
+                matrix.buffer(),
+                matrix.width(),
+                query_stride,
+                k,
+            )
+            .map_err(MerkleTreeError::CompressingRowHashes)?;
         }
-        let mut digest_layers: Vec<Arc<DeviceBuffer<H>>> = vec![digests];
-        loop {
+        // If not caching, drop the backing matrix at this point to save memory.
+        let backing_matrix = cache_backing_matrix.then_some(matrix);
+
+        let mut digest_layers = vec![query_digest_layer];
+        while digest_layers.last().unwrap().len() > 1 {
             let prev_layer = digest_layers.last().unwrap();
-            if prev_layer.len() == 1 {
-                break;
+            let mut layer = DeviceBuffer::<Digest>::with_capacity(prev_layer.len() / 2);
+            let layer_len = layer.len();
+            let layer_idx = digest_layers.len();
+            // SAFETY:
+            // - `layer` is properly allocated with half the size of `prev_layer` and does not
+            //   overlap with it.
+            unsafe {
+                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len).map_err(
+                    |error| MerkleTreeError::AdjacentCompressLayer {
+                        error,
+                        layer: layer_idx,
+                    },
+                )?;
             }
-            let next_layer_len = prev_layer.len() / 2;
-            let next_layer = Arc::new(DeviceBuffer::<H>::with_capacity(next_layer_len));
-            let is_inject = {
-                let matrices_to_inject = matrices_largest_first
-                    .peeking_take_while(|m| m.height().next_power_of_two() == next_layer_len)
-                    .map(|m| m.take_lde(m.height()))
-                    .collect_vec();
-
-                let has_matrices = !matrices_to_inject.is_empty();
-                if has_matrices {
-                    Self::hash_matrices(&next_layer, &matrices_to_inject).unwrap();
-                }
-                has_matrices
-            };
-
-            Self::hash_compress(&next_layer, prev_layer, is_inject).unwrap();
-
-            digest_layers.push(next_layer);
+            digest_layers.push(layer);
         }
+        let d_root = digest_layers.last().unwrap();
+        assert_eq!(d_root.len(), 1, "Only one root is supported");
+        let root = d_root.to_host()?.pop().unwrap();
 
+        mem.emit_metrics();
         Ok(Self {
-            leaves,
+            backing_matrix,
             digest_layers,
+            rows_per_query,
+            root,
         })
     }
 
-    fn hash_matrices(out: &DeviceBuffer<H>, matrices: &[DeviceMatrix<F>]) -> Result<(), CudaError> {
-        // For poseidon2_rows_p3_multi we need:
-        // matrices_ptr - array of pointers to matrices
-        // matrices_col - array of column sizes
-        // matrices_row - array of row sizes
-        let matrices_ptr: Vec<u64> = matrices
+    /// Batch queries multiple `trees` at _the same_ `query_indices` for merkle proofs.
+    ///
+    /// # Assumptions
+    /// - All `trees` have the same depth.
+    pub fn batch_query_merkle_proofs(
+        trees: &[&Self],
+        query_indices: &[usize],
+    ) -> Result<
+        Vec<
+            // per tree
+            Vec<
+                // per query index
+                Vec<Digest>, // merkle proof
+            >,
+        >,
+        MerkleTreeError,
+    > {
+        // the way the kernel works is that it just treats each layer as a separate array and does
+        // parallel accesses, so we just lay out all the layer pointers flattened into a vec
+        let num_trees = trees.len();
+        let num_queries = query_indices.len();
+        let depth = trees[0].proof_depth();
+        debug_assert!(
+            trees.iter().all(|tree| tree.proof_depth() == depth),
+            "Merkle trees don't have same depth"
+        );
+        let layers_ptr = trees
             .iter()
-            .map(|m| m.buffer().as_ptr() as u64)
-            .collect();
-        let matrices_col: Vec<u64> = matrices.iter().map(|m| m.width() as u64).collect();
-        let matrices_row: Vec<u64> = matrices.iter().map(|m| m.height() as u64).collect();
-
-        let d_matrices_ptr = matrices_ptr.to_device().unwrap();
-        let d_matrices_col = matrices_col.to_device().unwrap();
-        let d_matrices_row = matrices_row.to_device().unwrap();
-
-        unsafe {
-            poseidon2_rows_p3_multi(
-                out,
-                &d_matrices_ptr,
-                &d_matrices_col,
-                &d_matrices_row,
-                matrices_row[0],
-                matrices.len() as u64,
-            )
-        }
-    }
-
-    fn hash_compress(
-        out: &DeviceBuffer<H>,
-        prev_layer: &DeviceBuffer<H>,
-        is_inject: bool,
-    ) -> Result<(), CudaError> {
-        unsafe { poseidon2_compress(out, prev_layer, out.len() as u32, is_inject) }
-    }
-
-    pub fn root(&self) -> Hash<F, F, DIGEST_WIDTH> {
-        let root = self.digest_layers.last().unwrap();
-        assert_eq!(root.len(), 1, "Only one root is supported");
-        root.to_host().unwrap()[0].into()
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn open_batch_at_multiple_indices(
-        &self,
-        indices: &[usize],
-    ) -> Result<Vec<(Vec<Vec<F>>, Vec<H>)>, ()> {
-        let max_height = self.leaves.iter().map(|m| m.height()).max().unwrap();
-        let log_max_height = log2_strict_usize(max_height);
-
-        // open all indices of one leaf at once to reduce gpu peak memory
-        // the structure of openings: [leaf_index][point_index][column_index]
-        let mut openings_indexed_by_leaf_idx = self
-            .leaves
-            .iter()
-            .map(|matrix| {
-                let openings_per_matrix = debug_span!("read rows").in_scope(|| {
-                    let log_matrix_height = log2_ceil_usize(matrix.height());
-                    let bits_reduced = log_max_height - log_matrix_height;
-
-                    let mut unique_map = HashMap::new();
-                    let mut unique_indices = Vec::new();
-
-                    let reduced_indices = indices
-                        .iter()
-                        .map(|&index| {
-                            let reduced_idx = index >> bits_reduced;
-                            if !unique_map.contains_key(&reduced_idx) {
-                                unique_map.insert(reduced_idx, unique_map.len());
-                                unique_indices.push(reduced_idx);
-                            }
-                            reduced_idx
-                        })
-                        .collect_vec();
-
-                    let unique_openings_vec =
-                        matrix.get_lde_rows(&unique_indices).to_host().unwrap();
-                    let unique_openings_rows =
-                        unique_openings_vec.chunks(matrix.width()).collect_vec();
-
-                    reduced_indices
-                        .iter()
-                        .map(|idx| Ok(unique_openings_rows[unique_map[idx]].to_vec()))
-                        .collect::<Result<Vec<_>, ()>>()
-                })?;
-
-                Ok(openings_per_matrix)
+            .flat_map(|tree| {
+                // skip root layer [depth]
+                tree.digest_layers
+                    .iter()
+                    .take(depth)
+                    .map(|layer| layer.as_ptr() as u64)
             })
-            .collect::<Result<Vec<_>, ()>>()?;
+            .collect_vec();
+        let d_layers_ptr = layers_ptr.to_device()?;
+        debug_assert_eq!(d_layers_ptr.len(), num_trees * depth);
 
-        // convert openings' structure to [point_index][leaf_index][column_index]
-        let openings_indexed_by_point_idx = indices
+        // [query_idx] is the top level grouping
+        let indices = query_indices
             .iter()
-            .rev()
-            .map(|_| {
-                // For each point (in reverse)
-                openings_indexed_by_leaf_idx
-                    .iter_mut()
-                    .map(|openings_per_matrix| openings_per_matrix.pop().unwrap())
+            .flat_map(|&index| {
+                (0..num_trees).flat_map(move |tree_idx| {
+                    (0..depth).map(move |layer_idx| {
+                        debug_assert!(index < trees[tree_idx].query_stride());
+                        ((index >> layer_idx) ^ 1) as u64
+                    })
+                })
+            })
+            .collect_vec();
+        let d_indices = indices.to_device()?;
+        debug_assert_eq!(d_indices.len(), d_layers_ptr.len() * num_queries);
+
+        let mut d_out =
+            DeviceBuffer::<F>::with_capacity(d_layers_ptr.len() * num_queries * DIGEST_SIZE);
+        // SAFETY:
+        // - d_out has size num_trees * depth * num_queries * DIGEST_SIZE in `F` elements
+        // - d_layers_ptr is size `num_trees * depth` device pointers
+        // - d_indices is size `num_trees * depth * num_queries` indices for merkle proof sibling
+        //   indices
+        unsafe {
+            query_digest_layers(
+                &mut d_out,
+                &d_layers_ptr,
+                &d_indices,
+                num_queries as u64,
+                d_layers_ptr.len() as u64,
+            )
+            .map_err(MerkleTreeError::QueryDigestLayers)?;
+        }
+        let out = d_out.to_host()?;
+        // Chunk up the array into expected Vec groupings
+        let res = (0..num_trees)
+            .map(|tree_idx| {
+                (0..num_queries)
+                    .map(|query_idx| {
+                        // merkle proof for a single query for tree `tree_idx`
+                        (0..depth)
+                            .map(|layer_idx| -> Digest {
+                                from_fn(|elem_idx| {
+                                    out[(query_idx * num_trees * depth
+                                        + tree_idx * depth
+                                        + layer_idx)
+                                        * DIGEST_SIZE
+                                        + elem_idx]
+                                })
+                            })
+                            .collect_vec()
+                    })
                     .collect_vec()
             })
-            .collect_vec()
-            .into_iter()
-            .rev()
             .collect_vec();
-
-        let proofs: Vec<Vec<H>> = debug_span!("read digests").in_scope(|| {
-            let query_indices = indices
-                .iter()
-                .flat_map(|index| {
-                    (0..log_max_height)
-                        .map(|i| {
-                            ((index >> i) ^ 1) as u64 //sibling_index
-                        })
-                        .collect::<Vec<u64>>()
-                })
-                .collect::<Vec<_>>();
-
-            let num_query = indices.len();
-            let num_layer = log_max_height;
-
-            let all_digests = Self::query_digest_layers(
-                &self.digest_layers[..log_max_height],
-                &query_indices,
-                num_query,
-                num_layer,
-            );
-            assert_eq!(num_layer + 1, self.digest_layers.len());
-            assert_eq!(all_digests.len(), query_indices.len());
-
-            all_digests
-                .chunks(num_layer)
-                .map(|layers_digest| Ok(layers_digest.to_vec()))
-                .collect::<Result<Vec<_>, ()>>()
-        })?;
-
-        Ok(openings_indexed_by_point_idx
-            .into_iter()
-            .zip(proofs)
-            .collect::<Vec<(_, _)>>())
+        Ok(res)
     }
 
-    fn query_digest_layers(
-        digest_layers: &[Arc<DeviceBuffer<H>>],
-        indices: &[u64],
-        num_query: usize,
-        num_layer: usize,
-    ) -> Vec<H> {
-        assert_eq!(num_layer, digest_layers.len());
-        assert_eq!(num_layer * num_query, indices.len());
-
-        let digest_layers_ptr = digest_layers
+    pub fn batch_open_rows(
+        backing_matrices: &[&DeviceMatrix<F>],
+        query_indices: &[usize],
+        query_stride: usize,
+        rows_per_query: usize,
+    ) -> Result<
+        Vec<
+            // per tree
+            Vec<
+                // per query index
+                Vec<F>, // opened rows, concatenated for rows_per_query strided rows
+            >,
+        >,
+        MerkleTreeError,
+    > {
+        let row_idxs = query_indices
             .iter()
-            .map(|layer| layer.as_ptr() as u64)
+            .flat_map(|&query_idx| {
+                debug_assert!(query_idx < query_stride);
+                (0..rows_per_query)
+                    .map(move |row_offset| (row_offset * query_stride + query_idx) as u32)
+            })
             .collect_vec();
-        let digest_layers_ptr_buf = digest_layers_ptr.to_device().unwrap();
-
-        let d_indices = indices.to_device().unwrap();
-        let digest_buffer = DeviceBuffer::<H>::with_capacity(indices.len());
-
-        unsafe {
-            query_digest_layers_kernel(
-                &digest_buffer,
-                &digest_layers_ptr_buf,
-                &d_indices,
-                num_query.try_into().unwrap(),
-                num_layer.try_into().unwrap(),
-            )
-            .unwrap();
-        }
-        digest_buffer.to_host().unwrap()
+        let d_row_idxs = row_idxs.to_device()?;
+        // PERF[jpw]: I did not batch across trees into a single kernel call because widths are
+        // different so it was inconvenient. Make a new kernel if slow.
+        // NOTE: par_iter requires cross-stream waits, not worth the effort
+        backing_matrices
+            .iter()
+            .enumerate()
+            .map(|(matrix_idx, matrix)| {
+                let d_out = DeviceBuffer::<F>::with_capacity(row_idxs.len() * matrix.width());
+                // SAFETY:
+                // - `output_rows` is allocated with row_idxs.len() * width
+                // - row indices are within bounds
+                unsafe {
+                    matrix_get_rows_fp_kernel(
+                        &d_out,
+                        matrix.buffer(),
+                        &d_row_idxs,
+                        matrix.width() as u64,
+                        matrix.height() as u64,
+                        d_row_idxs.len() as u32,
+                    )
+                    .map_err(|error| MerkleTreeError::MatrixGetRows { error, matrix_idx })?;
+                }
+                let width = matrix.width();
+                let out = d_out.to_host()?;
+                let opened_rows_per_query = out
+                    .chunks_exact(rows_per_query * width)
+                    .map(|rows| rows.to_vec())
+                    .collect_vec();
+                Ok(opened_rows_per_query)
+            })
+            .collect::<Result<Vec<_>, MerkleTreeError>>()
     }
+}
 
-    pub fn get_max_height(&self) -> usize {
-        self.leaves.iter().map(|m| m.height()).max().unwrap()
+// Extension field merkle tree
+// NOTE: this is currently unused because we transpose DeviceMatrix<EF> to DeviceMatrix<F>
+// beforehand in our use cases
+impl MerkleTreeGpu<EF, Digest> {
+    #[instrument(name = "merkle_tree_ext", skip_all)]
+    pub fn new(
+        matrix: DeviceMatrix<EF>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, MerkleTreeError> {
+        let height = matrix.height();
+        assert!(height.is_power_of_two());
+        let k = log2_strict_usize(rows_per_query);
+        assert!(
+            rows_per_query <= height,
+            "rows_per_query ({rows_per_query}) must not exceed height ({height})"
+        );
+        let query_stride = height / rows_per_query;
+        let mut query_digest_layer = DeviceBuffer::<Digest>::with_capacity(query_stride);
+        // SAFETY: query_digest_layer properly allocated
+        unsafe {
+            poseidon2_compressing_row_hashes_ext(
+                &mut query_digest_layer,
+                matrix.buffer(),
+                matrix.width(),
+                query_stride,
+                k,
+            )
+            .map_err(MerkleTreeError::CompressingRowHashesExt)?;
+        }
+        // If not caching, drop the backing matrix at this point to save memory.
+        let backing_matrix = cache_backing_matrix.then_some(matrix);
+
+        let mut digest_layers = vec![query_digest_layer];
+        while digest_layers.last().unwrap().len() > 1 {
+            let prev_layer = digest_layers.last().unwrap();
+            let mut layer = DeviceBuffer::<Digest>::with_capacity(prev_layer.len() / 2);
+            let layer_len = layer.len();
+            let layer_idx = digest_layers.len();
+            // SAFETY:
+            // - `layer` is properly allocated with half the size of `prev_layer` and does not
+            //   overlap with it.
+            unsafe {
+                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len).map_err(
+                    |error| MerkleTreeError::AdjacentCompressLayer {
+                        error,
+                        layer: layer_idx,
+                    },
+                )?;
+            }
+            digest_layers.push(layer);
+        }
+        let d_root = digest_layers.last().unwrap();
+        assert_eq!(d_root.len(), 1, "Only one root is supported");
+        let root = d_root.to_host()?.pop().unwrap();
+
+        Ok(Self {
+            backing_matrix,
+            digest_layers,
+            rows_per_query,
+            root,
+        })
     }
 }

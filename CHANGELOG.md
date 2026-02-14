@@ -21,7 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 - (CUDA backend) The alignment of `FpExt` is changed to 4 bytes (from 16 bytes) to match the Rust Plonky3 alignment for the BabyBear degree-4 extension field.
-- (CUDA common) Fix for VPMM to re-use unmapped VA regions and claim more VA ranges on-demand if needed. Lowers the default VA range to 8TB to support Windows.
+- (CUDA common) Fix for VPMM to reuse unmapped VA regions and claim more VA ranges on-demand if needed. Lowers the default VA range to 8TB to support Windows.
 
 ## v1.2.1 (2025-10-26)
 
