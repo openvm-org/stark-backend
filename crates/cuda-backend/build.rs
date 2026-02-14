@@ -8,15 +8,18 @@ fn main() {
         exit(1);
     }
 
-    let common = CudaBuilder::new().include_from_dep("DEP_CUDA_COMMON_INCLUDE");
+    let common = CudaBuilder::new()
+        .include_from_dep("DEP_CUDA_COMMON_INCLUDE")
+        .include("cuda/include");
 
     common.emit_link_directives();
 
     common
         .clone()
-        .library_name("stark_backend_gpu")
+        .library_name("cuda-backend")
+        .watch("cuda")
         .include("cuda/include")
-        .files_from_glob("cuda/src/*.cu")
+        .files_from_glob("cuda/src/**/*.cu")
         .build();
 
     common
