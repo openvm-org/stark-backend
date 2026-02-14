@@ -36,8 +36,8 @@ use openvm_stark_backend::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    AirRef, Chip, DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig,
-    SystemParams, TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
+    AirRef, Chip, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
+    TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
     config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},
@@ -54,7 +54,7 @@ type SC = BabyBearPoseidon2Config;
 
 pub fn test_engine_small() -> BabyBearPoseidon2CpuEngine<DuplexSponge> {
     setup_tracing();
-    DefaultStarkEngine::new(default_test_params_small())
+    BabyBearPoseidon2CpuEngine::new(default_test_params_small())
 }
 
 #[test]

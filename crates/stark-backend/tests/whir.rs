@@ -9,8 +9,7 @@ use openvm_stark_backend::{
     },
     test_utils::{test_whir_config_small, FibFixture, TestFixture},
     verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
-    DefaultStarkEngine, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory,
-    WhirConfig, WhirRoundConfig,
+    StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory, WhirConfig, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
     config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},

@@ -45,6 +45,10 @@ where
     type PD: ProverDevice<Self::PB, Self::TS> + DeviceDataTransporter<Self::SC, Self::PB>;
     type TS: FiatShamirTranscript<Self::SC>;
 
+    /// Constructor from only system parameters. In particular, the transcript and hasher must have
+    /// a default configuration.
+    fn new(params: SystemParams) -> Self;
+
     fn config(&self) -> &Self::SC;
 
     fn params(&self) -> &SystemParams {
@@ -166,10 +170,4 @@ where
         self.verify(&vk, &proof)?;
         Ok(VerificationData { vk, proof })
     }
-}
-
-/// [StarkEngine] that can be constructed from only system parameters. In particular, the
-/// transcript and hasher must have a default configuration.
-pub trait DefaultStarkEngine: StarkEngine {
-    fn new(params: SystemParams) -> Self;
 }
