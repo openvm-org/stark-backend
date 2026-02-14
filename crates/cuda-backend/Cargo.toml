@@ -3,45 +3,42 @@ name = "openvm-cuda-backend"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-description = "OpenVM CUDA prover backend for BabyBear Poseidon2 STARK config"
+description = "OpenVM CUDA prover backend for the SWIRL proof system"
 
 [dependencies]
 openvm-stark-backend.workspace = true
 openvm-stark-sdk.workspace = true
 openvm-cuda-common.workspace = true
 
+itertools.workspace = true
 derive-new.workspace = true
 tracing.workspace = true
-derivative.workspace = true
-itertools = { workspace = true, features = ["use_std"] }
-rustc-hash.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-lazy_static.workspace = true
 thiserror.workspace = true
-metrics.workspace = true
-bincode.workspace = true
-bincode_derive.workspace = true
+getset.workspace = true
+rustc-hash.workspace = true
+rand.workspace = true
 
 # Plonky3
 p3-field = { workspace = true }
 p3-baby-bear = { workspace = true }
-p3-commit = { workspace = true }
-p3-matrix = { workspace = true }
-p3-util = { workspace = true }
-p3-merkle-tree = { workspace = true }
-p3-symmetric = { workspace = true }
-p3-fri = { workspace = true }
 p3-dft = { workspace = true }
+p3-util = { workspace = true }
+p3-symmetric = { workspace = true }
 
 [build-dependencies]
 openvm-cuda-builder.workspace = true
 
 [dev-dependencies]
-clap = { workspace = true }
-rand = { workspace = true }
-p3-keccak-air = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+openvm-stark-backend = { workspace = true, features = ["test-utils"] }
+p3-keccak-air.workspace = true
+eyre.workspace = true
+test-case.workspace = true
 
 [features]
+default = []
 touchemall = ["openvm-cuda-common/touchemall"]
+test-utils = ["openvm-stark-backend/test-utils"]
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"

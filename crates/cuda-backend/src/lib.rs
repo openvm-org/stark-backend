@@ -1,22 +1,36 @@
 pub mod base;
-pub mod chip;
-mod committer;
-pub mod cuda;
-pub mod fri_log_up;
-mod lde;
-mod merkle_tree;
-mod opener;
-mod quotient;
-pub mod transpiler;
-pub mod types;
+pub mod hybrid_chip;
+pub mod logup_zerocheck;
+pub mod merkle_tree;
+pub mod monomial;
+pub mod ntt;
+pub mod poly;
+pub mod sponge;
+pub mod stacked_pcs;
+pub mod stacked_reduction;
+pub mod utils;
+pub mod whir;
 
-pub mod ntt {
-    pub use crate::lde::ntt::batch_ntt;
-}
+/// Rust bindings for CUDA kernels
+mod cuda;
+mod device;
+mod engine;
+mod error;
+mod gpu_backend;
+mod pkey;
+mod sumcheck;
+mod types;
+pub use device::*;
+pub use engine::*;
+pub use error::*;
+pub use gpu_backend::*;
+pub use pkey::*;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+#[cfg(test)]
+mod tests;
+
 pub mod prelude {
-    pub use crate::types::prelude::*;
+    pub use crate::types::*;
 }
-pub mod data_transporter;
-pub mod engine;
-pub mod gpu_device;
-pub mod prover_backend;
