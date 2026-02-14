@@ -9,10 +9,16 @@ use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-    BaseAirWithPublicValues, PartitionedBaseAir,
-    StarkEngine, SystemParams, WhirConfig, WhirParams,
+    BaseAirWithPublicValues, DefaultStarkEngine, PartitionedBaseAir, StarkEngine, SystemParams,
+    WhirConfig, WhirParams,
 };
-use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_100_bits;
+use openvm_stark_sdk::{
+    config::{
+        baby_bear_poseidon2::{BabyBearPoseidon2CpuEngine, DuplexSponge},
+        log_up_params::log_up_security_params_baby_bear_100_bits,
+    },
+    utils::setup_tracing,
+};
 use p3_baby_bear::BabyBear;
 use p3_keccak_air::KeccakAir;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -59,6 +65,7 @@ fn make_params() -> SystemParams {
 }
 
 fn main() {
+    setup_tracing();
     std::panic::set_hook(Box::new(|info| {
         eprintln!("Thread panicked: {}", info);
         std::process::abort();
@@ -78,7 +85,7 @@ fn main() {
 
     // ----- CPU keygen once, shared by all threads -----
     let air = TestAir(KeccakAir {});
-    let engine = BabyBearPoseidon2GpuEngine::new(make_params());
+    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(make_params());
     let (pk, vk) = engine.keygen(&[Arc::new(air)]);
     let pk = Arc::new(pk);
     let vk = Arc::new(vk);
@@ -99,8 +106,7 @@ fn main() {
 
         handles.push(std::thread::spawn(move || {
             for t in start_task..end_task {
-                let task_seed =
-                    base_seed ^ ((t as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let task_seed = base_seed ^ ((t as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
                 let mut rng = StdRng::seed_from_u64(task_seed);
 
                 let inputs = (0..NUM_PERMUTATIONS)
@@ -110,16 +116,19 @@ fn main() {
                     .in_scope(|| p3_keccak_air::generate_trace_rows::<BabyBear>(inputs, 0));
 
                 println!("[task {t}] Starting GPU proof");
-                let engine = BabyBearPoseidon2GpuEngine::new(make_params());
+                let mut engine = BabyBearPoseidon2GpuEngine::new(make_params());
+                // KeccakfAir has no interactions, so save memory heuristic is bad for zerocheck
+                engine
+                    .device_mut()
+                    .prover_config_mut()
+                    .zerocheck_save_memory = false;
                 let device = engine.device();
 
                 let d_pk = device.transport_pk_to_device(&pk);
-                let d_trace = device
-                    .transport_matrix_to_device(&ColMajorMatrix::from_row_major(&trace));
-                let ctx = ProvingContext::new(vec![(
-                    air_idx,
-                    AirProvingContext::simple_no_pis(d_trace),
-                )]);
+                let d_trace =
+                    device.transport_matrix_to_device(&ColMajorMatrix::from_row_major(&trace));
+                let ctx =
+                    ProvingContext::new(vec![(air_idx, AirProvingContext::simple_no_pis(d_trace))]);
 
                 let proof = engine.prove(&d_pk, ctx);
                 engine.verify(&vk, &proof).expect("verification failed");

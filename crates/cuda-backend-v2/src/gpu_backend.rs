@@ -81,7 +81,7 @@ impl MultiRapProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
         _common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
     ) -> ((GkrProof<SC>, BatchConstraintProof<SC>), Vec<EF>) {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
-        let save_memory = self.config.log_blowup == 1;
+        let save_memory = self.prover_config.zerocheck_save_memory;
         // Threshold for monomial evaluation path based on proof type:
         // - App proofs (log_blowup=1): higher threshold (512)
         // - Recursion proofs: lower threshold (64)

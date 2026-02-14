@@ -81,7 +81,9 @@ pub fn prove_whir_opening_gpu(
 
     // Proof-of-work grinding before μ batching challenge.
     // This amplifies soundness of the initial batching step.
-    let mu_pow_witness = transcript.grind(whir_params.mu_pow_bits);
+    let mu_pow_witness = transcript
+        .grind_gpu(whir_params.mu_pow_bits)
+        .map_err(WhirProverError::MuGrind)?;
     // Sample randomness for algebraic batching.
     // We batch the codewords for \hat{q}_j together _before_ applying WHIR.
     let mu = transcript.sample_ext();

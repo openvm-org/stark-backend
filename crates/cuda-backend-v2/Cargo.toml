@@ -29,7 +29,7 @@ p3-symmetric = { workspace = true }
 openvm-cuda-builder.workspace = true
 
 [dev-dependencies]
-openvm-stark-backend = { workspace = true, features = ["test-utils", "parallel"] }
+openvm-stark-backend = { workspace = true, features = ["test-utils"] }
 p3-keccak-air.workspace = true
 eyre.workspace = true
 test-case.workspace = true

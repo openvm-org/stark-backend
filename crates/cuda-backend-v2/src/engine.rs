@@ -1,9 +1,13 @@
+use getset::MutGetters;
 use openvm_stark_backend::{prover::Coordinator, DefaultStarkEngine, StarkEngine, SystemParams};
 
 use crate::{prelude::SC, sponge::DuplexSpongeGpu, GpuBackend, GpuDevice};
 
+#[derive(MutGetters)]
 pub struct BabyBearPoseidon2GpuEngine {
+    #[getset(get_mut = "pub")]
     device: GpuDevice,
+    #[getset(get_mut = "pub")]
     config: SC,
 }
 

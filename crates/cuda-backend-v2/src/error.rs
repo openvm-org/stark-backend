@@ -104,6 +104,8 @@ pub enum WhirProverError {
     },
     #[error("w_moments_accumulate [whir_round={whir_round}]: {error}")]
     WMomentsAccumulate { error: CudaError, whir_round: usize },
+    #[error("Mu grind error: {0}")]
+    MuGrind(GrindError),
     #[error("Folding grind error: {0}")]
     FoldingGrind(GrindError),
     #[error("Query phase grind error: {0}")]
