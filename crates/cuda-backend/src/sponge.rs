@@ -316,11 +316,10 @@ mod tests {
     use std::time::Instant;
 
     use openvm_stark_sdk::config::baby_bear_poseidon2::default_duplex_sponge;
-
-    use crate::prelude::SC;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
+    use crate::prelude::SC;
 
     #[test]
     fn test_device_sponge_state_size() {
@@ -420,7 +419,7 @@ mod tests {
 
     /// Benchmark test comparing CPU vs GPU grinding performance.
     ///
-    /// Run with: `cargo test -p cuda-backend-v2 test_grind_cpu_vs_gpu -- --nocapture`
+    /// Run with: `cargo test -p openvm-cuda-backend test_grind_cpu_vs_gpu -- --nocapture`
     ///
     /// Note: GPU has ~20ms fixed overhead for kernel launch + sync. CPU wins for
     /// small search spaces (low bit counts). GPU wins for larger search spaces

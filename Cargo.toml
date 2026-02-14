@@ -13,8 +13,8 @@ members = [
     "crates/stark-backend/codec-derive",
     "crates/stark-sdk",
     "crates/cuda-common",
-    "crates/cuda-backend-v2",
     "crates/cuda-builder",
+    "crates/cuda-backend",
     "benchmarks/fields"
 ]
 # Only these build by default
@@ -67,7 +67,7 @@ openvm-codec-derive = { path = "crates/stark-backend/codec-derive", default-feat
 openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
 openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
-cuda-backend-v2 = { path = "crates/cuda-backend-v2", default-features = false }
+openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
 
 # Plonky3 - we pin the exact version since this dependency is security critical
 p3-air = { version = "=0.4.1", default-features = false }

@@ -1,6 +1,6 @@
 use std::{env, process};
 
-use cuda_backend_v2::{
+use openvm_cuda_backend::{
     logup_zerocheck::{fractional_sumcheck_gpu, make_synthetic_leaves},
     sponge::DuplexSpongeGpu,
 };
