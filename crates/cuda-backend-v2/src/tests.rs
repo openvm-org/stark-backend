@@ -27,7 +27,8 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{
-            BabyBearPoseidon2CpuEngine, DuplexSponge, DuplexSpongeRecorder, DuplexSpongeValidator,
+            default_duplex_sponge, BabyBearPoseidon2CpuEngine, DuplexSponge, DuplexSpongeRecorder,
+            DuplexSpongeValidator,
         },
         log_up_params::log_up_security_params_baby_bear_100_bits,
     },
@@ -62,7 +63,7 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
         .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
         .collect::<Vec<_>>();
     let mut prover_sponge_gpu = DuplexSpongeGpu::default();
-    let mut verifier_sponge = DuplexSponge::default();
+    let mut verifier_sponge = default_duplex_sponge();
 
     let (proof_gpu, _) = sumcheck_multilinear_gpu(&mut prover_sponge_gpu, &evals);
 
@@ -84,7 +85,7 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
         .collect::<Vec<_>>();
 
     let mut prover_sponge = DuplexSpongeGpu::default();
-    let mut verifier_sponge = DuplexSponge::default();
+    let mut verifier_sponge = default_duplex_sponge();
 
     let (proof, _) = sumcheck_prismalinear_gpu(&mut prover_sponge, l_skip, &evals);
     verify_sumcheck_prismalinear::<F, _>(&mut verifier_sponge, l_skip, &proof)
@@ -181,7 +182,7 @@ fn test_batch_sumcheck_zero_interactions(
     }
 
     let mut prover_sponge = DuplexSpongeGpu::default();
-    let mut verifier_sponge = DuplexSponge::default();
+    let mut verifier_sponge = default_duplex_sponge();
 
     let omega_skip = F::two_adic_generator(params.l_skip);
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
@@ -261,7 +262,7 @@ fn test_stacked_opening_reduction(
     debug!(?batch_proof.column_openings);
 
     let u_prism = verify_stacked_reduction(
-        &mut DuplexSponge::default(),
+        &mut default_duplex_sponge(),
         &stacking_proof,
         &[common_main_pcs_data.layout],
         &need_rot_per_commit,
@@ -375,7 +376,7 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
     let mut prover_sponge = DuplexSpongeGpu::default();
     let proof = fib.prove_from_transcript(&engine, &pk, &mut prover_sponge);
 
-    let mut validator_sponge = DuplexSponge::default();
+    let mut validator_sponge = default_duplex_sponge();
     verify(&vk, &proof, &mut validator_sponge)
 }
 
@@ -394,7 +395,7 @@ fn test_dummy_interactions_roundtrip(
     let mut prover_sponge = DuplexSpongeGpu::default();
     let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_sponge);
 
-    let mut validator_sponge = DuplexSponge::default();
+    let mut validator_sponge = default_duplex_sponge();
     verify(&vk, &proof, &mut validator_sponge)
 }
 
@@ -415,8 +416,8 @@ fn test_cached_trace_roundtrip(
     let mut prover_sponge = DuplexSpongeGpu::default();
     let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_sponge);
 
-    let mut validator_sponge = DuplexSponge::default();
-    verify(&vk, &proof, &mut validator_sponge)
+    let mut validator_sponge = default_duplex_sponge();
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
 }
 
 #[test_case(2, 8, 3)]
@@ -438,7 +439,7 @@ fn test_preprocessed_trace_roundtrip(
     let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
     let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
-    verify(&vk, &proof, &mut validator_sponge)
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
 }
 
 #[test]
@@ -627,7 +628,7 @@ fn test_monomial_vs_dag_equivalence() {
 
     let engine = test_gpu_engine_small();
     let device = engine.device();
-    let params = engine.config();
+    let params = engine.params();
     let l_skip = params.l_skip;
 
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);

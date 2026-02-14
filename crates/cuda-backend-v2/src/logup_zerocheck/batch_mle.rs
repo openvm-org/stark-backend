@@ -493,6 +493,7 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_logup_batched(
     traces: &[TraceCtx],
     pk: &DeviceMultiStarkProvingKey<GpuBackend>,

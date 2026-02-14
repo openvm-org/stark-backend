@@ -265,12 +265,12 @@ pub fn prove_whir_opening_gpu(
         let f_height = 1 << (m - k_whir);
         debug_assert!(f_coeffs.len() >= f_height);
         debug_assert_eq!(size_of::<EF>() / size_of::<F>(), D_EF);
-        let g_coeffs = DeviceBuffer::<F>::with_capacity(f_height * D_EF);
+        let mut g_coeffs = DeviceBuffer::<F>::with_capacity(f_height * D_EF);
         // SAFETY: we allocated `f_coeffs.len() * D_EF` space for `g_coeffs` to do a 1-to-D_EF
         // (1-to-4) split
         unsafe {
             split_ext_to_base_col_major_matrix(
-                &g_coeffs,
+                &mut g_coeffs,
                 &f_coeffs,
                 f_height as u64,
                 f_height as u32,
@@ -287,9 +287,9 @@ pub fn prove_whir_opening_gpu(
             // - We resize each F-poly to RS domain size 2^{log_rs_domain_size - 1}, which is
             //   equivalent to resizing the EF-polynomial
             unsafe {
-                batch_expand_pad::<F>(
-                    &g_rs,
-                    &g_coeffs,
+                batch_expand_pad(
+                    g_rs.as_mut_ptr(),
+                    g_coeffs.as_ptr(),
                     D_EF as u32,
                     codeword_height as u32,
                     f_height as u32,
@@ -531,7 +531,7 @@ mod tests {
         },
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
-        SystemParams, WhirConfig, WhirParams,
+        StarkEngine, SystemParams, WhirConfig, WhirParams,
     };
     use openvm_stark_sdk::{
         config::{
@@ -550,7 +550,7 @@ mod tests {
         sponge::DuplexSpongeGpu,
         stacked_reduction::StackedPcsData2,
         whir::prove_whir_opening_gpu,
-        GpuDevice,
+        BabyBearPoseidon2GpuEngine, GpuDevice,
     };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
@@ -593,7 +593,8 @@ mod tests {
         pk: MultiStarkProvingKey<SC>,
         ctx: ProvingContext<CpuBackend<SC>>,
     ) -> Result<(), VerifyWhirError> {
-        let device = GpuDevice::new(params.clone());
+        let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
+        let device = engine.device();
         let mut rng = StdRng::seed_from_u64(0);
         let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
 
@@ -601,7 +602,9 @@ mod tests {
             .common_main_traces()
             .map(|(_, trace)| trace)
             .collect_vec();
+        // Use CPU stacked_commit to isolate GPU testing to WHIR prover
         let (common_main_commit, common_main_pcs_data) = stacked_commit(
+            engine.config().hasher(),
             params.l_skip,
             params.n_stack,
             params.log_blowup,

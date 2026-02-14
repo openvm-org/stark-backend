@@ -10,7 +10,7 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::{
     keygen::types::MultiStarkProvingKey,
-    p3_matrix::dense::RowMajorMatrix,
+    p3_matrix::{dense::RowMajorMatrix, Matrix},
     poly_common::Squarable,
     proof::*,
     prover::{
@@ -223,7 +223,7 @@ pub fn transport_matrix_h2d_row(
         )?;
     }
     assert_eq!(output.strong_count(), 1);
-    output
+    Ok(output)
 }
 
 /// `d` must be the stacked pcs data of a single trace matrix.
@@ -387,7 +387,7 @@ pub fn transport_air_proving_ctx_to_host(
             // GpuProverConfig fields cache_stacked_matrix and cache_rs_code_matrix are set
             // to be true.
             let evals_matrix = mat.data.matrix.as_ref().unwrap().to_evals(l_skip).unwrap();
-            CommittedTraceData::<CpuBackend> {
+            CommittedTraceData {
                 commitment: mat.commitment,
                 trace: transport_matrix_d2h_col_major(&mat.trace).unwrap(),
                 data: Arc::new(StackedPcsData {
@@ -415,10 +415,10 @@ pub fn transport_matrix_d2h_col_major<T>(
 pub fn transport_matrix_d2h_row_major(
     matrix: &DeviceMatrix<F>,
 ) -> Result<RowMajorMatrix<F>, MemCopyError> {
-    let mut matrix_buffer = DeviceBuffer::<F>::with_capacity(matrix.height() * matrix.width());
+    let matrix_buffer = DeviceBuffer::<F>::with_capacity(matrix.height() * matrix.width());
     unsafe {
         matrix_transpose_fp(
-            &mut matrix_buffer,
+            &matrix_buffer,
             matrix.buffer(),
             matrix.height(),
             matrix.width(),

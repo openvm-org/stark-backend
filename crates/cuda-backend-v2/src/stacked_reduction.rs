@@ -171,6 +171,7 @@ impl StackedReductionGpu {
 ///
 /// The `stacked_matrix, stacked_layout` should be the result of stacking the `traces` with
 /// parameters `l_skip` and `n_stack`.
+#[allow(clippy::type_complexity)]
 #[instrument(
     name = "prover.openings.stacked_reduction",
     level = "info",
@@ -646,9 +647,9 @@ impl StackedReductionGpu {
 
         // 4. Pointwise multiply and sum: s[j] = sum_i e[j][i] * g[j][i]
         let mut s_evals = vec![EF::ZERO; domain_size];
-        for j in 0..domain_size {
+        for (j, s_j) in s_evals.iter_mut().enumerate() {
             for i in 0..3 {
-                s_evals[j] += e_evals_mat.values[j * 3 + i] * g_evals_mat.values[j * 3 + i];
+                *s_j += e_evals_mat.values[j * 3 + i] * g_evals_mat.values[j * 3 + i];
             }
         }
 

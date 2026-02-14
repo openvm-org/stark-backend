@@ -205,8 +205,8 @@ pub fn rs_code_matrix(
         // expand from `matrix.mixed` which is `width` polys of `height` each.
         unsafe {
             batch_expand_pad(
-                &codewords,
-                &stacked_matrix.mixed,
+                codewords.as_mut_ptr(),
+                stacked_matrix.mixed.as_ptr(),
                 width as u32,
                 codeword_height as u32,
                 height as u32,
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_stacked_matrix_manual_1() {
-        let ctx = InteractionsFixture11.generate_proving_ctx();
+        let ctx = TestFixture::<SC>::generate_proving_ctx(&InteractionsFixture11);
         let [send_trace, rcv_trace] = [0, 1]
             .map(|i| transport_matrix_h2d_col_major(&ctx.per_trace[i].1.common_main).unwrap());
         let l_skip = 2;

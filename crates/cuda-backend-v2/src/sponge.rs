@@ -14,7 +14,8 @@ use openvm_stark_backend::{
     p3_challenger::{CanObserve, CanSample},
     FiatShamirTranscript,
 };
-use p3_baby_bear::{default_babybear_poseidon2_16, Poseidon2BabyBear};
+use openvm_stark_sdk::config::baby_bear_poseidon2::poseidon2_perm;
+use p3_baby_bear::default_babybear_poseidon2_16;
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 
@@ -36,8 +37,6 @@ pub struct DeviceSpongeState {
     pub absorb_idx: u32,
     /// Current sample position (0 <= sample_idx <= CHUNK)
     pub sample_idx: u32,
-    /// Permutation
-    perm: Poseidon2BabyBear<WIDTH>,
 }
 
 impl Default for DeviceSpongeState {
@@ -46,7 +45,6 @@ impl Default for DeviceSpongeState {
             state: [F::default(); WIDTH],
             absorb_idx: 0,
             sample_idx: 0,
-            perm: default_babybear_poseidon2_16(),
         }
     }
 }
@@ -60,7 +58,7 @@ impl DeviceSpongeState {
         self.state[self.absorb_idx as usize] = value;
         self.absorb_idx += 1;
         if self.absorb_idx == CHUNK as u32 {
-            self.perm.permute_mut(&mut self.state);
+            poseidon2_perm().permute_mut(&mut self.state);
             self.absorb_idx = 0;
             self.sample_idx = CHUNK as u32;
         }
@@ -72,7 +70,7 @@ impl DeviceSpongeState {
     #[inline]
     pub fn sample(&mut self) -> F {
         if self.absorb_idx != 0 || self.sample_idx == 0 {
-            self.perm.permute_mut(&mut self.state);
+            poseidon2_perm().permute_mut(&mut self.state);
             self.absorb_idx = 0;
             self.sample_idx = CHUNK as u32;
         }

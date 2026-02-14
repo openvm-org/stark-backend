@@ -77,8 +77,9 @@ extern "C" {
 
 /// Safety:
 /// - `input` and `output` must not overlap.
+/// - `input` and `output` must each have capacity at least `width * height`.
 pub unsafe fn matrix_transpose_fp(
-    output: &mut DeviceBuffer<F>,
+    output: &DeviceBuffer<F>,
     input: &DeviceBuffer<F>,
     width: usize,
     height: usize,
@@ -93,8 +94,9 @@ pub unsafe fn matrix_transpose_fp(
 
 /// Safety:
 /// - `input` and `output` must not overlap.
+/// - `input` and `output` must each have capacity at least `width * height`.
 pub unsafe fn matrix_transpose_fpext(
-    output: &mut DeviceBuffer<EF>,
+    output: &DeviceBuffer<EF>,
     input: &DeviceBuffer<EF>,
     width: usize,
     height: usize,
@@ -108,7 +110,7 @@ pub unsafe fn matrix_transpose_fpext(
 }
 
 pub unsafe fn matrix_get_rows_fp_kernel(
-    output: &mut DeviceBuffer<F>,
+    output: &DeviceBuffer<F>,
     input: &DeviceBuffer<F>,
     row_indices: &DeviceBuffer<u32>,
     matrix_width: u64,

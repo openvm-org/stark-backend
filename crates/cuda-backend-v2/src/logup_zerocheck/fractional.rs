@@ -235,7 +235,7 @@ fn choose_round_strategy(
         return GkrRoundStrategy::FoldEval;
     }
     let start_base = 1usize;
-    let stop = (round + 1) / 2;
+    let stop = round.div_ceil(2);
     let rem_n = round - start_base;
     let rounds_left = stop - start_base;
     if choose_precompute_m_window_w(
@@ -765,7 +765,7 @@ pub fn fractional_sumcheck_gpu(
             }
             GkrRoundStrategy::PrecomputeM => {
                 let base = 1usize;
-                let stop = (round + 1) / 2;
+                let stop = round.div_ceil(2);
 
                 // First window reads from `layer` with pending_fold=true
                 // (M-build folds prev_r inline). Multifold writes to
@@ -773,13 +773,12 @@ pub fn fractional_sumcheck_gpu(
                 // last). After the first window, subsequent windows
                 // read/write active_pq with pending_fold=false.
                 let mut pending_fold = true;
-                let layer_read_ptr = layer.as_ptr() as *const Frac<EF>;
-                let active_pq: &mut DeviceBuffer<Frac<EF>>;
-                if last_outer_round {
-                    active_pq = &mut layer;
+                let layer_read_ptr = layer.as_ptr();
+                let active_pq = if last_outer_round {
+                    &mut layer
                 } else {
-                    active_pq = &mut work_buffer;
-                }
+                    &mut work_buffer
+                };
 
                 // w+1 to accommodate r_prev prepended to window challenges
                 // on the first iteration (inline fold on last outer round).
@@ -850,7 +849,7 @@ pub fn fractional_sumcheck_gpu(
                     let build_src = if pending_fold {
                         layer_read_ptr
                     } else {
-                        active_pq.as_ptr() as *const Frac<EF>
+                        active_pq.as_ptr()
                     };
                     unsafe {
                         frac_precompute_m_build_raw(
@@ -928,7 +927,7 @@ pub fn fractional_sumcheck_gpu(
                     let multifold_src = if pending_fold {
                         layer_read_ptr
                     } else {
-                        active_pq.as_ptr() as *const Frac<EF>
+                        active_pq.as_ptr()
                     };
                     unsafe {
                         frac_multifold_raw(
@@ -1041,7 +1040,7 @@ fn copy_from_device<T: Copy>(
     index: usize,
     scratch: &mut DeviceBuffer<T>,
 ) -> Result<T, FractionalSumcheckError> {
-    debug_assert!(scratch.len() >= 1);
+    debug_assert!(!scratch.is_empty());
     unsafe {
         cuda_memcpy::<true, true>(
             scratch.as_mut_raw_ptr(),

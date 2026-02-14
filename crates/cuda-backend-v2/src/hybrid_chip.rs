@@ -1,17 +1,16 @@
 use std::marker::PhantomData;
 
-use derive_new::new;
 use openvm_stark_backend::{
-    prover::{AirProvingContext, CpuBackend, ProverBackend},
+    prover::{AirProvingContext, CpuBackend},
     Chip,
 };
 
-use crate::{prelude::SC, transport_matrix_h2d_col_major, GpuBackend};
+use crate::{base::DeviceMatrix, prelude::SC, transport_matrix_h2d_col_major, GpuBackend};
 
-pub fn get_empty_air_proving_ctx<PB: ProverBackend>() -> AirProvingContext<PB> {
+pub fn get_empty_air_proving_ctx() -> AirProvingContext<GpuBackend> {
     AirProvingContext {
         cached_mains: vec![],
-        common_main: None,
+        common_main: DeviceMatrix::dummy(),
         public_values: vec![],
     }
 }
@@ -45,12 +44,7 @@ pub fn cpu_proving_ctx_to_gpu(
         cpu_ctx.cached_mains.is_empty(),
         "CPU to GPU transfer of cached traces not supported"
     );
-    let trace = cpu_ctx
-        .common_main
-        .filter(|trace| trace.height() > 0)
-        .map(|trace| {
-            transport_matrix_h2d_col_major(&trace).expect("transport_matrix_h2d_col_major")
-        });
+    let trace = transport_matrix_h2d_col_major(&cpu_ctx.common_main).unwrap();
     AirProvingContext {
         cached_mains: vec![],
         common_main: trace,
