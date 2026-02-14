@@ -7,10 +7,8 @@ use eyre::eyre;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
-    poseidon2::sponge::DuplexSponge,
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-    rap::{BaseAirWithPublicValues, PartitionedBaseAir},
-    verifier::verify,
+    BaseAirWithPublicValues, PartitionedBaseAir,
     StarkEngine, SystemParams, WhirConfig, WhirParams,
 };
 use openvm_stark_sdk::{
@@ -81,7 +79,7 @@ fn main() -> eyre::Result<()> {
         let d_pk = device.transport_pk_to_device(&pk);
         let proof = engine.prove(&d_pk, ProvingContext::new(vec![(air_idx, air_ctx)]));
 
-        verify(&vk, &proof, &mut DuplexSponge::default())
+        engine.verify(&vk, &proof)
             .map_err(|e| eyre!("Proof failed to verify: {e}"))
     })
 }

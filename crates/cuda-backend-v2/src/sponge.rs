@@ -315,7 +315,9 @@ impl FiatShamirTranscript<SC> for DuplexSpongeGpu {
 mod tests {
     use std::time::Instant;
 
-    use openvm_stark_sdk::config::baby_bear_poseidon2::DuplexSponge;
+    use openvm_stark_sdk::config::baby_bear_poseidon2::default_duplex_sponge;
+
+    use crate::prelude::SC;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
@@ -363,18 +365,18 @@ mod tests {
     fn test_device_sponge_state_matches_duplex_sponge() {
         // Verify our implementation matches DuplexSponge exactly
         let mut device_state = DeviceSpongeState::default();
-        let mut duplex_sponge = DuplexSponge::default();
+        let mut duplex_sponge = default_duplex_sponge();
 
         // Test observe/sample sequence
         for i in 0..20 {
             let val = F::from_u32(i * 42 + 17);
             device_state.observe(val);
-            FiatShamirTranscript::observe(&mut duplex_sponge, val);
+            FiatShamirTranscript::<SC>::observe(&mut duplex_sponge, val);
         }
 
         for _ in 0..10 {
             let device_sample = device_state.sample();
-            let duplex_sample = duplex_sponge.sample();
+            let duplex_sample = FiatShamirTranscript::<SC>::sample(&mut duplex_sponge);
             assert_eq!(device_sample, duplex_sample);
         }
 
@@ -382,17 +384,17 @@ mod tests {
         for i in 0..5 {
             let val = F::from_u32(i * 100);
             device_state.observe(val);
-            FiatShamirTranscript::observe(&mut duplex_sponge, val);
+            FiatShamirTranscript::<SC>::observe(&mut duplex_sponge, val);
 
             let device_sample = device_state.sample();
-            let duplex_sample = duplex_sponge.sample();
+            let duplex_sample = FiatShamirTranscript::<SC>::sample(&mut duplex_sponge);
             assert_eq!(device_sample, duplex_sample);
         }
 
         // Many samples in a row
         for _ in 0..15 {
             let device_sample = device_state.sample();
-            let duplex_sample = duplex_sponge.sample();
+            let duplex_sample = FiatShamirTranscript::<SC>::sample(&mut duplex_sponge);
             assert_eq!(device_sample, duplex_sample);
         }
     }
@@ -400,18 +402,18 @@ mod tests {
     #[test]
     fn test_sponge_gpu_uses_host_transcript() {
         let mut gpu_sponge = DuplexSpongeGpu::default();
-        let mut cpu_sponge = DuplexSponge::default();
+        let mut cpu_sponge = default_duplex_sponge();
 
         // Test that host operations match DuplexSponge
         for i in 0..10 {
             let val = F::from_u32(i * 42 + 17);
             gpu_sponge.observe(val);
-            FiatShamirTranscript::observe(&mut cpu_sponge, val);
+            FiatShamirTranscript::<SC>::observe(&mut cpu_sponge, val);
         }
 
         for _ in 0..5 {
             let gpu_sample = gpu_sponge.sample();
-            let cpu_sample = cpu_sponge.sample();
+            let cpu_sample = FiatShamirTranscript::<SC>::sample(&mut cpu_sponge);
             assert_eq!(gpu_sample, cpu_sample);
         }
     }
@@ -448,20 +450,20 @@ mod tests {
 
         let mut seed = 265;
         for bits in bit_counts {
-            let mut cpu_sponge = DuplexSponge::default();
+            let mut cpu_sponge = default_duplex_sponge();
             let mut gpu_sponge = DuplexSpongeGpu::default();
 
             // Add some initial state
             for _ in 0..5 {
                 let val = F::from_u32(seed);
                 seed += 228;
-                FiatShamirTranscript::observe(&mut cpu_sponge, val);
+                FiatShamirTranscript::<SC>::observe(&mut cpu_sponge, val);
                 gpu_sponge.observe(val);
             }
 
             // Time CPU grinding
             let cpu_start = Instant::now();
-            let cpu_witness = cpu_sponge.grind(bits);
+            let cpu_witness = FiatShamirTranscript::<SC>::grind(&mut cpu_sponge, bits);
             let cpu_time = cpu_start.elapsed();
 
             // Time GPU grinding

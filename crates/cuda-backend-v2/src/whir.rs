@@ -531,11 +531,13 @@ mod tests {
         },
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
-        StarkEngine, SystemParams, WhirConfig, WhirParams,
+        DefaultStarkEngine, StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
     };
     use openvm_stark_sdk::{
         config::{
-            baby_bear_poseidon2::{BabyBearPoseidon2CpuEngine, DuplexSponge},
+            baby_bear_poseidon2::{
+                default_duplex_sponge, BabyBearPoseidon2CpuEngine, DuplexSponge,
+            },
             log_up_params::log_up_security_params_baby_bear_100_bits,
         },
         utils::setup_tracing_with_log_level,
@@ -550,7 +552,7 @@ mod tests {
         sponge::DuplexSpongeGpu,
         stacked_reduction::StackedPcsData2,
         whir::prove_whir_opening_gpu,
-        BabyBearPoseidon2GpuEngine, GpuDevice,
+        BabyBearPoseidon2GpuEngine,
     };
 
     fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
@@ -654,10 +656,10 @@ mod tests {
             prove_whir_opening_gpu(&params, &mut prover_sponge, stacked_per_commit, &z_cube)
                 .unwrap();
 
-        let mut verifier_sponge = DuplexSponge::default();
+        let mut verifier_sponge = default_duplex_sponge();
         verify_whir(
             &mut verifier_sponge,
-            &params,
+            engine.config(),
             &proof,
             &stacking_openings,
             &commits,

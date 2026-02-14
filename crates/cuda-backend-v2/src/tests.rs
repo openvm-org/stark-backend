@@ -22,13 +22,14 @@ use openvm_stark_backend::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    FiatShamirTranscript, StarkEngine, SystemParams, WhirConfig, WhirParams, WhirRoundConfig,
+    DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
+    TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{
-            default_duplex_sponge, BabyBearPoseidon2CpuEngine, DuplexSponge, DuplexSpongeRecorder,
-            DuplexSpongeValidator,
+            default_duplex_sponge, default_duplex_sponge_recorder, default_duplex_sponge_validator,
+            BabyBearPoseidon2CpuEngine, DuplexSponge, DuplexSpongeRecorder,
         },
         log_up_params::log_up_security_params_baby_bear_100_bits,
     },
@@ -40,7 +41,7 @@ use test_case::test_case;
 use tracing::{debug, Level};
 
 use crate::{
-    prelude::{EF, F},
+    prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     sumcheck::{sumcheck_multilinear_gpu, sumcheck_prismalinear_gpu},
     BabyBearPoseidon2GpuEngine,
@@ -67,7 +68,7 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
 
     let (proof_gpu, _) = sumcheck_multilinear_gpu(&mut prover_sponge_gpu, &evals);
 
-    verify_sumcheck_multilinear::<F, _>(&mut verifier_sponge, &proof_gpu)
+    verify_sumcheck_multilinear::<SC, _>(&mut verifier_sponge, &proof_gpu)
 }
 
 #[test]
@@ -88,7 +89,7 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
     let mut verifier_sponge = default_duplex_sponge();
 
     let (proof, _) = sumcheck_prismalinear_gpu(&mut prover_sponge, l_skip, &evals);
-    verify_sumcheck_prismalinear::<F, _>(&mut verifier_sponge, l_skip, &proof)
+    verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
 #[test]
@@ -138,6 +139,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
         let whir = WhirConfig {
             k: k_whir,
             rounds,
+            mu_pow_bits: 2,
             query_phase_pow_bits: 2,
             folding_pow_bits: 1,
         };
@@ -166,7 +168,7 @@ fn test_batch_sumcheck_zero_interactions(
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_gpu_engine_small();
-    let params = engine.config();
+    let params = engine.config().params();
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, vk) = fib.keygen(&engine);
     let device = engine.device();
@@ -213,8 +215,8 @@ fn test_stacked_opening_reduction(
 ) -> Result<(), StackedReductionError<EF>> {
     setup_tracing_with_log_level(Level::DEBUG);
 
-    let engine = test_gpu_engine_small();
-    let params = engine.config();
+    let gpu_engine = test_gpu_engine_small();
+    let params = gpu_engine.config().params();
 
     let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
@@ -226,6 +228,7 @@ fn test_stacked_opening_reduction(
 
     let (_, common_main_pcs_data) = {
         stacked_commit(
+            engine.config().hasher(),
             params.l_skip,
             params.n_stack,
             params.log_blowup,
@@ -250,7 +253,7 @@ fn test_stacked_opening_reduction(
 
     let need_rot = pk.per_air[ctx.per_trace[0].0].vk.params.need_rot;
     let need_rot_per_commit = vec![vec![need_rot]];
-    let (stacking_proof, _) = prove_stacked_opening_reduction::<_, _, _, StackedReductionCpu>(
+    let (stacking_proof, _) = prove_stacked_opening_reduction::<SC, _, _, _, StackedReductionCpu<SC>>(
         device,
         &mut DuplexSpongeGpu::default(),
         params.n_stack,
@@ -377,7 +380,7 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
     let proof = fib.prove_from_transcript(&engine, &pk, &mut prover_sponge);
 
     let mut validator_sponge = default_duplex_sponge();
-    verify(&vk, &proof, &mut validator_sponge)
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
 }
 
 #[test_case(2, 8, 3)]
@@ -396,7 +399,7 @@ fn test_dummy_interactions_roundtrip(
     let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_sponge);
 
     let mut validator_sponge = default_duplex_sponge();
-    verify(&vk, &proof, &mut validator_sponge)
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
 }
 
 #[test_case(2, 8, 3)]
@@ -409,8 +412,8 @@ fn test_cached_trace_roundtrip(
     k_whir: usize,
 ) -> Result<(), VerifierError<EF>> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
-    let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
-    let fx = CachedFixture11::new(params);
+    let engine = BabyBearPoseidon2GpuEngine::new(params);
+    let fx = CachedFixture11::new(engine.config().clone());
     let (pk, vk) = fx.keygen(&engine);
 
     let mut prover_sponge = DuplexSpongeGpu::default();
@@ -428,17 +431,17 @@ fn test_preprocessed_trace_roundtrip(
     k_whir: usize,
 ) -> Result<(), VerifierError<EF>> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
-    let engine = BabyBearPoseidon2CpuEngine::new(params);
+    let engine = BabyBearPoseidon2CpuEngine::<DuplexSpongeRecorder>::new(params);
     let log_trace_degree = 8;
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
     let fx = PreprocessedFibFixture::new(0, 1, sels);
     let (pk, vk) = fx.keygen(&engine);
 
-    let mut recorder = DuplexSpongeRecorder::default();
+    let mut recorder = default_duplex_sponge_recorder();
     let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
 
-    let mut validator_sponge = DuplexSpongeValidator::new(recorder.into_log());
+    let mut validator_sponge = default_duplex_sponge_validator(recorder.into_log());
     verify(engine.config(), &vk, &proof, &mut validator_sponge)
 }
 
@@ -512,7 +515,7 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
 
     let engine = test_gpu_engine_small();
     let device = engine.device();
-    let params = engine.config();
+    let params = engine.config().params();
     let fx = InteractionsFixture11;
     let (pk, _vk) = fx.keygen(&engine);
     let pk = device.transport_pk_to_device(&pk);
@@ -522,12 +525,16 @@ fn test_gkr_verify_zero_interactions() -> eyre::Result<()> {
     let mut transcript = DuplexSpongeGpu::default();
     let ((gkr_proof, _), _) = prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
 
-    let mut transcript = DuplexSpongeRecorder::default();
-    assert!(transcript.check_witness(params.logup.pow_bits, gkr_proof.logup_pow_witness));
-    let _alpha = transcript.sample_ext();
-    let _beta = transcript.sample_ext();
+    let mut transcript = default_duplex_sponge_recorder();
+    assert!(FiatShamirTranscript::<SC>::check_witness(
+        &mut transcript,
+        params.logup.pow_bits,
+        gkr_proof.logup_pow_witness
+    ));
+    let _alpha = FiatShamirTranscript::<SC>::sample_ext(&mut transcript);
+    let _beta = FiatShamirTranscript::<SC>::sample_ext(&mut transcript);
     let total_rounds = gkr_proof.claims_per_layer.len();
-    verify_gkr(&gkr_proof, &mut transcript, total_rounds)?;
+    let _ = verify_gkr(&gkr_proof, &mut transcript, total_rounds)?;
 
     Ok(())
 }
@@ -567,7 +574,7 @@ fn test_batch_constraints_with_interactions() -> eyre::Result<()> {
     let mut transcript = DuplexSpongeGpu::default();
     let ((gkr_proof, batch_proof), _) =
         prove_up_to_batch_constraints(&engine, &mut transcript, &pk, ctx);
-    let mut transcript = DuplexSpongeRecorder::default();
+    let mut transcript = default_duplex_sponge_recorder();
     verify_zerocheck_and_logup(
         &mut transcript,
         &vk.inner,

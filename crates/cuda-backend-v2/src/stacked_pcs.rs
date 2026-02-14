@@ -327,7 +327,7 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
-    use crate::{prelude::F, transport_matrix_d2h_col_major, transport_matrix_h2d_col_major};
+    use crate::{prelude::{F, SC}, transport_matrix_d2h_col_major, transport_matrix_h2d_col_major};
 
     #[test]
     fn test_stacked_matrix_manual_0() {
