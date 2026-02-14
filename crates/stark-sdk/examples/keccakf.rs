@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use eyre::eyre;
-use openvm_stark_backend::DefaultStarkEngine;
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
@@ -62,7 +61,7 @@ fn main() -> eyre::Result<()> {
     let mut rng = StdRng::seed_from_u64(42);
     let air = TestAir(KeccakAir {});
 
-    let engine: BabyBearPoseidon2CpuEngine = DefaultStarkEngine::new(params);
+    let engine: BabyBearPoseidon2CpuEngine = BabyBearPoseidon2CpuEngine::new(params);
     let (pk, vk) = engine.keygen(&[Arc::new(air)]);
 
     let inputs = (0..NUM_PERMUTATIONS)
