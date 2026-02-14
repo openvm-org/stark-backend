@@ -533,7 +533,7 @@ mod tests {
         },
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
-        DefaultStarkEngine, StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
+        StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
     };
     use openvm_stark_sdk::{
         config::{

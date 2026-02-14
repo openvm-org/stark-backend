@@ -13,8 +13,7 @@ use openvm_stark_backend::{
     hasher::Hasher,
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
     prover::{Coordinator, CpuBackend, CpuDevice},
-    DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
-    TranscriptLog,
+    FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptLog,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
 use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
@@ -64,13 +63,17 @@ impl StarkProtocolConfig for BabyBearPoseidon2Config {
 }
 
 impl BabyBearPoseidon2Config {
-    pub fn default_from_params(params: SystemParams) -> Self {
-        let perm = default_babybear_poseidon2_16();
+    pub fn new_from_perm(params: SystemParams, perm: Perm) -> Self {
         let hasher = Hasher::new(
             PaddingFreeSponge::new(perm.clone()),
             TruncatedPermutation::new(perm),
         );
-        Self::new(params, hasher)
+        Self { params, hasher }
+    }
+
+    pub fn default_from_params(params: SystemParams) -> Self {
+        let perm = default_babybear_poseidon2_16();
+        Self::new_from_perm(params, perm)
     }
 }
 
@@ -123,6 +126,14 @@ where
     type PD = CpuDevice<SC>;
     type TS = TS;
 
+    fn new(params: SystemParams) -> Self {
+        let config = BabyBearPoseidon2Config::default_from_params(params);
+        Self {
+            device: CpuDevice::new(config),
+            _transcript: PhantomData,
+        }
+    }
+
     fn config(&self) -> &SC {
         self.device.config()
     }
@@ -140,19 +151,6 @@ where
         transcript: TS,
     ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
         Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
-    }
-}
-
-impl<TS> DefaultStarkEngine for BabyBearPoseidon2CpuEngine<TS>
-where
-    TS: FiatShamirTranscript<BabyBearPoseidon2Config> + From<Perm>,
-{
-    fn new(params: SystemParams) -> Self {
-        let config = BabyBearPoseidon2Config::default_from_params(params);
-        Self {
-            device: CpuDevice::new(config),
-            _transcript: PhantomData,
-        }
     }
 }
 

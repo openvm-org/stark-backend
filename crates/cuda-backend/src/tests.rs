@@ -22,8 +22,8 @@ use openvm_stark_backend::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    DefaultStarkEngine, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
-    TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
+    FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory,
+    WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
     config::{
