@@ -112,12 +112,3 @@ pub enum MemCopyError {
         device_len: usize,
     },
 }
-
-#[derive(Error, Debug)]
-pub enum KernelError {
-    #[error(transparent)]
-    Cuda(#[from] CudaError),
-
-    #[error("Unsupported type size {size}")]
-    UnsupportedTypeSize { size: usize },
-}

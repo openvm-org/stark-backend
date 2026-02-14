@@ -87,14 +87,7 @@ where
         &self,
         pk: &DeviceMultiStarkProvingKey<Self::PB>,
         ctx: ProvingContext<Self::PB>,
-    ) -> Proof<Self::SC>
-    where
-        Self::PB: ProverBackend<
-            Val = <Self::SC as StarkProtocolConfig>::F,
-            Challenge = <Self::SC as StarkProtocolConfig>::EF,
-            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
-        >,
-    {
+    ) -> Proof<Self::SC> {
         let mut prover = self.prover();
         prover.prove(pk, ctx)
     }
@@ -104,10 +97,7 @@ where
         &self,
         vk: &MultiStarkVerifyingKey<Self::SC>,
         proof: &Proof<Self::SC>,
-    ) -> Result<(), VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
-    where
-        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField,
-    {
+    ) -> Result<(), VerifierError<<Self::SC as StarkProtocolConfig>::EF>> {
         let mut transcript = self.initial_transcript();
         verify(self.config(), vk, proof, &mut transcript)
     }
@@ -167,13 +157,15 @@ where
         airs: Vec<AirRef<Self::SC>>,
         ctxs: Vec<AirProvingContext<Self::PB>>,
     ) -> Result<VerificationData<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
-    where
-        Self::PB: ProverBackend<
-            Val = <Self::SC as StarkProtocolConfig>::F,
-            Challenge = <Self::SC as StarkProtocolConfig>::EF,
-            Commitment = <Self::SC as StarkProtocolConfig>::Digest,
-        >,
-        <Self::SC as StarkProtocolConfig>::EF: p3_field::TwoAdicField;
+    {
+        let (pk, vk) = self.keygen(&airs);
+        let device = self.prover().device;
+        let d_pk = device.transport_pk_to_device(&pk);
+        let ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
+        let proof = self.prove(&d_pk, ctx);
+        self.verify(&vk, &proof)?;
+        Ok(VerificationData { vk, proof })
+    }
 }
 
 /// [StarkEngine] that can be constructed from only system parameters. In particular, the

@@ -11,7 +11,7 @@ The backend is designed to be modular and compatible with different proof system
 
 ## Crates
 
-- [`openvm-stark-backend`](crates/stark-backend): General purpose STARK proving system with multi-trace and logup support, built on top of Plonky3.
+- [`openvm-stark-backend`](crates/stark-backend): General purpose STARK proving system with multi-trace and logup support, using the SWIRL proof system.
 - [`openvm-stark-sdk`](crates/stark-sdk): Low-level SDK for use with STARK backend to generate proofs for specific STARK configurations.
 - [`openvm-cuda-builder`](crates/cuda-builder): Build utilities and CUDA detection crate, meant to be imported as a build dependency in crates that use CUDA.
 - [`openvm-cuda-common`](crates/cuda-common): Shared headers (`.cuh/.h` files) and CUDA utilities library.
@@ -32,7 +32,7 @@ See [SECURITY.md](./SECURITY.md).
 We studied and built upon the work of other teams in our quest to design a modular and performant proving framework.
 We would like to thank these teams for sharing their code for open source development:
 
-- [Plonky3](https://github.com/Plonky3/Plonky3): This codebase is built on top of Plonky3, where we have heavily benefited from their modular design at the polynomial IOP level. We extend Plonky3 by providing higher level interfaces for proving multi-chip circuits.
+- [Plonky3](https://github.com/Plonky3/Plonky3): This codebase is built on top of Plonky3, where we have heavily benefited from their modular design at the polynomial IOP level.
 - [Valida](https://github.com/valida-xyz/valida): Valida introduced the exceptionally elegant interactions interface for multi-chip communication via logup permutation arguments. We have found this interface quite well thought out and have built upon and extended it.
 - [SP1](https://github.com/succinctlabs/sp1): We learned from SP1's `AirBuilder` designs, and the original design for the `InteractionBuilder` was inspired by them.
 - [Risc0](https://github.com/risc0/risc0): We used some of Risc0's open source CUDA kernels as the starting point for our own CUDA kernels.

@@ -21,7 +21,7 @@ pub trait StarkProtocolConfig: 'static + Clone + Send + Sync {
     /// The prime base field.
     type F: TwoAdicField + PrimeField64;
     /// The extension field, used for random challenges.
-    type EF: ExtensionField<Self::F>;
+    type EF: TwoAdicField + ExtensionField<Self::F>;
     /// The digest type used for commitments.
     type Digest: Copy
         + Send
