@@ -1,5 +1,5 @@
 use getset::MutGetters;
-use openvm_stark_backend::{prover::Coordinator, DefaultStarkEngine, StarkEngine, SystemParams};
+use openvm_stark_backend::{prover::Coordinator, StarkEngine, SystemParams};
 
 use crate::{prelude::SC, sponge::DuplexSpongeGpu, GpuBackend, GpuDevice};
 
@@ -27,6 +27,10 @@ impl StarkEngine for BabyBearPoseidon2GpuEngine {
     type PD = GpuDevice;
     type TS = DuplexSpongeGpu;
 
+    fn new(params: SystemParams) -> Self {
+        Self::new(params)
+    }
+
     fn config(&self) -> &Self::SC {
         &self.config
     }
@@ -44,12 +48,6 @@ impl StarkEngine for BabyBearPoseidon2GpuEngine {
         transcript: DuplexSpongeGpu,
     ) -> Coordinator<SC, Self::PB, Self::PD, Self::TS> {
         Coordinator::new(GpuBackend, self.device.clone(), transcript)
-    }
-}
-
-impl DefaultStarkEngine for BabyBearPoseidon2GpuEngine {
-    fn new(params: SystemParams) -> Self {
-        Self::new(params)
     }
 }
 
