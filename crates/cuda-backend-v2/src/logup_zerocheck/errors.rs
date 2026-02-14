@@ -1,7 +1,7 @@
 use openvm_cuda_common::error::{CudaError, MemCopyError};
 use thiserror::Error;
 
-use crate::{EF, KernelError, sponge::GrindError};
+use crate::{prelude::EF, sponge::GrindError, KernelError};
 
 #[derive(Debug, Error)]
 pub enum Round0PrepError {

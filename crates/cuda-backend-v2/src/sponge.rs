@@ -317,7 +317,7 @@ impl FiatShamirTranscript<SC> for DuplexSpongeGpu {
 mod tests {
     use std::time::Instant;
 
-    use openvm_stark_backend::poseidon2::sponge::DuplexSponge;
+    use openvm_stark_sdk::config::baby_bear_poseidon2::DuplexSponge;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;

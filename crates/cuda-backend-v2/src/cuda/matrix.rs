@@ -1,9 +1,6 @@
-use openvm_cuda_common::{
-    d_buffer::DeviceBuffer,
-    error::{CudaError, KernelError},
-};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 
-use crate::{EF, F};
+use crate::prelude::{EF, F};
 
 extern "C" {
     fn _matrix_transpose_fp(
@@ -78,6 +75,8 @@ extern "C" {
     ) -> i32;
 }
 
+/// Safety:
+/// - `input` and `output` must not overlap.
 pub unsafe fn matrix_transpose_fp(
     output: &mut DeviceBuffer<F>,
     input: &DeviceBuffer<F>,
@@ -92,16 +91,23 @@ pub unsafe fn matrix_transpose_fp(
     ))
 }
 
+/// Safety:
+/// - `input` and `output` must not overlap.
 pub unsafe fn matrix_transpose_fpext(
     output: &mut DeviceBuffer<EF>,
     input: &DeviceBuffer<EF>,
     width: usize,
     height: usize,
 ) -> Result<(), CudaError> {
-    _matrix_transpose_fpext(output.as_mut_ptr(), input.as_ptr(), width, height)
+    CudaError::from_result(_matrix_transpose_fpext(
+        output.as_mut_ptr(),
+        input.as_ptr(),
+        width,
+        height,
+    ))
 }
 
-pub unsafe fn matrix_get_rows_fp_kernel<F>(
+pub unsafe fn matrix_get_rows_fp_kernel(
     output: &mut DeviceBuffer<F>,
     input: &DeviceBuffer<F>,
     row_indices: &DeviceBuffer<u32>,

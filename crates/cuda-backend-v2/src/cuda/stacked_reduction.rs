@@ -1,12 +1,12 @@
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
-    error::{CudaError, check},
+    error::{check, CudaError},
 };
 
 use crate::{
-    D_EF, EF, F,
     poly::EqEvalSegments,
-    stacked_reduction::{STACKED_REDUCTION_S_DEG, UnstackedSlice},
+    prelude::{D_EF, EF, F},
+    stacked_reduction::{UnstackedSlice, STACKED_REDUCTION_S_DEG},
 };
 
 /// Number of G outputs per z in round 0: G0, G1, G2

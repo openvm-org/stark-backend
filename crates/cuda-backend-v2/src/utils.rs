@@ -4,7 +4,7 @@ use itertools::Itertools;
 use openvm_stark_backend::utils::batch_multiplicative_inverse_serial;
 use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeField64};
 
-use crate::{D_EF, EF, F};
+use crate::prelude::{D_EF, EF, F};
 
 // https://hackmd.io/@vbuterin/barycentric_evaluation#Special-case-roots-of-unity
 pub fn compute_barycentric_inv_lagrange_denoms<F: Field, EF: ExtensionField<F>>(

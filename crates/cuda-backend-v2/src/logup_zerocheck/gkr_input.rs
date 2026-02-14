@@ -16,7 +16,8 @@ use crate::{
         frac_add_alpha, frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
         logup_gkr_input_eval,
     },
-    GpuBackend, EF, F,
+    prelude::{EF, F},
+    GpuBackend,
 };
 
 const TASK_SIZE: u32 = 65536;

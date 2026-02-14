@@ -18,7 +18,8 @@ use crate::{
         logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints,
     },
     logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpu},
-    GpuBackend, EF, F,
+    prelude::{EF, F},
+    GpuBackend,
 };
 
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.

@@ -1,7 +1,4 @@
-use openvm_stark_backend::{
-    prover::{Coordinator, ProvingContext},
-    AirRef, DefaultStarkEngine, StarkEngine, SystemParams,
-};
+use openvm_stark_backend::{prover::Coordinator, DefaultStarkEngine, StarkEngine, SystemParams};
 
 use crate::{prelude::SC, sponge::DuplexSpongeGpu, GpuBackend, GpuDevice};
 
@@ -12,7 +9,7 @@ pub struct BabyBearPoseidon2GpuEngine {
 
 impl BabyBearPoseidon2GpuEngine {
     pub fn new(params: SystemParams) -> Self {
-        let config = SC::default_from_params(params);
+        let config = SC::default_from_params(params.clone());
         Self {
             device: GpuDevice::new(params),
             config,

@@ -2,15 +2,11 @@ use std::marker::PhantomData;
 
 use derive_new::new;
 use openvm_stark_backend::{
-    prover::{
-        cpu::CpuBackend,
-        hal::{MatrixDimensions, ProverBackend},
-        types::AirProvingContext,
-    },
+    prover::{AirProvingContext, CpuBackend, ProverBackend},
     Chip,
 };
 
-use crate::{data_transporter::transport_matrix_to_device, prover_backend::GpuBackend, types::SC};
+use crate::{prelude::SC, transport_matrix_h2d_col_major, GpuBackend};
 
 pub fn get_empty_air_proving_ctx<PB: ProverBackend>() -> AirProvingContext<PB> {
     AirProvingContext {
@@ -52,7 +48,9 @@ pub fn cpu_proving_ctx_to_gpu(
     let trace = cpu_ctx
         .common_main
         .filter(|trace| trace.height() > 0)
-        .map(transport_matrix_to_device);
+        .map(|trace| {
+            transport_matrix_h2d_col_major(&trace).expect("transport_matrix_h2d_col_major")
+        });
     AirProvingContext {
         cached_mains: vec![],
         common_main: trace,

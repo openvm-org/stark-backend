@@ -16,7 +16,8 @@ use crate::{
         LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
     },
     logup_zerocheck::batch_mle::TraceCtx,
-    GpuBackend, EF,
+    prelude::EF,
+    GpuBackend,
 };
 
 const THREADS_PER_BLOCK: u32 = 256;

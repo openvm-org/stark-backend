@@ -1,10 +1,13 @@
 use openvm_cuda_common::{
     copy::MemCopyD2H,
     d_buffer::DeviceBuffer,
-    error::{CudaError, check},
+    error::{check, CudaError},
 };
 
-use crate::{D_EF, EF, F, KernelError};
+use crate::{
+    prelude::{D_EF, EF, F},
+    KernelError,
+};
 
 extern "C" {
     fn _algebraic_batch_matrices(
@@ -46,7 +49,7 @@ extern "C" {
 
     // `out` must be device ptr
     fn _eval_poly_ext_at_point(base_coeffs: *const F, coeff_len: usize, x: EF, out: *mut EF)
-    -> i32;
+        -> i32;
 
     fn _vector_scalar_multiply_ext(vec: *mut EF, scalar: EF, length: u32) -> i32;
 

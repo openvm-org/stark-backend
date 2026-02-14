@@ -804,7 +804,12 @@ pub unsafe fn frac_precompute_m_eval_round_raw(
     debug_assert!(w > 0);
     debug_assert!(t < w);
     CudaError::from_result(_frac_precompute_m_eval_round(
-        m_total, w, t, eq_r_prefix, eq_suffix, out,
+        m_total,
+        w,
+        t,
+        eq_r_prefix,
+        eq_suffix,
+        out,
     ))
 }
 

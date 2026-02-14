@@ -1,12 +1,8 @@
 //! Tests copied from openvm-stark-backend crate and then modified to use GPU backend.
 use itertools::Itertools;
-use openvm_cuda_backend::prelude::F;
 use openvm_stark_backend::{
     p3_matrix::dense::RowMajorMatrix,
     p3_util::log2_strict_usize,
-    poseidon2::sponge::{
-        DuplexSponge, DuplexSpongeRecorder, FiatShamirTranscript, TranscriptHistory,
-    },
     prover::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
@@ -15,8 +11,8 @@ use openvm_stark_backend::{
     },
     test_utils::{
         default_test_params_small, prove_up_to_batch_constraints, test_system_params_small,
-        CachedFixture11, DuplexSpongeValidator, FibFixture, InteractionsFixture11, MixtureFixture,
-        PreprocessedFibFixture, SelfInteractionFixture, TestFixture,
+        CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture, PreprocessedFibFixture,
+        SelfInteractionFixture, TestFixture,
     },
     verifier::{
         batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
@@ -26,11 +22,16 @@ use openvm_stark_backend::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    BabyBearPoseidon2CpuEngine, StarkEngine, SystemParams, WhirConfig, WhirParams, WhirRoundConfig,
+    FiatShamirTranscript, StarkEngine, SystemParams, WhirConfig, WhirParams, WhirRoundConfig,
 };
-use openvm_stark_sdk::config::{
-    log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing,
-    setup_tracing_with_log_level,
+use openvm_stark_sdk::{
+    config::{
+        baby_bear_poseidon2::{
+            BabyBearPoseidon2CpuEngine, DuplexSponge, DuplexSpongeRecorder, DuplexSpongeValidator,
+        },
+        log_up_params::log_up_security_params_baby_bear_100_bits,
+    },
+    utils::{setup_tracing, setup_tracing_with_log_level},
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -38,6 +39,7 @@ use test_case::test_case;
 use tracing::{debug, Level};
 
 use crate::{
+    prelude::{EF, F},
     sponge::DuplexSpongeGpu,
     sumcheck::{sumcheck_multilinear_gpu, sumcheck_prismalinear_gpu},
     BabyBearPoseidon2GpuEngine,
@@ -159,7 +161,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
 #[test_case(0 ; "when log_height is zero")]
 fn test_batch_sumcheck_zero_interactions(
     log_trace_degree: usize,
-) -> Result<(), BatchConstraintError> {
+) -> Result<(), BatchConstraintError<EF>> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_gpu_engine_small();
@@ -205,7 +207,9 @@ fn test_batch_sumcheck_zero_interactions(
 #[test_case(2 ; "when log_height equals l_skip")]
 #[test_case(1 ; "when log_height less than l_skip")]
 #[test_case(0 ; "when log_height is zero")]
-fn test_stacked_opening_reduction(log_trace_degree: usize) -> Result<(), StackedReductionError> {
+fn test_stacked_opening_reduction(
+    log_trace_degree: usize,
+) -> Result<(), StackedReductionError<EF>> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = test_gpu_engine_small();
@@ -344,7 +348,7 @@ fn test_single_fib_and_dummy_trace_stark(log_trace_degree: usize) {
 #[test_case(2, 0; "where log_trace_degree=0 less than l_skip=2")]
 #[test_case(3, 2; "where log_trace_degree=2 less than l_skip=3")]
 #[test_case(6, 10; "where l_skip exceeds log_warp_size")]
-fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError> {
+fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), VerifierError<EF>> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let n_stack = 8;
@@ -381,7 +385,7 @@ fn test_dummy_interactions_roundtrip(
     l_skip: usize,
     n_stack: usize,
     k_whir: usize,
-) -> Result<(), VerifierError> {
+) -> Result<(), VerifierError<EF>> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = BabyBearPoseidon2GpuEngine::new(params);
     let fx = InteractionsFixture11;
@@ -402,7 +406,7 @@ fn test_cached_trace_roundtrip(
     l_skip: usize,
     n_stack: usize,
     k_whir: usize,
-) -> Result<(), VerifierError> {
+) -> Result<(), VerifierError<EF>> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
     let fx = CachedFixture11::new(params);
@@ -421,7 +425,7 @@ fn test_preprocessed_trace_roundtrip(
     l_skip: usize,
     n_stack: usize,
     k_whir: usize,
-) -> Result<(), VerifierError> {
+) -> Result<(), VerifierError<EF>> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = BabyBearPoseidon2CpuEngine::new(params);
     let log_trace_degree = 8;
@@ -610,7 +614,7 @@ fn test_monomial_vs_dag_equivalence() {
             fold_ple::fold_ple_evals_rotate,
         },
         poly::EqEvalSegments,
-        EF,
+        prelude::EF,
     };
 
     setup_tracing_with_log_level(Level::DEBUG);
@@ -793,10 +797,8 @@ fn test_monomial_vs_dag_equivalence() {
             );
         }
 
-        let interpolated = openvm_cuda_backend::base::DeviceMatrix::<EF>::with_capacity(
-            s_deg * num_y as usize,
-            columns.len(),
-        );
+        let interpolated =
+            crate::base::DeviceMatrix::<EF>::with_capacity(s_deg * num_y as usize, columns.len());
         let d_columns = columns.to_device().unwrap();
         unsafe {
             interpolate_columns_gpu(interpolated.buffer(), &d_columns, s_deg, num_y as usize)

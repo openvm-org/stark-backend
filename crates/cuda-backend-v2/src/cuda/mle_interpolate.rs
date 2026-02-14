@@ -1,9 +1,12 @@
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
-    error::{CudaError, check},
+    error::{check, CudaError},
 };
 
-use crate::{EF, F, cuda::LOG_WARP_SIZE};
+use crate::{
+    cuda::LOG_WARP_SIZE,
+    prelude::{EF, F},
+};
 
 extern "C" {
     fn _mle_interpolate_stage(

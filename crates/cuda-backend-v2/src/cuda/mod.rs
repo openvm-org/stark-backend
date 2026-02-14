@@ -4,7 +4,7 @@
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 
-use crate::{EF, F};
+use crate::prelude::{EF, F};
 
 pub mod batch_ntt_small;
 pub mod device_info;

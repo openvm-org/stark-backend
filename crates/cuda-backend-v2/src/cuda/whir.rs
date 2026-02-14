@@ -1,9 +1,12 @@
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
-    error::{CudaError, check},
+    error::{check, CudaError},
 };
 
-use crate::{D_EF, EF, F, whir::BatchingTracePacket};
+use crate::{
+    prelude::{D_EF, EF, F},
+    whir::BatchingTracePacket,
+};
 
 extern "C" {
     fn _whir_algebraic_batch_traces(

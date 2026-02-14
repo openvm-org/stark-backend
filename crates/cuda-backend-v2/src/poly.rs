@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use getset::Getters;
-use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{MemCopyD2D, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -11,20 +10,22 @@ use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::PrimeCharacteristicRing;
 
 use crate::{
-    EF, F, KernelError,
+    base::DeviceMatrix,
     cuda::{
-        LOG_WARP_SIZE,
         batch_ntt_small::batch_ntt_small,
         mle_interpolate::{
-            MLE_SHARED_TILE_LOG_SIZE, mle_interpolate_fused_2d, mle_interpolate_shared_2d,
-            mle_interpolate_stage_2d,
+            mle_interpolate_fused_2d, mle_interpolate_shared_2d, mle_interpolate_stage_2d,
+            MLE_SHARED_TILE_LOG_SIZE,
         },
         poly::{
             eq_hypercube_interleaved_stage_ext, eq_hypercube_nonoverlapping_stage_ext,
             eq_hypercube_stage_ext, mobius_eq_hypercube_stage_ext,
         },
         sumcheck::fold_mle_column,
+        LOG_WARP_SIZE,
     },
+    prelude::{EF, F},
+    KernelError,
 };
 
 #[derive(derive_new::new, Getters)]
@@ -251,7 +252,8 @@ pub unsafe fn evals_mobius_eq_hypercube(
 
     for (i, &omega_i) in omega.iter().enumerate() {
         let step = 1 << i;
-        mobius_eq_hypercube_stage_ext(out.as_mut_ptr(), omega_i, step).map_err(KernelError::Kernel)?;
+        mobius_eq_hypercube_stage_ext(out.as_mut_ptr(), omega_i, step)
+            .map_err(KernelError::Kernel)?;
     }
     Ok(())
 }

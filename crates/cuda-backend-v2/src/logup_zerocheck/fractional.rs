@@ -1,6 +1,5 @@
 use std::{array::from_fn, convert::TryInto, env, ffi::c_void, mem::transmute};
 
-use openvm_cuda_backend::cuda::ntt::bit_rev_frac_ext;
 use openvm_cuda_common::{
     copy::{cuda_memcpy, MemCopyD2H},
     d_buffer::DeviceBuffer,
@@ -8,9 +7,9 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::{
     poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
-    poseidon2::sponge::FiatShamirTranscript,
     proof::GkrLayerClaims,
     prover::fractional_sumcheck_gkr::{Frac, FracSumcheckProof},
+    FiatShamirTranscript,
 };
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
@@ -18,15 +17,19 @@ use tracing::{debug_span, instrument};
 
 use super::errors::FractionalSumcheckError;
 use crate::{
-    cuda::logup_zerocheck::{
-        _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, fold_ef_frac_columns_inplace,
-        frac_build_tree_layer, frac_compute_round, frac_compute_round_and_fold,
-        frac_compute_round_and_fold_inplace, frac_compute_round_and_revert, frac_multifold_raw,
-        frac_precompute_m_build_raw, frac_precompute_m_eval_round_raw,
+    cuda::{
+        logup_zerocheck::{
+            _frac_compute_round_temp_buffer_size, fold_ef_frac_columns,
+            fold_ef_frac_columns_inplace, frac_build_tree_layer, frac_compute_round,
+            frac_compute_round_and_fold, frac_compute_round_and_fold_inplace,
+            frac_compute_round_and_revert, frac_multifold_raw, frac_precompute_m_build_raw,
+            frac_precompute_m_eval_round_raw,
+        },
+        ntt::bit_rev_frac_ext,
     },
     poly::SqrtEqLayers,
+    prelude::{EF, SC},
     sponge::DuplexSpongeGpu,
-    EF,
 };
 
 const GKR_S_DEG: usize = 3;
@@ -475,7 +478,7 @@ pub fn fractional_sumcheck_gpu(
     leaves: DeviceBuffer<Frac<EF>>,
     assert_zero: bool,
     mem: &mut MemTracker,
-) -> Result<(FracSumcheckProof<EF>, Vec<EF>), FractionalSumcheckError> {
+) -> Result<(FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
     let mut layer = leaves;
     if layer.is_empty() {
         return Ok((
@@ -1051,7 +1054,7 @@ fn copy_from_device<T: Copy>(
 }
 
 /// Reduces claims to a single evaluation point using linear interpolation.
-fn reduce_to_single_evaluation(claims: &GkrLayerClaims, mu: EF) -> (EF, EF) {
+fn reduce_to_single_evaluation(claims: &GkrLayerClaims<SC>, mu: EF) -> (EF, EF) {
     let numer = interpolate_linear_at_01(&[claims.p_xi_0, claims.p_xi_1], mu);
     let denom = interpolate_linear_at_01(&[claims.q_xi_0, claims.q_xi_1], mu);
     (numer, denom)
@@ -1129,14 +1132,14 @@ mod tests {
 
     use super::{
         fractional_sumcheck_gpu, make_synthetic_leaves, DuplexSpongeGpu, FractionalSumcheckError,
-        GkrRoundStrategy, EF,
+        GkrRoundStrategy, EF, SC,
     };
 
     /// Run fractional sumcheck with a given round strategy and return the proof + final randomness.
     fn run_with_strategy(
         n: usize,
         strategy: GkrRoundStrategy,
-    ) -> Result<(super::FracSumcheckProof<EF>, Vec<EF>), FractionalSumcheckError> {
+    ) -> Result<(super::FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
         // SAFETY: test sets process env; run with --test-threads=1.
         let enable_precompute_m = matches!(strategy, GkrRoundStrategy::PrecomputeM);
         unsafe {
@@ -1154,8 +1157,8 @@ mod tests {
     }
 
     fn assert_proofs_equal(
-        a: &(super::FracSumcheckProof<EF>, Vec<EF>),
-        b: &(super::FracSumcheckProof<EF>, Vec<EF>),
+        a: &(super::FracSumcheckProof<SC>, Vec<EF>),
+        b: &(super::FracSumcheckProof<SC>, Vec<EF>),
     ) {
         assert_eq!(
             a.0.fractional_sum, b.0.fractional_sum,

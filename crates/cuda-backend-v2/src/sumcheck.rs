@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-use openvm_cuda_backend::prelude::*;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -7,8 +6,8 @@ use openvm_cuda_common::{
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
     poly_common::UnivariatePoly,
-    poseidon2::sponge::FiatShamirTranscript,
     prover::sumcheck::{SumcheckCubeProof, SumcheckPrismProof},
+    FiatShamirTranscript,
 };
 use p3_field::{ExtensionField, Field};
 use tracing::{debug, info_span, instrument};
@@ -19,6 +18,7 @@ use crate::{
         matrix::batch_expand_pad_wide,
         sumcheck::{fold_mle, fold_ple_from_coeffs, reduce_over_x_and_cols, sumcheck_mle_round},
     },
+    prelude::*,
     sponge::DuplexSpongeGpu,
 };
 

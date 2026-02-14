@@ -1,3 +1,13 @@
+use std::{fmt::Debug, sync::Arc};
+
+use openvm_cuda_common::copy::MemCopyD2H;
+use openvm_stark_backend::{
+    p3_matrix::{dense::RowMajorMatrix, Matrix},
+    prover::MatrixDimensions,
+};
+
+use crate::base::DeviceMatrix;
+
 pub fn assert_eq_device_matrix<T: Clone + Send + Sync + PartialEq + Debug>(
     a: &DeviceMatrix<T>,
     b: &DeviceMatrix<T>,

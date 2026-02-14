@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use openvm_stark_backend::air_builders::symbolic::{
-    SymbolicConstraints, SymbolicExpressionDag, SymbolicExpressionNode,
     symbolic_expression::SymbolicExpression,
     symbolic_variable::{Entry, SymbolicVariable},
+    SymbolicConstraints, SymbolicExpressionDag, SymbolicExpressionNode,
 };
 use p3_field::Field;
 use rustc_hash::FxHashMap;

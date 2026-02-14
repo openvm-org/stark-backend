@@ -412,19 +412,19 @@ pub fn transport_matrix_d2h_col_major<T>(
     Ok(ColMajorMatrix::new(values_host, matrix.width()))
 }
 
-pub fn transport_matrix_d2h_row_major<T>(
-    matrix: &DeviceMatrix<T>,
-) -> Result<RowMajorMatrix<T>, MemCopyError> {
-    let matrix_buffer = DeviceBuffer::<T>::with_capacity(matrix.height() * matrix.width());
+pub fn transport_matrix_d2h_row_major(
+    matrix: &DeviceMatrix<F>,
+) -> Result<RowMajorMatrix<F>, MemCopyError> {
+    let mut matrix_buffer = DeviceBuffer::<F>::with_capacity(matrix.height() * matrix.width());
     unsafe {
         matrix_transpose_fp(
-            &matrix_buffer,
+            &mut matrix_buffer,
             matrix.buffer(),
             matrix.height(),
             matrix.width(),
         )?;
     }
-    Ok(RowMajorMatrix::<T>::new(
+    Ok(RowMajorMatrix::<F>::new(
         matrix_buffer.to_host()?,
         matrix.width(),
     ))

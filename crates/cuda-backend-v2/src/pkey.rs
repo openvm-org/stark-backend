@@ -17,7 +17,7 @@ use crate::{
         ExpandedInteractionMonomials, ExpandedMonomials, InteractionMonomialTerm, LambdaTerm,
         MonomialHeader, PackedVar,
     },
-    F,
+    prelude::{F, SC},
 };
 
 pub struct AirDataGpu {
@@ -82,7 +82,7 @@ fn to_device_or_empty<T>(data: &[T]) -> Result<DeviceBuffer<T>, MemCopyError> {
 }
 
 impl AirDataGpu {
-    pub fn new(pk: &StarkProvingKey) -> Result<Self, MemCopyError> {
+    pub fn new(pk: &StarkProvingKey<SC>) -> Result<Self, MemCopyError> {
         let dag = &pk.vk.symbolic_constraints;
         let symbolic_constraints = SymbolicConstraints::from(dag);
         let interaction_rules = InteractionEvalRules::new(&symbolic_constraints)?;

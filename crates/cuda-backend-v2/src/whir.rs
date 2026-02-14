@@ -1,29 +1,25 @@
 use std::{iter::zip, sync::Arc};
 
 use itertools::Itertools;
-use openvm_cuda_backend::{
-    base::DeviceMatrix,
-    cuda::kernels::{fri::split_ext_poly_to_base_col_major_matrix, lde::batch_expand_pad},
-    ntt::batch_ntt,
-};
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
 };
 use openvm_stark_backend::{
-    poseidon2::sponge::FiatShamirTranscript,
     proof::{MerkleProof, WhirProof},
     prover::MatrixDimensions,
-    SystemParams,
+    FiatShamirTranscript, SystemParams,
 };
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
+    base::DeviceMatrix,
     cuda::{
         batch_ntt_small::batch_ntt_small,
+        matrix::{batch_expand_pad, split_ext_to_base_col_major_matrix},
         mle_interpolate::mle_interpolate_stage_ext,
         poly::{eval_poly_ext_at_point_from_base, transpose_fp_to_fpext_vec},
         whir::{
@@ -33,11 +29,13 @@ use crate::{
         },
     },
     merkle_tree::MerkleTreeGpu,
+    ntt::batch_ntt,
     poly::evals_eq_hypercube,
+    prelude::{Digest, D_EF, EF, F, SC},
     sponge::DuplexSpongeGpu,
     stacked_pcs::rs_code_matrix,
     stacked_reduction::StackedPcsData2,
-    Digest, WhirProverError, D_EF, EF, F,
+    WhirProverError,
 };
 
 #[repr(C)]
@@ -65,7 +63,7 @@ pub fn prove_whir_opening_gpu(
     transcript: &mut DuplexSpongeGpu,
     mut stacked_per_commit: Vec<StackedPcsData2>,
     u: &[EF],
-) -> Result<WhirProof, WhirProverError> {
+) -> Result<WhirProof<SC>, WhirProverError> {
     let mem = MemTracker::start("prover.prove_whir_opening");
     let l_skip = params.l_skip;
     let log_blowup = params.log_blowup;
@@ -175,9 +173,9 @@ pub fn prove_whir_opening_gpu(
     let mut ood_values = vec![];
     // per commitment, per whir query, per column
     let mut initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>> = vec![vec![]; num_commits];
-    let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof>> = vec![];
+    let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof<Digest>>> = vec![];
     let mut codeword_opened_values: Vec<Vec<Vec<EF>>> = vec![];
-    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof>> = vec![];
+    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof<Digest>>> = vec![];
     let mut folding_pow_witnesses = vec![];
     let mut query_phase_pow_witnesses = vec![];
     let mut rs_tree = None;
@@ -271,7 +269,7 @@ pub fn prove_whir_opening_gpu(
         // SAFETY: we allocated `f_coeffs.len() * D_EF` space for `g_coeffs` to do a 1-to-D_EF
         // (1-to-4) split
         unsafe {
-            split_ext_poly_to_base_col_major_matrix(
+            split_ext_to_base_col_major_matrix(
                 &g_coeffs,
                 &f_coeffs,
                 f_height as u64,
@@ -527,17 +525,20 @@ mod tests {
     use openvm_stark_backend::{
         keygen::types::MultiStarkProvingKey,
         poly_common::Squarable,
-        poseidon2::sponge::DuplexSponge,
         prover::{
             poly::Ple, stacked_pcs::stacked_commit, ColMajorMatrix, CpuBackend,
             DeviceDataTransporter, ProvingContext,
         },
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
-        BabyBearPoseidon2CpuEngine, SystemParams, WhirConfig, WhirParams, EF, F,
+        SystemParams, WhirConfig, WhirParams,
     };
-    use openvm_stark_sdk::config::{
-        log_up_params::log_up_security_params_baby_bear_100_bits, setup_tracing_with_log_level,
+    use openvm_stark_sdk::{
+        config::{
+            baby_bear_poseidon2::{BabyBearPoseidon2CpuEngine, DuplexSponge},
+            log_up_params::log_up_security_params_baby_bear_100_bits,
+        },
+        utils::setup_tracing_with_log_level,
     };
     use p3_field::PrimeCharacteristicRing;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -545,7 +546,10 @@ mod tests {
     use tracing::Level;
 
     use crate::{
-        sponge::DuplexSpongeGpu, stacked_reduction::StackedPcsData2, whir::prove_whir_opening_gpu,
+        prelude::{EF, F, SC},
+        sponge::DuplexSpongeGpu,
+        stacked_reduction::StackedPcsData2,
+        whir::prove_whir_opening_gpu,
         GpuDevice,
     };
 
@@ -586,8 +590,8 @@ mod tests {
 
     fn run_whir_test(
         params: SystemParams,
-        pk: MultiStarkProvingKey,
-        ctx: ProvingContext<CpuBackend>,
+        pk: MultiStarkProvingKey<SC>,
+        ctx: ProvingContext<CpuBackend<SC>>,
     ) -> Result<(), VerifyWhirError> {
         let device = GpuDevice::new(params.clone());
         let mut rng = StdRng::seed_from_u64(0);

@@ -2,11 +2,6 @@ use std::{ffi::c_void, sync::Arc};
 
 use getset::Getters;
 use itertools::Itertools;
-use openvm_cuda_backend::{
-    base::{DeviceMatrix, DeviceMatrixView},
-    cuda::{kernels::lde::batch_expand_pad, ntt::bit_rev},
-    ntt::batch_ntt,
-};
 use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer, memory_manager::MemTracker};
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
@@ -15,10 +10,17 @@ use openvm_stark_backend::{
 use tracing::instrument;
 
 use crate::{
-    cuda::{batch_ntt_small::batch_ntt_small, matrix::batch_expand_pad_wide},
+    base::{DeviceMatrix, DeviceMatrixView},
+    cuda::{
+        batch_ntt_small::batch_ntt_small,
+        matrix::{batch_expand_pad, batch_expand_pad_wide},
+        ntt::bit_rev,
+    },
     merkle_tree::MerkleTreeGpu,
+    ntt::batch_ntt,
     poly::{mle_interpolate_stages, PleMatrix},
-    Digest, GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError, F,
+    prelude::{Digest, F},
+    GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError,
 };
 
 #[derive(Getters)]
@@ -325,7 +327,7 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
-    use crate::{transport_matrix_d2h_col_major, transport_matrix_h2d_col_major, F};
+    use crate::{prelude::F, transport_matrix_d2h_col_major, transport_matrix_h2d_col_major};
 
     #[test]
     fn test_stacked_matrix_manual_0() {

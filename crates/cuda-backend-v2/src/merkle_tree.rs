@@ -1,10 +1,6 @@
 use std::array::from_fn;
 
 use itertools::Itertools;
-use openvm_cuda_backend::{
-    base::DeviceMatrix,
-    cuda::kernels::{matrix::matrix_get_rows_fp_kernel, poseidon2::query_digest_layers_kernel},
-};
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -15,11 +11,16 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    DIGEST_SIZE, Digest, EF, F, MerkleTreeError,
-    cuda::merkle_tree::{
-        poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
-        poseidon2_compressing_row_hashes_ext,
+    base::DeviceMatrix,
+    cuda::{
+        matrix::matrix_get_rows_fp_kernel,
+        merkle_tree::{
+            poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
+            poseidon2_compressing_row_hashes_ext, query_digest_layers,
+        },
     },
+    prelude::{Digest, DIGEST_SIZE, EF, F},
+    MerkleTreeError,
 };
 
 pub struct MerkleTreeGpu<F, Digest> {
@@ -171,7 +172,7 @@ impl MerkleTreeGpu<F, Digest> {
         let d_indices = indices.to_device()?;
         debug_assert_eq!(d_indices.len(), d_layers_ptr.len() * num_queries);
 
-        let d_out =
+        let mut d_out =
             DeviceBuffer::<F>::with_capacity(d_layers_ptr.len() * num_queries * DIGEST_SIZE);
         // SAFETY:
         // - d_out has size num_trees * depth * num_queries * DIGEST_SIZE in `F` elements
@@ -179,8 +180,8 @@ impl MerkleTreeGpu<F, Digest> {
         // - d_indices is size `num_trees * depth * num_queries` indices for merkle proof sibling
         //   indices
         unsafe {
-            query_digest_layers_kernel::<F>(
-                &d_out,
+            query_digest_layers(
+                &mut d_out,
                 &d_layers_ptr,
                 &d_indices,
                 num_queries as u64,

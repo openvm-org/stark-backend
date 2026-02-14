@@ -111,4 +111,3 @@ pub enum MemCopyError {
         device_len: usize,
     },
 }
-

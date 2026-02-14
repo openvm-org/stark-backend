@@ -1,7 +1,6 @@
 use std::{array::from_fn, cmp::max, ffi::c_void, iter::zip, mem, sync::Arc};
 
 use itertools::{zip_eq, Itertools};
-use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{cuda_memcpy, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -14,18 +13,19 @@ use openvm_stark_backend::{
         eq_uni_poly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, Squarable,
         UnivariatePoly,
     },
-    poseidon2::sponge::FiatShamirTranscript,
     proof::StackingProof,
     prover::{
         stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKey,
         MatrixDimensions, ProvingContext,
     },
+    FiatShamirTranscript,
 };
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use tracing::{debug, info_span, instrument};
 
 use crate::{
+    base::DeviceMatrix,
     cuda::{
         batch_ntt_small::ensure_device_ntt_twiddles_initialized,
         poly::vector_scalar_multiply_ext,
@@ -38,10 +38,11 @@ use crate::{
         sumcheck::{fold_mle, triangular_fold_mle},
     },
     poly::EqEvalSegments,
+    prelude::{Digest, D_EF, EF, F, SC},
     sponge::DuplexSpongeGpu,
     stacked_pcs::StackedPcsDataGpu,
     utils::{compute_barycentric_inv_lagrange_denoms, reduce_raw_u64_to_ef},
-    Digest, GpuBackend, GpuDevice, ProverError, D_EF, EF, F,
+    GpuBackend, GpuDevice, ProverError,
 };
 
 /// Degree of the sumcheck polynomial for stacked reduction.
@@ -183,7 +184,7 @@ pub fn prove_stacked_opening_reduction_gpu(
     ctx: ProvingContext<GpuBackend>,
     common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
     r: &[EF],
-) -> Result<(StackingProof, Vec<EF>, Vec<StackedPcsData2>), ProverError> {
+) -> Result<(StackingProof<SC>, Vec<EF>, Vec<StackedPcsData2>), ProverError> {
     let n_stack = device.config.n_stack;
     // Batching randomness
     let lambda = transcript.sample_ext();

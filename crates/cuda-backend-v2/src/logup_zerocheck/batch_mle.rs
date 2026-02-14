@@ -19,7 +19,8 @@ use crate::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
         mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
     },
-    GpuBackend, EF, F,
+    prelude::{EF, F},
+    GpuBackend,
 };
 
 const MAX_THREADS_PER_BLOCK: u32 = 128;

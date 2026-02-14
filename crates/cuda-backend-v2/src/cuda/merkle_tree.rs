@@ -1,6 +1,6 @@
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 
-use crate::{Digest, EF, F};
+use crate::prelude::{Digest, EF, F};
 
 extern "C" {
     fn _poseidon2_compressing_row_hashes(

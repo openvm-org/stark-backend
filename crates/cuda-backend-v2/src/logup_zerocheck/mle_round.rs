@@ -8,7 +8,8 @@ use crate::{
         _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size,
         logup_eval_mle, zerocheck_eval_mle,
     },
-    ConstraintOnlyRules, InteractionEvalRules, EF, F,
+    prelude::{EF, F},
+    ConstraintOnlyRules, InteractionEvalRules,
 };
 
 // We interpolate first, so access to vars is free and doesn't need to be buffered

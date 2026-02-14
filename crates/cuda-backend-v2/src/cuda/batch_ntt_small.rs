@@ -2,10 +2,10 @@ use std::{ffi::c_void, sync::Once};
 
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
-    error::{CudaError, check},
+    error::{check, CudaError},
 };
 
-use crate::F;
+use crate::prelude::F;
 
 /// Size of the device NTT twiddle table (2^11 - 2 = 2046 elements for MAX_NTT_LEVEL=10)
 pub const DEVICE_NTT_TWIDDLES_SIZE: usize = (1 << 11) - 2;

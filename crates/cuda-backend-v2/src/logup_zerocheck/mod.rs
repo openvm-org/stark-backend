@@ -14,7 +14,6 @@ use std::{
 };
 
 use itertools::{izip, Itertools};
-use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -43,6 +42,7 @@ use rustc_hash::FxHashMap;
 use tracing::{debug, info, info_span, instrument};
 
 use crate::{
+    base::DeviceMatrix,
     cuda::{
         logup_zerocheck::{fold_selectors_round0, interpolate_columns_gpu, MainMatrixPtrs},
         sumcheck::batch_fold_mle,
@@ -53,9 +53,10 @@ use crate::{
         gkr_input::TraceInteractionMeta, round0::evaluate_round0_interactions_gpu,
     },
     poly::EqEvalLayers,
+    prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     utils::compute_barycentric_inv_lagrange_denoms,
-    GpuBackend, EF, F,
+    GpuBackend,
 };
 
 pub(crate) mod batch_mle;
@@ -105,7 +106,7 @@ pub fn prove_zerocheck_and_logup_gpu(
     save_memory: bool,
     monomial_num_y_threshold: u32,
     sm_count: u32,
-) -> (GkrProof, BatchConstraintProof, Vec<EF>) {
+) -> (GkrProof<SC>, BatchConstraintProof<SC>, Vec<EF>) {
     let logup_gkr_span = info_span!("prover.rap_constraints.logup_gkr", phase = "prover").entered();
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;

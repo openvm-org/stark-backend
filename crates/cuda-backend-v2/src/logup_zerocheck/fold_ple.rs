@@ -1,11 +1,14 @@
 use std::{cmp::max, sync::Arc};
 
-use openvm_cuda_backend::base::DeviceMatrix;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_stark_backend::prover::MatrixDimensions;
 
 use super::errors::FoldPleError;
-use crate::{EF, F, cuda::logup_zerocheck::fold_ple_from_evals};
+use crate::{
+    base::DeviceMatrix,
+    cuda::logup_zerocheck::fold_ple_from_evals,
+    prelude::{EF, F},
+};
 
 /// Folds plain using mixed coefficients, folds rotation from evals.
 /// - `mixed` should be mixed coefficient form of the _lifted_ trace.
