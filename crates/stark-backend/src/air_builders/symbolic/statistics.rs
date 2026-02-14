@@ -164,7 +164,7 @@ impl AirStatisticsGenerator {
 
 #[cfg(test)]
 mod tests {
-    use p3_baby_bear::BabyBear;
+    use openvm_stark_sdk::p3_baby_bear::BabyBear;
     use p3_field::PrimeCharacteristicRing;
 
     use crate::{
