@@ -29,13 +29,13 @@ p3-symmetric = { workspace = true }
 openvm-cuda-builder.workspace = true
 
 [dev-dependencies]
-openvm-stark-backend = { workspace = true, features = ["test-utils"] }
+openvm-stark-backend = { workspace = true, features = ["test-utils", "parallel"] }
 p3-keccak-air.workspace = true
 eyre.workspace = true
 test-case.workspace = true
 
 [features]
-default = ["openvm-stark-backend/parallel"] # TODO: remove this once no longer using cpu rayon
+default = []
 touchemall = ["openvm-cuda-common/touchemall"]
 test-utils = ["openvm-stark-backend/test-utils"]
 

@@ -64,4 +64,4 @@ jobs:
       - name: Run cuda-backend examples
         working-directory: crates/cuda-backend
         run: |
-          NUM_THREADS=3 NUM_TASKS=10 cargo run --release --example keccakf
+          NUM_THREADS=3 NUM_TASKS=10 cargo run --example keccakf
