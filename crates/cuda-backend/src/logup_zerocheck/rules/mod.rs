@@ -105,7 +105,7 @@ pub struct SymbolicRulesGpu<F> {
     pub dag_idx_to_rule_idx: FxHashMap<usize, usize>,
 }
 
-/// Stateful rule builder that schedules buffer allocation and re-use using a priority queue.
+/// Stateful rule builder that schedules buffer allocation and reuse using a priority queue.
 ///
 /// At any given time, the builder will determine the buffer scheduling for a contiguous range of
 /// nodes in a global DAG, where the DAG is already topologically sorted.

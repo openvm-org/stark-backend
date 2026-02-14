@@ -273,8 +273,8 @@ impl MerkleTreeGpu<F, Digest> {
 }
 
 // Extension field merkle tree
-// NOTE: this is currently unused because we tranpose DeviceMatrix<EF> to DeviceMatrix<F> beforehand
-// in our use cases
+// NOTE: this is currently unused because we transpose DeviceMatrix<EF> to DeviceMatrix<F>
+// beforehand in our use cases
 impl MerkleTreeGpu<EF, Digest> {
     #[instrument(name = "merkle_tree_ext", skip_all)]
     pub fn new(
