@@ -8,7 +8,7 @@ use openvm_stark_backend::{
         test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
         PreprocessedFibFixture, TestFixture,
     },
-    DefaultStarkEngine, SystemParams,
+    SystemParams,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::*;
 

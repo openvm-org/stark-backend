@@ -10,7 +10,7 @@ use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
     prover::{stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData},
     utils::disable_debug_builder,
-    DefaultStarkEngine, PartitionedBaseAir, StarkEngine, StarkProtocolConfig,
+    PartitionedBaseAir, StarkEngine, StarkProtocolConfig,
 };
 use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
 use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
@@ -63,7 +63,7 @@ fn prove_and_verify_sum_air(
     assert_eq!(x.len(), ys.len());
 
     let engine: BabyBearPoseidon2CpuEngine<DuplexSponge> =
-        DefaultStarkEngine::new(openvm_stark_backend::test_utils::default_test_params_small());
+        StarkEngine::new(openvm_stark_backend::test_utils::default_test_params_small());
     let config = engine.config();
     let params = config.params();
 
