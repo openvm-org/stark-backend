@@ -1,4 +1,5 @@
 pub mod base;
+pub mod data_transporter;
 pub mod logup_zerocheck;
 pub mod merkle_tree;
 pub mod monomial;
@@ -25,8 +26,6 @@ pub use error::*;
 pub use gpu_backend::*;
 pub use pkey::*;
 
-#[cfg(any(test, feature = "test-utils"))]
-pub mod test_utils;
 #[cfg(test)]
 mod tests;
 
