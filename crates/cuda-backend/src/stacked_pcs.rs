@@ -328,8 +328,8 @@ mod tests {
 
     use super::*;
     use crate::{
+        data_transporter::{transport_matrix_d2h_col_major, transport_matrix_h2d_col_major},
         prelude::{F, SC},
-        transport_matrix_d2h_col_major, transport_matrix_h2d_col_major,
     };
 
     #[test]
