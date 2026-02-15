@@ -36,7 +36,7 @@ use openvm_stark_backend::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    AirRef, Chip, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
+    AirRef, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
     TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
@@ -656,9 +656,9 @@ fn test_optional_air() {
 
         let ctx = ProvingContext::new(vec![
             (0, fib_air_ctx),
-            (1, Chip::generate_proving_ctx(&s1, ())),
-            (2, Chip::generate_proving_ctx(&s2, ())),
-            (3, Chip::generate_proving_ctx(&r1, ())),
+            (1, s1.generate_proving_ctx()),
+            (2, s2.generate_proving_ctx()),
+            (3, r1.generate_proving_ctx()),
         ]);
         let proof = engine.prove(&d_pk, ctx);
         engine.verify(&pk.get_vk(), &proof).unwrap();
@@ -680,8 +680,8 @@ fn test_optional_air() {
         });
 
         let ctx = ProvingContext::new(vec![
-            (1, Chip::generate_proving_ctx(&s1, ())),
-            (3, Chip::generate_proving_ctx(&r1, ())),
+            (1, s1.generate_proving_ctx()),
+            (3, r1.generate_proving_ctx()),
         ]);
         let proof = engine.prove(&d_pk, ctx);
         engine.verify(&pk.get_vk(), &proof).unwrap();
@@ -701,7 +701,7 @@ fn test_optional_air() {
         let pk = &pk;
         let engine = &engine;
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let ctx = ProvingContext::new(vec![(3, Chip::generate_proving_ctx(&r1, ()))]);
+            let ctx = ProvingContext::new(vec![(3, r1.generate_proving_ctx())]);
             let proof = engine.prove(d_pk, ctx);
             engine.verify(&pk.get_vk(), &proof)
         }));
@@ -996,8 +996,8 @@ fn test_interaction_cached_trace_neg() {
 
     let airs = vec![receiver_chip.air(), sender_chip.air()];
     let ctxs = vec![
-        Chip::generate_proving_ctx(&receiver_chip, ()),
-        Chip::generate_proving_ctx(&sender_chip, ()),
+        receiver_chip.generate_proving_ctx(),
+        sender_chip.generate_proving_ctx(),
     ];
 
     disable_debug_builder();

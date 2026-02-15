@@ -1,5 +1,4 @@
 pub mod base;
-pub mod hybrid_chip;
 pub mod logup_zerocheck;
 pub mod merkle_tree;
 pub mod monomial;
