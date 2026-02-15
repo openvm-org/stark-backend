@@ -39,8 +39,6 @@ pub mod test_utils;
 // pub mod tests;
 
 mod any_air;
-/// Trait for stateful chip that owns trace generation
-mod chip;
 /// STARK Protocol configuration trait
 mod config;
 /// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
@@ -48,7 +46,6 @@ mod engine;
 /// Fiat-Shamir transcript trait definition.
 mod transcript;
 pub use any_air::*;
-pub use chip::*;
 pub use config::*;
 pub use engine::*;
 pub use transcript::*;
