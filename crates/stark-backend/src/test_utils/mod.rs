@@ -21,7 +21,7 @@ use crate::{
         CpuBackend, DeviceDataTransporter, DeviceMultiStarkProvingKey, MatrixDimensions,
         MultiRapProver, Prover, ProvingContext, TraceCommitter,
     },
-    AirRef, Chip, StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
+    AirRef, StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
 };
 
 pub mod dummy_airs;
@@ -357,7 +357,7 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for SelfInteractionFixture {
                     width,
                     log_height: self.log_height,
                 };
-                Chip::<(), CpuBackend<SC>>::generate_proving_ctx(&chip, ())
+                chip.generate_proving_ctx::<SC>()
             })
             .enumerate()
             .collect_vec();
