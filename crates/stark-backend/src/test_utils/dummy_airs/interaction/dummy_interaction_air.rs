@@ -2,7 +2,6 @@
 //! | count | fields[..] |
 //!
 //! Chip will either send or receive the fields with multiplicity count.
-//! The main Air has no constraints, the only constraints are specified by the Chip trait
 
 use std::{iter, sync::Arc};
 
@@ -18,7 +17,7 @@ use crate::{
         stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData,
         CpuBackend,
     },
-    AirRef, Chip, PartitionedBaseAir, StarkProtocolConfig,
+    AirRef, PartitionedBaseAir, StarkProtocolConfig,
 };
 
 pub struct DummyInteractionCols;
@@ -175,8 +174,8 @@ impl<SC> DummyInteractionChip<SC> {
     }
 }
 
-impl<SC: StarkProtocolConfig> Chip<(), CpuBackend<SC>> for DummyInteractionChip<SC> {
-    fn generate_proving_ctx(&self, _: ()) -> AirProvingContext<CpuBackend<SC>> {
+impl<SC: StarkProtocolConfig> DummyInteractionChip<SC> {
+    pub fn generate_proving_ctx(&self) -> AirProvingContext<CpuBackend<SC>> {
         assert!(self.data.is_some());
         let data = self.data.clone().unwrap();
         if self.air.partition {
