@@ -47,7 +47,7 @@ use crate::{
         logup_zerocheck::{fold_selectors_round0, interpolate_columns_gpu, MainMatrixPtrs},
         sumcheck::batch_fold_mle,
     },
-    gpu_backend::transport_matrix_d2h_col_major,
+    data_transporter::transport_matrix_d2h_col_major,
     logup_zerocheck::{
         batch_mle::evaluate_zerocheck_batched, fold_ple::fold_ple_evals_rotate,
         gkr_input::TraceInteractionMeta, round0::evaluate_round0_interactions_gpu,
