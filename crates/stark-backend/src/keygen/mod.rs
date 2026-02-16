@@ -8,8 +8,7 @@ use tracing::instrument;
 
 use crate::{
     air_builders::symbolic::{
-        get_symbolic_builder,
-        max_constraint_degree_round0,
+        get_symbolic_builder, max_constraint_degree_round0,
         symbolic_variable::{Entry, SymbolicVariable},
         SymbolicConstraintsDag, SymbolicExpressionNode, SymbolicRapBuilder,
     },
