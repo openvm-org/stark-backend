@@ -89,7 +89,7 @@ pub fn log_gkr_input_evals(
     ctx: &ProvingContext<MetalBackend>,
     l_skip: usize,
     alpha_logup: EF,
-    d_challenges: &MetalBuffer<EF>,
+    _d_challenges: &MetalBuffer<EF>,
     total_leaves: usize,
 ) -> Result<MetalBuffer<Frac<EF>>, InteractionMetalError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {

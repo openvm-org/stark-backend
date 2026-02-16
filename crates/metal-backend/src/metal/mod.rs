@@ -4,6 +4,7 @@
 //! pipeline dispatch. Each sub-module provides safe Rust wrappers around Metal kernel
 //! launches, analogous to the CUDA backend's per-file FFI bindings.
 
+
 pub mod batch_ntt_small;
 pub mod device_info;
 pub mod logup_zerocheck;

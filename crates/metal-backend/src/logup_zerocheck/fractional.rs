@@ -1,6 +1,6 @@
 use std::{array::from_fn, convert::TryInto, env, mem::transmute};
 
-use openvm_metal_common::{copy::MemCopyH2D, d_buffer::MetalBuffer};
+use openvm_metal_common::d_buffer::MetalBuffer;
 use openvm_stark_backend::{
     poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
     proof::GkrLayerClaims,
