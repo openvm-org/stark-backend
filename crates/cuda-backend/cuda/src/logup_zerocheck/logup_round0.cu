@@ -205,6 +205,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
 
     Fp is_first_mult[NUM_COSETS];
     Fp is_last_mult[NUM_COSETS];
+    Fp omega_trans[NUM_COSETS];
     Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
     Fp const omega_skip_ntt = pow(omega_skip, ntt_idx);
 
@@ -214,8 +215,13 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
     for (uint32_t c = 0; c < NUM_COSETS; c++) {
         Fp eval_point = g_coset * omega_skip_ntt;
         Fp omega = exp_power_of_2(eval_point, log_stride);
+        Fp omega_z = omega * eta;
+        if (log_height_total == 0) {
+            omega_z = Fp::one();
+        }
         is_first_mult[c] = avg_gp(omega, segment_size);
-        is_last_mult[c] = avg_gp(omega * eta, segment_size);
+        is_last_mult[c] = avg_gp(omega_z, segment_size);
+        omega_trans[c] = omega_z;
         g_coset *= g_shift; // g^(c+1) for next iteration
     }
 
@@ -251,6 +257,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
         ntt_buffer,
         {}, // is_first - updated per x_int
         {}, // is_last - updated per x_int
+        {}, // is_transition - updated per x_int
         {}, // omega_shifts - set once below
         skip_domain,
         height,
@@ -276,6 +283,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
             eval_ctx.is_first[c] = is_first_mult[c] * selectors_cube[x_int];
             eval_ctx.is_last[c] = is_last_mult[c] * selectors_cube[2 * num_x + x_int];
+            eval_ctx.is_transition[c] = omega_trans[c] - selectors_cube[2 * num_x + x_int];
         }
 
         FpExt numer_results[NUM_COSETS];
@@ -374,8 +382,12 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
     Fp const g_coset = is_identity_coset ? Fp::one() : pow(g_shift, coset_idx);
     Fp const eval_point = is_identity_coset ? omega_skip_ntt : (g_coset * omega_skip_ntt);
     Fp const omega = exp_power_of_2(eval_point, log_stride);
+    Fp omega_z = omega * eta;
+    if (log_height_total == 0) {
+        omega_z = Fp::one();
+    }
     Fp const is_first_mult = avg_gp(omega, segment_size);
-    Fp const is_last_mult = avg_gp(omega * eta, segment_size);
+    Fp const is_last_mult = avg_gp(omega_z, segment_size);
     Fp const omega_shift = is_identity_coset ? Fp::one() : pow(g_coset, ntt_idx_rev);
 
     // Intermediate buffer setup (single coset, no NUM_COSETS multiplier)
@@ -405,6 +417,7 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
         ntt_buffer,
         {Fp::zero()},  // is_first[1] - updated per x_int
         {Fp::zero()},  // is_last[1] - updated per x_int
+        {Fp::zero()},  // is_transition[1] - updated per x_int
         {omega_shift}, // omega_shifts[1]
         skip_domain,
         height,
@@ -419,6 +432,7 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
         eval_ctx.x_int = x_int;
         eval_ctx.is_first[0] = is_first_mult * selectors_cube[x_int];
         eval_ctx.is_last[0] = is_last_mult * selectors_cube[2 * num_x + x_int];
+        eval_ctx.is_transition[0] = omega_z - selectors_cube[2 * num_x + x_int];
 
         FpExt numer_results[1];
         FpExt denom_results[1];

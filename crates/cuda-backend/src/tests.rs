@@ -692,9 +692,9 @@ fn test_monomial_vs_dag_equivalence() {
     // Setup selectors (is_first, is_transition, is_last)
     let sel_height = 1 << n_lift;
     let mut sel_cols = F::zero_vec(3 * sel_height);
-    sel_cols[sel_height..2 * sel_height - 1].fill(F::ONE); // is_transition
+    // is_transition column is unused (computed from omega*z - eq_x)
     sel_cols[0] = F::ONE; // is_first
-    sel_cols[2 * sel_height + sel_height - 1] = F::ONE; // is_last
+    sel_cols[2 * sel_height + sel_height - 1] = F::ONE; // is_last (eq_x at x=1)
     let d_sels_base = sel_cols.to_device().unwrap();
 
     // Fold selectors
@@ -709,6 +709,7 @@ fn test_monomial_vs_dag_equivalence() {
     let omega = F::two_adic_generator(l);
     let is_first = eval_eq_uni_at_one(l, r_fold);
     let is_last = eval_eq_uni_at_one(l, r_fold * omega);
+    let omega_r0 = r_fold * omega;
     let d_sels_folded =
         openvm_cuda_common::d_buffer::DeviceBuffer::<EF>::with_capacity(sel_height * 3);
     unsafe {
@@ -717,7 +718,9 @@ fn test_monomial_vs_dag_equivalence() {
             d_sels_base.as_ptr(),
             is_first,
             is_last,
+            omega_r0,
             sel_height,
+            l == 0,
         )
         .unwrap();
     }

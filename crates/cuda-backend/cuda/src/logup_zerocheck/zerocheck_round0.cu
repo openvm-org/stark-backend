@@ -192,6 +192,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
 
     Fp is_first_mult[NUM_COSETS];
     Fp is_last_mult[NUM_COSETS];
+    Fp omega_trans[NUM_COSETS];
     Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
     Fp const omega_skip_ntt =
         (l_skip == 0) ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
@@ -201,8 +202,13 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
     for (uint32_t c = 0; c < NUM_COSETS; c++) {
         Fp eval_point = g_coset * omega_skip_ntt;
         Fp omega = exp_power_of_2(eval_point, log_stride);
+        Fp omega_z = omega * eta;
+        if (log_height_total == 0) {
+            omega_z = Fp::one();
+        }
         is_first_mult[c] = avg_gp(omega, segment_size);
-        is_last_mult[c] = avg_gp(omega * eta, segment_size);
+        is_last_mult[c] = avg_gp(omega_z, segment_size);
+        omega_trans[c] = omega_z;
         g_coset *= g_shift; // g^(c+2) for next iteration
     }
 
@@ -234,6 +240,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
         ntt_buffer,
         {}, // is_first - updated per x_int
         {}, // is_last - updated per x_int
+        {}, // is_transition - updated per x_int
         {}, // omega_shifts - set once below
         skip_domain,
         height,
@@ -259,6 +266,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
             eval_ctx.is_first[c] = is_first_mult[c] * selectors_cube[x_int];
             eval_ctx.is_last[c] = is_last_mult[c] * selectors_cube[2 * num_x + x_int];
+            eval_ctx.is_transition[c] = omega_trans[c] - selectors_cube[2 * num_x + x_int];
         }
 
         FpExt constraint_sums[NUM_COSETS];
@@ -313,15 +321,18 @@ __global__ void fold_selectors_round0_kernel(
     const Fp *in,
     FpExt is_first,
     FpExt is_last,
-    uint32_t num_x
+    FpExt omega_r0,
+    uint32_t num_x,
+    bool log_height_is_zero
 ) {
     size_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
     if (tidx >= num_x)
         return;
 
-    out[tidx] = is_first * in[tidx];                              // is_first
-    out[2 * num_x + tidx] = is_last * in[2 * num_x + tidx];       // is_last
-    out[num_x + tidx] = FpExt(Fp::one()) - out[2 * num_x + tidx]; // is_transition
+    out[tidx] = is_first * in[tidx];                        // is_first
+    out[2 * num_x + tidx] = is_last * in[2 * num_x + tidx]; // is_last
+    out[num_x + tidx] =
+        log_height_is_zero ? FpExt(0) : (omega_r0 - FpExt(in[2 * num_x + tidx])); // is_transition
 }
 
 // Coset-parallel kernel: grid.y = num_cosets, each block handles ONE coset.
@@ -384,8 +395,12 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
     Fp const g_coset = pow(g_shift, coset_idx + 1);
     Fp const eval_point = g_coset * omega_skip_ntt;
     Fp const omega = exp_power_of_2(eval_point, log_stride);
+    Fp omega_z = omega * eta;
+    if (log_height_total == 0) {
+        omega_z = Fp::one();
+    }
     Fp const is_first_mult = avg_gp(omega, segment_size);
-    Fp const is_last_mult = avg_gp(omega * eta, segment_size);
+    Fp const is_last_mult = avg_gp(omega_z, segment_size);
     Fp const omega_shift = pow(g_coset, ntt_idx_rev);
 
     // Intermediate buffer setup (single coset, no NUM_COSETS multiplier)
@@ -415,6 +430,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
         ntt_buffer,
         {Fp::zero()},  // is_first[1] - updated per x_int
         {Fp::zero()},  // is_last[1] - updated per x_int
+        {Fp::zero()},  // is_transition[1] - updated per x_int
         {omega_shift}, // omega_shifts[1]
         skip_domain,
         height,
@@ -429,6 +445,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
         eval_ctx.x_int = x_int;
         eval_ctx.is_first[0] = is_first_mult * selectors_cube[x_int];
         eval_ctx.is_last[0] = is_last_mult * selectors_cube[2 * num_x + x_int];
+        eval_ctx.is_transition[0] = omega_z - selectors_cube[2 * num_x + x_int];
 
         FpExt constraint_sums[1];
         acc_constraints<1, NEEDS_SHMEM>(
@@ -719,10 +736,14 @@ extern "C" int _fold_selectors_round0(
     const Fp *in,
     FpExt is_first,
     FpExt is_last,
-    uint32_t num_x
+    FpExt omega_r0,
+    uint32_t num_x,
+    bool log_height_is_zero
 ) {
     auto [grid, block] = kernel_launch_params(num_x);
-    fold_selectors_round0_kernel<<<grid, block>>>(out, in, is_first, is_last, num_x);
+    fold_selectors_round0_kernel<<<grid, block>>>(
+        out, in, is_first, is_last, omega_r0, num_x, log_height_is_zero
+    );
     return CHECK_KERNEL();
 }
 

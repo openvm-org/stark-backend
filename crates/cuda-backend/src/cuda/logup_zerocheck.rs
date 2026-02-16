@@ -343,7 +343,9 @@ extern "C" {
         input: *const F,
         is_first: EF,
         is_last: EF,
+        omega_r0: EF,
         num_x: u32,
+        log_height_is_zero: bool,
     ) -> i32;
 
     // mle.cu
@@ -1326,13 +1328,17 @@ pub unsafe fn fold_selectors_round0(
     input: *const F,
     is_first: EF,
     is_last: EF,
+    omega_r0: EF,
     num_x: usize,
+    log_height_is_zero: bool,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_fold_selectors_round0(
         out,
         input,
         is_first,
         is_last,
+        omega_r0,
         num_x as u32,
+        log_height_is_zero,
     ))
 }

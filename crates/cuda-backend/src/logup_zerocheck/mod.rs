@@ -701,7 +701,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 let n_lift = n.max(0) as usize;
                 let height = 1 << n_lift;
                 let mut cols = F::zero_vec(3 * height);
-                cols[height..2 * height - 1].fill(F::ONE); // is_transition
+                // The `is_transition` column will be filled later
                 cols[0] = F::ONE; // is_first
                 cols[2 * height + height - 1] = F::ONE; // is_last
                 let d_cols = cols.to_device().unwrap();
@@ -956,6 +956,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 let num_x = selectors_cube.height();
                 debug_assert_eq!(num_x, 1 << n.max(0));
                 debug_assert_eq!(selectors_cube.width(), 3);
+                let log_height = l_skip.checked_add_signed(n).unwrap();
                 let (l, r) = if n.is_negative() {
                     (
                         l_skip.wrapping_add_signed(n),
@@ -967,6 +968,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                 let omega = F::two_adic_generator(l);
                 let is_first = eval_eq_uni_at_one(l, r);
                 let is_last = eval_eq_uni_at_one(l, r * omega);
+                let omega_r0 = if log_height == 0 { EF::ONE } else { r * omega };
                 let folded_buf = DeviceBuffer::<EF>::with_capacity(num_x * 3);
                 unsafe {
                     fold_selectors_round0(
@@ -974,7 +976,9 @@ impl<'a> LogupZerocheckGpu<'a> {
                         selectors_cube.buffer().as_ptr(),
                         is_first,
                         is_last,
+                        omega_r0,
                         num_x,
+                        l == 0,
                     )
                     .unwrap();
                 }

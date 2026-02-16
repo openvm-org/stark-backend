@@ -21,6 +21,7 @@ template <uint32_t NUM_COSETS> struct NttEvalContext {
     Fp *__restrict__ ntt_buffer;   // shared memory for NTT scratch (only when NEEDS_SHMEM)
     Fp is_first[NUM_COSETS];       // per-coset selectors
     Fp is_last[NUM_COSETS];
+    Fp is_transition[NUM_COSETS];
     Fp omega_shifts[NUM_COSETS]; // precomputed: g^((c+1)*ntt_idx_rev)
     uint32_t skip_domain;        // 2^l_skip
     uint32_t height;             // trace height (could be < num_x * skip_domain in lifted case)
@@ -206,10 +207,9 @@ __device__ __forceinline__ void ntt_eval_dag_entry(
         }
         return;
     case SRC_IS_TRANSITION:
-        // is_transition = 1 - is_last
 #pragma unroll
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
-            results[c] = Fp::one() - ctx.is_last[c];
+            results[c] = ctx.is_transition[c];
         }
         return;
     default:
