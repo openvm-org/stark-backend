@@ -99,6 +99,63 @@ impl<F: Field> SymbolicConstraints<F> {
     }
 }
 
+pub fn max_constraint_degree_round0<F: Field>(dag: &SymbolicConstraintsDag<F>) -> usize {
+    let nodes = &dag.constraints.nodes;
+    let mut degrees: Vec<usize> = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let deg = match node {
+            SymbolicExpressionNode::Variable(var) => var.degree_multiple(),
+            SymbolicExpressionNode::IsFirstRow => 1,
+            SymbolicExpressionNode::IsLastRow => 1,
+            SymbolicExpressionNode::IsTransition => 0,
+            SymbolicExpressionNode::Constant(_) => 0,
+            SymbolicExpressionNode::Add {
+                left_idx,
+                right_idx,
+                degree_multiple: _,
+            }
+            | SymbolicExpressionNode::Sub {
+                left_idx,
+                right_idx,
+                degree_multiple: _,
+            }
+            | SymbolicExpressionNode::Mul {
+                left_idx,
+                right_idx,
+                degree_multiple: _,
+            } => {
+                let left = degrees[*left_idx];
+                let right = degrees[*right_idx];
+                if matches!(node, SymbolicExpressionNode::Mul { .. }) {
+                    left + right
+                } else {
+                    left.max(right)
+                }
+            }
+            SymbolicExpressionNode::Neg {
+                idx,
+                degree_multiple: _,
+            } => degrees[*idx],
+        };
+        degrees.push(deg);
+    }
+
+    let mut max_degree = 0;
+    for &idx in &dag.constraints.constraint_idx {
+        max_degree = max_degree.max(degrees[idx]);
+    }
+    for interaction in &dag.interactions {
+        for &idx in interaction
+            .message
+            .iter()
+            .chain(iter::once(&interaction.count))
+        {
+            max_degree = max_degree.max(degrees[idx]);
+        }
+    }
+    max_degree
+}
+
 #[instrument(name = "evaluate constraints symbolically", skip_all, level = "debug")]
 pub fn get_symbolic_builder<F, R>(
     rap: &R,

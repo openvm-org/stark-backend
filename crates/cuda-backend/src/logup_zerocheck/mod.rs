@@ -20,7 +20,7 @@ use openvm_cuda_common::{
     memory_manager::MemTracker,
 };
 use openvm_stark_backend::{
-    air_builders::symbolic::SymbolicConstraints,
+    air_builders::symbolic::{max_constraint_degree_round0, SymbolicConstraints},
     calculate_n_logup,
     dft::Radix2BowersSerial,
     p3_matrix::dense::RowMajorMatrix,
@@ -214,9 +214,10 @@ pub fn prove_zerocheck_and_logup_gpu(
 
     let sp_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
     let s_0_cpu_span = info_span!("s'_0 -> s_0 cpu interpolations").entered();
-    let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree);
-    let s_deg = constraint_degree + 1;
-    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
+    let constraint_degree_round0 = prover.constraint_degree_round0;
+    let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree_round0);
+    let s_deg_round0 = constraint_degree_round0 + 1;
+    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg_round0);
     let large_uni_domain = (s_0_deg + 1).next_power_of_two();
     let dft = Radix2BowersSerial;
     let s_0_logup_polys = {
@@ -332,6 +333,7 @@ pub fn prove_zerocheck_and_logup_gpu(
     // `s_round` is degree `s_deg` so we evaluate it at `0, ..., =s_deg`. The prover skips
     // evaluation at `0` because the verifier can infer it from the previous round's
     // `s_{round-1}(r)` claim. The degree is constraint_degree + 1, where + 1 is from eq term
+    let s_deg = constraint_degree + 1;
     let mle_rounds_span =
         info_span!("prover.rap_constraints.mle_rounds", phase = "prover").entered();
     debug!(%s_deg);
@@ -411,6 +413,8 @@ pub struct LogupZerocheckGpu<'a> {
 
     pub interactions_layout: StackedLayout,
     pub constraint_degree: usize,
+    pub constraint_degree_round0: usize,
+    constraint_degree_round0_per_air: Vec<usize>,
     n_per_trace: Vec<isize>,
     max_num_constraints: usize,
     pub monomial_num_y_threshold: u32,
@@ -479,6 +483,17 @@ impl<'a> LogupZerocheckGpu<'a> {
         let num_airs_present = ctx.per_trace.len();
 
         let constraint_degree = pk.max_constraint_degree;
+        let constraint_degree_round0_per_air = pk
+            .per_air
+            .iter()
+            .map(|air_pk| max_constraint_degree_round0(&air_pk.vk.symbolic_constraints))
+            .collect_vec();
+        let constraint_degree_round0 = constraint_degree_round0_per_air
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        debug_assert!(constraint_degree_round0 <= constraint_degree);
 
         let max_interaction_length = pk
             .per_air
@@ -537,6 +552,8 @@ impl<'a> LogupZerocheckGpu<'a> {
             d_omega_skip_pows,
             interactions_layout,
             constraint_degree,
+            constraint_degree_round0,
+            constraint_degree_round0_per_air,
             n_per_trace,
             max_num_constraints,
             sm_count,
@@ -736,6 +753,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             let single_air_constraints =
                 SymbolicConstraints::from(&single_pk.vk.symbolic_constraints);
             let local_constraint_deg = single_pk.vk.max_constraint_degree as usize;
+            let local_constraint_deg_round0 = self.constraint_degree_round0_per_air[*air_idx];
             debug_assert_eq!(
                 single_air_constraints.max_constraint_degree(),
                 local_constraint_deg
@@ -745,8 +763,9 @@ impl<'a> LogupZerocheckGpu<'a> {
                 "Max constraint degree ({local_constraint_deg}) of AIR {air_idx} exceeds the global maximum {}",
                 self.constraint_degree
             );
+            debug_assert!(local_constraint_deg_round0 <= local_constraint_deg);
 
-            let log_large_domain = log2_ceil_usize(local_constraint_deg << l_skip);
+            let log_large_domain = log2_ceil_usize(local_constraint_deg_round0 << l_skip);
             let omega_root = F::two_adic_generator(log_large_domain);
 
             assert!(!xi.is_empty(), "xi vector must not be empty");
@@ -765,7 +784,7 @@ impl<'a> LogupZerocheckGpu<'a> {
             // local_constraint_deg = 0 means no constraints. The only way that linear constraints
             // on trace polynomials could vanish on 2^l_skip points is if the constraint polynomial
             // is identically zero. Thus for local_constraint_deg = 0 or 1, we must have `s'_0 = 0`.
-            let num_cosets_zc = local_constraint_deg.saturating_sub(1);
+            let num_cosets_zc = local_constraint_deg_round0.saturating_sub(1);
             let sum_buffer = evaluate_round0_constraints_gpu(
                 single_pk,
                 selectors_cube.buffer(),
@@ -801,7 +820,7 @@ impl<'a> LogupZerocheckGpu<'a> {
                     )
                 };
                 // sp_0 = (Z^{2^l_skip} - 1) * q
-                let sp_0_deg = sumcheck_round0_deg(l_skip, local_constraint_deg);
+                let sp_0_deg = sumcheck_round0_deg(l_skip, local_constraint_deg_round0);
                 let coeffs = (0..=sp_0_deg)
                     .map(|i| {
                         let mut c = -*q.coeffs().get(i).unwrap_or(&EF::ZERO);

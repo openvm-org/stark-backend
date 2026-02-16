@@ -9,7 +9,9 @@ use thiserror::Error;
 use tracing::{debug, instrument};
 
 use crate::{
-    air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
+    air_builders::symbolic::{
+        max_constraint_degree_round0, symbolic_expression::SymbolicEvaluator, SymbolicConstraints,
+    },
     calculate_n_logup,
     keygen::types::MultiStarkVerifyingKey0,
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
@@ -143,10 +145,16 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
 
     let s_deg = mvk.params.max_constraint_degree + 1;
     let r_0 = transcript.sample_ext();
+    let max_constraint_degree_round0 = mvk
+        .per_air
+        .iter()
+        .map(|vk| max_constraint_degree_round0(&vk.symbolic_constraints))
+        .max()
+        .unwrap();
     debug!(round = 0, r_round = %r_0);
     assert_eq!(
         univariate_round_coeffs.len(),
-        (mvk.max_constraint_degree() + 1) * ((1 << l_skip) - 1) + 1
+        (max_constraint_degree_round0 + 1) * ((1 << l_skip) - 1) + 1
     );
     let s_0 = UnivariatePoly::new(univariate_round_coeffs.clone());
     let sum_univ_domain_s_0 = s_0

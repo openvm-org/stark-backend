@@ -331,8 +331,7 @@ __global__ void fold_selectors_round0_kernel(
 
     out[tidx] = is_first * in[tidx];                        // is_first
     out[2 * num_x + tidx] = is_last * in[2 * num_x + tidx]; // is_last
-    out[num_x + tidx] =
-        log_height_is_zero ? FpExt(0) : (omega_r0 - FpExt(in[2 * num_x + tidx])); // is_transition
+    out[num_x + tidx] = log_height_is_zero ? FpExt(0) : (omega_r0 - FpExt(in[2 * num_x + tidx])); // is_transition
 }
 
 // Coset-parallel kernel: grid.y = num_cosets, each block handles ONE coset.
@@ -445,7 +444,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
         eval_ctx.x_int = x_int;
         eval_ctx.is_first[0] = is_first_mult * selectors_cube[x_int];
         eval_ctx.is_last[0] = is_last_mult * selectors_cube[2 * num_x + x_int];
-        eval_ctx.is_transition[0] = omega_z - selectors_cube[2 * num_x + x_int];
+        eval_ctx.is_transition[0] = (height == 0) ? Fp(0) : (omega_z - selectors_cube[2 * num_x + x_int]);
 
         FpExt constraint_sums[1];
         acc_constraints<1, NEEDS_SHMEM>(
@@ -741,9 +740,7 @@ extern "C" int _fold_selectors_round0(
     bool log_height_is_zero
 ) {
     auto [grid, block] = kernel_launch_params(num_x);
-    fold_selectors_round0_kernel<<<grid, block>>>(
-        out, in, is_first, is_last, omega_r0, num_x, log_height_is_zero
-    );
+    fold_selectors_round0_kernel<<<grid, block>>>(out, in, is_first, is_last, omega_r0, num_x, log_height_is_zero);
     return CHECK_KERNEL();
 }
 
