@@ -9,9 +9,7 @@ use thiserror::Error;
 use tracing::{debug, instrument};
 
 use crate::{
-    air_builders::symbolic::{
-        max_constraint_degree_round0, symbolic_expression::SymbolicEvaluator, SymbolicConstraints,
-    },
+    air_builders::symbolic::{symbolic_expression::SymbolicEvaluator, SymbolicConstraints},
     calculate_n_logup,
     keygen::types::MultiStarkVerifyingKey0,
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
@@ -148,7 +146,7 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
     let max_constraint_degree_round0 = mvk
         .per_air
         .iter()
-        .map(|vk| max_constraint_degree_round0(&vk.symbolic_constraints))
+        .map(|vk| vk.max_uni_constraint_degree as usize)
         .max()
         .unwrap();
     debug!(round = 0, r_round = %r_0);

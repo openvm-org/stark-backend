@@ -9,6 +9,7 @@ use tracing::instrument;
 use crate::{
     air_builders::symbolic::{
         get_symbolic_builder,
+        max_constraint_degree_round0,
         symbolic_variable::{Entry, SymbolicVariable},
         SymbolicConstraintsDag, SymbolicExpressionNode, SymbolicRapBuilder,
     },
@@ -240,6 +241,7 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilder<SC> {
         } = self;
 
         let dag = SymbolicConstraintsDag::from(symbolic_constraints);
+        let max_uni_constraint_degree = max_constraint_degree_round0(&dag);
         let max_rotation = dag.constraints.max_rotation();
         debug_assert!(max_rotation <= 1);
         let need_rot = max_rotation == 1;
@@ -258,6 +260,9 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilder<SC> {
             max_constraint_degree: constraint_degree
                 .try_into()
                 .expect("constraint degree should fit in u8"),
+            max_uni_constraint_degree: max_uni_constraint_degree
+                .try_into()
+                .expect("univariate constraint degree should fit in u8"),
             is_required: self.is_required,
             unused_variables,
         };

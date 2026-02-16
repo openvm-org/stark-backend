@@ -25,6 +25,7 @@ pub struct EvalHelper<'a, F> {
     // TODO: skip rotation if vk dictates it is never used
     pub needs_next: bool,
     pub constraint_degree: u8,
+    pub max_uni_constraint_degree: u8,
 }
 
 impl<'a, F: TwoAdicField> EvalHelper<'a, F> {

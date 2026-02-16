@@ -106,6 +106,8 @@ pub struct StarkVerifyingKey<F, Digest> {
     pub symbolic_constraints: SymbolicConstraintsDag<F>,
     /// The maximum degree of any polynomial (constraint or interaction) for this AIR.
     pub max_constraint_degree: u8,
+    /// The maximum degree of any univariate constraint used in round 0.
+    pub max_uni_constraint_degree: u8,
     /// True means this AIR must have non-empty trace.
     pub is_required: bool,
     /// Symbolic variables referenced unreferenced by the AIR.

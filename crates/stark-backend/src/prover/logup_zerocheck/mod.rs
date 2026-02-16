@@ -67,6 +67,12 @@ where
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
+    let constraint_degree_round0 = mpk
+        .per_air
+        .iter()
+        .map(|air_pk| air_pk.vk.max_uni_constraint_degree as usize)
+        .max()
+        .unwrap_or(0);
     let num_traces = ctx.per_trace.len();
 
     // Traces are sorted
@@ -210,9 +216,10 @@ where
     debug!(%lambda);
 
     let sp_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
-    let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree);
+    let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree_round0);
+    let s_deg_round0 = constraint_degree_round0 + 1;
+    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg_round0);
     let s_deg = constraint_degree + 1;
-    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
     let large_uni_domain = (s_0_deg + 1).next_power_of_two();
     let dft = Radix2BowersSerial;
     let s_0_logup_polys = {

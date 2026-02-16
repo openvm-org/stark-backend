@@ -20,7 +20,7 @@ use openvm_cuda_common::{
     memory_manager::MemTracker,
 };
 use openvm_stark_backend::{
-    air_builders::symbolic::{max_constraint_degree_round0, SymbolicConstraints},
+    air_builders::symbolic::SymbolicConstraints,
     calculate_n_logup,
     dft::Radix2BowersSerial,
     p3_matrix::dense::RowMajorMatrix,
@@ -486,7 +486,7 @@ impl<'a> LogupZerocheckGpu<'a> {
         let constraint_degree_round0_per_air = pk
             .per_air
             .iter()
-            .map(|air_pk| max_constraint_degree_round0(&air_pk.vk.symbolic_constraints))
+            .map(|air_pk| air_pk.vk.max_uni_constraint_degree as usize)
             .collect_vec();
         let constraint_degree_round0 = constraint_degree_round0_per_air
             .iter()

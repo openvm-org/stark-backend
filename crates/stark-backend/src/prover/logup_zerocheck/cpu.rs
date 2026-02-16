@@ -130,6 +130,7 @@ where
                     .chain(iter::once(trace_ctx.common_main.as_view().into()))
                     .collect_vec();
                 let constraint_degree = pk.vk.max_constraint_degree;
+                let max_uni_constraint_degree = pk.vk.max_uni_constraint_degree;
                 // Scan constraints to see if we need `next` row and also check index bounds
                 // so we don't need to check them per row.
                 let mut rotation = 0;
@@ -167,6 +168,7 @@ where
                     preprocessed_trace,
                     needs_next,
                     constraint_degree,
+                    max_uni_constraint_degree,
                 }
             })
             .collect(); // end of preparation / loading of constraints
@@ -319,7 +321,7 @@ where
                 // q(Z) by interpolating evaluations on (d - 1) * 2^l_skip points. For computation
                 // efficiency, we choose these to be (d - 1) cosets of D. To avoid divide by zero,
                 // we avoid the coset equal to the subgroup D itself.
-                let constraint_deg = helper.constraint_degree as usize;
+                let constraint_deg = helper.max_uni_constraint_degree as usize;
                 if constraint_deg == 0 {
                     return UnivariatePoly(vec![]);
                 }
