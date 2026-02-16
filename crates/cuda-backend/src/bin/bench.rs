@@ -42,6 +42,7 @@ fn bench_fractional_sumcheck() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(clippy::type_complexity)]
 const BENCHMARKS: &[(&str, fn() -> Result<(), Box<dyn std::error::Error>>)] =
     &[("fractional-sumcheck", bench_fractional_sumcheck)];
 
