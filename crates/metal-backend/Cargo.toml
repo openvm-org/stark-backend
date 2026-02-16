@@ -1,0 +1,49 @@
+[package]
+name = "openvm-metal-backend"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "OpenVM Metal prover backend for the SWIRL proof system"
+
+[dependencies]
+openvm-stark-backend.workspace = true
+openvm-stark-sdk.workspace = true
+openvm-metal-common = { path = "../metal-common" }
+
+metal = "0.29"
+objc = "0.2"
+
+itertools.workspace = true
+derive-new.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+getset.workspace = true
+rustc-hash.workspace = true
+rand.workspace = true
+
+# Plonky3
+p3-field = { workspace = true }
+p3-baby-bear = { workspace = true }
+p3-dft = { workspace = true }
+p3-util = { workspace = true }
+p3-symmetric = { workspace = true }
+
+[build-dependencies]
+glob.workspace = true
+
+[dev-dependencies]
+openvm-stark-backend = { workspace = true, features = ["test-utils"] }
+p3-keccak-air.workspace = true
+eyre.workspace = true
+test-case.workspace = true
+
+[features]
+default = []
+test-utils = ["openvm-stark-backend/test-utils"]
+
+[[test]]
+name = "ntt_roundtrip"
+harness = true
+
+[[example]]
+name = "keccakf"

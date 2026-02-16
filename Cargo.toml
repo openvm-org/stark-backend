@@ -15,6 +15,8 @@ members = [
     "crates/cuda-common",
     "crates/cuda-builder",
     "crates/cuda-backend",
+    "crates/metal-common",
+    "crates/metal-backend",
     "benchmarks/fields"
 ]
 # Only these build by default
@@ -68,6 +70,8 @@ openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
 openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
 openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
+openvm-metal-common = { path = "crates/metal-common", default-features = false }
+openvm-metal-backend = { path = "crates/metal-backend", default-features = false }
 
 # Plonky3 - we pin the exact version since this dependency is security critical
 p3-air = { version = "=0.4.1", default-features = false }
