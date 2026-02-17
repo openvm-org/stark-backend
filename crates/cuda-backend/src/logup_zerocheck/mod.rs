@@ -162,7 +162,7 @@ pub fn prove_zerocheck_and_logup_gpu(
         .mem
         .emit_metrics_with_label("prover.before_gkr_input_evals");
     prover.mem.reset_peak();
-    let inputs = if has_interactions {
+    let (inputs, alpha) = if has_interactions {
         log_gkr_input_evals(
             &prover.trace_interactions,
             mpk,
@@ -174,7 +174,7 @@ pub fn prove_zerocheck_and_logup_gpu(
         )
         .expect("failed to evaluate interactions on device")
     } else {
-        DeviceBuffer::new()
+        (DeviceBuffer::new(), EF::ZERO)
     };
     // Set memory limit for batch MLE based on inputs buffer size
     prover.gkr_mem_contribution = inputs.len() * std::mem::size_of::<Frac<EF>>();
@@ -192,7 +192,7 @@ pub fn prove_zerocheck_and_logup_gpu(
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
     let (frac_sum_proof, mut xi) =
-        fractional_sumcheck_gpu(transcript, inputs, true, &mut prover.mem)
+        fractional_sumcheck_gpu(transcript, inputs, alpha, true, &mut prover.mem)
             .expect("failed to run fractional sumcheck on GPU");
     while xi.len() != l_skip + n_global {
         xi.push(transcript.sample_ext());
