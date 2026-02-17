@@ -152,7 +152,7 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
     debug!(round = 0, r_round = %r_0);
     assert_eq!(
         univariate_round_coeffs.len(),
-        (max_constraint_degree_round0 + 1) * ((1 << l_skip) - 1) + 1
+        (max_constraint_degree_round0 + 1) * ((1 << l_skip) - 1) + 2
     );
     let s_0 = UnivariatePoly::new(univariate_round_coeffs.clone());
     let sum_univ_domain_s_0 = s_0

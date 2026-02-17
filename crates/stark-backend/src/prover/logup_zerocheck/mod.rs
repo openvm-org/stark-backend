@@ -216,9 +216,10 @@ where
     debug!(%lambda);
 
     let sp_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
-    let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree_round0);
+    let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree_round0) + 1; // +1 for linear
+                                                                              // IsTransition
     let s_deg_round0 = constraint_degree_round0 + 1;
-    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg_round0);
+    let s_0_deg = sumcheck_round0_deg(l_skip, s_deg_round0) + 1; // +1 for linear IsTransition
     let s_deg = constraint_degree + 1;
     let large_uni_domain = (s_0_deg + 1).next_power_of_two();
     let dft = Radix2BowersSerial;

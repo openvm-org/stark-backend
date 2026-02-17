@@ -420,7 +420,7 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         .max()
         .unwrap() as usize
         + 1)
-        * ((1 << l_skip) - 1);
+        * ((1 << l_skip) - 1) + 1;
     if batch_proof.numerator_term_per_air.len() != num_airs_present {
         return ProofShapeError::invalid_batch_constraint(
             BatchProofShapeError::InvalidNumeratorTerms {
