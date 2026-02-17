@@ -13,8 +13,7 @@ use tracing::instrument;
 use super::errors::InteractionGpuError;
 use crate::{
     cuda::logup_zerocheck::{
-        frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
-        logup_gkr_input_eval,
+        frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp, logup_gkr_input_eval,
     },
     prelude::{EF, F},
     GpuBackend,

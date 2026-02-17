@@ -526,10 +526,8 @@ pub fn fractional_sumcheck_gpu(
                 use crate::cuda::logup_zerocheck::frac_add_alpha;
                 let half = total_leaves / 2;
                 let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
-                let second_half_buf = DeviceBuffer::<Frac<EF>>::from_raw_parts(
-                    second_half_ptr.add(half),
-                    half,
-                );
+                let second_half_buf =
+                    DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
                 frac_add_alpha(&second_half_buf, alpha)
                     .map_err(|e| FractionalSumcheckError::SegmentTree(e.into()))?;
                 std::mem::forget(second_half_buf);

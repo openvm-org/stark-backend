@@ -5,8 +5,8 @@ use openvm_cuda_backend::{
     prelude::EF,
     sponge::DuplexSpongeGpu,
 };
-use p3_field::PrimeCharacteristicRing;
 use openvm_cuda_common::copy::MemCopyD2D;
+use p3_field::PrimeCharacteristicRing;
 
 fn parse_usize(var: &str, default: usize) -> usize {
     env::var(var)
