@@ -2,9 +2,11 @@ use std::{env, process};
 
 use openvm_cuda_backend::{
     logup_zerocheck::{fractional_sumcheck_gpu, make_synthetic_leaves},
+    prelude::EF,
     sponge::DuplexSpongeGpu,
 };
 use openvm_cuda_common::copy::MemCopyD2D;
+use p3_field::PrimeCharacteristicRing;
 
 fn parse_usize(var: &str, default: usize) -> usize {
     env::var(var)
@@ -32,7 +34,7 @@ fn bench_fractional_sumcheck() -> Result<(), Box<dyn std::error::Error>> {
 
         openvm_cuda_common::stream::current_stream_sync().expect("sync before timing");
         let t0 = std::time::Instant::now();
-        let _ = fractional_sumcheck_gpu(&mut transcript, leaves, false, &mut mem)?;
+        let _ = fractional_sumcheck_gpu(&mut transcript, leaves, EF::ZERO, false, &mut mem)?;
         openvm_cuda_common::stream::current_stream_sync().expect("sync after timing");
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
 
