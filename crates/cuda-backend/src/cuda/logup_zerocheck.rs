@@ -98,7 +98,13 @@ pub struct LogupMonomialCtx {
 
 extern "C" {
     // gkr.cu
-    fn _frac_build_tree_layer(layer: *mut Frac<EF>, layer_size: usize, revert: bool) -> i32;
+    fn _frac_build_tree_layer(
+        layer: *mut Frac<EF>,
+        layer_size: usize,
+        revert: bool,
+        alpha: EF,
+        apply_alpha: bool,
+    ) -> i32;
 
     pub fn _frac_compute_round_temp_buffer_size(stride: u32) -> u32;
 
@@ -523,12 +529,16 @@ pub unsafe fn frac_build_tree_layer(
     layer: &mut DeviceBuffer<Frac<EF>>,
     layer_size: usize,
     revert: bool,
+    alpha: EF,
+    apply_alpha: bool,
 ) -> Result<(), CudaError> {
     debug_assert!(layer.len() >= layer_size);
     CudaError::from_result(_frac_build_tree_layer(
         layer.as_mut_ptr(),
         layer_size,
         revert,
+        alpha,
+        apply_alpha,
     ))
 }
 
