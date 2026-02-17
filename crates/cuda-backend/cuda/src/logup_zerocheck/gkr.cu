@@ -43,6 +43,9 @@ __global__ void frac_build_tree_layer_kernel(
         lhs_val.q = lhs_val.q + alpha;
         rhs_val.q = rhs_val.q + alpha;
 
+        // Save alpha-applied rhs_val before combining (for second half write-back)
+        FracExt rhs_val_with_alpha = rhs_val;
+
         if constexpr (revert) {
             frac_unadd_inplace(lhs_val, rhs_val);
         } else {
@@ -50,6 +53,7 @@ __global__ void frac_build_tree_layer_kernel(
         }
 
         layer[idx] = lhs_val;
+        layer[idx | half] = rhs_val_with_alpha;  // Write back alpha-applied value to second half
     } else {
         // Original fast path: use references for in-place modification
         FracExt &lhs = layer[idx];

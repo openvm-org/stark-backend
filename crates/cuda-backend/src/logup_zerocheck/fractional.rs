@@ -518,19 +518,9 @@ pub fn fractional_sumcheck_gpu(
     for i in 0..total_rounds {
         unsafe {
             if i == 0 {
-                // Fuse alpha into first tree layer (first half only)
+                // Fuse alpha into first tree layer (applies to both halves)
                 frac_build_tree_layer(&mut layer, total_leaves >> i, false, alpha, true)
                     .map_err(FractionalSumcheckError::SegmentTree)?;
-
-                // Apply alpha to second half (needed for sumcheck revert operations)
-                use crate::cuda::logup_zerocheck::frac_add_alpha;
-                let half = total_leaves / 2;
-                let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
-                let second_half_buf =
-                    DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
-                frac_add_alpha(&second_half_buf, alpha)
-                    .map_err(|e| FractionalSumcheckError::SegmentTree(e.into()))?;
-                std::mem::forget(second_half_buf);
             } else {
                 frac_build_tree_layer(&mut layer, total_leaves >> i, false, EF::ZERO, false)
                     .map_err(FractionalSumcheckError::SegmentTree)?;
@@ -1147,6 +1137,7 @@ pub fn make_synthetic_leaves(n: usize) -> Result<DeviceBuffer<Frac<EF>>, Fractio
 #[cfg(test)]
 mod tests {
     use openvm_cuda_common::{memory_manager::MemTracker, stream::current_stream_sync};
+    use p3_field::PrimeCharacteristicRing;
 
     use super::{
         fractional_sumcheck_gpu, make_synthetic_leaves, DuplexSpongeGpu, FractionalSumcheckError,
@@ -1169,7 +1160,7 @@ mod tests {
         let mut transcript = DuplexSpongeGpu::default();
         let leaves = make_synthetic_leaves(n)?;
         let mut mem = MemTracker::start("test.precompute_m");
-        let result = fractional_sumcheck_gpu(&mut transcript, leaves, false, &mut mem)?;
+        let result = fractional_sumcheck_gpu(&mut transcript, leaves, EF::ZERO, false, &mut mem)?;
         current_stream_sync().expect("sync");
         Ok(result)
     }
