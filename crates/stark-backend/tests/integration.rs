@@ -786,6 +786,39 @@ fn test_interaction_trace_height_constraints() {
     );
 }
 
+/// When all count_weight values are <= 1, per-bus constraints are implied by the global
+/// constraint and should be removed during minimization.
+#[test]
+fn test_trace_height_constraints_implied_removal() {
+    let log_trace_degree = 3;
+    let n = 1usize << log_trace_degree;
+    let sels: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+    let fib_air = FibonacciSelectorAir::new(sels, true);
+    // Default count_weight is 0 for DummyInteractionAir
+    let sender_air = DummyInteractionAir::new(1, true, 0);
+    let sender_air_2 = DummyInteractionAir::new(1, true, 1);
+
+    let engine = test_engine_small();
+    let airs: Vec<AirRef<SC>> = vec![
+        Arc::new(fib_air),
+        Arc::new(sender_air),
+        Arc::new(sender_air_2),
+    ];
+    let (_pk, vk) = engine.keygen(&airs);
+
+    // Per-bus coefficients are component-wise <= global coefficients, and
+    // bus threshold (base_order) >= global threshold (max_interaction_count),
+    // so all per-bus constraints are implied by the global one.
+    assert_eq!(vk.inner.trace_height_constraints.len(), 1);
+    assert_eq!(
+        vk.inner.trace_height_constraints[0],
+        LinearConstraint {
+            coefficients: vec![1, 1, 1],
+            threshold: engine.params().logup.max_interaction_count,
+        }
+    );
+}
+
 #[test]
 fn test_interaction_multi_rows_neg() {
     setup_tracing();
