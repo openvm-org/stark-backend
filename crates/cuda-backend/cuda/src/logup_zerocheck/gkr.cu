@@ -839,6 +839,13 @@ __global__ void frac_vector_scalar_multiply_kernel(
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
+template <bool revert, bool apply_alpha>
+int launch_frac_build_tree_layer(FracExt *layer, size_t layer_size, FpExt alpha) {
+    auto [grid, block] = kernel_launch_params(layer_size);
+    frac_build_tree_layer_kernel<revert, apply_alpha><<<grid, block>>>(layer, layer_size, alpha);
+    return CHECK_KERNEL();
+}
+
 extern "C" int _frac_build_tree_layer(
     FracExt *layer,
     size_t layer_size,
@@ -852,23 +859,9 @@ extern "C" int _frac_build_tree_layer(
     assert(layer_size % 2 == 0);
     layer_size /= 2;
 
-    auto [grid, block] = kernel_launch_params(layer_size);
-
-    // Dispatch to appropriate kernel instantiation based on revert and apply_alpha flags
-    if (revert) {
-        if (apply_alpha) {
-            frac_build_tree_layer_kernel<true, true><<<grid, block>>>(layer, layer_size, alpha);
-        } else {
-            frac_build_tree_layer_kernel<true, false><<<grid, block>>>(layer, layer_size);
-        }
-    } else {
-        if (apply_alpha) {
-            frac_build_tree_layer_kernel<false, true><<<grid, block>>>(layer, layer_size, alpha);
-        } else {
-            frac_build_tree_layer_kernel<false, false><<<grid, block>>>(layer, layer_size);
-        }
-    }
-    return CHECK_KERNEL();
+    return DISPATCH_BOOL_PAIR(
+        launch_frac_build_tree_layer, revert, apply_alpha, layer, layer_size, alpha
+    );
 }
 
 inline uint32_t min_blocks_target_for_device(uint32_t blocks_per_sm, uint32_t fallback_blocks) {
