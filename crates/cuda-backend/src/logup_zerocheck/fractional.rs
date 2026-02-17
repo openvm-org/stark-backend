@@ -518,9 +518,19 @@ pub fn fractional_sumcheck_gpu(
     for i in 0..total_rounds {
         unsafe {
             if i == 0 {
-                // Fuse alpha into first tree layer (applies to both halves)
+                // Fuse alpha into first tree layer (first half only)
                 frac_build_tree_layer(&mut layer, total_leaves >> i, false, alpha, true)
                     .map_err(FractionalSumcheckError::SegmentTree)?;
+
+                // Apply alpha to second half (needed for sumcheck revert operations)
+                use crate::cuda::logup_zerocheck::frac_add_alpha;
+                let half = total_leaves / 2;
+                let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
+                let second_half_buf =
+                    DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
+                frac_add_alpha(&second_half_buf, alpha)
+                    .map_err(|e| FractionalSumcheckError::SegmentTree(e.into()))?;
+                std::mem::forget(second_half_buf);
             } else {
                 frac_build_tree_layer(&mut layer, total_leaves >> i, false, EF::ZERO, false)
                     .map_err(FractionalSumcheckError::SegmentTree)?;
