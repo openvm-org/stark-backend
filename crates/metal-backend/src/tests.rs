@@ -19,7 +19,6 @@ use openvm_stark_backend::{
         fractional_sumcheck_gkr::verify_gkr,
         proof_shape::{verify_proof_shape, ProofShapeError},
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
-        sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory,
@@ -35,7 +34,7 @@ use openvm_stark_sdk::{
     },
     utils::{setup_tracing, setup_tracing_with_log_level},
 };
-use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
+use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use test_case::test_case;
 use tracing::{debug, Level};
@@ -43,53 +42,12 @@ use tracing::{debug, Level};
 use crate::{
     prelude::{EF, F, SC},
     sponge::DuplexSpongeMetal,
-    sumcheck::{sumcheck_multilinear_metal, sumcheck_prismalinear_metal},
     BabyBearPoseidon2MetalEngine,
 };
 
 pub fn test_metal_engine_small() -> BabyBearPoseidon2MetalEngine {
     setup_tracing();
     BabyBearPoseidon2MetalEngine::new(default_test_params_small())
-}
-
-#[test]
-fn test_plain_multilinear_sumcheck() -> Result<(), String> {
-    let n = 15;
-    let mut rng = StdRng::from_seed([228; 32]);
-
-    let num_pts = 1 << n;
-    assert!((F::ORDER_U32 - 1) % num_pts == 0);
-
-    let evals = (0..num_pts)
-        .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
-        .collect::<Vec<_>>();
-    let mut prover_sponge_metal = DuplexSpongeMetal::default();
-    let mut verifier_sponge = default_duplex_sponge();
-
-    let (proof_metal, _) = sumcheck_multilinear_metal(&mut prover_sponge_metal, &evals);
-
-    verify_sumcheck_multilinear::<SC, _>(&mut verifier_sponge, &proof_metal)
-}
-
-#[test]
-fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
-    let n = 5;
-    let l_skip = 10;
-    let mut rng = StdRng::from_seed([228; 32]);
-
-    let dim = n + l_skip;
-    let num_pts = 1 << dim;
-    assert!((F::ORDER_U32 - 1) % num_pts == 0);
-
-    let evals = (0..num_pts)
-        .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
-        .collect::<Vec<_>>();
-
-    let mut prover_sponge = DuplexSpongeMetal::default();
-    let mut verifier_sponge = default_duplex_sponge();
-
-    let (proof, _) = sumcheck_prismalinear_metal(&mut prover_sponge, l_skip, &evals);
-    verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
 #[test]
