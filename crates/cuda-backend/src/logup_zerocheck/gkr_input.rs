@@ -13,7 +13,7 @@ use tracing::instrument;
 use super::errors::InteractionGpuError;
 use crate::{
     cuda::logup_zerocheck::{
-        frac_add_alpha, frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
+        frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
         logup_gkr_input_eval,
     },
     prelude::{EF, F},
@@ -84,7 +84,7 @@ pub fn collect_trace_interactions(
 }
 
 /// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
-/// Returns separate buffers for numerators (F) and denominators (EF) to save memory.
+/// Returns leaves buffer (WITHOUT alpha applied) and alpha value to be applied in first tree layer.
 #[instrument(name = "prover.rap_constraints.logup_gkr.input_evals", skip_all)]
 pub fn log_gkr_input_evals(
     trace_interactions: &[Option<TraceInteractionMeta>],
@@ -94,9 +94,9 @@ pub fn log_gkr_input_evals(
     alpha_logup: EF,
     d_challenges: &DeviceBuffer<EF>,
     total_leaves: usize,
-) -> Result<DeviceBuffer<Frac<EF>>, InteractionGpuError> {
+) -> Result<(DeviceBuffer<Frac<EF>>, EF), InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
-        return Ok(DeviceBuffer::new());
+        return Ok((DeviceBuffer::new(), alpha_logup));
     }
 
     let leaves = DeviceBuffer::<Frac<EF>>::with_capacity(total_leaves);
@@ -215,11 +215,7 @@ pub fn log_gkr_input_evals(
         }
     }
 
-    if !leaves.is_empty() {
-        unsafe {
-            frac_add_alpha(&leaves, alpha_logup)?;
-        }
-    }
-
-    Ok(leaves)
+    // NOTE: alpha is NO LONGER applied here - it will be fused into the first tree layer
+    // in fractional_sumcheck_gpu for better performance (eliminates one memory pass)
+    Ok((leaves, alpha_logup))
 }

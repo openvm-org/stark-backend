@@ -476,6 +476,7 @@ fn do_fused_sumcheck_round_inplace(
 pub fn fractional_sumcheck_gpu(
     transcript: &mut DuplexSpongeGpu,
     leaves: DeviceBuffer<Frac<EF>>,
+    alpha: EF,
     assert_zero: bool,
     mem: &mut MemTracker,
 ) -> Result<(FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
@@ -513,10 +514,29 @@ pub fn fractional_sumcheck_gpu(
         .map_err(FractionalSumcheckError::BitReversal)?;
     }
 
+    // Build segment tree with fused alpha application
     for i in 0..total_rounds {
         unsafe {
-            frac_build_tree_layer(&mut layer, total_leaves >> i, false)
-                .map_err(FractionalSumcheckError::SegmentTree)?;
+            if i == 0 {
+                // Fuse alpha into first tree layer (first half only)
+                frac_build_tree_layer(&mut layer, total_leaves >> i, false, alpha, true)
+                    .map_err(FractionalSumcheckError::SegmentTree)?;
+
+                // Apply alpha to second half (needed for sumcheck revert operations)
+                use crate::cuda::logup_zerocheck::frac_add_alpha;
+                let half = total_leaves / 2;
+                let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
+                let second_half_buf = DeviceBuffer::<Frac<EF>>::from_raw_parts(
+                    second_half_ptr.add(half),
+                    half,
+                );
+                frac_add_alpha(&second_half_buf, alpha)
+                    .map_err(|e| FractionalSumcheckError::SegmentTree(e.into()))?;
+                std::mem::forget(second_half_buf);
+            } else {
+                frac_build_tree_layer(&mut layer, total_leaves >> i, false, EF::ZERO, false)
+                    .map_err(FractionalSumcheckError::SegmentTree)?;
+            }
         }
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
@@ -524,7 +544,8 @@ pub fn fractional_sumcheck_gpu(
     let mut copy_scratch = DeviceBuffer::<Frac<EF>>::with_capacity(1);
     let root = copy_from_device(&layer, 0, &mut copy_scratch)?;
     unsafe {
-        frac_build_tree_layer(&mut layer, 2, true).map_err(FractionalSumcheckError::SegmentTree)?;
+        frac_build_tree_layer(&mut layer, 2, true, EF::ZERO, false)
+            .map_err(FractionalSumcheckError::SegmentTree)?;
     }
     if assert_zero {
         if root.p != EF::ZERO {

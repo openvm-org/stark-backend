@@ -24,19 +24,42 @@ constexpr int GKR_SP_DEG = 2;
 // ============================================================================
 // KERNELS
 // ============================================================================
-template <bool revert>
-__global__ void frac_build_tree_layer_kernel(FracExt *__restrict__ layer, uint32_t half) {
+template <bool revert, bool apply_alpha = false>
+__global__ void frac_build_tree_layer_kernel(
+    FracExt *__restrict__ layer,
+    uint32_t half,
+    FpExt alpha = FpExt(Fp(0))
+) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= half) {
         return;
     }
 
-    FracExt &lhs = layer[idx];
-    FracExt const &rhs = layer[idx | half];
-    if constexpr (revert) {
-        frac_unadd_inplace(lhs, rhs);
+    if constexpr (apply_alpha) {
+        // When applying alpha, we need to modify both operands before combining
+        // Read both values, apply alpha to denominators, then combine
+        FracExt lhs_val = layer[idx];
+        FracExt rhs_val = layer[idx | half];
+        lhs_val.q = lhs_val.q + alpha;
+        rhs_val.q = rhs_val.q + alpha;
+
+        if constexpr (revert) {
+            frac_unadd_inplace(lhs_val, rhs_val);
+        } else {
+            frac_add_inplace(lhs_val, rhs_val);
+        }
+
+        layer[idx] = lhs_val;
     } else {
-        frac_add_inplace(lhs, rhs);
+        // Original fast path: use references for in-place modification
+        FracExt &lhs = layer[idx];
+        FracExt const &rhs = layer[idx | half];
+
+        if constexpr (revert) {
+            frac_unadd_inplace(lhs, rhs);
+        } else {
+            frac_add_inplace(lhs, rhs);
+        }
     }
 }
 
@@ -812,7 +835,13 @@ __global__ void frac_vector_scalar_multiply_kernel(
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
-extern "C" int _frac_build_tree_layer(FracExt *layer, size_t layer_size, bool revert) {
+extern "C" int _frac_build_tree_layer(
+    FracExt *layer,
+    size_t layer_size,
+    bool revert,
+    FpExt alpha,
+    bool apply_alpha
+) {
     if (layer_size == 0) {
         return 0;
     }
@@ -820,10 +849,20 @@ extern "C" int _frac_build_tree_layer(FracExt *layer, size_t layer_size, bool re
     layer_size /= 2;
 
     auto [grid, block] = kernel_launch_params(layer_size);
+
+    // Dispatch to appropriate kernel instantiation based on revert and apply_alpha flags
     if (revert) {
-        frac_build_tree_layer_kernel<true><<<grid, block>>>(layer, layer_size);
+        if (apply_alpha) {
+            frac_build_tree_layer_kernel<true, true><<<grid, block>>>(layer, layer_size, alpha);
+        } else {
+            frac_build_tree_layer_kernel<true, false><<<grid, block>>>(layer, layer_size);
+        }
     } else {
-        frac_build_tree_layer_kernel<false><<<grid, block>>>(layer, layer_size);
+        if (apply_alpha) {
+            frac_build_tree_layer_kernel<false, true><<<grid, block>>>(layer, layer_size, alpha);
+        } else {
+            frac_build_tree_layer_kernel<false, false><<<grid, block>>>(layer, layer_size);
+        }
     }
     return CHECK_KERNEL();
 }
