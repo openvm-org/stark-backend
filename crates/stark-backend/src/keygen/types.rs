@@ -56,6 +56,19 @@ pub struct LinearConstraint {
     pub threshold: u32,
 }
 
+impl LinearConstraint {
+    /// Returns true if `self` is logically implied by `other`, i.e.,
+    /// whenever `other` is satisfied, `self` is also satisfied.
+    pub fn is_implied_by(&self, other: &LinearConstraint) -> bool {
+        self.threshold >= other.threshold
+            && self
+                .coefficients
+                .iter()
+                .zip(&other.coefficients)
+                .all(|(a, b)| a <= b)
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum KeygenError {
     #[error("Max constraint degree exceeded for AIR {name}: {degree} > {max_degree}")]

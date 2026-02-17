@@ -157,20 +157,32 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
             }
         }
 
-        // Sorting by bus index is not necessary, but makes debugging/testing easier.
-        let mut trace_height_constraints = count_weight_per_air_per_bus_index
+        let log_up_security_params = params.logup;
+
+        // Collect all constraints: per-bus sorted by bus index, then global.
+        let mut all_constraints: Vec<LinearConstraint> = count_weight_per_air_per_bus_index
             .into_iter()
             .sorted_by_key(|(bus_index, _)| *bus_index)
             .map(|(_, constraint)| constraint)
             .collect_vec();
 
-        let log_up_security_params = params.logup;
-
-        // Add a constraint for the total number of interactions.
-        trace_height_constraints.push(LinearConstraint {
+        all_constraints.push(LinearConstraint {
             coefficients: num_interactions_per_air,
             threshold: log_up_security_params.max_interaction_count,
         });
+
+        // Minimize: keep only constraints not implied by any other.
+        let mut trace_height_constraints: Vec<LinearConstraint> = Vec::new();
+        for constraint in all_constraints {
+            if trace_height_constraints
+                .iter()
+                .any(|c| constraint.is_implied_by(c))
+            {
+                continue;
+            }
+            trace_height_constraints.retain(|c| !c.is_implied_by(&constraint));
+            trace_height_constraints.push(constraint);
+        }
 
         let pre_vk: MultiStarkVerifyingKey0<SC> = MultiStarkVerifyingKey0 {
             params: params.clone(),
