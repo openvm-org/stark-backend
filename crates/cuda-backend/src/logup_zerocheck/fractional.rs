@@ -529,7 +529,7 @@ pub fn fractional_sumcheck_gpu(
                 let second_half_buf =
                     DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
                 frac_add_alpha(&second_half_buf, alpha)
-                    .map_err(|e| FractionalSumcheckError::SegmentTree(e.into()))?;
+                    .map_err(FractionalSumcheckError::SegmentTree)?;
                 std::mem::forget(second_half_buf);
             } else {
                 frac_build_tree_layer(&mut layer, total_leaves >> i, false, EF::ZERO, false)
