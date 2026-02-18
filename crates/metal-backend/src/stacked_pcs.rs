@@ -62,11 +62,6 @@ impl StackedPcsDataMetal {
         &self.inner
     }
 
-    /// Convert to CPU PCS data (for internal use by proving modules).
-    pub(crate) fn to_cpu(&self) -> StackedPcsData<F, Digest> {
-        self.inner.clone()
-    }
-
     /// Return the Merkle root commitment.
     pub fn commit(&self) -> Digest {
         self.inner.commit()

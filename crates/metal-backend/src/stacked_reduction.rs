@@ -11,7 +11,6 @@ use openvm_stark_backend::{
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
         CpuDevice, DeviceMultiStarkProvingKey, ProvingContext,
     },
-    StarkProtocolConfig,
 };
 use tracing::instrument;
 

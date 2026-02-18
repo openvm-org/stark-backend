@@ -9,13 +9,16 @@ mod device;
 mod engine;
 mod error;
 pub(crate) mod logup_zerocheck;
+#[allow(dead_code)]
 pub(crate) mod merkle_tree;
 mod metal_backend;
 pub(crate) mod openings;
 mod pkey;
 pub mod stacked_pcs;
+#[allow(dead_code)]
 pub(crate) mod stacked_reduction;
 mod types;
+#[allow(dead_code)]
 pub(crate) mod whir;
 
 pub use device::*;

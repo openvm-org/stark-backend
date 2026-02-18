@@ -26,6 +26,42 @@ Phase 0: Scaffolding & Permissions (Lead)
                         └── Phase 6: Tests & validation (Agent I)
 ```
 
+## Current Gap Snapshot (as of 2026-02-18)
+
+The current `openvm-metal-backend` implementation still routes prover-critical work through CPU code paths. In particular, commitment, RAP constraints, opening reduction, and WHIR opening are delegated to CPU helpers after converting Metal data back to host-oriented structures.
+
+This plan treats those CPU fallbacks as temporary scaffolding. Completion means removing them and reaching end-to-end Metal execution parity with `openvm-cuda-backend`.
+
+## Definition of Done (Hard Release Gate)
+
+The project is not complete until every item below is satisfied:
+
+1. **No CPU prover fallback**  
+   During `BabyBearPoseidon2MetalEngine::prove`, no prover-critical stage delegates to CPU proving helpers.
+
+2. **Full prover-stage Metal execution**  
+   The following stages execute on Metal kernels + Metal buffers:
+   - Stacked PCS commitment and Merkle hashing
+   - RAP constraints (zerocheck, logup, GKR/sumcheck)
+   - Stacked opening reduction
+   - WHIR opening
+   - Transcript grinding work
+
+3. **CUDA module parity**  
+   Metal implementations exist and are actively used for the CUDA-equivalent components:
+   - `ntt`, `poly`, `matrix`, `merkle_tree`, `sponge`
+   - `sumcheck`, `prefix`, `whir`, `stacked_pcs`, `stacked_reduction`
+   - `logup_zerocheck` (including round-0, MLE, and GKR input paths)
+
+4. **Protocol/output parity with CUDA**  
+   For deterministic vectors, Metal and CUDA runs produce protocol-equivalent commitments/challenges/openings and valid proofs under the same verifier.
+
+5. **Kernel correctness parity**  
+   Each Metal kernel category is validated against CPU/CUDA references on randomized + edge-case fixtures.
+
+6. **Fallback observability + zero threshold**  
+   Fallback metrics/tracing are present; all CI prover tests require zero CPU fallback invocations.
+
 ---
 
 ## Phase 0: Scaffolding & Permissions (Lead Agent)
@@ -148,7 +184,7 @@ Phase 0: Scaffolding & Permissions (Lead)
      - Power/inverse functions
      - Encode/decode from Montgomery form
      - Reference: risc0's `fp.h` (BabyBear, same prime)
-   - `baby_bear_ext.h` - Extension field (degree 5)
+   - `baby_bear_ext.h` - Extension field (degree 4)
      - Arithmetic over irreducible polynomial
      - Reference: CUDA's extension field operations in `utils.cuh`
    - `utils.h` - Shared utilities (exp, bit reversal, etc.)
@@ -363,7 +399,7 @@ impl MetalKernels {
 
 ## Phase 5: Backend Implementation (Agent G + Agent H)
 
-**Goal**: Implement all the high-level Rust logic, porting from cuda-backend.
+**Goal**: Implement all high-level Rust logic and wire it to Metal dispatch so prover execution does not rely on CPU fallback paths.
 
 **Dependencies**: Phase 4 (FFI layer), Phase 1 (metal-common)
 
@@ -432,6 +468,7 @@ impl MetalKernels {
 - `MetalDevice` implements `ProverDevice<MetalBackend, DuplexSpongeMetal>`
 - `BabyBearPoseidon2MetalEngine` implements `StarkEngine`
 - `cargo check -p openvm-metal-backend` compiles
+- `prove()` hot path uses Metal-native prover stages (no CPU delegation for commit/RAP/opening/WHIR)
 
 ---
 
@@ -464,9 +501,9 @@ impl MetalKernels {
    - Categories: NTT, matrix ops, polynomial ops, Poseidon2, sumcheck, WHIR
 
 4. **Cross-backend validation**
-   - Run a small proof with `BabyBearPoseidon2CpuEngine`
+   - Run a small proof with `BabyBearPoseidon2GpuEngine` (CUDA)
    - Run same proof with `BabyBearPoseidon2MetalEngine`
-   - Verify proofs are identical (deterministic)
+   - Verify protocol-equivalent outputs for deterministic fixtures
    - Verify both proofs pass verification
 
 5. **Memory pressure tests**
@@ -481,7 +518,8 @@ impl MetalKernels {
 - All tests pass on Apple Silicon
 - NTT roundtrip verified
 - Keccak-f example proves and verifies
-- Cross-backend proof equivalence verified
+- CUDA-vs-Metal protocol/output parity verified on deterministic fixtures
+- No-fallback tests verify zero CPU prover fallback invocations
 
 ---
 

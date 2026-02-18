@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use openvm_metal_common::copy::MemCopyD2H;
 use openvm_stark_backend::prover::{
-    AirProvingContext, ColMajorMatrix, CommittedTraceData, CpuBackend, CpuDevice,
+    AirProvingContext, ColMajorMatrix, CommittedTraceData, CpuBackend,
     DeviceMultiStarkProvingKey, DeviceStarkProvingKey, MatrixDimensions, ProvingContext,
 };
 
@@ -81,8 +81,3 @@ pub fn ctx_to_cpu(ctx: &ProvingContext<MetalBackend>) -> ProvingContext<CpuBacke
     ProvingContext::new(per_trace)
 }
 
-/// Create a CpuDevice from SystemParams (for delegating prove calls).
-pub fn make_cpu_device(params: &openvm_stark_backend::SystemParams) -> CpuDevice<SC> {
-    let config = SC::default_from_params(params.clone());
-    CpuDevice::new(config)
-}

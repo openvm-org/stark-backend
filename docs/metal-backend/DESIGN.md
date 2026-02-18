@@ -4,9 +4,23 @@
 
 This document describes the design for `openvm-metal-backend`, an Apple Metal GPU implementation of `ProverBackend` for `BabyBearPoseidon2Config`. It is a parallel implementation to the existing `openvm-cuda-backend`, targeting Apple Silicon GPUs via the Metal Shading Language (MSL) and the `metal` Rust crate.
 
+## Current Status (as of 2026-02-18)
+
+The current `openvm-metal-backend` code is a CPU-delegating prototype, not a complete GPU prover implementation.
+
+- `TraceCommitter::commit` converts `MetalMatrix` to CPU `ColMajorMatrix` and calls CPU `stacked_commit`.
+- `MultiRapProver::prove_rap_constraints` converts proving data to CPU and calls CPU `prove_zerocheck_and_logup`.
+- `OpeningProver::prove_openings` uses CPU `StackedReductionCpu` and CPU `prove_whir_opening`.
+- `DuplexSpongeMetal` currently wraps the host challenger and does not dispatch Metal kernels.
+- The `src/metal/` module currently exposes device info only; protocol/kernel dispatch modules are not implemented yet.
+
+These host fallback paths are temporary scaffolding and are explicitly out-of-scope for the final design target below.
+
 ## Architecture
 
 ### Crate Structure
+
+This crate structure is the target end state (what "done" means), not a statement of the current implementation status.
 
 Two new crates, mirroring the CUDA crate structure:
 
@@ -28,7 +42,7 @@ crates/
 │   ├── metal/             # Metal Shading Language kernels
 │   │   ├── include/
 │   │   │   ├── baby_bear.h     # BabyBear field arithmetic (Montgomery form)
-│   │   │   ├── baby_bear_ext.h # Extension field F_p^5
+│   │   │   ├── baby_bear_ext.h # Extension field F_p^4
 │   │   │   ├── poseidon2.h     # Poseidon2 constants & permutation
 │   │   │   ├── utils.h         # Shared utility functions
 │   │   │   ├── monomial.h      # Monomial computation structures
@@ -135,6 +149,57 @@ impl ProverBackend for MetalBackend {
     type OtherAirData = AirDataMetal;
 }
 ```
+
+## Completion Criteria (Hard Gates)
+
+`openvm-metal-backend` is complete only when all gates below pass.
+
+### Gate 1: No CPU fallback in prover execution
+
+Proof generation must execute through Metal-backed code paths only. During `prove()` there must be no delegating calls into CPU prover helpers for any prover stage.
+
+Specifically, the final path must not rely on:
+
+- CPU conversions of proving data as a prerequisite for prover stages.
+- CPU implementations of stacked commitment, zerocheck/logup proving, stacked opening reduction, or WHIR opening.
+- Host-only transcript grinding for proof-of-work steps.
+
+### Gate 2: Full prover-stage GPU coverage
+
+All stages below must run on Metal kernels + Metal buffers:
+
+| Prover Stage | Required GPU Ownership |
+|--------------|------------------------|
+| Trace commitment / PCS | Matrix preprocessing, Merkle hashing, and stacked commit machinery run on Metal |
+| RAP constraints | Zerocheck, LogUp, GKR/sumcheck rounds, and related folds/reductions run on Metal |
+| Opening reduction | Stacked reduction (including prefix/reduction kernels) run on Metal |
+| WHIR opening | WHIR-specific algebraic batching and folding kernels run on Metal |
+| Transcript grinding | Grinding work runs on Metal; host only orchestrates |
+
+### Gate 3: CUDA parity at module level
+
+For each prover-critical CUDA component, there must be a Metal counterpart with equivalent semantics and test coverage:
+
+- `ntt`, `poly`, `matrix`, `merkle_tree`, `sponge`
+- `sumcheck`, `prefix`, `whir`, `stacked_pcs`, `stacked_reduction`
+- `logup_zerocheck` (including round-0 and GKR input paths)
+
+Parity means matching mathematical behavior, transcript compatibility, and proof validity under the same protocol parameters.
+
+### Gate 4: Proof compatibility and correctness
+
+For deterministic test vectors and fixed transcript seeds:
+
+- Metal and CUDA backends produce equivalent protocol artifacts (commitments/challenges/openings) and valid proofs.
+- Metal proofs verify under the same verifier as CUDA proofs.
+- Kernel-level outputs match trusted CPU/CUDA references for representative and adversarial cases.
+
+### Gate 5: Explicit fallback observability
+
+The backend must expose and test fallback observability:
+
+- Any CPU fallback path in prover execution is counted and surfaced via metrics/tracing.
+- Release criteria require fallback count to be zero in all prover integration tests.
 
 ## Metal Integration Approach
 
@@ -441,7 +506,8 @@ All tests from `cuda-backend` are copied and adapted:
 1. **Unit tests** (`tests/ntt_roundtrip.rs`): NTT forward → inverse roundtrip
 2. **Integration test** (`examples/keccakf.rs`): Full Keccak-f proving pipeline
 3. **Correctness validation**: For each kernel, compare Metal output against CPU reference implementation
-4. **Cross-validation**: Run same proof with CPU backend and Metal backend, verify identical proof outputs
+4. **Cross-validation**: Run same proof with CUDA backend and Metal backend, verify protocol-equivalent outputs and proof validity
+5. **No-fallback validation**: Assert prover execution does not invoke CPU fallback paths for any prover stage
 
 ## Performance Considerations
 
