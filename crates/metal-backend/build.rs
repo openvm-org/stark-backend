@@ -58,14 +58,7 @@ fn main() {
     .collect();
 
     if metal_files.is_empty() {
-        let metallib_path = out_dir.join("kernels.metallib");
-        std::fs::write(&metallib_path, &[]).unwrap();
-        println!(
-            "cargo:rustc-env=METAL_KERNELS_PATH={}",
-            metallib_path.display()
-        );
-        println!("cargo:warning=No .metal files found, using empty metallib");
-        return;
+        panic!("No .metal files found in {}", metal_src_dir.display());
     }
 
     // Set rerun-if-changed for all source and header files

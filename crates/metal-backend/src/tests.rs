@@ -19,6 +19,7 @@ use openvm_stark_backend::{
         fractional_sumcheck_gkr::verify_gkr,
         proof_shape::{verify_proof_shape, ProofShapeError},
         stacked_reduction::{verify_stacked_reduction, StackedReductionError},
+        sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory,
@@ -34,7 +35,7 @@ use openvm_stark_sdk::{
     },
     utils::{setup_tracing, setup_tracing_with_log_level},
 };
-use p3_field::{PrimeCharacteristicRing, TwoAdicField};
+use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use test_case::test_case;
 use tracing::{debug, Level};
@@ -42,12 +43,62 @@ use tracing::{debug, Level};
 use crate::{
     prelude::{EF, F, SC},
     sponge::DuplexSpongeMetal,
+    sumcheck::{sumcheck_multilinear_metal, sumcheck_prismalinear_metal},
     BabyBearPoseidon2MetalEngine,
 };
 
 pub fn test_metal_engine_small() -> BabyBearPoseidon2MetalEngine {
     setup_tracing();
     BabyBearPoseidon2MetalEngine::new(default_test_params_small())
+}
+
+#[test]
+fn test_plain_multilinear_sumcheck() -> Result<(), String> {
+    let n = 15;
+    let mut rng = StdRng::from_seed([228; 32]);
+
+    let num_pts = 1 << n;
+    assert!((F::ORDER_U32 - 1) % num_pts == 0);
+
+    let evals = (0..num_pts)
+        .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
+        .collect::<Vec<_>>();
+    let mut prover_sponge_metal = DuplexSpongeMetal::default();
+    let mut prover_sponge_cpu = default_duplex_sponge();
+    let mut verifier_sponge = default_duplex_sponge();
+
+    let (proof_metal, _) = sumcheck_multilinear_metal(&mut prover_sponge_metal, &evals);
+    let (proof_cpu, _) =
+        openvm_stark_backend::prover::sumcheck::sumcheck_multilinear::<SC, _, _>(
+            &mut prover_sponge_cpu,
+            &evals,
+        );
+    assert_eq!(proof_metal.sum_claim, proof_cpu.sum_claim);
+    assert_eq!(proof_metal.eval_claim, proof_cpu.eval_claim);
+    assert_eq!(proof_metal.round_polys_eval, proof_cpu.round_polys_eval);
+
+    verify_sumcheck_multilinear::<SC, _>(&mut verifier_sponge, &proof_metal)
+}
+
+#[test]
+fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
+    let n = 5;
+    let l_skip = 10;
+    let mut rng = StdRng::from_seed([228; 32]);
+
+    let dim = n + l_skip;
+    let num_pts = 1 << dim;
+    assert!((F::ORDER_U32 - 1) % num_pts == 0);
+
+    let evals = (0..num_pts)
+        .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
+        .collect::<Vec<_>>();
+
+    let mut prover_sponge = DuplexSpongeMetal::default();
+    let mut verifier_sponge = default_duplex_sponge();
+
+    let (proof, _) = sumcheck_prismalinear_metal(&mut prover_sponge, l_skip, &evals);
+    verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
 #[test]
@@ -451,7 +502,110 @@ fn test_multi_interaction_traces_stark(log_trace_degree: usize) {
         bus_index: 4,
     };
     let (vk, proof) = fx.keygen_and_prove(&engine);
-    engine.verify(&vk, &proof).unwrap();
+    if let Err(err) = engine.verify(&vk, &proof) {
+        if log_trace_degree == 10 {
+            let cpu_engine =
+                BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(engine.config().params().clone());
+            let (vk_cpu, proof_cpu) = fx.keygen_and_prove(&cpu_engine);
+            cpu_engine.verify(&vk_cpu, &proof_cpu).unwrap();
+            eprintln!(
+                "pow_witness metal={:?} cpu={:?}",
+                proof.gkr_proof.logup_pow_witness,
+                proof_cpu.gkr_proof.logup_pow_witness
+            );
+            if proof.gkr_proof != proof_cpu.gkr_proof {
+                eprintln!("gkr_proof mismatch");
+                eprintln!("gkr_q0_claim_metal={:?}", proof.gkr_proof.q0_claim);
+                eprintln!("gkr_q0_claim_cpu={:?}", proof_cpu.gkr_proof.q0_claim);
+                if let (Some(m0), Some(c0)) = (
+                    proof.gkr_proof.claims_per_layer.first(),
+                    proof_cpu.gkr_proof.claims_per_layer.first(),
+                ) {
+                    eprintln!("gkr_claim0_metal={:?}", m0);
+                    eprintln!("gkr_claim0_cpu={:?}", c0);
+                }
+                if let (Some(msp), Some(csp)) = (
+                    proof.gkr_proof.sumcheck_polys.first(),
+                    proof_cpu.gkr_proof.sumcheck_polys.first(),
+                ) {
+                    eprintln!("gkr_sumcheck_poly0_metal={:?}", msp);
+                    eprintln!("gkr_sumcheck_poly0_cpu={:?}", csp);
+                }
+            }
+            if proof.batch_constraint_proof.numerator_term_per_air
+                != proof_cpu.batch_constraint_proof.numerator_term_per_air
+            {
+                eprintln!("numerator_term_per_air mismatch");
+            }
+            if proof.batch_constraint_proof.denominator_term_per_air
+                != proof_cpu.batch_constraint_proof.denominator_term_per_air
+            {
+                eprintln!("denominator_term_per_air mismatch");
+            }
+            if proof.batch_constraint_proof.sumcheck_round_polys
+                != proof_cpu.batch_constraint_proof.sumcheck_round_polys
+            {
+                eprintln!("sumcheck_round_polys mismatch");
+            }
+            if proof.batch_constraint_proof.univariate_round_coeffs
+                != proof_cpu.batch_constraint_proof.univariate_round_coeffs
+            {
+                eprintln!("univariate_round_coeffs mismatch");
+            }
+            if proof.batch_constraint_proof.column_openings
+                != proof_cpu.batch_constraint_proof.column_openings
+            {
+                eprintln!("column_openings mismatch");
+                for (air_idx, (m_air, c_air)) in proof
+                    .batch_constraint_proof
+                    .column_openings
+                    .iter()
+                    .zip(proof_cpu.batch_constraint_proof.column_openings.iter())
+                    .enumerate()
+                {
+                    if m_air != c_air {
+                        eprintln!(
+                            "air_idx={} parts_metal={} parts_cpu={}",
+                            air_idx,
+                            m_air.len(),
+                            c_air.len()
+                        );
+                        for (part_idx, (m_part, c_part)) in
+                            m_air.iter().zip(c_air.iter()).enumerate()
+                        {
+                            if m_part != c_part {
+                                eprintln!(
+                                    "air_idx={} part_idx={} len_metal={} len_cpu={}",
+                                    air_idx,
+                                    part_idx,
+                                    m_part.len(),
+                                    c_part.len()
+                                );
+                                for (i, (&mv, &cv)) in
+                                    m_part.iter().zip(c_part.iter()).enumerate()
+                                {
+                                    if mv != cv {
+                                        eprintln!(
+                                            "first_mismatch air_idx={} part_idx={} i={} metal={:?} cpu={:?}",
+                                            air_idx,
+                                            part_idx,
+                                            i,
+                                            mv,
+                                            cv
+                                        );
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        panic!("metal verify failed: {err:?}");
+    }
 }
 
 #[test_case(10 ; "when log_height equals n_stack plus l_skip")]

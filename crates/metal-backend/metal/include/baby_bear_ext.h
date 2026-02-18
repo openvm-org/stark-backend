@@ -1,247 +1,245 @@
-// BabyBear degree-4 extension field arithmetic for Metal Shading Language.
-//
-// Based on risc0/risc0/build_kernel/kernels/metal/fpext.h (Apache-2.0)
-// and openvm-org cuda-common/include/fpext.h
-//
-// F_p^4 = F_p[X] / (X^4 - 11)
-// BETA = 11 (the smallest value making x^4 - BETA irreducible over BabyBear)
-
 #pragma once
 
+/// BabyBear extension field F_p^4 = F_p[X] / (X^4 - 11).
+/// Degree 4 extension with irreducible polynomial x^4 - 11.
+
 #include <metal_stdlib>
+using namespace metal;
 
 #include "baby_bear.h"
 
-// BETA and NBETA are used in the multiplication and inverse formulae.
-// Defined as macros (following risc0 convention) and undef'd at end of file.
 #define BETA Fp(11)
 #define NBETA Fp(Fp::P - 11)
 
-/// FpExt represents an element of the degree-4 extension field F_p^4.
-///
-/// An element is a[0] + a[1]*X + a[2]*X^2 + a[3]*X^3 in F_p[X] / (X^4 - 11).
 struct FpExt {
-    /// Coefficients: elems[0] + elems[1]*X + elems[2]*X^2 + elems[3]*X^3
-    Fp elems[4];
+    Fp elems[4]; // elems[0] + elems[1]*X + elems[2]*X^2 + elems[3]*X^3
 
-    // ----------------------------------------------------------------
-    // Constructors
-    // ----------------------------------------------------------------
+    // --- Constructors ---
 
-    /// Default: zero element
-    constexpr FpExt() {
-        elems[0] = Fp();
-        elems[1] = Fp();
-        elems[2] = Fp();
-        elems[3] = Fp();
-    }
+    constexpr FpExt() thread {}
+    constexpr FpExt() threadgroup {}
+    constexpr FpExt() device {}
 
-    /// Construct from a uint32_t (embed as constant polynomial)
-    explicit constexpr FpExt(uint32_t x) {
+    explicit constexpr FpExt(uint32_t x) thread {
         elems[0] = Fp(x);
-        elems[1] = Fp();
-        elems[2] = Fp();
-        elems[3] = Fp();
+        elems[1] = Fp(0);
+        elems[2] = Fp(0);
+        elems[3] = Fp(0);
     }
 
-    /// Embed a base-field element into the extension
-    explicit constexpr FpExt(Fp x) {
+    explicit constexpr FpExt(Fp x) thread {
         elems[0] = x;
-        elems[1] = Fp();
-        elems[2] = Fp();
-        elems[3] = Fp();
+        elems[1] = Fp(0);
+        elems[2] = Fp(0);
+        elems[3] = Fp(0);
     }
 
-    /// Explicit 4-coefficient constructor
-    constexpr FpExt(Fp a, Fp b, Fp c, Fp d) {
+    constexpr FpExt(Fp a, Fp b, Fp c, Fp d) thread {
         elems[0] = a;
         elems[1] = b;
         elems[2] = c;
         elems[3] = d;
     }
 
-    // ----------------------------------------------------------------
-    // Special operations
-    // ----------------------------------------------------------------
+    // --- Assignment ---
+    constexpr void operator=(FpExt rhs) thread { for (int i = 0; i < 4; i++) elems[i] = rhs.elems[i]; }
+    constexpr void operator=(FpExt rhs) device { for (int i = 0; i < 4; i++) elems[i] = rhs.elems[i]; }
+    constexpr void operator=(FpExt rhs) threadgroup { for (int i = 0; i < 4; i++) elems[i] = rhs.elems[i]; }
 
-    /// Replace invalid sentinel components with zero
-    constexpr FpExt zeroize() {
+    constexpr FpExt zeroize() const thread {
+        FpExt r;
         for (uint32_t i = 0; i < 4; i++) {
-            elems[i].zeroize();
+            r.elems[i] = elems[i].zeroize();
         }
+        return r;
+    }
+    constexpr FpExt zeroize() const device {
+        FpExt r;
+        for (uint32_t i = 0; i < 4; i++) {
+            r.elems[i] = Fp::fromRaw(elems[i].val).zeroize();
+        }
+        return r;
+    }
+
+    // --- Addition / Subtraction ---
+
+    constexpr FpExt operator+=(FpExt rhs) thread {
+        for (uint32_t i = 0; i < 4; i++) elems[i] += rhs.elems[i];
         return *this;
     }
 
-    /// Return the constant part (coefficient of X^0)
-    constexpr Fp constPart() const { return elems[0]; }
-
-    // ----------------------------------------------------------------
-    // Addition / subtraction
-    // ----------------------------------------------------------------
-
-    constexpr FpExt operator+=(FpExt rhs) {
-        for (uint32_t i = 0; i < 4; i++) {
-            elems[i] += rhs.elems[i];
-        }
+    constexpr FpExt operator+=(FpExt rhs) device {
+        for (uint32_t i = 0; i < 4; i++) elems[i] += rhs.elems[i];
         return *this;
     }
 
-    constexpr FpExt operator-=(FpExt rhs) {
-        for (uint32_t i = 0; i < 4; i++) {
-            elems[i] -= rhs.elems[i];
-        }
+    constexpr FpExt operator+=(FpExt rhs) threadgroup {
+        for (uint32_t i = 0; i < 4; i++) elems[i] += rhs.elems[i];
         return *this;
     }
 
-    constexpr FpExt operator+(FpExt rhs) const {
-        FpExt result = *this;
-        result += rhs;
-        return result;
-    }
-
-    constexpr FpExt operator-(FpExt rhs) const {
-        FpExt result = *this;
-        result -= rhs;
-        return result;
-    }
-
-    constexpr FpExt operator-(Fp rhs) const {
-        FpExt result = *this;
-        result.elems[0] -= rhs;
-        return result;
-    }
-
-    constexpr FpExt operator-() const { return FpExt() - *this; }
-
-    // ----------------------------------------------------------------
-    // Multiplication by base field Fp
-    // ----------------------------------------------------------------
-
-    constexpr FpExt operator*=(Fp rhs) {
-        for (uint32_t i = 0; i < 4; i++) {
-            elems[i] *= rhs;
-        }
+    constexpr FpExt operator-=(FpExt rhs) thread {
+        for (uint32_t i = 0; i < 4; i++) elems[i] -= rhs.elems[i];
         return *this;
     }
 
-    constexpr FpExt operator*(Fp rhs) const {
-        FpExt result = *this;
-        result *= rhs;
-        return result;
+    constexpr FpExt operator-=(FpExt rhs) device {
+        for (uint32_t i = 0; i < 4; i++) elems[i] -= rhs.elems[i];
+        return *this;
     }
 
-    // ----------------------------------------------------------------
-    // Multiplication of two extension field elements
-    //
-    // Multiply out the polynomial representations and reduce modulo X^4 - 11.
-    // Powers >= 4 get shifted back by 4 and multiplied by NBETA (= -11 mod P).
-    // ----------------------------------------------------------------
-
-    constexpr FpExt operator*(FpExt rhs) const {
-#define a elems
-#define b rhs.elems
-        return FpExt(a[0] * b[0] + NBETA * (a[1] * b[3] + a[2] * b[2] + a[3] * b[1]),
-                     a[0] * b[1] + a[1] * b[0] + NBETA * (a[2] * b[3] + a[3] * b[2]),
-                     a[0] * b[2] + a[1] * b[1] + a[2] * b[0] + NBETA * (a[3] * b[3]),
-                     a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0]);
-#undef a
-#undef b
+    constexpr FpExt operator-=(FpExt rhs) threadgroup {
+        for (uint32_t i = 0; i < 4; i++) elems[i] -= rhs.elems[i];
+        return *this;
     }
 
-    constexpr FpExt operator*=(FpExt rhs) {
+    constexpr FpExt operator+(FpExt rhs) const thread {
+        FpExt r = *this;
+        r += rhs;
+        return r;
+    }
+
+    constexpr FpExt operator-(FpExt rhs) const thread {
+        FpExt r = *this;
+        r -= rhs;
+        return r;
+    }
+
+    constexpr FpExt operator-() const thread { return FpExt() - *this; }
+
+    // --- Scalar multiplication (Fp * FpExt) ---
+
+    constexpr FpExt operator*=(Fp rhs) thread {
+        for (uint32_t i = 0; i < 4; i++) elems[i] *= rhs;
+        return *this;
+    }
+
+    constexpr FpExt operator*=(Fp rhs) device {
+        for (uint32_t i = 0; i < 4; i++) elems[i] *= rhs;
+        return *this;
+    }
+
+    constexpr FpExt operator*(Fp rhs) const thread {
+        FpExt r = *this;
+        r *= rhs;
+        return r;
+    }
+
+    // --- Full extension multiplication ---
+    // Multiply modulo x^4 - 11. Powers >= 4 wrap with x^4 = 11.
+
+    constexpr FpExt operator*(FpExt rhs) const thread {
+        return FpExt(
+            elems[0] * rhs.elems[0] + BETA * (elems[1] * rhs.elems[3] + elems[2] * rhs.elems[2] + elems[3] * rhs.elems[1]),
+            elems[0] * rhs.elems[1] + elems[1] * rhs.elems[0] + BETA * (elems[2] * rhs.elems[3] + elems[3] * rhs.elems[2]),
+            elems[0] * rhs.elems[2] + elems[1] * rhs.elems[1] + elems[2] * rhs.elems[0] + BETA * (elems[3] * rhs.elems[3]),
+            elems[0] * rhs.elems[3] + elems[1] * rhs.elems[2] + elems[2] * rhs.elems[1] + elems[3] * rhs.elems[0]
+        );
+    }
+
+    constexpr FpExt operator*=(FpExt rhs) thread {
         *this = *this * rhs;
         return *this;
     }
 
-    // ----------------------------------------------------------------
-    // Equality
-    // ----------------------------------------------------------------
+    constexpr FpExt operator*=(FpExt rhs) device {
+        *this = FpExt(*this) * rhs;
+        return *this;
+    }
 
-    constexpr bool operator==(FpExt rhs) const {
+    // --- Equality ---
+
+    constexpr bool operator==(FpExt rhs) const thread {
         for (uint32_t i = 0; i < 4; i++) {
-            if (elems[i] != rhs.elems[i]) {
-                return false;
-            }
+            if (elems[i] != rhs.elems[i]) return false;
         }
         return true;
     }
 
-    constexpr bool operator!=(FpExt rhs) const { return !(*this == rhs); }
+    constexpr bool operator!=(FpExt rhs) const thread { return !(*this == rhs); }
 
-    // ----------------------------------------------------------------
-    // device-qualified overloads
-    // ----------------------------------------------------------------
+    constexpr Fp constPart() const thread { return elems[0]; }
 
-    constexpr FpExt operator+=(FpExt rhs) device {
-        for (uint32_t i = 0; i < 4; i++) {
-            elems[i] += rhs.elems[i];
-        }
-        return *this;
-    }
+    // --- Device address space operators ---
 
-    constexpr FpExt operator+(FpExt rhs) device const { return FpExt(*this) + rhs; }
-    constexpr FpExt operator-(FpExt rhs) device const { return FpExt(*this) - rhs; }
-    constexpr FpExt operator-() device const { return -FpExt(*this); }
-    constexpr FpExt operator*(FpExt rhs) device const { return FpExt(*this) * rhs; }
-    constexpr FpExt operator*(Fp rhs) device const { return FpExt(*this) * rhs; }
-    constexpr bool operator==(FpExt rhs) device const { return FpExt(*this) == rhs; }
-    constexpr bool operator!=(FpExt rhs) device const { return FpExt(*this) != rhs; }
-    constexpr Fp constPart() device const { return FpExt(*this).constPart(); }
+    constexpr FpExt operator+(FpExt rhs) const device { return FpExt(*this) + rhs; }
+    constexpr FpExt operator-(FpExt rhs) const device { return FpExt(*this) - rhs; }
+    constexpr FpExt operator-() const device { return -FpExt(*this); }
+    constexpr FpExt operator*(FpExt rhs) const device { return FpExt(*this) * rhs; }
+    constexpr FpExt operator*(Fp rhs) const device { return FpExt(*this) * rhs; }
+    constexpr bool operator==(FpExt rhs) const device { return FpExt(*this) == rhs; }
+    constexpr bool operator!=(FpExt rhs) const device { return FpExt(*this) != rhs; }
+    constexpr Fp constPart() const device { return FpExt(*this).constPart(); }
+
+    // --- Threadgroup address space operators ---
+
+    constexpr FpExt operator+(FpExt rhs) const threadgroup { return FpExt(*this) + rhs; }
+    constexpr FpExt operator-(FpExt rhs) const threadgroup { return FpExt(*this) - rhs; }
+    constexpr FpExt operator-() const threadgroup { return -FpExt(*this); }
+    constexpr FpExt operator*(FpExt rhs) const threadgroup { return FpExt(*this) * rhs; }
+    constexpr FpExt operator*(Fp rhs) const threadgroup { return FpExt(*this) * rhs; }
+    constexpr bool operator==(FpExt rhs) const threadgroup { return FpExt(*this) == rhs; }
+    constexpr bool operator!=(FpExt rhs) const threadgroup { return FpExt(*this) != rhs; }
+    constexpr Fp constPart() const threadgroup { return FpExt(*this).constPart(); }
+
+    // --- Constant address space operators ---
+
+    constexpr FpExt operator+(FpExt rhs) const constant { return FpExt(*this) + rhs; }
+    constexpr FpExt operator-(FpExt rhs) const constant { return FpExt(*this) - rhs; }
+    constexpr FpExt operator-() const constant { return -FpExt(*this); }
+    constexpr FpExt operator*(FpExt rhs) const constant { return FpExt(*this) * rhs; }
+    constexpr FpExt operator*(Fp rhs) const constant { return FpExt(*this) * rhs; }
+    constexpr bool operator==(FpExt rhs) const constant { return FpExt(*this) == rhs; }
+    constexpr bool operator!=(FpExt rhs) const constant { return FpExt(*this) != rhs; }
+    constexpr Fp constPart() const constant { return FpExt(*this).constPart(); }
 };
 
-// ============================================================================
-// Free functions
-// ============================================================================
-
-/// Fp * FpExt (the reverse direction is handled by the member operator*)
+/// Fp * FpExt (free function for commutativity)
 constexpr inline FpExt operator*(Fp a, FpExt b) {
     return b * a;
 }
 
-/// Raise an FpExt to the n-th power
-constexpr inline FpExt pow(FpExt x, size_t n) {
+/// Raise FpExt to a power
+constexpr inline FpExt pow(FpExt x, uint32_t n) {
     FpExt tot(1);
     while (n != 0) {
-        if (n % 2 == 1) {
+        if (n & 1) {
             tot *= x;
         }
-        n = n / 2;
+        n >>= 1;
         x *= x;
     }
     return tot;
 }
 
-/// Multiplicative inverse of an FpExt element.
-///
-/// Uses the composite-field inversion technique (analogous to complex number
-/// inversion). See risc0 fpext.h for the detailed derivation.
-///
-/// For zero input, returns zero (safe inverse convention).
+/// Multiplicative inverse of FpExt using composite field inversion.
 constexpr inline FpExt inv(FpExt in) {
-#define a in.elems
-    // Step 1: compute b = a * a' where a' has negated odd components.
-    // By construction b has zero odd components. Let b = (b0, 0, b2, 0).
-    Fp b0 = a[0] * a[0] + BETA * (a[1] * (a[3] + a[3]) - a[2] * a[2]);
-    Fp b2 = a[0] * (a[2] + a[2]) - a[1] * a[1] + BETA * (a[3] * a[3]);
-
-    // Step 2: compute c = b * b' which is a base-field element.
-    Fp c = b0 * b0 + BETA * b2 * b2;
-
-    // Step 3: invert c in the base field.
+    Fp b0 = in.elems[0] * in.elems[0]
+        + BETA * (in.elems[2] * in.elems[2] - in.elems[1] * (in.elems[3] + in.elems[3]));
+    Fp b2 = in.elems[0] * (in.elems[2] + in.elems[2])
+        - in.elems[1] * in.elems[1]
+        - BETA * (in.elems[3] * in.elems[3]);
+    Fp c = b0 * b0 - BETA * b2 * b2;
     Fp ic = inv(c);
-
-    // Step 4: multiply a' * b' * ic to get the full inverse.
     b0 *= ic;
     b2 *= ic;
-    return FpExt(a[0] * b0 + BETA * a[2] * b2,
-                 -a[1] * b0 + NBETA * a[3] * b2,
-                 -a[0] * b2 + a[2] * b0,
-                 a[1] * b2 - a[3] * b0);
-#undef a
+    return FpExt(
+        in.elems[0] * b0 - BETA * in.elems[2] * b2,
+        -in.elems[1] * b0 + BETA * in.elems[3] * b2,
+        -in.elems[0] * b2 + in.elems[2] * b0,
+        in.elems[1] * b2 - in.elems[3] * b0
+    );
 }
 
-/// Helper: construct an FpExt from a boolean value (0 or 1)
-inline FpExt make_bool_ext(bool value) { return FpExt(Fp(value ? 1u : 0u)); }
+/// Negate FpExt (free function for convenience in DAG evaluation)
+constexpr inline FpExt fpext_neg(FpExt x) {
+    return -x;
+}
+
+/// Multiplicative inverse of FpExt (free function alias)
+constexpr inline FpExt fpext_inv(FpExt x) {
+    return inv(x);
+}
 
 #undef BETA
 #undef NBETA

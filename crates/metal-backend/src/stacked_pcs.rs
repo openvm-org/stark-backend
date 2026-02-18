@@ -1,75 +1,89 @@
-//! Metal-native stacked PCS (polynomial commitment scheme).
-//!
-//! Provides `stacked_commit_metal` which takes MetalMatrix traces and produces
-//! a commitment + PCS data. Mirrors the CUDA `stacked_pcs.rs` module structure.
+use std::sync::Arc;
 
+use getset::Getters;
 use itertools::Itertools;
-use openvm_metal_common::copy::MemCopyD2H;
+use openvm_metal_common::d_buffer::MetalBuffer;
 use openvm_stark_backend::{
-    p3_field::PrimeCharacteristicRing,
-    p3_maybe_rayon::prelude::*,
     p3_util::log2_strict_usize,
-    prover::{
-        poly::eval_to_coeff_rs_message,
-        stacked_pcs::{StackedLayout, StackedPcsData},
-        ColMajorMatrix, MatrixDimensions,
-    },
-    StarkProtocolConfig, SystemParams,
+    prover::{stacked_pcs::StackedLayout, MatrixDimensions},
 };
-use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
 use tracing::instrument;
 
 use crate::{
-    base::MetalMatrix,
-    prelude::{Digest, F, SC},
-    MetalProverConfig,
+    base::{MetalMatrix, MetalMatrixView},
+    metal::{
+        batch_ntt_small::batch_ntt_small,
+        matrix::{batch_expand_pad, batch_expand_pad_wide},
+        ntt::bit_rev,
+    },
+    merkle_tree::MerkleTreeMetal,
+    ntt::batch_ntt,
+    poly::{mle_interpolate_stages, PleMatrix},
+    prelude::{Digest, F},
+    MetalProverConfig, ProverError, RsCodeMatrixError, StackTracesError,
 };
 
-/// PCS data type for the Metal backend.
-///
-/// Internally wraps the CPU `StackedPcsData` since the algorithms are the same
-/// (Metal uses unified memory, so data is directly accessible from CPU).
-/// The Metal-native interface ensures no CPU type conversions in `metal_backend.rs`.
-pub struct StackedPcsDataMetal {
-    pub(crate) inner: StackedPcsData<F, Digest>,
+#[derive(Getters)]
+pub struct StackedPcsDataMetal<F, Digest> {
+    #[getset(get = "pub")]
+    pub(crate) layout: StackedLayout,
+    #[getset(get = "pub")]
+    pub(crate) matrix: Option<PleMatrix<F>>,
+    #[getset(get = "pub")]
+    pub(crate) tree: MerkleTreeMetal<F, Digest>,
 }
 
-// SAFETY: StackedPcsData fields are Send+Sync
-unsafe impl Send for StackedPcsDataMetal {}
-unsafe impl Sync for StackedPcsDataMetal {}
-
-impl Clone for StackedPcsDataMetal {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
+#[instrument(level = "info", skip_all)]
+pub fn stacked_commit(
+    l_skip: usize,
+    n_stack: usize,
+    log_blowup: usize,
+    k_whir: usize,
+    traces: &[&MetalMatrix<F>],
+    prover_config: MetalProverConfig,
+) -> Result<(Digest, StackedPcsDataMetal<F, Digest>), ProverError> {
+    let layout = get_stacked_layout(l_skip, n_stack, traces);
+    tracing::info!(
+        height = layout.height(),
+        width = layout.width(),
+        "stacked_matrix_dimensions"
+    );
+    let opt_stacked_matrix = if prover_config.cache_stacked_matrix {
+        Some(stack_traces(&layout, traces)?)
+    } else {
+        None
+    };
+    let rs_matrix = rs_code_matrix(log_blowup, &layout, traces, &opt_stacked_matrix)?;
+    let tree = MerkleTreeMetal::<F, Digest>::new(
+        rs_matrix,
+        1 << k_whir,
+        prover_config.cache_rs_code_matrix,
+    )?;
+    let root = tree.root();
+    let data = StackedPcsDataMetal {
+        layout,
+        matrix: opt_stacked_matrix,
+        tree,
+    };
+    Ok((root, data))
 }
 
-impl StackedPcsDataMetal {
-    /// Create from CPU PCS data (used by data transporter).
-    pub fn from_cpu(inner: StackedPcsData<F, Digest>) -> Self {
-        Self { inner }
-    }
-
-    /// Access the stacked layout.
-    pub fn layout(&self) -> &StackedLayout {
-        &self.inner.layout
-    }
-
-    /// Access the inner CPU PCS data (for internal use by proving modules).
-    pub(crate) fn inner(&self) -> &StackedPcsData<F, Digest> {
-        &self.inner
-    }
-
-    /// Return the Merkle root commitment.
-    pub fn commit(&self) -> Digest {
-        self.inner.commit()
-    }
+#[instrument(skip_all)]
+pub fn stacked_matrix(
+    l_skip: usize,
+    n_stack: usize,
+    traces: &[&MetalMatrix<F>],
+) -> Result<(PleMatrix<F>, StackedLayout), ProverError> {
+    let layout = get_stacked_layout(l_skip, n_stack, traces);
+    let matrix = stack_traces(&layout, traces)?;
+    Ok((matrix, layout))
 }
 
-/// Compute the stacked layout for the given traces.
-fn get_stacked_layout(l_skip: usize, n_stack: usize, traces: &[&MetalMatrix<F>]) -> StackedLayout {
+pub(crate) fn get_stacked_layout(
+    l_skip: usize,
+    n_stack: usize,
+    traces: &[&MetalMatrix<F>],
+) -> StackedLayout {
     let sorted_meta = traces
         .iter()
         .map(|trace| {
@@ -81,87 +95,162 @@ fn get_stacked_layout(l_skip: usize, n_stack: usize, traces: &[&MetalMatrix<F>])
     StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta)
 }
 
-/// Stack traces into a column-major matrix.
-///
-/// Reads MetalMatrix data from unified memory and stacks columns according to the layout.
-/// Each trace is read once via `to_host()` and cached for reuse across columns.
-fn stack_traces(
-    l_skip: usize,
+pub(crate) fn stack_traces(
     layout: &StackedLayout,
     traces: &[&MetalMatrix<F>],
-) -> ColMajorMatrix<F> {
+) -> Result<PleMatrix<F>, StackTracesError> {
+    let l_skip = layout.l_skip();
     let height = layout.height();
     let width = layout.width();
-    let mut q_mat = F::zero_vec(width.checked_mul(height).unwrap());
+    let mut q_evals = MetalBuffer::<F>::with_capacity(width.checked_mul(height).unwrap());
+    stack_traces_into_expanded(layout, traces, &mut q_evals, height)?;
+    Ok(PleMatrix::from_evals(l_skip, q_evals, height, width))
+}
 
-    // Cache trace data to avoid repeated to_host() copies per column
-    let trace_data_cache: Vec<Vec<F>> = traces.iter().map(|t| t.to_host()).collect();
-
+pub(crate) fn stack_traces_into_expanded(
+    layout: &StackedLayout,
+    traces: &[&MetalMatrix<F>],
+    buffer: &mut MetalBuffer<F>,
+    padded_height: usize,
+) -> Result<(), StackTracesError> {
+    let l_skip = layout.l_skip();
+    debug_assert_eq!(padded_height % layout.height(), 0);
+    debug_assert_eq!(buffer.len() % padded_height, 0);
+    debug_assert_eq!(buffer.len() / padded_height, layout.width());
+    buffer.fill_zero();
     for (mat_idx, j, s) in &layout.sorted_cols {
-        let trace_data = &trace_data_cache[*mat_idx];
-        let trace_height = traces[*mat_idx].height();
-        let start = s.col_idx * height + s.row_idx;
-
-        // Column j of the trace is at offset j * trace_height in column-major layout
-        let col_offset = *j * trace_height;
-        let col_data = &trace_data[col_offset..col_offset + trace_height];
-
+        let start = s.col_idx * padded_height + s.row_idx;
+        let trace = traces[*mat_idx];
+        let s_len = s.len(l_skip);
+        debug_assert_eq!(trace.height(), 1 << s.log_height());
         if s.log_height() >= l_skip {
-            q_mat[start..start + col_data.len()].copy_from_slice(col_data);
+            debug_assert_eq!(trace.height(), s_len);
+            // With Metal's unified memory, D2D copy is just memcpy
+            unsafe {
+                let src = trace.buffer().as_ptr().add(*j * s_len);
+                let dst = buffer.as_mut_ptr().add(start);
+                std::ptr::copy_nonoverlapping(src, dst, s_len);
+            }
         } else {
-            // Stride for small columns
             let stride = s.stride(l_skip);
-            for (i, val) in col_data.iter().enumerate() {
-                q_mat[start + i * stride] = *val;
+            debug_assert_eq!(stride * trace.height(), s_len);
+            unsafe {
+                batch_expand_pad_wide(
+                    buffer,
+                    start,
+                    trace.buffer(),
+                    *j * trace.height(),
+                    trace.height() as u32,
+                    stride as u32,
+                    1,
+                )
+                    .map_err(StackTracesError::BatchExpandPadWide)?;
             }
         }
     }
-    ColMajorMatrix::new(q_mat, width)
+    Ok(())
 }
 
-/// Compute the Reed-Solomon codeword matrix.
-fn rs_code_matrix(l_skip: usize, log_blowup: usize, eval_matrix: &ColMajorMatrix<F>) -> ColMajorMatrix<F> {
-    let height = eval_matrix.height();
-    let codewords: Vec<_> = eval_matrix
-        .values
-        .par_chunks_exact(height)
-        .map(|column_evals| {
-            let mut coeffs = eval_to_coeff_rs_message(l_skip, column_evals);
-            let dft = Radix2DitParallel::default();
-            coeffs.resize(height.checked_shl(log_blowup as u32).unwrap(), F::ZERO);
-            dft.dft(coeffs)
-        })
-        .collect::<Vec<_>>()
-        .concat();
-    ColMajorMatrix::new(codewords, eval_matrix.width())
-}
-
-/// Metal-native stacked commit.
-///
-/// Reads trace data from MetalMatrix buffers (unified memory) and computes
-/// the stacked PCS commitment. This function does NOT appear in the forbidden
-/// patterns check since it's a Metal-native implementation.
-#[instrument(name = "metal.stacked_commit", skip_all)]
-pub fn commit_traces_metal(
-    params: &SystemParams,
+#[instrument(skip_all)]
+pub fn rs_code_matrix(
+    log_blowup: usize,
+    layout: &StackedLayout,
     traces: &[&MetalMatrix<F>],
-    _prover_config: &MetalProverConfig,
-) -> (Digest, StackedPcsDataMetal) {
-    let l_skip = params.l_skip;
-    let n_stack = params.n_stack;
-    let log_blowup = params.log_blowup;
-    let k_whir = params.k_whir();
+    stacked_matrix: &Option<PleMatrix<F>>,
+) -> Result<MetalMatrix<F>, RsCodeMatrixError> {
+    let l_skip = layout.l_skip();
+    let height = layout.height();
+    let width = layout.width();
+    debug_assert!(height >= (1 << l_skip));
+    let codeword_height = height.checked_shl(log_blowup as u32).unwrap();
+    let mut codewords = MetalBuffer::<F>::with_capacity(codeword_height * width);
+    if let Some(stacked_matrix) = stacked_matrix.as_ref() {
+        unsafe {
+            batch_expand_pad(
+                &codewords,
+                0,
+                &stacked_matrix.mixed,
+                0,
+                width as u32,
+                codeword_height as u32,
+                height as u32,
+            )
+            .map_err(RsCodeMatrixError::BatchExpandPad)?;
+        }
+    } else {
+        stack_traces_into_expanded(layout, traces, &mut codewords, codeword_height)
+            .map_err(RsCodeMatrixError::StackTraces)?;
+        if l_skip > 0 {
+            let num_uni_poly = width * (codeword_height >> l_skip);
+            unsafe {
+                batch_ntt_small(&mut codewords, l_skip, num_uni_poly, true)
+                    .map_err(RsCodeMatrixError::CustomBatchIntt)?;
+            }
+        }
+    }
+    let log_codeword_height = log2_strict_usize(codeword_height);
 
-    let layout = get_stacked_layout(l_skip, n_stack, traces);
-    let q_trace = stack_traces(l_skip, &layout, traces);
-    let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace);
+    if l_skip > 0 {
+        unsafe {
+            mle_interpolate_stages(
+                &mut codewords,
+                width as u16,
+                codeword_height as u32,
+                log_blowup as u32,
+                0,
+                l_skip as u32 - 1,
+                false,
+                false,
+            )
+            .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d { error, step: 1 })?;
+        }
+    }
 
-    let sc = SC::default_from_params(params.clone());
-    let hasher = sc.hasher();
-    use openvm_stark_backend::prover::stacked_pcs::MerkleTree;
-    let tree = MerkleTree::new(hasher, rs_matrix, 1 << k_whir);
-    let root = tree.root();
+    unsafe {
+        bit_rev(
+            &codewords,
+            &codewords,
+            log_codeword_height as u32,
+            codeword_height as u32,
+            width as u32,
+        )
+        .map_err(RsCodeMatrixError::BitRev)?;
+    }
 
-    let data = StackedPcsData::new(layout, q_trace, tree);
-    (root, StackedPcsDataMetal::from_cpu(data))
+    batch_ntt(
+        &codewords,
+        log_codeword_height as u32,
+        0u32,
+        width as u32,
+        false,
+        false,
+    );
+    let code_matrix = MetalMatrix::new(Arc::new(codewords), codeword_height, width);
+
+    Ok(code_matrix)
+}
+
+impl<F, Digest> StackedPcsDataMetal<F, Digest> {
+    pub fn mixed_view<'a>(
+        &'a self,
+        mat_idx: usize,
+        width: usize,
+    ) -> Option<MetalMatrixView<'a, F>> {
+        if let Some(matrix) = self.matrix.as_ref() {
+            debug_assert_eq!(self.layout.width_of(mat_idx), width);
+            let s = self
+                .layout
+                .get(mat_idx, 0)
+                .unwrap_or_else(|| panic!("Invalid matrix index: {mat_idx}"));
+            let l_skip = self.layout.l_skip();
+            let lifted_height = s.len(l_skip);
+            let offset = s.col_idx * matrix.height() + s.row_idx;
+            unsafe {
+                let ptr = matrix.mixed.as_ptr().add(offset);
+                Some(MetalMatrixView::from_raw_parts(ptr, lifted_height, width))
+            }
+        } else {
+            None
+        }
+    }
 }

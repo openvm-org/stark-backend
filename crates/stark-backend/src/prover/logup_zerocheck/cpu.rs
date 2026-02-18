@@ -8,6 +8,7 @@ use itertools::Itertools;
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
+use tracing::debug;
 
 use crate::{
     air_builders::symbolic::{
@@ -418,6 +419,41 @@ where
             .collect::<Vec<_>>();
         self.sels_per_trace =
             batch_fold_ple_evals(l_skip, take(&mut self.sels_per_trace_base), false, r_0);
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            for (trace_idx, mats) in self.mat_evals_per_trace.iter().enumerate() {
+                if trace_idx > 0 {
+                    continue;
+                }
+                for (mat_idx, mat) in mats.iter().enumerate() {
+                    if mat.height() <= 8 {
+                        let cols = mat.columns().map(|c| c.to_vec()).collect_vec();
+                        debug!(
+                            trace_idx,
+                            mat_idx,
+                            width = mat.width(),
+                            height = mat.height(),
+                            ?cols,
+                            "cpu_fold_ple_mat_evals_trace"
+                        );
+                    }
+                }
+            }
+            for (trace_idx, sels) in self.sels_per_trace.iter().enumerate() {
+                if trace_idx > 0 {
+                    continue;
+                }
+                if sels.height() <= 8 {
+                    let cols = sels.columns().map(|c| c.to_vec()).collect_vec();
+                    debug!(
+                        trace_idx,
+                        width = sels.width(),
+                        height = sels.height(),
+                        ?cols,
+                        "cpu_fold_ple_selectors_trace"
+                    );
+                }
+            }
+        }
         let eq_r0 = eval_eq_uni(l_skip, self.xi[0], r_0);
         let eq_sharp_r0 = eval_eq_sharp_uni(&self.omega_skip_pows, &self.xi[..l_skip], r_0);
         self.eq_ns.push(eq_r0);
@@ -428,6 +464,14 @@ where
                 eq.truncate(eq.len() / 2);
             }
         });
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            for (trace_idx, eq) in self.eq_xi_per_trace.iter().enumerate() {
+                if trace_idx > 0 {
+                    continue;
+                }
+                debug!(trace_idx, ?eq, "cpu_eq_xi_after_round0_fold");
+            }
+        }
     }
 
     /// Returns length `3 * num_airs_present` polynomials, each polynomial either evaluated at
@@ -478,6 +522,13 @@ where
             }
         })
         .collect();
+
+        #[cfg(debug_assertions)]
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            for (trace_idx, vals) in sp_zerocheck_evals.iter().enumerate() {
+                tracing::debug!(round, trace_idx, ?vals, "cpu_zc_round_evals");
+            }
+        }
 
         let sp_logup_evals: Vec<Vec<SC::EF>> = parizip!(
             &self.eval_helpers,

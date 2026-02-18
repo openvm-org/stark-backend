@@ -1,4 +1,4 @@
-use std::{ffi::c_void, fmt::Debug, marker::PhantomData, mem, ptr, slice};
+use std::{any::type_name, ffi::c_void, fmt::Debug, marker::PhantomData, mem, ptr, slice};
 
 use metal::{Buffer as MetalRawBuffer, Device, MTLResourceOptions, NSUInteger};
 
@@ -28,21 +28,20 @@ impl<T> MetalBuffer<T> {
     /// Allocates a Metal buffer with capacity for `len` elements of type `T`.
     ///
     /// Uses `StorageModeShared` for unified CPU/GPU access.
-    /// Panics if `len` is zero.
     pub fn with_capacity(len: usize) -> Self {
-        assert_ne!(len, 0, "Zero capacity request");
         let ctx = get_context();
         Self::with_capacity_on_device(&ctx.device, len)
     }
 
     /// Allocates a Metal buffer on a specific device.
     pub fn with_capacity_on_device(device: &Device, len: usize) -> Self {
-        assert_ne!(len, 0, "Zero capacity request");
-        let size_bytes = mem::size_of::<T>() * len;
+        let alloc_len = len.max(1);
+        let size_bytes = mem::size_of::<T>() * alloc_len;
         tracing::debug!(
-            "Allocating Metal buffer: {} elements, {} bytes",
+            "Allocating Metal buffer: {} elements, {} bytes, type {}",
             len,
-            size_bytes
+            size_bytes,
+            type_name::<T>(),
         );
         metrics::counter!("metal.buffer.alloc_bytes").increment(size_bytes as u64);
 
@@ -56,14 +55,18 @@ impl<T> MetalBuffer<T> {
 
     /// Creates a Metal buffer by copying data from a host slice.
     pub fn from_slice(data: &[T]) -> Self {
-        assert!(!data.is_empty(), "Cannot create buffer from empty slice");
+        if data.is_empty() {
+            return Self::with_capacity(0);
+        }
         let ctx = get_context();
         Self::from_slice_on_device(&ctx.device, data)
     }
 
     /// Creates a Metal buffer on a specific device by copying data from a host slice.
     pub fn from_slice_on_device(device: &Device, data: &[T]) -> Self {
-        assert!(!data.is_empty(), "Cannot create buffer from empty slice");
+        if data.is_empty() {
+            return Self::with_capacity_on_device(device, 0);
+        }
         let size_bytes = mem::size_of_val(data);
         metrics::counter!("metal.buffer.alloc_bytes").increment(size_bytes as u64);
 
@@ -106,12 +109,28 @@ impl<T> MetalBuffer<T> {
         self.buffer.contents() as *const T
     }
 
+    /// Returns a const GPU virtual address pointer for this buffer.
+    ///
+    /// Use this pointer only for values passed to GPU kernels (e.g. pointer tables/context structs).
+    #[inline]
+    pub fn as_device_ptr(&self) -> *const T {
+        self.buffer.gpu_address() as *const T
+    }
+
     /// Returns a mutable pointer to the buffer contents.
     ///
     /// The pointer is valid for `self.len()` elements of type `T`.
     #[inline]
     pub fn as_mut_ptr(&self) -> *mut T {
         self.buffer.contents() as *mut T
+    }
+
+    /// Returns a mutable GPU virtual address pointer for this buffer.
+    ///
+    /// Use this pointer only for values passed to GPU kernels (e.g. pointer tables/context structs).
+    #[inline]
+    pub fn as_device_mut_ptr(&self) -> *mut T {
+        self.buffer.gpu_address() as *mut T
     }
 
     /// Returns a reference to the underlying `metal::Buffer` for use in kernel dispatch.
@@ -242,4 +261,5 @@ mod tests {
         buf.fill_zero_suffix(3);
         assert_eq!(buf.to_vec(), vec![1, 2, 3, 0, 0]);
     }
+
 }

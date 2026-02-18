@@ -277,6 +277,16 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
         let n_lift = n.max(0) as usize;
         let need_rot = need_rot_per_trace[trace_idx];
 
+        debug!(
+            trace_idx,
+            air_idx,
+            need_rot,
+            n,
+            n_lift,
+            ?air_openings,
+            "column_openings_for_trace"
+        );
+
         // claim lengths are checked in proof shape
         for claims in air_openings.iter().skip(1) {
             for (claim, claim_rot) in column_openings_by_rot(claims, need_rot) {
@@ -318,6 +328,13 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
             rs_n,
             l,
         );
+        debug!(
+            trace_idx,
+            is_first = %evaluator.is_first_row,
+            is_transition = %(SC::EF::ONE - evaluator.is_last_row),
+            is_last = %evaluator.is_last_row,
+            "selector_eval_verifier"
+        );
 
         let constraints = &vk.symbolic_constraints.constraints;
         let nodes = evaluator.eval_nodes(&constraints.nodes);
@@ -356,12 +373,28 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
         interactions_evals.push(num * norm_factor * eq_sharp_ns[n_lift]);
         interactions_evals.push(denom * eq_sharp_ns[n_lift]);
     }
-    let evaluated_claim = interactions_evals
+    let claims = interactions_evals
         .iter()
         .chain(constraints_evals.iter())
-        .zip(mu.powers())
-        .map(|(x, y)| *x * y)
+        .copied()
+        .collect_vec();
+    let mu_pows_dbg = mu.powers().take(claims.len()).collect_vec();
+    let evaluated_claim = claims
+        .iter()
+        .zip(mu_pows_dbg.iter())
+        .map(|(x, y)| *x * *y)
         .sum::<SC::EF>();
+    if claims.len() == 3 {
+        let c = claims[2];
+        debug!(
+            alt0 = %c,
+            alt1 = %(c * mu_pows_dbg[1]),
+            alt2 = %(c * mu_pows_dbg[2]),
+            "claim_component_alts"
+        );
+    }
+    debug!(?claims, ?mu_pows_dbg, "claim_components");
+    debug!(%cur_sum, %evaluated_claim, "final_claim_check");
     if cur_sum != evaluated_claim {
         return Err(BatchConstraintError::InconsistentClaims);
     }

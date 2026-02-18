@@ -1,30 +1,14 @@
-// Instruction encoding/decoding for DAG-based constraint evaluation.
-//
-// Based on openvm-org cuda-backend/cuda/include/codec.cuh
-// (originally from plonky3-gpu)
-//
-// A very simple custom codec for constraints written in the AIR/RAP frontend language.
-// Each constraint is compiled into a DAG of Rules, where each Rule is a 128-bit
-// instruction encoding an operation (add, sub, mul, neg, var, inv) and its operands.
-
+// Instruction encoding for DAG eval - Metal translation
+// Translated from CUDA: cuda-backend/cuda/include/codec.cuh
 #pragma once
 
 #include <metal_stdlib>
-
 using namespace metal;
-
-// ============================================================================
-// Rule: 128-bit encoded instruction (two 64-bit words)
-// ============================================================================
 
 struct Rule {
     uint64_t low;
     uint64_t high;
 };
-
-// ============================================================================
-// Enumerations
-// ============================================================================
 
 enum OperationType : uint32_t {
     OP_ADD = 0,
@@ -37,21 +21,17 @@ enum OperationType : uint32_t {
 
 enum EntryType : uint32_t {
     ENTRY_PREPROCESSED = 0,
-    ENTRY_MAIN         = 1,
-    ENTRY_PERMUTATION  = 2,
-    ENTRY_PUBLIC       = 3,
-    ENTRY_CHALLENGE    = 4,
-    ENTRY_EXPOSED      = 5,
-    SRC_INTERMEDIATE   = 6,
-    SRC_CONSTANT       = 7,
-    SRC_IS_FIRST       = 8,
-    SRC_IS_LAST        = 9,
-    SRC_IS_TRANSITION  = 10
+    ENTRY_MAIN = 1,
+    ENTRY_PERMUTATION = 2,
+    ENTRY_PUBLIC = 3,
+    ENTRY_CHALLENGE = 4,
+    ENTRY_EXPOSED = 5,
+    SRC_INTERMEDIATE = 6,
+    SRC_CONSTANT = 7,
+    SRC_IS_FIRST = 8,
+    SRC_IS_LAST = 9,
+    SRC_IS_TRANSITION = 10
 };
-
-// ============================================================================
-// Decoded structs
-// ============================================================================
 
 struct SourceInfo {
     EntryType type;
@@ -69,8 +49,6 @@ struct DecodedRule {
     uint32_t z_index;
 };
 
-// Lightweight header: only op, flags, and x (always needed).
-// Used for lazy decoding to reduce register pressure.
 struct RuleHeader {
     bool is_constraint;
     bool buffer_result;
@@ -78,42 +56,33 @@ struct RuleHeader {
     SourceInfo x;
 };
 
-// ============================================================================
-// Encoding constants (bit masks and shifts)
-// ============================================================================
+constant uint64_t ENTRY_SRC_MASK = 0xF;
+constant uint64_t ENTRY_PART_SHIFT = 4;
+constant uint64_t ENTRY_PART_MASK = 0xFF;
+constant uint64_t ENTRY_OFFSET_SHIFT = 12;
+constant uint64_t ENTRY_OFFSET_MASK = 0xF;
+constant uint64_t ENTRY_INDEX_SHIFT = 16;
+constant uint64_t ENTRY_INDEX_MASK = 0xFFFFFFFF;
+constant uint64_t SOURCE_INTERMEDIATE_SHIFT = 4;
+constant uint64_t SOURCE_INTERMEDIATE_MASK = 0xFFFFF;
+constant uint64_t SOURCE_CONSTANT_SHIFT = 16;
+constant uint64_t SOURCE_CONSTANT_MASK = 0xFFFFFFFF;
+constant uint64_t LOW_48_BITS_MASK = 0xFFFFFFFFFFFF;
+constant int Y_HIGH_SHIFT = 16;
+constant uint64_t Y_HIGH_MASK = 0xFFFFFFFF;
+constant int Z_LOW_SHIFT = 32;
+constant uint64_t Z_LOW_MASK = 0xFFFFFF;
+constant uint64_t OP_MASK = 0x3F;
+constant int OP_SHIFT = 56;
+constant uint64_t BUFFER_RESULT_MASK = 0x4000000000000000ULL;
+constant uint64_t IS_CONSTRAINT_MASK = 0x8000000000000000ULL;
 
-constant uint64_t ENTRY_SRC_MASK              = 0xF;
-constant uint64_t ENTRY_PART_SHIFT            = 4;
-constant uint64_t ENTRY_PART_MASK             = 0xFF;
-constant uint64_t ENTRY_OFFSET_SHIFT          = 12;
-constant uint64_t ENTRY_OFFSET_MASK           = 0xF;
-constant uint64_t ENTRY_INDEX_SHIFT           = 16;
-constant uint64_t ENTRY_INDEX_MASK            = 0xFFFFFFFF;
-constant uint64_t SOURCE_INTERMEDIATE_SHIFT   = 4;
-constant uint64_t SOURCE_INTERMEDIATE_MASK    = 0xFFFFF;
-constant uint64_t SOURCE_CONSTANT_SHIFT       = 16;
-constant uint64_t SOURCE_CONSTANT_MASK        = 0xFFFFFFFF;
-constant uint64_t LOW_48_BITS_MASK            = 0xFFFFFFFFFFFF;
-constant int      Y_HIGH_SHIFT                = 16;
-constant uint64_t Y_HIGH_MASK                 = 0xFFFFFFFF;
-constant int      Z_LOW_SHIFT                 = 32;
-constant uint64_t Z_LOW_MASK                  = 0xFFFFFF;
-constant uint64_t OP_MASK                     = 0x3F;
-constant int      OP_SHIFT                    = 56;
-constant uint64_t BUFFER_RESULT_MASK          = 0x4000000000000000;
-constant uint64_t IS_CONSTRAINT_MASK          = 0x8000000000000000;
-
-// ============================================================================
-// Decode functions
-// ============================================================================
-
-/// Decode a single source operand from its 48-bit encoding.
 inline SourceInfo decode_source(uint64_t encoded) {
     SourceInfo src;
-    src.type   = (EntryType)(encoded & ENTRY_SRC_MASK);
-    src.part   = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;
+    src.type = static_cast<EntryType>(encoded & ENTRY_SRC_MASK);
+    src.part = (encoded >> ENTRY_PART_SHIFT) & ENTRY_PART_MASK;
     src.offset = (encoded >> ENTRY_OFFSET_SHIFT) & ENTRY_OFFSET_MASK;
-    src.index  = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;
+    src.index = (encoded >> ENTRY_INDEX_SHIFT) & ENTRY_INDEX_MASK;
 
     if (src.type == SRC_INTERMEDIATE) {
         src.part = 0;
@@ -125,7 +94,6 @@ inline SourceInfo decode_source(uint64_t encoded) {
     return src;
 }
 
-/// Fully decode a 128-bit Rule into all its fields.
 inline DecodedRule decode_rule(Rule encoded) {
     DecodedRule rule;
 
@@ -138,7 +106,7 @@ inline DecodedRule decode_rule(Rule encoded) {
     uint64_t z_encoded = (encoded.high >> Z_LOW_SHIFT) & Z_LOW_MASK;
     rule.z_index = (z_encoded >> SOURCE_INTERMEDIATE_SHIFT) & SOURCE_INTERMEDIATE_MASK;
 
-    rule.op = (OperationType)((encoded.high >> OP_SHIFT) & OP_MASK);
+    rule.op = static_cast<OperationType>((encoded.high >> OP_SHIFT) & OP_MASK);
 
     rule.buffer_result = (encoded.high & BUFFER_RESULT_MASK) != 0;
     rule.is_constraint = (encoded.high & IS_CONSTRAINT_MASK) != 0;
@@ -146,27 +114,27 @@ inline DecodedRule decode_rule(Rule encoded) {
     return rule;
 }
 
-/// Decode only the header (op, flags, x) -- for lazy decoding.
+// Decode only header (op, flags, x) - for lazy decoding pattern
 inline RuleHeader decode_rule_header(Rule encoded) {
     RuleHeader header;
 
     uint64_t x_encoded = (encoded.low & LOW_48_BITS_MASK);
     header.x = decode_source(x_encoded);
 
-    header.op = (OperationType)((encoded.high >> OP_SHIFT) & OP_MASK);
+    header.op = static_cast<OperationType>((encoded.high >> OP_SHIFT) & OP_MASK);
     header.buffer_result = (encoded.high & BUFFER_RESULT_MASK) != 0;
     header.is_constraint = (encoded.high & IS_CONSTRAINT_MASK) != 0;
 
     return header;
 }
 
-/// Decode the y operand on demand (only needed for binary ops: ADD, SUB, MUL).
+// Decode y operand on demand (only needed for binary ops: ADD, SUB, MUL)
 inline SourceInfo decode_y(Rule encoded) {
     uint64_t y_encoded = ((encoded.low >> 48) | ((encoded.high & Y_HIGH_MASK) << Y_HIGH_SHIFT));
     return decode_source(y_encoded);
 }
 
-/// Decode the z_index on demand (only needed when buffer_result is true).
+// Decode z_index on demand (only needed when buffer_result is true)
 inline uint32_t decode_z_index(Rule encoded) {
     uint64_t z_encoded = (encoded.high >> Z_LOW_SHIFT) & Z_LOW_MASK;
     return (z_encoded >> SOURCE_INTERMEDIATE_SHIFT) & SOURCE_INTERMEDIATE_MASK;

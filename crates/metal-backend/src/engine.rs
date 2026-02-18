@@ -1,5 +1,6 @@
 use getset::MutGetters;
 use openvm_stark_backend::{prover::Coordinator, StarkEngine, SystemParams};
+use tracing::debug;
 
 use crate::{prelude::SC, sponge::DuplexSpongeMetal, MetalBackend, MetalDevice};
 
@@ -47,6 +48,11 @@ impl StarkEngine for BabyBearPoseidon2MetalEngine {
         &self,
         transcript: DuplexSpongeMetal,
     ) -> Coordinator<SC, Self::PB, Self::PD, Self::TS> {
-        Coordinator::new(MetalBackend, self.device.clone(), transcript)
+        debug!("engine::prover_from_transcript start");
+        let device = self.device.clone();
+        debug!("engine::prover_from_transcript cloned device");
+        let coordinator = Coordinator::new(MetalBackend, device, transcript);
+        debug!("engine::prover_from_transcript done");
+        coordinator
     }
 }
