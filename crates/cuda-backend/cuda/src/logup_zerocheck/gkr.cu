@@ -64,7 +64,7 @@ __global__ void frac_build_tree_layer_kernel(
 }
 
 // Reconstruct eq weight from sqrt-decomposed buffers.
-// See gkr-prover.md § "Eq buffer sqrt decomposition".
+// See docs/cuda-backend/gkr-prover.md § "Eq buffer sqrt decomposition".
 __device__ __forceinline__ FpExt sqrt_buffer_get(
     const FpExt *__restrict__ eq_xi_low,
     const FpExt *__restrict__ eq_xi_high,
@@ -75,7 +75,7 @@ __device__ __forceinline__ FpExt sqrt_buffer_get(
 }
 
 // Accumulate GKR sumcheck contributions for s'_t(1) and s'_t(2).
-// See gkr-prover.md § "Sumcheck round implementation".
+// See docs/cuda-backend/gkr-prover.md § "Sumcheck round implementation".
 __device__ __forceinline__ void accumulate_compute_contributions(
     const FpExt *__restrict__ eq_xi_low,
     const FpExt *__restrict__ eq_xi_high,
@@ -507,7 +507,7 @@ __global__ void compute_round_and_revert_kernel(
 constexpr uint32_t PRECOMPUTE_M_TAIL_BATCH = 16;
 
 // Build partial M blocks by parallelizing over tail points.
-// See gkr-prover.md § "Precompute M strategy".
+// See docs/cuda-backend/gkr-prover.md § "Precompute M strategy".
 // Each block covers a range of tail points [b_start, b_end) and computes a full M block.
 // Uses 2D blocks (m,m) where each thread owns one (u,v) M-matrix entry.
 // Shared memory uses +1 padding on the m-dimension stride to avoid bank conflicts.
@@ -716,7 +716,7 @@ __global__ void precompute_m_reduce_partials_kernel(
 }
 
 // Evaluate one round polynomial inside a precompute-M window from precomputed M.
-// See gkr-prover.md § "Precompute M strategy".
+// See docs/cuda-backend/gkr-prover.md § "Precompute M strategy".
 // Output: out[0] = s'(1), out[1] = s'(2).
 __global__ void precompute_m_eval_round_kernel(
     const FpExt *__restrict__ m_total,

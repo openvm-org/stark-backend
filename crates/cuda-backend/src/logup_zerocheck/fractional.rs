@@ -270,7 +270,7 @@ fn eval_mle_table(points: &[EF], out: &mut [EF]) {
 }
 
 /// Get low/high eq pointers for the tail portion of the eq buffer, skipping `drop_count` layers.
-/// See gkr-prover.md § "Eq buffer sqrt decomposition".
+/// See `docs/cuda-backend/gkr-prover.md` § "Eq buffer sqrt decomposition".
 fn eq_tail_ptrs(
     eq_buffer: &SqrtEqLayers,
     drop_count: usize,
@@ -344,7 +344,7 @@ fn observe_and_update(
 
 /// Fused revert + compute round: reverts the tree layer and computes s'_0(1) and s'_0(2).
 ///
-/// See gkr-prover.md § "Sumcheck round strategies" for context.
+/// See `docs/cuda-backend/gkr-prover.md` § "Sumcheck round strategies" for context.
 #[allow(clippy::too_many_arguments)]
 fn do_sumcheck_round_and_revert(
     eq_buffer: &mut SqrtEqLayers,
@@ -1083,7 +1083,7 @@ fn reduce_to_single_evaluation(claims: &GkrLayerClaims<SC>, mu: EF) -> (EF, EF) 
 /// Goal: compute s({1,2,3}) from s(X) = eq(xi_j, X) * s'(X).
 /// Reconstruct the full round polynomial s_t from GPU-computed s'_t(1), s'_t(2).
 ///
-/// See gkr-prover.md § "Sumcheck round implementation" for the derivation.
+/// See `docs/cuda-backend/gkr-prover.md` § "Sumcheck round implementation" for the derivation.
 fn reconstruct_s_evals(
     d_sum_evals: &DeviceBuffer<EF>,
     prev_s_eval: EF,
