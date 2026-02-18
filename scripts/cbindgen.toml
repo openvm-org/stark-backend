@@ -1,3 +1,11 @@
+# cbindgen configuration for the Rust/CUDA ABI matcher pipeline.
+# Run from crates/cuda-backend:  cbindgen -c ../../scripts/cbindgen.toml . -o rust_abi.hpp
+#
+# When adding a new SDK config module gated by #[cfg(feature = "...")]:
+#   1. Add a "feature = <name>" = "<CPP_DEFINE>" entry under [defines] below.
+#   2. Update scripts/gen_stub.py with fallback type definitions for the new
+#      config (F, EF, Digest) if they differ from the default.
+#   3. Test locally — see gen_stub.py docstring for the full command sequence.
 language = "C++"
 no_includes = true
 sys_includes = ["cstdint"]
@@ -8,6 +16,7 @@ include = ["openvm-stark-sdk", "openvm-stark-backend"]
 
 [defines]
 test = "CB_TEST"
+"feature = baby-bear-bn254-poseidon2" = "BABY_BEAR_BN254_POSEIDON2"
 
 [const]
 # Don't emit constexpr/static const for consts
