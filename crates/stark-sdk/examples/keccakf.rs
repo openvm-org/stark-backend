@@ -2,12 +2,10 @@
 
 use std::sync::Arc;
 
+use cfg_if::cfg_if;
 use eyre::eyre;
 use openvm_stark_sdk::{
-    config::{
-        baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
-        log_up_params::log_up_security_params_baby_bear_100_bits,
-    },
+    config::log_up_params::log_up_security_params_baby_bear_100_bits,
     openvm_stark_backend::{
         p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues},
         p3_field::Field,
@@ -18,6 +16,13 @@ use openvm_stark_sdk::{
 use p3_keccak_air::KeccakAir;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tracing::info_span;
+cfg_if! {
+    if #[cfg(feature = "baby-bear-bn254-poseidon2")] {
+        use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::BabyBearBn254Poseidon2CpuEngine;
+    } else {
+        use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2CpuEngine;
+    }
+}
 
 const NUM_PERMUTATIONS: usize = 1 << 10;
 
@@ -61,7 +66,15 @@ fn main() -> eyre::Result<()> {
     let mut rng = StdRng::seed_from_u64(42);
     let air = TestAir(KeccakAir {});
 
-    let engine: BabyBearPoseidon2CpuEngine = BabyBearPoseidon2CpuEngine::new(params);
+    cfg_if! {
+        if #[cfg(feature = "baby-bear-bn254-poseidon2")] {
+            println!("Using BabyBearBn254Poseidon2CpuEngine");
+            let engine: BabyBearBn254Poseidon2CpuEngine = StarkEngine::new(params);
+        } else {
+            println!("Using BabyBearPoseidon2CpuEngine");
+            let engine: BabyBearPoseidon2CpuEngine = StarkEngine::new(params);
+        }
+    }
     let (pk, vk) = engine.keygen(&[Arc::new(air)]);
 
     let inputs = (0..NUM_PERMUTATIONS)

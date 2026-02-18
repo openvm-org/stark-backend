@@ -143,6 +143,7 @@ metrics-tracing-context = "0.16.0"
 metrics-util = "0.17.0"
 metrics-exporter-prometheus = "0.15.3"
 rustls = { version = "0.23", default-features = false }
+num-bigint = { version = "0.4", default-features = false }
 
 # default-features = false for no_std
 itertools = { version = "0.14.0", default-features = false }
