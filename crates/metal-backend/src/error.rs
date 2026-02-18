@@ -44,6 +44,8 @@ pub enum MerkleTreeError {
 pub enum StackTracesError {
     #[error(transparent)]
     MemCopy(#[from] MemCopyError),
+    #[error("blit copy error: {0}")]
+    BlitCopy(MetalError),
     #[error("batch_expand_pad_wide error: {0}")]
     BatchExpandPadWide(MetalError),
     #[error("fill_zero error: {0}")]

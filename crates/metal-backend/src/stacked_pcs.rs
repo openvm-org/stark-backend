@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{mem::size_of, sync::Arc};
 
 use getset::Getters;
 use itertools::Itertools;
-use openvm_metal_common::d_buffer::MetalBuffer;
+use openvm_metal_common::{command, d_buffer::MetalBuffer, device::get_context};
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
     prover::{stacked_pcs::StackedLayout, MatrixDimensions},
@@ -11,12 +11,12 @@ use tracing::instrument;
 
 use crate::{
     base::{MetalMatrix, MetalMatrixView},
+    merkle_tree::MerkleTreeMetal,
     metal::{
         batch_ntt_small::batch_ntt_small,
         matrix::{batch_expand_pad, batch_expand_pad_wide},
         ntt::bit_rev,
     },
-    merkle_tree::MerkleTreeMetal,
     ntt::batch_ntt,
     poly::{mle_interpolate_stages, PleMatrix},
     prelude::{Digest, F},
@@ -113,6 +113,31 @@ pub(crate) fn stack_traces_into_expanded(
     buffer: &mut MetalBuffer<F>,
     padded_height: usize,
 ) -> Result<(), StackTracesError> {
+    fn blit_copy_range<T>(
+        src: &MetalBuffer<T>,
+        src_offset: usize,
+        dst: &MetalBuffer<T>,
+        dst_offset: usize,
+        len: usize,
+    ) -> Result<(), StackTracesError> {
+        debug_assert!(src_offset + len <= src.len());
+        debug_assert!(dst_offset + len <= dst.len());
+        let src_offset_bytes = (src_offset * size_of::<T>()) as u64;
+        let dst_offset_bytes = (dst_offset * size_of::<T>()) as u64;
+        let copy_bytes = (len * size_of::<T>()) as u64;
+        let ctx = get_context();
+        command::blit_operation(&ctx.queue, |blit| {
+            blit.copy_from_buffer(
+                src.gpu_buffer(),
+                src_offset_bytes,
+                dst.gpu_buffer(),
+                dst_offset_bytes,
+                copy_bytes,
+            );
+        })
+        .map_err(StackTracesError::BlitCopy)
+    }
+
     let l_skip = layout.l_skip();
     debug_assert_eq!(padded_height % layout.height(), 0);
     debug_assert_eq!(buffer.len() % padded_height, 0);
@@ -125,12 +150,7 @@ pub(crate) fn stack_traces_into_expanded(
         debug_assert_eq!(trace.height(), 1 << s.log_height());
         if s.log_height() >= l_skip {
             debug_assert_eq!(trace.height(), s_len);
-            // With Metal's unified memory, D2D copy is just memcpy
-            unsafe {
-                let src = trace.buffer().as_ptr().add(*j * s_len);
-                let dst = buffer.as_mut_ptr().add(start);
-                std::ptr::copy_nonoverlapping(src, dst, s_len);
-            }
+            blit_copy_range(trace.buffer(), *j * s_len, buffer, start, s_len)?;
         } else {
             let stride = s.stride(l_skip);
             debug_assert_eq!(stride * trace.height(), s_len);
@@ -144,7 +164,7 @@ pub(crate) fn stack_traces_into_expanded(
                     stride as u32,
                     1,
                 )
-                    .map_err(StackTracesError::BatchExpandPadWide)?;
+                .map_err(StackTracesError::BatchExpandPadWide)?;
             }
         }
     }

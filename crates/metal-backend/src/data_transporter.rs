@@ -1,7 +1,7 @@
 use std::{cmp::max, sync::Arc};
 
 use openvm_metal_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
+    copy::{MemCopyD2D, MemCopyD2H, MemCopyH2D},
     d_buffer::MetalBuffer,
 };
 use openvm_stark_backend::{
@@ -17,8 +17,8 @@ use tracing::debug;
 
 use crate::{
     base::MetalMatrix,
-    metal::matrix::{collapse_strided_matrix, matrix_transpose_fp},
     merkle_tree::MerkleTreeMetal,
+    metal::matrix::{collapse_strided_matrix, matrix_transpose_fp},
     poly::PleMatrix,
     prelude::{Digest, F, SC},
     stacked_pcs::StackedPcsDataMetal,
@@ -81,21 +81,13 @@ impl DeviceDataTransporter<SC, MetalBackend> for MetalDevice {
     }
 }
 
-pub fn transport_matrix_h2d_col_major<T>(
-    matrix: &ColMajorMatrix<T>,
-) -> MetalMatrix<T> {
+pub fn transport_matrix_h2d_col_major<T>(matrix: &ColMajorMatrix<T>) -> MetalMatrix<T> {
     // matrix is already col-major, so this is just H2D buffer transfer
     let buffer = matrix.values.to_device();
-    MetalMatrix::new(
-        Arc::new(buffer),
-        matrix.height(),
-        matrix.width(),
-    )
+    MetalMatrix::new(Arc::new(buffer), matrix.height(), matrix.width())
 }
 
-pub fn transport_matrix_h2d_row(
-    matrix: &RowMajorMatrix<F>,
-) -> MetalMatrix<F> {
+pub fn transport_matrix_h2d_row(matrix: &RowMajorMatrix<F>) -> MetalMatrix<F> {
     let data = matrix.values.as_slice();
     let input_buffer = data.to_device();
     let output = MetalMatrix::<F>::with_capacity(matrix.height(), matrix.width());
@@ -136,15 +128,8 @@ pub fn transport_and_unstack_single_data_h2d(
     let stacked_width = d.matrix.width();
     let stacked_height = d.matrix.height();
     let d_matrix_evals = d.matrix.values.to_device();
-    // With Metal's unified memory, D2D copy is just a blit
     let strided_trace = MetalBuffer::<F>::with_capacity(lifted_height * width);
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            d_matrix_evals.as_ptr(),
-            strided_trace.as_mut_ptr(),
-            lifted_height * width,
-        );
-    }
+    d_matrix_evals.device_copy_to(&strided_trace)?;
     let trace_buffer = if stride == 1 {
         strided_trace
     } else {
@@ -229,16 +214,12 @@ pub fn transport_pcs_data_h2d(
     })
 }
 
-pub fn transport_matrix_d2h_col_major<T>(
-    matrix: &MetalMatrix<T>,
-) -> ColMajorMatrix<T> {
+pub fn transport_matrix_d2h_col_major<T>(matrix: &MetalMatrix<T>) -> ColMajorMatrix<T> {
     let values_host = matrix.to_host();
     ColMajorMatrix::new(values_host, matrix.width())
 }
 
-pub fn transport_matrix_d2h_row_major(
-    matrix: &MetalMatrix<F>,
-) -> RowMajorMatrix<F> {
+pub fn transport_matrix_d2h_row_major(matrix: &MetalMatrix<F>) -> RowMajorMatrix<F> {
     let matrix_buffer = MetalBuffer::<F>::with_capacity(matrix.height() * matrix.width());
     unsafe {
         matrix_transpose_fp(
@@ -249,8 +230,5 @@ pub fn transport_matrix_d2h_row_major(
         )
         .unwrap();
     }
-    RowMajorMatrix::<F>::new(
-        matrix_buffer.to_host(),
-        matrix.width(),
-    )
+    RowMajorMatrix::<F>::new(matrix_buffer.to_host(), matrix.width())
 }

@@ -4,7 +4,6 @@
 //! pipeline dispatch. Each sub-module provides safe Rust wrappers around Metal kernel
 //! launches, analogous to the CUDA backend's per-file FFI bindings.
 
-
 pub mod batch_ntt_small;
 pub mod device_info;
 pub mod logup_zerocheck;
@@ -21,10 +20,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
-use metal::{
-    CommandBufferRef, ComputeCommandEncoderRef, ComputePipelineState, Library,
-    MTLSize,
-};
+use metal::{CommandBufferRef, ComputeCommandEncoderRef, ComputePipelineState, Library, MTLSize};
 use openvm_metal_common::device::get_context;
 use openvm_metal_common::error::MetalError;
 
@@ -373,7 +369,11 @@ pub mod sumcheck {
             encoder.set_buffer(1, Some(output_matrices.gpu_buffer()), 0);
             encoder.set_buffer(2, Some(widths.gpu_buffer()), 0);
             encoder.set_bytes(3, 1, &log_output_height as *const u8 as *const c_void);
-            encoder.set_bytes(4, mem::size_of::<EF>() as u64, &r_val as *const EF as *const c_void);
+            encoder.set_bytes(
+                4,
+                mem::size_of::<EF>() as u64,
+                &r_val as *const EF as *const c_void,
+            );
         })
     }
 
@@ -397,7 +397,11 @@ pub mod sumcheck {
             encoder.set_buffer(0, Some(input.gpu_buffer()), 0);
             encoder.set_buffer(1, Some(output.gpu_buffer()), 0);
             encoder.set_bytes(2, 1, &log_output_height as *const u8 as *const c_void);
-            encoder.set_bytes(3, mem::size_of::<EF>() as u64, &r_val as *const EF as *const c_void);
+            encoder.set_bytes(
+                3,
+                mem::size_of::<EF>() as u64,
+                &r_val as *const EF as *const c_void,
+            );
         })
     }
 
@@ -424,7 +428,11 @@ pub mod sumcheck {
             encoder.set_buffer(1, Some(output.gpu_buffer()), 0);
             encoder.set_bytes(2, 4, &width as *const u32 as *const c_void);
             encoder.set_bytes(3, 1, &log_output_height as *const u8 as *const c_void);
-            encoder.set_bytes(4, mem::size_of::<EF>() as u64, &r_val as *const EF as *const c_void);
+            encoder.set_bytes(
+                4,
+                mem::size_of::<EF>() as u64,
+                &r_val as *const EF as *const c_void,
+            );
         })
     }
 
@@ -446,7 +454,11 @@ pub mod sumcheck {
         dispatch_sync(&pipeline, grid, group, |encoder| {
             encoder.set_buffer(0, Some(buffer.gpu_buffer()), 0);
             encoder.set_bytes(1, 4, &half_u32 as *const u32 as *const c_void);
-            encoder.set_bytes(2, mem::size_of::<EF>() as u64, &r as *const EF as *const c_void);
+            encoder.set_bytes(
+                2,
+                mem::size_of::<EF>() as u64,
+                &r as *const EF as *const c_void,
+            );
         })
     }
 
@@ -493,31 +505,45 @@ pub mod sumcheck {
             encoder.set_buffer(1, Some(output_matrices.gpu_buffer()), 0);
             encoder.set_buffer(2, Some(widths.gpu_buffer()), 0);
             encoder.set_buffer(3, Some(log_output_heights.gpu_buffer()), 0);
-            encoder.set_bytes(4, mem::size_of::<EF>() as u64, &r_val as *const EF as *const c_void);
+            encoder.set_bytes(
+                4,
+                mem::size_of::<EF>() as u64,
+                &r_val as *const EF as *const c_void,
+            );
         })
     }
 
     pub unsafe fn fold_ple_from_coeffs(
-        input_coeffs: *const F,
-        output: *mut EF,
+        input_coeffs: &MetalBuffer<F>,
+        output: &MetalBuffer<EF>,
         num_x: u32,
         width: u32,
         domain_size: u32,
         r: EF,
     ) -> Result<(), MetalError> {
         let total_polys = (num_x * width) as usize;
-        let dom = domain_size as usize;
-        let coeffs = std::slice::from_raw_parts(input_coeffs, total_polys * dom);
-        let out = std::slice::from_raw_parts_mut(output, total_polys);
-        for poly in 0..total_polys {
-            let off = poly * dom;
-            let mut acc = EF::from(coeffs[off + dom - 1]);
-            for i in (0..dom - 1).rev() {
-                acc = acc * r + EF::from(coeffs[off + i]);
-            }
-            out[poly] = acc;
+        if total_polys == 0 {
+            return Ok(());
         }
-        Ok(())
+        debug_assert!(input_coeffs.len() >= total_polys * domain_size as usize);
+        debug_assert!(output.len() >= total_polys);
+
+        let threads_per_group = DEFAULT_THREADS_PER_GROUP;
+        let total_threads = align_threads(total_polys, threads_per_group);
+        let (grid, group) = grid_size_1d(total_threads, threads_per_group);
+        let pipeline = get_kernels().get_pipeline("fold_ple_from_coeffs")?;
+        dispatch_sync(&pipeline, grid, group, |encoder| {
+            encoder.set_buffer(0, Some(input_coeffs.gpu_buffer()), 0);
+            encoder.set_buffer(1, Some(output.gpu_buffer()), 0);
+            encoder.set_bytes(2, 4, &num_x as *const u32 as *const c_void);
+            encoder.set_bytes(3, 4, &width as *const u32 as *const c_void);
+            encoder.set_bytes(4, 4, &domain_size as *const u32 as *const c_void);
+            encoder.set_bytes(
+                5,
+                mem::size_of::<EF>() as u64,
+                &r as *const EF as *const c_void,
+            );
+        })
     }
 
     pub unsafe fn reduce_over_x_and_cols(
@@ -566,7 +592,11 @@ pub mod sumcheck {
         dispatch_sync(&pipeline, grid, group, |encoder| {
             encoder.set_buffer(0, Some(output.buffer.gpu_buffer()), 0);
             encoder.set_buffer(1, Some(input.buffer.gpu_buffer()), 0);
-            encoder.set_bytes(2, mem::size_of::<EF>() as u64, &r as *const EF as *const c_void);
+            encoder.set_bytes(
+                2,
+                mem::size_of::<EF>() as u64,
+                &r as *const EF as *const c_void,
+            );
         })
     }
 }
@@ -587,9 +617,21 @@ pub mod prefix {
         let (grid, group) = grid_size_1d(block_num as usize * SIMD_SIZE, SIMD_SIZE);
         dispatch_sync(&pipeline, grid, group, |encoder| {
             encoder.set_buffer(0, Some(d_inout.gpu_buffer()), 0);
-            encoder.set_bytes(1, std::mem::size_of::<u64>() as u64, &length as *const u64 as *const c_void);
-            encoder.set_bytes(2, std::mem::size_of::<u64>() as u64, &round_stride as *const u64 as *const c_void);
-            encoder.set_bytes(3, std::mem::size_of::<u64>() as u64, &block_num as *const u64 as *const c_void);
+            encoder.set_bytes(
+                1,
+                std::mem::size_of::<u64>() as u64,
+                &length as *const u64 as *const c_void,
+            );
+            encoder.set_bytes(
+                2,
+                std::mem::size_of::<u64>() as u64,
+                &round_stride as *const u64 as *const c_void,
+            );
+            encoder.set_bytes(
+                3,
+                std::mem::size_of::<u64>() as u64,
+                &block_num as *const u64 as *const c_void,
+            );
         })
     }
 
@@ -603,8 +645,16 @@ pub mod prefix {
         let (grid, group) = grid_size_1d(total, DEFAULT_THREADS_PER_GROUP);
         dispatch_sync(&pipeline, grid, group, |encoder| {
             encoder.set_buffer(0, Some(d_inout.gpu_buffer()), 0);
-            encoder.set_bytes(1, std::mem::size_of::<u64>() as u64, &length as *const u64 as *const c_void);
-            encoder.set_bytes(2, std::mem::size_of::<u64>() as u64, &round_stride as *const u64 as *const c_void);
+            encoder.set_bytes(
+                1,
+                std::mem::size_of::<u64>() as u64,
+                &length as *const u64 as *const c_void,
+            );
+            encoder.set_bytes(
+                2,
+                std::mem::size_of::<u64>() as u64,
+                &round_stride as *const u64 as *const c_void,
+            );
         })
     }
 
@@ -617,7 +667,11 @@ pub mod prefix {
         let (grid, group) = grid_size_1d(total, DEFAULT_THREADS_PER_GROUP);
         dispatch_sync(&pipeline, grid, group, |encoder| {
             encoder.set_buffer(0, Some(d_inout.gpu_buffer()), 0);
-            encoder.set_bytes(1, std::mem::size_of::<u64>() as u64, &length as *const u64 as *const c_void);
+            encoder.set_bytes(
+                1,
+                std::mem::size_of::<u64>() as u64,
+                &length as *const u64 as *const c_void,
+            );
         })
     }
 }

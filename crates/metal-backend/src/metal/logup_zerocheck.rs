@@ -10,6 +10,7 @@
 
 use std::ffi::c_void;
 
+use metal::Buffer as MetalRawBuffer;
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
@@ -22,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP,
+    dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
 };
 
 const GKR_SP_DEG: usize = 2;
@@ -55,6 +56,67 @@ fn frac_p_ptr_mut(ptr: *mut Frac<EF>) -> *mut EF {
 #[inline]
 fn frac_q_ptr_mut(ptr: *mut Frac<EF>, frac_len: usize) -> *mut EF {
     unsafe { (ptr as *mut EF).add(frac_len) }
+}
+
+#[inline]
+fn block_shared_bytes(threads_per_group: usize) -> u64 {
+    let simd_groups = threads_per_group.div_ceil(SIMD_SIZE);
+    (simd_groups * std::mem::size_of::<EF>()) as u64
+}
+
+#[inline]
+unsafe fn final_reduce_block_sums_to_buffer(
+    block_sums: &MetalBuffer<EF>,
+    output_buffer: &MetalRawBuffer,
+    output_offset_bytes: u64,
+    num_blocks: u32,
+    d: u32,
+    threads_per_group: usize,
+) -> Result<(), MetalError> {
+    if d == 0 {
+        return Ok(());
+    }
+    let shared_bytes = block_shared_bytes(threads_per_group);
+    let pipeline_reduce = get_kernels().get_pipeline("final_reduce_block_sums")?;
+    let final_threads = d as usize * threads_per_group;
+    let (grid_reduce, group_reduce) = grid_size_1d(final_threads, threads_per_group);
+    dispatch_sync(&pipeline_reduce, grid_reduce, group_reduce, |encoder| {
+        encoder.set_buffer(0, Some(block_sums.gpu_buffer()), 0);
+        encoder.set_buffer(1, Some(output_buffer), output_offset_bytes);
+        encoder.set_bytes(2, 4, &num_blocks as *const u32 as *const c_void);
+        encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
+        encoder.set_threadgroup_memory_length(0, shared_bytes);
+    })
+}
+
+#[inline]
+unsafe fn batched_final_reduce_block_sums_to_buffer(
+    block_sums: &MetalBuffer<EF>,
+    output_buffer: &MetalRawBuffer,
+    output_offset_bytes: u64,
+    segment_offsets: &MetalBuffer<u32>,
+    num_segments: usize,
+    d: u32,
+    threads_per_group: usize,
+) -> Result<(), MetalError> {
+    if d == 0 || num_segments == 0 {
+        return Ok(());
+    }
+    let shared_bytes = block_shared_bytes(threads_per_group);
+    let pipeline_reduce = get_kernels().get_pipeline("batched_final_reduce_block_sums")?;
+    let (grid_reduce, group_reduce) = grid_size_2d(
+        num_segments * threads_per_group,
+        d as usize,
+        threads_per_group,
+        1,
+    );
+    dispatch_sync(&pipeline_reduce, grid_reduce, group_reduce, |encoder| {
+        encoder.set_buffer(0, Some(block_sums.gpu_buffer()), 0);
+        encoder.set_buffer(1, Some(output_buffer), output_offset_bytes);
+        encoder.set_buffer(2, Some(segment_offsets.gpu_buffer()), 0);
+        encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
+        encoder.set_threadgroup_memory_length(0, shared_bytes);
+    })
 }
 
 // ============================================================================
@@ -210,11 +272,7 @@ pub fn zerocheck_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize {
     blocks * num_y as usize * 2
 }
 
-pub fn zerocheck_mle_intermediates_buffer_size(
-    buffer_size: u32,
-    num_x: u32,
-    num_y: u32,
-) -> usize {
+pub fn zerocheck_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
     buffer_size as usize * num_x as usize * num_y as usize
 }
 
@@ -223,11 +281,7 @@ pub fn logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize {
     blocks * num_y as usize * 2
 }
 
-pub fn logup_mle_intermediates_buffer_size(
-    buffer_size: u32,
-    num_x: u32,
-    num_y: u32,
-) -> usize {
+pub fn logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
     buffer_size as usize * num_x as usize * num_y as usize
 }
 
@@ -303,19 +357,22 @@ pub unsafe fn frac_compute_round(
         encoder.set_buffer(4, Some(tmp_block_sums.gpu_buffer()), 0);
         encoder.set_bytes(5, 4, &num_x_u32 as *const u32 as *const c_void);
         encoder.set_bytes(6, 4, &log_eq_low_cap as *const u32 as *const c_void);
-        encoder.set_bytes(7, std::mem::size_of::<EF>() as u64, &lambda as *const EF as *const c_void);
+        encoder.set_bytes(
+            7,
+            std::mem::size_of::<EF>() as u64,
+            &lambda as *const EF as *const c_void,
+        );
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let block_sums = tmp_block_sums.to_vec();
-    let mut out = [EF::ZERO; GKR_SP_DEG];
-    for b in 0..num_blocks {
-        for d in 0..GKR_SP_DEG {
-            out[d] += block_sums[b * GKR_SP_DEG + d];
-        }
-    }
-    out_device.copy_from_slice(&out);
-    Ok(())
+    final_reduce_block_sums_to_buffer(
+        tmp_block_sums,
+        out_device.gpu_buffer(),
+        0,
+        num_blocks as u32,
+        GKR_SP_DEG as u32,
+        threads_per_group,
+    )
 }
 
 pub unsafe fn frac_compute_round_and_revert(
@@ -349,19 +406,22 @@ pub unsafe fn frac_compute_round_and_revert(
         encoder.set_buffer(4, Some(tmp_block_sums.gpu_buffer()), 0);
         encoder.set_bytes(5, 4, &num_x_u32 as *const u32 as *const c_void);
         encoder.set_bytes(6, 4, &log_eq_low_cap as *const u32 as *const c_void);
-        encoder.set_bytes(7, std::mem::size_of::<EF>() as u64, &lambda as *const EF as *const c_void);
+        encoder.set_bytes(
+            7,
+            std::mem::size_of::<EF>() as u64,
+            &lambda as *const EF as *const c_void,
+        );
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let block_sums = tmp_block_sums.to_vec();
-    let mut out = [EF::ZERO; GKR_SP_DEG];
-    for b in 0..num_blocks {
-        for d in 0..GKR_SP_DEG {
-            out[d] += block_sums[b * GKR_SP_DEG + d];
-        }
-    }
-    out_device.copy_from_slice(&out);
-    Ok(())
+    final_reduce_block_sums_to_buffer(
+        tmp_block_sums,
+        out_device.gpu_buffer(),
+        0,
+        num_blocks as u32,
+        GKR_SP_DEG as u32,
+        threads_per_group,
+    )
 }
 
 pub unsafe fn fold_ef_frac_columns(
@@ -383,14 +443,22 @@ pub unsafe fn fold_ef_frac_columns(
         encoder.set_buffer(0, Some(src.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(dst.gpu_buffer()), 0);
         encoder.set_bytes(2, 4, &quarter_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(3, std::mem::size_of::<EF>() as u64, &r as *const EF as *const c_void);
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<EF>() as u64,
+            &r as *const EF as *const c_void,
+        );
     })?;
 
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(src.gpu_buffer()), src_q_offset);
         encoder.set_buffer(1, Some(dst.gpu_buffer()), dst_q_offset);
         encoder.set_bytes(2, 4, &quarter_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(3, std::mem::size_of::<EF>() as u64, &r as *const EF as *const c_void);
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<EF>() as u64,
+            &r as *const EF as *const c_void,
+        );
     })
 }
 
@@ -410,14 +478,22 @@ pub unsafe fn fold_ef_frac_columns_inplace(
         encoder.set_buffer(0, Some(buffer.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(buffer.gpu_buffer()), 0);
         encoder.set_bytes(2, 4, &quarter_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(3, std::mem::size_of::<EF>() as u64, &r as *const EF as *const c_void);
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<EF>() as u64,
+            &r as *const EF as *const c_void,
+        );
     })?;
 
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(buffer.gpu_buffer()), q_offset);
         encoder.set_buffer(1, Some(buffer.gpu_buffer()), q_offset);
         encoder.set_bytes(2, 4, &quarter_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(3, std::mem::size_of::<EF>() as u64, &r as *const EF as *const c_void);
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<EF>() as u64,
+            &r as *const EF as *const c_void,
+        );
     })
 }
 
@@ -458,20 +534,27 @@ pub unsafe fn frac_compute_round_and_fold(
         encoder.set_buffer(6, Some(dst_pq_buffer.gpu_buffer()), dst_q_offset);
         encoder.set_bytes(7, 4, &num_x_u32 as *const u32 as *const c_void);
         encoder.set_bytes(8, 4, &log_eq_low_cap as *const u32 as *const c_void);
-        encoder.set_bytes(9, std::mem::size_of::<EF>() as u64, &lambda as *const EF as *const c_void);
-        encoder.set_bytes(10, std::mem::size_of::<EF>() as u64, &r_prev as *const EF as *const c_void);
+        encoder.set_bytes(
+            9,
+            std::mem::size_of::<EF>() as u64,
+            &lambda as *const EF as *const c_void,
+        );
+        encoder.set_bytes(
+            10,
+            std::mem::size_of::<EF>() as u64,
+            &r_prev as *const EF as *const c_void,
+        );
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let block_sums = tmp_block_sums.to_vec();
-    let mut out = [EF::ZERO; GKR_SP_DEG];
-    for b in 0..num_blocks {
-        for d in 0..GKR_SP_DEG {
-            out[d] += block_sums[b * GKR_SP_DEG + d];
-        }
-    }
-    out_device.copy_from_slice(&out);
-    Ok(())
+    final_reduce_block_sums_to_buffer(
+        tmp_block_sums,
+        out_device.gpu_buffer(),
+        0,
+        num_blocks as u32,
+        GKR_SP_DEG as u32,
+        threads_per_group,
+    )
 }
 
 pub unsafe fn frac_compute_round_and_fold_inplace(
@@ -507,20 +590,27 @@ pub unsafe fn frac_compute_round_and_fold_inplace(
         encoder.set_buffer(4, Some(tmp_block_sums.gpu_buffer()), 0);
         encoder.set_bytes(5, 4, &num_x_u32 as *const u32 as *const c_void);
         encoder.set_bytes(6, 4, &log_eq_low_cap as *const u32 as *const c_void);
-        encoder.set_bytes(7, std::mem::size_of::<EF>() as u64, &lambda as *const EF as *const c_void);
-        encoder.set_bytes(8, std::mem::size_of::<EF>() as u64, &r_prev as *const EF as *const c_void);
+        encoder.set_bytes(
+            7,
+            std::mem::size_of::<EF>() as u64,
+            &lambda as *const EF as *const c_void,
+        );
+        encoder.set_bytes(
+            8,
+            std::mem::size_of::<EF>() as u64,
+            &r_prev as *const EF as *const c_void,
+        );
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let block_sums = tmp_block_sums.to_vec();
-    let mut out = [EF::ZERO; GKR_SP_DEG];
-    for b in 0..num_blocks {
-        for d in 0..GKR_SP_DEG {
-            out[d] += block_sums[b * GKR_SP_DEG + d];
-        }
-    }
-    out_device.copy_from_slice(&out);
-    Ok(())
+    final_reduce_block_sums_to_buffer(
+        tmp_block_sums,
+        out_device.gpu_buffer(),
+        0,
+        num_blocks as u32,
+        GKR_SP_DEG as u32,
+        threads_per_group,
+    )
 }
 
 pub unsafe fn frac_precompute_m_build_raw(
@@ -554,8 +644,16 @@ pub unsafe fn frac_precompute_m_build_raw(
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_bytes(0, 4, &rem_n_u32 as *const u32 as *const c_void);
         encoder.set_bytes(1, 4, &w_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(2, std::mem::size_of::<EF>() as u64, &lambda as *const EF as *const c_void);
-        encoder.set_bytes(3, std::mem::size_of::<EF>() as u64, &r_prev as *const EF as *const c_void);
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<EF>() as u64,
+            &lambda as *const EF as *const c_void,
+        );
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<EF>() as u64,
+            &r_prev as *const EF as *const c_void,
+        );
         encoder.set_bytes(4, 4, &inline_fold_u32 as *const u32 as *const c_void);
         encoder.set_bytes(5, 4, &eq_tail_low_cap_u32 as *const u32 as *const c_void);
         encoder.set_bytes(6, 4, &tail_tile_u32 as *const u32 as *const c_void);
@@ -673,10 +771,7 @@ pub unsafe fn fold_ple_from_evals(
     Ok(())
 }
 
-pub unsafe fn frac_add_alpha(
-    data: &MetalBuffer<Frac<EF>>,
-    alpha: EF,
-) -> Result<(), MetalError> {
+pub unsafe fn frac_add_alpha(data: &MetalBuffer<Frac<EF>>, alpha: EF) -> Result<(), MetalError> {
     let pipeline = get_kernels().get_pipeline("frac_add_alpha")?;
     let len = data.len();
     let (grid, group) = grid_size_1d(len, DEFAULT_THREADS_PER_GROUP);
@@ -685,7 +780,11 @@ pub unsafe fn frac_add_alpha(
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(data.gpu_buffer()), q_offset);
         encoder.set_bytes(1, 4, &len_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(2, std::mem::size_of::<EF>() as u64, &alpha as *const EF as *const c_void);
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<EF>() as u64,
+            &alpha as *const EF as *const c_void,
+        );
     })
 }
 
@@ -700,7 +799,11 @@ pub unsafe fn frac_vector_scalar_multiply_ext_fp(
     let start_offset_bytes = (start * std::mem::size_of::<EF>()) as u64;
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(frac_vec.gpu_buffer()), start_offset_bytes);
-        encoder.set_bytes(1, std::mem::size_of::<F>() as u64, &scalar as *const F as *const c_void);
+        encoder.set_bytes(
+            1,
+            std::mem::size_of::<F>() as u64,
+            &scalar as *const F as *const c_void,
+        );
         encoder.set_bytes(2, 4, &length as *const u32 as *const c_void);
     })
 }
@@ -767,8 +870,16 @@ pub unsafe fn fold_selectors_round0(
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(out.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(input.gpu_buffer()), 0);
-        encoder.set_bytes(2, std::mem::size_of::<EF>() as u64, &is_first as *const EF as *const c_void);
-        encoder.set_bytes(3, std::mem::size_of::<EF>() as u64, &is_last as *const EF as *const c_void);
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<EF>() as u64,
+            &is_first as *const EF as *const c_void,
+        );
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<EF>() as u64,
+            &is_last as *const EF as *const c_void,
+        );
         encoder.set_bytes(4, 4, &num_x_u32 as *const u32 as *const c_void);
     })
 }
@@ -880,7 +991,11 @@ pub unsafe fn logup_gkr_input_eval(
         "evaluate_interactions_gkr_local"
     };
     let pipeline = get_kernels().get_pipeline(pipeline_name)?;
-    let count = if is_global { GKR_INPUT_TASK_SIZE } else { height };
+    let count = if is_global {
+        GKR_INPUT_TASK_SIZE
+    } else {
+        height
+    };
     let (grid, group) = grid_size_1d(count as usize, DEFAULT_THREADS_PER_GROUP);
 
     let p_offset = (fracs_offset * std::mem::size_of::<EF>()) as u64;
@@ -910,34 +1025,22 @@ pub unsafe fn logup_gkr_input_eval(
             encoder.set_bytes(13, 4, &total_threads as *const u32 as *const c_void);
             encoder.set_buffer(
                 14,
-                main_parts
-                    .first()
-                    .map(|b| b.gpu_buffer())
-                    .map(|v| &**v),
+                main_parts.first().map(|b| b.gpu_buffer()).map(|v| &**v),
                 0,
             );
             encoder.set_buffer(
                 15,
-                main_parts
-                    .get(1)
-                    .map(|b| b.gpu_buffer())
-                    .map(|v| &**v),
+                main_parts.get(1).map(|b| b.gpu_buffer()).map(|v| &**v),
                 0,
             );
             encoder.set_buffer(
                 16,
-                main_parts
-                    .get(2)
-                    .map(|b| b.gpu_buffer())
-                    .map(|v| &**v),
+                main_parts.get(2).map(|b| b.gpu_buffer()).map(|v| &**v),
                 0,
             );
             encoder.set_buffer(
                 17,
-                main_parts
-                    .get(3)
-                    .map(|b| b.gpu_buffer())
-                    .map(|v| &**v),
+                main_parts.get(3).map(|b| b.gpu_buffer()).map(|v| &**v),
                 0,
             );
         })
@@ -961,34 +1064,22 @@ pub unsafe fn logup_gkr_input_eval(
             encoder.set_bytes(12, 4, &total_threads as *const u32 as *const c_void);
             encoder.set_buffer(
                 13,
-                main_parts
-                    .first()
-                    .map(|b| b.gpu_buffer())
-                    .map(|v| &**v),
+                main_parts.first().map(|b| b.gpu_buffer()).map(|v| &**v),
                 0,
             );
             encoder.set_buffer(
                 14,
-                main_parts
-                    .get(1)
-                    .map(|b| b.gpu_buffer())
-                    .map(|v| &**v),
+                main_parts.get(1).map(|b| b.gpu_buffer()).map(|v| &**v),
                 0,
             );
             encoder.set_buffer(
                 15,
-                main_parts
-                    .get(2)
-                    .map(|b| b.gpu_buffer())
-                    .map(|v| &**v),
+                main_parts.get(2).map(|b| b.gpu_buffer()).map(|v| &**v),
                 0,
             );
             encoder.set_buffer(
                 16,
-                main_parts
-                    .get(3)
-                    .map(|b| b.gpu_buffer())
-                    .map(|v| &**v),
+                main_parts.get(3).map(|b| b.gpu_buffer()).map(|v| &**v),
                 0,
             );
         })
@@ -1043,7 +1134,6 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
     let used_nodes_len = used_nodes.len() as u32;
     let lambda_len = lambda_pows.len() as u32;
 
-    let out_ptr = output.as_mut_ptr();
     for coset_idx in 0..num_cosets {
         let tmp = MetalBuffer::<EF>::with_capacity(num_blocks as usize * skip_domain as usize);
         dispatch_sync(&pipeline, grid, group, |encoder| {
@@ -1065,20 +1155,26 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
             encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
             encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
             encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-            encoder.set_bytes(18, std::mem::size_of::<F>() as u64, &g_shift as *const F as *const c_void);
+            encoder.set_bytes(
+                18,
+                std::mem::size_of::<F>() as u64,
+                &g_shift as *const F as *const c_void,
+            );
             encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
             encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
             encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
         })?;
 
-        let tmp_host = tmp.to_vec();
-        for ntt_idx in 0..skip_domain as usize {
-            let mut acc = EF::ZERO;
-            for block in 0..num_blocks as usize {
-                acc += tmp_host[block * skip_domain as usize + ntt_idx];
-            }
-            *out_ptr.add(coset_idx as usize * skip_domain as usize + ntt_idx) = acc;
-        }
+        let out_offset_bytes =
+            (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
+        final_reduce_block_sums_to_buffer(
+            &tmp,
+            output.gpu_buffer(),
+            out_offset_bytes,
+            num_blocks as u32,
+            skip_domain,
+            threads_per_group,
+        )?;
     }
     Ok(())
 }
@@ -1136,8 +1232,7 @@ pub unsafe fn logup_bary_eval_interactions_round0(
             0
         };
     let rules_len = rules.len() as u32;
-    let p_ptr = output.as_mut_ptr() as *mut EF;
-    let q_ptr = p_ptr.add(output.len());
+    let q_offset_bytes = frac_q_offset_bytes(output.len());
     let intermediates = if use_global_intermediates {
         MetalBuffer::<F>::with_capacity(buffer_size as usize * total_threads)
     } else {
@@ -1159,7 +1254,11 @@ pub unsafe fn logup_bary_eval_interactions_round0(
                 encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
                 encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
                 encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
-                encoder.set_bytes(9, std::mem::size_of::<EF>() as u64, &denom_sum_init as *const EF as *const c_void);
+                encoder.set_bytes(
+                    9,
+                    std::mem::size_of::<EF>() as u64,
+                    &denom_sum_init as *const EF as *const c_void,
+                );
                 encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
                 encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
                 encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
@@ -1168,9 +1267,17 @@ pub unsafe fn logup_bary_eval_interactions_round0(
                 encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
                 encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
                 encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                encoder.set_bytes(18, std::mem::size_of::<F>() as u64, &g_shift as *const F as *const c_void);
+                encoder.set_bytes(
+                    18,
+                    std::mem::size_of::<F>() as u64,
+                    &g_shift as *const F as *const c_void,
+                );
                 encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                encoder.set_bytes(20, 4, &is_identity_coset_flag as *const u32 as *const c_void);
+                encoder.set_bytes(
+                    20,
+                    4,
+                    &is_identity_coset_flag as *const u32 as *const c_void,
+                );
                 encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
                 encoder.set_buffer(22, Some(intermediates.gpu_buffer()), 0);
                 encoder.set_bytes(23, 4, &total_threads_u32 as *const u32 as *const c_void);
@@ -1187,7 +1294,11 @@ pub unsafe fn logup_bary_eval_interactions_round0(
                 encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
                 encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
                 encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
-                encoder.set_bytes(9, std::mem::size_of::<EF>() as u64, &denom_sum_init as *const EF as *const c_void);
+                encoder.set_bytes(
+                    9,
+                    std::mem::size_of::<EF>() as u64,
+                    &denom_sum_init as *const EF as *const c_void,
+                );
                 encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
                 encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
                 encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
@@ -1196,28 +1307,40 @@ pub unsafe fn logup_bary_eval_interactions_round0(
                 encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
                 encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
                 encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                encoder.set_bytes(18, std::mem::size_of::<F>() as u64, &g_shift as *const F as *const c_void);
+                encoder.set_bytes(
+                    18,
+                    std::mem::size_of::<F>() as u64,
+                    &g_shift as *const F as *const c_void,
+                );
                 encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                encoder.set_bytes(20, 4, &is_identity_coset_flag as *const u32 as *const c_void);
+                encoder.set_bytes(
+                    20,
+                    4,
+                    &is_identity_coset_flag as *const u32 as *const c_void,
+                );
                 encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
                 encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
             })?;
         }
 
-        let tmp_p_host = tmp_p.to_vec();
-        let tmp_q_host = tmp_q.to_vec();
-        for ntt_idx in 0..skip_domain as usize {
-            let mut acc_p = EF::ZERO;
-            let mut acc_q = EF::ZERO;
-            for block in 0..num_blocks as usize {
-                let idx = block * skip_domain as usize + ntt_idx;
-                acc_p += tmp_p_host[idx];
-                acc_q += tmp_q_host[idx];
-            }
-            let out_idx = coset_idx as usize * skip_domain as usize + ntt_idx;
-            *p_ptr.add(out_idx) = acc_p;
-            *q_ptr.add(out_idx) = acc_q;
-        }
+        let out_offset_bytes =
+            (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
+        final_reduce_block_sums_to_buffer(
+            &tmp_p,
+            output.gpu_buffer(),
+            out_offset_bytes,
+            num_blocks as u32,
+            skip_domain,
+            threads_per_group,
+        )?;
+        final_reduce_block_sums_to_buffer(
+            &tmp_q,
+            output.gpu_buffer(),
+            q_offset_bytes + out_offset_bytes,
+            num_blocks as u32,
+            skip_domain,
+            threads_per_group,
+        )?;
     }
     Ok(())
 }
@@ -1242,7 +1365,11 @@ pub unsafe fn zerocheck_eval_mle(
     let preprocessed_ctx = MetalBuffer::from_slice(&[preprocessed]);
     let threads_per_group = num_y.min(128).max(1) as usize;
     let num_blocks = num_y.div_ceil(threads_per_group as u32);
-    let grid = metal::MTLSize::new(num_blocks as u64 * threads_per_group as u64, num_x as u64, 1);
+    let grid = metal::MTLSize::new(
+        num_blocks as u64 * threads_per_group as u64,
+        num_x as u64,
+        1,
+    );
     let group = metal::MTLSize::new(threads_per_group as u64, 1, 1);
     let tmp = MetalBuffer::<EF>::with_capacity(num_blocks as usize * num_x as usize);
     let rules_len = rules.len() as u32;
@@ -1268,20 +1395,22 @@ pub unsafe fn zerocheck_eval_mle(
         encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
         encoder.set_bytes(14, 4, &num_y as *const u32 as *const c_void);
         encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-        encoder.set_bytes(16, 4, &use_global_intermediates as *const u32 as *const c_void);
+        encoder.set_bytes(
+            16,
+            4,
+            &use_global_intermediates as *const u32 as *const c_void,
+        );
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let tmp_host = tmp.to_vec();
-    let out_ptr = output.as_mut_ptr();
-    for x in 0..num_x as usize {
-        let mut acc = EF::ZERO;
-        for b in 0..num_blocks as usize {
-            acc += tmp_host[b * num_x as usize + x];
-        }
-        *out_ptr.add(x) = acc;
-    }
-    Ok(())
+    final_reduce_block_sums_to_buffer(
+        &tmp,
+        output.gpu_buffer(),
+        0,
+        num_blocks,
+        num_x,
+        threads_per_group,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1306,7 +1435,11 @@ pub unsafe fn logup_eval_mle(
     let preprocessed_ctx = MetalBuffer::from_slice(&[preprocessed]);
     let threads_per_group = num_y.min(128).max(1) as usize;
     let num_blocks = num_y.div_ceil(threads_per_group as u32);
-    let grid = metal::MTLSize::new(num_blocks as u64 * threads_per_group as u64, num_x as u64, 1);
+    let grid = metal::MTLSize::new(
+        num_blocks as u64 * threads_per_group as u64,
+        num_x as u64,
+        1,
+    );
     let group = metal::MTLSize::new(threads_per_group as u64, 1, 1);
     let tmp_p = MetalBuffer::<EF>::with_capacity(num_blocks as usize * num_x as usize);
     let tmp_q = MetalBuffer::<EF>::with_capacity(num_blocks as usize * num_x as usize);
@@ -1334,26 +1467,30 @@ pub unsafe fn logup_eval_mle(
         encoder.set_bytes(15, 4, &num_y as *const u32 as *const c_void);
         encoder.set_bytes(16, 4, &num_x as *const u32 as *const c_void);
         encoder.set_bytes(17, 4, &rules_len as *const u32 as *const c_void);
-        encoder.set_bytes(18, 4, &use_global_intermediates as *const u32 as *const c_void);
+        encoder.set_bytes(
+            18,
+            4,
+            &use_global_intermediates as *const u32 as *const c_void,
+        );
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let tmp_p_host = tmp_p.to_vec();
-    let tmp_q_host = tmp_q.to_vec();
-    let p_ptr = output.as_mut_ptr() as *mut EF;
-    let q_ptr = p_ptr.add(output.len());
-    for x in 0..num_x as usize {
-        let mut acc_p = EF::ZERO;
-        let mut acc_q = EF::ZERO;
-        for b in 0..num_blocks as usize {
-            let idx = b * num_x as usize + x;
-            acc_p += tmp_p_host[idx];
-            acc_q += tmp_q_host[idx];
-        }
-        *p_ptr.add(x) = acc_p;
-        *q_ptr.add(x) = acc_q;
-    }
-    Ok(())
+    final_reduce_block_sums_to_buffer(
+        &tmp_p,
+        output.gpu_buffer(),
+        0,
+        num_blocks,
+        num_x,
+        threads_per_group,
+    )?;
+    final_reduce_block_sums_to_buffer(
+        &tmp_q,
+        output.gpu_buffer(),
+        frac_q_offset_bytes(output.len()),
+        num_blocks,
+        num_x,
+        threads_per_group,
+    )
 }
 
 pub unsafe fn zerocheck_batch_eval_mle(
@@ -1389,21 +1526,15 @@ pub unsafe fn zerocheck_batch_eval_mle(
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let tmp_host = tmp.to_vec();
-    let air_offsets = air_block_offsets.to_vec();
-    let out_ptr = output.as_mut_ptr();
-    for air_idx in 0..num_airs {
-        let block_start = air_offsets[air_idx] as usize;
-        let block_end = air_offsets[air_idx + 1] as usize;
-        for x in 0..num_x as usize {
-            let mut acc = EF::ZERO;
-            for block_idx in block_start..block_end {
-                acc += tmp_host[block_idx * num_x as usize + x];
-            }
-            *out_ptr.add(air_idx * num_x as usize + x) = acc;
-        }
-    }
-    Ok(())
+    batched_final_reduce_block_sums_to_buffer(
+        &tmp,
+        output.gpu_buffer(),
+        0,
+        air_block_offsets,
+        num_airs,
+        num_x,
+        threads_per_block as usize,
+    )
 }
 
 pub unsafe fn logup_batch_eval_mle(
@@ -1436,28 +1567,24 @@ pub unsafe fn logup_batch_eval_mle(
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let tmp_p_host = tmp_p.to_vec();
-    let tmp_q_host = tmp_q.to_vec();
-    let air_offsets = air_block_offsets.to_vec();
-    let p_ptr = output.as_mut_ptr() as *mut EF;
-    let q_ptr = p_ptr.add(output.len());
-    for air_idx in 0..num_airs {
-        let block_start = air_offsets[air_idx] as usize;
-        let block_end = air_offsets[air_idx + 1] as usize;
-        for x in 0..num_x as usize {
-            let mut acc_p = EF::ZERO;
-            let mut acc_q = EF::ZERO;
-            for block_idx in block_start..block_end {
-                let idx = block_idx * num_x as usize + x;
-                acc_p += tmp_p_host[idx];
-                acc_q += tmp_q_host[idx];
-            }
-            let out_idx = air_idx * num_x as usize + x;
-            *p_ptr.add(out_idx) = acc_p;
-            *q_ptr.add(out_idx) = acc_q;
-        }
-    }
-    Ok(())
+    batched_final_reduce_block_sums_to_buffer(
+        &tmp_p,
+        output.gpu_buffer(),
+        0,
+        air_block_offsets,
+        num_airs,
+        num_x,
+        threads_per_block as usize,
+    )?;
+    batched_final_reduce_block_sums_to_buffer(
+        &tmp_q,
+        output.gpu_buffer(),
+        frac_q_offset_bytes(output.len()),
+        air_block_offsets,
+        num_airs,
+        num_x,
+        threads_per_block as usize,
+    )
 }
 
 pub unsafe fn zerocheck_monomial_batched(
@@ -1489,21 +1616,15 @@ pub unsafe fn zerocheck_monomial_batched(
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let tmp_host = tmp.to_vec();
-    let air_offsets = air_offsets.to_vec();
-    let out_ptr = output.as_mut_ptr();
-    for air_idx in 0..num_airs {
-        let block_start = air_offsets[air_idx] as usize;
-        let block_end = air_offsets[air_idx + 1] as usize;
-        for x in 0..num_x as usize {
-            let mut acc = EF::ZERO;
-            for block_idx in block_start..block_end {
-                acc += tmp_host[block_idx * num_x as usize + x];
-            }
-            *out_ptr.add(air_idx * num_x as usize + x) = acc;
-        }
-    }
-    Ok(())
+    batched_final_reduce_block_sums_to_buffer(
+        &tmp,
+        output.gpu_buffer(),
+        0,
+        air_offsets,
+        num_airs,
+        num_x,
+        threads_per_block as usize,
+    )
 }
 
 pub unsafe fn zerocheck_monomial_par_y_batched(
@@ -1537,21 +1658,15 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let tmp_host = tmp.to_vec();
-    let air_offsets = air_offsets.to_vec();
-    let out_ptr = output.as_mut_ptr();
-    for air_idx in 0..num_airs {
-        let block_start = air_offsets[air_idx] as usize;
-        let block_end = air_offsets[air_idx + 1] as usize;
-        for x in 0..num_x as usize {
-            let mut acc = EF::ZERO;
-            for block_idx in block_start..block_end {
-                acc += tmp_host[block_idx * num_x as usize + x];
-            }
-            *out_ptr.add(air_idx * num_x as usize + x) = acc;
-        }
-    }
-    Ok(())
+    batched_final_reduce_block_sums_to_buffer(
+        &tmp,
+        output.gpu_buffer(),
+        0,
+        air_offsets,
+        num_airs,
+        num_x,
+        threads_per_block as usize,
+    )
 }
 
 pub unsafe fn logup_monomial_batched(
@@ -1596,26 +1711,22 @@ pub unsafe fn logup_monomial_batched(
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
 
-    let tmp_p_host = tmp_p.to_vec();
-    let tmp_q_host = tmp_q.to_vec();
-    let air_offsets = air_offsets.to_vec();
-    let p_ptr = output.as_mut_ptr() as *mut EF;
-    let q_ptr = p_ptr.add(output.len());
-    for air_idx in 0..num_airs {
-        let block_start = air_offsets[air_idx] as usize;
-        let block_end = air_offsets[air_idx + 1] as usize;
-        for x in 0..num_x as usize {
-            let mut acc_p = EF::ZERO;
-            let mut acc_q = EF::ZERO;
-            for block_idx in block_start..block_end {
-                let idx = block_idx * num_x as usize + x;
-                acc_p += tmp_p_host[idx];
-                acc_q += tmp_q_host[idx];
-            }
-            let out_idx = air_idx * num_x as usize + x;
-            *p_ptr.add(out_idx) = acc_p;
-            *q_ptr.add(out_idx) = acc_q;
-        }
-    }
-    Ok(())
+    batched_final_reduce_block_sums_to_buffer(
+        &tmp_p,
+        output.gpu_buffer(),
+        0,
+        air_offsets,
+        num_airs,
+        num_x,
+        threads_per_block as usize,
+    )?;
+    batched_final_reduce_block_sums_to_buffer(
+        &tmp_q,
+        output.gpu_buffer(),
+        frac_q_offset_bytes(output.len()),
+        air_offsets,
+        num_airs,
+        num_x,
+        threads_per_block as usize,
+    )
 }
