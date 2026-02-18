@@ -14,9 +14,7 @@ use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 
 use crate::prelude::{EF, F};
 
-use super::{
-    dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP,
-};
+use super::{dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP};
 
 const ROOT_TABLE_SIZE: usize = 28;
 static FORWARD_ROOTS: OnceLock<MetalBuffer<F>> = OnceLock::new();

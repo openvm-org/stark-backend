@@ -23,9 +23,7 @@ pub fn get_context() -> &'static MetalContext {
 
 /// Tries to get the global Metal context, returning an error if no device is available.
 pub fn try_get_context() -> Result<&'static MetalContext, MetalError> {
-    Ok(METAL_CONTEXT.get_or_init(|| {
-        try_init_context().expect("Metal initialization failed")
-    }))
+    Ok(METAL_CONTEXT.get_or_init(|| try_init_context().expect("Metal initialization failed")))
 }
 
 fn init_context() -> MetalContext {

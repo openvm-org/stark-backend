@@ -5,10 +5,7 @@ use std::{
 };
 
 use itertools::{izip, Itertools};
-use openvm_metal_common::{
-    copy::MemCopyH2D,
-    d_buffer::MetalBuffer,
-};
+use openvm_metal_common::{copy::MemCopyH2D, d_buffer::MetalBuffer};
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints,
     calculate_n_logup,
@@ -38,7 +35,9 @@ use crate::{
         batch_mle::evaluate_zerocheck_batched, fold_ple::fold_ple_evals_rotate,
         gkr_input::TraceInteractionMeta, round0::evaluate_round0_interactions_metal,
     },
-    metal::logup_zerocheck::{fold_selectors_round0, interpolate_columns_gpu, ColumnPtr, MainMatrixPtrs},
+    metal::logup_zerocheck::{
+        fold_selectors_round0, interpolate_columns_gpu, ColumnPtr, MainMatrixPtrs,
+    },
     metal::sumcheck::fold_mle_matrix,
     poly::EqEvalLayers,
     prelude::{EF, F, SC},
@@ -188,9 +187,8 @@ pub fn prove_zerocheck_and_logup_metal(
         prover.memory_limit_bytes = DEFAULT_MEMORY_LIMIT;
     }
 
-    let (frac_sum_proof, mut xi) =
-        fractional_sumcheck_metal(transcript, inputs, true)
-            .expect("failed to run fractional sumcheck on Metal");
+    let (frac_sum_proof, mut xi) = fractional_sumcheck_metal(transcript, inputs, true)
+        .expect("failed to run fractional sumcheck on Metal");
     while xi.len() != l_skip + n_global {
         xi.push(transcript.sample_ext());
     }
@@ -597,8 +595,11 @@ impl<'a> LogupZerocheckMetal<'a> {
         let lambda_pows_ref = self.lambda_pows.as_ref().unwrap();
         for (air_idx, air_pk) in self.pk.per_air.iter().enumerate() {
             if air_pk.other_data.zerocheck_monomials.is_some() {
-                self.lambda_combinations[air_idx] =
-                    Some(compute_lambda_combinations(self.pk, air_idx, lambda_pows_ref));
+                self.lambda_combinations[air_idx] = Some(compute_lambda_combinations(
+                    self.pk,
+                    air_idx,
+                    lambda_pows_ref,
+                ));
             }
         }
         let num_present_airs = ctx.per_trace.len();
@@ -765,7 +766,10 @@ impl<'a> LogupZerocheckMetal<'a> {
             .expect("failed to evaluate round-0 constraints on device");
             if !sum_buffer.is_empty() {
                 let q_evals = sum_buffer.to_vec();
-                debug!("round0 zerocheck q_evals | trace_idx: {} | values: {:?}", trace_idx, q_evals);
+                debug!(
+                    "round0 zerocheck q_evals | trace_idx: {} | values: {:?}",
+                    trace_idx, q_evals
+                );
                 let q = {
                     // Make q_evals row-major, with columns <> cosets
                     let mut values = EF::zero_vec(num_cosets_zc << l_skip);
@@ -1326,15 +1330,10 @@ impl<'a> LogupZerocheckMetal<'a> {
                         let interpolated_height = sp_deg * num_y;
                         let decoded_rules_all: Vec<_> = rules_host
                             .iter()
-                            .map(|&r| {
-                                crate::logup_zerocheck::rules::RuleWithFlag::<F>::decode(r)
-                            })
+                            .map(|&r| crate::logup_zerocheck::rules::RuleWithFlag::<F>::decode(r))
                             .collect();
-                        let decoded_rules: Vec<_> = decoded_rules_all
-                            .iter()
-                            .take(10)
-                            .cloned()
-                            .collect();
+                        let decoded_rules: Vec<_> =
+                            decoded_rules_all.iter().take(10).cloned().collect();
                         debug!(
                             round,
                             trace_idx,
@@ -1354,10 +1353,12 @@ impl<'a> LogupZerocheckMetal<'a> {
                         let public_vals_host = public_vals.to_vec();
                         let mut main_part_base_cols = Vec::new();
                         let mut main_part_air_widths = Vec::new();
-                        let mut cursor = 3usize + if has_preprocessed { mats[0].width() } else { 0 };
+                        let mut cursor =
+                            3usize + if has_preprocessed { mats[0].width() } else { 0 };
                         for m in mats[first_main_idx..].iter() {
                             main_part_base_cols.push(cursor);
-                            main_part_air_widths.push(air_width_for_mat(need_rot, m.width()) as usize);
+                            main_part_air_widths
+                                .push(air_width_for_mat(need_rot, m.width()) as usize);
                             cursor += m.width();
                         }
 
@@ -1368,14 +1369,16 @@ impl<'a> LogupZerocheckMetal<'a> {
                                 let row = x_int * num_y + y;
                                 let mut inter = vec![
                                     EF::ZERO;
-                                    pk.other_data.zerocheck_mle.inner.buffer_size as usize
+                                    pk.other_data.zerocheck_mle.inner.buffer_size
+                                        as usize
                                 ];
                                 let mut sum = EF::ZERO;
                                 let mut lambda_idx = 0usize;
                                 for (node_idx, rule) in decoded_rules_all.iter().enumerate() {
-                                    let eval_source = |src: &crate::logup_zerocheck::rules::Source<F>,
-                                                       inter: &Vec<EF>| {
-                                        match src {
+                                    let eval_source =
+                                        |src: &crate::logup_zerocheck::rules::Source<F>,
+                                         inter: &Vec<EF>| {
+                                            match src {
                                             crate::logup_zerocheck::rules::Source::Intermediate(i) => inter[*i],
                                             crate::logup_zerocheck::rules::Source::TerminalIntermediate => EF::ZERO,
                                             crate::logup_zerocheck::rules::Source::Var(v) => {
@@ -1409,24 +1412,27 @@ impl<'a> LogupZerocheckMetal<'a> {
                                             }
                                             crate::logup_zerocheck::rules::Source::Constant(c) => EF::from(*c),
                                         }
-                                    };
+                                        };
                                     let result = match &rule.inner {
                                         crate::logup_zerocheck::rules::Rule::Add(x, y_src, z) => {
-                                            let r = eval_source(x, &inter) + eval_source(y_src, &inter);
+                                            let r =
+                                                eval_source(x, &inter) + eval_source(y_src, &inter);
                                             if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
                                                 inter[*i] = r;
                                             }
                                             r
                                         }
                                         crate::logup_zerocheck::rules::Rule::Sub(x, y_src, z) => {
-                                            let r = eval_source(x, &inter) - eval_source(y_src, &inter);
+                                            let r =
+                                                eval_source(x, &inter) - eval_source(y_src, &inter);
                                             if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
                                                 inter[*i] = r;
                                             }
                                             r
                                         }
                                         crate::logup_zerocheck::rules::Rule::Mul(x, y_src, z) => {
-                                            let r = eval_source(x, &inter) * eval_source(y_src, &inter);
+                                            let r =
+                                                eval_source(x, &inter) * eval_source(y_src, &inter);
                                             if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
                                                 inter[*i] = r;
                                             }
@@ -1451,7 +1457,9 @@ impl<'a> LogupZerocheckMetal<'a> {
                                         }
                                     };
                                     if rule.need_accumulate {
-                                        while lambda_idx < used_nodes.len() && used_nodes[lambda_idx] == node_idx {
+                                        while lambda_idx < used_nodes.len()
+                                            && used_nodes[lambda_idx] == node_idx
+                                        {
                                             sum += lambda_pows[lambda_idx] * result;
                                             lambda_idx += 1;
                                         }
@@ -1526,11 +1534,7 @@ impl<'a> LogupZerocheckMetal<'a> {
                 });
                 debug!(
                     round,
-                    trace_idx,
-                    n_lift,
-                    log_num_y,
-                    num_y,
-                    "sumcheck_early_trace_shape"
+                    trace_idx, n_lift, log_num_y, num_y, "sumcheck_early_trace_shape"
                 );
             }
         }
@@ -1647,8 +1651,11 @@ impl<'a> LogupZerocheckMetal<'a> {
                 .iter()
                 .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
                 .collect();
-            let batch =
-                ZerocheckMonomialBatch::new(low_mono_traces.iter().copied(), self.pk, &lambda_combs);
+            let batch = ZerocheckMonomialBatch::new(
+                low_mono_traces.iter().copied(),
+                self.pk,
+                &lambda_combs,
+            );
             let out = batch.evaluate(sp_deg as u32);
             let host = out.to_vec();
             for (i, trace_idx) in batch.trace_indices().enumerate() {
@@ -1657,7 +1664,8 @@ impl<'a> LogupZerocheckMetal<'a> {
 
             #[cfg(debug_assertions)]
             if tracing::enabled!(tracing::Level::DEBUG) {
-                let mut dag_cmp_out: Vec<Vec<EF>> = vec![vec![EF::ZERO; sp_deg]; self.n_per_trace.len()];
+                let mut dag_cmp_out: Vec<Vec<EF>> =
+                    vec![vec![EF::ZERO; sp_deg]; self.n_per_trace.len()];
                 evaluate_zerocheck_batched(
                     low_mono_traces.iter().copied(),
                     self.pk,
@@ -1785,10 +1793,8 @@ impl<'a> LogupZerocheckMetal<'a> {
                 })
                 .collect();
 
-            for (input_mat, output_mat) in input_mats
-                .iter()
-                .take(num_matrices)
-                .zip(output_mats.iter())
+            for (input_mat, output_mat) in
+                input_mats.iter().take(num_matrices).zip(output_mats.iter())
             {
                 let output_height = (input_mat.height() >> 1) as u32;
                 let width = input_mat.width() as u32;

@@ -226,8 +226,7 @@ pub unsafe fn evals_mobius_eq_hypercube(
 
     for (i, &omega_i) in omega.iter().enumerate() {
         let step = 1 << i;
-        mobius_eq_hypercube_stage_ext(out, 0, omega_i, step as u32)
-            .map_err(KernelError::Kernel)?;
+        mobius_eq_hypercube_stage_ext(out, 0, omega_i, step as u32).map_err(KernelError::Kernel)?;
     }
     Ok(())
 }

@@ -16,18 +16,18 @@ use tracing::instrument;
 
 use crate::{
     base::MetalMatrix,
+    merkle_tree::MerkleTreeMetal,
     metal::{
         batch_ntt_small::batch_ntt_small,
         matrix::{batch_expand_pad, split_ext_to_base_col_major_matrix},
         mle_interpolate::mle_interpolate_stage_ext,
         poly::{eval_poly_ext_at_point_from_base, transpose_fp_to_fpext_vec},
         whir::{
-            whir_sumcheck_coeff_moments_required_temp_buffer_size, w_moments_accumulate,
-            whir_algebraic_batch_traces, whir_fold_coeffs_and_moments,
+            w_moments_accumulate, whir_algebraic_batch_traces, whir_fold_coeffs_and_moments,
+            whir_sumcheck_coeff_moments_required_temp_buffer_size,
             whir_sumcheck_coeff_moments_round,
         },
     },
-    merkle_tree::MerkleTreeMetal,
     ntt::batch_ntt,
     poly::evals_eq_hypercube,
     prelude::{Digest, D_EF, EF, F, SC},

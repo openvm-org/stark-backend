@@ -110,7 +110,11 @@ pub unsafe fn whir_fold_coeffs_and_moments(
         encoder.set_buffer(1, Some(w_moments.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(f_folded_coeffs.gpu_buffer()), 0);
         encoder.set_buffer(3, Some(w_folded_moments.gpu_buffer()), 0);
-        encoder.set_bytes(4, std::mem::size_of::<EF>() as u64, &alpha as *const EF as *const c_void);
+        encoder.set_bytes(
+            4,
+            std::mem::size_of::<EF>() as u64,
+            &alpha as *const EF as *const c_void,
+        );
         encoder.set_bytes(5, 4, &half_height as *const u32 as *const c_void);
     })
 }
@@ -133,7 +137,11 @@ pub unsafe fn w_moments_accumulate(
         encoder.set_buffer(0, Some(w_moments.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(z0_pows2.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(z_pows2.gpu_buffer()), 0);
-        encoder.set_bytes(3, std::mem::size_of::<EF>() as u64, &gamma as *const EF as *const c_void);
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<EF>() as u64,
+            &gamma as *const EF as *const c_void,
+        );
         encoder.set_bytes(4, 4, &num_queries as *const u32 as *const c_void);
         encoder.set_bytes(5, 4, &log_height as *const u32 as *const c_void);
         encoder.set_bytes(6, 4, &height_u32 as *const u32 as *const c_void);

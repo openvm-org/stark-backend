@@ -11,12 +11,12 @@ pub mod stacked_reduction;
 pub mod utils;
 pub mod whir;
 
-/// Rust bindings for Metal kernels
-#[allow(dead_code, unused_variables)]
-mod metal;
 mod device;
 mod engine;
 mod error;
+/// Rust bindings for Metal kernels
+#[allow(dead_code, unused_variables)]
+mod metal;
 mod metal_backend;
 mod pkey;
 mod sumcheck;

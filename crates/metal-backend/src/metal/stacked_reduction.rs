@@ -94,8 +94,8 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
     let reduce_threads_per_group = DEFAULT_THREADS_PER_GROUP;
     let reduce_total_threads = d as usize * reduce_threads_per_group;
     let (reduce_grid, reduce_group) = grid_size_1d(reduce_total_threads, reduce_threads_per_group);
-    let reduce_shared_bytes = (((reduce_threads_per_group + SIMD_SIZE - 1) / SIMD_SIZE)
-        * mem::size_of::<EF>()) as u64;
+    let reduce_shared_bytes =
+        (((reduce_threads_per_group + SIMD_SIZE - 1) / SIMD_SIZE) * mem::size_of::<EF>()) as u64;
     let pipeline_reduce =
         get_kernels().get_pipeline("stacked_reduction_final_reduce_block_sums_add")?;
     dispatch_sync(&pipeline_reduce, reduce_grid, reduce_group, |encoder| {
@@ -154,12 +154,7 @@ pub unsafe fn initialize_k_rot_from_eq_segments(
     let pipeline = get_kernels().get_pipeline("initialize_k_rot_from_eq_segments")?;
     let max_x = 1usize << max_n;
     let aligned_x = align_threads(max_x, DEFAULT_THREADS_PER_GROUP);
-    let (grid, group) = grid_size_2d(
-        aligned_x,
-        max_n as usize + 1,
-        DEFAULT_THREADS_PER_GROUP,
-        1,
-    );
+    let (grid, group) = grid_size_2d(aligned_x, max_n as usize + 1, DEFAULT_THREADS_PER_GROUP, 1);
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(eq_r_ns.buffer.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(k_rot_ns.gpu_buffer()), 0);
@@ -228,7 +223,11 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
         encoder.set_buffer(0, Some(q_eval.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(eq_r_ns.buffer.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(k_rot_ns.buffer.gpu_buffer()), 0);
-        encoder.set_buffer(3, Some(unstacked_cols.gpu_buffer()), unstacked_cols_offset_bytes);
+        encoder.set_buffer(
+            3,
+            Some(unstacked_cols.gpu_buffer()),
+            unstacked_cols_offset_bytes,
+        );
         encoder.set_buffer(4, Some(lambda_pows.gpu_buffer()), lambda_pows_offset_bytes);
         encoder.set_buffer(5, Some(output.gpu_buffer()), 0);
         encoder.set_bytes(6, 4, &q_height_u32 as *const u32 as *const c_void);
@@ -266,18 +265,25 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate(
     let shared_bytes =
         (((block_size as usize + SIMD_SIZE - 1) / SIMD_SIZE) * mem::size_of::<EF>()) as u64;
 
-    let pipeline =
-        get_kernels().get_pipeline("stacked_reduction_sumcheck_mle_round_degenerate")?;
+    let pipeline = get_kernels().get_pipeline("stacked_reduction_sumcheck_mle_round_degenerate")?;
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(q_eval.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(eq_ub_ptr.gpu_buffer()), 0);
-        encoder.set_bytes(2, mem::size_of::<EF>() as u64, &eq_r as *const EF as *const c_void);
+        encoder.set_bytes(
+            2,
+            mem::size_of::<EF>() as u64,
+            &eq_r as *const EF as *const c_void,
+        );
         encoder.set_bytes(
             3,
             mem::size_of::<EF>() as u64,
             &k_rot_r as *const EF as *const c_void,
         );
-        encoder.set_buffer(4, Some(unstacked_cols.gpu_buffer()), unstacked_cols_offset_bytes);
+        encoder.set_buffer(
+            4,
+            Some(unstacked_cols.gpu_buffer()),
+            unstacked_cols_offset_bytes,
+        );
         encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), lambda_pows_offset_bytes);
         encoder.set_buffer(6, Some(output.gpu_buffer()), 0);
         encoder.set_bytes(7, 4, &q_height_u32 as *const u32 as *const c_void);

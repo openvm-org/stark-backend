@@ -4,12 +4,10 @@ use tracing::debug;
 
 use crate::{
     metal::logup_zerocheck::{
-        logup_batch_eval_mle,
-        logup_mle_intermediates_buffer_size, logup_mle_temp_sums_buffer_size,
-        BlockCtx, EvalCoreCtx, LogupCtx, ZerocheckCtx,
-        zerocheck_batch_eval_mle,
-        zerocheck_mle_intermediates_buffer_size, zerocheck_mle_temp_sums_buffer_size,
-        MainMatrixPtrs,
+        logup_batch_eval_mle, logup_mle_intermediates_buffer_size, logup_mle_temp_sums_buffer_size,
+        zerocheck_batch_eval_mle, zerocheck_mle_intermediates_buffer_size,
+        zerocheck_mle_temp_sums_buffer_size, BlockCtx, EvalCoreCtx, LogupCtx, MainMatrixPtrs,
+        ZerocheckCtx,
     },
     prelude::{EF, F},
     ConstraintOnlyRules, InteractionEvalRules,

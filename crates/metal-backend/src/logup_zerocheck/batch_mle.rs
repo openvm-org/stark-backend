@@ -7,14 +7,14 @@ use openvm_metal_common::{copy::MemCopyH2D, d_buffer::MetalBuffer};
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 
 use crate::{
-    metal::logup_zerocheck::{
-        BlockCtx, EvalCoreCtx, LogupCtx, MainMatrixPtrs, ZerocheckCtx,
-        logup_batch_eval_mle, zerocheck_batch_eval_mle,
-        logup_batch_mle_intermediates_buffer_size, zerocheck_batch_mle_intermediates_buffer_size,
-    },
     logup_zerocheck::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
         mle_round::{evaluate_mle_constraints_metal, evaluate_mle_interactions_metal},
+    },
+    metal::logup_zerocheck::{
+        logup_batch_eval_mle, logup_batch_mle_intermediates_buffer_size, zerocheck_batch_eval_mle,
+        zerocheck_batch_mle_intermediates_buffer_size, BlockCtx, EvalCoreCtx, LogupCtx,
+        MainMatrixPtrs, ZerocheckCtx,
     },
     prelude::{EF, F},
     MetalBackend,
@@ -49,8 +49,7 @@ fn zerocheck_batch_mle_intermediates_buffer_bytes(
 }
 
 fn logup_batch_mle_intermediates_buffer_bytes(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
-    logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
-        * std::mem::size_of::<EF>()
+    logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y) * std::mem::size_of::<EF>()
 }
 
 // ============================================================================
@@ -350,7 +349,11 @@ impl<'a> LogupMleBatchBuilder<'a> {
                     .inner
                     .d_used_nodes
                     .as_device_ptr(),
-                d_pair_idxs: air_pk.other_data.interaction_rules.d_pair_idxs.as_device_ptr(),
+                d_pair_idxs: air_pk
+                    .other_data
+                    .interaction_rules
+                    .d_pair_idxs
+                    .as_device_ptr(),
                 used_nodes_len: air_pk
                     .other_data
                     .interaction_rules

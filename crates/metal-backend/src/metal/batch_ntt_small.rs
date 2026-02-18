@@ -9,7 +9,10 @@ use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 
 use crate::prelude::F;
 
-use super::{dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, LOG_SIMD_SIZE, DEFAULT_THREADS_PER_GROUP};
+use super::{
+    dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP,
+    LOG_SIMD_SIZE,
+};
 
 /// Size of the device NTT twiddle table (2^11 - 2 = 2046 elements for MAX_NTT_LEVEL=10)
 pub const DEVICE_NTT_TWIDDLES_SIZE: usize = (1 << 11) - 2;
@@ -20,7 +23,8 @@ fn device_ntt_twiddles() -> &'static MetalBuffer<F> {
     DEVICE_NTT_TWIDDLES.get_or_init(|| {
         let twiddles = MetalBuffer::<F>::with_capacity(DEVICE_NTT_TWIDDLES_SIZE);
         unsafe {
-            generate_device_ntt_twiddles(&twiddles).expect("failed to initialize device NTT twiddles");
+            generate_device_ntt_twiddles(&twiddles)
+                .expect("failed to initialize device NTT twiddles");
         }
         twiddles
     })

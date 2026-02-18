@@ -17,8 +17,8 @@ use crate::{
         logup_zerocheck::{
             fold_ef_frac_columns, fold_ef_frac_columns_inplace, frac_build_tree_layer,
             frac_compute_round, frac_compute_round_and_fold, frac_compute_round_and_fold_inplace,
-            frac_compute_round_and_revert, frac_compute_round_temp_buffer_size,
-            frac_multifold_raw, frac_precompute_m_build_raw, frac_precompute_m_eval_round_raw,
+            frac_compute_round_and_revert, frac_compute_round_temp_buffer_size, frac_multifold_raw,
+            frac_precompute_m_build_raw, frac_precompute_m_eval_round_raw,
         },
         ntt::bit_rev_frac_ext,
     },
@@ -273,10 +273,7 @@ fn eq_tail_ptrs(
     }
 }
 
-fn copy_to_device_ptr<T: Copy>(
-    dst: *mut T,
-    src: &[T],
-) -> Result<(), FractionalSumcheckError> {
+fn copy_to_device_ptr<T: Copy>(dst: *mut T, src: &[T]) -> Result<(), FractionalSumcheckError> {
     if src.is_empty() {
         return Ok(());
     }
@@ -332,8 +329,15 @@ fn do_sumcheck_round_and_revert(
     eq_r_acc: &mut EF,
 ) -> Result<EF, FractionalSumcheckError> {
     unsafe {
-        frac_compute_round_and_revert(eq_buffer, layer, pq_size / 2, lambda, d_sum_evals, tmp_block_sums)
-            .map_err(FractionalSumcheckError::ComputeRound)?;
+        frac_compute_round_and_revert(
+            eq_buffer,
+            layer,
+            pq_size / 2,
+            lambda,
+            d_sum_evals,
+            tmp_block_sums,
+        )
+        .map_err(FractionalSumcheckError::ComputeRound)?;
     }
     eq_buffer.drop_layer();
     observe_and_update(
@@ -469,8 +473,7 @@ pub fn fractional_sumcheck_metal(
 
     let root = copy_from_device(&layer, 0)?;
     unsafe {
-        frac_build_tree_layer(&mut layer, 2, true)
-            .map_err(FractionalSumcheckError::SegmentTree)?;
+        frac_build_tree_layer(&mut layer, 2, true).map_err(FractionalSumcheckError::SegmentTree)?;
     }
     if assert_zero {
         if root.p != EF::ZERO {
@@ -551,8 +554,7 @@ pub fn fractional_sumcheck_metal(
 
         let lambda = transcript.sample_ext();
 
-        let tmp_buffer_capacity =
-            frac_compute_round_temp_buffer_size((1 << round) as u32) as usize;
+        let tmp_buffer_capacity = frac_compute_round_temp_buffer_size((1 << round) as u32) as usize;
         if tmp_buffer_capacity > tmp_block_sums.len() {
             tmp_block_sums = MetalBuffer::<EF>::with_capacity(tmp_buffer_capacity);
         }
@@ -714,8 +716,7 @@ pub fn fractional_sumcheck_metal(
                         MetalBuffer::<EF>::with_capacity(1usize << GKR_WINDOW_SIZE);
                 }
                 if eq_suffix_buffer.is_empty() {
-                    eq_suffix_buffer =
-                        MetalBuffer::<EF>::with_capacity(1usize << GKR_WINDOW_SIZE);
+                    eq_suffix_buffer = MetalBuffer::<EF>::with_capacity(1usize << GKR_WINDOW_SIZE);
                 }
 
                 let mut base = base;

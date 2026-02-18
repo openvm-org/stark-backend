@@ -3,10 +3,7 @@
 //! This module provides [`DuplexSpongeMetal`], a transcript implementation that maintains
 //! state on both host and device with explicit synchronization methods.
 
-use openvm_metal_common::{
-    d_buffer::MetalBuffer,
-    error::MetalError,
-};
+use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 use openvm_stark_backend::{
     p3_challenger::{CanObserve, CanSample},
     FiatShamirTranscript,
@@ -213,8 +210,9 @@ impl DuplexSpongeMetal {
         debug!("grind_gpu synced");
 
         // 2. Launch grinding kernel
-        let witness_u32 =
-            unsafe { crate::metal::sponge::sponge_grind(&self.device, bits as u32, F::ORDER_U32 - 1)? };
+        let witness_u32 = unsafe {
+            crate::metal::sponge::sponge_grind(&self.device, bits as u32, F::ORDER_U32 - 1)?
+        };
         debug!(witness_u32, "grind_gpu kernel done");
 
         let witness = F::from_u32(witness_u32);

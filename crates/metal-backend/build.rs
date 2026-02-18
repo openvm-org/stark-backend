@@ -35,9 +35,7 @@ fn main() {
             "cargo:rustc-env=METAL_KERNELS_PATH={}",
             metallib_path.display()
         );
-        println!(
-            "cargo:warning=Metal compiler not found. Install Xcode for Metal GPU support."
-        );
+        println!("cargo:warning=Metal compiler not found. Install Xcode for Metal GPU support.");
         return;
     }
 
@@ -47,15 +45,10 @@ fn main() {
     let metal_include_dir = manifest_dir.join("metal/include");
 
     // Find all .metal files recursively
-    let metal_files: Vec<PathBuf> = glob::glob(
-        metal_src_dir
-            .join("**/*.metal")
-            .to_str()
-            .unwrap(),
-    )
-    .unwrap()
-    .filter_map(|e| e.ok())
-    .collect();
+    let metal_files: Vec<PathBuf> = glob::glob(metal_src_dir.join("**/*.metal").to_str().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
 
     if metal_files.is_empty() {
         panic!("No .metal files found in {}", metal_src_dir.display());
@@ -65,12 +58,7 @@ fn main() {
     for f in &metal_files {
         println!("cargo:rerun-if-changed={}", f.display());
     }
-    if let Ok(headers) = glob::glob(
-        metal_include_dir
-            .join("**/*.h")
-            .to_str()
-            .unwrap(),
-    ) {
+    if let Ok(headers) = glob::glob(metal_include_dir.join("**/*.h").to_str().unwrap()) {
         for entry in headers.filter_map(|e| e.ok()) {
             println!("cargo:rerun-if-changed={}", entry.display());
         }
@@ -106,11 +94,7 @@ fn main() {
             ])
             .output()
             .unwrap_or_else(|e| {
-                panic!(
-                    "Failed to run Metal compiler for {}: {}",
-                    src.display(),
-                    e
-                )
+                panic!("Failed to run Metal compiler for {}: {}", src.display(), e)
             });
 
         if !output.status.success() {

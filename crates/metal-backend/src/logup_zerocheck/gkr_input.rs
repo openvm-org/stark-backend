@@ -112,8 +112,7 @@ fn eval_source_for_row(
     match source {
         Source::Intermediate(idx) => intermediates[*idx],
         Source::Var(var) => match var.entry {
-            Entry::Preprocessed { offset } => preprocessed
-                .expect("missing preprocessed matrix")
+            Entry::Preprocessed { offset } => preprocessed.expect("missing preprocessed matrix")
                 [var.index * height + (row + offset) % height]
                 .into(),
             Entry::Main { part_index, offset } => {
@@ -783,16 +782,16 @@ pub fn log_gkr_input_evals(
             if required > tmp.len() {
                 tmp = MetalBuffer::with_capacity(required);
             }
-                unsafe {
-                    logup_gkr_input_eval(
-                        is_global,
-                        &tmp,
-                        0,
-                        d_preprocessed,
-                        &main_parts_buffers,
-                        &d_public_values,
-                        d_challenges,
-                        &intermediates,
+            unsafe {
+                logup_gkr_input_eval(
+                    is_global,
+                    &tmp,
+                    0,
+                    d_preprocessed,
+                    &main_parts_buffers,
+                    &d_public_values,
+                    d_challenges,
+                    &intermediates,
                     &rules.inner.d_rules,
                     &rules.inner.d_used_nodes,
                     &rules.d_pair_idxs,
@@ -801,16 +800,16 @@ pub fn log_gkr_input_evals(
                 )?;
             }
         } else {
-                unsafe {
-                    logup_gkr_input_eval(
-                        is_global,
-                        &leaves,
-                        dst_offset,
-                        d_preprocessed,
-                        &main_parts_buffers,
-                        &d_public_values,
-                        d_challenges,
-                        &intermediates,
+            unsafe {
+                logup_gkr_input_eval(
+                    is_global,
+                    &leaves,
+                    dst_offset,
+                    d_preprocessed,
+                    &main_parts_buffers,
+                    &d_public_values,
+                    d_challenges,
+                    &intermediates,
                     &rules.inner.d_rules,
                     &rules.inner.d_used_nodes,
                     &rules.d_pair_idxs,
@@ -858,12 +857,7 @@ pub fn log_gkr_input_evals(
             let norm_factor_denom = lifted_height / height;
             let norm_factor = F::from_usize(norm_factor_denom).inverse();
             unsafe {
-                frac_vector_scalar_multiply_ext_fp(
-                    &tmp,
-                    0,
-                    norm_factor,
-                    tmp.len() as u32,
-                )?;
+                frac_vector_scalar_multiply_ext_fp(&tmp, 0, norm_factor, tmp.len() as u32)?;
                 frac_matrix_vertically_repeat(
                     &leaves,
                     dst_offset,

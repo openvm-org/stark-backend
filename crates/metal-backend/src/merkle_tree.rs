@@ -15,8 +15,7 @@ use crate::{
         matrix::matrix_get_rows_fp_kernel,
         merkle_tree::{
             poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
-            poseidon2_compressing_row_hashes_ext,
-            query_digest_layers,
+            poseidon2_compressing_row_hashes_ext, query_digest_layers,
         },
     },
     prelude::{Digest, DIGEST_SIZE, EF, F},

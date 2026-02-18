@@ -296,38 +296,36 @@ impl<'a, FF: Field> SymbolicRulesBuilder<'a, FF> {
     }
 
     pub fn to_rules(&self) -> SymbolicRulesGpu<FF> {
-        let dag_idx_to_source = |idx: usize, use_idx: usize| {
-            match &self.dag_nodes[idx] {
-                SymbolicExpressionNode::IsFirstRow => Source::IsFirst,
-                SymbolicExpressionNode::IsLastRow => Source::IsLast,
-                SymbolicExpressionNode::IsTransition => Source::IsTransition,
-                SymbolicExpressionNode::Constant(c) => Source::Constant(*c),
-                SymbolicExpressionNode::Variable(var) => {
-                    if self.static_expr_info[idx].buffer_var {
-                        let buffer_idx = self.live_expr_info[&idx].buffer_idx;
-                        if buffer_idx != usize::MAX && idx != use_idx {
-                            Source::Intermediate(buffer_idx)
-                        } else {
-                            Source::Var(*var)
-                        }
+        let dag_idx_to_source = |idx: usize, use_idx: usize| match &self.dag_nodes[idx] {
+            SymbolicExpressionNode::IsFirstRow => Source::IsFirst,
+            SymbolicExpressionNode::IsLastRow => Source::IsLast,
+            SymbolicExpressionNode::IsTransition => Source::IsTransition,
+            SymbolicExpressionNode::Constant(c) => Source::Constant(*c),
+            SymbolicExpressionNode::Variable(var) => {
+                if self.static_expr_info[idx].buffer_var {
+                    let buffer_idx = self.live_expr_info[&idx].buffer_idx;
+                    if buffer_idx != usize::MAX && idx != use_idx {
+                        Source::Intermediate(buffer_idx)
                     } else {
                         Source::Var(*var)
                     }
+                } else {
+                    Source::Var(*var)
                 }
-                SymbolicExpressionNode::Add { .. }
-                | SymbolicExpressionNode::Sub { .. }
-                | SymbolicExpressionNode::Mul { .. }
-                | SymbolicExpressionNode::Neg { .. } => {
-                    let buffer_idx = self
-                        .live_expr_info
-                        .get(&idx)
-                        .map(|info| info.buffer_idx)
-                        .unwrap_or(usize::MAX);
-                    if buffer_idx == usize::MAX {
-                        Source::TerminalIntermediate
-                    } else {
-                        Source::Intermediate(buffer_idx)
-                    }
+            }
+            SymbolicExpressionNode::Add { .. }
+            | SymbolicExpressionNode::Sub { .. }
+            | SymbolicExpressionNode::Mul { .. }
+            | SymbolicExpressionNode::Neg { .. } => {
+                let buffer_idx = self
+                    .live_expr_info
+                    .get(&idx)
+                    .map(|info| info.buffer_idx)
+                    .unwrap_or(usize::MAX);
+                if buffer_idx == usize::MAX {
+                    Source::TerminalIntermediate
+                } else {
+                    Source::Intermediate(buffer_idx)
                 }
             }
         };

@@ -1,11 +1,6 @@
 use std::ptr;
 
-use crate::{
-    command,
-    d_buffer::MetalBuffer,
-    device::get_context,
-    error::MemCopyError,
-};
+use crate::{command, d_buffer::MetalBuffer, device::get_context, error::MemCopyError};
 
 /// Host-to-Device copy trait.
 ///
@@ -60,8 +55,7 @@ pub trait MemCopyD2D<T> {
 impl<T> MemCopyD2D<T> for MetalBuffer<T> {
     fn device_copy(&self) -> MetalBuffer<T> {
         let dst = MetalBuffer::<T>::with_capacity(self.len());
-        self.device_copy_to(&dst)
-            .expect("device_copy failed");
+        self.device_copy_to(&dst).expect("device_copy failed");
         dst
     }
 
@@ -75,13 +69,7 @@ impl<T> MemCopyD2D<T> for MetalBuffer<T> {
         let size_bytes = self.size_bytes();
         let ctx = get_context();
         command::blit_operation(&ctx.queue, |blit| {
-            blit.copy_from_buffer(
-                self.gpu_buffer(),
-                0,
-                dst.gpu_buffer(),
-                0,
-                size_bytes as u64,
-            );
+            blit.copy_from_buffer(self.gpu_buffer(), 0, dst.gpu_buffer(), 0, size_bytes as u64);
         })
         .expect("blit copy failed");
         Ok(())

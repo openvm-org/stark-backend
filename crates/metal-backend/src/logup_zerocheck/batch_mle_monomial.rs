@@ -9,11 +9,11 @@ use p3_field::PrimeCharacteristicRing;
 use tracing::debug;
 
 use crate::{
-    metal::logup_zerocheck::{
-        BlockCtx, EvalCoreCtx, LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
-        logup_monomial_batched, zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
-    },
     logup_zerocheck::batch_mle::TraceCtx,
+    metal::logup_zerocheck::{
+        logup_monomial_batched, zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
+        BlockCtx, EvalCoreCtx, LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
+    },
     prelude::EF,
     MetalBackend,
 };

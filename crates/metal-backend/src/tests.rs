@@ -68,11 +68,10 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
     let mut verifier_sponge = default_duplex_sponge();
 
     let (proof_metal, _) = sumcheck_multilinear_metal(&mut prover_sponge_metal, &evals);
-    let (proof_cpu, _) =
-        openvm_stark_backend::prover::sumcheck::sumcheck_multilinear::<SC, _, _>(
-            &mut prover_sponge_cpu,
-            &evals,
-        );
+    let (proof_cpu, _) = openvm_stark_backend::prover::sumcheck::sumcheck_multilinear::<SC, _, _>(
+        &mut prover_sponge_cpu,
+        &evals,
+    );
     assert_eq!(proof_metal.sum_claim, proof_cpu.sum_claim);
     assert_eq!(proof_metal.eval_claim, proof_cpu.eval_claim);
     assert_eq!(proof_metal.round_polys_eval, proof_cpu.round_polys_eval);
@@ -510,8 +509,7 @@ fn test_multi_interaction_traces_stark(log_trace_degree: usize) {
             cpu_engine.verify(&vk_cpu, &proof_cpu).unwrap();
             eprintln!(
                 "pow_witness metal={:?} cpu={:?}",
-                proof.gkr_proof.logup_pow_witness,
-                proof_cpu.gkr_proof.logup_pow_witness
+                proof.gkr_proof.logup_pow_witness, proof_cpu.gkr_proof.logup_pow_witness
             );
             if proof.gkr_proof != proof_cpu.gkr_proof {
                 eprintln!("gkr_proof mismatch");
@@ -581,8 +579,7 @@ fn test_multi_interaction_traces_stark(log_trace_degree: usize) {
                                     m_part.len(),
                                     c_part.len()
                                 );
-                                for (i, (&mv, &cv)) in
-                                    m_part.iter().zip(c_part.iter()).enumerate()
+                                for (i, (&mv, &cv)) in m_part.iter().zip(c_part.iter()).enumerate()
                                 {
                                     if mv != cv {
                                         eprintln!(

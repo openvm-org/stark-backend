@@ -8,12 +8,12 @@ use openvm_metal_common::{
 use openvm_stark_backend::{
     dft::Radix2BowersSerial,
     p3_matrix::dense::RowMajorMatrix,
-    prover::poly::Ple,
     poly_common::{
         eq_uni_poly, eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, Squarable,
         UnivariatePoly,
     },
     proof::StackingProof,
+    prover::poly::Ple,
     prover::{
         stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKey,
         MatrixDimensions, ProvingContext,
@@ -218,7 +218,11 @@ pub fn prove_stacked_opening_reduction_metal(
             let l_skip = layout.l_skip();
             let h = layout.height();
             let w = layout.width();
-            let trace_hosts = stacked.traces.iter().map(MetalMatrix::to_host).collect_vec();
+            let trace_hosts = stacked
+                .traces
+                .iter()
+                .map(MetalMatrix::to_host)
+                .collect_vec();
             let mut cols = vec![vec![F::ZERO; h]; w];
             for &(mat_idx, col_idx, s) in &layout.sorted_cols {
                 let trace = &stacked.traces[mat_idx];
@@ -238,7 +242,9 @@ pub fn prove_stacked_opening_reduction_metal(
             }
             let expected = cols
                 .iter()
-                .map(|col| Ple::from_evaluations(l_skip, col).eval_at_point(l_skip, u_vec[0], &u_vec[1..]))
+                .map(|col| {
+                    Ple::from_evaluations(l_skip, col).eval_at_point(l_skip, u_vec[0], &u_vec[1..])
+                })
                 .collect_vec();
             debug_assert_eq!(stacking_openings[commit_idx], expected);
         }
@@ -342,7 +348,11 @@ impl StackedReductionMetal {
                 debug_assert_ne!(trace.width(), 0);
                 debug_assert_ne!(trace.height(), 0);
                 ht_diff_idxs.push(unstacked_cols.len());
-                trace_ptrs.push((trace.buffer().as_device_ptr(), trace.height(), trace.width()));
+                trace_ptrs.push((
+                    trace.buffer().as_device_ptr(),
+                    trace.height(),
+                    trace.width(),
+                ));
                 let need_rot = need_rot_for_commit[mat_idx];
                 for j in 0..trace.width() {
                     let (_, _j, s) = layout.sorted_cols[idx + j];
@@ -484,42 +494,42 @@ impl StackedReductionMetal {
                 let window_end = window_start + trace_width;
 
                 debug_assert_eq!(window_end - window_start, trace_width);
-            let log_height = trace_height.ilog2();
-            let n = log_height as isize - l_skip as isize;
+                let log_height = trace_height.ilog2();
+                let n = log_height as isize - l_skip as isize;
 
-            // Select output bucket based on n
-            let d_g_output = if n >= 0 {
-                &mut d_g_pos
-            } else {
-                &mut d_g_neg[(-n - 1) as usize]
-            };
+                // Select output bucket based on n
+                let d_g_output = if n >= 0 {
+                    &mut d_g_pos
+                } else {
+                    &mut d_g_neg[(-n - 1) as usize]
+                };
 
-            // Allocate block_sums buffer for intermediate reduction
-            let block_sums_len = stacked_reduction_r0_required_temp_buffer_size(
-                trace_height as u32,
-                trace_width as u32,
-                l_skip as u32,
-            ) as usize;
+                // Allocate block_sums buffer for intermediate reduction
+                let block_sums_len = stacked_reduction_r0_required_temp_buffer_size(
+                    trace_height as u32,
+                    trace_width as u32,
+                    l_skip as u32,
+                ) as usize;
 
-            if block_sums_len > self.d_block_sums.len() {
-                self.d_block_sums = MetalBuffer::<EF>::with_capacity(block_sums_len);
-            }
+                if block_sums_len > self.d_block_sums.len() {
+                    self.d_block_sums = MetalBuffer::<EF>::with_capacity(block_sums_len);
+                }
 
-            unsafe {
-                // 2 per column for (eq, k_rot) - coeff_eq and coeff_rot
-                stacked_reduction_sumcheck_round0(
-                    &self.eq_r_ns,
-                    trace.buffer(),
-                    &self.d_lambda_pows,
-                    2 * window_start,
-                    &mut self.d_block_sums,
-                    d_g_output,
-                    trace_height,
-                    trace_width,
-                    l_skip,
-                )
-                .unwrap();
-            };
+                unsafe {
+                    // 2 per column for (eq, k_rot) - coeff_eq and coeff_rot
+                    stacked_reduction_sumcheck_round0(
+                        &self.eq_r_ns,
+                        trace.buffer(),
+                        &self.d_lambda_pows,
+                        2 * window_start,
+                        &mut self.d_block_sums,
+                        d_g_output,
+                        trace_height,
+                        trace_width,
+                        l_skip,
+                    )
+                    .unwrap();
+                };
                 window_start = window_end;
             }
         }

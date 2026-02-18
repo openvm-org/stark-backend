@@ -45,7 +45,10 @@ impl<T> MetalBuffer<T> {
         );
         metrics::counter!("metal.buffer.alloc_bytes").increment(size_bytes as u64);
 
-        let buffer = device.new_buffer(size_bytes as NSUInteger, MTLResourceOptions::StorageModeShared);
+        let buffer = device.new_buffer(
+            size_bytes as NSUInteger,
+            MTLResourceOptions::StorageModeShared,
+        );
         MetalBuffer {
             buffer,
             len,
@@ -261,5 +264,4 @@ mod tests {
         buf.fill_zero_suffix(3);
         assert_eq!(buf.to_vec(), vec![1, 2, 3, 0, 0]);
     }
-
 }

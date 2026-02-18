@@ -12,13 +12,12 @@ use tracing::{debug, warn};
 
 use super::errors::Round0EvalError;
 use crate::{
-    metal::logup_zerocheck::{
-        logup_r0_intermediates_buffer_size, logup_r0_temp_sums_buffer_size,
-        logup_bary_eval_interactions_round0,
-        zerocheck_r0_intermediates_buffer_size, zerocheck_r0_temp_sums_buffer_size,
-        zerocheck_ntt_eval_constraints,
-    },
     logup_zerocheck::rules::{codec::Codec, SymbolicRulesMetal},
+    metal::logup_zerocheck::{
+        logup_bary_eval_interactions_round0, logup_r0_intermediates_buffer_size,
+        logup_r0_temp_sums_buffer_size, zerocheck_ntt_eval_constraints,
+        zerocheck_r0_intermediates_buffer_size, zerocheck_r0_temp_sums_buffer_size,
+    },
     prelude::{EF, F},
     MetalBackend,
 };

@@ -6,10 +6,7 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 
-use openvm_metal_common::{
-    d_buffer::MetalBuffer,
-    error::MetalError,
-};
+use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 
 use crate::{
     prelude::{D_EF, EF, F},
@@ -51,8 +48,16 @@ pub unsafe fn eq_hypercube_stage_ext(
     let pipeline = get_kernels().get_pipeline("eq_hypercube_stage_ext")?;
     let (grid, group) = grid_size_1d(step as usize, DEFAULT_THREADS_PER_GROUP);
     dispatch_sync(&pipeline, grid, group, |encoder| {
-        encoder.set_buffer(0, Some(out.gpu_buffer()), (out_offset * size_of::<EF>()) as u64);
-        encoder.set_bytes(1, size_of::<EF>() as u64, &x_i as *const EF as *const c_void);
+        encoder.set_buffer(
+            0,
+            Some(out.gpu_buffer()),
+            (out_offset * size_of::<EF>()) as u64,
+        );
+        encoder.set_bytes(
+            1,
+            size_of::<EF>() as u64,
+            &x_i as *const EF as *const c_void,
+        );
         encoder.set_bytes(2, 4, &step as *const u32 as *const c_void);
     })
 }
@@ -66,7 +71,11 @@ pub unsafe fn mobius_eq_hypercube_stage_ext(
     let pipeline = get_kernels().get_pipeline("mobius_eq_hypercube_stage_ext")?;
     let (grid, group) = grid_size_1d(step as usize, DEFAULT_THREADS_PER_GROUP);
     dispatch_sync(&pipeline, grid, group, |encoder| {
-        encoder.set_buffer(0, Some(out.gpu_buffer()), (out_offset * size_of::<EF>()) as u64);
+        encoder.set_buffer(
+            0,
+            Some(out.gpu_buffer()),
+            (out_offset * size_of::<EF>()) as u64,
+        );
         encoder.set_bytes(
             1,
             size_of::<EF>() as u64,
@@ -87,13 +96,21 @@ pub unsafe fn eq_hypercube_nonoverlapping_stage_ext(
     let pipeline = get_kernels().get_pipeline("eq_hypercube_nonoverlapping_stage_ext")?;
     let (grid, group) = grid_size_1d(step as usize, DEFAULT_THREADS_PER_GROUP);
     dispatch_sync(&pipeline, grid, group, |encoder| {
-        encoder.set_buffer(0, Some(out.gpu_buffer()), (out_offset * size_of::<EF>()) as u64);
+        encoder.set_buffer(
+            0,
+            Some(out.gpu_buffer()),
+            (out_offset * size_of::<EF>()) as u64,
+        );
         encoder.set_buffer(
             1,
             Some(input.gpu_buffer()),
             (input_offset * size_of::<EF>()) as u64,
         );
-        encoder.set_bytes(2, size_of::<EF>() as u64, &x_i as *const EF as *const c_void);
+        encoder.set_bytes(
+            2,
+            size_of::<EF>() as u64,
+            &x_i as *const EF as *const c_void,
+        );
         encoder.set_bytes(3, 4, &step as *const u32 as *const c_void);
     })
 }
@@ -109,13 +126,21 @@ pub unsafe fn eq_hypercube_interleaved_stage_ext(
     let pipeline = get_kernels().get_pipeline("eq_hypercube_interleaved_stage_ext")?;
     let (grid, group) = grid_size_1d(step as usize, DEFAULT_THREADS_PER_GROUP);
     dispatch_sync(&pipeline, grid, group, |encoder| {
-        encoder.set_buffer(0, Some(out.gpu_buffer()), (out_offset * size_of::<EF>()) as u64);
+        encoder.set_buffer(
+            0,
+            Some(out.gpu_buffer()),
+            (out_offset * size_of::<EF>()) as u64,
+        );
         encoder.set_buffer(
             1,
             Some(input.gpu_buffer()),
             (input_offset * size_of::<EF>()) as u64,
         );
-        encoder.set_bytes(2, size_of::<EF>() as u64, &x_i as *const EF as *const c_void);
+        encoder.set_bytes(
+            2,
+            size_of::<EF>() as u64,
+            &x_i as *const EF as *const c_void,
+        );
         encoder.set_bytes(3, 4, &step as *const u32 as *const c_void);
     })
 }
@@ -169,7 +194,11 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(base_coeffs.gpu_buffer()), 0);
         encoder.set_bytes(1, 4, &coeff_len_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(2, std::mem::size_of::<EF>() as u64, &x as *const EF as *const c_void);
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<EF>() as u64,
+            &x as *const EF as *const c_void,
+        );
         encoder.set_buffer(3, Some(d_out.gpu_buffer()), 0);
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })
@@ -178,10 +207,7 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
     Ok(out[0])
 }
 
-pub fn vector_scalar_multiply_ext(
-    vec: &mut MetalBuffer<EF>,
-    scalar: EF,
-) -> Result<(), MetalError> {
+pub fn vector_scalar_multiply_ext(vec: &mut MetalBuffer<EF>, scalar: EF) -> Result<(), MetalError> {
     let pipeline = get_kernels().get_pipeline("vector_scalar_multiply_ext")?;
     let length = vec.len() as u32;
     let (grid, group) = grid_size_1d(vec.len(), DEFAULT_THREADS_PER_GROUP);
