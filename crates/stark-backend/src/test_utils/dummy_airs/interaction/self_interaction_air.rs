@@ -54,10 +54,6 @@ impl<AB: AirBuilder + InteractionBuilder> Air<AB> for SelfInteractionAir {
         local.reverse();
         next.reverse();
 
-        // Interaction where count_weight != 1
-        builder.push_interaction(self.bus_index, local.clone(), AB::Expr::TWO, 2);
-        builder.push_interaction(self.bus_index, next.clone(), -AB::Expr::TWO, 2);
-
         // Interaction where count is an expression + common with interaction above
         builder.push_interaction(self.bus_index, local, local_sum, 1);
         builder.push_interaction(self.bus_index, next, -next_sum, 1);
