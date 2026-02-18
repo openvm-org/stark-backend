@@ -975,6 +975,7 @@ pub unsafe fn logup_gkr_input_eval(
     fracs_offset: usize,
     preprocessed: &MetalBuffer<F>,
     main_parts: &[&MetalBuffer<F>],
+    main_part_ptrs: &MetalBuffer<*const F>,
     public_values: &MetalBuffer<F>,
     challenges: &MetalBuffer<EF>,
     intermediates: &MetalBuffer<EF>,
@@ -1002,6 +1003,7 @@ pub unsafe fn logup_gkr_input_eval(
     let q_offset = frac_q_offset_bytes(fracs.len()) + p_offset;
     let used_nodes_len = used_nodes.len() as u32;
     let rules_len = rules.len() as u32;
+    let num_main_parts = main_parts.len() as u32;
     let total_threads = count;
 
     if is_global {
@@ -1023,26 +1025,8 @@ pub unsafe fn logup_gkr_input_eval(
             encoder.set_bytes(11, 4, &rules_len as *const u32 as *const c_void);
             encoder.set_bytes(12, 4, &num_rows_per_tile as *const u32 as *const c_void);
             encoder.set_bytes(13, 4, &total_threads as *const u32 as *const c_void);
-            encoder.set_buffer(
-                14,
-                main_parts.first().map(|b| b.gpu_buffer()).map(|v| &**v),
-                0,
-            );
-            encoder.set_buffer(
-                15,
-                main_parts.get(1).map(|b| b.gpu_buffer()).map(|v| &**v),
-                0,
-            );
-            encoder.set_buffer(
-                16,
-                main_parts.get(2).map(|b| b.gpu_buffer()).map(|v| &**v),
-                0,
-            );
-            encoder.set_buffer(
-                17,
-                main_parts.get(3).map(|b| b.gpu_buffer()).map(|v| &**v),
-                0,
-            );
+            encoder.set_buffer(14, Some(main_part_ptrs.gpu_buffer()), 0);
+            encoder.set_bytes(15, 4, &num_main_parts as *const u32 as *const c_void);
         })
     } else {
         dispatch_sync(&pipeline, grid, group, |encoder| {
@@ -1062,26 +1046,8 @@ pub unsafe fn logup_gkr_input_eval(
             encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
             encoder.set_bytes(11, 4, &num_rows_per_tile as *const u32 as *const c_void);
             encoder.set_bytes(12, 4, &total_threads as *const u32 as *const c_void);
-            encoder.set_buffer(
-                13,
-                main_parts.first().map(|b| b.gpu_buffer()).map(|v| &**v),
-                0,
-            );
-            encoder.set_buffer(
-                14,
-                main_parts.get(1).map(|b| b.gpu_buffer()).map(|v| &**v),
-                0,
-            );
-            encoder.set_buffer(
-                15,
-                main_parts.get(2).map(|b| b.gpu_buffer()).map(|v| &**v),
-                0,
-            );
-            encoder.set_buffer(
-                16,
-                main_parts.get(3).map(|b| b.gpu_buffer()).map(|v| &**v),
-                0,
-            );
+            encoder.set_buffer(13, Some(main_part_ptrs.gpu_buffer()), 0);
+            encoder.set_bytes(14, 4, &num_main_parts as *const u32 as *const c_void);
         })
     }
 }

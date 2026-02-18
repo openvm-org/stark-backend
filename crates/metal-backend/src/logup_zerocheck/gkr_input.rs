@@ -746,6 +746,11 @@ pub fn log_gkr_input_evals(
         let rules = &pk_air.other_data.interaction_rules;
         let num_interactions = pk_air.vk.symbolic_constraints.interactions.len();
         let main_parts_buffers = partitioned_main.iter().map(|m| m.buffer()).collect_vec();
+        let main_part_ptrs = main_parts_buffers
+            .iter()
+            .map(|buffer| buffer.as_device_ptr())
+            .collect_vec();
+        let d_main_part_ptrs = main_part_ptrs.to_device();
 
         let d_preprocessed = preprocessed_matrix
             .as_ref()
@@ -789,6 +794,7 @@ pub fn log_gkr_input_evals(
                     0,
                     d_preprocessed,
                     &main_parts_buffers,
+                    &d_main_part_ptrs,
                     &d_public_values,
                     d_challenges,
                     &intermediates,
@@ -807,6 +813,7 @@ pub fn log_gkr_input_evals(
                     dst_offset,
                     d_preprocessed,
                     &main_parts_buffers,
+                    &d_main_part_ptrs,
                     &d_public_values,
                     d_challenges,
                     &intermediates,

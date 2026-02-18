@@ -8,10 +8,6 @@ using namespace metal;
 #include "codec.h"
 #include "frac_ext.h"
 
-struct MainPtrs4 {
-    const device Fp *parts[4];
-};
-
 // Evaluate a DAG entry for GKR input phase.
 // Unlike MLE evaluation, this operates on base field traces (Fp) and wraps row with modular
 // arithmetic for rotation offsets. Selectors are boolean (is_first/is_last/is_transition).
@@ -19,7 +15,8 @@ inline FpExt evaluate_dag_entry_gkr_local(
     SourceInfo src,
     uint32_t row_index,
     const device Fp *d_preprocessed,
-    MainPtrs4 mains,
+    const device uint64_t *main_parts_ptrs,
+    uint32_t num_main_parts,
     const device Fp *d_public_values,
     const device FpExt *d_challenges,
     thread FpExt *d_intermediates,
@@ -33,7 +30,10 @@ inline FpExt evaluate_dag_entry_gkr_local(
         return FpExt(d_preprocessed[idx]);
     }
     case ENTRY_MAIN: {
-        const device Fp *d_main_fp = (src.part < 4) ? mains.parts[src.part] : nullptr;
+        if (src.part >= num_main_parts) {
+            return zero;
+        }
+        const device Fp *d_main_fp = reinterpret_cast<const device Fp *>(main_parts_ptrs[src.part]);
         if (d_main_fp == nullptr) {
             return zero;
         }
@@ -64,7 +64,8 @@ inline FpExt evaluate_dag_entry_gkr_global(
     SourceInfo src,
     uint32_t row_index,
     const device Fp *d_preprocessed,
-    MainPtrs4 mains,
+    const device uint64_t *main_parts_ptrs,
+    uint32_t num_main_parts,
     const device Fp *d_public_values,
     const device FpExt *d_challenges,
     const device FpExt *d_intermediates,
@@ -78,7 +79,10 @@ inline FpExt evaluate_dag_entry_gkr_global(
         return FpExt(d_preprocessed[idx]);
     }
     case ENTRY_MAIN: {
-        const device Fp *d_main_fp = (src.part < 4) ? mains.parts[src.part] : nullptr;
+        if (src.part >= num_main_parts) {
+            return zero;
+        }
+        const device Fp *d_main_fp = reinterpret_cast<const device Fp *>(main_parts_ptrs[src.part]);
         if (d_main_fp == nullptr) {
             return zero;
         }
@@ -123,10 +127,8 @@ kernel void evaluate_interactions_gkr_local_kernel(
     constant uint32_t &rules_len [[buffer(10)]],
     constant uint32_t &num_rows_per_tile [[buffer(11)]],
     constant uint32_t &total_threads [[buffer(12)]],
-    const device Fp *main0 [[buffer(13)]],
-    const device Fp *main1 [[buffer(14)]],
-    const device Fp *main2 [[buffer(15)]],
-    const device Fp *main3 [[buffer(16)]],
+    const device uint64_t *main_parts_ptrs [[buffer(13)]],
+    constant uint32_t &num_main_parts [[buffer(14)]],
     uint tidx [[thread_position_in_grid]]
 ) {
     (void)rules_len;
@@ -136,11 +138,6 @@ kernel void evaluate_interactions_gkr_local_kernel(
     FpExt local_intermediates[10];
     thread FpExt *intermediates_ptr = local_intermediates;
     uint32_t intermediate_stride = 1;
-    MainPtrs4 mains;
-    mains.parts[0] = main0;
-    mains.parts[1] = main1;
-    mains.parts[2] = main2;
-    mains.parts[3] = main3;
 
     for (uint32_t j = 0; j < num_rows_per_tile; j++) {
         uint32_t row = task_offset + j * task_stride;
@@ -161,7 +158,8 @@ kernel void evaluate_interactions_gkr_local_kernel(
                         header.x,
                         row,
                         d_preprocessed,
-                        mains,
+                        main_parts_ptrs,
+                        num_main_parts,
                         d_public_values,
                         d_challenges,
                         intermediates_ptr,
@@ -181,7 +179,8 @@ kernel void evaluate_interactions_gkr_local_kernel(
                         header.x,
                         row,
                         d_preprocessed,
-                        mains,
+                        main_parts_ptrs,
+                        num_main_parts,
                         d_public_values,
                         d_challenges,
                         intermediates_ptr,
@@ -197,7 +196,8 @@ kernel void evaluate_interactions_gkr_local_kernel(
                             y_src,
                             row,
                             d_preprocessed,
-                            mains,
+                            main_parts_ptrs,
+                            num_main_parts,
                             d_public_values,
                             d_challenges,
                             intermediates_ptr,
@@ -213,7 +213,8 @@ kernel void evaluate_interactions_gkr_local_kernel(
                             y_src,
                             row,
                             d_preprocessed,
-                            mains,
+                            main_parts_ptrs,
+                            num_main_parts,
                             d_public_values,
                             d_challenges,
                             intermediates_ptr,
@@ -229,7 +230,8 @@ kernel void evaluate_interactions_gkr_local_kernel(
                             y_src,
                             row,
                             d_preprocessed,
-                            mains,
+                            main_parts_ptrs,
+                            num_main_parts,
                             d_public_values,
                             d_challenges,
                             intermediates_ptr,
@@ -290,10 +292,8 @@ kernel void evaluate_interactions_gkr_global_kernel(
     constant uint32_t &rules_len [[buffer(11)]],
     constant uint32_t &num_rows_per_tile [[buffer(12)]],
     constant uint32_t &total_threads [[buffer(13)]],
-    const device Fp *main0 [[buffer(14)]],
-    const device Fp *main1 [[buffer(15)]],
-    const device Fp *main2 [[buffer(16)]],
-    const device Fp *main3 [[buffer(17)]],
+    const device uint64_t *main_parts_ptrs [[buffer(14)]],
+    constant uint32_t &num_main_parts [[buffer(15)]],
     uint tidx [[thread_position_in_grid]]
 ) {
     (void)rules_len;
@@ -301,11 +301,6 @@ kernel void evaluate_interactions_gkr_global_kernel(
     uint32_t task_stride = total_threads;
     uint32_t intermediate_stride = task_stride;
     device FpExt *intermediates_ptr = d_intermediates + task_offset;
-    MainPtrs4 mains;
-    mains.parts[0] = main0;
-    mains.parts[1] = main1;
-    mains.parts[2] = main2;
-    mains.parts[3] = main3;
 
     for (uint32_t j = 0; j < num_rows_per_tile; j++) {
         uint32_t row = task_offset + j * task_stride;
@@ -327,7 +322,8 @@ kernel void evaluate_interactions_gkr_global_kernel(
                         header.x,
                         row,
                         d_preprocessed,
-                        mains,
+                        main_parts_ptrs,
+                        num_main_parts,
                         d_public_values,
                         d_challenges,
                         intermediates_ptr,
@@ -347,7 +343,8 @@ kernel void evaluate_interactions_gkr_global_kernel(
                         header.x,
                         row,
                         d_preprocessed,
-                        mains,
+                        main_parts_ptrs,
+                        num_main_parts,
                         d_public_values,
                         d_challenges,
                         intermediates_ptr,
@@ -363,7 +360,8 @@ kernel void evaluate_interactions_gkr_global_kernel(
                             y_src,
                             row,
                             d_preprocessed,
-                            mains,
+                            main_parts_ptrs,
+                            num_main_parts,
                             d_public_values,
                             d_challenges,
                             intermediates_ptr,
@@ -379,7 +377,8 @@ kernel void evaluate_interactions_gkr_global_kernel(
                             y_src,
                             row,
                             d_preprocessed,
-                            mains,
+                            main_parts_ptrs,
+                            num_main_parts,
                             d_public_values,
                             d_challenges,
                             intermediates_ptr,
@@ -395,7 +394,8 @@ kernel void evaluate_interactions_gkr_global_kernel(
                             y_src,
                             row,
                             d_preprocessed,
-                            mains,
+                            main_parts_ptrs,
+                            num_main_parts,
                             d_public_values,
                             d_challenges,
                             intermediates_ptr,
