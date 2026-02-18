@@ -84,6 +84,7 @@ fn get_stacked_layout(l_skip: usize, n_stack: usize, traces: &[&MetalMatrix<F>])
 /// Stack traces into a column-major matrix.
 ///
 /// Reads MetalMatrix data from unified memory and stacks columns according to the layout.
+/// Each trace is read once via `to_host()` and cached for reuse across columns.
 fn stack_traces(
     l_skip: usize,
     layout: &StackedLayout,
@@ -93,10 +94,12 @@ fn stack_traces(
     let width = layout.width();
     let mut q_mat = F::zero_vec(width.checked_mul(height).unwrap());
 
+    // Cache trace data to avoid repeated to_host() copies per column
+    let trace_data_cache: Vec<Vec<F>> = traces.iter().map(|t| t.to_host()).collect();
+
     for (mat_idx, j, s) in &layout.sorted_cols {
-        let trace = traces[*mat_idx];
-        let trace_data = trace.to_host();
-        let trace_height = trace.height();
+        let trace_data = &trace_data_cache[*mat_idx];
+        let trace_height = traces[*mat_idx].height();
         let start = s.col_idx * height + s.row_idx;
 
         // Column j of the trace is at offset j * trace_height in column-major layout

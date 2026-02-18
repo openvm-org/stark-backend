@@ -35,6 +35,10 @@ pub struct MerkleTreeMetal<F> {
 /// In a column-major layout with dimensions `height x width`, element at
 /// row `r`, column `c` is stored at offset `c * height + r`.
 fn row_from_buffer(buffer: &MetalBuffer<F>, height: usize, width: usize, row_idx: usize) -> Vec<F> {
+    debug_assert!(
+        row_idx < height,
+        "row_from_buffer: row_idx ({row_idx}) must be less than height ({height})"
+    );
     let data = unsafe { std::slice::from_raw_parts(buffer.as_ptr(), buffer.len()) };
     (0..width).map(|c| data[c * height + row_idx]).collect()
 }
