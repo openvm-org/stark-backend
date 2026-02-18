@@ -8,6 +8,7 @@ include = ["openvm-stark-sdk", "openvm-stark-backend"]
 
 [defines]
 test = "CB_TEST"
+"feature = baby-bear-bn254-poseidon2" = "BABY_BEAR_BN254_POSEIDON2"
 
 [const]
 # Don't emit constexpr/static const for consts
