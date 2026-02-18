@@ -100,6 +100,28 @@ impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
     ) -> (StackingProof<SC>, WhirProof<SC>) {
         let mut mem = MemTracker::start_and_reset_peak("prover.openings");
         let params = self.config();
+        #[cfg(debug_assertions)]
+        {
+            let total_stacked_width: usize = std::iter::once(common_main_pcs_data.layout().width())
+                .chain(ctx.per_trace.iter().flat_map(|(air_idx, air_ctx)| {
+                    mpk.per_air[*air_idx]
+                        .preprocessed_data
+                        .iter()
+                        .map(|committed| committed.data.layout().width())
+                        .chain(
+                            air_ctx
+                                .cached_mains
+                                .iter()
+                                .map(|committed| committed.data.layout().width()),
+                        )
+                }))
+                .sum();
+            debug_assert!(
+                total_stacked_width <= mpk.params.w_stack,
+                "total stacked width across commits ({total_stacked_width}) exceeds w_stack ({})",
+                mpk.params.w_stack
+            );
+        }
         let (stacking_proof, u_prisma, stacked_per_commit) = prove_stacked_opening_reduction_gpu(
             self,
             transcript,

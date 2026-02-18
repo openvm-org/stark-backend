@@ -700,6 +700,7 @@ mod tests {
         setup_tracing_with_log_level(Level::DEBUG);
 
         let l_skip = 2;
+        let w_stack = 8;
         let whir = WhirConfig::new(
             log_blowup,
             l_skip + n_stack,
@@ -709,6 +710,7 @@ mod tests {
         let params = SystemParams {
             l_skip: 2,
             n_stack,
+            w_stack,
             log_blowup,
             whir,
             logup: log_up_security_params_baby_bear_100_bits(),
