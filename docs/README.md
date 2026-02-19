@@ -3,6 +3,9 @@
 - [STARK Backend](./stark-backend.md)
   - [AIR Interactions](./interactions.md)
   - [Metrics](./metrics.md): Guide to metrics collected by the prover.
+- [Metal Backend Optimization Prompt](./metal-backend-optimization-agent-prompt.md)
+- [Metal Backend Optimization Milestones](./metal-backend-optimization-milestones.md)
+- [Metal Backend Optimization Tracking](./metal-backend-optimization-tracking/README.md)
 
 ## Development without CUDA
 
