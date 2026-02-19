@@ -1,0 +1,42 @@
+# Keccakf Baseline Trace
+Date: 2026-02-19
+Command: cargo run -p openvm-metal-backend --example keccakf
+
+INFO     ｉ [info]: Metal device: Apple M2 Max, max buffer length: 57982058496 bytes
+INFO     ｉ [info]: TestAir              | Constraint Deg = 3  | Prep Cols = 0  | Main Cols = [2633]   | 3182 Constraints |   0 Interactions
+INFO     generate_trace [ 60.8ms | 100.00% ]
+INFO     stark_prove_excluding_trace [ 24.9s | 0.00% / 100.00% ] phase: "prover"
+INFO     ┝━ ｉ [info]:  | num_airs_present: 1
+INFO     ┝━ prover.main_trace_commit [ 1.18s | 0.00% / 4.75% ] phase: "prover"
+INFO     │  ┕━ stacked_commit [ 1.18s | 0.00% / 4.75% ]
+INFO     │     ┝━ ｉ [info]: stacked_matrix_dimensions | height: 2097152 | width: 42
+INFO     │     ┝━ rs_code_matrix [ 950ms | 3.82% ]
+INFO     │     ┕━ merkle_tree [ 233ms | 0.94% ]
+INFO     ┝━ prover.rap_constraints [ 7.21s | 0.00% / 28.95% ] phase: "prover"
+INFO     │  ┕━ prove_zerocheck_and_logup_metal [ 7.21s | 0.00% / 28.95% ]
+INFO     │     ┝━ prover.rap_constraints.logup_gkr [ 1.16ms | 0.00% / 0.00% ] phase: "prover"
+INFO     │     │  ┝━ ｉ [info]:  | n_global: 11 | n_logup: 0
+INFO     │     │  ┕━ fractional_sumcheck_metal [ 2.29µs | 0.00% ]
+INFO     │     ┝━ prover.rap_constraints.round0 [ 6.79s | 26.52% / 27.28% ] phase: "prover"
+INFO     │     │  ┝━ prover.rap_constraints.ple_round0 [ 191ms | 0.77% ]
+INFO     │     │  ┕━ s'_0 -> s_0 cpu interpolations [ 74.0µs | 0.00% ]
+INFO     │     ┕━ prover.rap_constraints.mle_rounds [ 414ms | 1.10% / 1.66% ] phase: "prover"
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 69.8ms | 0.28% ] round: 1
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 31.5ms | 0.13% ] round: 2
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 15.8ms | 0.06% ] round: 3
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 7.91ms | 0.03% ] round: 4
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 4.98ms | 0.02% ] round: 5
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 3.38ms | 0.01% ] round: 6
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.60ms | 0.01% ] round: 7
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.08ms | 0.00% ] round: 8
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 3.19ms | 0.01% ] round: 9
+INFO     │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 818µs | 0.00% ] round: 10
+INFO     │        ┕━ LogupZerocheck::sumcheck_polys_batch_eval [ 648µs | 0.00% ] round: 11
+INFO     ┕━ prover.openings [ 16.5s | 0.00% / 66.29% ] phase: "prover"
+INFO        ┝━ prover.openings.stacked_reduction [ 12.8s | 0.01% / 51.37% ] phase: "prover"
+INFO        │  ┝━ prover.openings.stacked_reduction.round0 [ 65.0ms | 0.26% ] phase: "prover"
+INFO        │  ┕━ prover.openings.stacked_reduction.mle_rounds [ 12.7s | 51.10% ] phase: "prover"
+INFO        ┕━ prover.openings.whir [ 3.71s | 14.56% / 14.92% ] phase: "prover"
+INFO           ┝━ merkle_tree [ 48.8ms | 0.20% ]
+INFO           ┝━ merkle_tree [ 26.5ms | 0.11% ]
+INFO           ┕━ merkle_tree [ 14.5ms | 0.06% ]

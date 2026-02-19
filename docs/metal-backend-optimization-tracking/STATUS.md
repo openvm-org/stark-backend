@@ -2,7 +2,7 @@
 
 | Milestone | Title | Status | Owner | Branch | PR | Last Update | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [0](./milestone-0.md) | Baseline Harness and Guardrails | not_started |  |  |  |  |  |
+| [0](./milestone-0.md) | Baseline Harness and Guardrails | completed | codex | `metal-backend` |  | 2026-02-19 | Baseline trace + guardrails recorded |
 | [1](./milestone-1.md) | Batch Synchronization and Dispatch Plumbing | not_started |  |  |  |  |  |
 | [2](./milestone-2.md) | Stacked Trace Copy Path Optimization | not_started |  |  |  |  |  |
 | [3](./milestone-3.md) | Unified-Memory Copy Elimination | not_started |  |  |  |  |  |

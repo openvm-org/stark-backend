@@ -142,3 +142,7 @@ Non-goals:
 - No protocol redesign.
 - No cross-crate large refactors outside metal-backend unless strictly needed for API support.
 - No implementation of unselected milestones.
+
+PR description template:
+- Use `.github/PULL_REQUEST_TEMPLATE.md`.
+- Always fill `PERF_NOTES` with baseline/post-change spans for milestone work.
