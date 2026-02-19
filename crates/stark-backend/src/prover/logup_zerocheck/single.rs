@@ -22,7 +22,7 @@ pub struct EvalHelper<'a, F> {
     pub interactions: Vec<SymbolicInteraction<F>>,
     pub public_values: Vec<F>,
     pub preprocessed_trace: Option<StridedColMajorMatrixView<'a, F>>,
-    // TODO: skip rotation if vk dictates it is never used
+    // PERF: skip rotation if vk dictates it is never used
     pub needs_next: bool,
     pub constraint_degree: u8,
 }
