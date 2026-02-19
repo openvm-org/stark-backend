@@ -30,6 +30,7 @@ pub mod poly_common;
 /// Definition of the STARK proof struct.
 pub mod proof;
 pub mod prover;
+pub mod soundness;
 pub mod utils;
 pub mod verifier;
 
