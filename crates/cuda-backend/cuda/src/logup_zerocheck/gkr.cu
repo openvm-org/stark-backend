@@ -832,6 +832,53 @@ __global__ void frac_vector_scalar_multiply_kernel(
     frac_vec[tidx].first *= scalar;
 }
 
+// Fused two-layer tree build kernel.
+// Applies two consecutive frac_add tree layers in one pass, keeping intermediate
+// right-half nodes for later revert operations.
+//
+// For fused layers i and i+1 with half_i = N >> (i+1) and half_i1 = N >> (i+2):
+//   Thread j in [0, half_i1) reads:
+//     A = layer[j],                  B = layer[j + half_i1],
+//     C = layer[j + half_i],         D = layer[j + half_i + half_i1]
+//   Computes:
+//     lhs = frac_add(A, C)            (layer i result at j, kept in register)
+//     rhs = frac_add(B, D)            (layer i result at j + half_i1)
+//     result = frac_add(lhs, rhs)     (layer i+1 result at j)
+//   Writes:
+//     layer[j]         = result        (layer i+1 output)
+//     layer[j+half_i1] = rhs           (layer i intermediate, needed for revert of layer i+1)
+//   C and D remain untouched (already in correct place for revert of layer i).
+//
+// Memory traffic vs two separate frac_build_tree_layer calls:
+//   Non-fused: 4 reads + 2 writes (layer i) + 2 reads + 1 write (layer i+1) = 6R+3W per group
+//   Fused:     4 reads + 2 writes per group
+//   Savings:   2 reads + 1 write = ~33% reduction in global memory traffic.
+__global__ void frac_build_tree_two_layers_kernel(
+    FracExt *__restrict__ layer,
+    uint32_t half_i1   // = N >> (i+2), where i is the first of the two layers
+) {
+    uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= half_i1) return;
+
+    uint32_t half_i = half_i1 << 1;   // = N >> (i+1)
+
+    FracExt A = layer[j];
+    FracExt B = layer[j + half_i1];
+    FracExt C = layer[j + half_i];
+    FracExt D = layer[j + half_i + half_i1];
+
+    // Layer i: combine A with C and B with D (kept in registers)
+    FracExt lhs = frac_add(A, C);
+    FracExt rhs = frac_add(B, D);
+    // Layer i+1: combine the two layer-i results
+    FracExt result = frac_add(lhs, rhs);
+
+    layer[j]         = result;
+    layer[j + half_i1] = rhs;   // Needed for revert of layer i+1
+    // layer[j + half_i] = C  (unchanged, needed for revert of layer i)
+    // layer[j + half_i + half_i1] = D  (unchanged, needed for revert of layer i)
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -858,6 +905,19 @@ extern "C" int _frac_build_tree_layer(
     return DISPATCH_BOOL_PAIR(
         launch_frac_build_tree_layer, revert, apply_alpha, layer, layer_size, alpha
     );
+}
+
+// Launcher for fused two-layer tree build.
+// half_i1 = N >> (i+2), where i is the index of the first layer to fuse.
+// Requires half_i1 >= 1 and half_i1 * 4 <= total array size.
+extern "C" int _frac_build_tree_two_layers(FracExt *layer, size_t half_i1) {
+    if (half_i1 == 0) return 0;
+    // Use 256 threads/block (not 1024) to give the compiler more register headroom.
+    // frac_build_tree_two_layers_kernel does 4 FracExt loads + 3 frac_add ops,
+    // which has higher register pressure than the single-layer build kernel.
+    auto [grid, block] = kernel_launch_params(half_i1, 256);
+    frac_build_tree_two_layers_kernel<<<grid, block>>>(layer, (uint32_t)half_i1);
+    return CHECK_KERNEL();
 }
 
 inline uint32_t min_blocks_target_for_device(uint32_t blocks_per_sm, uint32_t fallback_blocks) {

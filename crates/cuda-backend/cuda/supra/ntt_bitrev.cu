@@ -135,6 +135,109 @@ void bit_rev_permutation_z(T* out, const T* in, uint32_t lg_domain_size,
 }
 
 
+// Inline frac_add for frac_fpext_t. Cannot include frac_ext.cuh from this translation unit.
+__device__ __forceinline__ void frac_fpext_add_inplace(frac_fpext_t& lhs, const frac_fpext_t& rhs) {
+    bb31_4_t new_num = lhs.num * rhs.denom + lhs.denom * rhs.num;
+    lhs.denom = lhs.denom * rhs.denom;
+    lhs.num = new_num;
+}
+
+// Fused bitrev + K=2 tree build kernel for frac_fpext_t.
+// After bit-reversing, applies alpha to all elements and computes 2 tree layers in shmem,
+// then writes results to global memory. Eliminates 2 separate tree-layer kernel passes.
+//
+// Output layout for each Z-tile at base_rev (elements at i*step + base_rev, i=0..7):
+//   [0,1]  : layer 1 results (tree level 2)
+//   [2,3]  : layer 0 results preserved (tree level 1 right half, for revert of layer 1)
+//   [4..7] : original+alpha preserved (leaves, for revert of layer 0)
+__launch_bounds__(32, 2) __global__
+void bit_rev_frac_build_k2_kernel(
+    frac_fpext_t* inout, uint32_t lg_domain_size, bb31_4_t alpha)
+{
+    constexpr uint32_t Z_COUNT = 8;
+    constexpr uint32_t LG_Z_COUNT = 3;
+
+    extern __shared__ unsigned char xchg_raw[];
+    frac_fpext_t (*xchg)[Z_COUNT][Z_COUNT] =
+        reinterpret_cast<frac_fpext_t (*)[Z_COUNT][Z_COUNT]>(xchg_raw);
+
+    uint32_t gid = threadIdx.x / Z_COUNT;
+    uint32_t idx = threadIdx.x % Z_COUNT;
+    uint32_t rev = bit_rev(idx, LG_Z_COUNT);
+
+    index_t step = (index_t)1 << (lg_domain_size - LG_Z_COUNT);
+    index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
+
+    #pragma unroll 1
+    do {
+        index_t group_idx = tid >> LG_Z_COUNT;
+        index_t group_rev = bit_rev(group_idx, lg_domain_size - 2*LG_Z_COUNT);
+
+        if (group_idx > group_rev)
+            continue;
+
+        index_t base_idx = group_idx * Z_COUNT + idx;
+        index_t base_rev = group_rev * Z_COUNT + idx;
+
+        frac_fpext_t regs[Z_COUNT];
+
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++) {
+            xchg[gid][i][rev] = (regs[i] = inout[i * step + base_idx]);
+            if (group_idx != group_rev)
+                regs[i] = inout[i * step + base_rev];
+        }
+
+        __syncwarp();
+
+        // Apply alpha + tree layers 0 and 1 to transposed tile, then write to base_rev
+        {
+            frac_fpext_t* row = xchg[gid][rev];
+            #pragma unroll
+            for (uint32_t i = 0; i < Z_COUNT; i++)
+                row[i].denom = row[i].denom + alpha;
+            #pragma unroll
+            for (uint32_t i = 0; i < 4; i++)  // tree layer 0: pairs (0,4),(1,5),(2,6),(3,7)
+                frac_fpext_add_inplace(row[i], row[i + 4]);
+            #pragma unroll
+            for (uint32_t i = 0; i < 2; i++)  // tree layer 1: pairs (0,2),(1,3)
+                frac_fpext_add_inplace(row[i], row[i + 2]);
+        }
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            inout[i * step + base_rev] = xchg[gid][rev][i];
+
+        if (group_idx == group_rev)
+            continue;
+
+        __syncwarp();
+
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            xchg[gid][i][rev] = regs[i];
+
+        __syncwarp();
+
+        // Apply alpha + tree layers 0 and 1 to transposed tile, then write to base_idx
+        {
+            frac_fpext_t* row = xchg[gid][rev];
+            #pragma unroll
+            for (uint32_t i = 0; i < Z_COUNT; i++)
+                row[i].denom = row[i].denom + alpha;
+            #pragma unroll
+            for (uint32_t i = 0; i < 4; i++)
+                frac_fpext_add_inplace(row[i], row[i + 4]);
+            #pragma unroll
+            for (uint32_t i = 0; i < 2; i++)
+                frac_fpext_add_inplace(row[i], row[i + 2]);
+        }
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            inout[i * step + base_idx] = xchg[gid][rev][i];
+
+    } while (Z_COUNT <= WARP_SIZE && (tid += blockDim.x*gridDim.x) < step);
+}
+
 template<typename T>
 static int bit_rev_impl(T* d_out, const T* d_inp,
     uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
@@ -195,4 +298,22 @@ extern "C" int _bit_rev_frac_ext(frac_fpext_t* d_out, const frac_fpext_t* d_inp,
     uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
 {
     return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
+}
+
+// Fused bitrev + K=2 tree build for a single frac_fpext_t buffer.
+// Requires domain_size >= 256 (uses Z-tile shmem kernel).
+// Applies alpha to denominators and fuses tree layers 0 and 1 in shmem.
+extern "C" int _bit_rev_frac_ext_build_k2(
+    frac_fpext_t* inout, uint32_t lg_domain_size, bb31_4_t alpha)
+{
+    constexpr uint32_t Z_COUNT = 8;
+    constexpr uint32_t bsize = WARP_SIZE;  // 32
+    size_t domain_size = (size_t)1 << lg_domain_size;
+    if (domain_size < (size_t)(bsize * Z_COUNT))
+        return cudaErrorInvalidValue;
+    uint32_t grid_x = (uint32_t)(domain_size / Z_COUNT / bsize);
+    size_t shmem_bytes = (size_t)bsize * Z_COUNT * sizeof(frac_fpext_t);
+    bit_rev_frac_build_k2_kernel<<<dim3(grid_x), bsize, shmem_bytes>>>(
+        inout, lg_domain_size, alpha);
+    return CHECK_KERNEL();
 }
