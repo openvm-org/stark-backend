@@ -515,8 +515,14 @@ pub fn fractional_sumcheck_gpu(
         // Fallback: separate bitrev + layer 0.
         unsafe {
             let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
-            bit_rev_frac_ext(buf, buf, total_rounds as u32, total_leaves.try_into().unwrap(), 1)
-                .map_err(FractionalSumcheckError::BitReversal)?;
+            bit_rev_frac_ext(
+                buf,
+                buf,
+                total_rounds as u32,
+                total_leaves.try_into().unwrap(),
+                1,
+            )
+            .map_err(FractionalSumcheckError::BitReversal)?;
             frac_build_tree_layer(&mut layer, total_leaves, false, alpha, true)
                 .map_err(FractionalSumcheckError::SegmentTree)?;
             use crate::cuda::logup_zerocheck::frac_add_alpha;
