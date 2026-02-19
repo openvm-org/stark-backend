@@ -119,14 +119,39 @@ pub struct WhirConfig {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WhirRoundConfig {
+    /// Number of in-domain queries sampled in this WHIR round.
     pub num_queries: usize,
 }
 
-/// Defines the soundness type for the proof system.
+/// Defines the proximity regime for the proof system.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SoundnessType {
+pub enum ProximityRegime {
     /// Unique decoding guarantees a single valid witness.
     UniqueDecoding,
+}
+
+impl ProximityRegime {
+    /// Returns the per-query security bits for WHIR query sampling.
+    ///
+    /// Unique decoding formula:
+    /// Error per query = (1 + ρ) / 2 where ρ is the rate.
+    /// Security bits = -log₂((1 + ρ) / 2)
+    pub fn whir_per_query_security_bits(self, log_inv_rate: usize) -> f64 {
+        match self {
+            ProximityRegime::UniqueDecoding => {
+                let rate = 1.0 / (1 << log_inv_rate) as f64;
+                -((0.5 * (1.0 + rate)).log2())
+            }
+        }
+    }
+
+    /// Returns total security bits for `num_queries` WHIR queries.
+    ///
+    /// Unique decoding formula:
+    /// Security bits = -n × log₂((1 + ρ) / 2)
+    pub fn whir_query_security_bits(self, num_queries: usize, log_inv_rate: usize) -> f64 {
+        (num_queries as f64) * self.whir_per_query_security_bits(log_inv_rate)
+    }
 }
 
 impl WhirConfig {
@@ -156,7 +181,7 @@ impl WhirConfig {
             let next_rate = log_inv_rate + (k_whir - 1);
 
             let num_queries = Self::queries(
-                SoundnessType::UniqueDecoding,
+                ProximityRegime::UniqueDecoding,
                 protocol_security_level,
                 log_inv_rate,
             );
@@ -196,18 +221,12 @@ impl WhirConfig {
     ///   queries for.
     // Source: https://github.com/WizardOfMenlo/whir/blob/cf1599b56ff50e09142ebe6d2e2fbd86875c9986/src/whir/parameters.rs#L457
     pub fn queries(
-        soundness_type: SoundnessType,
+        proximity_regime: ProximityRegime,
         protocol_security_level: usize,
         log_inv_rate: usize,
     ) -> usize {
-        let num_queries_f = match soundness_type {
-            SoundnessType::UniqueDecoding => {
-                let rate = 1. / f64::from(1 << log_inv_rate);
-                let denom = (0.5 * (1. + rate)).log2();
-
-                -(protocol_security_level as f64) / denom
-            }
-        };
+        let per_query_bits = proximity_regime.whir_per_query_security_bits(log_inv_rate);
+        let num_queries_f = (protocol_security_level as f64) / per_query_bits;
         num_queries_f.ceil() as usize
     }
 }

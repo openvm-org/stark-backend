@@ -67,8 +67,7 @@ pub struct TraceVData<SC: StarkProtocolConfig> {
 )]
 #[serde(bound = "")]
 pub struct GkrProof<SC: StarkProtocolConfig> {
-    // TODO[jpw]: I'm not sure this is concepturally the place to put it, but recursion gkr module
-    // samples alpha,beta
+    /// The grinding proof-of-work witness before sampling LogUp alpha,beta
     pub logup_pow_witness: SC::F,
     /// The denominator of the root layer.
     ///
