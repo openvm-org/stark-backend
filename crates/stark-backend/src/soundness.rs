@@ -1,6 +1,6 @@
-//! Soundness calculator for the v2 proof system.
+//! Soundness calculator for the SWIRL proof system.
 //!
-//! The v2 proof system consists of the following components:
+//! The SWIRL proof system consists of the following components:
 //! 1. LogUp GKR - Fractional sumcheck for interaction constraints
 //! 2. ZeroCheck - Batched constraint verification across AIRs
 //! 3. Stacked Reduction - Reduces trace evaluations to stacked polynomial evaluations
