@@ -5,11 +5,12 @@
 
 use openvm_metal_common::{copy::MemCopyH2D, d_buffer::MetalBuffer};
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
+use metal::Buffer as MetalRawBuffer;
 
 use crate::{
     logup_zerocheck::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
-        mle_round::{evaluate_mle_constraints_metal, evaluate_mle_interactions_metal},
+        mle_round::evaluate_mle_interactions_metal,
     },
     metal::logup_zerocheck::{
         logup_batch_eval_mle, logup_batch_mle_intermediates_buffer_size, zerocheck_batch_eval_mle,
@@ -98,6 +99,7 @@ pub(crate) struct TraceCtx {
     pub main_ptrs_dev: MetalBuffer<MainMatrixPtrs<EF>>,
     pub public_ptr: *const F,
     pub eq_3bs_ptr: *const EF,
+    pub read_resources: Vec<MetalRawBuffer>,
 }
 
 /// Builder for batched zerocheck MLE evaluation.
@@ -107,6 +109,7 @@ pub(crate) struct ZerocheckMleBatchBuilder<'a> {
     d_zc_ctxs: MetalBuffer<ZerocheckCtx>,
     air_offsets: MetalBuffer<u32>,
     threads_per_block: u32,
+    read_resources: Vec<MetalRawBuffer>,
     _intermediates_keepalive: Vec<MetalBuffer<EF>>,
 }
 
@@ -125,6 +128,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
                 d_zc_ctxs: MetalBuffer::with_capacity(0),
                 air_offsets: MetalBuffer::with_capacity(0),
                 threads_per_block: 0,
+                read_resources: vec![],
                 _intermediates_keepalive: vec![],
             };
         }
@@ -149,6 +153,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
 
         let mut intermediates_keepalive: Vec<MetalBuffer<EF>> = Vec::new();
         let mut zc_ctxs_h: Vec<ZerocheckCtx> = Vec::with_capacity(traces.len());
+        let mut read_resources: Vec<MetalRawBuffer> = Vec::new();
 
         for t in traces.iter() {
             let air_pk = &pk.per_air[t.air_idx];
@@ -159,30 +164,51 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
                     zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y);
                 let buf = MetalBuffer::<EF>::with_capacity(intermediates_len);
                 let ptr = buf.as_device_mut_ptr();
+                read_resources.push(buf.gpu_buffer().to_owned());
                 intermediates_keepalive.push(buf);
                 ptr
             } else {
                 std::ptr::null_mut()
             };
 
+            read_resources.extend(t.read_resources.iter().cloned());
+            read_resources.push(
+                air_pk
+                    .other_data
+                    .zerocheck_mle
+                    .inner
+                    .d_rules
+                    .gpu_buffer()
+                    .to_owned(),
+            );
+            read_resources.push(
+                air_pk
+                    .other_data
+                    .zerocheck_mle
+                    .inner
+                    .d_used_nodes
+                    .gpu_buffer()
+                    .to_owned(),
+            );
+
             let eval_ctx = EvalCoreCtx {
-                d_selectors: t.sels_ptr,
+                d_selectors: t.sels_ptr as u64,
                 d_preprocessed: t.prep_ptr,
-                d_main: t.main_ptrs_dev.as_device_ptr(),
-                d_public: t.public_ptr,
+                d_main: t.main_ptrs_dev.as_device_ptr() as u64,
+                d_public: t.public_ptr as u64,
             };
 
             zc_ctxs_h.push(ZerocheckCtx {
                 eval_ctx,
-                d_intermediates,
+                d_intermediates: d_intermediates as u64,
                 num_y: t.num_y,
-                d_eq_xi: t.eq_xi_ptr,
+                d_eq_xi: t.eq_xi_ptr as u64,
                 d_rules: air_pk
                     .other_data
                     .zerocheck_mle
                     .inner
                     .d_rules
-                    .as_device_ptr() as *const _,
+                    .as_device_ptr() as u64,
                 rules_len: air_pk
                     .other_data
                     .zerocheck_mle
@@ -196,7 +222,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
                     .zerocheck_mle
                     .inner
                     .d_used_nodes
-                    .as_device_ptr(),
+                    .as_device_ptr() as u64,
                 used_nodes_len: air_pk
                     .other_data
                     .zerocheck_mle
@@ -219,6 +245,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
             d_zc_ctxs,
             air_offsets,
             threads_per_block,
+            read_resources,
             _intermediates_keepalive: intermediates_keepalive,
         }
     }
@@ -245,6 +272,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
             lambda_pows.len(),
             num_x,
             self.threads_per_block,
+            &self.read_resources,
         )
     }
 }
@@ -316,25 +344,25 @@ impl<'a> LogupMleBatchBuilder<'a> {
             };
 
             let eval_ctx = EvalCoreCtx {
-                d_selectors: t.sels_ptr,
+                d_selectors: t.sels_ptr as u64,
                 d_preprocessed: t.prep_ptr,
-                d_main: t.main_ptrs_dev.as_device_ptr(),
-                d_public: t.public_ptr,
+                d_main: t.main_ptrs_dev.as_device_ptr() as u64,
+                d_public: t.public_ptr as u64,
             };
 
             logup_ctxs_h.push(LogupCtx {
                 eval_ctx,
-                d_intermediates,
+                d_intermediates: d_intermediates as u64,
                 num_y: t.num_y,
-                d_eq_xi: t.eq_xi_ptr,
-                d_challenges: d_challenges_ptr,
-                d_eq_3bs: t.eq_3bs_ptr,
+                d_eq_xi: t.eq_xi_ptr as u64,
+                d_challenges: d_challenges_ptr as u64,
+                d_eq_3bs: t.eq_3bs_ptr as u64,
                 d_rules: air_pk
                     .other_data
                     .interaction_rules
                     .inner
                     .d_rules
-                    .as_device_ptr() as *const _,
+                    .as_device_ptr() as u64,
                 rules_len: air_pk
                     .other_data
                     .interaction_rules
@@ -348,12 +376,12 @@ impl<'a> LogupMleBatchBuilder<'a> {
                     .interaction_rules
                     .inner
                     .d_used_nodes
-                    .as_device_ptr(),
+                    .as_device_ptr() as u64,
                 d_pair_idxs: air_pk
                     .other_data
                     .interaction_rules
                     .d_pair_idxs
-                    .as_device_ptr(),
+                    .as_device_ptr() as u64,
                 used_nodes_len: air_pk
                     .other_data
                     .interaction_rules
@@ -448,47 +476,29 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
             .iter()
             .map(|(t, _)| *t)
             .collect();
-        if batch.len() == 1 {
-            // Single trace: use non-batch kernel
-            let t = batch[0];
-            if batch_memory > memory_limit_bytes {
-                tracing::warn!(
-                    air_idx = t.air_idx,
-                    intermediate_buffer_bytes = batch_memory,
-                    memory_limit_bytes,
-                    "zerocheck: trace exceeds memory limit, using non-batch kernel"
-                );
-            }
-            let rules = &pk.per_air[t.air_idx].other_data.zerocheck_mle;
-            let out = evaluate_mle_constraints_metal(
-                t.eq_xi_ptr,
-                t.sels_ptr,
-                t.prep_ptr,
-                &t.main_ptrs_dev,
-                t.public_ptr,
-                lambda_pows,
-                rules,
-                t.num_y,
-                num_x,
-            );
-            let out_host = out.to_vec();
-            zc_out[t.trace_idx].copy_from_slice(&out_host);
-        } else {
-            // Normal batch using ZerocheckMleBatchBuilder
-            tracing::debug!(
-                batch_size = batch.len(),
-                batch_memory,
+        if batch.len() == 1 && batch_memory > memory_limit_bytes {
+            tracing::warn!(
+                air_idx = batch[0].air_idx,
+                intermediate_buffer_bytes = batch_memory,
                 memory_limit_bytes,
-                "zerocheck: batching traces"
+                "zerocheck: trace exceeds memory limit"
             );
-            let builder = ZerocheckMleBatchBuilder::new(batch.iter().copied(), pk, num_x);
-            let out = builder.evaluate(lambda_pows, num_x);
-            let host = out.to_vec();
+        }
 
-            for (i, trace_idx) in builder.trace_indices().enumerate() {
-                let evals = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
-                zc_out[trace_idx].copy_from_slice(evals);
-            }
+        // Always use batched dispatch so indirect resources are declared consistently.
+        tracing::debug!(
+            batch_size = batch.len(),
+            batch_memory,
+            memory_limit_bytes,
+            "zerocheck: batching traces"
+        );
+        let builder = ZerocheckMleBatchBuilder::new(batch.iter().copied(), pk, num_x);
+        let out = builder.evaluate(lambda_pows, num_x);
+        let host = out.to_vec();
+
+        for (i, trace_idx) in builder.trace_indices().enumerate() {
+            let evals = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
+            zc_out[trace_idx].copy_from_slice(evals);
         }
         batch_start += batch_count;
     }
@@ -669,6 +679,7 @@ fn evaluate_mle_constraints_metal_batch(
     lambda_len: usize,
     num_x: u32,
     threads_per_block: u32,
+    read_resources: &[MetalRawBuffer],
 ) -> MetalBuffer<EF> {
     let num_airs = zc_ctxs.len();
     let output = MetalBuffer::<EF>::with_capacity(num_airs * num_x as usize);
@@ -682,6 +693,7 @@ fn evaluate_mle_constraints_metal_batch(
             lambda_len,
             num_x,
             threads_per_block,
+            read_resources,
         )
         .expect("zerocheck_batch_eval_mle failed");
     }

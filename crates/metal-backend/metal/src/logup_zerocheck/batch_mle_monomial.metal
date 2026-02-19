@@ -10,6 +10,14 @@ using namespace metal;
 #include "monomial.h"
 #include "sumcheck.h"
 
+inline const device MonomialHeader *as_monomial_headers(uint64_t ptr) {
+    return reinterpret_cast<const device MonomialHeader *>(ptr);
+}
+
+inline const device PackedVar *as_packed_vars(uint64_t ptr) {
+    return reinterpret_cast<const device PackedVar *>(ptr);
+}
+
 // Evaluate a variable from packed representation
 inline FpExt eval_variable_monomial(
     PackedVar var,
@@ -17,31 +25,35 @@ inline FpExt eval_variable_monomial(
     EvalCoreCtx ctx,
     uint32_t height
 ) {
+    const device FpExt *d_selectors = as_fpext_ptr(ctx.d_selectors);
+    const device MainMatrixPtrsExt *d_main = as_main_matrix_ptrs_ext(ctx.d_main);
+    const device Fp *d_public = as_fp_ptr(ctx.d_public);
+    const device FpExt *d_preprocessed = as_fpext_ptr(ctx.d_preprocessed.data);
     uint8_t entry_type = var.entry_type();
     uint8_t offset = var.offset();
 
     switch (entry_type) {
     case 1: { // MAIN
-        MainMatrixPtrsExt main_ptr = ctx.d_main[var.part_index()];
+        MainMatrixPtrsExt main_ptr = d_main[var.part_index()];
         uint32_t stride = height * main_ptr.air_width;
-        const device FpExt *matrix = main_ptr.data + stride * offset;
+        const device FpExt *matrix = as_fpext_ptr(main_ptr.data) + stride * offset;
         const device FpExt *column = matrix + height * var.col_index();
         return column[row];
     }
     case 0: { // PREPROCESSED
         uint32_t stride = height * ctx.d_preprocessed.air_width;
-        const device FpExt *matrix = ctx.d_preprocessed.data + stride * offset;
+        const device FpExt *matrix = d_preprocessed + stride * offset;
         const device FpExt *column = matrix + height * var.col_index();
         return column[row];
     }
     case 3: // PUBLIC
-        return FpExt{ctx.d_public[var.col_index()], Fp(0u), Fp(0u), Fp(0u)};
+        return FpExt{d_public[var.col_index()], Fp(0u), Fp(0u), Fp(0u)};
     case 8: // IS_FIRST
-        return ctx.d_selectors[row];
+        return d_selectors[row];
     case 9: // IS_LAST
-        return ctx.d_selectors[2 * height + row];
+        return d_selectors[2 * height + row];
     case 10: // IS_TRANSITION
-        return ctx.d_selectors[height + row];
+        return d_selectors[height + row];
     default:
         break;
     }
@@ -50,28 +62,28 @@ inline FpExt eval_variable_monomial(
 
 // Per-AIR context for batched monomial evaluation
 struct MonomialAirCtx {
-    const device MonomialHeader *d_headers;
-    const device PackedVar *d_variables;
-    const device FpExt *d_lambda_combinations;
+    uint64_t d_headers;
+    uint64_t d_variables;
+    uint64_t d_lambda_combinations;
     uint32_t num_monomials;
     EvalCoreCtx eval_ctx;
-    const device FpExt *d_eq_xi;
+    uint64_t d_eq_xi;
     uint32_t num_y;
 };
 
 // Logup monomial common context
 struct LogupMonomialCommonCtx {
     EvalCoreCtx eval_ctx;
-    const device FpExt *d_eq_xi;
+    uint64_t d_eq_xi;
     FpExt bus_term_sum;
     uint32_t num_y;
     uint32_t mono_blocks;
 };
 
 struct LogupMonomialCtx {
-    const device MonomialHeader *d_headers;
-    const device PackedVar *d_variables;
-    const device FpExt *d_combinations;
+    uint64_t d_headers;
+    uint64_t d_variables;
+    uint64_t d_combinations;
     uint32_t num_monomials;
 };
 
@@ -164,26 +176,29 @@ kernel void zerocheck_monomial_kernel(
     uint32_t height = num_x * actx.num_y;
     uint32_t row = x_int * actx.num_y + y_int;
 
+    const device MonomialHeader *d_headers = as_monomial_headers(actx.d_headers);
+    const device PackedVar *d_variables = as_packed_vars(actx.d_variables);
+    const device FpExt *d_lambda_combinations = as_fpext_ptr(actx.d_lambda_combinations);
+    const device FpExt *d_eq_xi = as_fpext_ptr(actx.d_eq_xi);
+
     FpExt zero = FpExt{Fp(0u), Fp(0u), Fp(0u), Fp(0u)};
     FpExt sum = zero;
 
     uint32_t m = mono_block * threads_per_block + tid;
     if (m < actx.num_monomials) {
-        MonomialHeader hdr = actx.d_headers[m];
-
-        FpExt product = FpExt(1u);
+        MonomialHeader hdr = d_headers[m];
+        FpExt product = FpExt(Fp(1u));
         for (uint16_t v = 0; v < hdr.num_vars; ++v) {
-            PackedVar var = actx.d_variables[hdr.var_offset + v];
+            PackedVar var = d_variables[hdr.var_offset + v];
             product = product * eval_variable_monomial(var, row, actx.eval_ctx, height);
         }
-
-        sum = product * actx.d_lambda_combinations[m];
+        sum = product * d_lambda_combinations[m];
     }
 
     FpExt reduced = block_reduce_sum(sum, shared, tid, tg_size);
 
     if (tid == 0) {
-        reduced = reduced * actx.d_eq_xi[y_int];
+        reduced = reduced * d_eq_xi[y_int];
         tmp_sums[gid.x * num_x + x_int] = reduced;
     }
 }
@@ -221,22 +236,26 @@ kernel void zerocheck_monomial_par_y_kernel(
     uint32_t mono_start = mono_chunk * chunk_size;
     uint32_t mono_end = min(mono_start + chunk_size, actx.num_monomials);
 
+    const device MonomialHeader *d_headers = as_monomial_headers(actx.d_headers);
+    const device PackedVar *d_variables = as_packed_vars(actx.d_variables);
+    const device FpExt *d_lambda_combinations = as_fpext_ptr(actx.d_lambda_combinations);
+    const device FpExt *d_eq_xi = as_fpext_ptr(actx.d_eq_xi);
+
     FpExt zero = FpExt{Fp(0u), Fp(0u), Fp(0u), Fp(0u)};
     FpExt sum = zero;
     if (active) {
         for (uint32_t m = mono_start; m < mono_end; ++m) {
-            MonomialHeader hdr = actx.d_headers[m];
+            MonomialHeader hdr = d_headers[m];
 
-            FpExt product = FpExt(1u);
+            FpExt product = FpExt(Fp(1u));
             for (uint16_t v = 0; v < hdr.num_vars; ++v) {
-                PackedVar var = actx.d_variables[hdr.var_offset + v];
+                PackedVar var = d_variables[hdr.var_offset + v];
                 product = product * eval_variable_monomial(var, row, actx.eval_ctx, height);
             }
 
-            sum = sum + product * actx.d_lambda_combinations[m];
+            sum = sum + product * d_lambda_combinations[m];
         }
-
-        sum = sum * actx.d_eq_xi[y_int];
+        sum = sum * d_eq_xi[y_int];
     }
 
     FpExt reduced = block_reduce_sum(sum, shared, tid, tg_size);
@@ -272,16 +291,21 @@ kernel void logup_monomial_numer_kernel(
     uint32_t row = x_int * common_ctx.num_y + y_int;
     uint32_t m = mono_block * tg_size + tid;
 
+    const device MonomialHeader *d_headers = as_monomial_headers(ctx.d_headers);
+    const device PackedVar *d_variables = as_packed_vars(ctx.d_variables);
+    const device FpExt *d_combinations = as_fpext_ptr(ctx.d_combinations);
+    const device FpExt *d_eq_xi = as_fpext_ptr(common_ctx.d_eq_xi);
+
     FpExt zero = FpExt{Fp(0u), Fp(0u), Fp(0u), Fp(0u)};
     FpExt sum = zero;
     if (y_int < common_ctx.num_y && m < ctx.num_monomials) {
-        MonomialHeader hdr = ctx.d_headers[m];
-        FpExt monomial = ctx.d_combinations[m];
+        MonomialHeader hdr = d_headers[m];
+        FpExt monomial = d_combinations[m];
         for (uint16_t v = 0; v < hdr.num_vars; ++v) {
-            PackedVar var = ctx.d_variables[hdr.var_offset + v];
+            PackedVar var = d_variables[hdr.var_offset + v];
             monomial = monomial * eval_variable_monomial(var, row, common_ctx.eval_ctx, height);
         }
-        sum = monomial * common_ctx.d_eq_xi[y_int];
+        sum = monomial * d_eq_xi[y_int];
     }
 
     FpExt reduced = block_reduce_sum(sum, shared, tid, tg_size);
@@ -317,22 +341,27 @@ kernel void logup_monomial_denom_kernel(
     uint32_t row = x_int * common_ctx.num_y + y_int;
     uint32_t m = mono_block * tg_size + tid;
 
+    const device MonomialHeader *d_headers = as_monomial_headers(ctx.d_headers);
+    const device PackedVar *d_variables = as_packed_vars(ctx.d_variables);
+    const device FpExt *d_combinations = as_fpext_ptr(ctx.d_combinations);
+    const device FpExt *d_eq_xi = as_fpext_ptr(common_ctx.d_eq_xi);
+
     FpExt zero = FpExt{Fp(0u), Fp(0u), Fp(0u), Fp(0u)};
     FpExt sum = zero;
     if (y_int < common_ctx.num_y && m < ctx.num_monomials) {
-        MonomialHeader hdr = ctx.d_headers[m];
-        FpExt monomial = ctx.d_combinations[m];
+        MonomialHeader hdr = d_headers[m];
+        FpExt monomial = d_combinations[m];
         for (uint16_t v = 0; v < hdr.num_vars; ++v) {
-            PackedVar var = ctx.d_variables[hdr.var_offset + v];
+            PackedVar var = d_variables[hdr.var_offset + v];
             monomial = monomial * eval_variable_monomial(var, row, common_ctx.eval_ctx, height);
         }
-        sum = monomial * common_ctx.d_eq_xi[y_int];
+        sum = monomial * d_eq_xi[y_int];
     }
 
     FpExt reduced = block_reduce_sum(sum, shared, tid, tg_size);
     if (tid == 0) {
         if (mono_block == 0 && y_int < common_ctx.num_y) {
-            reduced = reduced + common_ctx.bus_term_sum * common_ctx.d_eq_xi[y_int];
+            reduced = reduced + common_ctx.bus_term_sum * d_eq_xi[y_int];
         }
         tmp_sums_q[gid.x * num_x + x_int] = reduced;
     }

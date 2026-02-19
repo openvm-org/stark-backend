@@ -56,21 +56,21 @@ pub fn evaluate_mle_constraints_metal(
     let air_offsets = vec![0u32, num_blocks].to_device();
     let zc_ctxs = vec![ZerocheckCtx {
         eval_ctx: EvalCoreCtx {
-            d_selectors: sels_ptr,
+            d_selectors: sels_ptr as u64,
             d_preprocessed: prep_ptr,
-            d_main: d_main_ptrs.as_device_ptr(),
-            d_public: public_ptr,
+            d_main: d_main_ptrs.as_device_ptr() as u64,
+            d_public: public_ptr as u64,
         },
         d_intermediates: if buffer_size > 0 {
-            intermediates.as_device_mut_ptr()
+            intermediates.as_device_mut_ptr() as u64
         } else {
-            std::ptr::null_mut()
+            0
         },
         num_y,
-        d_eq_xi: eq_xi_ptr,
-        d_rules: rules.inner.d_rules.as_device_ptr() as *const _,
+        d_eq_xi: eq_xi_ptr as u64,
+        d_rules: rules.inner.d_rules.as_device_ptr() as u64,
         rules_len: rules.inner.d_rules.len().try_into().unwrap(),
-        d_used_nodes: rules.inner.d_used_nodes.as_device_ptr(),
+        d_used_nodes: rules.inner.d_used_nodes.as_device_ptr() as u64,
         used_nodes_len: rules.inner.d_used_nodes.len().try_into().unwrap(),
         buffer_size,
     }]
@@ -85,6 +85,7 @@ pub fn evaluate_mle_constraints_metal(
             lambda_pows.len(),
             num_x,
             threads_per_block,
+            &[],
         )
         .expect("zerocheck_batch_eval_mle failed");
     }
@@ -133,24 +134,24 @@ pub fn evaluate_mle_interactions_metal(
     let air_offsets = vec![0u32, num_blocks].to_device();
     let logup_ctxs = vec![LogupCtx {
         eval_ctx: EvalCoreCtx {
-            d_selectors: sels_ptr,
+            d_selectors: sels_ptr as u64,
             d_preprocessed: prep_ptr,
-            d_main: d_main_ptrs.as_device_ptr(),
-            d_public: public_ptr,
+            d_main: d_main_ptrs.as_device_ptr() as u64,
+            d_public: public_ptr as u64,
         },
         d_intermediates: if buffer_size > 0 {
-            intermediates.as_device_mut_ptr()
+            intermediates.as_device_mut_ptr() as u64
         } else {
-            std::ptr::null_mut()
+            0
         },
         num_y,
-        d_eq_xi: eq_xi_ptr,
-        d_challenges: challenges_ptr,
-        d_eq_3bs: eq_3bs_ptr,
-        d_rules: rules.inner.d_rules.as_device_ptr() as *const _,
+        d_eq_xi: eq_xi_ptr as u64,
+        d_challenges: challenges_ptr as u64,
+        d_eq_3bs: eq_3bs_ptr as u64,
+        d_rules: rules.inner.d_rules.as_device_ptr() as u64,
         rules_len: rules.inner.d_rules.len().try_into().unwrap(),
-        d_used_nodes: rules.inner.d_used_nodes.as_device_ptr(),
-        d_pair_idxs: rules.d_pair_idxs.as_device_ptr(),
+        d_used_nodes: rules.inner.d_used_nodes.as_device_ptr() as u64,
+        d_pair_idxs: rules.d_pair_idxs.as_device_ptr() as u64,
         used_nodes_len: rules.inner.d_used_nodes.len().try_into().unwrap(),
         buffer_size,
     }]

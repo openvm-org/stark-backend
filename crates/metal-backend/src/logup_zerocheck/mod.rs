@@ -17,7 +17,9 @@ use openvm_stark_backend::{
     },
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
-        fractional_sumcheck_gkr::Frac, stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
+        fractional_sumcheck_gkr::Frac,
+        stacked_pcs::StackedLayout,
+        sumcheck::{sumcheck_round0_deg, sumcheck_uni_round0_poly},
         ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
     },
     FiatShamirTranscript,
@@ -36,7 +38,7 @@ use crate::{
         gkr_input::TraceInteractionMeta, round0::evaluate_round0_interactions_metal,
     },
     metal::logup_zerocheck::{
-        fold_selectors_round0, interpolate_columns_gpu, ColumnPtr, MainMatrixPtrs,
+        fold_selectors_round0, interpolate_matrix_columns_gpu, MainMatrixPtrs,
     },
     metal::sumcheck::fold_mle_matrix,
     poly::EqEvalLayers,
@@ -173,11 +175,16 @@ pub fn prove_zerocheck_and_logup_metal(
     } else {
         MetalBuffer::with_capacity(0)
     };
-    // Set memory limit for batch MLE based on inputs buffer size
+    // Set memory budget for batched MLE.
+    // When there are no interactions (`inputs.len() == 0`), keep a non-zero budget so
+    // zerocheck can still use the fast batched GPU path.
+    const DEFAULT_MEMORY_LIMIT: usize = 5 << 30; // 5GiB
     prover.gkr_mem_contribution = inputs.len() * std::mem::size_of::<Frac<EF>>();
+    if prover.gkr_mem_contribution == 0 {
+        prover.gkr_mem_contribution = DEFAULT_MEMORY_LIMIT;
+    }
     prover.memory_limit_bytes = prover.gkr_mem_contribution;
     if !prover.save_memory {
-        const DEFAULT_MEMORY_LIMIT: usize = 5 << 30; // 5GiB
         if prover.memory_limit_bytes > DEFAULT_MEMORY_LIMIT {
             tracing::warn!(
                 "prover.memory_limit_bytes {} already exceeds 5GiB",
@@ -586,6 +593,19 @@ impl<'a> LogupZerocheckMetal<'a> {
         let l_skip = self.l_skip;
         let xi = &self.xi;
         let h_lambda_pows = lambda.powers().take(self.max_num_constraints).collect_vec();
+        #[cfg(debug_assertions)]
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let preview: Vec<_> = h_lambda_pows
+                .iter()
+                .take(h_lambda_pows.len().min(8))
+                .copied()
+                .collect();
+            debug!(
+                len = h_lambda_pows.len(),
+                ?preview,
+                "lambda_pows_preview"
+            );
+        }
         self.lambda_pows = Some(if !h_lambda_pows.is_empty() {
             h_lambda_pows.to_device()
         } else {
@@ -600,6 +620,22 @@ impl<'a> LogupZerocheckMetal<'a> {
                     air_idx,
                     lambda_pows_ref,
                 ));
+                #[cfg(debug_assertions)]
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    if let Some(comb) = self.lambda_combinations[air_idx].as_ref() {
+                        let host = comb.to_vec();
+                        let non_zero = host.iter().filter(|v| **v != EF::ZERO).count();
+                        let preview: Vec<_> =
+                            host.iter().take(host.len().min(8)).copied().collect();
+                        debug!(
+                            air_idx,
+                            len = host.len(),
+                            non_zero,
+                            ?preview,
+                            "lambda_combinations_preview"
+                        );
+                    }
+                }
             }
         }
         let num_present_airs = ctx.per_trace.len();
@@ -736,10 +772,13 @@ impl<'a> LogupZerocheckMetal<'a> {
 
             let height = air_ctx.common_main.height();
             let mut main_parts = Vec::with_capacity(air_ctx.cached_mains.len() + 1);
+            let mut main_part_buffers = Vec::with_capacity(air_ctx.cached_mains.len() + 1);
             for committed in &air_ctx.cached_mains {
                 main_parts.push(committed.trace.buffer().as_device_ptr());
+                main_part_buffers.push(committed.trace.buffer());
             }
             main_parts.push(air_ctx.common_main.buffer().as_device_ptr());
+            main_part_buffers.push(air_ctx.common_main.buffer());
             let d_main_parts = main_parts.to_device();
 
             let n_lift = n.max(0) as usize;
@@ -753,6 +792,7 @@ impl<'a> LogupZerocheckMetal<'a> {
                 single_pk,
                 selectors_cube.buffer(),
                 &d_main_parts,
+                &main_part_buffers,
                 public_values,
                 eq_xi_tree.get_ptr(n_lift),
                 d_lambda_pows,
@@ -804,6 +844,198 @@ impl<'a> LogupZerocheckMetal<'a> {
                 );
 
                 batch_sp_poly[2 * num_present_airs + trace_idx] = UnivariatePoly::new(coeffs);
+
+                #[cfg(debug_assertions)]
+                if tracing::enabled!(tracing::Level::DEBUG) && trace_idx == 0 {
+                    let need_rot = single_pk.vk.params.need_rot;
+                    let lambda_pows_host = d_lambda_pows.to_vec();
+                    let eq_xi_host = eq_xi_tree.layers[n_lift].to_vec();
+                    let log_height = l_skip.checked_add_signed(n).unwrap();
+                    let base_height = 1 << log_height;
+                    let lifted_height = base_height.max(1 << l_skip);
+                    let mut sels_values = F::zero_vec(3 * lifted_height);
+                    sels_values[lifted_height..2 * lifted_height].fill(F::ONE);
+                    for i in (0..lifted_height).step_by(base_height) {
+                        sels_values[i] = F::ONE;
+                        sels_values[lifted_height + i + base_height - 1] = F::ZERO;
+                        sels_values[2 * lifted_height + i + base_height - 1] = F::ONE;
+                    }
+                    let selectors_host = ColMajorMatrix::new(sels_values, 3);
+
+                    let mut host_parts = Vec::with_capacity(
+                        usize::from(single_pk.preprocessed_data.is_some())
+                            + air_ctx.cached_mains.len()
+                            + 1,
+                    );
+                    if let Some(pre) = &single_pk.preprocessed_data {
+                        host_parts.push(transport_matrix_d2h_col_major(&pre.trace));
+                    }
+                    for committed in &air_ctx.cached_mains {
+                        host_parts.push(transport_matrix_d2h_col_major(&committed.trace));
+                    }
+                    host_parts.push(transport_matrix_d2h_col_major(&air_ctx.common_main));
+
+                    let mut mats_cpu = vec![(selectors_host.as_view().into(), false)];
+                    for mat in &host_parts {
+                        mats_cpu.push((mat.as_view().into(), false));
+                        if need_rot {
+                            mats_cpu.push((mat.as_view().into(), true));
+                        }
+                    }
+
+                    let rules_host = single_pk.other_data.zerocheck_round0.inner.d_rules.to_vec();
+                    let used_nodes =
+                        single_pk.other_data.zerocheck_round0.inner.d_used_nodes.to_vec();
+                    let decoded_rules: Vec<_> = rules_host
+                        .iter()
+                        .map(|&r| crate::logup_zerocheck::rules::RuleWithFlag::<F>::decode(r))
+                        .collect();
+                    let has_preprocessed = single_pk.preprocessed_data.is_some();
+                    let main_start = 1 + if has_preprocessed { 1 + usize::from(need_rot) } else { 0 };
+
+                    let [q_cpu] = sumcheck_uni_round0_poly(
+                        l_skip,
+                        n_lift,
+                        num_cosets_zc,
+                        &mats_cpu,
+                        |z, x, row_parts| {
+                            let eq = eq_xi_host[x];
+                            let eval_source = |
+                                src: &crate::logup_zerocheck::rules::Source<F>,
+                                inter: &Vec<EF>,
+                            | -> EF {
+                                match src {
+                                    crate::logup_zerocheck::rules::Source::Intermediate(i) => {
+                                        inter[*i]
+                                    }
+                                    crate::logup_zerocheck::rules::Source::TerminalIntermediate => {
+                                        EF::ZERO
+                                    }
+                                    crate::logup_zerocheck::rules::Source::Var(v) => {
+                                        match v.entry {
+                                            openvm_stark_backend::air_builders::symbolic::symbolic_variable::Entry::Main { part_index, offset } => {
+                                                let idx = if need_rot {
+                                                    main_start + part_index * 2 + offset
+                                                } else {
+                                                    main_start + part_index
+                                                };
+                                                EF::from(row_parts[idx][v.index])
+                                            }
+                                            openvm_stark_backend::air_builders::symbolic::symbolic_variable::Entry::Preprocessed { offset } => {
+                                                let idx = if need_rot {
+                                                    1 + offset
+                                                } else {
+                                                    1
+                                                };
+                                                EF::from(row_parts[idx][v.index])
+                                            }
+                                            openvm_stark_backend::air_builders::symbolic::symbolic_variable::Entry::Public => {
+                                                EF::from(air_ctx.public_values[v.index])
+                                            }
+                                            _ => EF::ZERO,
+                                        }
+                                    }
+                                    crate::logup_zerocheck::rules::Source::IsFirst => {
+                                        EF::from(row_parts[0][0])
+                                    }
+                                    crate::logup_zerocheck::rules::Source::IsTransition => {
+                                        EF::from(row_parts[0][1])
+                                    }
+                                    crate::logup_zerocheck::rules::Source::IsLast => {
+                                        EF::from(row_parts[0][2])
+                                    }
+                                    crate::logup_zerocheck::rules::Source::Constant(c) => EF::from(*c),
+                                }
+                            };
+
+                            let mut inter = vec![
+                                EF::ZERO;
+                                single_pk.other_data.zerocheck_round0.inner.buffer_size as usize
+                            ];
+                            let mut lambda_idx = 0usize;
+                            let mut constraint_eval = EF::ZERO;
+                            for (node_idx, rule) in decoded_rules.iter().enumerate() {
+                                let result = match &rule.inner {
+                                    crate::logup_zerocheck::rules::Rule::Add(x, y_src, z) => {
+                                        let r = eval_source(x, &inter) + eval_source(y_src, &inter);
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                            inter[*i] = r;
+                                        }
+                                        r
+                                    }
+                                    crate::logup_zerocheck::rules::Rule::Sub(x, y_src, z) => {
+                                        let r = eval_source(x, &inter) - eval_source(y_src, &inter);
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                            inter[*i] = r;
+                                        }
+                                        r
+                                    }
+                                    crate::logup_zerocheck::rules::Rule::Mul(x, y_src, z) => {
+                                        let r = eval_source(x, &inter) * eval_source(y_src, &inter);
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                            inter[*i] = r;
+                                        }
+                                        r
+                                    }
+                                    crate::logup_zerocheck::rules::Rule::Neg(x, z) => {
+                                        let r = -eval_source(x, &inter);
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                            inter[*i] = r;
+                                        }
+                                        r
+                                    }
+                                    crate::logup_zerocheck::rules::Rule::Variable(x) => {
+                                        eval_source(x, &inter)
+                                    }
+                                    crate::logup_zerocheck::rules::Rule::BufferVar(x, z) => {
+                                        let r = eval_source(x, &inter);
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                            inter[*i] = r;
+                                        }
+                                        r
+                                    }
+                                };
+                                if rule.need_accumulate {
+                                    while lambda_idx < used_nodes.len()
+                                        && used_nodes[lambda_idx] == node_idx
+                                    {
+                                        constraint_eval += lambda_pows_host[lambda_idx] * result;
+                                        lambda_idx += 1;
+                                    }
+                                }
+                            }
+
+                            let zerofier = z.exp_power_of_2(l_skip) - F::ONE;
+                            [eq * constraint_eval * zerofier.inverse()]
+                        },
+                    );
+
+                    let sp_0_deg = sumcheck_round0_deg(l_skip, local_constraint_deg);
+                    let coeffs_cpu = (0..=sp_0_deg)
+                        .map(|i| {
+                            let mut c = -*q_cpu.coeffs().get(i).unwrap_or(&EF::ZERO);
+                            if i >= 1 << l_skip {
+                                c += q_cpu.coeffs()[i - (1 << l_skip)];
+                            }
+                            c
+                        })
+                        .collect_vec();
+                    let coeffs_gpu = batch_sp_poly[2 * num_present_airs + trace_idx].coeffs();
+                    if coeffs_cpu != coeffs_gpu {
+                        let first = coeffs_cpu
+                            .iter()
+                            .zip(coeffs_gpu.iter())
+                            .position(|(a, b)| a != b)
+                            .unwrap_or(0);
+                        debug!(
+                            trace_idx,
+                            first,
+                            cpu = ?coeffs_cpu[first],
+                            gpu = ?coeffs_gpu[first],
+                            "round0_zerocheck_poly_mismatch"
+                        );
+                    }
+                }
             }
 
             // PERF: we could use an interaction-specific constraint degree here
@@ -813,6 +1045,7 @@ impl<'a> LogupZerocheckMetal<'a> {
                 &single_air_constraints,
                 selectors_cube.buffer(),
                 &d_main_parts,
+                &main_part_buffers,
                 public_values,
                 eq_xi_tree.get_ptr(n_lift),
                 &self.beta_pows,
@@ -1227,6 +1460,15 @@ impl<'a> LogupZerocheckMetal<'a> {
                         })
                         .collect_vec();
                     let main_ptrs_dev = main_ptrs.to_device();
+                    let mut read_resources = Vec::with_capacity(mats.len() + 5);
+                    read_resources.push(sels.buffer().gpu_buffer().to_owned());
+                    for m in mats.iter() {
+                        read_resources.push(m.buffer().gpu_buffer().to_owned());
+                    }
+                    read_resources.push(main_ptrs_dev.gpu_buffer().to_owned());
+                    read_resources.push(public_vals.gpu_buffer().to_owned());
+                    read_resources.push(eq_3bs.gpu_buffer().to_owned());
+                    read_resources.push(eq_xi_tree.layers[0].gpu_buffer().to_owned());
 
                     late_eval.push(TraceCtx {
                         trace_idx,
@@ -1242,6 +1484,7 @@ impl<'a> LogupZerocheckMetal<'a> {
                         main_ptrs_dev,
                         public_ptr: public_vals.as_device_ptr(),
                         eq_3bs_ptr: eq_3bs.as_device_ptr(),
+                        read_resources,
                     });
                 } else {
                     // A.2: scale tilde evals only
@@ -1266,19 +1509,39 @@ impl<'a> LogupZerocheckMetal<'a> {
                 let height = 2 * num_y;
                 debug_assert_eq!(height, mats[0].height());
 
-                let mut columns: Vec<ColumnPtr<EF>> = Vec::new();
-                columns.extend(iter::once(sels).chain(mats.iter()).flat_map(|m| {
-                    assert_eq!(m.height(), height);
-                    (0..m.width()).map(|col| ColumnPtr {
-                        data: m.buffer().as_device_ptr().wrapping_add(col * m.height()),
-                    })
-                }));
-                let interpolated = MetalMatrix::<EF>::with_capacity(sp_deg * num_y, columns.len());
-                let d_columns = columns.to_device();
+                let total_columns = sels.width() + mats.iter().map(|m| m.width()).sum::<usize>();
+                let interpolated = MetalMatrix::<EF>::with_capacity(sp_deg * num_y, total_columns);
+                let mut out_col_offset = 0usize;
                 unsafe {
-                    interpolate_columns_gpu(interpolated.buffer(), &d_columns, sp_deg, num_y)
-                        .expect("failed to interpolate columns on Metal");
+                    interpolate_matrix_columns_gpu(
+                        sels.buffer(),
+                        interpolated.buffer(),
+                        height,
+                        sp_deg,
+                        num_y,
+                        sels.width(),
+                        out_col_offset,
+                    )
+                    .expect("failed to interpolate selectors on Metal");
                 }
+                out_col_offset += sels.width();
+                for m in mats {
+                    assert_eq!(m.height(), height);
+                    unsafe {
+                        interpolate_matrix_columns_gpu(
+                            m.buffer(),
+                            interpolated.buffer(),
+                            height,
+                            sp_deg,
+                            num_y,
+                            m.width(),
+                            out_col_offset,
+                        )
+                        .expect("failed to interpolate trace matrix on Metal");
+                    }
+                    out_col_offset += m.width();
+                }
+                debug_assert_eq!(out_col_offset, total_columns);
                 #[cfg(debug_assertions)]
                 if tracing::enabled!(tracing::Level::DEBUG) && trace_idx == 0 {
                     let got = interpolated.buffer().to_vec();
@@ -1324,7 +1587,7 @@ impl<'a> LogupZerocheckMetal<'a> {
                             "interpolate_columns_full_mismatch"
                         );
                     }
-                    if round == 1 {
+                    if true {
                         let rules_host = pk.other_data.zerocheck_mle.inner.d_rules.to_vec();
                         let used_nodes = pk.other_data.zerocheck_mle.inner.d_used_nodes.to_vec();
                         let interpolated_height = sp_deg * num_y;
@@ -1514,6 +1777,14 @@ impl<'a> LogupZerocheckMetal<'a> {
                 debug_assert_eq!(widths_so_far, interpolated.width());
                 let main_ptrs_dev = main_ptrs.to_device();
 
+                let mut read_resources = Vec::with_capacity(6);
+                read_resources.push(sels.buffer().gpu_buffer().to_owned());
+                read_resources.push(interpolated.buffer().gpu_buffer().to_owned());
+                read_resources.push(main_ptrs_dev.gpu_buffer().to_owned());
+                read_resources.push(public_vals.gpu_buffer().to_owned());
+                read_resources.push(eq_3bs.gpu_buffer().to_owned());
+                read_resources.push(eq_xi_tree.layers[log_num_y].gpu_buffer().to_owned());
+
                 _keepalive_interpolated.push(interpolated);
                 let eq_xi_ptr = eq_xi_tree.get_device_ptr(log_num_y);
 
@@ -1531,6 +1802,7 @@ impl<'a> LogupZerocheckMetal<'a> {
                     main_ptrs_dev,
                     public_ptr: public_vals.as_device_ptr(),
                     eq_3bs_ptr: eq_3bs.as_device_ptr(),
+                    read_resources,
                 });
                 debug!(
                     round,
@@ -1904,6 +2176,10 @@ impl<'a> LogupZerocheckMetal<'a> {
         let eq_r = eval_eq_mle(&[xi], &[r_round]);
         self.eq_ns.push(self.eq_ns[round - 1] * eq_r);
         self.eq_sharp_ns.push(self.eq_sharp_ns[round - 1] * eq_r);
+        #[cfg(debug_assertions)]
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            debug!(round, eq_r = %eq_r, eq_n = %self.eq_ns[round], "eq_ns_update");
+        }
 
         #[cfg(debug_assertions)]
         if tracing::enabled!(tracing::Level::DEBUG)

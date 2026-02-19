@@ -14,27 +14,27 @@ using namespace metal;
 
 struct ZerocheckCtx {
     EvalCoreCtx eval_ctx;
-    device FpExt *d_intermediates;
+    uint64_t d_intermediates;
     uint32_t num_y;
-    const device FpExt *d_eq_xi;
-    const device Rule *d_rules;
+    uint64_t d_eq_xi;
+    uint64_t d_rules;
     uint32_t rules_len;
-    const device uint64_t *d_used_nodes;
+    uint64_t d_used_nodes;
     uint32_t used_nodes_len;
     uint32_t buffer_size;
 };
 
 struct LogupCtx {
     EvalCoreCtx eval_ctx;
-    device FpExt *d_intermediates;
+    uint64_t d_intermediates;
     uint32_t num_y;
-    const device FpExt *d_eq_xi;
-    const device FpExt *d_challenges;
-    const device FpExt *d_eq_3bs;
-    const device Rule *d_rules;
+    uint64_t d_eq_xi;
+    uint64_t d_challenges;
+    uint64_t d_eq_3bs;
+    uint64_t d_rules;
     uint32_t rules_len;
-    const device uint64_t *d_used_nodes;
-    const device uint32_t *d_pair_idxs;
+    uint64_t d_used_nodes;
+    uint64_t d_pair_idxs;
     uint32_t used_nodes_len;
     uint32_t buffer_size;
 };
@@ -60,14 +60,14 @@ inline FpExt evaluate_mle_entry_batch(
     switch (src.type) {
     case ENTRY_PREPROCESSED: {
         uint32_t stride = ctx.height * ctx.d_preprocessed.air_width;
-        const device FpExt *matrix = ctx.d_preprocessed.data + stride * src.offset;
+        const device FpExt *matrix = as_fpext_ptr(ctx.d_preprocessed.data) + stride * src.offset;
         const device FpExt *column = matrix + ctx.height * src.index;
         return column[row];
     }
     case ENTRY_MAIN: {
         MainMatrixPtrsExt main_ptr = ctx.d_main[src.part];
         uint32_t stride = ctx.height * main_ptr.air_width;
-        const device FpExt *matrix = main_ptr.data + stride * src.offset;
+        const device FpExt *matrix = as_fpext_ptr(main_ptr.data) + stride * src.offset;
         const device FpExt *column = matrix + ctx.height * src.index;
         return column[row];
     }
@@ -120,25 +120,31 @@ kernel void zerocheck_batch_mle_kernel(
         uint32_t height = num_x * zc_ctx.num_y;
         uint32_t row = x_int * zc_ctx.num_y + y_int;
 
+        device FpExt *d_intermediates = reinterpret_cast<device FpExt *>(zc_ctx.d_intermediates);
+        const device FpExt *d_eq_xi = as_fpext_ptr(zc_ctx.d_eq_xi);
+        const device Rule *d_rules = reinterpret_cast<const device Rule *>(zc_ctx.d_rules);
+        const device uint64_t *d_used_nodes =
+            reinterpret_cast<const device uint64_t *>(zc_ctx.d_used_nodes);
+
         uint32_t buffer_stride = 0;
         device FpExt *intermediates = nullptr;
         if (zc_ctx.buffer_size > 0) {
-            intermediates = zc_ctx.d_intermediates + row;
+            intermediates = d_intermediates + row;
             buffer_stride = height;
         }
 
         EvalCtx eval_ctx;
-        eval_ctx.d_selectors = zc_ctx.eval_ctx.d_selectors;
+        eval_ctx.d_selectors = as_fpext_ptr(zc_ctx.eval_ctx.d_selectors);
         eval_ctx.d_preprocessed = zc_ctx.eval_ctx.d_preprocessed;
-        eval_ctx.d_main = zc_ctx.eval_ctx.d_main;
-        eval_ctx.d_public = zc_ctx.eval_ctx.d_public;
+        eval_ctx.d_main = as_main_matrix_ptrs_ext(zc_ctx.eval_ctx.d_main);
+        eval_ctx.d_public = as_fp_ptr(zc_ctx.eval_ctx.d_public);
         eval_ctx.d_intermediates = intermediates;
         eval_ctx.height = height;
 
         uint32_t lambda_idx = 0;
 
         for (uint32_t node = 0; node < zc_ctx.rules_len; ++node) {
-            Rule rule = zc_ctx.d_rules[node];
+            Rule rule = d_rules[node];
             DecodedRule decoded = decode_rule(rule);
 
             FpExt x_val = evaluate_mle_entry_batch(decoded.x, row, eval_ctx, buffer_stride, nullptr);
@@ -176,14 +182,14 @@ kernel void zerocheck_batch_mle_kernel(
 
             if (decoded.is_constraint) {
                 while (lambda_idx < lambda_len && lambda_idx < zc_ctx.used_nodes_len &&
-                       zc_ctx.d_used_nodes[lambda_idx] == node) {
+                       d_used_nodes[lambda_idx] == node) {
                     FpExt lambda = d_lambda_pows[lambda_idx];
                     lambda_idx++;
                     sum = sum + lambda * result;
                 }
             }
         }
-        sum = sum * zc_ctx.d_eq_xi[y_int];
+        sum = sum * d_eq_xi[y_int];
     }
 
     FpExt reduced = block_reduce_sum(sum, shared, tid, tg_size);
@@ -221,55 +227,65 @@ kernel void logup_batch_mle_kernel(
         uint32_t height = num_x * logup_ctx.num_y;
         uint32_t row = x_int * logup_ctx.num_y + y_int;
 
+        device FpExt *d_intermediates = reinterpret_cast<device FpExt *>(logup_ctx.d_intermediates);
+        const device FpExt *d_eq_xi = as_fpext_ptr(logup_ctx.d_eq_xi);
+        const device FpExt *d_challenges = as_fpext_ptr(logup_ctx.d_challenges);
+        const device FpExt *d_eq_3bs = as_fpext_ptr(logup_ctx.d_eq_3bs);
+        const device Rule *d_rules = reinterpret_cast<const device Rule *>(logup_ctx.d_rules);
+        const device uint64_t *d_used_nodes =
+            reinterpret_cast<const device uint64_t *>(logup_ctx.d_used_nodes);
+        const device uint32_t *d_pair_idxs =
+            reinterpret_cast<const device uint32_t *>(logup_ctx.d_pair_idxs);
+
         uint32_t buffer_stride = 0;
         device FpExt *intermediates = nullptr;
         if (logup_ctx.buffer_size > 0) {
-            intermediates = logup_ctx.d_intermediates + row;
+            intermediates = d_intermediates + row;
             buffer_stride = height;
         }
 
         EvalCtx eval_ctx;
-        eval_ctx.d_selectors = logup_ctx.eval_ctx.d_selectors;
+        eval_ctx.d_selectors = as_fpext_ptr(logup_ctx.eval_ctx.d_selectors);
         eval_ctx.d_preprocessed = logup_ctx.eval_ctx.d_preprocessed;
-        eval_ctx.d_main = logup_ctx.eval_ctx.d_main;
-        eval_ctx.d_public = logup_ctx.eval_ctx.d_public;
+        eval_ctx.d_main = as_main_matrix_ptrs_ext(logup_ctx.eval_ctx.d_main);
+        eval_ctx.d_public = as_fp_ptr(logup_ctx.eval_ctx.d_public);
         eval_ctx.d_intermediates = intermediates;
         eval_ctx.height = height;
 
         uint32_t rules_evaluated = 0;
 
         for (uint32_t used_idx = 0; used_idx < logup_ctx.used_nodes_len; ++used_idx) {
-            uint64_t node_idx = logup_ctx.d_used_nodes[used_idx];
+            uint64_t node_idx = d_used_nodes[used_idx];
             FpExt result = zero;
 
             if (node_idx < rules_evaluated) {
-                Rule rule = logup_ctx.d_rules[node_idx];
+                Rule rule = d_rules[node_idx];
                 DecodedRule decoded = decode_rule(rule);
                 if (decoded.op == OP_VAR) {
-                    result = evaluate_mle_entry_batch(decoded.x, row, eval_ctx, buffer_stride, logup_ctx.d_challenges);
+                    result = evaluate_mle_entry_batch(decoded.x, row, eval_ctx, buffer_stride, d_challenges);
                 } else if (logup_ctx.buffer_size > 0 && decoded.buffer_result) {
                     result = eval_ctx.d_intermediates[decoded.z_index * buffer_stride];
                 }
             } else {
                 for (; rules_evaluated <= node_idx; ++rules_evaluated) {
-                    Rule rule = logup_ctx.d_rules[rules_evaluated];
+                    Rule rule = d_rules[rules_evaluated];
                     DecodedRule decoded = decode_rule(rule);
 
-                    FpExt x_val = evaluate_mle_entry_batch(decoded.x, row, eval_ctx, buffer_stride, logup_ctx.d_challenges);
+                    FpExt x_val = evaluate_mle_entry_batch(decoded.x, row, eval_ctx, buffer_stride, d_challenges);
                     FpExt node_result;
                     switch (decoded.op) {
                     case OP_ADD: {
-                        FpExt y_val = evaluate_mle_entry_batch(decoded.y, row, eval_ctx, buffer_stride, logup_ctx.d_challenges);
+                        FpExt y_val = evaluate_mle_entry_batch(decoded.y, row, eval_ctx, buffer_stride, d_challenges);
                         node_result = x_val + y_val;
                         break;
                     }
                     case OP_SUB: {
-                        FpExt y_val = evaluate_mle_entry_batch(decoded.y, row, eval_ctx, buffer_stride, logup_ctx.d_challenges);
+                        FpExt y_val = evaluate_mle_entry_batch(decoded.y, row, eval_ctx, buffer_stride, d_challenges);
                         node_result = x_val - y_val;
                         break;
                     }
                     case OP_MUL: {
-                        FpExt y_val = evaluate_mle_entry_batch(decoded.y, row, eval_ctx, buffer_stride, logup_ctx.d_challenges);
+                        FpExt y_val = evaluate_mle_entry_batch(decoded.y, row, eval_ctx, buffer_stride, d_challenges);
                         node_result = x_val * y_val;
                         break;
                     }
@@ -294,8 +310,8 @@ kernel void logup_batch_mle_kernel(
                 }
             }
 
-            uint32_t pair_idx = logup_ctx.d_pair_idxs[used_idx];
-            result = result * logup_ctx.d_eq_3bs[pair_idx >> 1];
+            uint32_t pair_idx = d_pair_idxs[used_idx];
+            result = result * d_eq_3bs[pair_idx >> 1];
 
             if (pair_idx & 1) {
                 denom_sum = denom_sum + result;
@@ -304,7 +320,7 @@ kernel void logup_batch_mle_kernel(
             }
         }
 
-        FpExt eq_val = logup_ctx.d_eq_xi[y_int];
+        FpExt eq_val = d_eq_xi[y_int];
         numer_sum = numer_sum * eq_val;
         denom_sum = denom_sum * eq_val;
     }

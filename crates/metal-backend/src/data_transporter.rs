@@ -1,7 +1,7 @@
 use std::{cmp::max, sync::Arc};
 
 use openvm_metal_common::{
-    copy::{MemCopyD2D, MemCopyD2H, MemCopyH2D},
+    copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::MetalBuffer,
 };
 use openvm_stark_backend::{
@@ -129,7 +129,7 @@ pub fn transport_and_unstack_single_data_h2d(
     let stacked_height = d.matrix.height();
     let d_matrix_evals = d.matrix.values.to_device();
     let strided_trace = MetalBuffer::<F>::with_capacity(lifted_height * width);
-    d_matrix_evals.device_copy_to(&strided_trace)?;
+    trace_view.values().copy_to(&strided_trace)?;
     let trace_buffer = if stride == 1 {
         strided_trace
     } else {

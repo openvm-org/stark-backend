@@ -66,9 +66,6 @@ impl MultiRapProver<MetalBackend, DuplexSpongeMetal> for MetalDevice {
     ) -> ((GkrProof<SC>, BatchConstraintProof<SC>), Vec<EF>) {
         tracing::debug!("prove_rap_constraints start");
         let save_memory = self.prover_config.zerocheck_save_memory;
-        // Threshold for monomial evaluation path based on proof type:
-        // - App proofs (log_blowup=1): higher threshold (512)
-        // - Recursion proofs: lower threshold (64)
         let monomial_num_y_threshold = if self.config.log_blowup == 1 { 512 } else { 64 };
         let (gkr_proof, batch_constraint_proof, r) = prove_zerocheck_and_logup_metal(
             transcript,

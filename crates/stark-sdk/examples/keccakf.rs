@@ -12,6 +12,7 @@ use openvm_stark_sdk::{
         prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
         PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
     },
+    utils::setup_tracing,
 };
 use p3_keccak_air::KeccakAir;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -44,6 +45,7 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 }
 
 fn main() -> eyre::Result<()> {
+    setup_tracing();
     let l_skip = 4;
     let n_stack = 17;
     let k_whir = 4;

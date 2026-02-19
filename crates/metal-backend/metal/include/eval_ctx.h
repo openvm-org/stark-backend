@@ -8,21 +8,33 @@
 // Matrix pointer with width information
 // Metal equivalent of MainMatrixPtrs<T>
 struct MainMatrixPtrsExt {
-    const device FpExt *data;
+    uint64_t data;
     uint32_t air_width;
 };
 
 struct MainMatrixPtrsFp {
-    const device Fp *data;
+    uint64_t data;
     uint32_t air_width;
 };
 
 struct EvalCoreCtx {
-    const device FpExt *d_selectors;
+    uint64_t d_selectors;
     MainMatrixPtrsExt d_preprocessed;
-    const device MainMatrixPtrsExt *d_main;
-    const device Fp *d_public;
+    uint64_t d_main;
+    uint64_t d_public;
 };
+
+inline const device FpExt *as_fpext_ptr(uint64_t ptr) {
+    return reinterpret_cast<const device FpExt *>(ptr);
+}
+
+inline const device Fp *as_fp_ptr(uint64_t ptr) {
+    return reinterpret_cast<const device Fp *>(ptr);
+}
+
+inline const device MainMatrixPtrsExt *as_main_matrix_ptrs_ext(uint64_t ptr) {
+    return reinterpret_cast<const device MainMatrixPtrsExt *>(ptr);
+}
 
 struct BlockCtx {
     uint32_t local_block_idx_x;

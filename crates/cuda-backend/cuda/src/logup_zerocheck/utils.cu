@@ -87,7 +87,8 @@ __global__ void interpolate_columns_kernel(
     FpExt *__restrict__ this_interpolated = interpolated + col_idx * s_deg * num_y;
 
     for (int x = 0; x < s_deg; x++) {
-        this_interpolated[x * num_y + y] = t0 + (t1 - t0) * Fp(x + 1u);
+        uint32_t row_idx = static_cast<uint32_t>(x) * num_y + y;
+        this_interpolated[row_idx] = t0 + (t1 - t0) * Fp(x + 1u);
     }
 }
 

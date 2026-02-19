@@ -7,33 +7,40 @@ use std::ffi::c_void;
 
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 
-use crate::{
-    prelude::{D_EF, EF, F},
-    whir::BatchingTracePacket,
-};
+use crate::prelude::{D_EF, EF, F};
 
 use super::{dispatch_sync, get_kernels, grid_size_1d, DEFAULT_THREADS_PER_GROUP};
 
-pub unsafe fn whir_algebraic_batch_traces(
+pub unsafe fn whir_algebraic_batch_trace(
     output: &mut MetalBuffer<F>,
-    packets: &MetalBuffer<BatchingTracePacket>,
+    trace: &MetalBuffer<F>,
     mu_powers: &MetalBuffer<EF>,
+    stacked_height: u32,
+    trace_height: u32,
+    trace_width: u32,
+    stacked_row_start: u64,
+    mu_idx_start: u32,
     skip_domain: u32,
 ) -> Result<(), MetalError> {
     debug_assert_eq!(output.len() % D_EF, 0);
-    let pipeline = get_kernels().get_pipeline("whir_algebraic_batch_traces")?;
-    let stacked_height = output.len() / D_EF;
-    let num_packets = packets.len();
-    let stacked_height_u32 = stacked_height as u32;
-    let num_packets_u32 = num_packets as u32;
-    let (grid, group) = grid_size_1d(stacked_height, DEFAULT_THREADS_PER_GROUP);
+    debug_assert_eq!(output.len() / D_EF, stacked_height as usize);
+    debug_assert_eq!(
+        trace.len(),
+        trace_height as usize * trace_width as usize,
+        "trace buffer length mismatch"
+    );
+    let pipeline = get_kernels().get_pipeline("whir_algebraic_batch_trace")?;
+    let (grid, group) = grid_size_1d(stacked_height as usize, DEFAULT_THREADS_PER_GROUP);
     dispatch_sync(&pipeline, grid, group, |encoder| {
         encoder.set_buffer(0, Some(output.gpu_buffer()), 0);
-        encoder.set_buffer(1, Some(packets.gpu_buffer()), 0);
+        encoder.set_buffer(1, Some(trace.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(mu_powers.gpu_buffer()), 0);
-        encoder.set_bytes(3, 4, &stacked_height_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(4, 4, &num_packets_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(5, 4, &skip_domain as *const u32 as *const c_void);
+        encoder.set_bytes(3, 4, &stacked_height as *const u32 as *const c_void);
+        encoder.set_bytes(4, 4, &trace_height as *const u32 as *const c_void);
+        encoder.set_bytes(5, 4, &trace_width as *const u32 as *const c_void);
+        encoder.set_bytes(6, 8, &stacked_row_start as *const u64 as *const c_void);
+        encoder.set_bytes(7, 4, &mu_idx_start as *const u32 as *const c_void);
+        encoder.set_bytes(8, 4, &skip_domain as *const u32 as *const c_void);
     })
 }
 

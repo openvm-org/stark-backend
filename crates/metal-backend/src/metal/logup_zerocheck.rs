@@ -17,7 +17,7 @@ use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use tracing::debug;
 
 use crate::{
-    monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader, PackedVar},
+    monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader},
     poly::SqrtEqLayers,
     prelude::{EF, F},
 };
@@ -29,6 +29,7 @@ use super::{
 const GKR_SP_DEG: usize = 2;
 const GKR_INPUT_TASK_SIZE: u32 = 1 << 16;
 const LOGUP_R0_BUFFER_THRESHOLD: u32 = 16;
+const ZEROCHECK_R0_BUFFER_THRESHOLD: u32 = 16;
 const ZEROCHECK_MONOMIAL_THREADS_PER_BLOCK: u32 = 256;
 const ZEROCHECK_MONOMIAL_PAR_Y_THREADS_PER_BLOCK: u32 = 128;
 const LOGUP_MONOMIAL_THREADS_PER_BLOCK: u32 = 128;
@@ -146,34 +147,34 @@ pub struct BlockCtx {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct MonomialAirCtx {
-    pub d_headers: *const MonomialHeader,
-    pub d_variables: *const PackedVar,
-    pub d_lambda_combinations: *const EF,
+    pub d_headers: u64,
+    pub d_variables: u64,
+    pub d_lambda_combinations: u64,
     pub num_monomials: u32,
     pub eval_ctx: EvalCoreCtx,
-    pub d_eq_xi: *const EF,
+    pub d_eq_xi: u64,
     pub num_y: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct EvalCoreCtx {
-    pub d_selectors: *const EF,
+    pub d_selectors: u64,
     pub d_preprocessed: MainMatrixPtrs<EF>,
-    pub d_main: *const MainMatrixPtrs<EF>,
-    pub d_public: *const F,
+    pub d_main: u64,
+    pub d_public: u64,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ZerocheckCtx {
     pub eval_ctx: EvalCoreCtx,
-    pub d_intermediates: *mut EF,
+    pub d_intermediates: u64,
     pub num_y: u32,
-    pub d_eq_xi: *const EF,
-    pub d_rules: *const std::ffi::c_void,
+    pub d_eq_xi: u64,
+    pub d_rules: u64,
     pub rules_len: u32,
-    pub d_used_nodes: *const usize,
+    pub d_used_nodes: u64,
     pub used_nodes_len: u32,
     pub buffer_size: u32,
 }
@@ -182,15 +183,15 @@ pub struct ZerocheckCtx {
 #[derive(Clone, Copy, Debug)]
 pub struct LogupCtx {
     pub eval_ctx: EvalCoreCtx,
-    pub d_intermediates: *mut EF,
+    pub d_intermediates: u64,
     pub num_y: u32,
-    pub d_eq_xi: *const EF,
-    pub d_challenges: *const EF,
-    pub d_eq_3bs: *const EF,
-    pub d_rules: *const std::ffi::c_void,
+    pub d_eq_xi: u64,
+    pub d_challenges: u64,
+    pub d_eq_3bs: u64,
+    pub d_rules: u64,
     pub rules_len: u32,
-    pub d_used_nodes: *const usize,
-    pub d_pair_idxs: *const u32,
+    pub d_used_nodes: u64,
+    pub d_pair_idxs: u64,
     pub used_nodes_len: u32,
     pub buffer_size: u32,
 }
@@ -199,7 +200,7 @@ pub struct LogupCtx {
 #[derive(Clone, Copy, Debug)]
 pub struct LogupMonomialCommonCtx {
     pub eval_ctx: EvalCoreCtx,
-    pub d_eq_xi: *const EF,
+    pub d_eq_xi: u64,
     pub bus_term_sum: EF,
     pub num_y: u32,
     pub mono_blocks: u32,
@@ -208,9 +209,9 @@ pub struct LogupMonomialCommonCtx {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LogupMonomialCtx {
-    pub d_headers: *const MonomialHeader,
-    pub d_variables: *const PackedVar,
-    pub d_combinations: *const EF,
+    pub d_headers: u64,
+    pub d_variables: u64,
+    pub d_combinations: u64,
     pub num_monomials: u32,
 }
 
@@ -264,7 +265,17 @@ pub fn zerocheck_r0_intermediates_buffer_size(
     num_cosets: u32,
     _max_temp_bytes: usize,
 ) -> usize {
-    buffer_size as usize * skip_domain as usize * num_x as usize * num_cosets as usize
+    if buffer_size <= ZEROCHECK_R0_BUFFER_THRESHOLD {
+        return 0;
+    }
+
+    let count = (skip_domain as usize) * (num_x as usize);
+    let max_threads = skip_domain.max(128) as usize;
+    let threads_per_group = count.min(max_threads).max(skip_domain as usize);
+    let num_blocks = count.div_ceil(threads_per_group);
+    let total_threads = num_blocks * threads_per_group;
+
+    buffer_size as usize * total_threads * num_cosets as usize
 }
 
 pub fn zerocheck_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize {
@@ -729,6 +740,45 @@ pub unsafe fn interpolate_columns_gpu(
     })
 }
 
+/// Interpolate one contiguous matrix block directly into the destination matrix.
+///
+/// Input layout is column-major `[width * height]` with `height == 2 * num_y`.
+/// Output is written column-major into `interpolated` at `out_col_offset`.
+pub unsafe fn interpolate_matrix_columns_gpu(
+    input: &MetalBuffer<EF>,
+    interpolated: &MetalBuffer<EF>,
+    height: usize,
+    s_deg: usize,
+    num_y: usize,
+    width: usize,
+    out_col_offset: usize,
+) -> Result<(), MetalError> {
+    if width == 0 || num_y == 0 {
+        return Ok(());
+    }
+    debug_assert_eq!(height, 2 * num_y);
+    debug_assert!(input.len() >= width * height);
+    debug_assert!(interpolated.len() >= (out_col_offset + width) * s_deg * num_y);
+
+    let pipeline = get_kernels().get_pipeline("interpolate_matrix_columns")?;
+    let total = width * num_y;
+    let (grid, group) = grid_size_1d(total, DEFAULT_THREADS_PER_GROUP);
+    let height_u32 = height as u32;
+    let s_deg_u32 = s_deg as u32;
+    let num_y_u32 = num_y as u32;
+    let width_u32 = width as u32;
+    let out_col_offset_u32 = out_col_offset as u32;
+    dispatch_sync(&pipeline, grid, group, |encoder| {
+        encoder.set_buffer(0, Some(input.gpu_buffer()), 0);
+        encoder.set_buffer(1, Some(interpolated.gpu_buffer()), 0);
+        encoder.set_bytes(2, 4, &height_u32 as *const u32 as *const c_void);
+        encoder.set_bytes(3, 4, &s_deg_u32 as *const u32 as *const c_void);
+        encoder.set_bytes(4, 4, &num_y_u32 as *const u32 as *const c_void);
+        encoder.set_bytes(5, 4, &width_u32 as *const u32 as *const c_void);
+        encoder.set_bytes(6, 4, &out_col_offset_u32 as *const u32 as *const c_void);
+    })
+}
+
 pub unsafe fn fold_ple_from_evals(
     input_matrix: &MetalBuffer<F>,
     output_matrix: &MetalBuffer<EF>,
@@ -1059,19 +1109,27 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
     selectors_cube: &MetalBuffer<F>,
     preprocessed: &MetalBuffer<F>,
     main_ptrs: &MetalBuffer<*const F>,
+    main_part_buffers: &[&MetalBuffer<F>],
     eq_cube: &MetalBuffer<EF>,
     lambda_pows: &MetalBuffer<EF>,
     public_values: &MetalBuffer<F>,
     rules: &MetalBuffer<u128>,
     used_nodes: &MetalBuffer<usize>,
-    _buffer_size: u32,
+    buffer_size: u32,
+    intermediates: &MetalBuffer<F>,
     skip_domain: u32,
     num_x: u32,
     height: u32,
     num_cosets: u32,
     g_shift: F,
 ) -> Result<(), MetalError> {
-    let pipeline = get_kernels().get_pipeline("zerocheck_ntt_eval_constraints")?;
+    let use_global_intermediates = buffer_size > ZEROCHECK_R0_BUFFER_THRESHOLD;
+    let pipeline_name = if use_global_intermediates {
+        "zerocheck_ntt_eval_constraints_global"
+    } else {
+        "zerocheck_ntt_eval_constraints"
+    };
+    let pipeline = get_kernels().get_pipeline(pipeline_name)?;
     let l_skip = skip_domain.trailing_zeros();
     let twiddles = twiddles_for_l_skip(l_skip);
     let count = (skip_domain as usize) * (num_x as usize);
@@ -1079,6 +1137,7 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
     let threads_per_group = count.min(max_threads).max(skip_domain as usize);
     let num_blocks = count.div_ceil(threads_per_group);
     let total_threads = num_blocks * threads_per_group;
+    let total_threads_u32 = total_threads as u32;
     let x_int_stride = (total_threads / skip_domain as usize) as u32;
     debug!(
         "zerocheck_r0 launch | count: {} | threads_per_group: {} | num_blocks: {} | x_int_stride: {} | skip_domain: {} | num_x: {}",
@@ -1100,37 +1159,82 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
     let rules_len = rules.len() as u32;
     let used_nodes_len = used_nodes.len() as u32;
     let lambda_len = lambda_pows.len() as u32;
+    if use_global_intermediates {
+        debug_assert!(
+            intermediates.len() >= buffer_size as usize * total_threads * num_cosets as usize
+        );
+    }
 
     for coset_idx in 0..num_cosets {
         let tmp = MetalBuffer::<EF>::with_capacity(num_blocks as usize * skip_domain as usize);
-        dispatch_sync(&pipeline, grid, group, |encoder| {
-            encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
-            encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
-            encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
-            encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
-            encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
-            encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
-            encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-            encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
-            encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
-            encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
-            encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
-            encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
-            encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
-            encoder.set_bytes(13, 4, &_buffer_size as *const u32 as *const c_void);
-            encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-            encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-            encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-            encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-            encoder.set_bytes(
-                18,
-                std::mem::size_of::<F>() as u64,
-                &g_shift as *const F as *const c_void,
-            );
-            encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-            encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
-            encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-        })?;
+        if use_global_intermediates {
+            dispatch_sync(&pipeline, grid, group, |encoder| {
+                for part in main_part_buffers {
+                    encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                }
+                encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
+                encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
+                encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
+                encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
+                encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
+                encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
+                encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
+                encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
+                encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
+                encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
+                encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
+                encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
+                encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                encoder.set_bytes(
+                    18,
+                    std::mem::size_of::<F>() as u64,
+                    &g_shift as *const F as *const c_void,
+                );
+                encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
+                encoder.set_buffer(21, Some(intermediates.gpu_buffer()), 0);
+                encoder.set_bytes(22, 4, &total_threads_u32 as *const u32 as *const c_void);
+                encoder.set_bytes(23, 4, &num_cosets as *const u32 as *const c_void);
+                encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+            })?;
+        } else {
+            dispatch_sync(&pipeline, grid, group, |encoder| {
+                for part in main_part_buffers {
+                    encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                }
+                encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
+                encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
+                encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
+                encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
+                encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
+                encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
+                encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
+                encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
+                encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
+                encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
+                encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
+                encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
+                encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                encoder.set_bytes(
+                    18,
+                    std::mem::size_of::<F>() as u64,
+                    &g_shift as *const F as *const c_void,
+                );
+                encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
+                encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+            })?;
+        }
 
         let out_offset_bytes =
             (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
@@ -1152,6 +1256,7 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     selectors_cube: &MetalBuffer<F>,
     preprocessed: &MetalBuffer<F>,
     main_ptrs: &MetalBuffer<*const F>,
+    main_part_buffers: &[&MetalBuffer<F>],
     eq_cube: &MetalBuffer<EF>,
     public_values: &MetalBuffer<F>,
     numer_weights: &MetalBuffer<EF>,
@@ -1212,6 +1317,9 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
         if use_global_intermediates {
             dispatch_sync(&pipeline, grid, group, |encoder| {
+                for part in main_part_buffers {
+                    encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                }
                 encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
                 encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
                 encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
@@ -1252,6 +1360,9 @@ pub unsafe fn logup_bary_eval_interactions_round0(
             })?;
         } else {
             dispatch_sync(&pipeline, grid, group, |encoder| {
+                for part in main_part_buffers {
+                    encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                }
                 encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
                 encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
                 encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
@@ -1469,6 +1580,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
     lambda_len: usize,
     num_x: u32,
     threads_per_block: u32,
+    read_resources: &[MetalRawBuffer],
 ) -> Result<(), MetalError> {
     let pipeline = get_kernels().get_pipeline("zerocheck_batch_mle")?;
     let num_blocks = block_ctxs.len();
@@ -1484,6 +1596,12 @@ pub unsafe fn zerocheck_batch_eval_mle(
     let shared_bytes = (threads_per_block as usize * std::mem::size_of::<EF>()) as u64;
 
     dispatch_sync(&pipeline, grid, group, |encoder| {
+        for resource in read_resources {
+            encoder.use_resource(
+                resource,
+                metal::MTLResourceUsage::Read | metal::MTLResourceUsage::Write,
+            );
+        }
         encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(block_ctxs.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(zc_ctxs.gpu_buffer()), 0);
@@ -1559,6 +1677,7 @@ pub unsafe fn zerocheck_monomial_batched(
     block_ctxs: &MetalBuffer<BlockCtx>,
     air_ctxs: &MetalBuffer<MonomialAirCtx>,
     air_offsets: &MetalBuffer<u32>,
+    read_resources: &[MetalRawBuffer],
     num_x: u32,
 ) -> Result<(), MetalError> {
     let pipeline = get_kernels().get_pipeline("zerocheck_monomial")?;
@@ -1575,6 +1694,9 @@ pub unsafe fn zerocheck_monomial_batched(
     let shared_bytes = (threads_per_block as usize * std::mem::size_of::<EF>()) as u64;
 
     dispatch_sync(&pipeline, grid, group, |encoder| {
+        for resource in read_resources {
+            encoder.use_resource(resource, metal::MTLResourceUsage::Read);
+        }
         encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(block_ctxs.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(air_ctxs.gpu_buffer()), 0);
@@ -1582,6 +1704,20 @@ pub unsafe fn zerocheck_monomial_batched(
         encoder.set_bytes(4, 4, &num_x as *const u32 as *const c_void);
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
+
+    #[cfg(debug_assertions)]
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let tmp_host = tmp.to_vec();
+        let non_zero = tmp_host.iter().filter(|v| **v != EF::ZERO).count();
+        let preview: Vec<_> = tmp_host.iter().take(tmp_host.len().min(8)).copied().collect();
+        debug!(
+            num_blocks,
+            num_x,
+            non_zero,
+            ?preview,
+            "zerocheck_monomial_tmp_preview"
+        );
+    }
 
     batched_final_reduce_block_sums_to_buffer(
         &tmp,
@@ -1599,6 +1735,7 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
     block_ctxs: &MetalBuffer<BlockCtx>,
     air_ctxs: &MetalBuffer<MonomialAirCtx>,
     air_offsets: &MetalBuffer<u32>,
+    read_resources: &[MetalRawBuffer],
     chunk_size: u32,
     num_x: u32,
 ) -> Result<(), MetalError> {
@@ -1616,6 +1753,9 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
     let shared_bytes = (threads_per_block as usize * std::mem::size_of::<EF>()) as u64;
 
     dispatch_sync(&pipeline, grid, group, |encoder| {
+        for resource in read_resources {
+            encoder.use_resource(resource, metal::MTLResourceUsage::Read);
+        }
         encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(block_ctxs.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(air_ctxs.gpu_buffer()), 0);
@@ -1624,6 +1764,21 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
         encoder.set_bytes(5, 4, &num_x as *const u32 as *const c_void);
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })?;
+
+    #[cfg(debug_assertions)]
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let tmp_host = tmp.to_vec();
+        let non_zero = tmp_host.iter().filter(|v| **v != EF::ZERO).count();
+        let preview: Vec<_> = tmp_host.iter().take(tmp_host.len().min(8)).copied().collect();
+        debug!(
+            num_blocks,
+            num_x,
+            chunk_size,
+            non_zero,
+            ?preview,
+            "zerocheck_monomial_par_y_tmp_preview"
+        );
+    }
 
     batched_final_reduce_block_sums_to_buffer(
         &tmp,

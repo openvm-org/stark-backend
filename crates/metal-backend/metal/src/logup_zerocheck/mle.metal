@@ -26,14 +26,14 @@ inline FpExt evaluate_mle_entry(
     switch (src.type) {
     case ENTRY_PREPROCESSED: {
         uint32_t stride = height * d_preprocessed.air_width;
-        const device FpExt *matrix = d_preprocessed.data + stride * src.offset;
+        const device FpExt *matrix = as_fpext_ptr(d_preprocessed.data) + stride * src.offset;
         const device FpExt *column = matrix + height * src.index;
         return column[row];
     }
     case ENTRY_MAIN: {
         MainMatrixPtrsExt main_ptr = d_main[src.part];
         uint32_t stride = height * main_ptr.air_width;
-        const device FpExt *matrix = main_ptr.data + stride * src.offset;
+        const device FpExt *matrix = as_fpext_ptr(main_ptr.data) + stride * src.offset;
         const device FpExt *column = matrix + height * src.index;
         return column[row];
     }

@@ -6,6 +6,7 @@
 use openvm_metal_common::{copy::MemCopyH2D, d_buffer::MetalBuffer};
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
+use metal::Buffer as MetalRawBuffer;
 use tracing::debug;
 
 use crate::{
@@ -103,6 +104,7 @@ pub(crate) struct ZerocheckMonomialBatch<'a> {
     block_ctxs: MetalBuffer<BlockCtx>,
     air_ctxs: MetalBuffer<MonomialAirCtx>,
     air_offsets: MetalBuffer<u32>,
+    read_resources: Vec<MetalRawBuffer>,
 }
 
 impl<'a> ZerocheckMonomialBatch<'a> {
@@ -150,6 +152,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             air_offsets.push(block_ctxs_h.len() as u32);
         }
 
+        let mut read_resources: Vec<MetalRawBuffer> = Vec::new();
         let air_ctxs_h: Vec<MonomialAirCtx> = traces
             .iter()
             .zip(lambda_combinations)
@@ -160,20 +163,25 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                     .as_ref()
                     .unwrap();
 
+                read_resources.extend(t.read_resources.iter().cloned());
+                read_resources.push(monomials.d_headers.gpu_buffer().to_owned());
+                read_resources.push(monomials.d_variables.gpu_buffer().to_owned());
+                read_resources.push(lc.gpu_buffer().to_owned());
+
                 let eval_ctx = EvalCoreCtx {
-                    d_selectors: t.sels_ptr,
+                    d_selectors: t.sels_ptr as u64,
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_device_ptr(),
-                    d_public: t.public_ptr,
+                    d_main: t.main_ptrs_dev.as_device_ptr() as u64,
+                    d_public: t.public_ptr as u64,
                 };
 
                 MonomialAirCtx {
-                    d_headers: monomials.d_headers.as_device_ptr(),
-                    d_variables: monomials.d_variables.as_device_ptr(),
-                    d_lambda_combinations: lc.as_device_ptr(),
+                    d_headers: monomials.d_headers.as_device_ptr() as u64,
+                    d_variables: monomials.d_variables.as_device_ptr() as u64,
+                    d_lambda_combinations: lc.as_device_ptr() as u64,
                     num_monomials: monomials.num_monomials,
                     eval_ctx,
-                    d_eq_xi: t.eq_xi_ptr,
+                    d_eq_xi: t.eq_xi_ptr as u64,
                     num_y: t.num_y,
                 }
             })
@@ -194,6 +202,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             block_ctxs,
             air_ctxs,
             air_offsets,
+            read_resources,
         }
     }
 
@@ -231,6 +240,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 &self.block_ctxs,
                 &self.air_ctxs,
                 &self.air_offsets,
+                &self.read_resources,
                 num_x,
             )
             .expect("zerocheck_monomial_batched failed");
@@ -254,6 +264,7 @@ pub(crate) struct ZerocheckMonomialParYBatch<'a> {
     block_ctxs: MetalBuffer<BlockCtx>,
     air_ctxs: MetalBuffer<MonomialAirCtx>,
     air_offsets: MetalBuffer<u32>,
+    read_resources: Vec<MetalRawBuffer>,
     num_blocks: u32,
     chunk_size: u32,
 }
@@ -344,6 +355,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
 
         let num_blocks = block_ctxs_h.len() as u32;
 
+        let mut read_resources: Vec<MetalRawBuffer> = Vec::new();
         let air_ctxs_h: Vec<MonomialAirCtx> = traces
             .iter()
             .zip(lambda_combinations)
@@ -354,20 +366,25 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                     .as_ref()
                     .unwrap();
 
+                read_resources.extend(t.read_resources.iter().cloned());
+                read_resources.push(monomials.d_headers.gpu_buffer().to_owned());
+                read_resources.push(monomials.d_variables.gpu_buffer().to_owned());
+                read_resources.push(lc.gpu_buffer().to_owned());
+
                 let eval_ctx = EvalCoreCtx {
-                    d_selectors: t.sels_ptr,
+                    d_selectors: t.sels_ptr as u64,
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_device_ptr(),
-                    d_public: t.public_ptr,
+                    d_main: t.main_ptrs_dev.as_device_ptr() as u64,
+                    d_public: t.public_ptr as u64,
                 };
 
                 MonomialAirCtx {
-                    d_headers: monomials.d_headers.as_device_ptr(),
-                    d_variables: monomials.d_variables.as_device_ptr(),
-                    d_lambda_combinations: lc.as_device_ptr(),
+                    d_headers: monomials.d_headers.as_device_ptr() as u64,
+                    d_variables: monomials.d_variables.as_device_ptr() as u64,
+                    d_lambda_combinations: lc.as_device_ptr() as u64,
                     num_monomials: monomials.num_monomials,
                     eval_ctx,
-                    d_eq_xi: t.eq_xi_ptr,
+                    d_eq_xi: t.eq_xi_ptr as u64,
                     num_y: t.num_y,
                 }
             })
@@ -387,6 +404,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             block_ctxs,
             air_ctxs,
             air_offsets,
+            read_resources,
             num_blocks,
             chunk_size,
         }
@@ -423,6 +441,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                 &self.block_ctxs,
                 &self.air_ctxs,
                 &self.air_offsets,
+                &self.read_resources,
                 self.chunk_size,
                 num_x,
             )
@@ -599,15 +618,15 @@ impl<'a> LogupMonomialBatch<'a> {
                 let mono_blocks = max_monomials.div_ceil(threads_per_block).max(1);
 
                 let eval_ctx = EvalCoreCtx {
-                    d_selectors: t.sels_ptr,
+                    d_selectors: t.sels_ptr as u64,
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_device_ptr(),
-                    d_public: t.public_ptr,
+                    d_main: t.main_ptrs_dev.as_device_ptr() as u64,
+                    d_public: t.public_ptr as u64,
                 };
 
                 LogupMonomialCommonCtx {
                     eval_ctx,
-                    d_eq_xi: t.eq_xi_ptr,
+                    d_eq_xi: t.eq_xi_ptr as u64,
                     bus_term_sum: lc.bus_term_sum,
                     num_y: t.num_y,
                     mono_blocks,
@@ -624,9 +643,9 @@ impl<'a> LogupMonomialBatch<'a> {
                     .as_ref()
                     .unwrap();
                 LogupMonomialCtx {
-                    d_headers: monomials.d_numer_headers.as_device_ptr(),
-                    d_variables: monomials.d_numer_variables.as_device_ptr(),
-                    d_combinations: lc.d_numer_combinations.as_device_ptr(),
+                    d_headers: monomials.d_numer_headers.as_device_ptr() as u64,
+                    d_variables: monomials.d_numer_variables.as_device_ptr() as u64,
+                    d_combinations: lc.d_numer_combinations.as_device_ptr() as u64,
                     num_monomials: monomials.num_numer_monomials,
                 }
             })
@@ -641,9 +660,9 @@ impl<'a> LogupMonomialBatch<'a> {
                     .as_ref()
                     .unwrap();
                 LogupMonomialCtx {
-                    d_headers: monomials.d_denom_headers.as_device_ptr(),
-                    d_variables: monomials.d_denom_variables.as_device_ptr(),
-                    d_combinations: lc.d_denom_combinations.as_device_ptr(),
+                    d_headers: monomials.d_denom_headers.as_device_ptr() as u64,
+                    d_variables: monomials.d_denom_variables.as_device_ptr() as u64,
+                    d_combinations: lc.d_denom_combinations.as_device_ptr() as u64,
                     num_monomials: monomials.num_denom_monomials,
                 }
             })

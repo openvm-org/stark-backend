@@ -8,7 +8,7 @@ using namespace metal;
 #include "sumcheck.h"
 
 struct ColumnPtrExt {
-    const device FpExt *data;
+    uint64_t data;
 };
 
 // Fold PLE evaluations by barycentric interpolation on coset domain
@@ -74,13 +74,41 @@ kernel void interpolate_columns_kernel(
     uint col_idx = tidx / num_y;
     if (col_idx >= num_columns) return;
 
-    const device FpExt *column = columns[col_idx].data;
+    const device FpExt *column =
+        reinterpret_cast<const device FpExt *>(columns[col_idx].data);
     FpExt t0 = column[y << 1];
     FpExt t1 = column[(y << 1) | 1];
     device FpExt *this_interpolated = interpolated + col_idx * s_deg * num_y;
 
     for (uint x = 0; x < s_deg; x++) {
-        this_interpolated[x * num_y + y] = t0 + (t1 - t0) * Fp(x + 1u);
+        uint row_idx = x * num_y + y;
+        this_interpolated[row_idx] = t0 + (t1 - t0) * Fp(x + 1u);
+    }
+}
+
+// Interpolate one contiguous matrix block directly (no pointer table indirection).
+// Input layout is column-major [width * height], with height == 2 * num_y.
+// Output layout remains column-major in the destination matrix.
+kernel void interpolate_matrix_columns_kernel(
+    const device FpExt *input [[buffer(0)]],
+    device FpExt *interpolated [[buffer(1)]],
+    constant uint32_t &height [[buffer(2)]],
+    constant uint32_t &s_deg [[buffer(3)]],
+    constant uint32_t &num_y [[buffer(4)]],
+    constant uint32_t &width [[buffer(5)]],
+    constant uint32_t &out_col_offset [[buffer(6)]],
+    uint tidx [[thread_position_in_grid]]
+) {
+    uint y = tidx % num_y;
+    uint col = tidx / num_y;
+    if (col >= width) return;
+
+    const device FpExt *input_col = input + col * height;
+    FpExt t0 = input_col[y << 1];
+    FpExt t1 = input_col[(y << 1) | 1];
+    device FpExt *out_col = interpolated + (out_col_offset + col) * s_deg * num_y;
+    for (uint x = 0; x < s_deg; x++) {
+        out_col[x * num_y + y] = t0 + (t1 - t0) * Fp(x + 1u);
     }
 }
 

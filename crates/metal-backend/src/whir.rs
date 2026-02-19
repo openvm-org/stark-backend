@@ -23,7 +23,7 @@ use crate::{
         mle_interpolate::mle_interpolate_stage_ext,
         poly::{eval_poly_ext_at_point_from_base, transpose_fp_to_fpext_vec},
         whir::{
-            w_moments_accumulate, whir_algebraic_batch_traces, whir_fold_coeffs_and_moments,
+            w_moments_accumulate, whir_algebraic_batch_trace, whir_fold_coeffs_and_moments,
             whir_sumcheck_coeff_moments_required_temp_buffer_size,
             whir_sumcheck_coeff_moments_round,
         },
@@ -36,20 +36,6 @@ use crate::{
     stacked_reduction::StackedPcsData2,
     WhirProverError,
 };
-
-#[repr(C)]
-pub(crate) struct BatchingTracePacket {
-    /// Pointer to trace device buffer
-    ptr: u64,
-    /// Trace height
-    height: u32,
-    /// Trace width
-    width: u32,
-    /// Row start in the stacked matrix
-    stacked_row_start: u32,
-    /// Index in mu powers
-    mu_idx: u32,
-}
 
 #[instrument(
     name = "prover.openings.whir",
@@ -91,33 +77,42 @@ pub fn prove_whir_opening_metal(
     let mut f_ple_evals = MetalBuffer::<F>::with_capacity(height * D_EF);
     // We algebraically batch all matrices together so we only need to interpolate one column vector
     {
-        let mut packets = Vec::new();
+        f_ple_evals.fill_zero();
         let mut total_stacked_width = 0u32;
         for stacked in &stacked_per_commit {
             let layout = stacked.inner.layout();
-            for (trace, &idx) in zip(&stacked.traces, &layout.mat_starts) {
-                let (_, _, s) = layout.sorted_cols[idx];
-                let packet = BatchingTracePacket {
-                    ptr: trace.buffer().as_device_ptr() as u64,
-                    height: trace.height() as u32,
-                    width: trace.width() as u32,
-                    stacked_row_start: s.row_idx as u32,
-                    mu_idx: total_stacked_width + s.col_idx as u32,
-                };
-                packets.push(packet);
-            }
             total_stacked_width += layout.width() as u32;
         }
         let mu_powers = mu.powers().take(total_stacked_width as usize).collect_vec();
         let d_mu_powers = mu_powers.to_device();
-        let d_packets = packets.to_device();
+        let mut width_acc = 0u32;
+        let stacked_height_u32 = height as u32;
+        let skip_domain_u32 = 1u32 << l_skip;
+
         // SAFETY:
-        // - `mu_powers` has length `total_width`.
-        // - `f_ple_evals` has capacity `height * D_EF` (stacked height in base coordinates).
-        // - `d_packets` contain valid pointers and stacked row indices by construction.
+        // - `mu_powers` has length equal to sum of committed stacked widths.
+        // - each trace buffer is valid for `trace.height() * trace.width()` base elements.
+        // - output length is exactly `stacked_height * D_EF`.
         unsafe {
-            whir_algebraic_batch_traces(&mut f_ple_evals, &d_packets, &d_mu_powers, 1 << l_skip)
-                .map_err(WhirProverError::AlgebraicBatch)?;
+            for stacked in &stacked_per_commit {
+                let layout = stacked.inner.layout();
+                for (trace, &idx) in zip(&stacked.traces, &layout.mat_starts) {
+                    let (_, _, s) = layout.sorted_cols[idx];
+                    whir_algebraic_batch_trace(
+                        &mut f_ple_evals,
+                        trace.buffer(),
+                        &d_mu_powers,
+                        stacked_height_u32,
+                        trace.height() as u32,
+                        trace.width() as u32,
+                        s.row_idx as u64,
+                        width_acc + s.col_idx as u32,
+                        skip_domain_u32,
+                    )
+                    .map_err(WhirProverError::AlgebraicBatch)?;
+                }
+                width_acc += layout.width() as u32;
+            }
         }
         #[cfg(debug_assertions)]
         {

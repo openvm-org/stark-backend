@@ -30,6 +30,7 @@ pub fn evaluate_round0_constraints_metal(
     pk: &DeviceStarkProvingKey<MetalBackend>,
     selectors_cube: &MetalBuffer<F>,
     main_parts: &MetalBuffer<*const F>,
+    main_part_buffers: &[&MetalBuffer<F>],
     public_values: &MetalBuffer<F>,
     eq_cube: *const EF,
     lambda_pows: &MetalBuffer<EF>,
@@ -66,7 +67,7 @@ pub fn evaluate_round0_constraints_metal(
         num_cosets,
         max_temp_bytes,
     );
-    let _intermediates = if intermed_capacity > 0 {
+    let intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
         MetalBuffer::<F>::with_capacity(intermed_capacity)
     } else {
@@ -104,12 +105,14 @@ pub fn evaluate_round0_constraints_metal(
             selectors_cube,
             preprocessed,
             main_parts,
+            main_part_buffers,
             &eq_cube_buf,
             lambda_pows,
             public_values,
             &rules.inner.d_rules,
             &rules.inner.d_used_nodes,
             buffer_size,
+            &intermediates,
             skip_domain,
             num_x,
             height,
@@ -131,6 +134,7 @@ pub fn evaluate_round0_interactions_metal(
     symbolic: &SymbolicConstraints<F>,
     selectors_cube: &MetalBuffer<F>,
     main_parts: &MetalBuffer<*const F>,
+    main_part_buffers: &[&MetalBuffer<F>],
     public_values: &MetalBuffer<F>,
     eq_cube: *const EF,
     beta_pows: &[EF],
@@ -237,6 +241,7 @@ pub fn evaluate_round0_interactions_metal(
             selectors_cube,
             preprocessed,
             main_parts,
+            main_part_buffers,
             &eq_cube_buf,
             public_values,
             &d_numer_weights,

@@ -9,60 +9,48 @@ using namespace metal;
 
 constant int S_DEG = 2;
 
-struct BatchingTracePacket {
-    uint64_t ptr; // device pointer to Fp trace data
-    uint32_t height;
-    uint32_t width;
-    uint32_t stacked_row_start;
-    uint32_t mu_idx;
-};
-
-// Algebraically batch unstacked traces
-kernel void whir_algebraic_batch_traces_kernel(
-    device Fp *output                              [[buffer(0)]],
-    const device BatchingTracePacket *packets       [[buffer(1)]],
-    const device FpExt *mu_powers                  [[buffer(2)]],
-    constant uint32_t &stacked_height              [[buffer(3)]],
-    constant uint32_t &num_packets                 [[buffer(4)]],
-    constant uint32_t &skip_domain                 [[buffer(5)]],
-    uint gid                                        [[thread_position_in_grid]]
+// Algebraically batch one unstacked trace into the accumulated WHIR vector.
+// This mirrors the stacked-column batching semantics used by CPU/CUDA WHIR.
+kernel void whir_algebraic_batch_trace_kernel(
+    device Fp *output                         [[buffer(0)]],
+    const device Fp *trace                    [[buffer(1)]],
+    const device FpExt *mu_powers             [[buffer(2)]],
+    constant uint32_t &stacked_height         [[buffer(3)]],
+    constant uint32_t &trace_height           [[buffer(4)]],
+    constant uint32_t &trace_width            [[buffer(5)]],
+    constant uint64_t &stacked_row_start      [[buffer(6)]],
+    constant uint32_t &mu_idx_start           [[buffer(7)]],
+    constant uint32_t &skip_domain            [[buffer(8)]],
+    uint gid                                   [[thread_position_in_grid]]
 ) {
     uint32_t row = gid;
     if (row >= stacked_height) return;
 
-    FpExt zero = FpExt{Fp(0u), Fp(0u), Fp(0u), Fp(0u)};
-    FpExt res = zero;
+    uint64_t row64 = row;
+    uint64_t stacked_height64 = stacked_height;
+    uint32_t lifted_height = max(trace_height, skip_domain);
+    uint32_t stride = max(skip_domain / trace_height, 1u);
+    uint64_t row_start = stacked_row_start;
+    uint64_t stacked_end = row_start + uint64_t(lifted_height) * uint64_t(trace_width);
+    if (row64 >= stacked_end) return;
 
-    for (uint32_t idx = 0; idx < num_packets; idx++) {
-        BatchingTracePacket packet = packets[idx];
-        const device Fp *trace = reinterpret_cast<const device Fp *>(packet.ptr);
-        uint32_t h = packet.height;
-        uint32_t lifted_height = max(h, skip_domain);
-        uint32_t w = packet.width;
-        uint32_t row_start = packet.stacked_row_start;
-        uint32_t mu_idx_start = packet.mu_idx;
-        uint32_t stride = max(skip_domain / h, 1u);
-
-        uint32_t stacked_end = row_start + lifted_height * w;
-        if (row >= stacked_end) continue;
-
-        uint32_t offset_start = row_start <= row ? 0 : 1;
-        for (uint32_t row_offset = offset_start * stacked_height + row; row_offset < stacked_end;
-             row_offset += stacked_height) {
-            uint32_t offset = (row_offset - row) / stacked_height;
-            uint32_t tmp = row_offset - row_start;
-            uint32_t trace_col = tmp / lifted_height;
-            uint32_t strided_trace_row = tmp % lifted_height;
-            Fp trace_val = (strided_trace_row % stride == 0)
-                               ? trace[trace_col * h + (strided_trace_row / stride)]
-                               : Fp(0u);
-            FpExt mu_pow = mu_powers[mu_idx_start + offset];
-            res = res + mu_pow * trace_val;
-        }
+    FpExt res = FpExt{Fp(0u), Fp(0u), Fp(0u), Fp(0u)};
+    uint32_t offset_start = row_start <= row64 ? 0 : 1;
+    for (uint64_t row_offset = uint64_t(offset_start) * stacked_height64 + row64; row_offset < stacked_end;
+         row_offset += stacked_height64) {
+        uint32_t offset = uint32_t((row_offset - row64) / stacked_height64);
+        uint64_t tmp = row_offset - row_start;
+        uint32_t trace_col = uint32_t(tmp / uint64_t(lifted_height));
+        uint32_t strided_trace_row = uint32_t(tmp % uint64_t(lifted_height));
+        Fp trace_val = (strided_trace_row % stride == 0)
+                           ? trace[trace_col * trace_height + (strided_trace_row / stride)]
+                           : Fp(0u);
+        FpExt mu_pow = mu_powers[mu_idx_start + offset];
+        res = res + mu_pow * trace_val;
     }
 
     for (uint i = 0; i < 4; i++) {
-        output[i * stacked_height + row] = res.elems[i];
+        output[i * stacked_height + row] += res.elems[i];
     }
 }
 
