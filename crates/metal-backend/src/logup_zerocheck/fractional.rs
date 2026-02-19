@@ -783,9 +783,9 @@ pub fn fractional_sumcheck_metal(
                             eq_tail_high,
                             eq_low_cap,
                             tail_tile,
-                            m_partial_buffer.as_mut_ptr(),
+                            &m_partial_buffer,
                             partial_len,
-                            m_ptr,
+                            &m_buffer,
                         )
                         .map_err(FractionalSumcheckError::ComputeRound)?;
                     }
@@ -1103,5 +1103,51 @@ mod tests {
         assert_eq!(metal_proof.claims_per_layer, cpu_proof.claims_per_layer);
         assert_eq!(metal_proof.sumcheck_polys, cpu_proof.sumcheck_polys);
         assert_eq!(metal_xi, cpu_xi);
+    }
+
+    #[test]
+    fn test_frac_precompute_m_build_reduces_partials() {
+        let w = 2usize;
+        let rem_n = 4usize;
+        let total_entries = (1usize << w) * (1usize << w);
+        let num_blocks = 3usize;
+        let partial_len = total_entries * num_blocks;
+
+        let partial = MetalBuffer::<EF>::with_capacity(partial_len);
+        let m_total = MetalBuffer::<EF>::with_capacity(total_entries);
+
+        let partial_host = (0..partial_len)
+            .map(|i| EF::from_u32((i + 1) as u32))
+            .collect::<Vec<_>>();
+        partial.copy_from_slice(&partial_host);
+
+        unsafe {
+            crate::metal::logup_zerocheck::frac_precompute_m_build_raw(
+                std::ptr::null(),
+                rem_n,
+                w,
+                EF::ZERO,
+                EF::ZERO,
+                false,
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                1,
+                &partial,
+                partial_len,
+                &m_total,
+            )
+            .expect("frac_precompute_m_build_raw failed");
+        }
+
+        let actual = m_total.to_vec();
+        let expected = (0..total_entries)
+            .map(|entry| {
+                (0..num_blocks).fold(EF::ZERO, |acc, block| {
+                    acc + partial_host[block * total_entries + entry]
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 }

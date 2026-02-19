@@ -617,47 +617,48 @@ pub unsafe fn frac_precompute_m_build_raw(
     _pq: *const Frac<EF>,
     rem_n: usize,
     w: usize,
-    lambda: EF,
-    r_prev: EF,
-    inline_fold: bool,
+    _lambda: EF,
+    _r_prev: EF,
+    _inline_fold: bool,
     _eq_tail_low: *const EF,
     _eq_tail_high: *const EF,
     eq_tail_low_cap: usize,
     tail_tile: usize,
-    _partial_out: *mut EF,
+    partial_out: &MetalBuffer<EF>,
     partial_len: usize,
-    _m_total: *mut EF,
+    m_total: &MetalBuffer<EF>,
 ) -> Result<(), MetalError> {
     debug_assert!(rem_n > 0);
     debug_assert!(w > 0 && w <= rem_n);
     debug_assert!(eq_tail_low_cap.is_power_of_two());
     debug_assert!(tail_tile > 0);
+
     let pipeline = get_kernels().get_pipeline("frac_precompute_m_build")?;
-    let total = 1 << rem_n;
-    let (grid, group) = grid_size_1d(total, DEFAULT_THREADS_PER_GROUP);
-    let rem_n_u32 = rem_n as u32;
-    let w_u32 = w as u32;
-    let inline_fold_u32: u32 = if inline_fold { 1 } else { 0 };
-    let eq_tail_low_cap_u32 = eq_tail_low_cap as u32;
-    let tail_tile_u32 = tail_tile as u32;
-    let partial_len_u32 = partial_len as u32;
+    if partial_len == 0 {
+        return Ok(());
+    }
+
+    // Kernel contract:
+    //   buffer(0): partial[num_blocks * total_entries]
+    //   buffer(1): m_total[total_entries]
+    //   buffer(2): num_blocks
+    //   buffer(3): total_entries
+    let total_entries = (1usize << w) * (1usize << w);
+    debug_assert!(total_entries > 0);
+    debug_assert_eq!(partial_len % total_entries, 0);
+    let num_blocks = partial_len / total_entries;
+    debug_assert!(num_blocks > 0);
+    debug_assert!(partial_out.len() >= partial_len);
+    debug_assert!(m_total.len() >= total_entries);
+
+    let (grid, group) = grid_size_1d(total_entries, DEFAULT_THREADS_PER_GROUP);
+    let num_blocks_u32 = num_blocks as u32;
+    let total_entries_u32 = total_entries as u32;
     dispatch_sync(&pipeline, grid, group, |encoder| {
-        encoder.set_bytes(0, 4, &rem_n_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(1, 4, &w_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(
-            2,
-            std::mem::size_of::<EF>() as u64,
-            &lambda as *const EF as *const c_void,
-        );
-        encoder.set_bytes(
-            3,
-            std::mem::size_of::<EF>() as u64,
-            &r_prev as *const EF as *const c_void,
-        );
-        encoder.set_bytes(4, 4, &inline_fold_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(5, 4, &eq_tail_low_cap_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(6, 4, &tail_tile_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(7, 4, &partial_len_u32 as *const u32 as *const c_void);
+        encoder.set_buffer(0, Some(partial_out.gpu_buffer()), 0);
+        encoder.set_buffer(1, Some(m_total.gpu_buffer()), 0);
+        encoder.set_bytes(2, 4, &num_blocks_u32 as *const u32 as *const c_void);
+        encoder.set_bytes(3, 4, &total_entries_u32 as *const u32 as *const c_void);
     })
 }
 
