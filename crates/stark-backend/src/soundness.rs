@@ -344,7 +344,9 @@ impl SoundnessCalculator {
             min_query_bits = min_query_bits.min(query_bits);
 
             // In-domain γ batching (not protected by PoW; Merkle proofs are observed before γ).
-            let batch_size = round_config.num_queries + round_config.num_ood_samples;
+            // NOTE[jpw] For now we use the original paper where this is fixed to 1. <https://github.com/WizardOfMenlo/whir/blob/cf1599b56ff50e09142ebe6d2e2fbd86875c9986/src/whir/parameters.rs#L373> now varies this to increase security in LDR.
+            const NUM_OOD_SAMPLES: usize = 1;
+            let batch_size = round_config.num_queries + NUM_OOD_SAMPLES;
             debug_assert!(batch_size > 0);
             let gamma_batching_bits = Self::whir_gamma_batching_security(
                 proximity_regime,
@@ -618,14 +620,8 @@ mod tests {
             whir: WhirConfig {
                 k: 4,
                 rounds: vec![
-                    WhirRoundConfig {
-                        num_queries: 36,
-                        num_ood_samples: 1,
-                    },
-                    WhirRoundConfig {
-                        num_queries: 18,
-                        num_ood_samples: 1,
-                    },
+                    WhirRoundConfig { num_queries: 36 },
+                    WhirRoundConfig { num_queries: 18 },
                 ],
                 mu_pow_bits: 20,
                 query_phase_pow_bits: 16,

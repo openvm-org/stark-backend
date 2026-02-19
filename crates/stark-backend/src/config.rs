@@ -121,8 +121,6 @@ pub struct WhirConfig {
 pub struct WhirRoundConfig {
     /// Number of in-domain queries sampled in this WHIR round.
     pub num_queries: usize,
-    /// Number of out-of-domain samples in this WHIR round.
-    pub num_ood_samples: usize,
 }
 
 /// Defines the proximity regime for the proof system.
@@ -187,10 +185,7 @@ impl WhirConfig {
                 protocol_security_level,
                 log_inv_rate,
             );
-            round_parameters.push(WhirRoundConfig {
-                num_queries,
-                num_ood_samples: 1,
-            });
+            round_parameters.push(WhirRoundConfig { num_queries });
 
             log_inv_rate = next_rate;
         }
