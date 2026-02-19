@@ -745,16 +745,19 @@ mod tests {
     ///
     /// n_logup = ceil_log2(total_interactions) - l_skip, where:
     /// - total_interactions ≤ num_airs × max_interactions_per_air × 2^max_log_height
-    /// - total_interactions must fit in u32 (enforced by verifier)
+    /// - total_interactions < max_interaction_count (enforced by verifier as one of the
+    ///   `LinearConstraint`s, keygen ensures this linear constraint is included)
     ///
-    /// So: n_logup ≤ min(32 - l_skip, log2(num_airs × max_interactions) + max_log_height - l_skip)
+    /// So: n_logup ≤ min(ceil_log2(max_interaction_count) - l_skip, log2(num_airs ×
+    /// max_interactions) + max_log_height - l_skip)
     fn n_logup_bound(
         l_skip: usize,
         num_airs: usize,
         max_interactions_per_air: usize,
         max_log_height: usize,
+        max_interaction_count: usize,
     ) -> usize {
-        let field_bound = 32 - l_skip;
+        let field_bound = (max_interaction_count as f64).log2().ceil() as usize - l_skip;
         let param_bound = (num_airs as f64).log2().ceil() as usize
             + (max_interactions_per_air as f64).log2().ceil() as usize
             + max_log_height
@@ -943,6 +946,7 @@ mod tests {
             APP_NUM_AIRS,
             APP_MAX_INTERACTIONS_PER_AIR,
             APP_MAX_LOG_HEIGHT,
+            params.logup.max_interaction_count as usize,
         );
         let soundness = check_soundness(
             "App VM",
@@ -969,6 +973,7 @@ mod tests {
             RECURSION_NUM_AIRS,
             RECURSION_MAX_INTERACTIONS_PER_AIR,
             max_log_height,
+            params.logup.max_interaction_count as usize,
         );
         let soundness = check_soundness(
             "Leaf Aggregation",
@@ -995,6 +1000,7 @@ mod tests {
             RECURSION_NUM_AIRS,
             RECURSION_MAX_INTERACTIONS_PER_AIR,
             max_log_height,
+            params.logup.max_interaction_count as usize,
         );
         let soundness = check_soundness(
             "Internal Aggregation",
@@ -1021,6 +1027,7 @@ mod tests {
             RECURSION_NUM_AIRS,
             RECURSION_MAX_INTERACTIONS_PER_AIR,
             max_log_height,
+            params.logup.max_interaction_count as usize,
         );
         let soundness = check_soundness(
             "Compression",
@@ -1098,7 +1105,13 @@ mod tests {
             max_interactions,
         ) in configs
         {
-            let n_logup = n_logup_bound(params.l_skip, num_airs, max_interactions, max_log_height);
+            let n_logup = n_logup_bound(
+                params.l_skip,
+                num_airs,
+                max_interactions,
+                max_log_height,
+                params.logup.max_interaction_count as usize,
+            );
             let soundness = check_soundness(
                 name,
                 params,
