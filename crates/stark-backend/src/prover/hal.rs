@@ -1,11 +1,3 @@
-// TODO[jpw]: replace v1 hal.rs file
-// Keep from v1:
-// - MatrixDimensions
-//
-// Changed ProverBackend to remove Challenger(=Transcript) and non-essential types. Only keep the
-// types you really need for interfaces. Protocol specific types moved to ProverDevice (possibly
-// could be renamed ProtocolProver)
-
 use std::sync::Arc;
 
 use serde::{de::DeserializeOwned, Serialize};
