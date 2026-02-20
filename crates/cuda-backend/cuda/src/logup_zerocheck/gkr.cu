@@ -1296,4 +1296,157 @@ extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar,
     return CHECK_KERNEL();
 }
 
+
+// ============================================================================
+// Fused bit-reversal + K=2 GKR tree-build
+// ============================================================================
+
+// bit_rev() and index_t redeclared from supra/include/ntt/{ntt.cuh,parameters.cuh}
+// because the supra include path is not on the cuda-backend build search path.
+typedef unsigned int index_t;
+template<typename T>
+__device__ __forceinline__
+T bit_rev(T i, unsigned int nbits)
+{
+    return __brev(i) >> (8 * sizeof(unsigned int) - nbits);
+}
+
+// Fused bit-reversal + K=2 GKR tree-build kernel for FracExt.
+//
+// DERIVED FROM: bit_rev_permutation_z<T, Z_COUNT> in supra/ntt_bitrev.cu.
+// Diff vs the original template kernel:
+//   - Z_COUNT = 8 hardcoded (not a template param)
+//   - In-place: single `inout` pointer (original has separate `out`/`in`)
+//   - No poly_count / no 2-D grid: operates on one poly only
+//   - Extra `alpha` parameter: adds alpha to every denominator after bit-reversing
+//   - Two GKR tree layers (K=2) are computed inside shmem before writing to global mem,
+//     eliminating two separate kernel passes
+//   - __syncwarp() is used unconditionally (original conditionally uses __syncthreads()
+//     when Z_COUNT > WARP_SIZE, which is never true for Z_COUNT=8)
+//
+// Output layout for each Z-tile written at base_rev (i*step + base_rev, i=0..7):
+//   [0,1]  : layer-1 results  (tree level 2)
+//   [2,3]  : layer-0 results preserved (tree level 1 right half, for revert of layer 1)
+//   [4..7] : original+alpha preserved (leaves, for revert of layer 0)
+//
+// __launch_bounds__(256): not a correctness constraint — __syncwarp() is safe for any
+// multiple-of-32 bsize because each gid group is Z_COUNT=8 threads (always within one
+// warp) and different warps operate on independent shmem tiles. bsize=256 was chosen after
+// benchmarking: 2× faster than bsize=32 in isolation (1525 vs 754 GB/s at lg=24 on RTX
+// 5090). It requires 64KB dynamic shmem per block, so cudaFuncSetAttribute is used in the
+// launcher — but only once (static local), paid on the first call and never again.
+__launch_bounds__(256) __global__
+void bit_rev_frac_build_k2_kernel(
+    FracExt* inout, uint32_t lg_domain_size, FpExt alpha)
+{
+    constexpr uint32_t Z_COUNT = 8;
+    constexpr uint32_t LG_Z_COUNT = 3;
+
+    extern __shared__ unsigned char xchg_raw[];
+    FracExt (*xchg)[Z_COUNT][Z_COUNT] =
+        reinterpret_cast<FracExt (*)[Z_COUNT][Z_COUNT]>(xchg_raw);
+
+    uint32_t gid = threadIdx.x / Z_COUNT;
+    uint32_t idx = threadIdx.x % Z_COUNT;
+    uint32_t rev = bit_rev(idx, LG_Z_COUNT);
+
+    index_t step = (index_t)1 << (lg_domain_size - LG_Z_COUNT);
+    index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
+
+    #pragma unroll 1
+    do {
+        index_t group_idx = tid >> LG_Z_COUNT;
+        index_t group_rev = bit_rev(group_idx, lg_domain_size - 2*LG_Z_COUNT);
+
+        if (group_idx > group_rev)
+            continue;
+
+        index_t base_idx = group_idx * Z_COUNT + idx;
+        index_t base_rev = group_rev * Z_COUNT + idx;
+
+        FracExt regs[Z_COUNT];
+
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++) {
+            xchg[gid][i][rev] = (regs[i] = inout[i * step + base_idx]);
+            if (group_idx != group_rev)
+                regs[i] = inout[i * step + base_rev];
+        }
+
+        __syncwarp();
+
+        // Apply alpha + tree layers 0 and 1 to transposed tile, then write to base_rev
+        {
+            FracExt* row = xchg[gid][rev];
+            #pragma unroll
+            for (uint32_t i = 0; i < Z_COUNT; i++)
+                row[i].q = row[i].q + alpha;
+            #pragma unroll
+            for (uint32_t i = 0; i < 4; i++)  // tree layer 0: pairs (0,4),(1,5),(2,6),(3,7)
+                frac_add_inplace(row[i], row[i + 4]);
+            #pragma unroll
+            for (uint32_t i = 0; i < 2; i++)  // tree layer 1: pairs (0,2),(1,3)
+                frac_add_inplace(row[i], row[i + 2]);
+        }
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            inout[i * step + base_rev] = xchg[gid][rev][i];
+
+        if (group_idx == group_rev)
+            continue;
+
+        __syncwarp();
+
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            xchg[gid][i][rev] = regs[i];
+
+        __syncwarp();
+
+        // Apply alpha + tree layers 0 and 1 to transposed tile, then write to base_idx
+        {
+            FracExt* row = xchg[gid][rev];
+            #pragma unroll
+            for (uint32_t i = 0; i < Z_COUNT; i++)
+                row[i].q = row[i].q + alpha;
+            #pragma unroll
+            for (uint32_t i = 0; i < 4; i++)
+                frac_add_inplace(row[i], row[i + 4]);
+            #pragma unroll
+            for (uint32_t i = 0; i < 2; i++)
+                frac_add_inplace(row[i], row[i + 2]);
+        }
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            inout[i * step + base_idx] = xchg[gid][rev][i];
+
+    } while ((tid += blockDim.x*gridDim.x) < step);
+    // Note: the original bit_rev_permutation_z guards this with "Z_COUNT <= WARP_SIZE &&"
+    // to prevent register spills when Z_COUNT > WARP_SIZE. Z_COUNT=8 is always <= 32.
+}
+
+// Fused bitrev + K=2 tree build for a single FracExt buffer.
+// Requires domain_size >= 256 (uses Z-tile shmem kernel).
+// Applies alpha to denominators and fuses tree layers 0 and 1 in shmem.
+extern "C" int _bit_rev_frac_ext_build_k2(
+    FracExt* inout, uint32_t lg_domain_size, FpExt alpha)
+{
+    constexpr uint32_t Z_COUNT = 8;
+    constexpr uint32_t bsize = 256;
+    constexpr size_t shmem_bytes = (size_t)bsize * Z_COUNT * sizeof(FracExt);  // 64 KB
+    // Raise the per-block dynamic shmem limit once (static → paid on first call only).
+    static const cudaError_t shmem_err = cudaFuncSetAttribute(
+        bit_rev_frac_build_k2_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        (int)shmem_bytes);
+    if (shmem_err != cudaSuccess) return shmem_err;
+    size_t domain_size = (size_t)1 << lg_domain_size;
+    if (domain_size < (size_t)(bsize * Z_COUNT))
+        return cudaErrorInvalidValue;
+    uint32_t grid_x = (uint32_t)(domain_size / Z_COUNT / bsize);
+    bit_rev_frac_build_k2_kernel<<<dim3(grid_x), bsize, shmem_bytes>>>(
+        inout, lg_domain_size, alpha);
+    return CHECK_KERNEL();
+}
+
 } // namespace fractional_sumcheck_gkr
