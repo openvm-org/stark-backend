@@ -50,6 +50,15 @@ pub struct WhirSoundnessCalculator {
     pub mu_batching_bits: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Bchks25Degrees {
+    d_x: u128,
+    d_y: u128,
+    // Integer index representation for Z-degree support:
+    // `j + h < D_Z` is represented as `0 <= h <= d_z - j`, so `d_z = ceil(D_Z) - 1`.
+    d_z: u128,
+}
+
 impl SoundnessCalculator {
     /// Calculates soundness for the given system parameters.
     ///
@@ -451,14 +460,302 @@ impl SoundnessCalculator {
         hi + (1.0 + ratio).log2()
     }
 
+    const BCHKS25_DY_SEARCH_MIN_MAX: u128 = 9;
+    const BCHKS25_DY_SEARCH_REF_MULTIPLIER: u128 = 4;
+    const BCHKS25_DY_SEARCH_HARD_MAX: u128 = 4096;
+    const BCHKS25_DZ_SEARCH_MAX: u128 = 500_000;
+
+    #[inline]
+    fn bchks25_log2_a_from_log2_degrees(
+        log2_d_x: f64,
+        log2_d_y: f64,
+        log2_d_z: f64,
+        log2_agreement_term: f64,
+    ) -> f64 {
+        // Equation (13): a > 2*D_X*D_Y^2*D_Z + agreement_term*D_Y
+        let log2_term_poly = 1.0 + log2_d_x + 2.0 * log2_d_y + log2_d_z;
+        let log2_term_gamma = log2_d_y + log2_agreement_term;
+        Self::log2_add(log2_term_poly, log2_term_gamma)
+    }
+
+    /// Reference closed-form degrees from BCHKS25 Lemma 3.1, Equations (7), (8), (9).
+    /// For `m = 2`, use `D_Z = max(D_Y, D_Z)` as noted below Lemma 3.1.
+    fn bchks25_reference_log2_degrees(
+        log_degree: usize,
+        log_inv_rate: usize,
+        m: usize,
+    ) -> (f64, f64, f64) {
+        let m_bar = m.max(1) as f64 + 0.5;
+        let log2_m_bar = m_bar.log2();
+        let log2_n = (log_degree + log_inv_rate) as f64;
+        let log2_3 = 3.0_f64.log2();
+        let log2_rho = -(log_inv_rate as f64);
+
+        // D_X = (m + 1/2) * sqrt(k * n)
+        // D_Y = (m + 1/2) * sqrt(n / k)
+        // D_Z (Equation 9) = ((m + 1/2)^2 * n) / (3 * k)
+        let log2_d_x = log2_m_bar + log2_n + 0.5 * log2_rho;
+        let log2_d_y = log2_m_bar - 0.5 * log2_rho;
+        let log2_d_z = 2.0 * log2_m_bar - log2_3 - log2_rho;
+        let log2_d_z = if m == 2 {
+            log2_d_y.max(log2_d_z)
+        } else {
+            log2_d_z
+        };
+
+        (log2_d_x, log2_d_y, log2_d_z)
+    }
+
+    fn bchks25_dy_search_upper_bound(log_degree: usize, log_inv_rate: usize, m: usize) -> u128 {
+        let (_log2_d_x, log2_d_y, _log2_d_z) =
+            Self::bchks25_reference_log2_degrees(log_degree, log_inv_rate, m);
+        if !log2_d_y.is_finite() {
+            return Self::BCHKS25_DY_SEARCH_HARD_MAX;
+        }
+        let ref_d_y = log2_d_y.exp2().ceil();
+        if !ref_d_y.is_finite() || ref_d_y <= 0.0 {
+            return Self::BCHKS25_DY_SEARCH_HARD_MAX;
+        }
+        let ref_scaled = (ref_d_y as u128).saturating_mul(Self::BCHKS25_DY_SEARCH_REF_MULTIPLIER);
+        ref_scaled
+            .max(Self::BCHKS25_DY_SEARCH_MIN_MAX)
+            .min(Self::BCHKS25_DY_SEARCH_HARD_MAX)
+    }
+
+    /// Counts interpolation variables for fixed `D_Y, D_Z` with `D_X = k * D_Y`.
+    ///
+    /// Here `d_y` and `d_z` are index-space bounds (`ceil(D_Y)-1`, `ceil(D_Z)-1`), not real
+    /// degrees. This matches the lattice count used in Lemma 3.1:
+    /// `j + h < D_Z` contributes `(d_z - j + 1)` monomials in `Z`.
+    #[cfg(test)]
+    fn bchks25_num_vars_with_dx_eq_kdy(k: u128, d_y: u128, d_z: u128) -> Option<u128> {
+        if d_z < d_y {
+            return Some(0);
+        }
+
+        let mut total = 0_u128;
+        for j in 0..=d_y {
+            let x_terms = k.checked_mul(d_y - j)?.checked_add(1)?;
+            let z_terms = (d_z - j).checked_add(1)?;
+            let add = x_terms.checked_mul(z_terms)?;
+            total = total.checked_add(add)?;
+        }
+        Some(total)
+    }
+
+    /// Equation (11) RHS (closed form):
+    /// `n_eqs = n * ( m(m+1)/2 * ceil(D_Z) - (m^3-m)/6 )`.
+    ///
+    /// We store `d_z = ceil(D_Z)-1` (index-space convention), therefore `ceil(D_Z)=d_z+1`.
+    #[cfg(test)]
+    fn bchks25_num_eqs_eq11(n: u128, m: u128, d_z: u128) -> Option<u128> {
+        let ceil_d_z = d_z.checked_add(1)?;
+        let m_plus_1 = m.checked_add(1)?;
+        let m_choose_2_scaled = m.checked_mul(m_plus_1)?.checked_div(2)?;
+        let m_cubic_minus_m_over_6 = m
+            .checked_mul(m)?
+            .checked_mul(m)?
+            .checked_sub(m)?
+            .checked_div(6)?;
+        let inner = m_choose_2_scaled
+            .checked_mul(ceil_d_z)?
+            .checked_sub(m_cubic_minus_m_over_6)?;
+        n.checked_mul(inner)
+    }
+
+    /// Solves for the minimal index-space `d_z` satisfying
+    /// `n_vars(d_z) > n_eqs(d_z)` (Equation (11)).
+    ///
+    /// Both sides are affine in `d_z`, so this is a 1D linear inequality with bounds
+    /// `d_z in [max(d_y, m-1), BCHKS25_DZ_SEARCH_MAX]` and does not require binary search.
+    ///
+    /// The returned value corresponds to real-degree parameter `D_Z` via `d_z = ceil(D_Z)-1`.
+    fn bchks25_min_dz_with_dx_eq_kdy(k: u128, n: u128, m: u128, d_y: u128) -> Option<u128> {
+        let low = d_y.max(m.saturating_sub(1));
+        let high = Self::BCHKS25_DZ_SEARCH_MAX;
+        if low > high {
+            return None;
+        }
+
+        // n_vars(d_z) written in Equation (12)-style decomposition:
+        // n_vars = k * ( d_y(d_y+1)/2 * (d_z+1) - (d_y^3-d_y)/6 )
+        //        + ( (d_y+1)*(d_z+1) - d_y(d_y+1)/2 )
+        // The first term is exactly the Equation (12)-shape.
+        // The second term is the exact correction from the `+1` in
+        // `(k(d_y-j)+1)(d_z-j+1)`.
+        //
+        // So in affine form n_vars(d_z) = A_v * (d_z + 1) - B_v:
+        // A_v = k*d_y(d_y+1)/2 + (d_y+1)
+        // B_v = k*(d_y^3-d_y)/6 + d_y(d_y+1)/2
+        let d_y_plus_1 = d_y.checked_add(1)?;
+        let d_y_d_y_plus_1_over_2 = d_y.checked_mul(d_y_plus_1)?.checked_div(2)?;
+        let d_y_cubed_minus_d_y_over_6 = d_y
+            .checked_mul(d_y)?
+            .checked_mul(d_y)?
+            .checked_sub(d_y)?
+            .checked_div(6)?;
+        let eq12_slope = k.checked_mul(d_y_d_y_plus_1_over_2)?;
+        let eq12_intercept = k.checked_mul(d_y_cubed_minus_d_y_over_6)?;
+        let correction_slope = d_y_plus_1;
+        let correction_intercept = d_y_d_y_plus_1_over_2;
+        let a_v = eq12_slope.checked_add(correction_slope)?;
+        let b_v = eq12_intercept.checked_add(correction_intercept)?;
+
+        // n_eqs(d_z) = A_e * (d_z + 1) - B_e from Equation (11) closed form
+        let m_plus_1 = m.checked_add(1)?;
+        let a_e = n.checked_mul(m.checked_mul(m_plus_1)?.checked_div(2)?)?;
+        let b_e = n.checked_mul(
+            m.checked_mul(m)?
+                .checked_mul(m)?
+                .checked_sub(m)?
+                .checked_div(6)?,
+        )?;
+
+        let is_valid = |d_z: u128| -> Option<bool> {
+            let x = d_z.checked_add(1)?;
+            let n_vars = a_v.checked_mul(x)?.checked_sub(b_v)?;
+            let n_eqs = a_e.checked_mul(x)?.checked_sub(b_e)?;
+            Some(n_vars > n_eqs)
+        };
+
+        match a_v.cmp(&a_e) {
+            core::cmp::Ordering::Greater => {
+                // Increasing predicate: solve exactly, then clamp to bounds.
+                let slope = a_v.checked_sub(a_e)?;
+                let candidate = if b_v < b_e {
+                    low
+                } else {
+                    let rhs = b_v.checked_sub(b_e)?;
+                    let x_min = rhs.checked_div(slope)?.checked_add(1)?;
+                    let d_min = x_min.checked_sub(1)?;
+                    low.max(d_min)
+                };
+                if candidate > high {
+                    return None;
+                }
+                if is_valid(candidate)? {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            }
+            core::cmp::Ordering::Equal => {
+                if b_v < b_e {
+                    Some(low)
+                } else {
+                    None
+                }
+            }
+            core::cmp::Ordering::Less => {
+                // Decreasing predicate: if low is not valid, no later value can be valid.
+                if is_valid(low)? {
+                    Some(low)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// We find optimal parameters `D_X, D_Y, D_Z` that minimize Equation (13) in BCHKS25 **and**
+    /// satisfy the conditions necessary for the proof of Lemma 3.1 to carry through:
+    /// - `D_X = k * D_Y`
+    /// - `D_Z >= D_Y`
+    /// - `D_Y >= m - 1`
+    /// - `n_vars > n_eqs` where `n_eqs` is given by Equation (11) and `n_vars = \sum_0^{ceil(D_Y) -
+    ///   1} (ceil(D_X) - kj)(ceil(D_Z) - j)`
+    /// ```text
+    /// n_{\mathrm{vars}}=\sum_{j=0}^{\lceil D_Y\rceil-1}(\lceil D_X\rceil-kj)(\lceil D_Z\rceil-j)
+    /// n_{\mathrm{eqs}}=n\sum_{s=0}^{m-1}(\lceil D_Z\rceil-s)(m-s)
+    /// ```
+    ///
+    /// Brute-force search for degrees minimizing Equation (13):
+    /// - scan `D_Y in [max(1, m - 1), D_Y_max]`
+    /// - `D_Y_max` is chosen from a scaled Lemma 3.1 reference degree (with a hard cap to keep
+    ///   computation bounded)
+    /// - set `D_X = k * D_Y`
+    /// - solve directly for the smallest valid `D_Z` for each `D_Y`
+    fn bchks25_optimal_degrees_bruteforce(
+        log_degree: usize,
+        log_inv_rate: usize,
+        m: usize,
+        gamma: f64,
+    ) -> Option<(Bchks25Degrees, f64)> {
+        if !gamma.is_finite() || gamma <= 0.0 {
+            return None;
+        }
+
+        let log_n = log_degree.checked_add(log_inv_rate)?;
+        if log_n >= u128::BITS as usize || log_degree >= u128::BITS as usize {
+            return None;
+        }
+
+        let n = 1_u128.checked_shl(log_n as u32)?;
+        let k = 1_u128.checked_shl(log_degree as u32)?;
+        let m_u = m as u128;
+
+        let agreements_plus_one = (gamma * n as f64).ceil() + 1.0;
+        if !agreements_plus_one.is_finite() || agreements_plus_one <= 0.0 {
+            return None;
+        }
+        let log2_agreements_plus_one = agreements_plus_one.log2();
+
+        let mut best: Option<(Bchks25Degrees, f64)> = None;
+        let d_y_start = 1_u128.max(m_u.saturating_sub(1));
+        let d_y_end = Self::bchks25_dy_search_upper_bound(log_degree, log_inv_rate, m);
+        if d_y_start > d_y_end {
+            return None;
+        }
+
+        for d_y in d_y_start..=d_y_end {
+            let Some(d_z) = Self::bchks25_min_dz_with_dx_eq_kdy(k, n, m_u, d_y) else {
+                continue;
+            };
+            let Some(d_x) = k.checked_mul(d_y) else {
+                continue;
+            };
+
+            let log2_d_x = (d_x as f64).log2();
+            let log2_d_y = (d_y as f64).log2();
+            let log2_d_z = (d_z as f64).log2();
+            let log2_a = Self::bchks25_log2_a_from_log2_degrees(
+                log2_d_x,
+                log2_d_y,
+                log2_d_z,
+                log2_agreements_plus_one,
+            );
+            if !log2_a.is_finite() {
+                continue;
+            }
+
+            let candidate = (Bchks25Degrees { d_x, d_y, d_z }, log2_a);
+            match best {
+                None => best = Some(candidate),
+                Some((best_deg, best_log2_a)) => {
+                    // Stable tie-breaking keeps smaller degrees if scores are effectively equal.
+                    let better = log2_a + 1e-12 < best_log2_a
+                        || ((log2_a - best_log2_a).abs() <= 1e-12
+                            && (d_y < best_deg.d_y || (d_y == best_deg.d_y && d_z < best_deg.d_z)));
+                    if better {
+                        best = Some(candidate);
+                    }
+                }
+            }
+        }
+        best
+    }
+
     /// Computes `log2(a_bound)` from BCHKS25/TR25-169 Theorem 1.5 (contrapositive), where
     /// `a_bound = ceil(a).max(1)`.
     ///
-    /// We use Section 3.2 Equation (13):
-    /// `a > 2 * D_X * D_Y^2 * D_Z + (gamma * n + 1) * D_Y`,
-    /// with `D_X, D_Y, D_Z` from Lemma 3.1 Equations (7), (8), (9).
-    /// For `m = 2`, we follow the Lemma 3.1 note and set
-    /// `D_Z = max(D_Y, D_Z)` where `D_Z` is the Equation (9) value.
+    /// We use Lemma 3.1 and the bounds on `a` in terms of `D_X, D_Y, D_Z` from Section 3.2 and
+    /// Equation (13). As noted in the paragraph after Lemma 3.1, the parameters chosen in the
+    /// Lemma 3.1 statement are not optimal and chosen to provide cleaner expressions.
+    /// We do a brute-force search in `bchks25_optimal_degrees_bruteforce` to find parameters that
+    /// meet the conditions for the proof of Lemma 3.1 to be applied to find the polynomial `Q`.
+    ///
+    /// A closed-form Lemma 3.1 degree computation is kept in
+    /// `bchks25_reference_log2_degrees` for fallback/reference.
     ///
     /// Parameters are mapped as:
     /// - `num_variables = log_degree`
@@ -483,29 +780,27 @@ impl SoundnessCalculator {
             return f64::INFINITY;
         }
 
-        let m_bar = m_eff as f64 + 0.5;
-        let log2_m_bar = m_bar.log2();
         let log2_n = (log_degree + log_inv_rate) as f64;
-        let log2_3 = 3.0_f64.log2();
-
-        // Lemma 3.1 degrees in log2-space.
-        // D_X = (m + 1/2) * sqrt(k * n)
-        // D_Y = (m + 1/2) * sqrt(n / k)
-        // D_Z (Equation 9) = ((m + 1/2)^2 * n) / (3 * k)
-        let log2_d_x = log2_m_bar + log2_n + 0.5 * log2_rho;
-        let log2_d_y = log2_m_bar - 0.5 * log2_rho;
-        let log2_d_z = 2.0 * log2_m_bar - log2_3 - log2_rho;
-        let log2_d_z = if m_eff < 3 {
-            log2_d_y.max(log2_d_z)
+        let log2_a_real = if let Some((optimal_degrees, log2_a)) =
+            Self::bchks25_optimal_degrees_bruteforce(log_degree, log_inv_rate, m_eff, gamma)
+        {
+            debug_assert!(
+                optimal_degrees.d_x > 0 && optimal_degrees.d_y > 0 && optimal_degrees.d_z > 0
+            );
+            log2_a
         } else {
-            log2_d_z
+            // Fallback for extreme parameter regimes where exact integer search is not
+            // representable.
+            let (log2_d_x, log2_d_y, log2_d_z) =
+                Self::bchks25_reference_log2_degrees(log_degree, log_inv_rate, m_eff);
+            let log2_gamma_n_plus_1 = Self::log2_add(gamma.log2() + log2_n, 0.0);
+            Self::bchks25_log2_a_from_log2_degrees(
+                log2_d_x,
+                log2_d_y,
+                log2_d_z,
+                log2_gamma_n_plus_1,
+            )
         };
-
-        // Equation (13): a > 2*D_X*D_Y^2*D_Z + (gamma*n + 1)*D_Y
-        let log2_term_poly = 1.0 + log2_d_x + 2.0 * log2_d_y + log2_d_z;
-        let log2_gamma_n_plus_1 = Self::log2_add(gamma.log2() + log2_n, 0.0);
-        let log2_term_gamma = log2_d_y + log2_gamma_n_plus_1;
-        let log2_a_real = Self::log2_add(log2_term_poly, log2_term_gamma);
         if !log2_a_real.is_finite() {
             return f64::INFINITY;
         }
@@ -833,7 +1128,7 @@ mod tests {
             2,
             18,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
-            ProximityRegime::ListDecoding { m: 2 },
+            ProximityRegime::ListDecoding { m: 1 },
         )
     }
 
@@ -845,7 +1140,7 @@ mod tests {
             2,
             17,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
-            ProximityRegime::ListDecoding { m: 3 },
+            ProximityRegime::ListDecoding { m: 1 },
         )
     }
 
@@ -857,7 +1152,7 @@ mod tests {
             2,
             20,
             11,
-            ProximityRegime::ListDecoding { m: 3 },
+            ProximityRegime::ListDecoding { m: 2 },
         )
     }
 
@@ -981,6 +1276,99 @@ mod tests {
             "Expected ~67.8, got {}",
             security_blowup2
         );
+    }
+
+    #[test]
+    fn test_bchks25_optimizer_finds_minimal_valid_dz() {
+        let log_degree = 24;
+        let log_inv_rate = 2;
+        let m = 3;
+
+        let rho = (-(log_inv_rate as f64)).exp2();
+        let sqrt_rho = rho.sqrt();
+        let eta = sqrt_rho / (2.0 * m as f64);
+        let gamma = 1.0 - sqrt_rho - eta;
+
+        let (degrees, _log2_a) = SoundnessCalculator::bchks25_optimal_degrees_bruteforce(
+            log_degree,
+            log_inv_rate,
+            m,
+            gamma,
+        )
+        .expect("optimizer should find valid degrees");
+        let n = 1_u128 << (log_degree + log_inv_rate);
+        let k = 1_u128 << log_degree;
+        let m_u = m as u128;
+
+        assert_eq!(degrees.d_x, k * degrees.d_y);
+        assert!(degrees.d_y >= m_u.saturating_sub(1));
+        let vars =
+            SoundnessCalculator::bchks25_num_vars_with_dx_eq_kdy(k, degrees.d_y, degrees.d_z)
+                .expect("vars should fit in u128");
+        let eqs = SoundnessCalculator::bchks25_num_eqs_eq11(n, m_u, degrees.d_z)
+            .expect("eqs should fit in u128");
+        assert!(vars > eqs);
+        if degrees.d_z > degrees.d_y {
+            let prev_vars = SoundnessCalculator::bchks25_num_vars_with_dx_eq_kdy(
+                k,
+                degrees.d_y,
+                degrees.d_z - 1,
+            )
+            .expect("vars should fit in u128");
+            let prev_eqs = SoundnessCalculator::bchks25_num_eqs_eq11(n, m_u, degrees.d_z - 1)
+                .expect("eqs should fit in u128");
+            assert!(prev_vars <= prev_eqs);
+        }
+    }
+
+    #[test]
+    fn test_bchks25_eq11_closed_form_matches_expanded_sum() {
+        let n = 1_u128 << 12;
+        for m in 2_u128..=8 {
+            for d_z in (m - 1)..=(m + 12) {
+                let closed_form = SoundnessCalculator::bchks25_num_eqs_eq11(n, m, d_z)
+                    .expect("closed-form n_eqs should fit in u128");
+                let ceil_d_z = d_z + 1;
+                let mut expanded_sum = 0_u128;
+                for s in 0..m {
+                    expanded_sum += (ceil_d_z - s) * (m - s);
+                }
+                let expanded = n * expanded_sum;
+                assert_eq!(closed_form, expanded);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bchks25_reference_m2_enforces_dz_ge_dy() {
+        let (_log2_d_x, log2_d_y, log2_d_z) =
+            SoundnessCalculator::bchks25_reference_log2_degrees(24, 2, 2);
+        assert!(log2_d_z >= log2_d_y);
+    }
+
+    #[test]
+    fn test_bchks25_min_dz_direct_solve_matches_linear_scan() {
+        let cases = [
+            // Increasing predicate case.
+            (1_u128 << 20, 1_u128 << 22, 3_u128, 2_u128),
+            // Decreasing predicate case.
+            (1_u128 << 12, 1_u128 << 24, 6_u128, 5_u128),
+            // Near-flat-ish case.
+            (1_u128 << 16, 1_u128 << 20, 4_u128, 3_u128),
+        ];
+
+        for (k, n, m, d_y) in cases {
+            let got = SoundnessCalculator::bchks25_min_dz_with_dx_eq_kdy(k, n, m, d_y);
+            let low = d_y.max(m.saturating_sub(1));
+            let expected = (low..=SoundnessCalculator::BCHKS25_DZ_SEARCH_MAX).find(|&d_z| {
+                let vars = SoundnessCalculator::bchks25_num_vars_with_dx_eq_kdy(k, d_y, d_z)
+                    .expect("vars should fit");
+                let eqs =
+                    SoundnessCalculator::bchks25_num_eqs_eq11(n, m, d_z).expect("eqs should fit");
+                vars > eqs
+            });
+            assert_eq!(got, expected);
+        }
     }
 
     // ==========================================================================
