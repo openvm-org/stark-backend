@@ -156,6 +156,17 @@ where
         for data in &pre_cached_pcs_data_per_commit {
             stacked_per_commit.push(data);
         }
+        #[cfg(debug_assertions)]
+        {
+            let total_stacked_width: usize =
+                stacked_per_commit.iter().map(|d| d.layout.width()).sum();
+            debug_assert!(
+                total_stacked_width <= params.w_stack,
+                "total stacked width across commits ({total_stacked_width}) exceeds w_stack ({})",
+                params.w_stack
+            );
+        }
+
         let mut need_rot_per_commit = vec![need_rot_per_trace];
         for (air_idx, trace_ctx) in &ctx.per_trace {
             let need_rot = mpk.per_air[*air_idx].vk.params.need_rot;
