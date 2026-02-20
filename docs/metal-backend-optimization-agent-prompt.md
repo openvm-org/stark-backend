@@ -5,17 +5,15 @@ Goal:
 Implement exactly one milestone from `docs/metal-backend-optimization-milestones.md` in this run, with no proof-system behavior changes.
 
 Milestone selection input (required):
-- `MILESTONE_ID` must be provided by the caller (e.g. `1`, `2`, `3`, ...).
+- `MILESTONE_ID` must be provided by the caller (for example: `8`, `9`, `10`, ...).
 - Execute only the selected milestone.
 - Do not make code changes for any other milestone, even if nearby.
 
 Context:
-- Apple GPU has unified memory (StorageModeShared semantics matter).
-- Baseline trace from `keccakf` example shows dominant time in:
-  - `prover.main_trace_commit > stacked_commit > rs_code_matrix` (~36%)
-  - `prover.main_trace_commit > stacked_commit > merkle_tree` (~9%)
-  - `prover.rap_constraints.round0` (~35%)
-  - `prover.openings.whir > merkle_tree` (~2-3% across calls)
+- Apple GPU uses unified memory (StorageModeShared semantics matter).
+- Phase 1 milestones (`0` through `7`) are historical and complete.
+- Phase 2 target (as of February 20, 2026): reduce release `keccakf` median from `2.37s` to `<= 1.18s`.
+- LogUp path must be tracked separately using `test_batch_constraints_with_interactions` (n_logup > 0 path).
 
 Hard constraints:
 - Keep correctness and transcript behavior unchanged.
@@ -23,8 +21,9 @@ Hard constraints:
 - Do not upgrade Plonky3 (`=0.4.1` remains pinned).
 - Always run per-crate checks/tests only (never workspace-wide checks).
 - Prefer `cargo check -p openvm-metal-backend`.
-- Prefer `cargo test -p openvm-metal-backend --test ntt_roundtrip`.
+- Prefer targeted `cargo test -p openvm-metal-backend ...` for touched paths.
 - Treat all non-selected milestones as out of scope for this run.
+- Do not edit `docs/metal-backend-optimization-tracking/STATUS.md` in this workflow.
 
 Pre-flight process:
 1. Read `docs/metal-backend-optimization-milestones.md`.
@@ -33,110 +32,104 @@ Pre-flight process:
 4. If selected milestone is marked `completed`, stop and report no-op.
 5. If selected milestone is `in_progress` by another owner, stop and report conflict.
 
-Optimization catalog (global list; do not implement all in one run):
+Phase 2 optimization catalog (do not implement all in one run):
 
-1) Remove per-copy synchronization in stacked trace assembly (`rs_code_matrix` path)
-- Current hotspot:
-  - `crates/metal-backend/src/stacked_pcs.rs:110`
-  - `crates/metal-backend/src/stacked_pcs.rs:129`
-  - `crates/metal-backend/src/stacked_pcs.rs:146`
-- Problem:
-  - `command::blit_operation` is called repeatedly in a loop, forcing repeated command-buffer sync.
-- Target:
-  - Batch all blit copies into one command buffer with one sync, or replace with one packing kernel.
-  - Keep same output layout and zero-fill semantics.
+8) Benchmark harness expansion and KPI contract
+- Capture and store reproducible warm-run baselines for:
+  - `cargo run -p openvm-metal-backend --release --example keccakf`
+  - `cargo test -p openvm-metal-backend --release test_batch_constraints_with_interactions -- --nocapture`
+- Report required spans and median values used by later milestones.
 
-2) Reduce synchronous kernel dispatch overhead across hot loops
-- Current hotspot:
-  - `crates/metal-backend/src/metal/mod.rs:166`
-  - repeated use in `crates/metal-backend/src/metal/stacked_reduction.rs:77`
-  - repeated use in `crates/metal-backend/src/metal/logup_zerocheck.rs:1319`
-  - repeated reductions in `crates/metal-backend/src/metal/logup_zerocheck.rs:1406`
-- Problem:
-  - New command buffer + immediate wait for many kernels.
-- Target:
-  - Introduce stage-level batching (multi-dispatch/async + single barrier per stage where legal).
-  - Preserve ordering and determinism.
+9) Round0/LogUp coset dispatch fusion
+- Focus files:
+  - `crates/metal-backend/src/metal/logup_zerocheck.rs`
+  - `crates/metal-backend/src/metal/mod.rs`
+- Goal:
+  - reduce coset-loop dispatch/sync overhead and scratch allocation churn.
 
-3) Exploit unified memory to remove avoidable D2H/H2D copies
-- Current hotspots:
-  - Root extraction: `crates/metal-backend/src/merkle_tree.rs:97`
-  - Per-layer H2D digest copies: `crates/metal-backend/src/data_transporter.rs:170`
-  - Generic matrix D2H path: `crates/metal-backend/src/data_transporter.rs:217`
-  - Column openings conversion path: `crates/metal-backend/src/logup_zerocheck/mod.rs:2222`
-- Problem:
-  - Unnecessary `to_host()` / `to_device()` copies in shared-memory environment.
-- Target:
-  - Keep data in shared buffers and avoid full copies when only scalar/sliced reads are needed.
-  - Preserve API behavior for callers that require owned host buffers.
+10) LogUp MLE batching and fallback elimination
+- Focus files:
+  - `crates/metal-backend/src/logup_zerocheck/batch_mle.rs`
+  - `crates/metal-backend/src/logup_zerocheck/batch_mle_monomial.rs`
+  - `crates/metal-backend/src/metal/logup_zerocheck.rs`
+- Goal:
+  - reduce `evaluate_single_logup` fallback use and improve MLE throughput.
 
-4) Remove strided-upload double buffering during trace transport
-- Current hotspot:
-  - `crates/metal-backend/src/data_transporter.rs:110`
-  - `crates/metal-backend/src/data_transporter.rs:131`
-  - `crates/metal-backend/src/data_transporter.rs:136`
-  - `crates/metal-backend/src/metal/matrix.rs:145`
-- Problem:
-  - Upload to `strided_trace`, then allocate again and run `collapse_strided_matrix`.
-- Target:
-  - Upload in contiguous layout directly when possible, removing extra allocation and kernel dispatch.
-  - Keep compatibility with `stride == 1` and `stride > 1`.
+11) Main trace commit and RS pipeline optimization
+- Focus files:
+  - `crates/metal-backend/src/stacked_pcs.rs`
+  - `crates/metal-backend/src/merkle_tree.rs`
+- Goal:
+  - lower `prover.main_trace_commit` and `rs_code_matrix` spans.
 
-5) Reuse temporary buffers and batch reductions in logup round0
-- Current hotspot:
-  - `crates/metal-backend/src/metal/logup_zerocheck.rs:1254`
-  - `crates/metal-backend/src/metal/logup_zerocheck.rs:1315`
-  - `crates/metal-backend/src/metal/logup_zerocheck.rs:1414`
-  - `crates/metal-backend/src/metal/logup_zerocheck.rs:69`
-- Problem:
-  - Per-coset `tmp_p/tmp_q` allocations and separate synced reductions.
-- Target:
-  - Preallocate scratch buffers per call and reuse across cosets.
-  - Batch numerator/denominator final reductions where safe.
+12) Trace transport and layout path optimization
+- Focus files:
+  - `crates/metal-backend/src/data_transporter.rs`
+  - `crates/metal-backend/src/metal/matrix.rs`
+- Goal:
+  - reduce host-side layout work, temporary allocations, and transport dispatch count.
 
-6) Make `batch_ntt_small` threadgroup/shared-memory sizing device-aware
-- Current hotspot:
-  - `crates/metal-backend/src/metal/batch_ntt_small.rs:57`
-  - `crates/metal-backend/src/metal/batch_ntt_small.rs:67`
-- Problem:
-  - Hard-coded 1024 assumptions can reduce occupancy or break on stricter limits.
-- Target:
-  - Derive threadgroup shape and shared memory from pipeline/device limits.
-  - Keep existing correctness checks and twiddle usage.
+13) Openings and WHIR pipeline tightening
+- Focus files:
+  - `crates/metal-backend/src/whir.rs`
+  - `crates/metal-backend/src/stacked_reduction.rs`
+  - `crates/metal-backend/src/metal/stacked_reduction.rs`
+- Goal:
+  - reduce `prover.openings.whir` and reduction sync overhead.
+
+14) Cross-phase scheduling and buffer pool
+- Focus files:
+  - `crates/metal-backend/src/metal/mod.rs`
+  - `crates/metal-backend/src/base.rs`
+  - `crates/metal-common/src/d_buffer.rs`
+- Goal:
+  - introduce shared scheduling/buffer infrastructure used by multiple phases.
+
+15) Final 2x validation and residual backlog
+- No new optimization scope.
+- Validate final result against Milestone 8 baselines and publish residual bottlenecks.
 
 Milestone-to-work mapping:
-- Milestone 1 -> work item 2
-- Milestone 2 -> work item 1
-- Milestone 3 -> work item 3
-- Milestone 4 -> work item 4
-- Milestone 5 -> work item 5
-- Milestone 6 -> work item 6
-- Milestone 7 -> end-to-end validation/reporting only (no new optimization scope)
-- Milestone 0 -> baseline harness/guardrails only
+- Milestone 8 -> work item 8
+- Milestone 9 -> work item 9
+- Milestone 10 -> work item 10
+- Milestone 11 -> work item 11
+- Milestone 12 -> work item 12
+- Milestone 13 -> work item 13
+- Milestone 14 -> work item 14
+- Milestone 15 -> work item 15
 
 Execution rule:
-- Implement only the work items mapped to `MILESTONE_ID`.
+- Implement only the work item mapped to `MILESTONE_ID`.
 - Ignore all other work items.
 
 Implementation requirements:
-- Add tracing around new batching points (kernel count / sync count per major phase).
+- Add tracing around new batching points (kernel count / sync count / fallback count where relevant).
 - Keep unsafe invariants documented when moving pointer/buffer code.
 - Minimize extra allocations in hot loops.
 
 Validation required before finishing:
 1. `cargo check -p openvm-metal-backend`
-2. Run milestone-relevant tests (at least `cargo test -p openvm-metal-backend --test ntt_roundtrip` if touched code affects it)
-3. If milestone includes profiling goals, run keccakf with tracing:
+2. Run milestone-relevant tests (at minimum `cargo test -p openvm-metal-backend --test ntt_roundtrip` if touched code can affect it)
+3. If milestone includes profiling goals:
    - `cargo run -p openvm-metal-backend --release --example keccakf`
-4. Update tracking files:
-   - `docs/metal-backend-optimization-tracking/milestone-<MILESTONE_ID>.md`
-   - `docs/metal-backend-optimization-tracking/STATUS.md`
-5. Include in final report:
+4. If milestone targets LogUp (`9`, `10`, `14`, `15`):
+   - `cargo test -p openvm-metal-backend --release test_batch_constraints_with_interactions -- --nocapture`
+5. Update only `docs/metal-backend-optimization-tracking/milestone-<MILESTONE_ID>.md`:
+   - Set status to `completed`
+   - Set/refresh `Completed` and `Last Updated` dates
+   - Record validation commands and measured metrics
+6. Create a git commit before final response:
+   - Stage all intended milestone changes
+   - Use a non-empty commit message that references `MILESTONE_ID`
+   - Do not amend prior commits unless explicitly instructed
+7. Include in final report:
    - `MILESTONE_ID` and scope completed
+   - commit hash
    - changed files
    - optimization summary for selected milestone only
-   - measured timing deltas from trace spans
-   - any residual bottlenecks
+   - measured timing deltas from tracked spans
+   - residual bottlenecks
 
 Non-goals:
 - No protocol redesign.

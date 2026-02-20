@@ -13,6 +13,10 @@ This directory tracks milestone ownership and completion for `docs/metal-backend
 5. Record validation and performance results in the milestone file.
 6. Set status to `completed` when done, and update completion date.
 
+For Phase 2 milestones (`8` through `15`), record both benchmark families:
+- `keccakf` release benchmark (`cargo run -p openvm-metal-backend --release --example keccakf`)
+- LogUp benchmark (`cargo test -p openvm-metal-backend --release test_batch_constraints_with_interactions -- --nocapture`)
+
 ## Status Values
 
 - `not_started`
@@ -23,5 +27,6 @@ This directory tracks milestone ownership and completion for `docs/metal-backend
 ## Files
 
 - `STATUS.md`: global board across milestones.
-- `milestone-0.md` ... `milestone-7.md`: detailed per-milestone logs and results.
+- `milestone-0.md` ... `milestone-15.md`: detailed per-milestone logs and results.
 - `PARALLELISM.md`: guidance for running multiple milestone agents concurrently.
+- `baselines/`: raw benchmark traces used in milestone reports.

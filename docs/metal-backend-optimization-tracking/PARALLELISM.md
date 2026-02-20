@@ -2,45 +2,47 @@
 
 This is a practical guide for running multiple Codex agents concurrently on different milestones.
 
-## Generally Parallel-Safe
+## Phase 1 (Historical)
 
-- Milestone 2 (`stacked_pcs.rs`) with Milestone 6 (`batch_ntt_small.rs`)
-- Milestone 2 with Milestone 3
-- Milestone 2 with Milestone 5
-- Milestone 3 with Milestone 6
-- Milestone 5 with Milestone 6
+- Milestones `0` through `7` are completed.
+- Keep previous notes for historical context only; current scheduling applies to Phase 2 milestones `8` through `15`.
 
-## Potential Conflict (Prefer Serial)
+## Phase 2 Generally Parallel-Safe
 
-- Milestone 1 with Milestone 5
-  - Both touch `crates/metal-backend/src/metal/logup_zerocheck.rs`.
-- Milestone 3 with Milestone 4
-  - Both touch `crates/metal-backend/src/data_transporter.rs`.
-- Milestone 0 and Milestone 7
-  - Milestone 7 should run after optimization milestones complete.
-
-## Current State (2026-02-20)
-
-- Milestone 0 completed.
-- Wave A completed and merged into `metal-backend`: Milestones 1, 2, 3, and 6.
-- Wave B completed and merged into `metal-backend`: Milestones 4 and 5.
-- Milestone 7 is the next and final optimization milestone.
-
-## Recommended Parallel Plan
-
-1. Run Milestone 0 first. (completed)
-2. Parallel wave A: (completed)
-   - Agent A: Milestone 1
-   - Agent B: Milestone 2
-   - Agent C: Milestone 3
-   - Agent D: Milestone 6
-3. Parallel wave B (completed after wave A merge):
-   - Agent E: Milestone 4
-   - Agent F: Milestone 5
-4. Run Milestone 7 last (next).
+- Milestone 9 (`metal/logup_zerocheck.rs`) with Milestone 11 (`stacked_pcs.rs`, `merkle_tree.rs`)
+- Milestone 9 with Milestone 12 (`data_transporter.rs`, `metal/matrix.rs`)
+- Milestone 10 (`batch_mle*.rs`) with Milestone 11
+- Milestone 10 with Milestone 12
+- Milestone 11 with Milestone 13 (`whir.rs`, `stacked_reduction*.rs`)
 
 ## Coordination Rules
 
 - Claim milestone in `STATUS.md` before editing.
 - One milestone per agent per run.
 - Rebase/merge frequently to reduce conflict windows.
+
+## Phase 2 Potential Conflict (Prefer Serial)
+
+- Milestone 9 with Milestone 10
+  - Both can touch `crates/metal-backend/src/metal/logup_zerocheck.rs`.
+- Milestone 12 with Milestone 14
+  - Milestone 14 may update shared allocation/scheduling infra used by transporter paths.
+- Milestone 13 with Milestone 14
+  - Both may touch shared reduction dispatch infrastructure.
+- Milestone 14 with any still-open milestone
+  - Cross-phase infra changes are safest after feature milestones merge.
+- Milestone 8 and Milestone 15
+  - Milestone 15 depends on Milestone 8 baseline definitions.
+
+## Phase 2 Recommended Parallel Plan
+
+1. Run Milestone 8 first.
+2. Parallel wave A:
+   - Agent A: Milestone 9
+   - Agent B: Milestone 11
+   - Agent C: Milestone 12
+   - Agent D: Milestone 13
+3. Parallel wave B after wave A merge:
+   - Agent E: Milestone 10
+4. Run Milestone 14 after wave B.
+5. Run Milestone 15 last.
