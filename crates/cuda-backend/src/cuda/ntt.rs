@@ -53,6 +53,15 @@ extern "C" {
         padded_poly_size: u32,
         poly_count: u32,
     ) -> i32;
+
+    /// Fused bitrev + K=2 tree build for a single frac_fpext_t buffer.
+    /// Applies alpha to denominators and fuses tree layers 0 and 1 in shmem.
+    /// Requires domain_size >= 256.
+    fn _bit_rev_frac_ext_build_k2(
+        inout: *mut std::ffi::c_void,
+        lg_domain_size: u32,
+        alpha: EF,
+    ) -> i32;
 }
 
 pub unsafe fn bit_rev(
@@ -100,6 +109,18 @@ pub unsafe fn bit_rev_frac_ext(
         lg_domain_size,
         padded_poly_size,
         poly_count,
+    ))
+}
+
+pub unsafe fn bit_rev_frac_ext_build_k2(
+    inout: &DeviceBuffer<(EF, EF)>,
+    lg_domain_size: u32,
+    alpha: EF,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_bit_rev_frac_ext_build_k2(
+        inout.as_mut_raw_ptr(),
+        lg_domain_size,
+        alpha,
     ))
 }
 
