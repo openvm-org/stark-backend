@@ -128,6 +128,7 @@ fn test_proof_shape_verifier() -> Result<(), ProofShapeError> {
 fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> {
     setup_tracing();
     let mut rng = StdRng::from_seed([228; 32]);
+    let w_stack = 16;
     for _ in 0..10 {
         let l_skip = rng.random_range(1usize..=2);
         let n_stack = rng.random_range(8usize..=9);
@@ -150,6 +151,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
         let params = SystemParams {
             l_skip,
             n_stack,
+            w_stack,
             log_blowup,
             whir,
             logup: log_up_security_params_baby_bear_100_bits(),
@@ -358,6 +360,7 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
     setup_tracing_with_log_level(Level::DEBUG);
 
     let n_stack = 8;
+    let w_stack = 8;
     let k_whir = 4;
     let whir_params = WhirParams {
         k: k_whir,
@@ -369,6 +372,7 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
     let params = SystemParams {
         l_skip,
         n_stack,
+        w_stack,
         log_blowup,
         whir,
         logup: log_up_security_params_baby_bear_100_bits(),
