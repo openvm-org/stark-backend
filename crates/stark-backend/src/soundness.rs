@@ -335,7 +335,6 @@ impl SoundnessCalculator {
                     log_inv_rate,
                     2,
                 ) + whir.folding_pow_bits as f64;
-                println!("current_log_degree: {current_log_degree}, log_inv_rate: {log_inv_rate}, prox_gap_bits: {prox_gaps_bits}");
                 min_prox_gaps_bits = min_prox_gaps_bits.min(prox_gaps_bits);
 
                 let sumcheck_bits = Self::whir_sumcheck_security(
@@ -1234,7 +1233,7 @@ mod tests {
             18,
             1024,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
-            ProximityRegime::ListDecoding { m: 1 },
+            ProximityRegime::ListDecoding { m: 3 },
         )
     }
 
@@ -1247,7 +1246,7 @@ mod tests {
             17,
             1024,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
-            ProximityRegime::ListDecoding { m: 1 },
+            ProximityRegime::ListDecoding { m: 3 },
         )
     }
 
@@ -1260,7 +1259,7 @@ mod tests {
             20,
             64,
             11,
-            ProximityRegime::UniqueDecoding,
+            ProximityRegime::ListDecoding { m: 1 },
         )
     }
 
