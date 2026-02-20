@@ -45,6 +45,7 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 fn make_params() -> SystemParams {
     let l_skip = 4;
     let n_stack = 17;
+    let w_stack = 64;
     let k_whir = 4;
     let whir_params = WhirParams {
         k: k_whir,
@@ -56,6 +57,7 @@ fn make_params() -> SystemParams {
     SystemParams {
         l_skip,
         n_stack,
+        w_stack,
         log_blowup,
         whir,
         logup: log_up_security_params_baby_bear_100_bits(),

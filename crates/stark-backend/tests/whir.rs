@@ -148,11 +148,13 @@ fn test_whir_single_fib(
 ) -> Result<(), VerifyWhirError> {
     setup_tracing_with_log_level(Level::DEBUG);
     let l_skip = 2;
+    let w_stack = 8;
     let whir = test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len);
 
     let params = SystemParams {
         l_skip,
         n_stack,
+        w_stack,
         log_blowup,
         whir,
         logup: log_up_security_params_baby_bear_100_bits(),
@@ -220,6 +222,7 @@ fn test_whir_multiple_commitments() -> Result<(), VerifyWhirError> {
     let params = SystemParams {
         l_skip: 3,
         n_stack: 3,
+        w_stack: 64,
         log_blowup: 1,
         whir: whir_test_config(2),
         logup: log_up_security_params_baby_bear_100_bits(),
@@ -299,6 +302,7 @@ fn test_whir_multiple_commitments_negative() {
     let params = SystemParams {
         l_skip: 3,
         n_stack: 3,
+        w_stack: 64,
         log_blowup: 1,
         whir: whir_test_config(2),
         logup: log_up_security_params_baby_bear_100_bits(),

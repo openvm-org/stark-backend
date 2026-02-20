@@ -456,7 +456,8 @@ impl SystemParams {
     }
 }
 
-/// Trace heights cannot exceed 2^{l_skip + n_stack} when using these system params.
+/// Trace heights cannot exceed `2^{l_skip + n_stack}` and stacked cells cannot exceed
+/// `w_stack * 2^{l_skip + n_stack}` when using these system params.
 pub fn test_system_params_small(l_skip: usize, n_stack: usize, k_whir: usize) -> SystemParams {
     let log_final_poly_len = (n_stack + l_skip) % k_whir;
     test_system_params_small_with_poly_len(l_skip, n_stack, k_whir, log_final_poly_len, 3)
@@ -474,6 +475,7 @@ pub fn test_system_params_small_with_poly_len(
     SystemParams {
         l_skip,
         n_stack,
+        w_stack: 1 << 12,
         log_blowup,
         whir: test_whir_config_small(log_blowup, l_skip + n_stack, k_whir, log_final_poly_len),
         logup: LogUpSecurityParameters {
