@@ -106,6 +106,11 @@ extern "C" {
         apply_alpha: bool,
     ) -> i32;
 
+    /// Fused two-layer tree build. Applies layers i and i+1 in one kernel pass,
+    /// keeping intermediate right-half nodes for revert operations.
+    /// `half_i1` = N >> (i+2), where i is the first of the two layers.
+    fn _frac_build_tree_two_layers(layer: *mut Frac<EF>, half_i1: usize) -> i32;
+
     pub fn _frac_compute_round_temp_buffer_size(stride: u32) -> u32;
 
     fn _frac_compute_round(
@@ -540,6 +545,15 @@ pub unsafe fn frac_build_tree_layer(
         alpha,
         apply_alpha,
     ))
+}
+
+/// Fused two-layer tree build kernel.
+/// `half_i1` = N >> (i+2), where i is the first of the two layers being fused.
+pub unsafe fn frac_build_tree_two_layers(
+    layer: &mut DeviceBuffer<Frac<EF>>,
+    half_i1: usize,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_frac_build_tree_two_layers(layer.as_mut_ptr(), half_i1))
 }
 
 // `eq_xi` will not store evaluations for the first hypercube coordinate because the prover factors
