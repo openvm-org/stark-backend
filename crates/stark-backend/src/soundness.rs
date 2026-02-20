@@ -465,14 +465,14 @@ impl SoundnessCalculator {
         let m_eff = m.max(1);
         let log2_rho = -(log_inv_rate as f64);
         let rho = log2_rho.exp2();
-        if !(rho > 0.0) || !rho.is_finite() {
+        if rho <= 0.0 || !rho.is_finite() {
             return f64::INFINITY;
         }
 
         let sqrt_rho = rho.sqrt();
         let eta = sqrt_rho / (2.0 * m_eff as f64);
         let gamma = 1.0 - sqrt_rho - eta;
-        if !(eta > 0.0) || !(gamma > 0.0) || gamma >= 1.0 - sqrt_rho {
+        if eta <= 0.0 || gamma <= 0.0 || gamma >= 1.0 - sqrt_rho {
             // Invalid theorem regime => no security from this term.
             return f64::INFINITY;
         }
