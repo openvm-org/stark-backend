@@ -185,7 +185,7 @@ impl WhirConfig {
 
         // A safe setting for BabyBear and ~200 columns
         // TODO[jpw]: use rbr_soundness_queries_combination
-        const FOLDING_POW_BITS: usize = 10;
+        const FOLDING_POW_BITS: usize = 20;
 
         let mut round_parameters = Vec::with_capacity(num_rounds);
         for _round in 0..num_rounds {
