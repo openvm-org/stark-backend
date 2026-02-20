@@ -479,7 +479,7 @@ impl SoundnessCalculator {
     }
 
     /// Reference closed-form degrees from BCHKS25 Lemma 3.1, Equations (7), (8), (9).
-    /// For `m = 2`, use `D_Z = max(D_Y, D_Z)` as noted below Lemma 3.1.
+    /// For `m < 3`, use `D_Z = max(D_Y, D_Z)` as noted below Lemma 3.1.
     fn bchks25_reference_log2_degrees(
         log_degree: usize,
         log_inv_rate: usize,
@@ -497,7 +497,7 @@ impl SoundnessCalculator {
         let log2_d_x = log2_m_bar + log2_n + 0.5 * log2_rho;
         let log2_d_y = log2_m_bar - 0.5 * log2_rho;
         let log2_d_z = 2.0 * log2_m_bar - log2_3 - log2_rho;
-        let log2_d_z = if m == 2 {
+        let log2_d_z = if m < 3 {
             log2_d_y.max(log2_d_z)
         } else {
             log2_d_z
@@ -517,9 +517,29 @@ impl SoundnessCalculator {
             return Self::BCHKS25_DY_SEARCH_HARD_MAX;
         }
         let ref_scaled = (ref_d_y as u128).saturating_mul(Self::BCHKS25_DY_SEARCH_REF_MULTIPLIER);
-        ref_scaled
-            .max(Self::BCHKS25_DY_SEARCH_MIN_MAX)
-            .min(Self::BCHKS25_DY_SEARCH_HARD_MAX)
+        ref_scaled.clamp(
+            Self::BCHKS25_DY_SEARCH_MIN_MAX,
+            Self::BCHKS25_DY_SEARCH_HARD_MAX,
+        )
+    }
+
+    /// Index-space lower bound from Equation (9), where `d_z = ceil(D_Z)-1`.
+    fn bchks25_dz_eq9_index_lower_bound(log_inv_rate: usize, m: usize) -> Option<u128> {
+        let m_u = m.max(1) as u128;
+        if log_inv_rate >= u128::BITS as usize {
+            return None;
+        }
+
+        // Equation (9): D_Z = ((m + 1/2)^2 * (n/k)) / 3
+        // with n/k = 2^{log_inv_rate}. So:
+        // D_Z = ((2m+1)^2 * 2^{log_inv_rate}) / 12.
+        let n_over_k = 1_u128.checked_shl(log_inv_rate as u32)?;
+        let two_m_plus_1 = m_u.checked_mul(2)?.checked_add(1)?;
+        let numerator = two_m_plus_1
+            .checked_mul(two_m_plus_1)?
+            .checked_mul(n_over_k)?;
+        let ceil_d_z = numerator.checked_add(11)?.checked_div(12)?;
+        Some(ceil_d_z.saturating_sub(1))
     }
 
     /// Counts interpolation variables for fixed `D_Y, D_Z` with `D_X = k * D_Y`.
@@ -570,8 +590,14 @@ impl SoundnessCalculator {
     /// `d_z in [max(d_y, m-1), BCHKS25_DZ_SEARCH_MAX]` and does not require binary search.
     ///
     /// The returned value corresponds to real-degree parameter `D_Z` via `d_z = ceil(D_Z)-1`.
-    fn bchks25_min_dz_with_dx_eq_kdy(k: u128, n: u128, m: u128, d_y: u128) -> Option<u128> {
-        let low = d_y.max(m.saturating_sub(1));
+    fn bchks25_min_dz_with_dx_eq_kdy(
+        k: u128,
+        n: u128,
+        m: u128,
+        d_y: u128,
+        d_z_floor: u128,
+    ) -> Option<u128> {
+        let low = d_y.max(m.saturating_sub(1)).max(d_z_floor);
         let high = Self::BCHKS25_DZ_SEARCH_MAX;
         if low > high {
             return None;
@@ -661,7 +687,9 @@ impl SoundnessCalculator {
     /// satisfy the conditions necessary for the proof of Lemma 3.1 to carry through:
     /// - `D_X = k * D_Y`
     /// - `D_Z >= D_Y`
+    /// - for `m < 3`, additionally `D_Z >=` Equation (9), i.e. `D_Z = max(D_Y, D_Z^{(9)})`
     /// - `D_Y >= m - 1`
+    /// - `D_X <= (1 - gamma) * m * n` (Section 3.2 precondition before applying Equation (13))
     /// - `n_vars > n_eqs` where `n_eqs` is given by Equation (11) and `n_vars = \sum_0^{ceil(D_Y) -
     ///   1} (ceil(D_X) - kj)(ceil(D_Z) - j)`
     /// ```text
@@ -699,21 +727,35 @@ impl SoundnessCalculator {
             return None;
         }
         let log2_agreements_plus_one = agreements_plus_one.log2();
+        let max_d_x_for_gamma = (1.0 - gamma) * (m_u as f64) * (n as f64);
+        if !max_d_x_for_gamma.is_finite() || max_d_x_for_gamma <= 0.0 {
+            return None;
+        }
 
         let mut best: Option<(Bchks25Degrees, f64)> = None;
         let d_y_start = 1_u128.max(m_u.saturating_sub(1));
         let d_y_end = Self::bchks25_dy_search_upper_bound(log_degree, log_inv_rate, m);
+        let d_z_floor = if m < 3 {
+            Self::bchks25_dz_eq9_index_lower_bound(log_inv_rate, m)?
+        } else {
+            0
+        };
         if d_y_start > d_y_end {
             return None;
         }
 
         for d_y in d_y_start..=d_y_end {
-            let Some(d_z) = Self::bchks25_min_dz_with_dx_eq_kdy(k, n, m_u, d_y) else {
+            let Some(d_z) = Self::bchks25_min_dz_with_dx_eq_kdy(k, n, m_u, d_y, d_z_floor) else {
                 continue;
             };
             let Some(d_x) = k.checked_mul(d_y) else {
                 continue;
             };
+            // `d_x` is index-space (`ceil(D_X)-1`), so `D_X` can be chosen as `d_x + ε`.
+            // Enforce the Section 3.2 precondition with strict inequality on index-space.
+            if (d_x as f64) >= max_d_x_for_gamma {
+                continue;
+            }
 
             let log2_d_x = (d_x as f64).log2();
             let log2_d_y = (d_y as f64).log2();
@@ -769,6 +811,11 @@ impl SoundnessCalculator {
         let log2_rho = -(log_inv_rate as f64);
         let rho = log2_rho.exp2();
         if rho <= 0.0 || !rho.is_finite() {
+            return f64::INFINITY;
+        }
+        if m_eff == 1 && rho >= (4.0 / 9.0) {
+            // For m=1: gamma = 1 - sqrt(rho) - sqrt(rho)/(2m) = 1 - 3*sqrt(rho)/2.
+            // Gamma must be positive to apply the Section 3.2 argument.
             return f64::INFINITY;
         }
 
@@ -1152,7 +1199,7 @@ mod tests {
             2,
             20,
             11,
-            ProximityRegime::ListDecoding { m: 2 },
+            ProximityRegime::UniqueDecoding,
         )
     }
 
@@ -1280,9 +1327,9 @@ mod tests {
 
     #[test]
     fn test_bchks25_optimizer_finds_minimal_valid_dz() {
-        let log_degree = 24;
-        let log_inv_rate = 2;
-        let m = 3;
+        let log_degree = 14;
+        let log_inv_rate = 5;
+        let m = 1;
 
         let rho = (-(log_inv_rate as f64)).exp2();
         let sqrt_rho = rho.sqrt();
@@ -1302,13 +1349,19 @@ mod tests {
 
         assert_eq!(degrees.d_x, k * degrees.d_y);
         assert!(degrees.d_y >= m_u.saturating_sub(1));
+        let max_d_x_for_gamma = (1.0 - gamma) * (m as f64) * (n as f64);
+        assert!((degrees.d_x as f64) < max_d_x_for_gamma);
+        let d_z_floor = SoundnessCalculator::bchks25_dz_eq9_index_lower_bound(log_inv_rate, m)
+            .expect("d_z floor should be representable");
+        assert!(degrees.d_z >= degrees.d_y.max(d_z_floor));
         let vars =
             SoundnessCalculator::bchks25_num_vars_with_dx_eq_kdy(k, degrees.d_y, degrees.d_z)
                 .expect("vars should fit in u128");
         let eqs = SoundnessCalculator::bchks25_num_eqs_eq11(n, m_u, degrees.d_z)
             .expect("eqs should fit in u128");
         assert!(vars > eqs);
-        if degrees.d_z > degrees.d_y {
+        let low = degrees.d_y.max(m_u.saturating_sub(1)).max(d_z_floor);
+        if degrees.d_z > low {
             let prev_vars = SoundnessCalculator::bchks25_num_vars_with_dx_eq_kdy(
                 k,
                 degrees.d_y,
@@ -1347,6 +1400,17 @@ mod tests {
     }
 
     #[test]
+    fn test_bchks25_m1_requires_rho_below_four_ninths() {
+        // log_inv_rate=1 => rho=1/2 > 4/9, so m=1 regime is invalid.
+        let invalid = SoundnessCalculator::log2_a_bound_bchks25(12, 1, 1);
+        assert!(invalid.is_infinite());
+
+        // log_inv_rate=2 => rho=1/4 < 4/9, so m=1 regime is admissible.
+        let valid = SoundnessCalculator::log2_a_bound_bchks25(12, 2, 1);
+        assert!(valid.is_finite());
+    }
+
+    #[test]
     fn test_bchks25_min_dz_direct_solve_matches_linear_scan() {
         let cases = [
             // Increasing predicate case.
@@ -1355,11 +1419,20 @@ mod tests {
             (1_u128 << 12, 1_u128 << 24, 6_u128, 5_u128),
             // Near-flat-ish case.
             (1_u128 << 16, 1_u128 << 20, 4_u128, 3_u128),
+            // m < 3 with Equation (9) lower bound active.
+            (1_u128 << 12, 1_u128 << 17, 1_u128, 2_u128),
         ];
 
         for (k, n, m, d_y) in cases {
-            let got = SoundnessCalculator::bchks25_min_dz_with_dx_eq_kdy(k, n, m, d_y);
-            let low = d_y.max(m.saturating_sub(1));
+            let log_inv_rate = (n / k).ilog2() as usize;
+            let d_z_floor = if m < 3 {
+                SoundnessCalculator::bchks25_dz_eq9_index_lower_bound(log_inv_rate, m as usize)
+                    .expect("d_z floor should be representable")
+            } else {
+                0
+            };
+            let got = SoundnessCalculator::bchks25_min_dz_with_dx_eq_kdy(k, n, m, d_y, d_z_floor);
+            let low = d_y.max(m.saturating_sub(1)).max(d_z_floor);
             let expected = (low..=SoundnessCalculator::BCHKS25_DZ_SEARCH_MAX).find(|&d_z| {
                 let vars = SoundnessCalculator::bchks25_num_vars_with_dx_eq_kdy(k, d_y, d_z)
                     .expect("vars should fit");
@@ -1401,8 +1474,8 @@ mod tests {
 
         println!("\n=== {} Soundness ===", name);
         println!(
-            "Config: l_skip={}, n_stack={}, log_blowup={}, k_whir={}",
-            params.l_skip, params.n_stack, params.log_blowup, params.whir.k
+            "Config: l_skip={}, n_stack={}, log_blowup={}, k_whir={}, whir.rounds={:?}",
+            params.l_skip, params.n_stack, params.log_blowup, params.whir.k, params.whir.rounds
         );
         println!(
             "Context: max_constraints={}, num_airs={}, max_log_height={}, num_columns={}, n_logup={}",
