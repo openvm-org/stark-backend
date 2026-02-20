@@ -1,0 +1,879 @@
+# Milestone 8 baseline capture: keccakf
+# Timestamp: 2026-02-20T20:46:15Z
+# Command: cargo run -p openvm-metal-backend --release --example keccakf
+
+===== warmup =====
+warning: openvm-metal-backend@2.0.0-alpha: Compiled 19 Metal shaders into /Users/jpw/github/openvm-org/stark-backend-metal/target/release/build/openvm-metal-backend-30dbb44bbde17624/out/kernels.metallib
+warning: unused imports: `ColMajorMatrix` and `sumcheck_uni_round0_poly`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:22:41
+   |
+22 |         sumcheck::{sumcheck_round0_deg, sumcheck_uni_round0_poly},
+   |                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+23 |         ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `transport_matrix_d2h_col_major`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:35:54
+   |
+35 |     data_transporter::{read_folded_matrix_first_row, transport_matrix_d2h_col_major},
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rules::codec::Codec`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:73:5
+   |
+73 | use rules::codec::Codec;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MemCopyD2H`
+ --> crates/metal-backend/src/stacked_reduction.rs:5:12
+  |
+5 |     copy::{MemCopyD2H, MemCopyH2D},
+  |            ^^^^^^^^^^
+
+warning: unused import: `prover::poly::Ple`
+  --> crates/metal-backend/src/stacked_reduction.rs:16:5
+   |
+16 |     prover::poly::Ple,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:36:9
+   |
+36 |     let mut intermediates = if intermed_capacity > 0 {
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:114:9
+    |
+114 |     let mut intermediates = if intermed_capacity > 0 {
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable `mat_idx` is assigned to, but never used
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1129:25
+     |
+1129 |                 let mut mat_idx = 0usize;
+     |                         ^^^^^^^
+     |
+     = note: consider using `_mat_idx` instead
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `trace_idx`
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1125:20
+     |
+1125 |             .map(|(trace_idx, (air_idx, air_ctx))| {
+     |                    ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trace_idx`
+
+warning: constant `ZEROCHECK_BUFFER_VARS` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:17:7
+   |
+17 | const ZEROCHECK_BUFFER_VARS: bool = false;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `evaluate_mle_constraints_metal` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:23:8
+   |
+23 | pub fn evaluate_mle_constraints_metal(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `d_q_widths`, `q_width_max`, `d_q_eval_ptrs`, `trace_ptrs`, `d_input_ptrs`, and `d_output_ptrs` are never read
+  --> crates/metal-backend/src/stacked_reduction.rs:65:5
+   |
+50 | pub struct StackedReductionMetal {
+   |            --------------------- fields in this struct
+...
+65 |     d_q_widths: MetalBuffer<u32>,
+   |     ^^^^^^^^^^
+66 |     q_width_max: u32,
+   |     ^^^^^^^^^^^
+67 |     d_q_eval_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+68 |
+69 |     trace_ptrs: Vec<(
+   |     ^^^^^^^^^^
+...
+94 |     d_input_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^
+95 |     d_output_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+
+warning: `openvm-metal-backend` (lib) generated 12 warnings (run `cargo fix --lib -p openvm-metal-backend` to apply 7 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.14s
+     Running `target/release/examples/keccakf`
+[1;32mINFO    [0m ｉ [info]: Metal device: Apple M2 Max, max buffer length: 57982058496 bytes
+[1;32mINFO    [0m ｉ [info]: TestAir              | Constraint Deg = 3  | Prep Cols = 0  | Main Cols = [2633]   | 3182 Constraints |   0 Interactions
+[1;32mINFO    [0m generate_trace [ 39.6ms | 100.00% ]
+[1;32mINFO    [0m stark_prove_excluding_trace [ 2.38s | 0.00% / 100.00% ] phase: "prover"
+[1;32mINFO    [0m ┝━ ｉ [info]:  | num_airs_present: 1
+[1;32mINFO    [0m ┝━ prover.main_trace_commit [ 879ms | 0.00% / 36.86% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ stacked_commit [ 879ms | 0.00% / 36.86% ]
+[1;32mINFO    [0m │     ┝━ ｉ [info]: stacked_matrix_dimensions | height: 2097152 | width: 42
+[1;32mINFO    [0m │     ┝━ rs_code_matrix [ 646ms | 27.10% ]
+[1;32mINFO    [0m │     ┕━ merkle_tree [ 233ms | 9.76% ]
+[1;32mINFO    [0m ┝━ prover.rap_constraints [ 1.10s | 0.00% / 45.98% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ prove_zerocheck_and_logup_metal [ 1.10s | 0.00% / 45.97% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.logup_gkr [ 1.35ms | 0.06% / 0.06% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ ｉ [info]:  | n_global: 11 | n_logup: 0
+[1;32mINFO    [0m │     │  ┕━ fractional_sumcheck_metal [ 2.83µs | 0.00% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.round0 [ 928ms | 30.88% / 38.92% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ prover.rap_constraints.ple_round0 [ 192ms | 8.04% ]
+[1;32mINFO    [0m │     │  ┕━ s'_0 -> s_0 cpu interpolations [ 50.0µs | 0.00% ]
+[1;32mINFO    [0m │     ┕━ prover.rap_constraints.mle_rounds [ 167ms | 0.79% / 7.00% ] phase: "prover"
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 79.3ms | 3.32% ] round: 1
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 34.0ms | 1.43% ] round: 2
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 15.5ms | 0.65% ] round: 3
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 8.06ms | 0.34% ] round: 4
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 4.23ms | 0.18% ] round: 5
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 2.39ms | 0.10% ] round: 6
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.46ms | 0.06% ] round: 7
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.05ms | 0.04% ] round: 8
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 751µs | 0.03% ] round: 9
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 633µs | 0.03% ] round: 10
+[1;32mINFO    [0m │        ┕━ LogupZerocheck::sumcheck_polys_batch_eval [ 657µs | 0.03% ] round: 11
+[1;32mINFO    [0m ┕━ prover.openings [ 409ms | 0.00% / 17.16% ] phase: "prover"
+[1;32mINFO    [0m    ┝━ prover.openings.stacked_reduction [ 99.3ms | 0.01% / 4.16% ] phase: "prover"
+[1;32mINFO    [0m    │  ┝━ prover.openings.stacked_reduction.round0 [ 59.7ms | 2.50% ] phase: "prover"
+[1;32mINFO    [0m    │  ┕━ prover.openings.stacked_reduction.mle_rounds [ 39.4ms | 1.65% ] phase: "prover"
+[1;32mINFO    [0m    ┕━ prover.openings.whir [ 310ms | 9.26% / 12.99% ] phase: "prover"
+[1;32mINFO    [0m       ┝━ merkle_tree [ 48.4ms | 2.03% ]
+[1;32mINFO    [0m       ┝━ merkle_tree [ 25.7ms | 1.08% ]
+[1;32mINFO    [0m       ┕━ merkle_tree [ 14.8ms | 0.62% ]
+
+===== measured run 1 =====
+warning: openvm-metal-backend@2.0.0-alpha: Compiled 19 Metal shaders into /Users/jpw/github/openvm-org/stark-backend-metal/target/release/build/openvm-metal-backend-30dbb44bbde17624/out/kernels.metallib
+warning: unused imports: `ColMajorMatrix` and `sumcheck_uni_round0_poly`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:22:41
+   |
+22 |         sumcheck::{sumcheck_round0_deg, sumcheck_uni_round0_poly},
+   |                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+23 |         ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `transport_matrix_d2h_col_major`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:35:54
+   |
+35 |     data_transporter::{read_folded_matrix_first_row, transport_matrix_d2h_col_major},
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rules::codec::Codec`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:73:5
+   |
+73 | use rules::codec::Codec;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MemCopyD2H`
+ --> crates/metal-backend/src/stacked_reduction.rs:5:12
+  |
+5 |     copy::{MemCopyD2H, MemCopyH2D},
+  |            ^^^^^^^^^^
+
+warning: unused import: `prover::poly::Ple`
+  --> crates/metal-backend/src/stacked_reduction.rs:16:5
+   |
+16 |     prover::poly::Ple,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:36:9
+   |
+36 |     let mut intermediates = if intermed_capacity > 0 {
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:114:9
+    |
+114 |     let mut intermediates = if intermed_capacity > 0 {
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable `mat_idx` is assigned to, but never used
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1129:25
+     |
+1129 |                 let mut mat_idx = 0usize;
+     |                         ^^^^^^^
+     |
+     = note: consider using `_mat_idx` instead
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `trace_idx`
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1125:20
+     |
+1125 |             .map(|(trace_idx, (air_idx, air_ctx))| {
+     |                    ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trace_idx`
+
+warning: constant `ZEROCHECK_BUFFER_VARS` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:17:7
+   |
+17 | const ZEROCHECK_BUFFER_VARS: bool = false;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `evaluate_mle_constraints_metal` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:23:8
+   |
+23 | pub fn evaluate_mle_constraints_metal(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `d_q_widths`, `q_width_max`, `d_q_eval_ptrs`, `trace_ptrs`, `d_input_ptrs`, and `d_output_ptrs` are never read
+  --> crates/metal-backend/src/stacked_reduction.rs:65:5
+   |
+50 | pub struct StackedReductionMetal {
+   |            --------------------- fields in this struct
+...
+65 |     d_q_widths: MetalBuffer<u32>,
+   |     ^^^^^^^^^^
+66 |     q_width_max: u32,
+   |     ^^^^^^^^^^^
+67 |     d_q_eval_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+68 |
+69 |     trace_ptrs: Vec<(
+   |     ^^^^^^^^^^
+...
+94 |     d_input_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^
+95 |     d_output_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+
+warning: `openvm-metal-backend` (lib) generated 12 warnings (run `cargo fix --lib -p openvm-metal-backend` to apply 7 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.06s
+     Running `target/release/examples/keccakf`
+[1;32mINFO    [0m ｉ [info]: Metal device: Apple M2 Max, max buffer length: 57982058496 bytes
+[1;32mINFO    [0m ｉ [info]: TestAir              | Constraint Deg = 3  | Prep Cols = 0  | Main Cols = [2633]   | 3182 Constraints |   0 Interactions
+[1;32mINFO    [0m generate_trace [ 39.2ms | 100.00% ]
+[1;32mINFO    [0m stark_prove_excluding_trace [ 2.56s | 0.00% / 100.00% ] phase: "prover"
+[1;32mINFO    [0m ┝━ ｉ [info]:  | num_airs_present: 1
+[1;32mINFO    [0m ┝━ prover.main_trace_commit [ 890ms | 0.00% / 34.76% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ stacked_commit [ 890ms | 0.00% / 34.75% ]
+[1;32mINFO    [0m │     ┝━ ｉ [info]: stacked_matrix_dimensions | height: 2097152 | width: 42
+[1;32mINFO    [0m │     ┝━ rs_code_matrix [ 655ms | 25.56% ]
+[1;32mINFO    [0m │     ┕━ merkle_tree [ 235ms | 9.19% ]
+[1;32mINFO    [0m ┝━ prover.rap_constraints [ 1.24s | 0.00% / 48.57% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ prove_zerocheck_and_logup_metal [ 1.24s | 0.00% / 48.57% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.logup_gkr [ 1.23ms | 0.05% / 0.05% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ ｉ [info]:  | n_global: 11 | n_logup: 0
+[1;32mINFO    [0m │     │  ┕━ fractional_sumcheck_metal [ 2.96µs | 0.00% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.round0 [ 1.06s | 34.00% / 41.42% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ prover.rap_constraints.ple_round0 [ 190ms | 7.41% ]
+[1;32mINFO    [0m │     │  ┕━ s'_0 -> s_0 cpu interpolations [ 176µs | 0.01% ]
+[1;32mINFO    [0m │     ┕━ prover.rap_constraints.mle_rounds [ 182ms | 0.76% / 7.10% ] phase: "prover"
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 88.0ms | 3.43% ] round: 1
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 36.1ms | 1.41% ] round: 2
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 16.1ms | 0.63% ] round: 3
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 8.76ms | 0.34% ] round: 4
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 4.62ms | 0.18% ] round: 5
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 2.55ms | 0.10% ] round: 6
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 3.06ms | 0.12% ] round: 7
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.09ms | 0.04% ] round: 8
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 818µs | 0.03% ] round: 9
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 656µs | 0.03% ] round: 10
+[1;32mINFO    [0m │        ┕━ LogupZerocheck::sumcheck_polys_batch_eval [ 629µs | 0.02% ] round: 11
+[1;32mINFO    [0m ┕━ prover.openings [ 427ms | 0.00% / 16.67% ] phase: "prover"
+[1;32mINFO    [0m    ┝━ prover.openings.stacked_reduction [ 100ms | 0.00% / 3.91% ] phase: "prover"
+[1;32mINFO    [0m    │  ┝━ prover.openings.stacked_reduction.round0 [ 60.4ms | 2.36% ] phase: "prover"
+[1;32mINFO    [0m    │  ┕━ prover.openings.stacked_reduction.mle_rounds [ 39.8ms | 1.55% ] phase: "prover"
+[1;32mINFO    [0m    ┕━ prover.openings.whir [ 327ms | 9.00% / 12.76% ] phase: "prover"
+[1;32mINFO    [0m       ┝━ merkle_tree [ 53.0ms | 2.07% ]
+[1;32mINFO    [0m       ┝━ merkle_tree [ 28.1ms | 1.10% ]
+[1;32mINFO    [0m       ┕━ merkle_tree [ 15.3ms | 0.60% ]
+
+===== measured run 2 =====
+warning: openvm-metal-backend@2.0.0-alpha: Compiled 19 Metal shaders into /Users/jpw/github/openvm-org/stark-backend-metal/target/release/build/openvm-metal-backend-30dbb44bbde17624/out/kernels.metallib
+warning: unused imports: `ColMajorMatrix` and `sumcheck_uni_round0_poly`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:22:41
+   |
+22 |         sumcheck::{sumcheck_round0_deg, sumcheck_uni_round0_poly},
+   |                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+23 |         ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `transport_matrix_d2h_col_major`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:35:54
+   |
+35 |     data_transporter::{read_folded_matrix_first_row, transport_matrix_d2h_col_major},
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rules::codec::Codec`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:73:5
+   |
+73 | use rules::codec::Codec;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MemCopyD2H`
+ --> crates/metal-backend/src/stacked_reduction.rs:5:12
+  |
+5 |     copy::{MemCopyD2H, MemCopyH2D},
+  |            ^^^^^^^^^^
+
+warning: unused import: `prover::poly::Ple`
+  --> crates/metal-backend/src/stacked_reduction.rs:16:5
+   |
+16 |     prover::poly::Ple,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:36:9
+   |
+36 |     let mut intermediates = if intermed_capacity > 0 {
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:114:9
+    |
+114 |     let mut intermediates = if intermed_capacity > 0 {
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable `mat_idx` is assigned to, but never used
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1129:25
+     |
+1129 |                 let mut mat_idx = 0usize;
+     |                         ^^^^^^^
+     |
+     = note: consider using `_mat_idx` instead
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `trace_idx`
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1125:20
+     |
+1125 |             .map(|(trace_idx, (air_idx, air_ctx))| {
+     |                    ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trace_idx`
+
+warning: constant `ZEROCHECK_BUFFER_VARS` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:17:7
+   |
+17 | const ZEROCHECK_BUFFER_VARS: bool = false;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `evaluate_mle_constraints_metal` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:23:8
+   |
+23 | pub fn evaluate_mle_constraints_metal(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `d_q_widths`, `q_width_max`, `d_q_eval_ptrs`, `trace_ptrs`, `d_input_ptrs`, and `d_output_ptrs` are never read
+  --> crates/metal-backend/src/stacked_reduction.rs:65:5
+   |
+50 | pub struct StackedReductionMetal {
+   |            --------------------- fields in this struct
+...
+65 |     d_q_widths: MetalBuffer<u32>,
+   |     ^^^^^^^^^^
+66 |     q_width_max: u32,
+   |     ^^^^^^^^^^^
+67 |     d_q_eval_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+68 |
+69 |     trace_ptrs: Vec<(
+   |     ^^^^^^^^^^
+...
+94 |     d_input_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^
+95 |     d_output_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+
+warning: `openvm-metal-backend` (lib) generated 12 warnings (run `cargo fix --lib -p openvm-metal-backend` to apply 7 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.06s
+     Running `target/release/examples/keccakf`
+[1;32mINFO    [0m ｉ [info]: Metal device: Apple M2 Max, max buffer length: 57982058496 bytes
+[1;32mINFO    [0m ｉ [info]: TestAir              | Constraint Deg = 3  | Prep Cols = 0  | Main Cols = [2633]   | 3182 Constraints |   0 Interactions
+[1;32mINFO    [0m generate_trace [ 38.0ms | 100.00% ]
+[1;32mINFO    [0m stark_prove_excluding_trace [ 2.42s | 0.00% / 100.00% ] phase: "prover"
+[1;32mINFO    [0m ┝━ ｉ [info]:  | num_airs_present: 1
+[1;32mINFO    [0m ┝━ prover.main_trace_commit [ 891ms | 0.00% / 36.79% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ stacked_commit [ 891ms | 0.00% / 36.79% ]
+[1;32mINFO    [0m │     ┝━ ｉ [info]: stacked_matrix_dimensions | height: 2097152 | width: 42
+[1;32mINFO    [0m │     ┝━ rs_code_matrix [ 654ms | 27.01% ]
+[1;32mINFO    [0m │     ┕━ merkle_tree [ 237ms | 9.77% ]
+[1;32mINFO    [0m ┝━ prover.rap_constraints [ 1.12s | 0.00% / 46.15% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ prove_zerocheck_and_logup_metal [ 1.12s | 0.00% / 46.15% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.logup_gkr [ 2.25ms | 0.09% / 0.09% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ ｉ [info]:  | n_global: 11 | n_logup: 0
+[1;32mINFO    [0m │     │  ┕━ fractional_sumcheck_metal [ 4.79µs | 0.00% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.round0 [ 937ms | 30.88% / 38.70% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ prover.rap_constraints.ple_round0 [ 189ms | 7.81% ]
+[1;32mINFO    [0m │     │  ┕━ s'_0 -> s_0 cpu interpolations [ 170µs | 0.01% ]
+[1;32mINFO    [0m │     ┕━ prover.rap_constraints.mle_rounds [ 178ms | 0.84% / 7.36% ] phase: "prover"
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 77.7ms | 3.21% ] round: 1
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 36.0ms | 1.49% ] round: 2
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 16.2ms | 0.67% ] round: 3
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 16.0ms | 0.66% ] round: 4
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 4.41ms | 0.18% ] round: 5
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 2.67ms | 0.11% ] round: 6
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.58ms | 0.07% ] round: 7
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.03ms | 0.04% ] round: 8
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 816µs | 0.03% ] round: 9
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 938µs | 0.04% ] round: 10
+[1;32mINFO    [0m │        ┕━ LogupZerocheck::sumcheck_polys_batch_eval [ 646µs | 0.03% ] round: 11
+[1;32mINFO    [0m ┕━ prover.openings [ 413ms | 0.00% / 17.05% ] phase: "prover"
+[1;32mINFO    [0m    ┝━ prover.openings.stacked_reduction [ 99.1ms | 0.01% / 4.09% ] phase: "prover"
+[1;32mINFO    [0m    │  ┝━ prover.openings.stacked_reduction.round0 [ 59.9ms | 2.47% ] phase: "prover"
+[1;32mINFO    [0m    │  ┕━ prover.openings.stacked_reduction.mle_rounds [ 39.1ms | 1.62% ] phase: "prover"
+[1;32mINFO    [0m    ┕━ prover.openings.whir [ 314ms | 9.22% / 12.96% ] phase: "prover"
+[1;32mINFO    [0m       ┝━ merkle_tree [ 48.5ms | 2.00% ]
+[1;32mINFO    [0m       ┝━ merkle_tree [ 26.4ms | 1.09% ]
+[1;32mINFO    [0m       ┕━ merkle_tree [ 15.8ms | 0.65% ]
+
+===== measured run 3 =====
+warning: openvm-metal-backend@2.0.0-alpha: Compiled 19 Metal shaders into /Users/jpw/github/openvm-org/stark-backend-metal/target/release/build/openvm-metal-backend-30dbb44bbde17624/out/kernels.metallib
+warning: unused imports: `ColMajorMatrix` and `sumcheck_uni_round0_poly`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:22:41
+   |
+22 |         sumcheck::{sumcheck_round0_deg, sumcheck_uni_round0_poly},
+   |                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+23 |         ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `transport_matrix_d2h_col_major`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:35:54
+   |
+35 |     data_transporter::{read_folded_matrix_first_row, transport_matrix_d2h_col_major},
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rules::codec::Codec`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:73:5
+   |
+73 | use rules::codec::Codec;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MemCopyD2H`
+ --> crates/metal-backend/src/stacked_reduction.rs:5:12
+  |
+5 |     copy::{MemCopyD2H, MemCopyH2D},
+  |            ^^^^^^^^^^
+
+warning: unused import: `prover::poly::Ple`
+  --> crates/metal-backend/src/stacked_reduction.rs:16:5
+   |
+16 |     prover::poly::Ple,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:36:9
+   |
+36 |     let mut intermediates = if intermed_capacity > 0 {
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:114:9
+    |
+114 |     let mut intermediates = if intermed_capacity > 0 {
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable `mat_idx` is assigned to, but never used
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1129:25
+     |
+1129 |                 let mut mat_idx = 0usize;
+     |                         ^^^^^^^
+     |
+     = note: consider using `_mat_idx` instead
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `trace_idx`
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1125:20
+     |
+1125 |             .map(|(trace_idx, (air_idx, air_ctx))| {
+     |                    ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trace_idx`
+
+warning: constant `ZEROCHECK_BUFFER_VARS` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:17:7
+   |
+17 | const ZEROCHECK_BUFFER_VARS: bool = false;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `evaluate_mle_constraints_metal` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:23:8
+   |
+23 | pub fn evaluate_mle_constraints_metal(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `d_q_widths`, `q_width_max`, `d_q_eval_ptrs`, `trace_ptrs`, `d_input_ptrs`, and `d_output_ptrs` are never read
+  --> crates/metal-backend/src/stacked_reduction.rs:65:5
+   |
+50 | pub struct StackedReductionMetal {
+   |            --------------------- fields in this struct
+...
+65 |     d_q_widths: MetalBuffer<u32>,
+   |     ^^^^^^^^^^
+66 |     q_width_max: u32,
+   |     ^^^^^^^^^^^
+67 |     d_q_eval_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+68 |
+69 |     trace_ptrs: Vec<(
+   |     ^^^^^^^^^^
+...
+94 |     d_input_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^
+95 |     d_output_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+
+warning: `openvm-metal-backend` (lib) generated 12 warnings (run `cargo fix --lib -p openvm-metal-backend` to apply 7 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running `target/release/examples/keccakf`
+[1;32mINFO    [0m ｉ [info]: Metal device: Apple M2 Max, max buffer length: 57982058496 bytes
+[1;32mINFO    [0m ｉ [info]: TestAir              | Constraint Deg = 3  | Prep Cols = 0  | Main Cols = [2633]   | 3182 Constraints |   0 Interactions
+[1;32mINFO    [0m generate_trace [ 36.8ms | 100.00% ]
+[1;32mINFO    [0m stark_prove_excluding_trace [ 2.44s | 0.00% / 100.00% ] phase: "prover"
+[1;32mINFO    [0m ┝━ ｉ [info]:  | num_airs_present: 1
+[1;32mINFO    [0m ┝━ prover.main_trace_commit [ 890ms | 0.00% / 36.53% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ stacked_commit [ 890ms | 0.00% / 36.53% ]
+[1;32mINFO    [0m │     ┝━ ｉ [info]: stacked_matrix_dimensions | height: 2097152 | width: 42
+[1;32mINFO    [0m │     ┝━ rs_code_matrix [ 655ms | 26.87% ]
+[1;32mINFO    [0m │     ┕━ merkle_tree [ 235ms | 9.65% ]
+[1;32mINFO    [0m ┝━ prover.rap_constraints [ 1.13s | 0.00% / 46.31% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ prove_zerocheck_and_logup_metal [ 1.13s | 0.00% / 46.31% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.logup_gkr [ 1.54ms | 0.06% / 0.06% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ ｉ [info]:  | n_global: 11 | n_logup: 0
+[1;32mINFO    [0m │     │  ┕━ fractional_sumcheck_metal [ 4.46µs | 0.00% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.round0 [ 950ms | 31.00% / 38.99% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ prover.rap_constraints.ple_round0 [ 194ms | 7.98% ]
+[1;32mINFO    [0m │     │  ┕━ s'_0 -> s_0 cpu interpolations [ 177µs | 0.01% ]
+[1;32mINFO    [0m │     ┕━ prover.rap_constraints.mle_rounds [ 177ms | 0.82% / 7.25% ] phase: "prover"
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 77.5ms | 3.18% ] round: 1
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 43.3ms | 1.78% ] round: 2
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 15.6ms | 0.64% ] round: 3
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 8.44ms | 0.35% ] round: 4
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 4.17ms | 0.17% ] round: 5
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 2.59ms | 0.11% ] round: 6
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.54ms | 0.06% ] round: 7
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.06ms | 0.04% ] round: 8
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 940µs | 0.04% ] round: 9
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 672µs | 0.03% ] round: 10
+[1;32mINFO    [0m │        ┕━ LogupZerocheck::sumcheck_polys_batch_eval [ 764µs | 0.03% ] round: 11
+[1;32mINFO    [0m ┕━ prover.openings [ 418ms | 0.00% / 17.16% ] phase: "prover"
+[1;32mINFO    [0m    ┝━ prover.openings.stacked_reduction [ 97.0ms | 0.00% / 3.98% ] phase: "prover"
+[1;32mINFO    [0m    │  ┝━ prover.openings.stacked_reduction.round0 [ 59.8ms | 2.46% ] phase: "prover"
+[1;32mINFO    [0m    │  ┕━ prover.openings.stacked_reduction.mle_rounds [ 37.1ms | 1.52% ] phase: "prover"
+[1;32mINFO    [0m    ┕━ prover.openings.whir [ 321ms | 9.49% / 13.18% ] phase: "prover"
+[1;32mINFO    [0m       ┝━ merkle_tree [ 48.5ms | 1.99% ]
+[1;32mINFO    [0m       ┝━ merkle_tree [ 26.8ms | 1.10% ]
+[1;32mINFO    [0m       ┕━ merkle_tree [ 14.5ms | 0.60% ]
+
+===== measured run 4 =====
+warning: openvm-metal-backend@2.0.0-alpha: Compiled 19 Metal shaders into /Users/jpw/github/openvm-org/stark-backend-metal/target/release/build/openvm-metal-backend-30dbb44bbde17624/out/kernels.metallib
+warning: unused imports: `ColMajorMatrix` and `sumcheck_uni_round0_poly`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:22:41
+   |
+22 |         sumcheck::{sumcheck_round0_deg, sumcheck_uni_round0_poly},
+   |                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+23 |         ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `transport_matrix_d2h_col_major`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:35:54
+   |
+35 |     data_transporter::{read_folded_matrix_first_row, transport_matrix_d2h_col_major},
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rules::codec::Codec`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:73:5
+   |
+73 | use rules::codec::Codec;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MemCopyD2H`
+ --> crates/metal-backend/src/stacked_reduction.rs:5:12
+  |
+5 |     copy::{MemCopyD2H, MemCopyH2D},
+  |            ^^^^^^^^^^
+
+warning: unused import: `prover::poly::Ple`
+  --> crates/metal-backend/src/stacked_reduction.rs:16:5
+   |
+16 |     prover::poly::Ple,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:36:9
+   |
+36 |     let mut intermediates = if intermed_capacity > 0 {
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:114:9
+    |
+114 |     let mut intermediates = if intermed_capacity > 0 {
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable `mat_idx` is assigned to, but never used
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1129:25
+     |
+1129 |                 let mut mat_idx = 0usize;
+     |                         ^^^^^^^
+     |
+     = note: consider using `_mat_idx` instead
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `trace_idx`
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1125:20
+     |
+1125 |             .map(|(trace_idx, (air_idx, air_ctx))| {
+     |                    ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trace_idx`
+
+warning: constant `ZEROCHECK_BUFFER_VARS` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:17:7
+   |
+17 | const ZEROCHECK_BUFFER_VARS: bool = false;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `evaluate_mle_constraints_metal` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:23:8
+   |
+23 | pub fn evaluate_mle_constraints_metal(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `d_q_widths`, `q_width_max`, `d_q_eval_ptrs`, `trace_ptrs`, `d_input_ptrs`, and `d_output_ptrs` are never read
+  --> crates/metal-backend/src/stacked_reduction.rs:65:5
+   |
+50 | pub struct StackedReductionMetal {
+   |            --------------------- fields in this struct
+...
+65 |     d_q_widths: MetalBuffer<u32>,
+   |     ^^^^^^^^^^
+66 |     q_width_max: u32,
+   |     ^^^^^^^^^^^
+67 |     d_q_eval_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+68 |
+69 |     trace_ptrs: Vec<(
+   |     ^^^^^^^^^^
+...
+94 |     d_input_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^
+95 |     d_output_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+
+warning: `openvm-metal-backend` (lib) generated 12 warnings (run `cargo fix --lib -p openvm-metal-backend` to apply 7 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running `target/release/examples/keccakf`
+[1;32mINFO    [0m ｉ [info]: Metal device: Apple M2 Max, max buffer length: 57982058496 bytes
+[1;32mINFO    [0m ｉ [info]: TestAir              | Constraint Deg = 3  | Prep Cols = 0  | Main Cols = [2633]   | 3182 Constraints |   0 Interactions
+[1;32mINFO    [0m generate_trace [ 38.4ms | 100.00% ]
+[1;32mINFO    [0m stark_prove_excluding_trace [ 2.42s | 0.00% / 100.00% ] phase: "prover"
+[1;32mINFO    [0m ┝━ ｉ [info]:  | num_airs_present: 1
+[1;32mINFO    [0m ┝━ prover.main_trace_commit [ 892ms | 0.00% / 36.91% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ stacked_commit [ 892ms | 0.00% / 36.91% ]
+[1;32mINFO    [0m │     ┝━ ｉ [info]: stacked_matrix_dimensions | height: 2097152 | width: 42
+[1;32mINFO    [0m │     ┝━ rs_code_matrix [ 661ms | 27.34% ]
+[1;32mINFO    [0m │     ┕━ merkle_tree [ 231ms | 9.56% ]
+[1;32mINFO    [0m ┝━ prover.rap_constraints [ 1.12s | 0.00% / 46.33% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ prove_zerocheck_and_logup_metal [ 1.12s | 0.00% / 46.33% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.logup_gkr [ 1.23ms | 0.05% / 0.05% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ ｉ [info]:  | n_global: 11 | n_logup: 0
+[1;32mINFO    [0m │     │  ┕━ fractional_sumcheck_metal [ 3.00µs | 0.00% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.round0 [ 940ms | 31.06% / 38.90% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ prover.rap_constraints.ple_round0 [ 189ms | 7.84% ]
+[1;32mINFO    [0m │     │  ┕━ s'_0 -> s_0 cpu interpolations [ 79.5µs | 0.00% ]
+[1;32mINFO    [0m │     ┕━ prover.rap_constraints.mle_rounds [ 178ms | 0.82% / 7.38% ] phase: "prover"
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 80.9ms | 3.35% ] round: 1
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 33.9ms | 1.40% ] round: 2
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 24.3ms | 1.00% ] round: 3
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 7.55ms | 0.31% ] round: 4
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 4.23ms | 0.18% ] round: 5
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 2.50ms | 0.10% ] round: 6
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.45ms | 0.06% ] round: 7
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.46ms | 0.06% ] round: 8
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 848µs | 0.04% ] round: 9
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 687µs | 0.03% ] round: 10
+[1;32mINFO    [0m │        ┕━ LogupZerocheck::sumcheck_polys_batch_eval [ 679µs | 0.03% ] round: 11
+[1;32mINFO    [0m ┕━ prover.openings [ 405ms | 0.00% / 16.76% ] phase: "prover"
+[1;32mINFO    [0m    ┝━ prover.openings.stacked_reduction [ 96.7ms | 0.01% / 4.00% ] phase: "prover"
+[1;32mINFO    [0m    │  ┝━ prover.openings.stacked_reduction.round0 [ 58.2ms | 2.41% ] phase: "prover"
+[1;32mINFO    [0m    │  ┕━ prover.openings.stacked_reduction.mle_rounds [ 38.3ms | 1.59% ] phase: "prover"
+[1;32mINFO    [0m    ┕━ prover.openings.whir [ 308ms | 9.08% / 12.76% ] phase: "prover"
+[1;32mINFO    [0m       ┝━ merkle_tree [ 49.1ms | 2.03% ]
+[1;32mINFO    [0m       ┝━ merkle_tree [ 25.5ms | 1.06% ]
+[1;32mINFO    [0m       ┕━ merkle_tree [ 14.2ms | 0.59% ]
+
+===== measured run 5 =====
+warning: openvm-metal-backend@2.0.0-alpha: Compiled 19 Metal shaders into /Users/jpw/github/openvm-org/stark-backend-metal/target/release/build/openvm-metal-backend-30dbb44bbde17624/out/kernels.metallib
+warning: unused imports: `ColMajorMatrix` and `sumcheck_uni_round0_poly`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:22:41
+   |
+22 |         sumcheck::{sumcheck_round0_deg, sumcheck_uni_round0_poly},
+   |                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+23 |         ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `transport_matrix_d2h_col_major`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:35:54
+   |
+35 |     data_transporter::{read_folded_matrix_first_row, transport_matrix_d2h_col_major},
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rules::codec::Codec`
+  --> crates/metal-backend/src/logup_zerocheck/mod.rs:73:5
+   |
+73 | use rules::codec::Codec;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MemCopyD2H`
+ --> crates/metal-backend/src/stacked_reduction.rs:5:12
+  |
+5 |     copy::{MemCopyD2H, MemCopyH2D},
+  |            ^^^^^^^^^^
+
+warning: unused import: `prover::poly::Ple`
+  --> crates/metal-backend/src/stacked_reduction.rs:16:5
+   |
+16 |     prover::poly::Ple,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:36:9
+   |
+36 |     let mut intermediates = if intermed_capacity > 0 {
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:114:9
+    |
+114 |     let mut intermediates = if intermed_capacity > 0 {
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable `mat_idx` is assigned to, but never used
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1129:25
+     |
+1129 |                 let mut mat_idx = 0usize;
+     |                         ^^^^^^^
+     |
+     = note: consider using `_mat_idx` instead
+     = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `trace_idx`
+    --> crates/metal-backend/src/logup_zerocheck/mod.rs:1125:20
+     |
+1125 |             .map(|(trace_idx, (air_idx, air_ctx))| {
+     |                    ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trace_idx`
+
+warning: constant `ZEROCHECK_BUFFER_VARS` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:17:7
+   |
+17 | const ZEROCHECK_BUFFER_VARS: bool = false;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: function `evaluate_mle_constraints_metal` is never used
+  --> crates/metal-backend/src/logup_zerocheck/mle_round.rs:23:8
+   |
+23 | pub fn evaluate_mle_constraints_metal(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `d_q_widths`, `q_width_max`, `d_q_eval_ptrs`, `trace_ptrs`, `d_input_ptrs`, and `d_output_ptrs` are never read
+  --> crates/metal-backend/src/stacked_reduction.rs:65:5
+   |
+50 | pub struct StackedReductionMetal {
+   |            --------------------- fields in this struct
+...
+65 |     d_q_widths: MetalBuffer<u32>,
+   |     ^^^^^^^^^^
+66 |     q_width_max: u32,
+   |     ^^^^^^^^^^^
+67 |     d_q_eval_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+68 |
+69 |     trace_ptrs: Vec<(
+   |     ^^^^^^^^^^
+...
+94 |     d_input_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^
+95 |     d_output_ptrs: MetalBuffer<u64>,
+   |     ^^^^^^^^^^^^^
+
+warning: `openvm-metal-backend` (lib) generated 12 warnings (run `cargo fix --lib -p openvm-metal-backend` to apply 7 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running `target/release/examples/keccakf`
+[1;32mINFO    [0m ｉ [info]: Metal device: Apple M2 Max, max buffer length: 57982058496 bytes
+[1;32mINFO    [0m ｉ [info]: TestAir              | Constraint Deg = 3  | Prep Cols = 0  | Main Cols = [2633]   | 3182 Constraints |   0 Interactions
+[1;32mINFO    [0m generate_trace [ 38.8ms | 100.00% ]
+[1;32mINFO    [0m stark_prove_excluding_trace [ 2.44s | 0.00% / 100.00% ] phase: "prover"
+[1;32mINFO    [0m ┝━ ｉ [info]:  | num_airs_present: 1
+[1;32mINFO    [0m ┝━ prover.main_trace_commit [ 894ms | 0.00% / 36.72% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ stacked_commit [ 894ms | 0.00% / 36.71% ]
+[1;32mINFO    [0m │     ┝━ ｉ [info]: stacked_matrix_dimensions | height: 2097152 | width: 42
+[1;32mINFO    [0m │     ┝━ rs_code_matrix [ 659ms | 27.07% ]
+[1;32mINFO    [0m │     ┕━ merkle_tree [ 235ms | 9.64% ]
+[1;32mINFO    [0m ┝━ prover.rap_constraints [ 1.13s | 0.00% / 46.28% ] phase: "prover"
+[1;32mINFO    [0m │  ┕━ prove_zerocheck_and_logup_metal [ 1.13s | 0.00% / 46.28% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.logup_gkr [ 1.61ms | 0.07% / 0.07% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ ｉ [info]:  | n_global: 11 | n_logup: 0
+[1;32mINFO    [0m │     │  ┕━ fractional_sumcheck_metal [ 4.38µs | 0.00% ]
+[1;32mINFO    [0m │     ┝━ prover.rap_constraints.round0 [ 949ms | 31.07% / 38.96% ] phase: "prover"
+[1;32mINFO    [0m │     │  ┝━ prover.rap_constraints.ple_round0 [ 192ms | 7.89% ]
+[1;32mINFO    [0m │     │  ┕━ s'_0 -> s_0 cpu interpolations [ 64.1µs | 0.00% ]
+[1;32mINFO    [0m │     ┕━ prover.rap_constraints.mle_rounds [ 177ms | 0.85% / 7.25% ] phase: "prover"
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 81.7ms | 3.35% ] round: 1
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 37.1ms | 1.53% ] round: 2
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 15.9ms | 0.65% ] round: 3
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 8.79ms | 0.36% ] round: 4
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 4.69ms | 0.19% ] round: 5
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 2.57ms | 0.11% ] round: 6
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.53ms | 0.06% ] round: 7
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 1.27ms | 0.05% ] round: 8
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 825µs | 0.03% ] round: 9
+[1;32mINFO    [0m │        ┝━ LogupZerocheck::sumcheck_polys_batch_eval [ 819µs | 0.03% ] round: 10
+[1;32mINFO    [0m │        ┕━ LogupZerocheck::sumcheck_polys_batch_eval [ 714µs | 0.03% ] round: 11
+[1;32mINFO    [0m ┕━ prover.openings [ 414ms | 0.00% / 17.00% ] phase: "prover"
+[1;32mINFO    [0m    ┝━ prover.openings.stacked_reduction [ 104ms | 0.28% / 4.25% ] phase: "prover"
+[1;32mINFO    [0m    │  ┝━ prover.openings.stacked_reduction.round0 [ 57.5ms | 2.36% ] phase: "prover"
+[1;32mINFO    [0m    │  ┕━ prover.openings.stacked_reduction.mle_rounds [ 39.3ms | 1.61% ] phase: "prover"
+[1;32mINFO    [0m    ┕━ prover.openings.whir [ 311ms | 9.05% / 12.75% ] phase: "prover"
+[1;32mINFO    [0m       ┝━ merkle_tree [ 48.7ms | 2.00% ]
+[1;32mINFO    [0m       ┝━ merkle_tree [ 26.6ms | 1.09% ]
+[1;32mINFO    [0m       ┕━ merkle_tree [ 14.8ms | 0.61% ]

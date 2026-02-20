@@ -24,6 +24,7 @@ Hard constraints:
 - Prefer targeted `cargo test -p openvm-metal-backend ...` for touched paths.
 - Treat all non-selected milestones as out of scope for this run.
 - Do not edit `docs/metal-backend-optimization-tracking/STATUS.md` in this workflow.
+- A milestone is not successfully completed unless a new commit is created for the milestone work.
 
 Pre-flight process:
 1. Read `docs/metal-backend-optimization-milestones.md`.
@@ -123,6 +124,7 @@ Validation required before finishing:
    - Stage all intended milestone changes
    - Use a non-empty commit message that references `MILESTONE_ID`
    - Do not amend prior commits unless explicitly instructed
+   - If no commit is created, report the milestone as incomplete
 7. Include in final report:
    - `MILESTONE_ID` and scope completed
    - commit hash
