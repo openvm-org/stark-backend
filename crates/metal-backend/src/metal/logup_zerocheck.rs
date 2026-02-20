@@ -121,6 +121,45 @@ unsafe fn encode_final_reduce_block_sums_to_buffer(
 }
 
 #[inline]
+unsafe fn encode_dual_final_reduce_block_sums_to_buffer(
+    cmd_buffer: &CommandBufferRef,
+    pipeline_reduce: &ComputePipelineState,
+    block_sums_p: &MetalBuffer<EF>,
+    block_sums_q: &MetalBuffer<EF>,
+    output_buffer: &MetalRawBuffer,
+    output_offset_p_bytes: u64,
+    output_offset_q_bytes: u64,
+    num_blocks: u32,
+    d: u32,
+    threads_per_group: usize,
+) -> usize {
+    if d == 0 {
+        return 0;
+    }
+    encode_final_reduce_block_sums_to_buffer(
+        cmd_buffer,
+        pipeline_reduce,
+        block_sums_p,
+        output_buffer,
+        output_offset_p_bytes,
+        num_blocks,
+        d,
+        threads_per_group,
+    );
+    encode_final_reduce_block_sums_to_buffer(
+        cmd_buffer,
+        pipeline_reduce,
+        block_sums_q,
+        output_buffer,
+        output_offset_q_bytes,
+        num_blocks,
+        d,
+        threads_per_group,
+    );
+    2
+}
+
+#[inline]
 unsafe fn batched_final_reduce_block_sums_to_buffer(
     block_sums: &MetalBuffer<EF>,
     output_buffer: &MetalRawBuffer,
@@ -1346,14 +1385,25 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         MetalBuffer::<F>::with_capacity(0)
     };
     let pipeline_reduce = get_kernels().get_pipeline("final_reduce_block_sums")?;
-
-    for coset_idx in 0..num_cosets {
-        let tmp_p = MetalBuffer::<EF>::with_capacity(num_blocks as usize * skip_domain as usize);
-        let tmp_q = MetalBuffer::<EF>::with_capacity(num_blocks as usize * skip_domain as usize);
-        let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
-        let out_offset_bytes =
-            (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
-        dispatch_staged_sync("logup_bary_eval_interactions_round0.coset", |cmd_buffer| {
+    if num_cosets == 0 {
+        return Ok(());
+    }
+    let scratch_len = num_blocks as usize * skip_domain as usize;
+    let tmp_p = MetalBuffer::<EF>::with_capacity(scratch_len);
+    let tmp_q = MetalBuffer::<EF>::with_capacity(scratch_len);
+    debug!(
+        stage = "logup_bary_eval_interactions_round0",
+        scratch_len,
+        coset_count = num_cosets as usize,
+        reduce_kernels_per_coset = 2usize,
+        "logup_r0_scratch_reuse"
+    );
+    dispatch_staged_sync("logup_bary_eval_interactions_round0.cosets", |cmd_buffer| {
+        let mut kernel_count = 0usize;
+        for coset_idx in 0..num_cosets {
+            let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
+            let out_offset_bytes =
+                (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
             if use_global_intermediates {
                 encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
                     for part in main_part_buffers {
@@ -1439,29 +1489,32 @@ pub unsafe fn logup_bary_eval_interactions_round0(
                     encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
                 });
             }
-            encode_final_reduce_block_sums_to_buffer(
+            kernel_count += 1;
+            // Invariant: the round0 dispatch above overwrites all scratch entries for this coset
+            // before these two final-reduction kernels read `tmp_p/tmp_q`.
+            let reduce_kernel_count = encode_dual_final_reduce_block_sums_to_buffer(
                 cmd_buffer,
                 &pipeline_reduce,
                 &tmp_p,
-                output.gpu_buffer(),
-                out_offset_bytes,
-                num_blocks as u32,
-                skip_domain,
-                threads_per_group,
-            );
-            encode_final_reduce_block_sums_to_buffer(
-                cmd_buffer,
-                &pipeline_reduce,
                 &tmp_q,
                 output.gpu_buffer(),
+                out_offset_bytes,
                 q_offset_bytes + out_offset_bytes,
                 num_blocks as u32,
                 skip_domain,
                 threads_per_group,
             );
-            Ok(3)
-        })?;
-    }
+            kernel_count += reduce_kernel_count;
+            debug!(
+                stage = "logup_bary_eval_interactions_round0.coset_reductions",
+                coset_idx,
+                kernel_count = reduce_kernel_count,
+                sync_count = 0usize,
+                "metal_dispatch_stage"
+            );
+        }
+        Ok(kernel_count)
+    })?;
     Ok(())
 }
 

@@ -7,6 +7,6 @@
 | [2](./milestone-2.md) | Stacked Trace Copy Path Optimization | not_started |  |  |  |  |  |
 | [3](./milestone-3.md) | Unified-Memory Copy Elimination | not_started |  |  |  |  |  |
 | [4](./milestone-4.md) | Trace Transport Layout Simplification | not_started |  |  |  |  |  |
-| [5](./milestone-5.md) | LogUp Round0 Scratch Reuse and Reduction Batching | not_started |  |  |  |  |  |
+| [5](./milestone-5.md) | LogUp Round0 Scratch Reuse and Reduction Batching | completed | codex | `perf/m5` |  | 2026-02-20 | Round0 scratch reuse + single staged sync across cosets |
 | [6](./milestone-6.md) | Device-Aware `batch_ntt_small` Tuning | not_started |  |  |  |  |  |
 | [7](./milestone-7.md) | End-to-End Validation and Profiling Report | not_started |  |  |  |  |  |
