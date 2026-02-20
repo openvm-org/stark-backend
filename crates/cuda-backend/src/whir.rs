@@ -529,7 +529,7 @@ mod tests {
         prover::{stacked_pcs::stacked_commit, CpuBackend, DeviceDataTransporter, ProvingContext},
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
-        StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
+        ProximityRegime, StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
     };
     use openvm_stark_sdk::{
         config::{
@@ -666,6 +666,7 @@ mod tests {
             l_skip + n_stack,
             whir_test_params(k_whir, log_final_poly_len),
             10,
+            ProximityRegime::UniqueDecoding,
         );
         let params = SystemParams {
             l_skip: 2,
