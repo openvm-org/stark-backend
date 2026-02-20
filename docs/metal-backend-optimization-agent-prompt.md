@@ -127,7 +127,7 @@ Validation required before finishing:
 1. `cargo check -p openvm-metal-backend`
 2. Run milestone-relevant tests (at least `cargo test -p openvm-metal-backend --test ntt_roundtrip` if touched code affects it)
 3. If milestone includes profiling goals, run keccakf with tracing:
-   - `cargo run -p openvm-metal-backend --example keccakf`
+   - `cargo run -p openvm-metal-backend --release --example keccakf`
 4. Update tracking files:
    - `docs/metal-backend-optimization-tracking/milestone-<MILESTONE_ID>.md`
    - `docs/metal-backend-optimization-tracking/STATUS.md`

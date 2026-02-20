@@ -19,7 +19,7 @@ Objective:
 
 Tasks:
 - Capture and store baseline traces for:
-  - `cargo run -p openvm-metal-backend --example keccakf`
+  - `cargo run -p openvm-metal-backend --release --example keccakf`
 - Confirm local correctness checks:
   - `cargo check -p openvm-metal-backend`
   - `cargo test -p openvm-metal-backend --test ntt_roundtrip`
@@ -146,7 +146,7 @@ Tasks:
 - Run:
   - `cargo check -p openvm-metal-backend`
   - `cargo test -p openvm-metal-backend --test ntt_roundtrip`
-  - `cargo run -p openvm-metal-backend --example keccakf`
+  - `cargo run -p openvm-metal-backend --release --example keccakf`
 - Compare baseline vs final spans:
   - `rs_code_matrix`
   - `merkle_tree` (main trace + whir openings)
