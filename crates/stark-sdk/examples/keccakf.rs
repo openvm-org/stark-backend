@@ -5,7 +5,7 @@ use std::sync::Arc;
 use cfg_if::cfg_if;
 use eyre::eyre;
 use openvm_stark_sdk::{
-    config::log_up_params::log_up_security_params_baby_bear_100_bits,
+    config::log_up_params::log_up_security_params_baby_bear_128_bits,
     openvm_stark_backend::{
         p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues},
         p3_field::Field,
@@ -59,7 +59,7 @@ fn main() -> eyre::Result<()> {
         n_stack,
         log_blowup,
         whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
 

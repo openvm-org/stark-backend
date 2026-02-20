@@ -40,7 +40,7 @@ use openvm_stark_backend::{
     TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
-    config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},
+    config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_128_bits},
     utils::{setup_tracing, setup_tracing_with_log_level},
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
@@ -152,7 +152,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
             n_stack,
             log_blowup,
             whir,
-            logup: log_up_security_params_baby_bear_100_bits(),
+            logup: log_up_security_params_baby_bear_128_bits(),
             max_constraint_degree: 3,
         };
         let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params);
@@ -371,7 +371,7 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
         n_stack,
         log_blowup,
         whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);

@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory, WhirConfig, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
-    config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},
+    config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_128_bits},
     utils::setup_tracing_with_log_level,
 };
 use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
@@ -155,7 +155,7 @@ fn test_whir_single_fib(
         n_stack,
         log_blowup,
         whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
     run_whir_fib_test(params)
@@ -222,7 +222,7 @@ fn test_whir_multiple_commitments() -> Result<(), VerifyWhirError> {
         n_stack: 3,
         log_blowup: 1,
         whir: whir_test_config(2),
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
     let config = BabyBearPoseidon2Config::default_from_params(params);
@@ -301,7 +301,7 @@ fn test_whir_multiple_commitments_negative() {
         n_stack: 3,
         log_blowup: 1,
         whir: whir_test_config(2),
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
     let config = BabyBearPoseidon2Config::default_from_params(params);

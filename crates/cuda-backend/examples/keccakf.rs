@@ -14,7 +14,7 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{BabyBearPoseidon2CpuEngine, DuplexSponge},
-        log_up_params::log_up_security_params_baby_bear_100_bits,
+        log_up_params::log_up_security_params_baby_bear_128_bits,
     },
     utils::setup_tracing,
 };
@@ -58,7 +58,7 @@ fn make_params() -> SystemParams {
         n_stack,
         log_blowup,
         whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     }
 }

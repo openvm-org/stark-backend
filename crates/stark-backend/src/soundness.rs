@@ -60,7 +60,8 @@ impl SoundnessCalculator {
     /// * `num_airs` - Number of AIRs being batched.
     /// * `max_constraint_degree` - Maximum degree of any constraint polynomial.
     /// * `max_log_trace_height` - Maximum log₂(trace height) across all AIRs.
-    /// * `num_trace_columns` - Total columns batched in stacked reduction.
+    /// * `num_trace_columns` - Total columns batched in stacked reduction. These are base field
+    ///   columns and should not include rotations.
     /// * `num_stacked_columns` - Total columns across all commitments (for WHIR μ batching).
     /// * `n_logup` - GKR depth (log₂ of total interactions), or 0 if no interactions.
     /// * `proximity_regime` - Unique decoding or other regimes (for WHIR-related calculations).
@@ -601,7 +602,7 @@ pub fn min_whir_queries(
 
 #[cfg(test)]
 mod tests {
-    use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_100_bits as sdk_log_up_security_params_baby_bear_100_bits;
+    use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_128_bits;
     use p3_baby_bear::BabyBear;
     use p3_field::PrimeField64;
 
@@ -651,9 +652,9 @@ mod tests {
     // From SDK config.rs constants
     const WHIR_MAX_LOG_FINAL_POLY_LEN: usize = 10;
     const WHIR_POW_BITS: usize = 20;
-    const SECURITY_BITS_TARGET: usize = 100;
-    fn babybear_quartic_extension_bits() -> f64 {
-        4.0 * (BabyBear::ORDER_U64 as f64).log2()
+    const SECURITY_BITS_TARGET: usize = 128;
+    fn babybear_quintic_extension_bits() -> f64 {
+        5.0 * (BabyBear::ORDER_U64 as f64).log2()
     }
 
     // From SDK config.rs: DEFAULT_APP_L_SKIP, DEFAULT_APP_LOG_BLOWUP, etc.
@@ -687,13 +688,13 @@ mod tests {
                 },
                 SECURITY_BITS_TARGET,
             ),
-            logup: log_up_security_params_baby_bear_100_bits_local(),
+            logup: log_up_security_params_baby_bear_128_bits_local(),
             max_constraint_degree,
         }
     }
 
-    fn log_up_security_params_baby_bear_100_bits_local() -> LogUpSecurityParameters {
-        let params = sdk_log_up_security_params_baby_bear_100_bits();
+    fn log_up_security_params_baby_bear_128_bits_local() -> LogUpSecurityParameters {
+        let params = log_up_security_params_baby_bear_128_bits();
         LogUpSecurityParameters {
             max_interaction_count: params.max_interaction_count,
             log_max_message_length: params.log_max_message_length,
@@ -770,7 +771,7 @@ mod tests {
     const APP_MAX_CONSTRAINTS: usize = 5000;
     const APP_NUM_AIRS: usize = 100;
     const APP_MAX_LOG_HEIGHT: usize = 24;
-    const APP_NUM_COLUMNS: usize = 30000;
+    const APP_NUM_COLUMNS: usize = 40000;
     const APP_MAX_INTERACTIONS_PER_AIR: usize = 1000;
 
     // Recursion circuits: smaller, fixed structure
@@ -791,7 +792,7 @@ mod tests {
         let params = test_params();
         let soundness = SoundnessCalculator::calculate(
             &params,
-            babybear_quartic_extension_bits(),
+            babybear_quintic_extension_bits(),
             1000,
             50,
             4,
@@ -833,7 +834,7 @@ mod tests {
         let params = test_params();
         let security = SoundnessCalculator::calculate_logup_soundness(
             &params,
-            babybear_quartic_extension_bits(),
+            babybear_quintic_extension_bits(),
         );
         assert!(security > TARGET_SECURITY_BITS as f64);
     }
@@ -841,7 +842,8 @@ mod tests {
     #[test]
     fn test_whir_unique_decoding_security() {
         // rate = 0.5: error = 0.75, security per query ≈ 0.415 bits
-        let security = ProximityRegime::UniqueDecoding.whir_query_security_bits(100, 1);
+        let security =
+            ProximityRegime::UniqueDecoding.whir_query_security_bits(SECURITY_BITS_TARGET, 1);
         assert!(
             (security - 41.5).abs() < 1.0,
             "Expected ~41.5, got {}",
@@ -875,7 +877,7 @@ mod tests {
         // (stacking can only reduce width).
         let soundness = SoundnessCalculator::calculate(
             params,
-            babybear_quartic_extension_bits(),
+            babybear_quintic_extension_bits(),
             max_constraints,
             num_airs,
             params.max_constraint_degree,
