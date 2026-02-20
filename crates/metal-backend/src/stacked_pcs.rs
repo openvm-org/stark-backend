@@ -113,29 +113,12 @@ pub(crate) fn stack_traces_into_expanded(
     buffer: &mut MetalBuffer<F>,
     padded_height: usize,
 ) -> Result<(), StackTracesError> {
-    fn blit_copy_range<T>(
-        src: &MetalBuffer<T>,
+    #[derive(Clone, Copy)]
+    struct BlitCopyTask {
+        mat_idx: usize,
         src_offset: usize,
-        dst: &MetalBuffer<T>,
         dst_offset: usize,
         len: usize,
-    ) -> Result<(), StackTracesError> {
-        debug_assert!(src_offset + len <= src.len());
-        debug_assert!(dst_offset + len <= dst.len());
-        let src_offset_bytes = (src_offset * size_of::<T>()) as u64;
-        let dst_offset_bytes = (dst_offset * size_of::<T>()) as u64;
-        let copy_bytes = (len * size_of::<T>()) as u64;
-        let ctx = get_context();
-        command::blit_operation(&ctx.queue, |blit| {
-            blit.copy_from_buffer(
-                src.gpu_buffer(),
-                src_offset_bytes,
-                dst.gpu_buffer(),
-                dst_offset_bytes,
-                copy_bytes,
-            );
-        })
-        .map_err(StackTracesError::BlitCopy)
     }
 
     let l_skip = layout.l_skip();
@@ -143,6 +126,40 @@ pub(crate) fn stack_traces_into_expanded(
     debug_assert_eq!(buffer.len() % padded_height, 0);
     debug_assert_eq!(buffer.len() / padded_height, layout.width());
     buffer.fill_zero();
+    let mut batched_blit_tasks = Vec::<BlitCopyTask>::new();
+    let mut blit_copy_count = 0usize;
+    let mut blit_sync_count = 0usize;
+    let mut expand_pad_dispatch_count = 0usize;
+    let mut flush_batched_blits =
+        |tasks: &mut Vec<BlitCopyTask>| -> Result<(), StackTracesError> {
+            if tasks.is_empty() {
+                return Ok(());
+            }
+
+            let ctx = get_context();
+            command::blit_operation(&ctx.queue, |blit| {
+                for task in tasks.iter() {
+                    let src = traces[task.mat_idx].buffer();
+                    debug_assert!(task.src_offset + task.len <= src.len());
+                    debug_assert!(task.dst_offset + task.len <= buffer.len());
+                    let src_offset_bytes = (task.src_offset * size_of::<F>()) as u64;
+                    let dst_offset_bytes = (task.dst_offset * size_of::<F>()) as u64;
+                    let copy_bytes = (task.len * size_of::<F>()) as u64;
+                    blit.copy_from_buffer(
+                        src.gpu_buffer(),
+                        src_offset_bytes,
+                        buffer.gpu_buffer(),
+                        dst_offset_bytes,
+                        copy_bytes,
+                    );
+                }
+            })
+            .map_err(StackTracesError::BlitCopy)?;
+            tasks.clear();
+            blit_sync_count += 1;
+            Ok(())
+        };
+
     for (mat_idx, j, s) in &layout.sorted_cols {
         let start = s.col_idx * padded_height + s.row_idx;
         let trace = traces[*mat_idx];
@@ -150,8 +167,16 @@ pub(crate) fn stack_traces_into_expanded(
         debug_assert_eq!(trace.height(), 1 << s.log_height());
         if s.log_height() >= l_skip {
             debug_assert_eq!(trace.height(), s_len);
-            blit_copy_range(trace.buffer(), *j * s_len, buffer, start, s_len)?;
+            batched_blit_tasks.push(BlitCopyTask {
+                mat_idx: *mat_idx,
+                src_offset: *j * s_len,
+                dst_offset: start,
+                len: s_len,
+            });
+            blit_copy_count += 1;
         } else {
+            flush_batched_blits(&mut batched_blit_tasks)?;
+            expand_pad_dispatch_count += 1;
             let stride = s.stride(l_skip);
             debug_assert_eq!(stride * trace.height(), s_len);
             unsafe {
@@ -168,6 +193,13 @@ pub(crate) fn stack_traces_into_expanded(
             }
         }
     }
+    flush_batched_blits(&mut batched_blit_tasks)?;
+    tracing::debug!(
+        blit_copy_count,
+        blit_sync_count,
+        expand_pad_dispatch_count,
+        "stack_traces_into_expanded_dispatch_stats"
+    );
     Ok(())
 }
 
