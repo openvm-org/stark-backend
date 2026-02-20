@@ -36,7 +36,7 @@ use openvm_stark_backend::{
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
         verify, VerifierError,
     },
-    AirRef, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
+    AirRef, FiatShamirTranscript, ProximityRegime, StarkEngine, StarkProtocolConfig, SystemParams,
     TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
@@ -146,6 +146,7 @@ fn test_proof_shape_verifier_rng_system_params() -> Result<(), ProofShapeError> 
             mu_pow_bits: 1,
             query_phase_pow_bits: 1,
             folding_pow_bits: 1,
+            proximity_regime: ProximityRegime::UniqueDecoding,
         };
         let params = SystemParams {
             l_skip,
@@ -365,7 +366,13 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
         query_phase_pow_bits: 1,
     };
     let log_blowup = 1;
-    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 80);
+    let whir = WhirConfig::new(
+        log_blowup,
+        l_skip + n_stack,
+        whir_params,
+        80,
+        ProximityRegime::UniqueDecoding,
+    );
     let params = SystemParams {
         l_skip,
         n_stack,

@@ -9,7 +9,8 @@ use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-    BaseAirWithPublicValues, PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
+    BaseAirWithPublicValues, PartitionedBaseAir, ProximityRegime, StarkEngine, SystemParams,
+    WhirConfig, WhirParams,
 };
 use openvm_stark_sdk::{
     config::{
@@ -52,7 +53,13 @@ fn make_params() -> SystemParams {
         query_phase_pow_bits: 20,
     };
     let log_blowup = 1;
-    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
+    let whir = WhirConfig::new(
+        log_blowup,
+        l_skip + n_stack,
+        whir_params,
+        100,
+        ProximityRegime::UniqueDecoding,
+    );
     SystemParams {
         l_skip,
         n_stack,

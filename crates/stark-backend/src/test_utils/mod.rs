@@ -497,7 +497,13 @@ pub fn test_whir_config_small(
         query_phase_pow_bits: 1,
     };
     let security_bits = 5;
-    WhirConfig::new(log_blowup, log_stacked_height, params, security_bits)
+    WhirConfig::new(
+        log_blowup,
+        log_stacked_height,
+        params,
+        security_bits,
+        crate::config::ProximityRegime::UniqueDecoding,
+    )
 }
 
 pub fn default_test_params_small() -> SystemParams {
