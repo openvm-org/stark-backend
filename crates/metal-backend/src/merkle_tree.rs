@@ -22,11 +22,48 @@ use crate::{
     MerkleTreeError,
 };
 
+#[inline]
+fn read_single_from_shared<T>(buf: &MetalBuffer<T>) -> T {
+    debug_assert_eq!(buf.len(), 1, "Expected single-element buffer");
+    unsafe { buf.as_ptr().read() }
+}
+
+#[inline]
+fn build_non_root_layer_ptrs<Digest>(digest_layers: &[MetalBuffer<Digest>]) -> MetalBuffer<u64> {
+    digest_layers
+        .iter()
+        .take(digest_layers.len().saturating_sub(1))
+        .map(|layer| layer.as_device_ptr() as u64)
+        .collect_vec()
+        .to_device()
+}
+
+fn flatten_cached_layer_ptrs<F, Digest>(
+    trees: &[&MerkleTreeMetal<F, Digest>],
+    depth: usize,
+) -> MetalBuffer<u64> {
+    let out = MetalBuffer::<u64>::with_capacity(trees.len() * depth);
+    let mut out_offset = 0usize;
+    for tree in trees {
+        debug_assert_eq!(tree.non_root_layer_ptrs.len(), depth);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                tree.non_root_layer_ptrs.as_ptr(),
+                out.as_mut_ptr().add(out_offset),
+                depth,
+            );
+        }
+        out_offset += depth;
+    }
+    out
+}
+
 pub struct MerkleTreeMetal<F, Digest> {
     /// The matrix that is used to form the leaves of the Merkle tree.
     /// Optionally cached depending on the prover configuration.
     pub(crate) backing_matrix: Option<MetalMatrix<F>>,
     pub(crate) digest_layers: Vec<MetalBuffer<Digest>>,
+    pub(crate) non_root_layer_ptrs: MetalBuffer<u64>,
     pub(crate) rows_per_query: usize,
     pub(crate) root: Digest,
 }
@@ -96,11 +133,13 @@ impl MerkleTreeMetal<F, Digest> {
         }
         let d_root = digest_layers.last().unwrap();
         assert_eq!(d_root.len(), 1, "Only one root is supported");
-        let root = d_root.to_host().pop().unwrap();
+        let root = read_single_from_shared(d_root);
+        let non_root_layer_ptrs = build_non_root_layer_ptrs(&digest_layers);
 
         Ok(Self {
             backing_matrix,
             digest_layers,
+            non_root_layer_ptrs,
             rows_per_query,
             root,
         })
@@ -130,6 +169,13 @@ impl MerkleTreeMetal<F, Digest> {
             trees.iter().all(|tree| tree.proof_depth() == depth),
             "Merkle trees don't have same depth"
         );
+        let combined_layers_ptrs =
+            (num_trees > 1).then(|| flatten_cached_layer_ptrs(trees, depth));
+        let d_layers_ptr = combined_layers_ptrs
+            .as_ref()
+            .unwrap_or(&trees[0].non_root_layer_ptrs);
+        debug_assert_eq!(d_layers_ptr.len(), num_trees * depth);
+
         let layers = trees
             .iter()
             .flat_map(|tree| {
@@ -137,12 +183,6 @@ impl MerkleTreeMetal<F, Digest> {
                 tree.digest_layers.iter().take(depth)
             })
             .collect_vec();
-        let layers_ptr = layers
-            .iter()
-            .map(|layer| layer.as_device_ptr() as u64)
-            .collect_vec();
-        let d_layers_ptr = layers_ptr.to_device();
-        debug_assert_eq!(d_layers_ptr.len(), num_trees * depth);
 
         let indices = query_indices
             .iter()
@@ -330,11 +370,13 @@ impl MerkleTreeMetal<EF, Digest> {
         }
         let d_root = digest_layers.last().unwrap();
         assert_eq!(d_root.len(), 1, "Only one root is supported");
-        let root = d_root.to_host().pop().unwrap();
+        let root = read_single_from_shared(d_root);
+        let non_root_layer_ptrs = build_non_root_layer_ptrs(&digest_layers);
 
         Ok(Self {
             backing_matrix,
             digest_layers,
+            non_root_layer_ptrs,
             rows_per_query,
             root,
         })

@@ -182,9 +182,16 @@ pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
         .iter()
         .map(|layer| layer.to_device())
         .collect::<Vec<_>>();
+    let non_root_layer_ptrs = digest_layers
+        .iter()
+        .take(digest_layers.len().saturating_sub(1))
+        .map(|layer| layer.as_device_ptr() as u64)
+        .collect::<Vec<_>>()
+        .to_device();
     MerkleTreeMetal {
         backing_matrix,
         digest_layers,
+        non_root_layer_ptrs,
         rows_per_query: tree.rows_per_query(),
         root: tree.root(),
     }
@@ -217,6 +224,27 @@ pub fn transport_pcs_data_h2d(
 pub fn transport_matrix_d2h_col_major<T>(matrix: &MetalMatrix<T>) -> ColMajorMatrix<T> {
     let values_host = matrix.to_host();
     ColMajorMatrix::new(values_host, matrix.width())
+}
+
+pub(crate) fn read_folded_matrix_first_row<T: Copy>(matrix: &MetalMatrix<T>) -> Vec<T> {
+    let height = matrix.height();
+    let width = matrix.width();
+    debug_assert!(height > 0, "Folded matrix height must be non-zero");
+    if height == 0 || width == 0 {
+        return Vec::new();
+    }
+
+    let src = matrix.buffer().as_ptr();
+    if height == 1 {
+        let mut row = Vec::with_capacity(width);
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, row.as_mut_ptr(), width);
+            row.set_len(width);
+        }
+        row
+    } else {
+        (0..width).map(|col| unsafe { *src.add(col * height) }).collect()
+    }
 }
 
 pub fn transport_matrix_d2h_row_major(matrix: &MetalMatrix<F>) -> RowMajorMatrix<F> {

@@ -32,7 +32,7 @@ use tracing::{debug, info, info_span, instrument};
 
 use crate::{
     base::MetalMatrix,
-    data_transporter::transport_matrix_d2h_col_major,
+    data_transporter::{read_folded_matrix_first_row, transport_matrix_d2h_col_major},
     logup_zerocheck::{
         batch_mle::evaluate_zerocheck_batched, fold_ple::fold_ple_evals_rotate,
         gkr_input::TraceInteractionMeta, round0::evaluate_round0_interactions_metal,
@@ -2218,14 +2218,13 @@ impl<'a> LogupZerocheckMetal<'a> {
             .iter()
             .zip(std::mem::take(&mut self.mat_evals_per_trace))
         {
-            // Metal matrices are doubled-width (original + rotated), so we need to split them
-            // First, copy all matrices to host and split them
-            let mut split_mats: Vec<Option<ColMajorMatrix<EF>>> = mat_evals
+            // Folded matrices are height=1 and stored in shared memory; read row 0 directly and
+            // split into original / rotated halves when needed.
+            let mut split_rows: Vec<(Vec<EF>, Option<Vec<EF>>)> = mat_evals
                 .into_iter()
-                .flat_map(|mat| {
-                    let mat_host = transport_matrix_d2h_col_major(&mat);
-                    let width = mat_host.width();
-                    let height = mat_host.height();
+                .map(|mat| {
+                    let width = mat.width();
+                    let height = mat.height();
                     debug_assert_eq!(height, 1, "Matrices should have height=1 after folding");
                     let air_width = if need_rot {
                         debug_assert_eq!(
@@ -2237,64 +2236,30 @@ impl<'a> LogupZerocheckMetal<'a> {
                     } else {
                         width
                     };
-
-                    // Split doubled-width matrix into original and rotated parts
-                    let values = &mat_host.values;
-                    let orig: Vec<EF> = (0..air_width)
-                        .map(|col| values[col * height]) // height=1, so values[col]
-                        .collect();
-                    let rot: Option<Vec<EF>> = if need_rot {
-                        Some(
-                            (air_width..width)
-                                .map(|col| values[col * height]) // height=1, so values[col]
-                                .collect(),
-                        )
-                    } else {
-                        None
-                    };
-
-                    vec![
-                        Some(ColMajorMatrix::new(orig, air_width)),
-                        rot.map(|mat| ColMajorMatrix::new(mat, air_width)),
-                    ]
+                    let values = read_folded_matrix_first_row(&mat);
+                    debug_assert_eq!(values.len(), width);
+                    let orig = values[..air_width].to_vec();
+                    let rot = need_rot.then(|| values[air_width..].to_vec());
+                    (orig, rot)
                 })
-                .collect();
+                .collect_vec();
 
-            // Order of mats after splitting is:
-            // - preprocessed (if has_preprocessed),
-            // - preprocessed_rot (if has_preprocessed),
-            // - cached(0), cached(0)_rot, ...
+            // Order of split rows is:
+            // - preprocessed (if present),
+            // - cached(0), cached(1), ...
             // - common_main
-            // - common_main_rot
-            // For column openings, we pop common_main, common_main_rot and put it at the front
-            assert_eq!(
-                split_mats.len() % 2,
-                0,
-                "Should have even number of matrices after splitting"
-            );
-            let common_main_rot = split_mats.pop().unwrap();
-            let common_main = split_mats.pop().unwrap();
-
-            let openings_of_air = iter::once(&[common_main, common_main_rot] as &[_])
-                .chain(split_mats.chunks_exact(2))
-                .map(|pair| {
-                    let plains = pair[0].as_ref().unwrap();
-                    if let Some(rots) = pair[1].as_ref() {
-                        std::iter::zip(plains.columns(), rots.columns())
-                            .flat_map(|(claim, claim_rot)| {
-                                assert_eq!(claim.len(), 1);
-                                assert_eq!(claim_rot.len(), 1);
-                                [claim[0], claim_rot[0]]
-                            })
+            // For column openings, common_main goes first.
+            let common_main = split_rows.pop().unwrap();
+            let openings_of_air = iter::once(common_main)
+                .chain(split_rows.into_iter())
+                .map(|(plains, rots)| {
+                    if let Some(rots) = rots {
+                        debug_assert_eq!(plains.len(), rots.len());
+                        std::iter::zip(plains, rots)
+                            .flat_map(|(claim, claim_rot)| [claim, claim_rot])
                             .collect_vec()
                     } else {
                         plains
-                            .columns()
-                            .map(|claim| {
-                                assert_eq!(claim.len(), 1);
-                                claim[0]
-                            })
-                            .collect_vec()
                     }
                 })
                 .collect_vec();
