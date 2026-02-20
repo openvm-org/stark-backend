@@ -18,7 +18,7 @@ use tracing::debug;
 use crate::{
     base::MetalMatrix,
     merkle_tree::MerkleTreeMetal,
-    metal::matrix::{collapse_strided_matrix, matrix_transpose_fp},
+    metal::matrix::matrix_transpose_fp,
     poly::PleMatrix,
     prelude::{Digest, F, SC},
     stacked_pcs::StackedPcsDataMetal,
@@ -104,6 +104,28 @@ pub fn transport_matrix_h2d_row(matrix: &RowMajorMatrix<F>) -> MetalMatrix<F> {
     output
 }
 
+fn collapse_strided_trace_values<T: Copy>(
+    src: &[T],
+    dst: &mut [T],
+    width: usize,
+    height: usize,
+    lifted_height: usize,
+    stride: usize,
+) {
+    debug_assert_eq!(src.len(), lifted_height * width);
+    debug_assert_eq!(dst.len(), height * width);
+    debug_assert_eq!(lifted_height, height * stride);
+    debug_assert!(stride > 0);
+    for (src_col, dst_col) in src
+        .chunks_exact(lifted_height)
+        .zip(dst.chunks_exact_mut(height))
+    {
+        for (row_idx, dst_val) in dst_col.iter_mut().enumerate() {
+            *dst_val = src_col[row_idx * stride];
+        }
+    }
+}
+
 /// `d` must be the stacked pcs data of a single trace matrix.
 /// This function will transport `d` to device and then unstack it (allocating device memory) to
 /// return `CommittedTraceData<F, Digest>`.
@@ -128,26 +150,43 @@ pub fn transport_and_unstack_single_data_h2d(
     let stacked_width = d.matrix.width();
     let stacked_height = d.matrix.height();
     let d_matrix_evals = d.matrix.values.to_device();
-    let strided_trace = MetalBuffer::<F>::with_capacity(lifted_height * width);
-    trace_view.values().copy_to(&strided_trace)?;
     let trace_buffer = if stride == 1 {
-        strided_trace
+        debug!(
+            height,
+            width,
+            stride,
+            transport_kernel_dispatches = 0,
+            transport_sync_points = 0,
+            "trace transport direct contiguous upload"
+        );
+        trace_view.values().to_device()
     } else {
-        let buf = MetalBuffer::<F>::with_capacity(height * width);
-        unsafe {
-            collapse_strided_matrix(
-                &buf,
-                0,
-                &strided_trace,
-                0,
-                width as u32,
-                height as u32,
-                stride as u32,
-            )
-            .map_err(ProverError::CollapseStrided)?;
-        }
-        drop(strided_trace);
-        buf
+        let trace_buffer = MetalBuffer::<F>::with_capacity(height * width);
+        // SAFETY:
+        // - `trace_buffer` was freshly allocated in this function and has no concurrent GPU access.
+        // - The returned slice length is exactly `height * width`, matching `dst`.
+        // - Source and destination do not overlap.
+        let trace_slice = unsafe { trace_buffer.as_mut_slice() };
+        collapse_strided_trace_values(
+            trace_view.values(),
+            trace_slice,
+            width,
+            height,
+            lifted_height,
+            stride,
+        );
+        debug!(
+            height,
+            width,
+            stride,
+            lifted_height,
+            transport_kernel_dispatches = 0,
+            transport_sync_points = 0,
+            removed_kernel_dispatches = 1,
+            removed_sync_points = 1,
+            "trace transport collapsed to contiguous layout during upload"
+        );
+        trace_buffer
     };
     let d_matrix = prover_config
         .cache_stacked_matrix
@@ -259,4 +298,38 @@ pub fn transport_matrix_d2h_row_major(matrix: &MetalMatrix<F>) -> RowMajorMatrix
         .unwrap();
     }
     RowMajorMatrix::<F>::new(matrix_buffer.to_host(), matrix.width())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collapse_strided_trace_values;
+
+    #[test]
+    fn collapse_strided_trace_stride_one_identity() {
+        let width = 3;
+        let height = 4;
+        let stride = 1;
+        let lifted_height = height * stride;
+        let src: Vec<u32> = (0..(width * lifted_height) as u32).collect();
+        let mut dst = vec![0u32; width * height];
+        collapse_strided_trace_values(&src, &mut dst, width, height, lifted_height, stride);
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn collapse_strided_trace_stride_two_col_major() {
+        let width = 2;
+        let height = 4;
+        let stride = 2;
+        let lifted_height = height * stride;
+        let src = vec![
+            // col 0
+            0u32, 1, 2, 3, 4, 5, 6, 7,
+            // col 1
+            10u32, 11, 12, 13, 14, 15, 16, 17,
+        ];
+        let mut dst = vec![0u32; width * height];
+        collapse_strided_trace_values(&src, &mut dst, width, height, lifted_height, stride);
+        assert_eq!(dst, vec![0, 2, 4, 6, 10, 12, 14, 16]);
+    }
 }
