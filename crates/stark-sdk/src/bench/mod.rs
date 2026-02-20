@@ -25,7 +25,7 @@ pub fn run_with_metric_collection<R>(
     output_path_envar: impl AsRef<OsStr>,
     f: impl FnOnce() -> R,
 ) -> R {
-    let file = std::env::var(output_path_envar).map(|path| std::fs::File::create(path).unwrap());
+    let file = std::env::var(&output_path_envar).map(|path| std::fs::File::create(path).unwrap());
     // Set up tracing:
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,p3_=warn"));
