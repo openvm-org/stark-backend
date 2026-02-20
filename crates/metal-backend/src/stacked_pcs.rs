@@ -215,6 +215,10 @@ pub fn rs_code_matrix(
     let width = layout.width();
     debug_assert!(height >= (1 << l_skip));
     let codeword_height = height.checked_shl(log_blowup as u32).unwrap();
+    let mut used_compact_mixed_path = false;
+    let mut batch_expand_dispatch_count = 0usize;
+    let mut batch_ntt_small_dispatch_count = 0usize;
+    let mut stack_padded_height = codeword_height;
     let mut codewords = MetalBuffer::<F>::with_capacity(codeword_height * width);
     if let Some(stacked_matrix) = stacked_matrix.as_ref() {
         unsafe {
@@ -229,6 +233,32 @@ pub fn rs_code_matrix(
             )
             .map_err(RsCodeMatrixError::BatchExpandPad)?;
         }
+        batch_expand_dispatch_count += 1;
+    } else if l_skip > 0 && log_blowup > 0 {
+        // Preserve the existing mixed-coefficient semantics while avoiding an expanded-height
+        // `batch_ntt_small` over zero-padded tails.
+        used_compact_mixed_path = true;
+        stack_padded_height = height;
+        let mut stacked_mixed = MetalBuffer::<F>::with_capacity(height * width);
+        stack_traces_into_expanded(layout, traces, &mut stacked_mixed, height)
+            .map_err(RsCodeMatrixError::StackTraces)?;
+        let num_uni_poly = width * (height >> l_skip);
+        unsafe {
+            batch_ntt_small(&mut stacked_mixed, l_skip, num_uni_poly, true)
+                .map_err(RsCodeMatrixError::CustomBatchIntt)?;
+            batch_expand_pad(
+                &codewords,
+                0,
+                &stacked_mixed,
+                0,
+                width as u32,
+                codeword_height as u32,
+                height as u32,
+            )
+            .map_err(RsCodeMatrixError::BatchExpandPad)?;
+        }
+        batch_ntt_small_dispatch_count += 1;
+        batch_expand_dispatch_count += 1;
     } else {
         stack_traces_into_expanded(layout, traces, &mut codewords, codeword_height)
             .map_err(RsCodeMatrixError::StackTraces)?;
@@ -238,8 +268,18 @@ pub fn rs_code_matrix(
                 batch_ntt_small(&mut codewords, l_skip, num_uni_poly, true)
                     .map_err(RsCodeMatrixError::CustomBatchIntt)?;
             }
+            batch_ntt_small_dispatch_count += 1;
         }
     }
+    tracing::debug!(
+        cached_stacked_matrix = stacked_matrix.is_some(),
+        used_compact_mixed_path,
+        stack_padded_height,
+        codeword_height,
+        batch_expand_dispatch_count,
+        batch_ntt_small_dispatch_count,
+        "rs_code_matrix_dispatch_stats"
+    );
     let log_codeword_height = log2_strict_usize(codeword_height);
 
     if l_skip > 0 {
