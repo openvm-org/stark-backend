@@ -52,6 +52,9 @@ pub type Com<SC> = <SC as StarkProtocolConfig>::Digest;
 pub struct SystemParams {
     pub l_skip: usize,
     pub n_stack: usize,
+    /// Maximum number of stacked polynomials (i.e. stacked matrix width). This implies a max
+    /// stacked cell count of `w_stack * 2^(n_stack + l_skip)`.
+    pub w_stack: usize,
     /// `-log_2` of the rate for the initial Reed-Solomon code.
     pub log_blowup: usize,
     #[getset(get = "pub")]
@@ -190,7 +193,7 @@ impl WhirConfig {
             log_inv_rate = next_rate;
         }
 
-        const MU_POW_BITS: usize = 20;
+        const MU_POW_BITS: usize = 13;
 
         Self {
             k: k_whir,

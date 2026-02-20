@@ -606,7 +606,7 @@ mod tests {
     use p3_field::PrimeField64;
 
     use super::*;
-    use crate::{config::WhirRoundConfig, interaction::LogUpSecurityParameters};
+    use crate::{config::WhirRoundConfig, interaction::LogUpSecurityParameters, WhirParams};
 
     // ==========================================================================
     // Test fixtures
@@ -616,6 +616,7 @@ mod tests {
         SystemParams {
             l_skip: 3,
             n_stack: 8,
+            w_stack: 64,
             log_blowup: 1,
             whir: WhirConfig {
                 k: 4,
@@ -623,7 +624,7 @@ mod tests {
                     WhirRoundConfig { num_queries: 36 },
                     WhirRoundConfig { num_queries: 18 },
                 ],
-                mu_pow_bits: 20,
+                mu_pow_bits: 16,
                 query_phase_pow_bits: 16,
                 folding_pow_bits: 10,
             },
@@ -667,6 +668,7 @@ mod tests {
         log_blowup: usize,
         l_skip: usize,
         n_stack: usize,
+        w_stack: usize,
         log_final_poly_len: usize,
     ) -> SystemParams {
         let k_whir = 4;
@@ -676,11 +678,12 @@ mod tests {
         SystemParams {
             l_skip,
             n_stack,
+            w_stack,
             log_blowup,
             whir: WhirConfig::new(
                 log_blowup,
                 log_stacked_height,
-                crate::config::WhirParams {
+                WhirParams {
                     k: k_whir,
                     log_final_poly_len,
                     query_phase_pow_bits: WHIR_POW_BITS,
@@ -707,6 +710,7 @@ mod tests {
             DEFAULT_APP_LOG_BLOWUP,
             DEFAULT_APP_L_SKIP,
             20,
+            2048,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
         )
     }
@@ -714,7 +718,13 @@ mod tests {
     /// Leaf params: from SDK default_leaf_params(DEFAULT_LEAF_LOG_BLOWUP)
     /// l_skip=2, n_stack=18
     fn leaf_params() -> SystemParams {
-        production_system_params(DEFAULT_LEAF_LOG_BLOWUP, 2, 18, WHIR_MAX_LOG_FINAL_POLY_LEN)
+        production_system_params(
+            DEFAULT_LEAF_LOG_BLOWUP,
+            2,
+            18,
+            1024,
+            WHIR_MAX_LOG_FINAL_POLY_LEN,
+        )
     }
 
     /// Internal params: from SDK default_internal_params(DEFAULT_INTERNAL_LOG_BLOWUP)
@@ -724,6 +734,7 @@ mod tests {
             DEFAULT_INTERNAL_LOG_BLOWUP,
             2,
             17,
+            1024,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
         )
     }
@@ -731,7 +742,7 @@ mod tests {
     /// Compression params: from SDK default_compression_params(DEFAULT_COMPRESSION_LOG_BLOWUP)
     /// l_skip=2, n_stack=20, log_final_poly_len=11 (different from others!)
     fn compression_params() -> SystemParams {
-        production_system_params(DEFAULT_COMPRESSION_LOG_BLOWUP, 2, 20, 11)
+        production_system_params(DEFAULT_COMPRESSION_LOG_BLOWUP, 2, 20, 64, 11)
     }
 
     // ==========================================================================
@@ -870,9 +881,6 @@ mod tests {
         num_columns: usize,
         n_logup: usize,
     ) -> SoundnessCalculator {
-        // num_columns is used for both num_trace_columns and num_stacked_columns.
-        // This is conservative since num_trace_columns >= num_stacked_columns
-        // (stacking can only reduce width).
         let soundness = SoundnessCalculator::calculate(
             params,
             babybear_quartic_extension_bits(),
@@ -881,15 +889,15 @@ mod tests {
             params.max_constraint_degree,
             max_log_height,
             num_columns,
-            num_columns,
+            params.w_stack,
             n_logup,
             ProximityRegime::UniqueDecoding,
         );
 
         println!("\n=== {} Soundness ===", name);
         println!(
-            "Config: l_skip={}, n_stack={}, log_blowup={}, k_whir={}",
-            params.l_skip, params.n_stack, params.log_blowup, params.whir.k
+            "Config: l_skip={}, n_stack={}, w_stack={}, log_blowup={}, k_whir={}",
+            params.l_skip, params.n_stack, params.w_stack, params.log_blowup, params.whir.k
         );
         println!(
             "Context: max_constraints={}, num_airs={}, max_log_height={}, num_columns={}, n_logup={}",

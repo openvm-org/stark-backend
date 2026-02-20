@@ -182,6 +182,8 @@ pub enum StackingProofShapeError {
         expected: usize,
         actual: usize,
     },
+    #[error("Total stacked width across commits ({actual}) exceeds w_stack ({w_stack})")]
+    TotalStackedWidthOutOfBounds { w_stack: usize, actual: usize },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -562,6 +564,16 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         .chain(other_layouts)
         .collect_vec();
 
+    let total_stacked_width: usize = layouts.iter().map(StackedLayout::width).sum();
+    if total_stacked_width > mvk.params.w_stack {
+        return ProofShapeError::invalid_stacking(
+            StackingProofShapeError::TotalStackedWidthOutOfBounds {
+                w_stack: mvk.params.w_stack,
+                actual: total_stacked_width,
+            },
+        );
+    }
+
     if stacking_proof.stacking_openings.len() != layouts.len() {
         return ProofShapeError::invalid_stacking(StackingProofShapeError::InvalidStackOpenings {
             expected: layouts.len(),
@@ -575,7 +587,7 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         .zip(&layouts)
         .enumerate()
     {
-        let stacked_matrix_width = layout.sorted_cols.last().unwrap().2.col_idx + 1;
+        let stacked_matrix_width = layout.width();
         if openings.len() != stacked_matrix_width {
             return ProofShapeError::invalid_stacking(
                 StackingProofShapeError::InvalidStackOpeningsPerMatrix {
