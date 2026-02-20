@@ -454,6 +454,12 @@ impl SoundnessCalculator {
     /// Computes `log2(a_bound)` from BCHKS25/TR25-169 Theorem 1.5 (contrapositive), where
     /// `a_bound = ceil(a).max(1)`.
     ///
+    /// We use Section 3.2 Equation (13):
+    /// `a > 2 * D_X * D_Y^2 * D_Z + (gamma * n + 1) * D_Y`,
+    /// with `D_X, D_Y, D_Z` from Lemma 3.1 Equations (7), (8), (9).
+    /// For `m = 2`, we follow the Lemma 3.1 note and set
+    /// `D_Z = max(D_Y, D_Z)` where `D_Z` is the Equation (9) value.
+    ///
     /// Parameters are mapped as:
     /// - `num_variables = log_degree`
     /// - `rho = 2^{-log_inv_rate}`
@@ -482,17 +488,24 @@ impl SoundnessCalculator {
         let log2_n = (log_degree + log_inv_rate) as f64;
         let log2_3 = 3.0_f64.log2();
 
-        // numerator = 2*m_bar^5 + 3*m_bar*gamma*rho
-        let log2_a = 1.0 + 5.0 * log2_m_bar;
-        let log2_b = log2_3 + log2_m_bar + gamma.log2() + log2_rho;
-        let log2_numerator = Self::log2_add(log2_a, log2_b);
+        // Lemma 3.1 degrees in log2-space.
+        // D_X = (m + 1/2) * sqrt(k * n)
+        // D_Y = (m + 1/2) * sqrt(n / k)
+        // D_Z (Equation 9) = ((m + 1/2)^2 * n) / (3 * k)
+        let log2_d_x = log2_m_bar + log2_n + 0.5 * log2_rho;
+        let log2_d_y = log2_m_bar - 0.5 * log2_rho;
+        let log2_d_z = 2.0 * log2_m_bar - log2_3 - log2_rho;
+        let log2_d_z = if m_eff < 3 {
+            log2_d_y.max(log2_d_z)
+        } else {
+            log2_d_z
+        };
 
-        // term1 = (numerator / (3*rho^(3/2))) * n
-        let log2_term1 = log2_n + log2_numerator - log2_3 - 1.5 * log2_rho;
-        // term2 = m_bar / sqrt_rho
-        let log2_term2 = log2_m_bar - 0.5 * log2_rho;
-
-        let log2_a_real = Self::log2_add(log2_term1, log2_term2);
+        // Equation (13): a > 2*D_X*D_Y^2*D_Z + (gamma*n + 1)*D_Y
+        let log2_term_poly = 1.0 + log2_d_x + 2.0 * log2_d_y + log2_d_z;
+        let log2_gamma_n_plus_1 = Self::log2_add(gamma.log2() + log2_n, 0.0);
+        let log2_term_gamma = log2_d_y + log2_gamma_n_plus_1;
+        let log2_a_real = Self::log2_add(log2_term_poly, log2_term_gamma);
         if !log2_a_real.is_finite() {
             return f64::INFINITY;
         }
@@ -820,7 +833,7 @@ mod tests {
             2,
             18,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
-            ProximityRegime::ListDecoding { m: 3 },
+            ProximityRegime::ListDecoding { m: 2 },
         )
     }
 
