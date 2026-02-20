@@ -832,6 +832,53 @@ __global__ void frac_vector_scalar_multiply_kernel(
     frac_vec[tidx].first *= scalar;
 }
 
+// Fused two-layer tree build kernel.
+// Applies two consecutive frac_add tree layers in one pass, keeping intermediate
+// right-half nodes for later revert operations.
+//
+// For fused layers i and i+1 with half_i = N >> (i+1) and half_i1 = N >> (i+2):
+//   Thread j in [0, half_i1) reads:
+//     A = layer[j],                  B = layer[j + half_i1],
+//     C = layer[j + half_i],         D = layer[j + half_i + half_i1]
+//   Computes:
+//     lhs = frac_add(A, C)            (layer i result at j, kept in register)
+//     rhs = frac_add(B, D)            (layer i result at j + half_i1)
+//     result = frac_add(lhs, rhs)     (layer i+1 result at j)
+//   Writes:
+//     layer[j]         = result        (layer i+1 output)
+//     layer[j+half_i1] = rhs           (layer i intermediate, needed for revert of layer i+1)
+//   C and D remain untouched (already in correct place for revert of layer i).
+//
+// Memory traffic vs two separate frac_build_tree_layer calls:
+//   Non-fused: 4 reads + 2 writes (layer i) + 2 reads + 1 write (layer i+1) = 6R+3W per group
+//   Fused:     4 reads + 2 writes per group
+//   Savings:   2 reads + 1 write = ~33% reduction in global memory traffic.
+__global__ void frac_build_tree_two_layers_kernel(
+    FracExt *__restrict__ layer,
+    uint32_t half_i1   // = N >> (i+2), where i is the first of the two layers
+) {
+    uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= half_i1) return;
+
+    uint32_t half_i = half_i1 << 1;   // = N >> (i+1)
+
+    FracExt A = layer[j];
+    FracExt B = layer[j + half_i1];
+    FracExt C = layer[j + half_i];
+    FracExt D = layer[j + half_i + half_i1];
+
+    // Layer i: combine A with C and B with D (kept in registers)
+    FracExt lhs = frac_add(A, C);
+    FracExt rhs = frac_add(B, D);
+    // Layer i+1: combine the two layer-i results
+    FracExt result = frac_add(lhs, rhs);
+
+    layer[j]         = result;
+    layer[j + half_i1] = rhs;   // Needed for revert of layer i+1
+    // layer[j + half_i] = C  (unchanged, needed for revert of layer i)
+    // layer[j + half_i + half_i1] = D  (unchanged, needed for revert of layer i)
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -858,6 +905,19 @@ extern "C" int _frac_build_tree_layer(
     return DISPATCH_BOOL_PAIR(
         launch_frac_build_tree_layer, revert, apply_alpha, layer, layer_size, alpha
     );
+}
+
+// Launcher for fused two-layer tree build.
+// half_i1 = N >> (i+2), where i is the index of the first layer to fuse.
+// Requires half_i1 >= 1 and half_i1 * 4 <= total array size.
+extern "C" int _frac_build_tree_two_layers(FracExt *layer, size_t half_i1) {
+    if (half_i1 == 0) return 0;
+    // Use 256 threads/block (not 1024) to give the compiler more register headroom.
+    // frac_build_tree_two_layers_kernel does 4 FracExt loads + 3 frac_add ops,
+    // which has higher register pressure than the single-layer build kernel.
+    auto [grid, block] = kernel_launch_params(half_i1, 256);
+    frac_build_tree_two_layers_kernel<<<grid, block>>>(layer, (uint32_t)half_i1);
+    return CHECK_KERNEL();
 }
 
 inline uint32_t min_blocks_target_for_device(uint32_t blocks_per_sm, uint32_t fallback_blocks) {
@@ -1233,6 +1293,159 @@ extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar,
     auto [grid, block] = kernel_launch_params(length);
     frac_vector_scalar_multiply_kernel<Fp, FpExt>
         <<<grid, block>>>(reinterpret_cast<std::pair<FpExt, FpExt> *>(frac_vec), scalar, length);
+    return CHECK_KERNEL();
+}
+
+
+// ============================================================================
+// Fused bit-reversal + K=2 GKR tree-build
+// ============================================================================
+
+// bit_rev() and index_t redeclared from supra/include/ntt/{ntt.cuh,parameters.cuh}
+// because the supra include path is not on the cuda-backend build search path.
+typedef unsigned int index_t;
+template<typename T>
+__device__ __forceinline__
+T bit_rev(T i, unsigned int nbits)
+{
+    return __brev(i) >> (8 * sizeof(unsigned int) - nbits);
+}
+
+// Fused bit-reversal + K=2 GKR tree-build kernel for FracExt.
+//
+// DERIVED FROM: bit_rev_permutation_z<T, Z_COUNT> in supra/ntt_bitrev.cu.
+// Diff vs the original template kernel:
+//   - Z_COUNT = 8 hardcoded (not a template param)
+//   - In-place: single `inout` pointer (original has separate `out`/`in`)
+//   - No poly_count / no 2-D grid: operates on one poly only
+//   - Extra `alpha` parameter: adds alpha to every denominator after bit-reversing
+//   - Two GKR tree layers (K=2) are computed inside shmem before writing to global mem,
+//     eliminating two separate kernel passes
+//   - __syncwarp() is used unconditionally (original conditionally uses __syncthreads()
+//     when Z_COUNT > WARP_SIZE, which is never true for Z_COUNT=8)
+//
+// Output layout for each Z-tile written at base_rev (i*step + base_rev, i=0..7):
+//   [0,1]  : layer-1 results  (tree level 2)
+//   [2,3]  : layer-0 results preserved (tree level 1 right half, for revert of layer 1)
+//   [4..7] : original+alpha preserved (leaves, for revert of layer 0)
+//
+// __launch_bounds__(256): not a correctness constraint — __syncwarp() is safe for any
+// multiple-of-32 bsize because each gid group is Z_COUNT=8 threads (always within one
+// warp) and different warps operate on independent shmem tiles. bsize=256 was chosen after
+// benchmarking: 2× faster than bsize=32 in isolation (1525 vs 754 GB/s at lg=24 on RTX
+// 5090). It requires 64KB dynamic shmem per block, so cudaFuncSetAttribute is used in the
+// launcher — but only once (static local), paid on the first call and never again.
+__launch_bounds__(256) __global__
+void bit_rev_frac_build_k2_kernel(
+    FracExt* inout, uint32_t lg_domain_size, FpExt alpha)
+{
+    constexpr uint32_t Z_COUNT = 8;
+    constexpr uint32_t LG_Z_COUNT = 3;
+
+    extern __shared__ unsigned char xchg_raw[];
+    FracExt (*xchg)[Z_COUNT][Z_COUNT] =
+        reinterpret_cast<FracExt (*)[Z_COUNT][Z_COUNT]>(xchg_raw);
+
+    uint32_t gid = threadIdx.x / Z_COUNT;
+    uint32_t idx = threadIdx.x % Z_COUNT;
+    uint32_t rev = bit_rev(idx, LG_Z_COUNT);
+
+    index_t step = (index_t)1 << (lg_domain_size - LG_Z_COUNT);
+    index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
+
+    #pragma unroll 1
+    do {
+        index_t group_idx = tid >> LG_Z_COUNT;
+        index_t group_rev = bit_rev(group_idx, lg_domain_size - 2*LG_Z_COUNT);
+
+        if (group_idx > group_rev)
+            continue;
+
+        index_t base_idx = group_idx * Z_COUNT + idx;
+        index_t base_rev = group_rev * Z_COUNT + idx;
+
+        FracExt regs[Z_COUNT];
+
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++) {
+            xchg[gid][i][rev] = (regs[i] = inout[i * step + base_idx]);
+            if (group_idx != group_rev)
+                regs[i] = inout[i * step + base_rev];
+        }
+
+        __syncwarp();
+
+        // Apply alpha + tree layers 0 and 1 to transposed tile, then write to base_rev
+        {
+            FracExt* row = xchg[gid][rev];
+            #pragma unroll
+            for (uint32_t i = 0; i < Z_COUNT; i++)
+                row[i].q = row[i].q + alpha;
+            #pragma unroll
+            for (uint32_t i = 0; i < 4; i++)  // tree layer 0: pairs (0,4),(1,5),(2,6),(3,7)
+                frac_add_inplace(row[i], row[i + 4]);
+            #pragma unroll
+            for (uint32_t i = 0; i < 2; i++)  // tree layer 1: pairs (0,2),(1,3)
+                frac_add_inplace(row[i], row[i + 2]);
+        }
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            inout[i * step + base_rev] = xchg[gid][rev][i];
+
+        if (group_idx == group_rev)
+            continue;
+
+        __syncwarp();
+
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            xchg[gid][i][rev] = regs[i];
+
+        __syncwarp();
+
+        // Apply alpha + tree layers 0 and 1 to transposed tile, then write to base_idx
+        {
+            FracExt* row = xchg[gid][rev];
+            #pragma unroll
+            for (uint32_t i = 0; i < Z_COUNT; i++)
+                row[i].q = row[i].q + alpha;
+            #pragma unroll
+            for (uint32_t i = 0; i < 4; i++)
+                frac_add_inplace(row[i], row[i + 4]);
+            #pragma unroll
+            for (uint32_t i = 0; i < 2; i++)
+                frac_add_inplace(row[i], row[i + 2]);
+        }
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; i++)
+            inout[i * step + base_idx] = xchg[gid][rev][i];
+
+    } while ((tid += blockDim.x*gridDim.x) < step);
+    // Note: the original bit_rev_permutation_z guards this with "Z_COUNT <= WARP_SIZE &&"
+    // to prevent register spills when Z_COUNT > WARP_SIZE. Z_COUNT=8 is always <= 32.
+}
+
+// Fused bitrev + K=2 tree build for a single FracExt buffer.
+// Requires domain_size >= 256 (uses Z-tile shmem kernel).
+// Applies alpha to denominators and fuses tree layers 0 and 1 in shmem.
+extern "C" int _bit_rev_frac_ext_build_k2(
+    FracExt* inout, uint32_t lg_domain_size, FpExt alpha)
+{
+    constexpr uint32_t Z_COUNT = 8;
+    constexpr uint32_t bsize = 256;
+    constexpr size_t shmem_bytes = (size_t)bsize * Z_COUNT * sizeof(FracExt);  // 64 KB
+    // Raise the per-block dynamic shmem limit once (static → paid on first call only).
+    static const cudaError_t shmem_err = cudaFuncSetAttribute(
+        bit_rev_frac_build_k2_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        (int)shmem_bytes);
+    if (shmem_err != cudaSuccess) return shmem_err;
+    size_t domain_size = (size_t)1 << lg_domain_size;
+    if (domain_size < (size_t)(bsize * Z_COUNT))
+        return cudaErrorInvalidValue;
+    uint32_t grid_x = (uint32_t)(domain_size / Z_COUNT / bsize);
+    bit_rev_frac_build_k2_kernel<<<dim3(grid_x), bsize, shmem_bytes>>>(
+        inout, lg_domain_size, alpha);
     return CHECK_KERNEL();
 }
 

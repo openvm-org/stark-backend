@@ -20,12 +20,12 @@ use crate::{
     cuda::{
         logup_zerocheck::{
             _frac_compute_round_temp_buffer_size, fold_ef_frac_columns,
-            fold_ef_frac_columns_inplace, frac_build_tree_layer, frac_compute_round,
-            frac_compute_round_and_fold, frac_compute_round_and_fold_inplace,
+            fold_ef_frac_columns_inplace, frac_build_tree_layer, frac_build_tree_two_layers,
+            frac_compute_round, frac_compute_round_and_fold, frac_compute_round_and_fold_inplace,
             frac_compute_round_and_revert, frac_multifold_raw, frac_precompute_m_build_raw,
             frac_precompute_m_eval_round_raw,
         },
-        ntt::bit_rev_frac_ext,
+        ntt::{bit_rev_frac_ext, bit_rev_frac_ext_build_k2},
     },
     poly::SqrtEqLayers,
     prelude::{EF, SC},
@@ -501,40 +501,57 @@ pub fn fractional_sumcheck_gpu(
     // - First tree layer converts (F, EF) to FracExt (EF, EF)
 
     // We store it in bit-reversal order for coalesced memory accesses.
-    unsafe {
-        // SAFETY: Frac<EF> has exact same memory layout and alignment as (EF, EF).
-        let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
-        bit_rev_frac_ext(
-            buf,
-            buf,
-            total_rounds as u32,
-            total_leaves.try_into().unwrap(),
-            1,
-        )
-        .map_err(FractionalSumcheckError::BitReversal)?;
-    }
-
-    // Build segment tree with fused alpha application
-    for i in 0..total_rounds {
+    // For large N (> 1024), fuse bitrev + tree layers 0 and 1 into a single kernel pass,
+    // eliminating ~1.5N global memory reads. For small N, fall back to separate operations.
+    let start_layer_i = if total_leaves > 1024 {
         unsafe {
-            if i == 0 {
-                // Fuse alpha into first tree layer (first half only)
-                frac_build_tree_layer(&mut layer, total_leaves >> i, false, alpha, true)
-                    .map_err(FractionalSumcheckError::SegmentTree)?;
+            // SAFETY: Frac<EF> has exact same memory layout and alignment as (EF, EF).
+            let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
+            bit_rev_frac_ext_build_k2(buf, total_rounds as u32, alpha)
+                .map_err(FractionalSumcheckError::BitReversal)?;
+        }
+        2 // layers 0+1 already done
+    } else {
+        // Fallback: separate bitrev + layer 0.
+        unsafe {
+            let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
+            bit_rev_frac_ext(
+                buf,
+                buf,
+                total_rounds as u32,
+                total_leaves.try_into().unwrap(),
+                1,
+            )
+            .map_err(FractionalSumcheckError::BitReversal)?;
+            frac_build_tree_layer(&mut layer, total_leaves, false, alpha, true)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
+            use crate::cuda::logup_zerocheck::frac_add_alpha;
+            let half = total_leaves / 2;
+            let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
+            let second_half_buf =
+                DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
+            frac_add_alpha(&second_half_buf, alpha)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
+            std::mem::forget(second_half_buf);
+        }
+        1 // layer 0 done; continue from layer 1
+    };
 
-                // Apply alpha to second half (needed for sumcheck revert operations)
-                use crate::cuda::logup_zerocheck::frac_add_alpha;
-                let half = total_leaves / 2;
-                let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
-                let second_half_buf =
-                    DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
-                frac_add_alpha(&second_half_buf, alpha)
-                    .map_err(FractionalSumcheckError::SegmentTree)?;
-                std::mem::forget(second_half_buf);
-            } else {
-                frac_build_tree_layer(&mut layer, total_leaves >> i, false, EF::ZERO, false)
-                    .map_err(FractionalSumcheckError::SegmentTree)?;
-            }
+    // Remaining layers: fuse consecutive pairs via two-layer kernel (~33% traffic savings).
+    let mut i = start_layer_i;
+    while i + 1 < total_rounds {
+        let half_i1 = total_leaves >> (i + 2);
+        unsafe {
+            frac_build_tree_two_layers(&mut layer, half_i1)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
+        }
+        i += 2;
+    }
+    // Remaining single layer (if odd number of layers left).
+    if i < total_rounds {
+        unsafe {
+            frac_build_tree_layer(&mut layer, total_leaves >> i, false, EF::ZERO, false)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
         }
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
