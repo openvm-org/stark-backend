@@ -59,12 +59,12 @@ kernel void batch_ntt_small(
     constant uint32_t &is_intt [[buffer(4)]],
     threadgroup Fp *smem [[threadgroup(0)]],
     uint2 t_pos [[thread_position_in_threadgroup]], // (x=element_idx, y=block_within_tg)
-    uint2 tg_pos [[threadgroup_position_in_grid]],
-    uint2 tg_size [[threads_per_threadgroup]]
+    uint2 tg_pos [[threadgroup_position_in_grid]]
 ) {
     uint tg_pos_x = tg_pos.x;
     // Each threadgroup handles multiple NTT blocks (packed via y dimension)
-    uint32_t threads_y = tg_size.y;
+    uint32_t threads_x = 1u << l_skip;
+    uint32_t threads_y = 1024 / threads_x; // matching CUDA: threads_per_block = 1024
     uint32_t block_idx = tg_pos_x * threads_y + t_pos.y;
     bool active_thread = (block_idx < cnt_blocks);
 
