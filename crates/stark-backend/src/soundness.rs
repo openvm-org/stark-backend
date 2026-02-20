@@ -75,7 +75,6 @@ impl SoundnessCalculator {
         num_trace_columns: usize,
         num_stacked_columns: usize,
         n_logup: usize,
-        proximity_regime: ProximityRegime,
     ) -> Self {
         let logup_bits = Self::calculate_logup_soundness(params, challenge_field_bits);
 
@@ -109,7 +108,7 @@ impl SoundnessCalculator {
             params,
             challenge_field_bits,
             num_stacked_columns,
-            proximity_regime,
+            params.whir.proximity_regime,
         );
 
         let total_bits = logup_bits
@@ -275,7 +274,7 @@ impl SoundnessCalculator {
 
     /// WHIR soundness analysis based on the WHIR paper (ePrint 2024/1586).
     ///
-    /// Error sources (current formulas assume unique decoding, ℓ = 1):
+    /// Error sources (formulas depend on the proximity regime):
     /// 1. **Fold error** (sumcheck + proximity gap per sub-round)
     /// 2. **OOD error** (non-final rounds)
     /// 3. **Query error** (all rounds)
@@ -358,8 +357,11 @@ impl SoundnessCalculator {
             if !is_final_round {
                 // OOD error (not protected by PoW; sampled after commitment observed).
                 let log_degree_at_round_start = current_log_degree + k_whir;
-                let ood_bits =
-                    Self::whir_ood_security(challenge_field_bits, log_degree_at_round_start);
+                let ood_bits = Self::whir_ood_security(
+                    proximity_regime,
+                    challenge_field_bits,
+                    log_degree_at_round_start,
+                );
                 min_ood_bits = min_ood_bits.min(ood_bits);
 
                 tracing::debug!(
@@ -401,8 +403,9 @@ impl SoundnessCalculator {
     ///
     /// Per WHIR paper: err*(C, ℓ, δ) = (ℓ - 1) · 2^m / (ρ · |F|)
     ///
-    /// Unique decoding formula:
-    /// Security bits = |F_ext| - log₂(ℓ - 1) - log₂(degree) - log₂(1/rate)
+    /// - `UniqueDecoding`: Security bits = |F_ext| - log₂(ℓ - 1) - log₂(degree) - log₂(1/rate)
+    /// - `ListDecoding { m }`: Uses BCHKS25/TR25-169 Theorem 1.5 (contrapositive) to bound the "bad
+    ///   z set" size by `a`, with Haböck's global extension introducing a linear factor `(ℓ - 1)`.
     pub fn whir_proximity_gap_security(
         proximity_regime: ProximityRegime,
         challenge_field_bits: f64,
@@ -418,6 +421,93 @@ impl SoundnessCalculator {
                     - log_degree as f64
                     - log_inv_rate as f64
             }
+            ProximityRegime::ListDecoding { m } => {
+                let log2_a = Self::log2_a_bound_bchks25(log_degree, log_inv_rate, m);
+                // Haböck global mutual correlated agreement: error ∝ (ℓ - 1) * a / |F|.
+                challenge_field_bits - ((batch_size - 1) as f64).log2() - log2_a
+            }
+        }
+    }
+
+    /// Numerically stable `log2(2^x + 2^y)`.
+    #[inline]
+    fn log2_add(log2_x: f64, log2_y: f64) -> f64 {
+        if log2_x.is_infinite() && log2_x.is_sign_positive() {
+            return log2_x;
+        }
+        if log2_y.is_infinite() && log2_y.is_sign_positive() {
+            return log2_y;
+        }
+        if log2_x.is_nan() || log2_y.is_nan() {
+            return f64::NAN;
+        }
+
+        let (hi, lo) = if log2_x >= log2_y {
+            (log2_x, log2_y)
+        } else {
+            (log2_y, log2_x)
+        };
+        let ratio = (lo - hi).exp2();
+        hi + (1.0 + ratio).log2()
+    }
+
+    /// Computes `log2(a_bound)` from BCHKS25/TR25-169 Theorem 1.5 (contrapositive), where
+    /// `a_bound = ceil(a).max(1)`.
+    ///
+    /// Parameters are mapped as:
+    /// - `num_variables = log_degree`
+    /// - `rho = 2^{-log_inv_rate}`
+    /// - `n = 2^{log_degree + log_inv_rate}`
+    ///
+    /// We set the theorem slack `η` from the provided multiplicity `m` as
+    /// `η = sqrt(rho) / (2m)`, so that `m = ceil(sqrt(rho)/(2η))`.
+    fn log2_a_bound_bchks25(log_degree: usize, log_inv_rate: usize, m: usize) -> f64 {
+        let m_eff = m.max(1);
+        let log2_rho = -(log_inv_rate as f64);
+        let rho = log2_rho.exp2();
+        if !(rho > 0.0) || !rho.is_finite() {
+            return f64::INFINITY;
+        }
+
+        let sqrt_rho = rho.sqrt();
+        let eta = sqrt_rho / (2.0 * m_eff as f64);
+        let gamma = 1.0 - sqrt_rho - eta;
+        if !(eta > 0.0) || !(gamma > 0.0) || gamma >= 1.0 - sqrt_rho {
+            // Invalid theorem regime => no security from this term.
+            return f64::INFINITY;
+        }
+
+        let m_bar = m_eff as f64 + 0.5;
+        let log2_m_bar = m_bar.log2();
+        let log2_n = (log_degree + log_inv_rate) as f64;
+        let log2_3 = 3.0_f64.log2();
+
+        // numerator = 2*m_bar^5 + 3*m_bar*gamma*rho
+        let log2_a = 1.0 + 5.0 * log2_m_bar;
+        let log2_b = log2_3 + log2_m_bar + gamma.log2() + log2_rho;
+        let log2_numerator = Self::log2_add(log2_a, log2_b);
+
+        // term1 = (numerator / (3*rho^(3/2))) * n
+        let log2_term1 = log2_n + log2_numerator - log2_3 - 1.5 * log2_rho;
+        // term2 = m_bar / sqrt_rho
+        let log2_term2 = log2_m_bar - 0.5 * log2_rho;
+
+        let log2_a_real = Self::log2_add(log2_term1, log2_term2);
+        if !log2_a_real.is_finite() {
+            return f64::INFINITY;
+        }
+
+        // Clamp `a_bound >= 1` => `log2(a_bound) >= 0`.
+        let log2_a_real = log2_a_real.max(0.0);
+
+        // If `a` is small enough, apply `ceil` in normal space for exactness.
+        if log2_a_real < 52.0 {
+            let a = log2_a_real.exp2();
+            let a_bound = a.ceil().max(1.0);
+            a_bound.log2()
+        } else {
+            // For large `a`, `ceil` does not materially affect `log2(a)`.
+            log2_a_real
         }
     }
 
@@ -438,8 +528,16 @@ impl SoundnessCalculator {
     ///
     /// OOD error is 2^{m - 1} / |F| where m is the log_degree at round start.
     /// Security bits = |F_ext| - log_degree + 1
-    fn whir_ood_security(challenge_field_bits: f64, log_degree_at_round_start: usize) -> f64 {
-        challenge_field_bits - log_degree_at_round_start as f64 + 1.0
+    fn whir_ood_security(
+        proximity_regime: ProximityRegime,
+        challenge_field_bits: f64,
+        log_degree_at_round_start: usize,
+    ) -> f64 {
+        let base_bits = challenge_field_bits - log_degree_at_round_start as f64 + 1.0;
+        match proximity_regime {
+            ProximityRegime::UniqueDecoding => base_bits,
+            ProximityRegime::ListDecoding { m } => base_bits - (m.max(1) as f64).log2(),
+        }
     }
 
     /// Computes WHIR in-domain γ batching security bits.
@@ -452,10 +550,10 @@ impl SoundnessCalculator {
         batch_size: usize,
     ) -> f64 {
         debug_assert!(batch_size > 1, "batch_size must be > 1 for gamma batching");
+        let base_bits = challenge_field_bits - ((batch_size - 1) as f64).log2();
         match proximity_regime {
-            ProximityRegime::UniqueDecoding => {
-                challenge_field_bits - ((batch_size - 1) as f64).log2()
-            }
+            ProximityRegime::UniqueDecoding => base_bits,
+            ProximityRegime::ListDecoding { m } => base_bits - (m.max(1) as f64).log2(),
         }
     }
 }
@@ -484,7 +582,6 @@ pub fn print_soundness_report(
         num_trace_columns,
         num_stacked_columns,
         n_logup,
-        proximity_regime,
     );
 
     println!("=== V2 Proof System Soundness Report ===");
@@ -626,6 +723,7 @@ mod tests {
                 mu_pow_bits: 20,
                 query_phase_pow_bits: 16,
                 folding_pow_bits: 10,
+                proximity_regime: ProximityRegime::UniqueDecoding,
             },
             logup: LogUpSecurityParameters {
                 max_interaction_count: 1 << 20,
@@ -668,6 +766,7 @@ mod tests {
         l_skip: usize,
         n_stack: usize,
         log_final_poly_len: usize,
+        proximity_regime: ProximityRegime,
     ) -> SystemParams {
         let k_whir = 4;
         let max_constraint_degree = 4;
@@ -686,6 +785,7 @@ mod tests {
                     query_phase_pow_bits: WHIR_POW_BITS,
                 },
                 SECURITY_BITS_TARGET,
+                proximity_regime,
             ),
             logup: log_up_security_params_baby_bear_100_bits_local(),
             max_constraint_degree,
@@ -708,13 +808,20 @@ mod tests {
             DEFAULT_APP_L_SKIP,
             20,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
+            ProximityRegime::UniqueDecoding,
         )
     }
 
     /// Leaf params: from SDK default_leaf_params(DEFAULT_LEAF_LOG_BLOWUP)
     /// l_skip=2, n_stack=18
     fn leaf_params() -> SystemParams {
-        production_system_params(DEFAULT_LEAF_LOG_BLOWUP, 2, 18, WHIR_MAX_LOG_FINAL_POLY_LEN)
+        production_system_params(
+            DEFAULT_LEAF_LOG_BLOWUP,
+            2,
+            18,
+            WHIR_MAX_LOG_FINAL_POLY_LEN,
+            ProximityRegime::ListDecoding { m: 3 },
+        )
     }
 
     /// Internal params: from SDK default_internal_params(DEFAULT_INTERNAL_LOG_BLOWUP)
@@ -725,13 +832,20 @@ mod tests {
             2,
             17,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
+            ProximityRegime::ListDecoding { m: 3 },
         )
     }
 
     /// Compression params: from SDK default_compression_params(DEFAULT_COMPRESSION_LOG_BLOWUP)
     /// l_skip=2, n_stack=20, log_final_poly_len=11 (different from others!)
     fn compression_params() -> SystemParams {
-        production_system_params(DEFAULT_COMPRESSION_LOG_BLOWUP, 2, 20, 11)
+        production_system_params(
+            DEFAULT_COMPRESSION_LOG_BLOWUP,
+            2,
+            20,
+            11,
+            ProximityRegime::ListDecoding { m: 3 },
+        )
     }
 
     // ==========================================================================
@@ -799,7 +913,6 @@ mod tests {
             200,
             10,
             15,
-            ProximityRegime::UniqueDecoding,
         );
 
         assert!(soundness.logup_bits > 0.0);
@@ -883,7 +996,6 @@ mod tests {
             num_columns,
             num_columns,
             n_logup,
-            ProximityRegime::UniqueDecoding,
         );
 
         println!("\n=== {} Soundness ===", name);

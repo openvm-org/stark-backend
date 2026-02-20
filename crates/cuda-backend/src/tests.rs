@@ -23,7 +23,7 @@ use openvm_stark_backend::{
         verify, VerifierError,
     },
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory,
-    WhirConfig, WhirParams, WhirRoundConfig,
+    ProximityRegime, WhirConfig, WhirParams, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
     config::{
@@ -363,7 +363,13 @@ fn test_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) -> Result<(), 
         query_phase_pow_bits: 1,
     };
     let log_blowup = 1;
-    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 80);
+    let whir = WhirConfig::new(
+        log_blowup,
+        l_skip + n_stack,
+        whir_params,
+        80,
+        ProximityRegime::UniqueDecoding,
+    );
     let params = SystemParams {
         l_skip,
         n_stack,

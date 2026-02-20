@@ -9,7 +9,8 @@ use openvm_stark_backend::{
     },
     test_utils::{test_whir_config_small, FibFixture, TestFixture},
     verifier::whir::{binary_k_fold, verify_whir, VerifyWhirError},
-    StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory, WhirConfig, WhirRoundConfig,
+    ProximityRegime, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory, WhirConfig,
+    WhirRoundConfig,
 };
 use openvm_stark_sdk::{
     config::{baby_bear_poseidon2::*, log_up_params::log_up_security_params_baby_bear_100_bits},
@@ -208,6 +209,7 @@ fn whir_test_config(k_whir: usize) -> WhirConfig {
         mu_pow_bits: 1,
         query_phase_pow_bits: 1,
         folding_pow_bits: 1,
+        proximity_regime: ProximityRegime::UniqueDecoding,
     }
 }
 

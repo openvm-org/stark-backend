@@ -10,7 +10,7 @@ use openvm_stark_sdk::{
         p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues},
         p3_field::Field,
         prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-        PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
+        PartitionedBaseAir, ProximityRegime, StarkEngine, SystemParams, WhirConfig, WhirParams,
     },
 };
 use p3_keccak_air::KeccakAir;
@@ -53,7 +53,13 @@ fn main() -> eyre::Result<()> {
         query_phase_pow_bits: 20,
     };
     let log_blowup = 1;
-    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
+    let whir = WhirConfig::new(
+        log_blowup,
+        l_skip + n_stack,
+        whir_params,
+        100,
+        ProximityRegime::UniqueDecoding,
+    );
     let params = SystemParams {
         l_skip,
         n_stack,
