@@ -23,6 +23,7 @@ use std::sync::OnceLock;
 use metal::{CommandBufferRef, ComputeCommandEncoderRef, ComputePipelineState, Library, MTLSize};
 use openvm_metal_common::device::get_context;
 use openvm_metal_common::error::MetalError;
+use tracing::debug;
 
 /// Metal equivalent of CUDA's warp size for dispatch calculations.
 /// Apple GPUs use SIMD group size of 32.
@@ -163,6 +164,42 @@ pub unsafe fn set_buffer_from_ptr(
 
 /// Dispatches a compute kernel with the given pipeline, grid, and group sizes.
 /// This is synchronous: it commits the command buffer and waits for completion.
+#[inline]
+pub fn encode_dispatch(
+    cmd_buffer: &CommandBufferRef,
+    pipeline: &ComputePipelineState,
+    grid: MTLSize,
+    group: MTLSize,
+    encode_fn: impl FnOnce(&ComputeCommandEncoderRef),
+) {
+    let encoder = cmd_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(pipeline);
+    encode_fn(encoder);
+    encoder.dispatch_threads(grid, group);
+    encoder.end_encoding();
+}
+
+/// Encodes a staged sequence of dispatches onto a single command buffer, then syncs once.
+///
+/// The stage closure should return the number of kernel dispatches it encoded for tracing.
+pub fn dispatch_staged_sync(
+    stage_name: &str,
+    encode_stage: impl FnOnce(&CommandBufferRef) -> Result<usize, MetalError>,
+) -> Result<(), MetalError> {
+    let ctx = get_context();
+    let cmd_buffer = ctx.queue.new_command_buffer();
+    let kernel_count = encode_stage(cmd_buffer)?;
+    debug!(
+        stage = stage_name,
+        kernel_count,
+        sync_count = 1usize,
+        "metal_dispatch_stage"
+    );
+    openvm_metal_common::command::sync_and_check(cmd_buffer)
+}
+
+/// Dispatches a compute kernel with the given pipeline, grid, and group sizes.
+/// This is synchronous: it commits the command buffer and waits for completion.
 pub fn dispatch_sync(
     pipeline: &ComputePipelineState,
     grid: MTLSize,
@@ -171,11 +208,7 @@ pub fn dispatch_sync(
 ) -> Result<(), MetalError> {
     let ctx = get_context();
     let cmd_buffer = ctx.queue.new_command_buffer();
-    let encoder = cmd_buffer.new_compute_command_encoder();
-    encoder.set_compute_pipeline_state(pipeline);
-    encode_fn(encoder);
-    encoder.dispatch_threads(grid, group);
-    encoder.end_encoding();
+    encode_dispatch(cmd_buffer, pipeline, grid, group, encode_fn);
     openvm_metal_common::command::sync_and_check(cmd_buffer)
 }
 
@@ -189,11 +222,7 @@ pub fn dispatch_async(
 ) -> &CommandBufferRef {
     let ctx = get_context();
     let cmd_buffer = ctx.queue.new_command_buffer();
-    let encoder = cmd_buffer.new_compute_command_encoder();
-    encoder.set_compute_pipeline_state(pipeline);
-    encode_fn(encoder);
-    encoder.dispatch_threads(grid, group);
-    encoder.end_encoding();
+    encode_dispatch(cmd_buffer, pipeline, grid, group, encode_fn);
     cmd_buffer.commit();
     cmd_buffer
 }
@@ -207,16 +236,12 @@ pub fn dispatch_multi_sync(
         &dyn Fn(&ComputeCommandEncoderRef),
     )],
 ) -> Result<(), MetalError> {
-    let ctx = get_context();
-    let cmd_buffer = ctx.queue.new_command_buffer();
-    for (pipeline, grid, group, encode_fn) in dispatches {
-        let encoder = cmd_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(pipeline);
-        encode_fn(encoder);
-        encoder.dispatch_threads(*grid, *group);
-        encoder.end_encoding();
-    }
-    openvm_metal_common::command::sync_and_check(cmd_buffer)
+    dispatch_staged_sync("dispatch_multi_sync", |cmd_buffer| {
+        for (pipeline, grid, group, encode_fn) in dispatches {
+            encode_dispatch(cmd_buffer, pipeline, *grid, *group, |encoder| encode_fn(encoder));
+        }
+        Ok(dispatches.len())
+    })
 }
 
 /// Module-level sumcheck dispatch functions, ported from cuda/mod.rs sumcheck module.

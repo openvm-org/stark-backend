@@ -14,7 +14,8 @@ use crate::{
 };
 
 use super::{
-    dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
+    dispatch_staged_sync, dispatch_sync, encode_dispatch, get_kernels, grid_size_1d, grid_size_2d,
+    DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
 };
 
 /// Number of G outputs per z in round 0: G0, G1, G2
@@ -74,20 +75,7 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
     let lambda_pows_offset_bytes = (lambda_pows_offset * mem::size_of::<EF>()) as u64;
     let round0_shared_bytes = ((block_size as usize + 1) * NUM_G * mem::size_of::<EF>()) as u64;
 
-    let pipeline = get_kernels().get_pipeline("stacked_reduction_sumcheck_round0")?;
-    dispatch_sync(&pipeline, grid, group, |encoder| {
-        encoder.set_buffer(0, Some(eq_r_ns.buffer.gpu_buffer()), 0);
-        encoder.set_buffer(1, Some(trace.gpu_buffer()), 0);
-        encoder.set_buffer(2, Some(lambda_pows.gpu_buffer()), lambda_pows_offset_bytes);
-        encoder.set_buffer(3, Some(block_sums.gpu_buffer()), 0);
-        encoder.set_bytes(4, 4, &height_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(5, 4, &width_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(6, 4, &l_skip_u32 as *const u32 as *const c_void);
-        encoder.set_bytes(7, 4, &skip_mask as *const u32 as *const c_void);
-        encoder.set_bytes(8, 4, &num_x as *const u32 as *const c_void);
-        encoder.set_bytes(9, 4, &log_stride as *const u32 as *const c_void);
-        encoder.set_threadgroup_memory_length(0, round0_shared_bytes);
-    })?;
+    let pipeline_round0 = get_kernels().get_pipeline("stacked_reduction_sumcheck_round0")?;
 
     let num_blocks = grid_x * width_u32;
     let d = NUM_G as u32 * skip_domain;
@@ -98,12 +86,34 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
         (((reduce_threads_per_group + SIMD_SIZE - 1) / SIMD_SIZE) * mem::size_of::<EF>()) as u64;
     let pipeline_reduce =
         get_kernels().get_pipeline("stacked_reduction_final_reduce_block_sums_add")?;
-    dispatch_sync(&pipeline_reduce, reduce_grid, reduce_group, |encoder| {
-        encoder.set_buffer(0, Some(block_sums.gpu_buffer()), 0);
-        encoder.set_buffer(1, Some(output.gpu_buffer()), 0);
-        encoder.set_bytes(2, 4, &num_blocks as *const u32 as *const c_void);
-        encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
-        encoder.set_threadgroup_memory_length(0, reduce_shared_bytes);
+    dispatch_staged_sync("stacked_reduction_sumcheck_round0", |cmd_buffer| {
+        encode_dispatch(cmd_buffer, &pipeline_round0, grid, group, |encoder| {
+            encoder.set_buffer(0, Some(eq_r_ns.buffer.gpu_buffer()), 0);
+            encoder.set_buffer(1, Some(trace.gpu_buffer()), 0);
+            encoder.set_buffer(2, Some(lambda_pows.gpu_buffer()), lambda_pows_offset_bytes);
+            encoder.set_buffer(3, Some(block_sums.gpu_buffer()), 0);
+            encoder.set_bytes(4, 4, &height_u32 as *const u32 as *const c_void);
+            encoder.set_bytes(5, 4, &width_u32 as *const u32 as *const c_void);
+            encoder.set_bytes(6, 4, &l_skip_u32 as *const u32 as *const c_void);
+            encoder.set_bytes(7, 4, &skip_mask as *const u32 as *const c_void);
+            encoder.set_bytes(8, 4, &num_x as *const u32 as *const c_void);
+            encoder.set_bytes(9, 4, &log_stride as *const u32 as *const c_void);
+            encoder.set_threadgroup_memory_length(0, round0_shared_bytes);
+        });
+        encode_dispatch(
+            cmd_buffer,
+            &pipeline_reduce,
+            reduce_grid,
+            reduce_group,
+            |encoder| {
+                encoder.set_buffer(0, Some(block_sums.gpu_buffer()), 0);
+                encoder.set_buffer(1, Some(output.gpu_buffer()), 0);
+                encoder.set_bytes(2, 4, &num_blocks as *const u32 as *const c_void);
+                encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
+                encoder.set_threadgroup_memory_length(0, reduce_shared_bytes);
+            },
+        );
+        Ok(2)
     })
 }
 

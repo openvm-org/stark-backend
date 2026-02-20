@@ -10,7 +10,7 @@
 
 use std::ffi::c_void;
 
-use metal::Buffer as MetalRawBuffer;
+use metal::{Buffer as MetalRawBuffer, CommandBufferRef, ComputePipelineState};
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
@@ -23,7 +23,8 @@ use crate::{
 };
 
 use super::{
-    dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
+    dispatch_staged_sync, dispatch_sync, encode_dispatch, get_kernels, grid_size_1d, grid_size_2d,
+    DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
 };
 
 const GKR_SP_DEG: usize = 2;
@@ -88,6 +89,35 @@ unsafe fn final_reduce_block_sums_to_buffer(
         encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
         encoder.set_threadgroup_memory_length(0, shared_bytes);
     })
+}
+
+#[inline]
+unsafe fn encode_final_reduce_block_sums_to_buffer(
+    cmd_buffer: &CommandBufferRef,
+    pipeline_reduce: &ComputePipelineState,
+    block_sums: &MetalBuffer<EF>,
+    output_buffer: &MetalRawBuffer,
+    output_offset_bytes: u64,
+    num_blocks: u32,
+    d: u32,
+    threads_per_group: usize,
+) {
+    let shared_bytes = block_shared_bytes(threads_per_group);
+    let final_threads = d as usize * threads_per_group;
+    let (grid_reduce, group_reduce) = grid_size_1d(final_threads, threads_per_group);
+    encode_dispatch(
+        cmd_buffer,
+        pipeline_reduce,
+        grid_reduce,
+        group_reduce,
+        |encoder| {
+            encoder.set_buffer(0, Some(block_sums.gpu_buffer()), 0);
+            encoder.set_buffer(1, Some(output_buffer), output_offset_bytes);
+            encoder.set_bytes(2, 4, &num_blocks as *const u32 as *const c_void);
+            encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
+            encoder.set_threadgroup_memory_length(0, shared_bytes);
+        },
+    );
 }
 
 #[inline]
@@ -1164,88 +1194,93 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
             intermediates.len() >= buffer_size as usize * total_threads * num_cosets as usize
         );
     }
+    let pipeline_reduce = get_kernels().get_pipeline("final_reduce_block_sums")?;
 
     for coset_idx in 0..num_cosets {
         let tmp = MetalBuffer::<EF>::with_capacity(num_blocks as usize * skip_domain as usize);
-        if use_global_intermediates {
-            dispatch_sync(&pipeline, grid, group, |encoder| {
-                for part in main_part_buffers {
-                    encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
-                }
-                encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
-                encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
-                encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
-                encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
-                encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
-                encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
-                encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-                encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
-                encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
-                encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
-                encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
-                encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
-                encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
-                encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
-                encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-                encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-                encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-                encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                encoder.set_bytes(
-                    18,
-                    std::mem::size_of::<F>() as u64,
-                    &g_shift as *const F as *const c_void,
-                );
-                encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
-                encoder.set_buffer(21, Some(intermediates.gpu_buffer()), 0);
-                encoder.set_bytes(22, 4, &total_threads_u32 as *const u32 as *const c_void);
-                encoder.set_bytes(23, 4, &num_cosets as *const u32 as *const c_void);
-                encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-            })?;
-        } else {
-            dispatch_sync(&pipeline, grid, group, |encoder| {
-                for part in main_part_buffers {
-                    encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
-                }
-                encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
-                encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
-                encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
-                encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
-                encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
-                encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
-                encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-                encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
-                encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
-                encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
-                encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
-                encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
-                encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
-                encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
-                encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-                encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-                encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-                encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                encoder.set_bytes(
-                    18,
-                    std::mem::size_of::<F>() as u64,
-                    &g_shift as *const F as *const c_void,
-                );
-                encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
-                encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-            })?;
-        }
-
         let out_offset_bytes =
             (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
-        final_reduce_block_sums_to_buffer(
-            &tmp,
-            output.gpu_buffer(),
-            out_offset_bytes,
-            num_blocks as u32,
-            skip_domain,
-            threads_per_group,
-        )?;
+        dispatch_staged_sync("zerocheck_ntt_eval_constraints.coset", |cmd_buffer| {
+            if use_global_intermediates {
+                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                    for part in main_part_buffers {
+                        encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                    }
+                    encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
+                    encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
+                    encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
+                    encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
+                    encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
+                    encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
+                    encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                    encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
+                    encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
+                    encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
+                    encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
+                    encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
+                    encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
+                    encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                    encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                    encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                    encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                    encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                    encoder.set_bytes(
+                        18,
+                        std::mem::size_of::<F>() as u64,
+                        &g_shift as *const F as *const c_void,
+                    );
+                    encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                    encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
+                    encoder.set_buffer(21, Some(intermediates.gpu_buffer()), 0);
+                    encoder.set_bytes(22, 4, &total_threads_u32 as *const u32 as *const c_void);
+                    encoder.set_bytes(23, 4, &num_cosets as *const u32 as *const c_void);
+                    encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+                });
+            } else {
+                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                    for part in main_part_buffers {
+                        encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                    }
+                    encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
+                    encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
+                    encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
+                    encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
+                    encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
+                    encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
+                    encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                    encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
+                    encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
+                    encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
+                    encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
+                    encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
+                    encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
+                    encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                    encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                    encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                    encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                    encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                    encoder.set_bytes(
+                        18,
+                        std::mem::size_of::<F>() as u64,
+                        &g_shift as *const F as *const c_void,
+                    );
+                    encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                    encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
+                    encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+                });
+            }
+            encode_final_reduce_block_sums_to_buffer(
+                cmd_buffer,
+                &pipeline_reduce,
+                &tmp,
+                output.gpu_buffer(),
+                out_offset_bytes,
+                num_blocks as u32,
+                skip_domain,
+                threads_per_group,
+            );
+            Ok(2)
+        })?;
     }
     Ok(())
 }
@@ -1310,115 +1345,122 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     } else {
         MetalBuffer::<F>::with_capacity(0)
     };
+    let pipeline_reduce = get_kernels().get_pipeline("final_reduce_block_sums")?;
 
     for coset_idx in 0..num_cosets {
         let tmp_p = MetalBuffer::<EF>::with_capacity(num_blocks as usize * skip_domain as usize);
         let tmp_q = MetalBuffer::<EF>::with_capacity(num_blocks as usize * skip_domain as usize);
         let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
-        if use_global_intermediates {
-            dispatch_sync(&pipeline, grid, group, |encoder| {
-                for part in main_part_buffers {
-                    encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
-                }
-                encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
-                encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
-                encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
-                encoder.set_buffer(3, Some(preprocessed.gpu_buffer()), 0);
-                encoder.set_buffer(4, Some(main_ptrs.gpu_buffer()), 0);
-                encoder.set_buffer(5, Some(eq_cube.gpu_buffer()), 0);
-                encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-                encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
-                encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
-                encoder.set_bytes(
-                    9,
-                    std::mem::size_of::<EF>() as u64,
-                    &denom_sum_init as *const EF as *const c_void,
-                );
-                encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
-                encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
-                encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
-                encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
-                encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-                encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-                encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-                encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                encoder.set_bytes(
-                    18,
-                    std::mem::size_of::<F>() as u64,
-                    &g_shift as *const F as *const c_void,
-                );
-                encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                encoder.set_bytes(
-                    20,
-                    4,
-                    &is_identity_coset_flag as *const u32 as *const c_void,
-                );
-                encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
-                encoder.set_buffer(22, Some(intermediates.gpu_buffer()), 0);
-                encoder.set_bytes(23, 4, &total_threads_u32 as *const u32 as *const c_void);
-                encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-            })?;
-        } else {
-            dispatch_sync(&pipeline, grid, group, |encoder| {
-                for part in main_part_buffers {
-                    encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
-                }
-                encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
-                encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
-                encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
-                encoder.set_buffer(3, Some(preprocessed.gpu_buffer()), 0);
-                encoder.set_buffer(4, Some(main_ptrs.gpu_buffer()), 0);
-                encoder.set_buffer(5, Some(eq_cube.gpu_buffer()), 0);
-                encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-                encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
-                encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
-                encoder.set_bytes(
-                    9,
-                    std::mem::size_of::<EF>() as u64,
-                    &denom_sum_init as *const EF as *const c_void,
-                );
-                encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
-                encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
-                encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
-                encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
-                encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-                encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-                encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-                encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                encoder.set_bytes(
-                    18,
-                    std::mem::size_of::<F>() as u64,
-                    &g_shift as *const F as *const c_void,
-                );
-                encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                encoder.set_bytes(
-                    20,
-                    4,
-                    &is_identity_coset_flag as *const u32 as *const c_void,
-                );
-                encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
-                encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-            })?;
-        }
-
         let out_offset_bytes =
             (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
-        final_reduce_block_sums_to_buffer(
-            &tmp_p,
-            output.gpu_buffer(),
-            out_offset_bytes,
-            num_blocks as u32,
-            skip_domain,
-            threads_per_group,
-        )?;
-        final_reduce_block_sums_to_buffer(
-            &tmp_q,
-            output.gpu_buffer(),
-            q_offset_bytes + out_offset_bytes,
-            num_blocks as u32,
-            skip_domain,
-            threads_per_group,
-        )?;
+        dispatch_staged_sync("logup_bary_eval_interactions_round0.coset", |cmd_buffer| {
+            if use_global_intermediates {
+                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                    for part in main_part_buffers {
+                        encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                    }
+                    encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
+                    encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
+                    encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
+                    encoder.set_buffer(3, Some(preprocessed.gpu_buffer()), 0);
+                    encoder.set_buffer(4, Some(main_ptrs.gpu_buffer()), 0);
+                    encoder.set_buffer(5, Some(eq_cube.gpu_buffer()), 0);
+                    encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                    encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
+                    encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
+                    encoder.set_bytes(
+                        9,
+                        std::mem::size_of::<EF>() as u64,
+                        &denom_sum_init as *const EF as *const c_void,
+                    );
+                    encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
+                    encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
+                    encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
+                    encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                    encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                    encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                    encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                    encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                    encoder.set_bytes(
+                        18,
+                        std::mem::size_of::<F>() as u64,
+                        &g_shift as *const F as *const c_void,
+                    );
+                    encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                    encoder.set_bytes(
+                        20,
+                        4,
+                        &is_identity_coset_flag as *const u32 as *const c_void,
+                    );
+                    encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
+                    encoder.set_buffer(22, Some(intermediates.gpu_buffer()), 0);
+                    encoder.set_bytes(23, 4, &total_threads_u32 as *const u32 as *const c_void);
+                    encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+                });
+            } else {
+                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                    for part in main_part_buffers {
+                        encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                    }
+                    encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
+                    encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
+                    encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
+                    encoder.set_buffer(3, Some(preprocessed.gpu_buffer()), 0);
+                    encoder.set_buffer(4, Some(main_ptrs.gpu_buffer()), 0);
+                    encoder.set_buffer(5, Some(eq_cube.gpu_buffer()), 0);
+                    encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                    encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
+                    encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
+                    encoder.set_bytes(
+                        9,
+                        std::mem::size_of::<EF>() as u64,
+                        &denom_sum_init as *const EF as *const c_void,
+                    );
+                    encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
+                    encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
+                    encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
+                    encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                    encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                    encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                    encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                    encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                    encoder.set_bytes(
+                        18,
+                        std::mem::size_of::<F>() as u64,
+                        &g_shift as *const F as *const c_void,
+                    );
+                    encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                    encoder.set_bytes(
+                        20,
+                        4,
+                        &is_identity_coset_flag as *const u32 as *const c_void,
+                    );
+                    encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
+                    encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+                });
+            }
+            encode_final_reduce_block_sums_to_buffer(
+                cmd_buffer,
+                &pipeline_reduce,
+                &tmp_p,
+                output.gpu_buffer(),
+                out_offset_bytes,
+                num_blocks as u32,
+                skip_domain,
+                threads_per_group,
+            );
+            encode_final_reduce_block_sums_to_buffer(
+                cmd_buffer,
+                &pipeline_reduce,
+                &tmp_q,
+                output.gpu_buffer(),
+                q_offset_bytes + out_offset_bytes,
+                num_blocks as u32,
+                skip_domain,
+                threads_per_group,
+            );
+            Ok(3)
+        })?;
     }
     Ok(())
 }
