@@ -2,7 +2,7 @@
 
 - Status: `completed`
 - Owner: codex
-- Branch: `metal-backend`
+- Branch: `perf/m5`
 - PR:
 - Started: 2026-02-20
 - Completed: 2026-02-20

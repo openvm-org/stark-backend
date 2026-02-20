@@ -3,7 +3,7 @@
 - Status: `completed`
 - Owner: codex
 - Branch: `perf/m3`
-- PR: TODO
+- PR:
 - Started: 2026-02-20
 - Completed: 2026-02-20
 - Last Updated: 2026-02-20

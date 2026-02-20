@@ -19,18 +19,25 @@ This is a practical guide for running multiple Codex agents concurrently on diff
 - Milestone 0 and Milestone 7
   - Milestone 7 should run after optimization milestones complete.
 
+## Current State (2026-02-20)
+
+- Milestone 0 completed.
+- Wave A completed and merged into `metal-backend`: Milestones 1, 2, 3, and 6.
+- Wave B completed and merged into `metal-backend`: Milestones 4 and 5.
+- Milestone 7 is the next and final optimization milestone.
+
 ## Recommended Parallel Plan
 
-1. Run Milestone 0 first.
-2. Parallel wave A:
+1. Run Milestone 0 first. (completed)
+2. Parallel wave A: (completed)
    - Agent A: Milestone 1
    - Agent B: Milestone 2
    - Agent C: Milestone 3
    - Agent D: Milestone 6
-3. Parallel wave B (after wave A merge):
+3. Parallel wave B (completed after wave A merge):
    - Agent E: Milestone 4
    - Agent F: Milestone 5
-4. Run Milestone 7 last.
+4. Run Milestone 7 last (next).
 
 ## Coordination Rules
 
