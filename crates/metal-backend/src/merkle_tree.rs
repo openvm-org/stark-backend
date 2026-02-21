@@ -1,4 +1,4 @@
-use std::array::from_fn;
+use std::{array::from_fn, ffi::c_void};
 
 use itertools::Itertools;
 use openvm_metal_common::{
@@ -12,11 +12,13 @@ use tracing::instrument;
 use crate::{
     base::MetalMatrix,
     metal::{
+        dispatch_staged_sync, encode_dispatch, get_kernels, grid_size_1d,
         matrix::matrix_get_rows_fp_kernel,
         merkle_tree::{
-            poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
-            poseidon2_compressing_row_hashes_ext, query_digest_layers,
+            poseidon2_compressing_row_hashes, poseidon2_compressing_row_hashes_ext,
+            query_digest_layers,
         },
+        DEFAULT_THREADS_PER_GROUP,
     },
     prelude::{Digest, DIGEST_SIZE, EF, F},
     MerkleTreeError,
@@ -30,12 +32,69 @@ fn read_single_from_shared<T>(buf: &MetalBuffer<T>) -> T {
 
 #[inline]
 fn build_non_root_layer_ptrs<Digest>(digest_layers: &[MetalBuffer<Digest>]) -> MetalBuffer<u64> {
-    digest_layers
-        .iter()
-        .take(digest_layers.len().saturating_sub(1))
-        .map(|layer| layer.as_device_ptr() as u64)
-        .collect_vec()
-        .to_device()
+    let depth = digest_layers.len().saturating_sub(1);
+    let out = MetalBuffer::<u64>::with_capacity(depth);
+    for (idx, layer) in digest_layers.iter().take(depth).enumerate() {
+        unsafe {
+            out.as_mut_ptr()
+                .add(idx)
+                .write(layer.as_device_ptr() as u64);
+        }
+    }
+    out
+}
+
+#[inline]
+fn allocate_digest_layers<Digest>(query_stride: usize) -> Vec<MetalBuffer<Digest>> {
+    let layer_count = log2_strict_usize(query_stride) + 1;
+    let mut layer_len = query_stride;
+    let mut layers = Vec::with_capacity(layer_count);
+    for _ in 0..layer_count {
+        layers.push(MetalBuffer::<Digest>::with_capacity(layer_len));
+        if layer_len == 1 {
+            break;
+        }
+        layer_len >>= 1;
+    }
+    debug_assert_eq!(layers.len(), layer_count);
+    layers
+}
+
+fn compress_adjacent_digest_layers_staged<Digest>(
+    digest_layers: &mut [MetalBuffer<Digest>],
+) -> Result<(), MerkleTreeError> {
+    let layer_count = digest_layers.len().saturating_sub(1);
+    if layer_count == 0 {
+        return Ok(());
+    }
+    let pipeline = get_kernels()
+        .get_pipeline("poseidon2_adjacent_compress_layer")
+        .map_err(|error| MerkleTreeError::AdjacentCompressLayer { error, layer: 1 })?;
+    dispatch_staged_sync("merkle_tree.adjacent_layers", |cmd_buffer| {
+        let mut kernel_count = 0usize;
+        for layer_idx in 1..digest_layers.len() {
+            let (prev_layers, cur_and_rest) = digest_layers.split_at_mut(layer_idx);
+            let prev_layer = &prev_layers[layer_idx - 1];
+            let cur_layer = &mut cur_and_rest[0];
+            let output_size = cur_layer.len();
+            debug_assert!(prev_layer.len() >= output_size * 2);
+            let output_size_u32 = output_size as u32;
+            let (grid, group) = grid_size_1d(output_size, DEFAULT_THREADS_PER_GROUP);
+            encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                encoder.set_buffer(0, Some(cur_layer.gpu_buffer()), 0);
+                encoder.set_buffer(1, Some(prev_layer.gpu_buffer()), 0);
+                encoder.set_bytes(2, 4, &output_size_u32 as *const u32 as *const c_void);
+            });
+            kernel_count += 1;
+        }
+        Ok(kernel_count)
+    })
+    .map_err(|error| MerkleTreeError::AdjacentCompressLayer { error, layer: 1 })?;
+    tracing::debug!(
+        layer_count,
+        "merkle_tree_adjacent_layer_dispatch_stats"
+    );
+    Ok(())
 }
 
 fn flatten_cached_layer_ptrs<F, Digest>(
@@ -101,10 +160,10 @@ impl MerkleTreeMetal<F, Digest> {
             "rows_per_query ({rows_per_query}) must not exceed height ({height})"
         );
         let query_stride = height / rows_per_query;
-        let mut query_digest_layer = MetalBuffer::<Digest>::with_capacity(query_stride);
+        let mut digest_layers = allocate_digest_layers::<Digest>(query_stride);
         unsafe {
             poseidon2_compressing_row_hashes(
-                &mut query_digest_layer,
+                &mut digest_layers[0],
                 matrix.buffer(),
                 matrix.width(),
                 query_stride,
@@ -115,22 +174,7 @@ impl MerkleTreeMetal<F, Digest> {
         // If not caching, drop the backing matrix at this point to save memory.
         let backing_matrix = cache_backing_matrix.then_some(matrix);
 
-        let mut digest_layers = vec![query_digest_layer];
-        while digest_layers.last().unwrap().len() > 1 {
-            let prev_layer = digest_layers.last().unwrap();
-            let mut layer = MetalBuffer::<Digest>::with_capacity(prev_layer.len() / 2);
-            let layer_len = layer.len();
-            let layer_idx = digest_layers.len();
-            unsafe {
-                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len).map_err(
-                    |error| MerkleTreeError::AdjacentCompressLayer {
-                        error,
-                        layer: layer_idx,
-                    },
-                )?;
-            }
-            digest_layers.push(layer);
-        }
+        compress_adjacent_digest_layers_staged(&mut digest_layers)?;
         let d_root = digest_layers.last().unwrap();
         assert_eq!(d_root.len(), 1, "Only one root is supported");
         let root = read_single_from_shared(d_root);
@@ -338,10 +382,10 @@ impl MerkleTreeMetal<EF, Digest> {
             "rows_per_query ({rows_per_query}) must not exceed height ({height})"
         );
         let query_stride = height / rows_per_query;
-        let mut query_digest_layer = MetalBuffer::<Digest>::with_capacity(query_stride);
+        let mut digest_layers = allocate_digest_layers::<Digest>(query_stride);
         unsafe {
             poseidon2_compressing_row_hashes_ext(
-                &mut query_digest_layer,
+                &mut digest_layers[0],
                 matrix.buffer(),
                 matrix.width(),
                 query_stride,
@@ -352,22 +396,7 @@ impl MerkleTreeMetal<EF, Digest> {
         // If not caching, drop the backing matrix at this point to save memory.
         let backing_matrix = cache_backing_matrix.then_some(matrix);
 
-        let mut digest_layers = vec![query_digest_layer];
-        while digest_layers.last().unwrap().len() > 1 {
-            let prev_layer = digest_layers.last().unwrap();
-            let mut layer = MetalBuffer::<Digest>::with_capacity(prev_layer.len() / 2);
-            let layer_len = layer.len();
-            let layer_idx = digest_layers.len();
-            unsafe {
-                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len).map_err(
-                    |error| MerkleTreeError::AdjacentCompressLayer {
-                        error,
-                        layer: layer_idx,
-                    },
-                )?;
-            }
-            digest_layers.push(layer);
-        }
+        compress_adjacent_digest_layers_staged(&mut digest_layers)?;
         let d_root = digest_layers.last().unwrap();
         assert_eq!(d_root.len(), 1, "Only one root is supported");
         let root = read_single_from_shared(d_root);
