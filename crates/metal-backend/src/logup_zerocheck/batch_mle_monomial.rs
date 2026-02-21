@@ -3,10 +3,10 @@
 //! This module provides batch evaluators for monomial evaluations across multiple AIRs,
 //! enabling efficient Metal kernel launches that process multiple traces in a single launch.
 
+use metal::Buffer as MetalRawBuffer;
 use openvm_metal_common::{copy::MemCopyH2D, d_buffer::MetalBuffer};
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
-use metal::Buffer as MetalRawBuffer;
 use tracing::debug;
 
 use crate::{

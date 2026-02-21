@@ -3,17 +3,15 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use std::ffi::c_void;
-use std::mem::size_of;
+use std::{ffi::c_void, mem::size_of};
 
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 
+use super::{dispatch_sync, get_kernels, grid_size_1d, DEFAULT_THREADS_PER_GROUP};
 use crate::{
     prelude::{D_EF, EF, F},
     KernelError,
 };
-
-use super::{dispatch_sync, get_kernels, grid_size_1d, DEFAULT_THREADS_PER_GROUP};
 
 pub unsafe fn algebraic_batch_matrices(
     output: &mut MetalBuffer<EF>,

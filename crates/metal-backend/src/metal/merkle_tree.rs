@@ -7,9 +7,8 @@ use std::ffi::c_void;
 
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 
-use crate::prelude::{Digest, EF, F};
-
 use super::{dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP};
+use crate::prelude::{Digest, EF, F};
 
 pub unsafe fn poseidon2_compressing_row_hashes(
     out: &mut MetalBuffer<Digest>,

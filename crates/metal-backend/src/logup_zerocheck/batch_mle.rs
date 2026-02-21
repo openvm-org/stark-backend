@@ -3,9 +3,9 @@
 //! This module provides builders for batching MLE evaluations across multiple AIRs,
 //! enabling efficient Metal kernel launches that process multiple traces in parallel.
 
+use metal::Buffer as MetalRawBuffer;
 use openvm_metal_common::{copy::MemCopyH2D, d_buffer::MetalBuffer};
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
-use metal::Buffer as MetalRawBuffer;
 
 use crate::{
     logup_zerocheck::{

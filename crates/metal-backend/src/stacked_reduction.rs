@@ -13,10 +13,9 @@ use openvm_stark_backend::{
         UnivariatePoly,
     },
     proof::StackingProof,
-    prover::poly::Ple,
     prover::{
-        stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKey,
-        MatrixDimensions, ProvingContext,
+        poly::Ple, stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
+        DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
     },
     FiatShamirTranscript,
 };

@@ -4,17 +4,15 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::too_many_arguments)]
 
-use std::ffi::c_void;
-use std::sync::OnceLock;
+use std::{ffi::c_void, sync::OnceLock};
 
 use metal::MTLSize;
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 
-use crate::prelude::{EF, F};
-
 use super::{dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP};
+use crate::prelude::{EF, F};
 
 const ROOT_TABLE_SIZE: usize = 28;
 static FORWARD_ROOTS: OnceLock<MetalBuffer<F>> = OnceLock::new();

@@ -1,18 +1,15 @@
 //! Batch NTT small kernel dispatch wrappers.
 //! Ported from cuda-backend/src/cuda/batch_ntt_small.rs
 
-use std::ffi::c_void;
-use std::mem::size_of;
-use std::sync::OnceLock;
+use std::{ffi::c_void, mem::size_of, sync::OnceLock};
 
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
-
-use crate::prelude::F;
 
 use super::{
     dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP,
     LOG_SIMD_SIZE,
 };
+use crate::prelude::F;
 
 /// Size of the device NTT twiddle table (2^11 - 2 = 2046 elements for MAX_NTT_LEVEL=10)
 pub const DEVICE_NTT_TWIDDLES_SIZE: usize = (1 << 11) - 2;

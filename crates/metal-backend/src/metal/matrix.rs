@@ -7,9 +7,8 @@ use std::{ffi::c_void, mem::size_of};
 
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 
-use crate::prelude::{EF, F};
-
 use super::{dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP};
+use crate::prelude::{EF, F};
 
 pub unsafe fn matrix_transpose_fp(
     output: &MetalBuffer<F>,

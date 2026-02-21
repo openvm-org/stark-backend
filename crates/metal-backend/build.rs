@@ -2,9 +2,7 @@
 // Compiles .metal files → .air (intermediate) → .metallib (final library)
 // The resulting .metallib is embedded into the binary via include_bytes!
 
-use std::env;
-use std::path::PathBuf;
-use std::process::Command;
+use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

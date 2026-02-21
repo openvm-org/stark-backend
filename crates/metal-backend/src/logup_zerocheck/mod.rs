@@ -37,10 +37,10 @@ use crate::{
         batch_mle::evaluate_zerocheck_batched, fold_ple::fold_ple_evals_rotate,
         gkr_input::TraceInteractionMeta, round0::evaluate_round0_interactions_metal,
     },
-    metal::logup_zerocheck::{
-        fold_selectors_round0, interpolate_matrix_columns_gpu, MainMatrixPtrs,
+    metal::{
+        logup_zerocheck::{fold_selectors_round0, interpolate_matrix_columns_gpu, MainMatrixPtrs},
+        sumcheck::fold_mle_matrix,
     },
-    metal::sumcheck::fold_mle_matrix,
     poly::EqEvalLayers,
     prelude::{EF, F, SC},
     sponge::DuplexSpongeMetal,
@@ -631,11 +631,7 @@ impl<'a> LogupZerocheckMetal<'a> {
                 .take(h_lambda_pows.len().min(8))
                 .copied()
                 .collect();
-            debug!(
-                len = h_lambda_pows.len(),
-                ?preview,
-                "lambda_pows_preview"
-            );
+            debug!(len = h_lambda_pows.len(), ?preview, "lambda_pows_preview");
         }
         self.lambda_pows = Some(if !h_lambda_pows.is_empty() {
             h_lambda_pows.to_device()
@@ -915,14 +911,22 @@ impl<'a> LogupZerocheckMetal<'a> {
                     }
 
                     let rules_host = single_pk.other_data.zerocheck_round0.inner.d_rules.to_vec();
-                    let used_nodes =
-                        single_pk.other_data.zerocheck_round0.inner.d_used_nodes.to_vec();
+                    let used_nodes = single_pk
+                        .other_data
+                        .zerocheck_round0
+                        .inner
+                        .d_used_nodes
+                        .to_vec();
                     let decoded_rules: Vec<_> = rules_host
                         .iter()
                         .map(|&r| crate::logup_zerocheck::rules::RuleWithFlag::<F>::decode(r))
                         .collect();
                     let has_preprocessed = single_pk.preprocessed_data.is_some();
-                    let main_start = 1 + if has_preprocessed { 1 + usize::from(need_rot) } else { 0 };
+                    let main_start = 1 + if has_preprocessed {
+                        1 + usize::from(need_rot)
+                    } else {
+                        0
+                    };
 
                     let [q_cpu] = sumcheck_uni_round0_poly(
                         l_skip,
@@ -931,10 +935,9 @@ impl<'a> LogupZerocheckMetal<'a> {
                         &mats_cpu,
                         |z, x, row_parts| {
                             let eq = eq_xi_host[x];
-                            let eval_source = |
-                                src: &crate::logup_zerocheck::rules::Source<F>,
-                                inter: &Vec<EF>,
-                            | -> EF {
+                            let eval_source = |src: &crate::logup_zerocheck::rules::Source<F>,
+                                               inter: &Vec<EF>|
+                             -> EF {
                                 match src {
                                     crate::logup_zerocheck::rules::Source::Intermediate(i) => {
                                         inter[*i]
@@ -981,7 +984,8 @@ impl<'a> LogupZerocheckMetal<'a> {
 
                             let mut inter = vec![
                                 EF::ZERO;
-                                single_pk.other_data.zerocheck_round0.inner.buffer_size as usize
+                                single_pk.other_data.zerocheck_round0.inner.buffer_size
+                                    as usize
                             ];
                             let mut lambda_idx = 0usize;
                             let mut constraint_eval = EF::ZERO;
@@ -989,28 +993,40 @@ impl<'a> LogupZerocheckMetal<'a> {
                                 let result = match &rule.inner {
                                     crate::logup_zerocheck::rules::Rule::Add(x, y_src, z) => {
                                         let r = eval_source(x, &inter) + eval_source(y_src, &inter);
-                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(
+                                            i,
+                                        ) = z
+                                        {
                                             inter[*i] = r;
                                         }
                                         r
                                     }
                                     crate::logup_zerocheck::rules::Rule::Sub(x, y_src, z) => {
                                         let r = eval_source(x, &inter) - eval_source(y_src, &inter);
-                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(
+                                            i,
+                                        ) = z
+                                        {
                                             inter[*i] = r;
                                         }
                                         r
                                     }
                                     crate::logup_zerocheck::rules::Rule::Mul(x, y_src, z) => {
                                         let r = eval_source(x, &inter) * eval_source(y_src, &inter);
-                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(
+                                            i,
+                                        ) = z
+                                        {
                                             inter[*i] = r;
                                         }
                                         r
                                     }
                                     crate::logup_zerocheck::rules::Rule::Neg(x, z) => {
                                         let r = -eval_source(x, &inter);
-                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(
+                                            i,
+                                        ) = z
+                                        {
                                             inter[*i] = r;
                                         }
                                         r
@@ -1020,7 +1036,10 @@ impl<'a> LogupZerocheckMetal<'a> {
                                     }
                                     crate::logup_zerocheck::rules::Rule::BufferVar(x, z) => {
                                         let r = eval_source(x, &inter);
-                                        if let crate::logup_zerocheck::rules::Source::Intermediate(i) = z {
+                                        if let crate::logup_zerocheck::rules::Source::Intermediate(
+                                            i,
+                                        ) = z
+                                        {
                                             inter[*i] = r;
                                         }
                                         r

@@ -33,7 +33,8 @@ impl<T> MemCopyH2D<T> for [T] {
 /// Device-to-Host copy trait.
 ///
 /// On Metal with `StorageModeShared`, this is a direct read from unified memory.
-/// **Ensure GPU work has completed before calling** (e.g., via `cmd_buffer.wait_until_completed()`).
+/// **Ensure GPU work has completed before calling** (e.g., via
+/// `cmd_buffer.wait_until_completed()`).
 pub trait MemCopyD2H<T> {
     fn to_host(&self) -> Vec<T>;
 }

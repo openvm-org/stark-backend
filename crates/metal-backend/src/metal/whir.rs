@@ -7,9 +7,8 @@ use std::ffi::c_void;
 
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 
-use crate::prelude::{D_EF, EF, F};
-
 use super::{dispatch_sync, get_kernels, grid_size_1d, DEFAULT_THREADS_PER_GROUP};
+use crate::prelude::{D_EF, EF, F};
 
 pub unsafe fn whir_algebraic_batch_trace(
     output: &mut MetalBuffer<F>,

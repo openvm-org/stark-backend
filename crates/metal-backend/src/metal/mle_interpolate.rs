@@ -3,17 +3,15 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use std::ffi::c_void;
-use std::mem::size_of;
+use std::{ffi::c_void, mem::size_of};
 
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
-
-use crate::prelude::{EF, F};
 
 use super::{
     dispatch_sync, get_kernels, grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP,
     LOG_SIMD_SIZE,
 };
+use crate::prelude::{EF, F};
 
 pub unsafe fn mle_interpolate_stage(
     buffer: &mut MetalBuffer<F>,

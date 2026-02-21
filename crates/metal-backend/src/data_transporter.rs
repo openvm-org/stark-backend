@@ -107,13 +107,7 @@ pub fn transport_matrix_h2d_row(matrix: &RowMajorMatrix<F>) -> MetalMatrix<F> {
     let input_buffer = data.to_device();
     let output = MetalMatrix::<F>::with_capacity(height, width);
     unsafe {
-        matrix_transpose_fp(
-            output.buffer(),
-            &input_buffer,
-            width,
-            height,
-        )
-        .unwrap();
+        matrix_transpose_fp(output.buffer(), &input_buffer, width, height).unwrap();
     }
     debug!(
         height,
@@ -352,7 +346,9 @@ pub(crate) fn read_folded_matrix_first_row<T: Copy>(matrix: &MetalMatrix<T>) -> 
         }
         row
     } else {
-        (0..width).map(|col| unsafe { *src.add(col * height) }).collect()
+        (0..width)
+            .map(|col| unsafe { *src.add(col * height) })
+            .collect()
     }
 }
 
@@ -373,13 +369,7 @@ pub fn transport_matrix_d2h_row_major(matrix: &MetalMatrix<F>) -> RowMajorMatrix
 
     let matrix_buffer = MetalBuffer::<F>::with_capacity(height * width);
     unsafe {
-        matrix_transpose_fp(
-            &matrix_buffer,
-            matrix.buffer(),
-            height,
-            width,
-        )
-        .unwrap();
+        matrix_transpose_fp(&matrix_buffer, matrix.buffer(), height, width).unwrap();
     }
     debug!(
         height,
@@ -416,8 +406,7 @@ mod tests {
         let lifted_height = height * stride;
         let src = vec![
             // col 0
-            0u32, 1, 2, 3, 4, 5, 6, 7,
-            // col 1
+            0u32, 1, 2, 3, 4, 5, 6, 7, // col 1
             10u32, 11, 12, 13, 14, 15, 16, 17,
         ];
         let mut dst = vec![0u32; width * height];
