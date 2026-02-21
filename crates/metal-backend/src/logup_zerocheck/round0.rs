@@ -12,6 +12,7 @@ use tracing::{debug, warn};
 
 use super::errors::Round0EvalError;
 use crate::{
+    base::pooled_scratch_buffer,
     logup_zerocheck::rules::{codec::Codec, SymbolicRulesMetal},
     metal::logup_zerocheck::{
         logup_bary_eval_interactions_round0, logup_r0_intermediates_buffer_size,
@@ -69,9 +70,12 @@ pub fn evaluate_round0_constraints_metal(
     );
     let intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
-        MetalBuffer::<F>::with_capacity(intermed_capacity)
+        pooled_scratch_buffer::<F>(
+            "prover.rap_constraints.round0.zerocheck.intermediates",
+            intermed_capacity,
+        )
     } else {
-        MetalBuffer::<F>::with_capacity(0)
+        pooled_scratch_buffer::<F>("prover.rap_constraints.round0.zerocheck.intermediates", 0)
     };
 
     let temp_sums_buffer_capacity = zerocheck_r0_temp_sums_buffer_size(
@@ -82,7 +86,10 @@ pub fn evaluate_round0_constraints_metal(
         max_temp_bytes,
     );
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
-    let mut _temp_sums_buffer = MetalBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
+    let _temp_sums_buffer = pooled_scratch_buffer::<EF>(
+        "prover.rap_constraints.round0.zerocheck.temp_sums",
+        temp_sums_buffer_capacity,
+    );
     let used_temp_bytes =
         intermed_capacity * size_of::<F>() + temp_sums_buffer_capacity * size_of::<EF>();
     if used_temp_bytes > max_temp_bytes {
@@ -206,17 +213,23 @@ pub fn evaluate_round0_interactions_metal(
         num_cosets,
         max_temp_bytes,
     );
-    let mut _intermediates = if intermed_capacity > 0 {
+    let _intermediates = if intermed_capacity > 0 {
         debug!("logup_r0:intermediates_capacity={intermed_capacity}");
-        MetalBuffer::<F>::with_capacity(intermed_capacity)
+        pooled_scratch_buffer::<F>(
+            "prover.rap_constraints.round0.logup.intermediates",
+            intermed_capacity,
+        )
     } else {
-        MetalBuffer::<F>::with_capacity(0)
+        pooled_scratch_buffer::<F>("prover.rap_constraints.round0.logup.intermediates", 0)
     };
 
     let temp_sums_buffer_capacity =
         logup_r0_temp_sums_buffer_size(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes);
     debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
-    let mut _temp_sums_buffer = MetalBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);
+    let _temp_sums_buffer = pooled_scratch_buffer::<Frac<EF>>(
+        "prover.rap_constraints.round0.logup.temp_sums",
+        temp_sums_buffer_capacity,
+    );
     let used_temp_bytes =
         intermed_capacity * size_of::<F>() + temp_sums_buffer_capacity * size_of::<Frac<EF>>();
     if used_temp_bytes > max_temp_bytes {

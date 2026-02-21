@@ -10,7 +10,7 @@ use openvm_stark_backend::{
 use tracing::instrument;
 
 use crate::{
-    base::{MetalMatrix, MetalMatrixView},
+    base::{pooled_scratch_buffer, MetalMatrix, MetalMatrixView},
     merkle_tree::MerkleTreeMetal,
     metal::{
         batch_ntt_small::batch_ntt_small,
@@ -130,35 +130,34 @@ pub(crate) fn stack_traces_into_expanded(
     let mut blit_copy_count = 0usize;
     let mut blit_sync_count = 0usize;
     let mut expand_pad_dispatch_count = 0usize;
-    let mut flush_batched_blits =
-        |tasks: &mut Vec<BlitCopyTask>| -> Result<(), StackTracesError> {
-            if tasks.is_empty() {
-                return Ok(());
-            }
+    let mut flush_batched_blits = |tasks: &mut Vec<BlitCopyTask>| -> Result<(), StackTracesError> {
+        if tasks.is_empty() {
+            return Ok(());
+        }
 
-            let ctx = get_context();
-            command::blit_operation(&ctx.queue, |blit| {
-                for task in tasks.iter() {
-                    let src = traces[task.mat_idx].buffer();
-                    debug_assert!(task.src_offset + task.len <= src.len());
-                    debug_assert!(task.dst_offset + task.len <= buffer.len());
-                    let src_offset_bytes = (task.src_offset * size_of::<F>()) as u64;
-                    let dst_offset_bytes = (task.dst_offset * size_of::<F>()) as u64;
-                    let copy_bytes = (task.len * size_of::<F>()) as u64;
-                    blit.copy_from_buffer(
-                        src.gpu_buffer(),
-                        src_offset_bytes,
-                        buffer.gpu_buffer(),
-                        dst_offset_bytes,
-                        copy_bytes,
-                    );
-                }
-            })
-            .map_err(StackTracesError::BlitCopy)?;
-            tasks.clear();
-            blit_sync_count += 1;
-            Ok(())
-        };
+        let ctx = get_context();
+        command::blit_operation(&ctx.queue, |blit| {
+            for task in tasks.iter() {
+                let src = traces[task.mat_idx].buffer();
+                debug_assert!(task.src_offset + task.len <= src.len());
+                debug_assert!(task.dst_offset + task.len <= buffer.len());
+                let src_offset_bytes = (task.src_offset * size_of::<F>()) as u64;
+                let dst_offset_bytes = (task.dst_offset * size_of::<F>()) as u64;
+                let copy_bytes = (task.len * size_of::<F>()) as u64;
+                blit.copy_from_buffer(
+                    src.gpu_buffer(),
+                    src_offset_bytes,
+                    buffer.gpu_buffer(),
+                    dst_offset_bytes,
+                    copy_bytes,
+                );
+            }
+        })
+        .map_err(StackTracesError::BlitCopy)?;
+        tasks.clear();
+        blit_sync_count += 1;
+        Ok(())
+    };
 
     for (mat_idx, j, s) in &layout.sorted_cols {
         let start = s.col_idx * padded_height + s.row_idx;
@@ -239,7 +238,10 @@ pub fn rs_code_matrix(
         // `batch_ntt_small` over zero-padded tails.
         used_compact_mixed_path = true;
         stack_padded_height = height;
-        let mut stacked_mixed = MetalBuffer::<F>::with_capacity(height * width);
+        let mut stacked_mixed = pooled_scratch_buffer::<F>(
+            "prover.main_trace_commit.rs_code_matrix.stacked_mixed",
+            height * width,
+        );
         stack_traces_into_expanded(layout, traces, &mut stacked_mixed, height)
             .map_err(RsCodeMatrixError::StackTraces)?;
         let num_uni_poly = width * (height >> l_skip);

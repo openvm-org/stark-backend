@@ -16,13 +16,10 @@ pub mod sponge;
 pub mod stacked_reduction;
 pub mod whir;
 
-use std::collections::HashMap;
-use std::ffi::c_void;
-use std::sync::OnceLock;
+use std::{collections::HashMap, ffi::c_void, sync::OnceLock};
 
 use metal::{CommandBufferRef, ComputeCommandEncoderRef, ComputePipelineState, Library, MTLSize};
-use openvm_metal_common::device::get_context;
-use openvm_metal_common::error::MetalError;
+use openvm_metal_common::{device::get_context, error::MetalError};
 use tracing::debug;
 
 /// Metal equivalent of CUDA's warp size for dispatch calculations.
@@ -185,7 +182,8 @@ pub fn encode_dispatch(
 /// preallocate scratch buffers and encode many kernels before the single synchronization.
 ///
 /// The stage closure should return the number of kernel dispatches it encoded for tracing.
-pub fn dispatch_staged_sync(
+pub fn dispatch_phase_staged_sync(
+    phase_name: &str,
     stage_name: &str,
     encode_stage: impl FnOnce(&CommandBufferRef) -> Result<usize, MetalError>,
 ) -> Result<(), MetalError> {
@@ -193,6 +191,7 @@ pub fn dispatch_staged_sync(
     let cmd_buffer = ctx.queue.new_command_buffer();
     let kernel_count = encode_stage(cmd_buffer)?;
     debug!(
+        phase = phase_name,
         stage = stage_name,
         command_buffer_count = 1usize,
         kernel_count,
@@ -200,6 +199,13 @@ pub fn dispatch_staged_sync(
         "metal_dispatch_stage"
     );
     openvm_metal_common::command::sync_and_check(cmd_buffer)
+}
+
+pub fn dispatch_staged_sync(
+    stage_name: &str,
+    encode_stage: impl FnOnce(&CommandBufferRef) -> Result<usize, MetalError>,
+) -> Result<(), MetalError> {
+    dispatch_phase_staged_sync("unspecified", stage_name, encode_stage)
 }
 
 /// Dispatches a compute kernel with the given pipeline, grid, and group sizes.
@@ -242,7 +248,9 @@ pub fn dispatch_multi_sync(
 ) -> Result<(), MetalError> {
     dispatch_staged_sync("dispatch_multi_sync", |cmd_buffer| {
         for (pipeline, grid, group, encode_fn) in dispatches {
-            encode_dispatch(cmd_buffer, pipeline, *grid, *group, |encoder| encode_fn(encoder));
+            encode_dispatch(cmd_buffer, pipeline, *grid, *group, |encoder| {
+                encode_fn(encoder)
+            });
         }
         Ok(dispatches.len())
     })
@@ -254,12 +262,11 @@ pub mod sumcheck {
 
     use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 
+    use super::*;
     use crate::{
         poly::EqEvalSegments,
         prelude::{EF, F},
     };
-
-    use super::*;
 
     fn block_shared_bytes(threads_per_group: usize) -> u64 {
         let simd_groups = (threads_per_group + SIMD_SIZE - 1) / SIMD_SIZE;

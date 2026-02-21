@@ -1,7 +1,23 @@
 use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
-use openvm_metal_common::{copy::MemCopyD2H, d_buffer::MetalBuffer};
+use openvm_metal_common::{
+    copy::MemCopyD2H,
+    d_buffer::{global_metal_buffer_pool, MetalBuffer, PooledMetalBuffer, SharedMetalBufferPool},
+};
 use openvm_stark_backend::prover::MatrixDimensions;
+
+#[inline]
+pub fn shared_scratch_pool() -> &'static SharedMetalBufferPool {
+    global_metal_buffer_pool()
+}
+
+#[inline]
+pub fn pooled_scratch_buffer<T: 'static + Send>(
+    scope: &'static str,
+    len: usize,
+) -> PooledMetalBuffer<'static, T> {
+    shared_scratch_pool().checkout(len, scope)
+}
 
 pub struct MetalMatrix<T> {
     buffer: Arc<MetalBuffer<T>>,

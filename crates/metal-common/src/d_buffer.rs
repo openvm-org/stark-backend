@@ -1,4 +1,14 @@
-use std::{any::type_name, ffi::c_void, fmt::Debug, marker::PhantomData, mem, ptr, slice};
+use std::{
+    any::{type_name, Any, TypeId},
+    collections::HashMap,
+    ffi::c_void,
+    fmt::Debug,
+    marker::PhantomData,
+    mem,
+    ops::{Deref, DerefMut},
+    ptr, slice,
+    sync::{Mutex, OnceLock},
+};
 
 use metal::{Buffer as MetalRawBuffer, Device, MTLResourceOptions, NSUInteger};
 
@@ -114,7 +124,8 @@ impl<T> MetalBuffer<T> {
 
     /// Returns a const GPU virtual address pointer for this buffer.
     ///
-    /// Use this pointer only for values passed to GPU kernels (e.g. pointer tables/context structs).
+    /// Use this pointer only for values passed to GPU kernels (e.g. pointer tables/context
+    /// structs).
     #[inline]
     pub fn as_device_ptr(&self) -> *const T {
         self.buffer.gpu_address() as *const T
@@ -130,7 +141,8 @@ impl<T> MetalBuffer<T> {
 
     /// Returns a mutable GPU virtual address pointer for this buffer.
     ///
-    /// Use this pointer only for values passed to GPU kernels (e.g. pointer tables/context structs).
+    /// Use this pointer only for values passed to GPU kernels (e.g. pointer tables/context
+    /// structs).
     #[inline]
     pub fn as_device_mut_ptr(&self) -> *mut T {
         self.buffer.gpu_address() as *mut T
@@ -221,6 +233,150 @@ impl<T: Debug> Debug for MetalBuffer<T> {
     }
 }
 
+const DEFAULT_MAX_CACHED_PER_LEN: usize = 8;
+
+type BufferPoolByLen = HashMap<usize, Vec<Box<dyn Any + Send>>>;
+
+/// Global reusable scratch buffer pool keyed by `(TypeId, len)`.
+///
+/// Buffers are returned to the pool on [`PooledMetalBuffer`] drop. Reuse is exact-size to keep
+/// existing length invariants unchanged in debug assertions.
+pub struct SharedMetalBufferPool {
+    buffers: Mutex<HashMap<TypeId, BufferPoolByLen>>,
+    max_cached_per_len: usize,
+}
+
+impl Default for SharedMetalBufferPool {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_CACHED_PER_LEN)
+    }
+}
+
+impl SharedMetalBufferPool {
+    pub fn new(max_cached_per_len: usize) -> Self {
+        Self {
+            buffers: Mutex::new(HashMap::new()),
+            max_cached_per_len: max_cached_per_len.max(1),
+        }
+    }
+
+    pub fn checkout<'a, T: 'static + Send>(
+        &'a self,
+        len: usize,
+        scope: &'static str,
+    ) -> PooledMetalBuffer<'a, T> {
+        let buffer = self.acquire::<T>(len, scope);
+        PooledMetalBuffer {
+            pool: self,
+            buffer: Some(buffer),
+            scope,
+        }
+    }
+
+    fn acquire<T: 'static + Send>(&self, len: usize, scope: &'static str) -> MetalBuffer<T> {
+        let mut all = self.buffers.lock().unwrap();
+        if let Some(by_len) = all.get_mut(&TypeId::of::<T>()) {
+            if let Some(cached) = by_len.get_mut(&len) {
+                if let Some(buffer) = cached.pop() {
+                    metrics::counter!("metal.buffer_pool.reuse").increment(1);
+                    tracing::debug!(
+                        scope,
+                        len,
+                        type_name = type_name::<T>(),
+                        cached_remaining = cached.len(),
+                        "metal_buffer_pool_checkout_reuse"
+                    );
+                    return *buffer.downcast::<MetalBuffer<T>>().unwrap_or_else(|_| {
+                        panic!("buffer pool type mismatch for {}", type_name::<T>())
+                    });
+                }
+            }
+        }
+        metrics::counter!("metal.buffer_pool.miss").increment(1);
+        tracing::debug!(
+            scope,
+            len,
+            type_name = type_name::<T>(),
+            "metal_buffer_pool_checkout_alloc"
+        );
+        drop(all);
+        MetalBuffer::with_capacity(len)
+    }
+
+    fn release<T: 'static + Send>(&self, buffer: MetalBuffer<T>, scope: &'static str) {
+        let len = buffer.len();
+        let mut all = self.buffers.lock().unwrap();
+        let by_len = all.entry(TypeId::of::<T>()).or_default();
+        let cached = by_len.entry(len).or_default();
+        if cached.len() < self.max_cached_per_len {
+            cached.push(Box::new(buffer));
+            metrics::counter!("metal.buffer_pool.return").increment(1);
+            tracing::debug!(
+                scope,
+                len,
+                type_name = type_name::<T>(),
+                cached_count = cached.len(),
+                "metal_buffer_pool_release_cached"
+            );
+        } else {
+            metrics::counter!("metal.buffer_pool.drop").increment(1);
+            tracing::debug!(
+                scope,
+                len,
+                type_name = type_name::<T>(),
+                max_cached_per_len = self.max_cached_per_len,
+                "metal_buffer_pool_release_drop"
+            );
+        }
+    }
+}
+
+pub struct PooledMetalBuffer<'a, T: 'static + Send> {
+    pool: &'a SharedMetalBufferPool,
+    buffer: Option<MetalBuffer<T>>,
+    scope: &'static str,
+}
+
+impl<T: 'static + Send> PooledMetalBuffer<'_, T> {
+    pub fn into_inner(mut self) -> MetalBuffer<T> {
+        self.buffer
+            .take()
+            .expect("pooled metal buffer already moved")
+    }
+}
+
+impl<T: 'static + Send> Deref for PooledMetalBuffer<'_, T> {
+    type Target = MetalBuffer<T>;
+
+    fn deref(&self) -> &Self::Target {
+        self.buffer
+            .as_ref()
+            .expect("pooled metal buffer already moved")
+    }
+}
+
+impl<T: 'static + Send> DerefMut for PooledMetalBuffer<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.buffer
+            .as_mut()
+            .expect("pooled metal buffer already moved")
+    }
+}
+
+impl<T: 'static + Send> Drop for PooledMetalBuffer<'_, T> {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            self.pool.release(buffer, self.scope);
+        }
+    }
+}
+
+static SHARED_METAL_BUFFER_POOL: OnceLock<SharedMetalBufferPool> = OnceLock::new();
+
+pub fn global_metal_buffer_pool() -> &'static SharedMetalBufferPool {
+    SHARED_METAL_BUFFER_POOL.get_or_init(SharedMetalBufferPool::default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +419,36 @@ mod tests {
         let buf = MetalBuffer::from_slice(&data);
         buf.fill_zero_suffix(3);
         assert_eq!(buf.to_vec(), vec![1, 2, 3, 0, 0]);
+    }
+
+    #[test]
+    fn test_buffer_pool_caches_returned_buffer() {
+        let pool = SharedMetalBufferPool::new(2);
+        {
+            let _buf = pool.checkout::<u32>(8, "test.pool.cache");
+        }
+        let all = pool.buffers.lock().unwrap();
+        let cached = all
+            .get(&TypeId::of::<u32>())
+            .and_then(|by_len| by_len.get(&8))
+            .map(|v| v.len())
+            .unwrap_or(0);
+        assert_eq!(cached, 1);
+    }
+
+    #[test]
+    fn test_buffer_pool_reuses_exact_len() {
+        let pool = SharedMetalBufferPool::new(2);
+        {
+            let _buf = pool.checkout::<u32>(8, "test.pool.reuse.seed");
+        }
+        let _reuse = pool.checkout::<u32>(8, "test.pool.reuse.checkout");
+        let all = pool.buffers.lock().unwrap();
+        let cached = all
+            .get(&TypeId::of::<u32>())
+            .and_then(|by_len| by_len.get(&8))
+            .map(|v| v.len())
+            .unwrap_or(0);
+        assert_eq!(cached, 0);
     }
 }

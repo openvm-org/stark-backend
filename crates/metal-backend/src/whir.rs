@@ -15,7 +15,7 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    base::MetalMatrix,
+    base::{pooled_scratch_buffer, MetalMatrix},
     merkle_tree::MerkleTreeMetal,
     metal::{
         batch_ntt_small::batch_ntt_small,
@@ -216,7 +216,8 @@ pub fn prove_whir_opening_metal(
         }
     }
     // Reusable fold output scratch to avoid per-round buffer allocations.
-    let mut f_coeffs_scratch = MetalBuffer::<EF>::with_capacity(height);
+    let mut f_coeffs_scratch =
+        pooled_scratch_buffer::<EF>("prover.openings.whir.f_coeffs_scratch", height);
 
     debug_assert_eq!((m - log_final_poly_len) % k_whir, 0);
     let num_whir_rounds = (m - log_final_poly_len) / k_whir;
@@ -242,7 +243,8 @@ pub fn prove_whir_opening_metal(
         }
     }
     // Reusable fold output scratch to avoid per-round buffer allocations.
-    let mut w_moments_scratch = MetalBuffer::<EF>::with_capacity(1 << m);
+    let mut w_moments_scratch =
+        pooled_scratch_buffer::<EF>("prover.openings.whir.w_moments_scratch", 1 << m);
 
     let mut whir_sumcheck_polys: Vec<[EF; 2]> = vec![];
     let mut codeword_commits = vec![];
@@ -258,8 +260,8 @@ pub fn prove_whir_opening_metal(
     let mut log_rs_domain_size = m + log_blowup;
     let mut final_poly = None;
 
-    let mut d_s_evals = MetalBuffer::<EF>::with_capacity(2);
-    let mut d_sumcheck_tmp = MetalBuffer::<EF>::with_capacity(1);
+    let mut d_s_evals = pooled_scratch_buffer::<EF>("prover.openings.whir.sumcheck_s_evals", 2);
+    let mut d_sumcheck_tmp = pooled_scratch_buffer::<EF>("prover.openings.whir.sumcheck_tmp", 1);
 
     // We will drop `stacked_per_commit` and hence `common_main_pcs_data` after whir round 0.
     for (whir_round, round_params) in whir_params.rounds.iter().enumerate() {
@@ -279,7 +281,10 @@ pub fn prove_whir_opening_metal(
             let tmp_buffer_capacity =
                 whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32);
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
-                d_sumcheck_tmp = MetalBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
+                d_sumcheck_tmp = pooled_scratch_buffer::<EF>(
+                    "prover.openings.whir.sumcheck_tmp",
+                    tmp_buffer_capacity as usize,
+                );
             }
             // SAFETY:
             // - `d_s_evals` has length 2
@@ -376,15 +381,16 @@ pub fn prove_whir_opening_metal(
                     debug_assert_eq!(w_out[y], expected_w);
                 }
             }
-            std::mem::swap(&mut f_coeffs, &mut f_coeffs_scratch);
-            std::mem::swap(&mut w_moments, &mut w_moments_scratch);
+            std::mem::swap(&mut f_coeffs, &mut *f_coeffs_scratch);
+            std::mem::swap(&mut w_moments, &mut *w_moments_scratch);
         }
         // Define g^ = f^(alpha, \cdot) and send matrix commit of RS(g^)
         // `f_coeffs` is the coefficient form of f^(alpha, \cdot).
         let f_height = 1 << (m - k_whir);
         debug_assert!(f_coeffs.len() >= f_height);
         debug_assert_eq!(size_of::<EF>() / size_of::<F>(), D_EF);
-        let mut g_coeffs = MetalBuffer::<F>::with_capacity(f_height * D_EF);
+        let mut g_coeffs =
+            pooled_scratch_buffer::<F>("prover.openings.whir.g_coeffs", f_height * D_EF);
         // SAFETY: we allocated `f_coeffs.len() * D_EF` space for `g_coeffs` to do a 1-to-D_EF
         // (1-to-4) split
         unsafe {

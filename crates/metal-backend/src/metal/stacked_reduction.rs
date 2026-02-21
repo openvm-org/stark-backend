@@ -8,15 +8,14 @@ use std::{cmp::min, ffi::c_void, mem};
 use openvm_metal_common::{d_buffer::MetalBuffer, error::MetalError};
 use tracing::debug;
 
+use super::{
+    dispatch_phase_staged_sync, dispatch_sync, encode_dispatch, get_kernels, grid_size_1d,
+    grid_size_2d, DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
+};
 use crate::{
     poly::EqEvalSegments,
     prelude::{D_EF, EF, F},
     stacked_reduction::{UnstackedSlice, STACKED_REDUCTION_S_DEG},
-};
-
-use super::{
-    dispatch_staged_sync, dispatch_sync, encode_dispatch, get_kernels, grid_size_1d, grid_size_2d,
-    DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
 };
 
 /// Number of G outputs per z in round 0: G0, G1, G2
@@ -75,8 +74,7 @@ pub fn stacked_reduction_r0_required_temp_buffer_size(
 /// # Safety
 /// - `trace` must be valid for `height * width` base-field elements.
 /// - `lambda_pows` must contain at least `lambda_pows_offset + 2 * width` extension elements.
-/// - `block_sums` must be large enough for
-///   [`stacked_reduction_r0_required_temp_buffer_size`].
+/// - `block_sums` must be large enough for [`stacked_reduction_r0_required_temp_buffer_size`].
 /// - `output` must be valid for `NUM_G * 2^l_skip` extension elements; values are added in place.
 pub unsafe fn stacked_reduction_sumcheck_round0(
     eq_r_ns: &EqEvalSegments<EF>,
@@ -119,35 +117,39 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
         (((reduce_threads_per_group + SIMD_SIZE - 1) / SIMD_SIZE) * mem::size_of::<EF>()) as u64;
     let pipeline_reduce =
         get_kernels().get_pipeline("stacked_reduction_final_reduce_block_sums_add")?;
-    dispatch_staged_sync("stacked_reduction_sumcheck_round0", |cmd_buffer| {
-        encode_dispatch(cmd_buffer, &pipeline_round0, grid, group, |encoder| {
-            encoder.set_buffer(0, Some(eq_r_ns.buffer.gpu_buffer()), 0);
-            encoder.set_buffer(1, Some(trace.gpu_buffer()), 0);
-            encoder.set_buffer(2, Some(lambda_pows.gpu_buffer()), lambda_pows_offset_bytes);
-            encoder.set_buffer(3, Some(block_sums.gpu_buffer()), 0);
-            encoder.set_bytes(4, 4, &height_u32 as *const u32 as *const c_void);
-            encoder.set_bytes(5, 4, &width_u32 as *const u32 as *const c_void);
-            encoder.set_bytes(6, 4, &l_skip_u32 as *const u32 as *const c_void);
-            encoder.set_bytes(7, 4, &skip_mask as *const u32 as *const c_void);
-            encoder.set_bytes(8, 4, &num_x as *const u32 as *const c_void);
-            encoder.set_bytes(9, 4, &log_stride as *const u32 as *const c_void);
-            encoder.set_threadgroup_memory_length(0, round0_shared_bytes);
-        });
-        encode_dispatch(
-            cmd_buffer,
-            &pipeline_reduce,
-            reduce_grid,
-            reduce_group,
-            |encoder| {
-                encoder.set_buffer(0, Some(block_sums.gpu_buffer()), 0);
-                encoder.set_buffer(1, Some(output.gpu_buffer()), 0);
-                encoder.set_bytes(2, 4, &num_blocks as *const u32 as *const c_void);
-                encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
-                encoder.set_threadgroup_memory_length(0, reduce_shared_bytes);
-            },
-        );
-        Ok(2)
-    })
+    dispatch_phase_staged_sync(
+        "prover.openings.stacked_reduction",
+        "stacked_reduction_sumcheck_round0",
+        |cmd_buffer| {
+            encode_dispatch(cmd_buffer, &pipeline_round0, grid, group, |encoder| {
+                encoder.set_buffer(0, Some(eq_r_ns.buffer.gpu_buffer()), 0);
+                encoder.set_buffer(1, Some(trace.gpu_buffer()), 0);
+                encoder.set_buffer(2, Some(lambda_pows.gpu_buffer()), lambda_pows_offset_bytes);
+                encoder.set_buffer(3, Some(block_sums.gpu_buffer()), 0);
+                encoder.set_bytes(4, 4, &height_u32 as *const u32 as *const c_void);
+                encoder.set_bytes(5, 4, &width_u32 as *const u32 as *const c_void);
+                encoder.set_bytes(6, 4, &l_skip_u32 as *const u32 as *const c_void);
+                encoder.set_bytes(7, 4, &skip_mask as *const u32 as *const c_void);
+                encoder.set_bytes(8, 4, &num_x as *const u32 as *const c_void);
+                encoder.set_bytes(9, 4, &log_stride as *const u32 as *const c_void);
+                encoder.set_threadgroup_memory_length(0, round0_shared_bytes);
+            });
+            encode_dispatch(
+                cmd_buffer,
+                &pipeline_reduce,
+                reduce_grid,
+                reduce_group,
+                |encoder| {
+                    encoder.set_buffer(0, Some(block_sums.gpu_buffer()), 0);
+                    encoder.set_buffer(1, Some(output.gpu_buffer()), 0);
+                    encoder.set_bytes(2, 4, &num_blocks as *const u32 as *const c_void);
+                    encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
+                    encoder.set_threadgroup_memory_length(0, reduce_shared_bytes);
+                },
+            );
+            Ok(2)
+        },
+    )
 }
 
 /// Fold a single trace's PLE evaluations into stacked MLE form.
@@ -233,8 +235,8 @@ pub unsafe fn initialize_k_rot_from_eq_segments(
 /// - `q_eval` must contain the matrix for this window's commit at height `q_height`.
 /// - `unstacked_cols` must contain at least `unstacked_cols_offset + window_len` slices.
 /// - `lambda_pows` must contain at least `lambda_pows_offset + 2 * window_len` coefficients.
-/// - `output` must be zero-initialized for at least `STACKED_REDUCTION_S_DEG * D_EF` words
-///   before launch; kernel atomically accumulates into `output`.
+/// - `output` must be zero-initialized for at least `STACKED_REDUCTION_S_DEG * D_EF` words before
+///   launch; kernel atomically accumulates into `output`.
 pub unsafe fn stacked_reduction_sumcheck_mle_round(
     q_eval: &MetalBuffer<EF>,
     eq_r_ns: &EqEvalSegments<EF>,
@@ -306,8 +308,8 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
 /// - `eq_ub_ptr` must contain at least `window_len` extension elements.
 /// - `unstacked_cols` must contain at least `unstacked_cols_offset + window_len` slices.
 /// - `lambda_pows` must contain at least `lambda_pows_offset + 2 * window_len` coefficients.
-/// - `output` must be zero-initialized for at least `STACKED_REDUCTION_S_DEG * D_EF` words
-///   before launch; kernel atomically accumulates into `output`.
+/// - `output` must be zero-initialized for at least `STACKED_REDUCTION_S_DEG * D_EF` words before
+///   launch; kernel atomically accumulates into `output`.
 pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate(
     q_eval: &MetalBuffer<EF>,
     eq_ub_ptr: &MetalBuffer<EF>,
@@ -410,10 +412,16 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round_batch(
     let shift_factor = (l_skip + round) as u32;
     let sm_count = sm_count.max(1);
     let pipeline = get_kernels().get_pipeline("stacked_reduction_sumcheck_mle_round")?;
-    let pipeline_degenerate = get_kernels().get_pipeline("stacked_reduction_sumcheck_mle_round_degenerate")?;
+    let pipeline_degenerate =
+        get_kernels().get_pipeline("stacked_reduction_sumcheck_mle_round_degenerate")?;
     let degenerate_window_count = windows
         .iter()
-        .filter(|window| matches!(window.kind, StackedReductionMleWindowKind::Degenerate { .. }))
+        .filter(|window| {
+            matches!(
+                window.kind,
+                StackedReductionMleWindowKind::Degenerate { .. }
+            )
+        })
         .count();
     debug!(
         stage = "stacked_reduction_sumcheck_mle_round.batch",
@@ -424,100 +432,113 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round_batch(
         "metal_dispatch_stage"
     );
 
-    dispatch_staged_sync("stacked_reduction_sumcheck_mle_round.batch", |cmd_buffer| {
-        for window in windows {
-            let q_eval = &q_evals[window.q_eval_idx];
-            let output_offset_bytes = (window.output_offset * mem::size_of::<u64>()) as u64;
-            let window_len_u32 = window.window_len as u32;
-            let unstacked_cols_offset_bytes =
-                (window.unstacked_cols_offset * mem::size_of::<UnstackedSlice>()) as u64;
-            let lambda_pows_offset_bytes =
-                (window.lambda_pows_offset * mem::size_of::<EF>()) as u64;
+    dispatch_phase_staged_sync(
+        "prover.openings.stacked_reduction",
+        "stacked_reduction_sumcheck_mle_round.batch",
+        |cmd_buffer| {
+            for window in windows {
+                let q_eval = &q_evals[window.q_eval_idx];
+                let output_offset_bytes = (window.output_offset * mem::size_of::<u64>()) as u64;
+                let window_len_u32 = window.window_len as u32;
+                let unstacked_cols_offset_bytes =
+                    (window.unstacked_cols_offset * mem::size_of::<UnstackedSlice>()) as u64;
+                let lambda_pows_offset_bytes =
+                    (window.lambda_pows_offset * mem::size_of::<EF>()) as u64;
 
-            match window.kind {
-                StackedReductionMleWindowKind::NonDegenerate { num_y } => {
-                    let num_y_u32 = num_y as u32;
-                    let block_size = DEFAULT_THREADS_PER_GROUP as u32;
-                    let grid_x = div_ceil_u32(num_y_u32, block_size).max(1);
+                match window.kind {
+                    StackedReductionMleWindowKind::NonDegenerate { num_y } => {
+                        let num_y_u32 = num_y as u32;
+                        let block_size = DEFAULT_THREADS_PER_GROUP as u32;
+                        let grid_x = div_ceil_u32(num_y_u32, block_size).max(1);
 
-                    const WAVES_TARGET: u32 = 4;
-                    const ITERS_MIN: u32 = 4;
-                    const ITERS_MAX: u32 = 16;
-                    let stride_occ = div_ceil_u32(sm_count * WAVES_TARGET, grid_x);
-                    let stride_loop_lo = div_ceil_u32(window_len_u32, ITERS_MAX);
-                    let stride_loop_hi = div_ceil_u32(window_len_u32, ITERS_MIN);
-                    let lo = 1u32.max(stride_occ.max(stride_loop_lo));
-                    let hi = window_len_u32.min(MAX_GRID_DIM).min(stride_loop_hi);
-                    let grid_y = if lo <= hi {
-                        lo
-                    } else {
-                        lo.min(window_len_u32.min(MAX_GRID_DIM))
+                        const WAVES_TARGET: u32 = 4;
+                        const ITERS_MIN: u32 = 4;
+                        const ITERS_MAX: u32 = 16;
+                        let stride_occ = div_ceil_u32(sm_count * WAVES_TARGET, grid_x);
+                        let stride_loop_lo = div_ceil_u32(window_len_u32, ITERS_MAX);
+                        let stride_loop_hi = div_ceil_u32(window_len_u32, ITERS_MIN);
+                        let lo = 1u32.max(stride_occ.max(stride_loop_lo));
+                        let hi = window_len_u32.min(MAX_GRID_DIM).min(stride_loop_hi);
+                        let grid_y = if lo <= hi {
+                            lo
+                        } else {
+                            lo.min(window_len_u32.min(MAX_GRID_DIM))
+                        }
+                        .max(1);
+
+                        let grid_threads_x = (grid_x * block_size) as usize;
+                        let (grid, group) =
+                            grid_size_2d(grid_threads_x, grid_y as usize, block_size as usize, 1);
+                        let shared_bytes = (((block_size as usize + SIMD_SIZE - 1) / SIMD_SIZE)
+                            * mem::size_of::<EF>())
+                            as u64;
+
+                        encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                            encoder.set_buffer(0, Some(q_eval.gpu_buffer()), 0);
+                            encoder.set_buffer(1, Some(eq_r_ns.buffer.gpu_buffer()), 0);
+                            encoder.set_buffer(2, Some(k_rot_ns.buffer.gpu_buffer()), 0);
+                            encoder.set_buffer(
+                                3,
+                                Some(unstacked_cols.gpu_buffer()),
+                                unstacked_cols_offset_bytes,
+                            );
+                            encoder.set_buffer(
+                                4,
+                                Some(lambda_pows.gpu_buffer()),
+                                lambda_pows_offset_bytes,
+                            );
+                            encoder.set_buffer(5, Some(output.gpu_buffer()), output_offset_bytes);
+                            encoder.set_bytes(6, 4, &q_height_u32 as *const u32 as *const c_void);
+                            encoder.set_bytes(7, 4, &window_len_u32 as *const u32 as *const c_void);
+                            encoder.set_bytes(8, 4, &num_y_u32 as *const u32 as *const c_void);
+                            encoder.set_threadgroup_memory_length(0, shared_bytes);
+                        });
                     }
-                    .max(1);
-
-                    let grid_threads_x = (grid_x * block_size) as usize;
-                    let (grid, group) =
-                        grid_size_2d(grid_threads_x, grid_y as usize, block_size as usize, 1);
-                    let shared_bytes = (((block_size as usize + SIMD_SIZE - 1) / SIMD_SIZE)
-                        * mem::size_of::<EF>())
-                        as u64;
-
-                    encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
-                        encoder.set_buffer(0, Some(q_eval.gpu_buffer()), 0);
-                        encoder.set_buffer(1, Some(eq_r_ns.buffer.gpu_buffer()), 0);
-                        encoder.set_buffer(2, Some(k_rot_ns.buffer.gpu_buffer()), 0);
-                        encoder.set_buffer(
-                            3,
-                            Some(unstacked_cols.gpu_buffer()),
-                            unstacked_cols_offset_bytes,
-                        );
-                        encoder.set_buffer(4, Some(lambda_pows.gpu_buffer()), lambda_pows_offset_bytes);
-                        encoder.set_buffer(5, Some(output.gpu_buffer()), output_offset_bytes);
-                        encoder.set_bytes(6, 4, &q_height_u32 as *const u32 as *const c_void);
-                        encoder.set_bytes(7, 4, &window_len_u32 as *const u32 as *const c_void);
-                        encoder.set_bytes(8, 4, &num_y_u32 as *const u32 as *const c_void);
-                        encoder.set_threadgroup_memory_length(0, shared_bytes);
-                    });
-                }
-                StackedReductionMleWindowKind::Degenerate {
-                    eq_ub_offset,
-                    eq_r,
-                    k_rot_r,
-                } => {
-                    let block_size = min(window_len_u32.max(1), DEFAULT_THREADS_PER_GROUP as u32);
-                    let (grid, group) = grid_size_1d(block_size as usize, block_size as usize);
-                    let shared_bytes = (((block_size as usize + SIMD_SIZE - 1) / SIMD_SIZE)
-                        * mem::size_of::<EF>())
-                        as u64;
-                    let eq_ub_offset_bytes = (eq_ub_offset * mem::size_of::<EF>()) as u64;
-                    encode_dispatch(cmd_buffer, &pipeline_degenerate, grid, group, |encoder| {
-                        encoder.set_buffer(0, Some(q_eval.gpu_buffer()), 0);
-                        encoder.set_buffer(1, Some(eq_ub_ptr.gpu_buffer()), eq_ub_offset_bytes);
-                        encoder.set_bytes(
-                            2,
-                            mem::size_of::<EF>() as u64,
-                            &eq_r as *const EF as *const c_void,
-                        );
-                        encoder.set_bytes(
-                            3,
-                            mem::size_of::<EF>() as u64,
-                            &k_rot_r as *const EF as *const c_void,
-                        );
-                        encoder.set_buffer(
-                            4,
-                            Some(unstacked_cols.gpu_buffer()),
-                            unstacked_cols_offset_bytes,
-                        );
-                        encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), lambda_pows_offset_bytes);
-                        encoder.set_buffer(6, Some(output.gpu_buffer()), output_offset_bytes);
-                        encoder.set_bytes(7, 4, &q_height_u32 as *const u32 as *const c_void);
-                        encoder.set_bytes(8, 4, &window_len_u32 as *const u32 as *const c_void);
-                        encoder.set_bytes(9, 4, &shift_factor as *const u32 as *const c_void);
-                        encoder.set_threadgroup_memory_length(0, shared_bytes);
-                    });
+                    StackedReductionMleWindowKind::Degenerate {
+                        eq_ub_offset,
+                        eq_r,
+                        k_rot_r,
+                    } => {
+                        let block_size =
+                            min(window_len_u32.max(1), DEFAULT_THREADS_PER_GROUP as u32);
+                        let (grid, group) = grid_size_1d(block_size as usize, block_size as usize);
+                        let shared_bytes = (((block_size as usize + SIMD_SIZE - 1) / SIMD_SIZE)
+                            * mem::size_of::<EF>())
+                            as u64;
+                        let eq_ub_offset_bytes = (eq_ub_offset * mem::size_of::<EF>()) as u64;
+                        encode_dispatch(cmd_buffer, &pipeline_degenerate, grid, group, |encoder| {
+                            encoder.set_buffer(0, Some(q_eval.gpu_buffer()), 0);
+                            encoder.set_buffer(1, Some(eq_ub_ptr.gpu_buffer()), eq_ub_offset_bytes);
+                            encoder.set_bytes(
+                                2,
+                                mem::size_of::<EF>() as u64,
+                                &eq_r as *const EF as *const c_void,
+                            );
+                            encoder.set_bytes(
+                                3,
+                                mem::size_of::<EF>() as u64,
+                                &k_rot_r as *const EF as *const c_void,
+                            );
+                            encoder.set_buffer(
+                                4,
+                                Some(unstacked_cols.gpu_buffer()),
+                                unstacked_cols_offset_bytes,
+                            );
+                            encoder.set_buffer(
+                                5,
+                                Some(lambda_pows.gpu_buffer()),
+                                lambda_pows_offset_bytes,
+                            );
+                            encoder.set_buffer(6, Some(output.gpu_buffer()), output_offset_bytes);
+                            encoder.set_bytes(7, 4, &q_height_u32 as *const u32 as *const c_void);
+                            encoder.set_bytes(8, 4, &window_len_u32 as *const u32 as *const c_void);
+                            encoder.set_bytes(9, 4, &shift_factor as *const u32 as *const c_void);
+                            encoder.set_threadgroup_memory_length(0, shared_bytes);
+                        });
+                    }
                 }
             }
-        }
-        Ok(windows.len())
-    })
+            Ok(windows.len())
+        },
+    )
 }

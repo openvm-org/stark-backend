@@ -12,7 +12,7 @@ use tracing::instrument;
 use crate::{
     base::MetalMatrix,
     metal::{
-        dispatch_staged_sync, encode_dispatch, get_kernels, grid_size_1d,
+        dispatch_phase_staged_sync, encode_dispatch, get_kernels, grid_size_1d,
         matrix::matrix_get_rows_fp_kernel,
         merkle_tree::{
             poseidon2_compressing_row_hashes, poseidon2_compressing_row_hashes_ext,
@@ -70,30 +70,31 @@ fn compress_adjacent_digest_layers_staged<Digest>(
     let pipeline = get_kernels()
         .get_pipeline("poseidon2_adjacent_compress_layer")
         .map_err(|error| MerkleTreeError::AdjacentCompressLayer { error, layer: 1 })?;
-    dispatch_staged_sync("merkle_tree.adjacent_layers", |cmd_buffer| {
-        let mut kernel_count = 0usize;
-        for layer_idx in 1..digest_layers.len() {
-            let (prev_layers, cur_and_rest) = digest_layers.split_at_mut(layer_idx);
-            let prev_layer = &prev_layers[layer_idx - 1];
-            let cur_layer = &mut cur_and_rest[0];
-            let output_size = cur_layer.len();
-            debug_assert!(prev_layer.len() >= output_size * 2);
-            let output_size_u32 = output_size as u32;
-            let (grid, group) = grid_size_1d(output_size, DEFAULT_THREADS_PER_GROUP);
-            encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
-                encoder.set_buffer(0, Some(cur_layer.gpu_buffer()), 0);
-                encoder.set_buffer(1, Some(prev_layer.gpu_buffer()), 0);
-                encoder.set_bytes(2, 4, &output_size_u32 as *const u32 as *const c_void);
-            });
-            kernel_count += 1;
-        }
-        Ok(kernel_count)
-    })
+    dispatch_phase_staged_sync(
+        "prover.main_trace_commit",
+        "merkle_tree.adjacent_layers",
+        |cmd_buffer| {
+            let mut kernel_count = 0usize;
+            for layer_idx in 1..digest_layers.len() {
+                let (prev_layers, cur_and_rest) = digest_layers.split_at_mut(layer_idx);
+                let prev_layer = &prev_layers[layer_idx - 1];
+                let cur_layer = &mut cur_and_rest[0];
+                let output_size = cur_layer.len();
+                debug_assert!(prev_layer.len() >= output_size * 2);
+                let output_size_u32 = output_size as u32;
+                let (grid, group) = grid_size_1d(output_size, DEFAULT_THREADS_PER_GROUP);
+                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                    encoder.set_buffer(0, Some(cur_layer.gpu_buffer()), 0);
+                    encoder.set_buffer(1, Some(prev_layer.gpu_buffer()), 0);
+                    encoder.set_bytes(2, 4, &output_size_u32 as *const u32 as *const c_void);
+                });
+                kernel_count += 1;
+            }
+            Ok(kernel_count)
+        },
+    )
     .map_err(|error| MerkleTreeError::AdjacentCompressLayer { error, layer: 1 })?;
-    tracing::debug!(
-        layer_count,
-        "merkle_tree_adjacent_layer_dispatch_stats"
-    );
+    tracing::debug!(layer_count, "merkle_tree_adjacent_layer_dispatch_stats");
     Ok(())
 }
 
@@ -213,8 +214,7 @@ impl MerkleTreeMetal<F, Digest> {
             trees.iter().all(|tree| tree.proof_depth() == depth),
             "Merkle trees don't have same depth"
         );
-        let combined_layers_ptrs =
-            (num_trees > 1).then(|| flatten_cached_layer_ptrs(trees, depth));
+        let combined_layers_ptrs = (num_trees > 1).then(|| flatten_cached_layer_ptrs(trees, depth));
         let d_layers_ptr = combined_layers_ptrs
             .as_ref()
             .unwrap_or(&trees[0].non_root_layer_ptrs);

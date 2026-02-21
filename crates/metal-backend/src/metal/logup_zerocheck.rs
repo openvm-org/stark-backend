@@ -16,15 +16,15 @@ use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use tracing::debug;
 
+use super::{
+    dispatch_multi_sync, dispatch_phase_staged_sync, dispatch_sync, encode_dispatch, get_kernels,
+    grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
+};
 use crate::{
+    base::pooled_scratch_buffer,
     monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader},
     poly::SqrtEqLayers,
     prelude::{EF, F},
-};
-
-use super::{
-    dispatch_multi_sync, dispatch_staged_sync, dispatch_sync, encode_dispatch, get_kernels,
-    grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
 };
 
 const GKR_SP_DEG: usize = 2;
@@ -1233,7 +1233,8 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
         return Ok(());
     }
     let scratch_len = num_blocks as usize * skip_domain as usize;
-    let tmp = MetalBuffer::<EF>::with_capacity(scratch_len);
+    let tmp =
+        pooled_scratch_buffer::<EF>("prover.rap_constraints.round0.zerocheck.tmp", scratch_len);
     debug!(
         stage = "zerocheck_ntt_eval_constraints.round0_batch",
         scratch_len,
@@ -1243,116 +1244,126 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
     );
 
     if use_global_intermediates {
-        dispatch_staged_sync("zerocheck_ntt_eval_constraints.cosets", |cmd_buffer| {
-            let mut kernel_count = 0usize;
-            for coset_idx in 0..num_cosets {
-                let out_offset_bytes =
-                    (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
-                        as u64;
-                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
-                    for part in main_part_buffers {
-                        encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
-                    }
-                    encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
-                    encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
-                    encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
-                    encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
-                    encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
-                    encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
-                    encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-                    encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
-                    encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
-                    encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
-                    encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
-                    encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
-                    encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
-                    encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
-                    encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-                    encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-                    encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-                    encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                    encoder.set_bytes(
-                        18,
-                        std::mem::size_of::<F>() as u64,
-                        &g_shift as *const F as *const c_void,
+        dispatch_phase_staged_sync(
+            "prover.rap_constraints.round0",
+            "zerocheck_ntt_eval_constraints.cosets",
+            |cmd_buffer| {
+                let mut kernel_count = 0usize;
+                for coset_idx in 0..num_cosets {
+                    let out_offset_bytes =
+                        (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
+                            as u64;
+                    encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                        for part in main_part_buffers {
+                            encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                        }
+                        encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
+                        encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
+                        encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
+                        encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
+                        encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
+                        encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
+                        encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                        encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
+                        encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
+                        encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
+                        encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
+                        encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
+                        encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
+                        encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                        encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                        encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                        encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                        encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                        encoder.set_bytes(
+                            18,
+                            std::mem::size_of::<F>() as u64,
+                            &g_shift as *const F as *const c_void,
+                        );
+                        encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                        encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
+                        encoder.set_buffer(21, Some(intermediates.gpu_buffer()), 0);
+                        encoder.set_bytes(22, 4, &total_threads_u32 as *const u32 as *const c_void);
+                        encoder.set_bytes(23, 4, &num_cosets as *const u32 as *const c_void);
+                        encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+                    });
+                    kernel_count += 1;
+                    // Invariant: each coset dispatch fully writes `tmp` before this reduction reads
+                    // it.
+                    encode_final_reduce_block_sums_to_buffer(
+                        cmd_buffer,
+                        &pipeline_reduce,
+                        &tmp,
+                        output.gpu_buffer(),
+                        out_offset_bytes,
+                        num_blocks as u32,
+                        skip_domain,
+                        threads_per_group,
                     );
-                    encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                    encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
-                    encoder.set_buffer(21, Some(intermediates.gpu_buffer()), 0);
-                    encoder.set_bytes(22, 4, &total_threads_u32 as *const u32 as *const c_void);
-                    encoder.set_bytes(23, 4, &num_cosets as *const u32 as *const c_void);
-                    encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-                });
-                kernel_count += 1;
-                // Invariant: each coset dispatch fully writes `tmp` before this reduction reads it.
-                encode_final_reduce_block_sums_to_buffer(
-                    cmd_buffer,
-                    &pipeline_reduce,
-                    &tmp,
-                    output.gpu_buffer(),
-                    out_offset_bytes,
-                    num_blocks as u32,
-                    skip_domain,
-                    threads_per_group,
-                );
-                kernel_count += 1;
-            }
-            Ok(kernel_count)
-        })?;
+                    kernel_count += 1;
+                }
+                Ok(kernel_count)
+            },
+        )?;
     } else {
-        dispatch_staged_sync("zerocheck_ntt_eval_constraints.cosets", |cmd_buffer| {
-            let mut kernel_count = 0usize;
-            for coset_idx in 0..num_cosets {
-                let out_offset_bytes =
-                    (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
-                        as u64;
-                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
-                    for part in main_part_buffers {
-                        encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
-                    }
-                    encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
-                    encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
-                    encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
-                    encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
-                    encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
-                    encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
-                    encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-                    encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
-                    encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
-                    encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
-                    encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
-                    encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
-                    encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
-                    encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
-                    encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-                    encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-                    encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-                    encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                    encoder.set_bytes(
-                        18,
-                        std::mem::size_of::<F>() as u64,
-                        &g_shift as *const F as *const c_void,
+        dispatch_phase_staged_sync(
+            "prover.rap_constraints.round0",
+            "zerocheck_ntt_eval_constraints.cosets",
+            |cmd_buffer| {
+                let mut kernel_count = 0usize;
+                for coset_idx in 0..num_cosets {
+                    let out_offset_bytes =
+                        (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
+                            as u64;
+                    encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                        for part in main_part_buffers {
+                            encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                        }
+                        encoder.set_buffer(0, Some(tmp.gpu_buffer()), 0);
+                        encoder.set_buffer(1, Some(selectors_cube.gpu_buffer()), 0);
+                        encoder.set_buffer(2, Some(preprocessed.gpu_buffer()), 0);
+                        encoder.set_buffer(3, Some(main_ptrs.gpu_buffer()), 0);
+                        encoder.set_buffer(4, Some(eq_cube.gpu_buffer()), 0);
+                        encoder.set_buffer(5, Some(lambda_pows.gpu_buffer()), 0);
+                        encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                        encoder.set_buffer(7, Some(rules.gpu_buffer()), 0);
+                        encoder.set_buffer(8, Some(used_nodes.gpu_buffer()), 0);
+                        encoder.set_buffer(9, Some(twiddles.gpu_buffer()), 0);
+                        encoder.set_bytes(10, 4, &rules_len as *const u32 as *const c_void);
+                        encoder.set_bytes(11, 4, &used_nodes_len as *const u32 as *const c_void);
+                        encoder.set_bytes(12, 4, &lambda_len as *const u32 as *const c_void);
+                        encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                        encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                        encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                        encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                        encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                        encoder.set_bytes(
+                            18,
+                            std::mem::size_of::<F>() as u64,
+                            &g_shift as *const F as *const c_void,
+                        );
+                        encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                        encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
+                        encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+                    });
+                    kernel_count += 1;
+                    // Invariant: each coset dispatch fully writes `tmp` before this reduction reads
+                    // it.
+                    encode_final_reduce_block_sums_to_buffer(
+                        cmd_buffer,
+                        &pipeline_reduce,
+                        &tmp,
+                        output.gpu_buffer(),
+                        out_offset_bytes,
+                        num_blocks as u32,
+                        skip_domain,
+                        threads_per_group,
                     );
-                    encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                    encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
-                    encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-                });
-                kernel_count += 1;
-                // Invariant: each coset dispatch fully writes `tmp` before this reduction reads it.
-                encode_final_reduce_block_sums_to_buffer(
-                    cmd_buffer,
-                    &pipeline_reduce,
-                    &tmp,
-                    output.gpu_buffer(),
-                    out_offset_bytes,
-                    num_blocks as u32,
-                    skip_domain,
-                    threads_per_group,
-                );
-                kernel_count += 1;
-            }
-            Ok(kernel_count)
-        })?;
+                    kernel_count += 1;
+                }
+                Ok(kernel_count)
+            },
+        )?;
     }
     Ok(())
 }
@@ -1413,17 +1424,22 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     let rules_len = rules.len() as u32;
     let q_offset_bytes = frac_q_offset_bytes(output.len());
     let intermediates = if use_global_intermediates {
-        MetalBuffer::<F>::with_capacity(buffer_size as usize * total_threads)
+        pooled_scratch_buffer::<F>(
+            "prover.rap_constraints.round0.logup.intermediates",
+            buffer_size as usize * total_threads,
+        )
     } else {
-        MetalBuffer::<F>::with_capacity(0)
+        pooled_scratch_buffer::<F>("prover.rap_constraints.round0.logup.intermediates", 0)
     };
     let pipeline_reduce = get_kernels().get_pipeline("final_reduce_block_sums")?;
     if num_cosets == 0 {
         return Ok(());
     }
     let scratch_len = num_blocks as usize * skip_domain as usize;
-    let tmp_p = MetalBuffer::<EF>::with_capacity(scratch_len);
-    let tmp_q = MetalBuffer::<EF>::with_capacity(scratch_len);
+    let tmp_p =
+        pooled_scratch_buffer::<EF>("prover.rap_constraints.round0.logup.tmp_p", scratch_len);
+    let tmp_q =
+        pooled_scratch_buffer::<EF>("prover.rap_constraints.round0.logup.tmp_q", scratch_len);
     let expected_kernel_count = 3usize * num_cosets as usize;
     debug!(
         stage = "logup_bary_eval_interactions_round0",
@@ -1434,155 +1450,165 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         "logup_r0_scratch_reuse"
     );
     if use_global_intermediates {
-        dispatch_staged_sync("logup_bary_eval_interactions_round0.cosets", |cmd_buffer| {
-            let mut kernel_count = 0usize;
-            for coset_idx in 0..num_cosets {
-                let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
-                let out_offset_bytes =
-                    (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
-                        as u64;
-                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
-                    for part in main_part_buffers {
-                        encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
-                    }
-                    encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
-                    encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
-                    encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
-                    encoder.set_buffer(3, Some(preprocessed.gpu_buffer()), 0);
-                    encoder.set_buffer(4, Some(main_ptrs.gpu_buffer()), 0);
-                    encoder.set_buffer(5, Some(eq_cube.gpu_buffer()), 0);
-                    encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-                    encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
-                    encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
-                    encoder.set_bytes(
-                        9,
-                        std::mem::size_of::<EF>() as u64,
-                        &denom_sum_init as *const EF as *const c_void,
+        dispatch_phase_staged_sync(
+            "prover.rap_constraints.round0",
+            "logup_bary_eval_interactions_round0.cosets",
+            |cmd_buffer| {
+                let mut kernel_count = 0usize;
+                for coset_idx in 0..num_cosets {
+                    let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
+                    let out_offset_bytes =
+                        (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
+                            as u64;
+                    encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                        for part in main_part_buffers {
+                            encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                        }
+                        encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
+                        encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
+                        encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
+                        encoder.set_buffer(3, Some(preprocessed.gpu_buffer()), 0);
+                        encoder.set_buffer(4, Some(main_ptrs.gpu_buffer()), 0);
+                        encoder.set_buffer(5, Some(eq_cube.gpu_buffer()), 0);
+                        encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                        encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
+                        encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
+                        encoder.set_bytes(
+                            9,
+                            std::mem::size_of::<EF>() as u64,
+                            &denom_sum_init as *const EF as *const c_void,
+                        );
+                        encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
+                        encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
+                        encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
+                        encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                        encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                        encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                        encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                        encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                        encoder.set_bytes(
+                            18,
+                            std::mem::size_of::<F>() as u64,
+                            &g_shift as *const F as *const c_void,
+                        );
+                        encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                        encoder.set_bytes(
+                            20,
+                            4,
+                            &is_identity_coset_flag as *const u32 as *const c_void,
+                        );
+                        encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
+                        encoder.set_buffer(22, Some(intermediates.gpu_buffer()), 0);
+                        encoder.set_bytes(23, 4, &total_threads_u32 as *const u32 as *const c_void);
+                        encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+                    });
+                    kernel_count += 1;
+                    // Invariant: the round0 dispatch above overwrites all scratch entries for this
+                    // coset before these two final-reduction kernels read
+                    // `tmp_p/tmp_q`.
+                    let reduce_kernel_count = encode_dual_final_reduce_block_sums_to_buffer(
+                        cmd_buffer,
+                        &pipeline_reduce,
+                        &tmp_p,
+                        &tmp_q,
+                        output.gpu_buffer(),
+                        out_offset_bytes,
+                        q_offset_bytes + out_offset_bytes,
+                        num_blocks as u32,
+                        skip_domain,
+                        threads_per_group,
                     );
-                    encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
-                    encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
-                    encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
-                    encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
-                    encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-                    encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-                    encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-                    encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                    encoder.set_bytes(
-                        18,
-                        std::mem::size_of::<F>() as u64,
-                        &g_shift as *const F as *const c_void,
+                    kernel_count += reduce_kernel_count;
+                    debug!(
+                        stage = "logup_bary_eval_interactions_round0.coset_reductions",
+                        coset_idx,
+                        kernel_count = reduce_kernel_count,
+                        sync_count = 0usize,
+                        "metal_dispatch_stage"
                     );
-                    encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                    encoder.set_bytes(
-                        20,
-                        4,
-                        &is_identity_coset_flag as *const u32 as *const c_void,
-                    );
-                    encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
-                    encoder.set_buffer(22, Some(intermediates.gpu_buffer()), 0);
-                    encoder.set_bytes(23, 4, &total_threads_u32 as *const u32 as *const c_void);
-                    encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-                });
-                kernel_count += 1;
-                // Invariant: the round0 dispatch above overwrites all scratch entries for this coset
-                // before these two final-reduction kernels read `tmp_p/tmp_q`.
-                let reduce_kernel_count = encode_dual_final_reduce_block_sums_to_buffer(
-                    cmd_buffer,
-                    &pipeline_reduce,
-                    &tmp_p,
-                    &tmp_q,
-                    output.gpu_buffer(),
-                    out_offset_bytes,
-                    q_offset_bytes + out_offset_bytes,
-                    num_blocks as u32,
-                    skip_domain,
-                    threads_per_group,
-                );
-                kernel_count += reduce_kernel_count;
-                debug!(
-                    stage = "logup_bary_eval_interactions_round0.coset_reductions",
-                    coset_idx,
-                    kernel_count = reduce_kernel_count,
-                    sync_count = 0usize,
-                    "metal_dispatch_stage"
-                );
-            }
-            Ok(kernel_count)
-        })?;
+                }
+                Ok(kernel_count)
+            },
+        )?;
     } else {
-        dispatch_staged_sync("logup_bary_eval_interactions_round0.cosets", |cmd_buffer| {
-            let mut kernel_count = 0usize;
-            for coset_idx in 0..num_cosets {
-                let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
-                let out_offset_bytes =
-                    (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
-                        as u64;
-                encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
-                    for part in main_part_buffers {
-                        encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
-                    }
-                    encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
-                    encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
-                    encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
-                    encoder.set_buffer(3, Some(preprocessed.gpu_buffer()), 0);
-                    encoder.set_buffer(4, Some(main_ptrs.gpu_buffer()), 0);
-                    encoder.set_buffer(5, Some(eq_cube.gpu_buffer()), 0);
-                    encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
-                    encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
-                    encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
-                    encoder.set_bytes(
-                        9,
-                        std::mem::size_of::<EF>() as u64,
-                        &denom_sum_init as *const EF as *const c_void,
+        dispatch_phase_staged_sync(
+            "prover.rap_constraints.round0",
+            "logup_bary_eval_interactions_round0.cosets",
+            |cmd_buffer| {
+                let mut kernel_count = 0usize;
+                for coset_idx in 0..num_cosets {
+                    let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
+                    let out_offset_bytes =
+                        (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
+                            as u64;
+                    encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
+                        for part in main_part_buffers {
+                            encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
+                        }
+                        encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
+                        encoder.set_buffer(1, Some(tmp_q.gpu_buffer()), 0);
+                        encoder.set_buffer(2, Some(selectors_cube.gpu_buffer()), 0);
+                        encoder.set_buffer(3, Some(preprocessed.gpu_buffer()), 0);
+                        encoder.set_buffer(4, Some(main_ptrs.gpu_buffer()), 0);
+                        encoder.set_buffer(5, Some(eq_cube.gpu_buffer()), 0);
+                        encoder.set_buffer(6, Some(public_values.gpu_buffer()), 0);
+                        encoder.set_buffer(7, Some(numer_weights.gpu_buffer()), 0);
+                        encoder.set_buffer(8, Some(denom_weights.gpu_buffer()), 0);
+                        encoder.set_bytes(
+                            9,
+                            std::mem::size_of::<EF>() as u64,
+                            &denom_sum_init as *const EF as *const c_void,
+                        );
+                        encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
+                        encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
+                        encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
+                        encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
+                        encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
+                        encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
+                        encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
+                        encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
+                        encoder.set_bytes(
+                            18,
+                            std::mem::size_of::<F>() as u64,
+                            &g_shift as *const F as *const c_void,
+                        );
+                        encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
+                        encoder.set_bytes(
+                            20,
+                            4,
+                            &is_identity_coset_flag as *const u32 as *const c_void,
+                        );
+                        encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
+                        encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
+                    });
+                    kernel_count += 1;
+                    // Invariant: the round0 dispatch above overwrites all scratch entries for this
+                    // coset before these two final-reduction kernels read
+                    // `tmp_p/tmp_q`.
+                    let reduce_kernel_count = encode_dual_final_reduce_block_sums_to_buffer(
+                        cmd_buffer,
+                        &pipeline_reduce,
+                        &tmp_p,
+                        &tmp_q,
+                        output.gpu_buffer(),
+                        out_offset_bytes,
+                        q_offset_bytes + out_offset_bytes,
+                        num_blocks as u32,
+                        skip_domain,
+                        threads_per_group,
                     );
-                    encoder.set_buffer(10, Some(rules.gpu_buffer()), 0);
-                    encoder.set_buffer(11, Some(twiddles.gpu_buffer()), 0);
-                    encoder.set_bytes(12, 4, &rules_len as *const u32 as *const c_void);
-                    encoder.set_bytes(13, 4, &buffer_size as *const u32 as *const c_void);
-                    encoder.set_bytes(14, 4, &skip_domain as *const u32 as *const c_void);
-                    encoder.set_bytes(15, 4, &num_x as *const u32 as *const c_void);
-                    encoder.set_bytes(16, 4, &height as *const u32 as *const c_void);
-                    encoder.set_bytes(17, 4, &coset_idx as *const u32 as *const c_void);
-                    encoder.set_bytes(
-                        18,
-                        std::mem::size_of::<F>() as u64,
-                        &g_shift as *const F as *const c_void,
+                    kernel_count += reduce_kernel_count;
+                    debug!(
+                        stage = "logup_bary_eval_interactions_round0.coset_reductions",
+                        coset_idx,
+                        kernel_count = reduce_kernel_count,
+                        sync_count = 0usize,
+                        "metal_dispatch_stage"
                     );
-                    encoder.set_bytes(19, 4, &needs_tg_mem_flag as *const u32 as *const c_void);
-                    encoder.set_bytes(
-                        20,
-                        4,
-                        &is_identity_coset_flag as *const u32 as *const c_void,
-                    );
-                    encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
-                    encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
-                });
-                kernel_count += 1;
-                // Invariant: the round0 dispatch above overwrites all scratch entries for this coset
-                // before these two final-reduction kernels read `tmp_p/tmp_q`.
-                let reduce_kernel_count = encode_dual_final_reduce_block_sums_to_buffer(
-                    cmd_buffer,
-                    &pipeline_reduce,
-                    &tmp_p,
-                    &tmp_q,
-                    output.gpu_buffer(),
-                    out_offset_bytes,
-                    q_offset_bytes + out_offset_bytes,
-                    num_blocks as u32,
-                    skip_domain,
-                    threads_per_group,
-                );
-                kernel_count += reduce_kernel_count;
-                debug!(
-                    stage = "logup_bary_eval_interactions_round0.coset_reductions",
-                    coset_idx,
-                    kernel_count = reduce_kernel_count,
-                    sync_count = 0usize,
-                    "metal_dispatch_stage"
-                );
-            }
-            Ok(kernel_count)
-        })?;
+                }
+                Ok(kernel_count)
+            },
+        )?;
     }
     Ok(())
 }
@@ -1873,7 +1899,11 @@ pub unsafe fn zerocheck_monomial_batched(
     if tracing::enabled!(tracing::Level::DEBUG) {
         let tmp_host = tmp.to_vec();
         let non_zero = tmp_host.iter().filter(|v| **v != EF::ZERO).count();
-        let preview: Vec<_> = tmp_host.iter().take(tmp_host.len().min(8)).copied().collect();
+        let preview: Vec<_> = tmp_host
+            .iter()
+            .take(tmp_host.len().min(8))
+            .copied()
+            .collect();
         debug!(
             num_blocks,
             num_x,
@@ -1933,7 +1963,11 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
     if tracing::enabled!(tracing::Level::DEBUG) {
         let tmp_host = tmp.to_vec();
         let non_zero = tmp_host.iter().filter(|v| **v != EF::ZERO).count();
-        let preview: Vec<_> = tmp_host.iter().take(tmp_host.len().min(8)).copied().collect();
+        let preview: Vec<_> = tmp_host
+            .iter()
+            .take(tmp_host.len().min(8))
+            .copied()
+            .collect();
         debug!(
             num_blocks,
             num_x,
