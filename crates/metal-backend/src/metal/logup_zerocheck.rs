@@ -136,26 +136,21 @@ unsafe fn encode_dual_final_reduce_block_sums_to_buffer(
     if d == 0 {
         return 0;
     }
-    encode_final_reduce_block_sums_to_buffer(
-        cmd_buffer,
-        pipeline_reduce,
-        block_sums_p,
-        output_buffer,
-        output_offset_p_bytes,
-        num_blocks,
-        d,
-        threads_per_group,
-    );
-    encode_final_reduce_block_sums_to_buffer(
-        cmd_buffer,
-        pipeline_reduce,
-        block_sums_q,
-        output_buffer,
-        output_offset_q_bytes,
-        num_blocks,
-        d,
-        threads_per_group,
-    );
+    let shared_bytes = block_shared_bytes(threads_per_group);
+    let final_threads = d as usize * threads_per_group;
+    let (grid_reduce, group_reduce) = grid_size_1d(final_threads, threads_per_group);
+    let encoder = cmd_buffer.new_compute_command_encoder();
+    encoder.set_compute_pipeline_state(pipeline_reduce);
+    encoder.set_buffer(0, Some(block_sums_p.gpu_buffer()), 0);
+    encoder.set_buffer(1, Some(output_buffer), output_offset_p_bytes);
+    encoder.set_bytes(2, 4, &num_blocks as *const u32 as *const c_void);
+    encoder.set_bytes(3, 4, &d as *const u32 as *const c_void);
+    encoder.set_threadgroup_memory_length(0, shared_bytes);
+    encoder.dispatch_threads(grid_reduce, group_reduce);
+    encoder.set_buffer(0, Some(block_sums_q.gpu_buffer()), 0);
+    encoder.set_buffer(1, Some(output_buffer), output_offset_q_bytes);
+    encoder.dispatch_threads(grid_reduce, group_reduce);
+    encoder.end_encoding();
     2
 }
 
@@ -1234,13 +1229,26 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
         );
     }
     let pipeline_reduce = get_kernels().get_pipeline("final_reduce_block_sums")?;
+    if num_cosets == 0 {
+        return Ok(());
+    }
+    let scratch_len = num_blocks as usize * skip_domain as usize;
+    let tmp = MetalBuffer::<EF>::with_capacity(scratch_len);
+    debug!(
+        stage = "zerocheck_ntt_eval_constraints.round0_batch",
+        scratch_len,
+        coset_count = num_cosets as usize,
+        expected_kernel_count = 2usize * num_cosets as usize,
+        "zerocheck_r0_scratch_reuse"
+    );
 
-    for coset_idx in 0..num_cosets {
-        let tmp = MetalBuffer::<EF>::with_capacity(num_blocks as usize * skip_domain as usize);
-        let out_offset_bytes =
-            (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
-        dispatch_staged_sync("zerocheck_ntt_eval_constraints.coset", |cmd_buffer| {
-            if use_global_intermediates {
+    if use_global_intermediates {
+        dispatch_staged_sync("zerocheck_ntt_eval_constraints.cosets", |cmd_buffer| {
+            let mut kernel_count = 0usize;
+            for coset_idx in 0..num_cosets {
+                let out_offset_bytes =
+                    (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
+                        as u64;
                 encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
                     for part in main_part_buffers {
                         encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
@@ -1275,7 +1283,29 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
                     encoder.set_bytes(23, 4, &num_cosets as *const u32 as *const c_void);
                     encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
                 });
-            } else {
+                kernel_count += 1;
+                // Invariant: each coset dispatch fully writes `tmp` before this reduction reads it.
+                encode_final_reduce_block_sums_to_buffer(
+                    cmd_buffer,
+                    &pipeline_reduce,
+                    &tmp,
+                    output.gpu_buffer(),
+                    out_offset_bytes,
+                    num_blocks as u32,
+                    skip_domain,
+                    threads_per_group,
+                );
+                kernel_count += 1;
+            }
+            Ok(kernel_count)
+        })?;
+    } else {
+        dispatch_staged_sync("zerocheck_ntt_eval_constraints.cosets", |cmd_buffer| {
+            let mut kernel_count = 0usize;
+            for coset_idx in 0..num_cosets {
+                let out_offset_bytes =
+                    (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
+                        as u64;
                 encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
                     for part in main_part_buffers {
                         encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
@@ -1307,18 +1337,21 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
                     encoder.set_bytes(20, 4, &x_int_stride as *const u32 as *const c_void);
                     encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
                 });
+                kernel_count += 1;
+                // Invariant: each coset dispatch fully writes `tmp` before this reduction reads it.
+                encode_final_reduce_block_sums_to_buffer(
+                    cmd_buffer,
+                    &pipeline_reduce,
+                    &tmp,
+                    output.gpu_buffer(),
+                    out_offset_bytes,
+                    num_blocks as u32,
+                    skip_domain,
+                    threads_per_group,
+                );
+                kernel_count += 1;
             }
-            encode_final_reduce_block_sums_to_buffer(
-                cmd_buffer,
-                &pipeline_reduce,
-                &tmp,
-                output.gpu_buffer(),
-                out_offset_bytes,
-                num_blocks as u32,
-                skip_domain,
-                threads_per_group,
-            );
-            Ok(2)
+            Ok(kernel_count)
         })?;
     }
     Ok(())
@@ -1391,20 +1424,23 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     let scratch_len = num_blocks as usize * skip_domain as usize;
     let tmp_p = MetalBuffer::<EF>::with_capacity(scratch_len);
     let tmp_q = MetalBuffer::<EF>::with_capacity(scratch_len);
+    let expected_kernel_count = 3usize * num_cosets as usize;
     debug!(
         stage = "logup_bary_eval_interactions_round0",
         scratch_len,
         coset_count = num_cosets as usize,
         reduce_kernels_per_coset = 2usize,
+        expected_kernel_count,
         "logup_r0_scratch_reuse"
     );
-    dispatch_staged_sync("logup_bary_eval_interactions_round0.cosets", |cmd_buffer| {
-        let mut kernel_count = 0usize;
-        for coset_idx in 0..num_cosets {
-            let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
-            let out_offset_bytes =
-                (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>()) as u64;
-            if use_global_intermediates {
+    if use_global_intermediates {
+        dispatch_staged_sync("logup_bary_eval_interactions_round0.cosets", |cmd_buffer| {
+            let mut kernel_count = 0usize;
+            for coset_idx in 0..num_cosets {
+                let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
+                let out_offset_bytes =
+                    (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
+                        as u64;
                 encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
                     for part in main_part_buffers {
                         encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
@@ -1447,7 +1483,40 @@ pub unsafe fn logup_bary_eval_interactions_round0(
                     encoder.set_bytes(23, 4, &total_threads_u32 as *const u32 as *const c_void);
                     encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
                 });
-            } else {
+                kernel_count += 1;
+                // Invariant: the round0 dispatch above overwrites all scratch entries for this coset
+                // before these two final-reduction kernels read `tmp_p/tmp_q`.
+                let reduce_kernel_count = encode_dual_final_reduce_block_sums_to_buffer(
+                    cmd_buffer,
+                    &pipeline_reduce,
+                    &tmp_p,
+                    &tmp_q,
+                    output.gpu_buffer(),
+                    out_offset_bytes,
+                    q_offset_bytes + out_offset_bytes,
+                    num_blocks as u32,
+                    skip_domain,
+                    threads_per_group,
+                );
+                kernel_count += reduce_kernel_count;
+                debug!(
+                    stage = "logup_bary_eval_interactions_round0.coset_reductions",
+                    coset_idx,
+                    kernel_count = reduce_kernel_count,
+                    sync_count = 0usize,
+                    "metal_dispatch_stage"
+                );
+            }
+            Ok(kernel_count)
+        })?;
+    } else {
+        dispatch_staged_sync("logup_bary_eval_interactions_round0.cosets", |cmd_buffer| {
+            let mut kernel_count = 0usize;
+            for coset_idx in 0..num_cosets {
+                let is_identity_coset_flag: u32 = u32::from(coset_idx == 0);
+                let out_offset_bytes =
+                    (coset_idx as usize * skip_domain as usize * std::mem::size_of::<EF>())
+                        as u64;
                 encode_dispatch(cmd_buffer, &pipeline, grid, group, |encoder| {
                     for part in main_part_buffers {
                         encoder.use_resource(part.gpu_buffer(), metal::MTLResourceUsage::Read);
@@ -1488,33 +1557,33 @@ pub unsafe fn logup_bary_eval_interactions_round0(
                     encoder.set_bytes(21, 4, &x_int_stride as *const u32 as *const c_void);
                     encoder.set_threadgroup_memory_length(0, shared_bytes as u64);
                 });
+                kernel_count += 1;
+                // Invariant: the round0 dispatch above overwrites all scratch entries for this coset
+                // before these two final-reduction kernels read `tmp_p/tmp_q`.
+                let reduce_kernel_count = encode_dual_final_reduce_block_sums_to_buffer(
+                    cmd_buffer,
+                    &pipeline_reduce,
+                    &tmp_p,
+                    &tmp_q,
+                    output.gpu_buffer(),
+                    out_offset_bytes,
+                    q_offset_bytes + out_offset_bytes,
+                    num_blocks as u32,
+                    skip_domain,
+                    threads_per_group,
+                );
+                kernel_count += reduce_kernel_count;
+                debug!(
+                    stage = "logup_bary_eval_interactions_round0.coset_reductions",
+                    coset_idx,
+                    kernel_count = reduce_kernel_count,
+                    sync_count = 0usize,
+                    "metal_dispatch_stage"
+                );
             }
-            kernel_count += 1;
-            // Invariant: the round0 dispatch above overwrites all scratch entries for this coset
-            // before these two final-reduction kernels read `tmp_p/tmp_q`.
-            let reduce_kernel_count = encode_dual_final_reduce_block_sums_to_buffer(
-                cmd_buffer,
-                &pipeline_reduce,
-                &tmp_p,
-                &tmp_q,
-                output.gpu_buffer(),
-                out_offset_bytes,
-                q_offset_bytes + out_offset_bytes,
-                num_blocks as u32,
-                skip_domain,
-                threads_per_group,
-            );
-            kernel_count += reduce_kernel_count;
-            debug!(
-                stage = "logup_bary_eval_interactions_round0.coset_reductions",
-                coset_idx,
-                kernel_count = reduce_kernel_count,
-                sync_count = 0usize,
-                "metal_dispatch_stage"
-            );
-        }
-        Ok(kernel_count)
-    })?;
+            Ok(kernel_count)
+        })?;
+    }
     Ok(())
 }
 

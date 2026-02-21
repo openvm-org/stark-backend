@@ -181,6 +181,9 @@ pub fn encode_dispatch(
 
 /// Encodes a staged sequence of dispatches onto a single command buffer, then syncs once.
 ///
+/// This is intended for fused hot paths (for example, round0 coset batches) where callers
+/// preallocate scratch buffers and encode many kernels before the single synchronization.
+///
 /// The stage closure should return the number of kernel dispatches it encoded for tracing.
 pub fn dispatch_staged_sync(
     stage_name: &str,
@@ -191,6 +194,7 @@ pub fn dispatch_staged_sync(
     let kernel_count = encode_stage(cmd_buffer)?;
     debug!(
         stage = stage_name,
+        command_buffer_count = 1usize,
         kernel_count,
         sync_count = 1usize,
         "metal_dispatch_stage"
