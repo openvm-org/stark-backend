@@ -88,20 +88,48 @@ pub fn transport_matrix_h2d_col_major<T>(matrix: &ColMajorMatrix<T>) -> MetalMat
 }
 
 pub fn transport_matrix_h2d_row(matrix: &RowMajorMatrix<F>) -> MetalMatrix<F> {
+    let width = matrix.width();
+    let height = matrix.height();
     let data = matrix.values.as_slice();
+    if transpose_is_layout_identity(width, height) {
+        debug!(
+            height,
+            width,
+            transport_kernel_dispatches = 0,
+            transport_sync_points = 0,
+            transport_allocations = 1,
+            "row-major upload reused contiguous layout"
+        );
+        let buffer = data.to_device();
+        return MetalMatrix::new(Arc::new(buffer), height, width);
+    }
+
     let input_buffer = data.to_device();
-    let output = MetalMatrix::<F>::with_capacity(matrix.height(), matrix.width());
+    let output = MetalMatrix::<F>::with_capacity(height, width);
     unsafe {
         matrix_transpose_fp(
             output.buffer(),
             &input_buffer,
-            matrix.width(),
-            matrix.height(),
+            width,
+            height,
         )
         .unwrap();
     }
+    debug!(
+        height,
+        width,
+        transport_kernel_dispatches = 1,
+        transport_sync_points = 1,
+        transport_allocations = 2,
+        "row-major upload transpose kernel"
+    );
     assert_eq!(output.strong_count(), 1);
     output
+}
+
+#[inline]
+fn transpose_is_layout_identity(width: usize, height: usize) -> bool {
+    width <= 1 || height <= 1
 }
 
 fn collapse_strided_trace_values<T: Copy>(
@@ -144,19 +172,19 @@ pub fn transport_and_unstack_single_data_h2d(
     let width = trace_view.width();
     let stride = trace_view.stride();
     let lifted_height = height * stride;
+    let cache_stacked_matrix = prover_config.cache_stacked_matrix;
     debug_assert_eq!(lifted_height, max(height, 1 << l_skip));
     debug_assert_eq!(lifted_height * width, trace_view.values().len());
     debug_assert!(d.matrix.values.len() >= lifted_height * width);
-    let stacked_width = d.matrix.width();
-    let stacked_height = d.matrix.height();
-    let d_matrix_evals = d.matrix.values.to_device();
     let trace_buffer = if stride == 1 {
         debug!(
             height,
             width,
             stride,
+            transport_allocations = 1 + usize::from(cache_stacked_matrix),
             transport_kernel_dispatches = 0,
             transport_sync_points = 0,
+            cached_matrix_transport = cache_stacked_matrix,
             "trace transport direct contiguous upload"
         );
         trace_view.values().to_device()
@@ -180,17 +208,39 @@ pub fn transport_and_unstack_single_data_h2d(
             width,
             stride,
             lifted_height,
+            transport_allocations = 1 + usize::from(cache_stacked_matrix),
             transport_kernel_dispatches = 0,
             transport_sync_points = 0,
             removed_kernel_dispatches = 1,
             removed_sync_points = 1,
+            cached_matrix_transport = cache_stacked_matrix,
             "trace transport collapsed to contiguous layout during upload"
         );
         trace_buffer
     };
-    let d_matrix = prover_config
-        .cache_stacked_matrix
-        .then(|| PleMatrix::from_evals(l_skip, d_matrix_evals, stacked_height, stacked_width));
+    let d_matrix = if cache_stacked_matrix {
+        let stacked_width = d.matrix.width();
+        let stacked_height = d.matrix.height();
+        let d_matrix_evals = d.matrix.values.to_device();
+        Some(PleMatrix::from_evals(
+            l_skip,
+            d_matrix_evals,
+            stacked_height,
+            stacked_width,
+        ))
+    } else {
+        None
+    };
+    debug!(
+        cache_stacked_matrix,
+        cached_matrix_transport_allocations = usize::from(cache_stacked_matrix),
+        cached_matrix_transport_elements = if cache_stacked_matrix {
+            d.matrix.values.len()
+        } else {
+            0
+        },
+        "trace transport stacked matrix cache"
+    );
     let d_tree = transport_merkle_tree_h2d(&d.tree, prover_config.cache_rs_code_matrix);
     let d_data = StackedPcsDataMetal {
         layout: d.layout.clone(),
@@ -247,10 +297,30 @@ pub fn transport_pcs_data_h2d(
     } = pcs_data;
     let width = matrix.width();
     let height = matrix.height();
-    let d_matrix_evals = matrix.values.to_device();
-    let d_matrix = prover_config
-        .cache_stacked_matrix
-        .then(|| PleMatrix::from_evals(layout.l_skip(), d_matrix_evals, height, width));
+    let cache_stacked_matrix = prover_config.cache_stacked_matrix;
+    let d_matrix = if cache_stacked_matrix {
+        let d_matrix_evals = matrix.values.to_device();
+        Some(PleMatrix::from_evals(
+            layout.l_skip(),
+            d_matrix_evals,
+            height,
+            width,
+        ))
+    } else {
+        None
+    };
+    debug!(
+        width,
+        height,
+        cache_stacked_matrix,
+        cached_matrix_transport_allocations = usize::from(cache_stacked_matrix),
+        cached_matrix_transport_elements = if cache_stacked_matrix {
+            matrix.values.len()
+        } else {
+            0
+        },
+        "pcs transport stacked matrix cache"
+    );
     let d_tree = transport_merkle_tree_h2d(tree, prover_config.cache_rs_code_matrix);
 
     Ok(StackedPcsDataMetal {
@@ -287,22 +357,44 @@ pub(crate) fn read_folded_matrix_first_row<T: Copy>(matrix: &MetalMatrix<T>) -> 
 }
 
 pub fn transport_matrix_d2h_row_major(matrix: &MetalMatrix<F>) -> RowMajorMatrix<F> {
-    let matrix_buffer = MetalBuffer::<F>::with_capacity(matrix.height() * matrix.width());
+    let height = matrix.height();
+    let width = matrix.width();
+    if transpose_is_layout_identity(width, height) {
+        debug!(
+            height,
+            width,
+            transport_kernel_dispatches = 0,
+            transport_sync_points = 0,
+            transport_allocations = 0,
+            "row-major download reused contiguous layout"
+        );
+        return RowMajorMatrix::<F>::new(matrix.to_host(), width);
+    }
+
+    let matrix_buffer = MetalBuffer::<F>::with_capacity(height * width);
     unsafe {
         matrix_transpose_fp(
             &matrix_buffer,
             matrix.buffer(),
-            matrix.height(),
-            matrix.width(),
+            height,
+            width,
         )
         .unwrap();
     }
-    RowMajorMatrix::<F>::new(matrix_buffer.to_host(), matrix.width())
+    debug!(
+        height,
+        width,
+        transport_kernel_dispatches = 1,
+        transport_sync_points = 1,
+        transport_allocations = 1,
+        "row-major download transpose kernel"
+    );
+    RowMajorMatrix::<F>::new(matrix_buffer.to_host(), width)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::collapse_strided_trace_values;
+    use super::{collapse_strided_trace_values, transpose_is_layout_identity};
 
     #[test]
     fn collapse_strided_trace_stride_one_identity() {
@@ -331,5 +423,15 @@ mod tests {
         let mut dst = vec![0u32; width * height];
         collapse_strided_trace_values(&src, &mut dst, width, height, lifted_height, stride);
         assert_eq!(dst, vec![0, 2, 4, 6, 10, 12, 14, 16]);
+    }
+
+    #[test]
+    fn transpose_layout_identity_only_for_degenerate_shapes() {
+        assert!(transpose_is_layout_identity(1, 8));
+        assert!(transpose_is_layout_identity(8, 1));
+        assert!(transpose_is_layout_identity(0, 9));
+        assert!(transpose_is_layout_identity(9, 0));
+        assert!(!transpose_is_layout_identity(2, 2));
+        assert!(!transpose_is_layout_identity(3, 5));
     }
 }

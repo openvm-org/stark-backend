@@ -17,6 +17,9 @@ pub unsafe fn matrix_transpose_fp(
     width: usize,
     height: usize,
 ) -> Result<(), MetalError> {
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
     let pipeline = get_kernels().get_pipeline("matrix_transpose_fp")?;
     let total = width * height;
     let (grid, group) = grid_size_1d(total, DEFAULT_THREADS_PER_GROUP);
@@ -36,6 +39,9 @@ pub unsafe fn matrix_transpose_fpext(
     width: usize,
     height: usize,
 ) -> Result<(), MetalError> {
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
     let pipeline = get_kernels().get_pipeline("matrix_transpose_fpext")?;
     let total = width * height;
     let (grid, group) = grid_size_1d(total, DEFAULT_THREADS_PER_GROUP);
@@ -57,6 +63,9 @@ pub unsafe fn matrix_get_rows_fp_kernel(
     matrix_height: u64,
     row_indices_len: u32,
 ) -> Result<(), MetalError> {
+    if matrix_width == 0 || row_indices_len == 0 {
+        return Ok(());
+    }
     let pipeline = get_kernels().get_pipeline("matrix_get_rows_fp")?;
     let threads_x = DEFAULT_THREADS_PER_GROUP;
     let groups_x = (matrix_width as usize).div_ceil(threads_x);
@@ -79,6 +88,9 @@ pub unsafe fn split_ext_to_base_col_major_matrix(
     poly_len: u64,
     matrix_height: u32,
 ) -> Result<(), MetalError> {
+    if poly_len == 0 || matrix_height == 0 {
+        return Ok(());
+    }
     let pipeline = get_kernels().get_pipeline("split_ext_to_base_col_major_matrix")?;
     let total = poly_len as usize;
     let (grid, group) = grid_size_1d(total, DEFAULT_THREADS_PER_GROUP);
@@ -98,6 +110,9 @@ pub unsafe fn batch_rotate_pad(
     domain_size: u32,
     padded_size: u32,
 ) -> Result<(), MetalError> {
+    if width == 0 || num_x == 0 || padded_size == 0 {
+        return Ok(());
+    }
     debug_assert!(domain_size <= padded_size);
     debug_assert!(width.checked_mul(num_x).unwrap() < u16::MAX as u32 * u16::MAX as u32);
     let pipeline = get_kernels().get_pipeline("batch_rotate_pad")?;
@@ -125,6 +140,9 @@ pub unsafe fn lift_padded_matrix_evals(
     lifted_height: u32,
     padded_height: u32,
 ) -> Result<(), MetalError> {
+    if width == 0 || lifted_height == 0 {
+        return Ok(());
+    }
     debug_assert!(height <= lifted_height && lifted_height <= padded_height);
     let pipeline = get_kernels().get_pipeline("lift_padded_matrix_evals")?;
     let matrix_ptr = matrix as u64;
@@ -151,6 +169,9 @@ pub unsafe fn collapse_strided_matrix(
     height: u32,
     stride: u32,
 ) -> Result<(), MetalError> {
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
     let pipeline = get_kernels().get_pipeline("collapse_strided_matrix")?;
     let out_offset_bytes = (output_offset_elems * size_of::<F>()) as u64;
     let in_offset_bytes = (input_offset_elems * size_of::<F>()) as u64;
@@ -179,6 +200,9 @@ pub unsafe fn batch_expand_pad(
     out_size: u32,
     in_size: u32,
 ) -> Result<(), MetalError> {
+    if poly_count == 0 || out_size == 0 {
+        return Ok(());
+    }
     let pipeline = get_kernels().get_pipeline("batch_expand_pad")?;
     let out_offset_bytes = (output_offset_elems * size_of::<F>()) as u64;
     let in_offset_bytes = (input_offset_elems * size_of::<F>()) as u64;
@@ -202,6 +226,9 @@ pub unsafe fn batch_expand_pad_wide(
     padded_height: u32,
     height: u32,
 ) -> Result<(), MetalError> {
+    if width == 0 || padded_height == 0 {
+        return Ok(());
+    }
     debug_assert!(padded_height > height);
     let pipeline = get_kernels().get_pipeline("batch_expand_pad_wide")?;
     let out_offset_bytes = (output_offset_elems * size_of::<F>()) as u64;
