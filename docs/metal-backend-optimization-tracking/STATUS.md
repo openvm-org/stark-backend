@@ -15,6 +15,6 @@
 | [10](./milestone-10.md) | LogUp MLE Batching and Fallback Elimination | not_started |  |  |  | 2026-02-20 | Remove oversized-trace fallback serialization and improve MLE throughput |
 | [11](./milestone-11.md) | Main Trace Commit and RS Pipeline Optimization | not_started |  |  |  | 2026-02-20 | Reduce `main_trace_commit` and `rs_code_matrix` spans |
 | [12](./milestone-12.md) | Trace Transport and Layout Path Optimization | not_started |  |  |  | 2026-02-20 | Lower transport allocations and dispatch count |
-| [13](./milestone-13.md) | Openings and WHIR Pipeline Tightening | not_started |  |  |  | 2026-02-20 | Reduce `prover.openings.whir` and reduction overhead |
+| [13](./milestone-13.md) | Openings and WHIR Pipeline Tightening | completed | codex | `perf/m13` |  | 2026-02-20 | WHIR fold scratch reuse + batched stacked-reduction MLE window dispatch/readback |
 | [14](./milestone-14.md) | Cross-Phase Scheduling and Buffer Pool | not_started |  |  |  | 2026-02-20 | Introduce shared dispatch scheduling and temporary buffer pooling |
 | [15](./milestone-15.md) | Final 2x Validation and Residual Backlog | not_started |  |  |  | 2026-02-20 | Final benchmark gate and gap-to-target report |

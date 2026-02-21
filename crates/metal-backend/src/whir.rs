@@ -215,6 +215,8 @@ pub fn prove_whir_opening_metal(
             debug_assert_eq!(coeffs[row], expected);
         }
     }
+    // Reusable fold output scratch to avoid per-round buffer allocations.
+    let mut f_coeffs_scratch = MetalBuffer::<EF>::with_capacity(height);
 
     debug_assert_eq!((m - log_final_poly_len) % k_whir, 0);
     let num_whir_rounds = (m - log_final_poly_len) / k_whir;
@@ -239,6 +241,8 @@ pub fn prove_whir_opening_metal(
             debug_assert_eq!(got, expected);
         }
     }
+    // Reusable fold output scratch to avoid per-round buffer allocations.
+    let mut w_moments_scratch = MetalBuffer::<EF>::with_capacity(1 << m);
 
     let mut whir_sumcheck_polys: Vec<[EF; 2]> = vec![];
     let mut codeword_commits = vec![];
@@ -272,14 +276,11 @@ pub fn prove_whir_opening_metal(
                 m - round
             );
             debug_assert!(w_moments.len() >= f_height);
-            let output_height = f_height / 2;
             let tmp_buffer_capacity =
                 whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32);
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
                 d_sumcheck_tmp = MetalBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
             }
-            let mut new_f_coeffs = MetalBuffer::<EF>::with_capacity(output_height);
-            let mut new_w_moments = MetalBuffer::<EF>::with_capacity(output_height);
             // SAFETY:
             // - `d_s_evals` has length 2
             // - `d_sumcheck_tmp` has at least required scratch length
@@ -341,8 +342,8 @@ pub fn prove_whir_opening_metal(
                 whir_fold_coeffs_and_moments(
                     &f_coeffs,
                     &w_moments,
-                    &mut new_f_coeffs,
-                    &mut new_w_moments,
+                    &mut f_coeffs_scratch,
+                    &mut w_moments_scratch,
                     alpha,
                     f_height as u32,
                 )
@@ -354,10 +355,11 @@ pub fn prove_whir_opening_metal(
             }
             #[cfg(debug_assertions)]
             {
+                let output_height = f_height / 2;
                 let f_in = f_coeffs.to_host();
                 let w_in = w_moments.to_host();
-                let f_out = new_f_coeffs.to_host();
-                let w_out = new_w_moments.to_host();
+                let f_out = f_coeffs_scratch.to_host();
+                let w_out = w_moments_scratch.to_host();
                 let one = EF::ONE;
                 let one_minus_alpha = one - alpha;
                 let two_alpha_minus_one = alpha + alpha - one;
@@ -374,8 +376,8 @@ pub fn prove_whir_opening_metal(
                     debug_assert_eq!(w_out[y], expected_w);
                 }
             }
-            f_coeffs = new_f_coeffs;
-            w_moments = new_w_moments;
+            std::mem::swap(&mut f_coeffs, &mut f_coeffs_scratch);
+            std::mem::swap(&mut w_moments, &mut w_moments_scratch);
         }
         // Define g^ = f^(alpha, \cdot) and send matrix commit of RS(g^)
         // `f_coeffs` is the coefficient form of f^(alpha, \cdot).
