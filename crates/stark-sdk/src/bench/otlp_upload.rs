@@ -65,20 +65,20 @@ fn snapshot_to_otlp(snapshot: Snapshot, run_id: &str) -> (ExportMetricsServiceRe
         let metric = match kind {
             MetricKind::Gauge => Metric {
                 name: key_name.as_str().to_owned(),
-                data: Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
-                    Gauge {
+                data: Some(
+                    opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(Gauge {
                         data_points: vec![data_point],
-                    },
-                )),
+                    }),
+                ),
                 ..Default::default()
             },
             MetricKind::Counter => Metric {
                 name: key_name.as_str().to_owned(),
-                data: Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(
-                    Gauge {
+                data: Some(
+                    opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(Gauge {
                         data_points: vec![data_point],
-                    },
-                )),
+                    }),
+                ),
                 ..Default::default()
             },
             MetricKind::Histogram => continue,
@@ -95,9 +95,7 @@ fn snapshot_to_otlp(snapshot: Snapshot, run_id: &str) -> (ExportMetricsServiceRe
                 attributes: vec![KeyValue {
                     key: "service.name".to_string(),
                     value: Some(AnyValue {
-                        value: Some(AnyValueValue::StringValue(
-                            "openvm-benchmark".to_string(),
-                        )),
+                        value: Some(AnyValueValue::StringValue("openvm-benchmark".to_string())),
                     }),
                 }],
                 ..Default::default()
