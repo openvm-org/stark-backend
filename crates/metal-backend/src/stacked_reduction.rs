@@ -1,4 +1,4 @@
-use std::{array::from_fn, cmp::max, iter::zip, sync::Arc};
+use std::{cmp::max, iter::zip, sync::Arc};
 
 use itertools::{zip_eq, Itertools};
 use openvm_metal_common::{
@@ -31,8 +31,8 @@ use crate::{
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
             initialize_k_rot_from_eq_segments, stacked_reduction_fold_ple,
-            stacked_reduction_sumcheck_mle_round, stacked_reduction_sumcheck_mle_round_degenerate,
-            stacked_reduction_sumcheck_round0, NUM_G,
+            stacked_reduction_sumcheck_mle_round_batch, stacked_reduction_sumcheck_round0,
+            StackedReductionMleWindow, StackedReductionMleWindowKind, NUM_G,
         },
         sumcheck::{fold_mle_matrix, triangular_fold_mle},
     },
@@ -87,9 +87,11 @@ pub struct StackedReductionMetal {
 
     k_rot_ns: EqEvalSegments<EF>,
     eq_ub_per_trace: Vec<EF>,
+    // Packed `eq_ub` segments for all degenerate windows in the current round.
     d_eq_ub: MetalBuffer<EF>,
 
     d_block_sums: MetalBuffer<EF>,
+    // Batched per-window atomic accumulators: each window gets `STACKED_REDUCTION_S_DEG * D_EF`.
     d_accum: MetalBuffer<u64>,
     d_input_ptrs: MetalBuffer<u64>,
     d_output_ptrs: MetalBuffer<u64>,
@@ -763,7 +765,9 @@ impl StackedReductionMetal {
             debug_assert_eq!(self.k_rot_stable.len(), l_skip + round - 1);
             debug_assert!(self.eq_r_ns.buffer.len() > 1);
             debug_assert!(self.k_rot_ns.buffer.len() > 1);
-            // With Metal unified memory, read directly from the buffer pointer
+            // SAFETY:
+            // - `eq_r_ns` and `k_rot_ns` were allocated with at least 2 elements in this branch.
+            // - no GPU work is writing these buffers at this point in the round.
             unsafe {
                 let eq_val = *self.eq_r_ns.get_ptr(0);
                 self.eq_stable.push(eq_val);
@@ -772,77 +776,119 @@ impl StackedReductionMetal {
                 self.k_rot_stable.push(k_rot_val);
             }
         }
-        let mut s_evals_batch = Vec::with_capacity(self.ht_diff_idxs.len() - 1);
-        for window in self.ht_diff_idxs.windows(2) {
-            let window_len = window[1] - window[0];
-            let window_start = window[0];
-            let commit_idx = self.unstacked_cols[window_start].commit_idx as usize;
-            let q_eval = &self.q_evals[commit_idx];
-
-            let log_height = self.unstacked_cols[window_start].log_height as usize;
-
-            // Zero-initialize accumulator for atomic adds
-            self.d_accum.fill_zero();
-
-            if log_height < l_skip + round {
-                // We are in the eq, k_rot stable regime
-                let eq_r = self.eq_stable[log_height];
-                let k_rot_r = self.k_rot_stable[log_height];
-                let eq_ub_slice = &self.eq_ub_per_trace[window[0]..window[1]];
-                if eq_ub_slice.len() > self.d_eq_ub.len() {
-                    self.d_eq_ub = MetalBuffer::with_capacity(eq_ub_slice.len());
-                }
-                eq_ub_slice.copy_to(&self.d_eq_ub).unwrap();
-                let stacked_height = self.stacked_height(round);
-                unsafe {
-                    stacked_reduction_sumcheck_mle_round_degenerate(
-                        q_eval,
-                        &self.d_eq_ub,
-                        eq_r,
-                        k_rot_r,
-                        &self.d_unstacked_cols,
-                        window_start,
-                        &self.d_lambda_pows,
-                        2 * window_start,
-                        &mut self.d_accum,
-                        stacked_height,
-                        window_len,
-                        l_skip,
-                        round,
-                    )
-                    .unwrap();
-                }
-            } else {
-                let hypercube_dim = log_height - l_skip - round;
-                let num_y = 1 << hypercube_dim;
-
-                let stacked_height = self.stacked_height(round);
-                unsafe {
-                    stacked_reduction_sumcheck_mle_round(
-                        q_eval,
-                        &self.eq_r_ns,
-                        &self.k_rot_ns,
-                        &self.d_unstacked_cols,
-                        window_start,
-                        &self.d_lambda_pows,
-                        2 * window_start,
-                        &mut self.d_accum,
-                        stacked_height,
-                        window_len,
-                        num_y,
-                        self.sm_count,
-                    )
-                    .unwrap();
-                };
-            }
-
-            // Read accumulator and reduce modulo P (unified memory: direct read)
-            let h_accum = self.d_accum.to_vec();
-            let evals = reduce_raw_u64_to_ef(&h_accum);
-            s_evals_batch.push(evals);
+        let num_windows = self.ht_diff_idxs.len() - 1;
+        if num_windows == 0 {
+            return [EF::ZERO; STACKED_REDUCTION_S_DEG];
         }
 
-        from_fn(|i| s_evals_batch.iter().map(|evals| evals[i]).sum::<EF>())
+        let output_len_per_window = STACKED_REDUCTION_S_DEG * D_EF;
+        let total_output_len = num_windows * output_len_per_window;
+        if total_output_len > self.d_accum.len() {
+            self.d_accum = MetalBuffer::with_capacity(total_output_len);
+        }
+        // Zero-initialize all per-window atomic accumulators once.
+        self.d_accum.fill_zero();
+
+        let mut eq_ub_batch_len = 0usize;
+        for window in self.ht_diff_idxs.windows(2) {
+            let window_start = window[0];
+            let window_len = window[1] - window_start;
+            let log_height = self.unstacked_cols[window_start].log_height as usize;
+            if log_height < l_skip + round {
+                eq_ub_batch_len += window_len;
+            }
+        }
+        if eq_ub_batch_len > self.d_eq_ub.len() {
+            self.d_eq_ub = MetalBuffer::with_capacity(eq_ub_batch_len);
+        }
+
+        let stacked_height = self.stacked_height(round);
+        let mut windows = Vec::with_capacity(num_windows);
+        let mut eq_ub_packed = Vec::with_capacity(eq_ub_batch_len);
+        let mut degenerate_window_count = 0usize;
+        for (window_idx, window) in self.ht_diff_idxs.windows(2).enumerate() {
+            let window_start = window[0];
+            let window_end = window[1];
+            let window_len = window_end - window_start;
+            let commit_idx = self.unstacked_cols[window_start].commit_idx as usize;
+            let log_height = self.unstacked_cols[window_start].log_height as usize;
+            let kind = if log_height < l_skip + round {
+                degenerate_window_count += 1;
+                let eq_ub_slice = &self.eq_ub_per_trace[window_start..window_end];
+                let eq_ub_offset = eq_ub_packed.len();
+                eq_ub_packed.extend_from_slice(eq_ub_slice);
+                let kind = StackedReductionMleWindowKind::Degenerate {
+                    eq_ub_offset,
+                    eq_r: self.eq_stable[log_height],
+                    k_rot_r: self.k_rot_stable[log_height],
+                };
+                kind
+            } else {
+                let hypercube_dim = log_height - l_skip - round;
+                StackedReductionMleWindowKind::NonDegenerate {
+                    num_y: 1 << hypercube_dim,
+                }
+            };
+            windows.push(StackedReductionMleWindow {
+                q_eval_idx: commit_idx,
+                unstacked_cols_offset: window_start,
+                lambda_pows_offset: 2 * window_start,
+                output_offset: window_idx * output_len_per_window,
+                window_len,
+                kind,
+            });
+        }
+        if !eq_ub_packed.is_empty() {
+            eq_ub_packed.copy_to(&self.d_eq_ub).unwrap();
+        }
+
+        debug!(
+            round,
+            window_count = windows.len(),
+            degenerate_window_count,
+            nondegenerate_window_count = windows.len() - degenerate_window_count,
+            accum_len = total_output_len,
+            eq_ub_batch_len = eq_ub_packed.len(),
+            "stacked_reduction_sumcheck_mle_batch"
+        );
+
+        // SAFETY:
+        // - each window config points into valid `q_evals`, `d_unstacked_cols`, and `d_lambda_pows`
+        //   regions constructed above.
+        // - `d_eq_ub` is packed with all degenerate windows and `d_accum` was zeroed for all output
+        //   segments.
+        unsafe {
+            stacked_reduction_sumcheck_mle_round_batch(
+                &self.q_evals,
+                &self.eq_r_ns,
+                &self.k_rot_ns,
+                &self.d_eq_ub,
+                &self.d_unstacked_cols,
+                &self.d_lambda_pows,
+                &mut self.d_accum,
+                &windows,
+                stacked_height,
+                l_skip,
+                round,
+                self.sm_count,
+            )
+            .unwrap();
+        }
+
+        // Read back the full accumulator once after the batched dispatch.
+        let h_accum = self.d_accum.to_vec();
+        let mut s_evals_total = [EF::ZERO; STACKED_REDUCTION_S_DEG];
+        for window_idx in 0..num_windows {
+            let start = window_idx * output_len_per_window;
+            let end = start + output_len_per_window;
+            let evals = reduce_raw_u64_to_ef(&h_accum[start..end]);
+            debug_assert_eq!(evals.len(), STACKED_REDUCTION_S_DEG);
+            for (i, eval) in evals.into_iter().enumerate() {
+                s_evals_total[i] += eval;
+            }
+        }
+
+        s_evals_total
     }
 
     #[instrument("stacked_reduction_fold_mle", level = "debug", skip_all, fields(round = round))]
