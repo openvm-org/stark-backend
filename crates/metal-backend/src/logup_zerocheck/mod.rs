@@ -60,7 +60,7 @@ mod mle_round;
 mod round0;
 pub(crate) mod rules;
 
-use batch_mle::{evaluate_logup_batched, TraceCtx};
+use batch_mle::{evaluate_logup_batched, logup_batch_mle_intermediates_buffer_bytes, TraceCtx};
 use batch_mle_monomial::{
     compute_lambda_combinations, compute_logup_combinations, get_num_monomials,
     get_zerocheck_rules_len, trace_has_monomials, LogupCombinations, LogupMonomialBatch,
@@ -77,6 +77,7 @@ use rules::codec::Codec;
 /// This ratio can be tuned. Currently it is set to prefer the monomial kernel except for the
 /// Poseidon2Air where the DAG node size is much smaller than number of monomials.
 const DAG_FALLBACK_MONOMIAL_RATIO: usize = 2;
+const DEFAULT_MEMORY_LIMIT_BYTES: usize = 5 << 30; // 5GiB
 
 #[inline]
 fn frac_buffer_to_vec(buf: &MetalBuffer<Frac<EF>>) -> Vec<Frac<EF>> {
@@ -99,6 +100,37 @@ pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
     } else {
         mat_width as u32
     }
+}
+
+fn tuned_logup_memory_limit_bytes(
+    pk: &DeviceMultiStarkProvingKey<MetalBackend>,
+    traces: &[TraceCtx],
+    num_x: u32,
+    memory_limit_bytes: usize,
+    save_memory: bool,
+) -> usize {
+    if !save_memory {
+        return DEFAULT_MEMORY_LIMIT_BYTES;
+    }
+    let max_trace_memory = traces
+        .iter()
+        .filter(|t| t.has_interactions)
+        .map(|t| {
+            let buffer_size = pk.per_air[t.air_idx]
+                .other_data
+                .interaction_rules
+                .inner
+                .buffer_size;
+            logup_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y)
+        })
+        .max()
+        .unwrap_or(0);
+    if max_trace_memory == 0 {
+        return memory_limit_bytes;
+    }
+    memory_limit_bytes
+        .max(max_trace_memory)
+        .min(DEFAULT_MEMORY_LIMIT_BYTES)
 }
 
 #[instrument(level = "info", skip_all)]
@@ -178,20 +210,19 @@ pub fn prove_zerocheck_and_logup_metal(
     // Set memory budget for batched MLE.
     // When there are no interactions (`inputs.len() == 0`), keep a non-zero budget so
     // zerocheck can still use the fast batched GPU path.
-    const DEFAULT_MEMORY_LIMIT: usize = 5 << 30; // 5GiB
     prover.gkr_mem_contribution = inputs.len() * std::mem::size_of::<Frac<EF>>();
     if prover.gkr_mem_contribution == 0 {
-        prover.gkr_mem_contribution = DEFAULT_MEMORY_LIMIT;
+        prover.gkr_mem_contribution = DEFAULT_MEMORY_LIMIT_BYTES;
     }
     prover.memory_limit_bytes = prover.gkr_mem_contribution;
     if !prover.save_memory {
-        if prover.memory_limit_bytes > DEFAULT_MEMORY_LIMIT {
+        if prover.memory_limit_bytes > DEFAULT_MEMORY_LIMIT_BYTES {
             tracing::warn!(
                 "prover.memory_limit_bytes {} already exceeds 5GiB",
                 prover.memory_limit_bytes
             );
         }
-        prover.memory_limit_bytes = DEFAULT_MEMORY_LIMIT;
+        prover.memory_limit_bytes = DEFAULT_MEMORY_LIMIT_BYTES;
     }
 
     let (frac_sum_proof, mut xi) = fractional_sumcheck_metal(transcript, inputs, true)
@@ -1853,6 +1884,21 @@ impl<'a> LogupZerocheckMetal<'a> {
 
         // Logup for early traces: partition by num_y threshold
         if !early_eval.is_empty() {
+            let logup_memory_limit_bytes = tuned_logup_memory_limit_bytes(
+                self.pk,
+                &early_eval,
+                sp_deg as u32,
+                self.memory_limit_bytes,
+                self.save_memory,
+            );
+            if logup_memory_limit_bytes != self.memory_limit_bytes {
+                debug!(
+                    round,
+                    previous_memory_limit_bytes = self.memory_limit_bytes,
+                    logup_memory_limit_bytes,
+                    "adjusted logup memory limit"
+                );
+            }
             evaluate_logup_batched(
                 &early_eval,
                 self.pk,
@@ -1862,7 +1908,7 @@ impl<'a> LogupZerocheckMetal<'a> {
                 &self.logup_combinations,
                 &mut logup_out,
                 &mut self.logup_tilde_evals,
-                self.memory_limit_bytes,
+                logup_memory_limit_bytes,
             );
         }
 

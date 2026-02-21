@@ -23,8 +23,8 @@ use crate::{
 };
 
 use super::{
-    dispatch_staged_sync, dispatch_sync, encode_dispatch, get_kernels, grid_size_1d, grid_size_2d,
-    DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
+    dispatch_multi_sync, dispatch_staged_sync, dispatch_sync, encode_dispatch, get_kernels,
+    grid_size_1d, grid_size_2d, DEFAULT_THREADS_PER_GROUP, SIMD_SIZE,
 };
 
 const GKR_SP_DEG: usize = 2;
@@ -1979,23 +1979,26 @@ pub unsafe fn logup_monomial_batched(
     let tmp_q = MetalBuffer::<EF>::with_capacity(num_blocks * num_x as usize);
     let shared_bytes = (threads_per_block as usize * std::mem::size_of::<EF>()) as u64;
 
-    dispatch_sync(&numer_pipeline, grid, group, |encoder| {
+    let encode_numer = |encoder: &metal::ComputeCommandEncoderRef| {
         encoder.set_buffer(0, Some(tmp_p.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(block_ctxs.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(common_ctxs.gpu_buffer()), 0);
         encoder.set_buffer(3, Some(numer_ctxs.gpu_buffer()), 0);
         encoder.set_bytes(4, 4, &num_x as *const u32 as *const c_void);
         encoder.set_threadgroup_memory_length(0, shared_bytes);
-    })?;
-
-    dispatch_sync(&denom_pipeline, grid, group, |encoder| {
+    };
+    let encode_denom = |encoder: &metal::ComputeCommandEncoderRef| {
         encoder.set_buffer(0, Some(tmp_q.gpu_buffer()), 0);
         encoder.set_buffer(1, Some(block_ctxs.gpu_buffer()), 0);
         encoder.set_buffer(2, Some(common_ctxs.gpu_buffer()), 0);
         encoder.set_buffer(3, Some(denom_ctxs.gpu_buffer()), 0);
         encoder.set_bytes(4, 4, &num_x as *const u32 as *const c_void);
         encoder.set_threadgroup_memory_length(0, shared_bytes);
-    })?;
+    };
+    dispatch_multi_sync(&[
+        (&numer_pipeline, grid, group, &encode_numer),
+        (&denom_pipeline, grid, group, &encode_denom),
+    ])?;
 
     batched_final_reduce_block_sums_to_buffer(
         &tmp_p,

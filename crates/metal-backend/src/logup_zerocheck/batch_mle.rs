@@ -22,6 +22,7 @@ use crate::{
 };
 
 const MAX_THREADS_PER_BLOCK: u32 = 128;
+const LOGUP_SINGLE_TRACE_BATCH_CAP_BYTES: usize = 5 << 30; // 5GiB
 
 #[inline]
 fn frac_buffer_to_vec(buf: &MetalBuffer<Frac<EF>>) -> Vec<Frac<EF>> {
@@ -49,7 +50,11 @@ fn zerocheck_batch_mle_intermediates_buffer_bytes(
         * std::mem::size_of::<EF>()
 }
 
-fn logup_batch_mle_intermediates_buffer_bytes(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
+pub(crate) fn logup_batch_mle_intermediates_buffer_bytes(
+    buffer_size: u32,
+    num_x: u32,
+    num_y: u32,
+) -> usize {
     logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y) * std::mem::size_of::<EF>()
 }
 
@@ -520,6 +525,14 @@ pub(crate) fn evaluate_logup_batched(
         .iter()
         .filter(|t| t.has_interactions)
         .partition(|t| t.num_y <= monomial_num_y_threshold);
+    let mut monomial_trace_count = 0usize;
+    let mut monomial_block_count = 0u32;
+    let mut mle_batch_count = 0usize;
+    let mut mle_trace_count = 0usize;
+    let mut fallback_count = 0usize;
+    let mut memory_limit_raises = 0usize;
+    let mut max_batch_memory = 0usize;
+    let mut effective_memory_limit_bytes = memory_limit_bytes;
 
     if !low_traces.is_empty() {
         let logup_combs: Vec<_> = low_traces
@@ -527,6 +540,8 @@ pub(crate) fn evaluate_logup_batched(
             .map(|t| logup_combinations[t.trace_idx].as_ref().unwrap())
             .collect();
         let batch = LogupMonomialBatch::new(low_traces.iter().copied(), pk, &logup_combs);
+        monomial_trace_count = low_traces.len();
+        monomial_block_count = batch.num_blocks();
         let out = batch.evaluate(num_x);
         let host = frac_buffer_to_vec(&out);
         let num_x_usize = num_x as usize;
@@ -545,93 +560,118 @@ pub(crate) fn evaluate_logup_batched(
         }
     }
 
-    if high_traces.is_empty() {
-        return;
-    }
-
-    // Collect high traces with interactions and their buffer sizes
-    let mut logup_traces_with_size: Vec<(&TraceCtx, usize)> = high_traces
-        .iter()
-        .copied()
-        .map(|t| {
-            let buffer_size = pk.per_air[t.air_idx]
-                .other_data
-                .interaction_rules
-                .inner
-                .buffer_size;
-            let mem = logup_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y);
-            (t, mem)
-        })
-        .collect();
-    if logup_traces_with_size.is_empty() {
-        return;
-    }
-
-    logup_traces_with_size.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let num_x_usize = num_x as usize;
-    let mut batch_start = 0;
-
-    while batch_start < logup_traces_with_size.len() {
-        let (batch_count, batch_memory) = find_batch_end(
-            &logup_traces_with_size[batch_start..],
-            |(_, mem)| *mem,
-            memory_limit_bytes,
-        );
-        let batch: Vec<&TraceCtx> = logup_traces_with_size[batch_start..batch_start + batch_count]
+    if !high_traces.is_empty() {
+        // Collect high traces with interactions and their buffer sizes
+        let mut logup_traces_with_size: Vec<(&TraceCtx, usize)> = high_traces
             .iter()
-            .map(|(t, _)| *t)
+            .copied()
+            .map(|t| {
+                let buffer_size = pk.per_air[t.air_idx]
+                    .other_data
+                    .interaction_rules
+                    .inner
+                    .buffer_size;
+                let mem = logup_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y);
+                (t, mem)
+            })
             .collect();
-        tracing::debug!(
-            batch_size = batch.len(),
-            batch_memory,
-            memory_limit_bytes,
-            "logup: batching traces"
-        );
-        if batch.len() == 1 && batch_memory > memory_limit_bytes {
-            // Single oversized trace: use non-batch kernel
-            let t = batch[0];
-            tracing::warn!(
-                air_idx = t.air_idx,
-                intermediate_buffer_bytes = batch_memory,
-                memory_limit_bytes,
-                "logup: trace exceeds memory limit, using non-batch kernel"
-            );
-            evaluate_single_logup(
-                t,
-                pk,
-                d_challenges_ptr,
-                num_x,
-                &mut logup_out[t.trace_idx],
-                &mut logup_tilde_evals[t.trace_idx],
-            );
-        } else {
-            // Normal batch using LogupMleBatchBuilder
-            tracing::debug!(
-                batch_size = batch.len(),
-                batch_memory,
-                memory_limit_bytes,
-                "logup: batching traces"
-            );
-            let builder =
-                LogupMleBatchBuilder::new(batch.iter().copied(), pk, d_challenges_ptr, num_x);
-            let out = builder.evaluate(num_x);
-            let host = frac_buffer_to_vec(&out);
 
-            for (i, (trace_idx, norm_factor)) in builder.trace_info().enumerate() {
-                let fracs = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
-                if num_x == 1 {
-                    logup_tilde_evals[trace_idx][0] = fracs[0].p * norm_factor;
-                    logup_tilde_evals[trace_idx][1] = fracs[0].q;
-                } else {
-                    let numer: Vec<EF> = fracs.iter().map(|f| f.p * norm_factor).collect();
-                    let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
-                    logup_out[trace_idx] = [numer, denom];
+        if !logup_traces_with_size.is_empty() {
+            logup_traces_with_size.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let num_x_usize = num_x as usize;
+            let mut batch_start = 0;
+
+            while batch_start < logup_traces_with_size.len() {
+                let (batch_count, batch_memory) = find_batch_end(
+                    &logup_traces_with_size[batch_start..],
+                    |(_, mem)| *mem,
+                    effective_memory_limit_bytes,
+                );
+                max_batch_memory = max_batch_memory.max(batch_memory);
+                let batch: Vec<&TraceCtx> = logup_traces_with_size
+                    [batch_start..batch_start + batch_count]
+                    .iter()
+                    .map(|(t, _)| *t)
+                    .collect();
+                tracing::debug!(
+                    batch_size = batch.len(),
+                    batch_memory,
+                    memory_limit_bytes = effective_memory_limit_bytes,
+                    "logup: batching traces"
+                );
+
+                if batch.len() == 1 && batch_memory > effective_memory_limit_bytes {
+                    let t = batch[0];
+                    if batch_memory <= LOGUP_SINGLE_TRACE_BATCH_CAP_BYTES {
+                        let old_limit = effective_memory_limit_bytes;
+                        effective_memory_limit_bytes = batch_memory;
+                        memory_limit_raises += 1;
+                        tracing::debug!(
+                            air_idx = t.air_idx,
+                            intermediate_buffer_bytes = batch_memory,
+                            old_memory_limit_bytes = old_limit,
+                            new_memory_limit_bytes = effective_memory_limit_bytes,
+                            "logup: raising memory limit to keep oversized trace batched"
+                        );
+                        continue;
+                    }
+                    fallback_count += 1;
+                    tracing::warn!(
+                        air_idx = t.air_idx,
+                        intermediate_buffer_bytes = batch_memory,
+                        memory_limit_bytes = effective_memory_limit_bytes,
+                        cap_memory_limit_bytes = LOGUP_SINGLE_TRACE_BATCH_CAP_BYTES,
+                        "logup: trace exceeds hard memory cap, using non-batch kernel"
+                    );
+                    evaluate_single_logup(
+                        t,
+                        pk,
+                        d_challenges_ptr,
+                        num_x,
+                        &mut logup_out[t.trace_idx],
+                        &mut logup_tilde_evals[t.trace_idx],
+                    );
+                    batch_start += batch_count;
+                    continue;
                 }
+
+                mle_batch_count += 1;
+                mle_trace_count += batch.len();
+                let builder =
+                    LogupMleBatchBuilder::new(batch.iter().copied(), pk, d_challenges_ptr, num_x);
+                let out = builder.evaluate(num_x);
+                let host = frac_buffer_to_vec(&out);
+
+                for (i, (trace_idx, norm_factor)) in builder.trace_info().enumerate() {
+                    let fracs = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
+                    if num_x == 1 {
+                        logup_tilde_evals[trace_idx][0] = fracs[0].p * norm_factor;
+                        logup_tilde_evals[trace_idx][1] = fracs[0].q;
+                    } else {
+                        let numer: Vec<EF> = fracs.iter().map(|f| f.p * norm_factor).collect();
+                        let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
+                        logup_out[trace_idx] = [numer, denom];
+                    }
+                }
+                batch_start += batch_count;
             }
         }
-        batch_start += batch_count;
     }
+
+    tracing::info!(
+        total_logup_traces = low_traces.len() + high_traces.len(),
+        monomial_trace_count,
+        monomial_block_count,
+        mle_trace_count,
+        mle_batch_count,
+        fallback_count,
+        memory_limit_raises,
+        max_batch_memory,
+        initial_memory_limit_bytes = memory_limit_bytes,
+        effective_memory_limit_bytes,
+        "logup_batch_metrics"
+    );
 }
 
 fn evaluate_single_logup(

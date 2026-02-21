@@ -695,6 +695,10 @@ impl<'a> LogupMonomialBatch<'a> {
         self.traces.iter().map(|t| t.trace_idx)
     }
 
+    pub fn num_blocks(&self) -> u32 {
+        self.num_blocks
+    }
+
     /// Evaluates the batch and returns the output device buffer.
     pub fn evaluate(&self, num_x: u32) -> MetalBuffer<Frac<EF>> {
         let num_airs = self.common_ctxs.len();
