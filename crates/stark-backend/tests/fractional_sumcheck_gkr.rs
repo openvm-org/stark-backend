@@ -1,3 +1,11 @@
+//! Verifier-only unit tests for the GKR fractional sumcheck.
+//!
+//! These test `verify_gkr` with hand-constructed `GkrProof` structs, covering
+//! error paths (wrong layer count, wrong poly count, zero-check failure) and
+//! integration paths (1/2/3 rounds, mixed fractions, empty case). No engine or
+//! prover backend is involved — all verifier-side math — so they are not in the
+//! shared backend test suite.
+
 use openvm_stark_backend::{
     proof::{GkrLayerClaims, GkrProof},
     prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},

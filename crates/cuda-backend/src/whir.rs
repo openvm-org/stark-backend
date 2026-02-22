@@ -526,11 +526,7 @@ mod tests {
     use itertools::Itertools;
     use openvm_stark_backend::{
         keygen::types::MultiStarkProvingKey,
-        poly_common::Squarable,
-        prover::{
-            poly::Ple, stacked_pcs::stacked_commit, ColMajorMatrix, CpuBackend,
-            DeviceDataTransporter, ProvingContext,
-        },
+        prover::{stacked_pcs::stacked_commit, CpuBackend, DeviceDataTransporter, ProvingContext},
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
         StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
@@ -544,55 +540,18 @@ mod tests {
         },
         utils::setup_tracing_with_log_level,
     };
-    use p3_field::PrimeCharacteristicRing;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, SeedableRng};
     use test_case::test_case;
     use tracing::Level;
 
     use crate::{
-        prelude::{EF, F, SC},
-        sponge::DuplexSpongeGpu,
-        stacked_reduction::StackedPcsData2,
-        whir::prove_whir_opening_gpu,
-        BabyBearPoseidon2GpuEngine,
+        prelude::SC, sponge::DuplexSpongeGpu, stacked_reduction::StackedPcsData2,
+        whir::prove_whir_opening_gpu, BabyBearPoseidon2GpuEngine,
     };
 
-    fn generate_random_z(params: &SystemParams, rng: &mut StdRng) -> (Vec<EF>, Vec<EF>) {
-        let z_prism: Vec<_> = (0..params.n_stack + 1)
-            .map(|_| EF::from_u64(rng.random()))
-            .collect();
-
-        let z_cube = {
-            let z_cube = z_prism[0]
-                .exp_powers_of_2()
-                .take(params.l_skip)
-                .chain(z_prism[1..].iter().copied())
-                .collect_vec();
-            debug_assert_eq!(z_cube.len(), params.n_stack + params.l_skip);
-            z_cube
-        };
-
-        (z_prism, z_cube)
-    }
-
-    fn stacking_openings_for_matrix(
-        params: &SystemParams,
-        z_prism: &[EF],
-        matrix: &ColMajorMatrix<F>,
-    ) -> Vec<EF> {
-        matrix
-            .columns()
-            .map(|col| {
-                Ple::from_evaluations(params.l_skip, col).eval_at_point(
-                    params.l_skip,
-                    z_prism[0],
-                    &z_prism[1..],
-                )
-            })
-            .collect()
-    }
-
-    fn run_whir_test(
+    /// GPU-specific WHIR test runner. Uses `prove_whir_opening_gpu` for the
+    /// proving step and the shared CPU verifier for verification.
+    fn run_whir_test_gpu(
         params: SystemParams,
         pk: MultiStarkProvingKey<SC>,
         ctx: ProvingContext<CpuBackend<SC>>,
@@ -600,7 +559,7 @@ mod tests {
         let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
         let device = engine.device();
         let mut rng = StdRng::seed_from_u64(0);
-        let (z_prism, z_cube) = generate_random_z(&params, &mut rng);
+        let (z_prism, z_cube) = openvm_backend_tests::generate_random_z(&params, &mut rng);
 
         let common_main_traces = ctx
             .common_main_traces()
@@ -621,7 +580,7 @@ mod tests {
             .collect_vec();
         let d_common_main_pcs_data = device.transport_pcs_data_to_device(&common_main_pcs_data);
 
-        let mut stacking_openings = vec![stacking_openings_for_matrix(
+        let mut stacking_openings = vec![openvm_backend_tests::stacking_openings_for_matrix(
             &params,
             &z_prism,
             &common_main_pcs_data.matrix,
@@ -639,7 +598,7 @@ mod tests {
             {
                 let trace = device.transport_matrix_to_device(&data.mat_view(0).to_matrix());
                 commits.push(data.commit());
-                stacking_openings.push(stacking_openings_for_matrix(
+                stacking_openings.push(openvm_backend_tests::stacking_openings_for_matrix(
                     &params,
                     &z_prism,
                     &data.matrix,
@@ -669,12 +628,12 @@ mod tests {
         )
     }
 
-    fn run_whir_fib_test(params: SystemParams) -> Result<(), VerifyWhirError> {
+    fn run_whir_fib_test_gpu(params: SystemParams) -> Result<(), VerifyWhirError> {
         let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
         let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
         let (pk, _vk) = fib.keygen(&engine);
         let ctx = fib.generate_proving_ctx();
-        run_whir_test(params, pk, ctx)
+        run_whir_test_gpu(params, pk, ctx)
     }
 
     fn whir_test_params(k_whir: usize, log_final_poly_len: usize) -> WhirParams {
@@ -691,7 +650,7 @@ mod tests {
     #[test_case(2, 1, 3, 1)]
     #[test_case(2, 1, 4, 0)]
     #[test_case(2, 2, 4, 0)]
-    fn test_whir_single_fib(
+    fn test_whir_single_fib_gpu(
         n_stack: usize,
         log_blowup: usize,
         k_whir: usize,
@@ -716,8 +675,8 @@ mod tests {
             logup: log_up_security_params_baby_bear_100_bits(),
             max_constraint_degree: 3,
         };
-        run_whir_fib_test(params)
+        run_whir_fib_test_gpu(params)
     }
 
-    // TODO: test multiple commitments
+    // TODO: test multiple commitments with GPU prover
 }
