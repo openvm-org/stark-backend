@@ -1333,13 +1333,60 @@ pub fn whir_multiple_commitments_negative() {
 }
 
 // ===========================================================================
-// Test suite macro
+// Test suite macros
 // ===========================================================================
+
+/// Helper: generate `#[test]` functions for parameterized engine-generic tests.
+///
+/// Proc macro attributes like `#[test_case]` cannot be used inside
+/// `macro_rules!` expansions — Rust's macro hygiene assigns different syntax
+/// contexts to the generated tokens, causing the proc macro to emit wrapper
+/// functions that fail to connect arguments to parameters. This helper
+/// side-steps the issue by expanding each parameter set into its own `#[test]`
+/// function via pure `macro_rules!`.
+///
+/// # Variants
+///
+/// ```ignore
+/// // Function returning Result (calls .unwrap()):
+/// __test_cases!($engine, fib_air_roundtrip, unwrap, {
+///     test_fib_air_roundtrip(2, 10),
+///     test_fib_air_roundtrip_small(2, 1),
+/// });
+///
+/// // Function returning ():
+/// __test_cases!($engine, single_preprocessed_trace_stark, {
+///     test_single_preprocessed_trace_stark(10),
+///     test_single_preprocessed_trace_stark_zero(0),
+/// });
+/// ```
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __test_cases {
+    // Engine-generic, returns Result (call .unwrap())
+    ($engine:ty, $func:ident, unwrap, { $( $test_name:ident( $($arg:expr),* ) ),+ $(,)? }) => {
+        $(
+            #[test]
+            fn $test_name() {
+                $crate::$func::<$engine>($($arg),*).unwrap();
+            }
+        )+
+    };
+    // Engine-generic, returns ()
+    ($engine:ty, $func:ident, { $( $test_name:ident( $($arg:expr),* ) ),+ $(,)? }) => {
+        $(
+            #[test]
+            fn $test_name() {
+                $crate::$func::<$engine>($($arg),*);
+            }
+        )+
+    };
+}
 
 /// Generate the complete shared backend test suite for the given engine type.
 ///
 /// This macro expands to `#[test]` functions covering all engine-generic tests
-/// plus WHIR PCS tests.
+/// plus WHIR PCS tests. Parameterized tests use the [`__test_cases!`] helper.
 ///
 /// # Example
 ///
@@ -1354,282 +1401,148 @@ macro_rules! backend_test_suite {
     ($engine:ty) => {
         // === 1. Proof shape verification ===
 
-        #[test]
-        fn test_proof_shape_verifier() {
-            $crate::proof_shape_verifier::<$engine>().unwrap();
-        }
+        $crate::__test_cases!($engine, proof_shape_verifier, unwrap, {
+            test_proof_shape_verifier(),
+        });
 
-        #[test]
-        fn test_proof_shape_verifier_rng_system_params() {
-            $crate::proof_shape_verifier_rng_system_params::<$engine>().unwrap();
-        }
+        $crate::__test_cases!($engine, proof_shape_verifier_rng_system_params, unwrap, {
+            test_proof_shape_verifier_rng_system_params(),
+        });
 
         // === 2. Simple end-to-end ===
 
-        #[test]
-        fn test_interactions_single_sender_receiver_happy() {
-            $crate::interactions_single_sender_receiver_happy::<$engine>();
-        }
+        $crate::__test_cases!($engine, interactions_single_sender_receiver_happy, {
+            test_interactions_single_sender_receiver_happy(),
+        });
 
-        #[test]
-        fn test_single_cached_trace_stark() {
-            $crate::single_cached_trace_stark::<$engine>();
-        }
+        $crate::__test_cases!($engine, single_cached_trace_stark, {
+            test_single_cached_trace_stark(),
+        });
 
-        #[test]
-        fn test_single_preprocessed_trace_stark() {
-            $crate::single_preprocessed_trace_stark::<$engine>(10);
-        }
+        $crate::__test_cases!($engine, single_preprocessed_trace_stark, {
+            test_single_preprocessed_trace_stark(10),
+            test_single_preprocessed_trace_stark_log_height_gt_l_skip(3),
+            test_single_preprocessed_trace_stark_log_height_eq_l_skip(2),
+            test_single_preprocessed_trace_stark_log_height_lt_l_skip(1),
+            test_single_preprocessed_trace_stark_log_height_zero(0),
+        });
 
-        #[test]
-        fn test_single_preprocessed_trace_stark_log_height_gt_l_skip() {
-            $crate::single_preprocessed_trace_stark::<$engine>(3);
-        }
+        $crate::__test_cases!($engine, multi_interaction_traces_stark, {
+            test_multi_interaction_traces_stark(10),
+            test_multi_interaction_traces_stark_log_height_gt_l_skip(3),
+            test_multi_interaction_traces_stark_log_height_eq_l_skip(2),
+            test_multi_interaction_traces_stark_log_height_lt_l_skip(1),
+            test_multi_interaction_traces_stark_log_height_zero(0),
+        });
 
-        #[test]
-        fn test_single_preprocessed_trace_stark_log_height_eq_l_skip() {
-            $crate::single_preprocessed_trace_stark::<$engine>(2);
-        }
+        $crate::__test_cases!($engine, mixture_traces_stark, {
+            test_mixture_traces_stark(10),
+            test_mixture_traces_stark_log_height_gt_l_skip(3),
+            test_mixture_traces_stark_log_height_eq_l_skip(2),
+            test_mixture_traces_stark_log_height_lt_l_skip(1),
+            test_mixture_traces_stark_log_height_zero(0),
+        });
 
-        #[test]
-        fn test_single_preprocessed_trace_stark_log_height_lt_l_skip() {
-            $crate::single_preprocessed_trace_stark::<$engine>(1);
-        }
-
-        #[test]
-        fn test_single_preprocessed_trace_stark_log_height_zero() {
-            $crate::single_preprocessed_trace_stark::<$engine>(0);
-        }
-
-        #[test]
-        fn test_multi_interaction_traces_stark() {
-            $crate::multi_interaction_traces_stark::<$engine>(10);
-        }
-
-        #[test]
-        fn test_multi_interaction_traces_stark_log_height_gt_l_skip() {
-            $crate::multi_interaction_traces_stark::<$engine>(3);
-        }
-
-        #[test]
-        fn test_multi_interaction_traces_stark_log_height_eq_l_skip() {
-            $crate::multi_interaction_traces_stark::<$engine>(2);
-        }
-
-        #[test]
-        fn test_multi_interaction_traces_stark_log_height_lt_l_skip() {
-            $crate::multi_interaction_traces_stark::<$engine>(1);
-        }
-
-        #[test]
-        fn test_multi_interaction_traces_stark_log_height_zero() {
-            $crate::multi_interaction_traces_stark::<$engine>(0);
-        }
-
-        #[test]
-        fn test_mixture_traces_stark() {
-            $crate::mixture_traces_stark::<$engine>(10);
-        }
-
-        #[test]
-        fn test_mixture_traces_stark_log_height_gt_l_skip() {
-            $crate::mixture_traces_stark::<$engine>(3);
-        }
-
-        #[test]
-        fn test_mixture_traces_stark_log_height_eq_l_skip() {
-            $crate::mixture_traces_stark::<$engine>(2);
-        }
-
-        #[test]
-        fn test_mixture_traces_stark_log_height_lt_l_skip() {
-            $crate::mixture_traces_stark::<$engine>(1);
-        }
-
-        #[test]
-        fn test_mixture_traces_stark_log_height_zero() {
-            $crate::mixture_traces_stark::<$engine>(0);
-        }
-
-        #[test]
-        fn test_matrix_stacking_overflow() {
-            $crate::matrix_stacking_overflow::<$engine>();
-        }
+        $crate::__test_cases!($engine, matrix_stacking_overflow, {
+            test_matrix_stacking_overflow(),
+        });
 
         // === 3. Roundtrip tests ===
 
-        #[test]
-        fn test_fib_air_roundtrip() {
-            $crate::fib_air_roundtrip::<$engine>(2, 10).unwrap();
-        }
+        $crate::__test_cases!($engine, fib_air_roundtrip, unwrap, {
+            test_fib_air_roundtrip(2, 10),
+            test_fib_air_roundtrip_log_trace_degree_1_lt_l_skip_2(2, 1),
+            test_fib_air_roundtrip_log_trace_degree_0_lt_l_skip_2(2, 0),
+            test_fib_air_roundtrip_log_trace_degree_2_lt_l_skip_3(3, 2),
+            test_fib_air_roundtrip_large_l_skip(6, 10),
+        });
 
-        #[test]
-        fn test_fib_air_roundtrip_log_trace_degree_1_lt_l_skip_2() {
-            $crate::fib_air_roundtrip::<$engine>(2, 1).unwrap();
-        }
+        $crate::__test_cases!($engine, dummy_interactions_roundtrip, unwrap, {
+            test_dummy_interactions_roundtrip_2_8_3(2, 8, 3),
+            test_dummy_interactions_roundtrip_5_5_4(5, 5, 4),
+        });
 
-        #[test]
-        fn test_fib_air_roundtrip_log_trace_degree_0_lt_l_skip_2() {
-            $crate::fib_air_roundtrip::<$engine>(2, 0).unwrap();
-        }
+        $crate::__test_cases!($engine, cached_trace_roundtrip, unwrap, {
+            test_cached_trace_roundtrip_2_8_3(2, 8, 3),
+            test_cached_trace_roundtrip_5_5_4(5, 5, 4),
+            test_cached_trace_roundtrip_5_8_3(5, 8, 3),
+            test_cached_trace_roundtrip_6_7_3(6, 7, 3),
+        });
 
-        #[test]
-        fn test_fib_air_roundtrip_log_trace_degree_2_lt_l_skip_3() {
-            $crate::fib_air_roundtrip::<$engine>(3, 2).unwrap();
-        }
-
-        #[test]
-        fn test_fib_air_roundtrip_large_l_skip() {
-            $crate::fib_air_roundtrip::<$engine>(6, 10).unwrap();
-        }
-
-        #[test]
-        fn test_dummy_interactions_roundtrip_2_8_3() {
-            $crate::dummy_interactions_roundtrip::<$engine>(2, 8, 3).unwrap();
-        }
-
-        #[test]
-        fn test_dummy_interactions_roundtrip_5_5_4() {
-            $crate::dummy_interactions_roundtrip::<$engine>(5, 5, 4).unwrap();
-        }
-
-        #[test]
-        fn test_cached_trace_roundtrip_2_8_3() {
-            $crate::cached_trace_roundtrip::<$engine>(2, 8, 3).unwrap();
-        }
-
-        #[test]
-        fn test_cached_trace_roundtrip_5_5_4() {
-            $crate::cached_trace_roundtrip::<$engine>(5, 5, 4).unwrap();
-        }
-
-        #[test]
-        fn test_cached_trace_roundtrip_5_8_3() {
-            $crate::cached_trace_roundtrip::<$engine>(5, 8, 3).unwrap();
-        }
-
-        #[test]
-        fn test_cached_trace_roundtrip_6_7_3() {
-            $crate::cached_trace_roundtrip::<$engine>(6, 7, 3).unwrap();
-        }
-
-        #[test]
-        fn test_preprocessed_trace_roundtrip_2_8_3() {
-            $crate::preprocessed_trace_roundtrip::<$engine>(2, 8, 3).unwrap();
-        }
-
-        #[test]
-        fn test_preprocessed_trace_roundtrip_5_5_4() {
-            $crate::preprocessed_trace_roundtrip::<$engine>(5, 5, 4).unwrap();
-        }
+        $crate::__test_cases!($engine, preprocessed_trace_roundtrip, unwrap, {
+            test_preprocessed_trace_roundtrip_2_8_3(2, 8, 3),
+            test_preprocessed_trace_roundtrip_5_5_4(5, 5, 4),
+        });
 
         // === 4. Pipeline decomposition ===
 
-        #[test]
-        fn test_batch_sumcheck_zero_interactions() {
-            $crate::batch_sumcheck_zero_interactions::<$engine>(4).unwrap();
-        }
+        $crate::__test_cases!($engine, batch_sumcheck_zero_interactions, unwrap, {
+            test_batch_sumcheck_zero_interactions(4),
+            test_batch_sumcheck_zero_interactions_log_height_eq_l_skip(2),
+            test_batch_sumcheck_zero_interactions_log_height_lt_l_skip(1),
+            test_batch_sumcheck_zero_interactions_log_height_zero(0),
+        });
 
-        #[test]
-        fn test_batch_sumcheck_zero_interactions_log_height_eq_l_skip() {
-            $crate::batch_sumcheck_zero_interactions::<$engine>(2).unwrap();
-        }
+        $crate::__test_cases!($engine, gkr_verify_zero_interactions, unwrap, {
+            test_gkr_verify_zero_interactions(),
+        });
 
-        #[test]
-        fn test_batch_sumcheck_zero_interactions_log_height_lt_l_skip() {
-            $crate::batch_sumcheck_zero_interactions::<$engine>(1).unwrap();
-        }
-
-        #[test]
-        fn test_batch_sumcheck_zero_interactions_log_height_zero() {
-            $crate::batch_sumcheck_zero_interactions::<$engine>(0).unwrap();
-        }
-
-        #[test]
-        fn test_gkr_verify_zero_interactions() {
-            $crate::gkr_verify_zero_interactions::<$engine>().unwrap();
-        }
-
-        #[test]
-        fn test_batch_constraints_with_interactions() {
-            $crate::batch_constraints_with_interactions::<$engine>().unwrap();
-        }
+        $crate::__test_cases!($engine, batch_constraints_with_interactions, unwrap, {
+            test_batch_constraints_with_interactions(),
+        });
 
         // === 5. Custom context construction ===
 
-        #[test]
-        fn test_single_fib_and_dummy_trace_stark() {
-            $crate::single_fib_and_dummy_trace_stark::<$engine>(3);
-        }
-
-        #[test]
-        fn test_single_fib_and_dummy_trace_stark_log_height_eq_l_skip() {
-            $crate::single_fib_and_dummy_trace_stark::<$engine>(2);
-        }
-
-        #[test]
-        fn test_single_fib_and_dummy_trace_stark_log_height_lt_l_skip() {
-            $crate::single_fib_and_dummy_trace_stark::<$engine>(1);
-        }
-
-        #[test]
-        fn test_single_fib_and_dummy_trace_stark_log_height_zero() {
-            $crate::single_fib_and_dummy_trace_stark::<$engine>(0);
-        }
+        $crate::__test_cases!($engine, single_fib_and_dummy_trace_stark, {
+            test_single_fib_and_dummy_trace_stark(3),
+            test_single_fib_and_dummy_trace_stark_log_height_eq_l_skip(2),
+            test_single_fib_and_dummy_trace_stark_log_height_lt_l_skip(1),
+            test_single_fib_and_dummy_trace_stark_log_height_zero(0),
+        });
 
         // === 6. Interaction tests ===
 
-        #[test]
-        fn test_optional_air() {
-            $crate::optional_air::<$engine>();
-        }
+        $crate::__test_cases!($engine, optional_air, {
+            test_optional_air(),
+        });
 
-        #[test]
-        fn test_vkey_methods() {
-            $crate::vkey_methods::<$engine>();
-        }
+        $crate::__test_cases!($engine, vkey_methods, {
+            test_vkey_methods(),
+        });
 
-        #[test]
-        fn test_interaction_trace_height_constraints() {
-            $crate::interaction_trace_height_constraints::<$engine>();
-        }
+        $crate::__test_cases!($engine, interaction_trace_height_constraints, {
+            test_interaction_trace_height_constraints(),
+        });
 
-        #[test]
-        fn test_trace_height_constraints_implied_removal() {
-            $crate::trace_height_constraints_implied_removal::<$engine>();
-        }
+        $crate::__test_cases!($engine, trace_height_constraints_implied_removal, {
+            test_trace_height_constraints_implied_removal(),
+        });
 
-        #[test]
-        fn test_interaction_multi_rows_neg() {
-            $crate::interaction_multi_rows_neg::<$engine>();
-        }
+        $crate::__test_cases!($engine, interaction_multi_rows_neg, {
+            test_interaction_multi_rows_neg(),
+        });
 
-        #[test]
-        fn test_interaction_all_zero_sender() {
-            $crate::interaction_all_zero_sender::<$engine>();
-        }
+        $crate::__test_cases!($engine, interaction_all_zero_sender, {
+            test_interaction_all_zero_sender(),
+        });
 
-        #[test]
-        fn test_interaction_multi_senders() {
-            $crate::interaction_multi_senders::<$engine>();
-        }
+        $crate::__test_cases!($engine, interaction_multi_senders, {
+            test_interaction_multi_senders(),
+        });
 
-        #[test]
-        fn test_interaction_multi_senders_neg() {
-            $crate::interaction_multi_senders_neg::<$engine>();
-        }
+        $crate::__test_cases!($engine, interaction_multi_senders_neg, {
+            test_interaction_multi_senders_neg(),
+        });
 
-        #[test]
-        fn test_interaction_multi_sender_receiver() {
-            $crate::interaction_multi_sender_receiver::<$engine>();
-        }
+        $crate::__test_cases!($engine, interaction_multi_sender_receiver, {
+            test_interaction_multi_sender_receiver(),
+        });
 
-        #[test]
-        fn test_interaction_cached_trace_neg() {
-            $crate::interaction_cached_trace_neg::<$engine>();
-        }
+        $crate::__test_cases!($engine, interaction_cached_trace_neg, {
+            test_interaction_cached_trace_neg(),
+        });
 
-        // === 7. WHIR PCS tests ===
+        // === 7. WHIR PCS tests (not engine-generic, plain wrappers) ===
 
         #[test]
         fn test_fold_single() {
