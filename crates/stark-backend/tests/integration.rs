@@ -24,8 +24,8 @@ use openvm_stark_backend::{
             },
         },
         prove_up_to_batch_constraints, test_system_params_small, CachedFixture11, FibFixture,
-        InteractionsFixture11, MixtureFixture, PreprocessedFibFixture, SelfInteractionFixture,
-        TestFixture,
+        InteractionsFixture11, MixtureFixture, PreprocessedAndCachedFixture,
+        PreprocessedFibFixture, SelfInteractionFixture, TestFixture,
     },
     utils::disable_debug_builder,
     verifier::{
@@ -453,6 +453,31 @@ fn test_preprocessed_trace_roundtrip(
     verify(engine.config(), &vk, &proof, &mut validator_sponge)
 }
 
+#[test_case(2, 8, 3, 1)]
+#[test_case(2, 8, 3, 2)]
+#[test_case(2, 8, 3, 3)]
+#[test_case(5, 5, 4, 1)]
+#[test_case(5, 5, 4, 2)]
+#[test_case(5, 5, 4, 3)]
+fn test_preprocessed_and_cached_trace_roundtrip(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+    num_cached_parts: usize,
+) -> Result<(), VerifierError<EF>> {
+    let params = test_system_params_small(l_skip, n_stack, k_whir);
+    let engine = BabyBearPoseidon2CpuEngine::new(params);
+    let log_trace_degree = 8;
+    let height = 1 << log_trace_degree;
+    let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
+    let fx = PreprocessedAndCachedFixture::new(sels, engine.config().clone(), num_cached_parts);
+    let (pk, vk) = fx.keygen(&engine);
+
+    let mut recorder = default_duplex_sponge_recorder();
+    let proof = fx.prove_from_transcript(&engine, &pk, &mut recorder);
+    let mut validator_sponge = default_duplex_sponge_validator(recorder.into_log());
+    verify(engine.config(), &vk, &proof, &mut validator_sponge)
+}
 #[test]
 fn test_interactions_single_sender_receiver_happy() {
     setup_tracing();
