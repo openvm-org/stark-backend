@@ -6,7 +6,7 @@ use openvm_stark_backend::{
     proof::Proof,
     test_utils::{
         test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
-        PreprocessedFibFixture, TestFixture,
+        PreprocessedAndCachedFixture, PreprocessedFibFixture, TestFixture,
     },
     StarkEngine, SystemParams,
 };
@@ -62,4 +62,19 @@ fn test_preprocessed_proof_encode_decode() -> io::Result<()> {
         .collect_vec();
     let fx = PreprocessedFibFixture::new(0, 1, sels);
     test_proof_encode_decode(fx, params)
+}
+
+#[test]
+fn test_preprocessed_and_multi_cached_proof_encode_decode() -> io::Result<()> {
+    let log_trace_height = 5;
+    let params = SystemParams::new_for_testing(log_trace_height);
+    let sels = (0..(1 << log_trace_height))
+        .map(|i| i % 2 == 0)
+        .collect_vec();
+    for num_cached_parts in [1, 2, 3] {
+        let config = BabyBearPoseidon2Config::default_from_params(params.clone());
+        let fx = PreprocessedAndCachedFixture::new(sels.clone(), config, num_cached_parts);
+        test_proof_encode_decode(fx, params.clone())?;
+    }
+    Ok(())
 }

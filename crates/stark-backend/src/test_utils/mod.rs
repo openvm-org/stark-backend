@@ -11,6 +11,7 @@ use self::dummy_airs::{
         dummy_interaction_air::DummyInteractionAir,
         self_interaction_air::{SelfInteractionAir, SelfInteractionChip},
     },
+    preprocessed_cached_air::air::PreprocessedCachedAir,
 };
 use crate::{
     interaction::{BusIndex, LogUpSecurityParameters},
@@ -74,6 +75,25 @@ fn get_conditional_fib_number<F: PrimeField64>(mut a: u64, mut b: u64, sels: &[b
     b
 }
 
+fn commit_cached_trace<SC: StarkProtocolConfig>(
+    config: &SC,
+    trace: ColMajorMatrix<SC::F>,
+) -> CommittedTraceData<CpuBackend<SC>> {
+    let params = config.params();
+    let (commitment, data) = stacked_commit(
+        config.hasher(),
+        params.l_skip,
+        params.n_stack,
+        params.log_blowup,
+        params.k_whir(),
+        &[&trace],
+    );
+    CommittedTraceData {
+        commitment,
+        trace,
+        data: Arc::new(data),
+    }
+}
 /// Trait for object responsible for generating the collection of AIRs and trace matrices for a
 /// single test case.
 pub trait TestFixture<SC: StarkProtocolConfig> {
@@ -328,6 +348,49 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for PreprocessedFibFixture {
     }
 }
 
+#[derive(derive_new::new)]
+pub struct PreprocessedAndCachedFixture<SC> {
+    pub sels: Vec<bool>,
+    pub config: SC,
+    pub num_cached_parts: usize,
+}
+
+impl<SC: StarkProtocolConfig> TestFixture<SC> for PreprocessedAndCachedFixture<SC> {
+    fn airs(&self) -> Vec<AirRef<SC>> {
+        vec![Arc::new(PreprocessedCachedAir::new(
+            self.sels.clone(),
+            self.num_cached_parts,
+        ))]
+    }
+
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuBackend<SC>> {
+        assert!(self.sels.len().is_power_of_two());
+
+        let common_main =
+            ColMajorMatrix::new((0..self.sels.len()).map(SC::F::from_usize).collect(), 1);
+        let cached_mains = (0..self.num_cached_parts)
+            .map(|part| {
+                let trace = ColMajorMatrix::new(
+                    self.sels
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &sel)| {
+                            SC::F::from_usize(i)
+                                + SC::F::from_usize(part + 1) * SC::F::from_bool(sel)
+                        })
+                        .collect(),
+                    1,
+                );
+                commit_cached_trace(&self.config, trace)
+            })
+            .collect();
+
+        ProvingContext::new(vec![(
+            0,
+            AirProvingContext::new(cached_mains, common_main, vec![]),
+        )])
+    }
+}
 #[derive(derive_new::new)]
 pub struct SelfInteractionFixture {
     pub widths: Vec<usize>,
