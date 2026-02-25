@@ -25,13 +25,14 @@ use openvm_stark_backend::{
     dft::Radix2BowersSerial,
     p3_matrix::dense::RowMajorMatrix,
     poly_common::{
-        eq_sharp_uni_poly, eq_uni_poly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni,
-        eval_eq_uni_at_one, UnivariatePoly,
+        eq_uni_poly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, eval_eq_uni_at_one,
+        UnivariatePoly,
     },
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
-        fractional_sumcheck_gkr::Frac, stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg,
-        ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
+        fractional_sumcheck_gkr::Frac, poly::eq_sharp_uni_poly, stacked_pcs::StackedLayout,
+        sumcheck::sumcheck_round0_deg, ColMajorMatrix, DeviceMultiStarkProvingKey,
+        MatrixDimensions, ProvingContext,
     },
     FiatShamirTranscript,
 };
