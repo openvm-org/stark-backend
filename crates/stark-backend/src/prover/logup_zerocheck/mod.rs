@@ -13,10 +13,11 @@ use tracing::{debug, info_span, instrument};
 use crate::{
     calculate_n_logup,
     dft::Radix2BowersSerial,
-    poly_common::{eq_sharp_uni_poly, eq_uni_poly, UnivariatePoly},
+    poly_common::{eq_uni_poly, UnivariatePoly},
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
+        poly::eq_sharp_uni_poly,
         stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
         ColMajorMatrix, CpuBackend, DeviceMultiStarkProvingKey, MatrixDimensions, MatrixView,
