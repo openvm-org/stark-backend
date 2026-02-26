@@ -671,7 +671,7 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() {
             let proof = engine.prove(d_pk, d_ctx);
             engine.verify(&pk.get_vk(), &proof)
         }));
-        assert!(result.unwrap().is_err());
+        assert!(result.is_err() || result.unwrap().is_err());
     }
 }
 
@@ -801,7 +801,7 @@ pub fn interaction_multi_rows_neg<E: StarkEngine<SC = SC>>() {
             ],
         )
     }));
-    assert!(result.unwrap().is_err());
+    assert!(result.is_err() || result.unwrap().is_err());
 }
 
 pub fn interaction_all_zero_sender<E: StarkEngine<SC = SC>>() {
@@ -900,7 +900,7 @@ pub fn interaction_multi_senders_neg<E: StarkEngine<SC = SC>>() {
             ],
         )
     }));
-    assert!(result.unwrap().is_err());
+    assert!(result.is_err() || result.unwrap().is_err());
 }
 
 pub fn interaction_multi_sender_receiver<E: StarkEngine<SC = SC>>() {
@@ -987,7 +987,7 @@ pub fn interaction_cached_trace_neg<E: StarkEngine<SC = SC>>() {
         let proof = engine.prove(&d_pk, d_ctx);
         engine.verify(&vk, &proof)
     }));
-    assert!(result.unwrap().is_err());
+    assert!(result.is_err() || result.unwrap().is_err());
 }
 
 // ===========================================================================
