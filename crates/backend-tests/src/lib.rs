@@ -92,18 +92,14 @@ pub type SC = BabyBearPoseidon2Config;
 
 /// Generic version of `StarkEngine::run_test` that accepts CPU-side contexts
 /// and handles device transport automatically.
-pub fn run_test_generic<E: StarkEngine<SC = SC>>(
+pub fn run_test_on_cpu_ctx<E: StarkEngine<SC = SC>>(
     engine: &E,
     airs: Vec<AirRef<SC>>,
     ctxs: Vec<AirProvingContext<CpuBackend<SC>>>,
 ) -> Result<(), VerifierError<EF>> {
-    let (pk, vk) = engine.keygen(&airs);
-    let device = engine.device();
-    let d_pk = device.transport_pk_to_device(&pk);
     let cpu_ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
-    let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-    let proof = engine.prove(&d_pk, d_ctx);
-    engine.verify(&vk, &proof)?;
+    let d_ctx = engine.device().transport_proving_ctx_to_device(&cpu_ctx);
+    engine.run_test(airs, d_ctx.per_trace.into_iter().map(|(_, c)| c).collect())?;
     Ok(())
 }
 
@@ -775,7 +771,7 @@ pub fn interaction_multi_rows_neg<E: StarkEngine<SC = SC>>() {
     disable_debug_builder();
     let engine = E::new(default_test_params_small());
     let result = catch_unwind(AssertUnwindSafe(|| {
-        run_test_generic(
+        run_test_on_cpu_ctx(
             &engine,
             any_air_arc_vec![sender_air, receiver_air],
             vec![
@@ -800,7 +796,7 @@ pub fn interaction_all_zero_sender<E: StarkEngine<SC = SC>>() {
     let sender_air = DummyInteractionAir::new(1, true, 0);
 
     let engine = E::new(default_test_params_small());
-    run_test_generic(
+    run_test_on_cpu_ctx(
         &engine,
         any_air_arc_vec![sender_air],
         vec![AirProvingContext::simple_no_pis(
@@ -834,7 +830,7 @@ pub fn interaction_multi_senders<E: StarkEngine<SC = SC>>() {
     let receiver_air = DummyInteractionAir::new(1, false, 0);
 
     let engine = E::new(default_test_params_small());
-    run_test_generic(
+    run_test_on_cpu_ctx(
         &engine,
         any_air_arc_vec![sender_air, sender_air, receiver_air],
         vec![
@@ -873,7 +869,7 @@ pub fn interaction_multi_senders_neg<E: StarkEngine<SC = SC>>() {
     disable_debug_builder();
     let engine = E::new(default_test_params_small());
     let result = catch_unwind(AssertUnwindSafe(|| {
-        run_test_generic(
+        run_test_on_cpu_ctx(
             &engine,
             any_air_arc_vec![sender_air, sender_air, receiver_air],
             vec![
@@ -911,7 +907,7 @@ pub fn interaction_multi_sender_receiver<E: StarkEngine<SC = SC>>() {
     let receiver_air = DummyInteractionAir::new(1, false, 0);
 
     let engine = E::new(default_test_params_small());
-    run_test_generic(
+    run_test_on_cpu_ctx(
         &engine,
         any_air_arc_vec![sender_air, sender_air, receiver_air, receiver_air],
         vec![
@@ -1361,6 +1357,7 @@ pub fn whir_multiple_commitments_negative() {
 /// });
 /// ```
 #[doc(hidden)]
+// Must export macro for $crate::__test_cases hygiene inside backend_test_suite!
 #[macro_export]
 macro_rules! __test_cases {
     // Engine-generic, returns Result (call .unwrap())
