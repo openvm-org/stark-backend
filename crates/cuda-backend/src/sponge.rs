@@ -417,15 +417,68 @@ mod tests {
         }
     }
 
-    /// Benchmark test comparing CPU vs GPU grinding performance.
+    /// Test that GPU grinding produces valid witnesses for various bit counts.
     ///
-    /// Run with: `cargo test -p openvm-cuda-backend test_grind_cpu_vs_gpu -- --nocapture`
-    ///
-    /// Note: GPU has ~20ms fixed overhead for kernel launch + sync. CPU wins for
-    /// small search spaces (low bit counts). GPU wins for larger search spaces
-    /// where parallelism amortizes the overhead.
+    /// Validates correctness by cross-checking GPU-found witnesses against the
+    /// CPU sponge implementation. Uses sequential CPU validation (no rayon) to
+    /// avoid CPU oversubscription when running alongside other GPU tests via
+    /// `cargo nextest`. The previous version used `FiatShamirTranscript::grind`
+    /// which spawns a rayon parallel iterator over ~2 billion candidates; when
+    /// nextest runs many test processes in parallel, the combined rayon thread
+    /// pools saturate all CPU cores and the test stalls indefinitely.
     #[test]
     fn test_grind_cpu_vs_gpu() {
+        // Warmup: run one GPU grind to initialize CUDA context
+        {
+            let mut warmup = DuplexSpongeGpu::default();
+            let _ = warmup.grind_gpu(8);
+        }
+
+        // Test key bit counts (1 trial each to keep test fast under parallel execution)
+        let bit_counts = [8, 12, 16, 20];
+
+        let mut seed = 265;
+        for bits in bit_counts {
+            let mut cpu_sponge = default_duplex_sponge();
+            let mut gpu_sponge = DuplexSpongeGpu::default();
+
+            // Add some initial state
+            for _ in 0..5 {
+                let val = F::from_u32(seed);
+                seed += 228;
+                FiatShamirTranscript::<SC>::observe(&mut cpu_sponge, val);
+                gpu_sponge.observe(val);
+            }
+
+            // GPU grinding
+            let gpu_start = Instant::now();
+            let gpu_witness = gpu_sponge.grind_gpu(bits).expect("GPU grinding failed");
+            let gpu_time = gpu_start.elapsed();
+
+            // Verify GPU witness is valid using CPU sponge
+            assert!(
+                FiatShamirTranscript::<SC>::check_witness(&mut cpu_sponge, bits, gpu_witness),
+                "GPU witness failed CPU verification for bits={bits}"
+            );
+
+            eprintln!(
+                "  bits={:>2}: GPU grinding {:.2}ms, witness verified",
+                bits,
+                gpu_time.as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
+    /// Benchmark test comparing CPU (rayon parallel) vs GPU grinding performance.
+    ///
+    /// Run with: `cargo test -p openvm-cuda-backend test_grind_benchmark -- --ignored --nocapture`
+    ///
+    /// This test is `#[ignore]` because the rayon parallel CPU grind creates a
+    /// thread-per-core pool that causes CPU oversubscription when nextest runs
+    /// many GPU test processes concurrently, leading to indefinite stalls.
+    #[test]
+    #[ignore]
+    fn test_grind_benchmark() {
         // Warmup: run one GPU grind to initialize CUDA context
         {
             let mut warmup = DuplexSpongeGpu::default();
@@ -460,7 +513,7 @@ mod tests {
                 gpu_sponge.observe(val);
             }
 
-            // Time CPU grinding
+            // Time CPU grinding (uses rayon parallel iterator)
             let cpu_start = Instant::now();
             let cpu_witness = FiatShamirTranscript::<SC>::grind(&mut cpu_sponge, bits);
             let cpu_time = cpu_start.elapsed();
@@ -469,9 +522,6 @@ mod tests {
             let gpu_start = Instant::now();
             let gpu_witness = gpu_sponge.grind_gpu(bits).expect("GPU grinding failed");
             let gpu_time = gpu_start.elapsed();
-
-            // Verify both found valid witnesses (witnesses may differ but both should be valid)
-            // We already validated inside grind_gpu with debug_assert
 
             let speedup = cpu_time.as_secs_f64() / gpu_time.as_secs_f64();
 
@@ -483,9 +533,7 @@ mod tests {
                 speedup
             );
 
-            // Verify the witnesses are valid by checking with a fresh sponge
-            // (grind() and grind_gpu() already do this internally via check_witness)
-            let _ = (cpu_witness, gpu_witness); // suppress unused warnings
+            let _ = (cpu_witness, gpu_witness);
         }
 
         eprintln!("{}\n", "=".repeat(60));
