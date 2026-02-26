@@ -53,8 +53,8 @@ use openvm_stark_backend::{
             },
         },
         prove_up_to_batch_constraints, test_system_params_small, test_whir_config_small,
-        CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture, PreprocessedFibFixture,
-        SelfInteractionFixture, TestFixture,
+        CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture,
+        PreprocessedAndCachedFixture, PreprocessedFibFixture, SelfInteractionFixture, TestFixture,
     },
     utils::disable_debug_builder,
     verifier::{
@@ -324,6 +324,27 @@ pub fn preprocessed_trace_roundtrip<E: StarkEngine<SC = SC>>(
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
     let fx = PreprocessedFibFixture::new(0, 1, sels);
+    let (pk, vk) = fx.keygen(&engine);
+
+    let mut prover_transcript = engine.initial_transcript();
+    let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_transcript);
+
+    let mut verifier_sponge = default_duplex_sponge();
+    verify(engine.config(), &vk, &proof, &mut verifier_sponge)
+}
+
+pub fn preprocessed_and_cached_trace_roundtrip<E: StarkEngine<SC = SC>>(
+    l_skip: usize,
+    n_stack: usize,
+    k_whir: usize,
+    num_cached_parts: usize,
+) -> Result<(), VerifierError<EF>> {
+    let params = test_system_params_small(l_skip, n_stack, k_whir);
+    let engine = E::new(params);
+    let log_trace_degree = 8;
+    let height = 1 << log_trace_degree;
+    let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
+    let fx = PreprocessedAndCachedFixture::new(sels, engine.config().clone(), num_cached_parts);
     let (pk, vk) = fx.keygen(&engine);
 
     let mut prover_transcript = engine.initial_transcript();
@@ -1469,6 +1490,15 @@ macro_rules! backend_test_suite {
         $crate::__test_cases!($engine, preprocessed_trace_roundtrip, unwrap, {
             test_preprocessed_trace_roundtrip_2_8_3(2, 8, 3),
             test_preprocessed_trace_roundtrip_5_5_4(5, 5, 4),
+        });
+
+        $crate::__test_cases!($engine, preprocessed_and_cached_trace_roundtrip, unwrap, {
+            test_preprocessed_and_cached_trace_roundtrip_2_8_3_1(2, 8, 3, 1),
+            test_preprocessed_and_cached_trace_roundtrip_2_8_3_2(2, 8, 3, 2),
+            test_preprocessed_and_cached_trace_roundtrip_2_8_3_3(2, 8, 3, 3),
+            test_preprocessed_and_cached_trace_roundtrip_5_5_4_1(5, 5, 4, 1),
+            test_preprocessed_and_cached_trace_roundtrip_5_5_4_2(5, 5, 4, 2),
+            test_preprocessed_and_cached_trace_roundtrip_5_5_4_3(5, 5, 4, 3),
         });
 
         // === 4. Pipeline decomposition ===

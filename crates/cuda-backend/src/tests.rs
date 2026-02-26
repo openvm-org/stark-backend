@@ -26,6 +26,7 @@ use openvm_stark_sdk::{
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use test_case::test_case;
 use tracing::{debug, Level};
 
 use crate::{
@@ -87,10 +88,10 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
     verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
-#[::test_case::test_case(9)]
-#[::test_case::test_case(2 ; "when log_height equals l_skip")]
-#[::test_case::test_case(1 ; "when log_height less than l_skip")]
-#[::test_case::test_case(0 ; "when log_height is zero")]
+#[test_case(9)]
+#[test_case(2 ; "when log_height equals l_skip")]
+#[test_case(1 ; "when log_height less than l_skip")]
+#[test_case(0 ; "when log_height is zero")]
 fn test_stacked_opening_reduction(
     log_trace_degree: usize,
 ) -> Result<(), StackedReductionError<EF>> {
