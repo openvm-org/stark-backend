@@ -23,9 +23,10 @@ use crate::{
         mle_interpolate::mle_interpolate_stage_ext,
         poly::{eval_poly_ext_at_point_from_base, transpose_fp_to_fpext_vec},
         whir::{
+            _whir_fused_fold_and_sumcheck_required_temp_buffer_size,
             _whir_sumcheck_coeff_moments_required_temp_buffer_size, w_moments_accumulate,
             whir_algebraic_batch_traces, whir_fold_coeffs_and_moments,
-            whir_sumcheck_coeff_moments_round,
+            whir_fused_fold_and_sumcheck, whir_sumcheck_coeff_moments_round,
         },
     },
     merkle_tree::MerkleTreeGpu,
@@ -192,24 +193,31 @@ pub fn prove_whir_opening_gpu(
     for (whir_round, round_params) in whir_params.rounds.iter().enumerate() {
         let is_last_round = whir_round == num_whir_rounds - 1;
         // Run k_whir rounds of sumcheck on `sum_{x in H_m} \hat{w}(\hat{f}(x), x)`
-        for round in 0..k_whir {
+        //
+        // Optimization: for rounds 1..k_whir we fuse the previous round's fold with the
+        // current round's sumcheck into a single kernel pass, saving one full read of
+        // f_coeffs and w_moments per fused round (~23% fewer global reads for k_whir=4).
+        //
+        // Round 0: standalone sumcheck; fold is deferred.
+        // Rounds 1..k_whir: fused fold(prev alpha) + sumcheck.
+        // After loop: standalone fold for the last alpha.
+
+        // Round 0: standalone sumcheck.
+        {
+            let f_height = 1 << m;
             // Do not use f_coeffs.len() because it might have extra capacity.
-            let f_height = 1 << (m - round);
             debug_assert!(
                 f_coeffs.len() >= f_height,
-                "f_coeffs has length {}, expected 2^{} for m={m}, round={round}",
+                "f_coeffs has length {}, expected 2^{} for m={m}, round=0",
                 f_coeffs.len(),
-                m - round
+                m
             );
             debug_assert!(w_moments.len() >= f_height);
-            let output_height = f_height / 2;
             let tmp_buffer_capacity =
                 unsafe { _whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32) };
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
                 d_sumcheck_tmp = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
             }
-            let mut new_f_coeffs = DeviceBuffer::<EF>::with_capacity(output_height);
-            let mut new_w_moments = DeviceBuffer::<EF>::with_capacity(output_height);
             // SAFETY:
             // - `d_s_evals` has length 2
             // - `d_sumcheck_tmp` has at least required scratch length
@@ -224,7 +232,7 @@ pub fn prove_whir_opening_gpu(
                 .map_err(|error| WhirProverError::SumcheckMleRound {
                     error,
                     whir_round,
-                    round,
+                    round: 0,
                 })?;
             }
             let s_evals = d_s_evals.to_host()?;
@@ -232,31 +240,96 @@ pub fn prove_whir_opening_gpu(
                 transcript.observe_ext(eval);
             }
             whir_sumcheck_polys.push(s_evals.try_into().unwrap());
-
             folding_pow_witnesses.push(
                 transcript
                     .grind_gpu(whir_params.folding_pow_bits)
                     .map_err(WhirProverError::FoldingGrind)?,
             );
-            let alpha = transcript.sample_ext();
+        }
+        let mut alpha_prev = transcript.sample_ext();
+        // current_height tracks the pre-fold height of f_coeffs / w_moments.
+        // Starts at 2^m; halved by each fused fold call below.
+        let mut current_height = 1usize << m;
 
-            // Fold `f` and `w` in coefficient/moment form with respect to `alpha`.
+        // Rounds 1..k_whir: fused fold(alpha_prev) + sumcheck on folded values.
+        for round in 1..k_whir {
+            let pre_fold_height = current_height;
+            let post_fold_height = pre_fold_height / 2;
+            debug_assert!(
+                f_coeffs.len() >= pre_fold_height,
+                "f_coeffs has length {}, expected {pre_fold_height} for m={m}, round={round}",
+                f_coeffs.len()
+            );
+            debug_assert!(w_moments.len() >= pre_fold_height);
+            let tmp_buffer_capacity = unsafe {
+                _whir_fused_fold_and_sumcheck_required_temp_buffer_size(pre_fold_height as u32)
+            };
+            if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
+                d_sumcheck_tmp = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
+            }
+            let mut new_f_coeffs = DeviceBuffer::<EF>::with_capacity(post_fold_height);
+            let mut new_w_moments = DeviceBuffer::<EF>::with_capacity(post_fold_height);
             // SAFETY:
-            // - input buffers have length `f_height`.
-            // - output buffers have length `f_height / 2`.
+            // - `d_s_evals` has length 2
+            // - `d_sumcheck_tmp` has at least required scratch length
+            // - input buffers have length `pre_fold_height`
+            // - output buffers have length `pre_fold_height / 2`
+            unsafe {
+                whir_fused_fold_and_sumcheck(
+                    &f_coeffs,
+                    &w_moments,
+                    &mut new_f_coeffs,
+                    &mut new_w_moments,
+                    &mut d_s_evals,
+                    &mut d_sumcheck_tmp,
+                    alpha_prev,
+                    pre_fold_height as u32,
+                )
+                .map_err(|error| WhirProverError::FusedFoldAndSumcheckRound {
+                    error,
+                    whir_round,
+                    round,
+                })?;
+            }
+            f_coeffs = new_f_coeffs;
+            w_moments = new_w_moments;
+            current_height = post_fold_height;
+
+            let s_evals = d_s_evals.to_host()?;
+            for &eval in &s_evals {
+                transcript.observe_ext(eval);
+            }
+            whir_sumcheck_polys.push(s_evals.try_into().unwrap());
+            folding_pow_witnesses.push(
+                transcript
+                    .grind_gpu(whir_params.folding_pow_bits)
+                    .map_err(WhirProverError::FoldingGrind)?,
+            );
+            alpha_prev = transcript.sample_ext();
+        }
+
+        // Final standalone fold using the last round's alpha.
+        // SAFETY:
+        // - input buffers have length `current_height`
+        // - output buffers have length `current_height / 2`
+        {
+            let f_height = current_height;
+            let output_height = f_height / 2;
+            let mut new_f_coeffs = DeviceBuffer::<EF>::with_capacity(output_height);
+            let mut new_w_moments = DeviceBuffer::<EF>::with_capacity(output_height);
             unsafe {
                 whir_fold_coeffs_and_moments(
                     &f_coeffs,
                     &w_moments,
                     &mut new_f_coeffs,
                     &mut new_w_moments,
-                    alpha,
+                    alpha_prev,
                     f_height as u32,
                 )
                 .map_err(|error| WhirProverError::FoldMle {
                     error,
                     whir_round,
-                    round,
+                    round: k_whir - 1,
                 })?;
             }
             f_coeffs = new_f_coeffs;

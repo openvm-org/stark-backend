@@ -37,6 +37,19 @@ extern "C" {
         height: u32,
     ) -> i32;
 
+    pub fn _whir_fused_fold_and_sumcheck_required_temp_buffer_size(pre_fold_height: u32) -> u32;
+
+    fn _whir_fused_fold_and_sumcheck(
+        f_coeffs: *const EF,
+        w_moments: *const EF,
+        f_folded: *mut EF,
+        w_folded: *mut EF,
+        output: *mut EF,
+        tmp_block_sums: *mut EF,
+        alpha: EF,
+        pre_fold_height: u32,
+    ) -> i32;
+
     fn _w_moments_accumulate(
         w_moments: *const EF,
         z0_pows2: *const EF,
@@ -128,6 +141,56 @@ pub unsafe fn whir_fold_coeffs_and_moments(
         w_folded_moments.as_mut_ptr(),
         alpha,
         height,
+    ))
+}
+
+/// Fused fold (previous round) + sumcheck (current round) for WHIR.
+///
+/// Folds `f_coeffs` and `w_moments` (both of length `pre_fold_height`) by `alpha`, writing
+/// folded results to `f_folded` and `w_folded` (each of length `pre_fold_height / 2`), while
+/// simultaneously computing the WHIR sumcheck polynomial at X=1 and X=2 on the folded values.
+/// The sumcheck result is written to `output` (length >= 2).
+///
+/// This eliminates the separate read pass that the next round's standalone sumcheck would need.
+///
+/// # Safety
+/// - `f_coeffs` and `w_moments` have length `pre_fold_height`, which is a power of two >= 4.
+/// - `f_folded` and `w_folded` have length `pre_fold_height / 2`.
+/// - `output` has length at least 2.
+/// - `tmp_block_sums` has length at least
+///   `_whir_fused_fold_and_sumcheck_required_temp_buffer_size(pre_fold_height)`.
+pub unsafe fn whir_fused_fold_and_sumcheck(
+    f_coeffs: &DeviceBuffer<EF>,
+    w_moments: &DeviceBuffer<EF>,
+    f_folded: &mut DeviceBuffer<EF>,
+    w_folded: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+    alpha: EF,
+    pre_fold_height: u32,
+) -> Result<(), CudaError> {
+    debug_assert!(f_coeffs.len() >= pre_fold_height as usize);
+    debug_assert!(w_moments.len() >= pre_fold_height as usize);
+    debug_assert!(f_folded.len() >= pre_fold_height as usize / 2);
+    debug_assert!(w_folded.len() >= pre_fold_height as usize / 2);
+    #[cfg(debug_assertions)]
+    {
+        let len = tmp_block_sums.len();
+        let required = _whir_fused_fold_and_sumcheck_required_temp_buffer_size(pre_fold_height);
+        assert!(
+            len >= required as usize,
+            "tmp_block_sums len={len} < required={required}"
+        );
+    }
+    check(_whir_fused_fold_and_sumcheck(
+        f_coeffs.as_ptr(),
+        w_moments.as_ptr(),
+        f_folded.as_mut_ptr(),
+        w_folded.as_mut_ptr(),
+        output.as_mut_ptr(),
+        tmp_block_sums.as_mut_ptr(),
+        alpha,
+        pre_fold_height,
     ))
 }
 

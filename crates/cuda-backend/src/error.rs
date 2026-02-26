@@ -93,6 +93,14 @@ pub enum WhirProverError {
         whir_round: usize,
         round: usize,
     },
+    #[error(
+        "whir_fused_fold_and_sumcheck [whir_round={whir_round}, round={round}]: {error}"
+    )]
+    FusedFoldAndSumcheckRound {
+        error: CudaError,
+        whir_round: usize,
+        round: usize,
+    },
     #[error("split_ext_poly_to_base_col_major_matrix [whir_round={whir_round}]: {error}")]
     SplitExtPoly { error: CudaError, whir_round: usize },
     #[error("batch_expand_pad [whir_round={whir_round}]: {error}")]
