@@ -140,7 +140,7 @@ pub fn prove_zerocheck_and_logup_gpu(
     let n_logup = calculate_n_logup(l_skip, total_interactions);
     // There's no stride threshold for `interactions_layout` because there's no univariate skip for
     // GKR
-    let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
+    let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta).unwrap();
 
     // Grind to increase soundness of random sampling for LogUp
     let logup_pow_witness = transcript

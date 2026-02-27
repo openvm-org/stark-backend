@@ -1051,6 +1051,7 @@ fn run_whir_test(
             params.k_whir(),
             &traces,
         )
+        .unwrap()
     };
 
     let mut commits = vec![common_main_commit];
@@ -1063,7 +1064,7 @@ fn run_whir_test(
         for cd in pcs_datas {
             let data = &cd.data;
             committed_mats.push((&data.matrix, &data.tree));
-            commits.push(data.commit());
+            commits.push(data.commit().unwrap());
         }
     }
 
@@ -1080,7 +1081,8 @@ fn run_whir_test(
         params.whir(),
         &committed_mats,
         &z_cube,
-    );
+    )
+    .unwrap();
 
     let stacking_openings = committed_mats
         .iter()
@@ -1223,7 +1225,8 @@ pub fn whir_multiple_commitments() -> Result<(), VerifyWhirError> {
             params.log_blowup,
             params.k_whir(),
             &[&mat],
-        );
+        )
+        .unwrap();
 
         matrices.push(mat);
         commits.push(commit);
@@ -1245,7 +1248,8 @@ pub fn whir_multiple_commitments() -> Result<(), VerifyWhirError> {
         params.whir(),
         &committed_mats,
         &z_cube,
-    );
+    )
+    .unwrap();
 
     let stacking_openings: Vec<Vec<EF>> = matrices
         .iter()
@@ -1303,7 +1307,8 @@ pub fn whir_multiple_commitments_negative() {
             params.log_blowup,
             params.k_whir(),
             &[&mat],
-        );
+        )
+        .unwrap();
 
         matrices.push(mat);
         commits.push(commit);
@@ -1326,7 +1331,8 @@ pub fn whir_multiple_commitments_negative() {
         params.whir(),
         &committed_mats,
         &z_cube,
-    );
+    )
+    .unwrap();
 
     let mut stacking_openings: Vec<Vec<EF>> = matrices
         .iter()

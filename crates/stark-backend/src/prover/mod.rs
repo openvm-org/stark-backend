@@ -11,6 +11,7 @@ use crate::{
 };
 
 mod cpu_backend;
+pub mod error;
 mod hal;
 mod logup_zerocheck;
 mod matrix;
@@ -23,6 +24,7 @@ mod types;
 pub mod whir;
 
 pub use cpu_backend::*;
+pub use error::*;
 pub use hal::*;
 pub use logup_zerocheck::*;
 pub use matrix::*;

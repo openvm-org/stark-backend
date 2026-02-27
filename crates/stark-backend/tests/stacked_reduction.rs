@@ -89,7 +89,8 @@ fn generate_single_column_test_case() -> StackedReductionTestCase {
         .collect_vec();
 
     let slice = StackedSlice::new(0, 0, L_SKIP + N_STACK);
-    let layout = StackedLayout::from_raw_parts(L_SKIP, L_SKIP + N_STACK, vec![(0, 0, slice)]);
+    let layout =
+        StackedLayout::from_raw_parts(L_SKIP, L_SKIP + N_STACK, vec![(0, 0, slice)]).unwrap();
 
     let q = generate_random_linear_q(&mut rng);
     let r = (0..=N_STACK)

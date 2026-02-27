@@ -119,6 +119,7 @@ fn test_stacked_opening_reduction(
                 .map(|(_, trace)| trace)
                 .collect_vec(),
         )
+        .unwrap()
     };
 
     let omega_skip = F::two_adic_generator(params.l_skip);

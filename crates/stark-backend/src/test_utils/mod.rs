@@ -91,7 +91,8 @@ fn commit_cached_trace<SC: StarkProtocolConfig>(
         params.log_blowup,
         params.k_whir(),
         &[&trace],
-    );
+    )
+    .unwrap();
     CommittedTraceData {
         commitment,
         trace,
@@ -307,7 +308,8 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for CachedFixture11<SC> {
                     params.log_blowup,
                     params.k_whir(),
                     &[&cached],
-                );
+                )
+                .unwrap();
                 assert_eq!(common.height(), cached.height());
                 let cached_data = CommittedTraceData {
                     commitment: commit,

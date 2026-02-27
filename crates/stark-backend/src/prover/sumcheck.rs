@@ -16,7 +16,8 @@ use crate::{
     dft::Radix2BowersSerial,
     poly_common::UnivariatePoly,
     prover::{
-        ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, MatrixView, StridedColMajorMatrixView,
+        error::SumcheckError, ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, MatrixView,
+        StridedColMajorMatrixView,
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
@@ -426,10 +427,11 @@ pub struct SumcheckPrismProof<EF> {
 //
 // NOTE[jpw]: we currently fix EF for the transcript, but the evaluations in F can be either base
 // field or extension field
+#[allow(clippy::type_complexity)]
 pub fn sumcheck_multilinear<SC: StarkProtocolConfig, F: Field, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
     evals: &[F],
-) -> (SumcheckCubeProof<SC::EF>, Vec<SC::EF>)
+) -> Result<(SumcheckCubeProof<SC::EF>, Vec<SC::EF>), SumcheckError>
 where
     SC::EF: ExtensionField<F>,
 {
@@ -454,7 +456,9 @@ where
                 [evals[0][0]]
             });
 
-        assert_eq!(s.len(), 1);
+        if s.len() != 1 {
+            return Err(SumcheckError::MultilinearRoundPolyLen { len: s.len() });
+        }
         transcript.observe_ext(s[0]);
         round_polys_eval.push(s);
 
@@ -466,20 +470,24 @@ where
     }
 
     // After all rounds, current_evals should have exactly one element
-    assert_eq!(current_evals.values.len(), 1);
+    if current_evals.values.len() != 1 {
+        return Err(SumcheckError::MultilinearFinalEvalLen {
+            len: current_evals.values.len(),
+        });
+    }
     let eval_claim = current_evals.values[0];
 
     // Add final evaluation to transcript
     transcript.observe_ext(eval_claim);
 
-    (
+    Ok((
         SumcheckCubeProof {
             sum_claim,
             round_polys_eval,
             eval_claim,
         },
         r,
-    )
+    ))
 }
 
 /// "Plain" sumcheck on a prismalinear polynomial with Gruen's univariate skip.
@@ -498,17 +506,20 @@ where
 // field or extension field.
 // - for simplicity, the transcript observes `sum_claim` and `s_0` as valued in `EF`. More
 //   fine-grained approaches may observe in `F`.
+#[allow(clippy::type_complexity)]
 pub fn sumcheck_prismalinear<SC: StarkProtocolConfig, F, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
     l_skip: usize,
     evals: &[F],
-) -> (SumcheckPrismProof<SC::EF>, Vec<SC::EF>)
+) -> Result<(SumcheckPrismProof<SC::EF>, Vec<SC::EF>), SumcheckError>
 where
     F: TwoAdicField,
     SC::EF: ExtensionField<F> + TwoAdicField,
 {
     let prism_dim = log2_strict_usize(evals.len());
-    assert!(prism_dim >= l_skip);
+    if prism_dim < l_skip {
+        return Err(SumcheckError::PrismalinearDimTooSmall { prism_dim, l_skip });
+    }
     let n = prism_dim - l_skip;
 
     let mut round_polys_eval = Vec::with_capacity(n);
@@ -563,7 +574,9 @@ where
             &[current_evals.as_view()],
             |_x, _y, evals| [evals[0][0]],
         );
-        assert_eq!(s.len(), 1);
+        if s.len() != 1 {
+            return Err(SumcheckError::PrismalinearRoundPolyLen { len: s.len() });
+        }
         transcript.observe_ext(s[0]);
         round_polys_eval.push(s);
 
@@ -574,15 +587,24 @@ where
         current_evals = fold_mle_evals(current_evals, r_round);
     }
 
-    assert_eq!(r.len(), n + 1);
+    if r.len() != n + 1 {
+        return Err(SumcheckError::PrismalinearRLen {
+            r_len: r.len(),
+            expected: n + 1,
+        });
+    }
     // After all rounds, current_evals should have exactly one element
-    assert_eq!(current_evals.values.len(), 1);
+    if current_evals.values.len() != 1 {
+        return Err(SumcheckError::PrismalinearFinalEvalLen {
+            len: current_evals.values.len(),
+        });
+    }
     let eval_claim = current_evals.values[0];
 
     // Add final evaluation to transcript
     transcript.observe_ext(eval_claim);
 
-    (
+    Ok((
         SumcheckPrismProof {
             sum_claim,
             s_0: s_0_ext,
@@ -590,5 +612,5 @@ where
             eval_claim,
         },
         r,
-    )
+    ))
 }

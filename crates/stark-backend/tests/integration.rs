@@ -59,7 +59,7 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = default_duplex_sponge();
     let mut verifier_sponge = default_duplex_sponge();
 
-    let (proof, _) = sumcheck_multilinear::<SC, _, _>(&mut prover_sponge, &evals);
+    let (proof, _) = sumcheck_multilinear::<SC, _, _>(&mut prover_sponge, &evals).unwrap();
     verify_sumcheck_multilinear::<SC, _>(&mut verifier_sponge, &proof)
 }
 
@@ -80,7 +80,7 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = default_duplex_sponge();
     let mut verifier_sponge = default_duplex_sponge();
 
-    let (proof, _) = sumcheck_prismalinear::<SC, _, _>(&mut prover_sponge, l_skip, &evals);
+    let (proof, _) = sumcheck_prismalinear::<SC, _, _>(&mut prover_sponge, l_skip, &evals).unwrap();
     verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
@@ -114,6 +114,7 @@ fn test_stacked_opening_reduction(
                 .map(|(_, trace)| trace)
                 .collect_vec(),
         )
+        .unwrap()
     };
 
     let omega_skip = F::two_adic_generator(params.l_skip);

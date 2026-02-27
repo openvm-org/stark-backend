@@ -86,7 +86,8 @@ fn prove_and_verify_sum_air(
         params.log_blowup,
         params.k_whir(),
         &[&y_trace],
-    );
+    )
+    .unwrap();
 
     let trace_ctx = AirProvingContext {
         cached_mains: vec![CommittedTraceData {

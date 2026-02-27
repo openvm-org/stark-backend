@@ -16,6 +16,7 @@ use crate::{
     parizip,
     poly_common::{eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
     prover::{
+        error::LogupZerocheckError,
         logup_zerocheck::EvalHelper,
         poly::evals_eq_hypercubes,
         stacked_pcs::StackedLayout,
@@ -81,7 +82,7 @@ where
         interactions_layout: StackedLayout,
         alpha_logup: SC::EF,
         beta_logup: SC::EF,
-    ) -> Self {
+    ) -> Result<Self, LogupZerocheckError> {
         let l_skip = pk.params.l_skip;
         let omega_skip = SC::F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
@@ -138,38 +139,54 @@ where
                         match var.entry {
                             Entry::Preprocessed { offset } => {
                                 rotation = max(rotation, offset);
-                                assert!(var.index < preprocessed_trace.as_ref().unwrap().width());
+                                let width = preprocessed_trace.as_ref().unwrap().width();
+                                if var.index >= width {
+                                    return Err(
+                                        LogupZerocheckError::PreprocessedIndexOutOfBounds {
+                                            index: var.index,
+                                            width,
+                                        },
+                                    );
+                                }
                             }
                             Entry::Main { part_index, offset } => {
                                 rotation = max(rotation, offset);
-                                assert!(
-                                    var.index < partitioned_main_trace[part_index].width(),
-                                    "col_index={} >= main partition {} width={}",
-                                    var.index,
-                                    part_index,
-                                    partitioned_main_trace[part_index].width()
-                                );
+                                let width = partitioned_main_trace[part_index].width();
+                                if var.index >= width {
+                                    return Err(
+                                        LogupZerocheckError::MainPartitionIndexOutOfBounds {
+                                            part_index,
+                                            col_index: var.index,
+                                            width,
+                                        },
+                                    );
+                                }
                             }
                             Entry::Public => {
-                                assert!(var.index < public_values.len());
+                                if var.index >= public_values.len() {
+                                    return Err(LogupZerocheckError::PublicValueIndexOutOfBounds {
+                                        index: var.index,
+                                        len: public_values.len(),
+                                    });
+                                }
                             }
-                            _ => unreachable!("after_challenge not supported"),
+                            _ => return Err(LogupZerocheckError::AfterChallengeNotSupported),
                         }
                     }
                 }
                 let needs_next = pk.vk.params.need_rot;
                 debug_assert_eq!(needs_next, rotation > 0);
                 let symbolic_constraints = SymbolicConstraints::from(&pk.vk.symbolic_constraints);
-                EvalHelper {
+                Ok(EvalHelper {
                     constraints_dag: &pk.vk.symbolic_constraints.constraints,
                     interactions: symbolic_constraints.interactions,
                     public_values,
                     preprocessed_trace,
                     needs_next,
                     constraint_degree,
-                }
+                })
             })
-            .collect(); // end of preparation / loading of constraints
+            .collect::<Result<_, _>>()?; // end of preparation / loading of constraints
         let max_num_constraints = pk
             .per_air
             .iter()
@@ -179,7 +196,7 @@ where
 
         let zerocheck_tilde_evals = vec![SC::EF::ZERO; num_airs_present];
         let logup_tilde_evals = vec![[SC::EF::ZERO; 2]; num_airs_present];
-        Self {
+        Ok(Self {
             alpha_logup,
             beta_pows,
             l_skip,
@@ -204,7 +221,7 @@ where
             prev_s_eval: SC::EF::ZERO,
             eq_ns: Vec::with_capacity(n_max + 1),
             eq_sharp_ns: Vec::with_capacity(n_max + 1),
-        }
+        })
     }
 
     /// Returns the `s_0` polynomials in coefficient form. There should be exactly `num_airs_present
@@ -217,7 +234,7 @@ where
         &mut self,
         ctx: &ProvingContext<CpuBackend<SC>>,
         lambda: SC::EF,
-    ) -> Vec<UnivariatePoly<SC::EF>> {
+    ) -> Result<Vec<UnivariatePoly<SC::EF>>, LogupZerocheckError> {
         let n_logup = self.n_logup;
         let l_skip = self.l_skip;
         let xi = &self.xi;
@@ -230,30 +247,38 @@ where
             .par_iter()
             .zip(&self.n_per_trace)
             .enumerate()
-            .map(|(trace_idx, (helper, &n))| {
-                // Everything for logup is done with respect to lifted traces
-                // Note: `n_lift = \tilde{n}` from the paper
-                let n_lift = n.max(0) as usize;
-                if helper.interactions.is_empty() {
-                    return vec![];
-                }
-                let mut b_vec = vec![SC::F::ZERO; n_logup - n_lift];
-                (0..helper.interactions.len())
-                    .map(|i| {
-                        // PERF[jpw]: interactions_layout.get is linear
-                        let stacked_idx =
-                            self.interactions_layout.get(trace_idx, i).unwrap().row_idx;
-                        debug_assert!(stacked_idx.trailing_zeros() as usize >= n_lift + l_skip);
-                        let mut b_int = stacked_idx >> (l_skip + n_lift);
-                        for b in &mut b_vec {
-                            *b = SC::F::from_bool(b_int & 1 == 1);
-                            b_int >>= 1;
-                        }
-                        eval_eq_mle(&xi[l_skip + n_lift..l_skip + n_logup], &b_vec)
-                    })
-                    .collect_vec()
-            })
-            .collect::<Vec<_>>();
+            .map(
+                |(trace_idx, (helper, &n))| -> Result<Vec<SC::EF>, LogupZerocheckError> {
+                    // Everything for logup is done with respect to lifted traces
+                    // Note: `n_lift = \tilde{n}` from the paper
+                    let n_lift = n.max(0) as usize;
+                    if helper.interactions.is_empty() {
+                        return Ok(vec![]);
+                    }
+                    let mut b_vec = vec![SC::F::ZERO; n_logup - n_lift];
+                    (0..helper.interactions.len())
+                        .map(|i| {
+                            // PERF[jpw]: interactions_layout.get is linear
+                            let stacked_idx = self
+                                .interactions_layout
+                                .get(trace_idx, i)
+                                .ok_or(LogupZerocheckError::InteractionsLayoutMissing {
+                                    trace_idx,
+                                    interaction_idx: i,
+                                })?
+                                .row_idx;
+                            debug_assert!(stacked_idx.trailing_zeros() as usize >= n_lift + l_skip);
+                            let mut b_int = stacked_idx >> (l_skip + n_lift);
+                            for b in &mut b_vec {
+                                *b = SC::F::from_bool(b_int & 1 == 1);
+                                b_int >>= 1;
+                            }
+                            Ok(eval_eq_mle(&xi[l_skip + n_lift..l_skip + n_logup], &b_vec))
+                        })
+                        .collect()
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
 
         // PERF[jpw]: make Hashmap from unique n -> eq_n(xi, -)
         // NOTE: this is evaluations of `x -> eq_{H_{\tilde n}}(x, \xi[l_skip..l_skip + \tilde n])`
@@ -394,7 +419,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        sp_0_logups.into_iter().chain(sp_0_zerochecks).collect()
+        Ok(sp_0_logups.into_iter().chain(sp_0_zerochecks).collect())
     }
 
     /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
@@ -433,9 +458,21 @@ where
     /// Returns length `3 * num_airs_present` polynomials, each polynomial either evaluated at
     /// `1,...,deg(s')` or at `1` if a linear term (terms in front-loaded sumcheck that have reached
     /// exhaustion)
-    pub fn sumcheck_polys_eval(&mut self, round: usize, r_prev: SC::EF) -> Vec<Vec<SC::EF>> {
+    pub fn sumcheck_polys_eval(
+        &mut self,
+        round: usize,
+        r_prev: SC::EF,
+    ) -> Result<Vec<Vec<SC::EF>>, LogupZerocheckError> {
         // sp = s'
         let sp_deg = self.constraint_degree;
+        let eq_r_acc = *self
+            .eq_ns
+            .last()
+            .ok_or(LogupZerocheckError::EqNsEmpty { round })?;
+        let eq_sharp_r_acc = *self
+            .eq_sharp_ns
+            .last()
+            .ok_or(LogupZerocheckError::EqSharpNsEmpty { round })?;
         let sp_zerocheck_evals: Vec<Vec<SC::EF>> = parizip!(
             &self.eval_helpers,
             &mut self.zerocheck_tilde_evals,
@@ -454,7 +491,6 @@ where
                         .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
                         .collect_vec();
                     // eq(xi, \vect r_{round-1})
-                    let eq_r_acc = *self.eq_ns.last().unwrap();
                     *tilde_eval = eq_r_acc * helper.acc_constraints(&parts, &self.lambda_pows);
                 } else {
                     *tilde_eval *= r_prev;
@@ -502,7 +538,6 @@ where
                         .chain(mats)
                         .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
                         .collect_vec();
-                    let eq_sharp_r_acc = *self.eq_sharp_ns.last().unwrap();
                     *tilde_eval = helper
                         .acc_interactions(&parts, &self.beta_pows, eq_3bs)
                         .map(|x| eq_sharp_r_acc * x);
@@ -536,10 +571,10 @@ where
         })
         .collect();
 
-        sp_logup_evals
+        Ok(sp_logup_evals
             .into_iter()
             .chain(sp_zerocheck_evals)
-            .collect()
+            .collect())
     }
 
     pub fn fold_mle_evals(&mut self, round: usize, r_round: SC::EF) {
@@ -604,7 +639,7 @@ where
         }
     }
 
-    pub fn into_column_openings(&mut self) -> Vec<Vec<Vec<SC::EF>>> {
+    pub fn into_column_openings(&mut self) -> Result<Vec<Vec<Vec<SC::EF>>>, LogupZerocheckError> {
         let num_airs_present = self.mat_evals_per_trace.len();
         let mut column_openings = Vec::with_capacity(num_airs_present);
         // At the end, we've folded all MLEs so they only have one row equal to evaluation at `\vec
@@ -617,28 +652,34 @@ where
             // For column openings, we pop common_main (and common_main_rot when present) and put it
             // at the front.
             let openings_of_air: Vec<Vec<SC::EF>> = if helper.needs_next {
-                let common_main_rot = mat_evals.pop().unwrap();
-                let common_main = mat_evals.pop().unwrap();
+                let common_main_rot = mat_evals
+                    .pop()
+                    .ok_or(LogupZerocheckError::MatEvalsPopNone)?;
+                let common_main = mat_evals
+                    .pop()
+                    .ok_or(LogupZerocheckError::MatEvalsPopNone)?;
                 iter::once(&[common_main, common_main_rot] as &[_])
                     .chain(mat_evals.chunks_exact(2))
                     .map(|pair| {
                         zip(pair[0].columns(), pair[1].columns())
                             .flat_map(|(claim, claim_rot)| {
-                                assert_eq!(claim.len(), 1);
-                                assert_eq!(claim_rot.len(), 1);
+                                debug_assert_eq!(claim.len(), 1);
+                                debug_assert_eq!(claim_rot.len(), 1);
                                 [claim[0], claim_rot[0]]
                             })
                             .collect_vec()
                     })
                     .collect_vec()
             } else {
-                let common_main = mat_evals.pop().unwrap();
+                let common_main = mat_evals
+                    .pop()
+                    .ok_or(LogupZerocheckError::MatEvalsPopNone)?;
                 iter::once(common_main)
                     .chain(mat_evals.into_iter())
                     .map(|mat| {
                         mat.columns()
                             .map(|claim| {
-                                assert_eq!(claim.len(), 1);
+                                debug_assert_eq!(claim.len(), 1);
                                 claim[0]
                             })
                             .collect_vec()
@@ -647,6 +688,6 @@ where
             };
             column_openings.push(openings_of_air);
         }
-        column_openings
+        Ok(column_openings)
     }
 }

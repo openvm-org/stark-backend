@@ -100,7 +100,8 @@ fn test_gkr_1_round_integration() {
     ];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) =
+        fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true).unwrap();
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -146,7 +147,8 @@ fn test_gkr_2_round_integration() {
     ];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) =
+        fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true).unwrap();
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -208,7 +210,8 @@ fn test_gkr_3_round_integration() {
     ];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) =
+        fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true).unwrap();
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -246,7 +249,8 @@ fn test_gkr_mixed_fractions() {
     ];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) =
+        fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true).unwrap();
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -274,7 +278,8 @@ fn test_gkr_empty_case() {
     let fractions = vec![];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) =
+        fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true).unwrap();
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,

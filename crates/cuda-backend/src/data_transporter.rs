@@ -181,9 +181,9 @@ pub fn transport_and_unstack_single_data_h2d(
     };
     // Sanity check. Not a strong assert because we transport the merkle tree
     // instead of recomputing it above.
-    assert_eq!(d_data.tree.root(), d.commit());
+    assert_eq!(d_data.tree.root(), d.commit().unwrap());
     Ok(CommittedTraceData {
-        commitment: d.commit(),
+        commitment: d.commit().unwrap(),
         trace: DeviceMatrix::new(Arc::new(trace_buffer), height, width),
         data: Arc::new(d_data),
     })
@@ -208,7 +208,7 @@ pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
         backing_matrix,
         digest_layers,
         rows_per_query: tree.rows_per_query(),
-        root: tree.root(),
+        root: tree.root().unwrap(),
     })
 }
 
