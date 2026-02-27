@@ -3,7 +3,11 @@
 //! This module provides batch evaluators for monomial evaluations across multiple AIRs,
 //! enabling efficient GPU kernel launches that process multiple traces in a single launch.
 
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{
+    copy::MemCopyH2D,
+    d_buffer::DeviceBuffer,
+    error::{CudaError, MemCopyError},
+};
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
 use tracing::debug;
@@ -15,6 +19,7 @@ use crate::{
         zerocheck_monomial_batched, zerocheck_monomial_par_y_batched, BlockCtx, EvalCoreCtx,
         LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
     },
+    error::KernelError,
     logup_zerocheck::batch_mle::TraceCtx,
     prelude::EF,
     GpuBackend,
@@ -122,7 +127,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         lambda_combinations: &[&DeviceBuffer<EF>],
-    ) -> Self {
+    ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
             !traces.is_empty(),
@@ -192,28 +197,22 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             .collect();
 
         // Upload to device
-        let block_ctxs = block_ctxs_h
-            .to_device()
-            .expect("failed to copy monomial block ctxs to device");
-        let air_ctxs = air_ctxs_h
-            .to_device()
-            .expect("failed to copy monomial air ctxs to device");
-        let air_offsets = air_offsets
-            .to_device()
-            .expect("failed to copy air offsets to device");
+        let block_ctxs = block_ctxs_h.to_device()?;
+        let air_ctxs = air_ctxs_h.to_device()?;
+        let air_offsets = air_offsets.to_device()?;
 
         debug!(
             num_airs = traces.len(),
-            num_blocks = block_ctxs_h.len(),
+            num_blocks = block_ctxs.len(),
             "ZerocheckMonomialBatch created"
         );
 
-        Self {
+        Ok(Self {
             traces,
             block_ctxs,
             air_ctxs,
             air_offsets,
-        }
+        })
     }
 
     /// Returns the trace indices in order.
@@ -226,7 +225,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
     /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
-    pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<EF> {
+    pub fn evaluate(&self, num_x: u32) -> Result<DeviceBuffer<EF>, KernelError> {
         let num_blocks = self.block_ctxs.len();
         let num_airs = self.air_ctxs.len();
 
@@ -259,11 +258,10 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 num_x,
                 num_airs as u32,
                 THREADS_PER_BLOCK,
-            )
-            .expect("zerocheck monomial batched kernel failed");
+            )?;
         }
 
-        output
+        Ok(output)
     }
 }
 
@@ -308,7 +306,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
         sm_count: u32,
         num_x: u32,
         max_monomials_per_thread: Option<u32>,
-    ) -> Self {
+    ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
             !traces.is_empty(),
@@ -422,29 +420,23 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             .collect();
 
         // Upload to device
-        let block_ctxs = block_ctxs_h
-            .to_device()
-            .expect("failed to copy par_y block ctxs to device");
-        let air_ctxs = air_ctxs_h
-            .to_device()
-            .expect("failed to copy par_y air ctxs to device");
-        let air_offsets = air_offsets
-            .to_device()
-            .expect("failed to copy par_y air offsets to device");
+        let block_ctxs = block_ctxs_h.to_device()?;
+        let air_ctxs = air_ctxs_h.to_device()?;
+        let air_offsets = air_offsets.to_device()?;
 
         debug!(
             num_airs = traces.len(),
             num_blocks, chunk_size, max_monomials, "ZerocheckMonomialParYBatch created"
         );
 
-        Self {
+        Ok(Self {
             traces,
             block_ctxs,
             air_ctxs,
             air_offsets,
             num_blocks,
             chunk_size,
-        }
+        })
     }
 
     /// Returns the trace indices in order.
@@ -457,7 +449,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
     /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
-    pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<EF> {
+    pub fn evaluate(&self, num_x: u32) -> Result<DeviceBuffer<EF>, KernelError> {
         let num_airs = self.air_ctxs.len();
 
         debug!(
@@ -492,11 +484,10 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                 num_airs as u32,
                 self.chunk_size,
                 THREADS_PER_BLOCK_PAR_Y,
-            )
-            .expect("zerocheck monomial par_y batched kernel failed");
+            )?;
         }
 
-        output
+        Ok(output)
     }
 }
 
@@ -616,7 +607,7 @@ impl<'a> LogupMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         logup_combinations: &[&LogupCombinations],
-    ) -> Self {
+    ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
             !traces.is_empty(),
@@ -726,28 +717,18 @@ impl<'a> LogupMonomialBatch<'a> {
             .collect();
 
         // Upload to device
-        let block_ctxs = block_ctxs_h
-            .to_device()
-            .expect("failed to copy logup block ctxs to device");
-        let common_ctxs = common_ctxs_h
-            .to_device()
-            .expect("failed to copy logup common ctxs to device");
-        let numer_ctxs = numer_ctxs_h
-            .to_device()
-            .expect("failed to copy logup numer ctxs to device");
-        let denom_ctxs = denom_ctxs_h
-            .to_device()
-            .expect("failed to copy logup denom ctxs to device");
-        let air_offsets = air_offsets
-            .to_device()
-            .expect("failed to copy logup air offsets to device");
+        let block_ctxs = block_ctxs_h.to_device()?;
+        let common_ctxs = common_ctxs_h.to_device()?;
+        let numer_ctxs = numer_ctxs_h.to_device()?;
+        let denom_ctxs = denom_ctxs_h.to_device()?;
+        let air_offsets = air_offsets.to_device()?;
 
         debug!(
             num_airs = traces.len(),
             num_blocks, "LogupMonomialBatch created"
         );
 
-        Self {
+        Ok(Self {
             traces,
             block_ctxs,
             common_ctxs,
@@ -755,7 +736,7 @@ impl<'a> LogupMonomialBatch<'a> {
             denom_ctxs,
             air_offsets,
             num_blocks,
-        }
+        })
     }
 
     /// Returns the trace indices in order.
@@ -768,7 +749,7 @@ impl<'a> LogupMonomialBatch<'a> {
     /// The buffer contains `num_airs * num_x` FracExt elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
     /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
-    pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<Frac<EF>> {
+    pub fn evaluate(&self, num_x: u32) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
         let num_airs = self.common_ctxs.len();
 
         debug!(
@@ -803,10 +784,9 @@ impl<'a> LogupMonomialBatch<'a> {
                 num_x,
                 num_airs as u32,
                 THREADS_PER_BLOCK_LOGUP,
-            )
-            .expect("logup monomial batched kernel failed");
+            )?;
         }
 
-        output
+        Ok(output)
     }
 }

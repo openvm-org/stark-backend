@@ -76,6 +76,7 @@ where
     TS: FiatShamirTranscript<SC>,
 {
     type Proof = Proof<SC>;
+    type Error = <PD as ProverDevice<PB, TS>>::Error;
     type ProvingKeyView<'a>
         = &'a DeviceMultiStarkProvingKey<PB>
     where
@@ -102,7 +103,7 @@ where
         &'a mut self,
         mpk: &'a DeviceMultiStarkProvingKey<PB>,
         unsorted_ctx: ProvingContext<PB>,
-    ) -> Self::Proof {
+    ) -> Result<Self::Proof, Self::Error> {
         let transcript = &mut self.transcript;
         transcript.observe_commit(mpk.vk_pre_hash);
 
@@ -118,7 +119,7 @@ where
                 .common_main_traces()
                 .map(|(_, trace)| trace)
                 .collect_vec();
-            self.device.commit(&traces)
+            self.device.commit(&traces)?
         };
 
         let mut trace_vdata: Vec<Option<TraceVData<SC>>> = vec![None; mpk.per_air.len()];
@@ -173,16 +174,16 @@ where
 
         let (constraints_proof, r) =
             self.device
-                .prove_rap_constraints(transcript, mpk, &ctx, &common_main_pcs_data);
+                .prove_rap_constraints(transcript, mpk, &ctx, &common_main_pcs_data)?;
 
         let opening_proof =
             self.device
-                .prove_openings(transcript, mpk, ctx, common_main_pcs_data, r.into());
+                .prove_openings(transcript, mpk, ctx, common_main_pcs_data, r.into())?;
 
         let (gkr_proof, batch_constraint_proof) = constraints_proof.into();
         let (stacking_proof, whir_proof) = opening_proof.into();
 
-        Proof::<SC> {
+        Ok(Proof::<SC> {
             public_values,
             trace_vdata,
             common_main_commit,
@@ -190,6 +191,6 @@ where
             batch_constraint_proof,
             stacking_proof,
             whir_proof,
-        }
+        })
     }
 }

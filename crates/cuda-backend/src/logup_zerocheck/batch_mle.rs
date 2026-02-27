@@ -6,6 +6,7 @@
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
+    error::MemCopyError,
 };
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 
@@ -15,6 +16,7 @@ use crate::{
         _logup_batch_mle_intermediates_buffer_size, _zerocheck_batch_mle_intermediates_buffer_size,
         logup_batch_eval_mle, zerocheck_batch_eval_mle,
     },
+    error::KernelError,
     logup_zerocheck::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
         mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
@@ -125,18 +127,18 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
         traces: impl Iterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         num_x: u32,
-    ) -> Self {
+    ) -> Result<Self, MemCopyError> {
         let traces: Vec<&TraceCtx> = traces.filter(|t| t.has_constraints).collect();
 
         if traces.is_empty() {
-            return Self {
+            return Ok(Self {
                 traces: vec![],
                 d_block_ctxs: DeviceBuffer::new(),
                 d_zc_ctxs: DeviceBuffer::new(),
                 air_offsets: DeviceBuffer::new(),
                 threads_per_block: 0,
                 _intermediates_keepalive: vec![],
-            };
+            });
         }
 
         // Compute threads_per_block from max_num_y
@@ -200,18 +202,18 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
         }
 
         // Upload to device
-        let d_block_ctxs = block_ctxs_h.to_device().expect("copy zc block ctxs");
-        let d_zc_ctxs = zc_ctxs_h.to_device().expect("copy zc ctxs");
-        let air_offsets = air_offsets.to_device().expect("copy zc air offsets");
+        let d_block_ctxs = block_ctxs_h.to_device()?;
+        let d_zc_ctxs = zc_ctxs_h.to_device()?;
+        let air_offsets = air_offsets.to_device()?;
 
-        Self {
+        Ok(Self {
             traces,
             d_block_ctxs,
             d_zc_ctxs,
             air_offsets,
             threads_per_block,
             _intermediates_keepalive: intermediates_keepalive,
-        }
+        })
     }
 
     /// Returns true if there are no traces to evaluate.
@@ -229,9 +231,13 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
     ///
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
-    pub fn evaluate(&self, lambda_pows: &DeviceBuffer<EF>, num_x: u32) -> DeviceBuffer<EF> {
+    pub fn evaluate(
+        &self,
+        lambda_pows: &DeviceBuffer<EF>,
+        num_x: u32,
+    ) -> Result<DeviceBuffer<EF>, KernelError> {
         if self.traces.is_empty() {
-            return DeviceBuffer::new();
+            return Ok(DeviceBuffer::new());
         }
 
         evaluate_mle_constraints_gpu_batch(
@@ -268,18 +274,18 @@ impl<'a> LogupMleBatchBuilder<'a> {
         pk: &DeviceMultiStarkProvingKey<GpuBackend>,
         d_challenges_ptr: *const EF,
         num_x: u32,
-    ) -> Self {
+    ) -> Result<Self, MemCopyError> {
         let traces: Vec<&TraceCtx> = traces.filter(|t| t.has_interactions).collect();
 
         if traces.is_empty() {
-            return Self {
+            return Ok(Self {
                 traces: vec![],
                 d_block_ctxs: DeviceBuffer::new(),
                 d_logup_ctxs: DeviceBuffer::new(),
                 air_offsets: DeviceBuffer::new(),
                 threads_per_block: 0,
                 _intermediates_keepalive: vec![],
-            };
+            });
         }
 
         // Compute threads_per_block from max_num_y
@@ -356,18 +362,18 @@ impl<'a> LogupMleBatchBuilder<'a> {
         }
 
         // Upload to device
-        let d_block_ctxs = block_ctxs_h.to_device().expect("copy logup block ctxs");
-        let d_logup_ctxs = logup_ctxs_h.to_device().expect("copy logup ctxs");
-        let air_offsets = air_offsets.to_device().expect("copy logup air offsets");
+        let d_block_ctxs = block_ctxs_h.to_device()?;
+        let d_logup_ctxs = logup_ctxs_h.to_device()?;
+        let air_offsets = air_offsets.to_device()?;
 
-        Self {
+        Ok(Self {
             traces,
             d_block_ctxs,
             d_logup_ctxs,
             air_offsets,
             threads_per_block,
             _intermediates_keepalive: intermediates_keepalive,
-        }
+        })
     }
 
     /// Returns true if there are no traces to evaluate.
@@ -385,9 +391,9 @@ impl<'a> LogupMleBatchBuilder<'a> {
     ///
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
-    pub fn evaluate(&self, num_x: u32) -> DeviceBuffer<Frac<EF>> {
+    pub fn evaluate(&self, num_x: u32) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
         if self.traces.is_empty() {
-            return DeviceBuffer::new();
+            return Ok(DeviceBuffer::new());
         }
 
         evaluate_mle_interactions_gpu_batch(
@@ -411,7 +417,7 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
     num_x: u32,
     zc_out: &mut [Vec<EF>],
     memory_limit_bytes: usize,
-) {
+) -> Result<(), KernelError> {
     // Collect traces with constraints and their buffer sizes
     let mut zc_traces_with_size: Vec<(&TraceCtx, usize)> = traces
         .into_iter()
@@ -427,7 +433,7 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
         })
         .collect();
     if zc_traces_with_size.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Sort by buffer size descending for better bin packing (First Fit Decreasing)
@@ -469,8 +475,8 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
                 rules,
                 t.num_y,
                 num_x,
-            );
-            let out_host = out.to_host().expect("copy zc output");
+            )?;
+            let out_host = out.to_host()?;
             zc_out[t.trace_idx].copy_from_slice(&out_host);
         } else {
             // Normal batch using ZerocheckMleBatchBuilder
@@ -480,9 +486,9 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
                 memory_limit_bytes,
                 "zerocheck: batching traces"
             );
-            let builder = ZerocheckMleBatchBuilder::new(batch.iter().copied(), pk, num_x);
-            let out = builder.evaluate(lambda_pows, num_x);
-            let host = out.to_host().expect("copy zc output");
+            let builder = ZerocheckMleBatchBuilder::new(batch.iter().copied(), pk, num_x)?;
+            let out = builder.evaluate(lambda_pows, num_x)?;
+            let host = out.to_host()?;
 
             for (i, trace_idx) in builder.trace_indices().enumerate() {
                 let evals = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
@@ -491,6 +497,7 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
         }
         batch_start += batch_count;
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -504,7 +511,7 @@ pub(crate) fn evaluate_logup_batched(
     logup_out: &mut [[Vec<EF>; 2]],
     logup_tilde_evals: &mut [[EF; 2]],
     memory_limit_bytes: usize,
-) {
+) -> Result<(), KernelError> {
     let (low_traces, high_traces): (Vec<&TraceCtx>, Vec<&TraceCtx>) = traces
         .iter()
         .filter(|t| t.has_interactions)
@@ -515,9 +522,9 @@ pub(crate) fn evaluate_logup_batched(
             .iter()
             .map(|t| logup_combinations[t.trace_idx].as_ref().unwrap())
             .collect();
-        let batch = LogupMonomialBatch::new(low_traces.iter().copied(), pk, &logup_combs);
-        let out = batch.evaluate(num_x);
-        let host = out.to_host().expect("copy logup monomial output");
+        let batch = LogupMonomialBatch::new(low_traces.iter().copied(), pk, &logup_combs)?;
+        let out = batch.evaluate(num_x)?;
+        let host = out.to_host()?;
         let num_x_usize = num_x as usize;
         for (i, trace_idx) in batch.trace_indices().enumerate() {
             let fracs = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
@@ -535,7 +542,7 @@ pub(crate) fn evaluate_logup_batched(
     }
 
     if high_traces.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Collect high traces with interactions and their buffer sizes
@@ -586,7 +593,7 @@ pub(crate) fn evaluate_logup_batched(
                 num_x,
                 &mut logup_out[t.trace_idx],
                 &mut logup_tilde_evals[t.trace_idx],
-            );
+            )?;
         } else {
             // Normal batch using LogupMleBatchBuilder
             tracing::debug!(
@@ -596,9 +603,9 @@ pub(crate) fn evaluate_logup_batched(
                 "logup: batching traces"
             );
             let builder =
-                LogupMleBatchBuilder::new(batch.iter().copied(), pk, d_challenges_ptr, num_x);
-            let out = builder.evaluate(num_x);
-            let host = out.to_host().expect("copy logup output");
+                LogupMleBatchBuilder::new(batch.iter().copied(), pk, d_challenges_ptr, num_x)?;
+            let out = builder.evaluate(num_x)?;
+            let host = out.to_host()?;
 
             for (i, (trace_idx, norm_factor)) in builder.trace_info().enumerate() {
                 let fracs = &host[(i * num_x_usize)..((i + 1) * num_x_usize)];
@@ -614,6 +621,7 @@ pub(crate) fn evaluate_logup_batched(
         }
         batch_start += batch_count;
     }
+    Ok(())
 }
 
 /// Evaluate logup for a single trace using non-batch kernel.
@@ -624,7 +632,7 @@ fn evaluate_single_logup(
     num_x: u32,
     logup_out: &mut [Vec<EF>; 2],
     logup_tilde_eval: &mut [EF; 2],
-) {
+) -> Result<(), KernelError> {
     let air_pk = &pk.per_air[t.air_idx];
     let out = evaluate_mle_interactions_gpu(
         t.eq_xi_ptr,
@@ -637,8 +645,8 @@ fn evaluate_single_logup(
         &air_pk.other_data.interaction_rules,
         t.num_y,
         num_x,
-    );
-    let fracs = out.to_host().expect("copy logup output");
+    )?;
+    let fracs = out.to_host()?;
 
     if num_x == 1 {
         logup_tilde_eval[0] = fracs[0].p * t.norm_factor;
@@ -649,6 +657,7 @@ fn evaluate_single_logup(
         let denom: Vec<EF> = fracs.iter().map(|f| f.q).collect();
         *logup_out = [numer, denom];
     }
+    Ok(())
 }
 
 // ============================================================================
@@ -664,7 +673,7 @@ fn evaluate_mle_constraints_gpu_batch(
     lambda_len: usize,
     num_x: u32,
     threads_per_block: u32,
-) -> DeviceBuffer<EF> {
+) -> Result<DeviceBuffer<EF>, KernelError> {
     let num_blocks = block_ctxs.len();
     let num_airs = zc_ctxs.len();
     tracing::debug!(
@@ -690,10 +699,9 @@ fn evaluate_mle_constraints_gpu_batch(
             num_x,
             num_airs as u32,
             threads_per_block,
-        )
-        .expect("failed to evaluate MLE constraints (batch) on GPU");
+        )?;
     }
-    output
+    Ok(output)
 }
 
 /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
@@ -703,7 +711,7 @@ fn evaluate_mle_interactions_gpu_batch(
     air_block_offsets: &DeviceBuffer<u32>,
     num_x: u32,
     threads_per_block: u32,
-) -> DeviceBuffer<Frac<EF>> {
+) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
     let num_blocks = block_ctxs.len();
     let num_airs = logup_ctxs.len();
     // Need one buffer slot per block
@@ -720,8 +728,7 @@ fn evaluate_mle_interactions_gpu_batch(
             num_x,
             num_airs as u32,
             threads_per_block,
-        )
-        .expect("failed to evaluate MLE interactions (batch) on GPU");
+        )?;
     }
-    output
+    Ok(output)
 }

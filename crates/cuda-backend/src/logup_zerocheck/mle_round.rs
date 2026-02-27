@@ -8,6 +8,7 @@ use crate::{
         _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size,
         logup_eval_mle, zerocheck_eval_mle,
     },
+    error::KernelError,
     prelude::{EF, F},
     ConstraintOnlyRules, InteractionEvalRules,
 };
@@ -30,7 +31,7 @@ pub fn evaluate_mle_constraints_gpu(
     rules: &ConstraintOnlyRules<ZEROCHECK_BUFFER_VARS>,
     num_y: u32,
     num_x: u32,
-) -> DeviceBuffer<EF> {
+) -> Result<DeviceBuffer<EF>, KernelError> {
     let buffer_size = rules.inner.buffer_size;
     let intermed_capacity =
         unsafe { _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };
@@ -64,10 +65,9 @@ pub fn evaluate_mle_constraints_gpu(
             &mut intermediates,
             num_y,
             num_x,
-        )
-        .expect("failed to evaluate MLE constraints on GPU");
+        )?;
     }
-    output
+    Ok(output)
 }
 
 /// Evaluate MLE interactions on GPU.
@@ -86,7 +86,7 @@ pub fn evaluate_mle_interactions_gpu(
     rules: &InteractionEvalRules,
     num_y: u32,
     num_x: u32,
-) -> DeviceBuffer<Frac<EF>> {
+) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
     let buffer_size = rules.inner.buffer_size;
     let intermed_capacity =
         unsafe { _logup_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };
@@ -120,8 +120,7 @@ pub fn evaluate_mle_interactions_gpu(
             &mut intermediates,
             num_y,
             num_x,
-        )
-        .expect("failed to evaluate MLE interactions on GPU");
+        )?;
     }
-    output
+    Ok(output)
 }

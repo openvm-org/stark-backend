@@ -18,7 +18,7 @@ use crate::{
     stacked_pcs::{stacked_commit, StackedPcsDataGpu},
     stacked_reduction::prove_stacked_opening_reduction_gpu,
     whir::prove_whir_opening_gpu,
-    AirDataGpu, GpuDevice,
+    AirDataGpu, GpuDevice, ProverError,
 };
 
 #[derive(Clone, Copy)]
@@ -35,10 +35,17 @@ impl ProverBackend for GpuBackend {
     type OtherAirData = AirDataGpu;
 }
 
-impl ProverDevice<GpuBackend, DuplexSpongeGpu> for GpuDevice {}
+impl ProverDevice<GpuBackend, DuplexSpongeGpu> for GpuDevice {
+    type Error = ProverError;
+}
 
 impl TraceCommitter<GpuBackend> for GpuDevice {
-    fn commit(&self, traces: &[&DeviceMatrix<F>]) -> (Digest, StackedPcsDataGpu<F, Digest>) {
+    type Error = ProverError;
+
+    fn commit(
+        &self,
+        traces: &[&DeviceMatrix<F>],
+    ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), Self::Error> {
         stacked_commit(
             self.config.l_skip,
             self.config.n_stack,
@@ -47,7 +54,6 @@ impl TraceCommitter<GpuBackend> for GpuDevice {
             traces,
             self.prover_config,
         )
-        .unwrap()
     }
 }
 
@@ -56,7 +62,9 @@ impl MultiRapProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
     /// The random opening point `r` where the batch constraint sumcheck reduces to evaluation
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
     type Artifacts = Vec<EF>;
+    type Error = ProverError;
 
+    #[allow(clippy::type_complexity)]
     #[instrument(name = "prover.rap_constraints", skip_all, fields(phase = "prover"))]
     fn prove_rap_constraints(
         &self,
@@ -64,7 +72,7 @@ impl MultiRapProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
         mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
         ctx: &ProvingContext<GpuBackend>,
         _common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
-    ) -> ((GkrProof<SC>, BatchConstraintProof<SC>), Vec<EF>) {
+    ) -> Result<((GkrProof<SC>, BatchConstraintProof<SC>), Vec<EF>), Self::Error> {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
         let save_memory = self.prover_config.zerocheck_save_memory;
         // Threshold for monomial evaluation path based on proof type:
@@ -78,9 +86,9 @@ impl MultiRapProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
             save_memory,
             monomial_num_y_threshold,
             self.sm_count,
-        );
+        )?;
         mem.emit_metrics();
-        ((gkr_proof, batch_constraint_proof), r)
+        Ok(((gkr_proof, batch_constraint_proof), r))
     }
 }
 
@@ -88,6 +96,7 @@ impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
     type OpeningProof = (StackingProof<SC>, WhirProof<SC>);
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<EF>;
+    type Error = ProverError;
 
     #[instrument(name = "prover.openings", skip_all, fields(phase = "prover"))]
     fn prove_openings(
@@ -97,7 +106,7 @@ impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
         ctx: ProvingContext<GpuBackend>,
         common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
         r: Vec<EF>,
-    ) -> (StackingProof<SC>, WhirProof<SC>) {
+    ) -> Result<(StackingProof<SC>, WhirProof<SC>), Self::Error> {
         let mut mem = MemTracker::start_and_reset_peak("prover.openings");
         let params = self.config();
         #[cfg(debug_assertions)]
@@ -129,8 +138,7 @@ impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
             ctx,
             common_main_pcs_data,
             &r,
-        )
-        .unwrap();
+        )?;
 
         let (&u0, u_rest) = u_prisma.split_first().unwrap();
         let u_cube = u0
@@ -139,10 +147,9 @@ impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
             .chain(u_rest.iter().copied())
             .collect_vec();
 
-        let whir_proof =
-            prove_whir_opening_gpu(params, transcript, stacked_per_commit, &u_cube).unwrap();
+        let whir_proof = prove_whir_opening_gpu(params, transcript, stacked_per_commit, &u_cube)?;
         mem.emit_metrics();
         mem.reset_peak();
-        (stacking_proof, whir_proof)
+        Ok((stacking_proof, whir_proof))
     }
 }

@@ -120,12 +120,14 @@ fn test_stacked_opening_reduction(
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
 
     let device = engine.device();
-    let ((_, batch_proof), r) = device.prove_rap_constraints(
-        &mut default_duplex_sponge(),
-        &pk,
-        &ctx,
-        &common_main_pcs_data,
-    );
+    let ((_, batch_proof), r) = device
+        .prove_rap_constraints(
+            &mut default_duplex_sponge(),
+            &pk,
+            &ctx,
+            &common_main_pcs_data,
+        )
+        .unwrap();
 
     let need_rot = pk.per_air[ctx.per_trace[0].0].vk.params.need_rot;
     let need_rot_per_commit = vec![vec![need_rot]];

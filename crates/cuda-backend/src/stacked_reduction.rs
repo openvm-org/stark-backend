@@ -42,7 +42,7 @@ use crate::{
     sponge::DuplexSpongeGpu,
     stacked_pcs::StackedPcsDataGpu,
     utils::{compute_barycentric_inv_lagrange_denoms, reduce_raw_u64_to_ef},
-    GpuBackend, GpuDevice, ProverError,
+    GpuBackend, GpuDevice, StackedReductionError,
 };
 
 /// Degree of the sumcheck polynomial for stacked reduction.
@@ -185,7 +185,7 @@ pub fn prove_stacked_opening_reduction_gpu(
     ctx: ProvingContext<GpuBackend>,
     common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
     r: &[EF],
-) -> Result<(StackingProof<SC>, Vec<EF>, Vec<StackedPcsData2>), ProverError> {
+) -> Result<(StackingProof<SC>, Vec<EF>, Vec<StackedPcsData2>), StackedReductionError> {
     let n_stack = device.config.n_stack;
     // Batching randomness
     let lambda = transcript.sample_ext();
@@ -196,7 +196,7 @@ pub fn prove_stacked_opening_reduction_gpu(
         StackedReductionGpu::new(mpk, ctx, common_main_pcs_data, r, lambda, device.sm_count())?;
 
     // Round 0: univariate sumcheck
-    let s_0 = prover.batch_sumcheck_uni_round0_poly();
+    let s_0 = prover.batch_sumcheck_uni_round0_poly()?;
     for &coeff in s_0.coeffs() {
         transcript.observe_ext(coeff);
     }
@@ -206,7 +206,7 @@ pub fn prove_stacked_opening_reduction_gpu(
     u_vec.push(u_0);
     debug!(round = 0, u_round = %u_0);
 
-    prover.fold_ple_evals(u_0);
+    prover.fold_ple_evals(u_0)?;
     drop(_round0_span);
     // end round 0
 
@@ -220,7 +220,7 @@ pub fn prove_stacked_opening_reduction_gpu(
     .entered();
     #[allow(clippy::needless_range_loop)]
     for round in 1..=n_stack {
-        let batch_s_evals = prover.batch_sumcheck_poly_eval(round, u_vec[round - 1]);
+        let batch_s_evals = prover.batch_sumcheck_poly_eval(round, u_vec[round - 1])?;
 
         for &eval in &batch_s_evals {
             transcript.observe_ext(eval);
@@ -231,9 +231,9 @@ pub fn prove_stacked_opening_reduction_gpu(
         u_vec.push(u_round);
         debug!(%round, %u_round);
 
-        prover.fold_mle_evals(round, u_round);
+        prover.fold_mle_evals(round, u_round)?;
     }
-    let stacking_openings = prover.get_stacked_openings();
+    let stacking_openings = prover.get_stacked_openings()?;
     for claims_for_com in &stacking_openings {
         for &claim in claims_for_com {
             transcript.observe_ext(claim);
@@ -257,7 +257,7 @@ impl StackedReductionGpu {
         r: &[EF],
         lambda: EF,
         sm_count: u32,
-    ) -> Result<Self, ProverError> {
+    ) -> Result<Self, StackedReductionError> {
         ensure_device_ntt_twiddles_initialized();
         let mem = MemTracker::start("prover.stacked_reduction_new");
         let l_skip = mpk.params.l_skip;
@@ -265,7 +265,7 @@ impl StackedReductionGpu {
 
         let omega_skip = F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
-        let d_omega_skip_pows = omega_skip_pows.to_device().unwrap();
+        let d_omega_skip_pows = omega_skip_pows.to_device()?;
 
         // NOTE: DeviceMatrix contains an Arc, so clone is lightweight [for now].
         // PERF[jpw]: stack the traces all at once. To save memory, we could either stack and drop
@@ -319,7 +319,7 @@ impl StackedReductionGpu {
             .map(|d| d.layout().width() as u32)
             .collect_vec();
         let q_width_max = *q_widths.iter().max().unwrap();
-        let d_q_widths = q_widths.to_device().unwrap();
+        let d_q_widths = q_widths.to_device()?;
 
         let total_num_cols: usize = stacked_per_commit
             .iter()
@@ -367,9 +367,9 @@ impl StackedReductionGpu {
                 lambda_pows[lambda_rot_idx] = lambda_pows_used[lambda_rot_idx];
             }
         }
-        let d_lambda_pows = lambda_pows.to_device().unwrap();
+        let d_lambda_pows = lambda_pows.to_device()?;
 
-        let d_unstacked_cols = unstacked_cols.to_device().unwrap(); // TODO: handle error
+        let d_unstacked_cols = unstacked_cols.to_device()?;
         let max_window_len = ht_diff_idxs
             .windows(2)
             .map(|window| window[1] - window[0])
@@ -387,7 +387,8 @@ impl StackedReductionGpu {
                 .unwrap_or(0)
                 .saturating_sub(l_skip)
         );
-        let eq_r_ns = EqEvalSegments::new(&r[1..]).unwrap(); // TODO: return error
+        let eq_r_ns =
+            EqEvalSegments::new(&r[1..]).map_err(StackedReductionError::EqEvalSegments)?;
 
         let eq_const = eval_eq_uni_at_one(l_skip, r[0] * omega_skip);
         let eq_ub_per_trace = vec![EF::ONE; unstacked_cols.len()];
@@ -459,7 +460,9 @@ impl StackedReductionGpu {
         skip_all,
         fields(round = 0)
     )]
-    fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<EF> {
+    fn batch_sumcheck_uni_round0_poly(
+        &mut self,
+    ) -> Result<UnivariatePoly<EF>, StackedReductionError> {
         let l_skip = self.l_skip;
         let skip_domain = 1 << l_skip;
         let s_0_deg = sumcheck_round0_deg(l_skip, STACKED_REDUCTION_S_DEG);
@@ -467,16 +470,18 @@ impl StackedReductionGpu {
         // Accumulation buffers for G0, G1, G2 (on identity coset)
         // d_g_pos: for n >= 0 traces
         let mut d_g_pos = DeviceBuffer::<EF>::with_capacity(NUM_G * skip_domain);
-        d_g_pos.fill_zero().unwrap();
+        d_g_pos
+            .fill_zero()
+            .map_err(StackedReductionError::FillZero)?;
 
         // d_g_neg[k]: for traces with |n| = k+1, where n < 0 and k in 0..l_skip
         let mut d_g_neg: Vec<DeviceBuffer<EF>> = (0..l_skip)
             .map(|_| {
                 let b = DeviceBuffer::with_capacity(NUM_G * skip_domain);
-                b.fill_zero().unwrap();
-                b
+                b.fill_zero().map_err(StackedReductionError::FillZero)?;
+                Ok(b)
             })
-            .collect();
+            .collect::<Result<Vec<_>, StackedReductionError>>()?;
 
         // Process each trace - call kernel for each, accumulating into appropriate bucket
         for ((trace_ptr, trace_height, trace_width), window) in zip(
@@ -521,15 +526,15 @@ impl StackedReductionGpu {
                     trace_width,
                     l_skip,
                 )
-                .unwrap();
+                .map_err(StackedReductionError::SumcheckRound0)?;
             };
         }
 
         // CPU reconstruction: s₀(Z) = E0(Z)*G0(Z) + E1(Z)*G1(Z) + E2(Z)*G2(Z)
-        let s_0 = self.reconstruct_s0_from_g(d_g_pos, d_g_neg, s_0_deg);
+        let s_0 = self.reconstruct_s0_from_g(d_g_pos, d_g_neg, s_0_deg)?;
         self.mem.tracing_info("stacked_reduction_sumcheck round 0");
 
-        s_0
+        Ok(s_0)
     }
 
     /// Reconstructs s_0 from G0, G1, G2 using NTT-based polynomial multiplication.
@@ -545,7 +550,7 @@ impl StackedReductionGpu {
         d_g_pos: DeviceBuffer<EF>,
         d_g_neg: Vec<DeviceBuffer<EF>>,
         s_0_deg: usize,
-    ) -> UnivariatePoly<EF> {
+    ) -> Result<UnivariatePoly<EF>, StackedReductionError> {
         let l_skip = self.l_skip;
         let skip_domain = 1 << l_skip;
         let large_uni_domain = (s_0_deg + 1).next_power_of_two(); // 2 * skip_domain
@@ -555,7 +560,7 @@ impl StackedReductionGpu {
         let mut s_0_coeffs = vec![EF::ZERO; large_uni_domain];
 
         // --- Process n >= 0 bucket ---
-        let g_pos = d_g_pos.to_host().unwrap();
+        let g_pos = d_g_pos.to_host()?;
         if !g_pos.iter().all(|&x| x == EF::ZERO) {
             // Build E polynomials for n >= 0
             let e0 = eq_uni_poly::<F, EF>(l_skip, self.r_0);
@@ -579,7 +584,7 @@ impl StackedReductionGpu {
         // --- Process n < 0 buckets ---
         for (bucket_idx, d_g_neg_bucket) in d_g_neg.into_iter().enumerate() {
             let n_abs = bucket_idx + 1;
-            let g_neg = d_g_neg_bucket.to_host().unwrap();
+            let g_neg = d_g_neg_bucket.to_host()?;
             if g_neg.iter().all(|&x| x == EF::ZERO) {
                 continue;
             }
@@ -614,7 +619,7 @@ impl StackedReductionGpu {
         }
 
         s_0_coeffs.truncate(s_0_deg + 1);
-        UnivariatePoly::new(s_0_coeffs)
+        Ok(UnivariatePoly::new(s_0_coeffs))
     }
 
     /// NTT-based polynomial multiplication following logup pattern.
@@ -663,7 +668,7 @@ impl StackedReductionGpu {
     }
 
     #[instrument("stacked_reduction_fold_ple", level = "debug", skip_all)]
-    fn fold_ple_evals(&mut self, u_0: EF) {
+    fn fold_ple_evals(&mut self, u_0: EF) -> Result<(), StackedReductionError> {
         let l_skip = self.l_skip;
         let n_stack = self.n_stack;
         let r_0 = self.r_0;
@@ -675,7 +680,7 @@ impl StackedReductionGpu {
         let skip_domain = 1 << l_skip;
         let inv_lagrange_denoms =
             compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, u_0);
-        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device().unwrap();
+        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device()?;
 
         for stacked in &self.stacked_per_commit {
             let layout = stacked.layout();
@@ -684,7 +689,9 @@ impl StackedReductionGpu {
             debug_assert_eq!(layout.height(), 1 << (l_skip + n_stack));
             let folded_evals = DeviceBuffer::<EF>::with_capacity(num_x * stacked_width);
             // We must fill with zeros because some parts will be left empty due to stacking
-            folded_evals.fill_zero().unwrap();
+            folded_evals
+                .fill_zero()
+                .map_err(StackedReductionError::FillZero)?;
             let mut dst_offset = 0;
             for trace in &stacked.traces {
                 if trace.width() == 0 || trace.height() == 0 {
@@ -711,7 +718,7 @@ impl StackedReductionGpu {
                         trace.width(),
                         l_skip,
                     )
-                    .unwrap();
+                    .map_err(StackedReductionError::FoldPle)?;
                 }
 
                 dst_offset += new_height * trace.width();
@@ -725,7 +732,7 @@ impl StackedReductionGpu {
         let eq_uni_u01 = eval_eq_uni_at_one(l_skip, u_0);
         debug_assert_eq!(self.eq_r_ns.buffer.len(), 2 << n_max);
         self.k_rot_ns.buffer = DeviceBuffer::with_capacity(2 << n_max);
-        [EF::ZERO].copy_to(&mut self.k_rot_ns.buffer).unwrap();
+        [EF::ZERO].copy_to(&mut self.k_rot_ns.buffer)?;
         unsafe {
             // SAFETY:
             // - We allocated `k_rot_ns` with same capacity as `eq_r_ns` above.
@@ -736,9 +743,10 @@ impl StackedReductionGpu {
                 self.eq_const * eq_uni_u01,
                 n_max as u32,
             )
-            .unwrap();
+            .map_err(StackedReductionError::InitKRot)?;
         }
-        vector_scalar_multiply_ext(&mut self.eq_r_ns.buffer, eq_uni_u0r0).unwrap();
+        vector_scalar_multiply_ext(&mut self.eq_r_ns.buffer, eq_uni_u0r0)
+            .map_err(StackedReductionError::VectorScalarMul)?;
 
         // Compute the special eq values for n = -l_skip..0
         // First in order -n = 1..=l_skip, then reverse to order n = -l_skip..0 corresponding to
@@ -758,6 +766,7 @@ impl StackedReductionGpu {
                 .unzip();
         self.eq_stable.reverse();
         self.k_rot_stable.reverse();
+        Ok(())
     }
 
     #[instrument("stacked_reduction_sumcheck", level = "debug", skip_all, fields(round = round))]
@@ -765,11 +774,11 @@ impl StackedReductionGpu {
         &mut self,
         round: usize,
         _u_prev: EF,
-    ) -> [EF; STACKED_REDUCTION_S_DEG] {
+    ) -> Result<[EF; STACKED_REDUCTION_S_DEG], StackedReductionError> {
         let l_skip = self.l_skip;
 
         let q_eval_ptrs = self.q_evals.iter().map(|q| q.as_ptr()).collect_vec();
-        q_eval_ptrs.copy_to(&mut self.d_q_eval_ptrs).unwrap();
+        q_eval_ptrs.copy_to(&mut self.d_q_eval_ptrs)?;
 
         if self.n_max >= (round - 1) {
             // Move stable eq, k_rot to stable vectors
@@ -785,8 +794,7 @@ impl StackedReductionGpu {
                     tmp.as_mut_ptr() as *mut c_void,
                     self.eq_r_ns.get_ptr(0) as *const c_void,
                     size_of::<EF>(),
-                )
-                .unwrap();
+                )?;
 
                 self.eq_stable.push(tmp[0]);
 
@@ -795,8 +803,7 @@ impl StackedReductionGpu {
                     tmp.as_mut_ptr() as *mut c_void,
                     self.k_rot_ns.get_ptr(0) as *const c_void,
                     size_of::<EF>(),
-                )
-                .unwrap();
+                )?;
 
                 self.k_rot_stable.push(tmp[0]);
             }
@@ -813,7 +820,9 @@ impl StackedReductionGpu {
             let log_height = self.unstacked_cols[window[0]].log_height as usize;
 
             // Zero-initialize accumulator for atomic adds
-            self.d_accum.fill_zero().unwrap();
+            self.d_accum
+                .fill_zero()
+                .map_err(StackedReductionError::FillZero)?;
 
             if log_height < l_skip + round {
                 // We are in the eq, k_rot stable regime
@@ -828,7 +837,7 @@ impl StackedReductionGpu {
                 if eq_ub_slice.len() > self.d_eq_ub.len() {
                     self.d_eq_ub = DeviceBuffer::with_capacity(eq_ub_slice.len());
                 }
-                eq_ub_slice.copy_to(&mut self.d_eq_ub).unwrap();
+                eq_ub_slice.copy_to(&mut self.d_eq_ub)?;
                 let stacked_height = self.stacked_height(round);
                 unsafe {
                     stacked_reduction_sumcheck_mle_round_degenerate(
@@ -844,7 +853,7 @@ impl StackedReductionGpu {
                         l_skip,
                         round,
                     )
-                    .unwrap();
+                    .map_err(StackedReductionError::SumcheckMleRoundDegenerate)?;
                 }
             } else {
                 let hypercube_dim = log_height - l_skip - round;
@@ -866,21 +875,23 @@ impl StackedReductionGpu {
                         num_y,
                         self.sm_count,
                     )
-                    .unwrap();
+                    .map_err(StackedReductionError::SumcheckMleRound)?;
                 };
             }
 
             // D2H copy and reduce modulo P
-            let h_accum = self.d_accum.to_host().unwrap();
+            let h_accum = self.d_accum.to_host()?;
             let evals = reduce_raw_u64_to_ef(&h_accum);
             s_evals_batch.push(evals);
         }
 
-        from_fn(|i| s_evals_batch.iter().map(|evals| evals[i]).sum::<EF>())
+        Ok(from_fn(|i| {
+            s_evals_batch.iter().map(|evals| evals[i]).sum::<EF>()
+        }))
     }
 
     #[instrument("stacked_reduction_fold_mle", level = "debug", skip_all, fields(round = round))]
-    fn fold_mle_evals(&mut self, round: usize, u_round: EF) {
+    fn fold_mle_evals(&mut self, round: usize, u_round: EF) -> Result<(), StackedReductionError> {
         debug_assert!(round <= self.n_stack);
         let l_skip = self.l_skip;
         let (folded_q_evals, input_ptrs, output_ptrs): (Vec<_>, Vec<_>, Vec<_>) = self
@@ -892,8 +903,8 @@ impl StackedReductionGpu {
                 (folded, q.as_ptr(), output_ptr)
             })
             .multiunzip();
-        input_ptrs.copy_to(&mut self.d_input_ptrs).unwrap();
-        output_ptrs.copy_to(&mut self.d_output_ptrs).unwrap();
+        input_ptrs.copy_to(&mut self.d_input_ptrs)?;
+        output_ptrs.copy_to(&mut self.d_output_ptrs)?;
 
         // SAFETY:
         // - `d_input_ptrs` points to matrices with widths specified by `d_q_widths` and heights
@@ -911,7 +922,7 @@ impl StackedReductionGpu {
                 self.q_width_max * output_height,
                 u_round,
             )
-            .unwrap();
+            .map_err(StackedReductionError::FoldMle)?;
         }
         self.q_evals = folded_q_evals;
 
@@ -921,20 +932,21 @@ impl StackedReductionGpu {
             let output_len = 1 << input_max_n;
 
             let mut buffer = DeviceBuffer::<EF>::with_capacity(output_len);
-            [EF::ZERO].copy_to(&mut buffer).unwrap();
+            [EF::ZERO].copy_to(&mut buffer)?;
             // SAFETY:
             // - eq_r_ns has max_n equal to input_max_n
             // - we allocate output for half the size of eq_r_ns
             unsafe {
                 let mut output = EqEvalSegments::from_raw_parts(buffer, output_max_n);
                 if input_max_n != 0 {
-                    triangular_fold_mle(&mut output, &self.eq_r_ns, u_round, output_max_n).unwrap();
+                    triangular_fold_mle(&mut output, &self.eq_r_ns, u_round, output_max_n)
+                        .map_err(StackedReductionError::TriangularFoldMle)?;
                 }
                 self.eq_r_ns = output;
             }
 
             let mut buffer = DeviceBuffer::<EF>::with_capacity(output_len);
-            [EF::ZERO].copy_to(&mut buffer).unwrap();
+            [EF::ZERO].copy_to(&mut buffer)?;
             // SAFETY:
             // - k_rot_ns has max_n equal to input_max_n
             // - we allocate output for half the size of eq_r_ns
@@ -942,7 +954,7 @@ impl StackedReductionGpu {
                 let mut output = EqEvalSegments::from_raw_parts(buffer, output_max_n);
                 if input_max_n != 0 {
                     triangular_fold_mle(&mut output, &self.k_rot_ns, u_round, output_max_n)
-                        .unwrap();
+                        .map_err(StackedReductionError::TriangularFoldMle)?;
                 }
                 self.k_rot_ns = output;
             }
@@ -959,11 +971,15 @@ impl StackedReductionGpu {
                 *eq_ub *= eval_eq_mle(&[u_round], &[F::from_bool(b == 1)]);
             }
         }
+        Ok(())
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn get_stacked_openings(&self) -> Vec<Vec<EF>> {
-        self.q_evals.iter().map(|q| q.to_host().unwrap()).collect()
+    fn get_stacked_openings(&self) -> Result<Vec<Vec<EF>>, StackedReductionError> {
+        self.q_evals
+            .iter()
+            .map(|q| q.to_host().map_err(StackedReductionError::MemCopy))
+            .collect::<Result<Vec<_>, _>>()
     }
 }
 

@@ -53,12 +53,17 @@ pub trait ProverBackend {
 pub trait ProverDevice<PB: ProverBackend, TS>:
     TraceCommitter<PB> + MultiRapProver<PB, TS> + OpeningProver<PB, TS>
 {
+    type Error: std::fmt::Debug
+        + From<<Self as TraceCommitter<PB>>::Error>
+        + From<<Self as MultiRapProver<PB, TS>>::Error>
+        + From<<Self as OpeningProver<PB, TS>>::Error>;
 }
 
 /// Provides functionality for committing to a batch of trace matrices, possibly of different
 /// heights.
 pub trait TraceCommitter<PB: ProverBackend> {
-    fn commit(&self, traces: &[&PB::Matrix]) -> (PB::Commitment, PB::PcsData);
+    type Error: std::fmt::Debug;
+    fn commit(&self, traces: &[&PB::Matrix]) -> Result<(PB::Commitment, PB::PcsData), Self::Error>;
 }
 
 /// This trait is responsible for all proving steps to prove a collection of trace matrices
@@ -78,13 +83,15 @@ pub trait MultiRapProver<PB: ProverBackend, TS> {
     /// of the protocol.
     type Artifacts;
 
+    type Error: std::fmt::Debug;
+
     fn prove_rap_constraints(
         &self,
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKey<PB>,
         ctx: &ProvingContext<PB>,
         common_main_pcs_data: &PB::PcsData,
-    ) -> (Self::PartialProof, Self::Artifacts);
+    ) -> Result<(Self::PartialProof, Self::Artifacts), Self::Error>;
 }
 
 /// This trait is responsible for proving the evaluation claims of a collection of polynomials at a
@@ -101,6 +108,8 @@ pub trait OpeningProver<PB: ProverBackend, TS> {
     /// matrices. It is owned by the function and may be mutated.
     /// The `pre_cached_pcs_data_per_commit` is the `PcsData` for the preprocessed and cached trace
     /// matrices. These are specified by their `PcsData` per commitment.
+    type Error: std::fmt::Debug;
+
     fn prove_openings(
         &self,
         transcript: &mut TS,
@@ -108,7 +117,7 @@ pub trait OpeningProver<PB: ProverBackend, TS> {
         ctx: ProvingContext<PB>,
         common_main_pcs_data: PB::PcsData,
         points: Self::OpeningPoints,
-    ) -> Self::OpeningProof;
+    ) -> Result<Self::OpeningProof, Self::Error>;
 }
 
 /// Trait to manage data transport of prover types from host to device.

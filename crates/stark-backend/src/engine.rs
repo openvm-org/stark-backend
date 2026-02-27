@@ -93,7 +93,7 @@ where
         ctx: ProvingContext<Self::PB>,
     ) -> Proof<Self::SC> {
         let mut prover = self.prover();
-        prover.prove(pk, ctx)
+        prover.prove(pk, ctx).unwrap()
     }
 
     /// Verifies using a default instantiation of the Fiat-Shamir transcript.
@@ -166,7 +166,7 @@ where
         let device = self.prover().device;
         let d_pk = device.transport_pk_to_device(&pk);
         let ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
-        let proof = self.prove(&d_pk, ctx);
+        let proof = self.prove(&d_pk, ctx); // .unwrap() is inside prove()
         self.verify(&vk, &proof)?;
         Ok(VerificationData { vk, proof })
     }
