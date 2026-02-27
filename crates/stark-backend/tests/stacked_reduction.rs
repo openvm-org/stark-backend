@@ -1,3 +1,13 @@
+//! Verifier-only unit tests for stacked reduction (`verify_stacked_reduction`).
+//!
+//! These hand-construct a `StackingProof` from first principles — computing
+//! `compute_t` over the hypercube and applying DFT for the univariate round —
+//! then verify it. Negative tests tamper with individual proof components
+//! (univariate coeffs, sumcheck polys, stacking openings) to confirm rejection.
+//!
+//! No engine or prover backend is involved; this is a self-contained verifier
+//! correctness test, so it is not in the shared backend test suite.
+
 use itertools::Itertools;
 use openvm_stark_backend::{
     poly_common::{eval_eq_mle, eval_eq_prism, eval_rot_kernel_prism},

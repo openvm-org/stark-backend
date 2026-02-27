@@ -1,3 +1,10 @@
+//! Unit tests for the transcript primitives (`DuplexSponge`, `DuplexSpongeRecorder`,
+//! `ReadOnlyTranscript`).
+//!
+//! These verify observe/sample sequencing, value matching, and panic behavior on
+//! misuse. No engine or prover backend is involved — they test the transcript
+//! layer in isolation, so there is nothing to parameterize across backends.
+
 use openvm_stark_backend::{FiatShamirTranscript, ReadOnlyTranscript, TranscriptHistory};
 use openvm_stark_sdk::{config::baby_bear_poseidon2::*, p3_baby_bear::BabyBear};
 use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
