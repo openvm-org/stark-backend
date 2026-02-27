@@ -46,6 +46,7 @@ mimalloc = { version = "0.1.43", optional = true }
 [dev-dependencies]
 openvm-stark-backend = { workspace = true, features = ["test-utils"] }
 openvm-stark-sdk.workspace = true # dev-dependency is not circular
+openvm-backend-tests.workspace = true
 p3-baby-bear.workspace = true
 rand.workspace = true
 test-case.workspace = true
