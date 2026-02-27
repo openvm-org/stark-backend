@@ -1,4 +1,9 @@
 //! Tests for AIR with partitioned main trace (cached + common).
+//!
+//! Defines a custom `SumAir` that exercises `PartitionedAirBuilder` with both
+//! cached and common main traces, constraining x == sum(y_i). The AIR
+//! definition and trace generation are local to this file and specific to this
+//! test scenario, so they are not in the shared backend test suite.
 
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},

@@ -1,3 +1,11 @@
+//! Serialization round-trip tests for `Proof::encode` / `Proof::decode`.
+//!
+//! Each test generates a proof with `BabyBearPoseidon2CpuEngine`, encodes it,
+//! decodes it, and asserts equality. The codec is backend-independent (the same
+//! proof bytes are produced regardless of which backend generated the proof), so
+//! running these on a GPU backend would exercise the same codec path. Not in the
+//! shared backend test suite for this reason.
+
 use std::io;
 
 use itertools::Itertools;
