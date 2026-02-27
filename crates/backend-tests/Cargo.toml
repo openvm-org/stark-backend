@@ -1,0 +1,20 @@
+[package]
+name = "openvm-backend-tests"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "Shared backend-generic test suite for the SWIRL proof system"
+
+[dependencies]
+openvm-stark-backend = { workspace = true, features = ["test-utils"] }
+openvm-stark-sdk.workspace = true
+
+p3-baby-bear.workspace = true
+p3-field.workspace = true
+p3-matrix.workspace = true
+p3-util.workspace = true
+
+itertools.workspace = true
+rand.workspace = true
+eyre.workspace = true
+tracing.workspace = true
