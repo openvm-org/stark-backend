@@ -37,13 +37,14 @@ pub trait Prover {
     where
         Self: 'a;
     type Proof;
+    type Error;
 
     /// The prover should own the challenger, whose state mutates during proving.
     fn prove<'a>(
         &'a mut self,
         pk: Self::ProvingKeyView<'a>,
         ctx: Self::ProvingContext<'a>,
-    ) -> Self::Proof;
+    ) -> Result<Self::Proof, Self::Error>;
 }
 
 pub struct Coordinator<SC: StarkProtocolConfig, PB: ProverBackend, PD, TS> {
