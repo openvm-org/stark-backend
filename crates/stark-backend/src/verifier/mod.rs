@@ -21,8 +21,13 @@ use crate::{
 pub enum VerifierError<EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq> {
     #[error("Protocol and VerifyingKey has mismatch in SystemParams")]
     SystemParamsMismatch,
+
     #[error("Trace heights are too large")]
     TraceHeightsTooLarge,
+
+    /// A proof without any traces is always considered invalid.
+    #[error("Proof has no traces")]
+    EmptyTraces,
 
     #[error("Proof shape verification failed: {0}")]
     ProofShapeError(#[from] ProofShapeError),
@@ -78,6 +83,12 @@ where
     let l_skip = params.l_skip;
 
     let num_airs = per_air.len();
+    let num_traces = trace_vdata.iter().flatten().collect_vec().len();
+    if num_traces == 0 {
+        return Err(VerifierError::EmptyTraces);
+    }
+    // We verify the proof shape early to return error and prevent later panics
+    let layouts = verify_proof_shape::<SC>(mvk, proof)?;
 
     let mut trace_id_to_air_id: Vec<usize> = (0..num_airs).collect();
     trace_id_to_air_id.sort_by_key(|&air_id| {
@@ -89,7 +100,6 @@ where
             air_id,
         )
     });
-    let num_traces = trace_vdata.iter().flatten().collect_vec().len();
     trace_id_to_air_id.truncate(num_traces);
 
     for constraint in trace_height_constraints {
@@ -138,8 +148,6 @@ where
             transcript.observe(*pv);
         }
     }
-
-    let layouts = verify_proof_shape::<SC>(mvk, proof)?;
 
     let n_per_trace: Vec<isize> = trace_id_to_air_id
         .iter()
