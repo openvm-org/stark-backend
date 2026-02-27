@@ -172,7 +172,7 @@ fn generate_single_column_test_case() -> StackedReductionTestCase {
 }
 
 #[test]
-fn verify_single_column_test() {
+fn verify_single_column_test() -> eyre::Result<()> {
     let mut test_case = generate_single_column_test_case();
     verify_stacked_reduction::<SC, _>(
         &mut test_case.transcript,
@@ -184,8 +184,8 @@ fn verify_single_column_test() {
         &test_case.column_openings,
         &test_case.r,
         &test_case.omega_pows,
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
 #[test]

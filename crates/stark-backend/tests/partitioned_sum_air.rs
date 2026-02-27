@@ -61,10 +61,7 @@ impl<AB: PartitionedAirBuilder> Air<AB> for SumAir {
     }
 }
 
-fn prove_and_verify_sum_air(
-    x: Vec<F>,
-    ys: Vec<Vec<F>>,
-) -> Result<(), openvm_stark_backend::verifier::VerifierError<EF>> {
+fn prove_and_verify_sum_air(x: Vec<F>, ys: Vec<Vec<F>>) -> eyre::Result<()> {
     assert_eq!(x.len(), ys.len());
 
     let engine: BabyBearPoseidon2CpuEngine<DuplexSponge> =
@@ -86,8 +83,7 @@ fn prove_and_verify_sum_air(
         params.log_blowup,
         params.k_whir(),
         &[&y_trace],
-    )
-    .unwrap();
+    )?;
 
     let trace_ctx = AirProvingContext {
         cached_mains: vec![CommittedTraceData {
@@ -99,7 +95,8 @@ fn prove_and_verify_sum_air(
         public_values: vec![],
     };
 
-    engine.run_test(vec![air], vec![trace_ctx]).map(|_| ())
+    engine.run_test(vec![air], vec![trace_ctx])?;
+    Ok(())
 }
 
 fn generate_random_matrix(mut rng: impl Rng, height: usize, width: usize) -> Vec<Vec<F>> {
@@ -113,7 +110,7 @@ fn generate_random_matrix(mut rng: impl Rng, height: usize, width: usize) -> Vec
 }
 
 #[test]
-fn test_partitioned_sum_air_happy_path() {
+fn test_partitioned_sum_air_happy_path() -> eyre::Result<()> {
     setup_tracing();
     let rng = StdRng::seed_from_u64(0);
     let n = 1 << 3;
@@ -122,7 +119,8 @@ fn test_partitioned_sum_air_happy_path() {
         .iter()
         .map(|row| row.iter().fold(F::ZERO, |sum, x| sum + *x))
         .collect();
-    prove_and_verify_sum_air(x, ys).expect("Verification failed");
+    prove_and_verify_sum_air(x, ys)?;
+    Ok(())
 }
 
 #[test]

@@ -18,7 +18,7 @@ use openvm_stark_backend::{
     },
     test_utils::{default_test_params_small, FibFixture, TestFixture},
     verifier::{
-        stacked_reduction::{verify_stacked_reduction, StackedReductionError},
+        stacked_reduction::verify_stacked_reduction,
         sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
     },
     StarkEngine, StarkProtocolConfig,
@@ -46,7 +46,7 @@ openvm_backend_tests::backend_test_suite!(Engine);
 // ===========================================================================
 
 #[test]
-fn test_plain_multilinear_sumcheck() -> Result<(), String> {
+fn test_plain_multilinear_sumcheck() -> eyre::Result<()> {
     let n = 15;
     let mut rng = StdRng::from_seed([228; 32]);
 
@@ -59,12 +59,14 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = default_duplex_sponge();
     let mut verifier_sponge = default_duplex_sponge();
 
-    let (proof, _) = sumcheck_multilinear::<SC, _, _>(&mut prover_sponge, &evals).unwrap();
+    let (proof, _) = sumcheck_multilinear::<SC, _, _>(&mut prover_sponge, &evals)?;
     verify_sumcheck_multilinear::<SC, _>(&mut verifier_sponge, &proof)
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    Ok(())
 }
 
 #[test]
-fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
+fn test_plain_prismalinear_sumcheck() -> eyre::Result<()> {
     setup_tracing();
     let n = 5;
     let l_skip = 10;
@@ -80,17 +82,17 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = default_duplex_sponge();
     let mut verifier_sponge = default_duplex_sponge();
 
-    let (proof, _) = sumcheck_prismalinear::<SC, _, _>(&mut prover_sponge, l_skip, &evals).unwrap();
+    let (proof, _) = sumcheck_prismalinear::<SC, _, _>(&mut prover_sponge, l_skip, &evals)?;
     verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    Ok(())
 }
 
 #[test_case(9)]
 #[test_case(2 ; "when log_height equals l_skip")]
 #[test_case(1 ; "when log_height less than l_skip")]
 #[test_case(0 ; "when log_height is zero")]
-fn test_stacked_opening_reduction(
-    log_trace_degree: usize,
-) -> Result<(), StackedReductionError<EF>> {
+fn test_stacked_opening_reduction(log_trace_degree: usize) -> eyre::Result<()> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(default_test_params_small());
@@ -113,22 +115,19 @@ fn test_stacked_opening_reduction(
             &ctx.common_main_traces()
                 .map(|(_, trace)| trace)
                 .collect_vec(),
-        )
-        .unwrap()
+        )?
     };
 
     let omega_skip = F::two_adic_generator(params.l_skip);
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
 
     let device = engine.device();
-    let ((_, batch_proof), r) = device
-        .prove_rap_constraints(
-            &mut default_duplex_sponge(),
-            &pk,
-            &ctx,
-            &common_main_pcs_data,
-        )
-        .unwrap();
+    let ((_, batch_proof), r) = device.prove_rap_constraints(
+        &mut default_duplex_sponge(),
+        &pk,
+        &ctx,
+        &common_main_pcs_data,
+    )?;
 
     let need_rot = pk.per_air[ctx.per_trace[0].0].vk.params.need_rot;
     let need_rot_per_commit = vec![vec![need_rot]];
