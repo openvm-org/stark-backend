@@ -52,6 +52,7 @@ impl CudaError {
 
     /// Returns `Ok(())` if `code == 0` (cudaSuccess), or `Err(CudaError)` if non-zero.
     pub fn from_result(code: i32) -> Result<(), Self> {
+        crate::stream::mark_cuda_thread_used();
         if code == 0 {
             Ok(())
         } else {
