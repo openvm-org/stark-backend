@@ -27,10 +27,7 @@
 //! 2. Add the test to the [`backend_test_suite!`] macro.
 //! 3. Each backend automatically picks it up on next build.
 
-use std::{
-    panic::{catch_unwind, AssertUnwindSafe},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use itertools::Itertools;
 use openvm_stark_backend::{
@@ -569,7 +566,7 @@ pub fn single_fib_and_dummy_trace_stark<E: StarkEngine<SC = SC>>(
         .transport_proving_ctx_to_device(&cpu_ctx)
         .into_sorted();
 
-    let proof = engine.prove(&combined_pk, combined_ctx);
+    let proof = engine.prove(&combined_pk, combined_ctx)?;
     engine.verify(&combined_pk.get_vk(), &proof)?;
     Ok(())
 }
@@ -639,7 +636,7 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
             (3, r1.generate_proving_ctx()),
         ]);
         let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-        let proof = engine.prove(&d_pk, d_ctx);
+        let proof = engine.prove(&d_pk, d_ctx)?;
         engine.verify(&pk.get_vk(), &proof)?;
     }
 
@@ -663,7 +660,7 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
             (3, r1.generate_proving_ctx()),
         ]);
         let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-        let proof = engine.prove(&d_pk, d_ctx);
+        let proof = engine.prove(&d_pk, d_ctx)?;
         engine.verify(&pk.get_vk(), &proof)?;
     }
 
@@ -677,17 +674,13 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
             fields: vec![vec![1], vec![2], vec![3]],
         });
 
-        let d_pk = &d_pk;
-        let pk = &pk;
-        let engine = &engine;
-        let device = engine.device();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let cpu_ctx = ProvingContext::new(vec![(3, r1.generate_proving_ctx())]);
-            let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-            let proof = engine.prove(d_pk, d_ctx);
-            engine.verify(&pk.get_vk(), &proof)
-        }));
-        assert!(result.is_err() || result.unwrap().is_err());
+        let cpu_ctx = ProvingContext::new(vec![(3, r1.generate_proving_ctx())]);
+        let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
+        let result = engine.prove(&d_pk, d_ctx);
+        assert!(
+            result.is_err(),
+            "Expected prover to fail with unbalanced interactions"
+        );
     }
     Ok(())
 }
@@ -808,17 +801,18 @@ pub fn interaction_multi_rows_neg<E: StarkEngine<SC = SC>>() {
 
     disable_debug_builder();
     let engine = E::new(default_test_params_small());
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        run_test_on_cpu_ctx(
-            &engine,
-            any_air_arc_vec![sender_air, receiver_air],
-            vec![
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace)),
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
-            ],
-        )
-    }));
-    assert!(result.is_err() || result.unwrap().is_err());
+    let result = run_test_on_cpu_ctx(
+        &engine,
+        any_air_arc_vec![sender_air, receiver_air],
+        vec![
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace)),
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "Expected test to fail with unbalanced interactions"
+    );
 }
 
 pub fn interaction_all_zero_sender<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
@@ -906,18 +900,19 @@ pub fn interaction_multi_senders_neg<E: StarkEngine<SC = SC>>() {
 
     disable_debug_builder();
     let engine = E::new(default_test_params_small());
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        run_test_on_cpu_ctx(
-            &engine,
-            any_air_arc_vec![sender_air, sender_air, receiver_air],
-            vec![
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
-            ],
-        )
-    }));
-    assert!(result.is_err() || result.unwrap().is_err());
+    let result = run_test_on_cpu_ctx(
+        &engine,
+        any_air_arc_vec![sender_air, sender_air, receiver_air],
+        vec![
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "Expected test to fail with unbalanced interactions"
+    );
 }
 
 pub fn interaction_multi_sender_receiver<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
@@ -996,15 +991,17 @@ pub fn interaction_cached_trace_neg<E: StarkEngine<SC = SC>>() {
 
     disable_debug_builder();
     let device = engine.device();
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let (pk, vk) = engine.keygen(&airs);
-        let d_pk = device.transport_pk_to_device(&pk);
-        let cpu_ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
-        let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-        let proof = engine.prove(&d_pk, d_ctx);
-        engine.verify(&vk, &proof)
-    }));
-    assert!(result.is_err() || result.unwrap().is_err());
+    let (pk, vk) = engine.keygen(&airs);
+    let d_pk = device.transport_pk_to_device(&pk);
+    let cpu_ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
+    let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
+    let result = engine.prove(&d_pk, d_ctx);
+    if let Ok(proof) = result {
+        assert!(
+            engine.verify(&vk, &proof).is_err(),
+            "Expected verification to fail with unbalanced interactions"
+        );
+    }
 }
 
 // ===========================================================================

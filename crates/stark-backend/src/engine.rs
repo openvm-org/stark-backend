@@ -25,6 +25,32 @@ pub struct VerificationData<SC: StarkProtocolConfig> {
     pub proof: Proof<SC>,
 }
 
+/// Error type for end-to-end tests that can fail in either the prover or verifier.
+#[derive(Debug)]
+pub enum StarkTestError<
+    PE: core::fmt::Debug,
+    EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq,
+> {
+    Prover(PE),
+    Verifier(VerifierError<EF>),
+}
+
+impl<PE: core::fmt::Debug, EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq>
+    core::fmt::Display for StarkTestError<PE, EF>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Prover(e) => write!(f, "Prover error: {e:?}"),
+            Self::Verifier(e) => write!(f, "Verifier error: {e}"),
+        }
+    }
+}
+
+impl<PE: core::fmt::Debug, EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq>
+    std::error::Error for StarkTestError<PE, EF>
+{
+}
+
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving.
 pub trait StarkEngine
@@ -91,9 +117,9 @@ where
         &self,
         pk: &DeviceMultiStarkProvingKey<Self::PB>,
         ctx: ProvingContext<Self::PB>,
-    ) -> Proof<Self::SC> {
+    ) -> Result<Proof<Self::SC>, <Self::PD as ProverDevice<Self::PB, Self::TS>>::Error> {
         let mut prover = self.prover();
-        prover.prove(pk, ctx).unwrap()
+        prover.prove(pk, ctx)
     }
 
     /// Verifies using a default instantiation of the Fiat-Shamir transcript.
@@ -160,14 +186,19 @@ where
         &self,
         airs: Vec<AirRef<Self::SC>>,
         ctxs: Vec<AirProvingContext<Self::PB>>,
-    ) -> Result<VerificationData<Self::SC>, VerifierError<<Self::SC as StarkProtocolConfig>::EF>>
-    {
+    ) -> Result<
+        VerificationData<Self::SC>,
+        StarkTestError<
+            <Self::PD as ProverDevice<Self::PB, Self::TS>>::Error,
+            <Self::SC as StarkProtocolConfig>::EF,
+        >,
+    > {
         let (pk, vk) = self.keygen(&airs);
         let device = self.prover().device;
         let d_pk = device.transport_pk_to_device(&pk);
         let ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
-        let proof = self.prove(&d_pk, ctx); // .unwrap() is inside prove()
-        self.verify(&vk, &proof)?;
+        let proof = self.prove(&d_pk, ctx).map_err(StarkTestError::Prover)?;
+        self.verify(&vk, &proof).map_err(StarkTestError::Verifier)?;
         Ok(VerificationData { vk, proof })
     }
 }
