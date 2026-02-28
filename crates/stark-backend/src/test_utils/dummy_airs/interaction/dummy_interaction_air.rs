@@ -218,7 +218,8 @@ impl<SC: StarkProtocolConfig> DummyInteractionChip<SC> {
             params.log_blowup,
             params.k_whir(),
             &[&cached_trace],
-        );
+        )
+        .unwrap();
 
         let common_main_rm = RowMajorMatrix::new(common_main_val, 1);
         AirProvingContext {

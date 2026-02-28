@@ -62,7 +62,7 @@ fn test_plain_multilinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge_gpu = DuplexSpongeGpu::default();
     let mut verifier_sponge = default_duplex_sponge();
 
-    let (proof_gpu, _) = sumcheck_multilinear_gpu(&mut prover_sponge_gpu, &evals);
+    let (proof_gpu, _) = sumcheck_multilinear_gpu(&mut prover_sponge_gpu, &evals).unwrap();
 
     verify_sumcheck_multilinear::<SC, _>(&mut verifier_sponge, &proof_gpu)
 }
@@ -84,7 +84,7 @@ fn test_plain_prismalinear_sumcheck() -> Result<(), String> {
     let mut prover_sponge = DuplexSpongeGpu::default();
     let mut verifier_sponge = default_duplex_sponge();
 
-    let (proof, _) = sumcheck_prismalinear_gpu(&mut prover_sponge, l_skip, &evals);
+    let (proof, _) = sumcheck_prismalinear_gpu(&mut prover_sponge, l_skip, &evals).unwrap();
     verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
 }
 
@@ -119,18 +119,21 @@ fn test_stacked_opening_reduction(
                 .map(|(_, trace)| trace)
                 .collect_vec(),
         )
+        .unwrap()
     };
 
     let omega_skip = F::two_adic_generator(params.l_skip);
     let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
 
     let device = engine.device();
-    let ((_, batch_proof), r) = device.prove_rap_constraints(
-        &mut DuplexSpongeGpu::default(),
-        &pk,
-        &ctx,
-        &common_main_pcs_data,
-    );
+    let ((_, batch_proof), r) = device
+        .prove_rap_constraints(
+            &mut DuplexSpongeGpu::default(),
+            &pk,
+            &ctx,
+            &common_main_pcs_data,
+        )
+        .unwrap();
 
     let need_rot = pk.per_air[ctx.per_trace[0].0].vk.params.need_rot;
     let need_rot_per_commit = vec![vec![need_rot]];
@@ -378,14 +381,14 @@ fn test_monomial_vs_dag_equivalence() {
         };
 
         let dag_builder =
-            ZerocheckMleBatchBuilder::new(std::iter::once(&trace_ctx), &pk, s_deg as u32);
-        let dag_output = dag_builder.evaluate(&d_lambda_pows, s_deg as u32);
+            ZerocheckMleBatchBuilder::new(std::iter::once(&trace_ctx), &pk, s_deg as u32).unwrap();
+        let dag_output = dag_builder.evaluate(&d_lambda_pows, s_deg as u32).unwrap();
         let dag_results: Vec<EF> = dag_output.to_host().expect("copy DAG output");
 
         let lambda_comb = compute_lambda_combinations(&pk, 0, &d_lambda_pows).unwrap();
         let mono_batch =
-            ZerocheckMonomialBatch::new(std::iter::once(&trace_ctx), &pk, &[&lambda_comb]);
-        let mono_output = mono_batch.evaluate(s_deg as u32);
+            ZerocheckMonomialBatch::new(std::iter::once(&trace_ctx), &pk, &[&lambda_comb]).unwrap();
+        let mono_output = mono_batch.evaluate(s_deg as u32).unwrap();
         let mono_results: Vec<EF> = mono_output.to_host().expect("copy monomial output");
 
         assert_eq!(

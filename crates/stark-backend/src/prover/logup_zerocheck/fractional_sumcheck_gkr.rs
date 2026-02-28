@@ -7,6 +7,7 @@ use tracing::{debug, instrument};
 use crate::{
     proof::GkrLayerClaims,
     prover::{
+        error::LogupZerocheckError,
         poly::evals_eq_hypercube,
         sumcheck::{fold_mle_evals, sumcheck_round_poly_evals},
         ColMajorMatrix,
@@ -60,16 +61,16 @@ pub fn fractional_sumcheck<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>
     transcript: &mut TS,
     evals: &[Frac<SC::EF>],
     assert_zero: bool,
-) -> (FracSumcheckProof<SC>, Vec<SC::EF>) {
+) -> Result<(FracSumcheckProof<SC>, Vec<SC::EF>), LogupZerocheckError> {
     if evals.is_empty() {
-        return (
+        return Ok((
             FracSumcheckProof {
                 fractional_sum: (SC::EF::ZERO, SC::EF::ONE),
                 claims_per_layer: vec![],
                 sumcheck_polys: vec![],
             },
             vec![],
-        );
+        ));
     }
     // total_rounds = l_skip + n_logup
     let total_rounds = log2_strict_usize(evals.len());
@@ -85,7 +86,9 @@ pub fn fractional_sumcheck<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>
     }
     let frac_sum = tree_evals[1];
     if assert_zero {
-        assert_eq!(frac_sum.p, SC::EF::ZERO);
+        if frac_sum.p != SC::EF::ZERO {
+            return Err(LogupZerocheckError::NonZeroRootSum);
+        }
     } else {
         transcript.observe_ext(frac_sum.p);
     }
@@ -155,7 +158,9 @@ pub fn fractional_sumcheck<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>
                     &[eq_xis.as_view(), pq_j_evals.as_view()],
                     |_x, _y, row| {
                         let eq_xi = row[0][0];
-                        let &[p_j0, q_j0, p_j1, q_j1] = row[1].as_slice().try_into().unwrap();
+                        let &[p_j0, q_j0, p_j1, q_j1] = row[1].as_slice() else {
+                            unreachable!("pq_j_evals always has 4 columns")
+                        };
                         let p_prev = p_j0 * q_j1 + p_j1 * q_j0;
                         let q_prev = q_j0 * q_j1;
                         // batch using lambda
@@ -197,12 +202,12 @@ pub fn fractional_sumcheck<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>
         sumcheck_polys.push(round_polys_eval);
     }
 
-    (
+    Ok((
         FracSumcheckProof {
             fractional_sum: (frac_sum.p, frac_sum.q),
             claims_per_layer,
             sumcheck_polys,
         },
         xi_prev,
-    )
+    ))
 }

@@ -86,7 +86,7 @@ fn test_gkr_base_layer_numerator_zero() {
 }
 
 #[test]
-fn test_gkr_1_round_integration() {
+fn test_gkr_1_round_integration() -> eyre::Result<()> {
     setup_tracing();
     let fractions = vec![
         Frac {
@@ -100,7 +100,7 @@ fn test_gkr_1_round_integration() {
     ];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true)?;
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -111,20 +111,15 @@ fn test_gkr_1_round_integration() {
 
     let mut verifier_transcript = default_duplex_sponge();
     let total_rounds = p3_util::log2_strict_usize(fractions.len());
-    let result = verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
-
-    assert!(
-        result.is_ok(),
-        "1-round verification failed: {:?}",
-        result.err()
-    );
-    let (numer_claim, denom_claim, _) = result.unwrap();
+    let (numer_claim, denom_claim, _) =
+        verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, total_rounds)?;
     assert_eq!(numer_claim, EF::ZERO);
     assert_ne!(denom_claim, EF::ZERO);
+    Ok(())
 }
 
 #[test]
-fn test_gkr_2_round_integration() {
+fn test_gkr_2_round_integration() -> eyre::Result<()> {
     setup_tracing();
     let fractions = vec![
         Frac {
@@ -146,7 +141,7 @@ fn test_gkr_2_round_integration() {
     ];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true)?;
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -157,20 +152,15 @@ fn test_gkr_2_round_integration() {
 
     let mut verifier_transcript = default_duplex_sponge();
     let total_rounds = p3_util::log2_strict_usize(fractions.len());
-    let result = verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
-
-    assert!(
-        result.is_ok(),
-        "2-round verification failed: {:?}",
-        result.err()
-    );
-    let (numer_claim, denom_claim, _) = result.unwrap();
+    let (numer_claim, denom_claim, _) =
+        verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, total_rounds)?;
     assert_eq!(numer_claim, EF::ZERO);
     assert_ne!(denom_claim, EF::ZERO);
+    Ok(())
 }
 
 #[test]
-fn test_gkr_3_round_integration() {
+fn test_gkr_3_round_integration() -> eyre::Result<()> {
     setup_tracing();
     let fractions = vec![
         Frac {
@@ -208,7 +198,7 @@ fn test_gkr_3_round_integration() {
     ];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true)?;
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -219,20 +209,15 @@ fn test_gkr_3_round_integration() {
 
     let mut verifier_transcript = default_duplex_sponge();
     let total_rounds = p3_util::log2_strict_usize(fractions.len());
-    let result = verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
-
-    assert!(
-        result.is_ok(),
-        "3-round verification failed: {:?}",
-        result.err()
-    );
-    let (numer_claim, denom_claim, _) = result.unwrap();
+    let (numer_claim, denom_claim, _) =
+        verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, total_rounds)?;
     assert_eq!(numer_claim, EF::ZERO);
     assert_ne!(denom_claim, EF::ZERO);
+    Ok(())
 }
 
 #[test]
-fn test_gkr_mixed_fractions() {
+fn test_gkr_mixed_fractions() -> eyre::Result<()> {
     setup_tracing();
     let fractions = vec![
         Frac {
@@ -246,7 +231,7 @@ fn test_gkr_mixed_fractions() {
     ];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true)?;
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -257,24 +242,19 @@ fn test_gkr_mixed_fractions() {
 
     let mut verifier_transcript = default_duplex_sponge();
     let total_rounds = p3_util::log2_strict_usize(fractions.len());
-    let result = verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, total_rounds);
-
-    assert!(
-        result.is_ok(),
-        "Mixed fractions verification failed: {:?}",
-        result.err()
-    );
-    let (_numer_claim, denom_claim, _) = result.unwrap();
+    let (_numer_claim, denom_claim, _) =
+        verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, total_rounds)?;
     assert_ne!(denom_claim, EF::ZERO);
+    Ok(())
 }
 
 #[test]
-fn test_gkr_empty_case() {
+fn test_gkr_empty_case() -> eyre::Result<()> {
     setup_tracing();
     let fractions = vec![];
 
     let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true);
+    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true)?;
 
     let gkr_proof = GkrProof::<SC> {
         logup_pow_witness: F::ZERO,
@@ -284,15 +264,10 @@ fn test_gkr_empty_case() {
     };
 
     let mut verifier_transcript = default_duplex_sponge();
-    let result = verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, 0);
-
-    assert!(
-        result.is_ok(),
-        "Empty case verification failed: {:?}",
-        result.err()
-    );
-    let (numer_claim, denom_claim, gkr_r) = result.unwrap();
+    let (numer_claim, denom_claim, gkr_r) =
+        verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, 0)?;
     assert_eq!(numer_claim, EF::ZERO);
     assert_eq!(denom_claim, EF::ONE);
     assert_eq!(gkr_r, vec![]);
+    Ok(())
 }

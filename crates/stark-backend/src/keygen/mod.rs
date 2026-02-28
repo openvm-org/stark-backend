@@ -308,7 +308,8 @@ impl<SC: StarkProtocolConfig> PrepKeygenData<SC> {
                 params.log_blowup,
                 params.k_whir(),
                 &[&trace],
-            );
+            )
+            .unwrap();
             debug_assert_eq!(trace.width(), data.mat_view(0).width());
             let vdata = VerifierSinglePreprocessedData {
                 commit,

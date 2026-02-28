@@ -11,6 +11,7 @@ use crate::{
     poly_common::Squarable,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
+        error::CpuProverError,
         prove_zerocheck_and_logup,
         stacked_pcs::{stacked_commit, StackedPcsData},
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
@@ -67,24 +68,27 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
     TS: FiatShamirTranscript<SC>,
 {
+    type Error = CpuProverError;
 }
 
 impl<SC: StarkProtocolConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<SC>
 where
     SC::F: Ord,
 {
+    type Error = CpuProverError;
+
     fn commit(
         &self,
         traces: &[&ColMajorMatrix<SC::F>],
-    ) -> (SC::Digest, StackedPcsData<SC::F, SC::Digest>) {
-        stacked_commit(
+    ) -> Result<(SC::Digest, StackedPcsData<SC::F, SC::Digest>), Self::Error> {
+        Ok(stacked_commit(
             self.config().hasher(),
             self.params().l_skip,
             self.params().n_stack,
             self.params().log_blowup,
             self.params().k_whir(),
             traces,
-        )
+        )?)
     }
 }
 
@@ -99,16 +103,18 @@ where
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
     type Artifacts = Vec<SC::EF>;
 
+    type Error = CpuProverError;
+
     fn prove_rap_constraints(
         &self,
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
         ctx: &ProvingContext<CpuBackend<SC>>,
         _common_main_pcs_data: &StackedPcsData<SC::F, SC::Digest>,
-    ) -> ((GkrProof<SC>, BatchConstraintProof<SC>), Vec<SC::EF>) {
+    ) -> Result<((GkrProof<SC>, BatchConstraintProof<SC>), Vec<SC::EF>), Self::Error> {
         let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup::<SC, _>(transcript, mpk, ctx);
-        ((gkr_proof, batch_constraint_proof), r)
+            prove_zerocheck_and_logup::<SC, _>(transcript, mpk, ctx)?;
+        Ok(((gkr_proof, batch_constraint_proof), r))
     }
 }
 
@@ -123,6 +129,8 @@ where
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<SC::EF>;
 
+    type Error = CpuProverError;
+
     fn prove_openings(
         &self,
         transcript: &mut TS,
@@ -130,7 +138,7 @@ where
         ctx: ProvingContext<CpuBackend<SC>>,
         common_main_pcs_data: StackedPcsData<SC::F, SC::Digest>,
         r: Vec<SC::EF>,
-    ) -> (StackingProof<SC>, WhirProof<SC>) {
+    ) -> Result<(StackingProof<SC>, WhirProof<SC>), Self::Error> {
         let params = self.params();
 
         let need_rot_per_trace = ctx
@@ -187,7 +195,9 @@ where
                 &r,
             );
 
-        let (&u0, u_rest) = u_prisma.split_first().unwrap();
+        let (&u0, u_rest) = u_prisma
+            .split_first()
+            .ok_or(crate::prover::error::WhirProverError::UPrismaEmpty)?;
         let u_cube = u0
             .exp_powers_of_2()
             .take(params.l_skip)
@@ -199,8 +209,8 @@ where
             common_main_pcs_data,
             pre_cached_pcs_data_per_commit,
             &u_cube,
-        );
-        (stacking_proof, whir_proof)
+        )?;
+        Ok((stacking_proof, whir_proof))
     }
 }
 
@@ -216,7 +226,7 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
                     let trace = d.mat_view(0).to_matrix();
                     CommittedTraceData {
-                        commitment: d.commit(),
+                        commitment: d.commit().unwrap(),
                         trace,
                         data: d.clone(),
                     }
