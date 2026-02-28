@@ -53,7 +53,10 @@ pub trait ProverBackend {
 pub trait ProverDevice<PB: ProverBackend, TS>:
     TraceCommitter<PB> + MultiRapProver<PB, TS> + OpeningProver<PB, TS>
 {
-    type Error: std::fmt::Debug
+    type Error: 'static
+        + std::error::Error
+        + Send
+        + Sync
         + From<<Self as TraceCommitter<PB>>::Error>
         + From<<Self as MultiRapProver<PB, TS>>::Error>
         + From<<Self as OpeningProver<PB, TS>>::Error>;

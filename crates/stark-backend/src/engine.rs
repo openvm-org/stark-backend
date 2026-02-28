@@ -25,38 +25,8 @@ pub struct VerificationData<SC: StarkProtocolConfig> {
     pub proof: Proof<SC>,
 }
 
-/// Error type for end-to-end tests that can fail in either the prover or verifier.
-#[derive(Debug)]
-pub enum StarkTestError<
-    PE: core::fmt::Debug,
-    EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq,
-> {
-    Prover(PE),
-    Verifier(VerifierError<EF>),
-}
-
-impl<PE: core::fmt::Debug, EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq>
-    core::fmt::Display for StarkTestError<PE, EF>
-{
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Prover(e) => write!(f, "Prover error: {e:?}"),
-            Self::Verifier(e) => write!(f, "Verifier error: {e}"),
-        }
-    }
-}
-
-impl<PE: core::fmt::Debug, EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq>
-    std::error::Error for StarkTestError<PE, EF>
-{
-}
-
-type ProveResult<SC, PB, PD, TS> = Result<Proof<SC>, <PD as ProverDevice<PB, TS>>::Error>;
-
-type RunTestResult<SC, PB, PD, TS> = Result<
-    VerificationData<SC>,
-    StarkTestError<<PD as ProverDevice<PB, TS>>::Error, <SC as StarkProtocolConfig>::EF>,
->;
+pub type ProverError<E> =
+    <<E as StarkEngine>::PD as ProverDevice<<E as StarkEngine>::PB, <E as StarkEngine>::TS>>::Error;
 
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving.
@@ -124,7 +94,7 @@ where
         &self,
         pk: &DeviceMultiStarkProvingKey<Self::PB>,
         ctx: ProvingContext<Self::PB>,
-    ) -> ProveResult<Self::SC, Self::PB, Self::PD, Self::TS> {
+    ) -> Result<Proof<Self::SC>, ProverError<Self>> {
         let mut prover = self.prover();
         prover.prove(pk, ctx)
     }
@@ -202,4 +172,35 @@ where
         self.verify(&vk, &proof).map_err(StarkTestError::Verifier)?;
         Ok(VerificationData { vk, proof })
     }
+}
+
+type RunTestResult<SC, PB, PD, TS> = Result<
+    VerificationData<SC>,
+    StarkTestError<<PD as ProverDevice<PB, TS>>::Error, <SC as StarkProtocolConfig>::EF>,
+>;
+
+/// Error type for end-to-end tests that can fail in either the prover or verifier.
+#[derive(Debug)]
+pub enum StarkTestError<
+    PE: std::error::Error,
+    EF: std::fmt::Debug + std::fmt::Display + PartialEq + Eq,
+> {
+    Prover(PE),
+    Verifier(VerifierError<EF>),
+}
+
+impl<PE: std::error::Error, EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq>
+    core::fmt::Display for StarkTestError<PE, EF>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Prover(e) => write!(f, "Prover error: {e:?}"),
+            Self::Verifier(e) => write!(f, "Verifier error: {e}"),
+        }
+    }
+}
+
+impl<PE: std::error::Error, EF: core::fmt::Debug + core::fmt::Display + PartialEq + Eq>
+    std::error::Error for StarkTestError<PE, EF>
+{
 }
