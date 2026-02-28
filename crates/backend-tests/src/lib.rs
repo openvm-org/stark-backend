@@ -95,7 +95,9 @@ pub fn run_test_on_cpu_ctx<E: StarkEngine<SC = SC>>(
 ) -> eyre::Result<()> {
     let cpu_ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
     let d_ctx = engine.device().transport_proving_ctx_to_device(&cpu_ctx);
-    engine.run_test(airs, d_ctx.per_trace.into_iter().map(|(_, c)| c).collect())?;
+    engine
+        .run_test(airs, d_ctx.per_trace.into_iter().map(|(_, c)| c).collect())
+        .map_err(|err| eyre::eyre!("{err:?}"))?;
     Ok(())
 }
 
@@ -566,7 +568,9 @@ pub fn single_fib_and_dummy_trace_stark<E: StarkEngine<SC = SC>>(
         .transport_proving_ctx_to_device(&cpu_ctx)
         .into_sorted();
 
-    let proof = engine.prove(&combined_pk, combined_ctx)?;
+    let proof = engine
+        .prove(&combined_pk, combined_ctx)
+        .map_err(|err| eyre::eyre!("{err:?}"))?;
     engine.verify(&combined_pk.get_vk(), &proof)?;
     Ok(())
 }
@@ -636,7 +640,9 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
             (3, r1.generate_proving_ctx()),
         ]);
         let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-        let proof = engine.prove(&d_pk, d_ctx)?;
+        let proof = engine
+            .prove(&d_pk, d_ctx)
+            .map_err(|err| eyre::eyre!("{err:?}"))?;
         engine.verify(&pk.get_vk(), &proof)?;
     }
 
@@ -660,7 +666,9 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
             (3, r1.generate_proving_ctx()),
         ]);
         let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-        let proof = engine.prove(&d_pk, d_ctx)?;
+        let proof = engine
+            .prove(&d_pk, d_ctx)
+            .map_err(|err| eyre::eyre!("{err:?}"))?;
         engine.verify(&pk.get_vk(), &proof)?;
     }
 

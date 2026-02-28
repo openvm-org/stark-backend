@@ -51,6 +51,13 @@ impl<PE: core::fmt::Debug, EF: core::fmt::Debug + core::fmt::Display + PartialEq
 {
 }
 
+type ProveResult<SC, PB, PD, TS> = Result<Proof<SC>, <PD as ProverDevice<PB, TS>>::Error>;
+
+type RunTestResult<SC, PB, PD, TS> = Result<
+    VerificationData<SC>,
+    StarkTestError<<PD as ProverDevice<PB, TS>>::Error, <SC as StarkProtocolConfig>::EF>,
+>;
+
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving.
 pub trait StarkEngine
@@ -117,7 +124,7 @@ where
         &self,
         pk: &DeviceMultiStarkProvingKey<Self::PB>,
         ctx: ProvingContext<Self::PB>,
-    ) -> Result<Proof<Self::SC>, <Self::PD as ProverDevice<Self::PB, Self::TS>>::Error> {
+    ) -> ProveResult<Self::SC, Self::PB, Self::PD, Self::TS> {
         let mut prover = self.prover();
         prover.prove(pk, ctx)
     }
@@ -186,13 +193,7 @@ where
         &self,
         airs: Vec<AirRef<Self::SC>>,
         ctxs: Vec<AirProvingContext<Self::PB>>,
-    ) -> Result<
-        VerificationData<Self::SC>,
-        StarkTestError<
-            <Self::PD as ProverDevice<Self::PB, Self::TS>>::Error,
-            <Self::SC as StarkProtocolConfig>::EF,
-        >,
-    > {
+    ) -> RunTestResult<Self::SC, Self::PB, Self::PD, Self::TS> {
         let (pk, vk) = self.keygen(&airs);
         let device = self.prover().device;
         let d_pk = device.transport_pk_to_device(&pk);
