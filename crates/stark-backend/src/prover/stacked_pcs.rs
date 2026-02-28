@@ -10,8 +10,8 @@ use tracing::instrument;
 use crate::{
     hasher::MerkleHasher,
     prover::{
-        col_maj_idx, poly::eval_to_coeff_rs_message, ColMajorMatrix, MatrixDimensions, MatrixView,
-        StridedColMajorMatrixView,
+        col_maj_idx, error::StackedPcsError, poly::eval_to_coeff_rs_message, ColMajorMatrix,
+        MatrixDimensions, MatrixView, StridedColMajorMatrixView,
     },
 };
 
@@ -102,7 +102,7 @@ pub struct StackedPcsData<F, Digest> {
 
 impl<F, Digest: Clone> StackedPcsData<F, Digest> {
     /// Returns the root of the Merkle tree.
-    pub fn commit(&self) -> Digest {
+    pub fn commit(&self) -> Result<Digest, StackedPcsError> {
         self.tree.root()
     }
 
@@ -112,6 +112,7 @@ impl<F, Digest: Clone> StackedPcsData<F, Digest> {
 }
 
 #[instrument(level = "info", skip_all)]
+#[allow(clippy::type_complexity)]
 pub fn stacked_commit<H: MerkleHasher>(
     hasher: &H,
     l_skip: usize,
@@ -119,17 +120,17 @@ pub fn stacked_commit<H: MerkleHasher>(
     log_blowup: usize,
     k_whir: usize,
     traces: &[&ColMajorMatrix<H::F>],
-) -> (H::Digest, StackedPcsData<H::F, H::Digest>)
+) -> Result<(H::Digest, StackedPcsData<H::F, H::Digest>), StackedPcsError>
 where
     H::F: TwoAdicField + Ord,
     H::Digest: Copy,
 {
-    let (q_trace, layout) = stacked_matrix(l_skip, n_stack, traces);
-    let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace);
-    let tree = MerkleTree::new(hasher, rs_matrix, 1 << k_whir);
-    let root = tree.root();
+    let (q_trace, layout) = stacked_matrix(l_skip, n_stack, traces)?;
+    let rs_matrix = rs_code_matrix(l_skip, log_blowup, &q_trace)?;
+    let tree = MerkleTree::new(hasher, rs_matrix, 1 << k_whir)?;
+    let root = tree.root()?;
     let data = StackedPcsData::new(layout, q_trace, tree);
-    (root, data)
+    Ok((root, data))
 }
 
 impl StackedLayout {
@@ -144,7 +145,7 @@ impl StackedLayout {
         l_skip: usize,
         log_stacked_height: usize,
         sorted: Vec<(usize /* width */, usize /* log_height */)>,
-    ) -> Self {
+    ) -> Result<Self, StackedPcsError> {
         debug_assert!(l_skip <= log_stacked_height);
         debug_assert!(sorted.is_sorted_by(|a, b| a.1 >= b.1));
         let mut sorted_cols = Vec::with_capacity(sorted.len());
@@ -156,14 +157,21 @@ impl StackedLayout {
             if width == 0 {
                 continue;
             }
-            assert!(
-                log_ht <= log_stacked_height,
-                "log_height={log_ht} > log_stacked_height={log_stacked_height}"
-            );
+            if log_ht > log_stacked_height {
+                return Err(StackedPcsError::LayoutHeightExceeded {
+                    log_height: log_ht,
+                    log_stacked_height,
+                });
+            }
             for j in 0..width {
                 let slice_len = StackedSlice::_len(log_ht, l_skip);
                 if row_idx + slice_len > (1 << log_stacked_height) {
-                    assert_eq!(row_idx, 1 << log_stacked_height);
+                    if row_idx != 1 << log_stacked_height {
+                        return Err(StackedPcsError::LayoutRowOverflow {
+                            col_idx,
+                            stacked_height: 1 << log_stacked_height,
+                        });
+                    }
                     col_idx += 1;
                     row_idx = 0;
                 }
@@ -185,13 +193,13 @@ impl StackedLayout {
                 .max()
                 .unwrap_or(0)
         );
-        Self {
+        Ok(Self {
             l_skip,
             height: 1 << log_stacked_height,
             width: stacked_width,
             sorted_cols,
             mat_starts,
-        }
+        })
     }
 
     /// Raw unsafe constructor
@@ -199,7 +207,7 @@ impl StackedLayout {
         l_skip: usize,
         log_stacked_height: usize,
         sorted_cols: Vec<(usize, usize, StackedSlice)>,
-    ) -> Self {
+    ) -> Result<Self, StackedPcsError> {
         let height = 1 << log_stacked_height;
         let width = sorted_cols
             .iter()
@@ -209,17 +217,22 @@ impl StackedLayout {
         let mut mat_starts = Vec::new();
         for (idx, (mat_idx, _, _)) in sorted_cols.iter().enumerate() {
             if idx == 0 || *mat_idx + 1 != mat_starts.len() {
-                assert_eq!(*mat_idx, mat_starts.len());
+                if *mat_idx != mat_starts.len() {
+                    return Err(StackedPcsError::LayoutRawPartsMatIdx {
+                        mat_idx: *mat_idx,
+                        mat_starts_len: mat_starts.len(),
+                    });
+                }
                 mat_starts.push(idx);
             }
         }
-        Self {
+        Ok(Self {
             l_skip,
             height,
             width,
             sorted_cols,
             mat_starts,
-        }
+        })
     }
 
     pub fn unstacked_slices_iter(&self) -> impl Iterator<Item = &StackedSlice> {
@@ -282,7 +295,7 @@ pub fn stacked_matrix<F: Field>(
     l_skip: usize,
     n_stack: usize,
     traces: &[&ColMajorMatrix<F>],
-) -> (ColMajorMatrix<F>, StackedLayout) {
+) -> Result<(ColMajorMatrix<F>, StackedLayout), StackedPcsError> {
     let sorted_meta = traces
         .iter()
         .map(|trace| {
@@ -291,7 +304,7 @@ pub fn stacked_matrix<F: Field>(
             (trace.width(), log_height)
         })
         .collect_vec();
-    let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta);
+    let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta)?;
     let total_cells: usize = traces
         .iter()
         .map(|t| t.height().max(1 << l_skip) * t.width())
@@ -299,7 +312,11 @@ pub fn stacked_matrix<F: Field>(
     let height = 1usize << (l_skip + n_stack);
     let width = total_cells.div_ceil(height);
 
-    let mut q_mat = F::zero_vec(width.checked_mul(height).unwrap());
+    let mut q_mat = F::zero_vec(
+        width
+            .checked_mul(height)
+            .ok_or(StackedPcsError::StackedMatrixOverflow)?,
+    );
     for (mat_idx, j, s) in &mut layout.sorted_cols {
         let start = s.col_idx * height + s.row_idx;
         let t_col = traces[*mat_idx].column(*j);
@@ -314,7 +331,7 @@ pub fn stacked_matrix<F: Field>(
             }
         }
     }
-    (ColMajorMatrix::new(q_mat, width), layout)
+    Ok((ColMajorMatrix::new(q_mat, width), layout))
 }
 
 /// Computes the Reed-Solomon codeword of each column vector of `eval_matrix` where the rate is
@@ -325,8 +342,11 @@ pub fn rs_code_matrix<F: TwoAdicField + Ord>(
     l_skip: usize,
     log_blowup: usize,
     eval_matrix: &ColMajorMatrix<F>,
-) -> ColMajorMatrix<F> {
+) -> Result<ColMajorMatrix<F>, StackedPcsError> {
     let height = eval_matrix.height();
+    let rs_height = height
+        .checked_shl(log_blowup as u32)
+        .ok_or(StackedPcsError::RsCodeShiftOverflow { height, log_blowup })?;
     let codewords: Vec<_> = eval_matrix
         .values
         .par_chunks_exact(height)
@@ -337,13 +357,13 @@ pub fn rs_code_matrix<F: TwoAdicField + Ord>(
 
             // Compute RS codeword on the resulting univariate polynomial in coefficient form.
             let dft = Radix2DitParallel::default();
-            coeffs.resize(height.checked_shl(log_blowup as u32).unwrap(), F::ZERO);
+            coeffs.resize(rs_height, F::ZERO);
             dft.dft(coeffs)
         })
         .collect::<Vec<_>>()
         .concat();
 
-    ColMajorMatrix::new(codewords, eval_matrix.width())
+    Ok(ColMajorMatrix::new(codewords, eval_matrix.width()))
 }
 
 impl<F, Digest> MerkleTree<F, Digest> {
@@ -357,16 +377,22 @@ impl<F, Digest> MerkleTree<F, Digest> {
 }
 
 impl<F, Digest: Clone> MerkleTree<F, Digest> {
-    pub fn root(&self) -> Digest {
-        self.digest_layers.last().unwrap()[0].clone()
+    pub fn root(&self) -> Result<Digest, StackedPcsError> {
+        Ok(self
+            .digest_layers
+            .last()
+            .ok_or(StackedPcsError::MerkleTreeNoRoot)?[0]
+            .clone())
     }
 
-    pub fn query_merkle_proof(&self, query_idx: usize) -> Vec<Digest> {
+    pub fn query_merkle_proof(&self, query_idx: usize) -> Result<Vec<Digest>, StackedPcsError> {
         let stride = self.query_stride();
-        assert!(
-            query_idx < stride,
-            "query_idx {query_idx} out of bounds for query_stride {stride}"
-        );
+        if query_idx >= stride {
+            return Err(StackedPcsError::MerkleTreeQueryOutOfBounds {
+                query_idx,
+                query_stride: stride,
+            });
+        }
 
         let mut idx = query_idx;
         let mut proof = Vec::with_capacity(self.proof_depth());
@@ -375,7 +401,7 @@ impl<F, Digest: Clone> MerkleTree<F, Digest> {
             proof.push(sibling);
             idx >>= 1;
         }
-        proof
+        Ok(proof)
     }
 }
 
@@ -388,18 +414,24 @@ where
         hasher: &H,
         matrix: ColMajorMatrix<EF>,
         rows_per_query: usize,
-    ) -> Self
+    ) -> Result<Self, StackedPcsError>
     where
         EF: ExtensionField<H::F>,
     {
         let height = matrix.height();
-        assert!(height > 0);
-        assert!(rows_per_query.is_power_of_two());
+        if height == 0 {
+            return Err(StackedPcsError::MerkleTreeEmptyMatrix);
+        }
+        if !rows_per_query.is_power_of_two() {
+            return Err(StackedPcsError::MerkleTreeRowsPerQueryNotPow2 { rows_per_query });
+        }
         let num_leaves = height.next_power_of_two();
-        assert!(
-            rows_per_query <= num_leaves,
-            "rows_per_query ({rows_per_query}) must not exceed the number of Merkle leaves ({num_leaves})"
-        );
+        if rows_per_query > num_leaves {
+            return Err(StackedPcsError::MerkleTreeRowsPerQueryExceeded {
+                rows_per_query,
+                num_leaves,
+            });
+        }
         let row_hashes: Vec<_> = (0..num_leaves)
             .into_par_iter()
             .map(|r| {
@@ -429,8 +461,15 @@ where
         }
 
         let mut digest_layers = vec![query_digest_layer];
-        while digest_layers.last().unwrap().len() > 1 {
-            let prev_layer = digest_layers.last().unwrap();
+        while digest_layers
+            .last()
+            .ok_or(StackedPcsError::MerkleTreeNoRoot)?
+            .len()
+            > 1
+        {
+            let prev_layer = digest_layers
+                .last()
+                .ok_or(StackedPcsError::MerkleTreeNoRoot)?;
             let layer: Vec<_> = prev_layer
                 .par_chunks_exact(2)
                 .map(|pair| hasher.compress(pair[0], pair[1]))
@@ -438,11 +477,11 @@ where
             digest_layers.push(layer);
         }
 
-        Self {
+        Ok(Self {
             backing_matrix: matrix,
             digest_layers,
             rows_per_query,
-        }
+        })
     }
 
     /// # Safety
@@ -462,12 +501,14 @@ where
 
     /// Returns the ordered set of opened rows for the given query index.
     /// The rows are { query_idx + t * query_stride() } for t in 0..rows_per_query.
-    pub fn get_opened_rows(&self, index: usize) -> Vec<Vec<EF>> {
+    pub fn get_opened_rows(&self, index: usize) -> Result<Vec<Vec<EF>>, StackedPcsError> {
         let query_stride = self.query_stride();
-        assert!(
-            index < query_stride,
-            "index {index} out of bounds for query_stride {query_stride}"
-        );
+        if index >= query_stride {
+            return Err(StackedPcsError::MerkleTreeOpenedRowsOutOfBounds {
+                index,
+                query_stride,
+            });
+        }
 
         let rows_per_query = self.rows_per_query;
         let width = self.backing_matrix.width();
@@ -483,7 +524,7 @@ where
             );
             preimage.push(row);
         }
-        preimage
+        Ok(preimage)
     }
 
     fn row_iter(matrix: &ColMajorMatrix<EF>, index: usize) -> impl Iterator<Item = EF> + '_ {
@@ -509,7 +550,7 @@ mod tests {
             .map(|c| ColMajorMatrix::new(c, 1))
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
-        let (stacked_mat, layout) = stacked_matrix(0, 2, &mat_refs);
+        let (stacked_mat, layout) = stacked_matrix(0, 2, &mat_refs).unwrap();
         assert_eq!(stacked_mat.height(), 4);
         assert_eq!(stacked_mat.width(), 2);
         assert_eq!(
@@ -528,7 +569,7 @@ mod tests {
             .map(|c| ColMajorMatrix::new(c, 1))
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
-        let (stacked_mat, _layout) = stacked_matrix(2, 0, &mat_refs);
+        let (stacked_mat, _layout) = stacked_matrix(2, 0, &mat_refs).unwrap();
         assert_eq!(stacked_mat.height(), 4);
         assert_eq!(stacked_mat.width(), 3);
         assert_eq!(
@@ -548,7 +589,7 @@ mod tests {
             .map(|c| ColMajorMatrix::new(c, 1))
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
-        let (stacked_mat, _layout) = stacked_matrix(3, 0, &mat_refs);
+        let (stacked_mat, _layout) = stacked_matrix(3, 0, &mat_refs).unwrap();
         assert_eq!(stacked_mat.height(), 8);
         assert_eq!(stacked_mat.width(), 3);
         assert_eq!(

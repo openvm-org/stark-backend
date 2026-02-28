@@ -88,7 +88,9 @@ fn main() -> eyre::Result<()> {
 
     let trace_ctx = AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&trace));
     let d_pk = engine.device().transport_pk_to_device(&pk);
-    let proof = engine.prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]));
+    let proof = engine
+        .prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]))
+        .map_err(|e| eyre!("Proving failed: {e:?}"))?;
 
     engine
         .verify(&vk, &proof)

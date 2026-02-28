@@ -573,7 +573,8 @@ mod tests {
             params.log_blowup,
             params.k_whir(),
             &common_main_traces,
-        );
+        )
+        .unwrap();
         let d_common_main_traces = common_main_traces
             .iter()
             .map(|t| device.transport_matrix_to_device(t))
@@ -597,7 +598,7 @@ mod tests {
                 .chain(air_ctx.cached_mains.iter().map(|cd| &cd.data))
             {
                 let trace = device.transport_matrix_to_device(&data.mat_view(0).to_matrix());
-                commits.push(data.commit());
+                commits.push(data.commit().unwrap());
                 stacking_openings.push(openvm_backend_tests::stacking_openings_for_matrix(
                     &params,
                     &z_prism,

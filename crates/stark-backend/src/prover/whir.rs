@@ -11,6 +11,7 @@ use crate::{
     poly_common::Squarable,
     proof::{MerkleProof, WhirProof},
     prover::{
+        error::WhirProverError,
         poly::{eval_to_coeff_rs_message, evals_eq_hypercube, evals_mobius_eq_hypercube, Mle},
         stacked_pcs::{MerkleTree, StackedPcsData},
         ColMajorMatrix, CpuBackend, CpuDevice, MatrixDimensions, ProverBackend,
@@ -19,6 +20,8 @@ use crate::{
 };
 
 pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackend, PD, TS> {
+    type Error;
+
     /// Prove the WHIR protocol for a collection of MLE polynomials \hat{q}_j, each in n variables,
     /// at a single vector `u \in \Fext^n`.
     ///
@@ -34,7 +37,7 @@ pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackend, PD, TS> {
         common_main_pcs_data: PB::PcsData,
         pre_cached_pcs_data_per_commit: Vec<Arc<PB::PcsData>>,
         u_cube: &[PB::Challenge],
-    ) -> WhirProof<SC>;
+    ) -> Result<WhirProof<SC>, Self::Error>;
 }
 
 impl<SC, TS> WhirProver<SC, CpuBackend<SC>, CpuDevice<SC>, TS> for CpuDevice<SC>
@@ -44,6 +47,8 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
     TS: FiatShamirTranscript<SC>,
 {
+    type Error = WhirProverError;
+
     #[instrument(level = "info", skip_all)]
     fn prove_whir(
         &self,
@@ -51,7 +56,7 @@ where
         common_main_pcs_data: StackedPcsData<SC::F, SC::Digest>,
         pre_cached_pcs_data_per_commit: Vec<Arc<StackedPcsData<SC::F, SC::Digest>>>,
         u_cube: &[SC::EF],
-    ) -> WhirProof<SC> {
+    ) -> Result<WhirProof<SC>, WhirProverError> {
         let params = self.params();
         let committed_mats = once(&common_main_pcs_data)
             .chain(pre_cached_pcs_data_per_commit.iter().map(|d| d.as_ref()))
@@ -78,7 +83,7 @@ pub fn prove_whir_opening<SC, TS>(
     whir_params: &WhirConfig,
     committed_mats: &[(&ColMajorMatrix<SC::F>, &MerkleTree<SC::F, SC::Digest>)],
     u: &[SC::EF],
-) -> WhirProof<SC>
+) -> Result<WhirProof<SC>, WhirProverError>
 where
     SC: StarkProtocolConfig,
     SC::F: TwoAdicField + Ord,
@@ -175,7 +180,11 @@ where
             for &eval in &s_evals {
                 transcript.observe_ext(eval);
             }
-            whir_sumcheck_polys.push(s_evals.try_into().unwrap());
+            whir_sumcheck_polys.push(
+                s_evals
+                    .try_into()
+                    .map_err(|_| WhirProverError::TryIntoFailed)?,
+            );
 
             folding_pow_witnesses.push(transcript.grind(whir_params.folding_pow_bits));
             // Folding randomness
@@ -206,8 +215,8 @@ where
             g_coeffs.resize(1 << (log_rs_domain_size - 1), SC::EF::ZERO);
             // `g: \mathcal{L}^{(2)} \to \mathbb F`
             let g_rs = dft.dft(g_coeffs);
-            let g_tree = MerkleTree::new(hasher, ColMajorMatrix::new(g_rs, 1), 1 << k_whir);
-            let g_commit = g_tree.root();
+            let g_tree = MerkleTree::new(hasher, ColMajorMatrix::new(g_rs, 1), 1 << k_whir)?;
+            let g_commit = g_tree.root()?;
             transcript.observe_commit(g_commit);
             codeword_commits.push(g_commit);
 
@@ -259,25 +268,36 @@ where
                 for com_idx in 0..committed_mats.len() {
                     debug_assert_eq!(initial_round_merkle_proofs[com_idx].len(), query_idx);
                     let tree = &committed_mats[com_idx].1;
-                    assert_eq!(tree.backing_matrix.height(), 1 << log_rs_domain_size);
-                    let opened_rows = tree.get_opened_rows(index);
+                    let tree_height = tree.backing_matrix.height();
+                    let expected = 1 << log_rs_domain_size;
+                    if tree_height != expected {
+                        return Err(WhirProverError::TreeHeightMismatch {
+                            tree_height,
+                            expected,
+                        });
+                    }
+                    let opened_rows = tree.get_opened_rows(index)?;
                     initial_round_opened_rows[com_idx].push(opened_rows);
                     debug_assert_eq!(tree.proof_depth(), depth);
-                    let proof = tree.query_merkle_proof(index);
+                    let proof = tree.query_merkle_proof(index)?;
                     debug_assert_eq!(proof.len(), depth);
                     initial_round_merkle_proofs[com_idx].push(proof);
                 }
             } else {
-                let tree: &MerkleTree<SC::EF, SC::Digest> = rs_tree.as_ref().unwrap();
-                assert_eq!(tree.backing_matrix.width(), 1);
+                let tree: &MerkleTree<SC::EF, SC::Digest> =
+                    rs_tree.as_ref().ok_or(WhirProverError::RsTreeNone)?;
+                let width = tree.backing_matrix.width();
+                if width != 1 {
+                    return Err(WhirProverError::TreeWidthNotOne { width });
+                }
                 let opened_rows = tree
-                    .get_opened_rows(index)
+                    .get_opened_rows(index)?
                     .into_iter()
                     .flatten()
                     .collect_vec();
                 codeword_opened_values[whir_round - 1].push(opened_rows);
                 debug_assert_eq!(tree.proof_depth(), depth);
-                let proof = tree.query_merkle_proof(index);
+                let proof = tree.query_merkle_proof(index)?;
                 debug_assert_eq!(proof.len(), depth);
                 codeword_merkle_proofs[whir_round - 1].push(proof);
             }
@@ -291,7 +311,11 @@ where
 
         if !is_last_round {
             // Update \hat{w}
-            w_evals_accumulate::<SC::EF, SC::EF>(&mut w_evals, z_0.unwrap(), gamma);
+            w_evals_accumulate::<SC::EF, SC::EF>(
+                &mut w_evals,
+                z_0.ok_or(WhirProverError::Z0None)?,
+                gamma,
+            );
             for (z_i, gamma_pow) in zs.into_iter().zip(gamma.powers().skip(2)) {
                 w_evals_accumulate::<SC::F, SC::EF>(&mut w_evals, z_i, gamma_pow);
             }
@@ -301,7 +325,7 @@ where
         log_rs_domain_size -= 1;
     }
 
-    WhirProof::<SC> {
+    Ok(WhirProof::<SC> {
         mu_pow_witness,
         whir_sumcheck_polys,
         codeword_commits,
@@ -312,8 +336,8 @@ where
         initial_round_merkle_proofs,
         codeword_opened_values,
         codeword_merkle_proofs,
-        final_poly: final_poly.unwrap(),
-    }
+        final_poly: final_poly.ok_or(WhirProverError::FinalPolyNone)?,
+    })
 }
 
 /// Given hypercube evaluations `w_evals` of `\hat{w}` on `H_t`, this updates the evaluations

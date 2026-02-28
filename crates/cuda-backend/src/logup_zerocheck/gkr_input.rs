@@ -129,7 +129,7 @@ pub fn log_gkr_input_evals(
         let d_public_values = if air_ctx.public_values.is_empty() {
             DeviceBuffer::<F>::new()
         } else {
-            air_ctx.public_values.to_device().unwrap()
+            air_ctx.public_values.to_device()?
         };
 
         let height = air_ctx.height();
