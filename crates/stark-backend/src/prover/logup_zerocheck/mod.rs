@@ -16,6 +16,7 @@ use crate::{
     poly_common::{eq_uni_poly, UnivariatePoly},
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
+        error::LogupZerocheckError,
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         poly::eq_sharp_uni_poly,
         stacked_pcs::StackedLayout,
@@ -35,11 +36,12 @@ pub use cpu::LogupZerocheckCpu;
 pub use single::*;
 
 #[instrument(level = "info", skip_all)]
+#[allow(clippy::type_complexity)]
 pub fn prove_zerocheck_and_logup<SC: StarkProtocolConfig, TS>(
     transcript: &mut TS,
     mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
     ctx: &ProvingContext<CpuBackend<SC>>,
-) -> (GkrProof<SC>, BatchConstraintProof<SC>, Vec<SC::EF>)
+) -> Result<(GkrProof<SC>, BatchConstraintProof<SC>, Vec<SC::EF>), LogupZerocheckError>
 where
     TS: FiatShamirTranscript<SC>,
     SC::F: TwoAdicField,
@@ -74,7 +76,7 @@ where
     debug!(%n_logup);
     // There's no stride threshold for `interactions_layout` because there's no univariate skip for
     // GKR
-    let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
+    let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta)?;
 
     // Grind to increase soundness of random sampling for LogUp
     let logup_pow_witness = transcript.grind(mpk.params.logup.pow_bits);
@@ -89,7 +91,7 @@ where
         interactions_layout,
         alpha_logup,
         beta_logup,
-    );
+    )?;
     // GKR
     // Compute logup input layer: these are the evaluations of \hat{p}, \hat{q} on the hypercube
     // `H_{l_skip + n_logup}`
@@ -165,7 +167,8 @@ where
         evals
     };
 
-    let (frac_sum_proof, mut xi) = fractional_sumcheck::<SC, _>(transcript, &gkr_input_evals, true);
+    let (frac_sum_proof, mut xi) =
+        fractional_sumcheck::<SC, _>(transcript, &gkr_input_evals, true)?;
 
     // Sample more for `\xi` in the edge case that some AIRs don't have interactions
     let n_global = max(n_max, n_logup);
@@ -184,7 +187,7 @@ where
     let lambda = transcript.sample_ext();
     debug!(%lambda);
 
-    let sp_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
+    let sp_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda)?;
     let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree);
     let s_deg = constraint_degree + 1;
     let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
@@ -307,7 +310,7 @@ where
         info_span!("prover.batch_constraints.mle_rounds", phase = "prover").entered();
     debug!(%s_deg);
     for round in 1..=n_max {
-        let sp_round_evals = prover.sumcheck_polys_eval(round, r[round - 1]);
+        let sp_round_evals = prover.sumcheck_polys_eval(round, r[round - 1])?;
         // From s'_T above, we can form s'_head(X) and s'_tail where s'_tail is constant
         // The desired polynomial s(X) for this round `j` is
         // s(X) = eq(\vec xi, \vec r_{j-1}) eq(xi_{}, X) s'_head(X) + s'_tail * X
@@ -393,9 +396,14 @@ where
         prover.fold_mle_evals(round, r_round);
     }
     drop(_mle_rounds_span);
-    assert_eq!(r.len(), n_max + 1);
+    if r.len() != n_max + 1 {
+        return Err(LogupZerocheckError::RLenMismatch {
+            r_len: r.len(),
+            expected: n_max + 1,
+        });
+    }
 
-    let column_openings = prover.into_column_openings();
+    let column_openings = prover.into_column_openings()?;
 
     // Observe common main openings first, and then preprocessed/cached
     for (helper, openings) in prover.eval_helpers.iter().zip(column_openings.iter()) {
@@ -426,5 +434,5 @@ where
         claims_per_layer: frac_sum_proof.claims_per_layer,
         sumcheck_polys: frac_sum_proof.sumcheck_polys,
     };
-    (gkr_proof, batch_constraint_proof, r)
+    Ok((gkr_proof, batch_constraint_proof, r))
 }

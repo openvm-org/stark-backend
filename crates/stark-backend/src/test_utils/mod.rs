@@ -45,14 +45,18 @@ pub fn prove_up_to_batch_constraints<E: StarkEngine>(
     <E::PD as MultiRapProver<E::PB, E::TS>>::PartialProof,
     <E::PD as MultiRapProver<E::PB, E::TS>>::Artifacts,
 ) {
-    let (_, common_main_pcs_data) = engine.device().commit(
-        &ctx.common_main_traces()
-            .map(|(_, trace)| trace)
-            .collect_vec(),
-    );
+    let (_, common_main_pcs_data) = engine
+        .device()
+        .commit(
+            &ctx.common_main_traces()
+                .map(|(_, trace)| trace)
+                .collect_vec(),
+        )
+        .unwrap();
     engine
         .device()
         .prove_rap_constraints(transcript, pk, &ctx, &common_main_pcs_data)
+        .unwrap()
 }
 
 fn get_fib_number<F: PrimeField64>(mut a: u64, mut b: u64, n: usize) -> u64 {
@@ -87,7 +91,8 @@ fn commit_cached_trace<SC: StarkProtocolConfig>(
         params.log_blowup,
         params.k_whir(),
         &[&trace],
-    );
+    )
+    .unwrap();
     CommittedTraceData {
         commitment,
         trace,
@@ -128,7 +133,7 @@ pub trait TestFixture<SC: StarkProtocolConfig> {
         let d_pk = device.transport_pk_to_device(pk);
         let d_ctx = device.transport_proving_ctx_to_device(&ctx);
         let mut prover = engine.prover_from_transcript(transcript.clone());
-        let proof = prover.prove(&d_pk, d_ctx);
+        let proof = prover.prove(&d_pk, d_ctx).unwrap();
         *transcript = prover.transcript;
         proof
     }
@@ -303,7 +308,8 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for CachedFixture11<SC> {
                     params.log_blowup,
                     params.k_whir(),
                     &[&cached],
-                );
+                )
+                .unwrap();
                 assert_eq!(common.height(), cached.height());
                 let cached_data = CommittedTraceData {
                     commitment: commit,
