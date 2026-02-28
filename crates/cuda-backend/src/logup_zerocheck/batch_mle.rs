@@ -12,9 +12,9 @@ use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiSta
 
 use crate::{
     cuda::logup_zerocheck::{
-        BlockCtx, EvalCoreCtx, LogupCtx, MainMatrixPtrs, ZerocheckCtx,
         _logup_batch_mle_intermediates_buffer_size, _zerocheck_batch_mle_intermediates_buffer_size,
-        logup_batch_eval_mle, zerocheck_batch_eval_mle,
+        logup_batch_eval_mle, zerocheck_batch_eval_mle, BlockCtx, EvalCoreCtx, LogupCtx,
+        MainMatrixPtrs, ZerocheckCtx,
     },
     error::KernelError,
     logup_zerocheck::{

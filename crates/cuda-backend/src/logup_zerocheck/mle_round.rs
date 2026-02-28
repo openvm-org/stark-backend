@@ -4,9 +4,9 @@ use tracing::debug;
 
 use crate::{
     cuda::logup_zerocheck::{
-        MainMatrixPtrs, _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
+        _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
         _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size,
-        logup_eval_mle, zerocheck_eval_mle,
+        logup_eval_mle, zerocheck_eval_mle, MainMatrixPtrs,
     },
     error::KernelError,
     prelude::{EF, F},
