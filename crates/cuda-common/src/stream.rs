@@ -1,4 +1,4 @@
-use std::{borrow::Cow, ffi::c_void};
+use std::{borrow::Cow, cell::Cell, ffi::c_void};
 
 use crate::error::{check, CudaError};
 
@@ -80,6 +80,40 @@ pub fn current_stream_id() -> Result<CudaStreamId, CudaError> {
 
 pub fn current_stream_sync() -> Result<(), CudaError> {
     check(unsafe { cudaStreamSynchronize(cudaStreamPerThread) })
+}
+
+struct CudaThreadCleanup {
+    touched_cuda: Cell<bool>,
+}
+
+impl CudaThreadCleanup {
+    const fn new() -> Self {
+        Self {
+            touched_cuda: Cell::new(false),
+        }
+    }
+
+    fn mark_used(&self) {
+        self.touched_cuda.set(true);
+    }
+}
+
+impl Drop for CudaThreadCleanup {
+    fn drop(&mut self) {
+        if self.touched_cuda.get() {
+            // Best-effort drain of this thread's default stream before CUDA TLS teardown.
+            // Avoid calling `check` here to prevent re-entering TLS tracking during drop.
+            let _ = unsafe { cudaStreamSynchronize(cudaStreamPerThread) };
+        }
+    }
+}
+
+thread_local! {
+    static CUDA_THREAD_CLEANUP: CudaThreadCleanup = const { CudaThreadCleanup::new() };
+}
+
+pub(crate) fn mark_cuda_thread_used() {
+    CUDA_THREAD_CLEANUP.with(|cleanup| cleanup.mark_used());
 }
 
 #[allow(non_camel_case_types)]
