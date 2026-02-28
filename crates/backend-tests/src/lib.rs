@@ -27,10 +27,7 @@
 //! 2. Add the test to the [`backend_test_suite!`] macro.
 //! 3. Each backend automatically picks it up on next build.
 
-use std::{
-    panic::{catch_unwind, AssertUnwindSafe},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use itertools::Itertools;
 use openvm_stark_backend::{
@@ -58,12 +55,11 @@ use openvm_stark_backend::{
     },
     utils::disable_debug_builder,
     verifier::{
-        batch_constraints::{verify_zerocheck_and_logup, BatchConstraintError},
+        batch_constraints::verify_zerocheck_and_logup,
         fractional_sumcheck_gkr::verify_gkr,
-        proof_shape::{verify_proof_shape, ProofShapeError},
+        proof_shape::verify_proof_shape,
         verify,
         whir::{binary_k_fold, verify_whir, VerifyWhirError},
-        VerifierError,
     },
     AirRef, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
     TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
@@ -96,7 +92,7 @@ pub fn run_test_on_cpu_ctx<E: StarkEngine<SC = SC>>(
     engine: &E,
     airs: Vec<AirRef<SC>>,
     ctxs: Vec<AirProvingContext<CpuBackend<SC>>>,
-) -> Result<(), VerifierError<EF>> {
+) -> eyre::Result<()> {
     let cpu_ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
     let d_ctx = engine.device().transport_proving_ctx_to_device(&cpu_ctx);
     engine.run_test(airs, d_ctx.per_trace.into_iter().map(|(_, c)| c).collect())?;
@@ -107,7 +103,7 @@ pub fn run_test_on_cpu_ctx<E: StarkEngine<SC = SC>>(
 // 1. Proof shape verification
 // ===========================================================================
 
-pub fn proof_shape_verifier<E: StarkEngine<SC = SC>>() -> Result<(), ProofShapeError> {
+pub fn proof_shape_verifier<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
     let log_trace_degree = 3;
 
@@ -135,8 +131,7 @@ pub fn proof_shape_verifier<E: StarkEngine<SC = SC>>() -> Result<(), ProofShapeE
     Ok(())
 }
 
-pub fn proof_shape_verifier_rng_system_params<E: StarkEngine<SC = SC>>(
-) -> Result<(), ProofShapeError> {
+pub fn proof_shape_verifier_rng_system_params<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
     let mut rng = StdRng::from_seed([228; 32]);
     let w_stack = 16;
@@ -179,33 +174,40 @@ pub fn proof_shape_verifier_rng_system_params<E: StarkEngine<SC = SC>>(
 // 2. Simple end-to-end prove + verify
 // ===========================================================================
 
-pub fn interactions_single_sender_receiver_happy<E: StarkEngine<SC = SC>>() {
+pub fn interactions_single_sender_receiver_happy<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
     let engine = E::new(default_test_params_small());
     let fx = InteractionsFixture11;
     let (vk, proof) = fx.keygen_and_prove(&engine);
-    engine.verify(&vk, &proof).unwrap();
+    engine.verify(&vk, &proof)?;
+    Ok(())
 }
 
-pub fn single_cached_trace_stark<E: StarkEngine<SC = SC>>() {
+pub fn single_cached_trace_stark<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
     let engine = E::new(default_test_params_small());
     let fx = CachedFixture11::new(engine.config().clone());
     let (vk, proof) = fx.keygen_and_prove(&engine);
-    engine.verify(&vk, &proof).unwrap();
+    engine.verify(&vk, &proof)?;
+    Ok(())
 }
 
-pub fn single_preprocessed_trace_stark<E: StarkEngine<SC = SC>>(log_trace_degree: usize) {
+pub fn single_preprocessed_trace_stark<E: StarkEngine<SC = SC>>(
+    log_trace_degree: usize,
+) -> eyre::Result<()> {
     setup_tracing();
     let engine = E::new(default_test_params_small());
     let height = 1 << log_trace_degree;
     let sels = (0..height).map(|i| i % 2 == 0).collect_vec();
     let fx = PreprocessedFibFixture::new(0, 1, sels);
     let (vk, proof) = fx.keygen_and_prove(&engine);
-    engine.verify(&vk, &proof).unwrap();
+    engine.verify(&vk, &proof)?;
+    Ok(())
 }
 
-pub fn multi_interaction_traces_stark<E: StarkEngine<SC = SC>>(log_trace_degree: usize) {
+pub fn multi_interaction_traces_stark<E: StarkEngine<SC = SC>>(
+    log_trace_degree: usize,
+) -> eyre::Result<()> {
     setup_tracing();
     let engine = E::new(default_test_params_small());
     let fx = SelfInteractionFixture {
@@ -214,18 +216,20 @@ pub fn multi_interaction_traces_stark<E: StarkEngine<SC = SC>>(log_trace_degree:
         bus_index: 4,
     };
     let (vk, proof) = fx.keygen_and_prove(&engine);
-    engine.verify(&vk, &proof).unwrap();
+    engine.verify(&vk, &proof)?;
+    Ok(())
 }
 
-pub fn mixture_traces_stark<E: StarkEngine<SC = SC>>(log_trace_degree: usize) {
+pub fn mixture_traces_stark<E: StarkEngine<SC = SC>>(log_trace_degree: usize) -> eyre::Result<()> {
     setup_tracing();
     let engine = E::new(default_test_params_small());
     let fx = MixtureFixture::standard(log_trace_degree, engine.config().clone());
     let (vk, proof) = fx.keygen_and_prove(&engine);
-    engine.verify(&vk, &proof).unwrap();
+    engine.verify(&vk, &proof)?;
+    Ok(())
 }
 
-pub fn matrix_stacking_overflow<E: StarkEngine<SC = SC>>() {
+pub fn matrix_stacking_overflow<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
     let params = test_system_params_small(3, 5, 3);
     let engine = E::new(params);
@@ -235,7 +239,8 @@ pub fn matrix_stacking_overflow<E: StarkEngine<SC = SC>>() {
         bus_index: 4,
     };
     let (vk, proof) = fx.keygen_and_prove(&engine);
-    engine.verify(&vk, &proof).unwrap();
+    engine.verify(&vk, &proof)?;
+    Ok(())
 }
 
 // ===========================================================================
@@ -245,7 +250,7 @@ pub fn matrix_stacking_overflow<E: StarkEngine<SC = SC>>() {
 pub fn fib_air_roundtrip<E: StarkEngine<SC = SC>>(
     l_skip: usize,
     log_trace_degree: usize,
-) -> Result<(), VerifierError<EF>> {
+) -> eyre::Result<()> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let n_stack = 8;
@@ -275,14 +280,15 @@ pub fn fib_air_roundtrip<E: StarkEngine<SC = SC>>(
     let proof = fib.prove_from_transcript(&engine, &pk, &mut prover_transcript);
 
     let mut verifier_sponge = default_duplex_sponge();
-    verify(engine.config(), &vk, &proof, &mut verifier_sponge)
+    verify(engine.config(), &vk, &proof, &mut verifier_sponge)?;
+    Ok(())
 }
 
 pub fn dummy_interactions_roundtrip<E: StarkEngine<SC = SC>>(
     l_skip: usize,
     n_stack: usize,
     k_whir: usize,
-) -> Result<(), VerifierError<EF>> {
+) -> eyre::Result<()> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = E::new(params);
     let fx = InteractionsFixture11;
@@ -292,14 +298,15 @@ pub fn dummy_interactions_roundtrip<E: StarkEngine<SC = SC>>(
     let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_transcript);
 
     let mut verifier_sponge = default_duplex_sponge();
-    verify(engine.config(), &vk, &proof, &mut verifier_sponge)
+    verify(engine.config(), &vk, &proof, &mut verifier_sponge)?;
+    Ok(())
 }
 
 pub fn cached_trace_roundtrip<E: StarkEngine<SC = SC>>(
     l_skip: usize,
     n_stack: usize,
     k_whir: usize,
-) -> Result<(), VerifierError<EF>> {
+) -> eyre::Result<()> {
     setup_tracing_with_log_level(Level::DEBUG);
     let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = E::new(params);
@@ -310,14 +317,15 @@ pub fn cached_trace_roundtrip<E: StarkEngine<SC = SC>>(
     let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_transcript);
 
     let mut verifier_sponge = default_duplex_sponge();
-    verify(engine.config(), &vk, &proof, &mut verifier_sponge)
+    verify(engine.config(), &vk, &proof, &mut verifier_sponge)?;
+    Ok(())
 }
 
 pub fn preprocessed_trace_roundtrip<E: StarkEngine<SC = SC>>(
     l_skip: usize,
     n_stack: usize,
     k_whir: usize,
-) -> Result<(), VerifierError<EF>> {
+) -> eyre::Result<()> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = E::new(params);
     let log_trace_degree = 8;
@@ -330,7 +338,8 @@ pub fn preprocessed_trace_roundtrip<E: StarkEngine<SC = SC>>(
     let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_transcript);
 
     let mut verifier_sponge = default_duplex_sponge();
-    verify(engine.config(), &vk, &proof, &mut verifier_sponge)
+    verify(engine.config(), &vk, &proof, &mut verifier_sponge)?;
+    Ok(())
 }
 
 pub fn preprocessed_and_cached_trace_roundtrip<E: StarkEngine<SC = SC>>(
@@ -338,7 +347,7 @@ pub fn preprocessed_and_cached_trace_roundtrip<E: StarkEngine<SC = SC>>(
     n_stack: usize,
     k_whir: usize,
     num_cached_parts: usize,
-) -> Result<(), VerifierError<EF>> {
+) -> eyre::Result<()> {
     let params = test_system_params_small(l_skip, n_stack, k_whir);
     let engine = E::new(params);
     let log_trace_degree = 8;
@@ -351,7 +360,8 @@ pub fn preprocessed_and_cached_trace_roundtrip<E: StarkEngine<SC = SC>>(
     let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_transcript);
 
     let mut verifier_sponge = default_duplex_sponge();
-    verify(engine.config(), &vk, &proof, &mut verifier_sponge)
+    verify(engine.config(), &vk, &proof, &mut verifier_sponge)?;
+    Ok(())
 }
 
 // ===========================================================================
@@ -360,7 +370,7 @@ pub fn preprocessed_and_cached_trace_roundtrip<E: StarkEngine<SC = SC>>(
 
 pub fn batch_sumcheck_zero_interactions<E: StarkEngine<SC = SC>>(
     log_trace_degree: usize,
-) -> Result<(), BatchConstraintError<EF>> {
+) -> eyre::Result<()> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let engine = E::new(default_test_params_small());
@@ -494,7 +504,9 @@ pub fn batch_constraints_with_interactions<E: StarkEngine<SC = SC>>() -> eyre::R
 // 5. Custom context construction
 // ===========================================================================
 
-pub fn single_fib_and_dummy_trace_stark<E: StarkEngine<SC = SC>>(log_trace_degree: usize) {
+pub fn single_fib_and_dummy_trace_stark<E: StarkEngine<SC = SC>>(
+    log_trace_degree: usize,
+) -> eyre::Result<()> {
     setup_tracing();
 
     let engine = E::new(default_test_params_small());
@@ -554,15 +566,16 @@ pub fn single_fib_and_dummy_trace_stark<E: StarkEngine<SC = SC>>(log_trace_degre
         .transport_proving_ctx_to_device(&cpu_ctx)
         .into_sorted();
 
-    let proof = engine.prove(&combined_pk, combined_ctx);
-    engine.verify(&combined_pk.get_vk(), &proof).unwrap();
+    let proof = engine.prove(&combined_pk, combined_ctx)?;
+    engine.verify(&combined_pk.get_vk(), &proof)?;
+    Ok(())
 }
 
 // ===========================================================================
 // 6. Interaction tests (positive and negative)
 // ===========================================================================
 
-pub fn optional_air<E: StarkEngine<SC = SC>>() {
+pub fn optional_air<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
 
     let engine = E::new(default_test_params_small());
@@ -623,8 +636,8 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() {
             (3, r1.generate_proving_ctx()),
         ]);
         let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-        let proof = engine.prove(&d_pk, d_ctx);
-        engine.verify(&pk.get_vk(), &proof).unwrap();
+        let proof = engine.prove(&d_pk, d_ctx)?;
+        engine.verify(&pk.get_vk(), &proof)?;
     }
 
     // Case 2: Only send_chip1 and recv_chip1 present (fib and send_chip2 omitted).
@@ -647,8 +660,8 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() {
             (3, r1.generate_proving_ctx()),
         ]);
         let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-        let proof = engine.prove(&d_pk, d_ctx);
-        engine.verify(&pk.get_vk(), &proof).unwrap();
+        let proof = engine.prove(&d_pk, d_ctx)?;
+        engine.verify(&pk.get_vk(), &proof)?;
     }
 
     // Case 3: Negative - unbalanced interactions.
@@ -661,18 +674,15 @@ pub fn optional_air<E: StarkEngine<SC = SC>>() {
             fields: vec![vec![1], vec![2], vec![3]],
         });
 
-        let d_pk = &d_pk;
-        let pk = &pk;
-        let engine = &engine;
-        let device = engine.device();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let cpu_ctx = ProvingContext::new(vec![(3, r1.generate_proving_ctx())]);
-            let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-            let proof = engine.prove(d_pk, d_ctx);
-            engine.verify(&pk.get_vk(), &proof)
-        }));
-        assert!(result.is_err() || result.unwrap().is_err());
+        let cpu_ctx = ProvingContext::new(vec![(3, r1.generate_proving_ctx())]);
+        let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
+        let result = engine.prove(&d_pk, d_ctx);
+        assert!(
+            result.is_err(),
+            "Expected prover to fail with unbalanced interactions"
+        );
     }
+    Ok(())
 }
 
 pub fn vkey_methods<E: StarkEngine<SC = SC>>() {
@@ -791,20 +801,21 @@ pub fn interaction_multi_rows_neg<E: StarkEngine<SC = SC>>() {
 
     disable_debug_builder();
     let engine = E::new(default_test_params_small());
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        run_test_on_cpu_ctx(
-            &engine,
-            any_air_arc_vec![sender_air, receiver_air],
-            vec![
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace)),
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
-            ],
-        )
-    }));
-    assert!(result.is_err() || result.unwrap().is_err());
+    let result = run_test_on_cpu_ctx(
+        &engine,
+        any_air_arc_vec![sender_air, receiver_air],
+        vec![
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace)),
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "Expected test to fail with unbalanced interactions"
+    );
 }
 
-pub fn interaction_all_zero_sender<E: StarkEngine<SC = SC>>() {
+pub fn interaction_all_zero_sender<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
 
     let sender_trace = RowMajorMatrix::new(
@@ -823,11 +834,11 @@ pub fn interaction_all_zero_sender<E: StarkEngine<SC = SC>>() {
         vec![AirProvingContext::simple_no_pis(
             ColMajorMatrix::from_row_major(&sender_trace),
         )],
-    )
-    .expect("Verification failed");
+    )?;
+    Ok(())
 }
 
-pub fn interaction_multi_senders<E: StarkEngine<SC = SC>>() {
+pub fn interaction_multi_senders<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
 
     let sender_trace1 = RowMajorMatrix::new(
@@ -859,8 +870,8 @@ pub fn interaction_multi_senders<E: StarkEngine<SC = SC>>() {
             AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
             AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
         ],
-    )
-    .expect("Verification failed");
+    )?;
+    Ok(())
 }
 
 pub fn interaction_multi_senders_neg<E: StarkEngine<SC = SC>>() {
@@ -889,21 +900,22 @@ pub fn interaction_multi_senders_neg<E: StarkEngine<SC = SC>>() {
 
     disable_debug_builder();
     let engine = E::new(default_test_params_small());
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        run_test_on_cpu_ctx(
-            &engine,
-            any_air_arc_vec![sender_air, sender_air, receiver_air],
-            vec![
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
-                AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
-            ],
-        )
-    }));
-    assert!(result.is_err() || result.unwrap().is_err());
+    let result = run_test_on_cpu_ctx(
+        &engine,
+        any_air_arc_vec![sender_air, sender_air, receiver_air],
+        vec![
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace1)),
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&sender_trace2)),
+            AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace)),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "Expected test to fail with unbalanced interactions"
+    );
 }
 
-pub fn interaction_multi_sender_receiver<E: StarkEngine<SC = SC>>() {
+pub fn interaction_multi_sender_receiver<E: StarkEngine<SC = SC>>() -> eyre::Result<()> {
     setup_tracing();
 
     let sender_trace1 = RowMajorMatrix::new(
@@ -937,8 +949,8 @@ pub fn interaction_multi_sender_receiver<E: StarkEngine<SC = SC>>() {
             AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace1)),
             AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&receiver_trace2)),
         ],
-    )
-    .expect("Verification failed");
+    )?;
+    Ok(())
 }
 
 pub fn interaction_cached_trace_neg<E: StarkEngine<SC = SC>>() {
@@ -979,15 +991,17 @@ pub fn interaction_cached_trace_neg<E: StarkEngine<SC = SC>>() {
 
     disable_debug_builder();
     let device = engine.device();
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let (pk, vk) = engine.keygen(&airs);
-        let d_pk = device.transport_pk_to_device(&pk);
-        let cpu_ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
-        let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
-        let proof = engine.prove(&d_pk, d_ctx);
-        engine.verify(&vk, &proof)
-    }));
-    assert!(result.is_err() || result.unwrap().is_err());
+    let (pk, vk) = engine.keygen(&airs);
+    let d_pk = device.transport_pk_to_device(&pk);
+    let cpu_ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
+    let d_ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
+    let result = engine.prove(&d_pk, d_ctx);
+    if let Ok(proof) = result {
+        assert!(
+            engine.verify(&vk, &proof).is_err(),
+            "Expected verification to fail with unbalanced interactions"
+        );
+    }
 }
 
 // ===========================================================================
@@ -1036,7 +1050,7 @@ fn run_whir_test(
     config: &SC,
     pk: DeviceMultiStarkProvingKey<CpuBackend<SC>>,
     ctx: &ProvingContext<CpuBackend<SC>>,
-) -> Result<(), VerifyWhirError> {
+) -> eyre::Result<()> {
     let params = config.params();
     let (common_main_commit, common_main_pcs_data) = {
         let traces = ctx
@@ -1050,7 +1064,7 @@ fn run_whir_test(
             params.log_blowup,
             params.k_whir(),
             &traces,
-        )
+        )?
     };
 
     let mut commits = vec![common_main_commit];
@@ -1063,7 +1077,7 @@ fn run_whir_test(
         for cd in pcs_datas {
             let data = &cd.data;
             committed_mats.push((&data.matrix, &data.tree));
-            commits.push(data.commit());
+            commits.push(data.commit()?);
         }
     }
 
@@ -1080,7 +1094,7 @@ fn run_whir_test(
         params.whir(),
         &committed_mats,
         &z_cube,
-    );
+    )?;
 
     let stacking_openings = committed_mats
         .iter()
@@ -1096,10 +1110,11 @@ fn run_whir_test(
         &stacking_openings,
         &commits,
         &z_cube,
-    )
+    )?;
+    Ok(())
 }
 
-fn run_whir_fib_test(params: SystemParams) -> Result<(), VerifyWhirError> {
+fn run_whir_fib_test(params: SystemParams) -> eyre::Result<()> {
     let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
     let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
     let (pk, _vk) = fib.keygen(&engine);
@@ -1152,7 +1167,7 @@ pub fn whir_single_fib(
     log_blowup: usize,
     k_whir: usize,
     log_final_poly_len: usize,
-) -> Result<(), VerifyWhirError> {
+) -> eyre::Result<()> {
     setup_tracing_with_log_level(Level::DEBUG);
     let l_skip = 2;
     let w_stack = 8;
@@ -1185,7 +1200,7 @@ pub fn whir_test_config(k_whir: usize) -> WhirConfig {
 }
 
 /// Test CPU WHIR prover + verifier with 5 randomly generated commitments.
-pub fn whir_multiple_commitments() -> Result<(), VerifyWhirError> {
+pub fn whir_multiple_commitments() -> eyre::Result<()> {
     setup_tracing_with_log_level(Level::DEBUG);
 
     let mut rng = StdRng::seed_from_u64(42);
@@ -1223,7 +1238,7 @@ pub fn whir_multiple_commitments() -> Result<(), VerifyWhirError> {
             params.log_blowup,
             params.k_whir(),
             &[&mat],
-        );
+        )?;
 
         matrices.push(mat);
         commits.push(commit);
@@ -1245,7 +1260,7 @@ pub fn whir_multiple_commitments() -> Result<(), VerifyWhirError> {
         params.whir(),
         &committed_mats,
         &z_cube,
-    );
+    )?;
 
     let stacking_openings: Vec<Vec<EF>> = matrices
         .iter()
@@ -1261,7 +1276,8 @@ pub fn whir_multiple_commitments() -> Result<(), VerifyWhirError> {
         &stacking_openings,
         &commits,
         &z_cube,
-    )
+    )?;
+    Ok(())
 }
 
 /// Soundness test: verify that WHIR correctly rejects tampered openings.
@@ -1303,7 +1319,8 @@ pub fn whir_multiple_commitments_negative() {
             params.log_blowup,
             params.k_whir(),
             &[&mat],
-        );
+        )
+        .unwrap();
 
         matrices.push(mat);
         commits.push(commit);
@@ -1326,7 +1343,8 @@ pub fn whir_multiple_commitments_negative() {
         params.whir(),
         &committed_mats,
         &z_cube,
-    );
+    )
+    .unwrap();
 
     let mut stacking_openings: Vec<Vec<EF>> = matrices
         .iter()
@@ -1429,15 +1447,15 @@ macro_rules! backend_test_suite {
 
         // === 2. Simple end-to-end ===
 
-        $crate::__test_cases!($engine, interactions_single_sender_receiver_happy, {
+        $crate::__test_cases!($engine, interactions_single_sender_receiver_happy, unwrap, {
             test_interactions_single_sender_receiver_happy(),
         });
 
-        $crate::__test_cases!($engine, single_cached_trace_stark, {
+        $crate::__test_cases!($engine, single_cached_trace_stark, unwrap, {
             test_single_cached_trace_stark(),
         });
 
-        $crate::__test_cases!($engine, single_preprocessed_trace_stark, {
+        $crate::__test_cases!($engine, single_preprocessed_trace_stark, unwrap, {
             test_single_preprocessed_trace_stark(10),
             test_single_preprocessed_trace_stark_log_height_gt_l_skip(3),
             test_single_preprocessed_trace_stark_log_height_eq_l_skip(2),
@@ -1445,7 +1463,7 @@ macro_rules! backend_test_suite {
             test_single_preprocessed_trace_stark_log_height_zero(0),
         });
 
-        $crate::__test_cases!($engine, multi_interaction_traces_stark, {
+        $crate::__test_cases!($engine, multi_interaction_traces_stark, unwrap, {
             test_multi_interaction_traces_stark(10),
             test_multi_interaction_traces_stark_log_height_gt_l_skip(3),
             test_multi_interaction_traces_stark_log_height_eq_l_skip(2),
@@ -1453,7 +1471,7 @@ macro_rules! backend_test_suite {
             test_multi_interaction_traces_stark_log_height_zero(0),
         });
 
-        $crate::__test_cases!($engine, mixture_traces_stark, {
+        $crate::__test_cases!($engine, mixture_traces_stark, unwrap, {
             test_mixture_traces_stark(10),
             test_mixture_traces_stark_log_height_gt_l_skip(3),
             test_mixture_traces_stark_log_height_eq_l_skip(2),
@@ -1461,7 +1479,7 @@ macro_rules! backend_test_suite {
             test_mixture_traces_stark_log_height_zero(0),
         });
 
-        $crate::__test_cases!($engine, matrix_stacking_overflow, {
+        $crate::__test_cases!($engine, matrix_stacking_overflow, unwrap, {
             test_matrix_stacking_overflow(),
         });
 
@@ -1520,7 +1538,7 @@ macro_rules! backend_test_suite {
 
         // === 5. Custom context construction ===
 
-        $crate::__test_cases!($engine, single_fib_and_dummy_trace_stark, {
+        $crate::__test_cases!($engine, single_fib_and_dummy_trace_stark, unwrap, {
             test_single_fib_and_dummy_trace_stark(3),
             test_single_fib_and_dummy_trace_stark_log_height_eq_l_skip(2),
             test_single_fib_and_dummy_trace_stark_log_height_lt_l_skip(1),
@@ -1529,7 +1547,7 @@ macro_rules! backend_test_suite {
 
         // === 6. Interaction tests ===
 
-        $crate::__test_cases!($engine, optional_air, {
+        $crate::__test_cases!($engine, optional_air, unwrap, {
             test_optional_air(),
         });
 
@@ -1549,11 +1567,11 @@ macro_rules! backend_test_suite {
             test_interaction_multi_rows_neg(),
         });
 
-        $crate::__test_cases!($engine, interaction_all_zero_sender, {
+        $crate::__test_cases!($engine, interaction_all_zero_sender, unwrap, {
             test_interaction_all_zero_sender(),
         });
 
-        $crate::__test_cases!($engine, interaction_multi_senders, {
+        $crate::__test_cases!($engine, interaction_multi_senders, unwrap, {
             test_interaction_multi_senders(),
         });
 
@@ -1561,7 +1579,7 @@ macro_rules! backend_test_suite {
             test_interaction_multi_senders_neg(),
         });
 
-        $crate::__test_cases!($engine, interaction_multi_sender_receiver, {
+        $crate::__test_cases!($engine, interaction_multi_sender_receiver, unwrap, {
             test_interaction_multi_sender_receiver(),
         });
 
