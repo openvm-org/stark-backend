@@ -16,13 +16,16 @@ use {
     metrics_util::layers::Layer,
 };
 
+#[cfg(feature = "metrics-upload")]
+mod otlp_upload;
+
 /// Run a function with metric collection enabled. The metrics will be written to a file specified
 /// by an environment variable which name is `output_path_envar`.
 pub fn run_with_metric_collection<R>(
     output_path_envar: impl AsRef<OsStr>,
     f: impl FnOnce() -> R,
 ) -> R {
-    let file = std::env::var(output_path_envar).map(|path| std::fs::File::create(path).unwrap());
+    let file = std::env::var(&output_path_envar).map(|path| std::fs::File::create(path).unwrap());
     // Set up tracing:
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,p3_=warn"));
@@ -46,6 +49,35 @@ pub fn run_with_metric_collection<R>(
         metrics::set_global_recorder(recorder).unwrap();
     }
     let res = f();
+
+    // OTLP upload if METRICS_ENDPOINT is set (requires metrics-upload feature)
+    #[cfg(feature = "metrics-upload")]
+    if let Ok(endpoint) = std::env::var("METRICS_ENDPOINT") {
+        let api_key = std::env::var("METRICS_API_KEY").unwrap_or_default();
+        let run_id = std::env::var("METRICS_RUN_ID").unwrap_or_else(|_| {
+            format!(
+                "bench-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            )
+        });
+
+        match otlp_upload::upload_snapshot_as_otlp(
+            snapshotter.snapshot(),
+            &endpoint,
+            &api_key,
+            &run_id,
+        ) {
+            Ok(count) => println!("Uploaded {} metrics to {}", count, endpoint),
+            Err(e) => eprintln!(
+                "Warning: OTLP upload failed: {} (use {} for JSON fallback)",
+                e,
+                output_path_envar.as_ref().to_string_lossy()
+            ),
+        }
+    }
 
     if let Ok(file) = file {
         serde_json::to_writer_pretty(&file, &serialize_metric_snapshot(snapshotter.snapshot()))

@@ -36,6 +36,9 @@ tokio = { workspace = true, features = [
 rustls = { workspace = true, features = ["aws-lc-rs"], optional = true }
 eyre.workspace = true
 static_assertions.workspace = true
+reqwest = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+opentelemetry-proto = { workspace = true, optional = true }
 derive-new.workspace = true
 num-bigint = { workspace = true, optional = true }
 
@@ -58,4 +61,10 @@ prometheus = [
   "dep:metrics-exporter-prometheus",
   "dep:tokio",
   "dep:rustls",
+]
+metrics-upload = [
+  "metrics",
+  "dep:reqwest",
+  "dep:prost",
+  "dep:opentelemetry-proto",
 ]
