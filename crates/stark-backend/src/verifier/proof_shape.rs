@@ -542,7 +542,8 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
             .iter()
             .map(|(_, vk, vdata)| (vk.params.width.common_main, vdata.log_height))
             .collect_vec(),
-    );
+    )
+    .unwrap();
 
     let other_layouts = per_trace
         .iter()
@@ -556,7 +557,9 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
                 .map(|width| (width, vdata.log_height))
                 .collect_vec()
         })
-        .map(|sorted| StackedLayout::new(l_skip, mvk.params.n_stack + l_skip, vec![sorted]))
+        .map(|sorted| {
+            StackedLayout::new(l_skip, mvk.params.n_stack + l_skip, vec![sorted]).unwrap()
+        })
         .collect_vec();
 
     let layouts = [common_main_layout]

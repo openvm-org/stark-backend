@@ -131,7 +131,7 @@ fn main() {
                 let ctx =
                     ProvingContext::new(vec![(air_idx, AirProvingContext::simple_no_pis(d_trace))]);
 
-                let proof = engine.prove(&d_pk, ctx);
+                let proof = engine.prove(&d_pk, ctx).expect("proving failed");
                 engine.verify(&vk, &proof).expect("verification failed");
                 println!(
                     "[task {t} - stream {}] Proof verified",

@@ -109,7 +109,7 @@ pub(crate) fn get_stacked_layout(
         })
         .collect_vec();
     debug_assert!(sorted_meta.is_sorted_by(|a, b| a.1 >= b.1));
-    StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta)
+    StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta).unwrap()
 }
 
 pub(crate) fn stack_traces(
