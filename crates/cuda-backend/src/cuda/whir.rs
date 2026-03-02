@@ -28,6 +28,14 @@ extern "C" {
         height: u32,
     ) -> i32;
 
+    fn _whir_sumcheck_coeff_moments_round_factored(
+        f_coeffs: *const EF,
+        w_moments: *const EF,
+        output: *mut EF,
+        tmp_block_sums: *mut EF,
+        height: u32,
+    ) -> i32;
+
     fn _whir_fold_coeffs_and_moments(
         f_coeffs: *const EF,
         w_moments: *const EF,
@@ -96,6 +104,46 @@ pub unsafe fn whir_sumcheck_coeff_moments_round(
         );
     }
     check(_whir_sumcheck_coeff_moments_round(
+        f_coeffs.as_ptr(),
+        w_moments.as_ptr(),
+        output.as_mut_ptr(),
+        tmp_block_sums.as_mut_ptr(),
+        height,
+    ))
+}
+
+/// Factored WHIR sumcheck round (use only when `whir_round == 0`).
+///
+/// Exploits `m1(y) = u_k * m0(y)` (holds when `w = eq(u, -)` before accumulation).
+/// Returns `[T_const, T_linear]` in `output`; caller reconstructs:
+/// ```text
+/// s(1) = u_k * (T_const + T_linear)
+/// s(2) = (3*u_k - 1) * (T_const + 2*T_linear)
+/// ```
+/// Temp buffer size requirement is the same as [`whir_sumcheck_coeff_moments_round`].
+///
+/// # Safety
+/// Same preconditions as [`whir_sumcheck_coeff_moments_round`].
+pub unsafe fn whir_sumcheck_coeff_moments_round_factored(
+    f_coeffs: &DeviceBuffer<EF>,
+    w_moments: &DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+    height: u32,
+) -> Result<(), CudaError> {
+    debug_assert!(f_coeffs.len() >= height as usize);
+    debug_assert!(w_moments.len() >= height as usize);
+    debug_assert!(output.len() >= 2);
+    #[cfg(debug_assertions)]
+    {
+        let len = tmp_block_sums.len();
+        let required = _whir_sumcheck_coeff_moments_required_temp_buffer_size(height);
+        assert!(
+            len >= required as usize,
+            "tmp_block_sums len={len} < required={required}"
+        );
+    }
+    check(_whir_sumcheck_coeff_moments_round_factored(
         f_coeffs.as_ptr(),
         w_moments.as_ptr(),
         output.as_mut_ptr(),

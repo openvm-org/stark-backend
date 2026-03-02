@@ -25,7 +25,7 @@ use crate::{
         whir::{
             _whir_sumcheck_coeff_moments_required_temp_buffer_size, w_moments_accumulate,
             whir_algebraic_batch_traces, whir_fold_coeffs_and_moments,
-            whir_sumcheck_coeff_moments_round,
+            whir_sumcheck_coeff_moments_round, whir_sumcheck_coeff_moments_round_factored,
         },
     },
     merkle_tree::MerkleTreeGpu,
@@ -213,25 +213,55 @@ pub fn prove_whir_opening_gpu(
             // SAFETY:
             // - `d_s_evals` has length 2
             // - `d_sumcheck_tmp` has at least required scratch length
-            unsafe {
-                whir_sumcheck_coeff_moments_round(
-                    &f_coeffs,
-                    &w_moments,
-                    &mut d_s_evals,
-                    &mut d_sumcheck_tmp,
-                    f_height as u32,
-                )
-                .map_err(|error| WhirProverError::SumcheckMleRound {
-                    error,
-                    whir_round,
-                    round,
-                })?;
-            }
-            let s_evals = d_s_evals.to_host()?;
-            for &eval in &s_evals {
-                transcript.observe_ext(eval);
-            }
-            whir_sumcheck_polys.push(s_evals.try_into().unwrap());
+            let [s1, s2] = if whir_round == 0 {
+                // Factored kernel: m1(y) = u_k * m0(y) holds for all inner rounds of outer
+                // round 0 (before w_moments_accumulate). GPU computes [T_const, T_linear]
+                // where T(X) = sum_y f(X,y)*m0(y) is degree-1 in X.
+                unsafe {
+                    whir_sumcheck_coeff_moments_round_factored(
+                        &f_coeffs,
+                        &w_moments,
+                        &mut d_s_evals,
+                        &mut d_sumcheck_tmp,
+                        f_height as u32,
+                    )
+                    .map_err(|error| WhirProverError::SumcheckMleRound {
+                        error,
+                        whir_round,
+                        round,
+                    })?;
+                }
+                let t_vals = d_s_evals.to_host()?;
+                let t_const = t_vals[0];
+                let t_linear = t_vals[1];
+                let u_k = u[round];
+                let t1 = t_const + t_linear;
+                let t2 = t1 + t_linear; // T_const + 2*T_linear
+                let s1 = u_k * t1;
+                // c_w(2) = (1-2*u_k) + 2*(3*u_k-1) = 4*u_k - 1
+                let s2 = (u_k + u_k + u_k + u_k - EF::ONE) * t2;
+                [s1, s2]
+            } else {
+                unsafe {
+                    whir_sumcheck_coeff_moments_round(
+                        &f_coeffs,
+                        &w_moments,
+                        &mut d_s_evals,
+                        &mut d_sumcheck_tmp,
+                        f_height as u32,
+                    )
+                    .map_err(|error| WhirProverError::SumcheckMleRound {
+                        error,
+                        whir_round,
+                        round,
+                    })?;
+                }
+                let s_evals = d_s_evals.to_host()?;
+                s_evals.try_into().unwrap()
+            };
+            transcript.observe_ext(s1);
+            transcript.observe_ext(s2);
+            whir_sumcheck_polys.push([s1, s2]);
 
             folding_pow_witnesses.push(
                 transcript

@@ -135,6 +135,64 @@ __global__ void whir_sumcheck_coeff_moments_round_kernel(
     }
 }
 
+// Factored sumcheck kernel for outer round 0.
+//
+// Exploits the invariant w_moments[2y] = (1-u_k)*eq_rest(y) and
+// w_moments[2y+1] = u_k*eq_rest(y), so eq_rest(y) = w_moments[2y] + w_moments[2y+1].
+// The moment-form polynomial is w(X,y) = eq_rest(y) * c_w(X) where
+//   c_w(X) = (1 - 2*u_k) + X*(3*u_k - 1).
+//
+// Computes:
+//   T_const  = sum_y  c0(y) * eq_rest(y)
+//   T_linear = sum_y  c1(y) * eq_rest(y)
+//
+// CPU reconstructs using c_w(1) = u_k and c_w(2) = 4*u_k - 1:
+//   s(1) = u_k * (T_const + T_linear)
+//   s(2) = (4*u_k - 1) * (T_const + 2*T_linear)
+//
+// Proof format [s(1), s(2)] and verifier are unchanged.
+__global__ void whir_sumcheck_coeff_moments_round_factored_kernel(
+    const FpExt *f_coeffs,
+    const FpExt *w_moments,
+    FpExt *block_sums,
+    const uint32_t height
+) {
+    extern __shared__ char smem[];
+    FpExt *shared = (FpExt *)smem;
+
+    int half_height = height >> 1;
+
+    // local_sums[0] = T_const, local_sums[1] = T_linear
+    FpExt local_sums[2];
+
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+        local_sums[i] = FpExt(0);
+    }
+
+    for (int y = blockIdx.x * blockDim.x + threadIdx.x; y < half_height;
+         y += gridDim.x * blockDim.x) {
+        int idx0 = y << 1;
+        int idx1 = idx0 + 1;
+
+        FpExt c0 = f_coeffs[idx0];
+        FpExt c1 = f_coeffs[idx1];
+        FpExt m0 = w_moments[idx0] + w_moments[idx1]; // total moment = eq_rest(y)
+
+        local_sums[0] += c0 * m0; // T_const
+        local_sums[1] += c1 * m0; // T_linear
+    }
+
+#pragma unroll
+    for (int idx = 0; idx < 2; idx++) {
+        FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
+        if (threadIdx.x == 0) {
+            block_sums[blockIdx.x * 2 + idx] = reduced;
+        }
+        __syncthreads();
+    }
+}
+
 // Folds both:
 // - `f` in MLE coefficient form
 // - `w` in moment form m[T] = sum_{x superset T} w(x)
@@ -273,6 +331,37 @@ extern "C" int _whir_sumcheck_coeff_moments_round(
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     sumcheck::static_final_reduce_block_sums<S_DEG>
         <<<S_DEG, reduce_block, reduce_shmem>>>(tmp_block_sums, output, num_blocks);
+
+    return CHECK_KERNEL();
+}
+
+// Factored launcher: same temp buffer size as _whir_sumcheck_coeff_moments_round.
+// Output is [T_const, T_linear]; CPU scales by u_k to get [s(1), s(2)].
+extern "C" int _whir_sumcheck_coeff_moments_round_factored(
+    const FpExt *f_coeffs,
+    const FpExt *w_moments,
+    FpExt *output,         // Output: [T_const, T_linear], size 2
+    FpExt *tmp_block_sums, // Temporary buffer: [num_blocks * 2]
+    const uint32_t height
+) {
+    auto [grid, block] = whir_sumcheck_coeff_moments_launch_params(height);
+    unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;
+    size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
+
+    whir_sumcheck_coeff_moments_round_factored_kernel<<<grid, block, shmem_bytes>>>(
+        f_coeffs, w_moments, tmp_block_sums, height
+    );
+
+    int err = CHECK_KERNEL();
+    if (err != 0)
+        return err;
+
+    auto num_blocks = grid.x;
+    auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
+    unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
+    size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
+    sumcheck::static_final_reduce_block_sums<2>
+        <<<2, reduce_block, reduce_shmem>>>(tmp_block_sums, output, num_blocks);
 
     return CHECK_KERNEL();
 }
