@@ -301,6 +301,101 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
     }
 }
 
+// Factored variant of stacked_reduction_sumcheck_mle_round_kernel.
+//
+// Exploits the factorization invariant that holds at every MLE round:
+//   k_rot_ns[num_evals + 2y+1] = D_k * (eq_r_ns[num_evals + 2y] + eq_r_ns[num_evals + 2y+1])
+// where D_k is a scalar depending on r[round] and prior fold values.
+//
+// At X=1 this allows replacing:
+//   (lambda_eq * eq_1 + lambda_krot * k_rot_1) * q_1
+// with:
+//   (r_k * lambda_eq + D_k * lambda_krot) * eq_rest * q_1
+// where eq_rest = eq_0 + eq_1 and D_k is a known CPU-computed scalar.
+//
+// Additionally, k_rot_1 = D_k * eq_rest is computed rather than loaded from global memory,
+// saving one FpExt load per pair per round.
+__global__ void stacked_reduction_sumcheck_mle_round_factored_kernel(
+    const FpExt *__restrict__ const
+        *__restrict__ q_evals,
+    const FpExt *__restrict__ eq_r_ns,
+    const FpExt *__restrict__ k_rot_ns,
+    const UnstackedSlice *__restrict__ unstacked_cols,
+    const FpExt *__restrict__ lambda_pows,
+    uint64_t *__restrict__ output, // [S_DEG * 4] - atomic accumulator, reduced on CPU
+    uint32_t q_height,
+    uint32_t window_len,
+    uint32_t num_y,
+    FpExt r_k, // r[round]: scalar for eq factorization at X=1
+    FpExt D_k  // scalar s.t. k_rot_1 = D_k * eq_rest for all y
+) {
+    extern __shared__ char smem[];
+    FpExt *shared = (FpExt *)smem;
+    FpExt local_sums[S_DEG];
+#pragma unroll
+    for (int i = 0; i < S_DEG; i++) {
+        local_sums[i] = FpExt(0);
+    }
+
+    uint32_t window_idx_base = blockIdx.y;
+    uint32_t y_int = blockIdx.x * blockDim.x + threadIdx.x;
+    bool const active_thread = (y_int < num_y);
+
+    if (active_thread) {
+        uint32_t num_evals = num_y * 2;
+
+        auto eq_0 = get_eq_cube(eq_r_ns, num_evals, y_int << 1);
+        auto eq_1 = get_eq_cube(eq_r_ns, num_evals, (y_int << 1) | 1);
+        auto eq_rest = eq_0 + eq_1;
+        auto eq_c1 = eq_1 - eq_0;
+
+        auto k_rot_0 = get_eq_cube(k_rot_ns, num_evals, y_int << 1);
+        // k_rot_1 = D_k * eq_rest by the factorization invariant; no global load needed
+        auto k_rot_1 = D_k * eq_rest;
+        auto k_rot_c1 = k_rot_1 - k_rot_0;
+
+        for (uint32_t window_idx = window_idx_base; window_idx < window_len;
+             window_idx += gridDim.y) {
+            UnstackedSlice s = unstacked_cols[window_idx];
+            const FpExt *__restrict__ q = q_evals[s.commit_idx];
+
+            auto log_height = s.log_height;
+            auto col_idx = s.stacked_col_idx;
+            auto row_start = (s.stacked_row_idx >> log_height) * num_evals;
+            auto q_offset = col_idx * q_height + row_start;
+
+            auto q_0 = q[q_offset + (y_int << 1)];
+            auto q_1 = q[q_offset + (y_int << 1) + 1];
+            auto q_c1 = q_1 - q_0;
+
+            auto lambda_eq = lambda_pows[2 * window_idx];
+            auto lambda_krot = lambda_pows[2 * window_idx + 1];
+
+            // X=1: use factored form (r_k * lambda_eq + D_k * lambda_krot) * eq_rest * q_1
+            auto combined_lambda = r_k * lambda_eq + D_k * lambda_krot;
+            local_sums[0] += combined_lambda * eq_rest * (q_0 + q_c1);
+
+            // X=2: standard formula
+            {
+                Fp x = Fp(2);
+                auto q_x = q_0 + q_c1 * x;
+                auto eq = eq_0 + eq_c1 * x;
+                auto k_rot = k_rot_0 + k_rot_c1 * x;
+                local_sums[1] += (lambda_eq * eq + lambda_krot * k_rot) * q_x;
+            }
+        }
+    }
+
+#pragma unroll
+    for (int idx = 0; idx < S_DEG; idx++) {
+        FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
+        if (threadIdx.x == 0) {
+            sumcheck::atomic_add_fpext_to_u64(output + idx * 4, reduced);
+        }
+        __syncthreads();
+    }
+}
+
 // Degenerate case
 // Uses warp-aggregated atomics for reduction - no shared memory or __syncthreads() needed.
 __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
@@ -529,6 +624,48 @@ extern "C" int _stacked_reduction_sumcheck_mle_round(
 
     stacked_reduction_sumcheck_mle_round_kernel<<<grid, block, shmem_bytes>>>(
         q_evals, eq_r_ns, k_rot_ns, unstacked_cols, lambda_pows, output, q_height, window_len, num_y
+    );
+
+    return CHECK_KERNEL();
+}
+
+extern "C" int _stacked_reduction_sumcheck_mle_round_factored(
+    const FpExt *const *q_evals,
+    const FpExt *eq_r_ns,
+    const FpExt *k_rot_ns,
+    const UnstackedSlice *unstacked_cols,
+    const FpExt *lambda_pows,
+    uint64_t *output, // [S_DEG * D_EF] - atomic accumulator, reduced on CPU
+    uint32_t q_height,
+    uint32_t window_len,
+    uint32_t num_y,
+    uint32_t sm_count,
+    FpExt r_k,
+    FpExt D_k
+) {
+    auto [grid, block] = kernel_launch_params(num_y, 256);
+    assert(sm_count);
+
+    constexpr uint32_t WAVES_TARGET = 4;
+    constexpr uint32_t ITERS_MIN = 4;
+    constexpr uint32_t ITERS_MAX = 16;
+
+    uint32_t stride_occ = div_ceil(sm_count * WAVES_TARGET, grid.x);
+    uint32_t stride_loop_lo = div_ceil(window_len, ITERS_MAX);
+    uint32_t stride_loop_hi = div_ceil(window_len, ITERS_MIN);
+
+    uint32_t lo = std::max(1u, std::max(stride_occ, stride_loop_lo));
+    uint32_t hi = std::min(std::min(window_len, MAX_GRID_DIM), stride_loop_hi);
+
+    uint32_t tuned_stride = (lo <= hi) ? lo : std::min(lo, std::min(window_len, MAX_GRID_DIM));
+    grid.y = tuned_stride;
+
+    assert((size_t)num_y * grid.y < (size_t)1u << 32);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
+
+    stacked_reduction_sumcheck_mle_round_factored_kernel<<<grid, block, shmem_bytes>>>(
+        q_evals, eq_r_ns, k_rot_ns, unstacked_cols, lambda_pows, output,
+        q_height, window_len, num_y, r_k, D_k
     );
 
     return CHECK_KERNEL();

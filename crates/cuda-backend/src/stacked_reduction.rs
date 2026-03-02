@@ -21,7 +21,7 @@ use openvm_stark_backend::{
     FiatShamirTranscript,
 };
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{PrimeCharacteristicRing, TwoAdicField};
+use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 use tracing::{debug, info_span, instrument};
 
 use crate::{
@@ -31,8 +31,8 @@ use crate::{
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
             _stacked_reduction_r0_required_temp_buffer_size, initialize_k_rot_from_eq_segments,
-            stacked_reduction_fold_ple, stacked_reduction_sumcheck_mle_round,
-            stacked_reduction_sumcheck_mle_round_degenerate, stacked_reduction_sumcheck_round0,
+            stacked_reduction_fold_ple, stacked_reduction_sumcheck_mle_round_degenerate,
+            stacked_reduction_sumcheck_mle_round_factored, stacked_reduction_sumcheck_round0,
             NUM_G,
         },
         sumcheck::{fold_mle, triangular_fold_mle},
@@ -104,6 +104,9 @@ pub struct StackedReductionGpu {
     d_accum: DeviceBuffer<u64>,
     d_input_ptrs: DeviceBuffer<*const EF>,
     d_output_ptrs: DeviceBuffer<*mut EF>,
+
+    /// Constraint opening point r[0..=n_max] stored for use in the factored MLE kernel.
+    r: Vec<EF>,
 
     mem: MemTracker,
 }
@@ -445,6 +448,7 @@ impl StackedReductionGpu {
             d_accum,
             d_input_ptrs,
             d_output_ptrs,
+            r: r.to_vec(),
             mem,
         })
     }
@@ -731,19 +735,21 @@ impl StackedReductionGpu {
         let eq_uni_u0r0_rot = eval_eq_uni(l_skip, u_0, r_0 * omega_skip);
         let eq_uni_u01 = eval_eq_uni_at_one(l_skip, u_0);
         debug_assert_eq!(self.eq_r_ns.buffer.len(), 2 << n_max);
-        self.k_rot_ns.buffer = DeviceBuffer::with_capacity(2 << n_max);
-        [EF::ZERO].copy_to(&mut self.k_rot_ns.buffer)?;
+        let mut k_rot_buffer = DeviceBuffer::<EF>::with_capacity(2 << n_max);
+        [EF::ZERO].copy_to(&mut k_rot_buffer)?;
         unsafe {
             // SAFETY:
-            // - We allocated `k_rot_ns` with same capacity as `eq_r_ns` above.
+            // - We allocated `k_rot_buffer` with same capacity as `eq_r_ns` above.
             initialize_k_rot_from_eq_segments(
                 &self.eq_r_ns,
-                &mut self.k_rot_ns.buffer,
+                &mut k_rot_buffer,
                 eq_uni_u0r0_rot,
                 self.eq_const * eq_uni_u01,
                 n_max as u32,
             )
             .map_err(StackedReductionError::InitKRot)?;
+            // SAFETY: k_rot_buffer has length 2^{n_max+1} as required by from_raw_parts.
+            self.k_rot_ns = EqEvalSegments::from_raw_parts(k_rot_buffer, n_max);
         }
         vector_scalar_multiply_ext(&mut self.eq_r_ns.buffer, eq_uni_u0r0)
             .map_err(StackedReductionError::VectorScalarMul)?;
@@ -808,6 +814,34 @@ impl StackedReductionGpu {
                 self.k_rot_stable.push(tmp[0]);
             }
         }
+        // Compute D_k for the factored MLE kernel (non-degenerate windows only).
+        // D_k satisfies: k_rot_ns[segment_1 + 2y+1] = D_k * (eq_r_ns[segment_1 + 2y] + eq_r_ns[segment_1 + 2y+1])
+        // for all y, extracted by reading one pair from level-1 of both segments.
+        // Only valid/needed when n_max >= round (i.e., non-degenerate windows exist).
+        let factored_scalars: Option<(EF, EF)> = if self.n_max >= round {
+            let mut eq_pair = [EF::ZERO; 2];
+            let mut k_rot_pair = [EF::ZERO; 2];
+            unsafe {
+                cuda_memcpy::<true, false>(
+                    eq_pair.as_mut_ptr() as *mut c_void,
+                    self.eq_r_ns.get_ptr(1) as *const c_void,
+                    2 * size_of::<EF>(),
+                )
+                .unwrap();
+                cuda_memcpy::<true, false>(
+                    k_rot_pair.as_mut_ptr() as *mut c_void,
+                    self.k_rot_ns.get_ptr(1) as *const c_void,
+                    2 * size_of::<EF>(),
+                )
+                .unwrap();
+            }
+            let eq_rest = eq_pair[0] + eq_pair[1];
+            let d_k = k_rot_pair[1] * eq_rest.inverse();
+            Some((self.r[round], d_k))
+        } else {
+            None
+        };
+
         let mut s_evals_batch = Vec::with_capacity(self.ht_diff_idxs.len() - 1);
         for window in self.ht_diff_idxs.windows(2) {
             let window_len = window[1] - window[0];
@@ -862,8 +896,12 @@ impl StackedReductionGpu {
                 // (num_y, window_len) and device SM count.
 
                 let stacked_height = self.stacked_height(round);
+                // factored_scalars is always Some here: n_max >= round is guaranteed by the
+                // fact that log_height >= l_skip + round implies n_max >= round.
+                let (r_k, d_k) = factored_scalars
+                    .expect("non-degenerate path requires n_max >= round");
                 unsafe {
-                    stacked_reduction_sumcheck_mle_round(
+                    stacked_reduction_sumcheck_mle_round_factored(
                         &self.d_q_eval_ptrs,
                         &self.eq_r_ns,
                         &self.k_rot_ns,
@@ -874,9 +912,11 @@ impl StackedReductionGpu {
                         window_len,
                         num_y,
                         self.sm_count,
+                        r_k,
+                        d_k,
                     )
                     .map_err(StackedReductionError::SumcheckMleRound)?;
-                };
+                }
             }
 
             // D2H copy and reduce modulo P

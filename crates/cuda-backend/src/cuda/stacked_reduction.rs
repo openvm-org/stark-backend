@@ -63,6 +63,21 @@ extern "C" {
         sm_count: u32,
     ) -> i32;
 
+    fn _stacked_reduction_sumcheck_mle_round_factored(
+        q_evals: *const *const EF,
+        eq_r_ns: *const EF,
+        k_rot_ns: *const EF,
+        unstacked_cols: *const UnstackedSlice,
+        lambda_pows: *const EF,
+        output: *mut u64, // atomic accumulator [S_DEG * D_EF]
+        q_height: u32,
+        window_len: u32,
+        num_y: u32,
+        sm_count: u32,
+        r_k: EF,
+        d_k: EF,
+    ) -> i32;
+
     fn _stacked_reduction_sumcheck_mle_round_degenerate(
         q_evals: *const *const EF,
         eq_ub_ptr: *const EF,
@@ -231,6 +246,53 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
         window_len as u32,
         num_y as u32,
         sm_count,
+    ))
+}
+
+/// Factored variant of [stacked_reduction_sumcheck_mle_round].
+///
+/// Exploits the invariant `k_rot_1(y) = D_k * eq_rest(y)` that holds at every MLE round,
+/// where `D_k` and `r_k = r[round]` are CPU-computed scalars.
+///
+/// At X=1 this replaces two multiplications with one (per window per y) and saves one
+/// global memory load (k_rot_1 is computed rather than loaded).
+///
+/// # Safety
+/// Same as [stacked_reduction_sumcheck_mle_round].
+/// Additionally:
+/// - `r_k` must equal `r[round]` (the constraint opening point component for this round).
+/// - `d_k` must satisfy `k_rot_ns[num_evals + 2y+1] = d_k * (eq_r_ns[num_evals + 2y] + eq_r_ns[num_evals + 2y+1])`
+///   for all valid `y` and segment levels; obtain it via D2H copy from the segment pair.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn stacked_reduction_sumcheck_mle_round_factored(
+    q_evals: &DeviceBuffer<*const EF>,
+    eq_r_ns: &EqEvalSegments<EF>,
+    k_rot_ns: &EqEvalSegments<EF>,
+    unstacked_cols: *const UnstackedSlice,
+    lambda_pows: *const EF,
+    output: &mut DeviceBuffer<u64>,
+    q_height: usize,
+    window_len: usize,
+    num_y: usize,
+    sm_count: u32,
+    r_k: EF,
+    d_k: EF,
+) -> Result<(), CudaError> {
+    debug_assert!(output.len() >= STACKED_REDUCTION_S_DEG * D_EF);
+
+    check(_stacked_reduction_sumcheck_mle_round_factored(
+        q_evals.as_ptr(),
+        eq_r_ns.buffer.as_ptr(),
+        k_rot_ns.buffer.as_ptr(),
+        unstacked_cols,
+        lambda_pows,
+        output.as_mut_ptr(),
+        q_height as u32,
+        window_len as u32,
+        num_y as u32,
+        sm_count,
+        r_k,
+        d_k,
     ))
 }
 
