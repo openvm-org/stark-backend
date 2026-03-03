@@ -25,7 +25,7 @@ use crate::{
     AirRef, AnyAir, StarkProtocolConfig, SystemParams,
 };
 
-// #[cfg(feature = "lean")]
+#[cfg(feature = "lean")]
 pub mod lean;
 pub mod types;
 
