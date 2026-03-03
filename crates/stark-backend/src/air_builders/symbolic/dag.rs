@@ -76,18 +76,14 @@ impl<F> SymbolicExpressionDag<F> {
 #[repr(C)]
 pub struct SymbolicConstraintsDag<F> {
     /// DAG with all symbolic expressions as nodes.
-    /// A subset of the nodes represents all constraints that will be
-    /// included in the quotient polynomial via DEEP-ALI.
+    /// These nodes include expressions for plain AIR constraints as well as symbolic expressions
+    /// used for `interactions`.
     pub constraints: SymbolicExpressionDag<F>,
     /// List of all interactions, where expressions in the interactions
     /// are referenced by node idx as `usize`.
     ///
-    /// This is used by the prover for after challenge trace generation,
-    /// and some partial information may be used by the verifier.
-    ///
-    /// **However**, any contributions to the quotient polynomial from
-    /// logup are already included in `constraints` and do not need to
-    /// be separately calculated from `interactions`.
+    /// These expressions are converted into a LogUp fractional sum
+    /// which must be proven using GKR.
     pub interactions: Vec<Interaction<usize>>,
 }
 
