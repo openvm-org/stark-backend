@@ -355,38 +355,57 @@ pub fn extract_constraints_to_lean<F: Field>(
     println!("------");
 }
 
-
-fn collect_variables<F>(expression: &SymbolicExpression<F>, leaves: &mut HashSet<SymbolicVariable<F>>)
-    where F: Clone + std::cmp::Eq + std::hash::Hash
+fn collect_variables<F>(
+    expression: &SymbolicExpression<F>,
+    leaves: &mut HashSet<SymbolicVariable<F>>,
+) where
+    F: Clone + std::cmp::Eq + std::hash::Hash,
 {
     match expression {
         SymbolicExpression::Variable(symbolic_variable) => {
             leaves.insert(symbolic_variable.clone());
-        },
-        SymbolicExpression::Add { x, y, degree_multiple: _ } => {
+        }
+        SymbolicExpression::Add {
+            x,
+            y,
+            degree_multiple: _,
+        } => {
             collect_variables(x, leaves);
             collect_variables(y, leaves);
-        },
-        SymbolicExpression::Sub { x, y, degree_multiple: _ } => {
+        }
+        SymbolicExpression::Sub {
+            x,
+            y,
+            degree_multiple: _,
+        } => {
             collect_variables(x, leaves);
             collect_variables(y, leaves);
-        },
-        SymbolicExpression::Neg { x, degree_multiple: _ } => {
+        }
+        SymbolicExpression::Neg {
+            x,
+            degree_multiple: _,
+        } => {
             collect_variables(x, leaves);
-        },
-        SymbolicExpression::Mul { x, y, degree_multiple: _ } => {
+        }
+        SymbolicExpression::Mul {
+            x,
+            y,
+            degree_multiple: _,
+        } => {
             collect_variables(x, leaves);
             collect_variables(y, leaves);
-        },
+        }
         _ => {}
     }
 }
 
-
 fn get_entry_type_id(entry: &Entry) -> u8 {
     match entry {
         Entry::Preprocessed { offset: _ } => 0,
-        Entry::Main { part_index: _, offset: _ } => 1,
+        Entry::Main {
+            part_index: _,
+            offset: _,
+        } => 1,
         Entry::Permutation { offset: _ } => 2,
         Entry::Public => 3,
         Entry::Challenge => 4,
@@ -395,7 +414,8 @@ fn get_entry_type_id(entry: &Entry) -> u8 {
 }
 
 fn placeholder_column_names<F>(constraints: &SymbolicConstraints<F>) -> String
-    where F: Clone + std::cmp::Eq + std::hash::Hash
+where
+    F: Clone + std::cmp::Eq + std::hash::Hash,
 {
     let leaves = {
         let mut leaves = HashSet::new();
@@ -411,20 +431,41 @@ fn placeholder_column_names<F>(constraints: &SymbolicConstraints<F>) -> String
             });
         });
 
-        leaves.into_iter().sorted_by(|lhs, rhs| {
-            let type_order = get_entry_type_id(&lhs.entry).cmp(&get_entry_type_id(&rhs.entry));
+        leaves
+            .into_iter()
+            .sorted_by(|lhs, rhs| {
+                let type_order = get_entry_type_id(&lhs.entry).cmp(&get_entry_type_id(&rhs.entry));
 
-            let index_order = lhs.index.cmp(&rhs.index);
+                let index_order = lhs.index.cmp(&rhs.index);
 
-            let (part_index_order, offset_order) = match (lhs.entry, rhs.entry) {
-                (Entry::Preprocessed { offset: l_offset }, Entry::Preprocessed { offset: r_offset }) => (Ordering::Equal, l_offset.cmp(&r_offset)),
-                (Entry::Main { part_index: l_part_index, offset: l_offset }, Entry::Main { part_index: r_part_index, offset: r_offset }) => (l_part_index.cmp(&r_part_index), l_offset.cmp(&r_offset)),
-                (Entry::Permutation { offset: l_offset }, Entry::Permutation { offset: r_offset }) => (Ordering::Equal, l_offset.cmp(&r_offset)),
-                _ => (Ordering::Equal, Ordering::Equal),
-            };
+                let (part_index_order, offset_order) = match (lhs.entry, rhs.entry) {
+                    (
+                        Entry::Preprocessed { offset: l_offset },
+                        Entry::Preprocessed { offset: r_offset },
+                    ) => (Ordering::Equal, l_offset.cmp(&r_offset)),
+                    (
+                        Entry::Main {
+                            part_index: l_part_index,
+                            offset: l_offset,
+                        },
+                        Entry::Main {
+                            part_index: r_part_index,
+                            offset: r_offset,
+                        },
+                    ) => (l_part_index.cmp(&r_part_index), l_offset.cmp(&r_offset)),
+                    (
+                        Entry::Permutation { offset: l_offset },
+                        Entry::Permutation { offset: r_offset },
+                    ) => (Ordering::Equal, l_offset.cmp(&r_offset)),
+                    _ => (Ordering::Equal, Ordering::Equal),
+                };
 
-            type_order.then(part_index_order).then(index_order).then(offset_order)
-        }).collect_vec()
+                type_order
+                    .then(part_index_order)
+                    .then(index_order)
+                    .then(offset_order)
+            })
+            .collect_vec()
     };
 
     leaves.iter().map(|leaf| {
@@ -446,12 +487,20 @@ fn placeholder_column_names<F>(constraints: &SymbolicConstraints<F>) -> String
     }).join("\n")
 }
 
-fn symbolic_expression_to_string<F: Field>(x: &SymbolicExpression<F>, scoping: &str, characteristic: Option<u32>) -> String {
+fn symbolic_expression_to_string<F: Field>(
+    x: &SymbolicExpression<F>,
+    scoping: &str,
+    characteristic: Option<u32>,
+) -> String {
     let x = x.clone();
     symbolic_expression_to_string_impl(&x, scoping, characteristic)
 }
 
-fn symbolic_expression_to_string_impl<F: Field>(x: &SymbolicExpression<F>, scoping: &str, characteristic: Option<u32>) -> String {
+fn symbolic_expression_to_string_impl<F: Field>(
+    x: &SymbolicExpression<F>,
+    scoping: &str,
+    characteristic: Option<u32>,
+) -> String {
     match x {
         SymbolicExpression::Variable(symbolic_variable) =>
             format!(
