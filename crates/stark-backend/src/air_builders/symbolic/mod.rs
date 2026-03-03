@@ -9,7 +9,6 @@ use p3_air::{
 };
 use p3_field::Field;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
-use p3_util::log2_ceil_usize;
 use tracing::instrument;
 
 use self::{
@@ -32,18 +31,13 @@ pub use dag::*;
 use crate::interaction::BusIndex;
 
 /// Symbolic constraints for a single AIR with interactions.
-/// The constraints contain the constraints on the logup partial sums.
 #[derive(Clone, Debug)]
 pub struct SymbolicConstraints<F> {
-    /// All constraints of the RAP, including the constraints on the logup partial sums.
+    /// All plain AIR constraints. These do **not** include interaction constraints that are proven
+    /// via LogUp-GKR.
     pub constraints: Vec<SymbolicExpression<F>>,
-    /// Symbolic representation of chip interactions. This is used by
-    /// the prover for after challenge trace generation, and some partial
-    /// information may be used by the verifier.
-    ///
-    /// **However**, any contributions to the quotient polynomial from
-    /// logup are already included in `constraints` and do not need to
-    /// be separately calculated from `interactions`.
+    /// Symbolic representation of interactions. These are converted into a LogUp fractional sum
+    /// which must be proven using GKR.
     pub interactions: Vec<SymbolicInteraction<F>>,
 }
 
@@ -59,17 +53,6 @@ impl<F: Field> SymbolicConstraints<F> {
             .map(|expr| expr.degree_multiple())
             .max()
             .unwrap_or(0)
-    }
-
-    pub fn get_log_quotient_degree(&self) -> usize {
-        // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller
-        // degrees.
-        let constraint_degree = self.max_constraint_degree().max(2);
-
-        // The quotient's actual degree is approximately (max_constraint_degree - 1) * (trace
-        // height), where subtracting 1 comes from division by the zerofier.
-        // But we pad it to a power of two so that we can efficiently decompose the quotient.
-        log2_ceil_usize(constraint_degree - 1)
     }
 
     /// Returns the maximum field degree and count degree across all interactions
