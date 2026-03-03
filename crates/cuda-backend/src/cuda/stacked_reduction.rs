@@ -261,8 +261,9 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
 /// Same as [stacked_reduction_sumcheck_mle_round].
 /// Additionally:
 /// - `r_k` must equal `r[round]` (the constraint opening point component for this round).
-/// - `d_k` must satisfy `k_rot_ns[num_evals + 2y+1] = d_k * (eq_r_ns[num_evals + 2y] + eq_r_ns[num_evals + 2y+1])`
-///   for all valid `y` and segment levels; obtain it via D2H copy from the segment pair.
+/// - `d_k` must satisfy `k_rot_ns[num_evals + 2y+1] = d_k * (eq_r_ns[num_evals + 2y] +
+///   eq_r_ns[num_evals + 2y+1])` for all valid `y` and segment levels; obtain it via D2H copy from
+///   the segment pair.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_mle_round_factored(
     q_evals: &DeviceBuffer<*const EF>,

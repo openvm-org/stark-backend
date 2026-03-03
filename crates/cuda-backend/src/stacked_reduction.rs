@@ -815,9 +815,10 @@ impl StackedReductionGpu {
             }
         }
         // Compute D_k for the factored MLE kernel (non-degenerate windows only).
-        // D_k satisfies: k_rot_ns[segment_1 + 2y+1] = D_k * (eq_r_ns[segment_1 + 2y] + eq_r_ns[segment_1 + 2y+1])
-        // for all y, extracted by reading one pair from level-1 of both segments.
-        // Only valid/needed when n_max >= round (i.e., non-degenerate windows exist).
+        // D_k satisfies: k_rot_ns[segment_1 + 2y+1] = D_k * (eq_r_ns[segment_1 + 2y] +
+        // eq_r_ns[segment_1 + 2y+1]) for all y, extracted by reading one pair from level-1
+        // of both segments. Only valid/needed when n_max >= round (i.e., non-degenerate
+        // windows exist).
         let factored_scalars: Option<(EF, EF)> = if self.n_max >= round {
             let mut eq_pair = [EF::ZERO; 2];
             let mut k_rot_pair = [EF::ZERO; 2];
@@ -898,8 +899,8 @@ impl StackedReductionGpu {
                 let stacked_height = self.stacked_height(round);
                 // factored_scalars is always Some here: n_max >= round is guaranteed by the
                 // fact that log_height >= l_skip + round implies n_max >= round.
-                let (r_k, d_k) = factored_scalars
-                    .expect("non-degenerate path requires n_max >= round");
+                let (r_k, d_k) =
+                    factored_scalars.expect("non-degenerate path requires n_max >= round");
                 unsafe {
                     stacked_reduction_sumcheck_mle_round_factored(
                         &self.d_q_eval_ptrs,
