@@ -373,7 +373,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_factored_kernel(
 
             // X=1: use factored form (r_k * lambda_eq + D_k * lambda_krot) * eq_rest * q_1
             auto combined_lambda = r_k * lambda_eq + D_k * lambda_krot;
-            local_sums[0] += combined_lambda * eq_rest * (q_0 + q_c1);
+            local_sums[0] += combined_lambda * eq_rest * q_1;
 
             // X=2: standard formula
             {
