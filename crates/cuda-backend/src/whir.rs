@@ -192,7 +192,7 @@ pub fn prove_whir_opening_gpu(
     for (whir_round, round_params) in whir_params.rounds.iter().enumerate() {
         let is_last_round = whir_round == num_whir_rounds - 1;
         // Run k_whir rounds of sumcheck on `sum_{x in H_m} \hat{w}(\hat{f}(x), x)`
-        for round in 0..k_whir {
+        for (round, &u_k) in u.iter().enumerate().take(k_whir) {
             // Do not use f_coeffs.len() because it might have extra capacity.
             let f_height = 1 << (m - round);
             debug_assert!(
@@ -234,7 +234,6 @@ pub fn prove_whir_opening_gpu(
                 let t_vals = d_s_evals.to_host()?;
                 let t_const = t_vals[0];
                 let t_linear = t_vals[1];
-                let u_k = u[round];
                 let t1 = t_const + t_linear;
                 let t2 = t1 + t_linear; // T_const + 2*T_linear
                 let s1 = u_k * t1;
