@@ -20,7 +20,7 @@ use crate::{
     merkle_tree::MerkleTreeGpu,
     ntt::batch_ntt,
     poly::{mle_interpolate_stages, PleMatrix},
-    prelude::{Digest, F},
+    prelude::F,
     GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError,
 };
 
@@ -43,6 +43,7 @@ pub struct StackedPcsDataGpu<F, Digest> {
     pub(crate) tree: MerkleTreeGpu<F, Digest>,
 }
 
+#[allow(clippy::type_complexity)]
 #[instrument(level = "info", skip_all)]
 pub fn stacked_commit<MH: GpuMerkleHash>(
     l_skip: usize,

@@ -1,10 +1,7 @@
-use std::marker::PhantomData;
-
 use getset::MutGetters;
 use openvm_stark_backend::{prover::Coordinator, StarkEngine, SystemParams};
 
 use crate::{
-    gpu_backend::GenericGpuBackend,
     hash_scheme::{DefaultHashScheme, GpuHashScheme},
     prelude::SC,
     sponge::DuplexSpongeGpu,
@@ -61,10 +58,6 @@ impl StarkEngine for GpuEngine<DefaultHashScheme> {
         &self,
         transcript: DuplexSpongeGpu,
     ) -> Coordinator<SC, Self::PB, Self::PD, Self::TS> {
-        Coordinator::new(
-            GenericGpuBackend::<DefaultHashScheme>(PhantomData),
-            self.device.clone(),
-            transcript,
-        )
+        Coordinator::new(GpuBackend::default(), self.device.clone(), transcript)
     }
 }

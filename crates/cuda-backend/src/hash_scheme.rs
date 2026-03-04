@@ -24,6 +24,11 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
     type Digest: Copy + Clone + Send + Sync + Serialize + DeserializeOwned + 'static;
 
     /// Compress rows of a base-field matrix into digest leaves.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be allocated with capacity `query_stride` and `matrix` must
+    /// contain `width * query_stride * (1 << log_rows_per_query)` valid elements.
     unsafe fn compress_rows(
         out: &mut DeviceBuffer<Self::Digest>,
         matrix: &DeviceBuffer<F>,
@@ -33,6 +38,11 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
     ) -> Result<(), CudaError>;
 
     /// Compress rows of an extension-field matrix into digest leaves.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be allocated with capacity `query_stride` and `matrix` must
+    /// contain `width * query_stride * (1 << log_rows_per_query)` valid elements.
     unsafe fn compress_rows_ext(
         out: &mut DeviceBuffer<Self::Digest>,
         matrix: &DeviceBuffer<EF>,
@@ -42,6 +52,12 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
     ) -> Result<(), CudaError>;
 
     /// Compress adjacent pairs of digests to build an inner Merkle layer.
+    ///
+    /// # Safety
+    ///
+    /// `output` must be allocated with capacity `output_size`, `prev_layer` must
+    /// contain at least `output_size * 2` valid elements, and the two buffers
+    /// must not overlap.
     unsafe fn compress_layer(
         output: &mut DeviceBuffer<Self::Digest>,
         prev_layer: &DeviceBuffer<Self::Digest>,
@@ -54,12 +70,7 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
 pub trait GpuHashScheme: Copy + Clone + Send + Sync + 'static {
     type SC: StarkProtocolConfig<F = F, EF = EF, Digest = Self::Digest>;
     type Digest: Copy + Clone + Send + Sync + Serialize + DeserializeOwned + 'static;
-    type Transcript: GpuFiatShamirTranscript<Self::SC>
-        + Default
-        + Clone
-        + Send
-        + Sync
-        + 'static;
+    type Transcript: GpuFiatShamirTranscript<Self::SC> + Default + Clone + Send + Sync + 'static;
     type MerkleHash: GpuMerkleHash<Digest = Self::Digest>;
 
     fn default_config(params: SystemParams) -> Self::SC;

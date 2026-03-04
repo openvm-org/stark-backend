@@ -14,7 +14,7 @@ use tracing::instrument;
 
 use crate::{
     base::DeviceMatrix,
-    hash_scheme::{GpuHashScheme, DefaultHashScheme},
+    hash_scheme::{DefaultHashScheme, GpuHashScheme},
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
     prelude::{Digest, D_EF, EF, F, SC},
     sponge::DuplexSpongeGpu,

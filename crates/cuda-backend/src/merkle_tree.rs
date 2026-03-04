@@ -12,10 +12,7 @@ use tracing::instrument;
 
 use crate::{
     base::DeviceMatrix,
-    cuda::{
-        matrix::matrix_get_rows_fp_kernel,
-        merkle_tree::query_digest_layers,
-    },
+    cuda::{matrix::matrix_get_rows_fp_kernel, merkle_tree::query_digest_layers},
     hash_scheme::{GpuMerkleHash, Poseidon2MerkleHash},
     prelude::{Digest, DIGEST_SIZE, EF, F},
     MerkleTreeError,
