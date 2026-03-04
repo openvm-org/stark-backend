@@ -16,6 +16,7 @@ use crate::{
         matrix::{batch_expand_pad, batch_expand_pad_wide},
         ntt::bit_rev,
     },
+    hash_scheme::GpuMerkleHash,
     merkle_tree::MerkleTreeGpu,
     ntt::batch_ntt,
     poly::{mle_interpolate_stages, PleMatrix},
@@ -43,14 +44,14 @@ pub struct StackedPcsDataGpu<F, Digest> {
 }
 
 #[instrument(level = "info", skip_all)]
-pub fn stacked_commit(
+pub fn stacked_commit<MH: GpuMerkleHash>(
     l_skip: usize,
     n_stack: usize,
     log_blowup: usize,
     k_whir: usize,
     traces: &[&DeviceMatrix<F>],
     prover_config: GpuProverConfig,
-) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), ProverError> {
+) -> Result<(MH::Digest, StackedPcsDataGpu<F, MH::Digest>), ProverError> {
     let mut mem = MemTracker::start("prover.stacked_commit");
     mem.tracing_info("before stacked_commit");
     mem.reset_peak();
@@ -66,7 +67,7 @@ pub fn stacked_commit(
         None
     };
     let rs_matrix = rs_code_matrix(log_blowup, &layout, traces, &opt_stacked_matrix)?;
-    let tree = MerkleTreeGpu::<F, Digest>::new(
+    let tree = MerkleTreeGpu::<F, MH::Digest>::new_with_hash::<MH>(
         rs_matrix,
         1 << k_whir,
         prover_config.cache_rs_code_matrix,

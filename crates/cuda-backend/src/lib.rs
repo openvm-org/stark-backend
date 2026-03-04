@@ -1,5 +1,6 @@
 pub mod base;
 pub mod data_transporter;
+pub mod hash_scheme;
 pub mod logup_zerocheck;
 pub mod merkle_tree;
 pub mod monomial;
@@ -24,6 +25,7 @@ pub use device::*;
 pub use engine::*;
 pub use error::*;
 pub use gpu_backend::*;
+pub use hash_scheme::{DefaultHashScheme, GpuHashScheme, GpuMerkleHash, Poseidon2MerkleHash};
 pub use pkey::*;
 
 #[cfg(test)]

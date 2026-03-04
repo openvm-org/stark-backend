@@ -14,11 +14,9 @@ use crate::{
     base::DeviceMatrix,
     cuda::{
         matrix::matrix_get_rows_fp_kernel,
-        merkle_tree::{
-            poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
-            poseidon2_compressing_row_hashes_ext, query_digest_layers,
-        },
+        merkle_tree::query_digest_layers,
     },
+    hash_scheme::{GpuMerkleHash, Poseidon2MerkleHash},
     prelude::{Digest, DIGEST_SIZE, EF, F},
     MerkleTreeError,
 };
@@ -54,10 +52,14 @@ impl<F, Digest> MerkleTreeGpu<F, Digest> {
     }
 }
 
-// Base field merkle tree
-impl MerkleTreeGpu<F, Digest> {
+// Base field merkle tree — generic constructor
+impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
+    /// Build a Merkle tree using the given hash scheme `MH`.
+    ///
+    /// This is the primary constructor; `new()` is a convenience wrapper that
+    /// fixes `MH = Poseidon2MerkleHash`.
     #[instrument(name = "merkle_tree", skip_all)]
-    pub fn new(
+    pub fn new_with_hash<MH: GpuMerkleHash<Digest = D>>(
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
@@ -71,10 +73,10 @@ impl MerkleTreeGpu<F, Digest> {
             "rows_per_query ({rows_per_query}) must not exceed height ({height})"
         );
         let query_stride = height / rows_per_query;
-        let mut query_digest_layer = DeviceBuffer::<Digest>::with_capacity(query_stride);
+        let mut query_digest_layer = DeviceBuffer::<D>::with_capacity(query_stride);
         // SAFETY: query_digest_layer properly allocated
         unsafe {
-            poseidon2_compressing_row_hashes(
+            MH::compress_rows(
                 &mut query_digest_layer,
                 matrix.buffer(),
                 matrix.width(),
@@ -89,19 +91,19 @@ impl MerkleTreeGpu<F, Digest> {
         let mut digest_layers = vec![query_digest_layer];
         while digest_layers.last().unwrap().len() > 1 {
             let prev_layer = digest_layers.last().unwrap();
-            let mut layer = DeviceBuffer::<Digest>::with_capacity(prev_layer.len() / 2);
+            let mut layer = DeviceBuffer::<D>::with_capacity(prev_layer.len() / 2);
             let layer_len = layer.len();
             let layer_idx = digest_layers.len();
             // SAFETY:
             // - `layer` is properly allocated with half the size of `prev_layer` and does not
             //   overlap with it.
             unsafe {
-                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len).map_err(
-                    |error| MerkleTreeError::AdjacentCompressLayer {
+                MH::compress_layer(&mut layer, prev_layer, layer_len).map_err(|error| {
+                    MerkleTreeError::AdjacentCompressLayer {
                         error,
                         layer: layer_idx,
-                    },
-                )?;
+                    }
+                })?;
             }
             digest_layers.push(layer);
         }
@@ -116,6 +118,20 @@ impl MerkleTreeGpu<F, Digest> {
             rows_per_query,
             root,
         })
+    }
+}
+
+// Base field merkle tree — Poseidon2 default constructor
+impl MerkleTreeGpu<F, Digest> {
+    /// Build a Merkle tree using the default Poseidon2 hash.
+    ///
+    /// Equivalent to `new_with_hash::<Poseidon2MerkleHash>(...)`.
+    pub fn new(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, MerkleTreeError> {
+        Self::new_with_hash::<Poseidon2MerkleHash>(matrix, rows_per_query, cache_backing_matrix)
     }
 
     /// Batch queries multiple `trees` at _the same_ `query_indices` for merkle proofs.
@@ -272,12 +288,11 @@ impl MerkleTreeGpu<F, Digest> {
     }
 }
 
-// Extension field merkle tree
-// NOTE: this is currently unused because we transpose DeviceMatrix<EF> to DeviceMatrix<F>
-// beforehand in our use cases
-impl MerkleTreeGpu<EF, Digest> {
+// Extension field merkle tree — generic constructor
+impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
+    /// Build a Merkle tree from an extension-field matrix using hash scheme `MH`.
     #[instrument(name = "merkle_tree_ext", skip_all)]
-    pub fn new(
+    pub fn new_with_hash<MH: GpuMerkleHash<Digest = D>>(
         matrix: DeviceMatrix<EF>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
@@ -290,10 +305,10 @@ impl MerkleTreeGpu<EF, Digest> {
             "rows_per_query ({rows_per_query}) must not exceed height ({height})"
         );
         let query_stride = height / rows_per_query;
-        let mut query_digest_layer = DeviceBuffer::<Digest>::with_capacity(query_stride);
+        let mut query_digest_layer = DeviceBuffer::<D>::with_capacity(query_stride);
         // SAFETY: query_digest_layer properly allocated
         unsafe {
-            poseidon2_compressing_row_hashes_ext(
+            MH::compress_rows_ext(
                 &mut query_digest_layer,
                 matrix.buffer(),
                 matrix.width(),
@@ -308,19 +323,19 @@ impl MerkleTreeGpu<EF, Digest> {
         let mut digest_layers = vec![query_digest_layer];
         while digest_layers.last().unwrap().len() > 1 {
             let prev_layer = digest_layers.last().unwrap();
-            let mut layer = DeviceBuffer::<Digest>::with_capacity(prev_layer.len() / 2);
+            let mut layer = DeviceBuffer::<D>::with_capacity(prev_layer.len() / 2);
             let layer_len = layer.len();
             let layer_idx = digest_layers.len();
             // SAFETY:
             // - `layer` is properly allocated with half the size of `prev_layer` and does not
             //   overlap with it.
             unsafe {
-                poseidon2_adjacent_compress_layer(&mut layer, prev_layer, layer_len).map_err(
-                    |error| MerkleTreeError::AdjacentCompressLayer {
+                MH::compress_layer(&mut layer, prev_layer, layer_len).map_err(|error| {
+                    MerkleTreeError::AdjacentCompressLayer {
                         error,
                         layer: layer_idx,
-                    },
-                )?;
+                    }
+                })?;
             }
             digest_layers.push(layer);
         }
@@ -334,5 +349,20 @@ impl MerkleTreeGpu<EF, Digest> {
             rows_per_query,
             root,
         })
+    }
+}
+
+// Extension field merkle tree — Poseidon2 default constructor
+impl MerkleTreeGpu<EF, Digest> {
+    /// Build a Merkle tree from an extension-field matrix using Poseidon2.
+    ///
+    /// NOTE: currently unused because we transpose `DeviceMatrix<EF>` to
+    /// `DeviceMatrix<F>` beforehand in our use cases.
+    pub fn new(
+        matrix: DeviceMatrix<EF>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, MerkleTreeError> {
+        Self::new_with_hash::<Poseidon2MerkleHash>(matrix, rows_per_query, cache_backing_matrix)
     }
 }
