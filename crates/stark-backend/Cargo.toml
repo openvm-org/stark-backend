@@ -58,3 +58,4 @@ jemalloc = ["dep:tikv-jemallocator"]
 jemalloc-prof = ["jemalloc", "tikv-jemallocator?/profiling"]
 metrics = ["dep:metrics"]
 test-utils = []
+lean = [] # feature for Lean constraint codegen
