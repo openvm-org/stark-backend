@@ -25,7 +25,7 @@ pub use device::*;
 pub use engine::*;
 pub use error::*;
 pub use gpu_backend::*;
-pub use hash_scheme::{DefaultHashScheme, GpuHashScheme, GpuMerkleHash, Poseidon2MerkleHash};
+pub use hash_scheme::*;
 pub use pkey::*;
 
 #[cfg(test)]
