@@ -22,12 +22,17 @@ serde.workspace = true
 # Plonky3
 p3-field = { workspace = true }
 p3-baby-bear = { workspace = true }
+p3-bn254 = { workspace = true, optional = true }
 p3-dft = { workspace = true }
 p3-util = { workspace = true }
 p3-symmetric = { workspace = true }
 
+# BN254 round constants
+zkhash = { workspace = true, optional = true }
+
 [build-dependencies]
 openvm-cuda-builder.workspace = true
+glob.workspace = true
 
 [dev-dependencies]
 openvm-stark-backend = { workspace = true, features = ["test-utils"] }
@@ -38,6 +43,11 @@ test-case.workspace = true
 
 [features]
 default = []
+baby-bear-bn254-poseidon2 = [
+    "openvm-stark-sdk/baby-bear-bn254-poseidon2",
+    "dep:p3-bn254",
+    "dep:zkhash",
+]
 touchemall = ["openvm-cuda-common/touchemall"]
 test-utils = ["openvm-stark-backend/test-utils"]
 

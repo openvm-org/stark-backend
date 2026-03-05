@@ -10,6 +10,8 @@ use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use crate::cuda::bn254_merkle_tree::Bn254Digest;
 use crate::{
     base::DeviceMatrix,
     cuda::{matrix::matrix_get_rows_fp_kernel, merkle_tree::query_digest_layers},
@@ -17,6 +19,35 @@ use crate::{
     prelude::{Digest, DIGEST_SIZE, EF, F},
     MerkleTreeError,
 };
+
+/// Trait for reconstructing a digest from a flat slice of F elements as
+/// produced by the `query_digest_layers` CUDA kernel.
+///
+/// Both `Digest = [F; 8]` (BabyBear Poseidon2) and `Bn254Digest = [Bn254Scalar; 1]`
+/// occupy exactly `DIGEST_SIZE * size_of::<F>()` = 32 bytes, so the same kernel
+/// can be reused for both.
+pub trait BatchQueryMerkle: Copy + Sized + 'static {
+    /// Reconstruct one digest from `DIGEST_SIZE` consecutive F-valued words in `out`
+    /// starting at index `base`.
+    fn reconstruct_from_f(out: &[F], base: usize) -> Self;
+}
+
+impl BatchQueryMerkle for Digest {
+    fn reconstruct_from_f(out: &[F], base: usize) -> Self {
+        from_fn(|i| out[base + i])
+    }
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+impl BatchQueryMerkle for Bn254Digest {
+    fn reconstruct_from_f(out: &[F], base: usize) -> Self {
+        // Safety: [F; DIGEST_SIZE] and Bn254Digest have the same size (32 bytes).
+        const _: () =
+            assert!(std::mem::size_of::<Bn254Digest>() == DIGEST_SIZE * std::mem::size_of::<F>());
+        let f_arr: [F; DIGEST_SIZE] = from_fn(|i| out[base + i]);
+        unsafe { std::ptr::read_unaligned(f_arr.as_ptr() as *const Bn254Digest) }
+    }
+}
 
 pub struct MerkleTreeGpu<F, Digest> {
     /// The matrix that is used to form the leaves of the Merkle tree, which are
@@ -116,116 +147,6 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
             root,
         })
     }
-}
-
-// Base field merkle tree — Poseidon2 default constructor
-impl MerkleTreeGpu<F, Digest> {
-    /// Build a Merkle tree using the default Poseidon2 hash.
-    ///
-    /// Equivalent to `new_with_hash::<Poseidon2MerkleHash>(...)`.
-    pub fn new(
-        matrix: DeviceMatrix<F>,
-        rows_per_query: usize,
-        cache_backing_matrix: bool,
-    ) -> Result<Self, MerkleTreeError> {
-        Self::new_with_hash::<Poseidon2MerkleHash>(matrix, rows_per_query, cache_backing_matrix)
-    }
-
-    /// Batch queries multiple `trees` at _the same_ `query_indices` for merkle proofs.
-    ///
-    /// # Assumptions
-    /// - All `trees` have the same depth.
-    pub fn batch_query_merkle_proofs(
-        trees: &[&Self],
-        query_indices: &[usize],
-    ) -> Result<
-        Vec<
-            // per tree
-            Vec<
-                // per query index
-                Vec<Digest>, // merkle proof
-            >,
-        >,
-        MerkleTreeError,
-    > {
-        // the way the kernel works is that it just treats each layer as a separate array and does
-        // parallel accesses, so we just lay out all the layer pointers flattened into a vec
-        let num_trees = trees.len();
-        let num_queries = query_indices.len();
-        let depth = trees[0].proof_depth();
-        debug_assert!(
-            trees.iter().all(|tree| tree.proof_depth() == depth),
-            "Merkle trees don't have same depth"
-        );
-        let layers_ptr = trees
-            .iter()
-            .flat_map(|tree| {
-                // skip root layer [depth]
-                tree.digest_layers
-                    .iter()
-                    .take(depth)
-                    .map(|layer| layer.as_ptr() as u64)
-            })
-            .collect_vec();
-        let d_layers_ptr = layers_ptr.to_device()?;
-        debug_assert_eq!(d_layers_ptr.len(), num_trees * depth);
-
-        // [query_idx] is the top level grouping
-        let indices = query_indices
-            .iter()
-            .flat_map(|&index| {
-                (0..num_trees).flat_map(move |tree_idx| {
-                    (0..depth).map(move |layer_idx| {
-                        debug_assert!(index < trees[tree_idx].query_stride());
-                        ((index >> layer_idx) ^ 1) as u64
-                    })
-                })
-            })
-            .collect_vec();
-        let d_indices = indices.to_device()?;
-        debug_assert_eq!(d_indices.len(), d_layers_ptr.len() * num_queries);
-
-        let mut d_out =
-            DeviceBuffer::<F>::with_capacity(d_layers_ptr.len() * num_queries * DIGEST_SIZE);
-        // SAFETY:
-        // - d_out has size num_trees * depth * num_queries * DIGEST_SIZE in `F` elements
-        // - d_layers_ptr is size `num_trees * depth` device pointers
-        // - d_indices is size `num_trees * depth * num_queries` indices for merkle proof sibling
-        //   indices
-        unsafe {
-            query_digest_layers(
-                &mut d_out,
-                &d_layers_ptr,
-                &d_indices,
-                num_queries as u64,
-                d_layers_ptr.len() as u64,
-            )
-            .map_err(MerkleTreeError::QueryDigestLayers)?;
-        }
-        let out = d_out.to_host()?;
-        // Chunk up the array into expected Vec groupings
-        let res = (0..num_trees)
-            .map(|tree_idx| {
-                (0..num_queries)
-                    .map(|query_idx| {
-                        // merkle proof for a single query for tree `tree_idx`
-                        (0..depth)
-                            .map(|layer_idx| -> Digest {
-                                from_fn(|elem_idx| {
-                                    out[(query_idx * num_trees * depth
-                                        + tree_idx * depth
-                                        + layer_idx)
-                                        * DIGEST_SIZE
-                                        + elem_idx]
-                                })
-                            })
-                            .collect_vec()
-                    })
-                    .collect_vec()
-            })
-            .collect_vec();
-        Ok(res)
-    }
 
     pub fn batch_open_rows(
         backing_matrices: &[&DeviceMatrix<F>],
@@ -282,6 +203,117 @@ impl MerkleTreeGpu<F, Digest> {
                 Ok(opened_rows_per_query)
             })
             .collect::<Result<Vec<_>, MerkleTreeError>>()
+    }
+}
+
+// Base field merkle tree — Poseidon2 default constructor
+impl MerkleTreeGpu<F, Digest> {
+    /// Build a Merkle tree using the default Poseidon2 hash.
+    ///
+    /// Equivalent to `new_with_hash::<Poseidon2MerkleHash>(...)`.
+    pub fn new(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, MerkleTreeError> {
+        Self::new_with_hash::<Poseidon2MerkleHash>(matrix, rows_per_query, cache_backing_matrix)
+    }
+}
+
+// Base field merkle tree — generic batch query (works for any BatchQueryMerkle digest)
+impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
+    /// Batch queries multiple `trees` at _the same_ `query_indices` for merkle proofs.
+    ///
+    /// # Assumptions
+    /// - All `trees` have the same depth.
+    pub fn batch_query_merkle_proofs(
+        trees: &[&Self],
+        query_indices: &[usize],
+    ) -> Result<
+        Vec<
+            // per tree
+            Vec<
+                // per query index
+                Vec<D>, // merkle proof
+            >,
+        >,
+        MerkleTreeError,
+    > {
+        // The kernel treats each layer as a separate array and does parallel accesses;
+        // we lay out all the layer pointers flattened into a vec.
+        let num_trees = trees.len();
+        let num_queries = query_indices.len();
+        let depth = trees[0].proof_depth();
+        debug_assert!(
+            trees.iter().all(|tree| tree.proof_depth() == depth),
+            "Merkle trees don't have same depth"
+        );
+        let layers_ptr = trees
+            .iter()
+            .flat_map(|tree| {
+                // skip root layer [depth]
+                tree.digest_layers
+                    .iter()
+                    .take(depth)
+                    .map(|layer| layer.as_ptr() as u64)
+            })
+            .collect_vec();
+        let d_layers_ptr = layers_ptr.to_device()?;
+        debug_assert_eq!(d_layers_ptr.len(), num_trees * depth);
+
+        // [query_idx] is the top level grouping
+        let indices = query_indices
+            .iter()
+            .flat_map(|&index| {
+                (0..num_trees).flat_map(move |tree_idx| {
+                    (0..depth).map(move |layer_idx| {
+                        debug_assert!(index < trees[tree_idx].query_stride());
+                        ((index >> layer_idx) ^ 1) as u64
+                    })
+                })
+            })
+            .collect_vec();
+        let d_indices = indices.to_device()?;
+        debug_assert_eq!(d_indices.len(), d_layers_ptr.len() * num_queries);
+
+        let mut d_out =
+            DeviceBuffer::<F>::with_capacity(d_layers_ptr.len() * num_queries * DIGEST_SIZE);
+        // SAFETY:
+        // - d_out has size num_trees * depth * num_queries * DIGEST_SIZE in `F` elements
+        // - d_layers_ptr is size `num_trees * depth` device pointers
+        // - d_indices is size `num_trees * depth * num_queries` indices for merkle proof sibling
+        //   indices
+        // - Both Digest=[F;8] and Bn254Digest=[Bn254Scalar;1] are 32 bytes == DIGEST_SIZE * 4, so
+        //   the same kernel correctly copies the raw bytes for either digest type.
+        unsafe {
+            query_digest_layers(
+                &mut d_out,
+                &d_layers_ptr,
+                &d_indices,
+                num_queries as u64,
+                d_layers_ptr.len() as u64,
+            )
+            .map_err(MerkleTreeError::QueryDigestLayers)?;
+        }
+        let out = d_out.to_host()?;
+        // Chunk up the array using D::reconstruct_from_f
+        let res = (0..num_trees)
+            .map(|tree_idx| {
+                (0..num_queries)
+                    .map(|query_idx| {
+                        (0..depth)
+                            .map(|layer_idx| {
+                                let base =
+                                    (query_idx * num_trees * depth + tree_idx * depth + layer_idx)
+                                        * DIGEST_SIZE;
+                                D::reconstruct_from_f(&out, base)
+                            })
+                            .collect_vec()
+                    })
+                    .collect_vec()
+            })
+            .collect_vec();
+        Ok(res)
     }
 }
 
