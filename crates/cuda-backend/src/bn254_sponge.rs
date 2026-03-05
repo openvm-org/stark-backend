@@ -9,10 +9,10 @@ use std::ffi::c_void;
 use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer, error::MemCopyError};
 use openvm_stark_backend::FiatShamirTranscript;
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
-    BabyBearBn254Poseidon2Config, Bn254Scalar, default_babybear_bn254_poseidon2,
+    default_babybear_bn254_poseidon2, BabyBearBn254Poseidon2Config, Bn254Scalar,
 };
 use p3_baby_bear::BabyBear;
-use p3_field::{PrimeCharacteristicRing, PrimeField32, reduce_32, split_32};
+use p3_field::{reduce_32, split_32, PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 
 use crate::sponge::{GpuFiatShamirTranscript, GrindError};
@@ -72,7 +72,7 @@ pub struct DeviceBn254SpongeState {
                          // 4 bytes implicit trailing padding → total 168 bytes
 }
 
-// Compile-time FFI safety: `Bn254Scalar` ↔ `[u64; 4]` transmute is sound only if
+// Compile-time FFI safety: `Bn254Scalar` ↔ `[u64; 4]` conversion is sound only if
 // size and alignment match.  `p3_bn254::Bn254` is a newtype `{ value: [u64; 4] }`
 // without `#[repr(C)]`, so we guard against upstream layout changes here.
 const _: () = assert!(
@@ -87,6 +87,22 @@ const _: () = assert!(
     std::mem::size_of::<DeviceBn254SpongeState>() == 168,
     "DeviceBn254SpongeState must be 168 bytes to match CUDA struct"
 );
+
+/// Extract the Montgomery-form `[u64; 4]` limbs from a `Bn254Scalar`.
+///
+/// # Safety
+///
+/// This reinterprets `Bn254Scalar` memory as `[u64; 4]` via a pointer cast,
+/// which depends on layout compatibility. `Bn254Scalar` (`p3_bn254::Bn254`) is
+/// a single-field newtype `{ value: [u64; 4] }` with identical size and
+/// alignment (guarded by the const assertions above). If upstream ever changes
+/// the struct layout (e.g. adds fields or changes repr), the const assertions
+/// will fail at compile time.
+fn bn254_scalar_to_raw(s: Bn254Scalar) -> [u64; 4] {
+    // Safety: size and alignment are equal (const-asserted), and Bn254Scalar is
+    // a single-field newtype over [u64; 4].
+    unsafe { std::ptr::read((&s as *const Bn254Scalar).cast::<[u64; 4]>()) }
+}
 
 // ---------------------------------------------------------------------------
 // MultiField32ChallengerGpu
@@ -210,21 +226,14 @@ impl MultiField32ChallengerGpu {
     /// Copy host sponge state to the device buffer.
     ///
     /// Call this before launching a GPU grinding kernel.
-    ///
-    /// # Safety of `transmute`
-    ///
-    /// `Bn254Scalar` = `p3_bn254::Bn254` is defined as `struct Bn254 { value: [u64; 4] }`.
-    /// It is a newtype over `[u64; 4]` with no discriminants or padding, so transmuting a
-    /// `Bn254Scalar` to `[u64; 4]` is sound and yields the Montgomery-form limbs that the
-    /// CUDA kernel expects.
     pub fn sync_h2d(&mut self) -> Result<(), MemCopyError> {
         self.ensure_device_allocated();
 
         let mut device_state = DeviceBn254SpongeState::default();
 
-        // Sponge state: extract Montgomery-form limbs via transmute.
+        // Sponge state: extract Montgomery-form limbs.
         for (i, &s) in self.sponge_state.iter().enumerate() {
-            device_state.sponge_state[i] = unsafe { std::mem::transmute::<Bn254Scalar, [u64; 4]>(s) };
+            device_state.sponge_state[i] = bn254_scalar_to_raw(s);
         }
 
         // Input buffer: canonical u32 values.
@@ -350,7 +359,10 @@ mod tests {
                 FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample(&mut gpu);
             let cpu_s: BabyBear =
                 FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample(&mut cpu);
-            assert_eq!(gpu_s, cpu_s, "sample mismatch between GPU and CPU challengers");
+            assert_eq!(
+                gpu_s, cpu_s,
+                "sample mismatch between GPU and CPU challengers"
+            );
         }
 
         // Observe a digest element.

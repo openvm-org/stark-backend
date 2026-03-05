@@ -125,10 +125,9 @@ fn main() {
                     .zerocheck_save_memory = false;
                 let device = engine.device();
 
-                let d_pk =
-                    <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_pk_to_device(
-                        device, &pk,
-                    );
+                let d_pk = <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_pk_to_device(
+                    device, &pk,
+                );
                 let d_trace =
                     <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_matrix_to_device(
                         device,

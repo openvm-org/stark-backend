@@ -184,7 +184,10 @@ pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
     };
     // Sanity check. Not a strong assert because we transport the merkle tree
     // instead of recomputing it above.
-    assert!(d_data.tree.root() == d.commit().unwrap(), "transported tree root mismatch");
+    assert!(
+        d_data.tree.root() == d.commit().unwrap(),
+        "transported tree root mismatch"
+    );
     Ok(CommittedTraceData {
         commitment: d.commit().unwrap(),
         trace: DeviceMatrix::new(Arc::new(trace_buffer), height, width),

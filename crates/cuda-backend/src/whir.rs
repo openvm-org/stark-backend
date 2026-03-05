@@ -395,8 +395,11 @@ where
             // Get merkle proofs for in-domain samples necessary to evaluate Fold(f, \vec
             // \alpha)(z_i)
             initial_round_merkle_proofs =
-                <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(trees.as_slice(), &query_indices)
-                    .map_err(WhirProverError::MerkleTree)?;
+                <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(
+                    trees.as_slice(),
+                    &query_indices,
+                )
+                .map_err(WhirProverError::MerkleTree)?;
 
             let query_stride = trees[0].query_stride();
             debug_assert!(
@@ -443,18 +446,19 @@ where
                     .map_err(WhirProverError::MerkleTree)?
                     .pop()
                     .expect("exactly 1 tree");
-            codeword_opened_values[whir_round - 1] = MerkleTreeGpu::<F, HS::Digest>::batch_open_rows(
-                &[tree.backing_matrix.as_ref().unwrap()],
-                &query_indices,
-                tree.query_stride(),
-                tree.rows_per_query,
-            )
-            .map_err(WhirProverError::MerkleTree)?
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(EF::reconstitute_from_base)
-            .collect();
+            codeword_opened_values[whir_round - 1] =
+                MerkleTreeGpu::<F, HS::Digest>::batch_open_rows(
+                    &[tree.backing_matrix.as_ref().unwrap()],
+                    &query_indices,
+                    tree.query_stride(),
+                    tree.rows_per_query,
+                )
+                .map_err(WhirProverError::MerkleTree)?
+                .pop()
+                .unwrap()
+                .into_iter()
+                .map(EF::reconstitute_from_base)
+                .collect();
         }
         rs_tree = g_tree;
 

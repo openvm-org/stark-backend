@@ -10,6 +10,8 @@ use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use crate::cuda::bn254_merkle_tree::Bn254Digest;
 use crate::{
     base::DeviceMatrix,
     cuda::{matrix::matrix_get_rows_fp_kernel, merkle_tree::query_digest_layers},
@@ -17,8 +19,6 @@ use crate::{
     prelude::{Digest, DIGEST_SIZE, EF, F},
     MerkleTreeError,
 };
-#[cfg(feature = "baby-bear-bn254-poseidon2")]
-use crate::cuda::bn254_merkle_tree::Bn254Digest;
 
 /// Trait for reconstructing a digest from a flat slice of F elements as
 /// produced by the `query_digest_layers` CUDA kernel.
@@ -42,9 +42,8 @@ impl BatchQueryMerkle for Digest {
 impl BatchQueryMerkle for Bn254Digest {
     fn reconstruct_from_f(out: &[F], base: usize) -> Self {
         // Safety: [F; DIGEST_SIZE] and Bn254Digest have the same size (32 bytes).
-        const _: () = assert!(
-            std::mem::size_of::<Bn254Digest>() == DIGEST_SIZE * std::mem::size_of::<F>()
-        );
+        const _: () =
+            assert!(std::mem::size_of::<Bn254Digest>() == DIGEST_SIZE * std::mem::size_of::<F>());
         let f_arr: [F; DIGEST_SIZE] = from_fn(|i| out[base + i]);
         unsafe { std::ptr::read_unaligned(f_arr.as_ptr() as *const Bn254Digest) }
     }
@@ -304,10 +303,9 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                     .map(|query_idx| {
                         (0..depth)
                             .map(|layer_idx| {
-                                let base = (query_idx * num_trees * depth
-                                    + tree_idx * depth
-                                    + layer_idx)
-                                    * DIGEST_SIZE;
+                                let base =
+                                    (query_idx * num_trees * depth + tree_idx * depth + layer_idx)
+                                        * DIGEST_SIZE;
                                 D::reconstruct_from_f(&out, base)
                             })
                             .collect_vec()

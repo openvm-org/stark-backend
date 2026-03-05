@@ -102,41 +102,6 @@ static const int BN254_NUM_F_ELMS    = 7;
 // Row hash helpers
 // ---------------------------------------------------------------------------
 
-/// Apply MultiField32PaddingFreeSponge to a sequence of BabyBear canonical u32s.
-/// Returns state[0] as the 1-element digest.
-static __device__ __forceinline__
-Bn254Fr bn254_hash_sequence(const uint32_t* vals, int count) {
-    Bn254Fr state[3];
-    state[0] = bn254_zero_init();
-    state[1] = bn254_zero_init();
-    state[2] = bn254_zero_init();
-
-    int pos = 0;
-    while (pos + BN254_BABY_BEAR_RATE <= count) {
-        // Full block: pack 16 BabyBear → 3 Bn254Fr [7, 7, 2]
-        state[0] = bn254_reduce_32(vals + pos,      7);
-        state[1] = bn254_reduce_32(vals + pos + 7,  7);
-        state[2] = bn254_reduce_32(vals + pos + 14, 2);
-        bn254_poseidon2_permute(state);
-        pos += BN254_BABY_BEAR_RATE;
-    }
-
-    int rem = count - pos;
-    if (rem > 0) {
-        // Partial last block: only overwrite the state positions we have data for
-        state[0] = bn254_reduce_32(vals + pos, min(BN254_NUM_F_ELMS, rem));
-        if (rem > BN254_NUM_F_ELMS)
-            state[1] = bn254_reduce_32(vals + pos + BN254_NUM_F_ELMS,
-                                       min(BN254_NUM_F_ELMS, rem - BN254_NUM_F_ELMS));
-        if (rem > 2 * BN254_NUM_F_ELMS)
-            state[2] = bn254_reduce_32(vals + pos + 2 * BN254_NUM_F_ELMS,
-                                       rem - 2 * BN254_NUM_F_ELMS);
-        bn254_poseidon2_permute(state);
-    }
-
-    return state[0];
-}
-
 /// Row hash for a base-field (Fp / BabyBear) matrix row.
 static __device__ __forceinline__
 Bn254Fr bn254_row_hash(const Fp* matrix, int width, int height, int row) {
@@ -355,7 +320,6 @@ static_assert(sizeof(DeviceBn254SpongeState) == 168,
 
 // Sponge constants for the grind transcript (MultiField32Challenger, num_f_elms=3)
 static const int BN254_GRIND_NUM_F_ELMS = 3;     // PF::bits()/64 = 254/64 = 3
-static const int BN254_GRIND_RATE       = 2;      // BN254_RATE
 static const int BN254_GRIND_WIDTH      = 3;      // WIDTH
 static const uint32_t BN254_GRIND_MAX_INPUT = 6;  // num_f_elms * RATE = 6
 
