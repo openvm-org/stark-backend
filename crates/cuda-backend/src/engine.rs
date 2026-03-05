@@ -1,20 +1,19 @@
 use getset::MutGetters;
 use openvm_stark_backend::{prover::Coordinator, StarkEngine, SystemParams};
-
-use crate::{
-    hash_scheme::{DefaultHashScheme, GpuHashScheme},
-    prelude::SC,
-    sponge::DuplexSpongeGpu,
-    GpuBackend, GpuDevice,
-};
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::BabyBearBn254Poseidon2Config;
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::{
     bn254_sponge::MultiField32ChallengerGpu, gpu_backend::GenericGpuBackend,
     hash_scheme::BabyBearBn254Poseidon2HashScheme,
 };
-#[cfg(feature = "baby-bear-bn254-poseidon2")]
-use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::BabyBearBn254Poseidon2Config;
+use crate::{
+    hash_scheme::{DefaultHashScheme, GpuHashScheme},
+    prelude::SC,
+    sponge::DuplexSpongeGpu,
+    GpuBackend, GpuDevice,
+};
 
 /// Generic GPU proving engine parameterised by a hash scheme.
 ///

@@ -283,8 +283,8 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         // - d_layers_ptr is size `num_trees * depth` device pointers
         // - d_indices is size `num_trees * depth * num_queries` indices for merkle proof sibling
         //   indices
-        // - Both Digest=[F;8] and Bn254Digest=[Bn254Scalar;1] are 32 bytes == DIGEST_SIZE * 4,
-        //   so the same kernel correctly copies the raw bytes for either digest type.
+        // - Both Digest=[F;8] and Bn254Digest=[Bn254Scalar;1] are 32 bytes == DIGEST_SIZE * 4, so
+        //   the same kernel correctly copies the raw bytes for either digest type.
         unsafe {
             query_digest_layers(
                 &mut d_out,

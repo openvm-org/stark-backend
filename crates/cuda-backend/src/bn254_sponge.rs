@@ -68,8 +68,8 @@ pub struct DeviceBn254SpongeState {
     /// Index `output_len - 1` is the next value to be returned (LIFO, matches `Vec::pop`).
     pub output_buffer: [u32; 9], // 36 bytes
     /// Number of valid entries in `output_buffer`.
-    pub output_len: u32, // 4 bytes
-                         // 4 bytes implicit trailing padding → total 168 bytes
+    pub output_len: u32, /* 4 bytes
+                          * 4 bytes implicit trailing padding → total 168 bytes */
 }
 
 // Compile-time FFI safety: `Bn254Scalar` ↔ `[u64; 4]` conversion is sound only if
