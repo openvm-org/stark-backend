@@ -18,7 +18,6 @@ use openvm_stark_backend::{
         stacked_pcs::StackedLayout, sumcheck::sumcheck_round0_deg, DeviceMultiStarkProvingKey,
         MatrixDimensions, ProvingContext,
     },
-    FiatShamirTranscript,
 };
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
@@ -37,18 +36,20 @@ use crate::{
         },
         sumcheck::{fold_mle, triangular_fold_mle},
     },
+    gpu_backend::GenericGpuBackend,
+    hash_scheme::GpuHashScheme,
     poly::EqEvalSegments,
-    prelude::{Digest, D_EF, EF, F, SC},
-    sponge::DuplexSpongeGpu,
+    prelude::{Digest, D_EF, EF, F},
+    sponge::GpuFiatShamirTranscript,
     stacked_pcs::StackedPcsDataGpu,
     utils::{compute_barycentric_inv_lagrange_denoms, reduce_raw_u64_to_ef},
-    GpuBackend, GpuDevice, StackedReductionError,
+    GpuDevice, StackedReductionError,
 };
 
 /// Degree of the sumcheck polynomial for stacked reduction.
 pub const STACKED_REDUCTION_S_DEG: usize = 2;
 
-pub struct StackedReductionGpu {
+pub struct StackedReductionGpu<D = Digest> {
     sm_count: u32,
 
     l_skip: usize,
@@ -62,7 +63,7 @@ pub struct StackedReductionGpu {
     d_lambda_pows: DeviceBuffer<EF>,
     eq_const: EF,
 
-    pub(crate) stacked_per_commit: Vec<StackedPcsData2>,
+    pub(crate) stacked_per_commit: Vec<StackedPcsData2<D>>,
     d_q_widths: DeviceBuffer<u32>,
     q_width_max: u32,
     d_q_eval_ptrs: DeviceBuffer<*const EF>,
@@ -112,17 +113,20 @@ pub struct StackedReductionGpu {
 /// but we wrap the latter in an `Arc` to provide uniformity in dealing with common main and
 /// preprocessed/cached traces. This struct stores the unstacked `traces`, in prismalinear
 /// evaluation form, corresponding to the stacked pcs data.
-pub struct StackedPcsData2 {
-    pub(crate) inner: Arc<StackedPcsDataGpu<F, Digest>>,
+///
+/// Generic over the Merkle digest type `D`.  The default `D = Digest` preserves the existing
+/// BabyBear-Poseidon2 behaviour.
+pub struct StackedPcsData2<D = Digest> {
+    pub(crate) inner: Arc<StackedPcsDataGpu<F, D>>,
     /// The unstacked traces corresponding to `inner`'s commitment.
     pub(crate) traces: Vec<DeviceMatrix<F>>,
 }
 
-impl StackedPcsData2 {
+impl<D> StackedPcsData2<D> {
     /// # Safety
     /// `traces` must be the traces that were committed to in `pcs_data`.
     pub unsafe fn from_raw(
-        pcs_data: Arc<StackedPcsDataGpu<F, Digest>>,
+        pcs_data: Arc<StackedPcsDataGpu<F, D>>,
         traces: Vec<DeviceMatrix<F>>,
     ) -> Self {
         Self {
@@ -152,7 +156,7 @@ pub(crate) struct UnstackedSlice {
     stacked_col_idx: u32,
 }
 
-impl StackedReductionGpu {
+impl<D> StackedReductionGpu<D> {
     fn log_stacked_height(&self, round: usize) -> usize {
         self.n_stack - (round - 1)
     }
@@ -178,14 +182,18 @@ impl StackedReductionGpu {
     skip_all,
     fields(phase = "prover")
 )]
-pub fn prove_stacked_opening_reduction_gpu(
+pub fn prove_stacked_opening_reduction_gpu<HS, TS>(
     device: &GpuDevice,
-    transcript: &mut DuplexSpongeGpu,
-    mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
-    ctx: ProvingContext<GpuBackend>,
-    common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
+    transcript: &mut TS,
+    mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
+    ctx: ProvingContext<GenericGpuBackend<HS>>,
+    common_main_pcs_data: StackedPcsDataGpu<F, HS::Digest>,
     r: &[EF],
-) -> Result<(StackingProof<SC>, Vec<EF>, Vec<StackedPcsData2>), StackedReductionError> {
+) -> Result<(StackingProof<HS::SC>, Vec<EF>, Vec<StackedPcsData2<HS::Digest>>), StackedReductionError>
+where
+    HS: GpuHashScheme,
+    TS: GpuFiatShamirTranscript<HS::SC>,
+{
     let n_stack = device.config.n_stack;
     // Batching randomness
     let lambda = transcript.sample_ext();
@@ -193,7 +201,7 @@ pub fn prove_stacked_opening_reduction_gpu(
     let _round0_span =
         info_span!("prover.openings.stacked_reduction.round0", phase = "prover").entered();
     let mut prover =
-        StackedReductionGpu::new(mpk, ctx, common_main_pcs_data, r, lambda, device.sm_count())?;
+        StackedReductionGpu::new::<HS>(mpk, ctx, common_main_pcs_data, r, lambda, device.sm_count())?;
 
     // Round 0: univariate sumcheck
     let s_0 = prover.batch_sumcheck_uni_round0_poly()?;
@@ -248,12 +256,12 @@ pub fn prove_stacked_opening_reduction_gpu(
     Ok((proof, u_vec, prover.stacked_per_commit))
 }
 
-impl StackedReductionGpu {
+impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
     #[instrument("stacked_reduction_new", level = "debug", skip_all)]
-    fn new(
-        mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
-        ctx: ProvingContext<GpuBackend>,
-        common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
+    fn new<HS: GpuHashScheme<Digest = D>>(
+        mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
+        ctx: ProvingContext<GenericGpuBackend<HS>>,
+        common_main_pcs_data: StackedPcsDataGpu<F, D>,
         r: &[EF],
         lambda: EF,
         sm_count: u32,

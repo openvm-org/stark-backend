@@ -8,6 +8,7 @@ use openvm_stark_backend::{
         SymbolicConstraints, SymbolicDagBuilder, SymbolicExpressionDag,
     },
     keygen::types::StarkProvingKey,
+    StarkProtocolConfig,
 };
 use p3_field::PrimeCharacteristicRing;
 
@@ -17,7 +18,7 @@ use crate::{
         ExpandedInteractionMonomials, ExpandedMonomials, InteractionMonomialTerm, LambdaTerm,
         MonomialHeader, PackedVar,
     },
-    prelude::{F, SC},
+    prelude::F,
 };
 
 pub struct AirDataGpu {
@@ -82,7 +83,7 @@ fn to_device_or_empty<T>(data: &[T]) -> Result<DeviceBuffer<T>, MemCopyError> {
 }
 
 impl AirDataGpu {
-    pub fn new(pk: &StarkProvingKey<SC>) -> Result<Self, MemCopyError> {
+    pub fn new<S: StarkProtocolConfig<F = F>>(pk: &StarkProvingKey<S>) -> Result<Self, MemCopyError> {
         let dag = &pk.vk.symbolic_constraints;
         let symbolic_constraints = SymbolicConstraints::from(dag);
         let interaction_rules = InteractionEvalRules::new(&symbolic_constraints)?;

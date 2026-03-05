@@ -36,7 +36,6 @@ use openvm_stark_backend::{
         sumcheck::sumcheck_round0_deg, ColMajorMatrix, DeviceMultiStarkProvingKey,
         MatrixDimensions, ProvingContext,
     },
-    FiatShamirTranscript,
 };
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
@@ -52,15 +51,16 @@ use crate::{
     },
     data_transporter::transport_matrix_d2h_col_major,
     error::LogupZerocheckError,
+    gpu_backend::GenericGpuBackend,
+    hash_scheme::GpuHashScheme,
     logup_zerocheck::{
         batch_mle::evaluate_zerocheck_batched, fold_ple::fold_ple_evals_rotate,
         gkr_input::TraceInteractionMeta, round0::evaluate_round0_interactions_gpu,
     },
     poly::EqEvalLayers,
-    prelude::{EF, F, SC},
-    sponge::DuplexSpongeGpu,
+    prelude::{EF, F},
+    sponge::GpuFiatShamirTranscript,
     utils::compute_barycentric_inv_lagrange_denoms,
-    GpuBackend,
 };
 
 pub(crate) mod batch_mle;
@@ -104,14 +104,18 @@ pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
 
 #[allow(clippy::type_complexity)]
 #[instrument(level = "info", skip_all)]
-pub fn prove_zerocheck_and_logup_gpu(
-    transcript: &mut DuplexSpongeGpu,
-    mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
-    ctx: &ProvingContext<GpuBackend>,
+pub fn prove_zerocheck_and_logup_gpu<HS, TS>(
+    transcript: &mut TS,
+    mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
+    ctx: &ProvingContext<GenericGpuBackend<HS>>,
     save_memory: bool,
     monomial_num_y_threshold: u32,
     sm_count: u32,
-) -> Result<(GkrProof<SC>, BatchConstraintProof<SC>, Vec<EF>), LogupZerocheckError> {
+) -> Result<(GkrProof<HS::SC>, BatchConstraintProof<HS::SC>, Vec<EF>), LogupZerocheckError>
+where
+    HS: GpuHashScheme,
+    TS: GpuFiatShamirTranscript<HS::SC>,
+{
     let logup_gkr_span = info_span!("prover.rap_constraints.logup_gkr", phase = "prover").entered();
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
@@ -400,7 +404,7 @@ pub fn prove_zerocheck_and_logup_gpu(
     Ok((gkr_proof, batch_constraint_proof, r))
 }
 
-pub struct LogupZerocheckGpu<'a> {
+pub struct LogupZerocheckGpu<'a, HS: GpuHashScheme> {
     pub alpha_logup: EF,
     pub beta_pows: Vec<EF>,
     // [alpha, beta^0, beta^1, .., beta^max_interaction_len]
@@ -448,7 +452,7 @@ pub struct LogupZerocheckGpu<'a> {
 
     trace_interactions: Vec<Option<TraceInteractionMeta>>,
     // round0: Round0Buffers,
-    pk: &'a DeviceMultiStarkProvingKey<GpuBackend>,
+    pk: &'a DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
 
     // In round `j`, contains `s_{j-1}(r_{j-1})`
     pub(crate) prev_s_eval: EF,
@@ -463,11 +467,11 @@ pub struct LogupZerocheckGpu<'a> {
     memory_limit_bytes: usize,
 }
 
-impl<'a> LogupZerocheckGpu<'a> {
+impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        pk: &'a DeviceMultiStarkProvingKey<GpuBackend>,
-        ctx: &ProvingContext<GpuBackend>,
+        pk: &'a DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
+        ctx: &ProvingContext<GenericGpuBackend<HS>>,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: EF,
@@ -593,7 +597,7 @@ impl<'a> LogupZerocheckGpu<'a> {
     #[instrument(name = "prover.rap_constraints.ple_round0", level = "info", skip_all)]
     fn sumcheck_uni_round0_polys(
         &mut self,
-        ctx: &ProvingContext<GpuBackend>,
+        ctx: &ProvingContext<GenericGpuBackend<HS>>,
         lambda: EF,
     ) -> Result<Vec<UnivariatePoly<EF>>, LogupZerocheckError> {
         self.mem
@@ -883,7 +887,7 @@ impl<'a> LogupZerocheckGpu<'a> {
     #[instrument(name = "LogupZerocheck::fold_ple_evals", level = "debug", skip_all)]
     fn fold_ple_evals(
         &mut self,
-        ctx: &ProvingContext<GpuBackend>,
+        ctx: &ProvingContext<GenericGpuBackend<HS>>,
         r_0: EF,
     ) -> Result<(), LogupZerocheckError> {
         let l_skip = self.l_skip;

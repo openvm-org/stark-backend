@@ -7,6 +7,8 @@ use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use crate::prelude::{EF, F};
 
 pub mod batch_ntt_small;
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+pub mod bn254_merkle_tree;
 pub mod device_info;
 pub mod logup_zerocheck;
 pub mod matrix;
