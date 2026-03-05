@@ -1,0 +1,119 @@
+name: Documentation Freshness Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  doc-check:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Check documentation freshness
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          use_sticky_comment: true
+          prompt: |
+            You are a documentation freshness checker for the openvm-org/stark-backend repository.
+            Analyze PR #${{ github.event.pull_request.number }} and determine whether any existing
+            documentation files may need updating as a result of the code changes.
+
+            ## Step 1: Get the PR diff
+
+            Run: gh pr diff ${{ github.event.pull_request.number }}
+
+            ## Step 2: Check the diff against the documentation map
+
+            Below is a map of documentation files to the code areas they cover. If the PR diff
+            modifies files in the listed trigger paths (or changes behavior/APIs described in the doc),
+            that doc may need updating.
+
+            ### docs/stark-backend.md
+            - Topics: STARK protocol overview, AIR/PAIR/RAP definitions, traces, proving key, verifying key
+            - Trigger paths: crates/stark-backend/src/prover/, crates/stark-backend/src/verifier/, crates/stark-backend/src/keygen/, crates/stark-backend/src/air/
+
+            ### docs/interactions.md
+            - Topics: AIR interactions framework, bus balancing, LogUp argument, InteractionBuilder API
+            - Trigger paths: crates/stark-backend/src/interaction/
+
+            ### docs/metrics.md
+            - Topics: Metrics collection, timing spans, gauge names
+            - Trigger paths: crates/stark-sdk/src/metrics/, metric name changes in prover/verifier
+
+            ### docs/vpmm_spec.md
+            - Topics: GPU virtual memory pool manager, malloc/free API, page management
+            - Trigger paths: crates/cuda-common/src/memory/, crates/cuda-common/include/ (VPMM-related)
+
+            ### docs/cuda-backend/gkr-prover.md
+            - Topics: GKR fractional sumcheck prover, fraction tree, CUDA kernels
+            - Trigger paths: crates/cuda-backend/src/gkr/, crates/cuda-backend/cuda/src/gkr/
+
+            ### docs/README.md
+            - Topics: Contributor guide, CUDA development setup, IDE configuration
+            - Trigger paths: scripts/, .vscode/, Cargo.toml (workspace member changes), build.rs files
+
+            ### AGENTS.md
+            - Topics: Build commands, project structure (crate list), code conventions, feature flags
+            - Trigger paths: Cargo.toml (workspace members, features, dependencies), rustfmt.toml, .cargo/config.toml
+
+            ### README.md (root)
+            - Topics: Project overview, crate descriptions, status, acknowledgements
+            - Trigger paths: Cargo.toml (workspace members, new/removed crates)
+
+            ### crates/stark-backend/README.md
+            - Topics: Crate purpose, features, SDK relationship
+            - Trigger paths: crates/stark-backend/Cargo.toml (features, dependencies)
+
+            ### CHANGELOG.md
+            - Topics: Version history, notable changes
+            - Trigger paths: Any user-facing feature addition, removal, or behavioral change
+
+            ### benchmarks/fields/README.md
+            - Topics: Field benchmark usage and structure
+            - Trigger paths: benchmarks/fields/
+
+            ## Step 3: Read flagged docs
+
+            For each doc file you think may be affected, use the Read tool to check its current
+            content. Verify that the specific sections are actually stale or missing info based on
+            the PR changes. This reduces false positives.
+
+            ## Step 4: Post findings
+
+            Post exactly ONE comment using: gh pr comment ${{ github.event.pull_request.number }} --body "..."
+
+            If NO documentation updates are needed:
+            Post: "### Documentation check\nNo documentation updates appear necessary for this PR."
+
+            If documentation updates MAY be needed, use this format:
+
+            ### Documentation may need updating
+
+            **`<doc path>`**
+            - <What changed in the code and why the doc may need updating>
+            - <Reference to specific functions/types/modules in the diff>
+
+            (Repeat for each affected doc.)
+
+            ---
+            *Automated documentation freshness check. Please verify whether the flagged docs actually need updating.*
+
+          claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 10
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr view:*),Read"
