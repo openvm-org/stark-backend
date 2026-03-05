@@ -84,14 +84,39 @@ hdr = pathlib.Path(hdr_path).read_text()
 
 # Match extern function declarations: "extern <ret> name(...);"
 pat = re.compile(r'^extern\s[^;{]*\b([A-Za-z_]\w*)\s*\([^;{]*\)\s*;', re.M)
-names = sorted(set(pat.findall(hdr)))
+
+# Track which extern functions are inside #ifdef/#if blocks so we can wrap
+# their force_refs entries in the same preprocessor guards.
+# Build a map: function_name -> guard_define (or None if unconditional).
+ifdef_pat = re.compile(r'^#if(?:def)?\s+(\w+)', re.M)
+endif_pat = re.compile(r'^#endif', re.M)
+
+func_guard = {}
+guard_stack = []
+for line in hdr.splitlines():
+    m_ifdef = re.match(r'^#if(?:def)?\s+(\w+)', line)
+    m_endif = re.match(r'^#endif', line)
+    m_extern = pat.match(line)
+    if m_ifdef:
+        guard_stack.append(m_ifdef.group(1))
+    elif m_endif and guard_stack:
+        guard_stack.pop()
+    elif m_extern:
+        name = m_extern.group(1)
+        func_guard[name] = guard_stack[-1] if guard_stack else None
+
+names = sorted(func_guard.keys())
 
 # Collect any undefined identifiers from "using X = Y[IDENT];" declarations
 # and emit them as #defines by searching for #define IDENT in the header.
+# Only consider C identifiers (not bare numeric literals).
 using_array_pat = re.compile(r'^using\s+\w+\s*=\s*\w+\[(\w+)\]\s*;', re.M)
 defined_pat = re.compile(r'^#define\s+(\w+)\b', re.M)
 defined_names = set(defined_pat.findall(hdr))
-undefined_array_dims = [m for m in using_array_pat.findall(hdr) if m not in defined_names]
+undefined_array_dims = [
+    m for m in using_array_pat.findall(hdr)
+    if m not in defined_names and not m.isdigit()
+]
 
 out = []
 
@@ -122,10 +147,22 @@ for dim in undefined_array_dims:
 out.append(f'#include "{hdr_path}"')
 
 # -- force_refs: take the address of every extern fn so DWARF is emitted ---
+# Functions inside #ifdef blocks are wrapped in the same guard so the stub
+# compiles even when the feature define is absent.
 out.append('static void force_refs() {')
 out.append('  volatile void* sink = 0;')
+current_guard = None
 for n in names:
+    guard = func_guard[n]
+    if guard != current_guard:
+        if current_guard is not None:
+            out.append(f'#endif')
+        if guard is not None:
+            out.append(f'#ifdef {guard}')
+        current_guard = guard
     out.append(f'  sink = (void*)&{n};')
+if current_guard is not None:
+    out.append(f'#endif')
 out.append('  (void)sink;')
 out.append('}')
 sys.stdout.write("\n".join(out))

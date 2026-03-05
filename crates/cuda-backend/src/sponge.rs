@@ -314,7 +314,7 @@ impl FiatShamirTranscript<SC> for DuplexSpongeGpu {
 /// Marker trait for GPU-compatible Fiat-Shamir transcripts.
 ///
 /// Extends [`FiatShamirTranscript`] with a GPU-accelerated proof-of-work grind method.
-/// Implementors maintain a device-side state buffer and can off-load the grinding loop
+/// Implementers maintain a device-side state buffer and can off-load the grinding loop
 /// to a CUDA kernel.
 pub trait GpuFiatShamirTranscript<Config: StarkProtocolConfig>:
     FiatShamirTranscript<Config>
