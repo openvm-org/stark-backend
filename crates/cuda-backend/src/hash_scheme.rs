@@ -1,14 +1,13 @@
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 use openvm_stark_backend::{StarkProtocolConfig, SystemParams};
-use openvm_stark_sdk::config::baby_bear_poseidon2::{
-    BabyBearPoseidon2Config, Digest as BabyBearPoseidon2Digest,
-};
-use serde::{de::DeserializeOwned, Serialize};
-
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
     BabyBearBn254Poseidon2Config, Digest as Bn254Digest,
 };
+use openvm_stark_sdk::config::baby_bear_poseidon2::{
+    BabyBearPoseidon2Config, Digest as BabyBearPoseidon2Digest,
+};
+use serde::{de::DeserializeOwned, Serialize};
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::{
@@ -181,7 +180,8 @@ pub struct Bn254Poseidon2MerkleHash;
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
     // `Bn254Digest` from stark-sdk = `[Bn254Scalar; 1]`, which is the same concrete type as
-    // `Bn254Digest` in `cuda::bn254_merkle_tree` — both are type aliases for `[p3_bn254::Bn254; 1]`.
+    // `Bn254Digest` in `cuda::bn254_merkle_tree` — both are type aliases for `[p3_bn254::Bn254;
+    // 1]`.
     type Digest = Bn254Digest;
 
     unsafe fn compress_rows(
