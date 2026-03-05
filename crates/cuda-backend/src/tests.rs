@@ -57,11 +57,7 @@ openvm_backend_tests::backend_test_suite!(Engine);
 #[test_case(2, 1   ; "log_trace_degree_1_lt_l_skip")]
 #[test_case(2, 0   ; "log_trace_degree_0_lt_l_skip")]
 fn test_bn254_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) {
-    use openvm_stark_backend::{
-        WhirConfig, WhirParams,
-        test_utils::FibFixture,
-        SystemParams,
-    };
+    use openvm_stark_backend::{test_utils::FibFixture, SystemParams, WhirConfig, WhirParams};
     use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 
     setup_tracing_with_log_level(Level::DEBUG);
@@ -91,7 +87,9 @@ fn test_bn254_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) {
     let engine = crate::BabyBearBn254Poseidon2GpuEngine::new(params);
     let (pk, vk) = fib.keygen(&engine);
     let proof = fib.prove(&engine, &pk);
-    engine.verify(&vk, &proof).expect("BN254 verification failed");
+    engine
+        .verify(&vk, &proof)
+        .expect("BN254 verification failed");
 }
 
 // ===========================================================================

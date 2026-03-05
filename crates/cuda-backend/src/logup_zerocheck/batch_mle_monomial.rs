@@ -20,9 +20,9 @@ use crate::{
         LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
     },
     error::KernelError,
-    logup_zerocheck::batch_mle::TraceCtx,
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
+    logup_zerocheck::batch_mle::TraceCtx,
     prelude::EF,
 };
 

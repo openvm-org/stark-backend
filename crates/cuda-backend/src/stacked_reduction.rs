@@ -189,7 +189,14 @@ pub fn prove_stacked_opening_reduction_gpu<HS, TS>(
     ctx: ProvingContext<GenericGpuBackend<HS>>,
     common_main_pcs_data: StackedPcsDataGpu<F, HS::Digest>,
     r: &[EF],
-) -> Result<(StackingProof<HS::SC>, Vec<EF>, Vec<StackedPcsData2<HS::Digest>>), StackedReductionError>
+) -> Result<
+    (
+        StackingProof<HS::SC>,
+        Vec<EF>,
+        Vec<StackedPcsData2<HS::Digest>>,
+    ),
+    StackedReductionError,
+>
 where
     HS: GpuHashScheme,
     TS: GpuFiatShamirTranscript<HS::SC>,
@@ -200,8 +207,14 @@ where
 
     let _round0_span =
         info_span!("prover.openings.stacked_reduction.round0", phase = "prover").entered();
-    let mut prover =
-        StackedReductionGpu::new::<HS>(mpk, ctx, common_main_pcs_data, r, lambda, device.sm_count())?;
+    let mut prover = StackedReductionGpu::new::<HS>(
+        mpk,
+        ctx,
+        common_main_pcs_data,
+        r,
+        lambda,
+        device.sm_count(),
+    )?;
 
     // Round 0: univariate sumcheck
     let s_0 = prover.batch_sumcheck_uni_round0_poly()?;

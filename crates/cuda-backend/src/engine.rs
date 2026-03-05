@@ -10,8 +10,7 @@ use crate::{
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::{
-    bn254_sponge::MultiField32ChallengerGpu,
-    gpu_backend::GenericGpuBackend,
+    bn254_sponge::MultiField32ChallengerGpu, gpu_backend::GenericGpuBackend,
     hash_scheme::BabyBearBn254Poseidon2HashScheme,
 };
 #[cfg(feature = "baby-bear-bn254-poseidon2")]

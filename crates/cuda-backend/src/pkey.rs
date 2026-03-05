@@ -83,7 +83,9 @@ fn to_device_or_empty<T>(data: &[T]) -> Result<DeviceBuffer<T>, MemCopyError> {
 }
 
 impl AirDataGpu {
-    pub fn new<S: StarkProtocolConfig<F = F>>(pk: &StarkProvingKey<S>) -> Result<Self, MemCopyError> {
+    pub fn new<S: StarkProtocolConfig<F = F>>(
+        pk: &StarkProvingKey<S>,
+    ) -> Result<Self, MemCopyError> {
         let dag = &pk.vk.symbolic_constraints;
         let symbolic_constraints = SymbolicConstraints::from(dag);
         let interaction_rules = InteractionEvalRules::new(&symbolic_constraints)?;

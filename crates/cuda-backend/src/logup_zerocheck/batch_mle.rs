@@ -17,12 +17,12 @@ use crate::{
         MainMatrixPtrs, ZerocheckCtx,
     },
     error::KernelError,
+    gpu_backend::GenericGpuBackend,
+    hash_scheme::GpuHashScheme,
     logup_zerocheck::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
         mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
     },
-    gpu_backend::GenericGpuBackend,
-    hash_scheme::GpuHashScheme,
     prelude::{EF, F},
 };
 

@@ -8,7 +8,10 @@ use zkhash::{
     poseidon2::poseidon2_instance_bn256::RC3,
 };
 
-use crate::{bn254_sponge::DeviceBn254SpongeState, prelude::{EF, F}};
+use crate::{
+    bn254_sponge::DeviceBn254SpongeState,
+    prelude::{EF, F},
+};
 
 // ---------------------------------------------------------------------------
 // BN254 Digest type (single Bn254Scalar = [u64; 4] in Montgomery form)
@@ -18,7 +21,8 @@ use crate::{bn254_sponge::DeviceBn254SpongeState, prelude::{EF, F}};
 /// Layout matches `bn254_digest_t` in the CUDA kernel (32 bytes, align 8).
 pub type Bn254Digest = [openvm_stark_sdk::config::baby_bear_bn254_poseidon2::Bn254Scalar; 1];
 
-// Compile-time FFI safety: `Bn254Digest` is passed to CUDA as `Bn254Fr*` (32 bytes, 8-aligned).
+// Compile-time FFI safety assertions.
+// `Bn254Digest` is passed to CUDA as `Bn254Fr*` (32 bytes, 8-aligned).
 const _: () = assert!(
     std::mem::size_of::<Bn254Digest>() == 32,
     "Bn254Digest must be 32 bytes to match CUDA bn254_digest_t"
@@ -26,6 +30,16 @@ const _: () = assert!(
 const _: () = assert!(
     std::mem::align_of::<Bn254Digest>() == 8,
     "Bn254Digest must be 8-byte aligned to match CUDA Bn254Fr"
+);
+// `F` (BabyBear) is cast to `*const u32` at the FFI boundary.
+const _: () = assert!(
+    std::mem::size_of::<F>() == std::mem::size_of::<u32>(),
+    "F must be 4 bytes to match CUDA uint32_t"
+);
+// `EF` (BinomialExtensionField<BabyBear, 4>) is cast to `*const u32` (stride of 4 u32s).
+const _: () = assert!(
+    std::mem::size_of::<EF>() == 4 * std::mem::size_of::<u32>(),
+    "EF must be 16 bytes (4 x uint32_t) for CUDA"
 );
 
 // ---------------------------------------------------------------------------
@@ -187,9 +201,7 @@ fn compute_bn254_rc_constants() -> (Vec<u64>, Vec<u64>, Vec<u64>) {
 
     let all_rows: Vec<[[u64; 4]; 3]> = RC3
         .iter()
-        .map(|row| {
-            [to_monty(&row[0]), to_monty(&row[1]), to_monty(&row[2])]
-        })
+        .map(|row| [to_monty(&row[0]), to_monty(&row[1]), to_monty(&row[2])])
         .collect();
 
     let flatten_rows = |rows: &[[[u64; 4]; 3]]| -> Vec<u64> {
@@ -199,7 +211,7 @@ fn compute_bn254_rc_constants() -> (Vec<u64>, Vec<u64>, Vec<u64>) {
             .collect()
     };
 
-    let initial_flat  = flatten_rows(&all_rows[0..4]);
+    let initial_flat = flatten_rows(&all_rows[0..4]);
     let partial_flat: Vec<u64> = all_rows[4..60]
         .iter()
         .flat_map(|r| r[0].iter().copied())
@@ -215,13 +227,7 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
 
     let code = *INIT.get_or_init(|| {
         let (initial, partial, terminal) = compute_bn254_rc_constants();
-        unsafe {
-            _init_bn254_poseidon2_rc(
-                initial.as_ptr(),
-                partial.as_ptr(),
-                terminal.as_ptr(),
-            )
-        }
+        unsafe { _init_bn254_poseidon2_rc(initial.as_ptr(), partial.as_ptr(), terminal.as_ptr()) }
     });
 
     CudaError::from_result(code)

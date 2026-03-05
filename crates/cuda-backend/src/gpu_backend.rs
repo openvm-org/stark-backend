@@ -69,8 +69,8 @@ impl<HS: GpuHashScheme> TraceCommitter<GenericGpuBackend<HS>> for GpuDevice {
     }
 }
 
-impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
-    ProverDevice<GenericGpuBackend<HS>, TS> for GpuDevice
+impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>> ProverDevice<GenericGpuBackend<HS>, TS>
+    for GpuDevice
 {
     type Error = ProverError;
 }
@@ -99,15 +99,14 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
         // - App proofs (log_blowup=1): higher threshold (512)
         // - Recursion proofs: lower threshold (64)
         let monomial_num_y_threshold = if self.config.log_blowup == 1 { 512 } else { 64 };
-        let (gkr_proof, batch_constraint_proof, r) =
-            prove_zerocheck_and_logup_gpu::<HS, TS>(
-                transcript,
-                mpk,
-                ctx,
-                save_memory,
-                monomial_num_y_threshold,
-                self.sm_count,
-            )?;
+        let (gkr_proof, batch_constraint_proof, r) = prove_zerocheck_and_logup_gpu::<HS, TS>(
+            transcript,
+            mpk,
+            ctx,
+            save_memory,
+            monomial_num_y_threshold,
+            self.sm_count,
+        )?;
         mem.emit_metrics();
         Ok(((gkr_proof, batch_constraint_proof), r))
     }

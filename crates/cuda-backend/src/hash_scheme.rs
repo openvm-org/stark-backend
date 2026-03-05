@@ -10,6 +10,14 @@ use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
     BabyBearBn254Poseidon2Config, Digest as Bn254Digest,
 };
 
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use crate::{
+    bn254_sponge::MultiField32ChallengerGpu,
+    cuda::bn254_merkle_tree::{
+        bn254_poseidon2_adjacent_compress_layer, bn254_poseidon2_compressing_row_hashes,
+        bn254_poseidon2_compressing_row_hashes_ext,
+    },
+};
 use crate::{
     cuda::merkle_tree::{
         poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
@@ -18,14 +26,6 @@ use crate::{
     merkle_tree::BatchQueryMerkle,
     sponge::{DuplexSpongeGpu, GpuFiatShamirTranscript},
     types::{EF, F},
-};
-#[cfg(feature = "baby-bear-bn254-poseidon2")]
-use crate::{
-    bn254_sponge::MultiField32ChallengerGpu,
-    cuda::bn254_merkle_tree::{
-        bn254_poseidon2_adjacent_compress_layer, bn254_poseidon2_compressing_row_hashes,
-        bn254_poseidon2_compressing_row_hashes_ext,
-    },
 };
 
 /// Dispatch trait for GPU Merkle hash kernels.
@@ -201,7 +201,13 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         query_stride: usize,
         log_rows_per_query: usize,
     ) -> Result<(), CudaError> {
-        bn254_poseidon2_compressing_row_hashes_ext(out, matrix, width, query_stride, log_rows_per_query)
+        bn254_poseidon2_compressing_row_hashes_ext(
+            out,
+            matrix,
+            width,
+            query_stride,
+            log_rows_per_query,
+        )
     }
 
     unsafe fn compress_layer(
