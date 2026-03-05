@@ -1,4 +1,6 @@
 pub mod base;
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+pub mod bn254_sponge;
 pub mod data_transporter;
 pub mod hash_scheme;
 pub mod logup_zerocheck;
@@ -21,6 +23,8 @@ mod gpu_backend;
 mod pkey;
 mod sumcheck;
 mod types;
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+pub use bn254_sponge::MultiField32ChallengerGpu;
 pub use device::*;
 pub use engine::*;
 pub use error::*;

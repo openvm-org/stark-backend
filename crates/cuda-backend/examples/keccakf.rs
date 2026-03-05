@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use openvm_cuda_backend::BabyBearPoseidon2GpuEngine;
+use openvm_cuda_backend::{prelude::SC, BabyBearPoseidon2GpuEngine, GpuBackend};
 use openvm_cuda_common::stream::current_stream_id;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
@@ -125,9 +125,15 @@ fn main() {
                     .zerocheck_save_memory = false;
                 let device = engine.device();
 
-                let d_pk = device.transport_pk_to_device(&pk);
+                let d_pk =
+                    <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_pk_to_device(
+                        device, &pk,
+                    );
                 let d_trace =
-                    device.transport_matrix_to_device(&ColMajorMatrix::from_row_major(&trace));
+                    <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_matrix_to_device(
+                        device,
+                        &ColMajorMatrix::from_row_major(&trace),
+                    );
                 let ctx =
                     ProvingContext::new(vec![(air_idx, AirProvingContext::simple_no_pis(d_trace))]);
 

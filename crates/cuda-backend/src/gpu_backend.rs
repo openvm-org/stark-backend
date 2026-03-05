@@ -16,8 +16,8 @@ use crate::{
     base::DeviceMatrix,
     hash_scheme::{DefaultHashScheme, GpuHashScheme},
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
-    prelude::{Digest, D_EF, EF, F, SC},
-    sponge::DuplexSpongeGpu,
+    prelude::{D_EF, EF, F},
+    sponge::GpuFiatShamirTranscript,
     stacked_pcs::{stacked_commit, StackedPcsDataGpu},
     stacked_reduction::prove_stacked_opening_reduction_gpu,
     whir::prove_whir_opening_gpu,
@@ -69,12 +69,16 @@ impl<HS: GpuHashScheme> TraceCommitter<GenericGpuBackend<HS>> for GpuDevice {
     }
 }
 
-impl ProverDevice<GpuBackend, DuplexSpongeGpu> for GpuDevice {
+impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
+    ProverDevice<GenericGpuBackend<HS>, TS> for GpuDevice
+{
     type Error = ProverError;
 }
 
-impl MultiRapProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
-    type PartialProof = (GkrProof<SC>, BatchConstraintProof<SC>);
+impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
+    MultiRapProver<GenericGpuBackend<HS>, TS> for GpuDevice
+{
+    type PartialProof = (GkrProof<HS::SC>, BatchConstraintProof<HS::SC>);
     /// The random opening point `r` where the batch constraint sumcheck reduces to evaluation
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
     type Artifacts = Vec<EF>;
@@ -84,32 +88,35 @@ impl MultiRapProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
     #[instrument(name = "prover.rap_constraints", skip_all, fields(phase = "prover"))]
     fn prove_rap_constraints(
         &self,
-        transcript: &mut DuplexSpongeGpu,
-        mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
-        ctx: &ProvingContext<GpuBackend>,
-        _common_main_pcs_data: &StackedPcsDataGpu<F, Digest>,
-    ) -> Result<((GkrProof<SC>, BatchConstraintProof<SC>), Vec<EF>), Self::Error> {
+        transcript: &mut TS,
+        mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
+        ctx: &ProvingContext<GenericGpuBackend<HS>>,
+        _common_main_pcs_data: &StackedPcsDataGpu<F, HS::Digest>,
+    ) -> Result<((GkrProof<HS::SC>, BatchConstraintProof<HS::SC>), Vec<EF>), Self::Error> {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
         let save_memory = self.prover_config.zerocheck_save_memory;
         // Threshold for monomial evaluation path based on proof type:
         // - App proofs (log_blowup=1): higher threshold (512)
         // - Recursion proofs: lower threshold (64)
         let monomial_num_y_threshold = if self.config.log_blowup == 1 { 512 } else { 64 };
-        let (gkr_proof, batch_constraint_proof, r) = prove_zerocheck_and_logup_gpu(
-            transcript,
-            mpk,
-            ctx,
-            save_memory,
-            monomial_num_y_threshold,
-            self.sm_count,
-        )?;
+        let (gkr_proof, batch_constraint_proof, r) =
+            prove_zerocheck_and_logup_gpu::<HS, TS>(
+                transcript,
+                mpk,
+                ctx,
+                save_memory,
+                monomial_num_y_threshold,
+                self.sm_count,
+            )?;
         mem.emit_metrics();
         Ok(((gkr_proof, batch_constraint_proof), r))
     }
 }
 
-impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
-    type OpeningProof = (StackingProof<SC>, WhirProof<SC>);
+impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
+    OpeningProver<GenericGpuBackend<HS>, TS> for GpuDevice
+{
+    type OpeningProof = (StackingProof<HS::SC>, WhirProof<HS::SC>);
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<EF>;
     type Error = ProverError;
@@ -117,12 +124,12 @@ impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
     #[instrument(name = "prover.openings", skip_all, fields(phase = "prover"))]
     fn prove_openings(
         &self,
-        transcript: &mut DuplexSpongeGpu,
-        mpk: &DeviceMultiStarkProvingKey<GpuBackend>,
-        ctx: ProvingContext<GpuBackend>,
-        common_main_pcs_data: StackedPcsDataGpu<F, Digest>,
+        transcript: &mut TS,
+        mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
+        ctx: ProvingContext<GenericGpuBackend<HS>>,
+        common_main_pcs_data: StackedPcsDataGpu<F, HS::Digest>,
         r: Vec<EF>,
-    ) -> Result<(StackingProof<SC>, WhirProof<SC>), Self::Error> {
+    ) -> Result<Self::OpeningProof, Self::Error> {
         let mut mem = MemTracker::start_and_reset_peak("prover.openings");
         let params = self.config();
         #[cfg(debug_assertions)]
@@ -147,14 +154,15 @@ impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
                 mpk.params.w_stack
             );
         }
-        let (stacking_proof, u_prisma, stacked_per_commit) = prove_stacked_opening_reduction_gpu(
-            self,
-            transcript,
-            mpk,
-            ctx,
-            common_main_pcs_data,
-            &r,
-        )?;
+        let (stacking_proof, u_prisma, stacked_per_commit) =
+            prove_stacked_opening_reduction_gpu::<HS, TS>(
+                self,
+                transcript,
+                mpk,
+                ctx,
+                common_main_pcs_data,
+                &r,
+            )?;
 
         let (&u0, u_rest) = u_prisma.split_first().unwrap();
         let u_cube = u0
@@ -163,7 +171,8 @@ impl OpeningProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {
             .chain(u_rest.iter().copied())
             .collect_vec();
 
-        let whir_proof = prove_whir_opening_gpu(params, transcript, stacked_per_commit, &u_cube)?;
+        let whir_proof =
+            prove_whir_opening_gpu::<HS, TS>(params, transcript, stacked_per_commit, &u_cube)?;
         mem.emit_metrics();
         mem.reset_peak();
         Ok((stacking_proof, whir_proof))
