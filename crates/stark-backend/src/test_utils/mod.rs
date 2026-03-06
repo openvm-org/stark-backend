@@ -23,6 +23,7 @@ use crate::{
         MultiRapProver, Prover, ProvingContext, TraceCommitter,
     },
     AirRef, StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
+    WhirProximityStrategy,
 };
 
 pub mod dummy_airs;
@@ -566,15 +567,13 @@ pub fn test_whir_config_small(
         k: k_whir,
         log_final_poly_len,
         query_phase_pow_bits: 1,
+        proximity: WhirProximityStrategy::SplitUniqueList {
+            m: 3,
+            list_start_round: 1,
+        },
     };
     let security_bits = 5;
-    WhirConfig::new(
-        log_blowup,
-        log_stacked_height,
-        params,
-        security_bits,
-        crate::config::ProximityRegime::UniqueDecoding,
-    )
+    WhirConfig::new(log_blowup, log_stacked_height, params, security_bits)
 }
 
 pub fn default_test_params_small() -> SystemParams {

@@ -9,7 +9,10 @@
 //! Each component contributes to the overall soundness error, and the total security
 //! is the minimum across all components.
 
-use crate::config::{ProximityRegime, SystemParams, WhirConfig};
+use crate::{
+    config::{ProximityRegime, SystemParams, WhirConfig},
+    WhirProximityStrategy,
+};
 
 #[derive(Clone, Debug)]
 pub struct SoundnessCalculator {
@@ -50,6 +53,12 @@ pub struct WhirSoundnessCalculator {
     pub mu_batching_bits: f64,
 }
 
+#[derive(Clone, Debug)]
+pub struct ProximityGapSecurity {
+    pub log2_err: f64,
+    pub log2_list_size: f64,
+}
+
 impl SoundnessCalculator {
     /// Calculates soundness for the given system parameters.
     ///
@@ -76,7 +85,18 @@ impl SoundnessCalculator {
         num_stacked_columns: usize,
         n_logup: usize,
     ) -> Self {
-        let logup_bits = Self::calculate_logup_soundness(params, challenge_field_bits);
+        let init_prox_gap = Self::whir_proximity_gap_security(
+            params.whir.proximity.initial_round(),
+            challenge_field_bits,
+            params.log_stacked_height(),
+            params.log_blowup,
+            num_stacked_columns,
+        );
+        // log2_list_size is log2(L_{PCS}) where L_{PCS} is the list size with respect to the
+        // proximity radius of the _initial_ WHIR round.
+        let log2_list_size = init_prox_gap.log2_list_size;
+        let logup_bits =
+            Self::calculate_logup_soundness(params, challenge_field_bits, log2_list_size);
 
         let gkr_sumcheck_bits =
             Self::calculate_gkr_sumcheck_soundness(challenge_field_bits, params.l_skip, n_logup);
@@ -89,12 +109,14 @@ impl SoundnessCalculator {
             max_constraint_degree,
             params.l_skip,
             max_log_trace_height,
+            log2_list_size,
         );
 
         let constraint_batching_bits = Self::calculate_constraint_batching_soundness(
             challenge_field_bits,
             max_num_constraints_per_air,
             num_airs,
+            log2_list_size,
         );
 
         let stacked_reduction_bits = Self::calculate_stacked_reduction_soundness(
@@ -102,13 +124,14 @@ impl SoundnessCalculator {
             num_trace_columns,
             params.l_skip,
             params.n_stack,
+            log2_list_size,
         );
 
         let (whir_bits, whir_details) = Self::calculate_whir_soundness(
             params,
             challenge_field_bits,
             num_stacked_columns,
-            params.whir.proximity_regime,
+            params.whir.proximity,
         );
 
         let total_bits = logup_bits
@@ -143,11 +166,17 @@ impl SoundnessCalculator {
     /// Security = |F_ext| - log₂(2 × max_interaction_count) - log_max_message_length + pow_bits
     ///
     /// Reference: Section 4 of docs/Soundness_of_Interactions_via_LogUp.pdf
-    fn calculate_logup_soundness(params: &SystemParams, challenge_field_bits: f64) -> f64 {
+    fn calculate_logup_soundness(
+        params: &SystemParams,
+        challenge_field_bits: f64,
+        log2_list_size: f64,
+    ) -> f64 {
         let logup = &params.logup;
         let max_interaction_count_bits = (2.0 * logup.max_interaction_count as f64).log2();
 
-        challenge_field_bits - max_interaction_count_bits - logup.log_max_message_length as f64
+        log2_list_size + challenge_field_bits
+            - max_interaction_count_bits
+            - logup.log_max_message_length as f64
             + logup.pow_bits as f64
     }
 
@@ -206,6 +235,7 @@ impl SoundnessCalculator {
         max_constraint_degree: usize,
         l_skip: usize,
         max_log_trace_height: usize,
+        log2_list_size: f64,
     ) -> f64 {
         let univariate_degree = (max_constraint_degree + 1) * ((1 << l_skip) - 1);
         let multilinear_degree = max_constraint_degree + 1;
@@ -219,7 +249,7 @@ impl SoundnessCalculator {
         let poly_degree_sum = (1 << l_skip) - 1 + n_max;
         let poly_identity_bits = challenge_field_bits - (poly_degree_sum as f64).log2();
 
-        sumcheck_bits.min(poly_identity_bits)
+        log2_list_size + sumcheck_bits.min(poly_identity_bits)
     }
 
     /// Constraint batching soundness via Schwartz-Zippel.
@@ -232,6 +262,7 @@ impl SoundnessCalculator {
         challenge_field_bits: f64,
         max_num_constraints_per_air: usize,
         num_airs: usize,
+        log2_list_size: f64,
     ) -> f64 {
         let lambda_batching_bits =
             challenge_field_bits - (max_num_constraints_per_air as f64).log2();
@@ -241,7 +272,7 @@ impl SoundnessCalculator {
         // 3. LogUp denominator (q̂(ξ) input layer)
         let mu_batching_bits = challenge_field_bits - (3.0 * num_airs as f64).log2();
 
-        lambda_batching_bits.min(mu_batching_bits)
+        log2_list_size + lambda_batching_bits.min(mu_batching_bits)
     }
 
     /// Stacked reduction soundness.
@@ -260,6 +291,7 @@ impl SoundnessCalculator {
         num_trace_columns: usize,
         l_skip: usize,
         _n_stack: usize,
+        log2_list_size: f64,
     ) -> f64 {
         let batching_bits = challenge_field_bits - (2.0 * num_trace_columns as f64).log2();
 
@@ -269,7 +301,7 @@ impl SoundnessCalculator {
         // Degree 2 per round => log2(2) = 1.
         let multilinear_bits = challenge_field_bits - 1.0;
 
-        batching_bits.min(univariate_bits).min(multilinear_bits)
+        log2_list_size + batching_bits.min(univariate_bits).min(multilinear_bits)
     }
 
     /// WHIR soundness analysis based on the WHIR paper (ePrint 2024/1586).
@@ -284,7 +316,7 @@ impl SoundnessCalculator {
         params: &SystemParams,
         challenge_field_bits: f64,
         num_stacked_columns: usize,
-        proximity_regime: ProximityRegime,
+        proximity: WhirProximityStrategy,
     ) -> (f64, WhirSoundnessCalculator) {
         let whir = &params.whir;
         let k_whir = whir.k;
@@ -301,31 +333,34 @@ impl SoundnessCalculator {
             num_stacked_columns >= 2,
             "WHIR requires at least 2 stacked columns for μ batching"
         );
-        let mu_batching_bits = Self::whir_proximity_gap_security(
-            proximity_regime,
+        let mu_security = Self::whir_proximity_gap_security(
+            proximity.initial_round(),
             challenge_field_bits,
             log_stacked_height,
             params.log_blowup,
             num_stacked_columns,
-        ) + whir.mu_pow_bits as f64;
+        );
+        let mu_batching_bits = mu_security.log2_err + whir.mu_pow_bits as f64;
 
         let mut log_inv_rate = params.log_blowup;
         let mut current_log_degree = log_stacked_height;
 
         for (round, round_config) in whir.rounds.iter().enumerate() {
+            let proximity_regime = proximity.in_round(round);
             let is_final_round = round == num_whir_rounds - 1;
             let next_rate = log_inv_rate + (k_whir - 1);
 
             for sub_round in 0..k_whir {
                 current_log_degree -= 1;
 
-                let prox_gaps_bits = Self::whir_proximity_gap_security(
+                let prox_gaps = Self::whir_proximity_gap_security(
                     proximity_regime,
                     challenge_field_bits,
                     current_log_degree,
                     log_inv_rate,
                     2,
-                ) + whir.folding_pow_bits as f64;
+                );
+                let prox_gaps_bits = prox_gaps.log2_err + whir.folding_pow_bits as f64;
                 min_prox_gaps_bits = min_prox_gaps_bits.min(prox_gaps_bits);
 
                 let sumcheck_bits = Self::whir_sumcheck_security(
@@ -412,19 +447,28 @@ impl SoundnessCalculator {
         log_degree: usize,
         log_inv_rate: usize,
         batch_size: usize,
-    ) -> f64 {
+    ) -> ProximityGapSecurity {
         debug_assert!(batch_size > 1, "batch_size must be > 1 for err*");
         match proximity_regime {
             ProximityRegime::UniqueDecoding => {
-                challenge_field_bits
+                let log2_err = challenge_field_bits
                     - ((batch_size - 1) as f64).log2()
                     - log_degree as f64
-                    - log_inv_rate as f64
+                    - log_inv_rate as f64;
+                ProximityGapSecurity {
+                    log2_err,
+                    log2_list_size: 0.0,
+                }
             }
             ProximityRegime::ListDecoding { m } => {
-                let log2_a = Self::log2_a_bound_bchks25(log_degree, log_inv_rate, m);
+                let (log2_a, log2_list_size) =
+                    Self::log2_a_bound_bchks25(log_degree, log_inv_rate, m);
                 // Haböck global mutual correlated agreement: error ∝ (ℓ - 1) * a / |F|.
-                challenge_field_bits - ((batch_size - 1) as f64).log2() - log2_a
+                let log2_err = challenge_field_bits - ((batch_size - 1) as f64).log2() - log2_a;
+                ProximityGapSecurity {
+                    log2_err,
+                    log2_list_size,
+                }
             }
         }
     }
@@ -466,6 +510,20 @@ impl SoundnessCalculator {
 
     /// Reference closed-form degrees from BCHKS25 Lemma 3.1, Equations (7), (8), (9).
     /// For `m < 3`, use `D_Z = max(D_Y, Equation (9) value)` as noted below Lemma 3.1.
+    ///
+    /// Returns (log2(D_X), log2(D_Y), log2(D_Z))
+    fn bchks25_log2_degrees(log_degree: usize, log_inv_rate: usize, m: usize) -> (f64, f64, f64) {
+        // if let Some((optimal_degrees, log2_a)) =
+        //     Self::bchks25_optimal_degrees_bruteforce(log_degree, log_inv_rate, m_eff, gamma)
+        // {
+        //     debug_assert!(
+        //         optimal_degrees.d_x > 0 && optimal_degrees.d_y > 0 && optimal_degrees.d_z > 0
+        //     );
+        //     log2_a
+        // } else
+        Self::bchks25_reference_log2_degrees(log_degree, log_inv_rate, m)
+    }
+
     fn bchks25_reference_log2_degrees(
         log_degree: usize,
         log_inv_rate: usize,
@@ -511,17 +569,20 @@ impl SoundnessCalculator {
     ///
     /// We set the theorem slack `η` from the provided multiplicity `m` as
     /// `η = sqrt(rho) / (2m)`, so that `m = ceil(sqrt(rho)/(2η))`.
-    fn log2_a_bound_bchks25(log_degree: usize, log_inv_rate: usize, m: usize) -> f64 {
+    ///
+    /// Returns `log2(a_bound), log2(list_size)`.
+    fn log2_a_bound_bchks25(log_degree: usize, log_inv_rate: usize, m: usize) -> (f64, f64) {
+        const INVALID: (f64, f64) = (f64::INFINITY, f64::INFINITY);
         let m_eff = m.max(1);
         let log2_rho = -(log_inv_rate as f64);
         let rho = log2_rho.exp2();
         if rho <= 0.0 || !rho.is_finite() {
-            return f64::INFINITY;
+            return INVALID;
         }
         if m_eff == 1 && rho >= (4.0 / 9.0) {
             // For m=1: gamma = 1 - sqrt(rho) - sqrt(rho)/(2m) = 1 - 3*sqrt(rho)/2.
             // Gamma must be positive to apply the Section 3.2 argument.
-            return f64::INFINITY;
+            return INVALID;
         }
 
         let sqrt_rho = rho.sqrt();
@@ -529,33 +590,27 @@ impl SoundnessCalculator {
         let gamma = 1.0 - sqrt_rho - eta;
         if eta <= 0.0 || gamma <= 0.0 || gamma >= 1.0 - sqrt_rho {
             // Invalid theorem regime => no security from this term.
-            return f64::INFINITY;
+            return INVALID;
         }
 
         let log2_n = (log_degree + log_inv_rate) as f64;
-        // if let Some((optimal_degrees, log2_a)) =
-        //     Self::bchks25_optimal_degrees_bruteforce(log_degree, log_inv_rate, m_eff, gamma)
-        // {
-        //     debug_assert!(
-        //         optimal_degrees.d_x > 0 && optimal_degrees.d_y > 0 && optimal_degrees.d_z > 0
-        //     );
-        //     log2_a
-        // } else
-        let log2_a_real = {
+        let (log2_a_real, log2_list_size) = {
             // Fallback for extreme parameter regimes where exact integer search is not
             // representable.
             let (log2_d_x, log2_d_y, log2_d_z) =
-                Self::bchks25_reference_log2_degrees(log_degree, log_inv_rate, m_eff);
+                Self::bchks25_log2_degrees(log_degree, log_inv_rate, m_eff);
             let log2_gamma_n_plus_1 = Self::log2_add(gamma.log2() + log2_n, 0.0);
-            Self::bchks25_log2_a_from_log2_degrees(
+            let log2_a = Self::bchks25_log2_a_from_log2_degrees(
                 log2_d_x,
                 log2_d_y,
                 log2_d_z,
                 log2_gamma_n_plus_1,
-            )
+            );
+            // Note: we could take log2(floor(2^log2_d_y)) for a tighter list size bound
+            (log2_a, log2_d_y)
         };
         if !log2_a_real.is_finite() {
-            return f64::INFINITY;
+            return INVALID;
         }
 
         // Clamp `a_bound >= 1` => `log2(a_bound) >= 0`.
@@ -565,10 +620,10 @@ impl SoundnessCalculator {
         if log2_a_real < 52.0 {
             let a = log2_a_real.exp2();
             let a_bound = a.ceil().max(1.0);
-            a_bound.log2()
+            (a_bound.log2(), log2_list_size)
         } else {
             // For large `a`, `ceil` does not materially affect `log2(a)`.
-            log2_a_real
+            (log2_a_real, log2_list_size)
         }
     }
 
@@ -785,7 +840,7 @@ mod tests {
                 mu_pow_bits: 16,
                 query_phase_pow_bits: 16,
                 folding_pow_bits: 10,
-                proximity_regime: ProximityRegime::UniqueDecoding,
+                proximity: WhirProximityStrategy::UniqueDecoding,
             },
             logup: LogUpSecurityParameters {
                 max_interaction_count: 1 << 20,
@@ -829,7 +884,7 @@ mod tests {
         n_stack: usize,
         w_stack: usize,
         log_final_poly_len: usize,
-        proximity_regime: ProximityRegime,
+        proximity: WhirProximityStrategy,
     ) -> SystemParams {
         let k_whir = 4;
         let max_constraint_degree = 4;
@@ -847,9 +902,9 @@ mod tests {
                     k: k_whir,
                     log_final_poly_len,
                     query_phase_pow_bits: WHIR_POW_BITS,
+                    proximity,
                 },
                 SECURITY_BITS_TARGET,
-                proximity_regime,
             ),
             logup: log_up_security_params_baby_bear_100_bits_local(),
             max_constraint_degree,
@@ -873,7 +928,10 @@ mod tests {
             20,
             2048,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
-            ProximityRegime::UniqueDecoding,
+            WhirProximityStrategy::SplitUniqueList {
+                m: 2,
+                list_start_round: 1,
+            },
         )
     }
 
@@ -886,7 +944,10 @@ mod tests {
             18,
             1024,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
-            ProximityRegime::ListDecoding { m: 3 },
+            WhirProximityStrategy::SplitUniqueList {
+                m: 3,
+                list_start_round: 1,
+            },
         )
     }
 
@@ -899,7 +960,10 @@ mod tests {
             17,
             1024,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
-            ProximityRegime::ListDecoding { m: 3 },
+            WhirProximityStrategy::SplitUniqueList {
+                m: 3,
+                list_start_round: 1,
+            },
         )
     }
 
@@ -910,9 +974,9 @@ mod tests {
             DEFAULT_COMPRESSION_LOG_BLOWUP,
             2,
             20,
-            64,
+            16,
             11,
-            ProximityRegime::ListDecoding { m: 1 },
+            WhirProximityStrategy::ListDecoding { m: 2 },
         )
     }
 
@@ -1015,6 +1079,7 @@ mod tests {
         let security = SoundnessCalculator::calculate_logup_soundness(
             &params,
             babybear_quartic_extension_bits(),
+            0.0,
         );
         assert!(security > TARGET_SECURITY_BITS as f64);
     }
@@ -1049,11 +1114,11 @@ mod tests {
     fn test_bchks25_m1_requires_rho_below_four_ninths() {
         // log_inv_rate=1 => rho=1/2 > 4/9, so m=1 regime is invalid.
         let invalid = SoundnessCalculator::log2_a_bound_bchks25(12, 1, 1);
-        assert!(invalid.is_infinite());
+        assert!(invalid.0.is_infinite() && invalid.1.is_infinite());
 
         // log_inv_rate=2 => rho=1/4 < 4/9, so m=1 regime is admissible.
         let valid = SoundnessCalculator::log2_a_bound_bchks25(12, 2, 1);
-        assert!(valid.is_finite());
+        assert!(valid.0.is_finite() && valid.1.is_finite());
     }
 
     // ==========================================================================

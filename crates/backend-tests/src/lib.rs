@@ -61,8 +61,8 @@ use openvm_stark_backend::{
         verify,
         whir::{binary_k_fold, verify_whir, VerifyWhirError},
     },
-    AirRef, FiatShamirTranscript, ProximityRegime, StarkEngine, StarkProtocolConfig, SystemParams,
-    TranscriptHistory, WhirConfig, WhirParams, WhirRoundConfig,
+    AirRef, FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
+    TranscriptHistory, WhirConfig, WhirParams, WhirProximityStrategy, WhirRoundConfig,
 };
 use openvm_stark_sdk::{
     config::{
@@ -153,7 +153,10 @@ pub fn proof_shape_verifier_rng_system_params<E: StarkEngine<SC = SC>>() -> eyre
             mu_pow_bits: 1,
             query_phase_pow_bits: 1,
             folding_pow_bits: 1,
-            proximity_regime: ProximityRegime::UniqueDecoding,
+            proximity: WhirProximityStrategy::SplitUniqueList {
+                m: 3,
+                list_start_round: 1,
+            },
         };
         let params = SystemParams {
             l_skip,
@@ -261,15 +264,10 @@ pub fn fib_air_roundtrip<E: StarkEngine<SC = SC>>(
         k: k_whir,
         log_final_poly_len: k_whir,
         query_phase_pow_bits: 1,
+        proximity: WhirProximityStrategy::UniqueDecoding,
     };
     let log_blowup = 1;
-    let whir = WhirConfig::new(
-        log_blowup,
-        l_skip + n_stack,
-        whir_params,
-        80,
-        ProximityRegime::UniqueDecoding,
-    );
+    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 80);
     let params = SystemParams {
         l_skip,
         n_stack,
@@ -1203,7 +1201,8 @@ pub fn whir_test_config(k_whir: usize) -> WhirConfig {
         mu_pow_bits: 1,
         query_phase_pow_bits: 1,
         folding_pow_bits: 1,
-        proximity_regime: ProximityRegime::UniqueDecoding,
+        proximity: WhirProximityStrategy::UniqueDecoding, /* not relevant since `rounds` is
+                                                           * manually set above */
     }
 }
 

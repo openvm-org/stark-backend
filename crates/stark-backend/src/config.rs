@@ -102,6 +102,7 @@ pub struct WhirParams {
     /// log_final_poly_len`.
     pub log_final_poly_len: usize,
     pub query_phase_pow_bits: usize,
+    pub proximity: WhirProximityStrategy,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,15 +119,57 @@ pub struct WhirConfig {
     /// The folding PoW bits can vary per round, but for simplicity (and efficiency of the
     /// recursion circuit) we use the same number for all rounds.
     pub folding_pow_bits: usize,
-    /// Regime for proximity gaps (unique decoding or list decoding). We use only proven error
-    /// bounds.
-    pub proximity_regime: ProximityRegime,
+    /// Proximity regimes for WHIR rounds. We use only proven error bounds.
+    ///
+    /// Note: this field is not needed by the verifier as it is only used to determine the number
+    /// of queries in the `rounds` field. However we store it in `WhirConfig` for security analysis
+    /// purposes.
+    pub proximity: WhirProximityStrategy,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WhirRoundConfig {
     /// Number of in-domain queries sampled in this WHIR round.
     pub num_queries: usize,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WhirProximityStrategy {
+    /// Unique decoding regime in every WHIR round.
+    UniqueDecoding,
+    /// Unique decoding regime in the initial `list_start_round` WHIR rounds. Then list decoding
+    /// regime with the same proximity radius derived from `m` (see `ListDecoding`) for all
+    /// subsequent WHIR rounds (0-indices `>= list_start_round`). Note that a WHIR round
+    /// consists of codewords of different degrees with the same rate. The WHIR round changes
+    /// when the rate changes.
+    SplitUniqueList { m: usize, list_start_round: usize },
+    /// List decoding regime in every WHIR round, with the same proximity radius derived from `m`,
+    /// where `m = ceil(sqrt(\rho) / 2 \eta), \eta = 1 - sqrt(\rho) - \delta, where \delta is the
+    /// proximity radius.
+    ListDecoding { m: usize },
+}
+
+impl WhirProximityStrategy {
+    pub fn initial_round(&self) -> ProximityRegime {
+        self.in_round(0)
+    }
+
+    pub fn in_round(&self, whir_round: usize) -> ProximityRegime {
+        match *self {
+            Self::UniqueDecoding => ProximityRegime::UniqueDecoding,
+            Self::SplitUniqueList {
+                m,
+                list_start_round,
+            } => {
+                if whir_round < list_start_round {
+                    ProximityRegime::UniqueDecoding
+                } else {
+                    ProximityRegime::ListDecoding { m }
+                }
+            }
+            Self::ListDecoding { m } => ProximityRegime::ListDecoding { m },
+        }
+    }
 }
 
 /// Defines the proximity regime for the proof system.
@@ -176,7 +219,6 @@ impl WhirConfig {
         log_stacked_height: usize,
         whir_params: WhirParams,
         security_bits: usize,
-        proximity_regime: ProximityRegime,
     ) -> Self {
         let query_phase_pow_bits = whir_params.query_phase_pow_bits;
         let protocol_security_level = security_bits.saturating_sub(query_phase_pow_bits);
@@ -185,18 +227,22 @@ impl WhirConfig {
             .saturating_sub(whir_params.log_final_poly_len)
             .div_ceil(k_whir);
         let mut log_inv_rate = log_blowup;
+        let proximity = whir_params.proximity;
 
         // A safe setting for BabyBear and ~200 columns
         // TODO[jpw]: use rbr_soundness_queries_combination
         const FOLDING_POW_BITS: usize = 20;
 
         let mut round_parameters = Vec::with_capacity(num_rounds);
-        for _round in 0..num_rounds {
+        for round in 0..num_rounds {
             // Queries are set w.r.t. to old rate, while the rest to the new rate
             let next_rate = log_inv_rate + (k_whir - 1);
 
-            let num_queries =
-                Self::queries(proximity_regime, protocol_security_level, log_inv_rate);
+            let num_queries = Self::queries(
+                proximity.in_round(round),
+                protocol_security_level,
+                log_inv_rate,
+            );
             round_parameters.push(WhirRoundConfig { num_queries });
 
             log_inv_rate = next_rate;
@@ -210,7 +256,7 @@ impl WhirConfig {
             mu_pow_bits: MU_POW_BITS,
             query_phase_pow_bits,
             folding_pow_bits: FOLDING_POW_BITS,
-            proximity_regime,
+            proximity,
         }
     }
 
