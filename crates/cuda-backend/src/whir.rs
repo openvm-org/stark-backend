@@ -530,6 +530,7 @@ mod tests {
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
         ProximityRegime, StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
+        WhirProximityStrategy,
     };
     use openvm_stark_sdk::{
         config::{
@@ -642,6 +643,7 @@ mod tests {
             k: k_whir,
             log_final_poly_len,
             query_phase_pow_bits: 2,
+            proximity: WhirProximityStrategy::UniqueDecoding,
         }
     }
 
@@ -666,7 +668,6 @@ mod tests {
             l_skip + n_stack,
             whir_test_params(k_whir, log_final_poly_len),
             10,
-            ProximityRegime::UniqueDecoding,
         );
         let params = SystemParams {
             l_skip: 2,

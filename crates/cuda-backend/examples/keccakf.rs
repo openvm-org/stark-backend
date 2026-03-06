@@ -10,7 +10,7 @@ use openvm_stark_backend::{
     p3_field::Field,
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
     BaseAirWithPublicValues, PartitionedBaseAir, ProximityRegime, StarkEngine, SystemParams,
-    WhirConfig, WhirParams,
+    WhirConfig, WhirParams, WhirProximityStrategy,
 };
 use openvm_stark_sdk::{
     config::{
@@ -52,15 +52,10 @@ fn make_params() -> SystemParams {
         k: k_whir,
         log_final_poly_len: 2 * k_whir,
         query_phase_pow_bits: 20,
+        proximity: WhirProximityStrategy::UniqueDecoding,
     };
     let log_blowup = 1;
-    let whir = WhirConfig::new(
-        log_blowup,
-        l_skip + n_stack,
-        whir_params,
-        100,
-        ProximityRegime::UniqueDecoding,
-    );
+    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
     SystemParams {
         l_skip,
         n_stack,

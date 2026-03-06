@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use cfg_if::cfg_if;
 use eyre::eyre;
+use openvm_stark_backend::WhirProximityStrategy;
 use openvm_stark_sdk::{
     config::log_up_params::log_up_security_params_baby_bear_100_bits,
     openvm_stark_backend::{
         p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues},
         p3_field::Field,
         prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-        PartitionedBaseAir, ProximityRegime, StarkEngine, SystemParams, WhirConfig, WhirParams,
+        PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
     },
 };
 use p3_keccak_air::KeccakAir;
@@ -52,15 +53,10 @@ fn main() -> eyre::Result<()> {
         k: k_whir,
         log_final_poly_len: 2 * k_whir,
         query_phase_pow_bits: 20,
+        proximity: WhirProximityStrategy::UniqueDecoding,
     };
     let log_blowup = 1;
-    let whir = WhirConfig::new(
-        log_blowup,
-        l_skip + n_stack,
-        whir_params,
-        100,
-        ProximityRegime::UniqueDecoding,
-    );
+    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
     let params = SystemParams {
         l_skip,
         n_stack,
