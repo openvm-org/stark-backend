@@ -669,6 +669,8 @@ mod tests {
             k: k_whir,
             log_final_poly_len,
             query_phase_pow_bits: 2,
+            folding_pow_bits: 1,
+            mu_pow_bits: 3,
             proximity: WhirProximityStrategy::UniqueDecoding,
         }
     }
