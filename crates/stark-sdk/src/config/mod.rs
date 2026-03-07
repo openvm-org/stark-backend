@@ -28,6 +28,18 @@ pub const DEFAULT_COMPRESSION_LOG_BLOWUP: usize = 4;
 
 pub const MAX_APP_LOG_STACKED_HEIGHT: usize = 24;
 
+/// Returns `SystemParams` targeting 100 bits of proven RBR security for App VM circuits.
+///
+/// # Assumptions for 100-bit security
+/// - **Max trace height**: `log_stacked_height` ≤ [`MAX_APP_LOG_STACKED_HEIGHT`] (24)
+/// - **Max constraints per AIR**: ≤ 5,000
+/// - **Num AIRs**: ≤ 100
+/// - **Max interactions per AIR**: ≤ 1,000
+/// - **Num trace columns** (unstacked, total across all AIRs): ≤ 30,000
+/// - **`w_stack`** = 2,048, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+//
+// See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
+// full soundness analysis.
 pub fn app_params_with_100_bits_security(log_stacked_height: usize) -> SystemParams {
     assert!(
         log_stacked_height <= MAX_APP_LOG_STACKED_HEIGHT,
@@ -50,7 +62,21 @@ pub fn app_params_with_100_bits_security(log_stacked_height: usize) -> SystemPar
     )
 }
 
-/// l_skip=2, n_stack=18
+/// Returns `SystemParams` targeting 100 bits of proven RBR security for leaf aggregation circuits.
+///
+/// # Assumptions for 100-bit security
+/// - **Max trace height**: ≤ 2^20
+/// - **Max constraints per AIR**: ≤ 1,000
+/// - **Num AIRs**: ≤ 50
+/// - **Max interactions per AIR**: ≤ 100 (maximum number of interactions in a single AIR for a
+///   single row)
+/// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
+/// - **`w_stack`** = 1,024, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+///
+/// Config: `l_skip=2, n_stack=18, log_blowup=2`.
+//
+// See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
+// full soundness analysis.
 pub fn leaf_params_with_100_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_LEAF_LOG_BLOWUP,
@@ -69,7 +95,21 @@ pub fn leaf_params_with_100_bits_security() -> SystemParams {
     )
 }
 
-/// l_skip=2, n_stack=17
+/// Returns `SystemParams` targeting 100 bits of proven RBR security for internal aggregation
+/// circuits.
+///
+/// # Assumptions for 100-bit security
+/// - **Max trace height**: ≤ 2^19
+/// - **Max constraints per AIR**: ≤ 1,000
+/// - **Num AIRs**: ≤ 50
+/// - **Max interactions per AIR**: ≤ 100
+/// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
+/// - **`w_stack`** = 1,024, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+///
+/// Config: `l_skip=2, n_stack=17, log_blowup=2`.
+//
+// See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
+// full soundness analysis.
 pub fn internal_params_with_100_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_INTERNAL_LOG_BLOWUP,
@@ -88,7 +128,20 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
     )
 }
 
-/// l_skip=2, n_stack=20, log_final_poly_len=11 (different from others!)
+/// Returns `SystemParams` targeting 100 bits of proven RBR security for the compression circuit.
+///
+/// # Assumptions for 100-bit security
+/// - **Max trace height**: ≤ 2^22
+/// - **Max constraints per AIR**: ≤ 1,000
+/// - **Num AIRs**: ≤ 50
+/// - **Max interactions per AIR**: ≤ 100
+/// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
+/// - **`w_stack`** = 16, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+///
+/// Config: `l_skip=2, n_stack=20, log_blowup=4, log_final_poly_len=11`.
+//
+// See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
+// full soundness analysis.
 pub fn compression_params_with_100_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_COMPRESSION_LOG_BLOWUP,
