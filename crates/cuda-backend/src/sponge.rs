@@ -12,7 +12,7 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::{
     p3_challenger::{CanObserve, CanSample},
-    FiatShamirTranscript,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::poseidon2_perm;
 use p3_baby_bear::default_babybear_poseidon2_16;
@@ -310,6 +310,14 @@ impl FiatShamirTranscript<SC> for DuplexSpongeGpu {
         }
     }
 }
+
+/// Marker trait for GPU-compatible Fiat-Shamir transcripts.
+pub trait GpuFiatShamirTranscript<Config: StarkProtocolConfig>:
+    FiatShamirTranscript<Config>
+{
+}
+
+impl GpuFiatShamirTranscript<SC> for DuplexSpongeGpu {}
 
 #[cfg(test)]
 mod tests {
