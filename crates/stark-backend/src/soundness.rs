@@ -399,9 +399,9 @@ impl SoundnessCalculator {
             min_query_bits = min_query_bits.min(query_bits);
 
             // In-domain γ batching (not protected by PoW; Merkle proofs are observed before γ).
-            // Non-final rounds batch the OOD reply together with the in-domain query claims, while
-            // the final round batches only the in-domain query claims.
-            let batch_size = round_config.num_queries + if is_final_round { 0 } else { 1 };
+            // NOTE[jpw] For now we use the original paper where this is fixed to 1. <https://github.com/WizardOfMenlo/whir/blob/cf1599b56ff50e09142ebe6d2e2fbd86875c9986/src/whir/parameters.rs#L373> now varies this to increase security in LDR.
+            const NUM_OOD_SAMPLES: usize = 1;
+            let batch_size = round_config.num_queries + NUM_OOD_SAMPLES;
             debug_assert!(batch_size > 0);
             let gamma_batching_bits = Self::whir_gamma_batching_security(
                 challenge_field_bits,
