@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use itertools::Itertools;
 use openvm_cuda_common::memory_manager::MemTracker;
 use openvm_stark_backend::{
@@ -12,6 +14,7 @@ use tracing::instrument;
 
 use crate::{
     base::DeviceMatrix,
+    hash_scheme::{DefaultHashScheme, GpuHashScheme},
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
     prelude::{Digest, D_EF, EF, F, SC},
     sponge::DuplexSpongeGpu,
@@ -21,32 +24,41 @@ use crate::{
     AirDataGpu, GpuDevice, ProverError,
 };
 
+/// Generic GPU prover backend parameterised by a hash scheme `HS`.
+///
+/// Use the [`GpuBackend`] type alias to refer to the concrete BabyBear-Poseidon2
+/// backend without spelling out the generic parameter.
 #[derive(Clone, Copy)]
-pub struct GpuBackend;
+pub struct GenericGpuBackend<HS: GpuHashScheme>(PhantomData<HS>);
 
-impl ProverBackend for GpuBackend {
+impl<HS: GpuHashScheme> Default for GenericGpuBackend<HS> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
+/// Concrete GPU backend using the default BabyBear-Poseidon2 hash scheme.
+pub type GpuBackend = GenericGpuBackend<DefaultHashScheme>;
+
+impl<HS: GpuHashScheme> ProverBackend for GenericGpuBackend<HS> {
     const CHALLENGE_EXT_DEGREE: u8 = D_EF as u8;
 
     type Val = F;
     type Challenge = EF;
-    type Commitment = Digest;
+    type Commitment = HS::Digest;
     type Matrix = DeviceMatrix<F>;
-    type PcsData = StackedPcsDataGpu<F, Digest>;
+    type PcsData = StackedPcsDataGpu<F, HS::Digest>;
     type OtherAirData = AirDataGpu;
 }
 
-impl ProverDevice<GpuBackend, DuplexSpongeGpu> for GpuDevice {
-    type Error = ProverError;
-}
-
-impl TraceCommitter<GpuBackend> for GpuDevice {
+impl<HS: GpuHashScheme> TraceCommitter<GenericGpuBackend<HS>> for GpuDevice {
     type Error = ProverError;
 
     fn commit(
         &self,
         traces: &[&DeviceMatrix<F>],
-    ) -> Result<(Digest, StackedPcsDataGpu<F, Digest>), Self::Error> {
-        stacked_commit(
+    ) -> Result<(HS::Digest, StackedPcsDataGpu<F, HS::Digest>), Self::Error> {
+        stacked_commit::<HS::MerkleHash>(
             self.config.l_skip,
             self.config.n_stack,
             self.config.log_blowup,
@@ -55,6 +67,10 @@ impl TraceCommitter<GpuBackend> for GpuDevice {
             self.prover_config,
         )
     }
+}
+
+impl ProverDevice<GpuBackend, DuplexSpongeGpu> for GpuDevice {
+    type Error = ProverError;
 }
 
 impl MultiRapProver<GpuBackend, DuplexSpongeGpu> for GpuDevice {

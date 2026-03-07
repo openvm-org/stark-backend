@@ -17,6 +17,7 @@ thiserror.workspace = true
 getset.workspace = true
 rustc-hash.workspace = true
 rand.workspace = true
+serde.workspace = true
 
 # Plonky3
 p3-field = { workspace = true }
