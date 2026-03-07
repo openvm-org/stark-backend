@@ -1,19 +1,30 @@
 use getset::MutGetters;
 use openvm_stark_backend::{prover::Coordinator, StarkEngine, SystemParams};
 
-use crate::{prelude::SC, sponge::DuplexSpongeGpu, GpuBackend, GpuDevice};
+use crate::{
+    hash_scheme::{DefaultHashScheme, GpuHashScheme},
+    prelude::SC,
+    sponge::DuplexSpongeGpu,
+    GpuBackend, GpuDevice,
+};
 
+/// Generic GPU proving engine parameterised by a hash scheme.
+///
+/// Use the [`BabyBearPoseidon2GpuEngine`] type alias for the default Poseidon2 engine.
 #[derive(MutGetters)]
-pub struct BabyBearPoseidon2GpuEngine {
+pub struct GpuEngine<HS: GpuHashScheme> {
     #[getset(get_mut = "pub")]
     device: GpuDevice,
     #[getset(get_mut = "pub")]
-    config: SC,
+    config: HS::SC,
 }
 
-impl BabyBearPoseidon2GpuEngine {
+/// Concrete GPU engine using the default BabyBear-Poseidon2 hash scheme.
+pub type BabyBearPoseidon2GpuEngine = GpuEngine<DefaultHashScheme>;
+
+impl<HS: GpuHashScheme> GpuEngine<HS> {
     pub fn new(params: SystemParams) -> Self {
-        let config = SC::default_from_params(params.clone());
+        let config = HS::default_config(params.clone());
         Self {
             device: GpuDevice::new(params),
             config,
@@ -21,14 +32,14 @@ impl BabyBearPoseidon2GpuEngine {
     }
 }
 
-impl StarkEngine for BabyBearPoseidon2GpuEngine {
+impl StarkEngine for GpuEngine<DefaultHashScheme> {
     type SC = SC;
     type PB = GpuBackend;
     type PD = GpuDevice;
     type TS = DuplexSpongeGpu;
 
     fn new(params: SystemParams) -> Self {
-        Self::new(params)
+        GpuEngine::new(params)
     }
 
     fn config(&self) -> &Self::SC {
@@ -47,6 +58,6 @@ impl StarkEngine for BabyBearPoseidon2GpuEngine {
         &self,
         transcript: DuplexSpongeGpu,
     ) -> Coordinator<SC, Self::PB, Self::PD, Self::TS> {
-        Coordinator::new(GpuBackend, self.device.clone(), transcript)
+        Coordinator::new(GpuBackend::default(), self.device.clone(), transcript)
     }
 }
