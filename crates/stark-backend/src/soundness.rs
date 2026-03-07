@@ -41,18 +41,22 @@ pub struct SoundnessCalculator {
 /// WHIR soundness breakdown by error source.
 #[derive(Clone, Debug)]
 pub struct WhirSoundnessCalculator {
-    /// Security bits from query sampling.
-    pub query_bits: f64,
+    /// Security bits from μ batching (initial polynomial batching).
+    pub mu_batching_bits: f64,
+    /// Minimum round-by-round security bits across folding rounds, i.e. `ε_fold`.
+    pub fold_rbr_bits: f64,
     /// Security bits from proximity gaps (folding soundness).
     pub proximity_gaps_bits: f64,
     /// Security bits from sumcheck within WHIR rounds.
     pub sumcheck_bits: f64,
     /// Security bits from out-of-domain sampling.
-    pub ood_bits: f64,
+    pub ood_rbr_bits: f64,
+    /// Minimum round-by-round security bits across shift/final rounds, i.e. `ε_shift` / `ε_fin`.
+    pub shift_rbr_bits: f64,
+    /// Security bits from query sampling.
+    pub query_bits: f64,
     /// Security bits from γ batching (combining query and OOD claims).
     pub gamma_batching_bits: f64,
-    /// Security bits from μ batching (initial polynomial batching).
-    pub mu_batching_bits: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -311,8 +315,7 @@ impl SoundnessCalculator {
     /// Error sources (formulas depend on the proximity regime):
     /// 1. **Fold error** (sumcheck + proximity gap per sub-round)
     /// 2. **OOD error** (non-final rounds)
-    /// 3. **Query error** (all rounds)
-    /// 4. **γ batching** (in-domain batching)
+    /// 3. **Shift/final error** (query sampling + γ batching)
     /// 5. **Initial μ batching**
     fn calculate_whir_soundness(
         params: &SystemParams,
@@ -330,6 +333,8 @@ impl SoundnessCalculator {
         let mut min_sumcheck_bits = f64::INFINITY;
         let mut min_ood_bits = f64::INFINITY;
         let mut min_gamma_batching_bits = f64::INFINITY;
+        let mut min_fold_rbr_bits = f64::INFINITY;
+        let mut min_shift_rbr_bits = f64::INFINITY;
 
         assert!(
             num_stacked_columns >= 2,
@@ -343,6 +348,7 @@ impl SoundnessCalculator {
             num_stacked_columns,
         );
         let mu_batching_bits = mu_security.log2_err + whir.mu_pow_bits as f64;
+        let mut min_rbr_bits = mu_batching_bits;
 
         let mut log_inv_rate = params.log_blowup;
         let mut current_log_degree = log_stacked_height;
@@ -379,6 +385,11 @@ impl SoundnessCalculator {
                     whir.folding_pow_bits,
                 );
                 min_sumcheck_bits = min_sumcheck_bits.min(sumcheck_bits);
+
+                // Theorem 5.2: ε_fold = d * ℓ / |F| + err*.
+                let fold_rbr_bits = Self::combine_security_bits(sumcheck_bits, prox_gaps_bits);
+                min_fold_rbr_bits = min_fold_rbr_bits.min(fold_rbr_bits);
+                min_rbr_bits = min_rbr_bits.min(fold_rbr_bits);
             }
 
             // Query error (all rounds), protected by query_phase_pow_bits.
@@ -388,16 +399,23 @@ impl SoundnessCalculator {
             min_query_bits = min_query_bits.min(query_bits);
 
             // In-domain γ batching (not protected by PoW; Merkle proofs are observed before γ).
-            // NOTE[jpw] For now we use the original paper where this is fixed to 1. <https://github.com/WizardOfMenlo/whir/blob/cf1599b56ff50e09142ebe6d2e2fbd86875c9986/src/whir/parameters.rs#L373> now varies this to increase security in LDR.
-            const NUM_OOD_SAMPLES: usize = 1;
-            let batch_size = round_config.num_queries + NUM_OOD_SAMPLES;
+            // Non-final rounds batch the OOD reply together with the in-domain query claims, while
+            // the final round batches only the in-domain query claims.
+            let batch_size = round_config.num_queries + if is_final_round { 0 } else { 1 };
             debug_assert!(batch_size > 0);
             let gamma_batching_bits = Self::whir_gamma_batching_security(
-                proximity_regime,
                 challenge_field_bits,
                 batch_size,
+                log2_list_size.unwrap(),
             );
             min_gamma_batching_bits = min_gamma_batching_bits.min(gamma_batching_bits);
+
+            // Theorem 5.2 / Claim 5.4: ε_shift = (1 - δ)^t + ℓ * (t + 1) / |F|. The implementation
+            // keeps the same additive structure, with the final round batching only the query
+            // claims.
+            let shift_rbr_bits = Self::combine_security_bits(query_bits, gamma_batching_bits);
+            min_shift_rbr_bits = min_shift_rbr_bits.min(shift_rbr_bits);
+            min_rbr_bits = min_rbr_bits.min(shift_rbr_bits);
 
             if !is_final_round {
                 // OOD error (not protected by PoW; sampled after commitment observed).
@@ -409,17 +427,20 @@ impl SoundnessCalculator {
                     current_log_degree,
                 );
                 min_ood_bits = min_ood_bits.min(ood_bits);
+                min_rbr_bits = min_rbr_bits.min(ood_bits);
 
                 tracing::debug!(
-                    "WHIR round {} | rate=2^-{} | queries={} | query={:.1} | prox_gaps={:.1} | sumcheck={:.1} | ood={:.1} | gamma={:.1}",
+                    "WHIR round {} | rate=2^-{} | queries={} | query={:.1} | prox_gaps={:.1} | sumcheck={:.1} | shift={:.1} | ood={:.1} | gamma={:.1}",
                     round, log_inv_rate, round_config.num_queries, query_bits,
-                    min_prox_gaps_bits, min_sumcheck_bits, ood_bits, min_gamma_batching_bits,
+                    min_prox_gaps_bits, min_sumcheck_bits, shift_rbr_bits, ood_bits,
+                    min_gamma_batching_bits,
                 );
             } else {
                 tracing::debug!(
-                    "WHIR round {} (final) | rate=2^-{} | queries={} | query={:.1} | prox_gaps={:.1} | sumcheck={:.1} | gamma={:.1}",
+                    "WHIR round {} (final) | rate=2^-{} | queries={} | query={:.1} | prox_gaps={:.1} | sumcheck={:.1} | final={:.1} | gamma={:.1}",
                     round, log_inv_rate, round_config.num_queries, query_bits,
-                    min_prox_gaps_bits, min_sumcheck_bits, min_gamma_batching_bits,
+                    min_prox_gaps_bits, min_sumcheck_bits, shift_rbr_bits,
+                    min_gamma_batching_bits,
                 );
             }
 
@@ -427,20 +448,18 @@ impl SoundnessCalculator {
         }
 
         let details = WhirSoundnessCalculator {
+            mu_batching_bits,
+            fold_rbr_bits: min_fold_rbr_bits,
+            ood_rbr_bits: min_ood_bits,
+            shift_rbr_bits: min_shift_rbr_bits,
+            // The following are part of above rbr error, but kept for detailed analysis
             query_bits: min_query_bits,
             proximity_gaps_bits: min_prox_gaps_bits,
             sumcheck_bits: min_sumcheck_bits,
-            ood_bits: min_ood_bits,
             gamma_batching_bits: min_gamma_batching_bits,
-            mu_batching_bits,
         };
 
-        let min_security = min_query_bits
-            .min(min_prox_gaps_bits)
-            .min(min_sumcheck_bits)
-            .min(min_ood_bits)
-            .min(min_gamma_batching_bits)
-            .min(mu_batching_bits);
+        let min_security = min_rbr_bits;
 
         (min_security, details)
     }
@@ -504,6 +523,22 @@ impl SoundnessCalculator {
         };
         let ratio = (lo - hi).exp2();
         hi + (1.0 + ratio).log2()
+    }
+
+    /// Combines two additive error terms `2^-a + 2^-b` into security bits `-log2(error)`.
+    #[inline]
+    fn combine_security_bits(bits_a: f64, bits_b: f64) -> f64 {
+        if bits_a.is_infinite() && bits_a.is_sign_positive() {
+            return bits_b;
+        }
+        if bits_b.is_infinite() && bits_b.is_sign_positive() {
+            return bits_a;
+        }
+        if bits_a.is_nan() || bits_b.is_nan() {
+            return f64::NAN;
+        }
+
+        -Self::log2_add(-bits_a, -bits_b)
     }
 
     #[inline]
@@ -678,19 +713,15 @@ impl SoundnessCalculator {
 
     /// Computes WHIR in-domain γ batching security bits.
     ///
-    /// In-domain batching error is (t - 1) / |F| for batch size t.
-    /// Security bits = |F_ext| - log₂(t - 1)
+    /// Theorem 5.6 / Claim 5.4: batching `t` claims against a list of size `ℓ` gives
+    /// error `ℓ * t / |F|`.
     fn whir_gamma_batching_security(
-        proximity_regime: ProximityRegime,
         challenge_field_bits: f64,
         batch_size: usize,
+        log2_list_size: f64,
     ) -> f64 {
-        debug_assert!(batch_size > 1, "batch_size must be > 1 for gamma batching");
-        let base_bits = challenge_field_bits - ((batch_size - 1) as f64).log2();
-        match proximity_regime {
-            ProximityRegime::UniqueDecoding => base_bits,
-            ProximityRegime::ListDecoding { m } => base_bits - (m.max(1) as f64).log2(),
-        }
+        debug_assert!(batch_size > 0, "batch_size must be > 0 for gamma batching");
+        challenge_field_bits - (batch_size as f64).log2() - log2_list_size
     }
 }
 
@@ -780,7 +811,7 @@ pub fn print_soundness_report(
         "  Stacked reduction:           {:.1}",
         soundness.stacked_reduction_bits
     );
-    println!("  WHIR (min across sources):   {:.1}", soundness.whir_bits);
+    println!("  WHIR (round-by-round min):   {:.1}", soundness.whir_bits);
     println!();
     println!(
         "  TOTAL SECURITY:              {:.1} bits",
@@ -796,11 +827,13 @@ pub fn print_soundness_report(
         whir.proximity_gaps_bits
     );
     println!("  Sumcheck error:       {:.1} bits", whir.sumcheck_bits);
-    println!("  OOD error:            {:.1} bits", whir.ood_bits);
+    println!("  Min ε_fold:           {:.1} bits", whir.fold_rbr_bits);
+    println!("  OOD error:            {:.1} bits", whir.ood_rbr_bits);
     println!(
         "  γ batching error:     {:.1} bits",
         whir.gamma_batching_bits
     );
+    println!("  Min ε_shift/ε_fin:    {:.1} bits", whir.shift_rbr_bits);
     println!("  μ batching error:     {:.1} bits", whir.mu_batching_bits);
     println!();
 
@@ -1137,6 +1170,20 @@ mod tests {
     }
 
     #[test]
+    fn test_whir_gamma_batching_uses_list_size_and_full_batch_size() {
+        let security = SoundnessCalculator::whir_gamma_batching_security(100.0, 5, 3.0);
+        let expected = 100.0 - 5.0_f64.log2() - 3.0;
+        assert!((security - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_combine_security_bits_sums_errors_before_taking_log() {
+        let combined = SoundnessCalculator::combine_security_bits(100.0, 100.0);
+        let expected = 99.0;
+        assert!((combined - expected).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_bchks25_reference_m2_enforces_dz_ge_dy() {
         let (_log2_d_x, log2_d_y, log2_d_z) =
             SoundnessCalculator::bchks25_reference_log2_degrees(24, 2, 2);
@@ -1226,11 +1273,13 @@ mod tests {
             whir.proximity_gaps_bits
         );
         println!("  Sumcheck error:       {:.1} bits", whir.sumcheck_bits);
-        println!("  OOD error:            {:.1} bits", whir.ood_bits);
+        println!("  Min ε_fold:           {:.1} bits", whir.fold_rbr_bits);
+        println!("  OOD error:            {:.1} bits", whir.ood_rbr_bits);
         println!(
             "  γ batching error:     {:.1} bits",
             whir.gamma_batching_bits
         );
+        println!("  Min ε_shift/ε_fin:    {:.1} bits", whir.shift_rbr_bits);
         println!("  μ batching error:     {:.1} bits", whir.mu_batching_bits);
 
         soundness
