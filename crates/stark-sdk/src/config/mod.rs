@@ -24,6 +24,7 @@ pub const DEFAULT_APP_L_SKIP: usize = 4;
 pub const DEFAULT_APP_LOG_BLOWUP: usize = 1;
 pub const DEFAULT_LEAF_LOG_BLOWUP: usize = 2;
 pub const DEFAULT_INTERNAL_LOG_BLOWUP: usize = 2;
+pub const DEFAULT_ROOT_LOG_BLOWUP: usize = 2;
 pub const DEFAULT_COMPRESSION_LOG_BLOWUP: usize = 4;
 
 pub const MAX_APP_LOG_STACKED_HEIGHT: usize = 24;
@@ -116,6 +117,24 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
         2,    // l_skip
         17,   // n_stack
         1024, // w_stack
+        WHIR_MAX_LOG_FINAL_POLY_LEN,
+        20, // folding pow
+        13, // mu pow
+        WhirProximityStrategy::SplitUniqueList {
+            m: 3,
+            list_start_round: 1,
+        },
+        SECURITY_BITS_TARGET,
+        log_up_security_params_baby_bear_100_bits(),
+    )
+}
+
+pub fn root_params_with_100_bits_security() -> SystemParams {
+    SystemParams::new(
+        DEFAULT_ROOT_LOG_BLOWUP,
+        2,  // l_skip
+        17, // n_stack
+        64, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
         20, // folding pow
         13, // mu pow
