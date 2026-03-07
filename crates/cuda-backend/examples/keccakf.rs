@@ -9,14 +9,12 @@ use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-    BaseAirWithPublicValues, PartitionedBaseAir, ProximityRegime, StarkEngine, SystemParams,
-    WhirConfig, WhirParams, WhirProximityStrategy,
+    BaseAirWithPublicValues, PartitionedBaseAir, StarkEngine, SystemParams,
 };
 use openvm_stark_sdk::{
     config::{
         app_params_with_100_bits_security,
         baby_bear_poseidon2::{BabyBearPoseidon2CpuEngine, DuplexSponge},
-        log_up_params::log_up_security_params_baby_bear_100_bits,
     },
     utils::setup_tracing,
 };
