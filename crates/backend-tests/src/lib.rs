@@ -264,6 +264,8 @@ pub fn fib_air_roundtrip<E: StarkEngine<SC = SC>>(
         k: k_whir,
         log_final_poly_len: k_whir,
         query_phase_pow_bits: 1,
+        folding_pow_bits: 11,
+        mu_pow_bits: 10,
         proximity: WhirProximityStrategy::UniqueDecoding,
     };
     let log_blowup = 1;
