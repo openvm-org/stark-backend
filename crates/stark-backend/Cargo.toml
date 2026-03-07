@@ -59,3 +59,4 @@ jemalloc-prof = ["jemalloc", "tikv-jemallocator?/profiling"]
 metrics = ["dep:metrics"]
 test-utils = []
 lean = [] # feature for Lean constraint codegen
+soundness-bchks25-optimized = [] # use brute force optimized parameters for [BCHKS25] proximity gaps security
