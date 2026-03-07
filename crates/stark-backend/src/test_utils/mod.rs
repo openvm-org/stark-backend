@@ -567,6 +567,8 @@ pub fn test_whir_config_small(
         k: k_whir,
         log_final_poly_len,
         query_phase_pow_bits: 1,
+        folding_pow_bits: 2,
+        mu_pow_bits: 3,
         proximity: WhirProximityStrategy::SplitUniqueList {
             m: 3,
             list_start_round: 1,

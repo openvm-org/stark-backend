@@ -102,7 +102,13 @@ pub struct WhirParams {
     /// log_final_poly_len`.
     pub log_final_poly_len: usize,
     pub query_phase_pow_bits: usize,
+    /// Proximity regime to use within each WHIR round. This is used to determine the number of
+    /// queries in each round for a target security level.
     pub proximity: WhirProximityStrategy,
+    /// Number of bits of grinding to increase security of each folding step.
+    pub folding_pow_bits: usize,
+    /// Number of bits of grinding before sampling the μ batching challenge.
+    pub mu_pow_bits: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,8 +193,8 @@ impl ProximityRegime {
     /// This treats the per-query error as an upper bound on the maximum agreement.
     ///
     /// - `UniqueDecoding`: max agreement is `(1 + ρ) / 2`.
-    /// - `ListDecoding { m }`: Johnson bound, `sqrt(ρ(1 + 1/m)) + ε` for a tiny `ε`, to keep the
-    ///   proximity threshold strict.
+    /// - `ListDecoding { m }`: finite-multiplicity Guruswami-Sudan threshold, `sqrt(ρ(1 + 1/m)) +
+    ///   ε` for a tiny `ε`, to keep the proximity threshold strict.
     pub fn whir_query_security_bits(&self, num_queries: usize, log_inv_rate: usize) -> f64 {
         let rho = 2.0_f64.powf(-(log_inv_rate as f64));
         let max_agreement = match *self {
@@ -229,10 +235,6 @@ impl WhirConfig {
         let mut log_inv_rate = log_blowup;
         let proximity = whir_params.proximity;
 
-        // A safe setting for BabyBear and ~200 columns
-        // TODO[jpw]: use rbr_soundness_queries_combination
-        const FOLDING_POW_BITS: usize = 20;
-
         let mut round_parameters = Vec::with_capacity(num_rounds);
         for round in 0..num_rounds {
             // Queries are set w.r.t. to old rate, while the rest to the new rate
@@ -248,14 +250,12 @@ impl WhirConfig {
             log_inv_rate = next_rate;
         }
 
-        const MU_POW_BITS: usize = 13;
-
         Self {
             k: k_whir,
             rounds: round_parameters,
-            mu_pow_bits: MU_POW_BITS,
+            mu_pow_bits: whir_params.mu_pow_bits,
             query_phase_pow_bits,
-            folding_pow_bits: FOLDING_POW_BITS,
+            folding_pow_bits: whir_params.folding_pow_bits,
             proximity,
         }
     }

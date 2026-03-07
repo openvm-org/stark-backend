@@ -9,6 +9,8 @@
 //! Each component contributes to the overall soundness error, and the total security
 //! is the minimum across all components.
 
+use std::f64;
+
 use crate::{
     config::{ProximityRegime, SystemParams, WhirConfig},
     WhirProximityStrategy,
@@ -349,6 +351,9 @@ impl SoundnessCalculator {
             let proximity_regime = proximity.in_round(round);
             let is_final_round = round == num_whir_rounds - 1;
             let next_rate = log_inv_rate + (k_whir - 1);
+            // log2(list size) only depends on proximity regime, will not change depending on the
+            // sub-round
+            let mut log2_list_size: Option<f64> = None;
 
             for sub_round in 0..k_whir {
                 current_log_degree -= 1;
@@ -360,6 +365,11 @@ impl SoundnessCalculator {
                     log_inv_rate,
                     2,
                 );
+                if let Some(l2) = log2_list_size.as_mut() {
+                    debug_assert!((*l2 - prox_gaps.log2_list_size).abs() < 1e-6);
+                } else {
+                    log2_list_size = Some(prox_gaps.log2_list_size);
+                }
                 let prox_gaps_bits = prox_gaps.log2_err + whir.folding_pow_bits as f64;
                 min_prox_gaps_bits = min_prox_gaps_bits.min(prox_gaps_bits);
 
@@ -391,11 +401,12 @@ impl SoundnessCalculator {
 
             if !is_final_round {
                 // OOD error (not protected by PoW; sampled after commitment observed).
-                let log_degree_at_round_start = current_log_degree + k_whir;
+                // This is OOD sample on f_i for the *next* round `i = round + 1` after folding. So
+                // `m_i = current_log_degree` (with the present round `round`'s foldings)
                 let ood_bits = Self::whir_ood_security(
-                    proximity_regime,
+                    log2_list_size.unwrap(),
                     challenge_field_bits,
-                    log_degree_at_round_start,
+                    current_log_degree,
                 );
                 min_ood_bits = min_ood_bits.min(ood_bits);
 
@@ -512,15 +523,27 @@ impl SoundnessCalculator {
     /// For `m < 3`, use `D_Z = max(D_Y, Equation (9) value)` as noted below Lemma 3.1.
     ///
     /// Returns (log2(D_X), log2(D_Y), log2(D_Z))
-    fn bchks25_log2_degrees(log_degree: usize, log_inv_rate: usize, m: usize) -> (f64, f64, f64) {
-        // if let Some((optimal_degrees, log2_a)) =
-        //     Self::bchks25_optimal_degrees_bruteforce(log_degree, log_inv_rate, m_eff, gamma)
-        // {
-        //     debug_assert!(
-        //         optimal_degrees.d_x > 0 && optimal_degrees.d_y > 0 && optimal_degrees.d_z > 0
-        //     );
-        //     log2_a
-        // } else
+    fn bchks25_log2_degrees(
+        log_degree: usize,
+        log_inv_rate: usize,
+        m: usize,
+        _gamma: f64,
+    ) -> (f64, f64, f64) {
+        #[cfg(feature = "soundness-bchks25-optimized")]
+        if let Some((degrees, _)) = bchks25_brute_force_params::bchks25_optimal_degrees_bruteforce(
+            log_degree,
+            log_inv_rate,
+            m,
+            _gamma,
+        ) {
+            debug_assert!(degrees.d_x > 0 && degrees.d_y > 0 && degrees.d_z > 0);
+            return (
+                (degrees.d_x as f64).log2(),
+                (degrees.d_y as f64).log2(),
+                (degrees.d_z as f64).log2(),
+            );
+        }
+
         Self::bchks25_reference_log2_degrees(log_degree, log_inv_rate, m)
     }
 
@@ -598,7 +621,7 @@ impl SoundnessCalculator {
             // Fallback for extreme parameter regimes where exact integer search is not
             // representable.
             let (log2_d_x, log2_d_y, log2_d_z) =
-                Self::bchks25_log2_degrees(log_degree, log_inv_rate, m_eff);
+                Self::bchks25_log2_degrees(log_degree, log_inv_rate, m_eff, gamma);
             let log2_gamma_n_plus_1 = Self::log2_add(gamma.log2() + log2_n, 0.0);
             let log2_a = Self::bchks25_log2_a_from_log2_degrees(
                 log2_d_x,
@@ -642,18 +665,15 @@ impl SoundnessCalculator {
 
     /// Computes WHIR out-of-domain (OOD) security bits.
     ///
-    /// OOD error is 2^{m - 1} / |F| where m is the log_degree at round start.
-    /// Security bits = |F_ext| - log_degree + 1
+    /// OOD error is 2^{m_i - 1} ℓ^2 / |F| where m_i is the log_degree at the start of WHIR round
+    /// `i`. Security bits = |F_ext| - log_degree + 1
     fn whir_ood_security(
-        proximity_regime: ProximityRegime,
+        log2_list_size: f64,
         challenge_field_bits: f64,
         log_degree_at_round_start: usize,
     ) -> f64 {
         let base_bits = challenge_field_bits - log_degree_at_round_start as f64 + 1.0;
-        match proximity_regime {
-            ProximityRegime::UniqueDecoding => base_bits,
-            ProximityRegime::ListDecoding { m } => base_bits - (m.max(1) as f64).log2(),
-        }
+        base_bits - 2.0 * log2_list_size
     }
 
     /// Computes WHIR in-domain γ batching security bits.
@@ -878,12 +898,15 @@ mod tests {
     const DEFAULT_INTERNAL_LOG_BLOWUP: usize = 2;
     const DEFAULT_COMPRESSION_LOG_BLOWUP: usize = 4;
 
+    #[allow(clippy::too_many_arguments)]
     fn production_system_params(
         log_blowup: usize,
         l_skip: usize,
         n_stack: usize,
         w_stack: usize,
         log_final_poly_len: usize,
+        folding_pow_bits: usize,
+        mu_pow_bits: usize,
         proximity: WhirProximityStrategy,
     ) -> SystemParams {
         let k_whir = 4;
@@ -903,6 +926,8 @@ mod tests {
                     log_final_poly_len,
                     query_phase_pow_bits: WHIR_POW_BITS,
                     proximity,
+                    folding_pow_bits,
+                    mu_pow_bits,
                 },
                 SECURITY_BITS_TARGET,
             ),
@@ -928,6 +953,8 @@ mod tests {
             20,
             2048,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
+            20, // folding pow
+            15, // mu pow
             WhirProximityStrategy::SplitUniqueList {
                 m: 2,
                 list_start_round: 1,
@@ -944,6 +971,8 @@ mod tests {
             18,
             1024,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
+            20, // folding pow
+            13, // mu pow
             WhirProximityStrategy::SplitUniqueList {
                 m: 3,
                 list_start_round: 1,
@@ -960,6 +989,8 @@ mod tests {
             17,
             1024,
             WHIR_MAX_LOG_FINAL_POLY_LEN,
+            20, // folding pow
+            13, // mu pow
             WhirProximityStrategy::SplitUniqueList {
                 m: 3,
                 list_start_round: 1,
@@ -976,7 +1007,9 @@ mod tests {
             20,
             16,
             11,
-            WhirProximityStrategy::ListDecoding { m: 2 },
+            20, // folding pow
+            20, // mu pow
+            WhirProximityStrategy::ListDecoding { m: 1 },
         )
     }
 
@@ -1402,11 +1435,9 @@ mod tests {
 /// < 3` assumption is not needed. We can perform a brute force search over possible values of D_X,
 /// D_Y, D_Z that satisfy properties to allow the proof of Lemma 3.1 to go through.
 ///
-/// **Note**: This is currently **not** used in [SoundnessCalculator] to simplify the soundness
-/// reasoning and allow us to directly cite the paper. However we will keep this module up-to-date
-/// and may include it into the calculator to provide better soundness guarantees in the future.
 /// Everything in this module is still backed by proven results.
 #[allow(dead_code)]
+#[cfg(feature = "soundness-bchks25-optimized")]
 mod bchks25_brute_force_params {
     use crate::soundness::SoundnessCalculator;
 
@@ -1416,12 +1447,12 @@ mod bchks25_brute_force_params {
     const BCHKS25_DZ_SEARCH_MAX: u128 = 500_000;
 
     #[derive(Clone, Copy, Debug)]
-    struct Bchks25Degrees {
-        d_x: u128,
-        d_y: u128,
+    pub struct Bchks25Degrees {
+        pub d_x: u128,
+        pub d_y: u128,
         // Integer index representation for Z-degree support:
         // `j + h < D_Z` is represented as `0 <= h <= d_z - j`, so `d_z = ceil(D_Z) - 1`.
-        d_z: u128,
+        pub d_z: u128,
     }
 
     /// We find optimal parameters `D_X, D_Y, D_Z` that minimize Equation (13) in BCHKS25 **and**
@@ -1444,7 +1475,7 @@ mod bchks25_brute_force_params {
     ///   computation bounded)
     /// - scan candidate `D_X >= k * D_Y` up to the Section 3.2 limit
     /// - solve directly for the smallest valid `D_Z` for each `(D_X, D_Y)`
-    fn bchks25_optimal_degrees_bruteforce(
+    pub fn bchks25_optimal_degrees_bruteforce(
         log_degree: usize,
         log_inv_rate: usize,
         m: usize,
