@@ -92,6 +92,58 @@ impl SystemParams {
     pub fn num_whir_sumcheck_rounds(&self) -> usize {
         self.whir.num_sumcheck_rounds()
     }
+
+    /// Constructor with many configuration options. Only `k_whir`, `max_constraint_degree`,
+    /// `query_phase_pow_bits` are preset with constants.
+    ///
+    /// The `security_bits` is the target bits of security. It is used to select the number of WHIR
+    /// queries, but does **not** guarantee the target security level is achieved by the overall
+    /// protocol using these parameters. Use the soundness calculator to ensure the target security
+    /// level is met.
+    ///
+    /// This function should only be used for internal cryptography libraries. Most users should
+    /// instead use preset parameters provided in SDKs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        log_blowup: usize,
+        l_skip: usize,
+        n_stack: usize,
+        w_stack: usize,
+        log_final_poly_len: usize,
+        folding_pow_bits: usize,
+        mu_pow_bits: usize,
+        proximity: WhirProximityStrategy,
+        security_bits: usize,
+        logup: LogUpSecurityParameters,
+    ) -> SystemParams {
+        const WHIR_QUERY_PHASE_POW_BITS: usize = 20;
+
+        let k_whir = 4;
+        let max_constraint_degree = 4;
+        let log_stacked_height = l_skip + n_stack;
+
+        SystemParams {
+            l_skip,
+            n_stack,
+            w_stack,
+            log_blowup,
+            whir: WhirConfig::new(
+                log_blowup,
+                log_stacked_height,
+                WhirParams {
+                    k: k_whir,
+                    log_final_poly_len,
+                    query_phase_pow_bits: WHIR_QUERY_PHASE_POW_BITS,
+                    proximity,
+                    folding_pow_bits,
+                    mu_pow_bits,
+                },
+                security_bits,
+            ),
+            logup,
+            max_constraint_degree,
+        }
+    }
 }
 
 /// Configurable parameters that are used to determine the [WhirConfig] for a target security level.
