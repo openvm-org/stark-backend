@@ -55,6 +55,7 @@ fn make_params() -> SystemParams {
     SystemParams {
         l_skip,
         n_stack,
+        w_stack: 1 << 12,
         log_blowup,
         whir,
         logup: log_up_security_params_baby_bear_100_bits(),
@@ -78,7 +79,9 @@ fn bench_reference_backend(params: SystemParams, inputs: Vec<[u64; 25]>) -> std:
     let d_pk = engine.device().transport_pk_to_device(&pk);
 
     let start = std::time::Instant::now();
-    let _proof = engine.prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]));
+    let _proof = engine
+        .prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]))
+        .unwrap();
     start.elapsed()
 }
 
@@ -93,7 +96,9 @@ fn bench_rowmajor_backend(params: SystemParams, inputs: Vec<[u64; 25]>) -> std::
     let d_pk = engine.device().transport_pk_to_device(&pk);
 
     let start = std::time::Instant::now();
-    let _proof = engine.prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]));
+    let _proof = engine
+        .prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]))
+        .unwrap();
     start.elapsed()
 }
 

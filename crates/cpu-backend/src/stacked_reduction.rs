@@ -13,8 +13,7 @@ use openvm_stark_backend::{
         stacked_pcs::{StackedPcsData, StackedSlice},
         stacked_reduction::StackedReductionProver,
         sumcheck::{
-            batch_fold_mle_evals, fold_mle_evals, sumcheck_round0_deg,
-            sumcheck_round_poly_evals,
+            batch_fold_mle_evals, fold_mle_evals, sumcheck_round0_deg, sumcheck_round_poly_evals,
         },
         ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, MatrixView, ProverBackend,
     },
@@ -151,11 +150,7 @@ impl<F: TwoAdicField> DftTwiddles<F> {
 /// Optimized PLE fold: precompute barycentric weights once, then evaluate each element
 /// as an inline dot product. Eliminates the 5.5M per-element Vec allocations in the
 /// reference `fold_ple_evals` which calls `interpolate_coset_with_precomputation` per element.
-fn fold_ple_evals_cpu<F, EF>(
-    l_skip: usize,
-    mat: &ColMajorMatrix<F>,
-    r: EF,
-) -> ColMajorMatrix<EF>
+fn fold_ple_evals_cpu<F, EF>(l_skip: usize, mat: &ColMajorMatrix<F>, r: EF) -> ColMajorMatrix<EF>
 where
     F: TwoAdicField,
     EF: ExtensionField<F> + TwoAdicField,
@@ -248,16 +243,13 @@ fn rot_prev(x_int: usize, n: usize) -> usize {
     }
 }
 
-impl<'a, SC: StarkProtocolConfig>
-    StackedReductionProver<'a, CpuBackend<SC>, CpuDevice<SC>> for StackedReductionCpuNew<'a, SC>
+impl<'a, SC: StarkProtocolConfig> StackedReductionProver<'a, CpuBackend<SC>, CpuDevice<SC>>
+    for StackedReductionCpuNew<'a, SC>
 where
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    CpuBackend<SC>: ProverBackend<
-        Val = SC::F,
-        Challenge = SC::EF,
-        PcsData = StackedPcsData<SC::F, SC::Digest>,
-    >,
+    CpuBackend<SC>:
+        ProverBackend<Val = SC::F, Challenge = SC::EF, PcsData = StackedPcsData<SC::F, SC::Digest>>,
 {
     fn new(
         device: &CpuDevice<SC>,
@@ -387,8 +379,7 @@ where
                         let z_val: SC::F = shift * omega_pows[z_idx];
                         let ind = eval_in_uni(l_skip, n, z_val);
                         let eq_r0: SC::EF = eval_eq_uni(l, z_val.into(), r_uni);
-                        let eq_r0_rot: SC::EF =
-                            eval_eq_uni(l, z_val.into(), r_uni * omega_l);
+                        let eq_r0_rot: SC::EF = eval_eq_uni(l, z_val.into(), r_uni * omega_l);
                         let eq_1: SC::F = eval_eq_uni_at_one(l_skip, z_val);
                         pre_z.push((eq_r0 * ind, eq_r0_rot * ind, eq_const * eq_1 * ind));
                     }
@@ -465,8 +456,7 @@ where
                             for rm_idx in 0..d_n {
                                 let (pe, pr, p1) = pre_z[rm_idx];
                                 result[rm_idx][0] += (pe * eq_cube) * w_eq[rm_idx];
-                                result[rm_idx][1] +=
-                                    (pr * eq_cube + p1 * delta) * w_rot[rm_idx];
+                                result[rm_idx][1] += (pr * eq_cube + p1 * delta) * w_rot[rm_idx];
                             }
                             (result, coeffs, coset, w_eq, w_rot)
                         },

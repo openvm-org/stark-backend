@@ -7,24 +7,24 @@
 //! - Early drop of large intermediate data structures
 
 use itertools::Itertools;
-use p3_baby_bear::BabyBear;
-use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
-use p3_field::{BasedVectorSpace, ExtensionField, PrimeCharacteristicRing, TwoAdicField};
-use p3_maybe_rayon::prelude::*;
-use p3_util::log2_strict_usize;
-use tracing::instrument;
-
 use openvm_stark_backend::{
     hasher::MerkleHasher,
     poly_common::Squarable,
     proof::{MerkleProof, WhirProof},
     prover::{
+        error::WhirProverError,
         poly::{evals_mobius_eq_hypercube, Mle},
         stacked_pcs::MerkleTree,
         ColMajorMatrix, MatrixDimensions,
     },
     FiatShamirTranscript, StarkProtocolConfig, WhirConfig,
 };
+use p3_baby_bear::BabyBear;
+use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
+use p3_field::{BasedVectorSpace, ExtensionField, PrimeCharacteristicRing, TwoAdicField};
+use p3_maybe_rayon::prelude::*;
+use p3_util::log2_strict_usize;
+use tracing::instrument;
 
 use crate::device::eval_to_coeff_cpu;
 
@@ -45,7 +45,7 @@ pub fn prove_whir_opening_cpu<SC, TS>(
     whir_params: &WhirConfig,
     committed_mats: &[(&ColMajorMatrix<SC::F>, &MerkleTree<SC::F, SC::Digest>)],
     u: &[SC::EF],
-) -> WhirProof<SC>
+) -> Result<WhirProof<SC>, WhirProverError>
 where
     SC: StarkProtocolConfig,
     SC::F: TwoAdicField + Ord,
@@ -103,8 +103,7 @@ where
         vec![vec![]; committed_mats.len()];
     let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>> =
         vec![vec![]; committed_mats.len()];
-    let mut codeword_opened_values: Vec<Vec<Vec<SC::EF>>> =
-        Vec::with_capacity(num_whir_rounds - 1);
+    let mut codeword_opened_values: Vec<Vec<Vec<SC::EF>>> = Vec::with_capacity(num_whir_rounds - 1);
     let mut codeword_merkle_proofs: Vec<Vec<MerkleProof<SC::Digest>>> =
         Vec::with_capacity(num_whir_rounds - 1);
     let mut folding_pow_witnesses = Vec::with_capacity(num_sumcheck_rounds);
@@ -177,17 +176,16 @@ where
         // Build g_mle from folded evaluations
         let g_mle = Mle::from_evaluations(&f_evals);
         let (g_tree, z_0) = if !is_last_round {
-            let g_tree = tracing::info_span!("whir_dft_merkle", round = whir_round).in_scope(
-                || {
+            let g_tree =
+                tracing::info_span!("whir_dft_merkle", round = whir_round).in_scope(|| {
                     let dft = Radix2DitParallel::default();
                     let mut g_coeffs = g_mle.coeffs().to_vec();
                     debug_assert_eq!(g_coeffs.len(), 1 << (m - k_whir));
                     g_coeffs.resize(1 << (log_rs_domain_size - 1), SC::EF::ZERO);
                     let g_rs = dft.dft(g_coeffs);
                     build_ef_merkle_tree_packed::<SC>(hasher, g_rs, 1 << k_whir)
-                },
-            );
-            let g_commit = g_tree.root();
+                });
+            let g_commit = g_tree.root()?;
             transcript.observe_commit(g_commit);
             codeword_commits.push(g_commit);
 
@@ -231,14 +229,11 @@ where
                 for com_idx in 0..committed_mats.len() {
                     debug_assert_eq!(initial_round_merkle_proofs[com_idx].len(), query_idx);
                     let tree = &committed_mats[com_idx].1;
-                    assert_eq!(
-                        tree.backing_matrix().height(),
-                        1 << log_rs_domain_size
-                    );
-                    let opened_rows = tree.get_opened_rows(index);
+                    assert_eq!(tree.backing_matrix().height(), 1 << log_rs_domain_size);
+                    let opened_rows = tree.get_opened_rows(index)?;
                     initial_round_opened_rows[com_idx].push(opened_rows);
                     debug_assert_eq!(tree.proof_depth(), depth);
-                    let proof = tree.query_merkle_proof(index);
+                    let proof = tree.query_merkle_proof(index)?;
                     debug_assert_eq!(proof.len(), depth);
                     initial_round_merkle_proofs[com_idx].push(proof);
                 }
@@ -246,13 +241,13 @@ where
                 let tree: &MerkleTree<SC::EF, SC::Digest> = rs_tree.as_ref().unwrap();
                 assert_eq!(tree.backing_matrix().width(), 1);
                 let opened_rows = tree
-                    .get_opened_rows(index)
+                    .get_opened_rows(index)?
                     .into_iter()
                     .flatten()
                     .collect_vec();
                 codeword_opened_values[whir_round - 1].push(opened_rows);
                 debug_assert_eq!(tree.proof_depth(), depth);
-                let proof = tree.query_merkle_proof(index);
+                let proof = tree.query_merkle_proof(index)?;
                 debug_assert_eq!(proof.len(), depth);
                 codeword_merkle_proofs[whir_round - 1].push(proof);
             }
@@ -265,18 +260,10 @@ where
             // Fused w_evals accumulation without intermediate allocation
             tracing::info_span!("whir_w_evals_accum", round = whir_round).in_scope(|| {
                 // z_0 is in extension field — must use EF arithmetic
-                w_evals_accumulate_ef::<SC>(
-                    &mut w_evals,
-                    z_0.unwrap(),
-                    gamma,
-                );
+                w_evals_accumulate_ef::<SC>(&mut w_evals, z_0.unwrap(), gamma);
                 // z_i values are in base field — use base field eq + EF accumulate
                 for (z_i, gamma_pow) in zs.into_iter().zip(gamma.powers().skip(2)) {
-                    w_evals_accumulate_base::<SC>(
-                        &mut w_evals,
-                        z_i,
-                        gamma_pow,
-                    );
+                    w_evals_accumulate_base::<SC>(&mut w_evals, z_i, gamma_pow);
                 }
             });
         }
@@ -285,7 +272,7 @@ where
         log_rs_domain_size -= 1;
     }
 
-    WhirProof::<SC> {
+    Ok(WhirProof::<SC> {
         mu_pow_witness,
         whir_sumcheck_polys,
         codeword_commits,
@@ -296,17 +283,14 @@ where
         initial_round_merkle_proofs,
         codeword_opened_values,
         codeword_merkle_proofs,
-        final_poly: final_poly.unwrap(),
-    }
+        final_poly: final_poly.ok_or(WhirProverError::FinalPolyNone)?,
+    })
 }
 
 /// w_evals accumulation when z is in the extension field.
 /// Computes eq evaluations in EF and accumulates into w_evals.
-fn w_evals_accumulate_ef<SC: StarkProtocolConfig>(
-    w_evals: &mut [SC::EF],
-    z: SC::EF,
-    gamma: SC::EF,
-) where
+fn w_evals_accumulate_ef<SC: StarkProtocolConfig>(w_evals: &mut [SC::EF], z: SC::EF, gamma: SC::EF)
+where
     SC::EF: ExtensionField<SC::F>,
 {
     let dim = log2_strict_usize(w_evals.len());
@@ -352,11 +336,8 @@ fn w_evals_accumulate_ef<SC: StarkProtocolConfig>(
 /// Optimized w_evals accumulation when z is in the base field.
 /// Computes eq evaluations in base field F (F×F is ~4x cheaper than EF×EF),
 /// then multiplies by gamma (EF×F) and accumulates into w_evals.
-fn w_evals_accumulate_base<SC: StarkProtocolConfig>(
-    w_evals: &mut [SC::EF],
-    z: SC::F,
-    gamma: SC::EF,
-) where
+fn w_evals_accumulate_base<SC: StarkProtocolConfig>(w_evals: &mut [SC::EF], z: SC::F, gamma: SC::EF)
+where
     SC::F: TwoAdicField,
     SC::EF: ExtensionField<SC::F>,
 {
@@ -520,5 +501,7 @@ where
     };
 
     let backing_matrix = ColMajorMatrix::new(g_rs, 1);
-    MerkleTree::from_parts(backing_matrix, layers, rows_per_query)
+    // SAFETY: layers were just computed as correct Merkle hashes over backing_matrix
+    // by the WHIR folding loop above. rows_per_query comes from validated WhirParams.
+    unsafe { MerkleTree::from_raw_parts(backing_matrix, layers, rows_per_query) }
 }

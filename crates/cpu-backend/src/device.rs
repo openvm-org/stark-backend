@@ -1,4 +1,5 @@
-//! [CpuDevice] implementation: TraceCommitter, DeviceDataTransporter, MultiRapProver, OpeningProver.
+//! [CpuDevice] implementation: TraceCommitter, DeviceDataTransporter, MultiRapProver,
+//! OpeningProver.
 
 use getset::Getters;
 use itertools::Itertools;
@@ -6,6 +7,7 @@ use openvm_stark_backend::{
     hasher::MerkleHasher,
     keygen::types::MultiStarkProvingKey,
     poly_common::Squarable,
+    proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
         stacked_pcs::{stacked_matrix, MerkleTree, StackedPcsData},
         stacked_reduction::prove_stacked_opening_reduction,
@@ -13,7 +15,6 @@ use openvm_stark_backend::{
         DeviceStarkProvingKey, MatrixDimensions, MultiRapProver, OpeningProver, ProverDevice,
         ProvingContext, StridedColMajorMatrixView, TraceCommitter,
     },
-    proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     FiatShamirTranscript, StarkProtocolConfig, SystemParams,
 };
 use p3_baby_bear::BabyBear;
@@ -25,6 +26,7 @@ use tracing::instrument;
 
 use crate::{
     backend::{CpuBackend, RowMajorMatrixWrapper},
+    error::CpuBackendError,
     stacked_reduction::StackedReductionCpuNew,
 };
 
@@ -48,17 +50,20 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
     TS: FiatShamirTranscript<SC>,
 {
+    type Error = CpuBackendError;
 }
 
 impl<SC: StarkProtocolConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<SC>
 where
     SC::F: Ord,
 {
+    type Error = CpuBackendError;
+
     #[instrument(level = "info", name = "trace_commit_cpu", skip_all)]
     fn commit(
         &self,
         traces: &[&RowMajorMatrixWrapper<SC::F>],
-    ) -> (SC::Digest, StackedPcsData<SC::F, SC::Digest>) {
+    ) -> Result<(SC::Digest, StackedPcsData<SC::F, SC::Digest>), Self::Error> {
         // Convert row-major to col-major for stacking commitment
         let col_major_traces: Vec<ColMajorMatrix<SC::F>> = traces
             .iter()
@@ -67,8 +72,7 @@ where
         let col_major_refs: Vec<&ColMajorMatrix<SC::F>> = col_major_traces.iter().collect();
 
         let params = self.params();
-        let (q_trace, layout) =
-            stacked_matrix(params.l_skip, params.n_stack, &col_major_refs);
+        let (q_trace, layout) = stacked_matrix(params.l_skip, params.n_stack, &col_major_refs)?;
         let tree = rs_encode_and_merkle_cpu(
             self.config().hasher(),
             params.l_skip,
@@ -76,9 +80,9 @@ where
             &q_trace,
             1 << params.k_whir(),
         );
-        let root = tree.root();
+        let root = tree.root()?;
         let data = StackedPcsData::new(layout, q_trace, tree);
-        (root, data)
+        Ok((root, data))
     }
 }
 
@@ -91,16 +95,18 @@ where
     type PartialProof = (GkrProof<SC>, BatchConstraintProof<SC>);
     type Artifacts = Vec<SC::EF>;
 
+    type Error = CpuBackendError;
+
     fn prove_rap_constraints(
         &self,
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
         ctx: &ProvingContext<CpuBackend<SC>>,
         _common_main_pcs_data: &StackedPcsData<SC::F, SC::Digest>,
-    ) -> ((GkrProof<SC>, BatchConstraintProof<SC>), Vec<SC::EF>) {
+    ) -> Result<((GkrProof<SC>, BatchConstraintProof<SC>), Vec<SC::EF>), Self::Error> {
         let (gkr_proof, batch_constraint_proof, r) =
-            crate::logup_zerocheck::prove_zerocheck_and_logup::<SC, _>(transcript, mpk, ctx);
-        ((gkr_proof, batch_constraint_proof), r)
+            crate::logup_zerocheck::prove_zerocheck_and_logup::<SC, _>(transcript, mpk, ctx)?;
+        Ok(((gkr_proof, batch_constraint_proof), r))
     }
 }
 
@@ -114,6 +120,8 @@ where
     type OpeningProof = (StackingProof<SC>, WhirProof<SC>);
     type OpeningPoints = Vec<SC::EF>;
 
+    type Error = CpuBackendError;
+
     fn prove_openings(
         &self,
         transcript: &mut TS,
@@ -121,7 +129,7 @@ where
         ctx: ProvingContext<CpuBackend<SC>>,
         common_main_pcs_data: StackedPcsData<SC::F, SC::Digest>,
         r: Vec<SC::EF>,
-    ) -> (StackingProof<SC>, WhirProof<SC>) {
+    ) -> Result<(StackingProof<SC>, WhirProof<SC>), Self::Error> {
         let params = self.params();
 
         let need_rot_per_trace = ctx
@@ -166,7 +174,9 @@ where
                 &r,
             );
 
-        let (&u0, u_rest) = u_prisma.split_first().unwrap();
+        let (&u0, u_rest) = u_prisma
+            .split_first()
+            .ok_or(openvm_stark_backend::prover::error::WhirProverError::UPrismaEmpty)?;
         let u_cube = u0
             .exp_powers_of_2()
             .take(params.l_skip)
@@ -187,8 +197,8 @@ where
             &params.whir,
             &committed_mats,
             &u_cube,
-        );
-        (stacking_proof, whir_proof)
+        )?;
+        Ok((stacking_proof, whir_proof))
     }
 }
 
@@ -206,7 +216,7 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
                     let row_major = view.to_row_major_matrix();
                     let trace = RowMajorMatrixWrapper::new(row_major);
                     CommittedTraceData {
-                        commitment: d.commit(),
+                        commitment: d.commit().unwrap(),
                         trace,
                         data: d.clone(),
                     }
@@ -427,8 +437,6 @@ pub(crate) fn build_digest_layers_packed_babybear(
     let query_stride = num_leaves / rows_per_query;
 
     // Phase 1: Query-stride interleaved layers.
-    // Each iteration compresses pairs at stride `query_stride` apart,
-    // reducing the layer by half while maintaining query-aligned layout.
     let mut prev_layer = row_hashes;
     for _ in 0..log2_strict_usize(rows_per_query) {
         let n = prev_layer.len() / 2;
@@ -443,9 +451,6 @@ pub(crate) fn build_digest_layers_packed_babybear(
                 let actual = out_chunk.len();
 
                 if actual == pack_width {
-                    // Pack WIDTH compressions into one Poseidon2 call.
-                    // Consecutive lanes have same x (since qs >> pack_width),
-                    // so left/right reads are contiguous in memory.
                     let mut packed_input: [[P; 8]; 2] = [[P::default(); 8]; 2];
                     for d in 0..8 {
                         packed_input[0][d] = P::from_fn(|lane| {
@@ -468,13 +473,14 @@ pub(crate) fn build_digest_layers_packed_babybear(
                         }
                     }
                 } else {
-                    // Scalar fallback for partial final chunk.
                     for lane in 0..actual {
                         let i = base + lane;
                         let x = i / qs;
                         let y = i % qs;
-                        out_chunk[lane] = compressor
-                            .compress([prev_layer[2 * x * qs + y], prev_layer[(2 * x + 1) * qs + y]]);
+                        out_chunk[lane] = compressor.compress([
+                            prev_layer[2 * x * qs + y],
+                            prev_layer[(2 * x + 1) * qs + y],
+                        ]);
                     }
                 }
             });
@@ -499,10 +505,8 @@ pub(crate) fn build_digest_layers_packed_babybear(
                     if actual == pack_width {
                         let mut packed_input: [[P; 8]; 2] = [[P::default(); 8]; 2];
                         for d in 0..8 {
-                            packed_input[0][d] =
-                                P::from_fn(|lane| prev[2 * (base + lane)][d]);
-                            packed_input[1][d] =
-                                P::from_fn(|lane| prev[2 * (base + lane) + 1][d]);
+                            packed_input[0][d] = P::from_fn(|lane| prev[2 * (base + lane)][d]);
+                            packed_input[1][d] = P::from_fn(|lane| prev[2 * (base + lane) + 1][d]);
                         }
                         let packed_result: [P; 8] = compressor.compress(packed_input);
                         for lane in 0..pack_width {
@@ -513,8 +517,7 @@ pub(crate) fn build_digest_layers_packed_babybear(
                     } else {
                         for lane in 0..actual {
                             let i = base + lane;
-                            out_chunk[lane] =
-                                compressor.compress([prev[2 * i], prev[2 * i + 1]]);
+                            out_chunk[lane] = compressor.compress([prev[2 * i], prev[2 * i + 1]]);
                         }
                     }
                 });
@@ -526,9 +529,6 @@ pub(crate) fn build_digest_layers_packed_babybear(
 }
 
 /// Fused RS encoding + Merkle tree construction.
-/// Hashes rows from the row-major DFT result (cache-friendly: each row contiguous)
-/// before transposing to col-major for storage. This avoids the cache-unfriendly
-/// col-major row reads in MerkleTree::new (each row reads W values from W far-apart regions).
 #[instrument(name = "rs_encode_and_merkle_cpu", skip_all)]
 fn rs_encode_and_merkle_cpu<F, H>(
     hasher: &H,
@@ -598,8 +598,7 @@ where
             let bb_vals: &[BabyBear] = unsafe {
                 std::slice::from_raw_parts(rm_vals.as_ptr().cast::<BabyBear>(), rm_vals.len())
             };
-            let bb_digests =
-                hash_rows_packed_babybear(bb_vals, width, codeword_height, num_leaves);
+            let bb_digests = hash_rows_packed_babybear(bb_vals, width, codeword_height, num_leaves);
             let mut md = std::mem::ManuallyDrop::new(bb_digests);
             unsafe {
                 Vec::from_raw_parts(md.as_mut_ptr().cast::<H::Digest>(), md.len(), md.capacity())
@@ -634,8 +633,7 @@ where
                     md.capacity(),
                 )
             };
-            let bb_layers =
-                build_digest_layers_packed_babybear(bb_hashes, rows_per_query);
+            let bb_layers = build_digest_layers_packed_babybear(bb_hashes, rows_per_query);
             bb_layers
                 .into_iter()
                 .map(|layer| unsafe {
@@ -690,5 +688,8 @@ where
         ColMajorMatrix::new(cm_values, width)
     });
 
-    MerkleTree::from_parts(cm_matrix, digest_layers, rows_per_query)
+    // SAFETY: digest_layers were just computed as correct Merkle hashes over cm_matrix
+    // by hash_rows_packed_babybear and build_digest_layers_packed_babybear above.
+    // rows_per_query is forwarded from the validated SystemParams.
+    unsafe { MerkleTree::from_raw_parts(cm_matrix, digest_layers, rows_per_query) }
 }

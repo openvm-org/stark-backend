@@ -9,7 +9,7 @@ use eyre::eyre;
 use openvm_cpu_backend::{engine::BabyBearPoseidon2CpuEngine, RowMajorMatrixWrapper};
 use openvm_stark_backend::{
     prover::{AirProvingContext, DeviceDataTransporter, ProvingContext},
-    StarkEngine, SystemParams, WhirConfig, WhirParams,
+    PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
 };
 use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
@@ -17,8 +17,6 @@ use p3_field::Field;
 use p3_keccak_air::KeccakAir;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use tracing::info_span;
-
-use openvm_stark_backend::PartitionedBaseAir;
 
 const NUM_PERMUTATIONS: usize = 1 << 10;
 
@@ -56,6 +54,7 @@ fn main() -> eyre::Result<()> {
     let params = SystemParams {
         l_skip,
         n_stack,
+        w_stack: 1 << 12,
         log_blowup,
         whir,
         logup: log_up_security_params_baby_bear_100_bits(),
@@ -71,9 +70,7 @@ fn main() -> eyre::Result<()> {
     let engine: BabyBearPoseidon2CpuEngine = StarkEngine::new(params);
     let (pk, vk) = engine.keygen(&[Arc::new(air)]);
 
-    let inputs: Vec<[u64; 25]> = (0..NUM_PERMUTATIONS)
-        .map(|_| rng.random())
-        .collect();
+    let inputs: Vec<[u64; 25]> = (0..NUM_PERMUTATIONS).map(|_| rng.random()).collect();
     let trace = info_span!("generate_trace").in_scope(|| {
         p3_keccak_air::generate_trace_rows::<openvm_stark_sdk::p3_baby_bear::BabyBear>(inputs, 0)
     });
@@ -81,7 +78,9 @@ fn main() -> eyre::Result<()> {
     // Row-major backend: wrap the RowMajorMatrix directly (no col-major conversion needed).
     let trace_ctx = AirProvingContext::simple_no_pis(RowMajorMatrixWrapper::new(trace));
     let d_pk = engine.device().transport_pk_to_device(&pk);
-    let proof = engine.prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]));
+    let proof = engine
+        .prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]))
+        .map_err(|e| eyre!("Proving failed: {e}"))?;
 
     engine
         .verify(&vk, &proof)

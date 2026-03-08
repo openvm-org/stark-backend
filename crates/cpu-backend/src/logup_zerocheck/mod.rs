@@ -2,8 +2,8 @@
 //!
 //! Optimizations over the reference backend:
 //! 1. Eliminates full row-major → col-major conversion for round 0 sumcheck
-//! 2. Uses batch DFT on extracted row-major blocks, leveraging SIMD through
-//!    plonky3's butterfly operations (PackedField in apply_to_rows)
+//! 2. Uses batch DFT on extracted row-major blocks, leveraging SIMD through plonky3's butterfly
+//!    operations (PackedField in apply_to_rows)
 //! 3. Direct row-major access for constraint/interaction evaluation
 
 use std::{
@@ -14,16 +14,6 @@ use std::{
 };
 
 use itertools::{izip, Itertools};
-use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{
-    batch_multiplicative_inverse, ExtensionField, Field, PackedValue, PrimeCharacteristicRing,
-    TwoAdicField,
-};
-use p3_matrix::dense::RowMajorMatrix;
-use p3_maybe_rayon::prelude::*;
-use p3_util::log2_strict_usize;
-use tracing::{debug, info_span, instrument};
-
 use openvm_stark_backend::{
     air_builders::symbolic::{
         symbolic_expression::SymbolicEvaluator,
@@ -33,14 +23,12 @@ use openvm_stark_backend::{
     calculate_n_logup,
     dft::Radix2BowersSerial,
     interaction::SymbolicInteraction,
-    poly_common::{
-        eq_sharp_uni_poly, eq_uni_poly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni,
-        UnivariatePoly,
-    },
+    poly_common::{eq_uni_poly, eval_eq_mle, eval_eq_sharp_uni, eval_eq_uni, UnivariatePoly},
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
+        error::LogupZerocheckError,
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
-        poly::evals_eq_hypercubes,
+        poly::{eq_sharp_uni_poly, evals_eq_hypercubes},
         stacked_pcs::StackedLayout,
         sumcheck::{
             batch_fold_mle_evals, batch_fold_ple_evals, sumcheck_round0_deg,
@@ -51,6 +39,15 @@ use openvm_stark_backend::{
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
+use p3_dft::TwoAdicSubgroupDft;
+use p3_field::{
+    batch_multiplicative_inverse, ExtensionField, Field, PackedValue, PrimeCharacteristicRing,
+    TwoAdicField,
+};
+use p3_matrix::dense::RowMajorMatrix;
+use p3_maybe_rayon::prelude::*;
+use p3_util::log2_strict_usize;
+use tracing::{debug, info_span, instrument};
 
 use crate::backend::{CpuBackend, RowMajorMatrixWrapper};
 
@@ -155,7 +152,10 @@ where
     // Precompute barycentric weights (same as in p3-interpolation)
     let omega = F::two_adic_generator(l_skip);
     let omega_pows: Vec<F> = omega.powers().take(skip_sz).collect_vec();
-    let denoms: Vec<EF> = omega_pows.iter().map(|&x_i| r - EF::from(x_i)).collect_vec();
+    let denoms: Vec<EF> = omega_pows
+        .iter()
+        .map(|&x_i| r - EF::from(x_i))
+        .collect_vec();
     let inv_denoms = batch_multiplicative_inverse(&denoms);
 
     // col_scale[i] = omega^i / (r - omega^i)
@@ -402,8 +402,7 @@ where
             Vec::with_capacity(1 + mat_cosets.len());
         packed_row_parts.push(vec![<SC::F as Field>::Packing::default(); sels_w]);
         for mc in &mat_cosets {
-            packed_row_parts
-                .push(vec![<SC::F as Field>::Packing::default(); mc[0].width]);
+            packed_row_parts.push(vec![<SC::F as Field>::Packing::default(); mc[0].width]);
         }
 
         // Pre-allocate DAG node buffer (reused across all packed evaluations)
@@ -421,14 +420,13 @@ where
                 // Pack WIDTH z-points' column values into F::Packing vectors
                 // Selectors (3 columns)
                 for col in 0..sels_w {
-                    packed_row_parts[0][col] =
-                        <SC::F as Field>::Packing::from_fn(|lane| {
-                            if lane < z_count {
-                                sels_cosets[ci].values[(z_base + lane) * sels_w + col]
-                            } else {
-                                SC::F::ZERO
-                            }
-                        });
+                    packed_row_parts[0][col] = <SC::F as Field>::Packing::from_fn(|lane| {
+                        if lane < z_count {
+                            sels_cosets[ci].values[(z_base + lane) * sels_w + col]
+                        } else {
+                            SC::F::ZERO
+                        }
+                    });
                 }
 
                 // Trace matrices
@@ -533,9 +531,7 @@ struct ConstraintEvaluator<'a, F, EF> {
     public_values: &'a [F],
 }
 
-impl<F: Field, EF: ExtensionField<F>> SymbolicEvaluator<F, EF>
-    for ConstraintEvaluator<'_, F, EF>
-{
+impl<F: Field, EF: ExtensionField<F>> SymbolicEvaluator<F, EF> for ConstraintEvaluator<'_, F, EF> {
     fn eval_const(&self, c: F) -> EF {
         c.into()
     }
@@ -879,7 +875,6 @@ where
         }
         row_parts
     }
-
 }
 
 // ============================================================================
@@ -1007,8 +1002,7 @@ where
                 }
                 let needs_next = pk.vk.params.need_rot;
                 debug_assert_eq!(needs_next, rotation > 0);
-                let symbolic_constraints =
-                    SymbolicConstraints::from(&pk.vk.symbolic_constraints);
+                let symbolic_constraints = SymbolicConstraints::from(&pk.vk.symbolic_constraints);
                 RowMajorEvalHelper {
                     constraints_dag: &pk.vk.symbolic_constraints.constraints,
                     interactions: symbolic_constraints.interactions,
@@ -1220,9 +1214,7 @@ where
                 let rm_mats = helper.view_mats_rowmaj(trace_ctx);
                 rm_mats
                     .into_iter()
-                    .map(|(rm, is_rot)| {
-                        fold_ple_evals_rowmajor(l_skip, rm, is_rot, r_0)
-                    })
+                    .map(|(rm, is_rot)| fold_ple_evals_rowmajor(l_skip, rm, is_rot, r_0))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -1272,16 +1264,12 @@ where
                     .chain(mats)
                     .map(|m| m.as_view())
                     .collect_vec();
-                let [s] = sumcheck_round_poly_evals(
-                    log_num_y + 1,
-                    sp_deg,
-                    &parts,
-                    |_x, y, row_parts| {
+                let [s] =
+                    sumcheck_round_poly_evals(log_num_y + 1, sp_deg, &parts, |_x, y, row_parts| {
                         let eq = eq_xi[y];
                         let constraint_eval = helper.acc_constraints(row_parts, &self.lambda_pows);
                         [eq * constraint_eval]
-                    },
-                );
+                    });
                 s
             }
         })
@@ -1328,17 +1316,13 @@ where
                 let log_num_y = n_lift - round;
                 let num_y = 1 << log_num_y;
                 let eq_xi = &eq_xi_tree[num_y - 1..];
-                let [mut numer, denom] = sumcheck_round_poly_evals(
-                    log_num_y + 1,
-                    sp_deg,
-                    &parts,
-                    |_x, y, row_parts| {
+                let [mut numer, denom] =
+                    sumcheck_round_poly_evals(log_num_y + 1, sp_deg, &parts, |_x, y, row_parts| {
                         let eq = eq_xi[y];
                         helper
                             .acc_interactions(row_parts, &self.beta_pows, eq_3bs)
                             .map(|eval| eq * eval)
-                    },
-                );
+                    });
                 for p in &mut numer {
                     *p *= norm_factor;
                 }
@@ -1422,7 +1406,7 @@ pub fn prove_zerocheck_and_logup<SC: StarkProtocolConfig, TS>(
     transcript: &mut TS,
     mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
     ctx: &ProvingContext<CpuBackend<SC>>,
-) -> (GkrProof<SC>, BatchConstraintProof<SC>, Vec<SC::EF>)
+) -> Result<(GkrProof<SC>, BatchConstraintProof<SC>, Vec<SC::EF>), LogupZerocheckError>
 where
     TS: FiatShamirTranscript<SC>,
     SC::F: TwoAdicField,
@@ -1450,7 +1434,7 @@ where
         .collect();
     let n_logup = calculate_n_logup(l_skip, total_interactions);
     debug!(%n_logup);
-    let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta);
+    let interactions_layout = StackedLayout::new(0, l_skip + n_logup, interactions_meta)?;
 
     let logup_pow_witness = transcript.grind(mpk.params.logup.pow_bits);
     let alpha_logup = transcript.sample_ext();
@@ -1484,8 +1468,7 @@ where
                     .into_par_iter()
                     .map(|i| {
                         // Build row_parts from contiguous row-major memory
-                        let row_parts =
-                            RowMajorEvalHelper::<SC>::build_row_parts(&mats, i, height);
+                        let row_parts = RowMajorEvalHelper::<SC>::build_row_parts(&mats, i, height);
                         helper.eval_interactions(&row_parts, &prover.beta_pows)
                     })
                     .collect::<Vec<_>>()
@@ -1519,7 +1502,8 @@ where
         evals
     };
 
-    let (frac_sum_proof, mut xi) = fractional_sumcheck::<SC, _>(transcript, &gkr_input_evals, true);
+    let (frac_sum_proof, mut xi) =
+        fractional_sumcheck::<SC, _>(transcript, &gkr_input_evals, true)?;
 
     let n_global = max(n_max, n_logup);
     debug!(%n_global);
@@ -1743,5 +1727,5 @@ where
         claims_per_layer: frac_sum_proof.claims_per_layer,
         sumcheck_polys: frac_sum_proof.sumcheck_polys,
     };
-    (gkr_proof, batch_constraint_proof, r)
+    Ok((gkr_proof, batch_constraint_proof, r))
 }

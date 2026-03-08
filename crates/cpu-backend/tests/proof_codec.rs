@@ -1,6 +1,7 @@
 use std::io;
 
 use itertools::Itertools;
+use openvm_cpu_backend::engine::BabyBearPoseidon2CpuEngine;
 use openvm_stark_backend::{
     codec::{Decode, Encode},
     proof::Proof,
@@ -11,7 +12,6 @@ use openvm_stark_backend::{
     StarkEngine, SystemParams,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::*;
-use openvm_cpu_backend::engine::BabyBearPoseidon2CpuEngine;
 
 type ConcreteSC = BabyBearPoseidon2Config;
 

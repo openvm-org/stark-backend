@@ -2,9 +2,7 @@
 
 use std::marker::PhantomData;
 
-use openvm_stark_backend::{
-    prover::Coordinator, FiatShamirTranscript, StarkEngine, SystemParams,
-};
+use openvm_stark_backend::{prover::Coordinator, FiatShamirTranscript, StarkEngine, SystemParams};
 use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
 use p3_baby_bear::{default_babybear_poseidon2_16, Poseidon2BabyBear};
 

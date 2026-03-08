@@ -13,6 +13,7 @@ members = [
     "crates/stark-backend/codec-derive",
     "crates/stark-sdk",
     "crates/backend-tests",
+    "crates/cpu-backend",
     "crates/cuda-common",
     "crates/cuda-builder",
     "crates/cuda-backend",
@@ -24,6 +25,7 @@ default-members = [
     "crates/stark-backend/codec-derive",
     "crates/stark-sdk",
     "crates/backend-tests",
+    "crates/cpu-backend",
 ]
 resolver = "2"
 
@@ -67,6 +69,7 @@ lto = "thin"
 openvm-stark-backend = { path = "crates/stark-backend", default-features = false }
 openvm-codec-derive = { path = "crates/stark-backend/codec-derive", default-features = false }
 openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
+openvm-cpu-backend = { path = "crates/cpu-backend", default-features = false }
 openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
 openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }

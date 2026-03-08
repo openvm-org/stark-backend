@@ -1,3 +1,11 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::useless_conversion,
+    clippy::unnecessary_cast,
+    clippy::wrong_self_convention
+)]
 //! Row-major CPU prover backend for the SWIRL proof system.
 //!
 //! This crate provides [`CpuBackend`] and [`CpuDevice`], a prover backend that uses
@@ -11,6 +19,7 @@
 mod backend;
 mod device;
 pub mod engine;
+pub mod error;
 pub mod logup_zerocheck;
 mod stacked_reduction;
 pub mod transcript;
@@ -18,4 +27,5 @@ mod whir;
 
 pub use backend::*;
 pub use device::*;
+pub use error::CpuBackendError;
 pub use transcript::CpuTranscript;

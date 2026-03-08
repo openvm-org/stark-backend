@@ -6,6 +6,7 @@ use std::{
 };
 
 use itertools::Itertools;
+use openvm_cpu_backend::{engine::BabyBearPoseidon2CpuEngine, RowMajorMatrixWrapper};
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
     prover::{stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData},
@@ -13,7 +14,6 @@ use openvm_stark_backend::{
     PartitionedBaseAir, StarkEngine, StarkProtocolConfig,
 };
 use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
-use openvm_cpu_backend::{engine::BabyBearPoseidon2CpuEngine, RowMajorMatrixWrapper};
 use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
@@ -60,7 +60,7 @@ impl<AB: PartitionedAirBuilder> Air<AB> for SumAir {
 fn prove_and_verify_sum_air(
     x: Vec<F>,
     ys: Vec<Vec<F>>,
-) -> Result<(), openvm_stark_backend::verifier::VerifierError<EF>> {
+) -> Result<(), openvm_stark_backend::StarkTestError<openvm_cpu_backend::CpuBackendError, EF>> {
     assert_eq!(x.len(), ys.len());
 
     let engine: BabyBearPoseidon2CpuEngine<DuplexSponge> =
@@ -82,7 +82,8 @@ fn prove_and_verify_sum_air(
         params.log_blowup,
         params.k_whir(),
         &[&y_trace],
-    );
+    )
+    .unwrap();
 
     // CommittedTraceData.trace must match PB::Matrix = RowMajorMatrixWrapper for our backend.
     // The PCS data (commitment + tree) is computed from the ColMajorMatrix.
