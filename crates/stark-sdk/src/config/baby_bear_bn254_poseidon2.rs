@@ -16,13 +16,12 @@ use openvm_stark_backend::{
     prover::{Coordinator, CpuBackend, CpuDevice},
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
 };
-use p3_field::PrimeField;
 use p3_baby_bear::BabyBear;
 // NOTE: plonky3's Bn254 is the type for scalar field of the BN254 curve. It is not the type
 // for the curve itself.
 pub use p3_bn254::Bn254 as Bn254Scalar;
 use p3_bn254::Poseidon2Bn254;
-use p3_field::extension::BinomialExtensionField;
+use p3_field::{extension::BinomialExtensionField, PrimeField};
 use p3_poseidon2::ExternalLayerConstants;
 use zkhash::{
     ark_ff::PrimeField as _, fields::bn256::FpBN256 as ark_FpBN256,
