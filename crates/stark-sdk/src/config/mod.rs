@@ -23,8 +23,8 @@ const SECURITY_BITS_TARGET: usize = 100;
 pub const DEFAULT_APP_L_SKIP: usize = 4;
 pub const DEFAULT_APP_LOG_BLOWUP: usize = 1;
 pub const DEFAULT_LEAF_LOG_BLOWUP: usize = 2;
-pub const DEFAULT_INTERNAL_LOG_BLOWUP: usize = 2;
-pub const DEFAULT_ROOT_LOG_BLOWUP: usize = 2;
+pub const DEFAULT_INTERNAL_LOG_BLOWUP: usize = 3;
+pub const DEFAULT_ROOT_LOG_BLOWUP: usize = 3;
 pub const DEFAULT_COMPRESSION_LOG_BLOWUP: usize = 4;
 
 pub const MAX_APP_LOG_STACKED_HEIGHT: usize = 24;
@@ -52,12 +52,9 @@ pub fn app_params_with_100_bits_security(log_stacked_height: usize) -> SystemPar
         log_stacked_height.saturating_sub(DEFAULT_APP_L_SKIP), // n_stack
         2048,                                                  // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
-        20, // folding pow
+        5,  // folding pow
         15, // mu pow
-        WhirProximityStrategy::SplitUniqueList {
-            m: 2,
-            list_start_round: 1,
-        },
+        WhirProximityStrategy::UniqueDecoding,
         SECURITY_BITS_TARGET,
         log_up_security_params_baby_bear_100_bits(),
     )
@@ -85,12 +82,9 @@ pub fn leaf_params_with_100_bits_security() -> SystemParams {
         17,   // n_stack
         2048, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
-        20, // folding pow
+        4,  // folding pow
         13, // mu pow
-        WhirProximityStrategy::SplitUniqueList {
-            m: 3,
-            list_start_round: 1,
-        },
+        WhirProximityStrategy::UniqueDecoding,
         SECURITY_BITS_TARGET,
         log_up_security_params_baby_bear_100_bits(),
     )
@@ -118,12 +112,9 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
         17,  // n_stack
         512, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
-        20, // folding pow
-        13, // mu pow
-        WhirProximityStrategy::SplitUniqueList {
-            m: 3,
-            list_start_round: 1,
-        },
+        18, // folding pow
+        20, // mu pow
+        WhirProximityStrategy::ListDecoding { m: 2 },
         SECURITY_BITS_TARGET,
         log_up_security_params_baby_bear_100_bits(),
     )
@@ -136,12 +127,9 @@ pub fn root_params_with_100_bits_security() -> SystemParams {
         17, // n_stack
         64, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
-        20, // folding pow
-        13, // mu pow
-        WhirProximityStrategy::SplitUniqueList {
-            m: 3,
-            list_start_round: 1,
-        },
+        18, // folding pow
+        20, // mu pow
+        WhirProximityStrategy::ListDecoding { m: 2 },
         SECURITY_BITS_TARGET,
         log_up_security_params_baby_bear_100_bits(),
     )
