@@ -66,24 +66,24 @@ pub fn app_params_with_100_bits_security(log_stacked_height: usize) -> SystemPar
 /// Returns `SystemParams` targeting 100 bits of proven RBR security for leaf aggregation circuits.
 ///
 /// # Assumptions for 100-bit security
-/// - **Max trace height**: ≤ 2^20
+/// - **Max trace height**: ≤ 2^21
 /// - **Max constraints per AIR**: ≤ 1,000
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100 (maximum number of interactions in a single AIR for a
 ///   single row)
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
-/// - **`w_stack`** = 1,024, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+/// - **`w_stack`** = 2,048, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
-/// Config: `l_skip=2, n_stack=18, log_blowup=2`.
+/// Config: `l_skip=4, n_stack=17, log_blowup=2`.
 //
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
 pub fn leaf_params_with_100_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_LEAF_LOG_BLOWUP,
-        2,    // l_skip
-        18,   // n_stack
-        1024, // w_stack
+        4,    // l_skip
+        17,   // n_stack
+        2048, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
         20, // folding pow
         13, // mu pow
@@ -105,7 +105,7 @@ pub fn leaf_params_with_100_bits_security() -> SystemParams {
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
-/// - **`w_stack`** = 1,024, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+/// - **`w_stack`** = 512, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
 /// Config: `l_skip=2, n_stack=17, log_blowup=2`.
 //
@@ -114,9 +114,9 @@ pub fn leaf_params_with_100_bits_security() -> SystemParams {
 pub fn internal_params_with_100_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_INTERNAL_LOG_BLOWUP,
-        2,    // l_skip
-        17,   // n_stack
-        1024, // w_stack
+        2,   // l_skip
+        17,  // n_stack
+        512, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
         20, // folding pow
         13, // mu pow
