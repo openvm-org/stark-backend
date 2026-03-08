@@ -13,7 +13,7 @@ use openvm_stark_backend::{
     hasher::Hasher,
     p3_challenger::{CanObserve, CanSample, MultiField32Challenger},
     p3_symmetric::{self, MultiField32PaddingFreeSponge, TruncatedPermutation},
-    prover::{Coordinator, CpuBackend, CpuDevice},
+    prover::{Coordinator, ReferenceBackend, ReferenceDevice},
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
 };
 use p3_baby_bear::BabyBear;
@@ -159,7 +159,7 @@ impl From<Perm> for Transcript {
 }
 
 pub struct BabyBearBn254Poseidon2CpuEngine<TS = Transcript> {
-    device: CpuDevice<SC>,
+    device: ReferenceDevice<SC>,
     _transcript: PhantomData<TS>,
 }
 
@@ -168,14 +168,14 @@ where
     TS: FiatShamirTranscript<SC> + From<Perm>,
 {
     type SC = SC;
-    type PB = CpuBackend<SC>;
-    type PD = CpuDevice<SC>;
+    type PB = ReferenceBackend<SC>;
+    type PD = ReferenceDevice<SC>;
     type TS = TS;
 
     fn new(params: SystemParams) -> Self {
         let config = BabyBearBn254Poseidon2Config::default_from_params(params);
         Self {
-            device: CpuDevice::new(config),
+            device: ReferenceDevice::new(config),
             _transcript: PhantomData,
         }
     }
@@ -196,7 +196,7 @@ where
         &self,
         transcript: TS,
     ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
-        Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
+        Coordinator::new(ReferenceBackend::new(), self.device.clone(), transcript)
     }
 }
 

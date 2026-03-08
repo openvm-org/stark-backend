@@ -367,6 +367,19 @@ pub fn rs_code_matrix<F: TwoAdicField + Ord>(
 }
 
 impl<F, Digest> MerkleTree<F, Digest> {
+    /// Construct a `MerkleTree` from pre-computed parts.
+    pub fn from_parts(
+        backing_matrix: ColMajorMatrix<F>,
+        digest_layers: Vec<Vec<Digest>>,
+        rows_per_query: usize,
+    ) -> Self {
+        Self {
+            backing_matrix,
+            digest_layers,
+            rows_per_query,
+        }
+    }
+
     pub fn query_stride(&self) -> usize {
         self.digest_layers[0].len()
     }

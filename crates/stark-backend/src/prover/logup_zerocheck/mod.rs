@@ -21,8 +21,8 @@ use crate::{
         poly::eq_sharp_uni_poly,
         stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
-        ColMajorMatrix, CpuBackend, DeviceMultiStarkProvingKey, MatrixDimensions, MatrixView,
-        ProverBackend, ProvingContext,
+        ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, MatrixView, ProverBackend,
+        ProvingContext, ReferenceBackend,
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
@@ -39,14 +39,14 @@ pub use single::*;
 #[allow(clippy::type_complexity)]
 pub fn prove_zerocheck_and_logup<SC: StarkProtocolConfig, TS>(
     transcript: &mut TS,
-    mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
-    ctx: &ProvingContext<CpuBackend<SC>>,
+    mpk: &DeviceMultiStarkProvingKey<ReferenceBackend<SC>>,
+    ctx: &ProvingContext<ReferenceBackend<SC>>,
 ) -> Result<(GkrProof<SC>, BatchConstraintProof<SC>, Vec<SC::EF>), LogupZerocheckError>
 where
     TS: FiatShamirTranscript<SC>,
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
+    ReferenceBackend<SC>: ProverBackend<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;

@@ -14,7 +14,7 @@ use crate::{
         error::WhirProverError,
         poly::{eval_to_coeff_rs_message, evals_eq_hypercube, evals_mobius_eq_hypercube, Mle},
         stacked_pcs::{MerkleTree, StackedPcsData},
-        ColMajorMatrix, CpuBackend, CpuDevice, MatrixDimensions, ProverBackend,
+        ColMajorMatrix, MatrixDimensions, ProverBackend, ReferenceBackend, ReferenceDevice,
     },
     FiatShamirTranscript, StarkProtocolConfig, WhirConfig,
 };
@@ -40,7 +40,7 @@ pub trait WhirProver<SC: StarkProtocolConfig, PB: ProverBackend, PD, TS> {
     ) -> Result<WhirProof<SC>, Self::Error>;
 }
 
-impl<SC, TS> WhirProver<SC, CpuBackend<SC>, CpuDevice<SC>, TS> for CpuDevice<SC>
+impl<SC, TS> WhirProver<SC, ReferenceBackend<SC>, ReferenceDevice<SC>, TS> for ReferenceDevice<SC>
 where
     SC: StarkProtocolConfig,
     SC::F: TwoAdicField + Ord,

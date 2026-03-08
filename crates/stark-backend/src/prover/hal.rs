@@ -6,7 +6,7 @@ use crate::{
     keygen::types::MultiStarkProvingKey,
     prover::{
         stacked_pcs::StackedPcsData, AirProvingContext, ColMajorMatrix, CommittedTraceData,
-        CpuBackend, DeviceMultiStarkProvingKey, ProvingContext,
+        DeviceMultiStarkProvingKey, ProvingContext, ReferenceBackend,
     },
     StarkProtocolConfig,
 };
@@ -146,7 +146,7 @@ where
 
     fn transport_committed_trace_data_to_device(
         &self,
-        committed_trace: &CommittedTraceData<CpuBackend<SC>>,
+        committed_trace: &CommittedTraceData<ReferenceBackend<SC>>,
     ) -> CommittedTraceData<PB> {
         let trace = self.transport_matrix_to_device(&committed_trace.trace);
         let data = self.transport_pcs_data_to_device(committed_trace.data.as_ref());
@@ -160,7 +160,7 @@ where
 
     fn transport_proving_ctx_to_device(
         &self,
-        ctx: &ProvingContext<CpuBackend<SC>>,
+        ctx: &ProvingContext<ReferenceBackend<SC>>,
     ) -> ProvingContext<PB> {
         let per_trace = ctx
             .per_trace

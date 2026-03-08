@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     duplex_sponge,
     hasher::Hasher,
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
-    prover::{Coordinator, CpuBackend, CpuDevice},
+    prover::{Coordinator, ReferenceBackend, ReferenceDevice},
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptLog,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
@@ -113,7 +113,7 @@ impl DecodableConfig for BabyBearPoseidon2Config {
 }
 
 pub struct BabyBearPoseidon2CpuEngine<TS = DuplexSponge> {
-    device: CpuDevice<SC>,
+    device: ReferenceDevice<SC>,
     _transcript: PhantomData<TS>,
 }
 
@@ -122,14 +122,14 @@ where
     TS: FiatShamirTranscript<SC> + From<Perm>,
 {
     type SC = SC;
-    type PB = CpuBackend<SC>;
-    type PD = CpuDevice<SC>;
+    type PB = ReferenceBackend<SC>;
+    type PD = ReferenceDevice<SC>;
     type TS = TS;
 
     fn new(params: SystemParams) -> Self {
         let config = BabyBearPoseidon2Config::default_from_params(params);
         Self {
-            device: CpuDevice::new(config),
+            device: ReferenceDevice::new(config),
             _transcript: PhantomData,
         }
     }
@@ -150,7 +150,7 @@ where
         &self,
         transcript: TS,
     ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
-        Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
+        Coordinator::new(ReferenceBackend::new(), self.device.clone(), transcript)
     }
 }
 

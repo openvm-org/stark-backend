@@ -5,7 +5,7 @@ use p3_matrix::{dense::RowMajorMatrix, Matrix};
 
 use crate::{
     interaction::{BusIndex, InteractionBuilder},
-    prover::{AirProvingContext, ColMajorMatrix, CpuBackend},
+    prover::{AirProvingContext, ColMajorMatrix, ReferenceBackend},
     PartitionedBaseAir, StarkProtocolConfig,
 };
 
@@ -69,7 +69,7 @@ pub struct SelfInteractionChip {
 impl SelfInteractionChip {
     pub fn generate_proving_ctx<SC: StarkProtocolConfig>(
         &self,
-    ) -> AirProvingContext<CpuBackend<SC>> {
+    ) -> AirProvingContext<ReferenceBackend<SC>> {
         assert!(self.width > 0);
         let mut trace = vec![SC::F::ZERO; (1 << self.log_height) * self.width];
         for (row_idx, chunk) in trace.chunks_mut(self.width).enumerate() {
