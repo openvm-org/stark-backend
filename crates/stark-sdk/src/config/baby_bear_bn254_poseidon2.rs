@@ -1,6 +1,15 @@
-use std::{marker::PhantomData, sync::OnceLock};
+use std::{
+    io::{self, Read, Write},
+    marker::PhantomData,
+    sync::OnceLock,
+};
 
+use num_bigint::BigUint;
 use openvm_stark_backend::{
+    codec::{
+        decode_extension_field32, decode_prime_field32, encode_extension_field32,
+        encode_prime_field32, DecodableConfig, EncodableConfig,
+    },
     hasher::Hasher,
     p3_challenger::{CanObserve, CanSample, MultiField32Challenger},
     p3_symmetric::{self, MultiField32PaddingFreeSponge, TruncatedPermutation},
@@ -12,7 +21,7 @@ use p3_baby_bear::BabyBear;
 // for the curve itself.
 pub use p3_bn254::Bn254 as Bn254Scalar;
 use p3_bn254::Poseidon2Bn254;
-use p3_field::extension::BinomialExtensionField;
+use p3_field::{extension::BinomialExtensionField, PrimeField};
 use p3_poseidon2::ExternalLayerConstants;
 use zkhash::{
     ark_ff::PrimeField as _, fields::bn256::FpBN256 as ark_FpBN256,
@@ -58,6 +67,52 @@ impl StarkProtocolConfig for BabyBearBn254Poseidon2Config {
 
     fn hasher(&self) -> &Self::Hasher {
         &self.hasher
+    }
+}
+
+impl EncodableConfig for BabyBearBn254Poseidon2Config {
+    fn encode_base_field<W: Write>(val: &F, writer: &mut W) -> io::Result<()> {
+        encode_prime_field32(val, writer)
+    }
+
+    fn encode_extension_field<W: Write>(val: &EF, writer: &mut W) -> io::Result<()> {
+        encode_extension_field32::<Self::F, _, _>(val, writer)
+    }
+
+    fn encode_digest<W: Write>(digest: &Self::Digest, writer: &mut W) -> io::Result<()> {
+        for val in digest {
+            // Bn254 is encoded as 32 big-endian bytes for compatibility with
+            // CommitBytes in openvm and EVM conventions.
+            let bytes = val.as_canonical_biguint().to_bytes_be();
+            let mut buf = [0u8; 32];
+            buf[32 - bytes.len()..].copy_from_slice(&bytes);
+            writer.write_all(&buf)?;
+        }
+        Ok(())
+    }
+}
+
+impl DecodableConfig for BabyBearBn254Poseidon2Config {
+    fn decode_base_field<R: Read>(reader: &mut R) -> io::Result<F> {
+        decode_prime_field32(reader)
+    }
+
+    fn decode_extension_field<R: Read>(reader: &mut R) -> io::Result<EF> {
+        decode_extension_field32::<F, _, _>(reader)
+    }
+
+    fn decode_digest<R: Read>(reader: &mut R) -> io::Result<Digest> {
+        let mut result = Digest::default();
+        for val in &mut result {
+            // Bn254 is encoded as 32 big-endian bytes for compatibility with
+            // CommitBytes in openvm and EVM conventions.
+            let mut buf = [0u8; 32];
+            reader.read_exact(&mut buf)?;
+            let big = BigUint::from_bytes_be(&buf);
+            *val = Bn254Scalar::from_biguint(big)
+                .ok_or_else(|| io::Error::other("invalid Bn254 element"))?;
+        }
+        Ok(result)
     }
 }
 
