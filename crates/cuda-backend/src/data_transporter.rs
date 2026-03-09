@@ -242,9 +242,9 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
     })
 }
 
-pub fn transport_air_proving_ctx_to_device(
+pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
     cpu_ctx: AirProvingContext<CpuBackend<SC>>,
-) -> AirProvingContext<GpuBackend> {
+) -> AirProvingContext<GenericGpuBackend<HS>> {
     assert!(
         cpu_ctx.cached_mains.is_empty(),
         "CPU to GPU transfer of cached traces not supported"
