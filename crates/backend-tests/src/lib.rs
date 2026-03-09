@@ -68,7 +68,7 @@ use openvm_stark_sdk::{
     config::{
         baby_bear_poseidon2::{
             default_duplex_sponge, default_duplex_sponge_recorder, poseidon2_perm,
-            BabyBearPoseidon2Config, BabyBearPoseidon2CpuEngine, DuplexSponge, EF, F,
+            BabyBearPoseidon2Config, BabyBearPoseidon2RefEngine, DuplexSponge, EF, F,
         },
         log_up_params::log_up_security_params_baby_bear_100_bits,
     },
@@ -1122,7 +1122,7 @@ fn run_whir_test(
 }
 
 fn run_whir_fib_test(params: SystemParams) -> eyre::Result<()> {
-    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
+    let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
     let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
     let (pk, _vk) = fib.keygen(&engine);
     let pk = engine.device().transport_pk_to_device(&pk);
@@ -1438,7 +1438,7 @@ macro_rules! __test_cases {
 /// ```ignore
 /// use openvm_stark_sdk::config::baby_bear_poseidon2::*;
 ///
-/// type Engine = BabyBearPoseidon2CpuEngine<DuplexSponge>;
+/// type Engine = BabyBearPoseidon2RefEngine<DuplexSponge>;
 /// openvm_backend_tests::backend_test_suite!(Engine);
 /// ```
 #[macro_export]

@@ -6,12 +6,15 @@
 use std::sync::Arc;
 
 use eyre::eyre;
-use openvm_cpu_backend::{engine::BabyBearPoseidon2CpuEngine, RowMajorMatrixWrapper};
+use openvm_cpu_backend::RowMajorMatrixWrapper;
 use openvm_stark_backend::{
     prover::{AirProvingContext, DeviceDataTransporter, ProvingContext},
-    PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
+    PartitionedBaseAir, StarkEngine,
 };
-use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_100_bits;
+use openvm_stark_sdk::config::{
+    app_params_with_100_bits_security,
+    baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
+};
 use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
 use p3_field::Field;
 use p3_keccak_air::KeccakAir;
@@ -41,25 +44,7 @@ fn main() -> eyre::Result<()> {
     // Initialize tracing (reads RUST_LOG env var).
     openvm_stark_sdk::utils::setup_tracing();
 
-    let l_skip = 4;
-    let n_stack = 17;
-    let k_whir = 4;
-    let whir_params = WhirParams {
-        k: k_whir,
-        log_final_poly_len: 2 * k_whir,
-        query_phase_pow_bits: 20,
-    };
-    let log_blowup = 1;
-    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
-    let params = SystemParams {
-        l_skip,
-        n_stack,
-        w_stack: 1 << 12,
-        log_blowup,
-        whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
-        max_constraint_degree: 3,
-    };
+    let params = app_params_with_100_bits_security(21);
 
     let mut rng = StdRng::seed_from_u64(42);
     let air = TestAir(KeccakAir {});

@@ -112,12 +112,12 @@ impl DecodableConfig for BabyBearPoseidon2Config {
     }
 }
 
-pub struct BabyBearPoseidon2CpuEngine<TS = DuplexSponge> {
+pub struct BabyBearPoseidon2RefEngine<TS = DuplexSponge> {
     device: ReferenceDevice<SC>,
     _transcript: PhantomData<TS>,
 }
 
-impl<TS> StarkEngine for BabyBearPoseidon2CpuEngine<TS>
+impl<TS> StarkEngine for BabyBearPoseidon2RefEngine<TS>
 where
     TS: FiatShamirTranscript<SC> + From<Perm>,
 {
@@ -153,6 +153,108 @@ where
         Coordinator::new(ReferenceBackend::new(), self.device.clone(), transcript)
     }
 }
+
+// ---- Optimized CPU engine (behind `cpu-backend` feature) ----
+
+#[cfg(feature = "cpu-backend")]
+mod cpu_engine {
+    use openvm_cpu_backend::{CpuBackend, CpuDevice};
+
+    use super::*;
+
+    /// SIMD-optimized transcript backed by Plonky3's `DuplexChallenger`.
+    ///
+    /// Produces identical Fiat-Shamir challenges as the standard `DuplexSponge` transcript,
+    /// but with ~4x faster proof-of-work grinding on aarch64 NEON (8x on x86 AVX2).
+    #[derive(Clone, Debug)]
+    pub struct CpuTranscript {
+        inner: openvm_stark_backend::p3_challenger::DuplexChallenger<
+            BabyBear,
+            Poseidon2BabyBear<WIDTH>,
+            WIDTH,
+            RATE,
+        >,
+    }
+
+    impl From<Perm> for CpuTranscript {
+        fn from(perm: Perm) -> Self {
+            Self {
+                inner: openvm_stark_backend::p3_challenger::DuplexChallenger::new(perm),
+            }
+        }
+    }
+
+    impl FiatShamirTranscript<BabyBearPoseidon2Config> for CpuTranscript {
+        #[inline]
+        fn observe(&mut self, value: BabyBear) {
+            openvm_stark_backend::p3_challenger::CanObserve::observe(&mut self.inner, value);
+        }
+
+        #[inline]
+        fn sample(&mut self) -> BabyBear {
+            openvm_stark_backend::p3_challenger::CanSample::sample(&mut self.inner)
+        }
+
+        fn observe_commit(&mut self, digest: [BabyBear; RATE]) {
+            for x in digest {
+                openvm_stark_backend::p3_challenger::CanObserve::observe(&mut self.inner, x);
+            }
+        }
+
+        fn grind(&mut self, bits: usize) -> BabyBear {
+            openvm_stark_backend::p3_challenger::GrindingChallenger::grind(&mut self.inner, bits)
+        }
+    }
+
+    /// Row-major CPU engine for BabyBear + Poseidon2.
+    ///
+    /// Default transcript is [`CpuTranscript`], which uses Plonky3's `DuplexChallenger`
+    /// for SIMD-optimized proof-of-work grinding (~4x faster on NEON, ~8x on AVX2).
+    pub struct BabyBearPoseidon2CpuEngine<TS = CpuTranscript> {
+        device: CpuDevice<SC>,
+        _transcript: PhantomData<TS>,
+    }
+
+    impl<TS> StarkEngine for BabyBearPoseidon2CpuEngine<TS>
+    where
+        TS: FiatShamirTranscript<SC> + From<Poseidon2BabyBear<WIDTH>>,
+    {
+        type SC = SC;
+        type PB = CpuBackend<SC>;
+        type PD = CpuDevice<SC>;
+        type TS = TS;
+
+        fn new(params: SystemParams) -> Self {
+            let config = BabyBearPoseidon2Config::default_from_params(params);
+            Self {
+                device: CpuDevice::new(config),
+                _transcript: PhantomData,
+            }
+        }
+
+        fn config(&self) -> &SC {
+            self.device.config()
+        }
+
+        fn device(&self) -> &Self::PD {
+            &self.device
+        }
+
+        fn initial_transcript(&self) -> Self::TS {
+            TS::from(default_babybear_poseidon2_16())
+        }
+
+        fn prover_from_transcript(
+            &self,
+            transcript: TS,
+        ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
+            Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
+        }
+    }
+}
+
+#[cfg(feature = "cpu-backend")]
+pub use cpu_engine::{BabyBearPoseidon2CpuEngine, CpuTranscript};
 
 // Fixed Poseidon2 configuration
 pub fn poseidon2_perm() -> &'static Poseidon2BabyBear<WIDTH> {

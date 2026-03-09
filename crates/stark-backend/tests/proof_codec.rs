@@ -24,7 +24,7 @@ fn test_proof_encode_decode<Fx: TestFixture<ConcreteSC>>(
     fx: Fx,
     params: SystemParams,
 ) -> eyre::Result<()> {
-    let engine = BabyBearPoseidon2CpuEngine::new(params);
+    let engine = BabyBearPoseidon2RefEngine::new(params);
     let pk = fx.keygen(&engine).0;
     let proof = fx.prove_from_transcript(&engine, &pk, &mut default_duplex_sponge_recorder());
 

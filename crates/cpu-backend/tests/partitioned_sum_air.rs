@@ -6,14 +6,17 @@ use std::{
 };
 
 use itertools::Itertools;
-use openvm_cpu_backend::{engine::BabyBearPoseidon2CpuEngine, RowMajorMatrixWrapper};
+use openvm_cpu_backend::RowMajorMatrixWrapper;
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
     prover::{stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData},
     utils::disable_debug_builder,
     PartitionedBaseAir, StarkEngine, StarkProtocolConfig,
 };
-use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
+use openvm_stark_sdk::{
+    config::baby_bear_poseidon2::{BabyBearPoseidon2CpuEngine, *},
+    utils::setup_tracing,
+};
 use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{dense::RowMajorMatrix, Matrix};

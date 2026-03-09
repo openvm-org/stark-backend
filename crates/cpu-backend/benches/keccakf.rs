@@ -9,14 +9,16 @@
 
 use std::sync::Arc;
 
-use openvm_cpu_backend::{engine::BabyBearPoseidon2CpuEngine, RowMajorMatrixWrapper};
+use openvm_cpu_backend::RowMajorMatrixWrapper;
 use openvm_stark_backend::{
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-    PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
+    PartitionedBaseAir, StarkEngine, SystemParams,
 };
 use openvm_stark_sdk::config::{
-    baby_bear_poseidon2::BabyBearPoseidon2CpuEngine as ReferenceCpuEngine,
-    log_up_params::log_up_security_params_baby_bear_100_bits,
+    app_params_with_100_bits_security,
+    baby_bear_poseidon2::{
+        BabyBearPoseidon2CpuEngine, BabyBearPoseidon2RefEngine as ReferenceCpuEngine,
+    },
 };
 use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
 use p3_field::Field;
@@ -42,25 +44,7 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 }
 
 fn make_params() -> SystemParams {
-    let l_skip = 4;
-    let n_stack = 17;
-    let k_whir = 4;
-    let whir_params = WhirParams {
-        k: k_whir,
-        log_final_poly_len: 2 * k_whir,
-        query_phase_pow_bits: 20,
-    };
-    let log_blowup = 1;
-    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
-    SystemParams {
-        l_skip,
-        n_stack,
-        w_stack: 1 << 12,
-        log_blowup,
-        whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
-        max_constraint_degree: 3,
-    }
+    app_params_with_100_bits_security(21)
 }
 
 fn generate_inputs() -> Vec<[u64; 25]> {

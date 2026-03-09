@@ -18,14 +18,11 @@
 
 mod backend;
 mod device;
-pub mod engine;
 pub mod error;
 pub mod logup_zerocheck;
 mod stacked_reduction;
-pub mod transcript;
 mod whir;
 
 pub use backend::*;
 pub use device::*;
 pub use error::CpuBackendError;
-pub use transcript::CpuTranscript;

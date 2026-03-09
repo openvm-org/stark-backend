@@ -7,6 +7,7 @@ description = "SDK for production and testing usage of STARKs."
 
 [dependencies]
 openvm-stark-backend = { workspace = true }
+openvm-cpu-backend = { workspace = true, optional = true }
 
 p3-baby-bear = { workspace = true }
 p3-field = { workspace = true }
@@ -46,13 +47,14 @@ zkhash.workspace = true
 cfg-if.workspace = true
 
 [features]
-default = ["parallel", "metrics", "baby-bear-bn254-poseidon2"]
+default = ["parallel", "metrics", "baby-bear-bn254-poseidon2", "cpu-backend"]
 baby-bear-bn254-poseidon2 = ["dep:p3-bn254", "dep:zkhash", "dep:p3-poseidon2", "dep:num-bigint"]
-parallel = ["openvm-stark-backend/parallel"]
+cpu-backend = ["dep:openvm-cpu-backend"]
+parallel = ["openvm-stark-backend/parallel", "openvm-cpu-backend?/parallel"]
 mimalloc = ["openvm-stark-backend/mimalloc"]
 jemalloc = ["openvm-stark-backend/jemalloc"]
 jemalloc-prof = ["openvm-stark-backend/jemalloc-prof"]
-metrics = ["dep:metrics", "openvm-stark-backend/metrics"]
+metrics = ["dep:metrics", "openvm-stark-backend/metrics", "openvm-cpu-backend?/metrics"]
 prometheus = [
   "metrics",
   "dep:metrics-exporter-prometheus",

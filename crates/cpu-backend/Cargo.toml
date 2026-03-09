@@ -7,7 +7,6 @@ description = "Row-major CPU prover backend for the SWIRL proof system"
 
 [dependencies]
 openvm-stark-backend = { workspace = true }
-openvm-stark-sdk = { workspace = true }
 
 p3-air.workspace = true
 p3-baby-bear.workspace = true
@@ -30,7 +29,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 openvm-stark-backend = { workspace = true, features = ["test-utils"] }
-openvm-stark-sdk.workspace = true
+openvm-stark-sdk = { workspace = true, features = ["cpu-backend"] }
 openvm-backend-tests.workspace = true
 p3-baby-bear.workspace = true
 p3-keccak-air.workspace = true

@@ -14,7 +14,7 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::{
     config::{
         app_params_with_100_bits_security,
-        baby_bear_poseidon2::{BabyBearPoseidon2CpuEngine, DuplexSponge},
+        baby_bear_poseidon2::{BabyBearPoseidon2RefEngine, DuplexSponge},
     },
     utils::setup_tracing,
 };
@@ -67,7 +67,7 @@ fn main() {
 
     // ----- CPU keygen once, shared by all threads -----
     let air = TestAir(KeccakAir {});
-    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(make_params());
+    let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(make_params());
     let (pk, vk) = engine.keygen(&[Arc::new(air)]);
     let pk = Arc::new(pk);
     let vk = Arc::new(vk);

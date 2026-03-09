@@ -20,7 +20,7 @@ use openvm_stark_backend::{
 };
 use openvm_stark_sdk::{
     config::baby_bear_poseidon2::{
-        default_duplex_sponge, BabyBearPoseidon2CpuEngine, DuplexSponge,
+        default_duplex_sponge, BabyBearPoseidon2RefEngine, DuplexSponge,
     },
     utils::setup_tracing_with_log_level,
 };
@@ -148,7 +148,7 @@ fn test_stacked_opening_reduction(
     let gpu_engine = BabyBearPoseidon2GpuEngine::new(default_test_params_small());
     let params = gpu_engine.config().params().clone();
 
-    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
+    let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, _vk) = fib.keygen(&engine);
     let pk = engine.device().transport_pk_to_device(&pk);

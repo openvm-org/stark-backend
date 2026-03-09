@@ -12,7 +12,8 @@ type SC = BabyBearPoseidon2Config;
 // Shared backend test suite via macro
 // ============================================================================
 
-type Engine = openvm_cpu_backend::engine::BabyBearPoseidon2CpuEngine<DuplexSponge>;
+type Engine =
+    openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2CpuEngine<DuplexSponge>;
 openvm_backend_tests::backend_test_suite!(Engine);
 
 // ============================================================================

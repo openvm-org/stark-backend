@@ -544,7 +544,7 @@ mod tests {
     use openvm_stark_sdk::{
         config::{
             baby_bear_poseidon2::{
-                default_duplex_sponge, BabyBearPoseidon2CpuEngine, DuplexSponge,
+                default_duplex_sponge, BabyBearPoseidon2RefEngine, DuplexSponge,
             },
             log_up_params::log_up_security_params_baby_bear_100_bits,
         },
@@ -657,7 +657,7 @@ mod tests {
     }
 
     fn run_whir_fib_test_gpu(params: SystemParams) -> Result<(), VerifyWhirError> {
-        let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
         let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
         let (pk, _vk) = fib.keygen(&engine);
         let ctx = fib.generate_proving_ctx();

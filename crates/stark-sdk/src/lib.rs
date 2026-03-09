@@ -1,3 +1,5 @@
+#[cfg(feature = "cpu-backend")]
+pub use openvm_cpu_backend;
 pub use openvm_stark_backend;
 pub use p3_baby_bear;
 
