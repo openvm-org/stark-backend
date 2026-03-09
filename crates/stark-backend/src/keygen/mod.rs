@@ -193,8 +193,8 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
         };
         // To protect against weak Fiat-Shamir, we hash the "pre"-verifying key and include it in
         // the final verifying key. This just needs to commit to the verifying key and does
-        // not need to be verified by the verifier, so we just use bincode to serialize it.
-        let vk_bytes = bitcode::serialize(&pre_vk).unwrap();
+        // not need to be verified by the verifier, so we just use postcard to serialize it.
+        let vk_bytes = postcard::to_allocvec(&pre_vk).unwrap();
         tracing::debug!("pre-vkey: {} bytes", vk_bytes.len());
         // Purely to get type compatibility and convenience, we hash using the native hash
         let vk_pre_hash = self
