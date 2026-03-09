@@ -1417,7 +1417,8 @@ where
     let constraint_degree = mpk.max_constraint_degree;
     let num_traces = ctx.per_trace.len();
 
-    let n_max = log2_strict_usize(MatrixDimensions::height(&ctx.per_trace[0].1.common_main)).saturating_sub(l_skip);
+    let n_max = log2_strict_usize(MatrixDimensions::height(&ctx.per_trace[0].1.common_main))
+        .saturating_sub(l_skip);
     let mut total_interactions = 0u64;
     let interactions_meta: Vec<_> = ctx
         .per_trace

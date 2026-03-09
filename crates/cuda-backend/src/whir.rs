@@ -536,8 +536,7 @@ mod tests {
     use openvm_stark_backend::{
         keygen::types::MultiStarkProvingKey,
         prover::{
-            stacked_pcs::stacked_commit, DeviceDataTransporter, ProvingContext,
-            ReferenceBackend,
+            stacked_pcs::stacked_commit, DeviceDataTransporter, ProvingContext, ReferenceBackend,
         },
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},

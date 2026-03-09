@@ -19,13 +19,15 @@ use openvm_stark_backend::{
 };
 use p3_baby_bear::BabyBear;
 use p3_dft::TwoAdicSubgroupDft;
-use p3_matrix::dense::RowMajorMatrix;
 use p3_field::{ExtensionField, TwoAdicField};
+use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
-use crate::{backend::CpuBackend, error::CpuProverError, stacked_reduction::StackedReductionCpuNew};
+use crate::{
+    backend::CpuBackend, error::CpuProverError, stacked_reduction::StackedReductionCpuNew,
+};
 
 /// Row-major CPU prover device.
 #[derive(Clone, Getters, derive_new::new)]
@@ -235,10 +237,7 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
         )
     }
 
-    fn transport_matrix_to_device(
-        &self,
-        matrix: &ColMajorMatrix<SC::F>,
-    ) -> RowMajorMatrix<SC::F> {
+    fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<SC::F>) -> RowMajorMatrix<SC::F> {
         let view: StridedColMajorMatrixView<'_, SC::F> = matrix.as_view().into();
         view.to_row_major_matrix()
     }
