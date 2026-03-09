@@ -536,7 +536,7 @@ mod tests {
     use openvm_stark_backend::{
         keygen::types::MultiStarkProvingKey,
         prover::{
-            stacked_pcs::stacked_commit, DeviceDataTransporter, ProvingContext, ReferenceBackend,
+            stacked_pcs::stacked_commit, CpuColMajorBackend, DeviceDataTransporter, ProvingContext,
         },
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
@@ -566,7 +566,7 @@ mod tests {
     fn run_whir_test_gpu(
         params: SystemParams,
         pk: MultiStarkProvingKey<SC>,
-        ctx: ProvingContext<ReferenceBackend<SC>>,
+        ctx: ProvingContext<CpuColMajorBackend<SC>>,
     ) -> Result<(), VerifyWhirError> {
         let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
         let device = engine.device();

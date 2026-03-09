@@ -12,9 +12,9 @@ use openvm_stark_backend::{
     p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::{
         stacked_pcs::{MerkleTree, StackedPcsData},
-        AirProvingContext, ColMajorMatrix, CommittedTraceData, DeviceDataTransporter,
-        DeviceMultiStarkProvingKey, DeviceStarkProvingKey, MatrixDimensions, MatrixView,
-        ProvingContext, ReferenceBackend,
+        AirProvingContext, ColMajorMatrix, CommittedTraceData, CpuColMajorBackend,
+        DeviceDataTransporter, DeviceMultiStarkProvingKey, DeviceStarkProvingKey, MatrixDimensions,
+        MatrixView, ProvingContext,
     },
 };
 use tracing::debug;
@@ -243,7 +243,7 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
 }
 
 pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
-    cpu_ctx: AirProvingContext<ReferenceBackend<SC>>,
+    cpu_ctx: AirProvingContext<CpuColMajorBackend<SC>>,
 ) -> AirProvingContext<GenericGpuBackend<HS>> {
     assert!(
         cpu_ctx.cached_mains.is_empty(),
@@ -260,7 +260,7 @@ pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
 pub fn transport_proving_ctx_to_host(
     gpu_ctx: ProvingContext<GpuBackend>,
     l_skip: usize,
-) -> ProvingContext<ReferenceBackend<SC>> {
+) -> ProvingContext<CpuColMajorBackend<SC>> {
     let per_trace = gpu_ctx
         .per_trace
         .into_iter()
@@ -272,7 +272,7 @@ pub fn transport_proving_ctx_to_host(
 pub fn transport_air_proving_ctx_to_host(
     gpu_ctx: AirProvingContext<GpuBackend>,
     l_skip: usize,
-) -> AirProvingContext<ReferenceBackend<SC>> {
+) -> AirProvingContext<CpuColMajorBackend<SC>> {
     let trace = transport_matrix_d2h_col_major(&gpu_ctx.common_main).unwrap();
     let cached_mains = gpu_ctx
         .cached_mains

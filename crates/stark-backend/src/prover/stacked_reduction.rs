@@ -17,8 +17,8 @@ use crate::{
             batch_fold_mle_evals, fold_mle_evals, fold_ple_evals, sumcheck_round0_deg,
             sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
-        ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, MatrixView, ProverBackend,
-        ReferenceBackend, ReferenceDevice,
+        ColMajorMatrix, ColMajorMatrixView, CpuColMajorBackend, MatrixDimensions, MatrixView,
+        ProverBackend, ReferenceDevice,
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
@@ -154,12 +154,12 @@ struct TraceViewMeta {
 }
 
 impl<'a, SC: StarkProtocolConfig>
-    StackedReductionProver<'a, ReferenceBackend<SC>, ReferenceDevice<SC>>
+    StackedReductionProver<'a, CpuColMajorBackend<SC>, ReferenceDevice<SC>>
     for StackedReductionCpu<'a, SC>
 where
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    ReferenceBackend<SC>: ProverBackend<
+    CpuColMajorBackend<SC>: ProverBackend<
         Val = SC::F,
         Challenge = SC::EF,
         PcsData = StackedPcsData<SC::F, SC::Digest>,

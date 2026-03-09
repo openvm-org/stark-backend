@@ -12,7 +12,7 @@ use openvm_stark_backend::{
     duplex_sponge,
     hasher::Hasher,
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
-    prover::{Coordinator, ReferenceBackend, ReferenceDevice},
+    prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptLog,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
@@ -122,7 +122,7 @@ where
     TS: FiatShamirTranscript<SC> + From<Perm>,
 {
     type SC = SC;
-    type PB = ReferenceBackend<SC>;
+    type PB = CpuColMajorBackend<SC>;
     type PD = ReferenceDevice<SC>;
     type TS = TS;
 
@@ -150,7 +150,7 @@ where
         &self,
         transcript: TS,
     ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
-        Coordinator::new(ReferenceBackend::new(), self.device.clone(), transcript)
+        Coordinator::new(CpuColMajorBackend::new(), self.device.clone(), transcript)
     }
 }
 

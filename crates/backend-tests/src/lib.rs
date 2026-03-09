@@ -37,8 +37,8 @@ use openvm_stark_backend::{
     poly_common::Squarable,
     prover::{
         poly::Ple, stacked_pcs::stacked_commit, whir::prove_whir_opening, AirProvingContext,
-        ColMajorMatrix, DeviceDataTransporter, DeviceMultiStarkProvingKey, MatrixDimensions,
-        ProvingContext, ReferenceBackend,
+        ColMajorMatrix, CpuColMajorBackend, DeviceDataTransporter, DeviceMultiStarkProvingKey,
+        MatrixDimensions, ProvingContext,
     },
     test_utils::{
         default_test_params_small,
@@ -91,7 +91,7 @@ pub type SC = BabyBearPoseidon2Config;
 pub fn run_test_on_cpu_ctx<E: StarkEngine<SC = SC>>(
     engine: &E,
     airs: Vec<AirRef<SC>>,
-    ctxs: Vec<AirProvingContext<ReferenceBackend<SC>>>,
+    ctxs: Vec<AirProvingContext<CpuColMajorBackend<SC>>>,
 ) -> eyre::Result<()> {
     let cpu_ctx = ProvingContext::new(ctxs.into_iter().enumerate().collect());
     let d_ctx = engine.device().transport_proving_ctx_to_device(&cpu_ctx);
@@ -1055,8 +1055,8 @@ pub fn stacking_openings_for_matrix(
 /// Run a CPU WHIR prove-then-verify cycle for the given proving key and context.
 fn run_whir_test(
     config: &SC,
-    pk: DeviceMultiStarkProvingKey<ReferenceBackend<SC>>,
-    ctx: &ProvingContext<ReferenceBackend<SC>>,
+    pk: DeviceMultiStarkProvingKey<CpuColMajorBackend<SC>>,
+    ctx: &ProvingContext<CpuColMajorBackend<SC>>,
 ) -> eyre::Result<()> {
     let params = config.params();
     let (common_main_commit, common_main_pcs_data) = {

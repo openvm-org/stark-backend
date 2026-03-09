@@ -19,8 +19,8 @@ use crate::{
     proof::Proof,
     prover::{
         stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData,
-        DeviceDataTransporter, DeviceMultiStarkProvingKey, MatrixDimensions, MultiRapProver,
-        Prover, ProvingContext, ReferenceBackend, TraceCommitter,
+        CpuColMajorBackend, DeviceDataTransporter, DeviceMultiStarkProvingKey, MatrixDimensions,
+        MultiRapProver, Prover, ProvingContext, TraceCommitter,
     },
     AirRef, StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
     WhirProximityStrategy,
@@ -83,7 +83,7 @@ fn get_conditional_fib_number<F: PrimeField64>(mut a: u64, mut b: u64, sels: &[b
 fn commit_cached_trace<SC: StarkProtocolConfig>(
     config: &SC,
     trace: ColMajorMatrix<SC::F>,
-) -> CommittedTraceData<ReferenceBackend<SC>> {
+) -> CommittedTraceData<CpuColMajorBackend<SC>> {
     let params = config.params();
     let (commitment, data) = stacked_commit(
         config.hasher(),
@@ -105,7 +105,7 @@ fn commit_cached_trace<SC: StarkProtocolConfig>(
 pub trait TestFixture<SC: StarkProtocolConfig> {
     fn airs(&self) -> Vec<AirRef<SC>>;
 
-    fn generate_proving_ctx(&self) -> ProvingContext<ReferenceBackend<SC>>;
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>>;
 
     fn keygen<E: StarkEngine<SC = SC>>(
         &self,
@@ -190,7 +190,7 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for FibFixture {
         vec![air; self.num_airs]
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContext<ReferenceBackend<SC>> {
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>> {
         use crate::test_utils::dummy_airs::fib_air::trace::generate_trace_rows;
         let f_n = get_fib_number::<SC::F>(self.a, self.b, self.n);
         let pis = [self.a, self.b, f_n].map(SC::F::from_u64);
@@ -224,7 +224,7 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for InteractionsFixture11 {
         any_air_arc_vec!(sender_air, receiver_air)
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContext<ReferenceBackend<SC>> {
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>> {
         let sender_trace = RowMajorMatrix::new(
             [0, 1, 3, 5, 7, 4, 546, 889]
                 .into_iter()
@@ -269,7 +269,7 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for CachedFixture11<SC> {
         any_air_arc_vec!(sender_air, receiver_air)
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContext<ReferenceBackend<SC>> {
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>> {
         let sender_trace = ColMajorMatrix::new(
             [0, 3, 7, 546].into_iter().map(SC::F::from_usize).collect(),
             1,
@@ -343,7 +343,7 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for PreprocessedFibFixture {
         vec![air]
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContext<ReferenceBackend<SC>> {
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>> {
         use crate::test_utils::dummy_airs::fib_selector_air::trace::generate_trace_rows;
         let trace = generate_trace_rows::<SC::F>(self.a, self.b, &self.sels);
         let f_n = get_conditional_fib_number::<SC::F>(self.a, self.b, &self.sels);
@@ -370,7 +370,7 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for PreprocessedAndCachedFixture<S
         ))]
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContext<ReferenceBackend<SC>> {
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>> {
         assert!(self.sels.len().is_power_of_two());
 
         let common_main =
@@ -418,7 +418,7 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for SelfInteractionFixture {
             .collect_vec()
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContext<ReferenceBackend<SC>> {
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>> {
         let per_trace = self
             .widths
             .iter()
@@ -459,7 +459,7 @@ impl<SC: StarkProtocolConfig> MixtureFixtureEnum<SC> {
         }
     }
 
-    fn generate_air_proving_ctxs(&self) -> Vec<AirProvingContext<ReferenceBackend<SC>>> {
+    fn generate_air_proving_ctxs(&self) -> Vec<AirProvingContext<CpuColMajorBackend<SC>>> {
         use crate::test_utils::MixtureFixtureEnum::*;
         let ctx = match self {
             FibFixture(fx) => fx.generate_proving_ctx(),
@@ -501,7 +501,7 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for MixtureFixture<SC> {
         self.fxs.iter().flat_map(|fx| fx.airs()).collect_vec()
     }
 
-    fn generate_proving_ctx(&self) -> ProvingContext<ReferenceBackend<SC>> {
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>> {
         let per_trace = self
             .fxs
             .iter()

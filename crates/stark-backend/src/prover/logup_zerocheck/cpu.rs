@@ -24,8 +24,8 @@ use crate::{
             batch_fold_mle_evals, batch_fold_ple_evals, fold_ple_evals, sumcheck_round0_deg,
             sumcheck_round_poly_evals, sumcheck_uni_round0_poly,
         },
-        ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProverBackend,
-        ProvingContext, ReferenceBackend, StridedColMajorMatrixView,
+        ColMajorMatrix, CpuColMajorBackend, DeviceMultiStarkProvingKey, MatrixDimensions,
+        ProverBackend, ProvingContext, StridedColMajorMatrixView,
     },
     StarkProtocolConfig,
 };
@@ -73,11 +73,11 @@ impl<'a, SC: StarkProtocolConfig> LogupZerocheckCpu<'a, SC>
 where
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    ReferenceBackend<SC>: ProverBackend<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
+    CpuColMajorBackend<SC>: ProverBackend<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
 {
     pub fn new(
-        pk: &'a DeviceMultiStarkProvingKey<ReferenceBackend<SC>>,
-        ctx: &ProvingContext<ReferenceBackend<SC>>,
+        pk: &'a DeviceMultiStarkProvingKey<CpuColMajorBackend<SC>>,
+        ctx: &ProvingContext<CpuColMajorBackend<SC>>,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: SC::EF,
@@ -232,7 +232,7 @@ where
     /// form for uniformity and debugging since this interpolation is inexpensive.
     pub fn sumcheck_uni_round0_polys(
         &mut self,
-        ctx: &ProvingContext<ReferenceBackend<SC>>,
+        ctx: &ProvingContext<CpuColMajorBackend<SC>>,
         lambda: SC::EF,
     ) -> Result<Vec<UnivariatePoly<SC::EF>>, LogupZerocheckError> {
         let n_logup = self.n_logup;
@@ -425,7 +425,7 @@ where
     /// After univariate sumcheck round 0, fold prismalinear evaluations using randomness `r_0`.
     /// Folding _could_ directly mutate inplace the trace matrices in `ctx` as they will not be
     /// needed after this.
-    pub fn fold_ple_evals(&mut self, ctx: &ProvingContext<ReferenceBackend<SC>>, r_0: SC::EF) {
+    pub fn fold_ple_evals(&mut self, ctx: &ProvingContext<CpuColMajorBackend<SC>>, r_0: SC::EF) {
         let l_skip = self.l_skip;
         // "Fold" all PLE evaluations by interpolating and evaluating at `r_0`.
         // NOTE: after this folding, \hat{T} and \hat{T_{rot}} will be treated as completely
