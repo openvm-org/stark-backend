@@ -138,7 +138,7 @@ where
                                 let w_x = w_0 + (w_1 - w_0) * x;
                                 f_x * w_x
                             })
-                            .reduce(|| SC::EF::ZERO, |a, b| a + b)
+                            .sum::<SC::EF>()
                     })
                     .collect();
 

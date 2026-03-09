@@ -398,10 +398,11 @@ where
 
                 // Parallel fold-reduce over x-points in H_{n_lift}.
                 // Each thread reuses its own DFT and weighted-sum buffers.
-                let evals = (0..1usize << n_lift)
+                type Acc<F, EF> = (Vec<[EF; 2]>, Vec<F>, Vec<F>, Vec<EF>, Vec<EF>);
+                let (evals, _, _, _, _): Acc<SC::F, SC::EF> = (0..1usize << n_lift)
                     .into_par_iter()
-                    .fold(
-                        || {
+                    .par_fold_reduce(
+                        || -> Acc<SC::F, SC::EF> {
                             (
                                 vec![[SC::EF::ZERO; 2]; d_n],
                                 vec![SC::F::ZERO; n_skip],
@@ -460,16 +461,12 @@ where
                             }
                             (result, coeffs, coset, w_eq, w_rot)
                         },
-                    )
-                    .map(|(result, ..)| result)
-                    .reduce(
-                        || vec![[SC::EF::ZERO; 2]; d_n],
-                        |mut a, b| {
-                            for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                        |(mut a_result, a1, a2, a3, a4), (b_result, _, _, _, _)| {
+                            for (ai, bi) in a_result.iter_mut().zip(b_result.iter()) {
                                 ai[0] += bi[0];
                                 ai[1] += bi[1];
                             }
-                            a
+                            (a_result, a1, a2, a3, a4)
                         },
                     );
 
