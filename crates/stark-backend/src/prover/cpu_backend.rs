@@ -11,7 +11,7 @@ use crate::{
     poly_common::Squarable,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
-        error::CpuProverError,
+        error::RefProverError,
         prove_zerocheck_and_logup,
         stacked_pcs::{stacked_commit, StackedPcsData},
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
@@ -68,14 +68,14 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
     TS: FiatShamirTranscript<SC>,
 {
-    type Error = CpuProverError;
+    type Error = RefProverError;
 }
 
 impl<SC: StarkProtocolConfig> TraceCommitter<ReferenceBackend<SC>> for ReferenceDevice<SC>
 where
     SC::F: Ord,
 {
-    type Error = CpuProverError;
+    type Error = RefProverError;
 
     fn commit(
         &self,
@@ -103,7 +103,7 @@ where
     /// claims of trace matrices `T, T_{rot}` at `r_{n_T}`.
     type Artifacts = Vec<SC::EF>;
 
-    type Error = CpuProverError;
+    type Error = RefProverError;
 
     fn prove_rap_constraints(
         &self,
@@ -129,7 +129,7 @@ where
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
     type OpeningPoints = Vec<SC::EF>;
 
-    type Error = CpuProverError;
+    type Error = RefProverError;
 
     fn prove_openings(
         &self,

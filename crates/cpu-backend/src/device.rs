@@ -25,7 +25,7 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
-use crate::{backend::CpuBackend, error::CpuBackendError, stacked_reduction::StackedReductionCpuNew};
+use crate::{backend::CpuBackend, error::CpuProverError, stacked_reduction::StackedReductionCpuNew};
 
 /// Row-major CPU prover device.
 #[derive(Clone, Getters, derive_new::new)]
@@ -47,14 +47,14 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
     TS: FiatShamirTranscript<SC>,
 {
-    type Error = CpuBackendError;
+    type Error = CpuProverError;
 }
 
 impl<SC: StarkProtocolConfig> TraceCommitter<CpuBackend<SC>> for CpuDevice<SC>
 where
     SC::F: Ord,
 {
-    type Error = CpuBackendError;
+    type Error = CpuProverError;
 
     #[instrument(level = "info", name = "trace_commit_cpu", skip_all)]
     fn commit(
@@ -92,7 +92,7 @@ where
     type PartialProof = (GkrProof<SC>, BatchConstraintProof<SC>);
     type Artifacts = Vec<SC::EF>;
 
-    type Error = CpuBackendError;
+    type Error = CpuProverError;
 
     fn prove_rap_constraints(
         &self,
@@ -117,7 +117,7 @@ where
     type OpeningProof = (StackingProof<SC>, WhirProof<SC>);
     type OpeningPoints = Vec<SC::EF>;
 
-    type Error = CpuBackendError;
+    type Error = CpuProverError;
 
     fn prove_openings(
         &self,

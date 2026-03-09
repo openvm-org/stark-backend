@@ -25,4 +25,4 @@ mod whir;
 
 pub use backend::*;
 pub use device::*;
-pub use error::CpuBackendError;
+pub use error::CpuProverError;

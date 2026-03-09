@@ -5,7 +5,7 @@ use thiserror::Error;
 
 /// Top-level error type for the CPU backend prover.
 #[derive(Error, Debug)]
-pub enum CpuBackendError {
+pub enum CpuProverError {
     #[error("Stacked PCS: {0}")]
     StackedPcs(#[from] StackedPcsError),
     #[error("LogupZerocheck: {0}")]
