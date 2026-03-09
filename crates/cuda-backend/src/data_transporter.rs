@@ -22,6 +22,8 @@ use tracing::debug;
 use crate::{
     base::DeviceMatrix,
     cuda::matrix::{collapse_strided_matrix, matrix_transpose_fp},
+    gpu_backend::GenericGpuBackend,
+    hash_scheme::GpuHashScheme,
     merkle_tree::MerkleTreeGpu,
     poly::PleMatrix,
     prelude::{Digest, F, SC},
@@ -29,17 +31,18 @@ use crate::{
     AirDataGpu, GpuBackend, GpuDevice, GpuProverConfig, ProverError,
 };
 
-impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
+impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for GpuDevice {
     fn transport_pk_to_device(
         &self,
-        mpk: &MultiStarkProvingKey<SC>,
-    ) -> DeviceMultiStarkProvingKey<GpuBackend> {
+        mpk: &MultiStarkProvingKey<HS::SC>,
+    ) -> DeviceMultiStarkProvingKey<GenericGpuBackend<HS>> {
         let per_air = mpk
             .per_air
             .iter()
             .map(|pk| {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
-                    transport_and_unstack_single_data_h2d(d.as_ref(), &self.prover_config).unwrap()
+                    transport_and_unstack_single_data_h2d::<HS>(d.as_ref(), &self.prover_config)
+                        .unwrap()
                 });
                 let other_data = AirDataGpu::new(pk).unwrap();
                 let num_monomials = other_data
@@ -75,9 +78,9 @@ impl DeviceDataTransporter<SC, GpuBackend> for GpuDevice {
 
     fn transport_pcs_data_to_device(
         &self,
-        pcs_data: &StackedPcsData<F, Digest>,
-    ) -> StackedPcsDataGpu<F, Digest> {
-        transport_pcs_data_h2d(pcs_data, &self.prover_config).unwrap()
+        pcs_data: &StackedPcsData<F, HS::Digest>,
+    ) -> StackedPcsDataGpu<F, HS::Digest> {
+        transport_pcs_data_h2d::<HS::Digest>(pcs_data, &self.prover_config).unwrap()
     }
 
     fn transport_matrix_from_device_to_host(&self, matrix: &DeviceMatrix<F>) -> ColMajorMatrix<F> {
@@ -118,10 +121,10 @@ pub fn transport_matrix_h2d_row(
 /// `d` must be the stacked pcs data of a single trace matrix.
 /// This function will transport `d` to device and then unstack it (allocating device memory) to
 /// return `CommittedTraceData<F, Digest>`.
-pub fn transport_and_unstack_single_data_h2d(
-    d: &StackedPcsData<F, Digest>,
+pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
+    d: &StackedPcsData<F, HS::Digest>,
     prover_config: &GpuProverConfig,
-) -> Result<CommittedTraceData<GpuBackend>, ProverError> {
+) -> Result<CommittedTraceData<GenericGpuBackend<HS>>, ProverError> {
     debug_assert!(d
         .layout
         .sorted_cols
@@ -181,7 +184,10 @@ pub fn transport_and_unstack_single_data_h2d(
     };
     // Sanity check. Not a strong assert because we transport the merkle tree
     // instead of recomputing it above.
-    assert_eq!(d_data.tree.root(), d.commit().unwrap());
+    assert!(
+        d_data.tree.root() == d.commit().unwrap(),
+        "transported tree root mismatch"
+    );
     Ok(CommittedTraceData {
         commitment: d.commit().unwrap(),
         trace: DeviceMatrix::new(Arc::new(trace_buffer), height, width),
@@ -212,10 +218,10 @@ pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
     })
 }
 
-pub fn transport_pcs_data_h2d(
-    pcs_data: &StackedPcsData<F, Digest>,
+pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'static>(
+    pcs_data: &StackedPcsData<F, D>,
     prover_config: &GpuProverConfig,
-) -> Result<StackedPcsDataGpu<F, Digest>, ProverError> {
+) -> Result<StackedPcsDataGpu<F, D>, ProverError> {
     let StackedPcsData {
         layout,
         matrix,
@@ -236,9 +242,9 @@ pub fn transport_pcs_data_h2d(
     })
 }
 
-pub fn transport_air_proving_ctx_to_device(
+pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
     cpu_ctx: AirProvingContext<CpuBackend<SC>>,
-) -> AirProvingContext<GpuBackend> {
+) -> AirProvingContext<GenericGpuBackend<HS>> {
     assert!(
         cpu_ctx.cached_mains.is_empty(),
         "CPU to GPU transfer of cached traces not supported"

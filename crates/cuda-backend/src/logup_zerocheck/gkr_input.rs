@@ -15,8 +15,9 @@ use crate::{
     cuda::logup_zerocheck::{
         frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp, logup_gkr_input_eval,
     },
+    gpu_backend::GenericGpuBackend,
+    hash_scheme::GpuHashScheme,
     prelude::{EF, F},
-    GpuBackend,
 };
 
 const TASK_SIZE: u32 = 65536;
@@ -30,9 +31,9 @@ pub struct TraceInteractionMeta {
 }
 
 // TODO[jpw]: revisit if this function is needed
-pub fn collect_trace_interactions(
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
-    ctx: &ProvingContext<GpuBackend>,
+pub fn collect_trace_interactions<HS: GpuHashScheme>(
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
+    ctx: &ProvingContext<GenericGpuBackend<HS>>,
     layout: &StackedLayout,
 ) -> Vec<Option<TraceInteractionMeta>> {
     // Pre-group layout slices by trace to avoid repeated scans later.
@@ -85,10 +86,10 @@ pub fn collect_trace_interactions(
 /// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
 /// Returns leaves buffer (WITHOUT alpha applied) and alpha value to be applied in first tree layer.
 #[instrument(name = "prover.rap_constraints.logup_gkr.input_evals", skip_all)]
-pub fn log_gkr_input_evals(
+pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     trace_interactions: &[Option<TraceInteractionMeta>],
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
-    ctx: &ProvingContext<GpuBackend>,
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
+    ctx: &ProvingContext<GenericGpuBackend<HS>>,
     l_skip: usize,
     alpha_logup: EF,
     d_challenges: &DeviceBuffer<EF>,

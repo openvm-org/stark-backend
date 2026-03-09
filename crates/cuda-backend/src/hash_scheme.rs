@@ -1,15 +1,28 @@
 use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 use openvm_stark_backend::{StarkProtocolConfig, SystemParams};
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
+    BabyBearBn254Poseidon2Config, Digest as Bn254Digest,
+};
 use openvm_stark_sdk::config::baby_bear_poseidon2::{
     BabyBearPoseidon2Config, Digest as BabyBearPoseidon2Digest,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use crate::{
+    bn254_sponge::MultiField32ChallengerGpu,
+    cuda::bn254_merkle_tree::{
+        bn254_poseidon2_adjacent_compress_layer, bn254_poseidon2_compressing_row_hashes,
+        bn254_poseidon2_compressing_row_hashes_ext,
+    },
+};
 use crate::{
     cuda::merkle_tree::{
         poseidon2_adjacent_compress_layer, poseidon2_compressing_row_hashes,
         poseidon2_compressing_row_hashes_ext,
     },
+    merkle_tree::BatchQueryMerkle,
     sponge::{DuplexSpongeGpu, GpuFiatShamirTranscript},
     types::{EF, F},
 };
@@ -21,7 +34,15 @@ use crate::{
 /// appropriate CUDA FFI wrappers, and declares the concrete `Digest` type
 /// those kernels produce.
 pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
-    type Digest: Copy + Clone + Send + Sync + Serialize + DeserializeOwned + 'static;
+    type Digest: Copy
+        + Clone
+        + PartialEq
+        + Send
+        + Sync
+        + Serialize
+        + DeserializeOwned
+        + BatchQueryMerkle
+        + 'static;
 
     /// Compress rows of a base-field matrix into digest leaves.
     ///
@@ -69,7 +90,15 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
 /// and a transcript type into a single coherent GPU proving configuration.
 pub trait GpuHashScheme: Copy + Clone + Send + Sync + 'static {
     type SC: StarkProtocolConfig<F = F, EF = EF, Digest = Self::Digest>;
-    type Digest: Copy + Clone + Send + Sync + Serialize + DeserializeOwned + 'static;
+    type Digest: Copy
+        + Clone
+        + PartialEq
+        + Send
+        + Sync
+        + Serialize
+        + DeserializeOwned
+        + BatchQueryMerkle
+        + 'static;
     type Transcript: GpuFiatShamirTranscript<Self::SC> + Default + Clone + Send + Sync + 'static;
     type MerkleHash: GpuMerkleHash<Digest = Self::Digest>;
 
@@ -138,3 +167,75 @@ impl GpuHashScheme for BabyBearPoseidon2HashScheme {
 }
 
 pub type DefaultHashScheme = BabyBearPoseidon2HashScheme;
+
+// ---------------------------------------------------------------------------
+// BN254 Poseidon2 concrete implementations
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+/// BN254 Poseidon2 Merkle hash — delegates to the BN254 CUDA FFI.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bn254Poseidon2MerkleHash;
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
+    // `Bn254Digest` from stark-sdk = `[Bn254Scalar; 1]`, which is the same concrete type as
+    // `Bn254Digest` in `cuda::bn254_merkle_tree` — both are type aliases for `[p3_bn254::Bn254;
+    // 1]`.
+    type Digest = Bn254Digest;
+
+    unsafe fn compress_rows(
+        out: &mut DeviceBuffer<Self::Digest>,
+        matrix: &DeviceBuffer<F>,
+        width: usize,
+        query_stride: usize,
+        log_rows_per_query: usize,
+    ) -> Result<(), CudaError> {
+        bn254_poseidon2_compressing_row_hashes(out, matrix, width, query_stride, log_rows_per_query)
+    }
+
+    unsafe fn compress_rows_ext(
+        out: &mut DeviceBuffer<Self::Digest>,
+        matrix: &DeviceBuffer<EF>,
+        width: usize,
+        query_stride: usize,
+        log_rows_per_query: usize,
+    ) -> Result<(), CudaError> {
+        bn254_poseidon2_compressing_row_hashes_ext(
+            out,
+            matrix,
+            width,
+            query_stride,
+            log_rows_per_query,
+        )
+    }
+
+    unsafe fn compress_layer(
+        output: &mut DeviceBuffer<Self::Digest>,
+        prev_layer: &DeviceBuffer<Self::Digest>,
+        output_size: usize,
+    ) -> Result<(), CudaError> {
+        bn254_poseidon2_adjacent_compress_layer(output, prev_layer, output_size)
+    }
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+/// BabyBear + BN254 Poseidon2 hash scheme (Groth16-friendly transcript).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BabyBearBn254Poseidon2HashScheme;
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+impl GpuHashScheme for BabyBearBn254Poseidon2HashScheme {
+    type SC = BabyBearBn254Poseidon2Config;
+    type Digest = Bn254Digest;
+    type Transcript = MultiField32ChallengerGpu;
+    type MerkleHash = Bn254Poseidon2MerkleHash;
+
+    fn default_config(params: SystemParams) -> Self::SC {
+        Self::SC::default_from_params(params)
+    }
+
+    fn default_transcript() -> Self::Transcript {
+        Self::Transcript::default()
+    }
+}

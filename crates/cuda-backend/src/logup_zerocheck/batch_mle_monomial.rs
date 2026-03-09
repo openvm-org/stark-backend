@@ -20,9 +20,10 @@ use crate::{
         LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
     },
     error::KernelError,
+    gpu_backend::GenericGpuBackend,
+    hash_scheme::GpuHashScheme,
     logup_zerocheck::batch_mle::TraceCtx,
     prelude::EF,
-    GpuBackend,
 };
 
 const THREADS_PER_BLOCK: u32 = 256;
@@ -30,9 +31,9 @@ const THREADS_PER_BLOCK: u32 = 256;
 /// Returns true if the trace can use the monomial evaluation path.
 ///
 /// A trace is eligible if it has constraints and the AIR has expanded monomials.
-pub(crate) fn trace_has_monomials(
+pub(crate) fn trace_has_monomials<HS: GpuHashScheme>(
     trace: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
 ) -> bool {
     trace.has_constraints
         && pk.per_air[trace.air_idx]
@@ -44,9 +45,9 @@ pub(crate) fn trace_has_monomials(
 }
 
 /// Get the number of monomials for a trace. Returns 0 if the trace has no monomials.
-pub(crate) fn get_num_monomials(
+pub(crate) fn get_num_monomials<HS: GpuHashScheme>(
     trace: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
 ) -> u32 {
     pk.per_air[trace.air_idx]
         .other_data
@@ -57,9 +58,9 @@ pub(crate) fn get_num_monomials(
 }
 
 /// Get the rules_len for a trace's zerocheck DAG.
-pub(crate) fn get_zerocheck_rules_len(
+pub(crate) fn get_zerocheck_rules_len<HS: GpuHashScheme>(
     trace: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
 ) -> usize {
     pk.per_air[trace.air_idx]
         .other_data
@@ -75,8 +76,8 @@ pub(crate) fn get_zerocheck_rules_len(
 /// `sum_l(coefficient_l * lambda_pows[constraint_idx_l])` for that monomial.
 ///
 /// The AIR must have nonempty monomials.
-pub(crate) fn compute_lambda_combinations(
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     air_idx: usize,
     lambda_pows: &DeviceBuffer<EF>,
 ) -> Result<DeviceBuffer<EF>, CudaError> {
@@ -123,9 +124,9 @@ impl<'a> ZerocheckMonomialBatch<'a> {
     /// # Panics
     ///
     /// Panics if `traces` is empty or if `lambda_combinations` length doesn't match.
-    pub fn new(
+    pub fn new<HS: GpuHashScheme>(
         traces: impl IntoIterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+        pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         lambda_combinations: &[&DeviceBuffer<EF>],
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
@@ -299,9 +300,9 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
     ///
     /// Panics if `traces` is empty or if `lambda_combinations` length doesn't match.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<HS: GpuHashScheme>(
         traces: impl IntoIterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+        pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         lambda_combinations: &[&DeviceBuffer<EF>],
         sm_count: u32,
         num_x: u32,
@@ -505,8 +506,8 @@ pub struct LogupCombinations {
 /// Precompute logup combinations for a single AIR's interaction monomials.
 ///
 /// The AIR must have nonempty interaction monomials.
-pub(crate) fn compute_logup_combinations(
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     air_idx: usize,
     d_beta_pows: &DeviceBuffer<EF>,
     d_eq_3bs: &DeviceBuffer<EF>,
@@ -603,9 +604,9 @@ impl<'a> LogupMonomialBatch<'a> {
     /// # Panics
     ///
     /// Panics if `traces` is empty or if `logup_combinations` length doesn't match.
-    pub fn new(
+    pub fn new<HS: GpuHashScheme>(
         traces: impl IntoIterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+        pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         logup_combinations: &[&LogupCombinations],
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
