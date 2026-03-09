@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use eyre::eyre;
-use openvm_cpu_backend::RowMajorMatrixWrapper;
 use openvm_stark_backend::{
     prover::{AirProvingContext, DeviceDataTransporter, ProvingContext},
     PartitionedBaseAir, StarkEngine,
@@ -61,7 +60,7 @@ fn main() -> eyre::Result<()> {
     });
 
     // Row-major backend: wrap the RowMajorMatrix directly (no col-major conversion needed).
-    let trace_ctx = AirProvingContext::simple_no_pis(RowMajorMatrixWrapper::new(trace));
+    let trace_ctx = AirProvingContext::simple_no_pis(trace);
     let d_pk = engine.device().transport_pk_to_device(&pk);
     let proof = engine
         .prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]))

@@ -19,16 +19,13 @@ use openvm_stark_backend::{
 };
 use p3_baby_bear::BabyBear;
 use p3_dft::TwoAdicSubgroupDft;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_field::{ExtensionField, TwoAdicField};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
-use crate::{
-    backend::{CpuBackend, RowMajorMatrixWrapper},
-    error::CpuBackendError,
-    stacked_reduction::StackedReductionCpuNew,
-};
+use crate::{backend::CpuBackend, error::CpuBackendError, stacked_reduction::StackedReductionCpuNew};
 
 /// Row-major CPU prover device.
 #[derive(Clone, Getters, derive_new::new)]
@@ -62,12 +59,12 @@ where
     #[instrument(level = "info", name = "trace_commit_cpu", skip_all)]
     fn commit(
         &self,
-        traces: &[&RowMajorMatrixWrapper<SC::F>],
+        traces: &[&RowMajorMatrix<SC::F>],
     ) -> Result<(SC::Digest, StackedPcsData<SC::F, SC::Digest>), Self::Error> {
         // Convert row-major to col-major for stacking commitment
         let col_major_traces: Vec<ColMajorMatrix<SC::F>> = traces
             .iter()
-            .map(|rm| ColMajorMatrix::from_row_major(&rm.inner))
+            .map(|rm| ColMajorMatrix::from_row_major(rm))
             .collect();
         let col_major_refs: Vec<&ColMajorMatrix<SC::F>> = col_major_traces.iter().collect();
 
@@ -214,7 +211,7 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
                     let view: StridedColMajorMatrixView<'_, SC::F> = d.mat_view(0).into();
                     let row_major = view.to_row_major_matrix();
-                    let trace = RowMajorMatrixWrapper::new(row_major);
+                    let trace = row_major;
                     CommittedTraceData {
                         commitment: d.commit().unwrap(),
                         trace,
@@ -241,9 +238,9 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
     fn transport_matrix_to_device(
         &self,
         matrix: &ColMajorMatrix<SC::F>,
-    ) -> RowMajorMatrixWrapper<SC::F> {
+    ) -> RowMajorMatrix<SC::F> {
         let view: StridedColMajorMatrixView<'_, SC::F> = matrix.as_view().into();
-        RowMajorMatrixWrapper::new(view.to_row_major_matrix())
+        view.to_row_major_matrix()
     }
 
     fn transport_pcs_data_to_device(
@@ -255,9 +252,9 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
 
     fn transport_matrix_from_device_to_host(
         &self,
-        matrix: &RowMajorMatrixWrapper<SC::F>,
+        matrix: &RowMajorMatrix<SC::F>,
     ) -> ColMajorMatrix<SC::F> {
-        ColMajorMatrix::from_row_major(&matrix.inner)
+        ColMajorMatrix::from_row_major(matrix)
     }
 }
 

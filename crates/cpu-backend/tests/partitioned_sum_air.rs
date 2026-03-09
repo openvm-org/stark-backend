@@ -6,7 +6,6 @@ use std::{
 };
 
 use itertools::Itertools;
-use openvm_cpu_backend::RowMajorMatrixWrapper;
 use openvm_stark_backend::{
     air_builders::PartitionedAirBuilder,
     prover::{stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData},
@@ -88,15 +87,15 @@ fn prove_and_verify_sum_air(
     )
     .unwrap();
 
-    // CommittedTraceData.trace must match PB::Matrix = RowMajorMatrixWrapper for our backend.
+    // CommittedTraceData.trace must match PB::Matrix = RowMajorMatrix for our backend.
     // The PCS data (commitment + tree) is computed from the ColMajorMatrix.
     let trace_ctx = AirProvingContext {
         cached_mains: vec![CommittedTraceData {
             commitment: commit,
-            trace: RowMajorMatrixWrapper::new(y_rm),
+            trace: y_rm,
             data: Arc::new(data),
         }],
-        common_main: RowMajorMatrixWrapper::new(x_rm),
+        common_main: x_rm,
         public_values: vec![],
     };
 

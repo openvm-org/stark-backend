@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use openvm_cpu_backend::RowMajorMatrixWrapper;
 use openvm_stark_backend::{
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
     PartitionedBaseAir, StarkEngine, SystemParams,
@@ -76,7 +75,7 @@ fn bench_rowmajor_backend(params: SystemParams, inputs: Vec<[u64; 25]>) -> std::
 
     let trace =
         p3_keccak_air::generate_trace_rows::<openvm_stark_sdk::p3_baby_bear::BabyBear>(inputs, 0);
-    let trace_ctx = AirProvingContext::simple_no_pis(RowMajorMatrixWrapper::new(trace));
+    let trace_ctx = AirProvingContext::simple_no_pis(trace);
     let d_pk = engine.device().transport_pk_to_device(&pk);
 
     let start = std::time::Instant::now();

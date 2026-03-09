@@ -50,8 +50,6 @@ fn main() -> eyre::Result<()> {
 
     cfg_if! {
         if #[cfg(feature = "cpu-backend")] {
-            use openvm_stark_sdk::openvm_cpu_backend::RowMajorMatrixWrapper;
-
             cfg_if! {
                 if #[cfg(feature = "baby-bear-bn254-poseidon2")] {
                     use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::BabyBearBn254Poseidon2CpuEngine as Engine;
@@ -64,7 +62,7 @@ fn main() -> eyre::Result<()> {
 
             let engine: Engine = StarkEngine::new(params);
             let (pk, vk) = engine.keygen(&[Arc::new(air)]);
-            let trace_ctx = AirProvingContext::simple_no_pis(RowMajorMatrixWrapper::new(trace));
+            let trace_ctx = AirProvingContext::simple_no_pis(trace);
             let d_pk = engine.device().transport_pk_to_device(&pk);
             let proof = engine
                 .prove(&d_pk, ProvingContext::new(vec![(0, trace_ctx)]))

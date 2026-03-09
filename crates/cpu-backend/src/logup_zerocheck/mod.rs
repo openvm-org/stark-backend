@@ -49,7 +49,7 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::{debug, info_span, instrument};
 
-use crate::backend::{CpuBackend, RowMajorMatrixWrapper};
+use crate::backend::CpuBackend;
 
 // ============================================================================
 // Batch DFT helpers for row-major sumcheck
@@ -704,14 +704,14 @@ where
             }
         }
         for cd in &ctx.cached_mains {
-            mats.push((&cd.trace.inner, false));
+            mats.push((&cd.trace, false));
             if self.needs_next {
-                mats.push((&cd.trace.inner, true));
+                mats.push((&cd.trace, true));
             }
         }
-        mats.push((&ctx.common_main.inner, false));
+        mats.push((&ctx.common_main, false));
         if self.needs_next {
-            mats.push((&ctx.common_main.inner, true));
+            mats.push((&ctx.common_main, true));
         }
         mats
     }
@@ -914,7 +914,7 @@ impl<'a, SC: StarkProtocolConfig> LogupZerocheckRowMajor<'a, SC>
 where
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = RowMajorMatrixWrapper<SC::F>>,
+    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = RowMajorMatrix<SC::F>>,
 {
     pub fn new(
         pk: &'a DeviceMultiStarkProvingKey<CpuBackend<SC>>,
@@ -950,7 +950,7 @@ where
 
         let n_per_trace: Vec<isize> = ctx
             .common_main_traces()
-            .map(|(_, t)| log2_strict_usize(t.height()) as isize - l_skip as isize)
+            .map(|(_, t)| log2_strict_usize(MatrixDimensions::height(t)) as isize - l_skip as isize)
             .collect_vec();
         let n_max: usize = n_per_trace[0].max(0) as usize;
 
@@ -962,7 +962,7 @@ where
                 let constraints = &pk.vk.symbolic_constraints.constraints;
                 let public_values = trace_ctx.public_values.clone();
                 let preprocessed_trace: Option<&RowMajorMatrix<SC::F>> =
-                    pk.preprocessed_data.as_ref().map(|cd| &cd.trace.inner);
+                    pk.preprocessed_data.as_ref().map(|cd| &cd.trace);
                 // Validate index bounds
                 let mut rotation = 0;
                 for node in &constraints.nodes {
@@ -981,9 +981,9 @@ where
                                 rotation = max(rotation, offset);
                                 // Get width of the partition
                                 let part_width = if part_index < trace_ctx.cached_mains.len() {
-                                    trace_ctx.cached_mains[part_index].trace.inner.width
+                                    trace_ctx.cached_mains[part_index].trace.width
                                 } else {
-                                    trace_ctx.common_main.inner.width
+                                    trace_ctx.common_main.width
                                 };
                                 assert!(
                                     var.index < part_width,
@@ -1411,13 +1411,13 @@ where
     TS: FiatShamirTranscript<SC>,
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = RowMajorMatrixWrapper<SC::F>>,
+    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = RowMajorMatrix<SC::F>>,
 {
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
     let num_traces = ctx.per_trace.len();
 
-    let n_max = log2_strict_usize(ctx.per_trace[0].1.common_main.height()).saturating_sub(l_skip);
+    let n_max = log2_strict_usize(MatrixDimensions::height(&ctx.per_trace[0].1.common_main)).saturating_sub(l_skip);
     let mut total_interactions = 0u64;
     let interactions_meta: Vec<_> = ctx
         .per_trace
@@ -1425,7 +1425,7 @@ where
         .map(|(air_idx, trace_ctx)| {
             let pk = &mpk.per_air[*air_idx];
             let num_interactions = pk.vk.symbolic_constraints.interactions.len();
-            let height = trace_ctx.common_main.height();
+            let height = MatrixDimensions::height(&trace_ctx.common_main);
             let log_height = log2_strict_usize(height);
             let log_lifted_height = log_height.max(l_skip);
             total_interactions += (num_interactions as u64) << log_lifted_height;
@@ -1463,7 +1463,7 @@ where
             .map(|(trace_idx, helper)| {
                 let trace_ctx = &ctx.per_trace[trace_idx].1;
                 let mats = helper.view_mats_rowmaj(trace_ctx);
-                let height = trace_ctx.common_main.height();
+                let height = MatrixDimensions::height(&trace_ctx.common_main);
                 (0..height)
                     .into_par_iter()
                     .map(|i| {
