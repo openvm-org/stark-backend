@@ -287,6 +287,11 @@ impl FiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiField32Challeng
 
 impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiField32ChallengerGpu {
     fn grind_gpu(&mut self, bits: usize) -> Result<BabyBear, GrindError> {
+        // Trivial case: 0 bits mean no PoW is required and any witness is valid.
+        if bits == 0 {
+            return Ok(BabyBear::ZERO);
+        }
+
         // 1. Sync host state to device.
         self.sync_h2d()?;
 

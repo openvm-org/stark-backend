@@ -259,6 +259,10 @@ impl DuplexSpongeGpu {
     /// After this call, the host state will have observed the witness and sampled,
     /// matching the state after calling `check_witness(bits, witness)`.
     pub fn grind_gpu(&mut self, bits: usize) -> Result<F, GrindError> {
+        // Trivial case: 0 bits mean no PoW is required and any witness is valid.
+        if bits == 0 {
+            return Ok(F::ZERO);
+        }
         // 1. Sync host state to device
         self.sync_h2d()?;
 
