@@ -12,9 +12,9 @@ use openvm_stark_backend::{
     p3_matrix::{dense::RowMajorMatrix, Matrix},
     prover::{
         stacked_pcs::{MerkleTree, StackedPcsData},
-        AirProvingContext, ColMajorMatrix, CommittedTraceData, CpuBackend, DeviceDataTransporter,
+        AirProvingContext, ColMajorMatrix, CommittedTraceData, DeviceDataTransporter,
         DeviceMultiStarkProvingKey, DeviceStarkProvingKey, MatrixDimensions, MatrixView,
-        ProvingContext,
+        ProvingContext, ReferenceBackend,
     },
 };
 use tracing::debug;
@@ -105,13 +105,13 @@ pub fn transport_matrix_h2d_row(
 ) -> Result<DeviceMatrix<F>, MemCopyError> {
     let data = matrix.values.as_slice();
     let input_buffer = data.to_device().unwrap();
-    let output = DeviceMatrix::<F>::with_capacity(matrix.height(), matrix.width());
+    let output = DeviceMatrix::<F>::with_capacity(Matrix::height(matrix), Matrix::width(matrix));
     unsafe {
         matrix_transpose_fp(
             output.buffer(),
             &input_buffer,
-            matrix.width(),
-            matrix.height(),
+            Matrix::width(matrix),
+            Matrix::height(matrix),
         )?;
     }
     assert_eq!(output.strong_count(), 1);
@@ -243,7 +243,7 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
 }
 
 pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
-    cpu_ctx: AirProvingContext<CpuBackend<SC>>,
+    cpu_ctx: AirProvingContext<ReferenceBackend<SC>>,
 ) -> AirProvingContext<GenericGpuBackend<HS>> {
     assert!(
         cpu_ctx.cached_mains.is_empty(),
@@ -260,7 +260,7 @@ pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
 pub fn transport_proving_ctx_to_host(
     gpu_ctx: ProvingContext<GpuBackend>,
     l_skip: usize,
-) -> ProvingContext<CpuBackend<SC>> {
+) -> ProvingContext<ReferenceBackend<SC>> {
     let per_trace = gpu_ctx
         .per_trace
         .into_iter()
@@ -272,7 +272,7 @@ pub fn transport_proving_ctx_to_host(
 pub fn transport_air_proving_ctx_to_host(
     gpu_ctx: AirProvingContext<GpuBackend>,
     l_skip: usize,
-) -> AirProvingContext<CpuBackend<SC>> {
+) -> AirProvingContext<ReferenceBackend<SC>> {
     let trace = transport_matrix_d2h_col_major(&gpu_ctx.common_main).unwrap();
     let cached_mains = gpu_ctx
         .cached_mains
@@ -390,13 +390,13 @@ pub fn assert_eq_host_and_device_matrix<T: Clone + Send + Sync + PartialEq + Deb
     cpu: Arc<RowMajorMatrix<T>>,
     gpu: &DeviceMatrix<T>,
 ) {
-    assert_eq!(gpu.width(), cpu.width());
-    assert_eq!(gpu.height(), cpu.height());
+    assert_eq!(gpu.width(), Matrix::width(cpu.as_ref()));
+    assert_eq!(gpu.height(), Matrix::height(cpu.as_ref()));
     let gpu = gpu.to_host().unwrap();
-    for r in 0..cpu.height() {
-        for c in 0..cpu.width() {
+    for r in 0..Matrix::height(cpu.as_ref()) {
+        for c in 0..Matrix::width(cpu.as_ref()) {
             assert_eq!(
-                gpu[c * cpu.height() + r],
+                gpu[c * Matrix::height(cpu.as_ref()) + r],
                 cpu.get(r, c).expect("matrix index out of bounds"),
                 "Mismatch at row {} column {}",
                 r,
