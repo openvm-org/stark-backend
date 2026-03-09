@@ -33,7 +33,7 @@ cfg-if.workspace = true
 thiserror.workspace = true
 eyre.workspace = true
 derivative.workspace = true
-bitcode = { workspace = true, features = ["serde"] }
+postcard = { workspace = true, features = ["alloc"] }
 rustc-hash.workspace = true
 serde_json.workspace = true
 metrics = { workspace = true, optional = true }
