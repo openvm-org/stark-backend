@@ -399,9 +399,8 @@ where
                 // Parallel fold-reduce over x-points in H_{n_lift}.
                 // Each thread reuses its own DFT and weighted-sum buffers.
                 type Acc<F, EF> = (Vec<[EF; 2]>, Vec<F>, Vec<F>, Vec<EF>, Vec<EF>);
-                let (evals, _, _, _, _): Acc<SC::F, SC::EF> = (0..1usize << n_lift)
-                    .into_par_iter()
-                    .par_fold_reduce(
+                let (evals, _, _, _, _): Acc<SC::F, SC::EF> =
+                    (0..1usize << n_lift).into_par_iter().par_fold_reduce(
                         || -> Acc<SC::F, SC::EF> {
                             (
                                 vec![[SC::EF::ZERO; 2]; d_n],
