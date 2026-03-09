@@ -344,6 +344,54 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum Step {
+        Observe(u32),
+        ObserveCommit(u64),
+        Sample,
+    }
+
+    fn assert_sample_matches_cpu(
+        gpu: &mut MultiField32ChallengerGpu,
+        cpu: &mut impl FiatShamirTranscript<BabyBearBn254Poseidon2Config>,
+        context: &str,
+    ) {
+        let gpu_sample = FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample(gpu);
+        let cpu_sample = FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample(cpu);
+        assert_eq!(gpu_sample, cpu_sample, "{context}");
+    }
+
+    fn run_steps(steps: &[Step]) {
+        let mut gpu = MultiField32ChallengerGpu::new();
+        let mut cpu = default_transcript();
+
+        for (idx, step) in steps.iter().copied().enumerate() {
+            match step {
+                Step::Observe(value) => {
+                    let value = BabyBear::from_u32(value);
+                    FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut gpu, value);
+                    FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut cpu, value);
+                }
+                Step::ObserveCommit(value) => {
+                    let digest: Digest = [Bn254Scalar::from_u64(value)];
+                    FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe_commit(
+                        &mut gpu, digest,
+                    );
+                    FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe_commit(
+                        &mut cpu, digest,
+                    );
+                }
+                Step::Sample => {
+                    assert_sample_matches_cpu(
+                        &mut gpu,
+                        &mut cpu,
+                        &format!("sample mismatch at step {idx}: {step:?}"),
+                    );
+                }
+            }
+        }
+    }
+
     /// Verify that `MultiField32ChallengerGpu` produces the same samples as
     /// `openvm_stark_sdk::config::baby_bear_bn254_poseidon2::Transcript`.
     #[test]
@@ -383,5 +431,164 @@ mod tests {
                 FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample(&mut cpu);
             assert_eq!(gpu_s, cpu_s, "sample mismatch after observe_commit");
         }
+    }
+
+    #[test]
+    fn test_challenger_matches_transcript_for_all_absorb_prefix_lengths() {
+        // Sweep prefixes around multiple absorb-capacity boundaries. This catches
+        // off-by-one differences in when pending inputs trigger duplexing and when
+        // fresh output blocks are generated after sampling drains the buffer.
+        for num_observed in 0..=(MAX_INPUT * 2 + 1) {
+            let mut gpu = MultiField32ChallengerGpu::new();
+            let mut cpu = default_transcript();
+
+            for i in 0..num_observed {
+                let value = BabyBear::from_u32((i as u32).wrapping_mul(37).wrapping_add(11));
+                FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut gpu, value);
+                FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut cpu, value);
+            }
+
+            for sample_idx in 0..(MAX_OUTPUT * 2 + 3) {
+                assert_sample_matches_cpu(
+                    &mut gpu,
+                    &mut cpu,
+                    &format!(
+                        "mismatch after observing {num_observed} values, sample #{sample_idx}"
+                    ),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_challenger_clears_stale_outputs_when_observing_after_sampling() {
+        let mut gpu = MultiField32ChallengerGpu::new();
+        let mut cpu = default_transcript();
+
+        for i in 0..5u32 {
+            let value = BabyBear::from_u32(i * 17 + 3);
+            FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut gpu, value);
+            FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut cpu, value);
+        }
+
+        for sample_idx in 0..4 {
+            assert_sample_matches_cpu(
+                &mut gpu,
+                &mut cpu,
+                &format!("mismatch before clearing stale outputs at sample #{sample_idx}"),
+            );
+        }
+
+        // Sampling leaves buffered outputs available. A subsequent observe must
+        // invalidate them so future samples reflect the new transcript input.
+        assert!(
+            !gpu.output_buffer.is_empty(),
+            "test setup should leave buffered outputs before the next observe"
+        );
+
+        let fresh = BabyBear::from_u32(999);
+        FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut gpu, fresh);
+        FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut cpu, fresh);
+
+        assert!(
+            gpu.output_buffer.is_empty(),
+            "observing after sampling must invalidate stale buffered outputs"
+        );
+        assert_eq!(gpu.input_buffer, vec![fresh]);
+
+        for sample_idx in 0..(MAX_OUTPUT + 2) {
+            assert_sample_matches_cpu(
+                &mut gpu,
+                &mut cpu,
+                &format!("mismatch after clearing stale outputs at sample #{sample_idx}"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_challenger_matches_transcript_for_observe_commit_edge_cases() {
+        use Step::{Observe, ObserveCommit, Sample};
+
+        // `observe_commit` decomposes one BN254 element into three BabyBear limbs.
+        // These values intentionally straddle partial and full absorb buffers so
+        // we verify the GPU path matches CPU chunking and duplex timing exactly.
+        let steps = [
+            ObserveCommit(u64::MAX - 17),
+            Sample,
+            ObserveCommit((1u64 << 32) + 9),
+            Sample,
+            Sample,
+            Observe(7),
+            Observe(8),
+            ObserveCommit(u64::MAX - 0x1234),
+            Sample,
+            Sample,
+            Sample,
+            ObserveCommit(42),
+            ObserveCommit((1u64 << 40) + 5),
+            Sample,
+            Sample,
+            Sample,
+            Sample,
+            Observe(12345),
+            Sample,
+            Sample,
+            Sample,
+        ];
+
+        run_steps(&steps);
+    }
+
+    #[test]
+    fn test_challenger_matches_transcript_for_mixed_edge_case_sequence() {
+        use Step::{Observe, ObserveCommit, Sample};
+
+        // This sequence mixes empty-state sampling, partial absorbs, full-buffer
+        // absorbs, and commit observations. It is meant to stress every place
+        // where transcript state can flip between reusing buffered output and
+        // forcing a new duplexing step.
+        let steps = [
+            Sample,
+            Sample,
+            Observe(1),
+            Sample,
+            Observe(2),
+            Observe(3),
+            Observe(4),
+            Observe(5),
+            Observe(6),
+            Sample,
+            Sample,
+            Observe(7),
+            Sample,
+            Observe(8),
+            Observe(9),
+            Observe(10),
+            Observe(11),
+            Observe(12),
+            Observe(13),
+            Sample,
+            Sample,
+            Sample,
+            ObserveCommit(u64::MAX),
+            Observe(14),
+            Observe(15),
+            ObserveCommit((1u64 << 32) + 1),
+            Sample,
+            Sample,
+            Sample,
+            Sample,
+            Sample,
+            Sample,
+            Observe(16),
+            ObserveCommit(0),
+            Sample,
+            Sample,
+            Sample,
+            Sample,
+            Sample,
+        ];
+
+        run_steps(&steps);
     }
 }
