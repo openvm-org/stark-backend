@@ -17,9 +17,10 @@ use crate::{
         _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
         logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints,
     },
+    gpu_backend::GenericGpuBackend,
+    hash_scheme::GpuHashScheme,
     logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpu},
     prelude::{EF, F},
-    GpuBackend,
 };
 
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
@@ -27,8 +28,8 @@ use crate::{
 /// `num_cosets` should equal `constraint_degree - 1` because we evaluate the quotient polynomial.
 /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
-pub fn evaluate_round0_constraints_gpu(
-    pk: &DeviceStarkProvingKey<GpuBackend>,
+pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
+    pk: &DeviceStarkProvingKey<GenericGpuBackend<HS>>,
     selectors_cube: &DeviceBuffer<F>,
     main_parts: &DeviceBuffer<*const F>,
     public_values: &DeviceBuffer<F>,
@@ -128,8 +129,8 @@ pub fn evaluate_round0_constraints_gpu(
 /// `constraints` includes interaction expressions for the AIR.
 /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
-pub fn evaluate_round0_interactions_gpu(
-    pk: &DeviceStarkProvingKey<GpuBackend>,
+pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
+    pk: &DeviceStarkProvingKey<GenericGpuBackend<HS>>,
     symbolic: &SymbolicConstraints<F>,
     selectors_cube: &DeviceBuffer<F>,
     main_parts: &DeviceBuffer<*const F>,

@@ -33,7 +33,7 @@ use crate::{
     prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     sumcheck::{sumcheck_multilinear_gpu, sumcheck_prismalinear_gpu},
-    BabyBearPoseidon2GpuEngine,
+    BabyBearPoseidon2GpuEngine, GpuBackend,
 };
 
 type Engine = BabyBearPoseidon2GpuEngine;
@@ -43,6 +43,54 @@ type Engine = BabyBearPoseidon2GpuEngine;
 // ===========================================================================
 
 openvm_backend_tests::backend_test_suite!(Engine);
+
+// ===========================================================================
+// BN254 Poseidon2 engine end-to-end test
+// ===========================================================================
+
+/// End-to-end prove + verify using the BabyBear-BN254 Poseidon2 GPU engine.
+///
+/// Exercises the full BN254 pipeline: Merkle commitment, MultiField32Challenger
+/// transcript, BN254 sponge grinding kernel, and proof verification.
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+#[test_case(2, 10  ; "standard")]
+#[test_case(2, 1   ; "log_trace_degree_1_lt_l_skip")]
+#[test_case(2, 0   ; "log_trace_degree_0_lt_l_skip")]
+fn test_bn254_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) {
+    use openvm_stark_backend::{test_utils::FibFixture, SystemParams, WhirConfig, WhirParams};
+    use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_100_bits;
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let n_stack = 8;
+    let w_stack = 8;
+    let k_whir = 4;
+    let whir_params = WhirParams {
+        k: k_whir,
+        log_final_poly_len: k_whir,
+        query_phase_pow_bits: 1,
+    };
+    let log_blowup = 1;
+    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 80);
+    let params = SystemParams {
+        l_skip,
+        n_stack,
+        w_stack,
+        log_blowup,
+        whir,
+        logup: log_up_security_params_baby_bear_100_bits(),
+        max_constraint_degree: 3,
+    };
+
+    let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
+
+    let engine = crate::BabyBearBn254Poseidon2GpuEngine::new(params);
+    let (pk, vk) = fib.keygen(&engine);
+    let proof = fib.prove(&engine, &pk);
+    engine
+        .verify(&vk, &proof)
+        .expect("BN254 verification failed");
+}
 
 // ===========================================================================
 // GPU-specific tests (not shared)
@@ -195,18 +243,23 @@ fn test_monomial_vs_dag_equivalence() {
 
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
     let (pk, _vk) = fib.keygen(&engine);
-    let pk = device.transport_pk_to_device(&pk);
+    let pk = <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_pk_to_device(device, &pk);
 
-    let ctx_for_challenges = device
-        .transport_proving_ctx_to_device(&fib.generate_proving_ctx())
+    let ctx_for_challenges =
+        <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_proving_ctx_to_device(
+            device,
+            &fib.generate_proving_ctx(),
+        )
         .into_sorted();
     let mut prover_sponge = DuplexSpongeGpu::default();
     let ((_, _), r) =
         prove_up_to_batch_constraints(&engine, &mut prover_sponge, &pk, ctx_for_challenges);
 
-    let ctx = device
-        .transport_proving_ctx_to_device(&fib.generate_proving_ctx())
-        .into_sorted();
+    let ctx = <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_proving_ctx_to_device(
+        device,
+        &fib.generate_proving_ctx(),
+    )
+    .into_sorted();
 
     let height = ctx.per_trace[0].1.common_main.height();
     let n_calc = log2_strict_usize(height).saturating_sub(l_skip);

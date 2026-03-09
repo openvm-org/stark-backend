@@ -17,12 +17,13 @@ use crate::{
         MainMatrixPtrs, ZerocheckCtx,
     },
     error::KernelError,
+    gpu_backend::GenericGpuBackend,
+    hash_scheme::GpuHashScheme,
     logup_zerocheck::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
         mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
     },
     prelude::{EF, F},
-    GpuBackend,
 };
 
 const MAX_THREADS_PER_BLOCK: u32 = 128;
@@ -123,9 +124,9 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
     ///
     /// This constructor filters traces with constraints, computes thread configuration,
     /// builds all block and zerocheck contexts, and uploads them to the device.
-    pub fn new(
+    pub fn new<HS: GpuHashScheme>(
         traces: impl Iterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+        pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         num_x: u32,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<&TraceCtx> = traces.filter(|t| t.has_constraints).collect();
@@ -269,9 +270,9 @@ impl<'a> LogupMleBatchBuilder<'a> {
     ///
     /// This constructor filters traces with interactions, computes thread configuration,
     /// builds all block and logup contexts, and uploads them to the device.
-    pub fn new(
+    pub fn new<HS: GpuHashScheme>(
         traces: impl Iterator<Item = &'a TraceCtx>,
-        pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+        pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         d_challenges_ptr: *const EF,
         num_x: u32,
     ) -> Result<Self, MemCopyError> {
@@ -410,9 +411,9 @@ impl<'a> LogupMleBatchBuilder<'a> {
 // Memory-aware batched evaluation
 // ============================================================================
 
-pub(crate) fn evaluate_zerocheck_batched<'a>(
+pub(crate) fn evaluate_zerocheck_batched<'a, HS: GpuHashScheme>(
     traces: impl IntoIterator<Item = &'a TraceCtx>,
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     lambda_pows: &DeviceBuffer<EF>,
     num_x: u32,
     zc_out: &mut [Vec<EF>],
@@ -501,9 +502,9 @@ pub(crate) fn evaluate_zerocheck_batched<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_logup_batched(
+pub(crate) fn evaluate_logup_batched<HS: GpuHashScheme>(
     traces: &[TraceCtx],
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     d_challenges_ptr: *const EF,
     num_x: u32,
     monomial_num_y_threshold: u32,
@@ -625,9 +626,9 @@ pub(crate) fn evaluate_logup_batched(
 }
 
 /// Evaluate logup for a single trace using non-batch kernel.
-fn evaluate_single_logup(
+fn evaluate_single_logup<HS: GpuHashScheme>(
     t: &TraceCtx,
-    pk: &DeviceMultiStarkProvingKey<GpuBackend>,
+    pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     d_challenges_ptr: *const EF,
     num_x: u32,
     logup_out: &mut [Vec<EF>; 2],

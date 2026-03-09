@@ -9,7 +9,7 @@ use openvm_stark_backend::{
     poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
     proof::GkrLayerClaims,
     prover::fractional_sumcheck_gkr::{Frac, FracSumcheckProof},
-    FiatShamirTranscript,
+    FiatShamirTranscript, StarkProtocolConfig,
 };
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
@@ -28,8 +28,7 @@ use crate::{
         ntt::{bit_rev_frac_ext, bit_rev_frac_ext_build_k2},
     },
     poly::SqrtEqLayers,
-    prelude::{EF, SC},
-    sponge::DuplexSpongeGpu,
+    prelude::EF,
 };
 
 const GKR_S_DEG: usize = 3;
@@ -316,15 +315,19 @@ fn copy_to_device_ptr<T: Copy>(dst: *mut T, src: &[T]) -> Result<(), FractionalS
 
 /// Observes s_evals in transcript, updates accumulators, and returns the sampled challenge.
 #[allow(clippy::too_many_arguments)]
-fn observe_and_update(
+fn observe_and_update<SC, TS>(
     d_sum_evals: &DeviceBuffer<EF>,
-    transcript: &mut DuplexSpongeGpu,
+    transcript: &mut TS,
     round_polys_eval: &mut Vec<[EF; GKR_S_DEG]>,
     r_vec: &mut Vec<EF>,
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-) -> Result<EF, FractionalSumcheckError> {
+) -> Result<EF, FractionalSumcheckError>
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
     let (s_evals, sp_evals) = reconstruct_s_evals(d_sum_evals, *prev_s_eval, xi_j, *eq_r_acc)?;
 
     for &eval in &s_evals {
@@ -346,12 +349,12 @@ fn observe_and_update(
 ///
 /// See `docs/cuda-backend/gkr-prover.md` § "Sumcheck round strategies" for context.
 #[allow(clippy::too_many_arguments)]
-fn do_sumcheck_round_and_revert(
+fn do_sumcheck_round_and_revert<SC, TS>(
     eq_buffer: &mut SqrtEqLayers,
     layer: &mut DeviceBuffer<Frac<EF>>,
     pq_size: usize,
     lambda: EF,
-    transcript: &mut DuplexSpongeGpu,
+    transcript: &mut TS,
     d_sum_evals: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
     round_polys_eval: &mut Vec<[EF; GKR_S_DEG]>,
@@ -359,7 +362,11 @@ fn do_sumcheck_round_and_revert(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-) -> Result<EF, FractionalSumcheckError> {
+) -> Result<EF, FractionalSumcheckError>
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
     unsafe {
         frac_compute_round_and_revert(
             eq_buffer,
@@ -388,14 +395,14 @@ fn do_sumcheck_round_and_revert(
 /// This kernel fuses the fold operation (using `r_prev` from the previous round) into the current
 /// round's compute, eliminating one kernel launch and reducing memory traffic.
 #[allow(clippy::too_many_arguments)]
-fn do_fused_sumcheck_round(
+fn do_fused_sumcheck_round<SC, TS>(
     eq_buffer: &mut SqrtEqLayers,
     src_pq_buffer: &DeviceBuffer<Frac<EF>>,
     dst_pq_buffer: &mut DeviceBuffer<Frac<EF>>,
     src_pq_size: usize,
     lambda: EF,
     r_prev: EF,
-    transcript: &mut DuplexSpongeGpu,
+    transcript: &mut TS,
     d_sum_evals: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
     round_polys_eval: &mut Vec<[EF; GKR_S_DEG]>,
@@ -403,7 +410,11 @@ fn do_fused_sumcheck_round(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-) -> Result<EF, FractionalSumcheckError> {
+) -> Result<EF, FractionalSumcheckError>
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
     unsafe {
         frac_compute_round_and_fold(
             eq_buffer,
@@ -431,13 +442,13 @@ fn do_fused_sumcheck_round(
 
 /// In-place variant of [`do_fused_sumcheck_round`]. Reads and writes to the same buffer.
 #[allow(clippy::too_many_arguments)]
-fn do_fused_sumcheck_round_inplace(
+fn do_fused_sumcheck_round_inplace<SC, TS>(
     eq_buffer: &mut SqrtEqLayers,
     pq_buffer: &mut DeviceBuffer<Frac<EF>>,
     src_pq_size: usize,
     lambda: EF,
     r_prev: EF,
-    transcript: &mut DuplexSpongeGpu,
+    transcript: &mut TS,
     d_sum_evals: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
     round_polys_eval: &mut Vec<[EF; GKR_S_DEG]>,
@@ -445,7 +456,11 @@ fn do_fused_sumcheck_round_inplace(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-) -> Result<EF, FractionalSumcheckError> {
+) -> Result<EF, FractionalSumcheckError>
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
     unsafe {
         frac_compute_round_and_fold_inplace(
             eq_buffer,
@@ -473,13 +488,17 @@ fn do_fused_sumcheck_round_inplace(
 /// GKR fractional sumcheck prover. See `docs/cuda-backend/gkr-prover.md` (repo root) for the
 /// protocol and implementation details.
 #[instrument(skip_all)]
-pub fn fractional_sumcheck_gpu(
-    transcript: &mut DuplexSpongeGpu,
+pub fn fractional_sumcheck_gpu<SC, TS>(
+    transcript: &mut TS,
     leaves: DeviceBuffer<Frac<EF>>,
     alpha: EF,
     assert_zero: bool,
     mem: &mut MemTracker,
-) -> Result<(FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
+) -> Result<(FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError>
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
     let mut layer = leaves;
     if layer.is_empty() {
         return Ok((
@@ -1089,7 +1108,10 @@ fn copy_from_device<T: Copy>(
 }
 
 /// Reduces claims to a single evaluation point using linear interpolation.
-fn reduce_to_single_evaluation(claims: &GkrLayerClaims<SC>, mu: EF) -> (EF, EF) {
+fn reduce_to_single_evaluation<SC: StarkProtocolConfig<EF = EF>>(
+    claims: &GkrLayerClaims<SC>,
+    mu: EF,
+) -> (EF, EF) {
     let numer = interpolate_linear_at_01(&[claims.p_xi_0, claims.p_xi_1], mu);
     let denom = interpolate_linear_at_01(&[claims.q_xi_0, claims.q_xi_1], mu);
     (numer, denom)
@@ -1167,9 +1189,10 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
 
     use super::{
-        fractional_sumcheck_gpu, make_synthetic_leaves, DuplexSpongeGpu, FractionalSumcheckError,
-        GkrRoundStrategy, EF, SC,
+        fractional_sumcheck_gpu, make_synthetic_leaves, FractionalSumcheckError, GkrRoundStrategy,
+        EF,
     };
+    use crate::{prelude::SC, sponge::DuplexSpongeGpu};
 
     /// Run fractional sumcheck with a given round strategy and return the proof + final randomness.
     fn run_with_strategy(

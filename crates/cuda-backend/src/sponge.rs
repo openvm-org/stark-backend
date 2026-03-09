@@ -259,6 +259,10 @@ impl DuplexSpongeGpu {
     /// After this call, the host state will have observed the witness and sampled,
     /// matching the state after calling `check_witness(bits, witness)`.
     pub fn grind_gpu(&mut self, bits: usize) -> Result<F, GrindError> {
+        // Trivial case: 0 bits mean no PoW is required and any witness is valid.
+        if bits == 0 {
+            return Ok(F::ZERO);
+        }
         // 1. Sync host state to device
         self.sync_h2d()?;
 
@@ -312,12 +316,27 @@ impl FiatShamirTranscript<SC> for DuplexSpongeGpu {
 }
 
 /// Marker trait for GPU-compatible Fiat-Shamir transcripts.
+///
+/// Extends [`FiatShamirTranscript`] with a GPU-accelerated proof-of-work grind method.
+/// Implementers maintain a device-side state buffer and can off-load the grinding loop
+/// to a CUDA kernel.
 pub trait GpuFiatShamirTranscript<Config: StarkProtocolConfig>:
     FiatShamirTranscript<Config>
 {
+    /// GPU-accelerated proof-of-work grinding.
+    ///
+    /// Finds a witness value `w` of type `Config::F` such that after observing `w` and
+    /// sampling, the result has `bits` trailing zero bits.  Implementations should sync
+    /// host state to device, launch a CUDA grinding kernel, then update the host state
+    /// to match (observe witness + consume one sample).
+    fn grind_gpu(&mut self, bits: usize) -> Result<Config::F, GrindError>;
 }
 
-impl GpuFiatShamirTranscript<SC> for DuplexSpongeGpu {}
+impl GpuFiatShamirTranscript<SC> for DuplexSpongeGpu {
+    fn grind_gpu(&mut self, bits: usize) -> Result<F, GrindError> {
+        DuplexSpongeGpu::grind_gpu(self, bits)
+    }
+}
 
 #[cfg(test)]
 mod tests {

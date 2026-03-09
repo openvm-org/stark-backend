@@ -9,7 +9,7 @@ use openvm_cuda_common::{
 use openvm_stark_backend::{
     proof::{MerkleProof, WhirProof},
     prover::MatrixDimensions,
-    FiatShamirTranscript, SystemParams,
+    SystemParams,
 };
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
@@ -28,11 +28,12 @@ use crate::{
             whir_sumcheck_coeff_moments_round,
         },
     },
+    hash_scheme::GpuHashScheme,
     merkle_tree::MerkleTreeGpu,
     ntt::batch_ntt,
     poly::evals_eq_hypercube,
-    prelude::{Digest, D_EF, EF, F, SC},
-    sponge::DuplexSpongeGpu,
+    prelude::{D_EF, EF, F},
+    sponge::GpuFiatShamirTranscript,
     stacked_pcs::rs_code_matrix,
     stacked_reduction::StackedPcsData2,
     WhirProverError,
@@ -58,12 +59,16 @@ pub(crate) struct BatchingTracePacket {
     skip_all,
     fields(phase = "prover")
 )]
-pub fn prove_whir_opening_gpu(
+pub fn prove_whir_opening_gpu<HS, TS>(
     params: &SystemParams,
-    transcript: &mut DuplexSpongeGpu,
-    mut stacked_per_commit: Vec<StackedPcsData2>,
+    transcript: &mut TS,
+    mut stacked_per_commit: Vec<StackedPcsData2<HS::Digest>>,
     u: &[EF],
-) -> Result<WhirProof<SC>, WhirProverError> {
+) -> Result<WhirProof<HS::SC>, WhirProverError>
+where
+    HS: GpuHashScheme,
+    TS: GpuFiatShamirTranscript<HS::SC>,
+{
     let mem = MemTracker::start("prover.prove_whir_opening");
     let l_skip = params.l_skip;
     let log_blowup = params.log_blowup;
@@ -175,9 +180,9 @@ pub fn prove_whir_opening_gpu(
     let mut ood_values = vec![];
     // per commitment, per whir query, per column
     let mut initial_round_opened_rows: Vec<Vec<Vec<Vec<F>>>> = vec![vec![]; num_commits];
-    let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof<Digest>>> = vec![];
+    let mut initial_round_merkle_proofs: Vec<Vec<MerkleProof<HS::Digest>>> = vec![];
     let mut codeword_opened_values: Vec<Vec<Vec<EF>>> = vec![];
-    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof<Digest>>> = vec![];
+    let mut codeword_merkle_proofs: Vec<Vec<MerkleProof<HS::Digest>>> = vec![];
     let mut folding_pow_witnesses = vec![];
     let mut query_phase_pow_witnesses = vec![];
     let mut rs_tree = None;
@@ -308,7 +313,7 @@ pub fn prove_whir_opening_gpu(
                 );
             }
 
-            let g_tree = MerkleTreeGpu::<F, Digest>::new(
+            let g_tree = MerkleTreeGpu::<F, HS::Digest>::new_with_hash::<HS::MerkleHash>(
                 DeviceMatrix::new(Arc::new(g_rs), codeword_height, D_EF),
                 1 << k_whir,
                 true,
@@ -390,8 +395,11 @@ pub fn prove_whir_opening_gpu(
             // Get merkle proofs for in-domain samples necessary to evaluate Fold(f, \vec
             // \alpha)(z_i)
             initial_round_merkle_proofs =
-                MerkleTreeGpu::batch_query_merkle_proofs(&trees, &query_indices)
-                    .map_err(WhirProverError::MerkleTree)?;
+                <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(
+                    trees.as_slice(),
+                    &query_indices,
+                )
+                .map_err(WhirProverError::MerkleTree)?;
 
             let query_stride = trees[0].query_stride();
             debug_assert!(
@@ -406,7 +414,7 @@ pub fn prove_whir_opening_gpu(
                 "Merkle trees don't have same rows_per_query"
             );
 
-            initial_round_opened_rows = MerkleTreeGpu::batch_open_rows(
+            initial_round_opened_rows = MerkleTreeGpu::<F, HS::Digest>::batch_open_rows(
                 &backing_matrices,
                 &query_indices,
                 query_stride,
@@ -432,24 +440,25 @@ pub fn prove_whir_opening_gpu(
             stacked_per_commit.clear(); // this drops common_main_pcs_data
             mem.tracing_info("after_initial_whir_round");
         } else {
-            let tree: &MerkleTreeGpu<F, Digest> = rs_tree.as_ref().unwrap();
+            let tree: &MerkleTreeGpu<F, HS::Digest> = rs_tree.as_ref().unwrap();
             codeword_merkle_proofs[whir_round - 1] =
-                MerkleTreeGpu::batch_query_merkle_proofs(&[tree], &query_indices)
+                <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(&[tree], &query_indices)
                     .map_err(WhirProverError::MerkleTree)?
                     .pop()
                     .expect("exactly 1 tree");
-            codeword_opened_values[whir_round - 1] = MerkleTreeGpu::batch_open_rows(
-                &[tree.backing_matrix.as_ref().unwrap()],
-                &query_indices,
-                tree.query_stride(),
-                tree.rows_per_query,
-            )
-            .map_err(WhirProverError::MerkleTree)?
-            .pop()
-            .unwrap()
-            .into_iter()
-            .map(EF::reconstitute_from_base)
-            .collect();
+            codeword_opened_values[whir_round - 1] =
+                MerkleTreeGpu::<F, HS::Digest>::batch_open_rows(
+                    &[tree.backing_matrix.as_ref().unwrap()],
+                    &query_indices,
+                    tree.query_stride(),
+                    tree.rows_per_query,
+                )
+                .map_err(WhirProverError::MerkleTree)?
+                .pop()
+                .unwrap()
+                .into_iter()
+                .map(EF::reconstitute_from_base)
+                .collect();
         }
         rs_tree = g_tree;
 
@@ -546,7 +555,7 @@ mod tests {
 
     use crate::{
         prelude::SC, sponge::DuplexSpongeGpu, stacked_reduction::StackedPcsData2,
-        whir::prove_whir_opening_gpu, BabyBearPoseidon2GpuEngine,
+        whir::prove_whir_opening_gpu, BabyBearPoseidon2GpuEngine, GpuBackend,
     };
 
     /// GPU-specific WHIR test runner. Uses `prove_whir_opening_gpu` for the
@@ -577,9 +586,15 @@ mod tests {
         .unwrap();
         let d_common_main_traces = common_main_traces
             .iter()
-            .map(|t| device.transport_matrix_to_device(t))
+            .map(|t| {
+                <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_matrix_to_device(device, t)
+            })
             .collect_vec();
-        let d_common_main_pcs_data = device.transport_pcs_data_to_device(&common_main_pcs_data);
+        let d_common_main_pcs_data =
+            <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_pcs_data_to_device(
+                device,
+                &common_main_pcs_data,
+            );
 
         let mut stacking_openings = vec![openvm_backend_tests::stacking_openings_for_matrix(
             &params,
@@ -597,14 +612,21 @@ mod tests {
                 .iter()
                 .chain(air_ctx.cached_mains.iter().map(|cd| &cd.data))
             {
-                let trace = device.transport_matrix_to_device(&data.mat_view(0).to_matrix());
+                let trace =
+                    <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_matrix_to_device(
+                        device,
+                        &data.mat_view(0).to_matrix(),
+                    );
                 commits.push(data.commit().unwrap());
                 stacking_openings.push(openvm_backend_tests::stacking_openings_for_matrix(
                     &params,
                     &z_prism,
                     &data.matrix,
                 ));
-                let d_data = device.transport_pcs_data_to_device(data);
+                let d_data =
+                    <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_pcs_data_to_device(
+                        device, data,
+                    );
                 stacked_per_commit.push(StackedPcsData2 {
                     inner: Arc::new(d_data),
                     traces: vec![trace],
@@ -614,9 +636,13 @@ mod tests {
 
         let mut prover_sponge = DuplexSpongeGpu::default();
 
-        let proof =
-            prove_whir_opening_gpu(&params, &mut prover_sponge, stacked_per_commit, &z_cube)
-                .unwrap();
+        let proof = prove_whir_opening_gpu::<crate::DefaultHashScheme, _>(
+            &params,
+            &mut prover_sponge,
+            stacked_per_commit,
+            &z_cube,
+        )
+        .unwrap();
 
         let mut verifier_sponge = default_duplex_sponge();
         verify_whir(
