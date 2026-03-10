@@ -1,4 +1,5 @@
 use p3_field::TwoAdicField;
+use p3_util::reverse_slice_index_bits;
 
 /// Precomputed radix-2 twiddle factors for size `2^log_n`.
 pub(crate) struct DftTwiddles<F> {
@@ -114,12 +115,6 @@ impl<F: TwoAdicField> DftTwiddles<F> {
     }
 
     fn bit_reverse(&self, buf: &mut [F]) {
-        let n = self.size();
-        for i in 0..n {
-            let j = i.reverse_bits() >> (usize::BITS as u32 - self.log_n as u32);
-            if i < j {
-                buf.swap(i, j);
-            }
-        }
+        reverse_slice_index_bits(buf);
     }
 }

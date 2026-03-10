@@ -125,6 +125,45 @@ fn batch_coset_dft<F: TwoAdicField>(coeffs: &RowMajorMatrix<F>, shift: F) -> Row
     Radix2BowersSerial.dft_batch(mat)
 }
 
+/// Extract blocks from selector/trace matrices, iDFT them, and compute coset evaluations.
+///
+/// Shared between `sumcheck_uni_round0_batch` and `sumcheck_uni_round0_zerocheck_packed`.
+fn extract_and_dft_blocks<F: TwoAdicField>(
+    x: usize,
+    l_skip: usize,
+    rm_mats: &[(&RowMajorMatrix<F>, bool)],
+    sels_cm: &ColMajorMatrix<F>,
+    coset_shifts: &[F],
+) -> (Vec<RowMajorMatrix<F>>, Vec<Vec<RowMajorMatrix<F>>>) {
+    let dft = Radix2BowersSerial;
+
+    let sels_block = extract_cm_block(sels_cm, x, l_skip);
+    let sels_coeffs = dft.idft_batch(sels_block);
+    let sels_cosets = coset_shifts
+        .iter()
+        .map(|&shift| batch_coset_dft(&sels_coeffs, shift))
+        .collect();
+
+    let mat_coeffs: Vec<RowMajorMatrix<F>> = rm_mats
+        .iter()
+        .map(|(rm, is_rot)| {
+            let block = extract_rm_block(rm, x, l_skip, usize::from(*is_rot));
+            dft.idft_batch(block)
+        })
+        .collect();
+    let mat_cosets = mat_coeffs
+        .iter()
+        .map(|coeffs| {
+            coset_shifts
+                .iter()
+                .map(|&shift| batch_coset_dft(coeffs, shift))
+                .collect()
+        })
+        .collect();
+
+    (sels_cosets, mat_cosets)
+}
+
 /// Fold PLE evaluations directly from row-major data, avoiding the O(n*m) transpose.
 ///
 /// Barycentric interpolation: for each column j,
@@ -165,13 +204,9 @@ where
         .map(|(&sg, &diff_inv)| diff_inv * sg)
         .collect_vec();
 
-    let log_skip = l_skip;
-    let point_pow_height = r.exp_power_of_2(log_skip);
-    // shift = F::ONE, so shift_pow_height = 1
-    let shift_pow_height = EF::ONE;
-    let vanishing_polynomial = point_pow_height - shift_pow_height;
-    let denominator = shift_pow_height.mul_2exp_u64(log_skip as u64);
-    let scaling_factor = vanishing_polynomial * denominator.inverse();
+    // scaling_factor = (r^N - 1) / N where N = 2^l_skip
+    let r_pow_n = r.exp_power_of_2(l_skip);
+    let scaling_factor = (r_pow_n - EF::ONE) * EF::from_usize(skip_sz).inverse();
 
     // Output is col-major: values[col * new_height + x] for each (x, col)
     let values: Vec<EF> = (0..new_height)
@@ -196,13 +231,16 @@ where
         })
         .collect();
 
-    // Convert from row-major output (x varies fastest) to col-major
+    // Parallel transpose from row-major output to col-major
     let mut cm_values = EF::zero_vec(width * new_height);
-    for x in 0..new_height {
-        for j in 0..width {
-            cm_values[j * new_height + x] = values[x * width + j];
-        }
-    }
+    cm_values
+        .par_chunks_exact_mut(new_height)
+        .enumerate()
+        .for_each(|(j, col)| {
+            for x in 0..new_height {
+                col[x] = values[x * width + j];
+            }
+        });
     ColMajorMatrix::new(cm_values, width)
 }
 
@@ -238,34 +276,8 @@ where
 
     // Map-Reduce over x ∈ H_n
     let evals = (0..1usize << n).into_par_iter().map(|x| {
-        let dft = Radix2BowersSerial;
-
-        // Extract and batch-iDFT selector block (small: 3 columns)
-        let sels_block = extract_cm_block(sels_cm, x, l_skip);
-        let sels_coeffs = dft.idft_batch(sels_block);
-        let sels_cosets: Vec<RowMajorMatrix<F>> = coset_shifts
-            .iter()
-            .map(|&shift| batch_coset_dft(&sels_coeffs, shift))
-            .collect();
-
-        // Extract and batch-iDFT each trace matrix block
-        // Each block is 2^l_skip × width, contiguous row extraction from row-major
-        let mat_coeffs: Vec<RowMajorMatrix<F>> = rm_mats
-            .iter()
-            .map(|(rm, is_rot)| {
-                let block = extract_rm_block(rm, x, l_skip, usize::from(*is_rot));
-                dft.idft_batch(block)
-            })
-            .collect();
-        let mat_cosets: Vec<Vec<RowMajorMatrix<F>>> = mat_coeffs
-            .iter()
-            .map(|coeffs| {
-                coset_shifts
-                    .iter()
-                    .map(|&shift| batch_coset_dft(coeffs, shift))
-                    .collect()
-            })
-            .collect();
+        let (sels_cosets, mat_cosets) =
+            extract_and_dft_blocks(x, l_skip, rm_mats, sels_cm, &coset_shifts);
 
         // Pre-allocate row_parts buffers: reused across all z-points to avoid
         // per-z-point allocation (saves ~1.4GB of allocations for keccakf)
@@ -367,34 +379,10 @@ where
 
     // Map-Reduce over x ∈ H_n
     let evals = (0..1usize << n).into_par_iter().map(|x| {
-        let dft = Radix2BowersSerial;
         let eq = eq_xi[x];
 
-        // Extract and batch-iDFT selector block (3 columns)
-        let sels_block = extract_cm_block(sels_cm, x, l_skip);
-        let sels_coeffs = dft.idft_batch(sels_block);
-        let sels_cosets: Vec<RowMajorMatrix<SC::F>> = coset_shifts
-            .iter()
-            .map(|&shift| batch_coset_dft(&sels_coeffs, shift))
-            .collect();
-
-        // Extract and batch-iDFT each trace matrix block
-        let mat_coeffs: Vec<RowMajorMatrix<SC::F>> = rm_mats
-            .iter()
-            .map(|(rm, is_rot)| {
-                let block = extract_rm_block(rm, x, l_skip, usize::from(*is_rot));
-                dft.idft_batch(block)
-            })
-            .collect();
-        let mat_cosets: Vec<Vec<RowMajorMatrix<SC::F>>> = mat_coeffs
-            .iter()
-            .map(|coeffs| {
-                coset_shifts
-                    .iter()
-                    .map(|&shift| batch_coset_dft(coeffs, shift))
-                    .collect()
-            })
-            .collect();
+        let (sels_cosets, mat_cosets) =
+            extract_and_dft_blocks(x, l_skip, rm_mats, sels_cm, &coset_shifts);
 
         // Pre-allocate packed row_parts buffers
         let sels_w = sels_cosets[0].width;
@@ -716,11 +704,8 @@ where
         mats
     }
 
-    fn evaluator<FF: ExtensionField<SC::F>>(
-        &self,
-        row_parts: &[Vec<FF>],
-    ) -> ConstraintEvaluator<'_, SC::F, FF> {
-        let sels = &row_parts[0];
+    /// Build view pairs from row_parts, splitting preprocessed from main partitions.
+    fn build_view_pairs<T>(&self, row_parts: &[Vec<T>]) -> (Option<ViewPair<T>>, Vec<ViewPair<T>>) {
         let mut view_pairs = if self.needs_next {
             let mut chunks = row_parts[1..].chunks_exact(2);
             let pairs = chunks
@@ -735,13 +720,23 @@ where
                 .map(|part| ViewPair::new(part, None))
                 .collect_vec()
         };
-        let mut preprocessed = None;
-        if self.has_preprocessed() {
-            preprocessed = Some(view_pairs.remove(0));
-        }
+        let preprocessed = if self.has_preprocessed() {
+            Some(view_pairs.remove(0))
+        } else {
+            None
+        };
+        (preprocessed, view_pairs)
+    }
+
+    fn evaluator<FF: ExtensionField<SC::F>>(
+        &self,
+        row_parts: &[Vec<FF>],
+    ) -> ConstraintEvaluator<'_, SC::F, FF> {
+        let sels = &row_parts[0];
+        let (preprocessed, partitioned_main) = self.build_view_pairs(row_parts);
         ConstraintEvaluator {
             preprocessed,
-            partitioned_main: view_pairs,
+            partitioned_main,
             is_first_row: sels[0],
             is_transition: sels[1],
             is_last_row: sels[2],
@@ -762,35 +757,15 @@ where
             })
     }
 
-    /// Create a packed constraint evaluator from packed row_parts.
-    /// Each element in row_parts is a Vec<F::Packing> where each packed value
-    /// holds WIDTH independent evaluations across different z-points.
     fn evaluator_packed(
         &self,
         row_parts: &[Vec<<SC::F as Field>::Packing>],
     ) -> PackedConstraintEvaluator<'_, SC::F> {
         let sels = &row_parts[0];
-        let mut view_pairs = if self.needs_next {
-            let mut chunks = row_parts[1..].chunks_exact(2);
-            let pairs = chunks
-                .by_ref()
-                .map(|pair| ViewPair::new(&pair[0], Some(&pair[1][..])))
-                .collect_vec();
-            debug_assert!(chunks.remainder().is_empty());
-            pairs
-        } else {
-            row_parts[1..]
-                .iter()
-                .map(|part| ViewPair::new(part, None))
-                .collect_vec()
-        };
-        let mut preprocessed = None;
-        if self.has_preprocessed() {
-            preprocessed = Some(view_pairs.remove(0));
-        }
+        let (preprocessed, partitioned_main) = self.build_view_pairs(row_parts);
         PackedConstraintEvaluator {
             preprocessed,
-            partitioned_main: view_pairs,
+            partitioned_main,
             is_first_row: sels[0],
             is_transition: sels[1],
             is_last_row: sels[2],

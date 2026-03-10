@@ -26,7 +26,10 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
-use crate::{device::eval_to_coeff_cpu, two_adic::DftTwiddles};
+use crate::{
+    device::{build_digest_layers, eval_to_coeff_cpu, reinterpret_vec},
+    two_adic::DftTwiddles,
+};
 
 /// Optimized WHIR opening prover for the CPU backend.
 ///
@@ -364,11 +367,6 @@ fn fill_eq_evals<F: TwoAdicField>(eq: &mut [F], z_pows: &[F]) {
 }
 
 /// Build a Merkle tree from extension field codeword values using packed SIMD hashing.
-///
-/// Optimized replacement for `MerkleTree::new` that avoids the per-leaf `Vec` allocations
-/// in the shared implementation's `as_basis_coefficients_slice().to_vec()` pattern.
-/// For single-column EF matrices (WHIR codewords), this hashes the EF basis coefficients
-/// directly from contiguous memory and uses SIMD packed hashing for ~4x throughput.
 fn build_ef_merkle_tree_packed<SC>(
     hasher: &SC::Hasher,
     g_rs: Vec<SC::EF>,
@@ -390,7 +388,6 @@ where
         if TypeId::of::<SC::F>() == TypeId::of::<BabyBear>()
             && TypeId::of::<SC::Digest>() == TypeId::of::<[BabyBear; 8]>()
         {
-            // Reinterpret &[EF] as &[BabyBear] for packed hashing.
             // SAFETY: BinomialExtensionField<BabyBear, 4> is #[repr(C)] with value: [BabyBear; 4],
             // so the memory layout is contiguous BabyBear values.
             let bb_vals: &[BabyBear] = unsafe {
@@ -399,16 +396,8 @@ where
             let bb_digests =
                 crate::device::hash_rows_packed_babybear(bb_vals, ef_width, height, num_leaves);
             // SAFETY: TypeId checks guarantee SC::Digest = [BabyBear; 8].
-            let mut md = std::mem::ManuallyDrop::new(bb_digests);
-            unsafe {
-                Vec::from_raw_parts(
-                    md.as_mut_ptr().cast::<SC::Digest>(),
-                    md.len(),
-                    md.capacity(),
-                )
-            }
+            unsafe { reinterpret_vec(bb_digests) }
         } else {
-            // Allocation-free scalar fallback: hash basis coefficients directly.
             (0..num_leaves)
                 .into_par_iter()
                 .map(|r| {
@@ -422,66 +411,10 @@ where
         }
     });
 
-    // Phase 2: Build Merkle digest layers — packed SIMD for BabyBear, scalar fallback otherwise.
-    let layers: Vec<Vec<SC::Digest>> = {
-        use std::any::TypeId;
-        if TypeId::of::<SC::F>() == TypeId::of::<BabyBear>()
-            && TypeId::of::<SC::Digest>() == TypeId::of::<[BabyBear; 8]>()
-        {
-            // Packed SIMD compression — 4x throughput on NEON, 8x on AVX2.
-            // SAFETY: TypeId checks guarantee SC::Digest = [BabyBear; 8].
-            let bb_hashes: Vec<[BabyBear; 8]> = unsafe {
-                let mut md = std::mem::ManuallyDrop::new(row_hashes);
-                Vec::from_raw_parts(
-                    md.as_mut_ptr().cast::<[BabyBear; 8]>(),
-                    md.len(),
-                    md.capacity(),
-                )
-            };
-            let bb_layers =
-                crate::device::build_digest_layers_packed_babybear(bb_hashes, rows_per_query);
-            bb_layers
-                .into_iter()
-                .map(|layer| unsafe {
-                    let mut md = std::mem::ManuallyDrop::new(layer);
-                    Vec::from_raw_parts(
-                        md.as_mut_ptr().cast::<SC::Digest>(),
-                        md.len(),
-                        md.capacity(),
-                    )
-                })
-                .collect()
-        } else {
-            let query_stride = num_leaves / rows_per_query;
-            let mut query_digest_layer = row_hashes;
-            for _ in 0..log2_strict_usize(rows_per_query) {
-                let prev_layer = query_digest_layer;
-                query_digest_layer = (0..prev_layer.len() / 2)
-                    .into_par_iter()
-                    .map(|i| {
-                        let x = i / query_stride;
-                        let y = i % query_stride;
-                        let left = prev_layer[2 * x * query_stride + y];
-                        let right = prev_layer[(2 * x + 1) * query_stride + y];
-                        hasher.compress(left, right)
-                    })
-                    .collect();
-            }
-            let mut layers = vec![query_digest_layer];
-            while layers.last().unwrap().len() > 1 {
-                let prev = layers.last().unwrap();
-                let layer: Vec<_> = prev
-                    .par_chunks_exact(2)
-                    .map(|pair| hasher.compress(pair[0], pair[1]))
-                    .collect();
-                layers.push(layer);
-            }
-            layers
-        }
-    };
+    // Phase 2: Build Merkle digest layers using shared helper.
+    let layers = build_digest_layers::<SC::F, SC::Hasher>(row_hashes, rows_per_query, hasher);
 
     let backing_matrix = ColMajorMatrix::new(g_rs, 1);
-    // SAFETY: layers were just computed as correct Merkle hashes over backing_matrix
-    // by the WHIR folding loop above. rows_per_query comes from validated WhirParams.
+    // SAFETY: layers were just computed as correct Merkle hashes over backing_matrix.
     unsafe { MerkleTree::from_raw_parts(backing_matrix, layers, rows_per_query) }
 }
