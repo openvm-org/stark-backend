@@ -21,6 +21,7 @@ mod device;
 pub mod error;
 pub mod logup_zerocheck;
 mod stacked_reduction;
+mod two_adic;
 mod whir;
 
 pub use backend::*;

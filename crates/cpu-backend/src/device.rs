@@ -9,6 +9,7 @@ use openvm_stark_backend::{
     poly_common::Squarable,
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
+        poly::Mle,
         stacked_pcs::{stacked_matrix, MerkleTree, StackedPcsData},
         stacked_reduction::prove_stacked_opening_reduction,
         ColMajorMatrix, CommittedTraceData, DeviceDataTransporter, DeviceMultiStarkProvingKey,
@@ -27,6 +28,7 @@ use tracing::instrument;
 
 use crate::{
     backend::CpuBackend, error::CpuProverError, stacked_reduction::StackedReductionCpuNew,
+    two_adic::DftTwiddles,
 };
 
 /// Row-major CPU prover device.
@@ -258,85 +260,25 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
 }
 
 /// In-place PLE evaluation-to-coefficient conversion.
-/// Uses inline DIF iDFT with precomputed twiddle factors to eliminate
-/// the per-chunk allocation overhead of the shared `eval_to_coeff_rs_message`.
-pub(crate) fn eval_to_coeff_cpu<F: TwoAdicField>(l_skip: usize, evals: &[F]) -> Vec<F> {
-    let chunk_len = 1usize << l_skip;
+/// Uses inline DIF iDFT with reusable twiddle factors to eliminate the per-chunk allocation
+/// overhead of the shared `eval_to_coeff_rs_message`.
+pub(crate) fn eval_to_coeff_cpu<F: TwoAdicField>(
+    evals: &[F],
+    twiddles: &DftTwiddles<F>,
+) -> Vec<F> {
+    let chunk_len = twiddles.size();
     let mut buf = evals.to_vec();
 
-    // Precompute twiddle factors for DIF iDFT of size chunk_len.
-    // Layer l has block_size = chunk_len >> l, half_block twiddle factors.
-    let omega_inv = F::two_adic_generator(l_skip).inverse();
-    let two = F::ONE + F::ONE;
-    let mut n_field = F::ONE;
-    for _ in 0..l_skip {
-        n_field *= two;
-    }
-    let n_inv = n_field.inverse();
-    let twiddles: Vec<Vec<F>> = (0..l_skip)
-        .map(|layer| {
-            let half_block = chunk_len >> (layer + 1);
-            let w_step = omega_inv.exp_power_of_2(layer);
-            w_step.powers().take(half_block).collect()
-        })
-        .collect();
-
-    // Phase 1: In-place DIF iDFT on each chunk, then bit-reverse + scale.
+    // Phase 1: In-place DIF iDFT on each chunk.
     for chunk in buf.chunks_exact_mut(chunk_len) {
-        // DIF (Gentleman-Sande) butterflies: natural-order input → bit-reversed output.
-        let mut block_size = chunk_len;
-        for tw in &twiddles {
-            let half = block_size >> 1;
-            let mut k = 0;
-            while k < chunk_len {
-                for j in 0..half {
-                    let u = chunk[k + j];
-                    let v = chunk[k + j + half];
-                    chunk[k + j] = u + v;
-                    chunk[k + j + half] = (u - v) * tw[j];
-                }
-                k += block_size;
-            }
-            block_size = half;
-        }
-
-        // Bit-reverse permutation.
-        for i in 0..chunk_len {
-            let j = i.reverse_bits() >> (usize::BITS as u32 - l_skip as u32);
-            if i < j {
-                chunk.swap(i, j);
-            }
-        }
-
-        // Scale by 1/N.
-        for val in chunk.iter_mut() {
-            *val *= n_inv;
-        }
+        twiddles.idft_inplace(chunk);
     }
 
     // Phase 2: Convert MLE coefficients to evaluations in-place.
-    for chunk in buf.chunks_exact_mut(chunk_len) {
-        mle_coeffs_to_evals_inplace(chunk);
-    }
+    buf.par_chunks_exact_mut(chunk_len)
+        .for_each(Mle::coeffs_to_evals_inplace);
 
     buf
-}
-
-/// In-place conversion from multilinear polynomial coefficients to evaluations
-/// on the boolean hypercube. Equivalent to `Mle::coeffs_to_evals_inplace`.
-fn mle_coeffs_to_evals_inplace<F: TwoAdicField>(a: &mut [F]) {
-    let n = log2_strict_usize(a.len());
-    for b in 0..n {
-        let step = 1usize << b;
-        let span = step << 1;
-        let mut i = 0;
-        while i < a.len() {
-            for j in 0..step {
-                a[i + j + step] += a[i + j];
-            }
-            i += span;
-        }
-    }
 }
 
 /// Packed SIMD row hashing for BabyBear Poseidon2.
@@ -543,6 +485,7 @@ where
     let height = eval_matrix.height();
     let codeword_height = height.checked_shl(log_blowup as u32).unwrap();
     let width = eval_matrix.width();
+    let twiddles = DftTwiddles::new(l_skip);
 
     // Phase 1: Convert PLE evaluations to coefficients (parallel per column).
     let coeff_vecs: Vec<Vec<F>> = tracing::info_span!("eval_to_coeff_phase").in_scope(|| {
@@ -550,7 +493,7 @@ where
             .values
             .par_chunks_exact(height)
             .map(|column_evals| {
-                let mut coeffs = eval_to_coeff_cpu(l_skip, column_evals);
+                let mut coeffs = eval_to_coeff_cpu(column_evals, &twiddles);
                 coeffs.resize(codeword_height, F::ZERO);
                 coeffs
             })

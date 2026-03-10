@@ -26,7 +26,7 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
-use crate::device::eval_to_coeff_cpu;
+use crate::{device::eval_to_coeff_cpu, two_adic::DftTwiddles};
 
 /// Optimized WHIR opening prover for the CPU backend.
 ///
@@ -66,6 +66,7 @@ where
     let k_whir = whir_params.k;
     let num_whir_rounds = whir_params.num_whir_rounds();
     let num_sumcheck_rounds = whir_params.num_sumcheck_rounds();
+    let twiddles = DftTwiddles::new(l_skip);
 
     // Phase 1: MLE conversion using allocation-free eval_to_coeff_cpu
     let mles: Vec<Vec<SC::F>> = tracing::info_span!("whir_mle_conversion").in_scope(|| {
@@ -73,7 +74,7 @@ where
             .par_iter()
             .flat_map(|(mat, _)| {
                 mat.par_columns().map(|col| {
-                    let mut x = eval_to_coeff_cpu(l_skip, col);
+                    let mut x = eval_to_coeff_cpu(col, &twiddles);
                     Mle::coeffs_to_evals_inplace(&mut x);
                     x
                 })
@@ -299,32 +300,7 @@ where
 
     let mut eq = SC::EF::zero_vec(len);
     eq[0] = gamma;
-    for (j, &z_j) in z_pows.iter().enumerate() {
-        let one_minus_z = SC::EF::ONE - z_j;
-        let step = 1usize << j;
-        let span = step << 1;
-        let active_len = 2usize << j;
-        if active_len >= 1024 {
-            eq[..active_len]
-                .par_chunks_exact_mut(span)
-                .for_each(|chunk| {
-                    let (lo_half, hi_half) = chunk.split_at_mut(step);
-                    for (lo, hi) in lo_half.iter_mut().zip(hi_half.iter_mut()) {
-                        let prev = *lo;
-                        *hi = prev * z_j;
-                        *lo = prev * one_minus_z;
-                    }
-                });
-        } else {
-            for i in (0..active_len).step_by(span) {
-                for k in 0..step {
-                    let prev = eq[i + k];
-                    eq[i + k] = prev * one_minus_z;
-                    eq[i + k + step] = prev * z_j;
-                }
-            }
-        }
-    }
+    fill_eq_evals(&mut eq, &z_pows);
     w_evals
         .par_iter_mut()
         .zip(eq.par_iter())
@@ -348,8 +324,19 @@ where
     // Compute eq evaluations entirely in base field F (cheap F×F multiplies)
     let mut eq = SC::F::zero_vec(len);
     eq[0] = SC::F::ONE;
+    fill_eq_evals(&mut eq, &z_pows);
+    // Accumulate: w_evals[i] += gamma * eq[i]  (EF × F, not EF × EF)
+    w_evals
+        .par_iter_mut()
+        .zip(eq.par_iter())
+        .for_each(|(w, e)| {
+            *w += gamma * *e;
+        });
+}
+
+fn fill_eq_evals<F: TwoAdicField>(eq: &mut [F], z_pows: &[F]) {
     for (j, &z_j) in z_pows.iter().enumerate() {
-        let one_minus_z = SC::F::ONE - z_j;
+        let one_minus_z = F::ONE - z_j;
         let step = 1usize << j;
         let span = step << 1;
         let active_len = 2usize << j;
@@ -374,13 +361,6 @@ where
             }
         }
     }
-    // Accumulate: w_evals[i] += gamma * eq[i]  (EF × F, not EF × EF)
-    w_evals
-        .par_iter_mut()
-        .zip(eq.par_iter())
-        .for_each(|(w, e)| {
-            *w += gamma * *e;
-        });
 }
 
 /// Build a Merkle tree from extension field codeword values using packed SIMD hashing.
