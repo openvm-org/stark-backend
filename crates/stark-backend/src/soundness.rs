@@ -371,7 +371,7 @@ impl SoundnessCalculator {
                     log_inv_rate,
                     2,
                 );
-                if let Some(l2) = log2_list_size.as_mut() {
+                if let Some(l2) = log2_list_size.as_ref() {
                     debug_assert!((*l2 - prox_gaps.log2_list_size).abs() < 1e-6);
                 } else {
                     log2_list_size = Some(prox_gaps.log2_list_size);
@@ -599,11 +599,7 @@ impl SoundnessCalculator {
         let log2_d_x = log2_m_bar + log2_n + 0.5 * log2_rho;
         let log2_d_y = log2_m_bar - 0.5 * log2_rho;
         let log2_d_z = 2.0 * log2_m_bar - log2_3 - log2_rho;
-        let log2_d_z = if m < 3 {
-            log2_d_y.max(log2_d_z)
-        } else {
-            log2_d_z
-        };
+        let log2_d_z = log2_d_y.max(log2_d_z);
 
         (log2_d_x, log2_d_y, log2_d_z)
     }
@@ -614,11 +610,10 @@ impl SoundnessCalculator {
     /// We use Lemma 3.1 and the bounds on `a` in terms of `D_X, D_Y, D_Z` from Section 3.2 and
     /// Equation (13). As noted in the paragraph after Lemma 3.1, the parameters chosen in the
     /// Lemma 3.1 statement are not optimal and chosen to provide cleaner expressions.
-    /// We do a brute-force search in `bchks25_optimal_degrees_bruteforce` to find parameters that
+    /// When feature `soundness-bchks25-optimized` is enabled,
+    /// we do a brute-force search in `bchks25_optimal_degrees_bruteforce` to find parameters that
     /// meet the conditions for the proof of Lemma 3.1 to be applied to find the polynomial `Q`.
-    ///
-    /// A closed-form Lemma 3.1 degree computation is kept in
-    /// `bchks25_reference_log2_degrees` for fallback/reference.
+    /// When the feature is not enabled, a closed-form Lemma 3.1 degree computation is used.
     ///
     /// Parameters are mapped as:
     /// - `num_variables = log_degree`
@@ -675,14 +670,9 @@ impl SoundnessCalculator {
         let log2_a_real = log2_a_real.max(0.0);
 
         // If `a` is small enough, apply `ceil` in normal space for exactness.
-        if log2_a_real < 52.0 {
-            let a = log2_a_real.exp2();
-            let a_bound = a.ceil().max(1.0);
-            (a_bound.log2(), log2_list_size)
-        } else {
-            // For large `a`, `ceil` does not materially affect `log2(a)`.
-            (log2_a_real, log2_list_size)
-        }
+        let a = log2_a_real.exp2();
+        let a_bound = a.ceil().max(1.0);
+        (a_bound.log2(), log2_list_size)
     }
 
     /// Computes WHIR sumcheck security bits for a sub-round.
