@@ -26,7 +26,7 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    device::{build_digest_layers, eval_to_coeff_cpu, reinterpret_vec},
+    device::{build_digest_layers, eval_to_coeff_cpu, hash_rows_with_padding, reinterpret_vec},
     merkle::CpuMerkleTree,
     two_adic::DftTwiddles,
 };
@@ -398,16 +398,13 @@ where
             // SAFETY: TypeId checks guarantee SC::Digest = [BabyBear; 8].
             unsafe { reinterpret_vec(bb_digests) }
         } else {
-            (0..num_leaves)
-                .into_par_iter()
-                .map(|r| {
-                    if r < height {
-                        hasher.hash_slice(g_rs[r].as_basis_coefficients_slice())
-                    } else {
-                        hasher.hash_slice(&vec![SC::F::ZERO; ef_width])
-                    }
-                })
-                .collect()
+            let zero_row = vec![SC::F::ZERO; ef_width];
+            hash_rows_with_padding(
+                num_leaves,
+                height,
+                |r| hasher.hash_slice(g_rs[r].as_basis_coefficients_slice()),
+                || hasher.hash_slice(&zero_row),
+            )
         }
     });
 

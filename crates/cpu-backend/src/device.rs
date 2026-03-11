@@ -419,6 +419,29 @@ where
     }
 }
 
+pub(crate) fn hash_rows_with_padding<D, RowHashFn, PaddingHashFn>(
+    num_leaves: usize,
+    codeword_height: usize,
+    row_hash_fn: RowHashFn,
+    padding_hash_fn: PaddingHashFn,
+) -> Vec<D>
+where
+    D: Send,
+    RowHashFn: Fn(usize) -> D + Sync + Send,
+    PaddingHashFn: Fn() -> D + Sync + Send,
+{
+    (0..num_leaves)
+        .into_par_iter()
+        .map(|r| {
+            if r < codeword_height {
+                row_hash_fn(r)
+            } else {
+                padding_hash_fn()
+            }
+        })
+        .collect()
+}
+
 /// Scalar fallback for building Merkle digest layers.
 fn build_digest_layers_scalar<H: MerkleHasher>(
     row_hashes: Vec<H::Digest>,
@@ -637,16 +660,13 @@ where
             let bb_digests = hash_rows_packed_babybear(bb_vals, width, codeword_height, num_leaves);
             unsafe { reinterpret_vec(bb_digests) }
         } else {
-            (0..num_leaves)
-                .into_par_iter()
-                .map(|r| {
-                    if r < codeword_height {
-                        hasher.hash_slice(&rm_vals[r * width..(r + 1) * width])
-                    } else {
-                        hasher.hash_slice(&vec![F::ZERO; width])
-                    }
-                })
-                .collect()
+            let zero_row = vec![F::ZERO; width];
+            hash_rows_with_padding(
+                num_leaves,
+                codeword_height,
+                |r| hasher.hash_slice(&rm_vals[r * width..(r + 1) * width]),
+                || hasher.hash_slice(&zero_row),
+            )
         }
     });
 

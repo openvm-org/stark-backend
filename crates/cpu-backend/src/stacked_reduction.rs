@@ -123,6 +123,29 @@ fn rot_prev(x_int: usize, n: usize) -> usize {
     }
 }
 
+fn fold_eval_map<EF>(
+    evals_per_lht: HashMap<usize, Vec<EF>>,
+    one_minus_r: EF,
+    r: EF,
+) -> HashMap<usize, Vec<EF>>
+where
+    EF: Field + Send,
+{
+    evals_per_lht
+        .into_par_iter()
+        .map(|(lht, v)| {
+            if v.len() <= 1 {
+                return (lht, v);
+            }
+            let folded: Vec<EF> = v
+                .chunks_exact(2)
+                .map(|pair| pair[0] * one_minus_r + pair[1] * r)
+                .collect();
+            (lht, folded)
+        })
+        .collect()
+}
+
 impl<'a, SC: StarkProtocolConfig> StackedReductionProver<'a, CpuBackend<SC>, CpuDevice<SC>>
     for StackedReductionCpuNew<'a, SC>
 where
@@ -492,32 +515,9 @@ where
         let l_skip = self.l_skip;
         self.q_evals = batch_fold_mle_evals(take(&mut self.q_evals), u_round);
         let one_minus_r = SC::EF::ONE - u_round;
-        self.eq_r_per_lht = take(&mut self.eq_r_per_lht)
-            .into_par_iter()
-            .map(|(lht, v)| {
-                if v.len() <= 1 {
-                    return (lht, v);
-                }
-                let folded: Vec<SC::EF> = v
-                    .chunks_exact(2)
-                    .map(|pair| pair[0] * one_minus_r + pair[1] * u_round)
-                    .collect();
-                (lht, folded)
-            })
-            .collect();
-        self.k_rot_r_per_lht = take(&mut self.k_rot_r_per_lht)
-            .into_par_iter()
-            .map(|(lht, v)| {
-                if v.len() <= 1 {
-                    return (lht, v);
-                }
-                let folded: Vec<SC::EF> = v
-                    .chunks_exact(2)
-                    .map(|pair| pair[0] * one_minus_r + pair[1] * u_round)
-                    .collect();
-                (lht, folded)
-            })
-            .collect();
+        self.eq_r_per_lht = fold_eval_map(take(&mut self.eq_r_per_lht), one_minus_r, u_round);
+        self.k_rot_r_per_lht =
+            fold_eval_map(take(&mut self.k_rot_r_per_lht), one_minus_r, u_round);
         for (tv, eq_ub) in zip(&self.trace_views, &mut self.eq_ub_per_trace) {
             let s = tv.slice;
             let n_lift = s.log_height().saturating_sub(l_skip);
