@@ -48,6 +48,8 @@ pub mod fractional_sumcheck_gkr;
 pub mod proof_shape;
 pub mod stacked_reduction;
 pub mod sumcheck;
+#[cfg(test)]
+mod transcript_extractor;
 pub mod whir;
 
 pub fn verify<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
