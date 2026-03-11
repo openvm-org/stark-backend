@@ -49,6 +49,8 @@ pub mod proof_shape;
 pub mod stacked_reduction;
 pub mod sumcheck;
 pub mod whir;
+#[cfg(test)]
+mod transcript_extractor;
 
 pub fn verify<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     config: &SC,
