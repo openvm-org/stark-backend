@@ -12,10 +12,8 @@ use openvm_stark_backend::{
         poly::evals_eq_hypercube,
         stacked_pcs::StackedSlice,
         stacked_reduction::StackedReductionProver,
-        sumcheck::{
-            batch_fold_mle_evals, fold_mle_evals, sumcheck_round0_deg, sumcheck_round_poly_evals,
-        },
-        ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, MatrixView, ProverBackend,
+        sumcheck::{batch_fold_mle_evals, sumcheck_round0_deg, sumcheck_round_poly_evals},
+        ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, ProverBackend,
     },
     StarkProtocolConfig,
 };
@@ -100,10 +98,10 @@ pub struct StackedReductionCpuNew<'a, SC: StarkProtocolConfig> {
     trace_views: Vec<TraceViewMeta>,
     ht_diff_idxs: Vec<usize>,
 
-    eq_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>>,
+    eq_r_per_lht: HashMap<usize, Vec<SC::EF>>,
 
     // After round 0:
-    k_rot_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>>,
+    k_rot_r_per_lht: HashMap<usize, Vec<SC::EF>>,
     q_evals: Vec<ColMajorMatrix<SC::EF>>,
     eq_ub_per_trace: Vec<SC::EF>,
 }
@@ -171,7 +169,7 @@ where
         let lambda_pows = lambda.powers().take(lambda_idx).collect_vec();
 
         let mut ht_diff_idxs = Vec::new();
-        let mut eq_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>> = HashMap::new();
+        let mut eq_r_per_lht: HashMap<usize, Vec<SC::EF>> = HashMap::new();
         let mut last_height = 0;
         for (i, tv) in trace_views.iter().enumerate() {
             let n_lift = tv.slice.log_height().saturating_sub(l_skip);
@@ -181,7 +179,7 @@ where
             }
             eq_r_per_lht
                 .entry(tv.slice.log_height())
-                .or_insert_with(|| ColMajorMatrix::new(evals_eq_hypercube(&r[1..1 + n_lift]), 1));
+                .or_insert_with(|| evals_eq_hypercube(&r[1..1 + n_lift]));
         }
         ht_diff_idxs.push(trace_views.len());
 
@@ -232,7 +230,7 @@ where
                 let log_height = t_window[0].slice.log_height();
                 let n = log_height as isize - l_skip as isize;
                 let n_lift = n.max(0) as usize;
-                let eq_rs = eq_r_per_lht.get(&log_height).unwrap().column(0);
+                let eq_rs = eq_r_per_lht.get(&log_height).unwrap().as_slice();
                 debug_assert_eq!(eq_rs.len(), 1 << n_lift);
 
                 // Collect column data references (each trace view is a single column)
@@ -394,10 +392,10 @@ where
         self.k_rot_r_per_lht = self
             .eq_r_per_lht
             .par_iter_mut()
-            .map(|(&log_height, mat)| {
+            .map(|(&log_height, eq_vec)| {
                 let n = log_height as isize - l_skip as isize;
                 let n_lift = n.max(0) as usize;
-                debug_assert_eq!(mat.values.len(), 1 << n_lift);
+                debug_assert_eq!(eq_vec.len(), 1 << n_lift);
                 let ind = eval_in_uni(l_skip, n, u_0);
                 let (eq_uni, eq_uni_rot) = if n.is_negative() {
                     let omega = omega_skip.exp_power_of_2(-n as usize);
@@ -407,19 +405,19 @@ where
                 } else {
                     (eq_uni_u0r0, eq_uni_u0r0_rot)
                 };
-                let evals: Vec<_> = (0..1 << n_lift)
+                let k_rot_evals: Vec<_> = (0..1 << n_lift)
                     .into_par_iter()
                     .map(|x| {
-                        let eq_cube = unsafe { *mat.get_unchecked(x, 0) };
-                        let k_rot_cube = unsafe { *mat.get_unchecked(rot_prev(x, n_lift), 0) };
+                        let eq_cube = eq_vec[x];
+                        let k_rot_cube = eq_vec[rot_prev(x, n_lift)];
                         ind * (eq_uni_rot * eq_cube
                             + self.eq_const * eq_uni_u01 * (k_rot_cube - eq_cube))
                     })
                     .collect();
-                mat.values.par_iter_mut().for_each(|v| {
+                eq_vec.par_iter_mut().for_each(|v| {
                     *v *= ind * eq_uni;
                 });
-                (log_height, ColMajorMatrix::new(evals, 1))
+                (log_height, k_rot_evals)
             })
             .collect();
     }
@@ -436,8 +434,8 @@ where
                 let log_height = t_views[0].slice.log_height();
                 let n_lift = log_height.saturating_sub(l_skip);
                 let hypercube_dim = n_lift.saturating_sub(round);
-                let eq_rs = self.eq_r_per_lht.get(&log_height).unwrap().column(0);
-                let k_rot_rs = self.k_rot_r_per_lht.get(&log_height).unwrap().column(0);
+                let eq_rs = self.eq_r_per_lht.get(&log_height).unwrap().as_slice();
+                let k_rot_rs = self.k_rot_r_per_lht.get(&log_height).unwrap().as_slice();
                 debug_assert_eq!(eq_rs.len(), 1 << n_lift.saturating_sub(round - 1));
                 debug_assert_eq!(k_rot_rs.len(), 1 << n_lift.saturating_sub(round - 1));
                 let t_cols = t_views
@@ -493,13 +491,32 @@ where
         let _span = tracing::info_span!("stacked_fold_mle").entered();
         let l_skip = self.l_skip;
         self.q_evals = batch_fold_mle_evals(take(&mut self.q_evals), u_round);
+        let one_minus_r = SC::EF::ONE - u_round;
         self.eq_r_per_lht = take(&mut self.eq_r_per_lht)
             .into_par_iter()
-            .map(|(lht, mat)| (lht, fold_mle_evals(mat, u_round)))
+            .map(|(lht, v)| {
+                if v.len() <= 1 {
+                    return (lht, v);
+                }
+                let folded: Vec<SC::EF> = v
+                    .chunks_exact(2)
+                    .map(|pair| pair[0] * one_minus_r + pair[1] * u_round)
+                    .collect();
+                (lht, folded)
+            })
             .collect();
         self.k_rot_r_per_lht = take(&mut self.k_rot_r_per_lht)
             .into_par_iter()
-            .map(|(lht, mat)| (lht, fold_mle_evals(mat, u_round)))
+            .map(|(lht, v)| {
+                if v.len() <= 1 {
+                    return (lht, v);
+                }
+                let folded: Vec<SC::EF> = v
+                    .chunks_exact(2)
+                    .map(|pair| pair[0] * one_minus_r + pair[1] * u_round)
+                    .collect();
+                (lht, folded)
+            })
             .collect();
         for (tv, eq_ub) in zip(&self.trace_views, &mut self.eq_ub_per_trace) {
             let s = tv.slice;
