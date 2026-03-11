@@ -30,11 +30,8 @@ use openvm_stark_backend::{
         fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
         poly::{eq_sharp_uni_poly, evals_eq_hypercubes},
         stacked_pcs::StackedLayout,
-        sumcheck::{
-            batch_fold_mle_evals, batch_fold_ple_evals, sumcheck_round0_deg,
-            sumcheck_round_poly_evals,
-        },
-        AirProvingContext, ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions,
+        sumcheck::sumcheck_round0_deg,
+        AirProvingContext, DeviceMultiStarkProvingKey, MatrixDimensions,
         ProverBackend, ProvingContext,
     },
     FiatShamirTranscript, StarkProtocolConfig,
@@ -81,28 +78,6 @@ fn extract_rm_block<F: TwoAdicField>(
     RowMajorMatrix::new(vals, w)
 }
 
-/// Extract `2^l_skip` rows from a ColMajorMatrix for hypercube point `x`.
-/// Returns a RowMajorMatrix suitable for batch DFT.
-#[inline]
-fn extract_cm_block<F: TwoAdicField>(
-    cm: &ColMajorMatrix<F>,
-    x: usize,
-    l_skip: usize,
-) -> RowMajorMatrix<F> {
-    let h = cm.height();
-    let w = cm.width();
-    let sz = 1usize << l_skip;
-    let base = x << l_skip;
-    let mut vals = Vec::with_capacity(sz * w);
-    for z in 0..sz {
-        let row = (base + z) % h;
-        for c in 0..w {
-            vals.push(cm.values[c * h + row]);
-        }
-    }
-    RowMajorMatrix::new(vals, w)
-}
-
 /// Batch coset DFT: given iDFT'd coefficients in a RowMajorMatrix,
 /// evaluate on the coset `shift * D` where D = <omega_skip>.
 ///
@@ -132,12 +107,12 @@ fn extract_and_dft_blocks<F: TwoAdicField>(
     x: usize,
     l_skip: usize,
     rm_mats: &[(&RowMajorMatrix<F>, bool)],
-    sels_cm: &ColMajorMatrix<F>,
+    sels_rm: &RowMajorMatrix<F>,
     coset_shifts: &[F],
 ) -> (Vec<RowMajorMatrix<F>>, Vec<Vec<RowMajorMatrix<F>>>) {
     let dft = Radix2BowersSerial;
 
-    let sels_block = extract_cm_block(sels_cm, x, l_skip);
+    let sels_block = extract_rm_block(sels_rm, x, l_skip, 0);
     let sels_coeffs = dft.idft_batch(sels_block);
     let sels_cosets = coset_shifts
         .iter()
@@ -176,7 +151,7 @@ fn fold_ple_evals_rowmajor<F, EF>(
     rm: &RowMajorMatrix<F>,
     is_rot: bool,
     r: EF,
-) -> ColMajorMatrix<EF>
+) -> RowMajorMatrix<EF>
 where
     F: TwoAdicField,
     EF: ExtensionField<F> + TwoAdicField,
@@ -208,7 +183,7 @@ where
     let r_pow_n = r.exp_power_of_2(l_skip);
     let scaling_factor = (r_pow_n - EF::ONE) * EF::from_usize(skip_sz).inverse();
 
-    // Output is col-major: values[col * new_height + x] for each (x, col)
+    // Output is row-major: values[x * width + col] for each (x, col)
     let values: Vec<EF> = (0..new_height)
         .into_par_iter()
         .flat_map(|x| {
@@ -231,17 +206,7 @@ where
         })
         .collect();
 
-    // Parallel transpose from row-major output to col-major
-    let mut cm_values = EF::zero_vec(width * new_height);
-    cm_values
-        .par_chunks_exact_mut(new_height)
-        .enumerate()
-        .for_each(|(j, col)| {
-            for x in 0..new_height {
-                col[x] = values[x * width + j];
-            }
-        });
-    ColMajorMatrix::new(cm_values, width)
+    RowMajorMatrix::new(values, width)
 }
 
 /// Run the round-0 sumcheck using batch DFT from row-major data.
@@ -258,7 +223,7 @@ fn sumcheck_uni_round0_batch<F, EF, FN, const WD: usize>(
     n: usize,
     d: usize,
     rm_mats: &[(&RowMajorMatrix<F>, bool)],
-    sels_cm: &ColMajorMatrix<F>,
+    sels_rm: &RowMajorMatrix<F>,
     w: FN,
 ) -> [UnivariatePoly<EF>; WD]
 where
@@ -277,7 +242,7 @@ where
     // Map-Reduce over x ∈ H_n
     let evals = (0..1usize << n).into_par_iter().map(|x| {
         let (sels_cosets, mat_cosets) =
-            extract_and_dft_blocks(x, l_skip, rm_mats, sels_cm, &coset_shifts);
+            extract_and_dft_blocks(x, l_skip, rm_mats, sels_rm, &coset_shifts);
 
         // Pre-allocate row_parts buffers: reused across all z-points to avoid
         // per-z-point allocation (saves ~1.4GB of allocations for keccakf)
@@ -353,7 +318,7 @@ fn sumcheck_uni_round0_zerocheck_packed<SC>(
     n: usize,
     d: usize,
     rm_mats: &[(&RowMajorMatrix<SC::F>, bool)],
-    sels_cm: &ColMajorMatrix<SC::F>,
+    sels_rm: &RowMajorMatrix<SC::F>,
     helper: &RowMajorEvalHelper<'_, SC>,
     eq_xi: &[SC::EF],
     lambda_pows: &[SC::EF],
@@ -382,7 +347,7 @@ where
         let eq = eq_xi[x];
 
         let (sels_cosets, mat_cosets) =
-            extract_and_dft_blocks(x, l_skip, rm_mats, sels_cm, &coset_shifts);
+            extract_and_dft_blocks(x, l_skip, rm_mats, sels_rm, &coset_shifts);
 
         // Pre-allocate packed row_parts buffers
         let sels_w = sels_cosets[0].width;
@@ -874,9 +839,9 @@ pub(crate) struct LogupZerocheckRowMajor<'a, SC: StarkProtocolConfig> {
     lambda_pows: Vec<SC::EF>,
     eq_xi_per_trace: Vec<Vec<SC::EF>>,
     eq_3b_per_trace: Vec<Vec<SC::EF>>,
-    sels_per_trace_base: Vec<ColMajorMatrix<SC::F>>,
-    pub mat_evals_per_trace: Vec<Vec<ColMajorMatrix<SC::EF>>>,
-    pub sels_per_trace: Vec<ColMajorMatrix<SC::EF>>,
+    sels_per_trace_base: Vec<RowMajorMatrix<SC::F>>,
+    pub mat_evals_per_trace: Vec<Vec<RowMajorMatrix<SC::EF>>>,
+    pub sels_per_trace: Vec<RowMajorMatrix<SC::EF>>,
     pub(crate) zerocheck_tilde_evals: Vec<SC::EF>,
     pub(crate) logup_tilde_evals: Vec<[SC::EF; 2]>,
 
@@ -1076,14 +1041,15 @@ where
                 let log_height = l_skip.checked_add_signed(n).unwrap();
                 let height = 1 << log_height;
                 let lifted_height = height.max(1 << l_skip);
-                let mut mat = SC::F::zero_vec(3 * lifted_height);
-                mat[lifted_height..2 * lifted_height].fill(SC::F::ONE);
-                for i in (0..lifted_height).step_by(height) {
-                    mat[i] = SC::F::ONE;
-                    mat[lifted_height + i + height - 1] = SC::F::ZERO;
-                    mat[2 * lifted_height + i + height - 1] = SC::F::ONE;
+                // Row-major: each row is [is_first, is_transition, is_last]
+                let mut vals = SC::F::zero_vec(3 * lifted_height);
+                for i in 0..lifted_height {
+                    let row_in_period = i % height;
+                    vals[i * 3] = SC::F::from_bool(row_in_period == 0); // is_first
+                    vals[i * 3 + 1] = SC::F::from_bool(row_in_period != height - 1); // is_transition
+                    vals[i * 3 + 2] = SC::F::from_bool(row_in_period == height - 1); // is_last
                 }
-                ColMajorMatrix::new(mat, 3)
+                RowMajorMatrix::new(vals, 3)
             })
             .collect_vec();
 
@@ -1193,8 +1159,10 @@ where
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        self.sels_per_trace =
-            batch_fold_ple_evals(l_skip, take(&mut self.sels_per_trace_base), false, r_0);
+        self.sels_per_trace = take(&mut self.sels_per_trace_base)
+            .iter()
+            .map(|rm| fold_ple_evals_rowmajor(l_skip, rm, false, r_0))
+            .collect();
         let eq_r0 = eval_eq_uni(l_skip, self.xi[0], r_0);
         let eq_sharp_r0 = eval_eq_sharp_uni(&self.omega_skip_pows, &self.xi[..l_skip], r_0);
         self.eq_ns.push(eq_r0);
@@ -1206,7 +1174,7 @@ where
         });
     }
 
-    /// After folding, operates on small ColMajorMatrix<EF> — identical to reference.
+    /// After PLE folding, operates on small RowMajorMatrix<EF> via RM sumcheck.
     pub fn sumcheck_polys_eval(&mut self, round: usize, r_prev: SC::EF) -> Vec<Vec<SC::EF>> {
         let sp_deg = self.constraint_degree;
         let sp_zerocheck_evals: Vec<Vec<SC::EF>> = izip!(
@@ -1221,10 +1189,11 @@ where
             let n_lift = n.max(0) as usize;
             if round > n_lift {
                 if round == n_lift + 1 {
-                    let parts = iter::once(sels)
-                        .chain(mats)
-                        .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
-                        .collect_vec();
+                    // Height is 1 — extract single row as Vec
+                    let parts: Vec<Vec<SC::EF>> = iter::once(sels)
+                        .chain(mats.iter())
+                        .map(|mat| mat.values.to_vec())
+                        .collect();
                     let eq_r_acc = *self.eq_ns.last().unwrap();
                     *tilde_eval = eq_r_acc * helper.acc_constraints(&parts, &self.lambda_pows);
                 } else {
@@ -1235,16 +1204,20 @@ where
                 let log_num_y = n_lift - round;
                 let num_y = 1 << log_num_y;
                 let eq_xi = &eq_xi_tree[num_y - 1..];
-                let parts = iter::once(sels)
-                    .chain(mats)
-                    .map(|m| m.as_view())
-                    .collect_vec();
-                let [s] =
-                    sumcheck_round_poly_evals(log_num_y + 1, sp_deg, &parts, |_x, y, row_parts| {
+                let parts_vec: Vec<&RowMajorMatrix<SC::EF>> = iter::once(sels)
+                    .chain(mats.iter())
+                    .collect();
+                let [s] = crate::row_major_ops::sumcheck_round_poly_evals_rm(
+                    log_num_y + 1,
+                    sp_deg,
+                    &parts_vec,
+                    |_x, y, row_parts| {
                         let eq = eq_xi[y];
-                        let constraint_eval = helper.acc_constraints(row_parts, &self.lambda_pows);
+                        let constraint_eval =
+                            helper.acc_constraints(row_parts, &self.lambda_pows);
                         [eq * constraint_eval]
-                    });
+                    },
+                );
                 s
             }
         })
@@ -1268,10 +1241,11 @@ where
             let norm_factor = SC::F::from_usize(norm_factor_denom).inverse();
             if round > n_lift {
                 if round == n_lift + 1 {
-                    let parts = iter::once(sels)
-                        .chain(mats)
-                        .map(|mat| mat.columns().map(|c| c[0]).collect_vec())
-                        .collect_vec();
+                    // Height is 1 — extract single row as Vec
+                    let parts: Vec<Vec<SC::EF>> = iter::once(sels)
+                        .chain(mats.iter())
+                        .map(|mat| mat.values.to_vec())
+                        .collect();
                     let eq_sharp_r_acc = *self.eq_sharp_ns.last().unwrap();
                     *tilde_eval = helper
                         .acc_interactions(&parts, &self.beta_pows, eq_3bs)
@@ -1284,20 +1258,23 @@ where
                 };
                 tilde_eval.map(|tilde_eval| vec![tilde_eval])
             } else {
-                let parts = iter::once(sels)
-                    .chain(mats)
-                    .map(|m| m.as_view())
-                    .collect_vec();
+                let parts_vec: Vec<&RowMajorMatrix<SC::EF>> = iter::once(sels)
+                    .chain(mats.iter())
+                    .collect();
                 let log_num_y = n_lift - round;
                 let num_y = 1 << log_num_y;
                 let eq_xi = &eq_xi_tree[num_y - 1..];
-                let [mut numer, denom] =
-                    sumcheck_round_poly_evals(log_num_y + 1, sp_deg, &parts, |_x, y, row_parts| {
+                let [mut numer, denom] = crate::row_major_ops::sumcheck_round_poly_evals_rm(
+                    log_num_y + 1,
+                    sp_deg,
+                    &parts_vec,
+                    |_x, y, row_parts| {
                         let eq = eq_xi[y];
                         helper
                             .acc_interactions(row_parts, &self.beta_pows, eq_3bs)
                             .map(|eval| eq * eval)
-                    });
+                    },
+                );
                 for p in &mut numer {
                     *p *= norm_factor;
                 }
@@ -1315,9 +1292,10 @@ where
     pub fn fold_mle_evals(&mut self, round: usize, r_round: SC::EF) {
         self.mat_evals_per_trace = take(&mut self.mat_evals_per_trace)
             .into_iter()
-            .map(|mats| batch_fold_mle_evals(mats, r_round))
+            .map(|mats| crate::row_major_ops::batch_fold_mle_evals_rm(mats, r_round))
             .collect_vec();
-        self.sels_per_trace = batch_fold_mle_evals(take(&mut self.sels_per_trace), r_round);
+        self.sels_per_trace =
+            crate::row_major_ops::batch_fold_mle_evals_rm(take(&mut self.sels_per_trace), r_round);
         self.eq_xi_per_trace.par_iter_mut().for_each(|eq| {
             if eq.len() > 1 {
                 eq.truncate(eq.len() / 2);
@@ -1337,18 +1315,18 @@ where
             .iter()
             .zip(take(&mut self.mat_evals_per_trace))
         {
+            // All matrices have height 1 at this point — values IS the single row
             let openings_of_air: Vec<Vec<SC::EF>> = if helper.needs_next {
                 let common_main_rot = mat_evals.pop().unwrap();
                 let common_main = mat_evals.pop().unwrap();
                 iter::once(&[common_main, common_main_rot] as &[_])
                     .chain(mat_evals.chunks_exact(2))
                     .map(|pair| {
-                        zip(pair[0].columns(), pair[1].columns())
-                            .flat_map(|(claim, claim_rot)| {
-                                assert_eq!(claim.len(), 1);
-                                assert_eq!(claim_rot.len(), 1);
-                                [claim[0], claim_rot[0]]
-                            })
+                        pair[0]
+                            .values
+                            .iter()
+                            .zip(pair[1].values.iter())
+                            .flat_map(|(&claim, &claim_rot)| [claim, claim_rot])
                             .collect_vec()
                     })
                     .collect_vec()
@@ -1356,14 +1334,7 @@ where
                 let common_main = mat_evals.pop().unwrap();
                 iter::once(common_main)
                     .chain(mat_evals.into_iter())
-                    .map(|mat| {
-                        mat.columns()
-                            .map(|claim| {
-                                assert_eq!(claim.len(), 1);
-                                claim[0]
-                            })
-                            .collect_vec()
-                    })
+                    .map(|mat| mat.values)
                     .collect_vec()
             };
             column_openings.push(openings_of_air);

@@ -68,7 +68,7 @@ pub fn sumcheck_round_poly_evals_rm<EF, FN, const WD: usize>(
 ) -> [Vec<EF>; WD]
 where
     EF: Field,
-    FN: Fn(EF, usize, &[&[EF]]) -> [EF; WD] + Sync,
+    FN: Fn(EF, usize, &[Vec<EF>]) -> [EF; WD] + Sync,
 {
     debug_assert!(parts.iter().all(|mat| {
         let h = mat.values.len() / mat.width;
@@ -77,8 +77,8 @@ where
 
     if n == 0 {
         // Trivial sum: s(X) is constant. Each matrix is a single row.
-        let row_refs: Vec<&[EF]> = parts.iter().map(|mat| mat.values.as_slice()).collect();
-        return w(EF::ONE, 0, &row_refs).map(|x| vec![x; d]);
+        let row_vecs: Vec<Vec<EF>> = parts.iter().map(|mat| mat.values.to_vec()).collect();
+        return w(EF::ONE, 0, &row_vecs).map(|x| vec![x; d]);
     }
 
     let hypercube_dim = n - 1;
@@ -107,8 +107,7 @@ where
                         })
                         .collect();
 
-                    let row_refs: Vec<&[EF]> = interp_rows.iter().map(|v| v.as_slice()).collect();
-                    w(x_ef, y, &row_refs)
+                    w(x_ef, y, &interp_rows)
                 })
                 .collect_vec()
         });
@@ -251,7 +250,7 @@ mod tests {
             1,
             1,
             &[&mat],
-            |_x, _y, evals| [evals[0][0]],
+            |_x, _y, parts| [parts[0][0]],
         );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], b); // s(1) = b
@@ -275,7 +274,7 @@ mod tests {
             2,
             1,
             &[&mat],
-            |_x, _y, evals| [evals[0][0]],
+            |_x, _y, parts| [parts[0][0]],
         );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], b + d);
@@ -289,7 +288,7 @@ mod tests {
             0,
             1,
             &[&mat],
-            |_x, _y, evals| [evals[0][0]],
+            |_x, _y, parts| [parts[0][0]],
         );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], F::from_u32(42));
@@ -305,7 +304,7 @@ mod tests {
             1,
             1,
             &[&mat1, &mat2],
-            |_x, _y, evals| [evals[0][0] + evals[1][0]],
+            |_x, _y, parts| [parts[0][0] + parts[1][0]],
         );
         // s(1) = (mat1 row1) + (mat2 row1) = 20 + 7 = 27
         assert_eq!(result[0], F::from_u32(27));
@@ -323,7 +322,7 @@ mod tests {
             1,
             2,
             &[&mat],
-            |_x, _y, evals| [evals[0][0]],
+            |_x, _y, parts| [parts[0][0]],
         );
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], b); // s(1)
