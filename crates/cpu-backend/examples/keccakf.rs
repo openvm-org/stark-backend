@@ -11,8 +11,7 @@ use openvm_stark_backend::{
     PartitionedBaseAir, StarkEngine,
 };
 use openvm_stark_sdk::config::{
-    app_params_with_100_bits_security,
-    baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
+    app_params_with_100_bits_security, baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
 };
 use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
 use p3_field::Field;

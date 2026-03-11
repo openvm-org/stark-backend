@@ -206,10 +206,7 @@ mod tests {
     #[test]
     fn test_get_opened_rows_single() {
         // 4 rows x 3 cols, rows_per_query = 1
-        let mat = RowMajorMatrix::new(
-            vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-            3,
-        );
+        let mat = RowMajorMatrix::new(vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 3);
         let digest_layers = vec![vec![0u32; 4], vec![0u32; 2], vec![0u32; 1]];
 
         let tree = unsafe { CpuMerkleTree::from_raw_parts(mat, digest_layers, 1) };

@@ -3,9 +3,9 @@
 use std::marker::PhantomData;
 
 use openvm_stark_backend::{prover::ProverBackend, StarkProtocolConfig};
+use p3_matrix::dense::RowMajorMatrix;
 
 use crate::pcs_data::CpuStackedPcsData;
-use p3_matrix::dense::RowMajorMatrix;
 
 /// Row-major CPU prover backend.
 ///

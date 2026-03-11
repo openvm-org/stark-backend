@@ -27,9 +27,8 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    backend::CpuBackend, error::CpuProverError, merkle::CpuMerkleTree,
-    pcs_data::CpuStackedPcsData, stacked_reduction::StackedReductionCpuNew,
-    two_adic::DftTwiddles,
+    backend::CpuBackend, error::CpuProverError, merkle::CpuMerkleTree, pcs_data::CpuStackedPcsData,
+    stacked_reduction::StackedReductionCpuNew, two_adic::DftTwiddles,
 };
 
 /// Reinterpret a `Vec<A>` as `Vec<B>` when both types have identical layout.

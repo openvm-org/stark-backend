@@ -31,8 +31,8 @@ use openvm_stark_backend::{
         poly::{eq_sharp_uni_poly, evals_eq_hypercubes},
         stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
-        AirProvingContext, DeviceMultiStarkProvingKey, MatrixDimensions,
-        ProverBackend, ProvingContext,
+        AirProvingContext, DeviceMultiStarkProvingKey, MatrixDimensions, ProverBackend,
+        ProvingContext,
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
@@ -1204,17 +1204,15 @@ where
                 let log_num_y = n_lift - round;
                 let num_y = 1 << log_num_y;
                 let eq_xi = &eq_xi_tree[num_y - 1..];
-                let parts_vec: Vec<&RowMajorMatrix<SC::EF>> = iter::once(sels)
-                    .chain(mats.iter())
-                    .collect();
+                let parts_vec: Vec<&RowMajorMatrix<SC::EF>> =
+                    iter::once(sels).chain(mats.iter()).collect();
                 let [s] = crate::row_major_ops::sumcheck_round_poly_evals_rm(
                     log_num_y + 1,
                     sp_deg,
                     &parts_vec,
                     |_x, y, row_parts| {
                         let eq = eq_xi[y];
-                        let constraint_eval =
-                            helper.acc_constraints(row_parts, &self.lambda_pows);
+                        let constraint_eval = helper.acc_constraints(row_parts, &self.lambda_pows);
                         [eq * constraint_eval]
                     },
                 );
@@ -1258,9 +1256,8 @@ where
                 };
                 tilde_eval.map(|tilde_eval| vec![tilde_eval])
             } else {
-                let parts_vec: Vec<&RowMajorMatrix<SC::EF>> = iter::once(sels)
-                    .chain(mats.iter())
-                    .collect();
+                let parts_vec: Vec<&RowMajorMatrix<SC::EF>> =
+                    iter::once(sels).chain(mats.iter()).collect();
                 let log_num_y = n_lift - round;
                 let num_y = 1 << log_num_y;
                 let eq_xi = &eq_xi_tree[num_y - 1..];

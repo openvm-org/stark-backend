@@ -44,9 +44,7 @@ pub fn batch_fold_mle_evals_rm<EF: Field>(
     mats: Vec<RowMajorMatrix<EF>>,
     r: EF,
 ) -> Vec<RowMajorMatrix<EF>> {
-    mats.into_iter()
-        .map(|m| fold_mle_evals_rm(m, r))
-        .collect()
+    mats.into_iter().map(|m| fold_mle_evals_rm(m, r)).collect()
 }
 
 /// RowMajor-native version of
@@ -84,33 +82,31 @@ where
     let hypercube_dim = n - 1;
 
     // For each y in H_{n-1}, evaluate hat{f}(x, y) for x in {1, ..., d} by MLE interpolation.
-    let evals = (0..1usize << hypercube_dim)
-        .into_par_iter()
-        .map(|y| {
-            (1..=d)
-                .map(|x| {
-                    let x_ef = EF::from_usize(x);
-                    // For each matrix, read row 2y and row 2y+1, interpolate column-wise.
-                    let interp_rows: Vec<Vec<EF>> = parts
-                        .iter()
-                        .map(|mat| {
-                            let width = mat.width;
-                            let r0 = (y << 1) * width;
-                            let r1 = ((y << 1) | 1) * width;
-                            (0..width)
-                                .map(|j| {
-                                    let t_0 = mat.values[r0 + j];
-                                    let t_1 = mat.values[r1 + j];
-                                    t_0 + (t_1 - t_0) * x_ef
-                                })
-                                .collect()
-                        })
-                        .collect();
+    let evals = (0..1usize << hypercube_dim).into_par_iter().map(|y| {
+        (1..=d)
+            .map(|x| {
+                let x_ef = EF::from_usize(x);
+                // For each matrix, read row 2y and row 2y+1, interpolate column-wise.
+                let interp_rows: Vec<Vec<EF>> = parts
+                    .iter()
+                    .map(|mat| {
+                        let width = mat.width;
+                        let r0 = (y << 1) * width;
+                        let r1 = ((y << 1) | 1) * width;
+                        (0..width)
+                            .map(|j| {
+                                let t_0 = mat.values[r0 + j];
+                                let t_1 = mat.values[r1 + j];
+                                t_0 + (t_1 - t_0) * x_ef
+                            })
+                            .collect()
+                    })
+                    .collect();
 
-                    w(x_ef, y, &interp_rows)
-                })
-                .collect_vec()
-        });
+                w(x_ef, y, &interp_rows)
+            })
+            .collect_vec()
+    });
 
     // Reduce: sum over H_{n-1}
     let hypercube_sum = |mut acc: Vec<[EF; WD]>, x: Vec<[EF; WD]>| {
@@ -140,13 +136,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Use u64 as a mock field — it won't satisfy Field but we can test the logic
     // with a real field from the SDK. For unit tests of the pure-logic parts,
     // we use BabyBear from the dev-dependencies.
     use openvm_stark_sdk::config::baby_bear_poseidon2::F;
     use p3_field::PrimeCharacteristicRing;
+
+    use super::*;
 
     #[test]
     fn test_fold_mle_evals_rm_identity_at_zero() {
@@ -222,11 +218,21 @@ mod tests {
     #[test]
     fn test_batch_fold_mle_evals_rm() {
         let mat1 = RowMajorMatrix::new(
-            vec![F::from_u32(1), F::from_u32(2), F::from_u32(3), F::from_u32(4)],
+            vec![
+                F::from_u32(1),
+                F::from_u32(2),
+                F::from_u32(3),
+                F::from_u32(4),
+            ],
             2,
         );
         let mat2 = RowMajorMatrix::new(
-            vec![F::from_u32(10), F::from_u32(20), F::from_u32(30), F::from_u32(40)],
+            vec![
+                F::from_u32(10),
+                F::from_u32(20),
+                F::from_u32(30),
+                F::from_u32(40),
+            ],
             2,
         );
         let r = F::ZERO;
@@ -246,12 +252,8 @@ mod tests {
         let a = F::from_u32(5);
         let b = F::from_u32(11);
         let mat = RowMajorMatrix::new(vec![a, b], 1);
-        let [result] = sumcheck_round_poly_evals_rm::<_, _, 1>(
-            1,
-            1,
-            &[&mat],
-            |_x, _y, parts| [parts[0][0]],
-        );
+        let [result] =
+            sumcheck_round_poly_evals_rm::<_, _, 1>(1, 1, &[&mat], |_x, _y, parts| [parts[0][0]]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], b); // s(1) = b
     }
@@ -270,12 +272,8 @@ mod tests {
         let c = F::from_u32(3);
         let d = F::from_u32(4);
         let mat = RowMajorMatrix::new(vec![a, b, c, d], 1);
-        let [result] = sumcheck_round_poly_evals_rm::<_, _, 1>(
-            2,
-            1,
-            &[&mat],
-            |_x, _y, parts| [parts[0][0]],
-        );
+        let [result] =
+            sumcheck_round_poly_evals_rm::<_, _, 1>(2, 1, &[&mat], |_x, _y, parts| [parts[0][0]]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], b + d);
     }
@@ -284,12 +282,8 @@ mod tests {
     fn test_sumcheck_round_poly_evals_rm_n0() {
         // n=0, d=1: trivial case, single row
         let mat = RowMajorMatrix::new(vec![F::from_u32(42)], 1);
-        let [result] = sumcheck_round_poly_evals_rm::<_, _, 1>(
-            0,
-            1,
-            &[&mat],
-            |_x, _y, parts| [parts[0][0]],
-        );
+        let [result] =
+            sumcheck_round_poly_evals_rm::<_, _, 1>(0, 1, &[&mat], |_x, _y, parts| [parts[0][0]]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], F::from_u32(42));
     }
@@ -300,12 +294,10 @@ mod tests {
         // n=1, d=1
         let mat1 = RowMajorMatrix::new(vec![F::from_u32(10), F::from_u32(20)], 1);
         let mat2 = RowMajorMatrix::new(vec![F::from_u32(3), F::from_u32(7)], 1);
-        let [result] = sumcheck_round_poly_evals_rm::<_, _, 1>(
-            1,
-            1,
-            &[&mat1, &mat2],
-            |_x, _y, parts| [parts[0][0] + parts[1][0]],
-        );
+        let [result] =
+            sumcheck_round_poly_evals_rm::<_, _, 1>(1, 1, &[&mat1, &mat2], |_x, _y, parts| {
+                [parts[0][0] + parts[1][0]]
+            });
         // s(1) = (mat1 row1) + (mat2 row1) = 20 + 7 = 27
         assert_eq!(result[0], F::from_u32(27));
     }
@@ -318,12 +310,8 @@ mod tests {
         let a = F::from_u32(5);
         let b = F::from_u32(11);
         let mat = RowMajorMatrix::new(vec![a, b], 1);
-        let [result] = sumcheck_round_poly_evals_rm::<_, _, 1>(
-            1,
-            2,
-            &[&mat],
-            |_x, _y, parts| [parts[0][0]],
-        );
+        let [result] =
+            sumcheck_round_poly_evals_rm::<_, _, 1>(1, 2, &[&mat], |_x, _y, parts| [parts[0][0]]);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], b); // s(1)
         let expected_s2 = a * (F::ONE - F::from_u32(2)) + b * F::from_u32(2);

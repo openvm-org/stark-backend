@@ -516,8 +516,7 @@ where
         self.q_evals = batch_fold_mle_evals(take(&mut self.q_evals), u_round);
         let one_minus_r = SC::EF::ONE - u_round;
         self.eq_r_per_lht = fold_eval_map(take(&mut self.eq_r_per_lht), one_minus_r, u_round);
-        self.k_rot_r_per_lht =
-            fold_eval_map(take(&mut self.k_rot_r_per_lht), one_minus_r, u_round);
+        self.k_rot_r_per_lht = fold_eval_map(take(&mut self.k_rot_r_per_lht), one_minus_r, u_round);
         for (tv, eq_ub) in zip(&self.trace_views, &mut self.eq_ub_per_trace) {
             let s = tv.slice;
             let n_lift = s.log_height().saturating_sub(l_skip);
