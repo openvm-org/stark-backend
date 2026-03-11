@@ -4,10 +4,9 @@
 
 use openvm_stark_backend::{soundness::*, SystemParams};
 use openvm_stark_sdk::config::{
-    app_params_with_100_bits_security,
-    compression_params_with_100_bits_security as compression_params,
-    internal_params_with_100_bits_security as internal_params,
-    leaf_params_with_100_bits_security as leaf_params, MAX_APP_LOG_STACKED_HEIGHT,
+    app_params_with_100_bits_security, internal_params_with_100_bits_security as internal_params,
+    leaf_params_with_100_bits_security as leaf_params,
+    root_params_with_100_bits_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
 };
 use p3_baby_bear::BabyBear;
 use p3_field::PrimeField64;
@@ -229,9 +228,9 @@ fn test_internal_aggregation_security() {
 }
 
 #[test]
-fn test_compression_security() {
-    let params = compression_params();
-    let max_log_height = 22;
+fn test_root_aggregation_security() {
+    let params = root_params();
+    let max_log_height = 19;
     let n_logup = n_logup_bound(
         params.l_skip,
         RECURSION_NUM_AIRS,
@@ -240,7 +239,7 @@ fn test_compression_security() {
         params.logup.max_interaction_count as usize,
     );
     let soundness = check_soundness(
-        "Compression",
+        "Root Aggregation",
         &params,
         RECURSION_MAX_CONSTRAINTS,
         RECURSION_NUM_AIRS,
@@ -250,7 +249,7 @@ fn test_compression_security() {
     );
     assert!(
         soundness.total_bits >= TARGET_SECURITY_BITS as f64,
-        "Compression: got {:.1} bits",
+        "Root: got {:.1} bits",
         soundness.total_bits
     );
 }
@@ -262,11 +261,11 @@ fn test_all_production_configs() {
     let app = app_params();
     let leaf = leaf_params();
     let internal = internal_params();
-    let compression = compression_params();
+    let root = root_params();
 
     // (name, params, max_constraints, num_airs, max_log_height, num_columns,
     // max_interactions_per_air)
-    let configs: [(&str, &SystemParams, usize, usize, usize, usize, usize); 4] = [
+    let configs: [(&str, &SystemParams, usize, usize, usize, usize, usize); _] = [
         (
             "App VM",
             &app,
@@ -295,11 +294,11 @@ fn test_all_production_configs() {
             RECURSION_MAX_INTERACTIONS_PER_AIR,
         ),
         (
-            "Compression",
-            &compression,
+            "Root",
+            &root,
             RECURSION_MAX_CONSTRAINTS,
             RECURSION_NUM_AIRS,
-            22,
+            19,
             RECURSION_NUM_COLUMNS,
             RECURSION_MAX_INTERACTIONS_PER_AIR,
         ),
