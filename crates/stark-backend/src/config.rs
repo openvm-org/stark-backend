@@ -92,6 +92,58 @@ impl SystemParams {
     pub fn num_whir_sumcheck_rounds(&self) -> usize {
         self.whir.num_sumcheck_rounds()
     }
+
+    /// Constructor with many configuration options. Only `k_whir`, `max_constraint_degree`,
+    /// `query_phase_pow_bits` are preset with constants.
+    ///
+    /// The `security_bits` is the target bits of security. It is used to select the number of WHIR
+    /// queries, but does **not** guarantee the target security level is achieved by the overall
+    /// protocol using these parameters. Use the soundness calculator to ensure the target security
+    /// level is met.
+    ///
+    /// This function should only be used for internal cryptography libraries. Most users should
+    /// instead use preset parameters provided in SDKs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        log_blowup: usize,
+        l_skip: usize,
+        n_stack: usize,
+        w_stack: usize,
+        log_final_poly_len: usize,
+        folding_pow_bits: usize,
+        mu_pow_bits: usize,
+        proximity: WhirProximityStrategy,
+        security_bits: usize,
+        logup: LogUpSecurityParameters,
+    ) -> SystemParams {
+        const WHIR_QUERY_PHASE_POW_BITS: usize = 20;
+
+        let k_whir = 4;
+        let max_constraint_degree = 4;
+        let log_stacked_height = l_skip + n_stack;
+
+        SystemParams {
+            l_skip,
+            n_stack,
+            w_stack,
+            log_blowup,
+            whir: WhirConfig::new(
+                log_blowup,
+                log_stacked_height,
+                WhirParams {
+                    k: k_whir,
+                    log_final_poly_len,
+                    query_phase_pow_bits: WHIR_QUERY_PHASE_POW_BITS,
+                    proximity,
+                    folding_pow_bits,
+                    mu_pow_bits,
+                },
+                security_bits,
+            ),
+            logup,
+            max_constraint_degree,
+        }
+    }
 }
 
 /// Configurable parameters that are used to determine the [WhirConfig] for a target security level.
@@ -102,6 +154,13 @@ pub struct WhirParams {
     /// log_final_poly_len`.
     pub log_final_poly_len: usize,
     pub query_phase_pow_bits: usize,
+    /// Proximity regime to use within each WHIR round. This is used to determine the number of
+    /// queries in each round for a target security level.
+    pub proximity: WhirProximityStrategy,
+    /// Number of bits of grinding to increase security of each folding step.
+    pub folding_pow_bits: usize,
+    /// Number of bits of grinding before sampling the μ batching challenge.
+    pub mu_pow_bits: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,6 +177,12 @@ pub struct WhirConfig {
     /// The folding PoW bits can vary per round, but for simplicity (and efficiency of the
     /// recursion circuit) we use the same number for all rounds.
     pub folding_pow_bits: usize,
+    /// Proximity regimes for WHIR rounds. We use only proven error bounds.
+    ///
+    /// Note: this field is not needed by the verifier as it is only used to determine the number
+    /// of queries in the `rounds` field. However we store it in `WhirConfig` for security analysis
+    /// purposes.
+    pub proximity: WhirProximityStrategy,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,40 +191,87 @@ pub struct WhirRoundConfig {
     pub num_queries: usize,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WhirProximityStrategy {
+    /// Unique decoding regime in every WHIR round.
+    UniqueDecoding,
+    /// Unique decoding regime in the initial `list_start_round` WHIR rounds. Then list decoding
+    /// regime with the same proximity radius derived from `m` (see `ListDecoding`) for all
+    /// subsequent WHIR rounds (0-indices `>= list_start_round`). Note that a WHIR round
+    /// consists of codewords of different degrees with the same rate. The WHIR round changes
+    /// when the rate changes.
+    SplitUniqueList { m: usize, list_start_round: usize },
+    /// List decoding regime in every WHIR round, with the same proximity radius derived from `m`,
+    /// where `m = ceil(sqrt(\rho) / 2 \eta), \eta = 1 - sqrt(\rho) - \delta, where \delta is the
+    /// proximity radius.
+    ListDecoding { m: usize },
+}
+
+impl WhirProximityStrategy {
+    pub fn initial_round(&self) -> ProximityRegime {
+        self.in_round(0)
+    }
+
+    pub fn in_round(&self, whir_round: usize) -> ProximityRegime {
+        match *self {
+            Self::UniqueDecoding => ProximityRegime::UniqueDecoding,
+            Self::SplitUniqueList {
+                m,
+                list_start_round,
+            } => {
+                if whir_round < list_start_round {
+                    ProximityRegime::UniqueDecoding
+                } else {
+                    ProximityRegime::ListDecoding { m }
+                }
+            }
+            Self::ListDecoding { m } => ProximityRegime::ListDecoding { m },
+        }
+    }
+}
+
 /// Defines the proximity regime for the proof system.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProximityRegime {
     /// Unique decoding guarantees a single valid witness.
     UniqueDecoding,
+    /// List decoding bounded by multiplicity `m`.
+    ListDecoding { m: usize },
 }
 
 impl ProximityRegime {
-    /// Returns the per-query security bits for WHIR query sampling.
-    ///
-    /// Unique decoding formula:
-    /// Error per query = (1 + ρ) / 2 where ρ is the rate.
-    /// Security bits = -log₂((1 + ρ) / 2)
-    pub fn whir_per_query_security_bits(self, log_inv_rate: usize) -> f64 {
-        match self {
-            ProximityRegime::UniqueDecoding => {
-                let rate = 1.0 / (1 << log_inv_rate) as f64;
-                -((0.5 * (1.0 + rate)).log2())
-            }
-        }
-    }
-
     /// Returns total security bits for `num_queries` WHIR queries.
     ///
-    /// Unique decoding formula:
-    /// Security bits = -n × log₂((1 + ρ) / 2)
-    pub fn whir_query_security_bits(self, num_queries: usize, log_inv_rate: usize) -> f64 {
-        (num_queries as f64) * self.whir_per_query_security_bits(log_inv_rate)
+    /// This treats the per-query error as an upper bound on the maximum agreement.
+    ///
+    /// - `UniqueDecoding`: max agreement is `(1 + ρ) / 2`.
+    /// - `ListDecoding { m }`: finite-multiplicity Guruswami-Sudan threshold, `sqrt(ρ(1 + 1/m)) +
+    ///   ε` for a tiny `ε`, to keep the proximity threshold strict.
+    pub fn whir_query_security_bits(&self, num_queries: usize, log_inv_rate: usize) -> f64 {
+        let rho = 2.0_f64.powf(-(log_inv_rate as f64));
+        let max_agreement = match *self {
+            ProximityRegime::UniqueDecoding => (1.0 + rho) / 2.0,
+            ProximityRegime::ListDecoding { m } => {
+                let m = m.max(1) as f64;
+                // Johnson bound with a tiny epsilon to ensure strict proximity.
+                (rho * (1.0 + 1.0 / m)).sqrt() + 1e-6
+            }
+        };
+
+        // Keep the `log2` well-defined.
+        let max_agreement = max_agreement.clamp(f64::MIN_POSITIVE, 1.0);
+        -(num_queries as f64) * max_agreement.log2()
+    }
+
+    /// Returns the per-query security bits for WHIR query sampling.
+    pub fn whir_per_query_security_bits(&self, log_inv_rate: usize) -> f64 {
+        self.whir_query_security_bits(1, log_inv_rate)
     }
 }
 
 impl WhirConfig {
-    /// Sets parameters targeting 100-bits of provable security, with grinding, using the unique
-    /// decoding regime.
+    /// Sets parameters targeting `security_bits` of provable security (including grinding), using
+    /// the given proximity regime.
     pub fn new(
         log_blowup: usize,
         log_stacked_height: usize,
@@ -173,18 +285,15 @@ impl WhirConfig {
             .saturating_sub(whir_params.log_final_poly_len)
             .div_ceil(k_whir);
         let mut log_inv_rate = log_blowup;
-
-        // A safe setting for BabyBear and ~200 columns
-        // TODO[jpw]: use rbr_soundness_queries_combination
-        const FOLDING_POW_BITS: usize = 10;
+        let proximity = whir_params.proximity;
 
         let mut round_parameters = Vec::with_capacity(num_rounds);
-        for _round in 0..num_rounds {
+        for round in 0..num_rounds {
             // Queries are set w.r.t. to old rate, while the rest to the new rate
             let next_rate = log_inv_rate + (k_whir - 1);
 
             let num_queries = Self::queries(
-                ProximityRegime::UniqueDecoding,
+                proximity.in_round(round),
                 protocol_security_level,
                 log_inv_rate,
             );
@@ -193,14 +302,13 @@ impl WhirConfig {
             log_inv_rate = next_rate;
         }
 
-        const MU_POW_BITS: usize = 13;
-
         Self {
             k: k_whir,
             rounds: round_parameters,
-            mu_pow_bits: MU_POW_BITS,
+            mu_pow_bits: whir_params.mu_pow_bits,
             query_phase_pow_bits,
-            folding_pow_bits: FOLDING_POW_BITS,
+            folding_pow_bits: whir_params.folding_pow_bits,
+            proximity,
         }
     }
 
@@ -231,5 +339,19 @@ impl WhirConfig {
         let per_query_bits = proximity_regime.whir_per_query_security_bits(log_inv_rate);
         let num_queries_f = (protocol_security_level as f64) / per_query_bits;
         num_queries_f.ceil() as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_whir_list_decoding_query_bits_monotone_in_num_queries() {
+        let regime = ProximityRegime::ListDecoding { m: 2 };
+        let sec_10 = regime.whir_query_security_bits(10, 1);
+        let sec_20 = regime.whir_query_security_bits(20, 1);
+        assert!(sec_20 > sec_10);
+        assert!(sec_10 > 0.0);
     }
 }
