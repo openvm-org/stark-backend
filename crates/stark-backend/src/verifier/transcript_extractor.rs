@@ -169,7 +169,8 @@ where
     let params = &mvk.inner.params;
 
     let gkr_proof = extract_gkr::<SC, _>(&mut cursor, params, &shapes)?;
-    let batch_constraint_proof = extract_batch_constraints::<SC, _>(&mut cursor, &mvk.inner, &shapes)?;
+    let batch_constraint_proof =
+        extract_batch_constraints::<SC, _>(&mut cursor, &mvk.inner, &shapes)?;
     let stacking_proof = extract_stacking::<SC, _>(&mut cursor, params, &shapes.layouts)?;
     let whir_proof = extract_whir::<SC, _, F, RATE>(
         &mut cursor,
@@ -279,7 +280,10 @@ where
         Ok(digest)
     }
 
-    fn expect_observe_digest<const RATE: usize>(&mut self, expected: [F; RATE]) -> ExtractionResult<()> {
+    fn expect_observe_digest<const RATE: usize>(
+        &mut self,
+        expected: [F; RATE],
+    ) -> ExtractionResult<()> {
         for value in expected {
             self.expect_observe(value)?;
         }
@@ -364,8 +368,7 @@ impl<'a, SC: StarkProtocolConfig> ExtractionShape<'a, SC> {
     fn new(
         mvk: &'a MultiStarkVerifyingKey0<SC>,
         trace_vdata: &[Option<TraceVData<SC>>],
-    ) -> ExtractionResult<Self>
-    {
+    ) -> ExtractionResult<Self> {
         let mut present_traces = mvk
             .per_air
             .iter()
@@ -705,10 +708,8 @@ where
     )?;
     let codeword_opened_values =
         validate_codeword_opened_values(whir_hints.codeword_opened_values, params)?;
-    let codeword_merkle_proofs = validate_codeword_merkle_proofs::<SC>(
-        whir_hints.codeword_merkle_proofs,
-        params,
-    )?;
+    let codeword_merkle_proofs =
+        validate_codeword_merkle_proofs::<SC>(whir_hints.codeword_merkle_proofs, params)?;
 
     let mut remaining_sumcheck_rounds = num_whir_sumcheck_rounds;
     for (whir_round, round_params) in params.whir.rounds.iter().enumerate() {
@@ -731,9 +732,7 @@ where
             ood_values.push(cursor.observe_ext::<SC>()?);
         }
 
-        query_phase_pow_witnesses.push(cursor.extract_witness(
-            params.whir.query_phase_pow_bits,
-        )?);
+        query_phase_pow_witnesses.push(cursor.extract_witness(params.whir.query_phase_pow_bits)?);
         for _ in 0..round_params.num_queries {
             let _index = cursor.sample()?;
         }
@@ -762,8 +761,7 @@ fn validate_initial_round_merkle_proofs<SC: StarkProtocolConfig>(
     initial_round_merkle_proofs: &[Vec<MerkleProof<SC::Digest>>],
     widths: &[usize],
     params: &crate::SystemParams,
-) -> ExtractionResult<MerkleProofSets<SC>>
-{
+) -> ExtractionResult<MerkleProofSets<SC>> {
     let expected_commit_count = widths.len();
     if initial_round_merkle_proofs.len() != expected_commit_count {
         return Err(invalid_shape(
@@ -774,7 +772,8 @@ fn validate_initial_round_merkle_proofs<SC: StarkProtocolConfig>(
     }
 
     let expected_queries = params.whir.rounds[0].num_queries;
-    let expected_depth = (params.log_stacked_height() + params.log_blowup).saturating_sub(params.k_whir());
+    let expected_depth =
+        (params.log_stacked_height() + params.log_blowup).saturating_sub(params.k_whir());
     for (commit_idx, proofs) in initial_round_merkle_proofs.iter().enumerate() {
         if proofs.len() != expected_queries {
             return Err(invalid_shape(
@@ -858,8 +857,7 @@ where
 fn validate_codeword_merkle_proofs<SC: StarkProtocolConfig>(
     codeword_merkle_proofs: &[Vec<MerkleProof<SC::Digest>>],
     params: &crate::SystemParams,
-) -> ExtractionResult<MerkleProofSets<SC>>
-{
+) -> ExtractionResult<MerkleProofSets<SC>> {
     let expected_round_count = params.num_whir_rounds().saturating_sub(1);
     if codeword_merkle_proofs.len() != expected_round_count {
         return Err(invalid_shape(
@@ -1120,7 +1118,8 @@ mod tests {
         let log = recorder.into_log();
         let whir_hints = WhirProofHints::from(&proof.whir_proof);
 
-        let extracted = extract_proof(&vk, &log, whir_hints).map_err(|error| eyre::eyre!("{error}"))?;
+        let extracted =
+            extract_proof(&vk, &log, whir_hints).map_err(|error| eyre::eyre!("{error}"))?;
         assert_eq!(proof, extracted);
         Ok(())
     }
