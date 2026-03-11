@@ -101,7 +101,7 @@ pub fn leaf_params_with_100_bits_security() -> SystemParams {
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
 /// - **`w_stack`** = 512, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
-/// Config: `l_skip=2, n_stack=17, log_blowup=2`.
+/// Config: `l_skip=2, n_stack=17, log_blowup=3`.
 //
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
@@ -120,6 +120,20 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
     )
 }
 
+/// Returns `SystemParams` targeting 100 bits of proven RBR security for root circuits.
+///
+/// # Assumptions for 100-bit security
+/// - **Max trace height**: ≤ 2^19
+/// - **Max constraints per AIR**: ≤ 1,000
+/// - **Num AIRs**: ≤ 50
+/// - **Max interactions per AIR**: ≤ 100
+/// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
+/// - **`w_stack`** = 64, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+///
+/// Config: `l_skip=2, n_stack=17, log_blowup=3`.
+//
+// See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
+// full soundness analysis.
 pub fn root_params_with_100_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_ROOT_LOG_BLOWUP,
