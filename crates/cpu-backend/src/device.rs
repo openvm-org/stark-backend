@@ -10,7 +10,7 @@ use openvm_stark_backend::{
     proof::{BatchConstraintProof, GkrProof, StackingProof, WhirProof},
     prover::{
         poly::Mle,
-        stacked_pcs::{stacked_matrix, MerkleTree, StackedPcsData},
+        stacked_pcs::{stacked_matrix, StackedPcsData},
         stacked_reduction::prove_stacked_opening_reduction,
         ColMajorMatrix, CommittedTraceData, DeviceDataTransporter, DeviceMultiStarkProvingKey,
         DeviceStarkProvingKey, MatrixDimensions, MultiRapProver, OpeningProver, ProverDevice,
@@ -20,14 +20,15 @@ use openvm_stark_backend::{
 };
 use p3_baby_bear::BabyBear;
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{ExtensionField, TwoAdicField};
+use p3_field::{ExtensionField, PrimeCharacteristicRing, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    backend::CpuBackend, error::CpuProverError, stacked_reduction::StackedReductionCpuNew,
+    backend::CpuBackend, error::CpuProverError, merkle::CpuMerkleTree,
+    pcs_data::CpuStackedPcsData, stacked_reduction::StackedReductionCpuNew,
     two_adic::DftTwiddles,
 };
 
@@ -76,7 +77,7 @@ where
     fn commit(
         &self,
         traces: &[&RowMajorMatrix<SC::F>],
-    ) -> Result<(SC::Digest, StackedPcsData<SC::F, SC::Digest>), Self::Error> {
+    ) -> Result<(SC::Digest, CpuStackedPcsData<SC::F, SC::Digest>), Self::Error> {
         // Convert row-major to col-major for stacking commitment
         let col_major_traces: Vec<ColMajorMatrix<SC::F>> = traces
             .iter()
@@ -94,7 +95,7 @@ where
             1 << params.k_whir(),
         );
         let root = tree.root()?;
-        let data = StackedPcsData::new(layout, q_trace, tree);
+        let data = CpuStackedPcsData::new(layout, q_trace, tree);
         Ok((root, data))
     }
 }
@@ -115,7 +116,7 @@ where
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
         ctx: &ProvingContext<CpuBackend<SC>>,
-        _common_main_pcs_data: &StackedPcsData<SC::F, SC::Digest>,
+        _common_main_pcs_data: &CpuStackedPcsData<SC::F, SC::Digest>,
     ) -> Result<((GkrProof<SC>, BatchConstraintProof<SC>), Vec<SC::EF>), Self::Error> {
         let (gkr_proof, batch_constraint_proof, r) =
             crate::logup_zerocheck::prove_zerocheck_and_logup::<SC, _>(transcript, mpk, ctx)?;
@@ -140,7 +141,7 @@ where
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
         ctx: ProvingContext<CpuBackend<SC>>,
-        common_main_pcs_data: StackedPcsData<SC::F, SC::Digest>,
+        common_main_pcs_data: CpuStackedPcsData<SC::F, SC::Digest>,
         r: Vec<SC::EF>,
     ) -> Result<(StackingProof<SC>, WhirProof<SC>), Self::Error> {
         let params = self.params();
@@ -226,12 +227,11 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
             .map(|pk| {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
                     let view: StridedColMajorMatrixView<'_, SC::F> = d.mat_view(0).into();
-                    let row_major = view.to_row_major_matrix();
-                    let trace = row_major;
+                    let trace = view.to_row_major_matrix();
                     CommittedTraceData {
                         commitment: d.commit().unwrap(),
                         trace,
-                        data: d.clone(),
+                        data: std::sync::Arc::new(stacked_pcs_data_to_cpu::<SC>(d)),
                     }
                 });
                 DeviceStarkProvingKey {
@@ -259,8 +259,8 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
     fn transport_pcs_data_to_device(
         &self,
         pcs_data: &StackedPcsData<SC::F, SC::Digest>,
-    ) -> StackedPcsData<SC::F, SC::Digest> {
-        pcs_data.clone()
+    ) -> CpuStackedPcsData<SC::F, SC::Digest> {
+        stacked_pcs_data_to_cpu::<SC>(pcs_data)
     }
 
     fn transport_matrix_from_device_to_host(
@@ -269,6 +269,36 @@ impl<SC: StarkProtocolConfig> DeviceDataTransporter<SC, CpuBackend<SC>> for CpuD
     ) -> ColMajorMatrix<SC::F> {
         ColMajorMatrix::from_row_major(matrix)
     }
+}
+
+/// Convert stark-backend's `StackedPcsData` (ColMajor backing) to cpu-backend's
+/// `CpuStackedPcsData` (RowMajor backing). The eval matrix is cloned as-is (ColMajor),
+/// while the Merkle tree's backing matrix is transposed to RowMajor.
+fn stacked_pcs_data_to_cpu<SC: StarkProtocolConfig>(
+    pcs_data: &StackedPcsData<SC::F, SC::Digest>,
+) -> CpuStackedPcsData<SC::F, SC::Digest> {
+    let cm_backing = pcs_data.tree.backing_matrix();
+    let height = cm_backing.height();
+    let width = cm_backing.width();
+    // Transpose ColMajor backing → RowMajor backing
+    let mut rm_values = SC::F::zero_vec(height * width);
+    rm_values
+        .par_chunks_exact_mut(width)
+        .enumerate()
+        .for_each(|(i, row)| {
+            for j in 0..width {
+                row[j] = cm_backing.values[j * height + i];
+            }
+        });
+    let rm_backing = RowMajorMatrix::new(rm_values, width);
+    let cpu_tree = unsafe {
+        CpuMerkleTree::from_raw_parts(
+            rm_backing,
+            pcs_data.tree.digest_layers().clone(),
+            pcs_data.tree.rows_per_query(),
+        )
+    };
+    CpuStackedPcsData::new(pcs_data.layout.clone(), pcs_data.matrix.clone(), cpu_tree)
 }
 
 /// In-place PLE evaluation-to-coefficient conversion.
@@ -533,7 +563,10 @@ fn build_digest_layers_packed_babybear(
     layers
 }
 
-/// Fused RS encoding + Merkle tree construction.
+/// Fused RS encoding + Merkle tree construction with RowMajor backing.
+///
+/// Eliminates the Phase 6 transpose to col-major that the reference implementation requires,
+/// since `CpuMerkleTree` stores the codeword matrix in row-major layout directly.
 #[instrument(name = "rs_encode_and_merkle_cpu", skip_all)]
 fn rs_encode_and_merkle_cpu<F, H>(
     hasher: &H,
@@ -541,7 +574,7 @@ fn rs_encode_and_merkle_cpu<F, H>(
     log_blowup: usize,
     eval_matrix: &ColMajorMatrix<F>,
     rows_per_query: usize,
-) -> MerkleTree<F, H::Digest>
+) -> CpuMerkleTree<F, H::Digest>
 where
     F: TwoAdicField + Ord + 'static,
     H: MerkleHasher<F = F>,
@@ -598,9 +631,6 @@ where
         if TypeId::of::<F>() == TypeId::of::<BabyBear>()
             && TypeId::of::<H::Digest>() == TypeId::of::<[BabyBear; 8]>()
         {
-            // Packed SIMD hashing — 4x throughput on NEON, 8x on AVX2.
-            // SAFETY: TypeId checks guarantee F = BabyBear and H::Digest = [BabyBear; 8],
-            // so the pointer casts are between identical types (zero-cost reinterpretation).
             let bb_vals: &[BabyBear] = unsafe {
                 std::slice::from_raw_parts(rm_vals.as_ptr().cast::<BabyBear>(), rm_vals.len())
             };
@@ -624,22 +654,11 @@ where
     let digest_layers = tracing::info_span!("digest_layers")
         .in_scope(|| build_digest_layers::<F, H>(row_hashes, rows_per_query, hasher));
 
-    // Phase 6: Transpose to col-major for backing storage.
-    let cm_matrix = tracing::info_span!("transpose_to_cm").in_scope(|| {
-        let mut cm_values = F::zero_vec(codeword_height * width);
-        cm_values
-            .par_chunks_exact_mut(codeword_height)
-            .enumerate()
-            .for_each(|(j, col)| {
-                for i in 0..codeword_height {
-                    col[i] = rm_vals[i * width + j];
-                }
-            });
-        ColMajorMatrix::new(cm_values, width)
-    });
+    // No Phase 6: RowMajor DFT result is stored directly as the backing matrix.
+    // This eliminates the O(n*m) transpose to col-major.
 
-    // SAFETY: digest_layers were just computed as correct Merkle hashes over cm_matrix
+    // SAFETY: digest_layers were just computed as correct Merkle hashes over rm_result
     // by hash_rows_packed_babybear and build_digest_layers_packed_babybear above.
     // rows_per_query is forwarded from the validated SystemParams.
-    unsafe { MerkleTree::from_raw_parts(cm_matrix, digest_layers, rows_per_query) }
+    unsafe { CpuMerkleTree::from_raw_parts(rm_result, digest_layers, rows_per_query) }
 }

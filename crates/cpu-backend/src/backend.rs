@@ -2,10 +2,9 @@
 
 use std::marker::PhantomData;
 
-use openvm_stark_backend::{
-    prover::{stacked_pcs::StackedPcsData, ProverBackend},
-    StarkProtocolConfig,
-};
+use openvm_stark_backend::{prover::ProverBackend, StarkProtocolConfig};
+
+use crate::pcs_data::CpuStackedPcsData;
 use p3_matrix::dense::RowMajorMatrix;
 
 /// Row-major CPU prover backend.
@@ -35,5 +34,5 @@ impl<SC: StarkProtocolConfig> ProverBackend for CpuBackend<SC> {
     type Commitment = SC::Digest;
     type Matrix = RowMajorMatrix<SC::F>;
     type OtherAirData = ();
-    type PcsData = StackedPcsData<SC::F, SC::Digest>;
+    type PcsData = CpuStackedPcsData<SC::F, SC::Digest>;
 }

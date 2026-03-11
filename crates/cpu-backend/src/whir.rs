@@ -14,7 +14,6 @@ use openvm_stark_backend::{
     prover::{
         error::WhirProverError,
         poly::{evals_mobius_eq_hypercube, Mle},
-        stacked_pcs::MerkleTree,
         ColMajorMatrix, MatrixDimensions,
     },
     FiatShamirTranscript, StarkProtocolConfig, WhirConfig,
@@ -28,6 +27,7 @@ use tracing::instrument;
 
 use crate::{
     device::{build_digest_layers, eval_to_coeff_cpu, reinterpret_vec},
+    merkle::CpuMerkleTree,
     two_adic::DftTwiddles,
 };
 
@@ -46,7 +46,7 @@ pub fn prove_whir_opening_cpu<SC, TS>(
     l_skip: usize,
     log_blowup: usize,
     whir_params: &WhirConfig,
-    committed_mats: &[(&ColMajorMatrix<SC::F>, &MerkleTree<SC::F, SC::Digest>)],
+    committed_mats: &[(&ColMajorMatrix<SC::F>, &CpuMerkleTree<SC::F, SC::Digest>)],
     u: &[SC::EF],
 ) -> Result<WhirProof<SC>, WhirProverError>
 where
@@ -112,7 +112,7 @@ where
         Vec::with_capacity(num_whir_rounds - 1);
     let mut folding_pow_witnesses = Vec::with_capacity(num_sumcheck_rounds);
     let mut query_phase_pow_witnesses = Vec::with_capacity(num_whir_rounds);
-    let mut rs_tree: Option<MerkleTree<SC::EF, SC::Digest>> = None;
+    let mut rs_tree: Option<CpuMerkleTree<SC::EF, SC::Digest>> = None;
     let mut log_rs_domain_size = m + log_blowup;
     let mut final_poly = None;
 
@@ -242,7 +242,7 @@ where
                     initial_round_merkle_proofs[com_idx].push(proof);
                 }
             } else {
-                let tree: &MerkleTree<SC::EF, SC::Digest> = rs_tree.as_ref().unwrap();
+                let tree: &CpuMerkleTree<SC::EF, SC::Digest> = rs_tree.as_ref().unwrap();
                 assert_eq!(tree.backing_matrix().width(), 1);
                 let opened_rows = tree
                     .get_opened_rows(index)?
@@ -371,7 +371,7 @@ fn build_ef_merkle_tree_packed<SC>(
     hasher: &SC::Hasher,
     g_rs: Vec<SC::EF>,
     rows_per_query: usize,
-) -> MerkleTree<SC::EF, SC::Digest>
+) -> CpuMerkleTree<SC::EF, SC::Digest>
 where
     SC: StarkProtocolConfig,
     SC::F: TwoAdicField + Ord,
@@ -414,7 +414,7 @@ where
     // Phase 2: Build Merkle digest layers using shared helper.
     let layers = build_digest_layers::<SC::F, SC::Hasher>(row_hashes, rows_per_query, hasher);
 
-    let backing_matrix = ColMajorMatrix::new(g_rs, 1);
+    let backing_matrix = p3_matrix::dense::RowMajorMatrix::new(g_rs, 1);
     // SAFETY: layers were just computed as correct Merkle hashes over backing_matrix.
-    unsafe { MerkleTree::from_raw_parts(backing_matrix, layers, rows_per_query) }
+    unsafe { CpuMerkleTree::from_raw_parts(backing_matrix, layers, rows_per_query) }
 }

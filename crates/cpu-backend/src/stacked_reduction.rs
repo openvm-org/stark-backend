@@ -10,7 +10,7 @@ use openvm_stark_backend::{
     poly_common::{eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, UnivariatePoly},
     prover::{
         poly::evals_eq_hypercube,
-        stacked_pcs::{StackedPcsData, StackedSlice},
+        stacked_pcs::StackedSlice,
         stacked_reduction::StackedReductionProver,
         sumcheck::{
             batch_fold_mle_evals, fold_mle_evals, sumcheck_round0_deg, sumcheck_round_poly_evals,
@@ -25,7 +25,9 @@ use p3_field::{
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 
-use crate::{backend::CpuBackend, device::CpuDevice, two_adic::DftTwiddles};
+use crate::{
+    backend::CpuBackend, device::CpuDevice, pcs_data::CpuStackedPcsData, two_adic::DftTwiddles,
+};
 
 /// Optimized PLE fold: precompute barycentric weights once, then evaluate each element
 /// as an inline dot product. Eliminates the 5.5M per-element Vec allocations in the
@@ -94,7 +96,7 @@ pub struct StackedReductionCpuNew<'a, SC: StarkProtocolConfig> {
     lambda_pows: Vec<SC::EF>,
     eq_const: SC::EF,
 
-    stacked_per_commit: Vec<&'a StackedPcsData<SC::F, SC::Digest>>,
+    stacked_per_commit: Vec<&'a CpuStackedPcsData<SC::F, SC::Digest>>,
     trace_views: Vec<TraceViewMeta>,
     ht_diff_idxs: Vec<usize>,
 
@@ -128,12 +130,15 @@ impl<'a, SC: StarkProtocolConfig> StackedReductionProver<'a, CpuBackend<SC>, Cpu
 where
     SC::F: TwoAdicField,
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
-    CpuBackend<SC>:
-        ProverBackend<Val = SC::F, Challenge = SC::EF, PcsData = StackedPcsData<SC::F, SC::Digest>>,
+    CpuBackend<SC>: ProverBackend<
+        Val = SC::F,
+        Challenge = SC::EF,
+        PcsData = CpuStackedPcsData<SC::F, SC::Digest>,
+    >,
 {
     fn new(
         device: &CpuDevice<SC>,
-        stacked_per_commit: Vec<&'a StackedPcsData<SC::F, SC::Digest>>,
+        stacked_per_commit: Vec<&'a CpuStackedPcsData<SC::F, SC::Digest>>,
         need_rot_per_commit: Vec<Vec<bool>>,
         r: &[SC::EF],
         lambda: SC::EF,
