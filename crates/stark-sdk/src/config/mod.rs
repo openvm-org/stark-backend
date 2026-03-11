@@ -25,7 +25,6 @@ pub const DEFAULT_APP_LOG_BLOWUP: usize = 1;
 pub const DEFAULT_LEAF_LOG_BLOWUP: usize = 2;
 pub const DEFAULT_INTERNAL_LOG_BLOWUP: usize = 3;
 pub const DEFAULT_ROOT_LOG_BLOWUP: usize = 3;
-pub const DEFAULT_COMPRESSION_LOG_BLOWUP: usize = 4;
 
 pub const MAX_APP_LOG_STACKED_HEIGHT: usize = 24;
 
