@@ -9,12 +9,12 @@ use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-    BaseAirWithPublicValues, PartitionedBaseAir, StarkEngine, SystemParams, WhirConfig, WhirParams,
+    BaseAirWithPublicValues, PartitionedBaseAir, StarkEngine, SystemParams,
 };
 use openvm_stark_sdk::{
     config::{
+        app_params_with_100_bits_security,
         baby_bear_poseidon2::{BabyBearPoseidon2CpuEngine, DuplexSponge},
-        log_up_params::log_up_security_params_baby_bear_100_bits,
     },
     utils::setup_tracing,
 };
@@ -43,26 +43,7 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 }
 
 fn make_params() -> SystemParams {
-    let l_skip = 4;
-    let n_stack = 17;
-    let w_stack = 64;
-    let k_whir = 4;
-    let whir_params = WhirParams {
-        k: k_whir,
-        log_final_poly_len: 2 * k_whir,
-        query_phase_pow_bits: 20,
-    };
-    let log_blowup = 1;
-    let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 100);
-    SystemParams {
-        l_skip,
-        n_stack,
-        w_stack,
-        log_blowup,
-        whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
-        max_constraint_degree: 3,
-    }
+    app_params_with_100_bits_security(21)
 }
 
 fn main() {
