@@ -47,7 +47,7 @@ zkhash.workspace = true
 cfg-if.workspace = true
 
 [features]
-default = ["parallel", "metrics", "baby-bear-bn254-poseidon2", "cpu-backend"]
+default = ["parallel", "metrics", "cpu-backend"]
 baby-bear-bn254-poseidon2 = ["dep:p3-bn254", "dep:zkhash", "dep:p3-poseidon2", "dep:num-bigint"]
 cpu-backend = ["dep:openvm-cpu-backend"]
 parallel = ["openvm-stark-backend/parallel", "openvm-cpu-backend?/parallel"]
