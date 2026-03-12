@@ -1,8 +1,8 @@
 use thiserror::Error;
 
-/// Top-level error type for the CPU prover, used as `ProverDevice::Error`.
+/// Top-level error type for the reference prover, used as `ProverDevice::Error`.
 #[derive(Error, Debug)]
-pub enum CpuProverError {
+pub enum RefProverError {
     #[error("Stacked PCS: {0}")]
     StackedPcs(#[from] StackedPcsError),
     #[error("Sumcheck: {0}")]

@@ -1007,7 +1007,7 @@ mod tests {
     use crate::{
         duplex_sponge::DuplexSpongeRecorder,
         hasher::Hasher,
-        prover::{Coordinator, CpuBackend, CpuDevice},
+        prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
         test_utils::{
             test_system_params_small, CachedFixture11, InteractionsFixture11,
             PreprocessedAndCachedFixture, PreprocessedFibFixture, TestFixture,
@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     struct TestEngine<TS = Recorder> {
-        device: CpuDevice<TestConfig>,
+        device: ReferenceDevice<TestConfig>,
         _transcript: PhantomData<TS>,
     }
 
@@ -1069,14 +1069,14 @@ mod tests {
         TS: FiatShamirTranscript<TestConfig> + From<Perm>,
     {
         type SC = TestConfig;
-        type PB = CpuBackend<TestConfig>;
-        type PD = CpuDevice<TestConfig>;
+        type PB = CpuColMajorBackend<TestConfig>;
+        type PD = ReferenceDevice<TestConfig>;
         type TS = TS;
 
         fn new(params: SystemParams) -> Self {
             let config = TestConfig::default_from_params(params);
             Self {
-                device: CpuDevice::new(config),
+                device: ReferenceDevice::new(config),
                 _transcript: PhantomData,
             }
         }
@@ -1097,7 +1097,7 @@ mod tests {
             &self,
             transcript: TS,
         ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
-            Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
+            Coordinator::new(CpuColMajorBackend::new(), self.device.clone(), transcript)
         }
     }
 

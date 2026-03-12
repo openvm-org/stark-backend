@@ -64,7 +64,7 @@ impl<AB: PartitionedAirBuilder> Air<AB> for SumAir {
 fn prove_and_verify_sum_air(x: Vec<F>, ys: Vec<Vec<F>>) -> eyre::Result<()> {
     assert_eq!(x.len(), ys.len());
 
-    let engine: BabyBearPoseidon2CpuEngine<DuplexSponge> =
+    let engine: BabyBearPoseidon2RefEngine<DuplexSponge> =
         StarkEngine::new(openvm_stark_backend::test_utils::default_test_params_small());
     let config = engine.config();
     let params = config.params();
