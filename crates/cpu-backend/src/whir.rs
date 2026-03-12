@@ -26,8 +26,11 @@ use p3_util::log2_strict_usize;
 use tracing::instrument;
 
 use crate::{
-    device::{build_digest_layers, eval_to_coeff_cpu, hash_rows_with_padding, reinterpret_vec},
-    merkle::CpuMerkleTree,
+    device::eval_to_coeff_cpu,
+    merkle::{
+        build_digest_layers, hash_rows_packed_babybear, hash_rows_with_padding, reinterpret_vec,
+        CpuMerkleTree,
+    },
     two_adic::DftTwiddles,
 };
 
@@ -393,8 +396,7 @@ where
             let bb_vals: &[BabyBear] = unsafe {
                 std::slice::from_raw_parts(g_rs.as_ptr().cast::<BabyBear>(), height * ef_width)
             };
-            let bb_digests =
-                crate::device::hash_rows_packed_babybear(bb_vals, ef_width, height, num_leaves);
+            let bb_digests = hash_rows_packed_babybear(bb_vals, ef_width, height, num_leaves);
             // SAFETY: TypeId checks guarantee SC::Digest = [BabyBear; 8].
             unsafe { reinterpret_vec(bb_digests) }
         } else {
