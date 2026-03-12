@@ -484,9 +484,21 @@ where
         })
     }
 
+    /// Construct a `MerkleTree` from pre-computed parts without validation.
+    ///
     /// # Safety
-    /// - Caller must ensure that `digest_layers` are correctly constructed Merkle hashes for the
-    ///   Merkle tree.
+    ///
+    /// The caller must guarantee:
+    /// - `digest_layers` form a valid Merkle tree over `backing_matrix`: the leaf layer contains
+    ///   correct hashes of the matrix rows and each subsequent layer contains correct compressions
+    ///   of consecutive pairs from the previous layer, terminating in a single root digest.
+    /// - `rows_per_query` is a power of two and does not exceed the number of leaves (i.e.,
+    ///   `backing_matrix.height().next_power_of_two()`).
+    /// - The leaf layer length equals `backing_matrix.height().next_power_of_two() /
+    ///   rows_per_query`.
+    ///
+    /// Violating these invariants will produce incorrect Merkle proofs or panics
+    /// in downstream query/verification code.
     pub unsafe fn from_raw_parts(
         backing_matrix: ColMajorMatrix<EF>,
         digest_layers: Vec<Vec<Digest>>,

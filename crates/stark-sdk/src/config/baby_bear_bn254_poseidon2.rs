@@ -13,7 +13,7 @@ use openvm_stark_backend::{
     hasher::Hasher,
     p3_challenger::{CanObserve, CanSample, MultiField32Challenger},
     p3_symmetric::{self, MultiField32PaddingFreeSponge, TruncatedPermutation},
-    prover::{Coordinator, CpuBackend, CpuDevice},
+    prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
 };
 use p3_baby_bear::BabyBear;
@@ -158,24 +158,24 @@ impl From<Perm> for Transcript {
     }
 }
 
-pub struct BabyBearBn254Poseidon2CpuEngine<TS = Transcript> {
-    device: CpuDevice<SC>,
+pub struct BabyBearBn254Poseidon2RefEngine<TS = Transcript> {
+    device: ReferenceDevice<SC>,
     _transcript: PhantomData<TS>,
 }
 
-impl<TS> StarkEngine for BabyBearBn254Poseidon2CpuEngine<TS>
+impl<TS> StarkEngine for BabyBearBn254Poseidon2RefEngine<TS>
 where
     TS: FiatShamirTranscript<SC> + From<Perm>,
 {
     type SC = SC;
-    type PB = CpuBackend<SC>;
-    type PD = CpuDevice<SC>;
+    type PB = CpuColMajorBackend<SC>;
+    type PD = ReferenceDevice<SC>;
     type TS = TS;
 
     fn new(params: SystemParams) -> Self {
         let config = BabyBearBn254Poseidon2Config::default_from_params(params);
         Self {
-            device: CpuDevice::new(config),
+            device: ReferenceDevice::new(config),
             _transcript: PhantomData,
         }
     }
@@ -196,9 +196,66 @@ where
         &self,
         transcript: TS,
     ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
-        Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
+        Coordinator::new(CpuColMajorBackend::new(), self.device.clone(), transcript)
     }
 }
+
+// ---- Optimized CPU engine (behind `cpu-backend` feature) ----
+
+#[cfg(feature = "cpu-backend")]
+mod cpu_engine {
+    use openvm_cpu_backend::{CpuBackend, CpuDevice};
+
+    use super::*;
+
+    /// Row-major CPU engine for BabyBear + BN254 Poseidon2.
+    ///
+    /// Uses the standard [`Transcript`] (no special SIMD optimization for BN254).
+    pub struct BabyBearBn254Poseidon2CpuEngine<TS = Transcript> {
+        device: CpuDevice<SC>,
+        _transcript: PhantomData<TS>,
+    }
+
+    impl<TS> StarkEngine for BabyBearBn254Poseidon2CpuEngine<TS>
+    where
+        TS: FiatShamirTranscript<SC> + From<Perm>,
+    {
+        type SC = SC;
+        type PB = CpuBackend<SC>;
+        type PD = CpuDevice<SC>;
+        type TS = TS;
+
+        fn new(params: SystemParams) -> Self {
+            let config = BabyBearBn254Poseidon2Config::default_from_params(params);
+            Self {
+                device: CpuDevice::new(config),
+                _transcript: PhantomData,
+            }
+        }
+
+        fn config(&self) -> &SC {
+            self.device.config()
+        }
+
+        fn device(&self) -> &Self::PD {
+            &self.device
+        }
+
+        fn initial_transcript(&self) -> Self::TS {
+            TS::from(default_babybear_bn254_poseidon2())
+        }
+
+        fn prover_from_transcript(
+            &self,
+            transcript: TS,
+        ) -> Coordinator<Self::SC, Self::PB, Self::PD, Self::TS> {
+            Coordinator::new(CpuBackend::new(), self.device.clone(), transcript)
+        }
+    }
+}
+
+#[cfg(feature = "cpu-backend")]
+pub use cpu_engine::BabyBearBn254Poseidon2CpuEngine;
 
 pub fn default_babybear_bn254_poseidon2() -> Perm {
     static PERM: OnceLock<Perm> = OnceLock::new();

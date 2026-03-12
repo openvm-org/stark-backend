@@ -33,7 +33,7 @@ use test_case::test_case;
 use tracing::{debug, Level};
 
 type SC = BabyBearPoseidon2Config;
-type Engine = BabyBearPoseidon2CpuEngine<DuplexSponge>;
+type Engine = BabyBearPoseidon2RefEngine<DuplexSponge>;
 
 // ===========================================================================
 // Shared test suite (engine-generic + WHIR)
@@ -95,7 +95,7 @@ fn test_plain_prismalinear_sumcheck() -> eyre::Result<()> {
 fn test_stacked_opening_reduction(log_trace_degree: usize) -> eyre::Result<()> {
     setup_tracing_with_log_level(Level::DEBUG);
 
-    let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(default_test_params_small());
+    let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(default_test_params_small());
     let config = engine.config();
     let params = config.params();
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
