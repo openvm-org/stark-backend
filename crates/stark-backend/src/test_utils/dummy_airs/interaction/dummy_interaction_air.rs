@@ -15,7 +15,7 @@ use crate::{
     interaction::{BusIndex, InteractionBuilder},
     prover::{
         stacked_pcs::stacked_commit, AirProvingContext, ColMajorMatrix, CommittedTraceData,
-        CpuBackend,
+        CpuColMajorBackend,
     },
     AirRef, PartitionedBaseAir, StarkProtocolConfig,
 };
@@ -175,7 +175,7 @@ impl<SC> DummyInteractionChip<SC> {
 }
 
 impl<SC: StarkProtocolConfig> DummyInteractionChip<SC> {
-    pub fn generate_proving_ctx(&self) -> AirProvingContext<CpuBackend<SC>> {
+    pub fn generate_proving_ctx(&self) -> AirProvingContext<CpuColMajorBackend<SC>> {
         assert!(self.data.is_some());
         let data = self.data.clone().unwrap();
         if self.air.partition {
@@ -191,7 +191,7 @@ impl<SC: StarkProtocolConfig> DummyInteractionChip<SC> {
     pub fn generate_traces_with_partition(
         &self,
         data: DummyInteractionData,
-    ) -> AirProvingContext<CpuBackend<SC>> {
+    ) -> AirProvingContext<CpuColMajorBackend<SC>> {
         let DummyInteractionData {
             mut count,
             mut fields,

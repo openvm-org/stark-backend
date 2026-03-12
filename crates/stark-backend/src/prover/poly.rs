@@ -626,8 +626,8 @@ impl<F: TwoAdicField> UnivariatePoly<F> {
     where
         F: ExtensionField<BF>,
     {
-        let height = evals.height();
-        let width = evals.width();
+        let height = Matrix::height(&evals);
+        let width = Matrix::width(&evals);
         if height == 0 || width == 0 {
             return Self(Vec::new());
         }

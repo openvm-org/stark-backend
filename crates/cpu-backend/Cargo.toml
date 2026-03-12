@@ -1,0 +1,48 @@
+[package]
+name = "openvm-cpu-backend"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "Row-major CPU prover backend for the SWIRL proof system"
+
+[dependencies]
+openvm-stark-backend = { workspace = true }
+
+p3-air.workspace = true
+p3-baby-bear.workspace = true
+p3-dft.workspace = true
+p3-field.workspace = true
+p3-interpolation.workspace = true
+p3-matrix.workspace = true
+p3-maybe-rayon.workspace = true
+p3-util.workspace = true
+
+itertools.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+cfg-if.workspace = true
+getset.workspace = true
+derive-new.workspace = true
+serde = { workspace = true, features = ["derive", "alloc", "rc"] }
+rustc-hash.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+openvm-stark-backend = { workspace = true, features = ["test-utils"] }
+openvm-stark-sdk = { workspace = true, features = ["cpu-backend"] }
+openvm-backend-tests.workspace = true
+p3-baby-bear.workspace = true
+p3-keccak-air.workspace = true
+rand.workspace = true
+test-case.workspace = true
+eyre.workspace = true
+tracing-subscriber.workspace = true
+
+[[bench]]
+name = "keccakf"
+harness = false
+
+[features]
+default = ["parallel", "metrics"]
+parallel = ["p3-maybe-rayon/parallel", "openvm-stark-backend/parallel"]
+metrics = ["openvm-stark-backend/metrics"]

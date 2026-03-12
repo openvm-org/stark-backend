@@ -1,10 +1,21 @@
+use std::borrow::Borrow;
+
 use getset::CopyGetters;
 use p3_field::Field;
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_matrix::dense::{DenseMatrix, RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::prover::MatrixDimensions;
+
+impl<T, V: Borrow<[T]>> MatrixDimensions for DenseMatrix<T, V> {
+    fn height(&self) -> usize {
+        self.values.borrow().len() / self.width
+    }
+    fn width(&self) -> usize {
+        self.width
+    }
+}
 
 /// Trait to consolidate different virtual matrices that may not be backed by an in-memory matrix
 /// with a standard column-major or row-major layout.
@@ -90,7 +101,7 @@ impl<F> ColMajorMatrix<F> {
     {
         let mut values = F::zero_vec(mat.values.len());
         let width = mat.width;
-        let height = mat.height();
+        let height = mat.values.len() / mat.width;
         values.par_iter_mut().enumerate().for_each(|(idx, value)| {
             let r = idx % height;
             let c = idx / height;

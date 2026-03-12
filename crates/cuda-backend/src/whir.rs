@@ -535,7 +535,9 @@ mod tests {
     use itertools::Itertools;
     use openvm_stark_backend::{
         keygen::types::MultiStarkProvingKey,
-        prover::{stacked_pcs::stacked_commit, CpuBackend, DeviceDataTransporter, ProvingContext},
+        prover::{
+            stacked_pcs::stacked_commit, CpuColMajorBackend, DeviceDataTransporter, ProvingContext,
+        },
         test_utils::{FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
         StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
@@ -544,7 +546,7 @@ mod tests {
     use openvm_stark_sdk::{
         config::{
             baby_bear_poseidon2::{
-                default_duplex_sponge, BabyBearPoseidon2CpuEngine, DuplexSponge,
+                default_duplex_sponge, BabyBearPoseidon2RefEngine, DuplexSponge,
             },
             log_up_params::log_up_security_params_baby_bear_100_bits,
         },
@@ -564,7 +566,7 @@ mod tests {
     fn run_whir_test_gpu(
         params: SystemParams,
         pk: MultiStarkProvingKey<SC>,
-        ctx: ProvingContext<CpuBackend<SC>>,
+        ctx: ProvingContext<CpuColMajorBackend<SC>>,
     ) -> Result<(), VerifyWhirError> {
         let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
         let device = engine.device();
@@ -657,7 +659,7 @@ mod tests {
     }
 
     fn run_whir_fib_test_gpu(params: SystemParams) -> Result<(), VerifyWhirError> {
-        let engine = BabyBearPoseidon2CpuEngine::<DuplexSponge>::new(params.clone());
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
         let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
         let (pk, _vk) = fib.keygen(&engine);
         let ctx = fib.generate_proving_ctx();

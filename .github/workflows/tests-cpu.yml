@@ -7,6 +7,7 @@ on:
     branches: ["**"]
     paths:
       - "crates/stark-backend/**"
+      - "crates/cpu-backend/**"
       - ".github/workflows/tests-cpu.yml"
 
 concurrency:
@@ -17,8 +18,32 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      workflow: ${{ steps.filter.outputs.workflow }}
+      stark_backend: ${{ steps.filter.outputs.stark_backend }}
+      cpu_backend: ${{ steps.filter.outputs.cpu_backend }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            workflow:
+              - ".github/workflows/tests-cpu.yml"
+            stark_backend:
+              - "crates/stark-backend/**"
+            cpu_backend:
+              - "crates/cpu-backend/**"
+
   tests:
     name: stark-backend crate tests
+    needs: changes
+    if: needs.changes.outputs.stark_backend == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on:
       - runs-on=${{ github.run_id }}/runner=16cpu-linux-arm64
 
@@ -38,5 +63,26 @@ jobs:
 
       - name: Run stark-sdk tests
         working-directory: crates/stark-sdk
+        run: |
+          cargo nextest run
+
+  tests-cpu-backend:
+    name: cpu-backend crate tests
+    needs: changes
+    if: needs.changes.outputs.cpu_backend == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on:
+      - runs-on=${{ github.run_id }}/runner=test-gpu-nvidia
+
+    steps:
+      - uses: runs-on/action@v2
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        env:
+          RUSTUP_PERMIT_COPY_RENAME: "1"
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
+      - name: Run cpu-backend tests
+        working-directory: crates/cpu-backend
         run: |
           cargo nextest run
