@@ -61,7 +61,8 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
     omega_skip_pows: &[SC::F],
 ) -> Result<Vec<SC::EF>, BatchConstraintError<SC::EF>> {
     let l_skip = mvk.params.l_skip;
-    // let num_airs_present = mvk.per_air.len();
+    // Proof shape asserts that numerator_term_per_air.len() == denominator_term_per_air.len() ==
+    // num_traces (=: num_airs_present)
     let BatchConstraintProof {
         numerator_term_per_air,
         denominator_term_per_air,
@@ -169,7 +170,9 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
     #[allow(clippy::needless_range_loop)]
     for round in 0..n_max {
         debug!(sumcheck_round = round, sum_claim = %cur_sum, "batch_constraint_sumcheck");
+        // Proof shape asserts that sumcheck_round_polys.len() == n_max
         let batch_s_evals = &sumcheck_round_polys[round];
+        // Proof shape asserts that batch_s_evals.len() == s_deg
         for &eval in batch_s_evals.iter() {
             transcript.observe_ext(eval);
         }
@@ -215,6 +218,7 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
             if interactions.is_empty() {
                 return vec![];
             }
+            // By definition of n_logup, n_lift <= n_logup
             let n_lift = n.max(0) as usize;
             let mut b_vec = vec![SC::F::ZERO; n_logup - n_lift];
             (0..interactions.len())
@@ -240,6 +244,7 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
     eq_sharp_ns[0] = eval_eq_sharp_uni(omega_skip_pows, &xi[..l_skip], r_0);
     debug_assert_eq!(rs.len(), n_max + 1);
     for (i, r) in rs.iter().enumerate().skip(1) {
+        // xi has length l_skip + n_global >= l_skip + n_max
         let eq_mle = eval_eq_mle(&[xi[l_skip + i - 1]], slice::from_ref(r));
         eq_ns[i] = eq_ns[i - 1] * eq_mle;
         eq_sharp_ns[i] = eq_sharp_ns[i - 1] * eq_mle;
@@ -254,16 +259,20 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
     }
 
     // 9. Compute the interaction/constraint evals and their hash
-    let mut interactions_evals = Vec::new();
-    let mut constraints_evals = Vec::new();
+    let mut interactions_evals = Vec::new(); // len = 2 * num_traces
+    let mut constraints_evals = Vec::new(); // len = num_traces
     let need_rot_per_trace = trace_id_to_air_id
         .iter()
         .map(|&air_idx| mvk.per_air[air_idx].params.need_rot)
         .collect_vec();
 
     // Observe common main openings first, and then preprocessed/cached
+    // Proof shape asserts that:
+    // - column_openings.len() == num_traces
+    // - air_openings.len() == vk.num_parts() > 0
     for (trace_idx, air_openings) in column_openings.iter().enumerate() {
         let need_rot = need_rot_per_trace[trace_idx];
+        // Proof shape asserts that air_openings[0].len() == width.common_main * (needs_rot ? 2 : 1)
         for (claim, claim_rot) in column_openings_by_rot(&air_openings[0], need_rot) {
             transcript.observe_ext(claim);
             transcript.observe_ext(claim_rot);
@@ -279,6 +288,7 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
 
         // claim lengths are checked in proof shape
         for claims in air_openings.iter().skip(1) {
+            // Proof shape asserts that claims.len() is always multiple of (needs_rot ? 2 : 1)
             for (claim, claim_rot) in column_openings_by_rot(claims, need_rot) {
                 transcript.observe_ext(claim);
                 transcript.observe_ext(claim_rot);

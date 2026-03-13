@@ -37,6 +37,8 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     u: &[SC::EF],
 ) -> Result<(), VerifyWhirError> {
     let params = config.params();
+    // widths.len() = stacking_openings.len() = layouts.len(), which proof shape constructs to equal
+    // the number of commitments, which equals commitments.len() by construction
     let widths = stacking_openings
         .iter()
         .map(|v| v.len())
@@ -69,11 +71,14 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     let num_whir_rounds = params.num_whir_rounds();
     let mut log_rs_domain_size = m + params.log_blowup;
     debug_assert!(params.num_whir_sumcheck_rounds() <= m);
+    // Proof shape asserts this:
     debug_assert_eq!(
         folding_pow_witnesses.len(),
         params.num_whir_sumcheck_rounds()
     );
 
+    // Proof shape asserts whir_sumcheck_polys.len() == params.num_whir_sumcheck_rounds() :=
+    // num_whir_rounds * k_whir
     let mut sumcheck_poly_iter = whir_sumcheck_polys.iter();
     let mut folding_pow_iter = folding_pow_witnesses.iter();
     let mu_pows: Vec<_> = mu.powers().take(widths.iter().sum::<usize>()).collect();
@@ -90,7 +95,9 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     let mut z0s = Vec::with_capacity(num_whir_rounds);
     let mut alphas = Vec::with_capacity(m);
 
+    // Proof shape asserts this:
     debug_assert_eq!(query_phase_pow_witnesses.len(), num_whir_rounds);
+    // By construction, params.whir.rounds.len() == num_whir_rounds
     for (whir_round, (query_phase_pow_witness, round_params)) in
         zip(query_phase_pow_witnesses, &params.whir.rounds).enumerate()
     {
@@ -110,6 +117,7 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
         let mut alphas_round = Vec::with_capacity(k_whir);
 
         for _ in 0..k_whir {
+            // This is never None because num_whir_sumcheck_rounds == num_whir_rounds * k_whir
             if let Some(evals) = sumcheck_poly_iter.next() {
                 let &[ev1, ev2] = evals;
 
@@ -136,12 +144,14 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
             }
             None
         } else {
+            // Proof shape asserts codeword_commits.len() == num_whir_rounds - 1
             let commit = codeword_commits[whir_round];
             transcript.observe_commit(commit);
 
             let z0 = transcript.sample_ext();
             z0s.push(z0);
 
+            // Proof shape asserts ood_values.len() == num_whir_rounds - 1
             let y0 = ood_values[whir_round];
             transcript.observe_ext(y0);
             Some(y0)
@@ -167,18 +177,26 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
             let yi = if is_initial_round {
                 let mut codeword_vals = vec![SC::EF::ZERO; 1 << k_whir];
                 let mut mu_pow_iter = mu_pows.iter();
+                // Proof shape asserts everything in the izip! has length equal to layouts.len()
                 for (&commit, &width, opened_rows_per_query, merkle_proofs) in izip!(
                     commitments,
                     &widths,
                     initial_round_opened_rows,
                     initial_round_merkle_proofs
                 ) {
+                    // Proof shape asserts
+                    // - opened_rows_per_query.len() = whir.rounds[0].num_queries
+                    // - opened_rows.len() = 2^k_whir
                     let opened_rows = &opened_rows_per_query[query_idx];
                     let leaf_hashes = opened_rows
                         .iter()
                         .map(|opened_row| hasher.hash_slice(opened_row))
                         .collect_vec();
                     let query_digest = hasher.tree_compress(leaf_hashes);
+                    // Proof shape asserts
+                    // - merkle_proofs.len() = whir.rounds[0].num_queries
+                    // - merkle_proof.len() = l_skip + n_stack + log_blowup - k_whir =:
+                    //   log_rs_domain_size - k_whir
                     let merkle_proof = &merkle_proofs[query_idx];
                     merkle_verify(hasher, commit, index as u32, query_digest, merkle_proof)?;
 
@@ -191,6 +209,13 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
                 }
                 binary_k_fold::<SC::F, SC::EF>(codeword_vals, &alphas_round, zi_root)
             } else {
+                // Proof shape asserts
+                // - codeword_opened_values.len() == codeword_merkle_proofs.len() == num_whir_rounds
+                //   - 1
+                // - codeword_opened_values[whir_round - 1].len() ==
+                //   codeword_merkle_proofs[whir_round - 1].len() ==
+                //   whir.rounds[whir_round].num_queries
+                // - codeword_opened_values[whir_round - 1][query_idx].len() = 2^k_whir
                 let opened_values = codeword_opened_values[whir_round - 1][query_idx].clone();
                 let merkle_proof = &codeword_merkle_proofs[whir_round - 1][query_idx];
                 let leaf_hashes = opened_values
@@ -200,6 +225,8 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
                     })
                     .collect_vec();
                 let query_digest = hasher.tree_compress(leaf_hashes);
+                // Proof shape asserts `merkle_proof.len() == l_skip + n_stack + log_blowup - k_whir
+                // - round`, which equals `log_rs_domain_size - k_whir` at this point in time
                 merkle_verify(
                     hasher,
                     codeword_commits[whir_round - 1],

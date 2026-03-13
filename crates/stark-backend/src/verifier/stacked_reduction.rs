@@ -51,9 +51,12 @@ where
      * needs to compute and pass in has_preprocessed, which is expected to be sorted in the same
      * way column_openings is (i.e. sorted by trace height).
      */
+
+    // omega_order = 2^l_skip
     let omega_order = omega_shift_pows.len();
     let omega_order_f = SC::F::from_usize(omega_order);
 
+    // layouts and need_rot_per_commit both have length equal to the number of commitments
     debug_assert_eq!(layouts.len(), need_rot_per_commit.len());
     let mut lambda_idx = 0usize;
     let lambda_indices_per_layout: Vec<Vec<(usize, bool)>> = layouts
@@ -61,6 +64,7 @@ where
         .enumerate()
         .map(|(commit_idx, layout)| {
             let need_rot_for_commit = &need_rot_per_commit[commit_idx];
+            // This is true by construction of need_rot_for_commit:
             debug_assert_eq!(need_rot_for_commit.len(), layout.mat_starts.len());
             layout
                 .sorted_cols
@@ -72,10 +76,12 @@ where
                 .collect_vec()
         })
         .collect_vec();
+    // t_claims_len = w_{\Scr T, stack} from the paper
     let t_claims_len = lambda_idx;
     let mut t_claims = Vec::with_capacity(t_claims_len);
 
-    // common main columns (commit 0)
+    // Proof shape asserts that column_openings.len() == num_traces and each parts.len() ==
+    // vk.num_parts() common main columns (commit 0)
     for (trace_idx, parts) in column_openings.iter().enumerate() {
         let need_rot = need_rot_per_commit[0][trace_idx];
         t_claims.extend(column_openings_by_rot(&parts[0], need_rot));
@@ -111,6 +117,7 @@ where
     let s_0 = zip(&t_claims, &lambda_sqr_powers)
         .map(|(&t_i, &lambda_i)| (t_i.0 + t_i.1 * lambda) * lambda_i)
         .sum::<SC::EF>();
+    // Proof shape asserts that univariate_round_coeffs.len() == 2 * (2^l_skip - 1)
     let s_0_sum_eval = proof
         .univariate_round_coeffs
         .iter()
@@ -166,6 +173,8 @@ where
      * lambda^j * h(u, r, b_j) such that j maps to j' - given claims q_{j'}(u), we thus want to
      * assert s_{n_stack}(u_{n_stack}) == sum_{j'} q_{j'}(u) * q_coeffs[j'].
      */
+
+    // proof shape asserts that stacking_openings.len() == layouts.len() = number of commitments
     let mut q_coeffs = proof
         .stacking_openings
         .iter()
