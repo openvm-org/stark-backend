@@ -117,7 +117,7 @@ where
     let s_0 = zip(&t_claims, &lambda_sqr_powers)
         .map(|(&t_i, &lambda_i)| (t_i.0 + t_i.1 * lambda) * lambda_i)
         .sum::<SC::EF>();
-    // Proof shape asserts that univariate_round_coeffs.len() == 2 * (2^l_skip - 1)
+    // Proof shape asserts that univariate_round_coeffs.len() == 2 * (2^l_skip - 1) + 1
     let s_0_sum_eval = proof
         .univariate_round_coeffs
         .iter()
