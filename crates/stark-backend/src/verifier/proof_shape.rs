@@ -562,6 +562,8 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         })
         .collect_vec();
 
+    // layouts.len() is the total number of commitments, which is always >= 1. The total number is
+    // NOT determined from the vkey because it depends on which traces are present.
     let layouts = [common_main_layout]
         .into_iter()
         .chain(other_layouts)

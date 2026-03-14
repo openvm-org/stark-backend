@@ -22,15 +22,6 @@ pub enum GkrVerificationError<EF: core::fmt::Debug + core::fmt::Display + Partia
         expected: EF,
         actual: EF,
     },
-    // TODO(ayush): remove these errors and make them debug asserts once proof shape verifier is
-    // implemented
-    #[error(
-        "Zero-round proof should have empty layers and sumcheck, got {claims_len} and {sumcheck_len}"
-    )]
-    InvalidZeroRoundShape {
-        claims_len: usize,
-        sumcheck_len: usize,
-    },
     #[error("Expected {expected} layers, got {actual}")]
     IncorrectLayerCount { expected: usize, actual: usize },
     #[error("Expected {expected} sumcheck polynomial entries, got {actual}")]
@@ -59,13 +50,9 @@ pub fn verify_gkr<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     total_rounds: usize,
 ) -> Result<(SC::EF, SC::EF, Vec<SC::EF>), GkrVerificationError<SC::EF>> {
     if total_rounds == 0 {
-        // Check proof shape
-        if !proof.claims_per_layer.is_empty() || !proof.sumcheck_polys.is_empty() {
-            return Err(GkrVerificationError::InvalidZeroRoundShape {
-                claims_len: proof.claims_per_layer.len(),
-                sumcheck_len: proof.sumcheck_polys.len(),
-            });
-        }
+        // Proof shape asserts that `proof.claims_per_layer` and `proof.sumcheck_polys` are empty.
+        debug_assert!(proof.claims_per_layer.is_empty());
+        debug_assert!(proof.sumcheck_polys.is_empty());
         if proof.q0_claim != SC::EF::ONE {
             return Err(GkrVerificationError::InvalidZeroRoundValue {
                 actual: proof.q0_claim,
@@ -74,7 +61,7 @@ pub fn verify_gkr<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
         return Ok((SC::EF::ZERO, SC::EF::ONE, vec![]));
     }
 
-    // Verify proof shape
+    // Note: this is already asserted by proof shape
     if proof.claims_per_layer.len() != total_rounds {
         return Err(GkrVerificationError::IncorrectLayerCount {
             expected: total_rounds,
@@ -82,6 +69,7 @@ pub fn verify_gkr<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
         });
     }
 
+    // Note: this is already asserted by proof shape
     // Sumcheck polys: round j has j sub-rounds, so total = 0+1+2+...+(total_rounds-1)
     let expected_sumcheck_entries = total_rounds.saturating_sub(1);
     if proof.sumcheck_polys.len() != expected_sumcheck_entries {
@@ -130,6 +118,7 @@ pub fn verify_gkr<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
         let claim = numer_claim + lambda * denom_claim;
 
         // Run sumcheck protocol for this round (round j has j sub-rounds)
+        // Invariant: `gkr_r.len() == round_r.len() == round`
         let (new_claim, round_r, eq_at_r_prime) =
             verify_gkr_sumcheck::<SC, TS>(proof, transcript, round, claim, &gkr_r)?;
         debug_assert_eq!(eq_at_r_prime, eval_eq_mle(&gkr_r, &round_r));
@@ -190,6 +179,7 @@ fn verify_gkr_sumcheck<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     // For round j, there are j sumcheck sub-rounds
     let expected_subrounds = round;
     let polys = &proof.sumcheck_polys[round - 1];
+    // Note: this is already asserted by proof shape
     if polys.len() != expected_subrounds {
         return Err(GkrVerificationError::IncorrectSubroundCount {
             round,

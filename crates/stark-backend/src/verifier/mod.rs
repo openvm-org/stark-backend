@@ -83,8 +83,10 @@ where
         trace_height_constraints,
     } = &mvk;
     let l_skip = params.l_skip;
-
+    // Total number of AIRs is in vkey, committed to in vk_pre_hash
     let num_airs = per_air.len();
+    // Number of present traces. This is implicitly hashed via the
+    // transcript.observe(is_air_present) below.
     let num_traces = trace_vdata.iter().flatten().collect_vec().len();
     if num_traces == 0 {
         return Err(VerifierError::EmptyTraces);
@@ -128,6 +130,8 @@ where
     for (trace_vdata, avk, pvs) in izip!(&proof.trace_vdata, per_air, &proof.public_values) {
         let is_air_present = trace_vdata.is_some();
 
+        // Proof shape asserts that vk.is_required => is_air_present (see
+        // ProofShapeVDataError::RequiredAirNoVData)
         if !avk.is_required {
             transcript.observe(SC::F::from_bool(is_air_present));
         }
@@ -151,6 +155,7 @@ where
         }
     }
 
+    // n_per_trace.len() = num_traces
     let n_per_trace: Vec<isize> = trace_id_to_air_id
         .iter()
         .map(|&air_id| trace_vdata[air_id].as_ref().unwrap().log_height as isize - l_skip as isize)
