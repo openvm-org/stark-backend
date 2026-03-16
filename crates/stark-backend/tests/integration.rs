@@ -1,7 +1,6 @@
 //! CPU-specific integration tests.
 //!
-//! These tests call CPU-only prover APIs directly (`sumcheck_multilinear`,
-//! `sumcheck_prismalinear`, `StackedReductionCpu`) and are therefore not
+//! These tests call CPU-only prover APIs directly (`StackedReductionCpu`) and are therefore not
 //! engine-generic. The cuda-backend has its own GPU variants of these tests
 //! with different prover APIs.
 //!
@@ -13,22 +12,14 @@ use openvm_stark_backend::{
     prover::{
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
-        sumcheck::{sumcheck_multilinear, sumcheck_prismalinear},
         DeviceDataTransporter, MultiRapProver,
     },
     test_utils::{default_test_params_small, FibFixture, TestFixture},
-    verifier::{
-        stacked_reduction::verify_stacked_reduction,
-        sumcheck::{verify_sumcheck_multilinear, verify_sumcheck_prismalinear},
-    },
+    verifier::stacked_reduction::verify_stacked_reduction,
     StarkEngine, StarkProtocolConfig,
 };
-use openvm_stark_sdk::{
-    config::baby_bear_poseidon2::*,
-    utils::{setup_tracing, setup_tracing_with_log_level},
-};
-use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing_with_log_level};
+use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use test_case::test_case;
 use tracing::{debug, Level};
 
@@ -44,49 +35,6 @@ openvm_backend_tests::backend_test_suite!(Engine);
 // ===========================================================================
 // CPU-specific tests (not in shared suite)
 // ===========================================================================
-
-#[test]
-fn test_plain_multilinear_sumcheck() -> eyre::Result<()> {
-    let n = 15;
-    let mut rng = StdRng::from_seed([228; 32]);
-
-    let num_pts = 1 << n;
-    assert!((F::ORDER_U32 - 1) % num_pts == 0);
-
-    let evals = (0..num_pts)
-        .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
-        .collect::<Vec<_>>();
-    let mut prover_sponge = default_duplex_sponge();
-    let mut verifier_sponge = default_duplex_sponge();
-
-    let (proof, _) = sumcheck_multilinear::<SC, _, _>(&mut prover_sponge, &evals)?;
-    verify_sumcheck_multilinear::<SC, _>(&mut verifier_sponge, &proof)
-        .map_err(|e| eyre::eyre!("{e}"))?;
-    Ok(())
-}
-
-#[test]
-fn test_plain_prismalinear_sumcheck() -> eyre::Result<()> {
-    setup_tracing();
-    let n = 5;
-    let l_skip = 10;
-    let mut rng = StdRng::from_seed([228; 32]);
-
-    let dim = n + l_skip;
-    let num_pts = 1 << dim;
-    assert!((F::ORDER_U32 - 1) % num_pts == 0);
-
-    let evals = (0..num_pts)
-        .map(|_| F::from_u32(rng.random_range(0..F::ORDER_U32)))
-        .collect::<Vec<_>>();
-    let mut prover_sponge = default_duplex_sponge();
-    let mut verifier_sponge = default_duplex_sponge();
-
-    let (proof, _) = sumcheck_prismalinear::<SC, _, _>(&mut prover_sponge, l_skip, &evals)?;
-    verify_sumcheck_prismalinear::<SC, _>(&mut verifier_sponge, l_skip, &proof)
-        .map_err(|e| eyre::eyre!("{e}"))?;
-    Ok(())
-}
 
 #[test_case(9)]
 #[test_case(2 ; "when log_height equals l_skip")]
