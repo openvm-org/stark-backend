@@ -1047,8 +1047,7 @@ where
                     let row_in_period = i % height;
                     vals[i * 3] = SC::F::from_bool(row_in_period == 0); // is_first
                     vals[i * 3 + 1] = SC::F::from_bool(row_in_period != height - 1); // is_transition
-                    vals[i * 3 + 2] = SC::F::from_bool(row_in_period == height - 1);
-                    // is_last
+                    vals[i * 3 + 2] = SC::F::from_bool(row_in_period == height - 1); // is_last
                 }
                 RowMajorMatrix::new(vals, 3)
             })
