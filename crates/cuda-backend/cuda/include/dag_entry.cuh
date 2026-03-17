@@ -19,15 +19,12 @@ template <uint32_t NUM_COSETS> struct NttEvalContext {
     const Fp *__restrict__ public_values;
     Fp *__restrict__ inter_buffer; // [buffer_size][NUM_COSETS] per thread
     Fp *__restrict__ ntt_buffer;   // shared memory for NTT scratch (only when NEEDS_SHMEM)
-    Fp is_first[NUM_COSETS];       // per-coset selectors
-    Fp is_last[NUM_COSETS];
     Fp omega_shifts[NUM_COSETS]; // precomputed: g^((c+1)*ntt_idx_rev)
     uint32_t skip_domain;        // 2^l_skip
     uint32_t height;             // trace height (could be < num_x * skip_domain in lifted case)
     uint32_t buffer_stride;
     uint32_t buffer_size;
     uint32_t ntt_idx; // 0..skip_domain (thread's position within skip domain)
-    uint32_t x_int;   // 0..num_x
 };
 
 // Evaluates f(g^c * omega_skip^ntt_idx, x) for all cosets c in [0, NUM_COSETS).
@@ -125,11 +122,18 @@ __device__ __forceinline__ void ntt_coset_interpolate(
 // - FIRST_COSET_IS_IDENTITY: compile-time flag for lockstep kernel when coset 0 has shift=1
 // Runtime params:
 // - skip_ntt: runtime flag for coset-parallel kernel when processing identity coset
+// Per-iteration mutable state is passed as explicit parameters (is_first, is_last, x_int)
+// rather than stored in NttEvalContext. This avoids compiler aliasing issues when the struct
+// is passed by const reference but fields are mutated in the calling loop — a pattern that
+// caused incorrect codegen on Blackwell GPUs.
 template <uint32_t NUM_COSETS, bool NEEDS_SHMEM, bool FIRST_COSET_IS_IDENTITY = false>
 __device__ __forceinline__ void ntt_eval_dag_entry(
     Fp *__restrict__ results, // output [NUM_COSETS]
     const SourceInfo &src,
     const NttEvalContext<NUM_COSETS> &ctx,
+    const Fp *is_first, // [NUM_COSETS] per-coset selectors
+    const Fp *is_last,  // [NUM_COSETS] per-coset selectors
+    uint32_t x_int,
     bool skip_ntt = false // Runtime flag for identity coset
 ) {
     switch (src.type) {
@@ -141,7 +145,7 @@ __device__ __forceinline__ void ntt_eval_dag_entry(
             ctx.omega_shifts,
             ctx.ntt_buffer,
             ctx.ntt_idx,
-            ctx.x_int,
+            x_int,
             ctx.skip_domain,
             ctx.height,
             src.offset,
@@ -158,7 +162,7 @@ __device__ __forceinline__ void ntt_eval_dag_entry(
             ctx.omega_shifts,
             ctx.ntt_buffer,
             ctx.ntt_idx,
-            ctx.x_int,
+            x_int,
             ctx.skip_domain,
             ctx.height,
             src.offset,
@@ -196,20 +200,20 @@ __device__ __forceinline__ void ntt_eval_dag_entry(
     case SRC_IS_FIRST:
 #pragma unroll
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
-            results[c] = ctx.is_first[c];
+            results[c] = is_first[c];
         }
         return;
     case SRC_IS_LAST:
 #pragma unroll
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
-            results[c] = ctx.is_last[c];
+            results[c] = is_last[c];
         }
         return;
     case SRC_IS_TRANSITION:
         // is_transition = 1 - is_last
 #pragma unroll
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
-            results[c] = Fp::one() - ctx.is_last[c];
+            results[c] = Fp::one() - is_last[c];
         }
         return;
     default:
