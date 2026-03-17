@@ -317,7 +317,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
 }
 
 // Coset-parallel kernel: grid.y = num_cosets, each block handles ONE coset.
-// Reuses acc_interactions<1, NEEDS_SHMEM> for maximum code sharing.
+// Uses acc_interactions<1, NEEDS_SHMEM> with explicit parameter passing.
 // Use when num_x * skip_domain is small for better GPU utilization.
 template <bool GLOBAL, bool NEEDS_SHMEM>
 __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
