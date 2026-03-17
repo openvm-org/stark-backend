@@ -33,6 +33,9 @@ template <uint32_t NUM_COSETS, bool NEEDS_SHMEM>
 __device__ __inline__ void acc_constraints(
     FpExt *__restrict__ constraint_sums, // output [NUM_COSETS]
     const NttEvalContext<NUM_COSETS> &eval_ctx,
+    const Fp *is_first, // [NUM_COSETS] per-coset selectors, passed explicitly per x_int
+    const Fp *is_last,  // [NUM_COSETS] per-coset selectors, passed explicitly per x_int
+    uint32_t x_int,
     const FpExt *__restrict__ d_lambda_pows,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
@@ -55,14 +58,14 @@ __device__ __inline__ void acc_constraints(
 
         // Evaluate x operand for all cosets
         Fp x_vals[NUM_COSETS];
-        ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(x_vals, header.x, eval_ctx);
+        ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(x_vals, header.x, eval_ctx, is_first, is_last, x_int);
 
         switch (header.op) {
         case OP_ADD: {
             // Decode y only for binary ops
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx, is_first, is_last, x_int);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 x_vals[c] += y_vals[c];
@@ -72,7 +75,7 @@ __device__ __inline__ void acc_constraints(
         case OP_SUB: {
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx, is_first, is_last, x_int);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 x_vals[c] -= y_vals[c];
@@ -82,7 +85,7 @@ __device__ __inline__ void acc_constraints(
         case OP_MUL: {
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx, is_first, is_last, x_int);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 x_vals[c] *= y_vals[c];
@@ -232,15 +235,12 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
         public_values,
         inter_buffer,
         ntt_buffer,
-        {}, // is_first - updated per x_int
-        {}, // is_last - updated per x_int
         {}, // omega_shifts - set once below
         skip_domain,
         height,
         buffer_stride,
         buffer_size,
         ntt_idx,
-        0 // x_int - updated per iteration
     };
     // Compute omega_shifts directly into context using iterative multiplication
     Fp const omega_shift_base = pow(g_shift, ntt_idx_rev);
@@ -253,18 +253,22 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
 
     // Tile across x_int to save intermediate buffer size
     for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
-        // Update only the fields that change per x_int
-        eval_ctx.x_int = x_int;
+        // Compute per-iteration selectors as fresh local values
+        Fp is_first[NUM_COSETS];
+        Fp is_last[NUM_COSETS];
 #pragma unroll
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
-            eval_ctx.is_first[c] = is_first_mult[c] * selectors_cube[x_int];
-            eval_ctx.is_last[c] = is_last_mult[c] * selectors_cube[2 * num_x + x_int];
+            is_first[c] = is_first_mult[c] * selectors_cube[x_int];
+            is_last[c] = is_last_mult[c] * selectors_cube[2 * num_x + x_int];
         }
 
         FpExt constraint_sums[NUM_COSETS];
         acc_constraints<NUM_COSETS, NEEDS_SHMEM>(
             constraint_sums,
             eval_ctx,
+            is_first,
+            is_last,
+            x_int,
             d_lambda_pows,
             d_rules,
             rules_len,
@@ -325,7 +329,7 @@ __global__ void fold_selectors_round0_kernel(
 }
 
 // Coset-parallel kernel: grid.y = num_cosets, each block handles ONE coset.
-// Reuses acc_constraints<1, NEEDS_SHMEM> for maximum code sharing.
+// Uses acc_constraints<1, NEEDS_SHMEM> with explicit parameter passing.
 // Use when num_x * skip_domain is small for better GPU utilization.
 template <bool GLOBAL, bool NEEDS_SHMEM>
 __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
@@ -406,34 +410,32 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
 
     uint32_t const x_int_stride = (gridDim.x * blockDim.x) >> l_skip;
 
-    // Initialize single-coset context (NUM_COSETS=1)
+    // Single-coset context (NUM_COSETS=1), loop-invariant fields only
     NttEvalContext<1> eval_ctx{
         preprocessed,
         main_parts,
         public_values,
         inter_buffer,
         ntt_buffer,
-        {Fp::zero()},  // is_first[1] - updated per x_int
-        {Fp::zero()},  // is_last[1] - updated per x_int
         {omega_shift}, // omega_shifts[1]
         skip_domain,
         height,
         buffer_stride,
         buffer_size,
         ntt_idx,
-        0 // x_int - updated per iteration
     };
 
-    // Main loop - reuses acc_constraints<1, NEEDS_SHMEM>
     for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
-        eval_ctx.x_int = x_int;
-        eval_ctx.is_first[0] = is_first_mult * selectors_cube[x_int];
-        eval_ctx.is_last[0] = is_last_mult * selectors_cube[2 * num_x + x_int];
+        Fp is_first = is_first_mult * selectors_cube[x_int];
+        Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
 
         FpExt constraint_sums[1];
         acc_constraints<1, NEEDS_SHMEM>(
             constraint_sums,
             eval_ctx,
+            &is_first,
+            &is_last,
+            x_int,
             d_lambda_pows,
             d_rules,
             rules_len,

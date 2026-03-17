@@ -36,6 +36,9 @@ constexpr uint32_t COSET_PARALLEL_THRESHOLD = 32768; // 2^15
 template <uint32_t NUM_COSETS, bool NEEDS_SHMEM, bool FIRST_COSET_IS_IDENTITY = false>
 __device__ __inline__ void acc_interactions(
     const NttEvalContext<NUM_COSETS> &eval_ctx,
+    const Fp *is_first, // [NUM_COSETS] per-coset selectors, passed explicitly per x_int
+    const Fp *is_last,  // [NUM_COSETS] per-coset selectors, passed explicitly per x_int
+    uint32_t x_int,
     const FpExt *__restrict__ numer_weights,
     const FpExt *__restrict__ denom_weights,
     const Rule *__restrict__ d_rules,
@@ -59,7 +62,7 @@ __device__ __inline__ void acc_interactions(
         // Evaluate x operand for all cosets
         Fp x_vals[NUM_COSETS];
         ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
-            x_vals, header.x, eval_ctx, skip_ntt
+            x_vals, header.x, eval_ctx, is_first, is_last, x_int, skip_ntt
         );
 
         Fp results[NUM_COSETS];
@@ -70,7 +73,7 @@ __device__ __inline__ void acc_interactions(
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
             ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
-                y_vals, y_src, eval_ctx, skip_ntt
+                y_vals, y_src, eval_ctx, is_first, is_last, x_int, skip_ntt
             );
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
@@ -82,7 +85,7 @@ __device__ __inline__ void acc_interactions(
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
             ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
-                y_vals, y_src, eval_ctx, skip_ntt
+                y_vals, y_src, eval_ctx, is_first, is_last, x_int, skip_ntt
             );
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
@@ -94,7 +97,7 @@ __device__ __inline__ void acc_interactions(
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
             ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
-                y_vals, y_src, eval_ctx, skip_ntt
+                y_vals, y_src, eval_ctx, is_first, is_last, x_int, skip_ntt
             );
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
@@ -249,15 +252,12 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
         public_values,
         inter_buffer,
         ntt_buffer,
-        {}, // is_first - updated per x_int
-        {}, // is_last - updated per x_int
         {}, // omega_shifts - set once below
         skip_domain,
         height,
         buffer_stride,
         buffer_size,
         ntt_idx,
-        0 // x_int - updated per iteration
     };
     // Compute omega_shifts: coset 0 has identity shift, rest use g^c
     eval_ctx.omega_shifts[0] = Fp::one(); // Identity coset
@@ -270,18 +270,20 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
 
     // Tile across x_int
     for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
-        // Update only the fields that change per x_int
-        eval_ctx.x_int = x_int;
+        // Compute per-iteration selectors as fresh local values
+        Fp is_first[NUM_COSETS];
+        Fp is_last[NUM_COSETS];
 #pragma unroll
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
-            eval_ctx.is_first[c] = is_first_mult[c] * selectors_cube[x_int];
-            eval_ctx.is_last[c] = is_last_mult[c] * selectors_cube[2 * num_x + x_int];
+            is_first[c] = is_first_mult[c] * selectors_cube[x_int];
+            is_last[c] = is_last_mult[c] * selectors_cube[2 * num_x + x_int];
         }
 
         FpExt numer_results[NUM_COSETS];
         FpExt denom_results[NUM_COSETS];
         acc_interactions<NUM_COSETS, NEEDS_SHMEM, /*FIRST_COSET_IS_IDENTITY=*/true>(
-            eval_ctx, numer_weights, denom_weights, d_rules, rules_len, numer_results, denom_results
+            eval_ctx, is_first, is_last, x_int,
+            numer_weights, denom_weights, d_rules, rules_len, numer_results, denom_results
         );
 
         FpExt eq = eq_cube[x_int];
@@ -315,7 +317,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
 }
 
 // Coset-parallel kernel: grid.y = num_cosets, each block handles ONE coset.
-// Reuses acc_interactions<1, NEEDS_SHMEM> for maximum code sharing.
+// Uses acc_interactions<1, NEEDS_SHMEM> with explicit parameter passing.
 // Use when num_x * skip_domain is small for better GPU utilization.
 template <bool GLOBAL, bool NEEDS_SHMEM>
 __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
@@ -396,29 +398,25 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
 
     uint32_t const x_int_stride = (gridDim.x * blockDim.x) >> l_skip;
 
-    // Initialize single-coset context (NUM_COSETS=1)
+    // Single-coset context (NUM_COSETS=1), loop-invariant fields only
     NttEvalContext<1> eval_ctx{
         preprocessed,
         main_parts,
         public_values,
         inter_buffer,
         ntt_buffer,
-        {Fp::zero()},  // is_first[1] - updated per x_int
-        {Fp::zero()},  // is_last[1] - updated per x_int
         {omega_shift}, // omega_shifts[1]
         skip_domain,
         height,
         buffer_stride,
         buffer_size,
         ntt_idx,
-        0 // x_int - updated per iteration
     };
 
     // Main loop - reuses acc_interactions<1, NEEDS_SHMEM>
     for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
-        eval_ctx.x_int = x_int;
-        eval_ctx.is_first[0] = is_first_mult * selectors_cube[x_int];
-        eval_ctx.is_last[0] = is_last_mult * selectors_cube[2 * num_x + x_int];
+        Fp is_first = is_first_mult * selectors_cube[x_int];
+        Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
 
         FpExt numer_results[1];
         FpExt denom_results[1];
@@ -426,6 +424,9 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
         // The actual `coset_idx = 0` skip is handled by the `is_identity_coset` flag.
         acc_interactions</*NUM_COSETS=*/1, NEEDS_SHMEM, /*FIRST_COSET_IS_IDENTITY=*/false>(
             eval_ctx,
+            &is_first,
+            &is_last,
+            x_int,
             numer_weights,
             denom_weights,
             d_rules,
