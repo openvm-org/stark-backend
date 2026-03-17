@@ -18,6 +18,7 @@ use openvm_stark_backend::{
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
     default_babybear_bn254_poseidon2, Bn254Scalar,
 };
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
 use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
@@ -96,6 +97,7 @@ impl<F, Digest> MerkleTreeGpu<F, Digest> {
 impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     #[cfg(feature = "baby-bear-bn254-poseidon2")]
     fn cast_bn254_digest(digest: Bn254Digest) -> D {
+        assert_eq!(std::mem::size_of::<Bn254Digest>(), std::mem::size_of::<D>());
         debug_assert_eq!(TypeId::of::<D>(), TypeId::of::<Bn254Digest>());
         unsafe { std::mem::transmute_copy(&digest) }
     }
@@ -142,7 +144,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 }
                 leaf_hashes.push(hasher.hash_slice(&row_buf));
             }
-            query_digest_layer.push(hasher.tree_compress(leaf_hashes.clone()));
+            query_digest_layer.push(hasher.tree_compress(std::mem::take(&mut leaf_hashes)));
         }
 
         let mut digest_layers_host = vec![query_digest_layer];
@@ -361,6 +363,7 @@ impl MerkleTreeGpu<F, Digest> {
 
 // Base field merkle tree — generic batch query (works for any BatchQueryMerkle digest)
 impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
+    #[cfg(feature = "baby-bear-bn254-poseidon2")]
     fn batch_query_merkle_proofs_host(
         trees: &[&Self],
         query_indices: &[usize],
