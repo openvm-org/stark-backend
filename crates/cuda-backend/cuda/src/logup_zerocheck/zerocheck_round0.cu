@@ -26,223 +26,6 @@ constexpr uint32_t BUFFER_THRESHOLD = 16;
 // When >= threshold, use lockstep (single thread handles all cosets) to avoid redundant iNTT.
 constexpr uint32_t COSET_PARALLEL_THRESHOLD = 32768; // 2^15
 
-// Intentional codegen fork of the generic NttEvalContext/ntt_eval_dag_entry path for
-// NUM_COSETS == 1 in zerocheck round 0. Blackwell regressed in the shared generic form while this
-// direct single-coset expansion produces correct codegen. Keep this in sync semantically with the
-// generic path, but do not merge it back into the generic helper structure without re-validating
-// the Blackwell failure.
-template <bool NEEDS_SHMEM>
-__device__ __inline__ Fp eval_dag_entry_single(
-    const SourceInfo &src,
-    const Fp *__restrict__ preprocessed,
-    const Fp *const *__restrict__ main_parts,
-    const Fp *__restrict__ public_values,
-    Fp *__restrict__ inter_buffer,
-    Fp *__restrict__ ntt_buffer,
-    Fp is_first,
-    Fp is_last,
-    uint32_t buffer_stride,
-    uint32_t buffer_size,
-    uint32_t ntt_idx,
-    uint32_t x_int,
-    uint32_t skip_domain,
-    uint32_t height,
-    Fp omega_shift
-) {
-    auto eval_trace_entry = [&](const Fp *__restrict__ col, uint8_t offset) -> Fp {
-        uint32_t const l_skip = __ffs(skip_domain) - 1;
-        uint32_t const idx = ((x_int * skip_domain) + ntt_idx + offset) & (height - 1);
-        Fp coeff = col[idx];
-        if constexpr (NEEDS_SHMEM) {
-            ntt_buffer[ntt_idx] = coeff;
-            __syncthreads();
-        }
-        device_ntt::ntt_natural_to_bitrev<true, NEEDS_SHMEM>(
-            coeff, ntt_buffer, ntt_idx, l_skip
-        );
-        coeff *= omega_shift;
-        device_ntt::ntt_bitrev_to_natural<false, NEEDS_SHMEM>(
-            coeff, ntt_buffer, ntt_idx, l_skip
-        );
-        return coeff;
-    };
-
-    switch (src.type) {
-    case ENTRY_PREPROCESSED: {
-        const Fp *col = preprocessed + height * src.index;
-        return eval_trace_entry(col, src.offset);
-    }
-    case ENTRY_MAIN: {
-        auto main_ptr = main_parts[src.part];
-        const Fp *col = main_ptr + height * src.index;
-        return eval_trace_entry(col, src.offset);
-    }
-    case ENTRY_PUBLIC:
-        return public_values[src.index];
-    case SRC_CONSTANT:
-        return Fp(src.index);
-    case SRC_INTERMEDIATE:
-#ifdef CUDA_DEBUG
-        assert(buffer_size > 0);
-        assert(src.index < buffer_size);
-#endif
-        return inter_buffer[src.index * buffer_stride];
-    case SRC_IS_FIRST:
-        return is_first;
-    case SRC_IS_LAST:
-        return is_last;
-    case SRC_IS_TRANSITION:
-        return Fp::one() - is_last;
-    default:
-        assert(false);
-        return Fp::zero();
-    }
-}
-
-// Intentional codegen fork of acc_constraints<1, ...> for the same reason as
-// eval_dag_entry_single above. This duplication is deliberate; do not re-route the
-// NUM_COSETS == 1 zerocheck path back through the generic helper stack without re-testing the
-// Blackwell regression.
-template <bool NEEDS_SHMEM>
-__device__ __inline__ void acc_constraints_single(
-    FpExt *__restrict__ constraint_sums,
-    const Fp *__restrict__ preprocessed,
-    const Fp *const *__restrict__ main_parts,
-    const Fp *__restrict__ public_values,
-    Fp *__restrict__ inter_buffer,
-    Fp *__restrict__ ntt_buffer,
-    Fp is_first,
-    Fp is_last,
-    uint32_t buffer_stride,
-    uint32_t buffer_size,
-    uint32_t ntt_idx,
-    uint32_t x_int,
-    uint32_t skip_domain,
-    uint32_t height,
-    Fp omega_shift,
-    const FpExt *__restrict__ d_lambda_pows,
-    const Rule *__restrict__ d_rules,
-    size_t rules_len,
-    const size_t *__restrict__ d_used_nodes,
-    size_t used_nodes_len,
-    size_t lambda_len
-) {
-    size_t lambda_idx = 0;
-    constraint_sums[0] = FpExt(Fp::zero());
-
-    for (size_t node = 0; node < rules_len; ++node) {
-        Rule rule = d_rules[node];
-        RuleHeader header = decode_rule_header(rule);
-        Fp x_val = eval_dag_entry_single<NEEDS_SHMEM>(
-            header.x,
-            preprocessed,
-            main_parts,
-            public_values,
-            inter_buffer,
-            ntt_buffer,
-            is_first,
-            is_last,
-            buffer_stride,
-            buffer_size,
-            ntt_idx,
-            x_int,
-            skip_domain,
-            height,
-            omega_shift
-        );
-
-        switch (header.op) {
-        case OP_ADD: {
-            SourceInfo y_src = decode_y(rule);
-            x_val += eval_dag_entry_single<NEEDS_SHMEM>(
-                y_src,
-                preprocessed,
-                main_parts,
-                public_values,
-                inter_buffer,
-                ntt_buffer,
-                is_first,
-                is_last,
-                buffer_stride,
-                buffer_size,
-                ntt_idx,
-                x_int,
-                skip_domain,
-                height,
-                omega_shift
-            );
-            break;
-        }
-        case OP_SUB: {
-            SourceInfo y_src = decode_y(rule);
-            x_val -= eval_dag_entry_single<NEEDS_SHMEM>(
-                y_src,
-                preprocessed,
-                main_parts,
-                public_values,
-                inter_buffer,
-                ntt_buffer,
-                is_first,
-                is_last,
-                buffer_stride,
-                buffer_size,
-                ntt_idx,
-                x_int,
-                skip_domain,
-                height,
-                omega_shift
-            );
-            break;
-        }
-        case OP_MUL: {
-            SourceInfo y_src = decode_y(rule);
-            x_val *= eval_dag_entry_single<NEEDS_SHMEM>(
-                y_src,
-                preprocessed,
-                main_parts,
-                public_values,
-                inter_buffer,
-                ntt_buffer,
-                is_first,
-                is_last,
-                buffer_stride,
-                buffer_size,
-                ntt_idx,
-                x_int,
-                skip_domain,
-                height,
-                omega_shift
-            );
-            break;
-        }
-        case OP_NEG:
-            x_val = -x_val;
-            break;
-        case OP_VAR:
-            break;
-        case OP_INV:
-            x_val = inv(x_val);
-            break;
-        }
-
-        if (header.buffer_result && buffer_size > 0) {
-            uint32_t z_index = decode_z_index(rule);
-#ifdef CUDA_DEBUG
-            assert(z_index < buffer_size);
-#endif
-            inter_buffer[z_index * buffer_stride] = x_val;
-        }
-
-        if (header.is_constraint) {
-            while (lambda_idx < lambda_len && lambda_idx < used_nodes_len &&
-                   d_used_nodes[lambda_idx] == node) {
-                constraint_sums[0] += d_lambda_pows[lambda_idx] * x_val;
-                lambda_idx++;
-            }
-        }
-    }
-}
-
 // Device function to compute constraint sums for all cosets in lockstep with DAG traversal.
 // This computes: sum(lambda_i * constraint_i) for all constraints, for each coset.
 // NOTE: Using __inline__ instead of __forceinline__ to let compiler decide based on register pressure.
@@ -250,6 +33,9 @@ template <uint32_t NUM_COSETS, bool NEEDS_SHMEM>
 __device__ __inline__ void acc_constraints(
     FpExt *__restrict__ constraint_sums, // output [NUM_COSETS]
     const NttEvalContext<NUM_COSETS> &eval_ctx,
+    const Fp *is_first, // [NUM_COSETS] per-coset selectors, passed explicitly per x_int
+    const Fp *is_last,  // [NUM_COSETS] per-coset selectors, passed explicitly per x_int
+    uint32_t x_int,
     const FpExt *__restrict__ d_lambda_pows,
     const Rule *__restrict__ d_rules,
     size_t rules_len,
@@ -272,14 +58,14 @@ __device__ __inline__ void acc_constraints(
 
         // Evaluate x operand for all cosets
         Fp x_vals[NUM_COSETS];
-        ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(x_vals, header.x, eval_ctx);
+        ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(x_vals, header.x, eval_ctx, is_first, is_last, x_int);
 
         switch (header.op) {
         case OP_ADD: {
             // Decode y only for binary ops
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx, is_first, is_last, x_int);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 x_vals[c] += y_vals[c];
@@ -289,7 +75,7 @@ __device__ __inline__ void acc_constraints(
         case OP_SUB: {
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx, is_first, is_last, x_int);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 x_vals[c] -= y_vals[c];
@@ -299,7 +85,7 @@ __device__ __inline__ void acc_constraints(
         case OP_MUL: {
             SourceInfo y_src = decode_y(rule);
             Fp y_vals[NUM_COSETS];
-            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx);
+            ntt_eval_dag_entry<NUM_COSETS, NEEDS_SHMEM>(y_vals, y_src, eval_ctx, is_first, is_last, x_int);
 #pragma unroll
             for (uint32_t c = 0; c < NUM_COSETS; c++) {
                 x_vals[c] *= y_vals[c];
@@ -449,15 +235,12 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
         public_values,
         inter_buffer,
         ntt_buffer,
-        {}, // is_first - updated per x_int
-        {}, // is_last - updated per x_int
         {}, // omega_shifts - set once below
         skip_domain,
         height,
         buffer_stride,
         buffer_size,
         ntt_idx,
-        0 // x_int - updated per iteration
     };
     // Compute omega_shifts directly into context using iterative multiplication
     Fp const omega_shift_base = pow(g_shift, ntt_idx_rev);
@@ -470,18 +253,22 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
 
     // Tile across x_int to save intermediate buffer size
     for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
-        // Update only the fields that change per x_int
-        eval_ctx.x_int = x_int;
+        // Compute per-iteration selectors as fresh local values
+        Fp is_first[NUM_COSETS];
+        Fp is_last[NUM_COSETS];
 #pragma unroll
         for (uint32_t c = 0; c < NUM_COSETS; c++) {
-            eval_ctx.is_first[c] = is_first_mult[c] * selectors_cube[x_int];
-            eval_ctx.is_last[c] = is_last_mult[c] * selectors_cube[2 * num_x + x_int];
+            is_first[c] = is_first_mult[c] * selectors_cube[x_int];
+            is_last[c] = is_last_mult[c] * selectors_cube[2 * num_x + x_int];
         }
 
         FpExt constraint_sums[NUM_COSETS];
         acc_constraints<NUM_COSETS, NEEDS_SHMEM>(
             constraint_sums,
             eval_ctx,
+            is_first,
+            is_last,
+            x_int,
             d_lambda_pows,
             d_rules,
             rules_len,
@@ -542,7 +329,7 @@ __global__ void fold_selectors_round0_kernel(
 }
 
 // Coset-parallel kernel: grid.y = num_cosets, each block handles ONE coset.
-// Reuses acc_constraints<1, NEEDS_SHMEM> for maximum code sharing.
+// Uses acc_constraints<1, NEEDS_SHMEM> with explicit parameter passing.
 // Use when num_x * skip_domain is small for better GPU utilization.
 template <bool GLOBAL, bool NEEDS_SHMEM>
 __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
@@ -623,28 +410,32 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
 
     uint32_t const x_int_stride = (gridDim.x * blockDim.x) >> l_skip;
 
-    // Initialize single-coset context (NUM_COSETS=1)
+    // Single-coset context (NUM_COSETS=1), loop-invariant fields only
+    NttEvalContext<1> eval_ctx{
+        preprocessed,
+        main_parts,
+        public_values,
+        inter_buffer,
+        ntt_buffer,
+        {omega_shift}, // omega_shifts[1]
+        skip_domain,
+        height,
+        buffer_stride,
+        buffer_size,
+        ntt_idx,
+    };
+
     for (uint32_t x_int = x_int_base; x_int < num_x; x_int += x_int_stride) {
         Fp is_first = is_first_mult * selectors_cube[x_int];
         Fp is_last = is_last_mult * selectors_cube[2 * num_x + x_int];
 
         FpExt constraint_sums[1];
-        acc_constraints_single<NEEDS_SHMEM>(
+        acc_constraints<1, NEEDS_SHMEM>(
             constraint_sums,
-            preprocessed,
-            main_parts,
-            public_values,
-            inter_buffer,
-            ntt_buffer,
-            is_first,
-            is_last,
-            buffer_stride,
-            buffer_size,
-            ntt_idx,
+            eval_ctx,
+            &is_first,
+            &is_last,
             x_int,
-            skip_domain,
-            height,
-            omega_shift,
             d_lambda_pows,
             d_rules,
             rules_len,
