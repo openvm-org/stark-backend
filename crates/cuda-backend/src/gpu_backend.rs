@@ -15,8 +15,8 @@ use tracing::instrument;
 use crate::{
     base::DeviceMatrix,
     hash_scheme::{DefaultHashScheme, GpuHashScheme},
-    merkle_tree::{MerkleProofQueryDigest, MerkleTreeConstructor},
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
+    merkle_tree::{MerkleProofQueryDigest, MerkleTreeConstructor},
     prelude::{D_EF, EF, F},
     sponge::GpuFiatShamirTranscript,
     stacked_pcs::{stacked_commit, StackedPcsDataGpu},

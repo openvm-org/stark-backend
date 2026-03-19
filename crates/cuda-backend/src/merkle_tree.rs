@@ -7,6 +7,8 @@ use openvm_cuda_common::{
     memory_manager::MemTracker,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
+use p3_util::log2_strict_usize;
+use tracing::instrument;
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use {
     openvm_stark_backend::{
@@ -18,8 +20,6 @@ use {
     },
     p3_field::PrimeCharacteristicRing,
 };
-use p3_util::log2_strict_usize;
-use tracing::instrument;
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::cuda::bn254_merkle_tree::Bn254Digest;
@@ -373,7 +373,11 @@ impl MerkleTreeConstructor for crate::hash_scheme::Bn254Poseidon2MerkleHash {
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
         // BN254 Merkle leaves must match the CPU verifier byte-for-byte. Build these layers on the
         // host and upload them to avoid CUDA leaf-hash drift on the root proving path.
-        MerkleTreeGpu::<F, Self::Digest>::new_bn254_host(matrix, rows_per_query, cache_backing_matrix)
+        MerkleTreeGpu::<F, Self::Digest>::new_bn254_host(
+            matrix,
+            rows_per_query,
+            cache_backing_matrix,
+        )
     }
 }
 
