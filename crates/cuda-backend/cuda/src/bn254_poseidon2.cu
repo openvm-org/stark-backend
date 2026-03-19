@@ -377,19 +377,30 @@ __device__ bool bn254_sponge_check_witness(DeviceBn254SpongeState& s,
 }
 
 /// Grinding kernel: find smallest w in [min_witness, max_witness] with check_witness(bits,w)==true.
-__global__ void bn254_grind_kernel(
+__launch_bounds__(32) __global__ void bn254_grind_kernel(
     const DeviceBn254SpongeState* init_state,
     uint32_t bits,
     uint32_t min_witness,
     uint32_t max_witness,
     uint32_t* result
 ) {
-    uint32_t w = min_witness + blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t stride = gridDim.x * blockDim.x;
+    uint32_t w = min_witness + tid;
+
     if (w > max_witness || *result < w) return;
 
-    DeviceBn254SpongeState local_state = *init_state;
-    if (bn254_sponge_check_witness(local_state, bits, w)) {
-        atomicMin(result, w);
+    while (w <= max_witness) {
+        if (*result < w) return;
+
+        DeviceBn254SpongeState local_state = *init_state;
+        if (bn254_sponge_check_witness(local_state, bits, w)) {
+            atomicMin(result, w);
+            return;
+        }
+
+        if (max_witness - w < stride) return;
+        w += stride;
     }
 }
 
@@ -472,8 +483,11 @@ extern "C" int _bn254_sponge_grind(
     uint32_t max_witness,
     uint32_t* result
 ) {
-    auto const [grid, block] = kernel_launch_params(1 << bits);
-    bn254_grind_kernel<<<grid, block>>>(init_state, bits, min_witness, max_witness, result);
+    const size_t block_size = 32;
+    size_t total_threads = size_t{1} << bits;
+    size_t grid_size = div_ceil(total_threads, block_size);
+
+    bn254_grind_kernel<<<grid_size, block_size>>>(init_state, bits, min_witness, max_witness, result);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return (int)err;
