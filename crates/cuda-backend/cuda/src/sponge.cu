@@ -62,39 +62,27 @@ __device__ bool sponge_check_witness(DeviceSpongeState& sponge, uint32_t bits, F
  * @param bits Number of bits that must be zero in the sampled value
  * @param max_witness Maximum witness value to try (usually F::ORDER - 1)
  */
-__launch_bounds__(32) __global__ void grind_kernel(
+__global__ void grind_kernel(
     const DeviceSpongeState* init_state,
     uint32_t bits,
     uint32_t min_witness,
     uint32_t max_witness,
     uint32_t* result
 ) {
-    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t stride = gridDim.x * blockDim.x;
-    uint32_t w = min_witness + tid;
-
+    uint32_t w = min_witness + blockIdx.x * blockDim.x + threadIdx.x;
     if (w > max_witness || *result < w) {
         return;
     }
 
-    while (w <= max_witness) {
-        if (*result < w) {
-            return;
-        }
+    // Clone the initial state to local registers
+    DeviceSpongeState local_state = *init_state;
 
-        // Clone the initial state for this witness attempt.
-        DeviceSpongeState local_state = *init_state;
-
-        Fp witness = Fp(w);
-        if (sponge_check_witness(local_state, bits, witness)) {
-            atomicMin(result, w);
-            return;
-        }
-
-        if (max_witness - w < stride) {
-            return;
-        }
-        w += stride;
+    // Check if this witness value works
+    Fp witness = Fp(w);
+    if (sponge_check_witness(local_state, bits, witness)) {
+        // Found a valid witness - record it atomically
+        atomicMin(result, w);
+        return;
     }
 }
 
@@ -108,13 +96,8 @@ extern "C" int _sponge_grind(
     uint32_t* result  // Output: device pointer where the found witness value will be written.
     // Must be set to `UINT32_MAX` before this function call
 ) {
-    // Keep blocks to a single warp so the per-block register footprint stays launchable on H100,
-    // while still covering the full witness space in one strided launch.
-    const size_t block_size = 32;
-    size_t total_threads = size_t{1} << bits;
-    size_t grid_size = div_ceil(total_threads, block_size);
-
-    grind_kernel<<<grid_size, block_size>>>(init_state, bits, min_witness, max_witness, result);
+    auto const [grid, block] = kernel_launch_params(1 << bits);
+    grind_kernel<<<grid, block>>>(init_state, bits, min_witness, max_witness, result);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
