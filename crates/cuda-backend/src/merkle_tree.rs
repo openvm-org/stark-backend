@@ -9,6 +9,17 @@ use openvm_cuda_common::{
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use {
+    openvm_stark_backend::{
+        hasher::{Hasher as CpuMerkleHasher, MerkleHasher},
+        p3_symmetric::{MultiField32PaddingFreeSponge, TruncatedPermutation},
+    },
+    openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
+        default_babybear_bn254_poseidon2, Bn254Scalar,
+    },
+    p3_field::PrimeCharacteristicRing,
+};
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::cuda::bn254_merkle_tree::Bn254Digest;
@@ -63,6 +74,21 @@ pub struct MerkleTreeGpu<F, Digest> {
     pub(crate) root: Digest,
 }
 
+pub trait MerkleTreeConstructor: GpuMerkleHash {
+    fn new_merkle_tree(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError>;
+}
+
+pub trait MerkleProofQueryDigest: BatchQueryMerkle + Copy + Send + Sync + 'static {
+    fn batch_query_merkle_proofs(
+        trees: &[&MerkleTreeGpu<F, Self>],
+        query_indices: &[usize],
+    ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError>;
+}
+
 impl<F, Digest> MerkleTreeGpu<F, Digest> {
     pub fn root(&self) -> Digest
     where
@@ -82,12 +108,51 @@ impl<F, Digest> MerkleTreeGpu<F, Digest> {
 
 // Base field merkle tree — generic constructor
 impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
+    fn batch_open_rows_host(
+        backing_matrices: &[&DeviceMatrix<F>],
+        query_indices: &[usize],
+        query_stride: usize,
+        rows_per_query: usize,
+    ) -> Result<Vec<Vec<Vec<F>>>, MerkleTreeError> {
+        backing_matrices
+            .iter()
+            .map(|matrix| {
+                let width = matrix.width();
+                let height = matrix.height();
+                let host = matrix.to_host()?;
+                let opened_rows_per_query = query_indices
+                    .iter()
+                    .map(|&query_idx| {
+                        debug_assert!(query_idx < query_stride);
+                        let mut opened = Vec::with_capacity(rows_per_query * width);
+                        for row_offset in 0..rows_per_query {
+                            let row_idx = row_offset * query_stride + query_idx;
+                            for col_idx in 0..width {
+                                opened.push(host[col_idx * height + row_idx]);
+                            }
+                        }
+                        opened
+                    })
+                    .collect_vec();
+                Ok(opened_rows_per_query)
+            })
+            .collect()
+    }
+
     /// Build a Merkle tree using the given hash scheme `MH`.
     ///
     /// This is the primary constructor; `new()` is a convenience wrapper that
     /// fixes `MH = Poseidon2MerkleHash`.
     #[instrument(name = "merkle_tree", skip_all)]
-    pub fn new_with_hash<MH: GpuMerkleHash<Digest = D>>(
+    pub fn new_with_hash<MH: MerkleTreeConstructor<Digest = D>>(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, MerkleTreeError> {
+        MH::new_merkle_tree(matrix, rows_per_query, cache_backing_matrix)
+    }
+
+    fn new_generic_with_hash<MH: GpuMerkleHash<Digest = D>>(
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
@@ -163,6 +228,14 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         >,
         MerkleTreeError,
     > {
+        if backing_matrices.len() > 1 {
+            return Self::batch_open_rows_host(
+                backing_matrices,
+                query_indices,
+                query_stride,
+                rows_per_query,
+            );
+        }
         let row_idxs = query_indices
             .iter()
             .flat_map(|&query_idx| {
@@ -206,6 +279,108 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     }
 }
 
+impl MerkleTreeConstructor for Poseidon2MerkleHash {
+    fn new_merkle_tree(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
+        MerkleTreeGpu::<F, Self::Digest>::new_generic_with_hash::<Self>(
+            matrix,
+            rows_per_query,
+            cache_backing_matrix,
+        )
+    }
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+impl MerkleTreeGpu<F, Bn254Digest> {
+    fn bn254_host_hasher() -> CpuMerkleHasher<
+        F,
+        Bn254Digest,
+        MultiField32PaddingFreeSponge<F, Bn254Scalar, p3_bn254::Poseidon2Bn254<3>, 3, 16, 1>,
+        TruncatedPermutation<p3_bn254::Poseidon2Bn254<3>, 2, 1, 3>,
+    > {
+        let perm = default_babybear_bn254_poseidon2();
+        CpuMerkleHasher::new(
+            MultiField32PaddingFreeSponge::new(perm.clone()).unwrap(),
+            TruncatedPermutation::new(perm),
+        )
+    }
+
+    fn new_bn254_host(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<Self, MerkleTreeError> {
+        let height = matrix.height();
+        assert!(height.is_power_of_two());
+        assert!(
+            rows_per_query <= height,
+            "rows_per_query ({rows_per_query}) must not exceed height ({height})"
+        );
+        let query_stride = height / rows_per_query;
+        let width = matrix.width();
+        let hasher = Self::bn254_host_hasher();
+        let host = matrix.to_host()?;
+        let mut row_buf = vec![F::ZERO; width];
+        let mut leaf_hashes = Vec::with_capacity(rows_per_query);
+        let mut query_digest_layer = Vec::with_capacity(query_stride);
+        for query_idx in 0..query_stride {
+            leaf_hashes.clear();
+            for row_offset in 0..rows_per_query {
+                let row_idx = row_offset * query_stride + query_idx;
+                for col_idx in 0..width {
+                    row_buf[col_idx] = host[col_idx * height + row_idx];
+                }
+                leaf_hashes.push(hasher.hash_slice(&row_buf));
+            }
+            query_digest_layer.push(hasher.tree_compress(std::mem::take(&mut leaf_hashes)));
+        }
+
+        let mut digest_layers_host = vec![query_digest_layer];
+        while digest_layers_host.last().unwrap().len() > 1 {
+            let prev_layer = digest_layers_host.last().unwrap();
+            let layer = prev_layer
+                .chunks_exact(2)
+                .map(|pair| hasher.compress(pair[0], pair[1]))
+                .collect_vec();
+            digest_layers_host.push(layer);
+        }
+
+        let root = *digest_layers_host.last().unwrap().first().unwrap();
+        let digest_layers = digest_layers_host
+            .into_iter()
+            .map(|layer| layer.to_device())
+            .collect::<Result<Vec<_>, _>>()?;
+        let backing_matrix = cache_backing_matrix.then_some(matrix);
+
+        Ok(Self {
+            backing_matrix,
+            digest_layers,
+            rows_per_query,
+            root,
+        })
+    }
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+impl MerkleTreeConstructor for crate::hash_scheme::Bn254Poseidon2MerkleHash {
+    fn new_merkle_tree(
+        matrix: DeviceMatrix<F>,
+        rows_per_query: usize,
+        cache_backing_matrix: bool,
+    ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
+        // BN254 Merkle leaves must match the CPU verifier byte-for-byte. Build these layers on the
+        // host and upload them to avoid CUDA leaf-hash drift on the root proving path.
+        MerkleTreeGpu::<F, Self::Digest>::new_bn254_host(
+            matrix,
+            rows_per_query,
+            cache_backing_matrix,
+        )
+    }
+}
+
 // Base field merkle tree — Poseidon2 default constructor
 impl MerkleTreeGpu<F, Digest> {
     /// Build a Merkle tree using the default Poseidon2 hash.
@@ -222,6 +397,36 @@ impl MerkleTreeGpu<F, Digest> {
 
 // Base field merkle tree — generic batch query (works for any BatchQueryMerkle digest)
 impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
+    #[cfg(feature = "baby-bear-bn254-poseidon2")]
+    fn batch_query_merkle_proofs_host(
+        trees: &[&Self],
+        query_indices: &[usize],
+    ) -> Result<Vec<Vec<Vec<D>>>, MerkleTreeError> {
+        trees
+            .iter()
+            .map(|tree| {
+                let host_layers = tree
+                    .digest_layers
+                    .iter()
+                    .take(tree.proof_depth())
+                    .map(|layer| layer.to_host())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let proofs = query_indices
+                    .iter()
+                    .map(|&index| {
+                        debug_assert!(index < tree.query_stride());
+                        host_layers
+                            .iter()
+                            .enumerate()
+                            .map(|(layer_idx, layer)| layer[(index >> layer_idx) ^ 1])
+                            .collect_vec()
+                    })
+                    .collect::<Vec<_>>();
+                Ok(proofs)
+            })
+            .collect()
+    }
+
     /// Batch queries multiple `trees` at _the same_ `query_indices` for merkle proofs.
     ///
     /// # Assumptions
@@ -238,7 +443,19 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
             >,
         >,
         MerkleTreeError,
-    > {
+    >
+    where
+        D: MerkleProofQueryDigest,
+    {
+        D::batch_query_merkle_proofs(trees, query_indices)
+    }
+}
+
+impl MerkleProofQueryDigest for Digest {
+    fn batch_query_merkle_proofs(
+        trees: &[&MerkleTreeGpu<F, Self>],
+        query_indices: &[usize],
+    ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
         // The kernel treats each layer as a separate array and does parallel accesses;
         // we lay out all the layer pointers flattened into a vec.
         let num_trees = trees.len();
@@ -306,7 +523,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                                 let base =
                                     (query_idx * num_trees * depth + tree_idx * depth + layer_idx)
                                         * DIGEST_SIZE;
-                                D::reconstruct_from_f(&out, base)
+                                Self::reconstruct_from_f(&out, base)
                             })
                             .collect_vec()
                     })
@@ -314,6 +531,18 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
             })
             .collect_vec();
         Ok(res)
+    }
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+impl MerkleProofQueryDigest for Bn254Digest {
+    fn batch_query_merkle_proofs(
+        trees: &[&MerkleTreeGpu<F, Self>],
+        query_indices: &[usize],
+    ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
+        // BN254 digests are a raw 32-byte scalar, so host reconstruction is the safest path
+        // for Merkle proof extraction.
+        MerkleTreeGpu::<F, Self>::batch_query_merkle_proofs_host(trees, query_indices)
     }
 }
 
