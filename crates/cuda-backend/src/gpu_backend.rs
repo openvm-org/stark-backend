@@ -16,6 +16,7 @@ use crate::{
     base::DeviceMatrix,
     hash_scheme::{DefaultHashScheme, GpuHashScheme},
     logup_zerocheck::prove_zerocheck_and_logup_gpu,
+    merkle_tree::{MerkleProofQueryDigest, MerkleTreeConstructor},
     prelude::{D_EF, EF, F},
     sponge::GpuFiatShamirTranscript,
     stacked_pcs::{stacked_commit, StackedPcsDataGpu},
@@ -51,7 +52,10 @@ impl<HS: GpuHashScheme> ProverBackend for GenericGpuBackend<HS> {
     type OtherAirData = AirDataGpu;
 }
 
-impl<HS: GpuHashScheme> TraceCommitter<GenericGpuBackend<HS>> for GpuDevice {
+impl<HS: GpuHashScheme> TraceCommitter<GenericGpuBackend<HS>> for GpuDevice
+where
+    HS::MerkleHash: MerkleTreeConstructor,
+{
     type Error = ProverError;
 
     fn commit(
@@ -71,6 +75,9 @@ impl<HS: GpuHashScheme> TraceCommitter<GenericGpuBackend<HS>> for GpuDevice {
 
 impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>> ProverDevice<GenericGpuBackend<HS>, TS>
     for GpuDevice
+where
+    HS::MerkleHash: MerkleTreeConstructor,
+    HS::Digest: MerkleProofQueryDigest,
 {
     type Error = ProverError;
 }
@@ -114,6 +121,9 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
 
 impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
     OpeningProver<GenericGpuBackend<HS>, TS> for GpuDevice
+where
+    HS::MerkleHash: MerkleTreeConstructor,
+    HS::Digest: MerkleProofQueryDigest,
 {
     type OpeningProof = (StackingProof<HS::SC>, WhirProof<HS::SC>);
     /// The shared vector `r` where each trace matrix `T, T_{rot}` is opened at `r_{n_T}`.
