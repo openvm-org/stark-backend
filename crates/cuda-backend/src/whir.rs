@@ -29,7 +29,7 @@ use crate::{
         },
     },
     hash_scheme::GpuHashScheme,
-    merkle_tree::MerkleTreeGpu,
+    merkle_tree::{MerkleProofQueryDigest, MerkleTreeConstructor, MerkleTreeGpu},
     ntt::batch_ntt,
     poly::evals_eq_hypercube,
     prelude::{D_EF, EF, F},
@@ -68,6 +68,8 @@ pub fn prove_whir_opening_gpu<HS, TS>(
 where
     HS: GpuHashScheme,
     TS: GpuFiatShamirTranscript<HS::SC>,
+    HS::MerkleHash: MerkleTreeConstructor,
+    HS::Digest: MerkleProofQueryDigest,
 {
     let mem = MemTracker::start("prover.prove_whir_opening");
     let l_skip = params.l_skip;

@@ -112,4 +112,3 @@ extern "C" int _sponge_grind(
 
     return CHECK_KERNEL();
 }
-
