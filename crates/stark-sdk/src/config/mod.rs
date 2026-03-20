@@ -122,14 +122,14 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
 /// Returns `SystemParams` targeting 100 bits of proven RBR security for root circuits.
 ///
 /// # Assumptions for 100-bit security
-/// - **Max trace height**: ≤ 2^22
+/// - **Max trace height**: ≤ 2^21
 /// - **Max constraints per AIR**: ≤ 1,000
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
-/// - **`w_stack`** = 64, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+/// - **`w_stack`** = 16, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
-/// Config: `l_skip=2, n_stack=20, log_blowup=4`.
+/// Config: `l_skip=2, n_stack=19, log_blowup=4`.
 //
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
@@ -139,7 +139,7 @@ pub fn root_params_with_100_bits_security() -> SystemParams {
         2,  // l_skip
         19, // n_stack
         16, // w_stack
-        11,
+        WHIR_MAX_LOG_FINAL_POLY_LEN,
         20, // folding pow
         20, // mu pow
         WhirProximityStrategy::ListDecoding { m: 2 },
