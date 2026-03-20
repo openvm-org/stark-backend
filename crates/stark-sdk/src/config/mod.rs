@@ -24,7 +24,7 @@ pub const DEFAULT_APP_L_SKIP: usize = 4;
 pub const DEFAULT_APP_LOG_BLOWUP: usize = 1;
 pub const DEFAULT_LEAF_LOG_BLOWUP: usize = 2;
 pub const DEFAULT_INTERNAL_LOG_BLOWUP: usize = 3;
-pub const DEFAULT_ROOT_LOG_BLOWUP: usize = 3;
+pub const DEFAULT_ROOT_LOG_BLOWUP: usize = 4;
 
 pub const MAX_APP_LOG_STACKED_HEIGHT: usize = 24;
 
@@ -122,14 +122,14 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
 /// Returns `SystemParams` targeting 100 bits of proven RBR security for root circuits.
 ///
 /// # Assumptions for 100-bit security
-/// - **Max trace height**: ≤ 2^19
+/// - **Max trace height**: ≤ 2^22
 /// - **Max constraints per AIR**: ≤ 1,000
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
 /// - **`w_stack`** = 64, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
-/// Config: `l_skip=2, n_stack=17, log_blowup=3`.
+/// Config: `l_skip=2, n_stack=20, log_blowup=4`.
 //
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
@@ -137,12 +137,12 @@ pub fn root_params_with_100_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_ROOT_LOG_BLOWUP,
         2,  // l_skip
-        17, // n_stack
+        20, // n_stack
         64, // w_stack
-        WHIR_MAX_LOG_FINAL_POLY_LEN,
+        11,
         18, // folding pow
         20, // mu pow
-        WhirProximityStrategy::ListDecoding { m: 2 },
+        WhirProximityStrategy::ListDecoding { m: 1 },
         SECURITY_BITS_TARGET,
         log_up_security_params_baby_bear_100_bits(),
     )
