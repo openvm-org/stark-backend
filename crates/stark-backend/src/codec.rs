@@ -189,7 +189,7 @@ impl Encode for usize {
 
 impl Encode for String {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        self.as_bytes().to_vec().encode(writer)
+        encode_slice(self.as_bytes(), writer)
     }
 }
 
