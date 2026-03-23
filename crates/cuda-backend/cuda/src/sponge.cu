@@ -55,8 +55,8 @@ __device__ bool sponge_check_witness(DeviceSpongeState& sponge, uint32_t bits, F
 /**
  * Grinding kernel - finds a witness value such that check_witness(bits, witness) returns true.
  * 
- * Each thread searches a strided subset of the search space.
- * When a valid witness is found, it's atomically stored to g_grind_result.
+ * Each thread checks one witness candidate in the current chunk.
+ * When a valid witness is found, the first discovered witness is stored.
  * 
  * @param init_state Initial sponge state (before observing the witness)
  * @param bits Number of bits that must be zero in the sampled value
@@ -70,7 +70,7 @@ __global__ void grind_kernel(
     uint32_t* result
 ) {
     uint32_t w = min_witness + blockIdx.x * blockDim.x + threadIdx.x;
-    if (w > max_witness || *result < w) {
+    if (w > max_witness || *result != UINT32_MAX) {
         return;
     }
 
@@ -80,8 +80,8 @@ __global__ void grind_kernel(
     // Check if this witness value works
     Fp witness = Fp(w);
     if (sponge_check_witness(local_state, bits, witness)) {
-        // Found a valid witness - record it atomically
-        atomicMin(result, w);
+        // Found a valid witness - keep the first one discovered.
+        atomicCAS(result, UINT32_MAX, w);
         return;
     }
 }

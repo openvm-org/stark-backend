@@ -321,8 +321,10 @@ impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiField32Chall
 #[cfg(test)]
 mod tests {
     use openvm_stark_backend::FiatShamirTranscript;
+    use openvm_stark_backend::p3_symmetric::CryptographicHasher;
     use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::default_transcript;
     use p3_field::PrimeCharacteristicRing;
+    use p3_symmetric::MultiField32PaddingFreeSponge;
 
     use super::*;
 
@@ -590,5 +592,51 @@ mod tests {
         ];
 
         run_steps(&steps);
+    }
+
+    #[test]
+    fn test_grind_gpu_matches_cpu_after_large_commit_observes() {
+        let mut gpu = MultiField32ChallengerGpu::new();
+        let mut cpu = default_transcript();
+        let hash =
+            MultiField32PaddingFreeSponge::<BabyBear, Bn254Scalar, _, 3, 16, 1>::new(
+                default_babybear_bn254_poseidon2(),
+            )
+            .unwrap();
+
+        for seed in [17u32, 113, 997] {
+            let digest = hash.hash_slice(
+                &(0..48)
+                    .map(|i| BabyBear::from_u32(seed.wrapping_mul(i + 1).wrapping_add(i * 7)))
+                    .collect::<Vec<_>>(),
+            );
+            FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe_commit(&mut gpu, digest);
+            FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe_commit(&mut cpu, digest);
+        }
+
+        for i in 0..7u32 {
+            let value = BabyBear::from_u32(i.wrapping_mul(97).wrapping_add(11));
+            FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut gpu, value);
+            FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut cpu, value);
+        }
+
+        let witness = gpu.grind_gpu(12).expect("GPU grind should succeed");
+        FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut cpu, witness);
+        assert!(
+            (FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample(&mut cpu)
+                .as_canonical_u32()
+                & ((1 << 12) - 1))
+                == 0,
+            "CPU transcript rejected GPU witness"
+        );
+
+        for sample_idx in 0..12 {
+            let gpu_sample = FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample(&mut gpu);
+            let cpu_sample = FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample(&mut cpu);
+            assert_eq!(
+                gpu_sample, cpu_sample,
+                "post-grind sample mismatch at index {sample_idx}"
+            );
+        }
     }
 }

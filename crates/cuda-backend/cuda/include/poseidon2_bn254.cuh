@@ -257,7 +257,7 @@ void bn254_to_canonical(uint64_t canonical[4], Bn254Fr x) {
 // ---------------------------------------------------------------------------
 // reduce_32: pack BabyBear canonical u32 values into one Bn254Fr
 //
-//   num_f_elms = 7  (Merkle hash, MultiField32PaddingFreeSponge)
+//   num_f_elms = 8  (Merkle hash, MultiField32PaddingFreeSponge)
 //   num_f_elms = 3  (Challenger, MultiField32Challenger)
 //
 // Formula: result = sum_{i=0}^{n-1} bb[i] * 2^{32*i}  (as a BN254 scalar)
