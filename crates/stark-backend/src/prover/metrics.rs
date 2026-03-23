@@ -100,14 +100,12 @@ pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackend>(
         .map(|(air_idx, (pk, height))| {
             let air_name = &pk.air_name;
             let width = pk.vk.params.width.clone();
-            let mut interaction_width = pk.vk.num_interactions();
-            let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
-            interaction_width *= ext_degree;
             let cells = TraceCells {
                 preprocessed: width.preprocessed.map(|w| w * height),
                 cached_mains: width.cached_mains.iter().map(|w| w * height).collect(),
                 common_main: width.common_main * height,
-                after_challenge: vec![interaction_width * height],
+                // In OpenVM 2.0, there are no trace cells due to bus interactions.
+                after_challenge: vec![0],
             };
             let total_cells = cells
                 .cached_mains
