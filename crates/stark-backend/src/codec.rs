@@ -187,6 +187,12 @@ impl Encode for usize {
     }
 }
 
+impl Encode for String {
+    fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
+        encode_slice(self.as_bytes(), writer)
+    }
+}
+
 // ==================== Generic field codec helpers ====================
 
 /// Encode a `PrimeField32` element as 4 little-endian bytes of its canonical u32 value.
@@ -319,6 +325,13 @@ impl Decode for usize {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let val = u32::decode(reader)?;
         Ok(val as usize)
+    }
+}
+
+impl Decode for String {
+    fn decode<R: Read>(reader: &mut R) -> Result<Self> {
+        let bytes = Vec::<u8>::decode(reader)?;
+        String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 }
 
