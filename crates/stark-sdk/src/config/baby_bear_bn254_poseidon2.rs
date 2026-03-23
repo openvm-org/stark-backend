@@ -28,12 +28,12 @@ use zkhash::{
     poseidon2::poseidon2_instance_bn256::RC3,
 };
 
-const WIDTH: usize = 3;
+pub const WIDTH: usize = 3;
 /// Poseidon rate in F. <Poseidon RATE>(2) * <# of F in a N>(8) = 16
-const BABY_BEAR_RATE: usize = 16;
-const BN254_RATE: usize = 2;
+pub const BABY_BEAR_RATE: usize = 16;
+pub const BN254_RATE: usize = 2;
 /// Width in Bn254Fr
-const DIGEST_WIDTH: usize = 1;
+pub const DIGEST_WIDTH: usize = 1;
 
 type Perm = Poseidon2Bn254<WIDTH>;
 // Generic over P: CryptographicPermutation<[F; WIDTH]>
