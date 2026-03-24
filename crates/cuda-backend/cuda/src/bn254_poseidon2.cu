@@ -92,11 +92,11 @@ Bn254Fr bn254_zero_init() {
 //
 // Matches MultiField32PaddingFreeSponge<BabyBear, Bn254Scalar, Perm, 3, 16, 1>:
 //   BABY_BEAR_RATE = 16  BabyBear values absorbed per permutation
-//   NUM_F_ELMS = 7       BabyBear values packed per Bn254Fr (floor(254/32) = 7)
+//   NUM_F_ELMS = 8       BabyBear values packed per Bn254Fr (floor(254/31) = 8)
 // ---------------------------------------------------------------------------
 
 static const int BN254_BABY_BEAR_RATE = 16;
-static const int BN254_NUM_F_ELMS    = 7;
+static const int BN254_NUM_F_ELMS    = 8;
 
 // ---------------------------------------------------------------------------
 // Row hash helpers
@@ -116,9 +116,8 @@ Bn254Fr bn254_row_hash(const Fp* matrix, int width, int height, int row) {
     for (int col = 0; col < width; col++) {
         buf[cnt++] = matrix[col * height + row].asUInt32();
         if (cnt == BN254_BABY_BEAR_RATE) {
-            state[0] = bn254_reduce_32(buf,      7);
-            state[1] = bn254_reduce_32(buf + 7,  7);
-            state[2] = bn254_reduce_32(buf + 14, 2);
+            state[0] = bn254_reduce_32(buf, BN254_NUM_F_ELMS);
+            state[1] = bn254_reduce_32(buf + BN254_NUM_F_ELMS, BN254_NUM_F_ELMS);
             bn254_poseidon2_permute(state);
             cnt = 0;
         }
@@ -128,9 +127,6 @@ Bn254Fr bn254_row_hash(const Fp* matrix, int width, int height, int row) {
         if (cnt > BN254_NUM_F_ELMS)
             state[1] = bn254_reduce_32(buf + BN254_NUM_F_ELMS,
                                        min(BN254_NUM_F_ELMS, cnt - BN254_NUM_F_ELMS));
-        if (cnt > 2 * BN254_NUM_F_ELMS)
-            state[2] = bn254_reduce_32(buf + 2 * BN254_NUM_F_ELMS,
-                                       cnt - 2 * BN254_NUM_F_ELMS);
         bn254_poseidon2_permute(state);
     }
     return state[0];
@@ -152,9 +148,8 @@ Bn254Fr bn254_row_hash_ext(const FpExt* matrix, int width, int height, int row) 
         for (int d = 0; d < 4; d++) {
             buf[cnt++] = elem.elems[d].asUInt32();
             if (cnt == BN254_BABY_BEAR_RATE) {
-                state[0] = bn254_reduce_32(buf,      7);
-                state[1] = bn254_reduce_32(buf + 7,  7);
-                state[2] = bn254_reduce_32(buf + 14, 2);
+                state[0] = bn254_reduce_32(buf, BN254_NUM_F_ELMS);
+                state[1] = bn254_reduce_32(buf + BN254_NUM_F_ELMS, BN254_NUM_F_ELMS);
                 bn254_poseidon2_permute(state);
                 cnt = 0;
             }
@@ -165,9 +160,6 @@ Bn254Fr bn254_row_hash_ext(const FpExt* matrix, int width, int height, int row) 
         if (cnt > BN254_NUM_F_ELMS)
             state[1] = bn254_reduce_32(buf + BN254_NUM_F_ELMS,
                                        min(BN254_NUM_F_ELMS, cnt - BN254_NUM_F_ELMS));
-        if (cnt > 2 * BN254_NUM_F_ELMS)
-            state[2] = bn254_reduce_32(buf + 2 * BN254_NUM_F_ELMS,
-                                       cnt - 2 * BN254_NUM_F_ELMS);
         bn254_poseidon2_permute(state);
     }
     return state[0];
@@ -376,8 +368,10 @@ __device__ bool bn254_sponge_check_witness(DeviceBn254SpongeState& s,
     return (sample & ((1u << bits) - 1)) == 0;
 }
 
-/// Grinding kernel: find smallest w in [min_witness, max_witness] with check_witness(bits,w)==true.
-__launch_bounds__(32) __global__ void bn254_grind_kernel(
+static const uint32_t BN254_GRIND_BLOCK_SIZE = 32;
+
+/// Grinding kernel: find any w in [min_witness, max_witness] with check_witness(bits,w)==true.
+__launch_bounds__(BN254_GRIND_BLOCK_SIZE) __global__ void bn254_grind_kernel(
     const DeviceBn254SpongeState* init_state,
     uint32_t bits,
     uint32_t min_witness,
@@ -388,14 +382,14 @@ __launch_bounds__(32) __global__ void bn254_grind_kernel(
     const uint32_t stride = gridDim.x * blockDim.x;
     uint32_t w = min_witness + tid;
 
-    if (w > max_witness || *result < w) return;
+    if (w > max_witness || *result != UINT32_MAX) return;
 
     while (w <= max_witness) {
-        if (*result < w) return;
+        if (*result != UINT32_MAX) return;
 
         DeviceBn254SpongeState local_state = *init_state;
         if (bn254_sponge_check_witness(local_state, bits, w)) {
-            atomicMin(result, w);
+            atomicCAS(result, UINT32_MAX, w);
             return;
         }
 
@@ -483,7 +477,7 @@ extern "C" int _bn254_sponge_grind(
     uint32_t max_witness,
     uint32_t* result
 ) {
-    const size_t block_size = 32;
+    const size_t block_size = BN254_GRIND_BLOCK_SIZE;
     size_t total_threads = size_t{1} << bits;
     size_t grid_size = div_ceil(total_threads, block_size);
 
