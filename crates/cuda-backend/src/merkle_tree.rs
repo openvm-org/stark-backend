@@ -97,37 +97,6 @@ impl<F, Digest> MerkleTreeGpu<F, Digest> {
 
 // Base field merkle tree — generic constructor
 impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
-    fn batch_open_rows_host(
-        backing_matrices: &[&DeviceMatrix<F>],
-        query_indices: &[usize],
-        query_stride: usize,
-        rows_per_query: usize,
-    ) -> Result<Vec<Vec<Vec<F>>>, MerkleTreeError> {
-        backing_matrices
-            .iter()
-            .map(|matrix| {
-                let width = matrix.width();
-                let height = matrix.height();
-                let host = matrix.to_host()?;
-                let opened_rows_per_query = query_indices
-                    .iter()
-                    .map(|&query_idx| {
-                        debug_assert!(query_idx < query_stride);
-                        let mut opened = Vec::with_capacity(rows_per_query * width);
-                        for row_offset in 0..rows_per_query {
-                            let row_idx = row_offset * query_stride + query_idx;
-                            for col_idx in 0..width {
-                                opened.push(host[col_idx * height + row_idx]);
-                            }
-                        }
-                        opened
-                    })
-                    .collect_vec();
-                Ok(opened_rows_per_query)
-            })
-            .collect()
-    }
-
     /// Build a Merkle tree using the given hash scheme `MH`.
     ///
     /// This is the primary constructor; `new()` is a convenience wrapper that
@@ -217,14 +186,6 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         >,
         MerkleTreeError,
     > {
-        if backing_matrices.len() > 1 {
-            return Self::batch_open_rows_host(
-                backing_matrices,
-                query_indices,
-                query_stride,
-                rows_per_query,
-            );
-        }
         let row_idxs = query_indices
             .iter()
             .flat_map(|&query_idx| {
