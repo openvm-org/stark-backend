@@ -116,8 +116,8 @@ Bn254Fr bn254_row_hash(const Fp* matrix, int width, int height, int row) {
     for (int col = 0; col < width; col++) {
         buf[cnt++] = matrix[col * height + row].asUInt32();
         if (cnt == BN254_BABY_BEAR_RATE) {
-            state[0] = bn254_reduce_32(buf, 8);
-            state[1] = bn254_reduce_32(buf + 8, 8);
+            state[0] = bn254_reduce_32(buf, BN254_NUM_F_ELMS);
+            state[1] = bn254_reduce_32(buf + BN254_NUM_F_ELMS, BN254_NUM_F_ELMS);
             bn254_poseidon2_permute(state);
             cnt = 0;
         }
@@ -148,8 +148,8 @@ Bn254Fr bn254_row_hash_ext(const FpExt* matrix, int width, int height, int row) 
         for (int d = 0; d < 4; d++) {
             buf[cnt++] = elem.elems[d].asUInt32();
             if (cnt == BN254_BABY_BEAR_RATE) {
-                state[0] = bn254_reduce_32(buf, 8);
-                state[1] = bn254_reduce_32(buf + 8, 8);
+                state[0] = bn254_reduce_32(buf, BN254_NUM_F_ELMS);
+                state[1] = bn254_reduce_32(buf + BN254_NUM_F_ELMS, BN254_NUM_F_ELMS);
                 bn254_poseidon2_permute(state);
                 cnt = 0;
             }
