@@ -274,7 +274,7 @@ impl MerkleTreeGpu<F, Digest> {
 
 // Base field merkle tree — generic batch query (works for any BatchQueryMerkle digest)
 impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
-    fn batch_query_merkle_proofs_device(
+    fn batch_query_proofs(
         trees: &[&Self],
         query_indices: &[usize],
     ) -> Result<Vec<Vec<Vec<D>>>, MerkleTreeError> {
@@ -384,7 +384,7 @@ impl MerkleProofQueryDigest for Digest {
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
-        MerkleTreeGpu::<F, Self>::batch_query_merkle_proofs_device(trees, query_indices)
+        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices)
     }
 }
 
@@ -394,7 +394,7 @@ impl MerkleProofQueryDigest for Bn254Digest {
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
-        MerkleTreeGpu::<F, Self>::batch_query_merkle_proofs_device(trees, query_indices)
+        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices)
     }
 }
 
