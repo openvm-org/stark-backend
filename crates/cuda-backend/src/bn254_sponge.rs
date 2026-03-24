@@ -320,8 +320,7 @@ impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiField32Chall
 
 #[cfg(test)]
 mod tests {
-    use openvm_stark_backend::FiatShamirTranscript;
-    use openvm_stark_backend::p3_symmetric::CryptographicHasher;
+    use openvm_stark_backend::{p3_symmetric::CryptographicHasher, FiatShamirTranscript};
     use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::default_transcript;
     use p3_field::PrimeCharacteristicRing;
     use p3_symmetric::MultiField32PaddingFreeSponge;
@@ -598,11 +597,10 @@ mod tests {
     fn test_grind_gpu_matches_cpu_after_large_commit_observes() {
         let mut gpu = MultiField32ChallengerGpu::new();
         let mut cpu = default_transcript();
-        let hash =
-            MultiField32PaddingFreeSponge::<BabyBear, Bn254Scalar, _, 3, 16, 1>::new(
-                default_babybear_bn254_poseidon2(),
-            )
-            .unwrap();
+        let hash = MultiField32PaddingFreeSponge::<BabyBear, Bn254Scalar, _, 3, 16, 1>::new(
+            default_babybear_bn254_poseidon2(),
+        )
+        .unwrap();
 
         for seed in [17u32, 113, 997] {
             let digest = hash.hash_slice(
