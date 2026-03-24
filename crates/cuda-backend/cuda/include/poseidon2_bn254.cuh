@@ -6,7 +6,7 @@
 ///   - Field add / sub / neg / double / x^5 S-box
 ///   - MDS layers for WIDTH = 3 (external and internal)
 ///   - bn254_from_canonical / bn254_to_canonical conversions
-///   - reduce_32 (pack BabyBear → Bn254Fr) for both num_f_elms=7 (Merkle) and num_f_elms=3 (challenger)
+///   - reduce_32 (pack BabyBear → Bn254Fr) for both num_f_elms=8 (Merkle) and num_f_elms=3 (challenger)
 ///   - split_32 (unpack Bn254Fr → BabyBear canonical u32) for num_f_elms=3 (challenger)
 ///
 /// All functions are pure computation (no globals). The Poseidon2 permutation
@@ -257,7 +257,7 @@ void bn254_to_canonical(uint64_t canonical[4], Bn254Fr x) {
 // ---------------------------------------------------------------------------
 // reduce_32: pack BabyBear canonical u32 values into one Bn254Fr
 //
-//   num_f_elms = 7  (Merkle hash, MultiField32PaddingFreeSponge)
+//   num_f_elms = 8  (Merkle hash, MultiField32PaddingFreeSponge)
 //   num_f_elms = 3  (Challenger, MultiField32Challenger)
 //
 // Formula: result = sum_{i=0}^{n-1} bb[i] * 2^{32*i}  (as a BN254 scalar)
