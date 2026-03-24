@@ -5,6 +5,7 @@
 //! GPU-specific tests (monomial vs DAG, stacked reduction) remain here.
 //! Additional GPU-specific test cases for parameterized shared tests are added below.
 
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -35,7 +36,9 @@ use openvm_stark_sdk::{
     },
     utils::setup_tracing_with_log_level,
 };
-use p3_field::{reduce_32, BasedVectorSpace, PrimeCharacteristicRing, TwoAdicField};
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use p3_field::{reduce_32, BasedVectorSpace};
+use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use p3_symmetric::Permutation;
 use test_case::test_case;
