@@ -313,36 +313,6 @@ impl MerkleTreeGpu<F, Digest> {
 
 // Base field merkle tree — generic batch query (works for any BatchQueryMerkle digest)
 impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
-    #[cfg(feature = "baby-bear-bn254-poseidon2")]
-    fn batch_query_merkle_proofs_host(
-        trees: &[&Self],
-        query_indices: &[usize],
-    ) -> Result<Vec<Vec<Vec<D>>>, MerkleTreeError> {
-        trees
-            .iter()
-            .map(|tree| {
-                let host_layers = tree
-                    .digest_layers
-                    .iter()
-                    .take(tree.proof_depth())
-                    .map(|layer| layer.to_host())
-                    .collect::<Result<Vec<_>, _>>()?;
-                let proofs = query_indices
-                    .iter()
-                    .map(|&index| {
-                        debug_assert!(index < tree.query_stride());
-                        host_layers
-                            .iter()
-                            .enumerate()
-                            .map(|(layer_idx, layer)| layer[(index >> layer_idx) ^ 1])
-                            .collect_vec()
-                    })
-                    .collect::<Vec<_>>();
-                Ok(proofs)
-            })
-            .collect()
-    }
-
     fn batch_query_merkle_proofs_device(
         trees: &[&Self],
         query_indices: &[usize],
@@ -463,7 +433,7 @@ impl MerkleProofQueryDigest for Bn254Digest {
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
-        MerkleTreeGpu::<F, Self>::batch_query_merkle_proofs_host(trees, query_indices)
+        MerkleTreeGpu::<F, Self>::batch_query_merkle_proofs_device(trees, query_indices)
     }
 }
 

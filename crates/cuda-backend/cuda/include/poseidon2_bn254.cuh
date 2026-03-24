@@ -6,7 +6,7 @@
 ///   - Field add / sub / neg / double / x^5 S-box
 ///   - MDS layers for WIDTH = 3 (external and internal)
 ///   - bn254_from_canonical / bn254_to_canonical conversions
-///   - reduce_32 (pack BabyBear → Bn254Fr) for both num_f_elms=7 (Merkle) and num_f_elms=3 (challenger)
+///   - reduce_32 (pack BabyBear → Bn254Fr) for both num_f_elms=8 (Merkle) and num_f_elms=3 (challenger)
 ///   - split_32 (unpack Bn254Fr → BabyBear canonical u32) for num_f_elms=3 (challenger)
 ///
 /// All functions are pure computation (no globals). The Poseidon2 permutation

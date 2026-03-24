@@ -35,7 +35,7 @@ use openvm_stark_sdk::{
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
     default_babybear_bn254_poseidon2, Bn254Scalar,
 };
-use p3_field::{reduce_32, PrimeCharacteristicRing, TwoAdicField};
+use p3_field::{reduce_32, BasedVectorSpace, PrimeCharacteristicRing, TwoAdicField};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use p3_symmetric::Permutation;
 use test_case::test_case;
@@ -153,6 +153,64 @@ fn bn254_host_merkle_layers(
 }
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
+fn bn254_host_merkle_layers_ext(
+    matrix: &[EF],
+    height: usize,
+    width: usize,
+    rows_per_query: usize,
+) -> Vec<Vec<Bn254Digest>> {
+    let perm = default_babybear_bn254_poseidon2();
+    let hasher = CpuMerkleHasher::new(
+        MultiField32PaddingFreeSponge::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()).unwrap(),
+        TruncatedPermutation::new(perm),
+    );
+
+    let query_stride = height / rows_per_query;
+    let mut row_buf = Vec::with_capacity(width * 4);
+    let mut leaf_hashes = Vec::with_capacity(rows_per_query);
+    let mut query_digest_layer = Vec::with_capacity(query_stride);
+    for query_idx in 0..query_stride {
+        leaf_hashes.clear();
+        for row_offset in 0..rows_per_query {
+            row_buf.clear();
+            let row_idx = row_offset * query_stride + query_idx;
+            for col_idx in 0..width {
+                row_buf.extend_from_slice(matrix[col_idx * height + row_idx].as_basis_coefficients_slice());
+            }
+            leaf_hashes.push(hasher.hash_slice(&row_buf));
+        }
+        query_digest_layer.push(hasher.tree_compress(leaf_hashes.clone()));
+    }
+
+    let mut digest_layers = vec![query_digest_layer];
+    while digest_layers.last().unwrap().len() > 1 {
+        let prev_layer = digest_layers.last().unwrap();
+        let layer = prev_layer
+            .chunks_exact(2)
+            .map(|pair| hasher.compress(pair[0], pair[1]))
+            .collect_vec();
+        digest_layers.push(layer);
+    }
+    digest_layers
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+fn bn254_host_merkle_proofs(
+    host_layers: &[Vec<Bn254Digest>],
+    query_indices: &[usize],
+) -> Vec<Vec<Bn254Digest>> {
+    let proof_depth = host_layers.len() - 1;
+    query_indices
+        .iter()
+        .map(|&index| {
+            (0..proof_depth)
+                .map(|layer_idx| host_layers[layer_idx][(index >> layer_idx) ^ 1])
+                .collect_vec()
+        })
+        .collect_vec()
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
 fn bn254_row_hash_emulated(vals: &[F]) -> Bn254Digest {
     let perm = default_babybear_bn254_poseidon2();
     let mut state = [Bn254Scalar::ZERO; 3];
@@ -221,6 +279,43 @@ fn test_bn254_merkle_gpu_matches_host_large_matrix() {
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 #[test]
+fn test_bn254_merkle_proof_queries_gpu_match_host() {
+    let height = 1 << 12;
+    let width = 19;
+    let rows_per_query = 1;
+    let query_indices = [0, 1, 7, 42, 255, 1023];
+    let host_matrix_a = (0..width * height)
+        .map(|i| F::from_u32((i as u32).wrapping_mul(17).wrapping_add((i >> 4) as u32)))
+        .collect_vec();
+    let host_matrix_b = (0..width * height)
+        .map(|i| F::from_u32((i as u32).wrapping_mul(29).wrapping_add((i >> 6) as u32)))
+        .collect_vec();
+
+    let host_layers_a = bn254_host_merkle_layers(&host_matrix_a, height, width, rows_per_query);
+    let host_layers_b = bn254_host_merkle_layers(&host_matrix_b, height, width, rows_per_query);
+    let tree_a = MerkleTreeGpu::<F, Bn254Digest>::new_with_hash::<crate::hash_scheme::Bn254Poseidon2MerkleHash>(
+        DeviceMatrix::new(Arc::new(host_matrix_a.to_device().unwrap()), height, width),
+        rows_per_query,
+        true,
+    )
+    .unwrap();
+    let tree_b = MerkleTreeGpu::<F, Bn254Digest>::new_with_hash::<crate::hash_scheme::Bn254Poseidon2MerkleHash>(
+        DeviceMatrix::new(Arc::new(host_matrix_b.to_device().unwrap()), height, width),
+        rows_per_query,
+        true,
+    )
+    .unwrap();
+
+    let gpu_proofs =
+        MerkleTreeGpu::<F, Bn254Digest>::batch_query_merkle_proofs(&[&tree_a, &tree_b], &query_indices)
+            .unwrap();
+
+    assert_eq!(gpu_proofs[0], bn254_host_merkle_proofs(&host_layers_a, &query_indices));
+    assert_eq!(gpu_proofs[1], bn254_host_merkle_proofs(&host_layers_b, &query_indices));
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+#[test]
 fn test_bn254_row_hash_gpu_matches_host_multi_block_rows() {
     let height = 1 << 12;
     let width = 19;
@@ -245,6 +340,40 @@ fn test_bn254_row_hash_gpu_matches_host_multi_block_rows() {
     {
         panic!(
             "row-hash digest {digest_idx} mismatch: gpu={gpu_digest:?} host={host_digest:?}"
+        );
+    }
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+#[test]
+fn test_bn254_row_hash_ext_gpu_matches_host_multi_block_rows() {
+    let height = 1 << 11;
+    let width = 5;
+    let rows_per_query = 1;
+    let host_matrix = (0..width * height)
+        .map(|i| {
+            EF::from_basis_coefficients_fn(|j| {
+                F::from_u32((i as u32).wrapping_mul(43).wrapping_add((j as u32) * 11 + (i >> 3) as u32))
+            })
+        })
+        .collect_vec();
+
+    let host_layers = bn254_host_merkle_layers_ext(&host_matrix, height, width, rows_per_query);
+    let device_matrix = DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let gpu_tree = MerkleTreeGpu::<EF, Bn254Digest>::new_with_hash::<
+        crate::hash_scheme::Bn254Poseidon2MerkleHash,
+    >(device_matrix, rows_per_query, true)
+    .unwrap();
+    let gpu_layer0 = gpu_tree.digest_layers[0].to_host().unwrap();
+
+    if let Some((digest_idx, (gpu_digest, host_digest))) = gpu_layer0
+        .iter()
+        .zip(host_layers[0].iter())
+        .enumerate()
+        .find(|(_, (gpu_digest, host_digest))| gpu_digest != host_digest)
+    {
+        panic!(
+            "row-hash-ext digest {digest_idx} mismatch: gpu={gpu_digest:?} host={host_digest:?}"
         );
     }
 }

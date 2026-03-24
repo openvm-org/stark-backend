@@ -368,8 +368,10 @@ __device__ bool bn254_sponge_check_witness(DeviceBn254SpongeState& s,
     return (sample & ((1u << bits) - 1)) == 0;
 }
 
+static const uint32_t BN254_GRIND_BLOCK_SIZE = 32;
+
 /// Grinding kernel: find any w in [min_witness, max_witness] with check_witness(bits,w)==true.
-__launch_bounds__(32) __global__ void bn254_grind_kernel(
+__launch_bounds__(BN254_GRIND_BLOCK_SIZE) __global__ void bn254_grind_kernel(
     const DeviceBn254SpongeState* init_state,
     uint32_t bits,
     uint32_t min_witness,
@@ -475,7 +477,7 @@ extern "C" int _bn254_sponge_grind(
     uint32_t max_witness,
     uint32_t* result
 ) {
-    const size_t block_size = 32;
+    const size_t block_size = BN254_GRIND_BLOCK_SIZE;
     size_t total_threads = size_t{1} << bits;
     size_t grid_size = div_ceil(total_threads, block_size);
 
