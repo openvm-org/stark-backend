@@ -15,7 +15,7 @@ use p3_baby_bear::BabyBear;
 use p3_field::{reduce_32, split_32, PrimeCharacteristicRing, PrimeField32};
 use p3_symmetric::Permutation;
 
-use crate::sponge::{GpuFiatShamirTranscript, GrindError};
+use crate::sponge::{validate_gpu_grind_bits, GpuFiatShamirTranscript, GrindError};
 
 /// Bn254 digest type: one BN254 scalar element.
 type Digest = [Bn254Scalar; 1];
@@ -287,6 +287,7 @@ impl FiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiField32Challeng
 
 impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiField32ChallengerGpu {
     fn grind_gpu(&mut self, bits: usize) -> Result<BabyBear, GrindError> {
+        validate_gpu_grind_bits(bits)?;
         // Trivial case: 0 bits mean no PoW is required and any witness is valid.
         if bits == 0 {
             return Ok(BabyBear::ZERO);

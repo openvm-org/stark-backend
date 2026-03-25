@@ -524,6 +524,31 @@ fn test_sumcheck_mle_round_rejects_d_above_max() {
     assert_eq!(err.code, 1);
 }
 
+#[test]
+fn test_duplex_sponge_gpu_rejects_invalid_pow_bits() {
+    let err = DuplexSpongeGpu::default()
+        .grind_gpu(31)
+        .expect_err("bits=31 should be rejected");
+
+    match err {
+        crate::sponge::GrindError::Cuda(cuda_err) => assert_eq!(cuda_err.code, 1),
+        other => panic!("expected cuda invalid value error, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+#[test]
+fn test_bn254_sponge_gpu_rejects_invalid_pow_bits() {
+    let mut challenger = crate::bn254_sponge::MultiField32ChallengerGpu::default();
+    let err = crate::sponge::GpuFiatShamirTranscript::grind_gpu(&mut challenger, 31)
+        .expect_err("bits=31 should be rejected");
+
+    match err {
+        crate::sponge::GrindError::Cuda(cuda_err) => assert_eq!(cuda_err.code, 1),
+        other => panic!("expected cuda invalid value error, got {other:?}"),
+    }
+}
+
 // ===========================================================================
 // GPU-specific tests (not shared)
 // ===========================================================================

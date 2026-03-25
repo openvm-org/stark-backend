@@ -10,6 +10,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::CudaError,
 };
+use p3_field::PrimeField32;
 use zkhash::{
     ark_ff::PrimeField as _, fields::bn256::FpBN256 as ArkFpBN256,
     poseidon2::poseidon2_instance_bn256::RC3,
@@ -59,6 +60,13 @@ const MAX_MERKLE_LOG_ROWS_PER_QUERY: usize = 10;
 
 fn validate_merkle_log_rows_per_query(log_rows_per_query: usize) -> Result<(), CudaError> {
     if log_rows_per_query > MAX_MERKLE_LOG_ROWS_PER_QUERY {
+        return Err(CudaError::new(1));
+    }
+    Ok(())
+}
+
+fn validate_gpu_grind_bits(bits: u32) -> Result<(), CudaError> {
+    if bits >= u32::BITS || (1u64 << bits) >= u64::from(F::ORDER_U32) {
         return Err(CudaError::new(1));
     }
     Ok(())
@@ -336,6 +344,7 @@ pub unsafe fn bn254_sponge_grind(
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 
     init_bn254_poseidon2_rc()?;
+    validate_gpu_grind_bits(bits)?;
     let mut d_result: DeviceBuffer<u32> = DeviceBuffer::with_capacity(1);
     [u32::MAX].copy_to(&mut d_result)?;
 
