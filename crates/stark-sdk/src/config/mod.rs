@@ -127,7 +127,7 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
-/// - **`w_stack`** = 16, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+/// - **`w_stack`** = 9, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
 /// Config: `l_skip=2, n_stack=19, log_blowup=4`.
 //
@@ -138,7 +138,7 @@ pub fn root_params_with_100_bits_security() -> SystemParams {
         DEFAULT_ROOT_LOG_BLOWUP,
         2,  // l_skip
         19, // n_stack
-        16, // w_stack
+        9,  // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
         20, // folding pow
         20, // mu pow
