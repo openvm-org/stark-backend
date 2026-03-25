@@ -100,7 +100,7 @@ __global__ void frac_matrix_vertically_repeat_kernel(
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t col = blockIdx.y + blockIdx.z * gridDim.y;
-    if (col >= width) {
+    if (row >= lifted_height || col >= width) {
         return;
     }
     out[col * lifted_height + row].first = in[col * height + (row % height)].first;
@@ -119,7 +119,7 @@ __global__ void frac_matrix_vertically_repeat_mixed_kernel(
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t col = blockIdx.y + blockIdx.z * gridDim.y;
-    if (col >= width) {
+    if (row >= lifted_height || col >= width) {
         return;
     }
     uint32_t src_row = row % height;
