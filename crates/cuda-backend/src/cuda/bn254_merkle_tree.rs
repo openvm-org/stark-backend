@@ -1,8 +1,15 @@
 //! Rust bindings for BN254 Poseidon2 Merkle-tree CUDA kernels and RC initialization.
 
-use std::sync::OnceLock;
+use std::{
+    collections::BTreeSet,
+    sync::{Mutex, OnceLock},
+};
 
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{
+    common::{device_reset_epoch, get_device},
+    d_buffer::DeviceBuffer,
+    error::CudaError,
+};
 use zkhash::{
     ark_ff::PrimeField as _, fields::bn256::FpBN256 as ArkFpBN256,
     poseidon2::poseidon2_instance_bn256::RC3,
@@ -223,14 +230,22 @@ fn compute_bn254_rc_constants() -> (Vec<u64>, Vec<u64>, Vec<u64>) {
 
 /// Initialize BN254 Poseidon2 round constants on the GPU (called once at startup).
 pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
-    static INIT: OnceLock<i32> = OnceLock::new();
+    static RC_CONSTANTS: OnceLock<(Vec<u64>, Vec<u64>, Vec<u64>)> = OnceLock::new();
+    static INIT: OnceLock<Mutex<BTreeSet<(i32, u64)>>> = OnceLock::new();
 
-    let code = *INIT.get_or_init(|| {
-        let (initial, partial, terminal) = compute_bn254_rc_constants();
-        unsafe { _init_bn254_poseidon2_rc(initial.as_ptr(), partial.as_ptr(), terminal.as_ptr()) }
-    });
+    let device_key = (get_device()?, device_reset_epoch());
+    let initialized = INIT.get_or_init(|| Mutex::new(BTreeSet::<(i32, u64)>::new()));
+    let mut initialized = initialized.lock().unwrap();
+    if initialized.contains(&device_key) {
+        return Ok(());
+    }
 
-    CudaError::from_result(code)
+    let (initial, partial, terminal) = RC_CONSTANTS.get_or_init(compute_bn254_rc_constants);
+    let code =
+        unsafe { _init_bn254_poseidon2_rc(initial.as_ptr(), partial.as_ptr(), terminal.as_ptr()) };
+    CudaError::from_result(code)?;
+    initialized.insert(device_key);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
