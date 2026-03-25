@@ -218,8 +218,13 @@ extern "C" int _poseidon2_compressing_row_hashes(
     size_t query_stride,
     size_t log_rows_per_query
 ) {
-    auto [grid, block] = kernel_launch_params(query_stride, 512 >> log_rows_per_query);
-    block.y = 1 << log_rows_per_query;
+    if (log_rows_per_query > 10) {
+        return cudaErrorInvalidValue;
+    }
+    size_t block_y = size_t{1} << log_rows_per_query;
+    size_t threads_x = std::max<size_t>(1, size_t{512} / block_y);
+    auto [grid, block] = kernel_launch_params(query_stride, threads_x);
+    block.y = block_y;
     size_t shared_stride = block.x * div_ceil(block.y, 2);
     size_t shmem_bytes = CELLS_OUT * shared_stride * sizeof(Fp);
     auto height = query_stride << log_rows_per_query;
@@ -237,8 +242,13 @@ extern "C" int _poseidon2_compressing_row_hashes_ext(
     size_t query_stride,
     size_t log_rows_per_query
 ) {
-    auto [grid, block] = kernel_launch_params(query_stride, 512 >> log_rows_per_query);
-    block.y = 1 << log_rows_per_query;
+    if (log_rows_per_query > 10) {
+        return cudaErrorInvalidValue;
+    }
+    size_t block_y = size_t{1} << log_rows_per_query;
+    size_t threads_x = std::max<size_t>(1, size_t{512} / block_y);
+    auto [grid, block] = kernel_launch_params(query_stride, threads_x);
+    block.y = block_y;
     size_t shared_stride = block.x * div_ceil(block.y, 2);
     size_t shmem_bytes = CELLS_OUT * shared_stride * sizeof(Fp);
     auto height = query_stride << log_rows_per_query;

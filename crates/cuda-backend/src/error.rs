@@ -116,6 +116,13 @@ pub enum SumcheckError {
 pub enum MerkleTreeError {
     #[error(transparent)]
     MemCopy(#[from] MemCopyError),
+    #[error(
+        "unsupported rows_per_query {rows_per_query}; CUDA Merkle row hashing supports at most {max_rows_per_query}"
+    )]
+    UnsupportedRowsPerQuery {
+        rows_per_query: usize,
+        max_rows_per_query: usize,
+    },
     #[error("poseidon2_compressing_row_hashes error: {0}")]
     CompressingRowHashes(CudaError),
     #[error("poseidon2_compressing_row_hashes_ext error: {0}")]

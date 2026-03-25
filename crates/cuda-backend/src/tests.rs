@@ -5,7 +5,6 @@
 //! GPU-specific tests (monomial vs DAG, stacked reduction) remain here.
 //! Additional GPU-specific test cases for parameterized shared tests are added below.
 
-#[cfg(feature = "baby-bear-bn254-poseidon2")]
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -45,9 +44,11 @@ use test_case::test_case;
 use tracing::{debug, Level};
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
-use crate::{base::DeviceMatrix, cuda::bn254_merkle_tree::Bn254Digest, merkle_tree::MerkleTreeGpu};
+use crate::cuda::bn254_merkle_tree::Bn254Digest;
 use crate::{
+    base::DeviceMatrix,
     cuda::{batch_ntt_small::batch_ntt_small, logup_zerocheck::frac_matrix_vertically_repeat},
+    merkle_tree::MerkleTreeGpu,
     prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     BabyBearPoseidon2GpuEngine, GpuBackend,
@@ -423,6 +424,28 @@ fn test_bn254_row_hash_emulation_matches_host_multi_block_rows() {
         .collect_vec();
 
     assert_eq!(bn254_row_hash_emulated(&row), host_hasher.hash_slice(&row));
+}
+
+#[test]
+fn test_merkle_gpu_supports_1024_rows_per_query() {
+    use openvm_cuda_common::copy::MemCopyH2D;
+
+    let height = 1 << 10;
+    let width = 7;
+    let rows_per_query = 1 << 10;
+    let host_matrix = (0..width * height)
+        .map(|i| F::from_u32((i as u32).wrapping_mul(31).wrapping_add((i >> 2) as u32)))
+        .collect_vec();
+
+    let device_matrix =
+        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
+        crate::hash_scheme::Poseidon2MerkleHash,
+    >(device_matrix, rows_per_query, true)
+    .expect("rows_per_query=1024 should be supported");
+
+    assert_eq!(tree.query_stride(), 1);
+    assert_eq!(tree.proof_depth(), 0);
 }
 
 // ===========================================================================

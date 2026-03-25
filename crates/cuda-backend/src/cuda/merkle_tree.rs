@@ -2,6 +2,15 @@ use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 
 use crate::prelude::{Digest, EF, F};
 
+const MAX_MERKLE_LOG_ROWS_PER_QUERY: usize = 10;
+
+fn validate_merkle_log_rows_per_query(log_rows_per_query: usize) -> Result<(), CudaError> {
+    if log_rows_per_query > MAX_MERKLE_LOG_ROWS_PER_QUERY {
+        return Err(CudaError::new(1));
+    }
+    Ok(())
+}
+
 extern "C" {
     fn _poseidon2_compressing_row_hashes(
         out: *mut Digest,
@@ -56,6 +65,7 @@ pub unsafe fn poseidon2_compressing_row_hashes(
     query_stride: usize,
     log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
+    validate_merkle_log_rows_per_query(log_rows_per_query)?;
     debug_assert!(matrix.len() >= width * (query_stride << log_rows_per_query));
     debug_assert!(out.len() >= query_stride);
     CudaError::from_result(_poseidon2_compressing_row_hashes(
@@ -85,6 +95,7 @@ pub unsafe fn poseidon2_compressing_row_hashes_ext(
     query_stride: usize,
     log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
+    validate_merkle_log_rows_per_query(log_rows_per_query)?;
     debug_assert!(matrix.len() >= width * (query_stride << log_rows_per_query));
     debug_assert!(out.len() >= query_stride);
     CudaError::from_result(_poseidon2_compressing_row_hashes_ext(

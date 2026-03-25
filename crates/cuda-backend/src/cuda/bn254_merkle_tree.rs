@@ -55,6 +55,14 @@ const _: () = assert!(
 // passing non-repr(C) types across the FFI boundary.
 // ---------------------------------------------------------------------------
 type Bn254FrRaw = [u64; 4];
+const MAX_MERKLE_LOG_ROWS_PER_QUERY: usize = 10;
+
+fn validate_merkle_log_rows_per_query(log_rows_per_query: usize) -> Result<(), CudaError> {
+    if log_rows_per_query > MAX_MERKLE_LOG_ROWS_PER_QUERY {
+        return Err(CudaError::new(1));
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // FFI declarations
@@ -265,6 +273,7 @@ pub unsafe fn bn254_poseidon2_compressing_row_hashes(
     log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
     init_bn254_poseidon2_rc()?;
+    validate_merkle_log_rows_per_query(log_rows_per_query)?;
     CudaError::from_result(_bn254_poseidon2_compressing_row_hashes(
         out.as_mut_ptr().cast::<Bn254FrRaw>(),
         matrix.as_ptr().cast::<u32>(),
@@ -287,6 +296,7 @@ pub unsafe fn bn254_poseidon2_compressing_row_hashes_ext(
     log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
     init_bn254_poseidon2_rc()?;
+    validate_merkle_log_rows_per_query(log_rows_per_query)?;
     CudaError::from_result(_bn254_poseidon2_compressing_row_hashes_ext(
         out.as_mut_ptr().cast::<Bn254FrRaw>(),
         matrix.as_ptr().cast::<u32>(),

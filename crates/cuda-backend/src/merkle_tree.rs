@@ -32,6 +32,26 @@ pub trait BatchQueryMerkle: Copy + Sized + 'static {
     fn reconstruct_from_f(out: &[F], base: usize) -> Self;
 }
 
+const MAX_MERKLE_ROWS_PER_QUERY: usize = 1024;
+
+fn validate_merkle_rows_per_query(
+    rows_per_query: usize,
+    height: usize,
+) -> Result<usize, MerkleTreeError> {
+    let k = log2_strict_usize(rows_per_query);
+    assert!(
+        rows_per_query <= height,
+        "rows_per_query ({rows_per_query}) must not exceed height ({height})"
+    );
+    if rows_per_query > MAX_MERKLE_ROWS_PER_QUERY {
+        return Err(MerkleTreeError::UnsupportedRowsPerQuery {
+            rows_per_query,
+            max_rows_per_query: MAX_MERKLE_ROWS_PER_QUERY,
+        });
+    }
+    Ok(k)
+}
+
 impl BatchQueryMerkle for Digest {
     fn reconstruct_from_f(out: &[F], base: usize) -> Self {
         from_fn(|i| out[base + i])
@@ -118,11 +138,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
         assert!(height.is_power_of_two());
-        let k = log2_strict_usize(rows_per_query);
-        assert!(
-            rows_per_query <= height,
-            "rows_per_query ({rows_per_query}) must not exceed height ({height})"
-        );
+        let k = validate_merkle_rows_per_query(rows_per_query, height)?;
         let query_stride = height / rows_per_query;
         let mut query_digest_layer = DeviceBuffer::<D>::with_capacity(query_stride);
         // SAFETY: query_digest_layer properly allocated
@@ -410,11 +426,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
     ) -> Result<Self, MerkleTreeError> {
         let height = matrix.height();
         assert!(height.is_power_of_two());
-        let k = log2_strict_usize(rows_per_query);
-        assert!(
-            rows_per_query <= height,
-            "rows_per_query ({rows_per_query}) must not exceed height ({height})"
-        );
+        let k = validate_merkle_rows_per_query(rows_per_query, height)?;
         let query_stride = height / rows_per_query;
         let mut query_digest_layer = DeviceBuffer::<D>::with_capacity(query_stride);
         // SAFETY: query_digest_layer properly allocated
