@@ -22,7 +22,7 @@ use openvm_stark_backend::{
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
         DeviceDataTransporter, MatrixDimensions, MultiRapProver,
     },
-    test_utils::{default_test_params_small, FibFixture, TestFixture},
+    test_utils::{default_test_params_small, FibFixture, InteractionsFixture11, TestFixture},
     verifier::stacked_reduction::{verify_stacked_reduction, StackedReductionError},
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig,
 };
@@ -47,6 +47,7 @@ use tracing::{debug, Level};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::{base::DeviceMatrix, cuda::bn254_merkle_tree::Bn254Digest, merkle_tree::MerkleTreeGpu};
 use crate::{
+    cuda::batch_ntt_small::batch_ntt_small,
     prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     BabyBearPoseidon2GpuEngine, GpuBackend,
@@ -427,6 +428,40 @@ fn test_bn254_row_hash_emulation_matches_host_multi_block_rows() {
 // ===========================================================================
 // GPU-specific tests (not shared)
 // ===========================================================================
+
+#[test]
+fn test_batch_ntt_small_size1_is_noop() {
+    use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let original = (0..17).map(|i| F::from_u32(i * 7 + 3)).collect_vec();
+    let mut d_values = original.to_device().unwrap();
+
+    unsafe {
+        batch_ntt_small(&mut d_values, 0, original.len(), false).unwrap();
+    }
+    assert_eq!(d_values.to_host().unwrap(), original);
+
+    unsafe {
+        batch_ntt_small(&mut d_values, 0, original.len(), true).unwrap();
+    }
+    assert_eq!(d_values.to_host().unwrap(), original);
+}
+
+#[test]
+fn test_interactions_roundtrip_with_l_skip_zero() {
+    use openvm_stark_backend::test_utils::test_system_params_small;
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let engine = BabyBearPoseidon2GpuEngine::new(test_system_params_small(0, 8, 3));
+    let fixture = InteractionsFixture11;
+    let (vk, proof) = fixture.keygen_and_prove(&engine);
+    engine
+        .verify(&vk, &proof)
+        .expect("l_skip=0 interactions roundtrip should verify");
+}
 
 #[test_case(9)]
 #[test_case(2 ; "when log_height equals l_skip")]

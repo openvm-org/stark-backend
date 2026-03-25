@@ -47,6 +47,10 @@ pub unsafe fn batch_ntt_small(
     cnt_blocks: usize,
     is_intt: bool,
 ) -> Result<(), CudaError> {
+    if l_skip == 0 || cnt_blocks == 0 {
+        return Ok(());
+    }
+
     ensure_device_ntt_twiddles_initialized();
     check(_batch_ntt_small(
         buffer.as_mut_ptr(),

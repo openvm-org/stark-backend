@@ -30,7 +30,7 @@ __device__ __forceinline__ Fp avg_gp(Fp x, uint32_t n) {
 
 /// Assuming `x` is a `len`-bit number, reverses its `len` bits.
 __device__ __forceinline__ uint32_t rev_len(uint32_t x, uint32_t len) {
-    return __brev(x) >> (32 - len);
+    return len ? (__brev(x) >> (32 - len)) : 0;
 }
 
 __device__ __forceinline__ uint32_t with_rev_bits(uint32_t x, uint32_t buf_size) { return x; }

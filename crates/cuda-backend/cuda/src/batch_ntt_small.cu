@@ -132,6 +132,10 @@ extern "C" int _batch_ntt_small(
     size_t const cnt_blocks,
     bool const is_intt
 ) {
+    if (l_skip == 0 || cnt_blocks == 0) {
+        return 0;
+    }
+
     bool const needs_shmem = l_skip > LOG_WARP_SIZE;
     assert((1 << l_skip) <= 1024);
     return DISPATCH_BOOL_PAIR(

@@ -65,6 +65,10 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
     uint32_t const l_skip, // log2 of NTT size
     bool const active_thread = true
 ) {
+    if (l_skip == 0) {
+        return;
+    }
+
     uint32_t log_interwarp;
     if constexpr (needs_shmem) {
         log_interwarp = LOG_WARP_SIZE;
