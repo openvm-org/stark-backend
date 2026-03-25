@@ -55,6 +55,14 @@ extern "C" {
     ) -> i32;
 }
 
+#[inline]
+fn narrow_mle_width(width: usize) -> Result<u16, CudaError> {
+    if width > u16::MAX as usize {
+        return check(1).map(|_| 0);
+    }
+    Ok(width as u16)
+}
+
 /// Does in-place interpolation on `buffer` from eval to coeff form in one coordinate, assuming the
 /// associated polynomial is linear in that coordinate. Effectively it performs `v -= u` for `v, u`
 /// that are `step` apart in the buffer.
@@ -102,12 +110,13 @@ pub unsafe fn mle_interpolate_stage_ext(
 /// - `padded_height` must be a multiple of `step * 2`.
 pub unsafe fn mle_interpolate_stage_2d(
     buffer: *mut F,
-    width: u16,
+    width: usize,
     height: u32,
     padded_height: u32,
     step: u32,
     is_eval_to_coeff: bool,
 ) -> Result<(), CudaError> {
+    let width = narrow_mle_width(width)?;
     debug_assert!(height <= padded_height);
     debug_assert_eq!(padded_height % (step * 2), 0);
     check(_mle_interpolate_stage_2d(
@@ -140,7 +149,7 @@ pub unsafe fn mle_interpolate_stage_2d(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn mle_interpolate_fused_2d(
     buffer: *mut F,
-    width: u16,
+    width: usize,
     padded_height: u32,
     log_stride: u32,
     start_step: u32,
@@ -148,6 +157,7 @@ pub unsafe fn mle_interpolate_fused_2d(
     is_eval_to_coeff: bool,
     right_pad: bool,
 ) -> Result<(), CudaError> {
+    let width = narrow_mle_width(width)?;
     debug_assert!((1..=LOG_WARP_SIZE as u32).contains(&num_stages));
     debug_assert!((start_step << (num_stages - 1)) <= 16);
     check(_mle_interpolate_fused_2d(
@@ -180,7 +190,7 @@ pub const MLE_SHARED_TILE_LOG_SIZE: u32 = 12;
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn mle_interpolate_shared_2d(
     buffer: *mut F,
-    width: u16,
+    width: usize,
     padded_height: u32,
     log_stride: u32,
     start_log_step: u32,
@@ -188,6 +198,7 @@ pub unsafe fn mle_interpolate_shared_2d(
     is_eval_to_coeff: bool,
     right_pad: bool,
 ) -> Result<(), CudaError> {
+    let width = narrow_mle_width(width)?;
     debug_assert!(end_log_step < MLE_SHARED_TILE_LOG_SIZE);
     check(_mle_interpolate_shared_2d(
         buffer,

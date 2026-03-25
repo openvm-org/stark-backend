@@ -98,7 +98,7 @@ pub fn mle_evals_to_coeffs_inplace(evals: &mut DeviceBuffer<F>, n: usize) -> Res
     unsafe {
         mle_interpolate_stages(
             evals.as_mut_ptr(),
-            width.try_into().unwrap(),
+            width,
             1 << n,
             0,
             0,
@@ -129,7 +129,7 @@ pub fn mle_evals_to_coeffs_inplace(evals: &mut DeviceBuffer<F>, n: usize) -> Res
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn mle_interpolate_stages(
     buffer: *mut F,
-    width: u16,
+    width: usize,
     padded_height: u32,
     log_blowup: u32,
     start_log_step: u32,

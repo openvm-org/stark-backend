@@ -287,6 +287,9 @@ extern "C" int _mle_interpolate_stage_2d(
     uint32_t step,
     bool is_eval_to_coeff
 ) {
+    if (width == 0) {
+        return cudaErrorInvalidValue;
+    }
     if (is_eval_to_coeff) {
         return launch_mle_interpolate_stage_2d<Fp, true>(
             buffer, width, height, padded_height, step
@@ -353,6 +356,9 @@ extern "C" int _mle_interpolate_fused_2d(
     bool is_eval_to_coeff,
     bool right_pad
 ) {
+    if (width == 0) {
+        return cudaErrorInvalidValue;
+    }
     return DISPATCH_BOOL_PAIR(
         dispatch_mle_interpolate_fused_2d,
         is_eval_to_coeff,
@@ -407,6 +413,9 @@ extern "C" int _mle_interpolate_shared_2d(
     bool is_eval_to_coeff,
     bool right_pad
 ) {
+    if (width == 0) {
+        return cudaErrorInvalidValue;
+    }
     // Validate: end_log_step must be < MLE_SHARED_TILE_LOG_SIZE (step < tile_size)
     if (end_log_step >= MLE_SHARED_TILE_LOG_SIZE) {
         return cudaErrorInvalidValue;
