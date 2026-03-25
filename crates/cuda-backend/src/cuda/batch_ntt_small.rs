@@ -1,6 +1,11 @@
-use std::{ffi::c_void, sync::Once};
+use std::{
+    collections::BTreeSet,
+    ffi::c_void,
+    sync::{Mutex, OnceLock},
+};
 
 use openvm_cuda_common::{
+    common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
 };
@@ -24,18 +29,27 @@ extern "C" {
     fn _generate_device_ntt_twiddles(d_twiddles: *mut c_void) -> i32;
 }
 
-static INIT_DEVICE_NTT_TWIDDLES: Once = Once::new();
+static INIT_DEVICE_NTT_TWIDDLES: OnceLock<Mutex<BTreeSet<(i32, u64)>>> = OnceLock::new();
 
 /// Ensure device NTT twiddles are initialized in constant memory.
-/// Safe to call multiple times - initialization happens only once.
-pub fn ensure_device_ntt_twiddles_initialized() {
-    INIT_DEVICE_NTT_TWIDDLES.call_once(|| {
+/// Safe to call multiple times - initialization happens once per device/reset epoch.
+pub fn ensure_device_ntt_twiddles_initialized() -> Result<(), CudaError> {
+    let device_key = (get_device()?, device_reset_epoch());
+    let initialized =
+        INIT_DEVICE_NTT_TWIDDLES.get_or_init(|| Mutex::new(BTreeSet::<(i32, u64)>::new()));
+    let mut initialized = initialized.lock().unwrap();
+    if initialized.contains(&device_key) {
+        return Ok(());
+    }
+
+    {
         let twiddles = DeviceBuffer::<F>::with_capacity(DEVICE_NTT_TWIDDLES_SIZE);
         unsafe {
-            generate_device_ntt_twiddles(&twiddles)
-                .expect("failed to initialize device NTT twiddles");
+            generate_device_ntt_twiddles(&twiddles)?;
         }
-    });
+    }
+    initialized.insert(device_key);
+    Ok(())
 }
 
 /// Generate device NTT twiddles and copy to constant memory.
@@ -57,7 +71,7 @@ pub unsafe fn batch_ntt_small(
         return check(1);
     }
 
-    ensure_device_ntt_twiddles_initialized();
+    ensure_device_ntt_twiddles_initialized()?;
     check(_batch_ntt_small(
         buffer.as_mut_ptr(),
         l_skip,

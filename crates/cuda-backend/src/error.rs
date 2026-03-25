@@ -34,6 +34,8 @@ pub enum ProverError {
 pub enum StackedReductionError {
     #[error(transparent)]
     MemCopy(#[from] MemCopyError),
+    #[error("ensure_device_ntt_twiddles_initialized: {0}")]
+    InitNttTwiddles(CudaError),
     #[error("EqEvalSegments: {0}")]
     EqEvalSegments(KernelError),
     #[error("fill_zero: {0}")]

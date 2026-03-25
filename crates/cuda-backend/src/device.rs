@@ -26,7 +26,8 @@ pub struct GpuProverConfig {
 
 impl GpuDevice {
     pub fn new(config: SystemParams) -> Self {
-        ensure_device_ntt_twiddles_initialized();
+        ensure_device_ntt_twiddles_initialized()
+            .expect("failed to initialize small-NTT twiddles for current CUDA device");
 
         let prover_config = GpuProverConfig {
             zerocheck_save_memory: config.log_blowup == 1,
