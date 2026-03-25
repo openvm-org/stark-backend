@@ -378,6 +378,9 @@ extern "C" int _sumcheck_mle_round(
     const uint32_t height,
     const uint32_t d
 ) {
+    if (d == 0 || d > 5) {
+        return cudaErrorInvalidValue;
+    }
     int half_height = height >> 1;
     auto [grid, block] = kernel_launch_params(half_height);
     unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;

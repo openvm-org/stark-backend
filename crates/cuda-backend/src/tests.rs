@@ -499,6 +499,31 @@ fn test_merkle_batch_open_rows_empty_queries_returns_empty() {
     assert!(opened_rows[0].is_empty());
 }
 
+#[test]
+fn test_sumcheck_mle_round_rejects_d_above_max() {
+    use openvm_cuda_common::d_buffer::DeviceBuffer;
+
+    let input_matrices = DeviceBuffer::<*const EF>::with_capacity(1);
+    let output = DeviceBuffer::<EF>::with_capacity(1);
+    let tmp_block_sums = DeviceBuffer::<EF>::with_capacity(1);
+    let widths = DeviceBuffer::<u32>::with_capacity(1);
+
+    let err = unsafe {
+        crate::cuda::sumcheck::sumcheck_mle_round(
+            &input_matrices,
+            &output,
+            &tmp_block_sums,
+            &widths,
+            1,
+            2,
+            6,
+        )
+    }
+    .expect_err("d > 5 should be rejected before launch");
+
+    assert_eq!(err.code, 1);
+}
+
 // ===========================================================================
 // GPU-specific tests (not shared)
 // ===========================================================================
