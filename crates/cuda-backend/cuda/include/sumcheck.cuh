@@ -295,11 +295,14 @@ __device__ __forceinline__ void fold_mle(
     const FpExt *__restrict__ const *__restrict__ input_matrices,
     FpExt *__restrict__ const *__restrict__ output_matrices,
     const uint32_t *widths, // Width of each matrix
+    const uint32_t num_matrices,
     const uint8_t log_output_height,
     const FpExt &r_val,
     uint32_t tidx,
     uint32_t mat_idx
 ) {
+    if (mat_idx >= num_matrices)
+        return;
     uint32_t width = widths[mat_idx];
     uint32_t output_height = 1 << log_output_height;
     if (tidx >= output_height * width)
