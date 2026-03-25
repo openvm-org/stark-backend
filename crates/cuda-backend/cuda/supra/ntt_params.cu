@@ -68,33 +68,35 @@ __global__ void generate_partial_twiddles(fr_t (*roots)[WINDOW_SIZE],
 
 extern "C" int _generate_all_twiddles(fr_t* twiddles, bool inverse) {
     const fr_t* roots = inverse ? inverse_roots_of_unity : forward_roots_of_unity;
+    cudaStream_t stream = cudaStreamPerThread;
 
-    generate_all_twiddles<<<TWIDDLES_SIZE/32, 32>>>(
+    generate_all_twiddles<<<TWIDDLES_SIZE/32, 32, 0, stream>>>(
             twiddles, roots[6], roots[7], roots[8], roots[9], roots[10]);
 
     if (inverse) {
         cudaMemcpyToSymbolAsync(INVERSE_TWIDDLES, twiddles, TWIDDLES_SIZE * sizeof(fr_t),
-                                0, cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+                                0, cudaMemcpyDeviceToDevice, stream);
     } else {
         cudaMemcpyToSymbolAsync(FORWARD_TWIDDLES, twiddles, TWIDDLES_SIZE * sizeof(fr_t),
-                                0, cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+                                0, cudaMemcpyDeviceToDevice, stream);
     }
-    cudaStreamSynchronize(cudaStreamPerThread);
+    cudaStreamSynchronize(stream);
     return CHECK_KERNEL();
 }
 
 extern "C" int _generate_partial_twiddles(fr_t (*partial_twiddles)[WINDOW_SIZE], bool inverse) {
     const fr_t* roots = inverse ? inverse_roots_of_unity : forward_roots_of_unity;
-    generate_partial_twiddles<<<WINDOW_SIZE/32, 32>>>(
+    cudaStream_t stream = cudaStreamPerThread;
+    generate_partial_twiddles<<<WINDOW_SIZE/32, 32, 0, stream>>>(
             partial_twiddles, roots[MAX_LG_DOMAIN_SIZE]);
 
     if (inverse) {
         cudaMemcpyToSymbolAsync(INVERSE_PARTIAL_TWIDDLES, partial_twiddles, WINDOW_NUM * WINDOW_SIZE * sizeof(fr_t),
-                                0, cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+                                0, cudaMemcpyDeviceToDevice, stream);
     } else {
         cudaMemcpyToSymbolAsync(FORWARD_PARTIAL_TWIDDLES, partial_twiddles, WINDOW_NUM * WINDOW_SIZE * sizeof(fr_t),
-                                0, cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+                                0, cudaMemcpyDeviceToDevice, stream);
     }
-    cudaStreamSynchronize(cudaStreamPerThread);
+    cudaStreamSynchronize(stream);
     return CHECK_KERNEL();
 }

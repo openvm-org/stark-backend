@@ -54,18 +54,19 @@ extern "C" int _generate_device_ntt_twiddles(Fp *d_twiddles) {
     // Generate twiddles on GPU
     constexpr uint32_t BLOCK_SIZE = 256;
     uint32_t num_blocks = div_ceil(DEVICE_NTT_TWIDDLES_SIZE, BLOCK_SIZE);
-    generate_device_ntt_twiddles_kernel<<<num_blocks, BLOCK_SIZE>>>(d_twiddles);
+    cudaStream_t stream = cudaStreamPerThread;
+    generate_device_ntt_twiddles_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_twiddles);
 
-    // Copy to constant memory using per-thread stream
+    // Generate and publish on the same explicit stream so the copy cannot race the kernel.
     cudaMemcpyToSymbolAsync(
         DEVICE_NTT_TWIDDLES,
         d_twiddles,
         DEVICE_NTT_TWIDDLES_SIZE * sizeof(Fp),
         0,
         cudaMemcpyDeviceToDevice,
-        cudaStreamPerThread
+        stream
     );
-    cudaStreamSynchronize(cudaStreamPerThread);
+    cudaStreamSynchronize(stream);
 
     return CHECK_KERNEL();
 }
