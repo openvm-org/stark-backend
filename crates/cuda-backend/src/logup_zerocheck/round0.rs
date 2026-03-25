@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
 use openvm_stark_backend::{
     air_builders::symbolic::{
         symbolic_expression::SymbolicExpression, SymbolicConstraints, SymbolicDagBuilder,
@@ -22,6 +22,24 @@ use crate::{
     logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpu},
     prelude::{EF, F},
 };
+
+const ROUND0_COSET_PARALLEL_THRESHOLD: u32 = 32768;
+const MAX_LOCKSTEP_NUM_COSETS: u32 = 4;
+
+fn uses_round0_coset_parallel(num_x: u32, skip_domain: u32) -> bool {
+    num_x.saturating_mul(skip_domain) < ROUND0_COSET_PARALLEL_THRESHOLD
+}
+
+fn validate_round0_num_cosets(
+    num_x: u32,
+    skip_domain: u32,
+    num_cosets: u32,
+) -> Result<(), Round0EvalError> {
+    if num_cosets > MAX_LOCKSTEP_NUM_COSETS && !uses_round0_coset_parallel(num_x, skip_domain) {
+        return Err(CudaError::new(1).into());
+    }
+    Ok(())
+}
 
 /// Evaluate plain AIR constraints (not interactions) for a single AIR, given prepared trace input.
 ///
@@ -47,6 +65,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
         // No plain AIR constraints, return empty buffer
         return Ok(DeviceBuffer::new());
     }
+    validate_round0_num_cosets(num_x, skip_domain, num_cosets)?;
 
     let rules = &pk.other_data.zerocheck_round0;
 
@@ -149,6 +168,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     if eq_3bs.is_empty() {
         return Ok(DeviceBuffer::new());
     }
+    validate_round0_num_cosets(num_x, skip_domain, num_cosets)?;
     let large_domain = num_cosets * skip_domain;
 
     // We create a new "interactions DAG" where the new .constraints are the interaction [count,

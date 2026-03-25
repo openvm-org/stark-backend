@@ -690,6 +690,10 @@ extern "C" int _zerocheck_ntt_eval_constraints(
     size_t max_temp_bytes
 ) {
     bool is_global = buffer_size > BUFFER_THRESHOLD;
+    bool use_coset_parallel = use_coset_parallel_mode(num_x, skip_domain);
+    if (!use_coset_parallel && num_cosets > 4) {
+        return cudaErrorInvalidValue;
+    }
 
 #define KERNEL_ARGS                                                                                \
     tmp_sums_buffer, output, selectors_cube, preprocessed, main_parts, eq_cube, d_lambda_pows,     \
@@ -697,7 +701,7 @@ extern "C" int _zerocheck_ntt_eval_constraints(
         d_intermediates, skip_domain, num_x, height
 
     if (skip_domain == 1) {
-        if (use_coset_parallel_mode(num_x, skip_domain)) {
+        if (use_coset_parallel) {
             return is_global ? launch_zerocheck_coset_parallel<true, false>(
                                    KERNEL_ARGS, num_cosets, g_shift, max_temp_bytes
                                )
@@ -713,7 +717,7 @@ extern "C" int _zerocheck_ntt_eval_constraints(
     bool needs_shmem = skip_domain > WARP_SIZE;
 
     // Threshold-based dispatch: use coset-parallel for small workloads
-    if (use_coset_parallel_mode(num_x, skip_domain)) {
+    if (use_coset_parallel) {
         // Coset-parallel mode: grid.y = num_cosets, each block handles one coset
         return DISPATCH_BOOL_PAIR(
             launch_zerocheck_coset_parallel,

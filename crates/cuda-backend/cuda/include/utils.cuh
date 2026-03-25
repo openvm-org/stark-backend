@@ -67,7 +67,7 @@ with_rev_bits(uint32_t x, uint32_t buf_size, bool first, Bool &&...others) {
                           : func<N, false, false>(std::forward<Args>(args)...);                    \
             }                                                                                      \
         } else if constexpr (N == 1) {                                                             \
-            return -1;                                                                             \
+            return cudaErrorInvalidValue;                                                          \
         } else {                                                                                   \
             return name##_impl<N - 1>(n, b1, b2, std::forward<Args>(args)...);                     \
         }                                                                                          \

@@ -680,8 +680,12 @@ extern "C" int _logup_bary_eval_interactions_round0(
     size_t max_temp_bytes
 ) {
     bool is_global = buffer_size > BUFFER_THRESHOLD;
+    bool use_coset_parallel = use_coset_parallel_mode(num_x, skip_domain);
+    if (!use_coset_parallel && num_cosets > 4) {
+        return cudaErrorInvalidValue;
+    }
     if (skip_domain == 1) {
-        if (use_coset_parallel_mode(num_x, skip_domain)) {
+        if (use_coset_parallel) {
             return is_global ? launch_logup_coset_parallel<true, false>(
                                    tmp_sums_buffer,
                                    output,
@@ -756,7 +760,7 @@ extern "C" int _logup_bary_eval_interactions_round0(
     bool needs_shmem = skip_domain > WARP_SIZE;
 
     // Threshold-based dispatch: use coset-parallel for small workloads
-    if (use_coset_parallel_mode(num_x, skip_domain)) {
+    if (use_coset_parallel) {
         // Coset-parallel mode: grid.y = num_cosets, each block handles one coset
         if (is_global) {
             if (needs_shmem) {
