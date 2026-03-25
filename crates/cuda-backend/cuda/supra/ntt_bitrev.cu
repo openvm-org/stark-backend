@@ -20,6 +20,18 @@ struct frac_fpext_t {
     bb31_4_t denom;
 };
 
+template<unsigned int Z_COUNT>
+__device__ __forceinline__ unsigned subgroup_sync_mask(uint32_t idx)
+{
+    if constexpr (Z_COUNT >= WARP_SIZE) {
+        return 0xffffffffu;
+    } else {
+        uint32_t lane = threadIdx.x & (WARP_SIZE - 1);
+        uint32_t subgroup_base = lane - idx;
+        return (((uint32_t)1 << Z_COUNT) - 1u) << subgroup_base;
+    }
+}
+
 /*
  * Template type T requirements:
  * - Default constructible: T()
@@ -85,6 +97,7 @@ void bit_rev_permutation_z(T* out, const T* in, uint32_t lg_domain_size,
     uint32_t gid = threadIdx.x / Z_COUNT;
     uint32_t idx = threadIdx.x % Z_COUNT;
     uint32_t rev = bit_rev(idx, LG_Z_COUNT);
+    unsigned subgroup_mask = subgroup_sync_mask<Z_COUNT>(idx);
 
     index_t step = (index_t)1 << (lg_domain_size - LG_Z_COUNT);
     index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
@@ -109,7 +122,10 @@ void bit_rev_permutation_z(T* out, const T* in, uint32_t lg_domain_size,
                 regs[i] = in[i * step + base_rev];
         }
 
-        (Z_COUNT > WARP_SIZE) ? __syncthreads() : __syncwarp();
+        if constexpr (Z_COUNT > WARP_SIZE)
+            __syncthreads();
+        else
+            __syncwarp(subgroup_mask);
 
         #pragma unroll
         for (uint32_t i = 0; i < Z_COUNT; i++)
@@ -118,13 +134,19 @@ void bit_rev_permutation_z(T* out, const T* in, uint32_t lg_domain_size,
         if (group_idx == group_rev)
             continue;
 
-        (Z_COUNT > WARP_SIZE) ? __syncthreads() : __syncwarp();
+        if constexpr (Z_COUNT > WARP_SIZE)
+            __syncthreads();
+        else
+            __syncwarp(subgroup_mask);
 
         #pragma unroll
         for (uint32_t i = 0; i < Z_COUNT; i++)
             xchg[gid][i][rev] = regs[i];
 
-        (Z_COUNT > WARP_SIZE) ? __syncthreads() : __syncwarp();
+        if constexpr (Z_COUNT > WARP_SIZE)
+            __syncthreads();
+        else
+            __syncwarp(subgroup_mask);
 
         #pragma unroll
         for (uint32_t i = 0; i < Z_COUNT; i++)
