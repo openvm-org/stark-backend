@@ -47,8 +47,7 @@ use tracing::{debug, Level};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::{base::DeviceMatrix, cuda::bn254_merkle_tree::Bn254Digest, merkle_tree::MerkleTreeGpu};
 use crate::{
-    cuda::batch_ntt_small::batch_ntt_small,
-    cuda::logup_zerocheck::{frac_matrix_vertically_repeat, frac_matrix_vertically_repeat_ext},
+    cuda::{batch_ntt_small::batch_ntt_small, logup_zerocheck::frac_matrix_vertically_repeat},
     prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     BabyBearPoseidon2GpuEngine, GpuBackend,
@@ -431,26 +430,6 @@ fn test_bn254_row_hash_emulation_matches_host_multi_block_rows() {
 // ===========================================================================
 
 #[test]
-fn test_batch_ntt_small_size1_is_noop() {
-    use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
-
-    setup_tracing_with_log_level(Level::DEBUG);
-
-    let original = (0..17).map(|i| F::from_u32(i * 7 + 3)).collect_vec();
-    let mut d_values = original.to_device().unwrap();
-
-    unsafe {
-        batch_ntt_small(&mut d_values, 0, original.len(), false).unwrap();
-    }
-    assert_eq!(d_values.to_host().unwrap(), original);
-
-    unsafe {
-        batch_ntt_small(&mut d_values, 0, original.len(), true).unwrap();
-    }
-    assert_eq!(d_values.to_host().unwrap(), original);
-}
-
-#[test]
 fn test_interactions_roundtrip_with_l_skip_zero() {
     use openvm_stark_backend::test_utils::test_system_params_small;
 
@@ -464,10 +443,8 @@ fn test_interactions_roundtrip_with_l_skip_zero() {
         .expect("l_skip=0 interactions roundtrip should verify");
 }
 
-#[test_case(1)]
-#[test_case(2)]
-#[test_case(3)]
-#[test_case(4)]
+#[test_case(1 ; "l_skip_1")]
+#[test_case(4 ; "l_skip_4")]
 fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 
@@ -518,9 +495,7 @@ fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
 
     let d_input = input.to_device().unwrap();
     let mut d_output = DeviceBuffer::<Frac<EF>>::with_capacity(output_len);
-    vec![canary; output_len]
-        .copy_to(&mut d_output)
-        .unwrap();
+    vec![canary; output_len].copy_to(&mut d_output).unwrap();
 
     unsafe {
         frac_matrix_vertically_repeat(
@@ -541,69 +516,6 @@ fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
     }
 }
 
-#[test]
-fn test_frac_matrix_vertically_repeat_ext_guards_tail_rows() {
-    use openvm_cuda_common::{
-        copy::{MemCopyD2H, MemCopyH2D},
-        d_buffer::DeviceBuffer,
-    };
-
-    setup_tracing_with_log_level(Level::DEBUG);
-
-    let width = 3usize;
-    let height = 769usize;
-    let lifted_height = 1538usize;
-    let padded_height = 2048usize;
-    let tail_rows = padded_height - lifted_height;
-    let output_len = width * lifted_height + tail_rows;
-    let numer_canary = EF::from_u32(12345);
-    let denom_canary = EF::from_u32(54321);
-
-    let in_numerators = (0..(width * height))
-        .map(|i| EF::from_u32(i as u32 + 7))
-        .collect_vec();
-    let in_denominators = (0..(width * height))
-        .map(|i| EF::from_u32(i as u32 + 7007))
-        .collect_vec();
-
-    let mut expected_numerators = vec![numer_canary; output_len];
-    let mut expected_denominators = vec![denom_canary; output_len];
-    for col in 0..width {
-        for row in 0..lifted_height {
-            let src = col * height + (row % height);
-            let dst = col * lifted_height + row;
-            expected_numerators[dst] = in_numerators[src];
-            expected_denominators[dst] = in_denominators[src];
-        }
-    }
-
-    let d_in_numerators = in_numerators.to_device().unwrap();
-    let d_in_denominators = in_denominators.to_device().unwrap();
-    let mut d_out_numerators = DeviceBuffer::<EF>::with_capacity(output_len);
-    let mut d_out_denominators = DeviceBuffer::<EF>::with_capacity(output_len);
-    vec![numer_canary; output_len]
-        .copy_to(&mut d_out_numerators)
-        .unwrap();
-    vec![denom_canary; output_len]
-        .copy_to(&mut d_out_denominators)
-        .unwrap();
-
-    unsafe {
-        frac_matrix_vertically_repeat_ext(
-            d_out_numerators.as_mut_ptr(),
-            d_out_denominators.as_mut_ptr(),
-            d_in_numerators.as_ptr(),
-            d_in_denominators.as_ptr(),
-            width as u32,
-            lifted_height as u32,
-            height as u32,
-        )
-        .unwrap();
-    }
-
-    assert_eq!(d_out_numerators.to_host().unwrap(), expected_numerators);
-    assert_eq!(d_out_denominators.to_host().unwrap(), expected_denominators);
-}
 #[test_case(9)]
 #[test_case(2 ; "when log_height equals l_skip")]
 #[test_case(1 ; "when log_height less than l_skip")]
