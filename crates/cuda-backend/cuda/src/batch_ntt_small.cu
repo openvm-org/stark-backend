@@ -137,6 +137,9 @@ extern "C" int _batch_ntt_small(
     if (l_skip == 0 || cnt_blocks == 0) {
         return 0;
     }
+    if (l_skip > MAX_NTT_LEVEL) {
+        return cudaErrorInvalidValue;
+    }
 
     bool const needs_shmem = l_skip > LOG_WARP_SIZE;
     assert((1 << l_skip) <= 1024);

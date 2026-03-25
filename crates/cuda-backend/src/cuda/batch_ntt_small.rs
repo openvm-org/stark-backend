@@ -7,6 +7,9 @@ use openvm_cuda_common::{
 
 use crate::prelude::F;
 
+/// Maximum `l_skip` supported by the small-NTT CUDA kernel.
+pub const MAX_SMALL_NTT_LEVEL: usize = 10;
+
 /// Size of the device NTT twiddle table (2^11 - 2 = 2046 elements for MAX_NTT_LEVEL=10)
 pub const DEVICE_NTT_TWIDDLES_SIZE: usize = (1 << 11) - 2;
 
@@ -49,6 +52,9 @@ pub unsafe fn batch_ntt_small(
 ) -> Result<(), CudaError> {
     if l_skip == 0 || cnt_blocks == 0 {
         return Ok(());
+    }
+    if l_skip > MAX_SMALL_NTT_LEVEL {
+        return check(1);
     }
 
     ensure_device_ntt_twiddles_initialized();

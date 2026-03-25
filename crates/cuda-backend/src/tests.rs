@@ -466,6 +466,15 @@ fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
 }
 
 #[test]
+fn test_batch_ntt_small_rejects_l_skip_above_max() {
+    use openvm_cuda_common::d_buffer::DeviceBuffer;
+
+    let mut d_values = DeviceBuffer::<F>::new();
+    let err = unsafe { batch_ntt_small(&mut d_values, 11, 1, false) }.unwrap_err();
+    assert_eq!(err.code, 1);
+}
+
+#[test]
 fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
     use openvm_cuda_common::{
         copy::{MemCopyD2H, MemCopyH2D},
