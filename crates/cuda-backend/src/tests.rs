@@ -463,6 +463,29 @@ fn test_interactions_roundtrip_with_l_skip_zero() {
         .expect("l_skip=0 interactions roundtrip should verify");
 }
 
+#[test_case(1)]
+#[test_case(2)]
+#[test_case(3)]
+#[test_case(4)]
+fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
+    use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let block_size = 1usize << l_skip;
+    let cnt_blocks = (1024usize >> l_skip) + 1;
+    let original = (0..(cnt_blocks * block_size))
+        .map(|i| F::from_u32((i as u32).wrapping_mul(17).wrapping_add(5)))
+        .collect_vec();
+    let mut d_values = original.to_device().unwrap();
+
+    unsafe {
+        batch_ntt_small(&mut d_values, l_skip, cnt_blocks, false).unwrap();
+        batch_ntt_small(&mut d_values, l_skip, cnt_blocks, true).unwrap();
+    }
+
+    assert_eq!(d_values.to_host().unwrap(), original);
+}
 #[test_case(9)]
 #[test_case(2 ; "when log_height equals l_skip")]
 #[test_case(1 ; "when log_height less than l_skip")]

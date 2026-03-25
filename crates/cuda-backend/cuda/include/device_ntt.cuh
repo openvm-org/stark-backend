@@ -56,7 +56,9 @@ template <bool intt> __device__ __forceinline__ Fp sum_or_semi_sum(Fp &&x) {
 // `active_thread` indicates whether this thread has valid data; inactive threads still participate in syncs.
 //
 // # Assumption
-// - No warp has exited early before this call. We use the full `0xffffffff` mask.
+// - All lanes named in the current warp mask execute this call. We use `__activemask()` so
+//   callers may predicate out whole logical NTT subgroups as long as the remaining active lanes
+//   still form valid shuffle partners.
 template <bool intt, bool needs_shmem>
 __device__ __forceinline__ void ntt_natural_to_bitrev(
     Fp &this_thread_value,
@@ -75,6 +77,7 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
     } else {
         log_interwarp = l_skip;
     }
+    unsigned warp_mask = __activemask();
     // reverse index for iNTT to get the inverse twiddle
     uint32_t const twiddle_idx = intt ? (i ? (1 << l_skip) - i : 0) : i;
     Fp twiddle = get_twiddle(l_skip, twiddle_idx);
@@ -100,7 +103,7 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
     for (uint32_t log_len = log_interwarp; log_len-- > 0;) {
         uint32_t const len = 1u << log_len;
         Fp const other_value =
-            Fp::fromRaw(__shfl_xor_sync(0xffffffff, this_thread_value.asRaw(), len));
+            Fp::fromRaw(__shfl_xor_sync(warp_mask, this_thread_value.asRaw(), len));
         if (!(i & len)) {
             // this_thread_value = sum, other_value = diff
             this_thread_value = sum_or_semi_sum<intt>(this_thread_value + other_value);
@@ -118,7 +121,7 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
 // For both `needs_shmem` equals `true` and `false`, `this_thread_value` must already contain the input, which should be the `rev_len(i, l_skip)`-th element.
 //
 // # Assumption
-// - No warp has exited early before this call. We use the full `0xffffffff` mask.
+// - All lanes named in the current warp mask execute this call.
 template <bool intt, bool needs_shmem>
 __device__ __forceinline__ void ntt_bitrev_to_natural(
     Fp &this_thread_value,
@@ -127,6 +130,7 @@ __device__ __forceinline__ void ntt_bitrev_to_natural(
     uint32_t const l_skip
 ) {
     uint32_t const warp_levels = needs_shmem ? LOG_WARP_SIZE : l_skip;
+    unsigned warp_mask = __activemask();
 
     // Warp shuffle phase: levels 0 to warp_levels-1 (small to large)
     for (uint32_t m = 0; m < warp_levels; m++) {
@@ -137,7 +141,7 @@ __device__ __forceinline__ void ntt_bitrev_to_natural(
             j = j ? ((2u << m) - j) : 0;
         Fp twiddle = get_twiddle(m + 1, j);
 
-        Fp other = Fp::fromRaw(__shfl_xor_sync(0xffffffff, this_thread_value.asRaw(), len));
+        Fp other = Fp::fromRaw(__shfl_xor_sync(warp_mask, this_thread_value.asRaw(), len));
 
         if (i & len) {
             // Bottom: result = a - b * twiddle
