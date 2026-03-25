@@ -10,6 +10,16 @@
 #include <utility>
 #include <vector_types.h>
 
+constexpr uint32_t CUDA_GRID_Y_DIM_MAX = 65535;
+
+inline bool valid_grid_y_dim(uint32_t grid_y) {
+    return grid_y > 0 && grid_y <= CUDA_GRID_Y_DIM_MAX;
+}
+
+inline bool valid_frac_grid_y_dim(uint32_t num_x) {
+    return num_x > 0 && static_cast<uint64_t>(num_x) * 2 <= CUDA_GRID_Y_DIM_MAX;
+}
+
 // Shared implementation for coset-based round0 launch configs.
 // Template parameter COSET_PARALLEL controls grid organization:
 // - false (lockstep): grid.y = 1, each thread handles all cosets via NUM_COSETS template
