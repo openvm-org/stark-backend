@@ -203,6 +203,9 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         >,
         MerkleTreeError,
     > {
+        if query_indices.is_empty() {
+            return Ok(vec![Vec::new(); backing_matrices.len()]);
+        }
         let row_idxs = query_indices
             .iter()
             .flat_map(|&query_idx| {
@@ -295,6 +298,9 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         trees: &[&Self],
         query_indices: &[usize],
     ) -> Result<Vec<Vec<Vec<D>>>, MerkleTreeError> {
+        if trees.is_empty() {
+            return Ok(Vec::new());
+        }
         // The kernel treats each layer as a separate array and does parallel accesses;
         // we lay out all the layer pointers flattened into a vec.
         let num_trees = trees.len();
@@ -304,6 +310,12 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
             trees.iter().all(|tree| tree.proof_depth() == depth),
             "Merkle trees don't have same depth"
         );
+        if num_queries == 0 {
+            return Ok(vec![Vec::new(); num_trees]);
+        }
+        if depth == 0 {
+            return Ok(vec![vec![Vec::new(); num_queries]; num_trees]);
+        }
         let layers_ptr = trees
             .iter()
             .flat_map(|tree| {

@@ -260,6 +260,9 @@ extern "C" int _matrix_get_rows_fp(
     uint64_t matrix_height,
     uint32_t row_indices_len
 ) {
+    if (matrix_width == 0 || row_indices_len == 0) {
+        return cudaSuccess;
+    }
     auto block = WARP_SIZE;
     dim3 grid = dim3(div_ceil(matrix_width, WARP_SIZE), row_indices_len);
     matrix_get_rows_fp_kernel<<<grid, block>>>(

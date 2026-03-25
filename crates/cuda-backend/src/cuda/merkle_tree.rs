@@ -161,6 +161,9 @@ pub unsafe fn query_digest_layers(
     num_query: u64,
     num_layer: u64,
 ) -> Result<(), CudaError> {
+    if num_query == 0 || num_layer == 0 {
+        return Ok(());
+    }
     CudaError::from_result(_query_digest_layers(
         d_digest_matrix.as_mut_ptr(),
         d_layers_ptr.as_ptr(),

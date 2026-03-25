@@ -291,6 +291,9 @@ extern "C" int _query_digest_layers(
     uint64_t num_query,
     uint64_t num_layer
 ) {
+    if (num_query == 0 || num_layer == 0) {
+        return cudaSuccess;
+    }
     const size_t QUERY_DIGEST_THREADS = 128;
     const size_t DIGEST_WIDTH = 8;
 

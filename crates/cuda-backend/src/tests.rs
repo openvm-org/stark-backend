@@ -448,6 +448,57 @@ fn test_merkle_gpu_supports_1024_rows_per_query() {
     assert_eq!(tree.proof_depth(), 0);
 }
 
+#[test]
+fn test_merkle_batch_query_zero_work_returns_empty() {
+    use openvm_cuda_common::copy::MemCopyH2D;
+
+    let height = 1 << 3;
+    let width = 4;
+    let rows_per_query = height;
+    let host_matrix = (0..width * height)
+        .map(|i| F::from_u32((i as u32).wrapping_mul(19).wrapping_add(7)))
+        .collect_vec();
+
+    let device_matrix =
+        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
+        crate::hash_scheme::Poseidon2MerkleHash,
+    >(device_matrix, rows_per_query, true)
+    .unwrap();
+
+    let proofs =
+        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(&[&tree], &[0])
+            .unwrap();
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].len(), 1);
+    assert!(proofs[0][0].is_empty());
+
+    let empty_queries =
+        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(&[&tree], &[])
+            .unwrap();
+    assert_eq!(empty_queries.len(), 1);
+    assert!(empty_queries[0].is_empty());
+}
+
+#[test]
+fn test_merkle_batch_open_rows_empty_queries_returns_empty() {
+    use openvm_cuda_common::copy::MemCopyH2D;
+
+    let height = 1 << 3;
+    let width = 4;
+    let host_matrix = (0..width * height)
+        .map(|i| F::from_u32((i as u32).wrapping_mul(23).wrapping_add(11)))
+        .collect_vec();
+    let device_matrix =
+        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+
+    let opened_rows =
+        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_open_rows(&[&device_matrix], &[], 1, 1)
+            .unwrap();
+    assert_eq!(opened_rows.len(), 1);
+    assert!(opened_rows[0].is_empty());
+}
+
 // ===========================================================================
 // GPU-specific tests (not shared)
 // ===========================================================================

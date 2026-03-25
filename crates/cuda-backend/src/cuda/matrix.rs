@@ -117,6 +117,9 @@ pub unsafe fn matrix_get_rows_fp_kernel(
     matrix_height: u64,
     row_indices_len: u32,
 ) -> Result<(), CudaError> {
+    if matrix_width == 0 || row_indices_len == 0 {
+        return Ok(());
+    }
     CudaError::from_result(_matrix_get_rows_fp(
         output.as_mut_ptr(),
         input.as_ptr(),
