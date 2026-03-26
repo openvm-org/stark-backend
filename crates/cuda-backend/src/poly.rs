@@ -12,7 +12,7 @@ use p3_field::PrimeCharacteristicRing;
 use crate::{
     base::DeviceMatrix,
     cuda::{
-        batch_ntt_small::batch_ntt_small,
+        batch_ntt_small::{batch_ntt_small, validate_gpu_l_skip},
         mle_interpolate::{
             mle_interpolate_fused_2d, mle_interpolate_shared_2d, mle_interpolate_stage_2d,
             MLE_SHARED_TILE_LOG_SIZE,
@@ -51,6 +51,7 @@ impl<F> MatrixDimensions for PleMatrix<F> {
 impl PleMatrix<F> {
     /// Creates a `PleMatrix`. This doubles the VRAM footprint to cache the `mixed` buffer.
     pub fn from_evals(l_skip: usize, evals: DeviceBuffer<F>, height: usize, width: usize) -> Self {
+        validate_gpu_l_skip(l_skip).expect("GPU PleMatrix requires l_skip <= 10");
         let mut mixed = evals;
         if l_skip > 0 {
             // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column:
@@ -68,6 +69,7 @@ impl PleMatrix<F> {
     }
 
     pub fn to_evals(&self, l_skip: usize) -> Result<DeviceMatrix<F>, KernelError> {
+        validate_gpu_l_skip(l_skip)?;
         let width = self.width();
         let height = self.height();
         // D2D copy so we can do in-place NTT

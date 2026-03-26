@@ -599,6 +599,15 @@ fn test_batch_ntt_small_rejects_l_skip_above_max() {
 }
 
 #[test]
+fn test_gpu_engine_rejects_l_skip_above_max() {
+    let mut params = default_test_params_small();
+    params.l_skip = 11;
+
+    let result = std::panic::catch_unwind(|| BabyBearPoseidon2GpuEngine::new(params));
+    assert!(result.is_err(), "GPU engine should reject l_skip > 10");
+}
+
+#[test]
 fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
     use openvm_cuda_common::{
         copy::{MemCopyD2H, MemCopyH2D},

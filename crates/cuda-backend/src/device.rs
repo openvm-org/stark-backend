@@ -3,7 +3,8 @@ use openvm_cuda_common::common::get_device;
 use openvm_stark_backend::SystemParams;
 
 use crate::cuda::{
-    batch_ntt_small::ensure_device_ntt_twiddles_initialized, device_info::get_sm_count,
+    batch_ntt_small::{ensure_device_ntt_twiddles_initialized, validate_gpu_l_skip},
+    device_info::get_sm_count,
 };
 
 #[derive(Clone, Getters, CopyGetters, MutGetters)]
@@ -26,6 +27,8 @@ pub struct GpuProverConfig {
 
 impl GpuDevice {
     pub fn new(config: SystemParams) -> Self {
+        validate_gpu_l_skip(config.l_skip)
+            .expect("GPU backend requires l_skip <= 10 for current CUDA kernels");
         ensure_device_ntt_twiddles_initialized()
             .expect("failed to initialize small-NTT twiddles for current CUDA device");
 
