@@ -230,7 +230,7 @@ fn test_internal_aggregation_security() {
 #[test]
 fn test_root_aggregation_security() {
     let params = root_params();
-    let max_log_height = 19;
+    let max_log_height = 21;
     let n_logup = n_logup_bound(
         params.l_skip,
         RECURSION_NUM_AIRS,
@@ -298,7 +298,7 @@ fn test_all_production_configs() {
             &root,
             RECURSION_MAX_CONSTRAINTS,
             RECURSION_NUM_AIRS,
-            19,
+            21,
             RECURSION_NUM_COLUMNS,
             RECURSION_MAX_INTERACTIONS_PER_AIR,
         ),
