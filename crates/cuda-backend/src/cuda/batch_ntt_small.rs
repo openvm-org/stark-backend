@@ -15,6 +15,10 @@ use crate::prelude::F;
 /// Maximum `l_skip` supported by the small-NTT CUDA kernel.
 pub const MAX_SMALL_NTT_LEVEL: usize = 10;
 
+/// Validate the GPU small-NTT domain size.
+///
+/// `l_skip == 0` is explicitly allowed and means the caller can take the size-1 no-op path
+/// without launching the small-NTT kernel.
 pub fn validate_gpu_l_skip(l_skip: usize) -> Result<(), CudaError> {
     if l_skip > MAX_SMALL_NTT_LEVEL {
         return check(1);
@@ -50,6 +54,9 @@ pub fn ensure_device_ntt_twiddles_initialized() -> Result<(), CudaError> {
     }
 
     {
+        // Temporary staging buffer for the generated twiddles. The CUDA side copies from this
+        // buffer into constant memory and synchronizes before returning, so it is safe to free
+        // the buffer once `generate_device_ntt_twiddles` completes.
         let twiddles = DeviceBuffer::<F>::with_capacity(DEVICE_NTT_TWIDDLES_SIZE);
         unsafe {
             generate_device_ntt_twiddles(&twiddles)?;

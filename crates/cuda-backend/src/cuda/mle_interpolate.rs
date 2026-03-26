@@ -58,7 +58,7 @@ extern "C" {
 #[inline]
 fn narrow_mle_width(width: usize) -> Result<u16, CudaError> {
     if width > u16::MAX as usize {
-        return check(1).map(|_| 0);
+        return Err(CudaError::new(1));
     }
     Ok(width as u16)
 }

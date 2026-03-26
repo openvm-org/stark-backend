@@ -4,7 +4,9 @@ use crate::prelude::{Digest, EF, F};
 
 pub(super) const MAX_MERKLE_LOG_ROWS_PER_QUERY: usize = 10;
 
-pub(super) fn validate_merkle_log_rows_per_query(log_rows_per_query: usize) -> Result<(), CudaError> {
+pub(super) fn validate_merkle_log_rows_per_query(
+    log_rows_per_query: usize,
+) -> Result<(), CudaError> {
     if log_rows_per_query > MAX_MERKLE_LOG_ROWS_PER_QUERY {
         return Err(CudaError::new(1));
     }
