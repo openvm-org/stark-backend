@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{hasher::MerkleHasher, interaction::LogUpSecurityParameters};
 
+pub const DEFAULT_K_WHIR: usize = 4;
+
 /// Trait that holds the associated types for the SWIRL protocol. These are the types needed by the
 /// verifier and must be independent of the prover backend.
 ///
@@ -118,7 +120,7 @@ impl SystemParams {
     ) -> SystemParams {
         const WHIR_QUERY_PHASE_POW_BITS: usize = 20;
 
-        let k_whir = 4;
+        let k_whir = DEFAULT_K_WHIR;
         let max_constraint_degree = 4;
         let log_stacked_height = l_skip + n_stack;
 
