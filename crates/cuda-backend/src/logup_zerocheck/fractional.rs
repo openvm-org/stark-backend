@@ -632,7 +632,11 @@ where
     } else {
         0
     };
-    let mut work_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(max_work_size);
+    let mut work_buffer = if max_work_size > 0 {
+        DeviceBuffer::<Frac<EF>>::with_capacity(max_work_size)
+    } else {
+        DeviceBuffer::new()
+    };
     let max_tmp_buffer_capacity = if total_rounds > 1 {
         (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32) }) as usize
     } else {
@@ -1264,6 +1268,25 @@ mod tests {
         unsafe {
             std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N");
             std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_fractional_sumcheck_small_rounds() -> Result<(), FractionalSumcheckError> {
+        unsafe {
+            std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M", "0");
+        }
+        for n in [1, 2] {
+            let mut transcript = DuplexSpongeGpu::default();
+            let leaves = make_synthetic_leaves(n)?;
+            let mut mem = MemTracker::start("test.small_rounds");
+            let (proof, r) =
+                fractional_sumcheck_gpu(&mut transcript, leaves, EF::ZERO, false, &mut mem)?;
+            current_stream_sync().expect("sync");
+            assert_eq!(proof.claims_per_layer.len(), n);
+            assert_eq!(proof.sumcheck_polys.len(), n.saturating_sub(1));
+            assert_eq!(r.len(), n);
         }
         Ok(())
     }
