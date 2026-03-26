@@ -49,6 +49,7 @@ use crate::{
     base::DeviceMatrix,
     cuda::{batch_ntt_small::batch_ntt_small, logup_zerocheck::frac_matrix_vertically_repeat},
     merkle_tree::MerkleTreeGpu,
+    ntt::batch_ntt,
     prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     BabyBearPoseidon2GpuEngine, GpuBackend,
@@ -596,6 +597,17 @@ fn test_batch_ntt_small_rejects_l_skip_above_max() {
     let mut d_values = DeviceBuffer::<F>::new();
     let err = unsafe { batch_ntt_small(&mut d_values, 11, 1, false) }.unwrap_err();
     assert_eq!(err.code, 1);
+}
+
+#[test]
+fn test_batch_ntt_rejects_log_trace_height_above_max() {
+    use openvm_cuda_common::d_buffer::DeviceBuffer;
+
+    let d_values = DeviceBuffer::<F>::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        batch_ntt(&d_values, 28, 0, 0, false, false);
+    }));
+    assert!(result.is_err(), "batch_ntt should reject log_trace_height > 27");
 }
 
 #[test]

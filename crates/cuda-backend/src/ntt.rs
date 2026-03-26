@@ -4,7 +4,7 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 
 use crate::{cuda::ntt, prelude::F};
 
-const MAX_LG_DOMAIN_SIZE: usize = 27;
+const MAX_LG_DOMAIN_SIZE: usize = ntt::MAX_CUDA_NTT_LOG_DOMAIN_SIZE as usize;
 const LG_WINDOW_SIZE: usize = MAX_LG_DOMAIN_SIZE.div_ceil(5);
 const WINDOW_SIZE: usize = 1 << LG_WINDOW_SIZE;
 const WINDOW_NUM: usize = MAX_LG_DOMAIN_SIZE.div_ceil(LG_WINDOW_SIZE);
@@ -95,6 +95,11 @@ pub fn batch_ntt(
     if log_trace_height == 0 {
         return;
     }
+    assert!(
+        log_trace_height <= ntt::MAX_CUDA_NTT_LOG_DOMAIN_SIZE,
+        "CUDA batch_ntt supports log_trace_height <= {}",
+        ntt::MAX_CUDA_NTT_LOG_DOMAIN_SIZE
+    );
 
     let padded_poly_size = 1 << (log_trace_height + log_blowup);
 
@@ -111,20 +116,13 @@ pub fn batch_ntt(
         let step = log_trace_height / 2;
         _impl.step(step + log_trace_height % 2);
         _impl.step(step);
-    } else if log_trace_height <= 30 {
+    } else if log_trace_height <= ntt::MAX_CUDA_NTT_LOG_DOMAIN_SIZE {
         let step = log_trace_height / 3;
         let rem = log_trace_height % 3;
         _impl.step(step);
-        _impl.step(step + (if log_trace_height == 29 { 1 } else { 0 }));
-        _impl.step(step + (if log_trace_height == 29 { 1 } else { rem }));
-    } else if log_trace_height <= 40 {
-        let step = log_trace_height / 4;
-        let rem = log_trace_height % 4;
         _impl.step(step);
-        _impl.step(step + (if rem > 2 { 1 } else { 0 }));
-        _impl.step(step + (if rem > 1 { 1 } else { 0 }));
-        _impl.step(step + (if rem > 0 { 1 } else { 0 }));
+        _impl.step(step + rem);
     } else {
-        panic!("log_trace_height > 40 not supported");
+        unreachable!("log_trace_height is bounded above");
     }
 }

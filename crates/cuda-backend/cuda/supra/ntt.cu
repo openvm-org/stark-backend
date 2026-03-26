@@ -213,6 +213,9 @@ extern "C" int _ct_mixed_radix_narrow(
     uint32_t poly_count,
     bool is_intt
 ) {
+    if (lg_domain_size > MAX_LG_DOMAIN_SIZE)
+        return cudaErrorInvalidValue;
+
     index_t num_threads = (index_t)1 << (lg_domain_size - 1);
     index_t block_size = 1 << (radix - 1);
     index_t num_blocks;

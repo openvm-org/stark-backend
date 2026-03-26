@@ -1,9 +1,14 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::too_many_arguments)]
 
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{
+    d_buffer::DeviceBuffer,
+    error::{check, CudaError},
+};
 
 use crate::prelude::{EF, F};
+
+pub const MAX_CUDA_NTT_LOG_DOMAIN_SIZE: u32 = 27;
 
 // relate to supra/ntt_params.cu
 extern "C" {
@@ -148,6 +153,9 @@ pub unsafe fn ct_mixed_radix_narrow(
     poly_count: u32,
     is_intt: bool,
 ) -> Result<(), CudaError> {
+    if lg_domain_size > MAX_CUDA_NTT_LOG_DOMAIN_SIZE {
+        return check(1);
+    }
     CudaError::from_result(_ct_mixed_radix_narrow(
         d_inout.as_mut_raw_ptr(),
         radix,
