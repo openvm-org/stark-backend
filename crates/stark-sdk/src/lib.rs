@@ -7,6 +7,8 @@ pub mod bench;
 pub mod config;
 #[cfg(feature = "metrics")]
 pub mod metrics_tracing;
+#[cfg(feature = "nvtx")]
+pub mod nvtx_tracing;
 pub mod utils;
 
 // #[macro_export]

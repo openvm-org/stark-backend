@@ -8,7 +8,7 @@ use openvm_cuda_common::{
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
-use tracing::instrument;
+use tracing::{info_span, instrument};
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::cuda::bn254_merkle_tree::Bn254Digest;
@@ -171,6 +171,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         })
     }
 
+    #[instrument(name = "batch_open_rows", skip_all)]
     pub fn batch_open_rows(
         backing_matrices: &[&DeviceMatrix<F>],
         query_indices: &[usize],
@@ -218,7 +219,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                     .map_err(|error| MerkleTreeError::MatrixGetRows { error, matrix_idx })?;
                 }
                 let width = matrix.width();
-                let out = d_out.to_host()?;
+                let out = info_span!("opened_rows_d2h").in_scope(|| d_out.to_host())?;
                 let opened_rows_per_query = out
                     .chunks_exact(rows_per_query * width)
                     .map(|rows| rows.to_vec())
