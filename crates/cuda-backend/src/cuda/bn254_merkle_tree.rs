@@ -10,7 +10,6 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::CudaError,
 };
-use p3_field::PrimeField32;
 use zkhash::{
     ark_ff::PrimeField as _, fields::bn256::FpBN256 as ArkFpBN256,
     poseidon2::poseidon2_instance_bn256::RC3,
@@ -19,6 +18,7 @@ use zkhash::{
 use crate::{
     bn254_sponge::DeviceBn254SpongeState,
     prelude::{EF, F},
+    sponge::validate_gpu_grind_bits,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,21 +56,6 @@ const _: () = assert!(
 // passing non-repr(C) types across the FFI boundary.
 // ---------------------------------------------------------------------------
 type Bn254FrRaw = [u64; 4];
-const MAX_MERKLE_LOG_ROWS_PER_QUERY: usize = 10;
-
-fn validate_merkle_log_rows_per_query(log_rows_per_query: usize) -> Result<(), CudaError> {
-    if log_rows_per_query > MAX_MERKLE_LOG_ROWS_PER_QUERY {
-        return Err(CudaError::new(1));
-    }
-    Ok(())
-}
-
-fn validate_gpu_grind_bits(bits: u32) -> Result<(), CudaError> {
-    if bits >= u32::BITS || (1u64 << bits) >= u64::from(F::ORDER_U32) {
-        return Err(CudaError::new(1));
-    }
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // FFI declarations
@@ -281,7 +266,7 @@ pub unsafe fn bn254_poseidon2_compressing_row_hashes(
     log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
     init_bn254_poseidon2_rc()?;
-    validate_merkle_log_rows_per_query(log_rows_per_query)?;
+    super::merkle_tree::validate_merkle_log_rows_per_query(log_rows_per_query)?;
     CudaError::from_result(_bn254_poseidon2_compressing_row_hashes(
         out.as_mut_ptr().cast::<Bn254FrRaw>(),
         matrix.as_ptr().cast::<u32>(),
@@ -304,7 +289,7 @@ pub unsafe fn bn254_poseidon2_compressing_row_hashes_ext(
     log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
     init_bn254_poseidon2_rc()?;
-    validate_merkle_log_rows_per_query(log_rows_per_query)?;
+    super::merkle_tree::validate_merkle_log_rows_per_query(log_rows_per_query)?;
     CudaError::from_result(_bn254_poseidon2_compressing_row_hashes_ext(
         out.as_mut_ptr().cast::<Bn254FrRaw>(),
         matrix.as_ptr().cast::<u32>(),
@@ -344,7 +329,7 @@ pub unsafe fn bn254_sponge_grind(
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 
     init_bn254_poseidon2_rc()?;
-    validate_gpu_grind_bits(bits)?;
+    validate_gpu_grind_bits(bits as usize)?;
     let mut d_result: DeviceBuffer<u32> = DeviceBuffer::with_capacity(1);
     [u32::MAX].copy_to(&mut d_result)?;
 

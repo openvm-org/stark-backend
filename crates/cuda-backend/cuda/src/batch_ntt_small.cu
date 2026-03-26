@@ -102,7 +102,8 @@ __global__ void batch_ntt_kernel(
         ntt_natural_to_bitrev<intt, true>(this_thread_value, sbuf, i, l_skip, active_thread);
     } else if (active_thread) {
         // For l_skip < LOG_WARP_SIZE a warp contains multiple independent NTT instances. The
-        // helper uses `__activemask()` so the last block may safely skip whole inactive groups.
+        // helper uses a deterministic subgroup mask so the last block may safely skip whole
+        // inactive groups without naming non-participating lanes in shuffles.
         this_thread_value = buffer[i];
         ntt_natural_to_bitrev<intt, false>(this_thread_value, nullptr, i, l_skip, true);
     }
