@@ -17,7 +17,7 @@ use openvm_stark_backend::{
         MatrixView, ProvingContext,
     },
 };
-use tracing::debug;
+use tracing::{debug, info_span};
 
 use crate::{
     base::DeviceMatrix,
@@ -36,6 +36,7 @@ impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for
         &self,
         mpk: &MultiStarkProvingKey<HS::SC>,
     ) -> DeviceMultiStarkProvingKey<GenericGpuBackend<HS>> {
+        let _span = info_span!("transport_pk_to_device").entered();
         let per_air = mpk
             .per_air
             .iter()
@@ -125,6 +126,7 @@ pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
     d: &StackedPcsData<F, HS::Digest>,
     prover_config: &GpuProverConfig,
 ) -> Result<CommittedTraceData<GenericGpuBackend<HS>>, ProverError> {
+    let _span = info_span!("transport_unstack_h2d").entered();
     debug_assert!(d
         .layout
         .sorted_cols
@@ -222,6 +224,7 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
     pcs_data: &StackedPcsData<F, D>,
     prover_config: &GpuProverConfig,
 ) -> Result<StackedPcsDataGpu<F, D>, ProverError> {
+    let _span = info_span!("transport_pcs_data_h2d").entered();
     let StackedPcsData {
         layout,
         matrix,
@@ -245,6 +248,7 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
 pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
     cpu_ctx: AirProvingContext<CpuColMajorBackend<SC>>,
 ) -> AirProvingContext<GenericGpuBackend<HS>> {
+    let _span = info_span!("transport_air_ctx_h2d").entered();
     assert!(
         cpu_ctx.cached_mains.is_empty(),
         "CPU to GPU transfer of cached traces not supported"

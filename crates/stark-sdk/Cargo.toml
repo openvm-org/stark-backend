@@ -39,6 +39,7 @@ eyre.workspace = true
 static_assertions.workspace = true
 derive-new.workspace = true
 num-bigint = { workspace = true, optional = true }
+nvtx = { workspace = true, optional = true }
 
 [dev-dependencies]
 p3-keccak-air.workspace = true
@@ -61,3 +62,4 @@ prometheus = [
   "dep:tokio",
   "dep:rustls",
 ]
+nvtx = ["dep:nvtx"]
