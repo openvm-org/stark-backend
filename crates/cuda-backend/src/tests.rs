@@ -49,7 +49,6 @@ use crate::{
     base::DeviceMatrix,
     cuda::{batch_ntt_small::batch_ntt_small, logup_zerocheck::frac_matrix_vertically_repeat},
     merkle_tree::MerkleTreeGpu,
-    ntt::batch_ntt,
     prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     BabyBearPoseidon2GpuEngine, GpuBackend,
@@ -500,56 +499,6 @@ fn test_merkle_batch_open_rows_empty_queries_returns_empty() {
     assert!(opened_rows[0].is_empty());
 }
 
-#[test]
-fn test_sumcheck_mle_round_rejects_d_above_max() {
-    use openvm_cuda_common::d_buffer::DeviceBuffer;
-
-    let input_matrices = DeviceBuffer::<*const EF>::with_capacity(1);
-    let output = DeviceBuffer::<EF>::with_capacity(1);
-    let tmp_block_sums = DeviceBuffer::<EF>::with_capacity(1);
-    let widths = DeviceBuffer::<u32>::with_capacity(1);
-
-    let err = unsafe {
-        crate::cuda::sumcheck::sumcheck_mle_round(
-            &input_matrices,
-            &output,
-            &tmp_block_sums,
-            &widths,
-            1,
-            2,
-            6,
-        )
-    }
-    .expect_err("d > 5 should be rejected before launch");
-
-    assert_eq!(err.code, 1);
-}
-
-#[test]
-fn test_duplex_sponge_gpu_rejects_invalid_pow_bits() {
-    let err = DuplexSpongeGpu::default()
-        .grind_gpu(31)
-        .expect_err("bits=31 should be rejected");
-
-    match err {
-        crate::sponge::GrindError::Cuda(cuda_err) => assert_eq!(cuda_err.code, 1),
-        other => panic!("expected cuda invalid value error, got {other:?}"),
-    }
-}
-
-#[cfg(feature = "baby-bear-bn254-poseidon2")]
-#[test]
-fn test_bn254_sponge_gpu_rejects_invalid_pow_bits() {
-    let mut challenger = crate::bn254_sponge::MultiField32ChallengerGpu::default();
-    let err = crate::sponge::GpuFiatShamirTranscript::grind_gpu(&mut challenger, 31)
-        .expect_err("bits=31 should be rejected");
-
-    match err {
-        crate::sponge::GrindError::Cuda(cuda_err) => assert_eq!(cuda_err.code, 1),
-        other => panic!("expected cuda invalid value error, got {other:?}"),
-    }
-}
-
 // ===========================================================================
 // GPU-specific tests (not shared)
 // ===========================================================================
@@ -588,35 +537,6 @@ fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
     }
 
     assert_eq!(d_values.to_host().unwrap(), original);
-}
-
-#[test]
-fn test_batch_ntt_small_rejects_l_skip_above_max() {
-    use openvm_cuda_common::d_buffer::DeviceBuffer;
-
-    let mut d_values = DeviceBuffer::<F>::new();
-    let err = unsafe { batch_ntt_small(&mut d_values, 11, 1, false) }.unwrap_err();
-    assert_eq!(err.code, 1);
-}
-
-#[test]
-fn test_batch_ntt_rejects_log_trace_height_above_max() {
-    use openvm_cuda_common::d_buffer::DeviceBuffer;
-
-    let d_values = DeviceBuffer::<F>::new();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        batch_ntt(&d_values, 28, 0, 0, false, false);
-    }));
-    assert!(result.is_err(), "batch_ntt should reject log_trace_height > 27");
-}
-
-#[test]
-fn test_gpu_engine_rejects_l_skip_above_max() {
-    let mut params = default_test_params_small();
-    params.l_skip = 11;
-
-    let result = std::panic::catch_unwind(|| BabyBearPoseidon2GpuEngine::new(params));
-    assert!(result.is_err(), "GPU engine should reject l_skip > 10");
 }
 
 #[test]

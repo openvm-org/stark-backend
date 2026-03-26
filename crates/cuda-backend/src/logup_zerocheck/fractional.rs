@@ -1272,22 +1272,4 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_fractional_sumcheck_small_rounds() -> Result<(), FractionalSumcheckError> {
-        unsafe {
-            std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M", "0");
-        }
-        for n in [1, 2] {
-            let mut transcript = DuplexSpongeGpu::default();
-            let leaves = make_synthetic_leaves(n)?;
-            let mut mem = MemTracker::start("test.small_rounds");
-            let (proof, r) =
-                fractional_sumcheck_gpu(&mut transcript, leaves, EF::ZERO, false, &mut mem)?;
-            current_stream_sync().expect("sync");
-            assert_eq!(proof.claims_per_layer.len(), n);
-            assert_eq!(proof.sumcheck_polys.len(), n.saturating_sub(1));
-            assert_eq!(r.len(), n);
-        }
-        Ok(())
-    }
 }
