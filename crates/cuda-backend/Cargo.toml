@@ -7,7 +7,7 @@ description = "OpenVM CUDA prover backend for the SWIRL proof system"
 
 [dependencies]
 openvm-stark-backend.workspace = true
-openvm-stark-sdk.workspace = true
+openvm-stark-sdk = { workspace = true, features = ["nvtx"] }
 openvm-cuda-common.workspace = true
 
 itertools.workspace = true

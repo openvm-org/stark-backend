@@ -16,6 +16,9 @@ use {
     metrics_util::layers::Layer,
 };
 
+#[cfg(feature = "nvtx")]
+use crate::nvtx_tracing::NvtxLayer;
+
 /// Run a function with metric collection enabled. The metrics will be written to a file specified
 /// by an environment variable which name is `output_path_envar`.
 pub fn run_with_metric_collection<R>(
@@ -33,6 +36,8 @@ pub fn run_with_metric_collection<R>(
         .with(MetricsLayer::new());
     #[cfg(feature = "metrics")]
     let subscriber = subscriber.with(TimingMetricsLayer::new());
+    #[cfg(feature = "nvtx")]
+    let subscriber = subscriber.with(NvtxLayer::new(Default::default()));
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
@@ -120,6 +125,8 @@ pub fn run_with_metric_exporter<R>(
         .with(MetricsLayer::new());
     #[cfg(feature = "metrics")]
     let subscriber = subscriber.with(TimingMetricsLayer::new());
+    #[cfg(feature = "nvtx")]
+    let subscriber = subscriber.with(NvtxLayer::new(Default::default()));
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
