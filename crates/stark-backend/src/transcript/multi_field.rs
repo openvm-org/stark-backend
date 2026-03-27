@@ -2,76 +2,8 @@ use num_bigint::BigUint;
 use p3_field::{PrimeField, PrimeField32};
 use p3_symmetric::CryptographicPermutation;
 
-use super::FiatShamirTranscript;
+use super::{duplex_sponge::DuplexSponge, FiatShamirTranscript};
 use crate::StarkProtocolConfig;
-
-/// Overwrite-mode duplex sponge over a large sponge field.
-///
-/// "Duplex" means absorb and squeeze can be interleaved freely. "Overwrite"
-/// means new inputs replace state elements (rather than being added in).
-// Duplicates `super::duplex_sponge::DuplexSponge` because that type's squeeze
-// path is gated behind `StarkProtocolConfig` (which requires `F: PrimeField64`,
-// ruling out BN254) and its fields are private. TODO: unify.
-#[derive(Clone, Debug)]
-struct DuplexSponge<F, P, const WIDTH: usize, const RATE: usize> {
-    perm: P,
-    state: [F; WIDTH],
-    /// Invariant: 0 <= absorb_idx < RATE.
-    absorb_idx: usize,
-    /// Invariant: 0 <= sample_idx <= RATE.
-    sample_idx: usize,
-}
-
-impl<F: Default + Copy, P, const WIDTH: usize, const RATE: usize> DuplexSponge<F, P, WIDTH, RATE> {
-    pub fn new(perm: P) -> Self {
-        Self {
-            perm,
-            state: [F::default(); WIDTH],
-            absorb_idx: 0,
-            sample_idx: 0,
-        }
-    }
-}
-
-impl<F: Copy, P, const WIDTH: usize, const RATE: usize> DuplexSponge<F, P, WIDTH, RATE> {
-    pub fn state(&self) -> &[F; WIDTH] {
-        &self.state
-    }
-
-    pub fn absorb_idx(&self) -> usize {
-        self.absorb_idx
-    }
-
-    pub fn sample_idx(&self) -> usize {
-        self.sample_idx
-    }
-}
-
-impl<F: Copy, P: CryptographicPermutation<[F; WIDTH]>, const WIDTH: usize, const RATE: usize>
-    DuplexSponge<F, P, WIDTH, RATE>
-{
-    /// Absorb a single value (overwrite mode).
-    pub fn absorb(&mut self, value: F) {
-        self.state[self.absorb_idx] = value;
-        self.absorb_idx += 1;
-        if self.absorb_idx == RATE {
-            self.perm.permute_mut(&mut self.state);
-            self.absorb_idx = 0;
-            self.sample_idx = RATE;
-        }
-    }
-
-    /// Squeeze a single value. Flushes pending absorbs first.
-    pub fn squeeze(&mut self) -> F {
-        if self.absorb_idx != 0 || self.sample_idx == 0 {
-            self.perm.permute_mut(&mut self.state);
-            self.absorb_idx = 0;
-            self.sample_idx = RATE;
-        }
-        self.sample_idx -= 1;
-        self.state[self.sample_idx]
-    }
-}
 
 /// Multi-field transcript that operates on a sponge over a large `SpongeField`
 /// while producing samples in a smaller base field `F`.
@@ -143,7 +75,7 @@ where
         );
 
         Self {
-            sponge: DuplexSponge::new(perm),
+            sponge: DuplexSponge::from(perm),
             observe_buf: Vec::with_capacity(num_obs_per_elem),
             sample_buf: Vec::with_capacity(num_samples_per_elem),
             num_obs_per_elem,
