@@ -5,7 +5,7 @@ use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::BabyBearBn254Poseidon2C
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::{
-    bn254_sponge::MultiField32ChallengerGpu, gpu_backend::GenericGpuBackend,
+    bn254_sponge::MultiFieldTranscriptGpu, gpu_backend::GenericGpuBackend,
     hash_scheme::BabyBearBn254Poseidon2HashScheme,
 };
 use crate::{
@@ -78,7 +78,7 @@ impl StarkEngine for GpuEngine<BabyBearBn254Poseidon2HashScheme> {
     type SC = BabyBearBn254Poseidon2Config;
     type PB = GenericGpuBackend<BabyBearBn254Poseidon2HashScheme>;
     type PD = GpuDevice;
-    type TS = MultiField32ChallengerGpu;
+    type TS = MultiFieldTranscriptGpu;
 
     fn new(params: SystemParams) -> Self {
         GpuEngine::new(params)
@@ -93,12 +93,12 @@ impl StarkEngine for GpuEngine<BabyBearBn254Poseidon2HashScheme> {
     }
 
     fn initial_transcript(&self) -> Self::TS {
-        MultiField32ChallengerGpu::default()
+        MultiFieldTranscriptGpu::default()
     }
 
     fn prover_from_transcript(
         &self,
-        transcript: MultiField32ChallengerGpu,
+        transcript: MultiFieldTranscriptGpu,
     ) -> Coordinator<BabyBearBn254Poseidon2Config, Self::PB, Self::PD, Self::TS> {
         Coordinator::new(
             GenericGpuBackend::default(),

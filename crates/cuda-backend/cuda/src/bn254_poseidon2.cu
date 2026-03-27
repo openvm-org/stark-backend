@@ -290,81 +290,94 @@ __global__ void bn254_adjacent_compress_layer_kernel(
 // ---------------------------------------------------------------------------
 // BN254 sponge state for GPU grinding
 //
-// Matches MultiField32Challenger<BabyBear, Bn254Scalar, Perm, WIDTH=3, RATE=2>:
-//   num_f_elms = PF::bits() / 64 = 3   (BabyBear values per Bn254Scalar for challenger)
-//   max input_buffer  = num_f_elms * RATE  = 3 * 2 = 6
-//   max output_buffer = num_f_elms * WIDTH = 3 * 3 = 9
+// Matches MultiFieldTranscript<BabyBear, Bn254Scalar, Perm, WIDTH=3, RATE=2>:
+//   num_obs_per_word = SF::bits() / CF::bits() = 254/31 = 8
+//   num_samples_per_word = 7  (base-p decomposition)
 //
+// The sponge uses overwrite-mode duplex with absorb_idx/sample_idx tracking.
 // Rust DeviceBn254SpongeState must have identical layout (verified by size assert).
 // ---------------------------------------------------------------------------
 
+static const uint32_t BN254_NUM_OBS_PER_WORD = 8;
+static const uint32_t BN254_SPONGE_RATE      = 2;
+
 struct DeviceBn254SpongeState {
-    Bn254Fr  sponge_state[3]; // 3 * 32 = 96 bytes, align 8
-    uint32_t input_buffer[6]; // 24 bytes
-    uint32_t input_len;       // 4 bytes
-    uint32_t output_buffer[9]; // 36 bytes
-    uint32_t output_len;       // 4 bytes
-    // Trailing padding: 4 bytes → total 168 bytes (aligned to 8)
+    Bn254Fr  sponge_state[3];    // 96 bytes
+    uint32_t absorb_idx;         //  4 bytes
+    uint32_t sample_idx;         //  4 bytes
+    uint32_t observe_buf[8];     // 32 bytes
+    uint32_t observe_buf_len;    //  4 bytes
+    // total = 140 + 4 padding = 144 bytes (aligned to 8)
+    // Note: sample_buf is not needed on device — observe() clears it before grinding.
 };
 
-static_assert(sizeof(DeviceBn254SpongeState) == 168,
+static_assert(sizeof(DeviceBn254SpongeState) == 144,
               "DeviceBn254SpongeState size mismatch with Rust");
 
-// Sponge constants for the grind transcript (MultiField32Challenger, num_f_elms=3)
-static const int BN254_GRIND_NUM_F_ELMS = 3;     // PF::bits()/64 = 254/64 = 3
-static const int BN254_GRIND_WIDTH      = 3;      // WIDTH
-static const uint32_t BN254_GRIND_MAX_INPUT = 6;  // num_f_elms * RATE = 6
+// --- Low-level sponge (absorb/squeeze matching DuplexSponge) ---
 
-/// Duplexing: pack input → sponge_state, permute, fill output.
-/// Matches MultiField32Challenger::duplexing().
-__device__ void bn254_sponge_duplex(DeviceBn254SpongeState& s) {
-    // Pack input_buffer into sponge_state in chunks of BN254_GRIND_NUM_F_ELMS=3
-    for (int i = 0; (uint32_t)(i * BN254_GRIND_NUM_F_ELMS) < s.input_len; i++) {
-        int start = i * BN254_GRIND_NUM_F_ELMS;
-        int cnt   = (int)s.input_len - start;
-        if (cnt > BN254_GRIND_NUM_F_ELMS) cnt = BN254_GRIND_NUM_F_ELMS;
-        s.sponge_state[i] = bn254_reduce_32(s.input_buffer + start, cnt);
-    }
-    s.input_len = 0;
-
-    bn254_poseidon2_permute(s.sponge_state);
-
-    // Split each Bn254Fr into BN254_GRIND_NUM_F_ELMS=3 BabyBear values
-    s.output_len = 0;
-    for (int i = 0; i < BN254_GRIND_WIDTH; i++) {
-        uint32_t bb[3];
-        bn254_split_32_3(bb, s.sponge_state[i]);
-        for (int j = 0; j < BN254_GRIND_NUM_F_ELMS; j++) {
-            s.output_buffer[s.output_len++] = bb[j];
-        }
-    }
-    // output_len == 9 after full duplexing
-}
-
-/// Observe a canonical BabyBear u32 value into the sponge.
-/// Matches MultiField32Challenger::observe().
-__device__ void bn254_sponge_observe(DeviceBn254SpongeState& s, uint32_t value) {
-    s.output_len = 0; // invalidate buffered output
-    s.input_buffer[s.input_len++] = value;
-    if (s.input_len == BN254_GRIND_MAX_INPUT) {
-        bn254_sponge_duplex(s);
+/// Absorb one BN254 word into the sponge (overwrite mode).
+__device__ void bn254_sponge_absorb(DeviceBn254SpongeState& s, Bn254Fr value) {
+    s.sponge_state[s.absorb_idx] = value;
+    s.absorb_idx++;
+    if (s.absorb_idx == BN254_SPONGE_RATE) {
+        bn254_poseidon2_permute(s.sponge_state);
+        s.absorb_idx = 0;
+        s.sample_idx = BN254_SPONGE_RATE;
     }
 }
 
-/// Sample a canonical BabyBear u32 value from the sponge.
-/// Matches MultiField32Challenger::sample() (uses Vec::pop, i.e. last element).
-__device__ uint32_t bn254_sponge_sample(DeviceBn254SpongeState& s) {
-    if (s.input_len > 0 || s.output_len == 0) {
-        bn254_sponge_duplex(s);
+/// Squeeze one BN254 word from the sponge.
+__device__ Bn254Fr bn254_sponge_squeeze(DeviceBn254SpongeState& s) {
+    if (s.absorb_idx != 0 || s.sample_idx == 0) {
+        bn254_poseidon2_permute(s.sponge_state);
+        s.absorb_idx = 0;
+        s.sample_idx = BN254_SPONGE_RATE;
     }
-    return s.output_buffer[--s.output_len]; // pop from end
+    s.sample_idx--;
+    return s.sponge_state[s.sample_idx];
+}
+
+// --- MultiFieldTranscript operations ---
+
+/// Flush observe_buf: pack and absorb into sponge.
+__device__ void bn254_transcript_flush_observe(DeviceBn254SpongeState& s) {
+    if (s.observe_buf_len > 0) {
+        Bn254Fr packed = bn254_pack_base_2_31(s.observe_buf, s.observe_buf_len);
+        bn254_sponge_absorb(s, packed);
+        s.observe_buf_len = 0;
+    }
+}
+
+/// Observe a canonical BabyBear u32 value.
+/// Matches MultiFieldTranscript::observe().
+/// Note: sample_buf clearing is a no-op on device (not present in device state).
+__device__ void bn254_transcript_observe(DeviceBn254SpongeState& s, uint32_t value) {
+    s.observe_buf[s.observe_buf_len++] = value;
+    if (s.observe_buf_len == BN254_NUM_OBS_PER_WORD) {
+        Bn254Fr packed = bn254_pack_base_2_31(s.observe_buf, BN254_NUM_OBS_PER_WORD);
+        bn254_sponge_absorb(s, packed);
+        s.observe_buf_len = 0;
+    }
+}
+
+/// Sample a single canonical BabyBear u32 value (first base-p digit).
+///
+/// During grinding, sample_buf is always empty (observe clears it), so we
+/// always squeeze fresh. The first base-p digit is simply `canonical_value % p`.
+__device__ uint32_t bn254_transcript_sample(DeviceBn254SpongeState& s) {
+    bn254_transcript_flush_observe(s);
+    Bn254Fr squeezed = bn254_sponge_squeeze(s);
+    uint64_t canonical[4];
+    bn254_to_canonical(canonical, squeezed);
+    return u256_mod_u32(canonical, (uint32_t)BABYBEAR_PRIME);
 }
 
 /// Returns true if check_witness(bits, witness) passes.
 __device__ bool bn254_sponge_check_witness(DeviceBn254SpongeState& s,
                                            uint32_t bits, uint32_t witness) {
-    bn254_sponge_observe(s, witness);
-    uint32_t sample = bn254_sponge_sample(s);
+    bn254_transcript_observe(s, witness);
+    uint32_t sample = bn254_transcript_sample(s);
     return (sample & ((1u << bits) - 1)) == 0;
 }
 

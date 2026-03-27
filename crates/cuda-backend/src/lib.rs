@@ -24,7 +24,7 @@ mod pkey;
 mod sumcheck;
 mod types;
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
-pub use bn254_sponge::MultiField32ChallengerGpu;
+pub use bn254_sponge::MultiFieldTranscriptGpu;
 pub use device::*;
 pub use engine::*;
 pub use error::*;

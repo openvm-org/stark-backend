@@ -34,6 +34,7 @@ thiserror.workspace = true
 eyre.workspace = true
 derivative.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
+num-bigint.workspace = true
 rustc-hash.workspace = true
 serde_json.workspace = true
 metrics = { workspace = true, optional = true }
@@ -48,6 +49,7 @@ openvm-stark-backend = { workspace = true, features = ["test-utils"] }
 openvm-stark-sdk.workspace = true # dev-dependency is not circular
 openvm-backend-tests.workspace = true
 p3-baby-bear.workspace = true
+p3-bn254.workspace = true
 rand.workspace = true
 test-case.workspace = true
 
