@@ -349,7 +349,9 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
                     .message
                     .iter()
                     .map(|expr| evaluator.eval_expr(expr))
-                    .chain(std::iter::once(SC::EF::from_u16(interaction.bus_index + 1)))
+                    .chain(std::iter::once(
+                        SC::EF::from_u16(interaction.bus_index) + SC::EF::ONE,
+                    ))
                     .zip(beta_logup.powers())
                     .fold(SC::EF::ZERO, |acc, (x, y)| acc + x * y);
                 (num, denom)
