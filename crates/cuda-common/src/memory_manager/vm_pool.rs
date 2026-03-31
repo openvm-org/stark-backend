@@ -850,7 +850,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{FreeRegionMeta, VirtualMemoryPool, VpmmConfig};
-    use crate::stream::{CudaEvent, CudaStream, current_stream_id};
+    use crate::stream::{current_stream_id, CudaEvent, CudaStream};
 
     #[test]
     fn test_defrag_leftover_preserves_original_metadata() {
