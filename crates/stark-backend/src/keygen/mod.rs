@@ -18,6 +18,7 @@ use crate::{
         StarkProvingKey, StarkVerifyingKey, StarkVerifyingParams, TraceWidth,
         VerifierSinglePreprocessedData,
     },
+    proof::CODEC_VERSION,
     prover::{
         stacked_pcs::{stacked_commit, StackedPcsData},
         ColMajorMatrix, MatrixDimensions,
@@ -196,11 +197,20 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
         // not need to be verified by the verifier, so we just use postcard to serialize it.
         let vk_bytes = postcard::to_allocvec(&pre_vk).unwrap();
         tracing::debug!("pre-vkey: {} bytes", vk_bytes.len());
+        // Since postcard serialization is not self-describing, we include a version for domain
+        // separation. For further domain separation, we include the byte length.
+        let versioned_vk_bytes = CODEC_VERSION
+            .to_le_bytes()
+            .into_iter()
+            .chain((vk_bytes.len() as u64).to_le_bytes())
+            .chain(vk_bytes);
         // Purely to get type compatibility and convenience, we hash using the native hash
-        let vk_pre_hash = self
-            .config
-            .hasher()
-            .hash_slice(&vk_bytes.into_iter().map(SC::F::from_u8).collect_vec());
+        let vk_pre_hash = self.config.hasher().hash_slice(
+            &versioned_vk_bytes
+                .into_iter()
+                .map(SC::F::from_u8)
+                .collect_vec(),
+        );
 
         Ok(MultiStarkProvingKey {
             params,

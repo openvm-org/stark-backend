@@ -219,7 +219,8 @@ impl<SC: EncodableConfig> Encode for GkrLayerClaims<SC> {
 }
 
 /// Codec version should change only when proof system or proof format changes.
-/// It does _not_ correspond to the main openvm version (which may change more frequently).
+/// The codec version **must** change if the verifying key serialization/deserialization format
+/// changes. It does _not_ correspond to the main openvm version (which may change more frequently).
 pub(crate) const CODEC_VERSION: u32 = 3;
 
 impl<SC: EncodableConfig> Encode for Proof<SC> {
