@@ -38,6 +38,9 @@ fn validate_merkle_rows_per_query(
     rows_per_query: usize,
     height: usize,
 ) -> Result<usize, MerkleTreeError> {
+    // The generic Merkle constructor still treats "power of two" and "fits within the matrix
+    // height" as caller invariants. The CUDA-specific maximum rows-per-query is returned as a
+    // recoverable error because it depends on backend support, not generic Merkle correctness.
     let k = log2_strict_usize(rows_per_query);
     assert!(
         rows_per_query <= height,

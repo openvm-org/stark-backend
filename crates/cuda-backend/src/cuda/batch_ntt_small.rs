@@ -21,7 +21,7 @@ pub const MAX_SMALL_NTT_LEVEL: usize = 10;
 /// without launching the small-NTT kernel.
 pub fn validate_gpu_l_skip(l_skip: usize) -> Result<(), CudaError> {
     if l_skip > MAX_SMALL_NTT_LEVEL {
-        return check(1);
+        return Err(CudaError::new(1));
     }
     Ok(())
 }
