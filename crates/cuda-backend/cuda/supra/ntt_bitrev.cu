@@ -27,6 +27,7 @@ __device__ __forceinline__ unsigned subgroup_sync_mask(uint32_t idx)
         return 0xffffffffu;
     } else {
         // This kernel uses 1D thread blocks, so the hardware warp lane matches threadIdx.x.
+        // Callers must keep each logical Z-group contiguous within threadIdx.x.
         uint32_t lane = threadIdx.x & (WARP_SIZE - 1);
         uint32_t subgroup_base = lane - idx;
         return (((uint32_t)1 << Z_COUNT) - 1u) << subgroup_base;

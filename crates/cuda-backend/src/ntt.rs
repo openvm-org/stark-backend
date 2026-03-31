@@ -63,7 +63,7 @@ impl<'a> NttImpl<'a> {
         poly_count: u32,
         is_intt: bool,
     ) -> Self {
-        ensure_initialized(is_intt).unwrap();
+        ensure_initialized(is_intt).expect("failed to initialize CUDA NTT twiddle tables");
         Self {
             buffer,
             lg_domain_size,
@@ -88,7 +88,7 @@ impl<'a> NttImpl<'a> {
                 self.poly_count,
                 self.is_intt,
             )
-            .unwrap();
+            .expect("failed to launch CUDA mixed-radix NTT step");
         }
         self.stage += iterations;
     }
@@ -122,7 +122,8 @@ pub fn batch_ntt(
 
     if bit_reverse {
         unsafe {
-            ntt::bit_rev(buffer, buffer, log_trace_height, padded_poly_size, width).unwrap();
+            ntt::bit_rev(buffer, buffer, log_trace_height, padded_poly_size, width)
+                .expect("failed to launch CUDA bit-reversal permutation");
         }
     }
 
