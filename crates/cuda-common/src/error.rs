@@ -90,6 +90,11 @@ pub enum MemoryError {
     InvalidMemorySize { size: usize },
 
     #[error(
+        "Requested VPMM allocation {requested} exceeds reserved VA chunk size {va_size} bytes"
+    )]
+    RequestedExceedsVaChunk { requested: usize, va_size: usize },
+
+    #[error(
         "Out of memory in pool (size requested: {requested} bytes, available: {available} bytes)"
     )]
     OutOfMemory { requested: usize, available: usize },
