@@ -70,7 +70,7 @@ __global__ void poseidon2_compressing_row_hashes_kernel(
         __syncthreads(); // Ensure all reads complete before next iteration's writes
     }
 
-    if (leaf_idx == 0) {
+    if (leaf_idx == 0 && stride_idx < query_stride) {
 #pragma unroll
         for (int i = 0; i < CELLS_OUT; i++) {
             out[stride_idx].cells[i] = cells[i];
@@ -140,7 +140,7 @@ __global__ void poseidon2_compressing_row_hashes_ext_kernel(
         __syncthreads(); // Ensure all reads complete before next iteration's writes
     }
 
-    if (leaf_idx == 0) {
+    if (leaf_idx == 0 && stride_idx < query_stride) {
 #pragma unroll
         for (int i = 0; i < CELLS_OUT; i++) {
             out[stride_idx].cells[i] = cells[i];
