@@ -25,6 +25,9 @@ pub enum VerifierError<EF: core::fmt::Debug + core::fmt::Display + PartialEq + E
     #[error("Trace heights are too large")]
     TraceHeightsTooLarge,
 
+    #[error("Preprocessed trace height does not match verifier trace data")]
+    PreprocessedTraceHeightMismatch,
+
     /// A proof without any traces is always considered invalid.
     #[error("Proof has no traces")]
     EmptyTraces,
@@ -136,6 +139,9 @@ where
         }
         if let Some(trace_vdata) = trace_vdata {
             if let Some(pdata) = avk.preprocessed_data.as_ref() {
+                if (pdata.hypercube_dim + l_skip as isize) as usize != trace_vdata.log_height {
+                    return Err(VerifierError::PreprocessedTraceHeightMismatch);
+                }
                 transcript.observe_commit(pdata.commit);
             } else {
                 transcript.observe(SC::F::from_usize(trace_vdata.log_height));
