@@ -268,16 +268,12 @@ impl VirtualMemoryPool {
                 .expect("BUG: free region address not found after find_best_fit");
             debug_assert_eq!(region.stream_id, stream_id);
 
-            // If region is larger, return remainder to free list
+            // If region is larger, return the untouched tail with its original guard metadata.
             if region.size > requested {
-                self.free_regions.insert(
+                self.reinsert_split_free_region(
                     ptr + requested as u64,
-                    FreeRegionMeta {
-                        size: region.size - requested,
-                        event: region.event,
-                        stream_id,
-                        id: region.id,
-                    },
+                    region.size - requested,
+                    region,
                 );
             }
 
@@ -417,6 +413,21 @@ impl VirtualMemoryPool {
             },
         );
         (ptr, size)
+    }
+
+    /// Reinsert the untouched tail of a split free region without recording a new event.
+    ///
+    /// No new synchronization point was created for these pages, so they must keep the original
+    /// event, stream affinity, and age ordering.
+    fn reinsert_split_free_region(
+        &mut self,
+        ptr: CUdeviceptr,
+        size: usize,
+        region: FreeRegionMeta,
+    ) {
+        debug_assert!(size > 0);
+        self.free_regions
+            .insert(ptr, FreeRegionMeta { size, ..region });
     }
 
     /// Return the base address of a virtual hole large enough for `requested` bytes.
@@ -656,10 +667,10 @@ impl VirtualMemoryPool {
             remaining -= take;
 
             if region.size > take {
-                // Return the unused tail to the free list so it stays available.
+                // Return the untouched tail with its original guard metadata.
                 let leftover_addr = addr + take as u64;
                 let leftover_size = region.size - take;
-                let _ = self.free_region_insert(leftover_addr, leftover_size, region.stream_id);
+                self.reinsert_split_free_region(leftover_addr, leftover_size, region);
             }
         }
         let remapped_ptr = self.remap_regions(to_defrag, allocated_dst, stream_id)?;
@@ -831,5 +842,59 @@ impl std::fmt::Debug for VirtualMemoryPool {
             write!(f, "[{} {}]", label, ByteSize::b(*size as u64))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{FreeRegionMeta, VirtualMemoryPool, VpmmConfig};
+    use crate::stream::{CudaEvent, CudaStream, current_stream_id};
+
+    #[test]
+    fn test_defrag_leftover_preserves_original_metadata() {
+        let config = VpmmConfig {
+            page_size: None,
+            va_size: 1 << 30,
+            initial_pages: 2,
+        };
+        let mut pool = VirtualMemoryPool::new(config);
+
+        if pool.page_size == usize::MAX {
+            println!("VPMM not supported, skipping test");
+            return;
+        }
+
+        let page_size = pool.page_size;
+        let stream_id = current_stream_id().unwrap();
+        let foreign_stream_id = stream_id + 1000;
+        let foreign_stream = CudaStream::new().unwrap();
+
+        let ptr = pool.malloc_internal(2 * page_size, stream_id).unwrap();
+        pool.free_internal(ptr, stream_id).unwrap();
+
+        let (&free_addr, region) = pool.free_regions.iter_mut().next().unwrap();
+        let original_event = Arc::new(CudaEvent::new().unwrap());
+        unsafe {
+            original_event.record(foreign_stream.as_raw()).unwrap();
+        }
+        *region = FreeRegionMeta {
+            size: region.size,
+            event: original_event.clone(),
+            stream_id: foreign_stream_id,
+            id: 42,
+        };
+
+        let leftover_addr = free_addr + page_size as u64;
+        pool.defragment_or_create_new_pages(page_size, stream_id)
+            .unwrap()
+            .unwrap();
+
+        let leftover = pool.free_regions.get(&leftover_addr).unwrap();
+        assert_eq!(leftover.size, page_size);
+        assert_eq!(leftover.stream_id, foreign_stream_id);
+        assert_eq!(leftover.id, 42);
+        assert!(Arc::ptr_eq(&leftover.event, &original_event));
     }
 }
