@@ -105,10 +105,10 @@ pub enum MemoryError {
 pub enum MemCopyError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
-    #[error("Size mismatch in {operation}: host len={host_len}, device len={device_len}")]
+    #[error("Size mismatch in {operation}: src len={src_len}, dst len={dst_len}")]
     SizeMismatch {
         operation: &'static str,
-        host_len: usize,
-        device_len: usize,
+        src_len: usize,
+        dst_len: usize,
     },
 }
