@@ -2,6 +2,8 @@ use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 
 use crate::prelude::{EF, F};
 
+const MAX_CUDA_GRID_Y: usize = u16::MAX as usize;
+
 extern "C" {
     fn _matrix_transpose_fp(
         output: *mut F,
@@ -115,10 +117,13 @@ pub unsafe fn matrix_get_rows_fp_kernel(
     row_indices: &DeviceBuffer<u32>,
     matrix_width: u64,
     matrix_height: u64,
-    row_indices_len: u32,
+    row_indices_len: usize,
 ) -> Result<(), CudaError> {
     if matrix_width == 0 || row_indices_len == 0 {
         return Ok(());
+    }
+    if row_indices_len > MAX_CUDA_GRID_Y || row_indices_len > u32::MAX as usize {
+        return Err(CudaError::new(1));
     }
     CudaError::from_result(_matrix_get_rows_fp(
         output.as_mut_ptr(),
@@ -126,7 +131,7 @@ pub unsafe fn matrix_get_rows_fp_kernel(
         row_indices.as_ptr(),
         matrix_width,
         matrix_height,
-        row_indices_len,
+        row_indices_len as u32,
     ))
 }
 

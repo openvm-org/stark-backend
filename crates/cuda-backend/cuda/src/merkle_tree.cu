@@ -294,6 +294,9 @@ extern "C" int _query_digest_layers(
     if (num_query == 0 || num_layer == 0) {
         return cudaSuccess;
     }
+    if (num_query > UINT16_MAX) {
+        return cudaErrorInvalidValue;
+    }
     const size_t QUERY_DIGEST_THREADS = 128;
     const size_t DIGEST_WIDTH = 8;
 

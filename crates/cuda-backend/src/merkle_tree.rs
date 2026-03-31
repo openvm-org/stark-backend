@@ -233,7 +233,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                         &d_row_idxs,
                         matrix.width() as u64,
                         matrix.height() as u64,
-                        d_row_idxs.len() as u32,
+                        d_row_idxs.len(),
                     )
                     .map_err(|error| MerkleTreeError::MatrixGetRows { error, matrix_idx })?;
                 }
@@ -358,8 +358,8 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 &mut d_out,
                 &d_layers_ptr,
                 &d_indices,
-                num_queries as u64,
-                d_layers_ptr.len() as u64,
+                num_queries,
+                d_layers_ptr.len(),
             )
             .map_err(MerkleTreeError::QueryDigestLayers)?;
         }
