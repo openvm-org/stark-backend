@@ -9,10 +9,10 @@ use openvm_stark_backend::{
         decode_extension_field32, decode_prime_field32, encode_extension_field32,
         encode_prime_field32, DecodableConfig, EncodableConfig,
     },
-    duplex_sponge,
     hasher::Hasher,
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
     prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
+    transcript::duplex_sponge,
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptLog,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};

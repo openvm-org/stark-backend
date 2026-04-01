@@ -34,6 +34,7 @@ thiserror.workspace = true
 eyre.workspace = true
 derivative.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
+num-bigint = { workspace = true, optional = true }
 rustc-hash.workspace = true
 serde_json.workspace = true
 metrics = { workspace = true, optional = true }
@@ -48,6 +49,7 @@ openvm-stark-backend = { workspace = true, features = ["test-utils"] }
 openvm-stark-sdk.workspace = true # dev-dependency is not circular
 openvm-backend-tests.workspace = true
 p3-baby-bear.workspace = true
+p3-bn254.workspace = true
 rand.workspace = true
 test-case.workspace = true
 
@@ -57,6 +59,7 @@ parallel = ["p3-maybe-rayon/parallel"]
 jemalloc = ["dep:tikv-jemallocator"]
 jemalloc-prof = ["jemalloc", "tikv-jemallocator?/profiling"]
 metrics = ["dep:metrics"]
+multi-field-transcript = ["dep:num-bigint"]
 test-utils = []
 lean = [] # feature for Lean constraint codegen
 soundness-bchks25-optimized = [] # use brute force optimized parameters for [BCHKS25] proximity gaps security
