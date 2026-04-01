@@ -11,9 +11,9 @@ use openvm_stark_backend::{
         encode_prime_field32, DecodableConfig, EncodableConfig,
     },
     hasher::Hasher,
-    p3_challenger::{CanObserve, CanSample, MultiField32Challenger},
-    p3_symmetric::{self, MultiField32PaddingFreeSponge, TruncatedPermutation},
+    p3_symmetric::{MultiField32PaddingFreeSponge, TruncatedPermutation},
     prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
+    transcript::multi_field::MultiFieldTranscript,
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
 };
 use p3_baby_bear::BabyBear;
@@ -131,32 +131,7 @@ impl BabyBearBn254Poseidon2Config {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Transcript {
-    inner: MultiField32Challenger<F, Bn254Scalar, Perm, WIDTH, BN254_RATE>,
-}
-
-impl FiatShamirTranscript<SC> for Transcript {
-    fn observe(&mut self, value: F) {
-        CanObserve::observe(&mut self.inner, value);
-    }
-
-    fn sample(&mut self) -> F {
-        CanSample::sample(&mut self.inner)
-    }
-
-    fn observe_commit(&mut self, digest: Digest) {
-        CanObserve::<p3_symmetric::Hash<_, _, _>>::observe(&mut self.inner, digest.into());
-    }
-}
-
-impl From<Perm> for Transcript {
-    fn from(perm: Perm) -> Self {
-        Self {
-            inner: MultiField32Challenger::new(perm).unwrap(),
-        }
-    }
-}
+pub type Transcript = MultiFieldTranscript<F, Bn254Scalar, Perm, WIDTH, BN254_RATE>;
 
 pub struct BabyBearBn254Poseidon2RefEngine<TS = Transcript> {
     device: ReferenceDevice<SC>,

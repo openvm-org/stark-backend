@@ -17,9 +17,9 @@ pub struct DuplexSponge<F, P, const WIDTH: usize, const RATE: usize> {
     perm: P,
     /// Poseidon2 state
     state: [F; WIDTH],
-    /// Invariant to be preserved: 0 <= absorb_idx < CHUNK
+    /// Invariant to be preserved: 0 <= absorb_idx < RATE
     absorb_idx: usize,
-    /// Invariant to be preserved: 0 <= sample_idx <= CHUNK
+    /// Invariant to be preserved: 0 <= sample_idx <= RATE
     sample_idx: usize,
     /// True iff last sample/observe triggered a permutation
     last_op_perm: bool,
@@ -39,42 +39,27 @@ impl<F: Default + Copy, P, const WIDTH: usize, const RATE: usize> From<P>
     }
 }
 
-// This implementation **must** be equivalent to Plonky3's `DuplexChallenger`.
-impl<SC, F, P, const WIDTH: usize, const RATE: usize> FiatShamirTranscript<SC>
-    for DuplexSponge<F, P, WIDTH, RATE>
-where
-    F: PrimeField,
-    SC: StarkProtocolConfig<Digest = [F; RATE], F = F>,
-    P: CryptographicPermutation<[F; WIDTH]> + Send + Sync,
-{
-    fn observe(&mut self, value: F) {
-        // See below
-        CanObserve::observe(self, value);
+impl<F, P, const WIDTH: usize, const RATE: usize> DuplexSponge<F, P, WIDTH, RATE> {
+    pub fn state(&self) -> &[F; WIDTH] {
+        &self.state
     }
 
-    fn sample(&mut self) -> F {
-        self.last_op_perm = self.absorb_idx != 0 || self.sample_idx == 0;
-        if self.last_op_perm {
-            self.perm.permute_mut(&mut self.state);
-            self.absorb_idx = 0;
-            self.sample_idx = RATE;
-        }
-        self.sample_idx -= 1;
-        self.state[self.sample_idx]
+    pub fn absorb_idx(&self) -> usize {
+        self.absorb_idx
     }
 
-    fn observe_commit(&mut self, digest: [F; RATE]) {
-        // See below
-        CanObserve::observe(self, digest);
+    pub fn sample_idx(&self) -> usize {
+        self.sample_idx
     }
 }
 
-impl<F, P, const WIDTH: usize, const RATE: usize> CanObserve<F> for DuplexSponge<F, P, WIDTH, RATE>
+impl<F, P, const WIDTH: usize, const RATE: usize> DuplexSponge<F, P, WIDTH, RATE>
 where
-    F: Clone,
+    F: Copy,
     P: CryptographicPermutation<[F; WIDTH]>,
 {
-    fn observe(&mut self, value: F) {
+    /// Absorb a single value (overwrite mode).
+    pub fn absorb(&mut self, value: F) {
         self.state[self.absorb_idx] = value;
         self.absorb_idx += 1;
         self.last_op_perm = self.absorb_idx == RATE;
@@ -84,17 +69,60 @@ where
             self.sample_idx = RATE;
         }
     }
+
+    /// Squeeze a single value. Permutes if there are pending absorbs.
+    pub fn squeeze(&mut self) -> F {
+        self.last_op_perm = self.absorb_idx != 0 || self.sample_idx == 0;
+        if self.last_op_perm {
+            self.perm.permute_mut(&mut self.state);
+            self.absorb_idx = 0;
+            self.sample_idx = RATE;
+        }
+        self.sample_idx -= 1;
+        self.state[self.sample_idx]
+    }
+}
+
+// This implementation **must** be equivalent to Plonky3's `DuplexChallenger`.
+impl<SC, F, P, const WIDTH: usize, const RATE: usize> FiatShamirTranscript<SC>
+    for DuplexSponge<F, P, WIDTH, RATE>
+where
+    F: PrimeField,
+    SC: StarkProtocolConfig<Digest = [F; RATE], F = F>,
+    P: CryptographicPermutation<[F; WIDTH]> + Send + Sync,
+{
+    fn observe(&mut self, value: F) {
+        self.absorb(value);
+    }
+
+    fn sample(&mut self) -> F {
+        self.squeeze()
+    }
+
+    fn observe_commit(&mut self, digest: [F; RATE]) {
+        CanObserve::observe(self, digest);
+    }
+}
+
+impl<F, P, const WIDTH: usize, const RATE: usize> CanObserve<F> for DuplexSponge<F, P, WIDTH, RATE>
+where
+    F: Copy,
+    P: CryptographicPermutation<[F; WIDTH]>,
+{
+    fn observe(&mut self, value: F) {
+        self.absorb(value);
+    }
 }
 
 impl<F, P, const WIDTH: usize, const RATE: usize, const N: usize> CanObserve<[F; N]>
     for DuplexSponge<F, P, WIDTH, RATE>
 where
-    F: Clone,
+    F: Copy,
     P: CryptographicPermutation<[F; WIDTH]>,
 {
     fn observe(&mut self, values: [F; N]) {
         for x in values {
-            CanObserve::observe(self, x);
+            self.absorb(x);
         }
     }
 }

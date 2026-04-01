@@ -20,7 +20,6 @@ pub mod codec;
 /// Copy of Plonky3's DFT module without parallelism (Rayon) for faster single-threaded execution.
 /// Used by the prover **only**.
 pub mod dft;
-pub mod duplex_sponge;
 /// Protocol hasher trait definition.
 pub mod hasher;
 /// Log-up permutation argument implementation as RAP.
@@ -41,13 +40,14 @@ pub mod test_utils;
 // #[cfg(test)]
 // pub mod tests;
 
+/// Fiat-Shamir transcript trait and implementations (duplex sponge, multi-field).
+pub mod transcript;
+
 mod any_air;
 /// STARK Protocol configuration trait
 mod config;
 /// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
 mod engine;
-/// Fiat-Shamir transcript trait definition.
-mod transcript;
 pub use any_air::*;
 pub use config::*;
 pub use engine::*;

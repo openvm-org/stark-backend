@@ -32,7 +32,6 @@ use std::sync::Arc;
 use itertools::Itertools;
 use openvm_stark_backend::{
     any_air_arc_vec,
-    duplex_sponge::DuplexSpongeValidator,
     keygen::types::LinearConstraint,
     poly_common::Squarable,
     prover::{
@@ -53,6 +52,7 @@ use openvm_stark_backend::{
         CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture,
         PreprocessedAndCachedFixture, PreprocessedFibFixture, SelfInteractionFixture, TestFixture,
     },
+    transcript::duplex_sponge::DuplexSpongeValidator,
     utils::disable_debug_builder,
     verifier::{
         batch_constraints::verify_zerocheck_and_logup,

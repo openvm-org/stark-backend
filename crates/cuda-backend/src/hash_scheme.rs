@@ -11,7 +11,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use crate::{
-    bn254_sponge::MultiField32ChallengerGpu,
+    bn254_sponge::MultiFieldTranscriptGpu,
     cuda::bn254_merkle_tree::{
         bn254_poseidon2_adjacent_compress_layer, bn254_poseidon2_compressing_row_hashes,
         bn254_poseidon2_compressing_row_hashes_ext,
@@ -228,7 +228,7 @@ pub struct BabyBearBn254Poseidon2HashScheme;
 impl GpuHashScheme for BabyBearBn254Poseidon2HashScheme {
     type SC = BabyBearBn254Poseidon2Config;
     type Digest = Bn254Digest;
-    type Transcript = MultiField32ChallengerGpu;
+    type Transcript = MultiFieldTranscriptGpu;
     type MerkleHash = Bn254Poseidon2MerkleHash;
 
     fn default_config(params: SystemParams) -> Self::SC {

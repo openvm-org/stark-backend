@@ -6,8 +6,9 @@
 ///   - Field add / sub / neg / double / x^5 S-box
 ///   - MDS layers for WIDTH = 3 (external and internal)
 ///   - bn254_from_canonical / bn254_to_canonical conversions
-///   - reduce_32 (pack BabyBear → Bn254Fr) for both num_f_elms=8 (Merkle) and num_f_elms=3 (challenger)
-///   - split_32 (unpack Bn254Fr → BabyBear canonical u32) for num_f_elms=3 (challenger)
+///   - reduce_32 (pack BabyBear → Bn254Fr) for Merkle hashing
+///   - bn254_pack_base_2_31 / u256_mod_u32 helpers for MultiFieldTranscript
+///     packing and sampling during grinding
 ///
 /// All functions are pure computation (no globals). The Poseidon2 permutation
 /// function is declared here but defined in bn254_poseidon2.cu (where the
@@ -257,8 +258,7 @@ void bn254_to_canonical(uint64_t canonical[4], Bn254Fr x) {
 // ---------------------------------------------------------------------------
 // reduce_32: pack BabyBear canonical u32 values into one Bn254Fr
 //
-//   num_f_elms = 8  (Merkle hash, MultiField32PaddingFreeSponge)
-//   num_f_elms = 3  (Challenger, MultiField32Challenger)
+// Used by Merkle hashing (MultiField32PaddingFreeSponge, num_f_elms = 8).
 //
 // Formula: result = sum_{i=0}^{n-1} bb[i] * 2^{32*i}  (as a BN254 scalar)
 // Implementation: canonical = { bb[0]|(bb[1]<<32), bb[2]|(bb[3]<<32), ... }
@@ -281,19 +281,40 @@ Bn254Fr bn254_reduce_32(const uint32_t* bb, int count) {
 }
 
 // ---------------------------------------------------------------------------
-// split_32 (num_f_elms = 3, for MultiField32Challenger output):
-// Given a Bn254Fr in Montgomery form, extract 3 BabyBear canonical u32 values.
-// Each result = canonical_limb_i % BABYBEAR_PRIME.
+// MultiFieldTranscript helpers
 // ---------------------------------------------------------------------------
 
+/// Pack `count` (1..8) canonical BabyBear u32 values into one Bn254Fr.
+/// result = bb[0] + bb[1]*2^31 + bb[2]*2^62 + ... (as a BN254 scalar).
+///
+/// Since each bb[i] < 2^31, the terms don't overlap when bit-shifted,
+/// so the entire packing is done with shifts and ORs in canonical form,
+/// followed by a single Montgomery conversion.
 static __device__ __forceinline__
-void bn254_split_32_3(uint32_t bb[3], Bn254Fr x) {
-    uint64_t canonical[4];
-    bn254_to_canonical(canonical, x);
-    bb[0] = (uint32_t)(canonical[0] % BABYBEAR_PRIME);
-    bb[1] = (uint32_t)(canonical[1] % BABYBEAR_PRIME);
-    bb[2] = (uint32_t)(canonical[2] % BABYBEAR_PRIME);
-    // canonical[3] is the 4th limb; split_32 with n=3 ignores it
+Bn254Fr bn254_pack_base_2_31(const uint32_t* bb, int count) {
+    uint64_t canonical[4] = {0, 0, 0, 0};
+    for (int i = 0; i < count; i++) {
+        int bit_pos = i * 31;
+        int limb = bit_pos >> 6;       // bit_pos / 64
+        int shift = bit_pos & 63;      // bit_pos % 64
+        canonical[limb] |= (uint64_t)(bb[i]) << shift;
+        // If the value spans two limbs (shift + 31 > 64), write the overflow.
+        if (shift > 33 && limb < 3) {  // shift + 31 > 64 iff shift > 33
+            canonical[limb + 1] |= (uint64_t)(bb[i]) >> (64 - shift);
+        }
+    }
+    return bn254_from_canonical(canonical);
+}
+
+/// 256-bit unsigned mod by a 32-bit divisor.
+static __device__ __forceinline__
+uint32_t u256_mod_u32(const uint64_t x[4], uint32_t d) {
+    uint64_t rem = 0;
+    for (int i = 3; i >= 0; i--) {
+        rem = ((rem << 32) | (x[i] >> 32)) % d;
+        rem = ((rem << 32) | (x[i] & 0xFFFFFFFFULL)) % d;
+    }
+    return (uint32_t)rem;
 }
 
 // ---------------------------------------------------------------------------
