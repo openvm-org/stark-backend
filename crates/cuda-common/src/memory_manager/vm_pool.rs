@@ -868,7 +868,7 @@ mod tests {
 
         let page_size = pool.page_size;
         let stream_id = current_stream_id().unwrap();
-        let foreign_stream_id = stream_id + 1000;
+        let other_stream_id = stream_id + 1000;
         let foreign_stream = CudaStream::new().unwrap();
 
         let ptr = pool.malloc_internal(2 * page_size, stream_id).unwrap();
@@ -882,7 +882,7 @@ mod tests {
         *region = FreeRegionMeta {
             size: region.size,
             event: original_event.clone(),
-            stream_id: foreign_stream_id,
+            stream_id: other_stream_id,
             id: 42,
         };
 
@@ -893,7 +893,7 @@ mod tests {
 
         let leftover = pool.free_regions.get(&leftover_addr).unwrap();
         assert_eq!(leftover.size, page_size);
-        assert_eq!(leftover.stream_id, foreign_stream_id);
+        assert_eq!(leftover.stream_id, other_stream_id);
         assert_eq!(leftover.id, 42);
         assert!(Arc::ptr_eq(&leftover.event, &original_event));
     }
