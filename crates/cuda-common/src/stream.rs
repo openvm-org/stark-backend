@@ -160,7 +160,7 @@ impl Ord for CudaEventStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CudaEvent {
     event: cudaEvent_t,
 }

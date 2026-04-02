@@ -1,4 +1,4 @@
-use openvm_cuda_common::d_buffer::DeviceBuffer;
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use tracing::debug;
 
@@ -15,6 +15,14 @@ use crate::{
 
 // We interpolate first, so access to vars is free and doesn't need to be buffered
 const ZEROCHECK_BUFFER_VARS: bool = false;
+const CUDA_GRID_Y_DIM_MAX: u32 = 65535;
+
+fn validate_mle_num_x(num_x: u32) -> Result<(), KernelError> {
+    if num_x == 0 || num_x > CUDA_GRID_Y_DIM_MAX {
+        return Err(CudaError::new(1).into());
+    }
+    Ok(())
+}
 
 /// Evaluate MLE constraints on GPU.
 ///
@@ -32,6 +40,7 @@ pub fn evaluate_mle_constraints_gpu(
     num_y: u32,
     num_x: u32,
 ) -> Result<DeviceBuffer<EF>, KernelError> {
+    validate_mle_num_x(num_x)?;
     let buffer_size = rules.inner.buffer_size;
     let intermed_capacity =
         unsafe { _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };
@@ -87,6 +96,7 @@ pub fn evaluate_mle_interactions_gpu(
     num_y: u32,
     num_x: u32,
 ) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
+    validate_mle_num_x(num_x)?;
     let buffer_size = rules.inner.buffer_size;
     let intermed_capacity =
         unsafe { _logup_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };

@@ -69,8 +69,8 @@ impl<T> MemCopyH2D<T> for [T] {
         if self.len() > dst.len() {
             return Err(MemCopyError::SizeMismatch {
                 operation: "copy_to_device",
-                host_len: self.len(),
-                device_len: dst.len(),
+                src_len: self.len(),
+                dst_len: dst.len(),
             });
         }
         let size_bytes = std::mem::size_of_val(self);
@@ -138,6 +138,13 @@ impl<T> MemCopyD2D<T> for DeviceBuffer<T> {
     }
 
     fn device_copy_to(&self, dst: &mut DeviceBuffer<T>) -> Result<(), MemCopyError> {
+        if self.len() > dst.len() {
+            return Err(MemCopyError::SizeMismatch {
+                operation: "device_copy_to",
+                src_len: self.len(),
+                dst_len: dst.len(),
+            });
+        }
         let size_bytes = std::mem::size_of::<T>() * self.len();
 
         check(unsafe {

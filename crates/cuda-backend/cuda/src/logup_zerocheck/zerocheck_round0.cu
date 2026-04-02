@@ -174,6 +174,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
         NEEDS_SHMEM ? reinterpret_cast<Fp *>(smem + blockDim.x * sizeof(FpExt)) : nullptr;
 
     uint32_t const l_skip = __ffs(skip_domain) - 1;
+    bool const skip_ntt_domain = (l_skip == 0);
 
     // Each x_int group within the block gets its own ntt_buffer slice
     uint32_t const x_int_in_block = threadIdx.x >> l_skip;
@@ -185,7 +186,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
     uint32_t const x_int_base = tidx >> l_skip;
 
     // Precompute values needed for all cosets
-    uint32_t const ntt_idx_rev = rev_len(ntt_idx, l_skip);
+    uint32_t const ntt_idx_rev = skip_ntt_domain ? 0 : rev_len(ntt_idx, l_skip);
 
     // Compute is_first_mult, is_last_mult for all cosets
     uint32_t const log_height_total = __ffs(height) - 1;
@@ -195,9 +196,9 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
 
     Fp is_first_mult[NUM_COSETS];
     Fp is_last_mult[NUM_COSETS];
-    Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
+    Fp const eta = skip_ntt_domain ? Fp::one() : TWO_ADIC_GENERATORS[l_skip - log_stride];
     Fp const omega_skip_ntt =
-        (l_skip == 0) ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
+        skip_ntt_domain ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
 
     Fp g_coset = g_shift; // g^1, will iterate g^2, g^3, ...
 #pragma unroll
@@ -243,7 +244,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
         ntt_idx,
     };
     // Compute omega_shifts directly into context using iterative multiplication
-    Fp const omega_shift_base = pow(g_shift, ntt_idx_rev);
+    Fp const omega_shift_base = skip_ntt_domain ? Fp::one() : pow(g_shift, ntt_idx_rev);
     Fp omega_shift = omega_shift_base;
 #pragma unroll
     for (uint32_t c = 0; c < NUM_COSETS; c++) {
@@ -358,6 +359,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
         NEEDS_SHMEM ? reinterpret_cast<Fp *>(smem + blockDim.x * sizeof(FpExt)) : nullptr;
 
     uint32_t const l_skip = __ffs(skip_domain) - 1;
+    bool const skip_ntt_domain = (l_skip == 0);
     uint32_t const num_cosets = gridDim.y;
 
     // Each x_int group within the block gets its own ntt_buffer slice
@@ -373,16 +375,16 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
     uint32_t const coset_idx = blockIdx.y;
 
     // Precompute values for this single coset
-    uint32_t const ntt_idx_rev = rev_len(ntt_idx, l_skip);
+    uint32_t const ntt_idx_rev = skip_ntt_domain ? 0 : rev_len(ntt_idx, l_skip);
 
     uint32_t const log_height_total = __ffs(height) - 1;
     uint32_t const log_segment = min(l_skip, log_height_total);
     uint32_t const segment_size = 1u << log_segment;
     uint32_t const log_stride = l_skip - log_segment;
 
-    Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
+    Fp const eta = skip_ntt_domain ? Fp::one() : TWO_ADIC_GENERATORS[l_skip - log_stride];
     Fp const omega_skip_ntt =
-        (l_skip == 0) ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
+        skip_ntt_domain ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
 
     // Compute for single coset: g^(coset_idx + 1)
     Fp const g_coset = pow(g_shift, coset_idx + 1);
@@ -390,7 +392,7 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
     Fp const omega = exp_power_of_2(eval_point, log_stride);
     Fp const is_first_mult = avg_gp(omega, segment_size);
     Fp const is_last_mult = avg_gp(omega * eta, segment_size);
-    Fp const omega_shift = pow(g_coset, ntt_idx_rev);
+    Fp const omega_shift = skip_ntt_domain ? Fp::one() : pow(g_coset, ntt_idx_rev);
 
     // Intermediate buffer setup (single coset, no NUM_COSETS multiplier)
     Fp local_buffer[GLOBAL ? 1 : BUFFER_THRESHOLD];
@@ -688,15 +690,34 @@ extern "C" int _zerocheck_ntt_eval_constraints(
     size_t max_temp_bytes
 ) {
     bool is_global = buffer_size > BUFFER_THRESHOLD;
-    bool needs_shmem = skip_domain > WARP_SIZE;
+    bool use_coset_parallel = use_coset_parallel_mode(num_x, skip_domain);
+    if (!use_coset_parallel && num_cosets > 4) {
+        return cudaErrorInvalidValue;
+    }
 
 #define KERNEL_ARGS                                                                                \
     tmp_sums_buffer, output, selectors_cube, preprocessed, main_parts, eq_cube, d_lambda_pows,     \
         public_values, d_rules, rules_len, d_used_nodes, used_nodes_len, lambda_len, buffer_size,  \
         d_intermediates, skip_domain, num_x, height
 
+    if (skip_domain == 1) {
+        if (use_coset_parallel) {
+            return is_global ? launch_zerocheck_coset_parallel<true, false>(
+                                   KERNEL_ARGS, num_cosets, g_shift, max_temp_bytes
+                               )
+                             : launch_zerocheck_coset_parallel<false, false>(
+                                   KERNEL_ARGS, num_cosets, g_shift, max_temp_bytes
+                               );
+        }
+        return dispatch_zerocheck(
+            num_cosets, is_global, false, KERNEL_ARGS, g_shift, max_temp_bytes
+        );
+    }
+
+    bool needs_shmem = skip_domain > WARP_SIZE;
+
     // Threshold-based dispatch: use coset-parallel for small workloads
-    if (use_coset_parallel_mode(num_x, skip_domain)) {
+    if (use_coset_parallel) {
         // Coset-parallel mode: grid.y = num_cosets, each block handles one coset
         return DISPATCH_BOOL_PAIR(
             launch_zerocheck_coset_parallel,

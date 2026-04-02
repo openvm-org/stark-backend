@@ -2,6 +2,18 @@ use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
 
 use crate::prelude::{Digest, EF, F};
 
+pub(super) const MAX_MERKLE_LOG_ROWS_PER_QUERY: usize = 10;
+const MAX_CUDA_GRID_Y: usize = u16::MAX as usize;
+
+pub(super) fn validate_merkle_log_rows_per_query(
+    log_rows_per_query: usize,
+) -> Result<(), CudaError> {
+    if log_rows_per_query > MAX_MERKLE_LOG_ROWS_PER_QUERY {
+        return Err(CudaError::new(1));
+    }
+    Ok(())
+}
+
 extern "C" {
     fn _poseidon2_compressing_row_hashes(
         out: *mut Digest,
@@ -56,6 +68,7 @@ pub unsafe fn poseidon2_compressing_row_hashes(
     query_stride: usize,
     log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
+    validate_merkle_log_rows_per_query(log_rows_per_query)?;
     debug_assert!(matrix.len() >= width * (query_stride << log_rows_per_query));
     debug_assert!(out.len() >= query_stride);
     CudaError::from_result(_poseidon2_compressing_row_hashes(
@@ -85,6 +98,7 @@ pub unsafe fn poseidon2_compressing_row_hashes_ext(
     query_stride: usize,
     log_rows_per_query: usize,
 ) -> Result<(), CudaError> {
+    validate_merkle_log_rows_per_query(log_rows_per_query)?;
     debug_assert!(matrix.len() >= width * (query_stride << log_rows_per_query));
     debug_assert!(out.len() >= query_stride);
     CudaError::from_result(_poseidon2_compressing_row_hashes_ext(
@@ -147,14 +161,20 @@ pub unsafe fn query_digest_layers(
     d_digest_matrix: &mut DeviceBuffer<F>,
     d_layers_ptr: &DeviceBuffer<u64>,
     d_indices: &DeviceBuffer<u64>,
-    num_query: u64,
-    num_layer: u64,
+    num_query: usize,
+    num_layer: usize,
 ) -> Result<(), CudaError> {
+    if num_query == 0 || num_layer == 0 {
+        return Ok(());
+    }
+    if num_query > MAX_CUDA_GRID_Y {
+        return Err(CudaError::new(1));
+    }
     CudaError::from_result(_query_digest_layers(
         d_digest_matrix.as_mut_ptr(),
         d_layers_ptr.as_ptr(),
         d_indices.as_ptr(),
-        num_query,
-        num_layer,
+        num_query as u64,
+        num_layer as u64,
     ))
 }

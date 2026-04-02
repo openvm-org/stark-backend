@@ -279,7 +279,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         lambda: EF,
         sm_count: u32,
     ) -> Result<Self, StackedReductionError> {
-        ensure_device_ntt_twiddles_initialized();
+        ensure_device_ntt_twiddles_initialized().map_err(StackedReductionError::InitNttTwiddles)?;
         let mem = MemTracker::start("prover.stacked_reduction_new");
         let l_skip = mpk.params.l_skip;
         let n_stack = mpk.params.n_stack;

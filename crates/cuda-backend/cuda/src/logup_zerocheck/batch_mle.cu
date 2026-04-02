@@ -1,4 +1,5 @@
 #include "codec.cuh"
+#include "eval_config.cuh"
 #include "eval_ctx.cuh"
 #include "frac_ext.cuh"
 #include "launcher.cuh"
@@ -386,6 +387,9 @@ extern "C" int _zerocheck_batch_eval_mle(
     uint32_t num_airs,
     uint32_t threads_per_block
 ) {
+    if (!valid_grid_y_dim(num_x)) {
+        return cudaErrorInvalidValue;
+    }
     dim3 grid(num_blocks, num_x);
     dim3 block(threads_per_block);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
@@ -421,6 +425,9 @@ extern "C" int _logup_batch_eval_mle(
     uint32_t num_airs,
     uint32_t threads_per_block
 ) {
+    if (!valid_frac_grid_y_dim(num_x)) {
+        return cudaErrorInvalidValue;
+    }
     dim3 grid(num_blocks, num_x);
     dim3 block(threads_per_block);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);

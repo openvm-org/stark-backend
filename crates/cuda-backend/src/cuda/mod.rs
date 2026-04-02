@@ -29,6 +29,8 @@ pub mod sumcheck {
     use super::*;
     use crate::poly::EqEvalSegments;
 
+    const MAX_SUMCHECK_MLE_ROUND_D: u32 = 5;
+
     extern "C" {
         fn _sumcheck_mle_round(
             input_matrices: *const *const EF,
@@ -92,6 +94,9 @@ pub mod sumcheck {
         height: u32,
         d: u32,
     ) -> Result<(), CudaError> {
+        if d == 0 || d > MAX_SUMCHECK_MLE_ROUND_D {
+            return Err(CudaError::new(1));
+        }
         CudaError::from_result(_sumcheck_mle_round(
             input_matrices.as_ptr(),
             output.as_mut_ptr(),

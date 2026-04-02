@@ -632,7 +632,11 @@ where
     } else {
         0
     };
-    let mut work_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(max_work_size);
+    let mut work_buffer = if max_work_size > 0 {
+        DeviceBuffer::<Frac<EF>>::with_capacity(max_work_size)
+    } else {
+        DeviceBuffer::new()
+    };
     let max_tmp_buffer_capacity = if total_rounds > 1 {
         (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32) }) as usize
     } else {

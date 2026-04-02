@@ -6,7 +6,7 @@ use openvm_stark_backend::prover::MatrixDimensions;
 use super::errors::FoldPleError;
 use crate::{
     base::DeviceMatrix,
-    cuda::logup_zerocheck::fold_ple_from_evals,
+    cuda::{batch_ntt_small::validate_gpu_l_skip, logup_zerocheck::fold_ple_from_evals},
     prelude::{EF, F},
 };
 
@@ -20,6 +20,7 @@ pub fn fold_ple_evals_rotate(
     d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
     need_rot: bool,
 ) -> Result<DeviceMatrix<EF>, FoldPleError> {
+    validate_gpu_l_skip(l_skip)?;
     let width = trace_evals.width();
     let height = trace_evals.height();
     let num_x = max(height >> l_skip, 1);
@@ -72,6 +73,7 @@ pub unsafe fn fold_ple_evals_gpu(
     d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
     rotate: bool,
 ) -> Result<(), FoldPleError> {
+    validate_gpu_l_skip(l_skip)?;
     let height = mat.height();
     let width = mat.width();
 

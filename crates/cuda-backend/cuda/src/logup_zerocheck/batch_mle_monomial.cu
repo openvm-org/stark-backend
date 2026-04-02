@@ -1,3 +1,4 @@
+#include "eval_config.cuh"
 #include "eval_ctx.cuh"
 #include "frac_ext.cuh"
 #include "launcher.cuh"
@@ -164,6 +165,9 @@ extern "C" int _zerocheck_monomial_batched(
     if (num_blocks == 0) {
         return 0;
     }
+    if (!valid_grid_y_dim(num_x)) {
+        return cudaErrorInvalidValue;
+    }
 
     dim3 grid(num_blocks, num_x);
     dim3 block(threads_per_block);
@@ -269,6 +273,9 @@ extern "C" int _zerocheck_monomial_par_y_batched(
 ) {
     if (num_blocks == 0) {
         return 0;
+    }
+    if (!valid_grid_y_dim(num_x)) {
+        return cudaErrorInvalidValue;
     }
 
     dim3 grid(num_blocks, num_x);
@@ -456,6 +463,9 @@ extern "C" int _logup_monomial_batched(
 ) {
     if (num_blocks == 0)
         return 0;
+    if (!valid_frac_grid_y_dim(num_x)) {
+        return cudaErrorInvalidValue;
+    }
 
     dim3 grid(num_blocks, num_x);
     dim3 block(threads_per_block);

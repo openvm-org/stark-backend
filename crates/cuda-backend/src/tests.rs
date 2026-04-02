@@ -5,7 +5,6 @@
 //! GPU-specific tests (monomial vs DAG, stacked reduction) remain here.
 //! Additional GPU-specific test cases for parameterized shared tests are added below.
 
-#[cfg(feature = "baby-bear-bn254-poseidon2")]
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -22,7 +21,7 @@ use openvm_stark_backend::{
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
         DeviceDataTransporter, MatrixDimensions, MultiRapProver,
     },
-    test_utils::{default_test_params_small, FibFixture, TestFixture},
+    test_utils::{default_test_params_small, FibFixture, InteractionsFixture11, TestFixture},
     verifier::stacked_reduction::{verify_stacked_reduction, StackedReductionError},
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig,
 };
@@ -45,8 +44,11 @@ use test_case::test_case;
 use tracing::{debug, Level};
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
-use crate::{base::DeviceMatrix, cuda::bn254_merkle_tree::Bn254Digest, merkle_tree::MerkleTreeGpu};
+use crate::cuda::bn254_merkle_tree::Bn254Digest;
 use crate::{
+    base::DeviceMatrix,
+    cuda::{batch_ntt_small::batch_ntt_small, logup_zerocheck::frac_matrix_vertically_repeat},
+    merkle_tree::MerkleTreeGpu,
     prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
     BabyBearPoseidon2GpuEngine, GpuBackend,
@@ -424,9 +426,169 @@ fn test_bn254_row_hash_emulation_matches_host_multi_block_rows() {
     assert_eq!(bn254_row_hash_emulated(&row), host_hasher.hash_slice(&row));
 }
 
+#[test]
+fn test_merkle_gpu_supports_1024_rows_per_query() {
+    use openvm_cuda_common::copy::MemCopyH2D;
+
+    let height = 1 << 10;
+    let width = 7;
+    let rows_per_query = 1 << 10;
+    let host_matrix = (0..width * height)
+        .map(|i| F::from_u32((i as u32).wrapping_mul(31).wrapping_add((i >> 2) as u32)))
+        .collect_vec();
+
+    let device_matrix =
+        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
+        crate::hash_scheme::Poseidon2MerkleHash,
+    >(device_matrix, rows_per_query, true)
+    .expect("rows_per_query=1024 should be supported");
+
+    assert_eq!(tree.query_stride(), 1);
+    assert_eq!(tree.proof_depth(), 0);
+}
+
+#[test]
+fn test_merkle_batch_query_zero_work_returns_empty() {
+    use openvm_cuda_common::copy::MemCopyH2D;
+
+    let height = 1 << 3;
+    let width = 4;
+    let rows_per_query = height;
+    let host_matrix = (0..width * height)
+        .map(|i| F::from_u32((i as u32).wrapping_mul(19).wrapping_add(7)))
+        .collect_vec();
+
+    let device_matrix =
+        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
+        crate::hash_scheme::Poseidon2MerkleHash,
+    >(device_matrix, rows_per_query, true)
+    .unwrap();
+
+    let proofs =
+        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(&[&tree], &[0])
+            .unwrap();
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].len(), 1);
+    assert!(proofs[0][0].is_empty());
+
+    let empty_queries =
+        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(&[&tree], &[])
+            .unwrap();
+    assert_eq!(empty_queries.len(), 1);
+    assert!(empty_queries[0].is_empty());
+}
+
+#[test]
+fn test_merkle_batch_open_rows_empty_queries_returns_empty() {
+    use openvm_cuda_common::copy::MemCopyH2D;
+
+    let height = 1 << 3;
+    let width = 4;
+    let host_matrix = (0..width * height)
+        .map(|i| F::from_u32((i as u32).wrapping_mul(23).wrapping_add(11)))
+        .collect_vec();
+    let device_matrix =
+        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+
+    let opened_rows =
+        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_open_rows(&[&device_matrix], &[], 1, 1)
+            .unwrap();
+    assert_eq!(opened_rows.len(), 1);
+    assert!(opened_rows[0].is_empty());
+}
+
 // ===========================================================================
 // GPU-specific tests (not shared)
 // ===========================================================================
+
+#[test]
+fn test_interactions_roundtrip_with_l_skip_zero() {
+    use openvm_stark_backend::test_utils::test_system_params_small;
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let engine = BabyBearPoseidon2GpuEngine::new(test_system_params_small(0, 8, 3));
+    let fixture = InteractionsFixture11;
+    let (vk, proof) = fixture.keygen_and_prove(&engine);
+    engine
+        .verify(&vk, &proof)
+        .expect("l_skip=0 interactions roundtrip should verify");
+}
+
+#[test_case(1 ; "l_skip_1")]
+#[test_case(4 ; "l_skip_4")]
+fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
+    use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let block_size = 1usize << l_skip;
+    let cnt_blocks = (1024usize >> l_skip) + 1;
+    let original = (0..(cnt_blocks * block_size))
+        .map(|i| F::from_u32((i as u32).wrapping_mul(17).wrapping_add(5)))
+        .collect_vec();
+    let mut d_values = original.to_device().unwrap();
+
+    unsafe {
+        batch_ntt_small(&mut d_values, l_skip, cnt_blocks, false).unwrap();
+        batch_ntt_small(&mut d_values, l_skip, cnt_blocks, true).unwrap();
+    }
+
+    assert_eq!(d_values.to_host().unwrap(), original);
+}
+
+#[test]
+fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
+    use openvm_cuda_common::{
+        copy::{MemCopyD2H, MemCopyH2D},
+        d_buffer::DeviceBuffer,
+    };
+    use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let width = 3usize;
+    let height = 769usize;
+    let lifted_height = 1538usize;
+    let padded_height = 2048usize;
+    let tail_rows = padded_height - lifted_height;
+    let output_len = width * lifted_height + tail_rows;
+    let canary = Frac::new(EF::from_u32(777), EF::from_u32(999));
+
+    let input = (0..(width * height))
+        .map(|i| Frac::new(EF::from_u32(i as u32 + 1), EF::from_u32(i as u32 + 1001)))
+        .collect_vec();
+    let mut expected = vec![canary; output_len];
+    for col in 0..width {
+        for row in 0..lifted_height {
+            expected[col * lifted_height + row] = input[col * height + (row % height)];
+        }
+    }
+
+    let d_input = input.to_device().unwrap();
+    let mut d_output = DeviceBuffer::<Frac<EF>>::with_capacity(output_len);
+    vec![canary; output_len].copy_to(&mut d_output).unwrap();
+
+    unsafe {
+        frac_matrix_vertically_repeat(
+            d_output.as_mut_ptr(),
+            d_input.as_ptr(),
+            width as u32,
+            lifted_height as u32,
+            height as u32,
+        )
+        .unwrap();
+    }
+
+    let output = d_output.to_host().unwrap();
+    assert_eq!(output.len(), expected.len());
+    for (idx, (got, want)) in output.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(got.p, want.p, "numerator mismatch at index {idx}");
+        assert_eq!(got.q, want.q, "denominator mismatch at index {idx}");
+    }
+}
 
 #[test_case(9)]
 #[test_case(2 ; "when log_height equals l_skip")]

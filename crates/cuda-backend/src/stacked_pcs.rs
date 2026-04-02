@@ -247,7 +247,7 @@ pub fn rs_code_matrix(
         unsafe {
             mle_interpolate_stages(
                 codewords.as_mut_ptr(),
-                width as u16,
+                width,
                 codeword_height as u32,
                 log_blowup as u32,
                 0,                 // start_log_step

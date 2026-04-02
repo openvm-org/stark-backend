@@ -94,6 +94,7 @@ pub fn transport_matrix_h2d_col_major<T>(
 ) -> Result<DeviceMatrix<T>, MemCopyError> {
     // matrix is already col-major, so this is just H2D buffer transfer
     let buffer = matrix.values.to_device()?;
+    current_stream_sync()?;
     Ok(DeviceMatrix::new(
         Arc::new(buffer),
         matrix.height(),
@@ -115,6 +116,7 @@ pub fn transport_matrix_h2d_row(
             Matrix::height(matrix),
         )?;
     }
+    current_stream_sync()?;
     assert_eq!(output.strong_count(), 1);
     Ok(output)
 }
@@ -212,6 +214,7 @@ pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
         .iter()
         .map(|layer| layer.to_device())
         .collect::<Result<Vec<_>, _>>()?;
+    current_stream_sync()?;
     Ok(MerkleTreeGpu {
         backing_matrix,
         digest_layers,
@@ -237,6 +240,7 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
         .cache_stacked_matrix
         .then(|| PleMatrix::from_evals(layout.l_skip(), d_matrix_evals, height, width));
     let d_tree = transport_merkle_tree_h2d(tree, prover_config.cache_rs_code_matrix)?;
+    current_stream_sync().map_err(ProverError::CurrentStreamSync)?;
 
     Ok(StackedPcsDataGpu {
         layout: layout.clone(),

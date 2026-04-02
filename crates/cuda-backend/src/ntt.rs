@@ -1,32 +1,49 @@
-use std::sync::Once;
+use std::{
+    collections::BTreeSet,
+    sync::{Mutex, OnceLock},
+};
 
-use openvm_cuda_common::d_buffer::DeviceBuffer;
+use openvm_cuda_common::{
+    common::{device_reset_epoch, get_device},
+    d_buffer::DeviceBuffer,
+};
 
 use crate::{cuda::ntt, prelude::F};
 
-const MAX_LG_DOMAIN_SIZE: usize = 27;
+const MAX_LG_DOMAIN_SIZE: usize = ntt::MAX_CUDA_NTT_LOG_DOMAIN_SIZE as usize;
 const LG_WINDOW_SIZE: usize = MAX_LG_DOMAIN_SIZE.div_ceil(5);
 const WINDOW_SIZE: usize = 1 << LG_WINDOW_SIZE;
 const WINDOW_NUM: usize = MAX_LG_DOMAIN_SIZE.div_ceil(LG_WINDOW_SIZE);
+const RADIX_TWIDDLES_SIZE: usize = 32 + 64 + 128 + 256 + 512;
 
-static INIT_FORWARD: Once = Once::new();
-static INIT_INVERSE: Once = Once::new();
+static INIT_FORWARD: OnceLock<Mutex<BTreeSet<(i32, u64)>>> = OnceLock::new();
+static INIT_INVERSE: OnceLock<Mutex<BTreeSet<(i32, u64)>>> = OnceLock::new();
 
-fn ensure_initialized(inverse: bool) {
-    let once = if inverse {
+fn ensure_initialized(inverse: bool) -> Result<(), openvm_cuda_common::error::CudaError> {
+    let device_key = (get_device()?, device_reset_epoch());
+    let initialized = if inverse {
         &INIT_INVERSE
     } else {
         &INIT_FORWARD
     };
+    let initialized = initialized.get_or_init(|| Mutex::new(BTreeSet::new()));
+    let mut initialized = initialized.lock().unwrap();
+    if initialized.contains(&device_key) {
+        return Ok(());
+    }
 
-    once.call_once(|| {
+    {
         let partial_twiddles = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity(WINDOW_NUM);
-        let twiddles = DeviceBuffer::<F>::with_capacity(32 + 64 + 128 + 256 + 512);
+        let twiddles = DeviceBuffer::<F>::with_capacity(RADIX_TWIDDLES_SIZE);
         unsafe {
-            ntt::generate_all_twiddles(&twiddles, inverse).unwrap();
-            ntt::generate_partial_twiddles(&partial_twiddles, inverse).unwrap();
+            // Both CUDA helpers upload into constant memory and synchronize before returning, so
+            // these staging buffers are safe to free once the calls complete.
+            ntt::generate_all_twiddles(&twiddles, inverse)?;
+            ntt::generate_partial_twiddles(&partial_twiddles, inverse)?;
         }
-    });
+    }
+    initialized.insert(device_key);
+    Ok(())
 }
 
 struct NttImpl<'a> {
@@ -46,7 +63,7 @@ impl<'a> NttImpl<'a> {
         poly_count: u32,
         is_intt: bool,
     ) -> Self {
-        ensure_initialized(is_intt);
+        ensure_initialized(is_intt).expect("failed to initialize CUDA NTT twiddle tables");
         Self {
             buffer,
             lg_domain_size,
@@ -71,7 +88,7 @@ impl<'a> NttImpl<'a> {
                 self.poly_count,
                 self.is_intt,
             )
-            .unwrap();
+            .expect("failed to launch CUDA mixed-radix NTT step");
         }
         self.stage += iterations;
     }
@@ -95,12 +112,18 @@ pub fn batch_ntt(
     if log_trace_height == 0 {
         return;
     }
+    assert!(
+        log_trace_height <= ntt::MAX_CUDA_NTT_LOG_DOMAIN_SIZE,
+        "CUDA batch_ntt supports log_trace_height <= {}",
+        ntt::MAX_CUDA_NTT_LOG_DOMAIN_SIZE
+    );
 
     let padded_poly_size = 1 << (log_trace_height + log_blowup);
 
     if bit_reverse {
         unsafe {
-            ntt::bit_rev(buffer, buffer, log_trace_height, padded_poly_size, width).unwrap();
+            ntt::bit_rev(buffer, buffer, log_trace_height, padded_poly_size, width)
+                .expect("failed to launch CUDA bit-reversal permutation");
         }
     }
 
@@ -111,20 +134,13 @@ pub fn batch_ntt(
         let step = log_trace_height / 2;
         _impl.step(step + log_trace_height % 2);
         _impl.step(step);
-    } else if log_trace_height <= 30 {
+    } else if log_trace_height <= ntt::MAX_CUDA_NTT_LOG_DOMAIN_SIZE {
         let step = log_trace_height / 3;
         let rem = log_trace_height % 3;
         _impl.step(step);
-        _impl.step(step + (if log_trace_height == 29 { 1 } else { 0 }));
-        _impl.step(step + (if log_trace_height == 29 { 1 } else { rem }));
-    } else if log_trace_height <= 40 {
-        let step = log_trace_height / 4;
-        let rem = log_trace_height % 4;
         _impl.step(step);
-        _impl.step(step + (if rem > 2 { 1 } else { 0 }));
-        _impl.step(step + (if rem > 1 { 1 } else { 0 }));
-        _impl.step(step + (if rem > 0 { 1 } else { 0 }));
+        _impl.step(step + rem);
     } else {
-        panic!("log_trace_height > 40 not supported");
+        unreachable!("log_trace_height is bounded above");
     }
 }
