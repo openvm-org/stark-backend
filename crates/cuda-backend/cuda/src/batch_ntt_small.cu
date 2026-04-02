@@ -54,18 +54,19 @@ extern "C" int _generate_device_ntt_twiddles(Fp *d_twiddles) {
     // Generate twiddles on GPU
     constexpr uint32_t BLOCK_SIZE = 256;
     uint32_t num_blocks = div_ceil(DEVICE_NTT_TWIDDLES_SIZE, BLOCK_SIZE);
-    generate_device_ntt_twiddles_kernel<<<num_blocks, BLOCK_SIZE>>>(d_twiddles);
+    cudaStream_t stream = cudaStreamPerThread;
+    generate_device_ntt_twiddles_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_twiddles);
 
-    // Copy to constant memory using per-thread stream
+    // Generate and publish on the same explicit stream so the copy cannot race the kernel.
     cudaMemcpyToSymbolAsync(
         DEVICE_NTT_TWIDDLES,
         d_twiddles,
         DEVICE_NTT_TWIDDLES_SIZE * sizeof(Fp),
         0,
         cudaMemcpyDeviceToDevice,
-        cudaStreamPerThread
+        stream
     );
-    cudaStreamSynchronize(cudaStreamPerThread);
+    cudaStreamSynchronize(stream);
 
     return CHECK_KERNEL();
 }
@@ -100,6 +101,9 @@ __global__ void batch_ntt_kernel(
 
         ntt_natural_to_bitrev<intt, true>(this_thread_value, sbuf, i, l_skip, active_thread);
     } else if (active_thread) {
+        // For l_skip < LOG_WARP_SIZE a warp contains multiple independent NTT instances. The
+        // helper uses a deterministic subgroup mask so the last block may safely skip whole
+        // inactive groups without naming non-participating lanes in shuffles.
         this_thread_value = buffer[i];
         ntt_natural_to_bitrev<intt, false>(this_thread_value, nullptr, i, l_skip, true);
     }
@@ -132,6 +136,13 @@ extern "C" int _batch_ntt_small(
     size_t const cnt_blocks,
     bool const is_intt
 ) {
+    if (l_skip == 0 || cnt_blocks == 0) {
+        return 0;
+    }
+    if (l_skip > MAX_NTT_LEVEL) {
+        return cudaErrorInvalidValue;
+    }
+
     bool const needs_shmem = l_skip > LOG_WARP_SIZE;
     assert((1 << l_skip) <= 1024);
     return DISPATCH_BOOL_PAIR(

@@ -202,8 +202,8 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                     norm_factor,
                     tmp.len() as u32,
                 )?;
-                // SAFETY: stacked interaction layout is defined with respect to lifted height so
-                // lifting (i.e., vertically repeating) stays within bounds
+                // SAFETY: stacked interaction layout is defined with respect to lifted height, and
+                // the vertical-repeat kernel guards rounded-up tail threads beyond lifted_height.
                 frac_matrix_vertically_repeat(
                     leaves_ptr,
                     tmp.as_ptr(),

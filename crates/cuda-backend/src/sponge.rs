@@ -21,6 +21,13 @@ use p3_symmetric::Permutation;
 
 use crate::types::{Challenger, Digest, CHUNK, F, SC, WIDTH};
 
+pub(crate) fn validate_gpu_grind_bits(bits: usize) -> Result<(), GrindError> {
+    if bits >= u32::BITS as usize || (1u64 << bits) >= u64::from(F::ORDER_U32) {
+        return Err(CudaError::new(1).into());
+    }
+    Ok(())
+}
+
 /// Device-side sponge state, matching the CUDA `DeviceSpongeState` struct.
 ///
 /// This struct is `#[repr(C)]` to ensure ABI compatibility with the CUDA kernel.
@@ -259,6 +266,7 @@ impl DuplexSpongeGpu {
     /// After this call, the host state will have observed the witness and sampled,
     /// matching the state after calling `check_witness(bits, witness)`.
     pub fn grind_gpu(&mut self, bits: usize) -> Result<F, GrindError> {
+        validate_gpu_grind_bits(bits)?;
         // Trivial case: 0 bits mean no PoW is required and any witness is valid.
         if bits == 0 {
             return Ok(F::ZERO);

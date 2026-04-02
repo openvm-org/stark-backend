@@ -32,6 +32,29 @@ pub trait BatchQueryMerkle: Copy + Sized + 'static {
     fn reconstruct_from_f(out: &[F], base: usize) -> Self;
 }
 
+const MAX_MERKLE_ROWS_PER_QUERY: usize = 1024;
+
+fn validate_merkle_rows_per_query(
+    rows_per_query: usize,
+    height: usize,
+) -> Result<usize, MerkleTreeError> {
+    // The generic Merkle constructor still treats "power of two" and "fits within the matrix
+    // height" as caller invariants. The CUDA-specific maximum rows-per-query is returned as a
+    // recoverable error because it depends on backend support, not generic Merkle correctness.
+    let k = log2_strict_usize(rows_per_query);
+    assert!(
+        rows_per_query <= height,
+        "rows_per_query ({rows_per_query}) must not exceed height ({height})"
+    );
+    if rows_per_query > MAX_MERKLE_ROWS_PER_QUERY {
+        return Err(MerkleTreeError::UnsupportedRowsPerQuery {
+            rows_per_query,
+            max_rows_per_query: MAX_MERKLE_ROWS_PER_QUERY,
+        });
+    }
+    Ok(k)
+}
+
 impl BatchQueryMerkle for Digest {
     fn reconstruct_from_f(out: &[F], base: usize) -> Self {
         from_fn(|i| out[base + i])
@@ -118,11 +141,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
         assert!(height.is_power_of_two());
-        let k = log2_strict_usize(rows_per_query);
-        assert!(
-            rows_per_query <= height,
-            "rows_per_query ({rows_per_query}) must not exceed height ({height})"
-        );
+        let k = validate_merkle_rows_per_query(rows_per_query, height)?;
         let query_stride = height / rows_per_query;
         let mut query_digest_layer = DeviceBuffer::<D>::with_capacity(query_stride);
         // SAFETY: query_digest_layer properly allocated
@@ -187,6 +206,9 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         >,
         MerkleTreeError,
     > {
+        if query_indices.is_empty() {
+            return Ok(vec![Vec::new(); backing_matrices.len()]);
+        }
         let row_idxs = query_indices
             .iter()
             .flat_map(|&query_idx| {
@@ -214,7 +236,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                         &d_row_idxs,
                         matrix.width() as u64,
                         matrix.height() as u64,
-                        d_row_idxs.len() as u32,
+                        d_row_idxs.len(),
                     )
                     .map_err(|error| MerkleTreeError::MatrixGetRows { error, matrix_idx })?;
                 }
@@ -279,6 +301,9 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         trees: &[&Self],
         query_indices: &[usize],
     ) -> Result<Vec<Vec<Vec<D>>>, MerkleTreeError> {
+        if trees.is_empty() {
+            return Ok(Vec::new());
+        }
         // The kernel treats each layer as a separate array and does parallel accesses;
         // we lay out all the layer pointers flattened into a vec.
         let num_trees = trees.len();
@@ -288,6 +313,12 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
             trees.iter().all(|tree| tree.proof_depth() == depth),
             "Merkle trees don't have same depth"
         );
+        if num_queries == 0 {
+            return Ok(vec![Vec::new(); num_trees]);
+        }
+        if depth == 0 {
+            return Ok(vec![vec![Vec::new(); num_queries]; num_trees]);
+        }
         let layers_ptr = trees
             .iter()
             .flat_map(|tree| {
@@ -330,8 +361,8 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 &mut d_out,
                 &d_layers_ptr,
                 &d_indices,
-                num_queries as u64,
-                d_layers_ptr.len() as u64,
+                num_queries,
+                d_layers_ptr.len(),
             )
             .map_err(MerkleTreeError::QueryDigestLayers)?;
         }
@@ -410,11 +441,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
     ) -> Result<Self, MerkleTreeError> {
         let height = matrix.height();
         assert!(height.is_power_of_two());
-        let k = log2_strict_usize(rows_per_query);
-        assert!(
-            rows_per_query <= height,
-            "rows_per_query ({rows_per_query}) must not exceed height ({height})"
-        );
+        let k = validate_merkle_rows_per_query(rows_per_query, height)?;
         let query_stride = height / rows_per_query;
         let mut query_digest_layer = DeviceBuffer::<D>::with_capacity(query_stride);
         // SAFETY: query_digest_layer properly allocated

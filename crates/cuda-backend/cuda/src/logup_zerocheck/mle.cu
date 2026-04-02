@@ -374,6 +374,9 @@ extern "C" int _zerocheck_eval_mle(
     uint32_t num_y,
     uint32_t num_x
 ) {
+    if (!valid_grid_y_dim(num_x)) {
+        return cudaErrorInvalidValue;
+    }
     auto [grid, block] =
         mle_rounds_config::eval_constraints_launch_params(num_x, num_y, MAX_THREADS);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
@@ -438,6 +441,9 @@ extern "C" int _logup_eval_mle(
     uint32_t num_y,
     uint32_t num_x
 ) {
+    if (!valid_grid_y_dim(num_x)) {
+        return cudaErrorInvalidValue;
+    }
     auto [grid, block] =
         mle_rounds_config::eval_constraints_launch_params(num_x, num_y, MAX_THREADS);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);

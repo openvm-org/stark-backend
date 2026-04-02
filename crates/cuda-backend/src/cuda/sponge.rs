@@ -6,7 +6,7 @@ use openvm_cuda_common::{
     error::CudaError,
 };
 
-use crate::sponge::{DeviceSpongeState, GrindError};
+use crate::sponge::{validate_gpu_grind_bits, DeviceSpongeState, GrindError};
 
 extern "C" {
     fn _sponge_grind(
@@ -35,6 +35,7 @@ pub unsafe fn sponge_grind(
     bits: u32,
     max_witness: u32,
 ) -> Result<u32, GrindError> {
+    validate_gpu_grind_bits(bits as usize)?;
     let mut d_result = DeviceBuffer::with_capacity(1);
     [u32::MAX].copy_to(&mut d_result)?;
     for start in (0..=max_witness).step_by(1 << bits) {

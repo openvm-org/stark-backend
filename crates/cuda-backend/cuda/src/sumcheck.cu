@@ -165,6 +165,7 @@ __global__ void fold_mle_kernel(
     const FpExt *__restrict__ const *__restrict__ input_matrices, // Array of input matrix pointers
     FpExt *__restrict__ const *__restrict__ output_matrices,      // Array of output matrix pointers
     const uint32_t *widths,                                       // Width of each matrix
+    const uint32_t num_matrices,
     const uint8_t log_output_height,
     const FpExt r_val
 ) {
@@ -173,7 +174,14 @@ __global__ void fold_mle_kernel(
 
     // blockIdx.y selects which matrix we're working on
     sumcheck::fold_mle(
-        input_matrices, output_matrices, widths, log_output_height, r_val, tidx, mat_idx
+        input_matrices,
+        output_matrices,
+        widths,
+        num_matrices,
+        log_output_height,
+        r_val,
+        tidx,
+        mat_idx
     );
 }
 
@@ -193,16 +201,27 @@ __global__ void batch_fold_mle_kernel(
     const FpExt *__restrict__ const *__restrict__ input_matrices, // Array of input matrix pointers
     FpExt *__restrict__ const *__restrict__ output_matrices,      // Array of output matrix pointers
     const uint32_t *widths,                                       // Width of each matrix
+    const uint32_t num_matrices,
     const uint8_t *log_output_heights,
     const FpExt r_val
 ) {
     uint32_t mat_idx = blockIdx.y * blockDim.y + threadIdx.y;
     uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
 
+    if (mat_idx >= num_matrices) {
+        return;
+    }
     uint8_t log_output_height = log_output_heights[mat_idx];
 
     sumcheck::fold_mle(
-        input_matrices, output_matrices, widths, log_output_height, r_val, tidx, mat_idx
+        input_matrices,
+        output_matrices,
+        widths,
+        num_matrices,
+        log_output_height,
+        r_val,
+        tidx,
+        mat_idx
     );
 }
 
@@ -286,7 +305,7 @@ extern "C" int _fold_mle(
     auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
     uint8_t log_output_height = static_cast<uint8_t>(31 - __builtin_clz(output_height));
     fold_mle_kernel<<<grid, block>>>(
-        input_matrices, output_matrices, widths, log_output_height, r_val
+        input_matrices, output_matrices, widths, num_matrices, log_output_height, r_val
     );
     return CHECK_KERNEL();
 }
@@ -312,7 +331,7 @@ extern "C" int _batch_fold_mle(
 ) {
     auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
     batch_fold_mle_kernel<<<grid, block>>>(
-        input_matrices, output_matrices, widths, log_output_heights, r_val
+        input_matrices, output_matrices, widths, num_matrices, log_output_heights, r_val
     );
     return CHECK_KERNEL();
 }
@@ -359,6 +378,9 @@ extern "C" int _sumcheck_mle_round(
     const uint32_t height,
     const uint32_t d
 ) {
+    if (d == 0 || d > 5) {
+        return cudaErrorInvalidValue;
+    }
     int half_height = height >> 1;
     auto [grid, block] = kernel_launch_params(half_height);
     unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;

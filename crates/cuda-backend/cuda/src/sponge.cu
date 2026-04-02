@@ -96,6 +96,9 @@ extern "C" int _sponge_grind(
     uint32_t* result  // Output: device pointer where the found witness value will be written.
     // Must be set to `UINT32_MAX` before this function call
 ) {
+    if (bits >= 32 || (uint64_t{1} << bits) >= Fp::P) {
+        return cudaErrorInvalidValue;
+    }
     auto const [grid, block] = kernel_launch_params(1 << bits);
     grind_kernel<<<grid, block>>>(init_state, bits, min_witness, max_witness, result);
 

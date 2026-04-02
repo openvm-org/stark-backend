@@ -438,6 +438,13 @@ impl VirtualMemoryPool {
         debug_assert!(requested != 0);
         debug_assert_eq!(requested % self.page_size, 0);
 
+        if requested > self.va_size {
+            return Err(MemoryError::RequestedExceedsVaChunk {
+                requested,
+                va_size: self.va_size,
+            });
+        }
+
         if let Some((&addr, &size)) = self
             .unmapped_regions
             .iter()

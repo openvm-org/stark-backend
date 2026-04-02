@@ -90,6 +90,11 @@ pub enum MemoryError {
     InvalidMemorySize { size: usize },
 
     #[error(
+        "Requested VPMM allocation {requested} exceeds reserved VA chunk size {va_size} bytes"
+    )]
+    RequestedExceedsVaChunk { requested: usize, va_size: usize },
+
+    #[error(
         "Out of memory in pool (size requested: {requested} bytes, available: {available} bytes)"
     )]
     OutOfMemory { requested: usize, available: usize },
@@ -105,10 +110,10 @@ pub enum MemoryError {
 pub enum MemCopyError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
-    #[error("Size mismatch in {operation}: host len={host_len}, device len={device_len}")]
+    #[error("Size mismatch in {operation}: src len={src_len}, dst len={dst_len}")]
     SizeMismatch {
         operation: &'static str,
-        host_len: usize,
-        device_len: usize,
+        src_len: usize,
+        dst_len: usize,
     },
 }

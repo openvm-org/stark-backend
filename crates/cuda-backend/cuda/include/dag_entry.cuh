@@ -78,6 +78,14 @@ __device__ __forceinline__ void ntt_coset_interpolate(
     uint32_t const idx = (base + ntt_idx + offset) & (height - 1);
     Fp coeff = evals[idx];
 
+    if (l_skip == 0) {
+#pragma unroll
+        for (uint32_t c = 0; c < NUM_COSETS; c++) {
+            results[c] = coeff;
+        }
+        return;
+    }
+
     // Runtime skip path for coset-parallel identity coset
     if (skip_ntt) {
         results[0] = coeff;

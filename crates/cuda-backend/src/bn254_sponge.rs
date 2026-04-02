@@ -13,7 +13,7 @@ use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
 use p3_baby_bear::BabyBear;
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 
-use crate::sponge::{GpuFiatShamirTranscript, GrindError};
+use crate::sponge::{validate_gpu_grind_bits, GpuFiatShamirTranscript, GrindError};
 
 /// Bn254 digest type: one BN254 scalar element.
 type Digest = [Bn254Scalar; 1];
@@ -191,6 +191,7 @@ impl FiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscript
 
 impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscriptGpu {
     fn grind_gpu(&mut self, bits: usize) -> Result<BabyBear, GrindError> {
+        validate_gpu_grind_bits(bits)?;
         // Trivial case: 0 bits mean no PoW is required and any witness is valid.
         if bits == 0 {
             return Ok(BabyBear::ZERO);

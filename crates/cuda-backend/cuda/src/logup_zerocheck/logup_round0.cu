@@ -186,6 +186,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
         NEEDS_SHMEM ? reinterpret_cast<Fp *>(smem + blockDim.x * sizeof(FracExt)) : nullptr;
 
     uint32_t const l_skip = __ffs(skip_domain) - 1;
+    bool const skip_ntt_domain = (l_skip == 0);
 
     // Each x_int group within the block gets its own ntt_buffer slice
     uint32_t const x_int_in_block = threadIdx.x >> l_skip;
@@ -197,8 +198,7 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
     uint32_t const x_int_base = tidx >> l_skip;
 
     // Precompute values needed for all cosets
-    uint32_t const ntt_idx_rev = rev_len(ntt_idx, l_skip);
-    Fp const omega_skip = TWO_ADIC_GENERATORS[l_skip];
+    uint32_t const ntt_idx_rev = skip_ntt_domain ? 0 : rev_len(ntt_idx, l_skip);
 
     // Compute is_first_mult, is_last_mult for all cosets
     uint32_t const log_height_total = __ffs(height) - 1;
@@ -208,8 +208,9 @@ __global__ void logup_r0_ntt_eval_interactions_kernel(
 
     Fp is_first_mult[NUM_COSETS];
     Fp is_last_mult[NUM_COSETS];
-    Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
-    Fp const omega_skip_ntt = pow(omega_skip, ntt_idx);
+    Fp const eta = skip_ntt_domain ? Fp::one() : TWO_ADIC_GENERATORS[l_skip - log_stride];
+    Fp const omega_skip_ntt =
+        skip_ntt_domain ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
 
     // Cosets c=0..NUM_COSETS-1 with shifts 1,g^1, g^2, ...
     Fp g_coset = Fp::one();
@@ -361,16 +362,17 @@ __global__ void logup_r0_ntt_eval_interactions_coset_parallel_kernel(
     bool const is_identity_coset = (coset_idx == 0);
 
     // Precompute values for this single coset
-    uint32_t const ntt_idx_rev = rev_len(ntt_idx, l_skip);
-    Fp const omega_skip = TWO_ADIC_GENERATORS[l_skip];
+    bool const skip_ntt_domain = (l_skip == 0);
+    uint32_t const ntt_idx_rev = skip_ntt_domain ? 0 : rev_len(ntt_idx, l_skip);
 
     uint32_t const log_height_total = __ffs(height) - 1;
     uint32_t const log_segment = min(l_skip, log_height_total);
     uint32_t const segment_size = 1u << log_segment;
     uint32_t const log_stride = l_skip - log_segment;
 
-    Fp const eta = TWO_ADIC_GENERATORS[l_skip - log_stride];
-    Fp const omega_skip_ntt = pow(omega_skip, ntt_idx);
+    Fp const eta = skip_ntt_domain ? Fp::one() : TWO_ADIC_GENERATORS[l_skip - log_stride];
+    Fp const omega_skip_ntt =
+        skip_ntt_domain ? Fp::one() : device_ntt::get_twiddle(l_skip, ntt_idx);
 
     // Compute for single coset: coset 0 has shift=1, rest have shift=g^coset_idx
     Fp const g_coset = is_identity_coset ? Fp::one() : pow(g_shift, coset_idx);
@@ -678,10 +680,87 @@ extern "C" int _logup_bary_eval_interactions_round0(
     size_t max_temp_bytes
 ) {
     bool is_global = buffer_size > BUFFER_THRESHOLD;
+    bool use_coset_parallel = use_coset_parallel_mode(num_x, skip_domain);
+    if (!use_coset_parallel && num_cosets > 4) {
+        return cudaErrorInvalidValue;
+    }
+    if (skip_domain == 1) {
+        if (use_coset_parallel) {
+            return is_global ? launch_logup_coset_parallel<true, false>(
+                                   tmp_sums_buffer,
+                                   output,
+                                   selectors_cube,
+                                   preprocessed,
+                                   main_parts,
+                                   eq_cube,
+                                   public_values,
+                                   numer_weights,
+                                   denom_weights,
+                                   denom_sum_init,
+                                   d_rules,
+                                   rules_len,
+                                   buffer_size,
+                                   d_intermediates,
+                                   skip_domain,
+                                   num_x,
+                                   height,
+                                   num_cosets,
+                                   g_shift,
+                                   max_temp_bytes
+                               )
+                             : launch_logup_coset_parallel<false, false>(
+                                   tmp_sums_buffer,
+                                   output,
+                                   selectors_cube,
+                                   preprocessed,
+                                   main_parts,
+                                   eq_cube,
+                                   public_values,
+                                   numer_weights,
+                                   denom_weights,
+                                   denom_sum_init,
+                                   d_rules,
+                                   rules_len,
+                                   buffer_size,
+                                   d_intermediates,
+                                   skip_domain,
+                                   num_x,
+                                   height,
+                                   num_cosets,
+                                   g_shift,
+                                   max_temp_bytes
+                               );
+        }
+        return dispatch_logup(
+            num_cosets,
+            is_global,
+            false,
+            tmp_sums_buffer,
+            output,
+            selectors_cube,
+            preprocessed,
+            main_parts,
+            eq_cube,
+            public_values,
+            numer_weights,
+            denom_weights,
+            denom_sum_init,
+            d_rules,
+            rules_len,
+            buffer_size,
+            d_intermediates,
+            skip_domain,
+            num_x,
+            height,
+            g_shift,
+            max_temp_bytes
+        );
+    }
+
     bool needs_shmem = skip_domain > WARP_SIZE;
 
     // Threshold-based dispatch: use coset-parallel for small workloads
-    if (use_coset_parallel_mode(num_x, skip_domain)) {
+    if (use_coset_parallel) {
         // Coset-parallel mode: grid.y = num_cosets, each block handles one coset
         if (is_global) {
             if (needs_shmem) {

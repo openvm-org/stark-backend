@@ -35,6 +35,23 @@ __device__ __forceinline__ Fp get_twiddle(uint32_t level, uint32_t index) {
     return DEVICE_NTT_TWIDDLES[twiddle_offset(level) + index];
 }
 
+__device__ __forceinline__ uint32_t linear_thread_lane() {
+    uint32_t linear_tid =
+        threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+    return linear_tid & ((1u << LOG_WARP_SIZE) - 1u);
+}
+
+__device__ __forceinline__ unsigned ntt_subgroup_mask(uint32_t i, uint32_t subgroup_log_size) {
+    if (subgroup_log_size >= LOG_WARP_SIZE) {
+        return 0xffffffffu;
+    }
+
+    uint32_t subgroup_size = 1u << subgroup_log_size;
+    uint32_t lane = linear_thread_lane();
+    uint32_t subgroup_base = lane - (i & (subgroup_size - 1u));
+    return ((1u << subgroup_size) - 1u) << subgroup_base;
+}
+
 template <bool intt> __device__ __forceinline__ Fp sum_or_semi_sum(Fp &&x) {
     if constexpr (intt) {
         return x.halve();
@@ -56,7 +73,9 @@ template <bool intt> __device__ __forceinline__ Fp sum_or_semi_sum(Fp &&x) {
 // `active_thread` indicates whether this thread has valid data; inactive threads still participate in syncs.
 //
 // # Assumption
-// - No warp has exited early before this call. We use the full `0xffffffff` mask.
+// - Threads for each logical NTT are laid out contiguously within the warp. Callers may skip
+//   whole logical NTT subgroups, but every lane named by the subgroup shuffle mask must execute
+//   the shuffle.
 template <bool intt, bool needs_shmem>
 __device__ __forceinline__ void ntt_natural_to_bitrev(
     Fp &this_thread_value,
@@ -65,12 +84,17 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
     uint32_t const l_skip, // log2 of NTT size
     bool const active_thread = true
 ) {
+    if (l_skip == 0) {
+        return;
+    }
+
     uint32_t log_interwarp;
     if constexpr (needs_shmem) {
         log_interwarp = LOG_WARP_SIZE;
     } else {
         log_interwarp = l_skip;
     }
+    unsigned warp_mask = ntt_subgroup_mask(i, log_interwarp);
     // reverse index for iNTT to get the inverse twiddle
     uint32_t const twiddle_idx = intt ? (i ? (1 << l_skip) - i : 0) : i;
     Fp twiddle = get_twiddle(l_skip, twiddle_idx);
@@ -96,7 +120,7 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
     for (uint32_t log_len = log_interwarp; log_len-- > 0;) {
         uint32_t const len = 1u << log_len;
         Fp const other_value =
-            Fp::fromRaw(__shfl_xor_sync(0xffffffff, this_thread_value.asRaw(), len));
+            Fp::fromRaw(__shfl_xor_sync(warp_mask, this_thread_value.asRaw(), len));
         if (!(i & len)) {
             // this_thread_value = sum, other_value = diff
             this_thread_value = sum_or_semi_sum<intt>(this_thread_value + other_value);
@@ -114,7 +138,8 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
 // For both `needs_shmem` equals `true` and `false`, `this_thread_value` must already contain the input, which should be the `rev_len(i, l_skip)`-th element.
 //
 // # Assumption
-// - No warp has exited early before this call. We use the full `0xffffffff` mask.
+// - Threads for each logical NTT are laid out contiguously within the warp, and every lane named
+//   by the subgroup shuffle mask executes this call.
 template <bool intt, bool needs_shmem>
 __device__ __forceinline__ void ntt_bitrev_to_natural(
     Fp &this_thread_value,
@@ -123,6 +148,7 @@ __device__ __forceinline__ void ntt_bitrev_to_natural(
     uint32_t const l_skip
 ) {
     uint32_t const warp_levels = needs_shmem ? LOG_WARP_SIZE : l_skip;
+    unsigned warp_mask = ntt_subgroup_mask(i, warp_levels);
 
     // Warp shuffle phase: levels 0 to warp_levels-1 (small to large)
     for (uint32_t m = 0; m < warp_levels; m++) {
@@ -133,7 +159,7 @@ __device__ __forceinline__ void ntt_bitrev_to_natural(
             j = j ? ((2u << m) - j) : 0;
         Fp twiddle = get_twiddle(m + 1, j);
 
-        Fp other = Fp::fromRaw(__shfl_xor_sync(0xffffffff, this_thread_value.asRaw(), len));
+        Fp other = Fp::fromRaw(__shfl_xor_sync(warp_mask, this_thread_value.asRaw(), len));
 
         if (i & len) {
             // Bottom: result = a - b * twiddle
