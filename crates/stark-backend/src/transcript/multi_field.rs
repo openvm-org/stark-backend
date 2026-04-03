@@ -3,7 +3,10 @@ use p3_field::{PrimeField, PrimeField32};
 use p3_symmetric::CryptographicPermutation;
 
 use super::{duplex_sponge::DuplexSponge, FiatShamirTranscript};
-use crate::StarkProtocolConfig;
+use crate::{
+    multi_field_packing::{checked_num_packed_f_elms, pack_f_to_sf},
+    StarkProtocolConfig,
+};
 
 /// Multi-field transcript that operates on a sponge over a large `SpongeField`
 /// while producing samples in a smaller base field `F`.
@@ -56,17 +59,8 @@ where
     P: CryptographicPermutation<[SF; WIDTH]>,
 {
     pub fn new(perm: P) -> Self {
-        let num_obs_per_elem = SF::bits() / F::bits();
+        let num_obs_per_elem = checked_num_packed_f_elms::<F, SF>();
         let num_samples_per_elem = compute_num_samples_per_elem::<F, SF>();
-
-        // Packing `num_obs_per_elem` values in base 2^F::bits() can produce values
-        // up to (2^F::bits())^num_obs_per_elem - 1. For injectivity (distinct observe
-        // sequences must not alias after reduction in SF), this must be < SF::order().
-        let max_packed = BigUint::from(1u64) << (F::bits() * num_obs_per_elem);
-        assert!(
-            max_packed <= SF::order(),
-            "SF::order() too small for injective packing of {num_obs_per_elem} Felements"
-        );
 
         // Base-F::ORDER decomposition must extract at least 1 digit per squeeze.
         assert!(
@@ -112,7 +106,7 @@ where
         self.invalidate_samples();
         self.observe_buf.push(value);
         if self.observe_buf.len() == self.num_obs_per_elem {
-            let packed = Self::pack(&self.observe_buf);
+            let packed = pack_f_to_sf(&self.observe_buf);
             self.sponge.absorb(packed);
             self.observe_buf.clear();
         }
@@ -148,7 +142,7 @@ where
     /// Must be called before any sample-side operation (squeeze).
     fn flush_observe_buf(&mut self) {
         if !self.observe_buf.is_empty() {
-            let packed = Self::pack(&self.observe_buf);
+            let packed = pack_f_to_sf(&self.observe_buf);
             self.sponge.absorb(packed);
             self.observe_buf.clear();
         }
@@ -164,17 +158,6 @@ where
     }
 
     // --- F↔ SF conversion ---
-
-    /// Pack base-field values into a sponge-field element using bit-packing
-    /// in base-2^(F::bits()).
-    ///
-    /// Horner evaluation: `b[0] + b[1]*2^31 + b[2]*2^62 + ...`
-    fn pack(buf: &[F]) -> SF {
-        let base = SF::from_int(1u64 << F::bits());
-        buf.iter().rev().fold(SF::ZERO, |acc, val| {
-            acc * base + SF::from_int(val.as_canonical_u32())
-        })
-    }
 
     /// Extract k base-F::ORDER digits from a sponge-field element.
     ///
@@ -239,6 +222,7 @@ mod tests {
     use p3_field::{integers::QuotientMap, PrimeCharacteristicRing};
 
     use super::*;
+    use crate::multi_field_packing::pack_f_to_sf;
 
     type TestTranscript = MultiFieldTranscript<BabyBear, Bn254, MockPerm, 3, 2>;
 
@@ -270,7 +254,7 @@ mod tests {
             BabyBear::from_int(2u32),
             BabyBear::from_int(3u32),
         ];
-        let packed = TestTranscript::pack(&vals);
+        let packed: Bn254 = pack_f_to_sf(&vals);
         let expected = BigUint::from(1u64)
             + BigUint::from(2u64) * (BigUint::from(1u64) << 31)
             + BigUint::from(3u64) * (BigUint::from(1u64) << 62);

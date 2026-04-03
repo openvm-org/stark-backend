@@ -48,6 +48,8 @@ mod any_air;
 mod config;
 /// Trait for STARK backend engine proving keygen, proviing, verifying API functions.
 mod engine;
+#[cfg(feature = "multi-field-transcript")]
+pub mod multi_field_packing;
 pub use any_air::*;
 pub use config::*;
 pub use engine::*;
