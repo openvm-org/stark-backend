@@ -3,8 +3,8 @@ use std::{ffi::c_void, fmt::Debug, ptr};
 use crate::{
     copy::MemCopyD2H,
     error::{check, CudaError},
-    memory_manager::{d_free, d_malloc},
-    stream::{cudaStreamPerThread, cudaStream_t},
+    memory_manager::{d_free, d_malloc, d_malloc_on},
+    stream::{cudaStreamPerThread, cudaStream_t, DeviceContext},
 };
 
 #[link(name = "cudart")]
@@ -19,6 +19,8 @@ extern "C" {
 pub struct DeviceBuffer<T> {
     ptr: *mut T,
     len: usize,
+    #[cfg(feature = "debug-cuda-stream")]
+    alloc_stream: cudaStream_t,
 }
 
 /// A struct that packs a pointer with a size in bytes to pass on CUDA.
@@ -43,6 +45,8 @@ impl<T> DeviceBuffer<T> {
         DeviceBuffer {
             ptr: ptr::null_mut(),
             len: 0,
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: std::ptr::null_mut(),
         }
     }
 
@@ -53,10 +57,15 @@ impl<T> DeviceBuffer<T> {
     ///   either have been allocated by the internal memory manager (VPMM) or the caller must use
     ///   `ManuallyDrop` to prevent double-free.
     pub unsafe fn from_raw_parts(ptr: *mut T, len: usize) -> Self {
-        DeviceBuffer { ptr, len }
+        DeviceBuffer {
+            ptr,
+            len,
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: std::ptr::null_mut(),
+        }
     }
 
-    /// Allocate device memory for `len` elements of type `T`.
+    /// Allocate device memory for `len` elements of type `T` (PTDS path).
     pub fn with_capacity(len: usize) -> Self {
         tracing::debug!(
             "Creating device buffer of size {} (sizeof type = {})",
@@ -78,17 +87,58 @@ impl<T> DeviceBuffer<T> {
         DeviceBuffer {
             ptr: typed_ptr,
             len,
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: cudaStreamPerThread,
         }
     }
 
-    /// Fills the buffer with zeros.
+    /// Allocate device memory for `len` elements of type `T` on an explicit stream.
+    pub fn with_capacity_on(len: usize, ctx: &DeviceContext) -> Self {
+        tracing::debug!(
+            "Creating device buffer of size {} (sizeof type = {}) on stream",
+            len,
+            size_of::<T>()
+        );
+        assert_ne!(len, 0, "Zero capacity request is wrong");
+        let size_bytes = std::mem::size_of::<T>() * len;
+        let raw_ptr = d_malloc_on(size_bytes, &ctx.stream).expect("GPU allocation failed");
+        #[cfg(feature = "touchemall")]
+        {
+            unsafe {
+                cudaMemsetAsync(raw_ptr, 0xff, size_bytes, ctx.stream.as_raw());
+            }
+        }
+        let typed_ptr = raw_ptr as *mut T;
+
+        DeviceBuffer {
+            ptr: typed_ptr,
+            len,
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: ctx.stream.as_raw(),
+        }
+    }
+
+    /// Fills the buffer with zeros (PTDS path).
     pub fn fill_zero(&self) -> Result<(), CudaError> {
         assert_ne!(self.len, 0, "Empty buffer");
         let size_bytes = std::mem::size_of::<T>() * self.len;
         check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, cudaStreamPerThread) })
     }
 
-    /// Fills a suffix of the buffer with zeros.
+    /// Fills the buffer with zeros on an explicit stream.
+    pub fn fill_zero_on(&self, ctx: &DeviceContext) -> Result<(), CudaError> {
+        assert_ne!(self.len, 0, "Empty buffer");
+        #[cfg(feature = "debug-cuda-stream")]
+        debug_assert_eq!(
+            ctx.stream.as_raw(),
+            self.alloc_stream,
+            "fill_zero_on: stream mismatch"
+        );
+        let size_bytes = std::mem::size_of::<T>() * self.len;
+        check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, ctx.stream.as_raw()) })
+    }
+
+    /// Fills a suffix of the buffer with zeros (PTDS path).
     /// The `start_idx` is the index in the buffer, in `T` elements.
     pub fn fill_zero_suffix(&self, start_idx: usize) -> Result<(), CudaError> {
         assert!(
@@ -102,6 +152,33 @@ impl<T> DeviceBuffer<T> {
                 0,
                 size_bytes,
                 cudaStreamPerThread,
+            )
+        })
+    }
+
+    /// Fills a suffix of the buffer with zeros on an explicit stream.
+    pub fn fill_zero_suffix_on(
+        &self,
+        start_idx: usize,
+        ctx: &DeviceContext,
+    ) -> Result<(), CudaError> {
+        assert!(
+            start_idx < self.len,
+            "start index has to be smaller than length"
+        );
+        #[cfg(feature = "debug-cuda-stream")]
+        debug_assert_eq!(
+            ctx.stream.as_raw(),
+            self.alloc_stream,
+            "fill_zero_suffix_on: stream mismatch"
+        );
+        let size_bytes = std::mem::size_of::<T>() * (self.len - start_idx);
+        check(unsafe {
+            cudaMemsetAsync(
+                self.as_mut_ptr().add(start_idx) as *mut c_void,
+                0,
+                size_bytes,
+                ctx.stream.as_raw(),
             )
         })
     }
@@ -152,6 +229,8 @@ impl<T> DeviceBuffer<T> {
         let res = DeviceBuffer {
             ptr: self.ptr as *mut U,
             len: self.len * (size_of::<T>() / size_of::<U>()),
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: self.alloc_stream,
         };
         self.ptr = ptr::null_mut(); // for safe drop
         self.len = 0;

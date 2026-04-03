@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use crate::{
     d_buffer::DeviceBuffer,
     error::{check, MemCopyError},
-    stream::{cudaStreamPerThread, cudaStream_t, CudaEvent},
+    stream::{cudaStreamPerThread, cudaStream_t, CudaEvent, DeviceContext},
 };
 
 lazy_static! {
@@ -58,10 +58,45 @@ pub unsafe fn cuda_memcpy<const SRC_DEVICE: bool, const DST_DEVICE: bool>(
     .map_err(MemCopyError::from)
 }
 
-// Host -> Device
+/// FFI binding for `cudaMemcpyAsync` on an explicit stream.
+///
+/// # Safety
+/// Must follow the rules of the `cudaMemcpyAsync` function from the CUDA runtime API.
+pub unsafe fn cuda_memcpy_on<const SRC_DEVICE: bool, const DST_DEVICE: bool>(
+    dst: *mut c_void,
+    src: *const c_void,
+    size_bytes: usize,
+    ctx: &DeviceContext,
+) -> Result<(), MemCopyError> {
+    check(unsafe {
+        cudaMemcpyAsync(
+            dst,
+            src,
+            size_bytes,
+            std::mem::transmute::<i32, cudaMemcpyKind>(
+                if DST_DEVICE { 1 } else { 0 } + if SRC_DEVICE { 2 } else { 0 },
+            ),
+            ctx.stream.as_raw(),
+        )
+    })
+    .map_err(MemCopyError::from)
+}
+
+// ---- Host -> Device ----
+
 pub trait MemCopyH2D<T> {
     fn copy_to(&self, dst: &mut DeviceBuffer<T>) -> Result<(), MemCopyError>;
     fn to_device(&self) -> Result<DeviceBuffer<T>, MemCopyError>;
+    fn copy_to_on(
+        &self,
+        _dst: &mut DeviceBuffer<T>,
+        _ctx: &DeviceContext,
+    ) -> Result<(), MemCopyError> {
+        unimplemented!("copy_to_on not implemented for this type")
+    }
+    fn to_device_on(&self, _ctx: &DeviceContext) -> Result<DeviceBuffer<T>, MemCopyError> {
+        unimplemented!("to_device_on not implemented for this type")
+    }
 }
 
 impl<T> MemCopyH2D<T> for [T] {
@@ -91,11 +126,46 @@ impl<T> MemCopyH2D<T> for [T] {
         self.copy_to(&mut dst)?;
         Ok(dst)
     }
+
+    fn copy_to_on(
+        &self,
+        dst: &mut DeviceBuffer<T>,
+        ctx: &DeviceContext,
+    ) -> Result<(), MemCopyError> {
+        if self.len() > dst.len() {
+            return Err(MemCopyError::SizeMismatch {
+                operation: "copy_to_device_on",
+                src_len: self.len(),
+                dst_len: dst.len(),
+            });
+        }
+        let size_bytes = std::mem::size_of_val(self);
+        check(unsafe {
+            cudaMemcpyAsync(
+                dst.as_mut_raw_ptr(),
+                self.as_ptr() as *const c_void,
+                size_bytes,
+                cudaMemcpyKind::cudaMemcpyHostToDevice,
+                ctx.stream.as_raw(),
+            )
+        })
+        .map_err(MemCopyError::from)
+    }
+
+    fn to_device_on(&self, ctx: &DeviceContext) -> Result<DeviceBuffer<T>, MemCopyError> {
+        let mut dst = DeviceBuffer::with_capacity_on(self.len(), ctx);
+        self.copy_to_on(&mut dst, ctx)?;
+        Ok(dst)
+    }
 }
 
-// Device -> Host
+// ---- Device -> Host ----
+
 pub trait MemCopyD2H<T> {
     fn to_host(&self) -> Result<Vec<T>, MemCopyError>;
+    fn to_host_on(&self, _ctx: &DeviceContext) -> Result<Vec<T>, MemCopyError> {
+        unimplemented!("to_host_on not implemented for this type")
+    }
 }
 
 impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
@@ -123,11 +193,44 @@ impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
 
         Ok(host_vec)
     }
+
+    fn to_host_on(&self, ctx: &DeviceContext) -> Result<Vec<T>, MemCopyError> {
+        let mut host_vec = Vec::with_capacity(self.len());
+        let size_bytes = std::mem::size_of::<T>() * self.len();
+
+        check(unsafe {
+            cudaMemcpyAsync(
+                host_vec.as_mut_ptr() as *mut c_void,
+                self.as_raw_ptr(),
+                size_bytes,
+                cudaMemcpyKind::cudaMemcpyDeviceToHost,
+                ctx.stream.as_raw(),
+            )
+        })?;
+        ctx.stream.to_host_sync()?;
+        unsafe {
+            host_vec.set_len(self.len());
+        }
+
+        Ok(host_vec)
+    }
 }
+
+// ---- Device -> Device ----
 
 pub trait MemCopyD2D<T> {
     fn device_copy(&self) -> Result<DeviceBuffer<T>, MemCopyError>;
     fn device_copy_to(&self, dst: &mut DeviceBuffer<T>) -> Result<(), MemCopyError>;
+    fn device_copy_on(&self, _ctx: &DeviceContext) -> Result<DeviceBuffer<T>, MemCopyError> {
+        unimplemented!("device_copy_on not implemented for this type")
+    }
+    fn device_copy_to_on(
+        &self,
+        _dst: &mut DeviceBuffer<T>,
+        _ctx: &DeviceContext,
+    ) -> Result<(), MemCopyError> {
+        unimplemented!("device_copy_to_on not implemented for this type")
+    }
 }
 
 impl<T> MemCopyD2D<T> for DeviceBuffer<T> {
@@ -154,6 +257,38 @@ impl<T> MemCopyD2D<T> for DeviceBuffer<T> {
                 size_bytes,
                 cudaMemcpyKind::cudaMemcpyDeviceToDevice,
                 cudaStreamPerThread,
+            )
+        })
+        .map_err(MemCopyError::from)
+    }
+
+    fn device_copy_on(&self, ctx: &DeviceContext) -> Result<DeviceBuffer<T>, MemCopyError> {
+        let mut dst = DeviceBuffer::<T>::with_capacity_on(self.len(), ctx);
+        self.device_copy_to_on(&mut dst, ctx)?;
+        Ok(dst)
+    }
+
+    fn device_copy_to_on(
+        &self,
+        dst: &mut DeviceBuffer<T>,
+        ctx: &DeviceContext,
+    ) -> Result<(), MemCopyError> {
+        if self.len() > dst.len() {
+            return Err(MemCopyError::SizeMismatch {
+                operation: "device_copy_to_on",
+                src_len: self.len(),
+                dst_len: dst.len(),
+            });
+        }
+        let size_bytes = std::mem::size_of::<T>() * self.len();
+
+        check(unsafe {
+            cudaMemcpyAsync(
+                dst.as_mut_raw_ptr(),
+                self.as_raw_ptr(),
+                size_bytes,
+                cudaMemcpyKind::cudaMemcpyDeviceToDevice,
+                ctx.stream.as_raw(),
             )
         })
         .map_err(MemCopyError::from)

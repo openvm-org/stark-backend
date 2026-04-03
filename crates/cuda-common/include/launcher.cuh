@@ -38,12 +38,23 @@ inline std::pair<dim3, dim3> kernel_launch_2d_params(size_t x, size_t y) {
     inline int cuda_check_kernel(const char* kernel_name) {
         cudaError_t err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
-            fprintf(stderr, "[ERROR] Kernel '%s' failed: %s\n", 
+            fprintf(stderr, "[ERROR] Kernel '%s' failed: %s\n",
                     kernel_name, cudaGetErrorString(err));
         }
         return err;
     }
 #   define CHECK_KERNEL() cuda_check_kernel(__func__)
+
+    inline int cuda_check_kernel_on(cudaStream_t stream, const char* kernel_name) {
+        cudaError_t err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[ERROR] Kernel '%s' failed: %s\n",
+                    kernel_name, cudaGetErrorString(err));
+        }
+        return err;
+    }
+#   define CHECK_KERNEL_ON(stream) cuda_check_kernel_on(stream, __func__)
 #else
 #   define CHECK_KERNEL() cudaGetLastError()
+#   define CHECK_KERNEL_ON(stream) cudaGetLastError()
 #endif

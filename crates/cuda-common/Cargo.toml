@@ -22,3 +22,4 @@ tokio = { workspace = true, features = ["full"] }
 
 [features]
 touchemall = []
+debug-cuda-stream = []
