@@ -1,7 +1,16 @@
+//! BabyBear + BN254 Poseidon2 STARK configuration.
+//!
+//! Two Poseidon2 permutations over BN254 are used:
+//!
+//! - **Width 3** (leaf hashing & transcript sponge): rF=8, rP=56, d=5. Round constants from [HorizenLabs/poseidon2](https://github.com/HorizenLabs/poseidon2)
+//!   via the `zkhash` crate (`RC3`). Matches `p3-bn254`'s `Poseidon2Bn254<3>`.
+//!
+//! - **Width 2** (Merkle compression): rF=6, rP=50, d=5. Round constants from [gnark-crypto](https://github.com/Consensys/gnark-crypto).
+//!   Matches `poseidon2.NewPermutation(2, 6, 50)`. See [`super::bn254_poseidon2`].
+
 use std::{
     io::{self, Read, Write},
     marker::PhantomData,
-    sync::OnceLock,
 };
 
 use num_bigint::BigUint;
@@ -10,8 +19,8 @@ use openvm_stark_backend::{
         decode_extension_field32, decode_prime_field32, encode_extension_field32,
         encode_prime_field32, DecodableConfig, EncodableConfig,
     },
-    hasher::Hasher,
-    p3_symmetric::{MultiField32PaddingFreeSponge, TruncatedPermutation},
+    hasher::{Hasher, MultiFieldHasher},
+    p3_symmetric::TruncatedPermutation,
     prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
     transcript::multi_field::MultiFieldTranscript,
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
@@ -20,25 +29,34 @@ use p3_baby_bear::BabyBear;
 // NOTE: plonky3's Bn254 is the type for scalar field of the BN254 curve. It is not the type
 // for the curve itself.
 pub use p3_bn254::Bn254 as Bn254Scalar;
-use p3_bn254::Poseidon2Bn254;
 use p3_field::{extension::BinomialExtensionField, PrimeField};
-use p3_poseidon2::ExternalLayerConstants;
-use zkhash::{
-    ark_ff::PrimeField as _, fields::bn256::FpBN256 as ark_FpBN256,
-    poseidon2::poseidon2_instance_bn256::RC3,
+
+use super::bn254_poseidon2::{
+    default_bn254_poseidon2_width2, default_bn254_poseidon2_width3, Poseidon2Bn254Width2,
+    Poseidon2Bn254Width3,
 };
 
-pub const WIDTH: usize = 3;
-/// Poseidon rate in F. <Poseidon RATE>(2) * <# of F in a N>(8) = 16
+/// Width of the Poseidon2 sponge permutation (leaf hashing & transcript).
+pub const SPONGE_WIDTH: usize = 3;
+/// Width of the Poseidon2 compression permutation (Merkle tree).
+pub const COMPRESS_WIDTH: usize = 2;
+/// Sponge rate in BabyBear elements: BN254 rate (2) * BabyBear elements per BN254 (8) = 16.
 pub const BABY_BEAR_RATE: usize = 16;
+/// Sponge rate in BN254 elements.
 pub const BN254_RATE: usize = 2;
-/// Width in Bn254Fr
+/// Digest width in BN254 elements.
 pub const DIGEST_WIDTH: usize = 1;
 
-type Perm = Poseidon2Bn254<WIDTH>;
-// Generic over P: CryptographicPermutation<[F; WIDTH]>
-type H = MultiField32PaddingFreeSponge<F, Bn254Scalar, Perm, WIDTH, BABY_BEAR_RATE, DIGEST_WIDTH>;
-type Compress = TruncatedPermutation<Perm, 2, DIGEST_WIDTH, WIDTH>;
+type H = MultiFieldHasher<
+    F,
+    Bn254Scalar,
+    Poseidon2Bn254Width3,
+    SPONGE_WIDTH,
+    BABY_BEAR_RATE,
+    DIGEST_WIDTH,
+>;
+type Compress =
+    TruncatedPermutation<Poseidon2Bn254Width2, COMPRESS_WIDTH, DIGEST_WIDTH, COMPRESS_WIDTH>;
 type PermHasher = Hasher<F, Digest, H, Compress>;
 // Defined below
 type SC = BabyBearBn254Poseidon2Config;
@@ -117,21 +135,27 @@ impl DecodableConfig for BabyBearBn254Poseidon2Config {
 }
 
 impl BabyBearBn254Poseidon2Config {
-    pub fn new_from_perm(params: SystemParams, perm: Perm) -> Self {
+    pub fn new_from_perms(
+        params: SystemParams,
+        hash_perm: Poseidon2Bn254Width3,
+        compress_perm: Poseidon2Bn254Width2,
+    ) -> Self {
         let hasher = Hasher::new(
-            MultiField32PaddingFreeSponge::new(perm.clone()).unwrap(),
-            TruncatedPermutation::new(perm),
+            MultiFieldHasher::new(hash_perm),
+            TruncatedPermutation::new(compress_perm),
         );
         Self { params, hasher }
     }
 
     pub fn default_from_params(params: SystemParams) -> Self {
-        let perm = default_babybear_bn254_poseidon2();
-        Self::new_from_perm(params, perm)
+        let hash_perm = default_bn254_poseidon2_width3();
+        let compress_perm = default_bn254_poseidon2_width2();
+        Self::new_from_perms(params, hash_perm, compress_perm)
     }
 }
 
-pub type Transcript = MultiFieldTranscript<F, Bn254Scalar, Perm, WIDTH, BN254_RATE>;
+pub type Transcript =
+    MultiFieldTranscript<F, Bn254Scalar, Poseidon2Bn254Width3, SPONGE_WIDTH, BN254_RATE>;
 
 pub struct BabyBearBn254Poseidon2RefEngine<TS = Transcript> {
     device: ReferenceDevice<SC>,
@@ -140,7 +164,7 @@ pub struct BabyBearBn254Poseidon2RefEngine<TS = Transcript> {
 
 impl<TS> StarkEngine for BabyBearBn254Poseidon2RefEngine<TS>
 where
-    TS: FiatShamirTranscript<SC> + From<Perm>,
+    TS: FiatShamirTranscript<SC> + From<Poseidon2Bn254Width3>,
 {
     type SC = SC;
     type PB = CpuColMajorBackend<SC>;
@@ -164,7 +188,7 @@ where
     }
 
     fn initial_transcript(&self) -> Self::TS {
-        TS::from(default_babybear_bn254_poseidon2())
+        TS::from(default_bn254_poseidon2_width3())
     }
 
     fn prover_from_transcript(
@@ -193,7 +217,7 @@ mod cpu_engine {
 
     impl<TS> StarkEngine for BabyBearBn254Poseidon2CpuEngine<TS>
     where
-        TS: FiatShamirTranscript<SC> + From<Perm>,
+        TS: FiatShamirTranscript<SC> + From<Poseidon2Bn254Width3>,
     {
         type SC = SC;
         type PB = CpuBackend<SC>;
@@ -217,7 +241,7 @@ mod cpu_engine {
         }
 
         fn initial_transcript(&self) -> Self::TS {
-            TS::from(default_babybear_bn254_poseidon2())
+            TS::from(default_bn254_poseidon2_width3())
         }
 
         fn prover_from_transcript(
@@ -232,53 +256,6 @@ mod cpu_engine {
 #[cfg(feature = "cpu-backend")]
 pub use cpu_engine::BabyBearBn254Poseidon2CpuEngine;
 
-pub fn default_babybear_bn254_poseidon2() -> Perm {
-    static PERM: OnceLock<Perm> = OnceLock::new();
-    PERM.get_or_init(default_perm).clone()
-}
-
 pub fn default_transcript() -> Transcript {
-    Transcript::from(default_babybear_bn254_poseidon2())
-}
-
-/// The permutation for outer recursion.
-fn default_perm() -> Perm {
-    const ROUNDS_F: usize = 8;
-    const ROUNDS_P: usize = 56;
-    let mut round_constants = bn254_poseidon2_rc3();
-    let internal_end = (ROUNDS_F / 2) + ROUNDS_P;
-    let terminal = round_constants.split_off(internal_end);
-    let internal_round_constants = round_constants.split_off(ROUNDS_F / 2);
-    let internal_round_constants = internal_round_constants
-        .into_iter()
-        .map(|vec| vec[0])
-        .collect::<Vec<_>>();
-    let initial = round_constants;
-
-    let external_round_constants = ExternalLayerConstants::new(initial, terminal);
-    Perm::new(external_round_constants, internal_round_constants)
-}
-
-fn bn254_from_ark_ff(input: ark_FpBN256) -> Bn254Scalar {
-    let limbs_le = input.into_bigint().0;
-    // arkworks limbs are little-endian u64s; convert to BigUint in little-endian
-    let bytes = limbs_le
-        .iter()
-        .flat_map(|limb| limb.to_le_bytes())
-        .collect::<Vec<_>>();
-    let big = num_bigint::BigUint::from_bytes_le(&bytes);
-    Bn254Scalar::from_biguint(big).expect("Invalid BN254 element")
-}
-
-fn bn254_poseidon2_rc3() -> Vec<[Bn254Scalar; 3]> {
-    RC3.iter()
-        .map(|vec| {
-            vec.iter()
-                .cloned()
-                .map(bn254_from_ark_ff)
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap()
-        })
-        .collect()
+    Transcript::from(default_bn254_poseidon2_width3())
 }

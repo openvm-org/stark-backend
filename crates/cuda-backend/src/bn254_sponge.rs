@@ -7,8 +7,9 @@ use std::ffi::c_void;
 
 use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer, error::MemCopyError};
 use openvm_stark_backend::FiatShamirTranscript;
-use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
-    default_babybear_bn254_poseidon2, BabyBearBn254Poseidon2Config, Bn254Scalar, Transcript,
+use openvm_stark_sdk::config::{
+    baby_bear_bn254_poseidon2::{BabyBearBn254Poseidon2Config, Bn254Scalar, Transcript},
+    bn254_poseidon2::default_bn254_poseidon2_width3,
 };
 use p3_baby_bear::BabyBear;
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
@@ -104,7 +105,7 @@ pub struct MultiFieldTranscriptGpu {
 impl Default for MultiFieldTranscriptGpu {
     fn default() -> Self {
         Self {
-            inner: Transcript::from(default_babybear_bn254_poseidon2()),
+            inner: Transcript::from(default_bn254_poseidon2_width3()),
             device: DeviceBuffer::new(),
         }
     }

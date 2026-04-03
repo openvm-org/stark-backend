@@ -1,0 +1,184 @@
+//! Width-2 Poseidon2 permutation over BN254 for Merkle tree compression.
+//!
+//! Parameters: t=2, rF=6, rP=50, d=5.
+//! Round constants derived from a Keccak-256 chain seeded with
+//! `"Poseidon2-BN254[t=2,rF=6,rP=50,d=5]"`, producing the same constants as
+//! gnark-crypto's `poseidon2.NewPermutation(2, 6, 50)`.
+//!
+//! Generation logic: <https://github.com/Consensys/gnark-crypto/blob/49879afc0859220afd5165bc6cafc1ee0a6e987a/ecc/bn254/fr/poseidon2/poseidon2.go#L85>
+//!
+//! See [`crate::config::baby_bear_bn254_poseidon2`] for how this fits into the full STARK config.
+
+use std::sync::OnceLock;
+
+#[cfg(test)]
+use hex_literal::hex;
+use num_bigint::BigUint;
+use p3_bn254::Bn254;
+use p3_field::PrimeCharacteristicRing;
+use p3_poseidon2::{
+    internal_permute_state, matmul_internal, ExternalLayerConstants, InternalLayer,
+    InternalLayerConstructor, Poseidon2,
+};
+
+use super::{
+    common::{poseidon2_from_constants, split_flat_round_constants, Poseidon2Bn254Constants},
+    width2_constants::RC2,
+};
+
+const WIDTH: usize = 2;
+const S_BOX_DEGREE: u64 = 5;
+const ROUNDS_F: usize = 6;
+const ROUNDS_P: usize = 50;
+
+/// The inner Poseidon2 type.
+///
+/// The external layer reuses upstream `ExternalLayerConstants<Bn254, WIDTH>` which
+/// already implements `ExternalLayer<Bn254, WIDTH, 5>` for any WIDTH in p3-bn254.
+/// Only the internal layer needs a custom impl because upstream hardcodes width 3.
+type Poseidon2Bn254Width2Inner = Poseidon2<
+    Bn254,
+    ExternalLayerConstants<Bn254, WIDTH>,
+    Poseidon2InternalLayerBn254Width2,
+    WIDTH,
+    S_BOX_DEGREE,
+>;
+
+#[derive(Clone, Debug, Default)]
+pub struct Poseidon2InternalLayerBn254Width2 {
+    internal_constants: Vec<Bn254>,
+}
+
+impl InternalLayerConstructor<Bn254> for Poseidon2InternalLayerBn254Width2 {
+    fn new_from_constants(internal_constants: Vec<Bn254>) -> Self {
+        Self { internal_constants }
+    }
+}
+
+#[inline(always)]
+fn bn254_matmul_internal_w2(state: &mut [Bn254; WIDTH]) {
+    matmul_internal(state, [Bn254::ONE, Bn254::TWO]);
+}
+
+impl InternalLayer<Bn254, WIDTH, S_BOX_DEGREE> for Poseidon2InternalLayerBn254Width2 {
+    fn permute_state(&self, state: &mut [Bn254; WIDTH]) {
+        internal_permute_state(state, bn254_matmul_internal_w2, &self.internal_constants);
+    }
+}
+
+/// Width-2 Poseidon2 permutation over BN254.
+pub type Poseidon2Bn254Width2Constants = Poseidon2Bn254Constants<WIDTH>;
+
+/// Width-2 Poseidon2 permutation over BN254.
+pub type Poseidon2Bn254Width2 = Poseidon2Bn254Width2Inner;
+
+fn bn254_from_be_bytes(bytes: &[u8; 32]) -> Bn254 {
+    let big = BigUint::from_bytes_be(bytes);
+    Bn254::from_biguint(big).expect("round constant exceeds BN254 modulus")
+}
+
+/// Construct the shared width-2 Poseidon2 BN254 round constants.
+pub fn default_bn254_poseidon2_width2_constants() -> &'static Poseidon2Bn254Width2Constants {
+    static CONSTANTS: OnceLock<Poseidon2Bn254Width2Constants> = OnceLock::new();
+    CONSTANTS.get_or_init(|| {
+        let all_rc: Vec<Bn254> = RC2.iter().map(bn254_from_be_bytes).collect();
+        // Must match `bn254_matmul_internal_w2`: M_I = 1 + diag([1, 2]).
+        split_flat_round_constants(all_rc, ROUNDS_F, ROUNDS_P, [Bn254::ONE, Bn254::TWO])
+    })
+}
+
+/// Construct the default width-2 Poseidon2 BN254 permutation.
+pub fn default_bn254_poseidon2_width2() -> Poseidon2Bn254Width2 {
+    static PERM: OnceLock<Poseidon2Bn254Width2> = OnceLock::new();
+    PERM.get_or_init(|| {
+        let constants = default_bn254_poseidon2_width2_constants();
+        poseidon2_from_constants(constants)
+    })
+    .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use openvm_stark_backend::p3_symmetric::Permutation;
+
+    use super::*;
+
+    /// Re-derive every width-2 round constant from scratch using the same
+    /// Keccak-256 chain that gnark-crypto uses, and assert equality with our
+    /// hardcoded [`RC2`] table.
+    ///
+    /// Algorithm (gnark-crypto `initRC`):
+    ///   h₀ = Keccak256(seed)            // pre-hash, not a constant
+    ///   hᵢ = Keccak256(hᵢ₋₁)  for i ≥ 1  // each hᵢ → field element (BE, mod p)
+    #[test]
+    fn test_width2_constants_match_gnark_keccak_derivation() {
+        use sha3::{Digest, Keccak256};
+
+        let keccak256 = |data: &[u8]| -> [u8; 32] { Keccak256::digest(data).into() };
+
+        let seed = b"Poseidon2-BN254[t=2,rF=6,rP=50,d=5]";
+
+        // Pre-hash (not used as a constant).
+        let mut h = keccak256(seed);
+
+        for (i, expected_bytes) in RC2.iter().enumerate() {
+            h = keccak256(&h);
+            // gnark does Fr.SetBytes(h): big-endian, reduced mod p.
+            let derived = bn254_from_be_bytes(&h);
+            let expected = bn254_from_be_bytes(expected_bytes);
+            assert_eq!(
+                derived, expected,
+                "round constant {i} differs from gnark Keccak-256 derivation"
+            );
+        }
+    }
+
+    #[test]
+    fn test_poseidon2_bn254_width2_gnark_vector() {
+        let perm = default_bn254_poseidon2_width2();
+
+        // Test vector: permutation of [1, 2]
+        // Generated by gnark-crypto v0.20.1: poseidon2.NewPermutation(2, 6, 50)
+        let mut state = [Bn254::ONE, Bn254::TWO];
+        perm.permute_mut(&mut state);
+
+        let expected_0 = bn254_from_be_bytes(&hex!(
+            "02a5b5b81eaff3dfb6aa63c3f18e0e57dfa598062a78514dfa530a9f8d106bf3"
+        ));
+        let expected_1 = bn254_from_be_bytes(&hex!(
+            "02e7529d93e1a7ae526147c2ee72588aee90e6a7c3e361de6daa6be045c6f52e"
+        ));
+
+        assert_eq!(state[0], expected_0, "output[0] mismatch");
+        assert_eq!(state[1], expected_1, "output[1] mismatch");
+    }
+
+    #[test]
+    fn test_poseidon2_bn254_width2_zero_input() {
+        let perm = default_bn254_poseidon2_width2();
+
+        // Expected outputs generated offline by gnark-crypto v0.20.1.
+        let mut state = [Bn254::ZERO, Bn254::ZERO];
+        perm.permute_mut(&mut state);
+
+        let expected_0 = Bn254::from_biguint(
+            BigUint::parse_bytes(
+                b"0cbc44e16224792bb7b3fa931a5f51503120dca326172ad0897b49d7f7f53eb9",
+                16,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let expected_1 = Bn254::from_biguint(
+            BigUint::parse_bytes(
+                b"292c3a4b9343aec63e584aefa8bedeaefae44e6d718451a75736def795109dfb",
+                16,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(state[0], expected_0, "zero output[0] mismatch");
+        assert_eq!(state[1], expected_1, "zero output[1] mismatch");
+    }
+}
