@@ -201,7 +201,7 @@ where
     HS: GpuHashScheme,
     TS: GpuFiatShamirTranscript<HS::SC>,
 {
-    let n_stack = device.config.n_stack;
+    let n_stack = device.config().n_stack;
     // Batching randomness
     let lambda = transcript.sample_ext();
 

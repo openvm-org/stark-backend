@@ -42,7 +42,7 @@ impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for
             .iter()
             .map(|pk| {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
-                    transport_and_unstack_single_data_h2d::<HS>(d.as_ref(), &self.prover_config)
+                    transport_and_unstack_single_data_h2d::<HS>(d.as_ref(), self.prover_config())
                         .unwrap()
                 });
                 let other_data = AirDataGpu::new(pk).unwrap();
@@ -81,7 +81,7 @@ impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for
         &self,
         pcs_data: &StackedPcsData<F, HS::Digest>,
     ) -> StackedPcsDataGpu<F, HS::Digest> {
-        transport_pcs_data_h2d::<HS::Digest>(pcs_data, &self.prover_config).unwrap()
+        transport_pcs_data_h2d::<HS::Digest>(pcs_data, self.prover_config()).unwrap()
     }
 
     fn transport_matrix_from_device_to_host(&self, matrix: &DeviceMatrix<F>) -> ColMajorMatrix<F> {
