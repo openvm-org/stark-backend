@@ -1,4 +1,10 @@
-use std::{borrow::Cow, cell::Cell, ffi::c_void};
+use std::{
+    borrow::Cow,
+    cell::Cell,
+    ffi::c_void,
+    ops::Deref,
+    sync::{Arc, Mutex},
+};
 
 use crate::error::{check, CudaError};
 
@@ -7,6 +13,7 @@ extern "C" {
     fn cudaDeviceSynchronize() -> i32;
     fn cudaStreamGetId(stream: cudaStream_t, id: *mut CudaStreamId) -> i32;
     fn cudaStreamCreate(stream: *mut cudaStream_t) -> i32;
+    fn cudaStreamCreateWithFlags(stream: *mut cudaStream_t, flags: u32) -> i32;
     fn cudaStreamDestroy(stream: cudaStream_t) -> i32;
     fn cudaStreamSynchronize(stream: cudaStream_t) -> i32;
     fn cudaStreamWaitEvent(stream: cudaStream_t, event: cudaEvent_t, flags: u32) -> i32;
@@ -27,17 +34,39 @@ pub type cudaStream_t = *mut c_void;
 
 pub struct CudaStream {
     stream: cudaStream_t,
+    host_event: Mutex<CudaEvent>,
+}
+
+impl std::fmt::Debug for CudaStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaStream")
+            .field("stream", &self.stream)
+            .finish()
+    }
 }
 
 unsafe impl Send for CudaStream {}
 unsafe impl Sync for CudaStream {}
 
 impl CudaStream {
-    /// Creates a new non-blocking CUDA stream.
+    /// Creates a new CUDA stream using `cudaStreamCreate` (blocking stream).
+    #[deprecated(note = "Use CudaStream::new_non_blocking() instead")]
     pub fn new() -> Result<Self, CudaError> {
         let mut stream: cudaStream_t = std::ptr::null_mut();
         check(unsafe { cudaStreamCreate(&mut stream) })?;
-        Ok(Self { stream })
+        let host_event = Mutex::new(CudaEvent::new()?);
+        Ok(Self { stream, host_event })
+    }
+
+    /// Creates a new non-blocking CUDA stream using `cudaStreamCreateWithFlags`
+    /// with `cudaStreamNonBlocking`. Non-blocking streams have no implicit
+    /// synchronization with the legacy default stream (stream 0).
+    pub fn new_non_blocking() -> Result<Self, CudaError> {
+        let mut stream: cudaStream_t = std::ptr::null_mut();
+        // 0x1 = cudaStreamNonBlocking
+        check(unsafe { cudaStreamCreateWithFlags(&mut stream, 0x1) })?;
+        let host_event = Mutex::new(CudaEvent::new()?);
+        Ok(Self { stream, host_event })
     }
 
     /// Get the raw CUDA stream handle.
@@ -55,17 +84,65 @@ impl CudaStream {
     pub fn wait(&self, event: &CudaEvent) -> Result<(), CudaError> {
         check(unsafe { cudaStreamWaitEvent(self.stream, event.event, 0) })
     }
+
+    /// Record a per-stream event and synchronize to complete all pending D2H copies.
+    pub fn to_host_sync(&self) -> Result<(), CudaError> {
+        let event = self.host_event.lock().unwrap();
+        unsafe { event.record(self.stream) }?;
+        event.synchronize()
+    }
 }
 
 impl Drop for CudaStream {
     fn drop(&mut self) {
         if !self.stream.is_null() {
-            self.synchronize().unwrap();
-            let _ = unsafe { cudaStreamDestroy(self.stream) };
+            // Non-blocking: CUDA defers destruction until the stream is idle
+            unsafe { cudaStreamDestroy(self.stream) };
             self.stream = std::ptr::null_mut();
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// StreamGuard — keeps a CudaStream alive for allocation records
+// ---------------------------------------------------------------------------
+
+/// Keeps a `CudaStream` alive for the lifetime of an allocation record.
+#[derive(Clone, Debug)]
+pub struct StreamGuard(Arc<CudaStream>);
+
+impl StreamGuard {
+    pub fn new(stream: CudaStream) -> Self {
+        Self(Arc::new(stream))
+    }
+
+    /// Returns `true` if both guards refer to the same underlying `CudaStream`.
+    pub fn is_same_stream(&self, other: &StreamGuard) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Deref for StreamGuard {
+    type Target = CudaStream;
+    fn deref(&self) -> &CudaStream {
+        &self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DeviceContext — bundles device ID with a stream
+// ---------------------------------------------------------------------------
+
+/// Thin context for all GPU operations in the explicit-stream path.
+#[derive(Clone)]
+pub struct DeviceContext {
+    pub device_id: u32,
+    pub stream: StreamGuard,
+}
+
+// ---------------------------------------------------------------------------
+// Legacy PTDS helpers (deprecated, removed in Phase 8)
+// ---------------------------------------------------------------------------
 
 #[allow(non_upper_case_globals)]
 pub const cudaStreamPerThread: cudaStream_t = 0x02 as cudaStream_t;
@@ -115,6 +192,10 @@ thread_local! {
 pub(crate) fn mark_cuda_thread_used() {
     CUDA_THREAD_CLEANUP.with(|cleanup| cleanup.mark_used());
 }
+
+// ---------------------------------------------------------------------------
+// CudaEvent
+// ---------------------------------------------------------------------------
 
 #[allow(non_camel_case_types)]
 pub type cudaEvent_t = *mut c_void;
@@ -185,6 +266,11 @@ impl CudaEvent {
         check(cudaEventRecord(self.event, stream))
     }
 
+    /// Record this event on the given `CudaStream` (safe wrapper).
+    pub fn record_on(&self, stream: &CudaStream) -> Result<(), CudaError> {
+        check(unsafe { cudaEventRecord(self.event, stream.as_raw()) })
+    }
+
     pub fn record_on_this(&self) -> Result<(), CudaError> {
         check(unsafe { cudaEventRecord(self.event, cudaStreamPerThread) })
     }
@@ -220,7 +306,11 @@ impl Drop for CudaEvent {
     }
 }
 
-/// A GPU-aware span that collects a gauge metric using CUDA events.
+// ---------------------------------------------------------------------------
+// GPU metrics spans
+// ---------------------------------------------------------------------------
+
+/// A GPU-aware span that collects a gauge metric using CUDA events (PTDS path).
 pub fn gpu_metrics_span<R, F: FnOnce() -> R>(
     name: impl Into<Cow<'static, str>>,
     f: F,
@@ -232,6 +322,32 @@ pub fn gpu_metrics_span<R, F: FnOnce() -> R>(
     }
     let res = f();
     unsafe { stop.record_and_wait(cudaStreamPerThread)? };
+
+    let mut elapsed_ms = 0f32;
+    unsafe {
+        check(cudaEventElapsedTime(
+            &mut elapsed_ms,
+            start.event,
+            stop.event,
+        ))?
+    };
+
+    metrics::gauge!(name.into()).set(elapsed_ms as f64);
+    Ok(res)
+}
+
+/// A GPU-aware span that collects a gauge metric using CUDA events on an explicit stream.
+pub fn gpu_metrics_span_on<R, F: FnOnce() -> R>(
+    name: impl Into<Cow<'static, str>>,
+    stream: &CudaStream,
+    f: F,
+) -> Result<R, CudaError> {
+    let start = CudaEvent::new()?;
+    let stop = CudaEvent::new()?;
+    start.record_on(stream)?;
+    let res = f();
+    stop.record_on(stream)?;
+    stop.synchronize()?;
 
     let mut elapsed_ms = 0f32;
     unsafe {
