@@ -37,7 +37,7 @@ impl<HS: GpuHashScheme> GpuEngine<HS> {
     pub fn new(params: SystemParams) -> Self {
         let config = HS::default_config(params.clone());
         Self {
-            device: GpuDevice::new(params),
+            device: GpuDevice::new(params).expect("failed to create GpuDevice"),
             config,
         }
     }

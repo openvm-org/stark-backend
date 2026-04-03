@@ -62,13 +62,14 @@ where
         &self,
         traces: &[&DeviceMatrix<F>],
     ) -> Result<(HS::Digest, StackedPcsDataGpu<F, HS::Digest>), Self::Error> {
+        let cfg = self.config();
         stacked_commit::<HS::MerkleHash>(
-            self.config.l_skip,
-            self.config.n_stack,
-            self.config.log_blowup,
-            self.config.k_whir(),
+            cfg.l_skip,
+            cfg.n_stack,
+            cfg.log_blowup,
+            cfg.k_whir(),
             traces,
-            self.prover_config,
+            *self.prover_config(),
         )
     }
 }
@@ -101,18 +102,22 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
         _common_main_pcs_data: &StackedPcsDataGpu<F, HS::Digest>,
     ) -> Result<((GkrProof<HS::SC>, BatchConstraintProof<HS::SC>), Vec<EF>), Self::Error> {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
-        let save_memory = self.prover_config.zerocheck_save_memory;
+        let save_memory = self.prover_config().zerocheck_save_memory;
         // Threshold for monomial evaluation path based on proof type:
         // - App proofs (log_blowup=1): higher threshold (512)
         // - Recursion proofs: lower threshold (64)
-        let monomial_num_y_threshold = if self.config.log_blowup == 1 { 512 } else { 64 };
+        let monomial_num_y_threshold = if self.config().log_blowup == 1 {
+            512
+        } else {
+            64
+        };
         let (gkr_proof, batch_constraint_proof, r) = prove_zerocheck_and_logup_gpu::<HS, TS>(
             transcript,
             mpk,
             ctx,
             save_memory,
             monomial_num_y_threshold,
-            self.sm_count,
+            self.sm_count(),
         )?;
         mem.emit_metrics();
         Ok(((gkr_proof, batch_constraint_proof), r))

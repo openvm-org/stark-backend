@@ -1,5 +1,8 @@
 use getset::{CopyGetters, Getters, MutGetters};
-use openvm_cuda_common::common::get_device;
+use openvm_cuda_common::{
+    common::get_device,
+    stream::{CudaStream, DeviceContext, StreamGuard},
+};
 use openvm_stark_backend::SystemParams;
 
 use crate::cuda::{
@@ -7,8 +10,10 @@ use crate::cuda::{
     device_info::get_sm_count,
 };
 
+/// Pure device configuration — no stream, no CUDA runtime state.
+/// Renamed from the old `GpuDevice`.
 #[derive(Clone, Getters, CopyGetters, MutGetters)]
-pub struct GpuDevice {
+pub struct GpuDeviceConfig {
     #[getset(get = "pub")]
     pub(crate) config: SystemParams,
     #[getset(get = "pub", get_mut = "pub")]
@@ -25,34 +30,71 @@ pub struct GpuProverConfig {
     pub zerocheck_save_memory: bool,
 }
 
+/// Stream-owning device handle. Wraps [`GpuDeviceConfig`] with a
+/// [`DeviceContext`] that carries the explicit CUDA stream.
+#[derive(Clone)]
+pub struct GpuDevice {
+    pub config: GpuDeviceConfig,
+    pub ctx: DeviceContext,
+}
+
 impl GpuDevice {
-    pub fn new(config: SystemParams) -> Self {
-        validate_gpu_l_skip(config.l_skip)
+    pub fn new(params: SystemParams) -> Result<Self, openvm_cuda_common::error::CudaError> {
+        validate_gpu_l_skip(params.l_skip)
             .expect("GPU backend requires l_skip <= 10 for current CUDA kernels");
         ensure_device_ntt_twiddles_initialized()
             .expect("failed to initialize small-NTT twiddles for current CUDA device");
 
         let prover_config = GpuProverConfig {
-            zerocheck_save_memory: config.log_blowup == 1,
+            zerocheck_save_memory: params.log_blowup == 1,
             ..Default::default()
         };
         let id = get_device().unwrap() as u32;
         let sm_count = get_sm_count(id).expect("failed to get SM count");
-        Self {
-            config,
+        let config = GpuDeviceConfig {
+            config: params,
             prover_config,
             id,
             sm_count,
-        }
+        };
+
+        let stream = CudaStream::new_non_blocking()?;
+        let ctx = DeviceContext {
+            device_id: id,
+            stream: StreamGuard::new(stream),
+        };
+
+        Ok(Self { config, ctx })
+    }
+
+    // Delegate accessors to inner config
+    pub fn config(&self) -> &SystemParams {
+        &self.config.config
+    }
+
+    pub fn prover_config(&self) -> &GpuProverConfig {
+        &self.config.prover_config
+    }
+
+    pub fn prover_config_mut(&mut self) -> &mut GpuProverConfig {
+        &mut self.config.prover_config
+    }
+
+    pub fn sm_count(&self) -> u32 {
+        self.config.sm_count
+    }
+
+    pub fn id(&self) -> u32 {
+        self.config.id
     }
 
     pub fn with_cache_rs_code_matrix(mut self, cache_rs_code_matrix: bool) -> Self {
-        self.prover_config.cache_rs_code_matrix = cache_rs_code_matrix;
+        self.config.prover_config.cache_rs_code_matrix = cache_rs_code_matrix;
         self
     }
 
     pub fn set_cache_rs_code_matrix(&mut self, cache_rs_code_matrix: bool) {
-        self.prover_config.cache_rs_code_matrix = cache_rs_code_matrix;
+        self.config.prover_config.cache_rs_code_matrix = cache_rs_code_matrix;
     }
 }
 
