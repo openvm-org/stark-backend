@@ -11,6 +11,8 @@
 
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use hex_literal::hex;
 use num_bigint::BigUint;
 use p3_bn254::Bn254;
 use p3_field::PrimeCharacteristicRing;
@@ -18,8 +20,6 @@ use p3_poseidon2::{
     internal_permute_state, matmul_internal, ExternalLayerConstants, InternalLayer,
     InternalLayerConstructor, Poseidon2,
 };
-#[cfg(test)]
-use hex_literal::hex;
 
 use super::{
     common::{poseidon2_from_constants, split_flat_round_constants, Poseidon2Bn254Constants},
@@ -114,9 +114,7 @@ mod tests {
     fn test_width2_constants_match_gnark_keccak_derivation() {
         use sha3::{Digest, Keccak256};
 
-        let keccak256 = |data: &[u8]| -> [u8; 32] {
-            Keccak256::digest(data).into()
-        };
+        let keccak256 = |data: &[u8]| -> [u8; 32] { Keccak256::digest(data).into() };
 
         let seed = b"Poseidon2-BN254[t=2,rF=6,rP=50,d=5]";
 

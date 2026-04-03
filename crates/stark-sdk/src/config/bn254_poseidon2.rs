@@ -5,16 +5,16 @@
 //! - width 2 for Merkle compression
 
 mod common;
-mod width2_constants;
 mod width2;
+mod width2_constants;
 mod width3;
 
 pub use common::Poseidon2Bn254Constants;
 pub use width2::{
-    Poseidon2Bn254Width2, Poseidon2Bn254Width2Constants, default_bn254_poseidon2_width2,
-    default_bn254_poseidon2_width2_constants,
+    default_bn254_poseidon2_width2, default_bn254_poseidon2_width2_constants, Poseidon2Bn254Width2,
+    Poseidon2Bn254Width2Constants,
 };
 pub use width3::{
-    Poseidon2Bn254Width3, Poseidon2Bn254Width3Constants, default_bn254_poseidon2_width3,
-    default_bn254_poseidon2_width3_constants,
+    default_bn254_poseidon2_width3, default_bn254_poseidon2_width3_constants, Poseidon2Bn254Width3,
+    Poseidon2Bn254Width3Constants,
 };

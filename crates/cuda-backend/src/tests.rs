@@ -12,7 +12,7 @@ use itertools::Itertools;
 use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_backend::{
-    hasher::{Hasher as CpuMerkleHasher, MerkleHasher, MultiFieldPaddingFreeSponge},
+    hasher::{Hasher as CpuMerkleHasher, MerkleHasher, MultiFieldHasher},
     multi_field_packing::pack_f_to_sf,
     p3_symmetric::TruncatedPermutation,
 };
@@ -126,7 +126,7 @@ fn bn254_host_merkle_layers(
 ) -> Vec<Vec<Bn254Digest>> {
     let perm = default_bn254_poseidon2_width3();
     let hasher = CpuMerkleHasher::new(
-        MultiFieldPaddingFreeSponge::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()),
+        MultiFieldHasher::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()),
         TruncatedPermutation::new(default_bn254_poseidon2_width2()),
     );
 
@@ -167,7 +167,7 @@ fn bn254_host_merkle_layers_ext(
 ) -> Vec<Vec<Bn254Digest>> {
     let perm = default_bn254_poseidon2_width3();
     let hasher = CpuMerkleHasher::new(
-        MultiFieldPaddingFreeSponge::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()),
+        MultiFieldHasher::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()),
         TruncatedPermutation::new(default_bn254_poseidon2_width2()),
     );
 
@@ -417,7 +417,7 @@ fn test_bn254_row_hash_ext_gpu_matches_host_multi_block_rows() {
 fn test_bn254_row_hash_emulation_matches_host_multi_block_rows() {
     let perm = default_bn254_poseidon2_width3();
     let host_hasher = CpuMerkleHasher::new(
-        MultiFieldPaddingFreeSponge::<F, Bn254Scalar, _, 3, 16, 1>::new(perm),
+        MultiFieldHasher::<F, Bn254Scalar, _, 3, 16, 1>::new(perm),
         TruncatedPermutation::new(default_bn254_poseidon2_width2()),
     );
     let row = (0..19)

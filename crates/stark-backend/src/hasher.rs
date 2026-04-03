@@ -84,14 +84,7 @@ where
 /// base-2^32 packing of 8 elements can exceed the BN254 modulus.
 #[cfg(feature = "multi-field-transcript")]
 #[derive(Clone, Debug)]
-pub struct MultiFieldPaddingFreeSponge<
-    F,
-    PF,
-    P,
-    const WIDTH: usize,
-    const RATE: usize,
-    const OUT: usize,
-> {
+pub struct MultiFieldHasher<F, PF, P, const WIDTH: usize, const RATE: usize, const OUT: usize> {
     permutation: P,
     num_f_elms: usize,
     _phantom: PhantomData<(F, PF)>,
@@ -99,7 +92,7 @@ pub struct MultiFieldPaddingFreeSponge<
 
 #[cfg(feature = "multi-field-transcript")]
 impl<F, PF, P, const WIDTH: usize, const RATE: usize, const OUT: usize>
-    MultiFieldPaddingFreeSponge<F, PF, P, WIDTH, RATE, OUT>
+    MultiFieldHasher<F, PF, P, WIDTH, RATE, OUT>
 where
     F: PrimeField32,
     PF: PrimeField,
@@ -117,7 +110,7 @@ where
 
 #[cfg(feature = "multi-field-transcript")]
 impl<F, PF, P, const WIDTH: usize, const RATE: usize, const OUT: usize>
-    CryptographicHasher<F, [PF; OUT]> for MultiFieldPaddingFreeSponge<F, PF, P, WIDTH, RATE, OUT>
+    CryptographicHasher<F, [PF; OUT]> for MultiFieldHasher<F, PF, P, WIDTH, RATE, OUT>
 where
     F: PrimeField32,
     PF: PrimeField + Default + Copy,

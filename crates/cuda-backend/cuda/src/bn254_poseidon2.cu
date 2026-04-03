@@ -123,7 +123,7 @@ Bn254Fr bn254_zero_init() {
 // ---------------------------------------------------------------------------
 // Sponge constants for Merkle hashing
 //
-// Matches MultiFieldPaddingFreeSponge<BabyBear, Bn254Scalar, Perm, 3, 16, 1>:
+// Matches MultiFieldHasher<BabyBear, Bn254Scalar, Perm, 3, 16, 1>:
 //   BABY_BEAR_RATE = 16  BabyBear values absorbed per permutation
 //   NUM_F_ELMS = 8       BabyBear values packed per Bn254Fr (floor(254/31) = 8)
 // ---------------------------------------------------------------------------

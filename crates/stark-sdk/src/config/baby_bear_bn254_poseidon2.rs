@@ -19,7 +19,7 @@ use openvm_stark_backend::{
         decode_extension_field32, decode_prime_field32, encode_extension_field32,
         encode_prime_field32, DecodableConfig, EncodableConfig,
     },
-    hasher::{Hasher, MultiFieldPaddingFreeSponge},
+    hasher::{Hasher, MultiFieldHasher},
     p3_symmetric::TruncatedPermutation,
     prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
     transcript::multi_field::MultiFieldTranscript,
@@ -31,11 +31,9 @@ use p3_baby_bear::BabyBear;
 pub use p3_bn254::Bn254 as Bn254Scalar;
 use p3_field::{extension::BinomialExtensionField, PrimeField};
 
-use super::{
-    bn254_poseidon2::{
-        Poseidon2Bn254Width2, Poseidon2Bn254Width3, default_bn254_poseidon2_width2,
-        default_bn254_poseidon2_width3,
-    },
+use super::bn254_poseidon2::{
+    default_bn254_poseidon2_width2, default_bn254_poseidon2_width3, Poseidon2Bn254Width2,
+    Poseidon2Bn254Width3,
 };
 
 /// Width of the Poseidon2 sponge permutation (leaf hashing & transcript).
@@ -49,7 +47,7 @@ pub const BN254_RATE: usize = 2;
 /// Digest width in BN254 elements.
 pub const DIGEST_WIDTH: usize = 1;
 
-type H = MultiFieldPaddingFreeSponge<
+type H = MultiFieldHasher<
     F,
     Bn254Scalar,
     Poseidon2Bn254Width3,
@@ -143,7 +141,7 @@ impl BabyBearBn254Poseidon2Config {
         compress_perm: Poseidon2Bn254Width2,
     ) -> Self {
         let hasher = Hasher::new(
-            MultiFieldPaddingFreeSponge::new(hash_perm),
+            MultiFieldHasher::new(hash_perm),
             TruncatedPermutation::new(compress_perm),
         );
         Self { params, hasher }
@@ -156,7 +154,8 @@ impl BabyBearBn254Poseidon2Config {
     }
 }
 
-pub type Transcript = MultiFieldTranscript<F, Bn254Scalar, Poseidon2Bn254Width3, SPONGE_WIDTH, BN254_RATE>;
+pub type Transcript =
+    MultiFieldTranscript<F, Bn254Scalar, Poseidon2Bn254Width3, SPONGE_WIDTH, BN254_RATE>;
 
 pub struct BabyBearBn254Poseidon2RefEngine<TS = Transcript> {
     device: ReferenceDevice<SC>,

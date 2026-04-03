@@ -81,8 +81,7 @@ mod tests {
     use zkhash::{
         fields::bn256::FpBN256 as ark_FpBN256,
         poseidon2::{
-            poseidon2::Poseidon2 as Poseidon2Ref,
-            poseidon2_instance_bn256::POSEIDON2_BN256_PARAMS,
+            poseidon2::Poseidon2 as Poseidon2Ref, poseidon2_instance_bn256::POSEIDON2_BN256_PARAMS,
         },
     };
 
@@ -100,10 +99,8 @@ mod tests {
 
         let mut state = [Bn254::ONE, Bn254::TWO, Bn254::from_int(3u32)];
         let input_ark_ff = state.map(ark_ff_from_bn254);
-        let expected: [ark_FpBN256; WIDTH] = poseidon2_ref
-            .permutation(&input_ark_ff)
-            .try_into()
-            .unwrap();
+        let expected: [ark_FpBN256; WIDTH] =
+            poseidon2_ref.permutation(&input_ark_ff).try_into().unwrap();
         let expected = expected.map(bn254_from_ark_ff);
 
         perm.permute_mut(&mut state);
