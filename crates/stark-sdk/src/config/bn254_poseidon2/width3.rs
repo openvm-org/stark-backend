@@ -1,8 +1,10 @@
 //! Width-3 Poseidon2 permutation over BN254 for leaf hashing and transcript sponge.
 //!
 //! Parameters: t=3, rF=8, rP=56, d=5.
-//! Round constants are sourced from [HorizenLabs/poseidon2](https://github.com/HorizenLabs/poseidon2)
-//! via `zkhash`'s `RC3`, matching `p3-bn254`'s `Poseidon2Bn254<3>`.
+//! Round constants sourced from `zkhash`'s `RC3`, matching `p3-bn254`'s `Poseidon2Bn254<3>`.
+//!
+//! Constants: <https://github.com/HorizenLabs/poseidon2/blob/bb476b9/plain_implementations/src/poseidon2/poseidon2_instance_bn256.rs#L32>
+//! Plonky3 type: <https://github.com/Plonky3/Plonky3/blob/65bdaa3d9996516dfb80eabf26840ab80da137b0/bn254/src/poseidon2.rs#L26>
 //!
 //! See [`crate::config::baby_bear_bn254_poseidon2`] for how this fits into the full STARK config.
 

@@ -3,8 +3,9 @@
 //! Parameters: t=2, rF=6, rP=50, d=5.
 //! Round constants derived from a Keccak-256 chain seeded with
 //! `"Poseidon2-BN254[t=2,rF=6,rP=50,d=5]"`, producing the same constants as
-//! [gnark-crypto](https://github.com/Consensys/gnark-crypto)'s
-//! `poseidon2.NewPermutation(2, 6, 50)`.
+//! gnark-crypto's `poseidon2.NewPermutation(2, 6, 50)`.
+//!
+//! Generation logic: <https://github.com/Consensys/gnark-crypto/blob/49879afc0859220afd5165bc6cafc1ee0a6e987a/ecc/bn254/fr/poseidon2/poseidon2.go#L85>
 //!
 //! See [`crate::config::baby_bear_bn254_poseidon2`] for how this fits into the full STARK config.
 
@@ -102,6 +103,38 @@ mod tests {
 
     use super::*;
 
+    /// Re-derive every width-2 round constant from scratch using the same
+    /// Keccak-256 chain that gnark-crypto uses, and assert equality with our
+    /// hardcoded [`RC2`] table.
+    ///
+    /// Algorithm (gnark-crypto `initRC`):
+    ///   h₀ = Keccak256(seed)            // pre-hash, not a constant
+    ///   hᵢ = Keccak256(hᵢ₋₁)  for i ≥ 1  // each hᵢ → field element (BE, mod p)
+    #[test]
+    fn test_width2_constants_match_gnark_keccak_derivation() {
+        use sha3::{Digest, Keccak256};
+
+        let keccak256 = |data: &[u8]| -> [u8; 32] {
+            Keccak256::digest(data).into()
+        };
+
+        let seed = b"Poseidon2-BN254[t=2,rF=6,rP=50,d=5]";
+
+        // Pre-hash (not used as a constant).
+        let mut h = keccak256(seed);
+
+        for (i, expected_bytes) in RC2.iter().enumerate() {
+            h = keccak256(&h);
+            // gnark does Fr.SetBytes(h): big-endian, reduced mod p.
+            let derived = bn254_from_be_bytes(&h);
+            let expected = bn254_from_be_bytes(expected_bytes);
+            assert_eq!(
+                derived, expected,
+                "round constant {i} differs from gnark Keccak-256 derivation"
+            );
+        }
+    }
+
     #[test]
     fn test_poseidon2_bn254_width2_gnark_vector() {
         let perm = default_bn254_poseidon2_width2();
@@ -126,6 +159,7 @@ mod tests {
     fn test_poseidon2_bn254_width2_zero_input() {
         let perm = default_bn254_poseidon2_width2();
 
+        // Expected outputs generated offline by gnark-crypto v0.20.1.
         let mut state = [Bn254::ZERO, Bn254::ZERO];
         perm.permute_mut(&mut state);
 

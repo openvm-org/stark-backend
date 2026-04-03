@@ -5,6 +5,8 @@ use hex_literal::hex;
 /// Derived from a Keccak-256 chain seeded with `"Poseidon2-BN254[t=2,rF=6,rP=50,d=5]"`,
 /// producing the same constants as gnark-crypto's `NewPermutation(2, 6, 50)`.
 ///
+/// Generation logic: <https://github.com/Consensys/gnark-crypto/blob/49879afc0859220afd5165bc6cafc1ee0a6e987a/ecc/bn254/fr/poseidon2/poseidon2.go#L85>
+///
 /// Layout: initial external (3 rounds x 2), internal (50 x 1), terminal external (3 rounds x 2).
 pub(super) const RC2: [[u8; 32]; 62] = [
     // Initial external round constants (3 rounds x 2 elements)
