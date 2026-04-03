@@ -226,12 +226,11 @@ extern "C" int _logup_gkr_input_eval(
     const uint32_t *d_pair_idxs,
     size_t used_nodes_len,
     uint32_t permutation_height,
-    uint32_t num_rows_per_tile
-) {
+    uint32_t num_rows_per_tile, cudaStream_t stream) {
     auto count = is_global ? TASK_SIZE : permutation_height;
     auto [grid, block] = kernel_launch_params(count, 256);
     if (is_global) {
-        evaluate_interactions_gkr_kernel<true><<<grid, block>>>(
+        evaluate_interactions_gkr_kernel<true><<<grid, block, 0, stream>>>(
             d_fracs,
             d_preprocessed,
             d_main,
@@ -246,7 +245,7 @@ extern "C" int _logup_gkr_input_eval(
             num_rows_per_tile
         );
     } else {
-        evaluate_interactions_gkr_kernel<false><<<grid, block>>>(
+        evaluate_interactions_gkr_kernel<false><<<grid, block, 0, stream>>>(
             d_fracs,
             d_preprocessed,
             d_main,
@@ -261,7 +260,7 @@ extern "C" int _logup_gkr_input_eval(
             num_rows_per_tile
         );
     }
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 } // namespace logup_gkr_input_evaluation

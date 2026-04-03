@@ -211,8 +211,7 @@ extern "C" int _ct_mixed_radix_narrow(
     uint32_t iterations,
     uint32_t padded_poly_size,
     uint32_t poly_count,
-    bool is_intt
-) {
+    bool is_intt, cudaStream_t stream) {
     if (lg_domain_size > MAX_LG_DOMAIN_SIZE)
         return cudaErrorInvalidValue;
 
@@ -241,15 +240,15 @@ extern "C" int _ct_mixed_radix_narrow(
 
     // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
     if (num_blocks < Z_COUNT)
-        _CT_NTT<1><<<dim3(num_blocks, grid_y, grid_z), block_size, shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<1><<<dim3(num_blocks, grid_y, grid_z), block_size, shared_sz, stream>>>(NTT_ARGUMENTS);
     else if (stage == 0 || lg_domain_size < 12)
-        _CT_NTT<Z_COUNT><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<Z_COUNT><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz, stream>>>(NTT_ARGUMENTS);
     else if (lg_domain_size <= MAX_LG_DOMAIN_SIZE)
-        _CT_NTT<Z_COUNT, true><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz>>>(NTT_ARGUMENTS);
+        _CT_NTT<Z_COUNT, true><<<dim3(num_blocks / Z_COUNT, grid_y, grid_z), block_size, Z_COUNT*shared_sz, stream>>>(NTT_ARGUMENTS);
     else
         assert(lg_domain_size <= MAX_LG_DOMAIN_SIZE);
             
     #undef NTT_ARGUMENTS
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }

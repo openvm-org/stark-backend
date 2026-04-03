@@ -300,24 +300,23 @@ extern "C" int _fold_mle(
     const uint16_t num_matrices,
     const uint32_t output_height,
     const uint32_t max_output_cells,
-    const FpExt r_val
-) {
+    const FpExt r_val, cudaStream_t stream) {
     auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
     uint8_t log_output_height = static_cast<uint8_t>(31 - __builtin_clz(output_height));
-    fold_mle_kernel<<<grid, block>>>(
+    fold_mle_kernel<<<grid, block, 0, stream>>>(
         input_matrices, output_matrices, widths, num_matrices, log_output_height, r_val
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
-extern "C" int _fold_mle_column(FpExt *buffer, size_t size, FpExt r) {
+extern "C" int _fold_mle_column(FpExt *buffer, size_t size, FpExt r, cudaStream_t stream) {
     if (size <= 1) {
         return 0;
     }
     size_t half = size >> 1;
     auto [grid, block] = kernel_launch_params(half);
-    fold_mle_column_kernel<<<grid, block>>>(buffer, half, r);
-    return CHECK_KERNEL();
+    fold_mle_column_kernel<<<grid, block, 0, stream>>>(buffer, half, r);
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _batch_fold_mle(
@@ -327,13 +326,12 @@ extern "C" int _batch_fold_mle(
     const uint16_t num_matrices,
     const uint8_t *log_output_heights,
     const uint32_t max_output_cells, // max(height * width)
-    const FpExt r_val
-) {
+    const FpExt r_val, cudaStream_t stream) {
     auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
-    batch_fold_mle_kernel<<<grid, block>>>(
+    batch_fold_mle_kernel<<<grid, block, 0, stream>>>(
         input_matrices, output_matrices, widths, num_matrices, log_output_heights, r_val
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _fold_ple_from_coeffs(
@@ -342,16 +340,15 @@ extern "C" int _fold_ple_from_coeffs(
     const uint32_t num_x,
     const uint32_t width,
     const uint32_t domain_size,
-    const FpExt r_val
-) {
+    const FpExt r_val, cudaStream_t stream) {
     int total_polys = num_x * width;
     auto [grid, block] = kernel_launch_params(total_polys);
 
-    fold_ple_from_coeffs_kernel<<<grid, block>>>(
+    fold_ple_from_coeffs_kernel<<<grid, block, 0, stream>>>(
         input_coeffs, output, num_x, width, domain_size, r_val
     );
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _reduce_over_x_and_cols(
@@ -359,13 +356,12 @@ extern "C" int _reduce_over_x_and_cols(
     Fp *output,
     uint32_t num_x,
     uint32_t num_cols,
-    uint32_t large_domain_size
-) {
+    uint32_t large_domain_size, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(large_domain_size);
-    reduce_over_x_and_cols_kernel<<<grid, block>>>(
+    reduce_over_x_and_cols_kernel<<<grid, block, 0, stream>>>(
         input, output, num_x, num_cols, large_domain_size
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 // WD = 1
@@ -376,8 +372,7 @@ extern "C" int _sumcheck_mle_round(
     const uint32_t *widths,
     const uint32_t num_matrices,
     const uint32_t height,
-    const uint32_t d
-) {
+    const uint32_t d, cudaStream_t stream) {
     if (d == 0 || d > 5) {
         return cudaErrorInvalidValue;
     }
@@ -387,11 +382,11 @@ extern "C" int _sumcheck_mle_round(
     size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
 
     // Launch main kernel - writes to tmp_block_sums
-    sumcheck_mle_round_kernel<1><<<grid, block, shmem_bytes>>>(
+    sumcheck_mle_round_kernel<1><<<grid, block, shmem_bytes, stream>>>(
         input_matrices, tmp_block_sums, widths, num_matrices, height, d
     );
 
-    int err = CHECK_KERNEL();
+    int err = CHECK_KERNEL_ON(stream);
     if (err != 0)
         return err;
 
@@ -401,23 +396,22 @@ extern "C" int _sumcheck_mle_round(
     unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     reduce_blocks_sumcheck<1>
-        <<<d, reduce_block, reduce_shmem>>>(tmp_block_sums, output, num_blocks, d);
+        <<<d, reduce_block, reduce_shmem, stream>>>(tmp_block_sums, output, num_blocks, d);
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _triangular_fold_mle(
     FpExt *output,
     const FpExt *input,
     FpExt r,
-    uint32_t output_max_n
-) {
+    uint32_t output_max_n, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(1 << output_max_n);
     grid.y = output_max_n + 1;
 
-    triangular_fold_mle_kernel<<<grid, block>>>(output, input, r);
+    triangular_fold_mle_kernel<<<grid, block, 0, stream>>>(output, input, r);
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 } // namespace plain_sumcheck

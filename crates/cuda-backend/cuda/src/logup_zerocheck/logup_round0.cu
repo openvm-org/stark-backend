@@ -536,7 +536,8 @@ int launch_logup_ntt_eval_interactions(
     uint32_t num_x,
     uint32_t height,
     Fp g_shift,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     auto [grid, block] = coset_round0_config::eval_constraints_launch_params(
         buffer_size, skip_domain, num_x, NUM_COSETS, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
@@ -548,7 +549,7 @@ int launch_logup_ntt_eval_interactions(
     size_t shmem_bytes = shared_sum_size + ntt_buffers_size;
 
     logup_r0_ntt_eval_interactions_kernel<NUM_COSETS, GLOBAL, NEEDS_SHMEM>
-        <<<grid, block, shmem_bytes>>>(
+        <<<grid, block, shmem_bytes, stream>>>(
             tmp_sums_buffer,
             selectors_cube,
             preprocessed,
@@ -568,7 +569,7 @@ int launch_logup_ntt_eval_interactions(
             g_shift
         );
 
-    int err = CHECK_KERNEL();
+    int err = CHECK_KERNEL_ON(stream);
     if (err != 0) {
         return err;
     }
@@ -578,10 +579,10 @@ int launch_logup_ntt_eval_interactions(
     unsigned int reduce_warps = div_ceil(reduce_block.x, WARP_SIZE);
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     auto large_domain = NUM_COSETS * skip_domain;
-    sumcheck::final_reduce_block_sums<<<2 * large_domain, reduce_block, reduce_shmem>>>(
+    sumcheck::final_reduce_block_sums<<<2 * large_domain, reduce_block, reduce_shmem, stream>>>(
         reinterpret_cast<FpExt *>(tmp_sums_buffer), reinterpret_cast<FpExt *>(output), num_blocks
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 // Generate dispatcher for num_cosets (1-4) x is_global x needs_shmem
@@ -609,7 +610,8 @@ int launch_logup_coset_parallel(
     uint32_t height,
     uint32_t num_cosets,
     Fp g_shift,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     auto [grid, block] = coset_parallel_round0_config::eval_constraints_launch_params(
         buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
@@ -620,7 +622,7 @@ int launch_logup_coset_parallel(
     size_t shmem_bytes = shared_sum_size + ntt_buffers_size;
 
     logup_r0_ntt_eval_interactions_coset_parallel_kernel<GLOBAL, NEEDS_SHMEM>
-        <<<grid, block, shmem_bytes>>>(
+        <<<grid, block, shmem_bytes, stream>>>(
             tmp_sums_buffer,
             selectors_cube,
             preprocessed,
@@ -639,7 +641,7 @@ int launch_logup_coset_parallel(
             height,
             g_shift
         );
-    int err = CHECK_KERNEL();
+    int err = CHECK_KERNEL_ON(stream);
     if (err != 0) {
         return err;
     }
@@ -650,11 +652,11 @@ int launch_logup_coset_parallel(
     unsigned int reduce_warps = div_ceil(reduce_block.x, WARP_SIZE);
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     auto large_domain = num_cosets * skip_domain;
-    sumcheck::final_reduce_block_sums<<<2 * large_domain, reduce_block, reduce_shmem>>>(
+    sumcheck::final_reduce_block_sums<<<2 * large_domain, reduce_block, reduce_shmem, stream>>>(
         reinterpret_cast<FpExt *>(tmp_sums_buffer), reinterpret_cast<FpExt *>(output), num_blocks
     );
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _logup_bary_eval_interactions_round0(
@@ -677,7 +679,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
     uint32_t height,
     uint32_t num_cosets,
     Fp g_shift,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     bool is_global = buffer_size > BUFFER_THRESHOLD;
     bool use_coset_parallel = use_coset_parallel_mode(num_x, skip_domain);
@@ -706,7 +709,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
                                    height,
                                    num_cosets,
                                    g_shift,
-                                   max_temp_bytes
+                                   max_temp_bytes,
+                                   stream
                                )
                              : launch_logup_coset_parallel<false, false>(
                                    tmp_sums_buffer,
@@ -728,7 +732,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
                                    height,
                                    num_cosets,
                                    g_shift,
-                                   max_temp_bytes
+                                   max_temp_bytes,
+                                   stream
                                );
         }
         return dispatch_logup(
@@ -753,7 +758,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
             num_x,
             height,
             g_shift,
-            max_temp_bytes
+            max_temp_bytes,
+            stream
         );
     }
 
@@ -784,7 +790,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
                     height,
                     num_cosets,
                     g_shift,
-                    max_temp_bytes
+                    max_temp_bytes,
+                    stream
                 );
             } else {
                 return launch_logup_coset_parallel<true, false>(
@@ -807,7 +814,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
                     height,
                     num_cosets,
                     g_shift,
-                    max_temp_bytes
+                    max_temp_bytes,
+                    stream
                 );
             }
         } else {
@@ -832,7 +840,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
                     height,
                     num_cosets,
                     g_shift,
-                    max_temp_bytes
+                    max_temp_bytes,
+                    stream
                 );
             } else {
                 return launch_logup_coset_parallel<false, false>(
@@ -855,7 +864,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
                     height,
                     num_cosets,
                     g_shift,
-                    max_temp_bytes
+                    max_temp_bytes,
+                    stream
                 );
             }
         }
@@ -883,7 +893,8 @@ extern "C" int _logup_bary_eval_interactions_round0(
             num_x,
             height,
             g_shift,
-            max_temp_bytes
+            max_temp_bytes,
+            stream
         );
     }
 }

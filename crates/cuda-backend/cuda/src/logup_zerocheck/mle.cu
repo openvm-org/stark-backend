@@ -372,8 +372,7 @@ extern "C" int _zerocheck_eval_mle(
     uint32_t buffer_size,
     FpExt *intermediates,
     uint32_t num_y,
-    uint32_t num_x
-) {
+    uint32_t num_x, cudaStream_t stream) {
     if (!valid_grid_y_dim(num_x)) {
         return cudaErrorInvalidValue;
     }
@@ -386,11 +385,11 @@ extern "C" int _zerocheck_eval_mle(
         rules_len, used_nodes, used_nodes_len, lambda_len, buffer_size, intermediates, num_y
 
     if (buffer_size > ZEROCHECK_BUFFER_THRESHOLD) {
-        zerocheck_mle_kernel<true><<<grid, block, shmem_bytes>>>(ZEROCHECK_KERNEL_ARGS);
+        zerocheck_mle_kernel<true><<<grid, block, shmem_bytes, stream>>>(ZEROCHECK_KERNEL_ARGS);
     } else {
-        zerocheck_mle_kernel<false><<<grid, block, shmem_bytes>>>(ZEROCHECK_KERNEL_ARGS);
+        zerocheck_mle_kernel<false><<<grid, block, shmem_bytes, stream>>>(ZEROCHECK_KERNEL_ARGS);
     }
-    int err = CHECK_KERNEL();
+    int err = CHECK_KERNEL_ON(stream);
     if (err != 0)
         return err;
 
@@ -399,10 +398,10 @@ extern "C" int _zerocheck_eval_mle(
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
-    sumcheck::final_reduce_block_sums<<<num_x, reduce_block, reduce_shmem>>>(
+    sumcheck::final_reduce_block_sums<<<num_x, reduce_block, reduce_shmem, stream>>>(
         tmp_sums_buffer, output, num_blocks
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
@@ -439,8 +438,7 @@ extern "C" int _logup_eval_mle(
     uint32_t buffer_size,
     FpExt *intermediates,
     uint32_t num_y,
-    uint32_t num_x
-) {
+    uint32_t num_x, cudaStream_t stream) {
     if (!valid_grid_y_dim(num_x)) {
         return cudaErrorInvalidValue;
     }
@@ -453,11 +451,11 @@ extern "C" int _logup_eval_mle(
         rules, used_nodes, pair_idxs, used_nodes_len, buffer_size, intermediates, num_y
 
     if (buffer_size > LOGUP_BUFFER_THRESHOLD) {
-        logup_mle_kernel<true><<<grid, block, shmem_bytes>>>(LOGUP_KERNEL_ARGS);
+        logup_mle_kernel<true><<<grid, block, shmem_bytes, stream>>>(LOGUP_KERNEL_ARGS);
     } else {
-        logup_mle_kernel<false><<<grid, block, shmem_bytes>>>(LOGUP_KERNEL_ARGS);
+        logup_mle_kernel<false><<<grid, block, shmem_bytes, stream>>>(LOGUP_KERNEL_ARGS);
     }
-    int err = CHECK_KERNEL();
+    int err = CHECK_KERNEL_ON(stream);
     if (err != 0)
         return err;
 
@@ -467,10 +465,10 @@ extern "C" int _logup_eval_mle(
     unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     // FracExt = (FpExt, FpExt) so we set block = 2 * large_domain
-    sumcheck::final_reduce_block_sums<<<2 * num_x, reduce_block, reduce_shmem>>>(
+    sumcheck::final_reduce_block_sums<<<2 * num_x, reduce_block, reduce_shmem, stream>>>(
         reinterpret_cast<FpExt *>(tmp_sums_buffer), reinterpret_cast<FpExt *>(output), num_blocks
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 } // namespace logup_zerocheck_mle

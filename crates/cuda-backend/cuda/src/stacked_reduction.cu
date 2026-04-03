@@ -409,8 +409,7 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     uint32_t trace_height,
     uint32_t trace_width,
     uint32_t l_skip,
-    uint32_t num_x
-) {
+    uint32_t num_x, cudaStream_t stream) {
     uint32_t skip_domain = 1u << l_skip;
     uint32_t stride = std::max(skip_domain / trace_height, 1u);
     auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, trace_width, l_skip);
@@ -419,13 +418,13 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     // NUM_G=3 outputs per z (G0, G1, G2)
     size_t shmem_sum_size = sizeof(FpExt) * (block.x + 1) * NUM_G;
 
-    stacked_reduction_round0_block_sum_kernel<<<grid, block, shmem_sum_size>>>(
+    stacked_reduction_round0_block_sum_kernel<<<grid, block, shmem_sum_size, stream>>>(
         eq_r_ns, trace_ptr, lambda_pows, block_sums,
         trace_height, trace_width, l_skip,
         skip_domain - 1, num_x, 31 - __builtin_clz(stride)
     );
 
-    int err = CHECK_KERNEL();
+    int err = CHECK_KERNEL_ON(stream);
     if (err != 0)
         return err;
 
@@ -435,9 +434,9 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     size_t reduce_shmem = div_ceil(reduce_block.x, WARP_SIZE) * sizeof(FpExt);
     sumcheck::final_reduce_block_sums<true>
-        <<<output_size, reduce_block, reduce_shmem>>>(block_sums, output, num_blocks);
+        <<<output_size, reduce_block, reduce_shmem, stream>>>(block_sums, output, num_blocks);
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 // Parallelizes barycentric interpolation across 2^l_skip threads per output cell
@@ -448,8 +447,7 @@ extern "C" int _stacked_reduction_fold_ple(
     const FpExt *inv_lagrange_denoms,
     uint32_t trace_height,
     uint32_t trace_width,
-    uint32_t l_skip
-) {
+    uint32_t l_skip, cudaStream_t stream) {
     uint32_t skip_domain = 1u << l_skip;
     uint32_t new_height = std::max(trace_height, skip_domain) / skip_domain;
 
@@ -466,11 +464,11 @@ extern "C" int _stacked_reduction_fold_ple(
     uint32_t total_warps_in_block = block_size / WARP_SIZE;
     size_t smem_bytes = (skip_domain > WARP_SIZE) ? total_warps_in_block * sizeof(FpExt) : 0;
 
-    stacked_reduction_fold_ple_kernel<<<grid, block, smem_bytes>>>(
+    stacked_reduction_fold_ple_kernel<<<grid, block, smem_bytes, stream>>>(
         src, dst, omega_skip_pows, inv_lagrange_denoms, trace_height, new_height, skip_domain
     );
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _initialize_k_rot_from_eq_segments(
@@ -478,16 +476,15 @@ extern "C" int _initialize_k_rot_from_eq_segments(
     FpExt *k_rot_ns,
     FpExt k_rot_uni_0,
     FpExt k_rot_uni_1,
-    uint32_t max_n
-) {
+    uint32_t max_n, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(1 << max_n);
     grid.y = max_n + 1;
 
-    initialize_k_rot_from_eq_segments_kernel<<<grid, block>>>(
+    initialize_k_rot_from_eq_segments_kernel<<<grid, block, 0, stream>>>(
         eq_r_ns, k_rot_ns, k_rot_uni_0, k_rot_uni_1
     );
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _stacked_reduction_sumcheck_mle_round(
@@ -500,8 +497,7 @@ extern "C" int _stacked_reduction_sumcheck_mle_round(
     uint32_t q_height,
     uint32_t window_len,
     uint32_t num_y,
-    uint32_t sm_count
-) {
+    uint32_t sm_count, cudaStream_t stream) {
     // Smaller block size for more eligible warps to hide latency
     auto [grid, block] = kernel_launch_params(num_y, 256);
     assert(sm_count);
@@ -527,11 +523,11 @@ extern "C" int _stacked_reduction_sumcheck_mle_round(
     assert((size_t)num_y * grid.y < (size_t)1u << 32);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
-    stacked_reduction_sumcheck_mle_round_kernel<<<grid, block, shmem_bytes>>>(
+    stacked_reduction_sumcheck_mle_round_kernel<<<grid, block, shmem_bytes, stream>>>(
         q_evals, eq_r_ns, k_rot_ns, unstacked_cols, lambda_pows, output, q_height, window_len, num_y
     );
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
@@ -545,15 +541,14 @@ extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
     uint32_t q_height,
     uint32_t window_len,
     uint32_t l_skip,
-    uint32_t round
-) {
+    uint32_t round, cudaStream_t stream) {
     auto shift_factor = l_skip + round;
     dim3 block(std::min(window_len, 256u));
     dim3 grid(1);
     // block.x <= 512 < 2^32 so atomic u64 will not overflow
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
-    stacked_reduction_sumcheck_mle_round_degenerate_kernel<<<grid, block, shmem_bytes>>>(
+    stacked_reduction_sumcheck_mle_round_degenerate_kernel<<<grid, block, shmem_bytes, stream>>>(
         q_evals,
         eq_ub_ptr,
         eq_r,
@@ -566,5 +561,5 @@ extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
         shift_factor
     );
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }

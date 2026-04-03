@@ -230,13 +230,12 @@ extern "C" int _whir_algebraic_batch_traces(
     const FpExt *mu_powers, // Len is sum of widths of all matrices
     size_t stacked_height,
     size_t num_packets,
-    uint32_t skip_domain
-) {
+    uint32_t skip_domain, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(stacked_height);
-    whir_algebraic_batch_traces_kernel<<<grid, block>>>(
+    whir_algebraic_batch_traces_kernel<<<grid, block, 0, stream>>>(
         output, packets, mu_powers, stacked_height, num_packets, skip_domain
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 inline std::pair<dim3, dim3> whir_sumcheck_coeff_moments_launch_params(uint32_t height) {
@@ -253,17 +252,16 @@ extern "C" int _whir_sumcheck_coeff_moments_round(
     const FpExt *w_moments,
     FpExt *output,         // Output: [d=2] final results
     FpExt *tmp_block_sums, // Temporary buffer: [num_blocks * d]
-    const uint32_t height
-) {
+    const uint32_t height, cudaStream_t stream) {
     auto [grid, block] = whir_sumcheck_coeff_moments_launch_params(height);
     unsigned int num_warps = (block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t shmem_bytes = std::max(1u, num_warps) * sizeof(FpExt);
 
-    whir_sumcheck_coeff_moments_round_kernel<<<grid, block, shmem_bytes>>>(
+    whir_sumcheck_coeff_moments_round_kernel<<<grid, block, shmem_bytes, stream>>>(
         f_coeffs, w_moments, tmp_block_sums, height
     );
 
-    int err = CHECK_KERNEL();
+    int err = CHECK_KERNEL_ON(stream);
     if (err != 0)
         return err;
 
@@ -272,9 +270,9 @@ extern "C" int _whir_sumcheck_coeff_moments_round(
     unsigned int reduce_warps = (reduce_block.x + WARP_SIZE - 1) / WARP_SIZE;
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     sumcheck::static_final_reduce_block_sums<S_DEG>
-        <<<S_DEG, reduce_block, reduce_shmem>>>(tmp_block_sums, output, num_blocks);
+        <<<S_DEG, reduce_block, reduce_shmem, stream>>>(tmp_block_sums, output, num_blocks);
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _whir_fold_coeffs_and_moments(
@@ -283,13 +281,12 @@ extern "C" int _whir_fold_coeffs_and_moments(
     FpExt *f_folded_coeffs,
     FpExt *w_folded_moments,
     FpExt alpha,
-    uint32_t height
-) {
+    uint32_t height, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(height >> 1);
-    whir_fold_coeffs_and_moments_kernel<<<grid, block>>>(
+    whir_fold_coeffs_and_moments_kernel<<<grid, block, 0, stream>>>(
         f_coeffs, w_moments, f_folded_coeffs, w_folded_moments, alpha, height >> 1
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _w_moments_accumulate(
@@ -299,11 +296,10 @@ extern "C" int _w_moments_accumulate(
     FpExt gamma,
     uint32_t num_queries,
     uint32_t log_height,
-    uint32_t height
-) {
+    uint32_t height, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(height, 256);
-    w_moments_accumulate_kernel<<<grid, block>>>(
+    w_moments_accumulate_kernel<<<grid, block, 0, stream>>>(
         w_moments, z0_pows2, z_pows2, gamma, num_queries, log_height, height
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
