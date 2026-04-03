@@ -161,7 +161,7 @@ void bit_rev_permutation_z(T* out, const T* in, uint32_t lg_domain_size,
 
 template<typename T>
 static int bit_rev_impl(T* d_out, const T* d_inp,
-    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
+    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count, cudaStream_t stream)
 {
     size_t domain_size = (size_t)1 << lg_domain_size;
     // aim to read 4 cache lines of consecutive data per read
@@ -178,14 +178,14 @@ static int bit_rev_impl(T* d_out, const T* d_inp,
 
     // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
     if (domain_size <= 1024)
-        bit_rev_permutation<T><<<dim3(1u, grid_y, grid_z), domain_size>>>
+        bit_rev_permutation<T><<<dim3(1u, grid_y, grid_z), domain_size, 0, stream>>>
                             (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else if (domain_size < bsize * Z_COUNT)
-        bit_rev_permutation<T><<<dim3(domain_size / WARP_SIZE, grid_y, grid_z), WARP_SIZE>>>
+        bit_rev_permutation<T><<<dim3(domain_size / WARP_SIZE, grid_y, grid_z), WARP_SIZE, 0, stream>>>
                             (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else if (Z_COUNT > WARP_SIZE || lg_domain_size <= 32)
         bit_rev_permutation_z<T, Z_COUNT><<<dim3(domain_size / Z_COUNT / bsize, grid_y, grid_z), bsize,
-                                            bsize * Z_COUNT * sizeof(T)>>>
+                                            bsize * Z_COUNT * sizeof(T), stream>>>
                             (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     else {
         // Those GPUs that can reserve 96KB of shared memory can
@@ -196,27 +196,27 @@ static int bit_rev_impl(T* d_out, const T* d_inp,
         cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
 
         bit_rev_permutation_z<T, Z_COUNT><<<dim3(sm_count * 2, grid_y, grid_z), 192,
-                                            192 * Z_COUNT * sizeof(T)>>>
+                                            192 * Z_COUNT * sizeof(T), stream>>>
                                 (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     }
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
-    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
+    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count, cudaStream_t stream)
 {
-    return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
+    return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count, stream);
 }
 
 extern "C" int _bit_rev_ext(bb31_4_t* d_out, const bb31_4_t* d_inp,
-    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
+    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count, cudaStream_t stream)
 {
-    return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
+    return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count, stream);
 }
 
 extern "C" int _bit_rev_frac_ext(frac_fpext_t* d_out, const frac_fpext_t* d_inp,
-    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count)
+    uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count, cudaStream_t stream)
 {
-    return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
+    return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count, stream);
 }

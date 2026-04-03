@@ -144,8 +144,7 @@ extern "C" int _fold_ple_from_evals(
     uint32_t width,
     uint32_t l_skip,
     uint32_t new_height,
-    bool rotate
-) {
+    bool rotate, cudaStream_t stream) {
     uint32_t skip_domain = 1u << l_skip;
 
     // Block size: at least skip_domain, prefer 256 for occupancy
@@ -162,7 +161,7 @@ extern "C" int _fold_ple_from_evals(
     size_t smem_bytes = (skip_domain > WARP_SIZE) ? total_warps_in_block * sizeof(FpExt) : 0;
 
     if (rotate) {
-        fold_ple_from_evals_kernel<true><<<grid, block, smem_bytes>>>(
+        fold_ple_from_evals_kernel<true><<<grid, block, smem_bytes, stream>>>(
             input_matrix,
             output_matrix,
             omega_skip_pows,
@@ -173,7 +172,7 @@ extern "C" int _fold_ple_from_evals(
             new_height
         );
     } else {
-        fold_ple_from_evals_kernel<false><<<grid, block, smem_bytes>>>(
+        fold_ple_from_evals_kernel<false><<<grid, block, smem_bytes, stream>>>(
             input_matrix,
             output_matrix,
             omega_skip_pows,
@@ -184,7 +183,7 @@ extern "C" int _fold_ple_from_evals(
             new_height
         );
     }
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _interpolate_columns(
@@ -192,12 +191,11 @@ extern "C" int _interpolate_columns(
     const FpExt *const *columns,
     size_t s_deg,
     size_t num_y,
-    size_t num_columns
-) {
+    size_t num_columns, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(num_y * num_columns, 512);
 
-    interpolate_columns_kernel<<<grid, block>>>(interpolated, columns, s_deg, num_y, num_columns);
-    return CHECK_KERNEL();
+    interpolate_columns_kernel<<<grid, block, 0, stream>>>(interpolated, columns, s_deg, num_y, num_columns);
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _frac_matrix_vertically_repeat(
@@ -205,14 +203,13 @@ extern "C" int _frac_matrix_vertically_repeat(
     const std::pair<FpExt, FpExt> *in,
     const uint32_t width,
     const uint32_t lifted_height,
-    const uint32_t height
-) {
+    const uint32_t height, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(lifted_height);
     grid.y = std::min(width, MAX_GRID_DIM);
     grid.z = (width + grid.y - 1) / grid.y;
     assert(grid.z <= MAX_GRID_DIM);
-    frac_matrix_vertically_repeat_kernel<<<grid, block>>>(out, in, width, lifted_height, height);
-    return CHECK_KERNEL();
+    frac_matrix_vertically_repeat_kernel<<<grid, block, 0, stream>>>(out, in, width, lifted_height, height);
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _frac_matrix_vertically_repeat_ext(
@@ -222,13 +219,12 @@ extern "C" int _frac_matrix_vertically_repeat_ext(
     const FpExt *in_denominators,
     const uint32_t width,
     const uint32_t lifted_height,
-    const uint32_t height
-) {
+    const uint32_t height, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(lifted_height);
     grid.y = std::min(width, MAX_GRID_DIM);
     grid.z = (width + grid.y - 1) / grid.y;
     assert(grid.z <= MAX_GRID_DIM);
-    frac_matrix_vertically_repeat_mixed_kernel<<<grid, block>>>(
+    frac_matrix_vertically_repeat_mixed_kernel<<<grid, block, 0, stream>>>(
         out_numerators,
         out_denominators,
         in_numerators,
@@ -237,7 +233,7 @@ extern "C" int _frac_matrix_vertically_repeat_ext(
         lifted_height,
         height
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 } // namespace

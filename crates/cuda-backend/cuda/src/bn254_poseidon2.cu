@@ -455,8 +455,7 @@ __launch_bounds__(BN254_GRIND_BLOCK_SIZE) __global__ void bn254_grind_kernel(
 extern "C" int _init_bn254_poseidon2_rc(
     const uint64_t* initial_rc,
     const uint64_t* partial_rc,
-    const uint64_t* terminal_rc
-) {
+    const uint64_t* terminal_rc, cudaStream_t stream) {
     cudaError_t err;
     err = cudaMemcpyToSymbol(g_initial_rc,  initial_rc,  4 * 3 * 4 * sizeof(uint64_t));
     if (err != cudaSuccess) return (int)err;
@@ -475,8 +474,7 @@ extern "C" int _init_bn254_poseidon2_rc(
 extern "C" int _init_bn254_poseidon2_rc_w2(
     const uint64_t* initial_rc,
     const uint64_t* partial_rc,
-    const uint64_t* terminal_rc
-) {
+    const uint64_t* terminal_rc, cudaStream_t stream) {
     cudaError_t err;
     err = cudaMemcpyToSymbol(g_initial_rc_w2,  initial_rc,  3 * 2 * 4 * sizeof(uint64_t));
     if (err != cudaSuccess) return (int)err;
@@ -492,8 +490,7 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes(
     const Fp*       matrix,
     size_t          width,
     size_t          query_stride,
-    size_t          log_rows_per_query
-) {
+    size_t          log_rows_per_query, cudaStream_t stream) {
     if (log_rows_per_query > 10) {
         return cudaErrorInvalidValue;
     }
@@ -505,10 +502,10 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes(
     size_t shmem_bytes   = shared_stride * sizeof(Bn254Fr);
     auto   height        = query_stride << log_rows_per_query;
 
-    bn254_compressing_row_hashes_kernel<<<grid, block, shmem_bytes>>>(
+    bn254_compressing_row_hashes_kernel<<<grid, block, shmem_bytes, stream>>>(
         out, matrix, width, height, query_stride, log_rows_per_query
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _bn254_poseidon2_compressing_row_hashes_ext(
@@ -516,8 +513,7 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes_ext(
     const FpExt*    matrix,
     size_t          width,
     size_t          query_stride,
-    size_t          log_rows_per_query
-) {
+    size_t          log_rows_per_query, cudaStream_t stream) {
     if (log_rows_per_query > 10) {
         return cudaErrorInvalidValue;
     }
@@ -529,20 +525,19 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes_ext(
     size_t shmem_bytes   = shared_stride * sizeof(Bn254Fr);
     auto   height        = query_stride << log_rows_per_query;
 
-    bn254_compressing_row_hashes_ext_kernel<<<grid, block, shmem_bytes>>>(
+    bn254_compressing_row_hashes_ext_kernel<<<grid, block, shmem_bytes, stream>>>(
         out, matrix, width, height, query_stride, log_rows_per_query
     );
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _bn254_poseidon2_adjacent_compress_layer(
     bn254_digest_t*       output,
     const bn254_digest_t* prev_layer,
-    size_t                output_size
-) {
+    size_t                output_size, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(output_size);
-    bn254_adjacent_compress_layer_kernel<<<grid, block>>>(output, prev_layer, output_size);
-    return CHECK_KERNEL();
+    bn254_adjacent_compress_layer_kernel<<<grid, block, 0, stream>>>(output, prev_layer, output_size);
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _bn254_sponge_grind(
@@ -550,8 +545,7 @@ extern "C" int _bn254_sponge_grind(
     uint32_t bits,
     uint32_t min_witness,
     uint32_t max_witness,
-    uint32_t* result
-) {
+    uint32_t* result, cudaStream_t stream) {
     if (bits >= 32 || (uint64_t{1} << bits) >= Fp::P) {
         return cudaErrorInvalidValue;
     }
@@ -559,13 +553,13 @@ extern "C" int _bn254_sponge_grind(
     size_t total_threads = size_t{1} << bits;
     size_t grid_size = div_ceil(total_threads, block_size);
 
-    bn254_grind_kernel<<<grid_size, block_size>>>(init_state, bits, min_witness, max_witness, result);
+    bn254_grind_kernel<<<grid_size, block_size, 0, stream>>>(init_state, bits, min_witness, max_witness, result);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return (int)err;
 
-    err = cudaDeviceSynchronize();
+    err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) return (int)err;
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }

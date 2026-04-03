@@ -50,11 +50,10 @@ __global__ void generate_device_ntt_twiddles_kernel(Fp *d_twiddles) {
 // Generate twiddles into the provided device buffer and copy to constant memory.
 // `d_twiddles` must have capacity for DEVICE_NTT_TWIDDLES_SIZE elements.
 // Returns 0 on success, non-zero on error.
-extern "C" int _generate_device_ntt_twiddles(Fp *d_twiddles) {
+extern "C" int _generate_device_ntt_twiddles(Fp *d_twiddles, cudaStream_t stream) {
     // Generate twiddles on GPU
     constexpr uint32_t BLOCK_SIZE = 256;
     uint32_t num_blocks = div_ceil(DEVICE_NTT_TWIDDLES_SIZE, BLOCK_SIZE);
-    cudaStream_t stream = cudaStreamPerThread;
     generate_device_ntt_twiddles_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_twiddles);
 
     // Generate and publish on the same explicit stream so the copy cannot race the kernel.
@@ -68,7 +67,7 @@ extern "C" int _generate_device_ntt_twiddles(Fp *d_twiddles) {
     );
     cudaStreamSynchronize(stream);
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 // ============================================================================
@@ -115,7 +114,9 @@ __global__ void batch_ntt_kernel(
 }
 
 template <bool intt, bool needs_shmem>
-int launch_batch_ntt_small(Fp *buffer, size_t const l_skip, size_t const cnt_blocks) {
+int launch_batch_ntt_small(
+    Fp *buffer, size_t const l_skip, size_t const cnt_blocks, cudaStream_t stream
+) {
     uint32_t const threads_per_block = 1024;
     uint32_t const threads_x = 1 << l_skip;
     assert(threads_per_block >> l_skip);
@@ -123,18 +124,19 @@ int launch_batch_ntt_small(Fp *buffer, size_t const l_skip, size_t const cnt_blo
     size_t const smem_size = needs_shmem ? (sizeof(Fp) * threads_per_block) : 0;
 
     batch_ntt_kernel<intt, needs_shmem>
-        <<<div_ceil(cnt_blocks, threads_y), dim3{threads_x, threads_y, 1}, smem_size>>>(
+        <<<div_ceil(cnt_blocks, threads_y), dim3{threads_x, threads_y, 1}, smem_size, stream>>>(
             buffer, l_skip, cnt_blocks
         );
 
-    return CHECK_KERNEL();
+    return CHECK_KERNEL_ON(stream);
 }
 
 extern "C" int _batch_ntt_small(
     Fp *buffer,
     size_t const l_skip,
     size_t const cnt_blocks,
-    bool const is_intt
+    bool const is_intt,
+    cudaStream_t stream
 ) {
     if (l_skip == 0 || cnt_blocks == 0) {
         return 0;
@@ -146,6 +148,6 @@ extern "C" int _batch_ntt_small(
     bool const needs_shmem = l_skip > LOG_WARP_SIZE;
     assert((1 << l_skip) <= 1024);
     return DISPATCH_BOOL_PAIR(
-        launch_batch_ntt_small, is_intt, needs_shmem, buffer, l_skip, cnt_blocks
+        launch_batch_ntt_small, is_intt, needs_shmem, buffer, l_skip, cnt_blocks, stream
     );
 }
