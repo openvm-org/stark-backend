@@ -3,6 +3,13 @@ use std::{fmt::Debug, marker::PhantomData};
 use derivative::Derivative;
 use p3_field::Field;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
+#[cfg(feature = "multi-field-transcript")]
+use {
+    super::multi_field_packing::{checked_num_packed_f_elms, pack_f_to_sf},
+    itertools::Itertools,
+    p3_field::{PrimeField, PrimeField32},
+    p3_symmetric::CryptographicPermutation,
+};
 
 /// Trait abstracting Merkle tree hash operations. This trait is used as part of the definition of
 /// the [`StarkProtocolConfig`](crate::StarkProtocolConfig).
@@ -66,5 +73,64 @@ where
 
     fn compress(&self, left: Self::Digest, right: Self::Digest) -> Self::Digest {
         self.compress.compress([left, right])
+    }
+}
+
+/// A padding-free, overwrite-mode sponge that operates natively over `PF` but accepts elements
+/// of `F: PrimeField32`, packing them at base-2^(F::bits()).
+///
+/// This differs from Plonky3's `MultiField32PaddingFreeSponge` which packs at base-2^32.
+/// For BabyBear (31-bit field), base-2^31 packing is injective into BN254, whereas
+/// base-2^32 packing of 8 elements can exceed the BN254 modulus.
+#[cfg(feature = "multi-field-transcript")]
+#[derive(Clone, Debug)]
+pub struct MultiFieldHasher<F, PF, P, const WIDTH: usize, const RATE: usize, const OUT: usize> {
+    permutation: P,
+    num_f_elms: usize,
+    _phantom: PhantomData<(F, PF)>,
+}
+
+#[cfg(feature = "multi-field-transcript")]
+impl<F, PF, P, const WIDTH: usize, const RATE: usize, const OUT: usize>
+    MultiFieldHasher<F, PF, P, WIDTH, RATE, OUT>
+where
+    F: PrimeField32,
+    PF: PrimeField,
+{
+    pub fn new(permutation: P) -> Self {
+        let num_f_elms = checked_num_packed_f_elms::<F, PF>();
+
+        Self {
+            permutation,
+            num_f_elms,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "multi-field-transcript")]
+impl<F, PF, P, const WIDTH: usize, const RATE: usize, const OUT: usize>
+    CryptographicHasher<F, [PF; OUT]> for MultiFieldHasher<F, PF, P, WIDTH, RATE, OUT>
+where
+    F: PrimeField32,
+    PF: PrimeField + Default + Copy,
+    P: CryptographicPermutation<[PF; WIDTH]>,
+{
+    fn hash_iter<I>(&self, input: I) -> [PF; OUT]
+    where
+        I: IntoIterator<Item = F>,
+    {
+        let mut state = [PF::default(); WIDTH];
+        for block_chunk in &input.into_iter().chunks(RATE) {
+            for (chunk_id, chunk) in (&block_chunk.chunks(self.num_f_elms))
+                .into_iter()
+                .enumerate()
+            {
+                state[chunk_id] = pack_f_to_sf(&chunk.collect_vec());
+            }
+            state = self.permutation.permute(state);
+        }
+
+        state[..OUT].try_into().unwrap()
     }
 }

@@ -4,9 +4,8 @@
 ///   - Bn254Fr type (4 × u64 Montgomery form, little-endian limbs)
 ///   - CIOS Montgomery multiplication matching p3-bn254::helpers::monty_mul
 ///   - Field add / sub / neg / double / x^5 S-box
-///   - MDS layers for WIDTH = 3 (external and internal)
+///   - Templated MDS layers (external and internal, any WIDTH)
 ///   - bn254_from_canonical / bn254_to_canonical conversions
-///   - reduce_32 (pack BabyBear → Bn254Fr) for Merkle hashing
 ///   - bn254_pack_base_2_31 / u256_mod_u32 helpers for MultiFieldTranscript
 ///     packing and sampling during grinding
 ///
@@ -256,32 +255,7 @@ void bn254_to_canonical(uint64_t canonical[4], Bn254Fr x) {
 }
 
 // ---------------------------------------------------------------------------
-// reduce_32: pack BabyBear canonical u32 values into one Bn254Fr
-//
-// Used by Merkle hashing (MultiField32PaddingFreeSponge, num_f_elms = 8).
-//
-// Formula: result = sum_{i=0}^{n-1} bb[i] * 2^{32*i}  (as a BN254 scalar)
-// Implementation: canonical = { bb[0]|(bb[1]<<32), bb[2]|(bb[3]<<32), ... }
-//                 r = bn254_from_canonical(canonical)
-// ---------------------------------------------------------------------------
-
-static __device__ __forceinline__
-Bn254Fr bn254_reduce_32(const uint32_t* bb, int count) {
-    // Pack bb[0..count-1] into canonical 256-bit integer, then to Montgomery.
-    // canonical = bb[0] + bb[1]*2^32 + bb[2]*2^64 + ...
-    // Limb i = bb[2i] | (bb[2i+1] << 32) for pairs; last odd one goes into low32 of a limb.
-    uint64_t canonical[4] = {0, 0, 0, 0};
-    for (int i = 0; i < count; i++) {
-        // bit offset = i * 32; limb index = i / 2; within limb bit = (i & 1) * 32
-        int limb = i >> 1;       // 0, 0, 1, 1, 2, 2, 3, 3
-        int shift = (i & 1) << 5; // 0, 32, 0, 32, 0, 32, 0, 32
-        canonical[limb] |= (uint64_t)(bb[i]) << shift;
-    }
-    return bn254_from_canonical(canonical);
-}
-
-// ---------------------------------------------------------------------------
-// MultiFieldTranscript helpers
+// Multi-field packing helpers
 // ---------------------------------------------------------------------------
 
 /// Pack `count` (1..8) canonical BabyBear u32 values into one Bn254Fr.
@@ -318,29 +292,35 @@ uint32_t u256_mod_u32(const uint64_t x[4], uint32_t d) {
 }
 
 // ---------------------------------------------------------------------------
-// Poseidon2 MDS layers for WIDTH = 3
+// Poseidon2 MDS layers (generic over WIDTH)
+//
+// External MDS: M_E = 1 + ones  (circ(2,1,...,1))
+//   sum = s[0] + s[1] + ... + s[WIDTH-1]
+//   s[i] += sum  for all i
+//
+// Internal MDS: M_I = I + diag(1,...,1,2)
+//   Hardcodes mat_internal_diag_m_1 = [1,...,1,2] for performance (avoids monty mul).
+//   Must match the Rust-side constants for width 2 and width 3:
+//     width 2: [Bn254::ONE, Bn254::TWO]
+//     width 3: [Bn254::ONE, Bn254::ONE, Bn254::TWO]
+//   sum = s[0] + s[1] + ... + s[WIDTH-1]
+//   s[i] += sum  for i < WIDTH-1
+//   s[WIDTH-1] = 2*s[WIDTH-1] + sum
 // ---------------------------------------------------------------------------
 
-/// External MDS (same as mds_light_permutation for WIDTH=3):
-///   sum = s[0] + s[1] + s[2]
-///   s[i] += sum  for all i
+template<int WIDTH>
 static __device__ __forceinline__
-void bn254_mds_external(Bn254Fr s[3]) {
-    Bn254Fr sum = bn254_add(bn254_add(s[0], s[1]), s[2]);
-    s[0] = bn254_add(s[0], sum);
-    s[1] = bn254_add(s[1], sum);
-    s[2] = bn254_add(s[2], sum);
+void bn254_mds_external(Bn254Fr s[WIDTH]) {
+    Bn254Fr sum = s[0];
+    for (int i = 1; i < WIDTH; i++) sum = bn254_add(sum, s[i]);
+    for (int i = 0; i < WIDTH; i++) s[i] = bn254_add(s[i], sum);
 }
 
-/// Internal MDS (bn254_matmul_internal):
-///   sum = s[0] + s[1] + s[2]
-///   s[0] += sum
-///   s[1] += sum
-///   s[2] = 2*s[2] + sum
+template<int WIDTH>
 static __device__ __forceinline__
-void bn254_mds_internal(Bn254Fr s[3]) {
-    Bn254Fr sum = bn254_add(bn254_add(s[0], s[1]), s[2]);
-    s[0] = bn254_add(s[0], sum);
-    s[1] = bn254_add(s[1], sum);
-    s[2] = bn254_add(bn254_double(s[2]), sum);
+void bn254_mds_internal(Bn254Fr s[WIDTH]) {
+    Bn254Fr sum = s[0];
+    for (int i = 1; i < WIDTH; i++) sum = bn254_add(sum, s[i]);
+    for (int i = 0; i < WIDTH - 1; i++) s[i] = bn254_add(s[i], sum);
+    s[WIDTH - 1] = bn254_add(bn254_double(s[WIDTH - 1]), sum);
 }

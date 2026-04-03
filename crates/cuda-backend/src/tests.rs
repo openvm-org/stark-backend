@@ -12,8 +12,9 @@ use itertools::Itertools;
 use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_backend::{
-    hasher::{Hasher as CpuMerkleHasher, MerkleHasher},
-    p3_symmetric::{MultiField32PaddingFreeSponge, TruncatedPermutation},
+    hasher::{Hasher as CpuMerkleHasher, MerkleHasher, MultiFieldHasher},
+    multi_field_packing::pack_f_to_sf,
+    p3_symmetric::TruncatedPermutation,
 };
 use openvm_stark_backend::{
     prover::{
@@ -26,8 +27,10 @@ use openvm_stark_backend::{
     FiatShamirTranscript, StarkEngine, StarkProtocolConfig,
 };
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
-use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
-    default_babybear_bn254_poseidon2, Bn254Scalar,
+use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::Bn254Scalar;
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use openvm_stark_sdk::config::bn254_poseidon2::{
+    default_bn254_poseidon2_width2, default_bn254_poseidon2_width3,
 };
 use openvm_stark_sdk::{
     config::baby_bear_poseidon2::{
@@ -35,8 +38,6 @@ use openvm_stark_sdk::{
     },
     utils::setup_tracing_with_log_level,
 };
-#[cfg(feature = "baby-bear-bn254-poseidon2")]
-use p3_field::{reduce_32, BasedVectorSpace};
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use p3_symmetric::Permutation;
@@ -123,10 +124,10 @@ fn bn254_host_merkle_layers(
     width: usize,
     rows_per_query: usize,
 ) -> Vec<Vec<Bn254Digest>> {
-    let perm = default_babybear_bn254_poseidon2();
+    let perm = default_bn254_poseidon2_width3();
     let hasher = CpuMerkleHasher::new(
-        MultiField32PaddingFreeSponge::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()).unwrap(),
-        TruncatedPermutation::new(perm),
+        MultiFieldHasher::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()),
+        TruncatedPermutation::new(default_bn254_poseidon2_width2()),
     );
 
     let query_stride = height / rows_per_query;
@@ -164,10 +165,10 @@ fn bn254_host_merkle_layers_ext(
     width: usize,
     rows_per_query: usize,
 ) -> Vec<Vec<Bn254Digest>> {
-    let perm = default_babybear_bn254_poseidon2();
+    let perm = default_bn254_poseidon2_width3();
     let hasher = CpuMerkleHasher::new(
-        MultiField32PaddingFreeSponge::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()).unwrap(),
-        TruncatedPermutation::new(perm),
+        MultiFieldHasher::<F, Bn254Scalar, _, 3, 16, 1>::new(perm.clone()),
+        TruncatedPermutation::new(default_bn254_poseidon2_width2()),
     );
 
     let query_stride = height / rows_per_query;
@@ -219,7 +220,7 @@ fn bn254_host_merkle_proofs(
 
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 fn bn254_row_hash_emulated(vals: &[F]) -> Bn254Digest {
-    let perm = default_babybear_bn254_poseidon2();
+    let perm = default_bn254_poseidon2_width3();
     let mut state = [Bn254Scalar::ZERO; 3];
     let mut buf = [F::ZERO; 16];
     let mut cnt = 0usize;
@@ -228,17 +229,17 @@ fn bn254_row_hash_emulated(vals: &[F]) -> Bn254Digest {
         buf[cnt] = value;
         cnt += 1;
         if cnt == 16 {
-            state[0] = reduce_32(&buf[..8]);
-            state[1] = reduce_32(&buf[8..16]);
+            state[0] = pack_f_to_sf(&buf[..8]);
+            state[1] = pack_f_to_sf(&buf[8..16]);
             perm.permute_mut(&mut state);
             cnt = 0;
         }
     }
 
     if cnt > 0 {
-        state[0] = reduce_32(&buf[..cnt.min(8)]);
+        state[0] = pack_f_to_sf(&buf[..cnt.min(8)]);
         if cnt > 8 {
-            state[1] = reduce_32(&buf[8..cnt.min(16)]);
+            state[1] = pack_f_to_sf(&buf[8..cnt.min(16)]);
         }
         perm.permute_mut(&mut state);
     }
@@ -414,10 +415,10 @@ fn test_bn254_row_hash_ext_gpu_matches_host_multi_block_rows() {
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 #[test]
 fn test_bn254_row_hash_emulation_matches_host_multi_block_rows() {
-    let perm = default_babybear_bn254_poseidon2();
+    let perm = default_bn254_poseidon2_width3();
     let host_hasher = CpuMerkleHasher::new(
-        MultiField32PaddingFreeSponge::<F, Bn254Scalar, _, 3, 16, 1>::new(perm).unwrap(),
-        TruncatedPermutation::new(default_babybear_bn254_poseidon2()),
+        MultiFieldHasher::<F, Bn254Scalar, _, 3, 16, 1>::new(perm),
+        TruncatedPermutation::new(default_bn254_poseidon2_width2()),
     );
     let row = (0..19)
         .map(|i| F::from_u32((i as u32).wrapping_mul(53).wrapping_add((i >> 1) as u32)))

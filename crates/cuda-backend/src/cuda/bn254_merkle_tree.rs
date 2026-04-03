@@ -10,10 +10,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::CudaError,
 };
-use zkhash::{
-    ark_ff::PrimeField as _, fields::bn256::FpBN256 as ArkFpBN256,
-    poseidon2::poseidon2_instance_bn256::RC3,
-};
+use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::Bn254Scalar;
 
 use crate::{
     bn254_sponge::DeviceBn254SpongeState,
@@ -27,7 +24,7 @@ use crate::{
 
 /// One BN254 scalar element — the digest type for BN254 Poseidon2 Merkle trees.
 /// Layout matches `bn254_digest_t` in the CUDA kernel (32 bytes, align 8).
-pub type Bn254Digest = [openvm_stark_sdk::config::baby_bear_bn254_poseidon2::Bn254Scalar; 1];
+pub type Bn254Digest = [Bn254Scalar; 1];
 
 // Compile-time FFI safety assertions.
 // `Bn254Digest` is passed to CUDA as `Bn254Fr*` (32 bytes, 8-aligned).
@@ -66,6 +63,12 @@ extern "C" {
         initial_rc: *const u64,  // [4*3*4] = 48 u64s
         partial_rc: *const u64,  // [56*4]  = 224 u64s
         terminal_rc: *const u64, // [4*3*4] = 48 u64s
+    ) -> i32;
+
+    fn _init_bn254_poseidon2_rc_w2(
+        initial_rc: *const u64,  // [3*2*4] = 24 u64s
+        partial_rc: *const u64,  // [50*4]  = 200 u64s
+        terminal_rc: *const u64, // [3*2*4] = 24 u64s
     ) -> i32;
 
     fn _bn254_poseidon2_compressing_row_hashes(
@@ -190,48 +193,69 @@ pub fn canonical_to_monty_bn254(canonical: [u64; 4]) -> [u64; 4] {
     monty_mul_bn254(BN254_R_SQ, canonical)
 }
 
+/// Convert a `p3_bn254::Bn254` element to Montgomery-form `[u64; 4]` for CUDA.
+fn p3_bn254_to_monty(elem: &Bn254Scalar) -> [u64; 4] {
+    use p3_field::PrimeField;
+    let bytes = elem.as_canonical_biguint().to_bytes_le();
+    let mut canonical = [0u64; 4];
+    for (i, chunk) in bytes.chunks(8).enumerate() {
+        if i >= 4 {
+            break;
+        }
+        let mut buf = [0u8; 8];
+        buf[..chunk.len()].copy_from_slice(chunk);
+        canonical[i] = u64::from_le_bytes(buf);
+    }
+    canonical_to_monty_bn254(canonical)
+}
+
+fn flatten_external_rc<const WIDTH: usize>(round_constants: &[[Bn254Scalar; WIDTH]]) -> Vec<u64> {
+    round_constants
+        .iter()
+        .flat_map(|rc| rc.iter())
+        .flat_map(p3_bn254_to_monty)
+        .collect()
+}
+
+fn flatten_internal_rc(round_constants: &[Bn254Scalar]) -> Vec<u64> {
+    round_constants.iter().flat_map(p3_bn254_to_monty).collect()
+}
+
 // ---------------------------------------------------------------------------
 // Round-constant initialization
 // ---------------------------------------------------------------------------
 
-/// Compute BN254 Poseidon2 round constants from zkhash's RC3.
-/// Returns (initial_flat, partial_flat, terminal_flat) as flat u64 vectors.
-fn compute_bn254_rc_constants() -> (Vec<u64>, Vec<u64>, Vec<u64>) {
-    // RC3: 64 rows × 3 elements each (ark_FpBN256 in canonical form)
-    // Layout:
-    //   rows  0.. 4 → initial external rounds (3 elements each)
-    //   rows  4..60 → internal/partial rounds (3 elements, only [0] used)
-    //   rows 60..64 → terminal external rounds (3 elements each)
-    let to_monty = |elem: &ArkFpBN256| -> [u64; 4] {
-        let canonical: [u64; 4] = elem.into_bigint().0;
-        canonical_to_monty_bn254(canonical)
-    };
+/// Compute width-3 BN254 Poseidon2 round constants for CUDA.
+/// Returns (initial_flat, partial_flat, terminal_flat) as flat u64 vectors in Montgomery form.
+fn compute_bn254_rc_w3_constants() -> (Vec<u64>, Vec<u64>, Vec<u64>) {
+    use openvm_stark_sdk::config::bn254_poseidon2::default_bn254_poseidon2_width3_constants;
 
-    let all_rows: Vec<[[u64; 4]; 3]> = RC3
-        .iter()
-        .map(|row| [to_monty(&row[0]), to_monty(&row[1]), to_monty(&row[2])])
-        .collect();
+    let constants = default_bn254_poseidon2_width3_constants();
+    (
+        flatten_external_rc(constants.initial_external_rc()),
+        flatten_internal_rc(constants.internal_rc()),
+        flatten_external_rc(constants.terminal_external_rc()),
+    )
+}
 
-    let flatten_rows = |rows: &[[[u64; 4]; 3]]| -> Vec<u64> {
-        rows.iter()
-            .flat_map(|r| r.iter())
-            .flat_map(|limbs| limbs.iter().copied())
-            .collect()
-    };
+/// Compute width-2 BN254 Poseidon2 round constants for CUDA.
+/// Returns (initial_flat, partial_flat, terminal_flat) as flat u64 vectors in Montgomery form.
+fn compute_bn254_rc_w2_constants() -> (Vec<u64>, Vec<u64>, Vec<u64>) {
+    use openvm_stark_sdk::config::bn254_poseidon2::default_bn254_poseidon2_width2_constants;
 
-    let initial_flat = flatten_rows(&all_rows[0..4]);
-    let partial_flat: Vec<u64> = all_rows[4..60]
-        .iter()
-        .flat_map(|r| r[0].iter().copied())
-        .collect();
-    let terminal_flat = flatten_rows(&all_rows[60..64]);
-
-    (initial_flat, partial_flat, terminal_flat)
+    let constants = default_bn254_poseidon2_width2_constants();
+    (
+        flatten_external_rc(constants.initial_external_rc()),
+        flatten_internal_rc(constants.internal_rc()),
+        flatten_external_rc(constants.terminal_external_rc()),
+    )
 }
 
 /// Initialize BN254 Poseidon2 round constants on the GPU (called once at startup).
+/// This uploads both width-3 (for leaf hashing) and width-2 (for compression) constants.
 pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
-    static RC_CONSTANTS: OnceLock<(Vec<u64>, Vec<u64>, Vec<u64>)> = OnceLock::new();
+    static RC_W3_CONSTANTS: OnceLock<(Vec<u64>, Vec<u64>, Vec<u64>)> = OnceLock::new();
+    static RC_W2_CONSTANTS: OnceLock<(Vec<u64>, Vec<u64>, Vec<u64>)> = OnceLock::new();
     static INIT: OnceLock<Mutex<BTreeSet<(i32, u64)>>> = OnceLock::new();
 
     let device_key = (get_device()?, device_reset_epoch());
@@ -241,10 +265,24 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
         return Ok(());
     }
 
-    let (initial, partial, terminal) = RC_CONSTANTS.get_or_init(compute_bn254_rc_constants);
+    // Width-3 constants (leaf hashing)
+    let (initial, partial, terminal) = RC_W3_CONSTANTS.get_or_init(compute_bn254_rc_w3_constants);
     let code =
         unsafe { _init_bn254_poseidon2_rc(initial.as_ptr(), partial.as_ptr(), terminal.as_ptr()) };
     CudaError::from_result(code)?;
+
+    // Width-2 constants (compression)
+    let (initial_w2, partial_w2, terminal_w2) =
+        RC_W2_CONSTANTS.get_or_init(compute_bn254_rc_w2_constants);
+    let code = unsafe {
+        _init_bn254_poseidon2_rc_w2(
+            initial_w2.as_ptr(),
+            partial_w2.as_ptr(),
+            terminal_w2.as_ptr(),
+        )
+    };
+    CudaError::from_result(code)?;
+
     initialized.insert(device_key);
     Ok(())
 }
