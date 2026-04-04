@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{cuda_memcpy, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::MemCopyError,
-    stream::current_stream_sync,
+    stream::{cudaStreamPerThread, current_stream_sync},
 };
 use openvm_stark_backend::{
     keygen::types::MultiStarkProvingKey,
@@ -114,6 +114,7 @@ pub fn transport_matrix_h2d_row(
             &input_buffer,
             Matrix::width(matrix),
             Matrix::height(matrix),
+            cudaStreamPerThread,
         )?;
     }
     current_stream_sync()?;
@@ -169,6 +170,7 @@ pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
                 width as u32,
                 height as u32,
                 stride as u32,
+                cudaStreamPerThread,
             )
             .map_err(ProverError::CollapseStrided)?;
         }
@@ -325,6 +327,7 @@ pub fn transport_matrix_d2h_row_major(
             matrix.buffer(),
             matrix.height(),
             matrix.width(),
+            cudaStreamPerThread,
         )?;
     }
     Ok(RowMajorMatrix::<F>::new(

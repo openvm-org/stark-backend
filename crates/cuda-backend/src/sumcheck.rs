@@ -2,6 +2,7 @@
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
@@ -96,6 +97,7 @@ where
                 num_matrices as u32,
                 current_height as u32,
                 d as u32,
+                cudaStreamPerThread,
             )
             .map_err(|e| SumcheckError::SumcheckMleRound(e.into()))?;
         }
@@ -126,6 +128,7 @@ where
                 output_height,
                 width as u32 * output_height,
                 r_round,
+                cudaStreamPerThread,
             )
             .map_err(|e| SumcheckError::FoldMle(e.into()))?;
         }
@@ -197,8 +200,14 @@ pub fn sumcheck_prismalinear_gpu(
     // Input: [height=2^(l_skip+n), width=1]
     // Treat as: [height=2^l_skip, width=2^n]
     unsafe {
-        batch_ntt_small(&mut d_coeffs, l_skip, num_x * width, true)
-            .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
+        batch_ntt_small(
+            &mut d_coeffs,
+            l_skip,
+            num_x * width,
+            true,
+            cudaStreamPerThread,
+        )
+        .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
     }
 
     if domain_size == large_domain_size {
@@ -210,6 +219,7 @@ pub fn sumcheck_prismalinear_gpu(
                 num_x as u32,
                 width as u32,
                 large_domain_size as u32,
+                cudaStreamPerThread,
             )
             .map_err(|e| SumcheckError::ReduceOverXAndCols(e.into()))?;
         }
@@ -225,14 +235,21 @@ pub fn sumcheck_prismalinear_gpu(
                 (num_x * width) as u32,
                 large_domain_size as u32,
                 domain_size as u32,
+                cudaStreamPerThread,
             )
             .map_err(|e| SumcheckError::BatchExpandPadWide(e.into()))?;
         }
 
         // Step 3: DFT on large domain
         unsafe {
-            batch_ntt_small(&mut d_coeffs_large, log_large_domain, num_x * width, false)
-                .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
+            batch_ntt_small(
+                &mut d_coeffs_large,
+                log_large_domain,
+                num_x * width,
+                false,
+                cudaStreamPerThread,
+            )
+            .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
         }
 
         // Step 4: Sum over all x and columns
@@ -243,6 +260,7 @@ pub fn sumcheck_prismalinear_gpu(
                 num_x as u32,
                 width as u32,
                 large_domain_size as u32,
+                cudaStreamPerThread,
             )
             .map_err(|e| SumcheckError::ReduceOverXAndCols(e.into()))?;
         }
@@ -250,8 +268,14 @@ pub fn sumcheck_prismalinear_gpu(
 
         // Step 5: iDFT to get coefficients
         unsafe {
-            batch_ntt_small(&mut d_s0_coeffs, log_large_domain, 1, true)
-                .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
+            batch_ntt_small(
+                &mut d_s0_coeffs,
+                log_large_domain,
+                1,
+                true,
+                cudaStreamPerThread,
+            )
+            .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
         }
     }
     // Step 6: Copy to host and convert to extension field
@@ -284,6 +308,7 @@ pub fn sumcheck_prismalinear_gpu(
             width as u32,
             domain_size as u32,
             r_0,
+            cudaStreamPerThread,
         )
         .map_err(|e| SumcheckError::FoldPleFromCoeffs(e.into()))?;
     }
@@ -328,6 +353,7 @@ pub fn sumcheck_prismalinear_gpu(
                 num_matrices as u32,
                 current_height as u32,
                 d as u32,
+                cudaStreamPerThread,
             )
             .map_err(|e| SumcheckError::SumcheckMleRound(e.into()))?;
         }
@@ -353,6 +379,7 @@ pub fn sumcheck_prismalinear_gpu(
                 output_height,
                 width as u32 * output_height,
                 r_round,
+                cudaStreamPerThread,
             )
             .map_err(|e| SumcheckError::FoldMle(e.into()))?;
         }

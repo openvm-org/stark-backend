@@ -20,7 +20,10 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    pub fn _whir_sumcheck_coeff_moments_required_temp_buffer_size(height: u32, stream: cudaStream_t) -> u32;
+    pub fn _whir_sumcheck_coeff_moments_required_temp_buffer_size(
+        height: u32,
+        stream: cudaStream_t,
+    ) -> u32;
 
     fn _whir_sumcheck_coeff_moments_round(
         f_coeffs: *const EF,

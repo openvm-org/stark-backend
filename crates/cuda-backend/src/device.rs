@@ -1,7 +1,7 @@
 use getset::{CopyGetters, Getters, MutGetters};
 use openvm_cuda_common::{
     common::get_device,
-    stream::{CudaStream, DeviceContext, StreamGuard},
+    stream::{cudaStreamPerThread, CudaStream, DeviceContext, StreamGuard},
 };
 use openvm_stark_backend::SystemParams;
 
@@ -50,7 +50,7 @@ impl GpuDevice {
             ..Default::default()
         };
         let id = get_device().unwrap() as u32;
-        let sm_count = get_sm_count(id).expect("failed to get SM count");
+        let sm_count = get_sm_count(id, cudaStreamPerThread).expect("failed to get SM count");
         let config = GpuDeviceConfig {
             config: params,
             prover_config,

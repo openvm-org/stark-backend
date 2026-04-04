@@ -1,7 +1,7 @@
 use std::cmp::max;
 
 use itertools::Itertools;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::cudaStreamPerThread};
 use openvm_stark_backend::prover::{
     fractional_sumcheck_gkr::Frac,
     stacked_pcs::{StackedLayout, StackedSlice},
@@ -188,6 +188,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                 &rules.d_pair_idxs,
                 height as u32,
                 num_rows_per_tile as u32,
+                cudaStreamPerThread,
             )?;
         }
         if height != lifted_height {
@@ -201,6 +202,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                     tmp.as_mut_ptr(),
                     norm_factor,
                     tmp.len() as u32,
+                    cudaStreamPerThread,
                 )?;
                 // SAFETY: stacked interaction layout is defined with respect to lifted height, and
                 // the vertical-repeat kernel guards rounded-up tail threads beyond lifted_height.
@@ -210,6 +212,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                     num_interactions as u32,
                     lifted_height as u32,
                     height as u32,
+                    cudaStreamPerThread,
                 )?;
             }
         }

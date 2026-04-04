@@ -54,7 +54,12 @@ pub mod sumcheck {
             stream: cudaStream_t,
         ) -> i32;
 
-        fn _fold_mle_column(buffer: *mut std::ffi::c_void, size: usize, r: EF, stream: cudaStream_t) -> i32;
+        fn _fold_mle_column(
+            buffer: *mut std::ffi::c_void,
+            size: usize,
+            r: EF,
+            stream: cudaStream_t,
+        ) -> i32;
 
         fn _batch_fold_mle(
             input_matrices: *const *const EF,
@@ -86,10 +91,16 @@ pub mod sumcheck {
             stream: cudaStream_t,
         ) -> i32;
 
-        fn _triangular_fold_mle(output: *mut EF, input: *const EF, r: EF, output_max_n: u32, stream: cudaStream_t)
-            -> i32;
+        fn _triangular_fold_mle(
+            output: *mut EF,
+            input: *const EF,
+            r: EF,
+            output_max_n: u32,
+            stream: cudaStream_t,
+        ) -> i32;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn sumcheck_mle_round(
         input_matrices: &DeviceBuffer<*const EF>,
         output: &DeviceBuffer<EF>,
@@ -118,6 +129,7 @@ pub mod sumcheck {
     /// # Safety
     /// - `input_matrices` must consist of pointers to device memory locations.
     /// - `output_matrices` must consist of pointers to device memory locations.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn fold_mle(
         input_matrices: &DeviceBuffer<*const EF>,
         output_matrices: &DeviceBuffer<*mut EF>,
@@ -152,6 +164,7 @@ pub mod sumcheck {
     /// # Safety
     /// - `input_matrices` must consist of pointers to device memory locations.
     /// - `output_matrices` must consist of pointers to device memory locations.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn batch_fold_mle(
         input_matrices: &DeviceBuffer<*const EF>,
         output_matrices: &DeviceBuffer<*mut EF>,
@@ -256,7 +269,11 @@ pub mod prefix {
             stream: cudaStream_t,
         ) -> i32;
 
-        fn _prefix_scan_epilogue_ext(d_inout: *mut std::ffi::c_void, length: u64, stream: cudaStream_t) -> i32;
+        fn _prefix_scan_epilogue_ext(
+            d_inout: *mut std::ffi::c_void,
+            length: u64,
+            stream: cudaStream_t,
+        ) -> i32;
     }
 
     pub unsafe fn prefix_scan_block_ext<T>(
@@ -294,6 +311,10 @@ pub mod prefix {
         length: u64,
         stream: cudaStream_t,
     ) -> Result<(), CudaError> {
-        CudaError::from_result(_prefix_scan_epilogue_ext(d_inout.as_mut_raw_ptr(), length, stream))
+        CudaError::from_result(_prefix_scan_epilogue_ext(
+            d_inout.as_mut_raw_ptr(),
+            length,
+            stream,
+        ))
     }
 }

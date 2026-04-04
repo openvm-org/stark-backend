@@ -40,8 +40,12 @@ fn zerocheck_batch_mle_intermediates_buffer_bytes(
     num_y: u32,
 ) -> usize {
     unsafe {
-        _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread)
-            * std::mem::size_of::<EF>()
+        _zerocheck_batch_mle_intermediates_buffer_size(
+            buffer_size,
+            num_x,
+            num_y,
+            cudaStreamPerThread,
+        ) * std::mem::size_of::<EF>()
     }
 }
 
@@ -173,7 +177,12 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
 
             let d_intermediates = if buffer_size > 0 {
                 let intermediates_len = unsafe {
-                    _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y, cudaStreamPerThread)
+                    _zerocheck_batch_mle_intermediates_buffer_size(
+                        buffer_size,
+                        num_x,
+                        t.num_y,
+                        cudaStreamPerThread,
+                    )
                 };
                 let buf = DeviceBuffer::<EF>::with_capacity(intermediates_len);
                 let ptr = buf.as_mut_ptr();
@@ -320,7 +329,12 @@ impl<'a> LogupMleBatchBuilder<'a> {
 
             let d_intermediates = if buffer_size > 0 {
                 let intermediates_len = unsafe {
-                    _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y, cudaStreamPerThread)
+                    _logup_batch_mle_intermediates_buffer_size(
+                        buffer_size,
+                        num_x,
+                        t.num_y,
+                        cudaStreamPerThread,
+                    )
                 };
                 let buf = DeviceBuffer::<EF>::with_capacity(intermediates_len);
                 let ptr = buf.as_mut_ptr();
@@ -701,6 +715,7 @@ fn evaluate_mle_constraints_gpu_batch(
             num_x,
             num_airs as u32,
             threads_per_block,
+            cudaStreamPerThread,
         )?;
     }
     Ok(output)
@@ -730,6 +745,7 @@ fn evaluate_mle_interactions_gpu_batch(
             num_x,
             num_airs as u32,
             threads_per_block,
+            cudaStreamPerThread,
         )?;
     }
     Ok(output)

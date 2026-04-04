@@ -376,6 +376,7 @@ where
             lambda,
             d_sum_evals,
             tmp_block_sums,
+            cudaStreamPerThread,
         )
         .map_err(FractionalSumcheckError::ComputeRound)?;
     }
@@ -426,6 +427,7 @@ where
             r_prev,
             d_sum_evals,
             tmp_block_sums,
+            cudaStreamPerThread,
         )
         .map_err(FractionalSumcheckError::ComputeRound)?;
     }
@@ -471,6 +473,7 @@ where
             r_prev,
             d_sum_evals,
             tmp_block_sums,
+            cudaStreamPerThread,
         )
         .map_err(FractionalSumcheckError::ComputeRound)?;
     }
@@ -527,7 +530,7 @@ where
         unsafe {
             // SAFETY: Frac<EF> has exact same memory layout and alignment as (EF, EF).
             let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
-            bit_rev_frac_ext_build_k2(buf, total_rounds as u32, alpha)
+            bit_rev_frac_ext_build_k2(buf, total_rounds as u32, alpha, cudaStreamPerThread)
                 .map_err(FractionalSumcheckError::BitReversal)?;
         }
         2 // layers 0+1 already done
@@ -541,16 +544,24 @@ where
                 total_rounds as u32,
                 total_leaves.try_into().unwrap(),
                 1,
+                cudaStreamPerThread,
             )
             .map_err(FractionalSumcheckError::BitReversal)?;
-            frac_build_tree_layer(&mut layer, total_leaves, false, alpha, true)
-                .map_err(FractionalSumcheckError::SegmentTree)?;
+            frac_build_tree_layer(
+                &mut layer,
+                total_leaves,
+                false,
+                alpha,
+                true,
+                cudaStreamPerThread,
+            )
+            .map_err(FractionalSumcheckError::SegmentTree)?;
             use crate::cuda::logup_zerocheck::frac_add_alpha;
             let half = total_leaves / 2;
             let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
             let second_half_buf =
                 DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
-            frac_add_alpha(&second_half_buf, alpha)
+            frac_add_alpha(&second_half_buf, alpha, cudaStreamPerThread)
                 .map_err(FractionalSumcheckError::SegmentTree)?;
             std::mem::forget(second_half_buf);
         }
@@ -562,7 +573,7 @@ where
     while i + 1 < total_rounds {
         let half_i1 = total_leaves >> (i + 2);
         unsafe {
-            frac_build_tree_two_layers(&mut layer, half_i1)
+            frac_build_tree_two_layers(&mut layer, half_i1, cudaStreamPerThread)
                 .map_err(FractionalSumcheckError::SegmentTree)?;
         }
         i += 2;
@@ -570,8 +581,15 @@ where
     // Remaining single layer (if odd number of layers left).
     if i < total_rounds {
         unsafe {
-            frac_build_tree_layer(&mut layer, total_leaves >> i, false, EF::ZERO, false)
-                .map_err(FractionalSumcheckError::SegmentTree)?;
+            frac_build_tree_layer(
+                &mut layer,
+                total_leaves >> i,
+                false,
+                EF::ZERO,
+                false,
+                cudaStreamPerThread,
+            )
+            .map_err(FractionalSumcheckError::SegmentTree)?;
         }
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
@@ -579,7 +597,7 @@ where
     let mut copy_scratch = DeviceBuffer::<Frac<EF>>::with_capacity(1);
     let root = copy_from_device(&layer, 0, &mut copy_scratch)?;
     unsafe {
-        frac_build_tree_layer(&mut layer, 2, true, EF::ZERO, false)
+        frac_build_tree_layer(&mut layer, 2, true, EF::ZERO, false, cudaStreamPerThread)
             .map_err(FractionalSumcheckError::SegmentTree)?;
     }
     if assert_zero {
@@ -639,7 +657,12 @@ where
         DeviceBuffer::new()
     };
     let max_tmp_buffer_capacity = if total_rounds > 1 {
-        (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32, cudaStreamPerThread) }) as usize
+        (unsafe {
+            _frac_compute_round_temp_buffer_size(
+                (1 << (total_rounds - 1)) as u32,
+                cudaStreamPerThread,
+            )
+        }) as usize
     } else {
         0
     };
@@ -674,8 +697,9 @@ where
 
         let lambda = transcript.sample_ext();
 
-        let tmp_buffer_capacity =
-            unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32, cudaStreamPerThread) } as usize;
+        let tmp_buffer_capacity = unsafe {
+            _frac_compute_round_temp_buffer_size((1 << round) as u32, cudaStreamPerThread)
+        } as usize;
         if tmp_buffer_capacity > tmp_block_sums.len() {
             tmp_block_sums = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity);
         }
@@ -800,22 +824,38 @@ where
                 active = match scheduler.final_fold_target(last_outer_round) {
                     BufferTarget::InPlaceWork => {
                         unsafe {
-                            fold_ef_frac_columns_inplace(&mut work_buffer, pq_size, prev_r)
-                                .map_err(FractionalSumcheckError::FoldColumns)?;
+                            fold_ef_frac_columns_inplace(
+                                &mut work_buffer,
+                                pq_size,
+                                prev_r,
+                                cudaStreamPerThread,
+                            )
+                            .map_err(FractionalSumcheckError::FoldColumns)?;
                         }
                         &mut work_buffer
                     }
                     BufferTarget::InPlaceLayer => {
                         unsafe {
-                            fold_ef_frac_columns_inplace(&mut layer, pq_size, prev_r)
-                                .map_err(FractionalSumcheckError::FoldColumns)?;
+                            fold_ef_frac_columns_inplace(
+                                &mut layer,
+                                pq_size,
+                                prev_r,
+                                cudaStreamPerThread,
+                            )
+                            .map_err(FractionalSumcheckError::FoldColumns)?;
                         }
                         &mut layer
                     }
                     BufferTarget::LayerToWork => {
                         unsafe {
-                            fold_ef_frac_columns(&layer, &mut work_buffer, pq_size, prev_r)
-                                .map_err(FractionalSumcheckError::FoldColumns)?;
+                            fold_ef_frac_columns(
+                                &layer,
+                                &mut work_buffer,
+                                pq_size,
+                                prev_r,
+                                cudaStreamPerThread,
+                            )
+                            .map_err(FractionalSumcheckError::FoldColumns)?;
                         }
                         &mut work_buffer
                     }
@@ -926,6 +966,7 @@ where
                             m_partial_buffer.as_mut_ptr(),
                             partial_len,
                             m_ptr,
+                            cudaStreamPerThread,
                         )
                         .map_err(FractionalSumcheckError::ComputeRound)?;
                     }
@@ -953,6 +994,7 @@ where
                                 eq_r_prefix_buffer.as_ptr(),
                                 eq_suffix_buffer.as_ptr(),
                                 d_sum_evals.as_mut_ptr(),
+                                cudaStreamPerThread,
                             )
                             .map_err(FractionalSumcheckError::ComputeRound)?;
                         }
@@ -996,6 +1038,7 @@ where
                             buf_vars,
                             w_fold,
                             d_eq_r_window,
+                            cudaStreamPerThread,
                         )
                         .map_err(FractionalSumcheckError::FoldColumns)?;
                     }
@@ -1015,6 +1058,7 @@ where
                             lambda,
                             &mut d_sum_evals,
                             &mut tmp_block_sums,
+                            cudaStreamPerThread,
                         )
                         .map_err(FractionalSumcheckError::ComputeRound)?;
                     }
@@ -1051,7 +1095,7 @@ where
                 }
 
                 unsafe {
-                    fold_ef_frac_columns_inplace(active_pq, pq_size, prev_r)
+                    fold_ef_frac_columns_inplace(active_pq, pq_size, prev_r, cudaStreamPerThread)
                         .map_err(FractionalSumcheckError::FoldColumns)?;
                 }
                 active = active_pq;

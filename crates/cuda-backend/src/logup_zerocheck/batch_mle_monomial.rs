@@ -7,6 +7,7 @@ use openvm_cuda_common::{
     copy::MemCopyH2D,
     d_buffer::DeviceBuffer,
     error::{CudaError, MemCopyError},
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
@@ -94,6 +95,7 @@ pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
             monomials.d_lambda_terms.as_ptr(),
             lambda_pows,
             monomials.num_monomials,
+            cudaStreamPerThread,
         )?;
     }
     Ok(buf)
@@ -259,6 +261,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 num_x,
                 num_airs as u32,
                 THREADS_PER_BLOCK,
+                cudaStreamPerThread,
             )?;
         }
 
@@ -485,6 +488,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                 num_airs as u32,
                 self.chunk_size,
                 THREADS_PER_BLOCK_PAR_Y,
+                cudaStreamPerThread,
             )?;
         }
 
@@ -534,6 +538,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
                 monomials.d_numer_terms.as_ptr(),
                 d_eq_3bs,
                 monomials.num_numer_monomials,
+                cudaStreamPerThread,
             )?;
         }
     }
@@ -554,6 +559,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
                 d_beta_pows,
                 d_eq_3bs,
                 monomials.num_denom_monomials,
+                cudaStreamPerThread,
             )?;
         }
     }
@@ -785,6 +791,7 @@ impl<'a> LogupMonomialBatch<'a> {
                 num_x,
                 num_airs as u32,
                 THREADS_PER_BLOCK_LOGUP,
+                cudaStreamPerThread,
             )?;
         }
 

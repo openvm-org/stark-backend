@@ -24,7 +24,12 @@ extern "C" {
 
     fn _eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32, stream: cudaStream_t) -> i32;
 
-    fn _mobius_eq_hypercube_stage_ext(out: *mut EF, omega_i: EF, step: u32, stream: cudaStream_t) -> i32;
+    fn _mobius_eq_hypercube_stage_ext(
+        out: *mut EF,
+        omega_i: EF,
+        step: u32,
+        stream: cudaStream_t,
+    ) -> i32;
 
     fn _eq_hypercube_nonoverlapping_stage_ext(
         out: *mut EF,
@@ -53,12 +58,27 @@ extern "C" {
     ) -> i32;
 
     // `out` must be device ptr
-    fn _eval_poly_ext_at_point(base_coeffs: *const F, coeff_len: usize, x: EF, out: *mut EF, stream: cudaStream_t)
-        -> i32;
+    fn _eval_poly_ext_at_point(
+        base_coeffs: *const F,
+        coeff_len: usize,
+        x: EF,
+        out: *mut EF,
+        stream: cudaStream_t,
+    ) -> i32;
 
-    fn _vector_scalar_multiply_ext(vec: *mut EF, scalar: EF, length: u32, stream: cudaStream_t) -> i32;
+    fn _vector_scalar_multiply_ext(
+        vec: *mut EF,
+        scalar: EF,
+        length: u32,
+        stream: cudaStream_t,
+    ) -> i32;
 
-    fn _transpose_fp_to_fpext_vec(output: *mut EF, input: *const F, height: u32, stream: cudaStream_t) -> i32;
+    fn _transpose_fp_to_fpext_vec(
+        output: *mut EF,
+        input: *const F,
+        height: u32,
+        stream: cudaStream_t,
+    ) -> i32;
 }
 
 /// Computes the algebraic batch of the column vectors from input matrices `mats`, in order.
@@ -69,6 +89,7 @@ extern "C" {
 /// - `mats[i]` must have length `>= widths[i] * height` for all `i`.
 /// - `mats`, `mu_idxs`, `widths` must have length `>= num_mats`.
 /// - `mu_idxs[i] < mu_powers.len()` for all `i`.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn algebraic_batch_matrices(
     output: &mut DeviceBuffer<EF>,
     mat_ptrs: &DeviceBuffer<*const F>,
@@ -100,7 +121,12 @@ pub unsafe fn algebraic_batch_matrices(
 ///
 /// # Safety
 /// - `out` is **device** pointer with length `>= 2 * step`.
-pub unsafe fn eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32, stream: cudaStream_t) -> Result<(), CudaError> {
+pub unsafe fn eq_hypercube_stage_ext(
+    out: *mut EF,
+    x_i: EF,
+    step: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
     check(_eq_hypercube_stage_ext(out, x_i, step, stream))
 }
 
@@ -155,7 +181,9 @@ pub unsafe fn eq_hypercube_interleaved_stage_ext(
     step: u32,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    check(_eq_hypercube_interleaved_stage_ext(out, input, x_i, step, stream))
+    check(_eq_hypercube_interleaved_stage_ext(
+        out, input, x_i, step, stream,
+    ))
 }
 
 /// Same as `eq_hypercube_stage`, over base field, but computes `eq` evals in batch for multiple
@@ -210,7 +238,11 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
 }
 
 /// Scalar multiplication of a vector in-place by `scalar.
-pub fn vector_scalar_multiply_ext(vec: &mut DeviceBuffer<EF>, scalar: EF, stream: cudaStream_t) -> Result<(), CudaError> {
+pub fn vector_scalar_multiply_ext(
+    vec: &mut DeviceBuffer<EF>,
+    scalar: EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
     // SAFETY: `vec` is allocated for `vec.len()` so scalar multiplication is safe.
     unsafe {
         check(_vector_scalar_multiply_ext(

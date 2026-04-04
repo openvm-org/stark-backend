@@ -5,6 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
@@ -237,6 +238,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                         matrix.width() as u64,
                         matrix.height() as u64,
                         d_row_idxs.len(),
+                        cudaStreamPerThread,
                     )
                     .map_err(|error| MerkleTreeError::MatrixGetRows { error, matrix_idx })?;
                 }
@@ -363,6 +365,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 &d_indices,
                 num_queries,
                 d_layers_ptr.len(),
+                cudaStreamPerThread,
             )
             .map_err(MerkleTreeError::QueryDigestLayers)?;
         }

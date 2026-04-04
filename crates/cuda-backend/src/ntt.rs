@@ -6,6 +6,7 @@ use std::{
 use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
+    stream::cudaStreamPerThread,
 };
 
 use crate::{cuda::ntt, prelude::F};
@@ -38,8 +39,8 @@ fn ensure_initialized(inverse: bool) -> Result<(), openvm_cuda_common::error::Cu
         unsafe {
             // Both CUDA helpers upload into constant memory and synchronize before returning, so
             // these staging buffers are safe to free once the calls complete.
-            ntt::generate_all_twiddles(&twiddles, inverse)?;
-            ntt::generate_partial_twiddles(&partial_twiddles, inverse)?;
+            ntt::generate_all_twiddles(&twiddles, inverse, cudaStreamPerThread)?;
+            ntt::generate_partial_twiddles(&partial_twiddles, inverse, cudaStreamPerThread)?;
         }
     }
     initialized.insert(device_key);
@@ -87,6 +88,7 @@ impl<'a> NttImpl<'a> {
                 self.padded_poly_size,
                 self.poly_count,
                 self.is_intt,
+                cudaStreamPerThread,
             )
             .expect("failed to launch CUDA mixed-radix NTT step");
         }
@@ -122,8 +124,15 @@ pub fn batch_ntt(
 
     if bit_reverse {
         unsafe {
-            ntt::bit_rev(buffer, buffer, log_trace_height, padded_poly_size, width)
-                .expect("failed to launch CUDA bit-reversal permutation");
+            ntt::bit_rev(
+                buffer,
+                buffer,
+                log_trace_height,
+                padded_poly_size,
+                width,
+                cudaStreamPerThread,
+            )
+            .expect("failed to launch CUDA bit-reversal permutation");
         }
     }
 

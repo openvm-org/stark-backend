@@ -1,4 +1,4 @@
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::cudaStreamPerThread};
 use openvm_stark_backend::{StarkProtocolConfig, SystemParams};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
@@ -125,7 +125,14 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         query_stride: usize,
         log_rows_per_query: usize,
     ) -> Result<(), CudaError> {
-        poseidon2_compressing_row_hashes(out, matrix, width, query_stride, log_rows_per_query)
+        poseidon2_compressing_row_hashes(
+            out,
+            matrix,
+            width,
+            query_stride,
+            log_rows_per_query,
+            cudaStreamPerThread,
+        )
     }
 
     unsafe fn compress_rows_ext(
@@ -135,7 +142,14 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         query_stride: usize,
         log_rows_per_query: usize,
     ) -> Result<(), CudaError> {
-        poseidon2_compressing_row_hashes_ext(out, matrix, width, query_stride, log_rows_per_query)
+        poseidon2_compressing_row_hashes_ext(
+            out,
+            matrix,
+            width,
+            query_stride,
+            log_rows_per_query,
+            cudaStreamPerThread,
+        )
     }
 
     unsafe fn compress_layer(
@@ -143,7 +157,7 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         prev_layer: &DeviceBuffer<Self::Digest>,
         output_size: usize,
     ) -> Result<(), CudaError> {
-        poseidon2_adjacent_compress_layer(output, prev_layer, output_size)
+        poseidon2_adjacent_compress_layer(output, prev_layer, output_size, cudaStreamPerThread)
     }
 }
 
@@ -191,7 +205,14 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         query_stride: usize,
         log_rows_per_query: usize,
     ) -> Result<(), CudaError> {
-        bn254_poseidon2_compressing_row_hashes(out, matrix, width, query_stride, log_rows_per_query)
+        bn254_poseidon2_compressing_row_hashes(
+            out,
+            matrix,
+            width,
+            query_stride,
+            log_rows_per_query,
+            cudaStreamPerThread,
+        )
     }
 
     unsafe fn compress_rows_ext(
@@ -207,6 +228,7 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
             width,
             query_stride,
             log_rows_per_query,
+            cudaStreamPerThread,
         )
     }
 
@@ -215,7 +237,12 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         prev_layer: &DeviceBuffer<Self::Digest>,
         output_size: usize,
     ) -> Result<(), CudaError> {
-        bn254_poseidon2_adjacent_compress_layer(output, prev_layer, output_size)
+        bn254_poseidon2_adjacent_compress_layer(
+            output,
+            prev_layer,
+            output_size,
+            cudaStreamPerThread,
+        )
     }
 }
 

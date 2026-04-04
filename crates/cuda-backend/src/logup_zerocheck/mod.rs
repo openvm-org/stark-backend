@@ -20,6 +20,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::MemCopyError,
     memory_manager::MemTracker,
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints,
@@ -978,6 +979,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         is_first,
                         is_last,
                         num_x,
+                        cudaStreamPerThread,
                     )
                     .map_err(LogupZerocheckError::FoldSelectorsRound0)?;
                 }
@@ -1130,8 +1132,14 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 let interpolated = DeviceMatrix::<EF>::with_capacity(sp_deg * num_y, columns.len());
                 let d_columns = columns.to_device()?;
                 unsafe {
-                    interpolate_columns_gpu(interpolated.buffer(), &d_columns, sp_deg, num_y)
-                        .map_err(|e| LogupZerocheckError::InterpolateColumns(e.into()))?;
+                    interpolate_columns_gpu(
+                        interpolated.buffer(),
+                        &d_columns,
+                        sp_deg,
+                        num_y,
+                        cudaStreamPerThread,
+                    )
+                    .map_err(|e| LogupZerocheckError::InterpolateColumns(e.into()))?;
                 }
 
                 let interpolated_height = interpolated.height();
@@ -1448,6 +1456,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     &d_log_output_heights,
                     max_output_cells.try_into().unwrap(),
                     r_round,
+                    cudaStreamPerThread,
                 )
                 .map_err(LogupZerocheckError::BatchFoldMle)?;
             }

@@ -2,7 +2,10 @@ use std::{ffi::c_void, sync::Arc};
 
 use getset::Getters;
 use itertools::Itertools;
-use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer, memory_manager::MemTracker};
+use openvm_cuda_common::{
+    copy::cuda_memcpy, d_buffer::DeviceBuffer, memory_manager::MemTracker,
+    stream::cudaStreamPerThread,
+};
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
     prover::{stacked_pcs::StackedLayout, MatrixDimensions},
@@ -172,8 +175,15 @@ pub(crate) fn stack_traces_into_expanded(
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * trace.height());
                 let dst = buffer.as_mut_ptr().add(start);
-                batch_expand_pad_wide(dst, src, trace.height() as u32, stride as u32, 1)
-                    .map_err(StackTracesError::BatchExpandPadWide)?;
+                batch_expand_pad_wide(
+                    dst,
+                    src,
+                    trace.height() as u32,
+                    stride as u32,
+                    1,
+                    cudaStreamPerThread,
+                )
+                .map_err(StackTracesError::BatchExpandPadWide)?;
             }
         }
     }
@@ -212,6 +222,7 @@ pub fn rs_code_matrix(
                 width as u32,
                 codeword_height as u32,
                 height as u32,
+                cudaStreamPerThread,
             )
             .map_err(RsCodeMatrixError::BatchExpandPad)?;
         }
@@ -227,8 +238,14 @@ pub fn rs_code_matrix(
             // (width cols) * (codeword_height / 2^l_skip chunks per col). Use natural ordering.
             let num_uni_poly = width * (codeword_height >> l_skip);
             unsafe {
-                batch_ntt_small(&mut codewords, l_skip, num_uni_poly, true)
-                    .map_err(RsCodeMatrixError::CustomBatchIntt)?;
+                batch_ntt_small(
+                    &mut codewords,
+                    l_skip,
+                    num_uni_poly,
+                    true,
+                    cudaStreamPerThread,
+                )
+                .map_err(RsCodeMatrixError::CustomBatchIntt)?;
             }
         }
     }
@@ -267,6 +284,7 @@ pub fn rs_code_matrix(
             log_codeword_height as u32,
             codeword_height as u32,
             width as u32,
+            cudaStreamPerThread,
         )
         .map_err(RsCodeMatrixError::BitRev)?;
     }
