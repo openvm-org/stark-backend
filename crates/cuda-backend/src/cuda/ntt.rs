@@ -9,8 +9,16 @@ pub const MAX_CUDA_NTT_LOG_DOMAIN_SIZE: u32 = 27;
 
 // relate to supra/ntt_params.cu
 extern "C" {
-    fn _generate_all_twiddles(twiddles: *mut std::ffi::c_void, inverse: bool, stream: cudaStream_t) -> i32;
-    fn _generate_partial_twiddles(partial_twiddles: *mut std::ffi::c_void, inverse: bool, stream: cudaStream_t) -> i32;
+    fn _generate_all_twiddles(
+        twiddles: *mut std::ffi::c_void,
+        inverse: bool,
+        stream: cudaStream_t,
+    ) -> i32;
+    fn _generate_partial_twiddles(
+        partial_twiddles: *mut std::ffi::c_void,
+        inverse: bool,
+        stream: cudaStream_t,
+    ) -> i32;
 }
 
 pub unsafe fn generate_all_twiddles<F>(
@@ -18,7 +26,11 @@ pub unsafe fn generate_all_twiddles<F>(
     inverse: bool,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_generate_all_twiddles(twiddles.as_mut_raw_ptr(), inverse, stream))
+    CudaError::from_result(_generate_all_twiddles(
+        twiddles.as_mut_raw_ptr(),
+        inverse,
+        stream,
+    ))
 }
 
 pub unsafe fn generate_partial_twiddles<F>(

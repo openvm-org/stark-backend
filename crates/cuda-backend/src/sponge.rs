@@ -9,6 +9,7 @@ use openvm_cuda_common::{
     copy::cuda_memcpy,
     d_buffer::DeviceBuffer,
     error::{CudaError, MemCopyError},
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::{
     p3_challenger::{CanObserve, CanSample},
@@ -276,7 +277,12 @@ impl DuplexSpongeGpu {
 
         // 2. Launch grinding kernel
         let witness_u32 = unsafe {
-            crate::cuda::sponge::sponge_grind(self.device.as_ptr(), bits as u32, F::ORDER_U32 - 1)?
+            crate::cuda::sponge::sponge_grind(
+                self.device.as_ptr(),
+                bits as u32,
+                F::ORDER_U32 - 1,
+                cudaStreamPerThread,
+            )?
         };
 
         let witness = F::from_u32(witness_u32);

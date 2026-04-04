@@ -8,7 +8,7 @@ use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
-    stream::cudaStream_t,
+    stream::{cudaStreamPerThread, cudaStream_t},
 };
 
 use crate::prelude::F;
@@ -61,7 +61,7 @@ pub fn ensure_device_ntt_twiddles_initialized() -> Result<(), CudaError> {
         // the buffer once `generate_device_ntt_twiddles` completes.
         let twiddles = DeviceBuffer::<F>::with_capacity(DEVICE_NTT_TWIDDLES_SIZE);
         unsafe {
-            generate_device_ntt_twiddles(&twiddles)?;
+            generate_device_ntt_twiddles(&twiddles, cudaStreamPerThread)?;
         }
     }
     initialized.insert(device_key);

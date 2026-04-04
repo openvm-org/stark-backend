@@ -10,6 +10,7 @@ use std::sync::Arc;
 use itertools::Itertools;
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
+use openvm_cuda_common::stream::cudaStreamPerThread;
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_backend::{
     hasher::{Hasher as CpuMerkleHasher, MerkleHasher, MultiFieldHasher},
@@ -533,8 +534,15 @@ fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
     let mut d_values = original.to_device().unwrap();
 
     unsafe {
-        batch_ntt_small(&mut d_values, l_skip, cnt_blocks, false).unwrap();
-        batch_ntt_small(&mut d_values, l_skip, cnt_blocks, true).unwrap();
+        batch_ntt_small(
+            &mut d_values,
+            l_skip,
+            cnt_blocks,
+            false,
+            cudaStreamPerThread,
+        )
+        .unwrap();
+        batch_ntt_small(&mut d_values, l_skip, cnt_blocks, true, cudaStreamPerThread).unwrap();
     }
 
     assert_eq!(d_values.to_host().unwrap(), original);
@@ -579,6 +587,7 @@ fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
             width as u32,
             lifted_height as u32,
             height as u32,
+            cudaStreamPerThread,
         )
         .unwrap();
     }
@@ -768,6 +777,7 @@ fn test_monomial_vs_dag_equivalence() {
             is_first,
             is_last,
             sel_height,
+            cudaStreamPerThread,
         )
         .unwrap();
     }
@@ -849,8 +859,14 @@ fn test_monomial_vs_dag_equivalence() {
             crate::base::DeviceMatrix::<EF>::with_capacity(s_deg * num_y as usize, columns.len());
         let d_columns = columns.to_device().unwrap();
         unsafe {
-            interpolate_columns_gpu(interpolated.buffer(), &d_columns, s_deg, num_y as usize)
-                .expect("failed to interpolate columns");
+            interpolate_columns_gpu(
+                interpolated.buffer(),
+                &d_columns,
+                s_deg,
+                num_y as usize,
+                cudaStreamPerThread,
+            )
+            .expect("failed to interpolate columns");
         }
 
         let interpolated_height = interpolated.height();

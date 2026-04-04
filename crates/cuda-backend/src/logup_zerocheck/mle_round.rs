@@ -42,15 +42,17 @@ pub fn evaluate_mle_constraints_gpu(
 ) -> Result<DeviceBuffer<EF>, KernelError> {
     validate_mle_num_x(num_x)?;
     let buffer_size = rules.inner.buffer_size;
-    let intermed_capacity =
-        unsafe { _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread) };
+    let intermed_capacity = unsafe {
+        _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread)
+    };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
         DeviceBuffer::<EF>::with_capacity(intermed_capacity)
     } else {
         DeviceBuffer::<EF>::new()
     };
-    let temp_sums_buffer_capacity = unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y, cudaStreamPerThread) };
+    let temp_sums_buffer_capacity =
+        unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y, cudaStreamPerThread) };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
     let mut output = DeviceBuffer::<EF>::with_capacity(num_x as usize);
@@ -74,6 +76,7 @@ pub fn evaluate_mle_constraints_gpu(
             &mut intermediates,
             num_y,
             num_x,
+            cudaStreamPerThread,
         )?;
     }
     Ok(output)
@@ -98,15 +101,17 @@ pub fn evaluate_mle_interactions_gpu(
 ) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
     validate_mle_num_x(num_x)?;
     let buffer_size = rules.inner.buffer_size;
-    let intermed_capacity =
-        unsafe { _logup_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread) };
+    let intermed_capacity = unsafe {
+        _logup_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread)
+    };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("logup:intermediates_capacity={intermed_capacity}");
         DeviceBuffer::<EF>::with_capacity(intermed_capacity)
     } else {
         DeviceBuffer::<EF>::new()
     };
-    let temp_sums_buffer_capacity = unsafe { _logup_mle_temp_sums_buffer_size(num_x, num_y, cudaStreamPerThread) };
+    let temp_sums_buffer_capacity =
+        unsafe { _logup_mle_temp_sums_buffer_size(num_x, num_y, cudaStreamPerThread) };
     debug!("logup:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);
     let mut output = DeviceBuffer::<Frac<EF>>::with_capacity(num_x as usize);
@@ -130,6 +135,7 @@ pub fn evaluate_mle_interactions_gpu(
             &mut intermediates,
             num_y,
             num_x,
+            cudaStreamPerThread,
         )?;
     }
     Ok(output)

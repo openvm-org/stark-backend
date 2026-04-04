@@ -126,8 +126,14 @@ where
         // - `f_ple_evals` has capacity `height * D_EF` (stacked height in base coordinates).
         // - `d_packets` contain valid pointers and stacked row indices by construction.
         unsafe {
-            whir_algebraic_batch_traces(&mut f_ple_evals, &d_packets, &d_mu_powers, 1 << l_skip)
-                .map_err(WhirProverError::AlgebraicBatch)?;
+            whir_algebraic_batch_traces(
+                &mut f_ple_evals,
+                &d_packets,
+                &d_mu_powers,
+                1 << l_skip,
+                cudaStreamPerThread,
+            )
+            .map_err(WhirProverError::AlgebraicBatch)?;
         }
         for stacked in &mut stacked_per_commit {
             // drop traces to free device memory if RS codewords matrix exists
@@ -143,13 +149,19 @@ where
     // coefficients c_z(x) of f(Z, x) for a fixed boolean assignment x in H_{m - l_skip}.
     unsafe {
         let num_poly = f_ple_evals.len() >> l_skip;
-        batch_ntt_small(&mut f_ple_evals, l_skip, num_poly, true)
-            .map_err(WhirProverError::CustomBatchIntt)?;
+        batch_ntt_small(
+            &mut f_ple_evals,
+            l_skip,
+            num_poly,
+            true,
+            cudaStreamPerThread,
+        )
+        .map_err(WhirProverError::CustomBatchIntt)?;
     }
     let mut f_coeffs = DeviceBuffer::<EF>::with_capacity(height);
     // SAFETY: `f_ple_evals` is constructed with length `height * D_EF`.
     unsafe {
-        transpose_fp_to_fpext_vec(&mut f_coeffs, &f_ple_evals)
+        transpose_fp_to_fpext_vec(&mut f_coeffs, &f_ple_evals, cudaStreamPerThread)
             .map_err(WhirProverError::Transpose)?;
     }
     drop(f_ple_evals);
@@ -161,7 +173,7 @@ where
         let step = 1u32 << i;
         // SAFETY: `f_coeffs` has length `2^m` with `m >= l_skip`.
         unsafe {
-            mle_interpolate_stage_ext(&mut f_coeffs, step, false)
+            mle_interpolate_stage_ext(&mut f_coeffs, step, false, cudaStreamPerThread)
                 .map_err(|error| WhirProverError::MleInterpolate { error, step })?;
         }
     }
@@ -211,8 +223,12 @@ where
             );
             debug_assert!(w_moments.len() >= f_height);
             let output_height = f_height / 2;
-            let tmp_buffer_capacity =
-                unsafe { _whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32, cudaStreamPerThread) };
+            let tmp_buffer_capacity = unsafe {
+                _whir_sumcheck_coeff_moments_required_temp_buffer_size(
+                    f_height as u32,
+                    cudaStreamPerThread,
+                )
+            };
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
                 d_sumcheck_tmp = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
             }
@@ -228,6 +244,7 @@ where
                     &mut d_s_evals,
                     &mut d_sumcheck_tmp,
                     f_height as u32,
+                    cudaStreamPerThread,
                 )
                 .map_err(|error| WhirProverError::SumcheckMleRound {
                     error,
@@ -260,6 +277,7 @@ where
                     &mut new_w_moments,
                     alpha,
                     f_height as u32,
+                    cudaStreamPerThread,
                 )
                 .map_err(|error| WhirProverError::FoldMle {
                     error,
@@ -284,6 +302,7 @@ where
                 &f_coeffs,
                 f_height as u64,
                 f_height as u32,
+                cudaStreamPerThread,
             )
             .map_err(|error| WhirProverError::SplitExtPoly { error, whir_round })?;
         }
@@ -303,6 +322,7 @@ where
                     D_EF as u32,
                     codeword_height as u32,
                     f_height as u32,
+                    cudaStreamPerThread,
                 )
                 .map_err(|error| WhirProverError::BatchExpandPad { error, whir_round })?;
 
@@ -331,8 +351,13 @@ where
             // - `g_coeffs` is coefficient form of `\hat{g}`, which is degree `2^{m-k_whir}`.
             // - `g_coeffs` is F-column major matrix.
             let g_opened_value = unsafe {
-                eval_poly_ext_at_point_from_base(&g_coeffs, 1 << (m - k_whir), z_0)
-                    .map_err(|error| WhirProverError::EvalPolyAtPoint { error, whir_round })?
+                eval_poly_ext_at_point_from_base(
+                    &g_coeffs,
+                    1 << (m - k_whir),
+                    z_0,
+                    cudaStreamPerThread,
+                )
+                .map_err(|error| WhirProverError::EvalPolyAtPoint { error, whir_round })?
             };
             transcript.observe_ext(g_opened_value);
             ood_values.push(g_opened_value);
@@ -506,6 +531,7 @@ where
                     gamma,
                     num_queries as u32,
                     log_height,
+                    cudaStreamPerThread,
                 )
                 .map_err(|error| WhirProverError::WMomentsAccumulate { error, whir_round })?;
             }

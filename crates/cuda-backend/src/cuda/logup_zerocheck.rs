@@ -112,7 +112,11 @@ extern "C" {
     /// Fused two-layer tree build. Applies layers i and i+1 in one kernel pass,
     /// keeping intermediate right-half nodes for revert operations.
     /// `half_i1` = N >> (i+2), where i is the first of the two layers.
-    fn _frac_build_tree_two_layers(layer: *mut Frac<EF>, half_i1: usize, stream: cudaStream_t) -> i32;
+    fn _frac_build_tree_two_layers(
+        layer: *mut Frac<EF>,
+        half_i1: usize,
+        stream: cudaStream_t,
+    ) -> i32;
 
     pub fn _frac_compute_round_temp_buffer_size(stride: u32, stream: cudaStream_t) -> u32;
 
@@ -219,9 +223,19 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF, stream: cudaStream_t) -> i32;
+    fn _frac_add_alpha(
+        data: *mut std::ffi::c_void,
+        len: usize,
+        alpha: EF,
+        stream: cudaStream_t,
+    ) -> i32;
 
-    fn _frac_vector_scalar_multiply_ext_fp(frac_vec: *mut Frac<EF>, scalar: F, length: u32, stream: cudaStream_t) -> i32;
+    fn _frac_vector_scalar_multiply_ext_fp(
+        frac_vec: *mut Frac<EF>,
+        scalar: F,
+        length: u32,
+        stream: cudaStream_t,
+    ) -> i32;
 
     // utils.cu
     fn _fold_ple_from_evals(
@@ -381,7 +395,11 @@ extern "C" {
     ) -> i32;
 
     // mle.cu
-    pub fn _zerocheck_mle_temp_sums_buffer_size(num_x: u32, num_y: u32, stream: cudaStream_t) -> usize;
+    pub fn _zerocheck_mle_temp_sums_buffer_size(
+        num_x: u32,
+        num_y: u32,
+        stream: cudaStream_t,
+    ) -> usize;
 
     pub fn _zerocheck_mle_intermediates_buffer_size(
         buffer_size: u32,
@@ -413,7 +431,12 @@ extern "C" {
 
     pub fn _logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32, stream: cudaStream_t) -> usize;
 
-    pub fn _logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32, stream: cudaStream_t) -> usize;
+    pub fn _logup_mle_intermediates_buffer_size(
+        buffer_size: u32,
+        num_x: u32,
+        num_y: u32,
+        stream: cudaStream_t,
+    ) -> usize;
 
     fn _logup_eval_mle(
         tmp_sums_buffer: *mut Frac<EF>,
@@ -594,7 +617,11 @@ pub unsafe fn frac_build_tree_two_layers(
     half_i1: usize,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_build_tree_two_layers(layer.as_mut_ptr(), half_i1, stream))
+    CudaError::from_result(_frac_build_tree_two_layers(
+        layer.as_mut_ptr(),
+        half_i1,
+        stream,
+    ))
 }
 
 // `eq_xi` will not store evaluations for the first hypercube coordinate because the prover factors
@@ -976,7 +1003,12 @@ pub unsafe fn frac_add_alpha(
     alpha: EF,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_add_alpha(data.as_mut_raw_ptr(), data.len(), alpha, stream))
+    CudaError::from_result(_frac_add_alpha(
+        data.as_mut_raw_ptr(),
+        data.len(),
+        alpha,
+        stream,
+    ))
 }
 
 /// # Safety
@@ -1413,6 +1445,7 @@ pub unsafe fn frac_matrix_vertically_repeat(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_matrix_vertically_repeat_ext(
     out_numerators: *mut EF,
     out_denominators: *mut EF,

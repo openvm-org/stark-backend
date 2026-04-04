@@ -1,6 +1,6 @@
 use std::{cmp::max, sync::Arc};
 
-use openvm_cuda_common::d_buffer::DeviceBuffer;
+use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::cudaStreamPerThread};
 use openvm_stark_backend::prover::MatrixDimensions;
 
 use super::errors::FoldPleError;
@@ -98,6 +98,7 @@ pub unsafe fn fold_ple_evals_gpu(
             l_skip as u32,
             num_x as u32,
             rotate,
+            cudaStreamPerThread,
         )?;
     }
     Ok(())
