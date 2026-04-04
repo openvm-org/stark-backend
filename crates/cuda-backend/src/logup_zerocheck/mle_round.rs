@@ -1,4 +1,4 @@
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::cudaStreamPerThread};
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use tracing::debug;
 
@@ -43,14 +43,14 @@ pub fn evaluate_mle_constraints_gpu(
     validate_mle_num_x(num_x)?;
     let buffer_size = rules.inner.buffer_size;
     let intermed_capacity =
-        unsafe { _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };
+        unsafe { _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread) };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
         DeviceBuffer::<EF>::with_capacity(intermed_capacity)
     } else {
         DeviceBuffer::<EF>::new()
     };
-    let temp_sums_buffer_capacity = unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y) };
+    let temp_sums_buffer_capacity = unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y, cudaStreamPerThread) };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity(temp_sums_buffer_capacity);
     let mut output = DeviceBuffer::<EF>::with_capacity(num_x as usize);
@@ -99,14 +99,14 @@ pub fn evaluate_mle_interactions_gpu(
     validate_mle_num_x(num_x)?;
     let buffer_size = rules.inner.buffer_size;
     let intermed_capacity =
-        unsafe { _logup_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };
+        unsafe { _logup_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread) };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("logup:intermediates_capacity={intermed_capacity}");
         DeviceBuffer::<EF>::with_capacity(intermed_capacity)
     } else {
         DeviceBuffer::<EF>::new()
     };
-    let temp_sums_buffer_capacity = unsafe { _logup_mle_temp_sums_buffer_size(num_x, num_y) };
+    let temp_sums_buffer_capacity = unsafe { _logup_mle_temp_sums_buffer_size(num_x, num_y, cudaStreamPerThread) };
     debug!("logup:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);
     let mut output = DeviceBuffer::<Frac<EF>>::with_capacity(num_x as usize);

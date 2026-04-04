@@ -8,6 +8,7 @@ use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
+    stream::cudaStream_t,
 };
 
 use crate::prelude::F;
@@ -35,9 +36,10 @@ extern "C" {
         l_skip: usize,
         cnt_blocks: usize,
         is_intt: bool,
+        stream: cudaStream_t,
     ) -> i32;
 
-    fn _generate_device_ntt_twiddles(d_twiddles: *mut c_void) -> i32;
+    fn _generate_device_ntt_twiddles(d_twiddles: *mut c_void, stream: cudaStream_t) -> i32;
 }
 
 static INIT_DEVICE_NTT_TWIDDLES: OnceLock<Mutex<BTreeSet<(i32, u64)>>> = OnceLock::new();
@@ -68,8 +70,14 @@ pub fn ensure_device_ntt_twiddles_initialized() -> Result<(), CudaError> {
 
 /// Generate device NTT twiddles and copy to constant memory.
 /// `d_twiddles` must have capacity for `DEVICE_NTT_TWIDDLES_SIZE` elements.
-unsafe fn generate_device_ntt_twiddles(d_twiddles: &DeviceBuffer<F>) -> Result<(), CudaError> {
-    CudaError::from_result(_generate_device_ntt_twiddles(d_twiddles.as_mut_raw_ptr()))
+unsafe fn generate_device_ntt_twiddles(
+    d_twiddles: &DeviceBuffer<F>,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_generate_device_ntt_twiddles(
+        d_twiddles.as_mut_raw_ptr(),
+        stream,
+    ))
 }
 
 pub unsafe fn batch_ntt_small(
@@ -77,6 +85,7 @@ pub unsafe fn batch_ntt_small(
     l_skip: usize,
     cnt_blocks: usize,
     is_intt: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     if l_skip == 0 || cnt_blocks == 0 {
         return Ok(());
@@ -89,5 +98,6 @@ pub unsafe fn batch_ntt_small(
         l_skip,
         cnt_blocks,
         is_intt,
+        stream,
     ))
 }

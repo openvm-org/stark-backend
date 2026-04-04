@@ -5,6 +5,7 @@ use openvm_cuda_common::{
     copy::{cuda_memcpy, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::{
     dft::Radix2BowersSerial,
@@ -526,6 +527,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     trace_height as u32,
                     trace_width as u32,
                     l_skip as u32,
+                    cudaStreamPerThread,
                 )
             } as usize;
 

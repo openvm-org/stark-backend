@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::missing_safety_doc)]
 
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::cudaStream_t};
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 
 use crate::prelude::{EF, F};
@@ -40,6 +40,7 @@ pub mod sumcheck {
             num_matrices: u32,
             height: u32,
             d: u32,
+            stream: cudaStream_t,
         ) -> i32;
 
         fn _fold_mle(
@@ -50,9 +51,10 @@ pub mod sumcheck {
             output_height: u32,
             max_output_cells: u32,
             r_val: EF,
+            stream: cudaStream_t,
         ) -> i32;
 
-        fn _fold_mle_column(buffer: *mut std::ffi::c_void, size: usize, r: EF) -> i32;
+        fn _fold_mle_column(buffer: *mut std::ffi::c_void, size: usize, r: EF, stream: cudaStream_t) -> i32;
 
         fn _batch_fold_mle(
             input_matrices: *const *const EF,
@@ -62,6 +64,7 @@ pub mod sumcheck {
             log_output_heights: *const u8,
             max_output_cells: u32,
             r_val: EF,
+            stream: cudaStream_t,
         ) -> i32;
 
         fn _reduce_over_x_and_cols(
@@ -70,6 +73,7 @@ pub mod sumcheck {
             num_x: u32,
             num_cols: u32,
             large_domain_size: u32,
+            stream: cudaStream_t,
         ) -> i32;
 
         fn _fold_ple_from_coeffs(
@@ -79,9 +83,10 @@ pub mod sumcheck {
             width: u32,
             domain_size: u32,
             r: EF,
+            stream: cudaStream_t,
         ) -> i32;
 
-        fn _triangular_fold_mle(output: *mut EF, input: *const EF, r: EF, output_max_n: u32)
+        fn _triangular_fold_mle(output: *mut EF, input: *const EF, r: EF, output_max_n: u32, stream: cudaStream_t)
             -> i32;
     }
 
@@ -93,6 +98,7 @@ pub mod sumcheck {
         num_matrices: u32,
         height: u32,
         d: u32,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         if d == 0 || d > MAX_SUMCHECK_MLE_ROUND_D {
             return Err(CudaError::new(1));
@@ -105,6 +111,7 @@ pub mod sumcheck {
             num_matrices,
             height,
             d,
+            stream,
         ))
     }
 
@@ -119,6 +126,7 @@ pub mod sumcheck {
         output_height: u32,
         max_output_cells: u32,
         r_val: EF,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_fold_mle(
             input_matrices.as_ptr(),
@@ -128,6 +136,7 @@ pub mod sumcheck {
             output_height,
             max_output_cells,
             r_val,
+            stream,
         ))
     }
 
@@ -135,8 +144,9 @@ pub mod sumcheck {
         buffer: &mut DeviceBuffer<EF>,
         size: usize,
         r: EF,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
-        CudaError::from_result(_fold_mle_column(buffer.as_mut_raw_ptr(), size, r))
+        CudaError::from_result(_fold_mle_column(buffer.as_mut_raw_ptr(), size, r, stream))
     }
 
     /// # Safety
@@ -150,6 +160,7 @@ pub mod sumcheck {
         log_output_heights: &DeviceBuffer<u8>,
         max_output_cells: u32,
         r_val: EF,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_batch_fold_mle(
             input_matrices.as_ptr(),
@@ -159,6 +170,7 @@ pub mod sumcheck {
             log_output_heights.as_ptr(),
             max_output_cells,
             r_val,
+            stream,
         ))
     }
 
@@ -169,6 +181,7 @@ pub mod sumcheck {
         width: u32,
         domain_size: u32,
         r: EF,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_fold_ple_from_coeffs(
             input_coeffs as *const c_void,
@@ -177,6 +190,7 @@ pub mod sumcheck {
             width,
             domain_size,
             r,
+            stream,
         ))
     }
 
@@ -186,6 +200,7 @@ pub mod sumcheck {
         num_x: u32,
         num_cols: u32,
         large_domain_size: u32,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_reduce_over_x_and_cols(
             input.as_raw_ptr(),
@@ -193,6 +208,7 @@ pub mod sumcheck {
             num_x,
             num_cols,
             large_domain_size,
+            stream,
         ))
     }
 
@@ -206,6 +222,7 @@ pub mod sumcheck {
         input: &EqEvalSegments<EF>,
         r: EF,
         output_max_n: usize,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         debug_assert_eq!(output.buffer.len(), 2 << output_max_n);
         debug_assert_eq!(input.buffer.len(), 4 << output_max_n);
@@ -214,6 +231,7 @@ pub mod sumcheck {
             input.buffer.as_ptr(),
             r,
             output_max_n as u32,
+            stream,
         ))
     }
 }
@@ -228,15 +246,17 @@ pub mod prefix {
             length: u64,
             round_stride: u64,
             block_num: u64,
+            stream: cudaStream_t,
         ) -> i32;
 
         fn _prefix_scan_block_downsweep_ext(
             d_inout: *mut std::ffi::c_void,
             length: u64,
             round_stride: u64,
+            stream: cudaStream_t,
         ) -> i32;
 
-        fn _prefix_scan_epilogue_ext(d_inout: *mut std::ffi::c_void, length: u64) -> i32;
+        fn _prefix_scan_epilogue_ext(d_inout: *mut std::ffi::c_void, length: u64, stream: cudaStream_t) -> i32;
     }
 
     pub unsafe fn prefix_scan_block_ext<T>(
@@ -244,12 +264,14 @@ pub mod prefix {
         length: u64,
         round_stride: u64,
         block_num: u64,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_prefix_scan_block_ext(
             d_inout.as_mut_raw_ptr(),
             length,
             round_stride,
             block_num,
+            stream,
         ))
     }
 
@@ -257,18 +279,21 @@ pub mod prefix {
         d_inout: &DeviceBuffer<T>,
         length: u64,
         round_stride: u64,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_prefix_scan_block_downsweep_ext(
             d_inout.as_mut_raw_ptr(),
             length,
             round_stride,
+            stream,
         ))
     }
 
     pub unsafe fn prefix_scan_epilogue_ext<T>(
         d_inout: &DeviceBuffer<T>,
         length: u64,
+        stream: cudaStream_t,
     ) -> Result<(), CudaError> {
-        CudaError::from_result(_prefix_scan_epilogue_ext(d_inout.as_mut_raw_ptr(), length))
+        CudaError::from_result(_prefix_scan_epilogue_ext(d_inout.as_mut_raw_ptr(), length, stream))
     }
 }

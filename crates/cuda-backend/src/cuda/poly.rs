@@ -2,6 +2,7 @@ use openvm_cuda_common::{
     copy::MemCopyD2H,
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
+    stream::cudaStream_t,
 };
 
 use crate::{
@@ -18,17 +19,19 @@ extern "C" {
         widths: *const u32,
         height: usize,
         num_mats: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
-    fn _eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32) -> i32;
+    fn _eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32, stream: cudaStream_t) -> i32;
 
-    fn _mobius_eq_hypercube_stage_ext(out: *mut EF, omega_i: EF, step: u32) -> i32;
+    fn _mobius_eq_hypercube_stage_ext(out: *mut EF, omega_i: EF, step: u32, stream: cudaStream_t) -> i32;
 
     fn _eq_hypercube_nonoverlapping_stage_ext(
         out: *mut EF,
         input: *const EF,
         x_i: EF,
         step: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _eq_hypercube_interleaved_stage_ext(
@@ -36,6 +39,7 @@ extern "C" {
         input: *const EF,
         x_i: EF,
         step: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     // `x` must be **device** buffer
@@ -45,15 +49,16 @@ extern "C" {
         step: u32,
         width: u32,
         height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     // `out` must be device ptr
-    fn _eval_poly_ext_at_point(base_coeffs: *const F, coeff_len: usize, x: EF, out: *mut EF)
+    fn _eval_poly_ext_at_point(base_coeffs: *const F, coeff_len: usize, x: EF, out: *mut EF, stream: cudaStream_t)
         -> i32;
 
-    fn _vector_scalar_multiply_ext(vec: *mut EF, scalar: EF, length: u32) -> i32;
+    fn _vector_scalar_multiply_ext(vec: *mut EF, scalar: EF, length: u32, stream: cudaStream_t) -> i32;
 
-    fn _transpose_fp_to_fpext_vec(output: *mut EF, input: *const F, height: u32) -> i32;
+    fn _transpose_fp_to_fpext_vec(output: *mut EF, input: *const F, height: u32, stream: cudaStream_t) -> i32;
 }
 
 /// Computes the algebraic batch of the column vectors from input matrices `mats`, in order.
@@ -72,6 +77,7 @@ pub unsafe fn algebraic_batch_matrices(
     widths: &DeviceBuffer<u32>,
     height: usize,
     num_mats: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     check(_algebraic_batch_matrices(
         output.as_mut_ptr(),
@@ -81,6 +87,7 @@ pub unsafe fn algebraic_batch_matrices(
         widths.as_ptr(),
         height,
         num_mats,
+        stream,
     ))
 }
 
@@ -93,8 +100,8 @@ pub unsafe fn algebraic_batch_matrices(
 ///
 /// # Safety
 /// - `out` is **device** pointer with length `>= 2 * step`.
-pub unsafe fn eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32) -> Result<(), CudaError> {
-    check(_eq_hypercube_stage_ext(out, x_i, step))
+pub unsafe fn eq_hypercube_stage_ext(out: *mut EF, x_i: EF, step: u32, stream: cudaStream_t) -> Result<(), CudaError> {
+    check(_eq_hypercube_stage_ext(out, x_i, step, stream))
 }
 
 /// Performs an in-place update for the Möbius-adjusted equality kernel:
@@ -110,8 +117,9 @@ pub unsafe fn mobius_eq_hypercube_stage_ext(
     out: *mut EF,
     omega_i: EF,
     step: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    check(_mobius_eq_hypercube_stage_ext(out, omega_i, step))
+    check(_mobius_eq_hypercube_stage_ext(out, omega_i, step, stream))
 }
 
 /// Performs an update of:
@@ -132,9 +140,10 @@ pub unsafe fn eq_hypercube_nonoverlapping_stage_ext(
     input: *const EF,
     x_i: EF,
     step: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     check(_eq_hypercube_nonoverlapping_stage_ext(
-        out, input, x_i, step,
+        out, input, x_i, step, stream,
     ))
 }
 
@@ -144,8 +153,9 @@ pub unsafe fn eq_hypercube_interleaved_stage_ext(
     input: *const EF,
     x_i: EF,
     step: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    check(_eq_hypercube_interleaved_stage_ext(out, input, x_i, step))
+    check(_eq_hypercube_interleaved_stage_ext(out, input, x_i, step, stream))
 }
 
 /// Same as `eq_hypercube_stage`, over base field, but computes `eq` evals in batch for multiple
@@ -159,6 +169,7 @@ pub unsafe fn batch_eq_hypercube_stage(
     x: &DeviceBuffer<F>,
     step: u32,
     height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let width = x.len() as u32;
     debug_assert!(step < height);
@@ -169,6 +180,7 @@ pub unsafe fn batch_eq_hypercube_stage(
         step,
         width,
         height,
+        stream,
     ))
 }
 
@@ -181,6 +193,7 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
     base_coeffs: &DeviceBuffer<F>,
     coeff_len: usize,
     x: EF,
+    stream: cudaStream_t,
 ) -> Result<EF, KernelError> {
     debug_assert!(base_coeffs.len() >= coeff_len * D_EF);
     let d_out = DeviceBuffer::<EF>::with_capacity(1);
@@ -189,6 +202,7 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
         coeff_len,
         x,
         d_out.as_mut_ptr(),
+        stream,
     ))
     .map_err(KernelError::Kernel)?;
     let out = d_out.to_host().map_err(KernelError::MemCopy)?;
@@ -196,13 +210,14 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
 }
 
 /// Scalar multiplication of a vector in-place by `scalar.
-pub fn vector_scalar_multiply_ext(vec: &mut DeviceBuffer<EF>, scalar: EF) -> Result<(), CudaError> {
+pub fn vector_scalar_multiply_ext(vec: &mut DeviceBuffer<EF>, scalar: EF, stream: cudaStream_t) -> Result<(), CudaError> {
     // SAFETY: `vec` is allocated for `vec.len()` so scalar multiplication is safe.
     unsafe {
         check(_vector_scalar_multiply_ext(
             vec.as_mut_ptr(),
             scalar,
             vec.len() as u32,
+            stream,
         ))
     }
 }
@@ -215,6 +230,7 @@ pub fn vector_scalar_multiply_ext(vec: &mut DeviceBuffer<EF>, scalar: EF) -> Res
 pub unsafe fn transpose_fp_to_fpext_vec(
     output: &mut DeviceBuffer<EF>,
     input: &DeviceBuffer<F>,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let height = output.len();
     debug_assert_eq!(height * D_EF, input.len());
@@ -222,5 +238,6 @@ pub unsafe fn transpose_fp_to_fpext_vec(
         output.as_mut_ptr(),
         input.as_ptr(),
         height as u32,
+        stream,
     ))
 }

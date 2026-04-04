@@ -1,5 +1,10 @@
 use itertools::Itertools;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{
+    copy::MemCopyH2D,
+    d_buffer::DeviceBuffer,
+    error::CudaError,
+    stream::cudaStreamPerThread,
+};
 use openvm_stark_backend::{
     air_builders::symbolic::{
         symbolic_expression::SymbolicExpression, SymbolicConstraints, SymbolicDagBuilder,
@@ -77,6 +82,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
+            cudaStreamPerThread,
         )
     };
     let mut intermediates = if intermed_capacity > 0 {
@@ -93,6 +99,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
+            cudaStreamPerThread,
         )
     };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
@@ -237,6 +244,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
+            cudaStreamPerThread,
         )
     };
     let mut intermediates = if intermed_capacity > 0 {
@@ -247,7 +255,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     };
 
     let temp_sums_buffer_capacity = unsafe {
-        _logup_r0_temp_sums_buffer_size(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes)
+        _logup_r0_temp_sums_buffer_size(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes, cudaStreamPerThread)
     };
     debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer = DeviceBuffer::<Frac<EF>>::with_capacity(temp_sums_buffer_capacity);

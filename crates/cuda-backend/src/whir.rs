@@ -5,6 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::{
     proof::{MerkleProof, WhirProof},
@@ -211,7 +212,7 @@ where
             debug_assert!(w_moments.len() >= f_height);
             let output_height = f_height / 2;
             let tmp_buffer_capacity =
-                unsafe { _whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32) };
+                unsafe { _whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32, cudaStreamPerThread) };
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
                 d_sumcheck_tmp = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
             }

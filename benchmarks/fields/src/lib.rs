@@ -7,7 +7,11 @@
 
 use std::{ffi::c_void, time::Instant};
 
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::current_stream_sync};
+use openvm_cuda_common::{
+    copy::MemCopyH2D,
+    d_buffer::DeviceBuffer,
+    stream::{cudaStream_t, current_stream_sync},
+};
 
 // ============================================================================
 // FFI Bindings
@@ -16,93 +20,93 @@ use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::curre
 // Benchmark kernels
 #[link(name = "ext_field_bench")]
 extern "C" {
-    fn init_fp(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    fn init_fp(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_fp(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // BabyBear quartic extension (simple implementation)
-    pub fn init_fp4(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp4(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_fp4(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_fp4(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // BabyBear quartic extension (optimized bb31_4_t)
-    fn init_fpext(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fpext(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    fn init_fpext(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_fpext(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
-    pub fn init_fp5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_fp5(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_fp5(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
-    pub fn init_fp6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp6(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_fp6(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_fp6(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
-    pub fn init_fp2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_fp2x3(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_fp2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
-    pub fn init_fp3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_fp3x2(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_fp3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // KoalaBear base field
-    pub fn init_kb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_kb(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_kb(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // KoalaBear quintic extension (x^5 + x + 4)
-    pub fn init_kb5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_kb5(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_kb5(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // KoalaBear sextic extension (x^6 + x^3 + 1)
-    pub fn init_kb6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb6(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_kb6(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_kb6(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // KoalaBear 2×3 tower (u²=3, v³=1+u)
-    pub fn init_kb2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_kb2x3(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_kb2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // KoalaBear 3×2 tower (w³=-w-4, z²=3)
-    pub fn init_kb3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    pub fn init_kb3x2(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn add_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_kb3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // Goldilocks base field (64-bit prime: 2^64 - 2^32 + 1)
-    fn init_gl(out: *mut c_void, raw_data: *const u64, n: usize) -> i32;
-    fn add_gl(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_gl(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_gl(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    fn init_gl(out: *mut c_void, raw_data: *const u64, n: usize, stream: cudaStream_t) -> i32;
+    fn add_gl(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_gl(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_gl(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 
     // Goldilocks cubic extension (X³ - X - 1)
-    fn init_gl3(out: *mut c_void, raw_data: *const u64, n: usize) -> i32;
-    fn add_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_gl3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    fn init_gl3(out: *mut c_void, raw_data: *const u64, n: usize, stream: cudaStream_t) -> i32;
+    fn add_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn mul_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn inv_gl3(out: *mut c_void, a: *const c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 }
 
 // Poseidon2 benchmark kernels
 #[link(name = "ext_field_bench")]
 extern "C" {
-    fn init_poseidon2_bb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn run_poseidon2_bb(states: *mut c_void, n: usize, reps: i32) -> i32;
-    fn init_poseidon2_kb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn run_poseidon2_kb(states: *mut c_void, n: usize, reps: i32) -> i32;
+    fn init_poseidon2_bb(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn run_poseidon2_bb(states: *mut c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
+    fn init_poseidon2_kb(out: *mut c_void, raw_data: *const u32, n: usize, stream: cudaStream_t) -> i32;
+    fn run_poseidon2_kb(states: *mut c_void, n: usize, reps: i32, stream: cudaStream_t) -> i32;
 }
 
 /// Check CUDA return code, panic on error

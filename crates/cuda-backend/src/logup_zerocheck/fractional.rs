@@ -4,6 +4,7 @@ use openvm_cuda_common::{
     copy::{cuda_memcpy, MemCopyD2H},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::{
     poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
@@ -638,7 +639,7 @@ where
         DeviceBuffer::new()
     };
     let max_tmp_buffer_capacity = if total_rounds > 1 {
-        (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32) }) as usize
+        (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32, cudaStreamPerThread) }) as usize
     } else {
         0
     };
@@ -674,7 +675,7 @@ where
         let lambda = transcript.sample_ext();
 
         let tmp_buffer_capacity =
-            unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32) } as usize;
+            unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32, cudaStreamPerThread) } as usize;
         if tmp_buffer_capacity > tmp_block_sums.len() {
             tmp_block_sums = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity);
         }

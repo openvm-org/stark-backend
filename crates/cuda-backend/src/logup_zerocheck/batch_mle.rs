@@ -7,6 +7,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::MemCopyError,
+    stream::cudaStreamPerThread,
 };
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 
@@ -39,7 +40,7 @@ fn zerocheck_batch_mle_intermediates_buffer_bytes(
     num_y: u32,
 ) -> usize {
     unsafe {
-        _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
+        _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread)
             * std::mem::size_of::<EF>()
     }
 }
@@ -47,7 +48,7 @@ fn zerocheck_batch_mle_intermediates_buffer_bytes(
 /// Computes logup intermediate buffer memory in bytes for a trace.
 fn logup_batch_mle_intermediates_buffer_bytes(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
     unsafe {
-        _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
+        _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y, cudaStreamPerThread)
             * std::mem::size_of::<EF>()
     }
 }
@@ -172,7 +173,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
 
             let d_intermediates = if buffer_size > 0 {
                 let intermediates_len = unsafe {
-                    _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y)
+                    _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y, cudaStreamPerThread)
                 };
                 let buf = DeviceBuffer::<EF>::with_capacity(intermediates_len);
                 let ptr = buf.as_mut_ptr();
@@ -319,7 +320,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
 
             let d_intermediates = if buffer_size > 0 {
                 let intermediates_len = unsafe {
-                    _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y)
+                    _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y, cudaStreamPerThread)
                 };
                 let buf = DeviceBuffer::<EF>::with_capacity(intermediates_len);
                 let ptr = buf.as_mut_ptr();
