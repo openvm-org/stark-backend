@@ -1,3 +1,5 @@
+use openvm_cuda_common::stream::cudaStream_t;
+
 use super::*;
 use crate::{
     monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader, PackedVar},
@@ -104,14 +106,15 @@ extern "C" {
         revert: bool,
         alpha: EF,
         apply_alpha: bool,
+        stream: cudaStream_t,
     ) -> i32;
 
     /// Fused two-layer tree build. Applies layers i and i+1 in one kernel pass,
     /// keeping intermediate right-half nodes for revert operations.
     /// `half_i1` = N >> (i+2), where i is the first of the two layers.
-    fn _frac_build_tree_two_layers(layer: *mut Frac<EF>, half_i1: usize) -> i32;
+    fn _frac_build_tree_two_layers(layer: *mut Frac<EF>, half_i1: usize, stream: cudaStream_t) -> i32;
 
-    pub fn _frac_compute_round_temp_buffer_size(stride: u32) -> u32;
+    pub fn _frac_compute_round_temp_buffer_size(stride: u32, stream: cudaStream_t) -> u32;
 
     fn _frac_compute_round(
         eq_xi_low: *const EF,
@@ -122,6 +125,7 @@ extern "C" {
         lambda: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
     ) -> i32;
 
     /// Fused compute round + tree layer revert. Combines frac_build_tree_layer(revert=true)
@@ -135,6 +139,7 @@ extern "C" {
         lambda: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _frac_fold_fpext_columns(
@@ -142,6 +147,7 @@ extern "C" {
         dst: *mut Frac<EF>,
         size: usize,
         r: EF,
+        stream: cudaStream_t,
     ) -> i32;
 
     /// Fused compute round + fold (out-of-place). Reads from pre-fold src_pq_buffer (size
@@ -158,6 +164,7 @@ extern "C" {
         r_prev: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
     ) -> i32;
 
     /// Fused compute round + fold (in-place). Reads from pre-fold pq_buffer (size src_pq_size),
@@ -173,6 +180,7 @@ extern "C" {
         r_prev: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _frac_precompute_m_build(
@@ -189,6 +197,7 @@ extern "C" {
         partial_out: *mut EF,
         partial_len: usize,
         m_total: *mut EF,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _frac_precompute_m_eval_round(
@@ -198,6 +207,7 @@ extern "C" {
         eq_r_prefix: *const EF,
         eq_suffix: *const EF,
         out: *mut EF,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _frac_multifold(
@@ -206,11 +216,12 @@ extern "C" {
         rem_n: usize,
         w: usize,
         eq_r_window: *const EF,
+        stream: cudaStream_t,
     ) -> i32;
 
-    fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF) -> i32;
+    fn _frac_add_alpha(data: *mut std::ffi::c_void, len: usize, alpha: EF, stream: cudaStream_t) -> i32;
 
-    fn _frac_vector_scalar_multiply_ext_fp(frac_vec: *mut Frac<EF>, scalar: F, length: u32) -> i32;
+    fn _frac_vector_scalar_multiply_ext_fp(frac_vec: *mut Frac<EF>, scalar: F, length: u32, stream: cudaStream_t) -> i32;
 
     // utils.cu
     fn _fold_ple_from_evals(
@@ -223,6 +234,7 @@ extern "C" {
         l_skip: u32,
         new_height: u32,
         rotate: bool,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _interpolate_columns(
@@ -231,6 +243,7 @@ extern "C" {
         s_deg: usize,
         num_y: usize,
         num_columns: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _frac_matrix_vertically_repeat(
@@ -239,6 +252,7 @@ extern "C" {
         width: u32,
         lifted_height: u32,
         height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _frac_matrix_vertically_repeat_ext(
@@ -249,6 +263,7 @@ extern "C" {
         width: u32,
         lifted_height: u32,
         height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     // gkr_input.cu
@@ -266,6 +281,7 @@ extern "C" {
         used_nodes_len: usize,
         height: u32,
         num_rows_per_tile: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     // logup_round0.cu
@@ -275,6 +291,7 @@ extern "C" {
         num_x: u32,
         num_cosets: u32,
         max_temp_bytes: usize,
+        stream: cudaStream_t,
     ) -> usize;
 
     pub fn _logup_r0_intermediates_buffer_size(
@@ -283,6 +300,7 @@ extern "C" {
         num_x: u32,
         num_cosets: u32,
         max_temp_bytes: usize,
+        stream: cudaStream_t,
     ) -> usize;
 
     fn _logup_bary_eval_interactions_round0(
@@ -306,6 +324,7 @@ extern "C" {
         num_cosets: u32,
         g_shift: F,
         max_temp_bytes: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     // zerocheck_round0.cu
@@ -315,6 +334,7 @@ extern "C" {
         num_x: u32,
         num_cosets: u32,
         max_temp_bytes: usize,
+        stream: cudaStream_t,
     ) -> usize;
 
     pub fn _zerocheck_r0_intermediates_buffer_size(
@@ -323,6 +343,7 @@ extern "C" {
         num_x: u32,
         num_cosets: u32,
         max_temp_bytes: usize,
+        stream: cudaStream_t,
     ) -> usize;
 
     fn _zerocheck_ntt_eval_constraints(
@@ -347,6 +368,7 @@ extern "C" {
         num_cosets: u32,
         g_shift: F,
         max_temp_bytes: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _fold_selectors_round0(
@@ -355,15 +377,17 @@ extern "C" {
         is_first: EF,
         is_last: EF,
         num_x: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     // mle.cu
-    pub fn _zerocheck_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize;
+    pub fn _zerocheck_mle_temp_sums_buffer_size(num_x: u32, num_y: u32, stream: cudaStream_t) -> usize;
 
     pub fn _zerocheck_mle_intermediates_buffer_size(
         buffer_size: u32,
         num_x: u32,
         num_y: u32,
+        stream: cudaStream_t,
     ) -> usize;
 
     fn _zerocheck_eval_mle(
@@ -384,11 +408,12 @@ extern "C" {
         intermediates: *mut EF,
         num_y: u32,
         num_x: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
-    pub fn _logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize;
+    pub fn _logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32, stream: cudaStream_t) -> usize;
 
-    pub fn _logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
+    pub fn _logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32, stream: cudaStream_t) -> usize;
 
     fn _logup_eval_mle(
         tmp_sums_buffer: *mut Frac<EF>,
@@ -408,6 +433,7 @@ extern "C" {
         intermediates: *mut EF,
         num_y: u32,
         num_x: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     // batch_mle.cu (batch kernels always use global intermediates when buffer_size > 0)
@@ -415,12 +441,14 @@ extern "C" {
         buffer_size: u32,
         num_x: u32,
         num_y: u32,
+        stream: cudaStream_t,
     ) -> usize;
 
     pub fn _logup_batch_mle_intermediates_buffer_size(
         buffer_size: u32,
         num_x: u32,
         num_y: u32,
+        stream: cudaStream_t,
     ) -> usize;
 
     fn _zerocheck_batch_eval_mle(
@@ -435,6 +463,7 @@ extern "C" {
         num_x: u32,
         num_airs: u32,
         threads_per_block: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _logup_batch_eval_mle(
@@ -447,6 +476,7 @@ extern "C" {
         num_x: u32,
         num_airs: u32,
         threads_per_block: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _zerocheck_monomial_batched(
@@ -459,6 +489,7 @@ extern "C" {
         num_x: u32,
         num_airs: u32,
         threads_per_block: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _zerocheck_monomial_par_y_batched(
@@ -472,6 +503,7 @@ extern "C" {
         num_airs: u32,
         chunk_size: u32,
         threads_per_block: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _precompute_lambda_combinations(
@@ -480,6 +512,7 @@ extern "C" {
         lambda_terms: *const LambdaTerm<F>,
         lambda_pows: *const EF,
         num_monomials: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     // Logup monomial kernels
@@ -489,6 +522,7 @@ extern "C" {
         terms: *const InteractionMonomialTerm<F>,
         eq_3bs: *const EF,
         num_monomials: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _precompute_logup_denom_combinations(
@@ -498,6 +532,7 @@ extern "C" {
         beta_pows: *const EF,
         eq_3bs: *const EF,
         num_monomials: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _logup_monomial_batched(
@@ -512,6 +547,7 @@ extern "C" {
         num_x: u32,
         num_airs: u32,
         threads_per_block: u32,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -520,6 +556,7 @@ pub unsafe fn interpolate_columns_gpu(
     columns: &DeviceBuffer<*const EF>,
     s_deg: usize,
     num_y: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_interpolate_columns(
         interpolated.as_mut_ptr(),
@@ -527,6 +564,7 @@ pub unsafe fn interpolate_columns_gpu(
         s_deg,
         num_y,
         columns.len(),
+        stream,
     ))
 }
 
@@ -536,6 +574,7 @@ pub unsafe fn frac_build_tree_layer(
     revert: bool,
     alpha: EF,
     apply_alpha: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(layer.len() >= layer_size);
     CudaError::from_result(_frac_build_tree_layer(
@@ -544,6 +583,7 @@ pub unsafe fn frac_build_tree_layer(
         revert,
         alpha,
         apply_alpha,
+        stream,
     ))
 }
 
@@ -552,8 +592,9 @@ pub unsafe fn frac_build_tree_layer(
 pub unsafe fn frac_build_tree_two_layers(
     layer: &mut DeviceBuffer<Frac<EF>>,
     half_i1: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_build_tree_two_layers(layer.as_mut_ptr(), half_i1))
+    CudaError::from_result(_frac_build_tree_two_layers(layer.as_mut_ptr(), half_i1, stream))
 }
 
 // `eq_xi` will not store evaluations for the first hypercube coordinate because the prover factors
@@ -566,6 +607,7 @@ pub unsafe fn frac_compute_round(
     lambda: EF,
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let low_n = eq_xi.low_n();
     let high_n = eq_xi.high_n();
@@ -574,7 +616,7 @@ pub unsafe fn frac_compute_round(
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap());
+        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap(), stream);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -589,6 +631,7 @@ pub unsafe fn frac_compute_round(
         lambda,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
+        stream,
     ))
 }
 
@@ -607,6 +650,7 @@ pub unsafe fn frac_compute_round_and_revert(
     lambda: EF,
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let low_n = eq_xi.low_n();
     let high_n = eq_xi.high_n();
@@ -614,7 +658,7 @@ pub unsafe fn frac_compute_round_and_revert(
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap());
+        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap(), stream);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -630,6 +674,7 @@ pub unsafe fn frac_compute_round_and_revert(
         lambda,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
+        stream,
     ))
 }
 
@@ -641,6 +686,7 @@ pub unsafe fn fold_ef_frac_columns(
     dst: &mut DeviceBuffer<Frac<EF>>,
     size: usize,
     r: EF,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(src.len() >= size);
     debug_assert!(dst.len() >= size / 2);
@@ -649,6 +695,7 @@ pub unsafe fn fold_ef_frac_columns(
         dst.as_mut_ptr(),
         size,
         r,
+        stream,
     ))
 }
 
@@ -657,10 +704,11 @@ pub unsafe fn fold_ef_frac_columns_inplace(
     buffer: &mut DeviceBuffer<Frac<EF>>,
     size: usize,
     r: EF,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(buffer.len() >= size);
     let ptr = buffer.as_mut_ptr();
-    CudaError::from_result(_frac_fold_fpext_columns(ptr, ptr, size, r))
+    CudaError::from_result(_frac_fold_fpext_columns(ptr, ptr, size, r, stream))
 }
 
 /// Fused compute round + fold kernel.
@@ -683,6 +731,7 @@ pub unsafe fn frac_compute_round_and_fold(
     r_prev: EF,
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let low_n = eq_xi.low_n();
     let high_n = eq_xi.high_n();
@@ -707,7 +756,7 @@ pub unsafe fn frac_compute_round_and_fold(
             pq_size
         );
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(num_x as u32);
+        let required = _frac_compute_round_temp_buffer_size(num_x as u32, stream);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -724,6 +773,7 @@ pub unsafe fn frac_compute_round_and_fold(
         r_prev,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
+        stream,
     ))
 }
 
@@ -743,6 +793,7 @@ pub unsafe fn frac_compute_round_and_fold_inplace(
     r_prev: EF,
     out_device: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let low_n = eq_xi.low_n();
     let high_n = eq_xi.high_n();
@@ -760,7 +811,7 @@ pub unsafe fn frac_compute_round_and_fold_inplace(
             src_pq_size
         );
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(num_x as u32);
+        let required = _frac_compute_round_temp_buffer_size(num_x as u32, stream);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -776,6 +827,7 @@ pub unsafe fn frac_compute_round_and_fold_inplace(
         r_prev,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
+        stream,
     ))
 }
 
@@ -794,6 +846,7 @@ pub unsafe fn frac_precompute_m_build_raw(
     partial_out: *mut EF,
     partial_len: usize,
     m_total: *mut EF,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(rem_n > 0);
     debug_assert!(w > 0 && w <= rem_n);
@@ -813,6 +866,7 @@ pub unsafe fn frac_precompute_m_build_raw(
         partial_out,
         partial_len,
         m_total,
+        stream,
     ))
 }
 
@@ -824,6 +878,7 @@ pub unsafe fn frac_precompute_m_eval_round_raw(
     eq_r_prefix: *const EF,
     eq_suffix: *const EF,
     out: *mut EF,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(w > 0);
     debug_assert!(t < w);
@@ -834,6 +889,7 @@ pub unsafe fn frac_precompute_m_eval_round_raw(
         eq_r_prefix,
         eq_suffix,
         out,
+        stream,
     ))
 }
 
@@ -843,10 +899,11 @@ pub unsafe fn frac_multifold_raw(
     rem_n: usize,
     w: usize,
     eq_r_window: *const EF,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(rem_n > 0);
     debug_assert!(w > 0 && w <= rem_n);
-    CudaError::from_result(_frac_multifold(src, dst, rem_n, w, eq_r_window))
+    CudaError::from_result(_frac_multifold(src, dst, rem_n, w, eq_r_window, stream))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -860,6 +917,7 @@ pub unsafe fn fold_ple_from_evals(
     l_skip: u32,
     new_height: u32,
     rotate: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_fold_ple_from_evals(
         input_matrix.as_ptr(),
@@ -871,6 +929,7 @@ pub unsafe fn fold_ple_from_evals(
         l_skip,
         new_height,
         rotate,
+        stream,
     ))
 }
 
@@ -891,6 +950,7 @@ pub unsafe fn logup_gkr_input_eval(
     pair_idxs: &DeviceBuffer<u32>,
     height: u32,
     num_rows_per_tile: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert_eq!(used_nodes.len(), pair_idxs.len());
     CudaError::from_result(_logup_gkr_input_eval(
@@ -907,11 +967,16 @@ pub unsafe fn logup_gkr_input_eval(
         used_nodes.len(),
         height,
         num_rows_per_tile,
+        stream,
     ))
 }
 
-pub unsafe fn frac_add_alpha(data: &DeviceBuffer<Frac<EF>>, alpha: EF) -> Result<(), CudaError> {
-    CudaError::from_result(_frac_add_alpha(data.as_mut_raw_ptr(), data.len(), alpha))
+pub unsafe fn frac_add_alpha(
+    data: &DeviceBuffer<Frac<EF>>,
+    alpha: EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_frac_add_alpha(data.as_mut_raw_ptr(), data.len(), alpha, stream))
 }
 
 /// # Safety
@@ -940,6 +1005,7 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
     num_cosets: u32,
     g_shift: F,
     max_temp_bytes: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_zerocheck_ntt_eval_constraints(
         tmp_sums_buffer.as_mut_ptr(),
@@ -963,6 +1029,7 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
         num_cosets,
         g_shift,
         max_temp_bytes,
+        stream,
     ))
 }
 
@@ -994,6 +1061,7 @@ pub unsafe fn logup_bary_eval_interactions_round0(
     num_cosets: u32,
     g_shift: F,
     max_temp_bytes: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_bary_eval_interactions_round0(
         tmp_sums_buffer.as_mut_ptr(),
@@ -1016,6 +1084,7 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         num_cosets,
         g_shift,
         max_temp_bytes,
+        stream,
     ))
 }
 
@@ -1039,6 +1108,7 @@ pub unsafe fn zerocheck_eval_mle(
     intermediates: &mut DeviceBuffer<EF>,
     num_y: u32,
     num_x: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_zerocheck_eval_mle(
         tmp_sums_buffer.as_mut_ptr(),
@@ -1058,6 +1128,7 @@ pub unsafe fn zerocheck_eval_mle(
         intermediates.as_mut_ptr(),
         num_y,
         num_x,
+        stream,
     ))
 }
 
@@ -1074,6 +1145,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
     num_x: u32,
     num_airs: u32,
     threads_per_block: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_zerocheck_batch_eval_mle(
         tmp_sums_buffer.as_mut_ptr(),
@@ -1087,6 +1159,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
         num_x,
         num_airs,
         threads_per_block,
+        stream,
     ))
 }
 
@@ -1110,6 +1183,7 @@ pub unsafe fn logup_eval_mle(
     intermediates: &mut DeviceBuffer<EF>,
     num_y: u32,
     num_x: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_eval_mle(
         tmp_sums_buffer.as_mut_ptr(),
@@ -1129,6 +1203,7 @@ pub unsafe fn logup_eval_mle(
         intermediates.as_mut_ptr(),
         num_y,
         num_x,
+        stream,
     ))
 }
 
@@ -1143,6 +1218,7 @@ pub unsafe fn logup_batch_eval_mle(
     num_x: u32,
     num_airs: u32,
     threads_per_block: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_batch_eval_mle(
         tmp_sums_buffer.as_mut_ptr(),
@@ -1154,6 +1230,7 @@ pub unsafe fn logup_batch_eval_mle(
         num_x,
         num_airs,
         threads_per_block,
+        stream,
     ))
 }
 
@@ -1168,6 +1245,7 @@ pub unsafe fn zerocheck_monomial_batched(
     num_x: u32,
     num_airs: u32,
     threads_per_block: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_zerocheck_monomial_batched(
         tmp_sums.as_mut_ptr(),
@@ -1179,6 +1257,7 @@ pub unsafe fn zerocheck_monomial_batched(
         num_x,
         num_airs,
         threads_per_block,
+        stream,
     ))
 }
 
@@ -1194,6 +1273,7 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
     num_airs: u32,
     chunk_size: u32,
     threads_per_block: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_zerocheck_monomial_par_y_batched(
         tmp_sums.as_mut_ptr(),
@@ -1206,6 +1286,7 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
         num_airs,
         chunk_size,
         threads_per_block,
+        stream,
     ))
 }
 
@@ -1215,6 +1296,7 @@ pub unsafe fn precompute_lambda_combinations(
     lambda_terms: *const LambdaTerm<F>,
     lambda_pows: &DeviceBuffer<EF>,
     num_monomials: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_precompute_lambda_combinations(
         out.as_mut_ptr(),
@@ -1222,6 +1304,7 @@ pub unsafe fn precompute_lambda_combinations(
         lambda_terms,
         lambda_pows.as_ptr(),
         num_monomials,
+        stream,
     ))
 }
 
@@ -1231,6 +1314,7 @@ pub unsafe fn precompute_logup_numer_combinations(
     terms: *const InteractionMonomialTerm<F>,
     eq_3bs: &DeviceBuffer<EF>,
     num_monomials: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_precompute_logup_numer_combinations(
         out.as_mut_ptr(),
@@ -1238,6 +1322,7 @@ pub unsafe fn precompute_logup_numer_combinations(
         terms,
         eq_3bs.as_ptr(),
         num_monomials,
+        stream,
     ))
 }
 
@@ -1248,6 +1333,7 @@ pub unsafe fn precompute_logup_denom_combinations(
     beta_pows: &DeviceBuffer<EF>,
     eq_3bs: &DeviceBuffer<EF>,
     num_monomials: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_precompute_logup_denom_combinations(
         out.as_mut_ptr(),
@@ -1256,6 +1342,7 @@ pub unsafe fn precompute_logup_denom_combinations(
         beta_pows.as_ptr(),
         eq_3bs.as_ptr(),
         num_monomials,
+        stream,
     ))
 }
 
@@ -1272,6 +1359,7 @@ pub unsafe fn logup_monomial_batched(
     num_x: u32,
     num_airs: u32,
     threads_per_block: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_logup_monomial_batched(
         tmp_sums.as_mut_ptr(),
@@ -1285,6 +1373,7 @@ pub unsafe fn logup_monomial_batched(
         num_x,
         num_airs,
         threads_per_block,
+        stream,
     ))
 }
 
@@ -1292,9 +1381,10 @@ pub unsafe fn frac_vector_scalar_multiply_ext_fp(
     frac_vec: *mut Frac<EF>,
     scalar: F,
     length: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_frac_vector_scalar_multiply_ext_fp(
-        frac_vec, scalar, length,
+        frac_vec, scalar, length, stream,
     ))
 }
 
@@ -1310,6 +1400,7 @@ pub unsafe fn frac_matrix_vertically_repeat(
     width: u32,
     lifted_height: u32,
     height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(lifted_height > height);
     CudaError::from_result(_frac_matrix_vertically_repeat(
@@ -1318,6 +1409,7 @@ pub unsafe fn frac_matrix_vertically_repeat(
         width,
         lifted_height,
         height,
+        stream,
     ))
 }
 
@@ -1329,6 +1421,7 @@ pub unsafe fn frac_matrix_vertically_repeat_ext(
     width: u32,
     lifted_height: u32,
     height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(lifted_height > height);
     CudaError::from_result(_frac_matrix_vertically_repeat_ext(
@@ -1339,6 +1432,7 @@ pub unsafe fn frac_matrix_vertically_repeat_ext(
         width,
         lifted_height,
         height,
+        stream,
     ))
 }
 
@@ -1351,6 +1445,7 @@ pub unsafe fn fold_selectors_round0(
     is_first: EF,
     is_last: EF,
     num_x: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_fold_selectors_round0(
         out,
@@ -1358,5 +1453,6 @@ pub unsafe fn fold_selectors_round0(
         is_first,
         is_last,
         num_x as u32,
+        stream,
     ))
 }

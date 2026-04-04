@@ -1,6 +1,7 @@
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
+    stream::cudaStream_t,
 };
 
 use crate::{
@@ -16,9 +17,10 @@ extern "C" {
         stacked_height: usize,
         num_packets: usize,
         skip_domain: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
-    pub fn _whir_sumcheck_coeff_moments_required_temp_buffer_size(height: u32) -> u32;
+    pub fn _whir_sumcheck_coeff_moments_required_temp_buffer_size(height: u32, stream: cudaStream_t) -> u32;
 
     fn _whir_sumcheck_coeff_moments_round(
         f_coeffs: *const EF,
@@ -26,6 +28,7 @@ extern "C" {
         output: *mut EF,
         tmp_block_sums: *mut EF,
         height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _whir_fold_coeffs_and_moments(
@@ -35,6 +38,7 @@ extern "C" {
         w_folded_moments: *mut EF,
         alpha: EF,
         height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _w_moments_accumulate(
@@ -45,6 +49,7 @@ extern "C" {
         num_queries: u32,
         log_height: u32,
         height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -58,6 +63,7 @@ pub unsafe fn whir_algebraic_batch_traces(
     packets: &DeviceBuffer<BatchingTracePacket>,
     mu_powers: &DeviceBuffer<EF>,
     skip_domain: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert_eq!(output.len() % D_EF, 0);
     check(_whir_algebraic_batch_traces(
@@ -67,6 +73,7 @@ pub unsafe fn whir_algebraic_batch_traces(
         output.len() / D_EF,
         packets.len(),
         skip_domain,
+        stream,
     ))
 }
 
@@ -83,13 +90,14 @@ pub unsafe fn whir_sumcheck_coeff_moments_round(
     output: &mut DeviceBuffer<EF>,
     tmp_block_sums: &mut DeviceBuffer<EF>,
     height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(f_coeffs.len() >= height as usize);
     debug_assert!(w_moments.len() >= height as usize);
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _whir_sumcheck_coeff_moments_required_temp_buffer_size(height);
+        let required = _whir_sumcheck_coeff_moments_required_temp_buffer_size(height, stream);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -101,6 +109,7 @@ pub unsafe fn whir_sumcheck_coeff_moments_round(
         output.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
         height,
+        stream,
     ))
 }
 
@@ -116,6 +125,7 @@ pub unsafe fn whir_fold_coeffs_and_moments(
     w_folded_moments: &mut DeviceBuffer<EF>,
     alpha: EF,
     height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(f_coeffs.len() >= height as usize);
     debug_assert!(w_moments.len() >= height as usize);
@@ -128,6 +138,7 @@ pub unsafe fn whir_fold_coeffs_and_moments(
         w_folded_moments.as_mut_ptr(),
         alpha,
         height,
+        stream,
     ))
 }
 
@@ -144,6 +155,7 @@ pub unsafe fn w_moments_accumulate(
     gamma: EF,
     num_queries: u32,
     log_height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let height = w_moments.len();
     debug_assert_eq!(z0_pows2.len(), log_height as usize);
@@ -156,5 +168,6 @@ pub unsafe fn w_moments_accumulate(
         num_queries,
         log_height,
         height as u32,
+        stream,
     ))
 }

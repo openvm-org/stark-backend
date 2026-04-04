@@ -1,4 +1,4 @@
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::cudaStream_t};
 
 use crate::prelude::{Digest, EF, F};
 
@@ -21,6 +21,7 @@ extern "C" {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _poseidon2_compressing_row_hashes_ext(
@@ -29,6 +30,7 @@ extern "C" {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _poseidon2_strided_compress_layer(
@@ -36,12 +38,14 @@ extern "C" {
         prev_layer: *const Digest,
         output_size: usize,
         stride: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _poseidon2_adjacent_compress_layer(
         output: *mut Digest,
         prev_layer: *const Digest,
         output_size: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _query_digest_layers(
@@ -50,6 +54,7 @@ extern "C" {
         d_indices: *const u64,
         num_query: u64,
         num_layer: u64,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -67,6 +72,7 @@ pub unsafe fn poseidon2_compressing_row_hashes(
     width: usize,
     query_stride: usize,
     log_rows_per_query: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     validate_merkle_log_rows_per_query(log_rows_per_query)?;
     debug_assert!(matrix.len() >= width * (query_stride << log_rows_per_query));
@@ -77,6 +83,7 @@ pub unsafe fn poseidon2_compressing_row_hashes(
         width,
         query_stride,
         log_rows_per_query,
+        stream,
     ))
 }
 
@@ -97,6 +104,7 @@ pub unsafe fn poseidon2_compressing_row_hashes_ext(
     width: usize,
     query_stride: usize,
     log_rows_per_query: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     validate_merkle_log_rows_per_query(log_rows_per_query)?;
     debug_assert!(matrix.len() >= width * (query_stride << log_rows_per_query));
@@ -107,6 +115,7 @@ pub unsafe fn poseidon2_compressing_row_hashes_ext(
         width,
         query_stride,
         log_rows_per_query,
+        stream,
     ))
 }
 
@@ -124,6 +133,7 @@ pub unsafe fn poseidon2_strided_compress_layer(
     prev_layer: &DeviceBuffer<Digest>,
     output_size: usize,
     stride: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(stride > 0 && stride <= output_size);
     debug_assert!(output.len() >= output_size);
@@ -133,6 +143,7 @@ pub unsafe fn poseidon2_strided_compress_layer(
         prev_layer.as_ptr(),
         output_size,
         stride,
+        stream,
     ))
 }
 
@@ -147,6 +158,7 @@ pub unsafe fn poseidon2_adjacent_compress_layer(
     output: &mut DeviceBuffer<Digest>,
     prev_layer: &DeviceBuffer<Digest>,
     output_size: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(output.len() >= output_size);
     debug_assert!(prev_layer.len() >= output_size * 2);
@@ -154,6 +166,7 @@ pub unsafe fn poseidon2_adjacent_compress_layer(
         output.as_mut_ptr(),
         prev_layer.as_ptr(),
         output_size,
+        stream,
     ))
 }
 
@@ -163,6 +176,7 @@ pub unsafe fn query_digest_layers(
     d_indices: &DeviceBuffer<u64>,
     num_query: usize,
     num_layer: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     if num_query == 0 || num_layer == 0 {
         return Ok(());
@@ -176,5 +190,6 @@ pub unsafe fn query_digest_layers(
         d_indices.as_ptr(),
         num_query as u64,
         num_layer as u64,
+        stream,
     ))
 }
