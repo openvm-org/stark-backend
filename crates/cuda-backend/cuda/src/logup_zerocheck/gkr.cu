@@ -972,7 +972,7 @@ inline std::pair<dim3, dim3> frac_compute_round_launch_params(uint32_t num_x) {
     return {dim3(blocks_needed), dim3(block_size)};
 }
 
-extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t num_x) {
+extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t num_x, cudaStream_t stream) {
     auto [grid, block] = frac_compute_round_launch_params(num_x);
     return grid.x * GKR_SP_DEG;
 }

@@ -479,7 +479,8 @@ extern "C" size_t _logup_r0_temp_sums_buffer_size(
     uint32_t skip_domain,
     uint32_t num_x,
     uint32_t num_cosets,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     // Both modes use the same buffer size formula
     return DISPATCH_BOOL(
@@ -500,7 +501,8 @@ extern "C" size_t _logup_r0_intermediates_buffer_size(
     uint32_t skip_domain,
     uint32_t num_x,
     uint32_t num_cosets,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     // Both modes use the same buffer size formula
     return DISPATCH_BOOL(
