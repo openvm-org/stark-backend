@@ -58,10 +58,13 @@ impl GpuDevice {
             sm_count,
         };
 
-        let stream = CudaStream::new_non_blocking()?;
+        // During the transition (Phases 0–7) allocation/copy paths still use
+        // PTDS. Using the same PTDS handle here ensures kernel launches and
+        // allocations share a single stream, preventing races.
+        // Phase 8 replaces this with CudaStream::new_non_blocking().
         let ctx = DeviceContext {
             device_id: id,
-            stream: StreamGuard::new(stream),
+            stream: StreamGuard::new(CudaStream::ptds()),
         };
 
         Ok(Self { config, ctx })

@@ -35,6 +35,9 @@ pub type cudaStream_t = *mut c_void;
 pub struct CudaStream {
     stream: cudaStream_t,
     host_event: Mutex<CudaEvent>,
+    /// If `false`, this is a borrowed handle (e.g. PTDS) — `Drop` must not
+    /// call `cudaStreamDestroy`.
+    owned: bool,
 }
 
 impl std::fmt::Debug for CudaStream {
@@ -55,7 +58,11 @@ impl CudaStream {
         let mut stream: cudaStream_t = std::ptr::null_mut();
         check(unsafe { cudaStreamCreate(&mut stream) })?;
         let host_event = Mutex::new(CudaEvent::new()?);
-        Ok(Self { stream, host_event })
+        Ok(Self {
+            stream,
+            host_event,
+            owned: true,
+        })
     }
 
     /// Creates a new non-blocking CUDA stream using `cudaStreamCreateWithFlags`
@@ -66,7 +73,24 @@ impl CudaStream {
         // 0x1 = cudaStreamNonBlocking
         check(unsafe { cudaStreamCreateWithFlags(&mut stream, 0x1) })?;
         let host_event = Mutex::new(CudaEvent::new()?);
-        Ok(Self { stream, host_event })
+        Ok(Self {
+            stream,
+            host_event,
+            owned: true,
+        })
+    }
+
+    /// Returns a non-owning handle to the per-thread default stream (PTDS).
+    ///
+    /// During the transition (while allocation paths still use PTDS),
+    /// `GpuDevice` uses this so kernel launches and allocations share the
+    /// same stream. Phase 8 replaces this with `new_non_blocking()`.
+    pub fn ptds() -> Self {
+        Self {
+            stream: cudaStreamPerThread,
+            host_event: Mutex::new(CudaEvent::new().expect("failed to create PTDS host event")),
+            owned: false,
+        }
     }
 
     /// Get the raw CUDA stream handle.
@@ -95,7 +119,7 @@ impl CudaStream {
 
 impl Drop for CudaStream {
     fn drop(&mut self) {
-        if !self.stream.is_null() {
+        if self.owned && !self.stream.is_null() {
             // Non-blocking: CUDA defers destruction until the stream is idle
             unsafe { cudaStreamDestroy(self.stream) };
             self.stream = std::ptr::null_mut();
