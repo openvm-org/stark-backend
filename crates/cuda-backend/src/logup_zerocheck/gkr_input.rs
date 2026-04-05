@@ -145,7 +145,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         if partition_ptrs.len() > d_partition_ptrs.len() {
             d_partition_ptrs = DeviceBuffer::with_capacity_on(partition_ptrs.len(), ctx);
         }
-        partition_ptrs.copy_to(&mut d_partition_ptrs)?;
+        partition_ptrs.copy_to_on(&mut d_partition_ptrs, ctx)?;
 
         let buffer_size = rules.inner.buffer_size;
         // TODO[jpw]: remove magic 10
