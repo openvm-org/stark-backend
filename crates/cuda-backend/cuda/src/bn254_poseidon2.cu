@@ -505,7 +505,7 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes(
     bn254_compressing_row_hashes_kernel<<<grid, block, shmem_bytes, stream>>>(
         out, matrix, width, height, query_stride, log_rows_per_query
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _bn254_poseidon2_compressing_row_hashes_ext(
@@ -528,7 +528,7 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes_ext(
     bn254_compressing_row_hashes_ext_kernel<<<grid, block, shmem_bytes, stream>>>(
         out, matrix, width, height, query_stride, log_rows_per_query
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _bn254_poseidon2_adjacent_compress_layer(
@@ -537,7 +537,7 @@ extern "C" int _bn254_poseidon2_adjacent_compress_layer(
     size_t                output_size, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(output_size);
     bn254_adjacent_compress_layer_kernel<<<grid, block, 0, stream>>>(output, prev_layer, output_size);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _bn254_sponge_grind(
@@ -561,5 +561,5 @@ extern "C" int _bn254_sponge_grind(
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) return (int)err;
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }

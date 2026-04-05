@@ -306,7 +306,7 @@ extern "C" int _fold_mle(
     fold_mle_kernel<<<grid, block, 0, stream>>>(
         input_matrices, output_matrices, widths, num_matrices, log_output_height, r_val
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _fold_mle_column(FpExt *buffer, size_t size, FpExt r, cudaStream_t stream) {
@@ -316,7 +316,7 @@ extern "C" int _fold_mle_column(FpExt *buffer, size_t size, FpExt r, cudaStream_
     size_t half = size >> 1;
     auto [grid, block] = kernel_launch_params(half);
     fold_mle_column_kernel<<<grid, block, 0, stream>>>(buffer, half, r);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _batch_fold_mle(
@@ -331,7 +331,7 @@ extern "C" int _batch_fold_mle(
     batch_fold_mle_kernel<<<grid, block, 0, stream>>>(
         input_matrices, output_matrices, widths, num_matrices, log_output_heights, r_val
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _fold_ple_from_coeffs(
@@ -348,7 +348,7 @@ extern "C" int _fold_ple_from_coeffs(
         input_coeffs, output, num_x, width, domain_size, r_val
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _reduce_over_x_and_cols(
@@ -361,7 +361,7 @@ extern "C" int _reduce_over_x_and_cols(
     reduce_over_x_and_cols_kernel<<<grid, block, 0, stream>>>(
         input, output, num_x, num_cols, large_domain_size
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // WD = 1
@@ -386,7 +386,7 @@ extern "C" int _sumcheck_mle_round(
         input_matrices, tmp_block_sums, widths, num_matrices, height, d
     );
 
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -398,7 +398,7 @@ extern "C" int _sumcheck_mle_round(
     reduce_blocks_sumcheck<1>
         <<<d, reduce_block, reduce_shmem, stream>>>(tmp_block_sums, output, num_blocks, d);
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _triangular_fold_mle(
@@ -411,7 +411,7 @@ extern "C" int _triangular_fold_mle(
 
     triangular_fold_mle_kernel<<<grid, block, 0, stream>>>(output, input, r);
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 } // namespace plain_sumcheck

@@ -79,7 +79,7 @@ extern "C" int _generate_all_twiddles(fr_t* twiddles, bool inverse, cudaStream_t
                                 0, cudaMemcpyDeviceToDevice, stream);
     }
     cudaStreamSynchronize(stream);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _generate_partial_twiddles(fr_t (*partial_twiddles)[WINDOW_SIZE], bool inverse, cudaStream_t stream) {
@@ -95,5 +95,5 @@ extern "C" int _generate_partial_twiddles(fr_t (*partial_twiddles)[WINDOW_SIZE],
                                 0, cudaMemcpyDeviceToDevice, stream);
     }
     cudaStreamSynchronize(stream);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }

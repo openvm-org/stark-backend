@@ -569,7 +569,7 @@ int launch_logup_ntt_eval_interactions(
             g_shift
         );
 
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0) {
         return err;
     }
@@ -582,7 +582,7 @@ int launch_logup_ntt_eval_interactions(
     sumcheck::final_reduce_block_sums<<<2 * large_domain, reduce_block, reduce_shmem, stream>>>(
         reinterpret_cast<FpExt *>(tmp_sums_buffer), reinterpret_cast<FpExt *>(output), num_blocks
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // Generate dispatcher for num_cosets (1-4) x is_global x needs_shmem
@@ -641,7 +641,7 @@ int launch_logup_coset_parallel(
             height,
             g_shift
         );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0) {
         return err;
     }
@@ -656,7 +656,7 @@ int launch_logup_coset_parallel(
         reinterpret_cast<FpExt *>(tmp_sums_buffer), reinterpret_cast<FpExt *>(output), num_blocks
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _logup_bary_eval_interactions_round0(

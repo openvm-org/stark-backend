@@ -250,5 +250,5 @@ extern "C" int _ct_mixed_radix_narrow(
             
     #undef NTT_ARGUMENTS
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }

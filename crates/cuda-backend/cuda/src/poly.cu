@@ -230,19 +230,19 @@ extern "C" int _algebraic_batch_matrices(
     algebraic_batch_matrices_kernel<<<grid, block, 0, stream>>>(
         output, mats, mu_powers, mu_idxs, widths, height, num_mats
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _eq_hypercube_stage_ext(FpExt *out, FpExt x_i, uint32_t step, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(step);
     eq_hypercube_stage_ext_kernel<<<grid, block, 0, stream>>>(out, x_i, step);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _mobius_eq_hypercube_stage_ext(FpExt *out, FpExt omega_i, uint32_t step, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(step);
     mobius_eq_hypercube_stage_ext_kernel<<<grid, block, 0, stream>>>(out, omega_i, step);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _eq_hypercube_nonoverlapping_stage_ext(
@@ -254,7 +254,7 @@ extern "C" int _eq_hypercube_nonoverlapping_stage_ext(
 ) {
     auto [grid, block] = kernel_launch_params(step);
     eq_hypercube_nonoverlapping_stage_ext_kernel<<<grid, block, 0, stream>>>(out, in, x_i, step);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _eq_hypercube_interleaved_stage_ext(
@@ -266,7 +266,7 @@ extern "C" int _eq_hypercube_interleaved_stage_ext(
 ) {
     auto [grid, block] = kernel_launch_params(step);
     eq_hypercube_interleaved_stage_ext_kernel<<<grid, block, 0, stream>>>(out, in, x_i, step);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _batch_eq_hypercube_stage(
@@ -280,7 +280,7 @@ extern "C" int _batch_eq_hypercube_stage(
     auto [grid, block] = kernel_launch_params(step);
     grid.y = width;
     batch_eq_hypercube_stage_kernel<<<grid, block, 0, stream>>>(out, x, step, width, height);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // Helper to dispatch templated kernel based on runtime block size
@@ -292,7 +292,7 @@ int launch_eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *
     constexpr unsigned int num_warps = (BlockSize + WARP_SIZE - 1) / WARP_SIZE;
     size_t smem_size = num_warps * sizeof(FpExt);
     eval_poly_ext_at_point_kernel<BlockSize><<<1, BlockSize, smem_size, stream>>>(coeffs, len, x, out);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *out, cudaStream_t stream) {
@@ -312,11 +312,11 @@ extern "C" int _eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, Fp
 extern "C" int _vector_scalar_multiply_ext(FpExt *vec, FpExt scalar, uint32_t length, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(length);
     vector_scalar_multiply_kernel<FpExt><<<grid, block, 0, stream>>>(vec, scalar, length);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _transpose_fp_to_fpext_vec(FpExt *output, const Fp *input, uint32_t height, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(height);
     transpose_fp_to_fpext_vec_kernel<<<grid, block, 0, stream>>>(output, input, height);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }

@@ -200,7 +200,7 @@ static int bit_rev_impl(T* d_out, const T* d_inp,
                                 (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);
     }
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,

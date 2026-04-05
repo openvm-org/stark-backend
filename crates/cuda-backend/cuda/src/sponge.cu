@@ -113,5 +113,5 @@ extern "C" int _sponge_grind(
         return err;
     }
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }

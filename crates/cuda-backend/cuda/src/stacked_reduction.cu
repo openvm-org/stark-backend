@@ -424,7 +424,7 @@ extern "C" int _stacked_reduction_sumcheck_round0(
         skip_domain - 1, num_x, 31 - __builtin_clz(stride)
     );
 
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -436,7 +436,7 @@ extern "C" int _stacked_reduction_sumcheck_round0(
     sumcheck::final_reduce_block_sums<true>
         <<<output_size, reduce_block, reduce_shmem, stream>>>(block_sums, output, num_blocks);
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // Parallelizes barycentric interpolation across 2^l_skip threads per output cell
@@ -468,7 +468,7 @@ extern "C" int _stacked_reduction_fold_ple(
         src, dst, omega_skip_pows, inv_lagrange_denoms, trace_height, new_height, skip_domain
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _initialize_k_rot_from_eq_segments(
@@ -484,7 +484,7 @@ extern "C" int _initialize_k_rot_from_eq_segments(
         eq_r_ns, k_rot_ns, k_rot_uni_0, k_rot_uni_1
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _stacked_reduction_sumcheck_mle_round(
@@ -527,7 +527,7 @@ extern "C" int _stacked_reduction_sumcheck_mle_round(
         q_evals, eq_r_ns, k_rot_ns, unstacked_cols, lambda_pows, output, q_height, window_len, num_y
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
@@ -561,5 +561,5 @@ extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
         shift_factor
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
