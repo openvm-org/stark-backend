@@ -6,7 +6,7 @@ use std::{
 use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
-    stream::{cudaStreamPerThread, cudaStream_t},
+    stream::{CudaStream, DeviceContext, StreamGuard},
 };
 
 use crate::{cuda::ntt, prelude::F};
@@ -34,13 +34,17 @@ fn ensure_initialized(inverse: bool) -> Result<(), openvm_cuda_common::error::Cu
     }
 
     {
-        let partial_twiddles = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity(WINDOW_NUM);
-        let twiddles = DeviceBuffer::<F>::with_capacity(RADIX_TWIDDLES_SIZE);
+        let ctx = DeviceContext {
+            device_id: get_device()? as u32,
+            stream: StreamGuard::new(CudaStream::new_non_blocking()?),
+        };
+        let partial_twiddles = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity_on(WINDOW_NUM, &ctx);
+        let twiddles = DeviceBuffer::<F>::with_capacity_on(RADIX_TWIDDLES_SIZE, &ctx);
         unsafe {
             // Both CUDA helpers upload into constant memory and synchronize before returning, so
             // these staging buffers are safe to free once the calls complete.
-            ntt::generate_all_twiddles(&twiddles, inverse, cudaStreamPerThread)?;
-            ntt::generate_partial_twiddles(&partial_twiddles, inverse, cudaStreamPerThread)?;
+            ntt::generate_all_twiddles(&twiddles, inverse, ctx.stream.as_raw())?;
+            ntt::generate_partial_twiddles(&partial_twiddles, inverse, ctx.stream.as_raw())?;
         }
     }
     initialized.insert(device_key);
@@ -54,7 +58,7 @@ struct NttImpl<'a> {
     poly_count: u32,
     is_intt: bool,
     stage: u32,
-    stream: cudaStream_t,
+    ctx: DeviceContext,
 }
 
 impl<'a> NttImpl<'a> {
@@ -64,7 +68,7 @@ impl<'a> NttImpl<'a> {
         padded_poly_size: u32,
         poly_count: u32,
         is_intt: bool,
-        stream: cudaStream_t,
+        ctx: &DeviceContext,
     ) -> Self {
         ensure_initialized(is_intt).expect("failed to initialize CUDA NTT twiddle tables");
         Self {
@@ -74,7 +78,7 @@ impl<'a> NttImpl<'a> {
             poly_count,
             is_intt,
             stage: 0,
-            stream,
+            ctx: ctx.clone(),
         }
     }
 
@@ -91,7 +95,7 @@ impl<'a> NttImpl<'a> {
                 self.padded_poly_size,
                 self.poly_count,
                 self.is_intt,
-                self.stream,
+                self.ctx.stream.as_raw(),
             )
             .expect("failed to launch CUDA mixed-radix NTT step");
         }
@@ -113,7 +117,7 @@ pub fn batch_ntt(
     width: u32,
     bit_reverse: bool,
     is_intt: bool,
-    stream: cudaStream_t,
+    ctx: &DeviceContext,
 ) {
     if log_trace_height == 0 {
         return;
@@ -134,7 +138,7 @@ pub fn batch_ntt(
                 log_trace_height,
                 padded_poly_size,
                 width,
-                stream,
+                ctx.stream.as_raw(),
             )
             .expect("failed to launch CUDA bit-reversal permutation");
         }
@@ -146,7 +150,7 @@ pub fn batch_ntt(
         padded_poly_size,
         width,
         is_intt,
-        stream,
+        ctx,
     );
     if log_trace_height <= 10 {
         _impl.step(log_trace_height);

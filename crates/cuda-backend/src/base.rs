@@ -1,6 +1,8 @@
 use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
-use openvm_cuda_common::{copy::MemCopyD2H, d_buffer::DeviceBuffer, error::MemCopyError};
+use openvm_cuda_common::{
+    copy::MemCopyD2H, d_buffer::DeviceBuffer, error::MemCopyError, stream::DeviceContext,
+};
 use openvm_stark_backend::prover::MatrixDimensions;
 
 pub struct DeviceMatrix<T> {
@@ -59,6 +61,11 @@ impl<T> DeviceMatrix<T> {
             height,
             width,
         }
+    }
+
+    pub fn with_capacity_on(height: usize, width: usize, ctx: &DeviceContext) -> Self {
+        let buffer = DeviceBuffer::with_capacity_on(height * width, ctx);
+        Self::new(Arc::new(buffer), height, width)
     }
 
     pub fn dummy() -> Self {

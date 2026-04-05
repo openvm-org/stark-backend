@@ -1,7 +1,7 @@
 use getset::{CopyGetters, Getters, MutGetters};
 use openvm_cuda_common::{
     common::get_device,
-    stream::{cudaStreamPerThread, CudaStream, DeviceContext, StreamGuard},
+    stream::{CudaStream, DeviceContext, StreamGuard},
 };
 use openvm_stark_backend::SystemParams;
 
@@ -50,21 +50,16 @@ impl GpuDevice {
             ..Default::default()
         };
         let id = get_device().unwrap() as u32;
-        let sm_count = get_sm_count(id, cudaStreamPerThread).expect("failed to get SM count");
+        let ctx = DeviceContext {
+            device_id: id,
+            stream: StreamGuard::new(CudaStream::new_non_blocking()?),
+        };
+        let sm_count = get_sm_count(id, ctx.stream.as_raw()).expect("failed to get SM count");
         let config = GpuDeviceConfig {
             config: params,
             prover_config,
             id,
             sm_count,
-        };
-
-        // During the transition (Phases 0–7) allocation/copy paths still use
-        // PTDS. Using the same PTDS handle here ensures kernel launches and
-        // allocations share a single stream, preventing races.
-        // Phase 8 replaces this with CudaStream::new_non_blocking().
-        let ctx = DeviceContext {
-            device_id: id,
-            stream: StreamGuard::new(CudaStream::ptds()),
         };
 
         Ok(Self { config, ctx })

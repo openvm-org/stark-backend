@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
-    stream::cudaStream_t,
+    stream::DeviceContext,
 };
 use openvm_stark_backend::{
     proof::{MerkleProof, WhirProof},
@@ -65,7 +65,7 @@ pub fn prove_whir_opening_gpu<HS, TS>(
     transcript: &mut TS,
     mut stacked_per_commit: Vec<StackedPcsData2<HS::Digest>>,
     u: &[EF],
-    stream: cudaStream_t,
+    ctx: &DeviceContext,
 ) -> Result<WhirProof<HS::SC>, WhirProverError>
 where
     HS: GpuHashScheme,
@@ -91,7 +91,7 @@ where
     // Proof-of-work grinding before μ batching challenge.
     // This amplifies soundness of the initial batching step.
     let mu_pow_witness = transcript
-        .grind_gpu(whir_params.mu_pow_bits, stream)
+        .grind_gpu(whir_params.mu_pow_bits, ctx)
         .map_err(WhirProverError::MuGrind)?;
     // Sample randomness for algebraic batching.
     // We batch the codewords for \hat{q}_j together _before_ applying WHIR.
@@ -99,7 +99,7 @@ where
     let num_commits = stacked_per_commit.len();
 
     // The coefficient table of `\hat{f}` in the current WHIR round (MLE coefficient form).
-    let mut f_ple_evals = DeviceBuffer::<F>::with_capacity(height * D_EF);
+    let mut f_ple_evals = DeviceBuffer::<F>::with_capacity_on(height * D_EF, ctx);
     // We algebraically batch all matrices together so we only need to interpolate one column vector
     {
         let mut packets = Vec::new();
@@ -120,8 +120,8 @@ where
             total_stacked_width += layout.width() as u32;
         }
         let mu_powers = mu.powers().take(total_stacked_width as usize).collect_vec();
-        let d_mu_powers = mu_powers.to_device()?;
-        let d_packets = packets.to_device()?;
+        let d_mu_powers = mu_powers.to_device_on(ctx)?;
+        let d_packets = packets.to_device_on(ctx)?;
         // SAFETY:
         // - `mu_powers` has length `total_width`.
         // - `f_ple_evals` has capacity `height * D_EF` (stacked height in base coordinates).
@@ -132,7 +132,7 @@ where
                 &d_packets,
                 &d_mu_powers,
                 1 << l_skip,
-                stream,
+                ctx.stream.as_raw(),
             )
             .map_err(WhirProverError::AlgebraicBatch)?;
         }
@@ -150,13 +150,19 @@ where
     // coefficients c_z(x) of f(Z, x) for a fixed boolean assignment x in H_{m - l_skip}.
     unsafe {
         let num_poly = f_ple_evals.len() >> l_skip;
-        batch_ntt_small(&mut f_ple_evals, l_skip, num_poly, true, stream)
-            .map_err(WhirProverError::CustomBatchIntt)?;
+        batch_ntt_small(
+            &mut f_ple_evals,
+            l_skip,
+            num_poly,
+            true,
+            ctx.stream.as_raw(),
+        )
+        .map_err(WhirProverError::CustomBatchIntt)?;
     }
-    let mut f_coeffs = DeviceBuffer::<EF>::with_capacity(height);
+    let mut f_coeffs = DeviceBuffer::<EF>::with_capacity_on(height, ctx);
     // SAFETY: `f_ple_evals` is constructed with length `height * D_EF`.
     unsafe {
-        transpose_fp_to_fpext_vec(&mut f_coeffs, &f_ple_evals, stream)
+        transpose_fp_to_fpext_vec(&mut f_coeffs, &f_ple_evals, ctx.stream.as_raw())
             .map_err(WhirProverError::Transpose)?;
     }
     drop(f_ple_evals);
@@ -168,7 +174,7 @@ where
         let step = 1u32 << i;
         // SAFETY: `f_coeffs` has length `2^m` with `m >= l_skip`.
         unsafe {
-            mle_interpolate_stage_ext(&mut f_coeffs, step, false, stream)
+            mle_interpolate_stage_ext(&mut f_coeffs, step, false, ctx.stream.as_raw())
                 .map_err(|error| WhirProverError::MleInterpolate { error, step })?;
         }
     }
@@ -180,9 +186,9 @@ where
     // We maintain moments of \hat{w}:
     // M[T] = sum_{x superset T} \hat{w}(x).
     // For initial \hat{w} = mobius_eq(u, -), these moments are exactly eq(u, -).
-    let mut w_moments = DeviceBuffer::<EF>::with_capacity(1 << m);
+    let mut w_moments = DeviceBuffer::<EF>::with_capacity_on(1 << m, ctx);
     unsafe {
-        evals_eq_hypercube(&mut w_moments, u, stream).map_err(WhirProverError::EvalEq)?;
+        evals_eq_hypercube(&mut w_moments, u, ctx).map_err(WhirProverError::EvalEq)?;
     }
 
     let mut whir_sumcheck_polys: Vec<[EF; 2]> = vec![];
@@ -199,7 +205,7 @@ where
     let mut log_rs_domain_size = m + log_blowup;
     let mut final_poly = None;
 
-    let mut d_s_evals = DeviceBuffer::<EF>::with_capacity(2);
+    let mut d_s_evals = DeviceBuffer::<EF>::with_capacity_on(2, ctx);
     let mut d_sumcheck_tmp = DeviceBuffer::<EF>::new();
 
     mem.tracing_info("before_whir_rounds");
@@ -219,13 +225,17 @@ where
             debug_assert!(w_moments.len() >= f_height);
             let output_height = f_height / 2;
             let tmp_buffer_capacity = unsafe {
-                _whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32, stream)
+                _whir_sumcheck_coeff_moments_required_temp_buffer_size(
+                    f_height as u32,
+                    ctx.stream.as_raw(),
+                )
             };
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
-                d_sumcheck_tmp = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
+                d_sumcheck_tmp =
+                    DeviceBuffer::<EF>::with_capacity_on(tmp_buffer_capacity as usize, ctx);
             }
-            let mut new_f_coeffs = DeviceBuffer::<EF>::with_capacity(output_height);
-            let mut new_w_moments = DeviceBuffer::<EF>::with_capacity(output_height);
+            let mut new_f_coeffs = DeviceBuffer::<EF>::with_capacity_on(output_height, ctx);
+            let mut new_w_moments = DeviceBuffer::<EF>::with_capacity_on(output_height, ctx);
             // SAFETY:
             // - `d_s_evals` has length 2
             // - `d_sumcheck_tmp` has at least required scratch length
@@ -236,7 +246,7 @@ where
                     &mut d_s_evals,
                     &mut d_sumcheck_tmp,
                     f_height as u32,
-                    stream,
+                    ctx.stream.as_raw(),
                 )
                 .map_err(|error| WhirProverError::SumcheckMleRound {
                     error,
@@ -244,7 +254,7 @@ where
                     round,
                 })?;
             }
-            let s_evals = d_s_evals.to_host()?;
+            let s_evals = d_s_evals.to_host_on(ctx)?;
             for &eval in &s_evals {
                 transcript.observe_ext(eval);
             }
@@ -252,7 +262,7 @@ where
 
             folding_pow_witnesses.push(
                 transcript
-                    .grind_gpu(whir_params.folding_pow_bits, stream)
+                    .grind_gpu(whir_params.folding_pow_bits, ctx)
                     .map_err(WhirProverError::FoldingGrind)?,
             );
             let alpha = transcript.sample_ext();
@@ -269,7 +279,7 @@ where
                     &mut new_w_moments,
                     alpha,
                     f_height as u32,
-                    stream,
+                    ctx.stream.as_raw(),
                 )
                 .map_err(|error| WhirProverError::FoldMle {
                     error,
@@ -285,7 +295,7 @@ where
         let f_height = 1 << (m - k_whir);
         debug_assert!(f_coeffs.len() >= f_height);
         debug_assert_eq!(size_of::<EF>() / size_of::<F>(), D_EF);
-        let mut g_coeffs = DeviceBuffer::<F>::with_capacity(f_height * D_EF);
+        let mut g_coeffs = DeviceBuffer::<F>::with_capacity_on(f_height * D_EF, ctx);
         // SAFETY: we allocated `f_coeffs.len() * D_EF` space for `g_coeffs` to do a 1-to-D_EF
         // (1-to-4) split
         unsafe {
@@ -294,14 +304,14 @@ where
                 &f_coeffs,
                 f_height as u64,
                 f_height as u32,
-                stream,
+                ctx.stream.as_raw(),
             )
             .map_err(|error| WhirProverError::SplitExtPoly { error, whir_round })?;
         }
         let (g_tree, z_0) = if !is_last_round {
             let codeword_height = 1 << (log_rs_domain_size - 1);
             // `g: \mathcal{L}^{(2)} \to \mathbb F`
-            let g_rs = DeviceBuffer::<F>::with_capacity(D_EF * codeword_height);
+            let g_rs = DeviceBuffer::<F>::with_capacity_on(D_EF * codeword_height, ctx);
             // SAFETY:
             // - g_coeffs is a single EF polynomial, treated as 4 F-polynomials of height
             //   2^{m-k_whir}
@@ -314,7 +324,7 @@ where
                     D_EF as u32,
                     codeword_height as u32,
                     f_height as u32,
-                    stream,
+                    ctx.stream.as_raw(),
                 )
                 .map_err(|error| WhirProverError::BatchExpandPad { error, whir_round })?;
 
@@ -325,7 +335,7 @@ where
                     D_EF as u32,
                     true,
                     false,
-                    stream,
+                    ctx,
                 );
             }
 
@@ -333,7 +343,7 @@ where
                 DeviceMatrix::new(Arc::new(g_rs), codeword_height, D_EF),
                 1 << k_whir,
                 true,
-                stream,
+                ctx,
             )
             .map_err(WhirProverError::MerkleTree)?;
             let g_commit = g_tree.root();
@@ -345,7 +355,7 @@ where
             // - `g_coeffs` is coefficient form of `\hat{g}`, which is degree `2^{m-k_whir}`.
             // - `g_coeffs` is F-column major matrix.
             let g_opened_value = unsafe {
-                eval_poly_ext_at_point_from_base(&g_coeffs, 1 << (m - k_whir), z_0, stream)
+                eval_poly_ext_at_point_from_base(&g_coeffs, 1 << (m - k_whir), z_0, ctx)
                     .map_err(|error| WhirProverError::EvalPolyAtPoint { error, whir_round })?
             };
             transcript.observe_ext(g_opened_value);
@@ -356,7 +366,7 @@ where
             // Observe the final poly
             debug_assert_eq!(log_final_poly_len, m - k_whir);
             let final_poly_len = 1 << log_final_poly_len;
-            let base_coeffs = g_coeffs.to_host()?;
+            let base_coeffs = g_coeffs.to_host_on(ctx)?;
             debug_assert_eq!(base_coeffs.len(), D_EF * final_poly_len);
             let mut coeffs = Vec::with_capacity(final_poly_len);
             for i in 0..final_poly_len {
@@ -374,7 +384,7 @@ where
         let mut query_indices = Vec::with_capacity(num_queries);
         query_phase_pow_witnesses.push(
             transcript
-                .grind_gpu(whir_params.query_phase_pow_bits, stream)
+                .grind_gpu(whir_params.query_phase_pow_bits, ctx)
                 .map_err(WhirProverError::QueryPhaseGrind)?,
         );
         // Sample query indices first
@@ -402,7 +412,7 @@ where
                     let traces = d.traces.iter().collect_vec();
                     debug_assert!(!traces.is_empty());
                     let backing_matrix =
-                        rs_code_matrix(log_blowup, layout, &traces, &d.inner.matrix, stream)
+                        rs_code_matrix(log_blowup, layout, &traces, &d.inner.matrix, ctx)
                             .map_err(WhirProverError::RsCodeMatrix)?;
                     d.traces.clear();
                     *backing_mat_owned = Some(backing_matrix);
@@ -415,7 +425,7 @@ where
                 <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(
                     trees.as_slice(),
                     &query_indices,
-                    stream,
+                    ctx,
                 )
                 .map_err(WhirProverError::MerkleTree)?;
 
@@ -437,7 +447,7 @@ where
                 &query_indices,
                 query_stride,
                 num_rows_per_query,
-                stream,
+                ctx,
             )
             .map_err(WhirProverError::MerkleTree)?
             .into_iter()
@@ -464,7 +474,7 @@ where
                 <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(
                     &[tree],
                     &query_indices,
-                    stream,
+                    ctx,
                 )
                 .map_err(WhirProverError::MerkleTree)?
                 .pop()
@@ -475,7 +485,7 @@ where
                     &query_indices,
                     tree.query_stride(),
                     tree.rows_per_query,
-                    stream,
+                    ctx,
                 )
                 .map_err(WhirProverError::MerkleTree)?
                 .pop()
@@ -517,8 +527,8 @@ where
                 }
             }
 
-            let d_z0_pows2 = z0_pows2.to_device()?;
-            let d_z_pows2 = z_pows2.to_device()?;
+            let d_z0_pows2 = z0_pows2.to_device_on(ctx)?;
+            let d_z_pows2 = z_pows2.to_device_on(ctx)?;
             unsafe {
                 w_moments_accumulate(
                     &mut w_moments,
@@ -527,7 +537,7 @@ where
                     gamma,
                     num_queries as u32,
                     log_height,
-                    stream,
+                    ctx.stream.as_raw(),
                 )
                 .map_err(|error| WhirProverError::WMomentsAccumulate { error, whir_round })?;
             }
@@ -663,14 +673,13 @@ mod tests {
         }
 
         let mut prover_sponge = DuplexSpongeGpu::default();
-        let stream = device.ctx.stream.as_raw();
 
         let proof = prove_whir_opening_gpu::<crate::DefaultHashScheme, _>(
             &params,
             &mut prover_sponge,
             stacked_per_commit,
             &z_cube,
-            stream,
+            &device.ctx,
         )
         .unwrap();
 

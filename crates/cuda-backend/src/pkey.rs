@@ -1,6 +1,8 @@
 //! Defines the symbolic rule data to precompute and store in the GPU proving key
 use itertools::Itertools;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, error::MemCopyError};
+use openvm_cuda_common::{
+    copy::MemCopyH2D, d_buffer::DeviceBuffer, error::MemCopyError, stream::DeviceContext,
+};
 use openvm_stark_backend::{
     air_builders::symbolic::{
         symbolic_expression::SymbolicExpression,
@@ -74,34 +76,35 @@ pub struct InteractionMonomials {
     pub num_interactions: u32,
 }
 
-fn to_device_or_empty<T>(data: &[T]) -> Result<DeviceBuffer<T>, MemCopyError> {
+fn to_device_or_empty<T>(data: &[T], ctx: &DeviceContext) -> Result<DeviceBuffer<T>, MemCopyError> {
     if data.is_empty() {
         Ok(DeviceBuffer::new())
     } else {
-        data.to_device()
+        data.to_device_on(ctx)
     }
 }
 
 impl AirDataGpu {
     pub fn new<S: StarkProtocolConfig<F = F>>(
         pk: &StarkProvingKey<S>,
+        ctx: &DeviceContext,
     ) -> Result<Self, MemCopyError> {
         let dag = &pk.vk.symbolic_constraints;
         let symbolic_constraints = SymbolicConstraints::from(dag);
-        let interaction_rules = InteractionEvalRules::new(&symbolic_constraints)?;
-        let zerocheck_round0 = ConstraintOnlyRules::<true>::new(&dag.constraints)?;
-        let zerocheck_mle = ConstraintOnlyRules::<false>::new(&dag.constraints)?;
+        let interaction_rules = InteractionEvalRules::new(&symbolic_constraints, ctx)?;
+        let zerocheck_round0 = ConstraintOnlyRules::<true>::new(&dag.constraints, ctx)?;
+        let zerocheck_mle = ConstraintOnlyRules::<false>::new(&dag.constraints, ctx)?;
 
         let zerocheck_monomials = if dag.constraints.num_constraints() > 0 {
             let expanded = ExpandedMonomials::from_dag(&dag.constraints);
-            Some(ZerocheckMonomials::from_expanded(&expanded)?)
+            Some(ZerocheckMonomials::from_expanded(&expanded, ctx)?)
         } else {
             None
         };
         let interaction_monomials = if !symbolic_constraints.interactions.is_empty() {
             let expanded =
                 ExpandedInteractionMonomials::from_symbolic_constraints(&symbolic_constraints);
-            Some(InteractionMonomials::from_expanded(&expanded)?)
+            Some(InteractionMonomials::from_expanded(&expanded, ctx)?)
         } else {
             None
         };
@@ -116,7 +119,10 @@ impl AirDataGpu {
 }
 
 impl ZerocheckMonomials {
-    pub fn from_expanded(expanded: &ExpandedMonomials<F>) -> Result<Self, MemCopyError> {
+    pub fn from_expanded(
+        expanded: &ExpandedMonomials<F>,
+        ctx: &DeviceContext,
+    ) -> Result<Self, MemCopyError> {
         // Validate bounds for all monomial headers to prevent out-of-bounds access in CUDA kernel
         let num_variables = expanded.variables.len();
         let num_lambda_terms = expanded.lambda_terms.len();
@@ -138,16 +144,19 @@ impl ZerocheckMonomials {
         }
 
         Ok(Self {
-            d_headers: expanded.headers.to_device()?,
-            d_variables: expanded.variables.to_device()?,
-            d_lambda_terms: expanded.lambda_terms.to_device()?,
+            d_headers: expanded.headers.to_device_on(ctx)?,
+            d_variables: expanded.variables.to_device_on(ctx)?,
+            d_lambda_terms: expanded.lambda_terms.to_device_on(ctx)?,
             num_monomials: expanded.headers.len() as u32,
         })
     }
 }
 
 impl InteractionMonomials {
-    pub fn from_expanded(expanded: &ExpandedInteractionMonomials<F>) -> Result<Self, MemCopyError> {
+    pub fn from_expanded(
+        expanded: &ExpandedInteractionMonomials<F>,
+        ctx: &DeviceContext,
+    ) -> Result<Self, MemCopyError> {
         // Validate numerator monomial headers
         let num_numer_vars = expanded.numer_variables.len();
         let num_numer_terms = expanded.numer_terms.len();
@@ -181,13 +190,13 @@ impl InteractionMonomials {
         }
 
         Ok(Self {
-            d_numer_headers: to_device_or_empty(&expanded.numer_headers)?,
-            d_numer_variables: to_device_or_empty(&expanded.numer_variables)?,
-            d_numer_terms: to_device_or_empty(&expanded.numer_terms)?,
+            d_numer_headers: to_device_or_empty(&expanded.numer_headers, ctx)?,
+            d_numer_variables: to_device_or_empty(&expanded.numer_variables, ctx)?,
+            d_numer_terms: to_device_or_empty(&expanded.numer_terms, ctx)?,
             num_numer_monomials: expanded.numer_headers.len() as u32,
-            d_denom_headers: to_device_or_empty(&expanded.denom_headers)?,
-            d_denom_variables: to_device_or_empty(&expanded.denom_variables)?,
-            d_denom_terms: to_device_or_empty(&expanded.denom_terms)?,
+            d_denom_headers: to_device_or_empty(&expanded.denom_headers, ctx)?,
+            d_denom_variables: to_device_or_empty(&expanded.denom_variables, ctx)?,
+            d_denom_terms: to_device_or_empty(&expanded.denom_terms, ctx)?,
             num_denom_monomials: expanded.denom_headers.len() as u32,
             max_fields_len: expanded.max_fields_len,
             num_interactions: expanded.num_interactions,
@@ -196,7 +205,10 @@ impl InteractionMonomials {
 }
 
 impl InteractionEvalRules {
-    pub fn new(symbolic_constraints: &SymbolicConstraints<F>) -> Result<Self, MemCopyError> {
+    pub fn new(
+        symbolic_constraints: &SymbolicConstraints<F>,
+        ctx: &DeviceContext,
+    ) -> Result<Self, MemCopyError> {
         let interactions = &symbolic_constraints.interactions;
         let num_interactions = interactions.len();
         if num_interactions == 0 {
@@ -258,9 +270,9 @@ impl InteractionEvalRules {
             .map(|&dag_idx| rules.dag_idx_to_rule_idx[&dag_idx])
             .collect_vec();
         let encoded_rules = rules.rules.iter().map(|c| c.encode()).collect_vec();
-        let d_rules = encoded_rules.to_device()?;
-        let d_used_nodes = used_nodes.to_device()?;
-        let d_pair_idxs = pair_idxs.to_device()?;
+        let d_rules = encoded_rules.to_device_on(ctx)?;
+        let d_used_nodes = used_nodes.to_device_on(ctx)?;
+        let d_pair_idxs = pair_idxs.to_device_on(ctx)?;
         assert_eq!(
             used_nodes.len(),
             2 * num_interactions,
@@ -285,7 +297,7 @@ impl InteractionEvalRules {
 }
 
 impl<const BUFFER_VARS: bool> ConstraintOnlyRules<BUFFER_VARS> {
-    pub fn new(dag: &SymbolicExpressionDag<F>) -> Result<Self, MemCopyError> {
+    pub fn new(dag: &SymbolicExpressionDag<F>, ctx: &DeviceContext) -> Result<Self, MemCopyError> {
         if dag.num_constraints() == 0 {
             return Ok(Self {
                 inner: EvalRules::dummy(),
@@ -301,8 +313,8 @@ impl<const BUFFER_VARS: bool> ConstraintOnlyRules<BUFFER_VARS> {
             .collect_vec();
 
         let encoded_rules = rules.rules.iter().map(|c| c.encode()).collect_vec();
-        let d_rules = encoded_rules.to_device()?;
-        let d_used_nodes = used_nodes.to_device()?;
+        let d_rules = encoded_rules.to_device_on(ctx)?;
+        let d_used_nodes = used_nodes.to_device_on(ctx)?;
 
         let inner = EvalRules {
             d_rules,
