@@ -763,7 +763,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         let eq_uni_u01 = eval_eq_uni_at_one(l_skip, u_0);
         debug_assert_eq!(self.eq_r_ns.buffer.len(), 2 << n_max);
         self.k_rot_ns.buffer = DeviceBuffer::with_capacity_on(2 << n_max, &self.ctx);
-        [EF::ZERO].copy_to(&mut self.k_rot_ns.buffer)?;
+        [EF::ZERO].copy_to_on(&mut self.k_rot_ns.buffer, &self.ctx)?;
         unsafe {
             // SAFETY:
             // - We allocated `k_rot_ns` with same capacity as `eq_r_ns` above.
@@ -814,7 +814,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         let l_skip = self.l_skip;
 
         let q_eval_ptrs = self.q_evals.iter().map(|q| q.as_ptr()).collect_vec();
-        q_eval_ptrs.copy_to(&mut self.d_q_eval_ptrs)?;
+        q_eval_ptrs.copy_to_on(&mut self.d_q_eval_ptrs, &self.ctx)?;
 
         if self.n_max >= (round - 1) {
             // Move stable eq, k_rot to stable vectors
@@ -875,7 +875,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 if eq_ub_slice.len() > self.d_eq_ub.len() {
                     self.d_eq_ub = DeviceBuffer::with_capacity_on(eq_ub_slice.len(), &self.ctx);
                 }
-                eq_ub_slice.copy_to(&mut self.d_eq_ub)?;
+                eq_ub_slice.copy_to_on(&mut self.d_eq_ub, &self.ctx)?;
                 let stacked_height = self.stacked_height(round);
                 unsafe {
                     stacked_reduction_sumcheck_mle_round_degenerate(
@@ -943,8 +943,8 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 (folded, q.as_ptr(), output_ptr)
             })
             .multiunzip();
-        input_ptrs.copy_to(&mut self.d_input_ptrs)?;
-        output_ptrs.copy_to(&mut self.d_output_ptrs)?;
+        input_ptrs.copy_to_on(&mut self.d_input_ptrs, &self.ctx)?;
+        output_ptrs.copy_to_on(&mut self.d_output_ptrs, &self.ctx)?;
 
         // SAFETY:
         // - `d_input_ptrs` points to matrices with widths specified by `d_q_widths` and heights
@@ -973,7 +973,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             let output_len = 1 << input_max_n;
 
             let mut buffer = DeviceBuffer::<EF>::with_capacity_on(output_len, &self.ctx);
-            [EF::ZERO].copy_to(&mut buffer)?;
+            [EF::ZERO].copy_to_on(&mut buffer, &self.ctx)?;
             // SAFETY:
             // - eq_r_ns has max_n equal to input_max_n
             // - we allocate output for half the size of eq_r_ns
@@ -993,7 +993,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             }
 
             let mut buffer = DeviceBuffer::<EF>::with_capacity_on(output_len, &self.ctx);
-            [EF::ZERO].copy_to(&mut buffer)?;
+            [EF::ZERO].copy_to_on(&mut buffer, &self.ctx)?;
             // SAFETY:
             // - k_rot_ns has max_n equal to input_max_n
             // - we allocate output for half the size of eq_r_ns
