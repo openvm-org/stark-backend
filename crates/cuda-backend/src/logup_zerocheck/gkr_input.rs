@@ -1,7 +1,7 @@
 use std::cmp::max;
 
 use itertools::Itertools;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::cudaStream_t};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::DeviceContext};
 use openvm_stark_backend::prover::{
     fractional_sumcheck_gkr::Frac,
     stacked_pcs::{StackedLayout, StackedSlice},
@@ -90,25 +90,26 @@ pub fn collect_trace_interactions<HS: GpuHashScheme>(
 pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     trace_interactions: &[Option<TraceInteractionMeta>],
     pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
-    ctx: &ProvingContext<GenericGpuBackend<HS>>,
+    proving_ctx: &ProvingContext<GenericGpuBackend<HS>>,
     l_skip: usize,
     alpha_logup: EF,
     d_challenges: &DeviceBuffer<EF>,
     total_leaves: usize,
-    stream: cudaStream_t,
+    ctx: &DeviceContext,
 ) -> Result<(DeviceBuffer<Frac<EF>>, EF), InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
         return Ok((DeviceBuffer::new(), alpha_logup));
     }
 
-    let leaves = DeviceBuffer::<Frac<EF>>::with_capacity(total_leaves);
-    leaves.fill_zero()?;
+    let leaves = DeviceBuffer::<Frac<EF>>::with_capacity_on(total_leaves, ctx);
+    leaves.fill_zero_on(ctx)?;
     let null_preprocessed = DeviceBuffer::<F>::new();
 
+    let stream = ctx.stream.as_raw();
     let mut d_partition_ptrs = DeviceBuffer::<u64>::new();
     let mut tmp = DeviceBuffer::<Frac<EF>>::new();
     for meta in trace_interactions.iter().flatten() {
-        let air_ctx = &ctx.per_trace[meta.trace_idx].1;
+        let air_ctx = &proving_ctx.per_trace[meta.trace_idx].1;
         let pk_air = &pk.per_air[meta.air_idx];
 
         let preprocessed_matrix = pk_air
@@ -132,7 +133,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         let d_public_values = if air_ctx.public_values.is_empty() {
             DeviceBuffer::<F>::new()
         } else {
-            air_ctx.public_values.to_device()?
+            air_ctx.public_values.to_device_on(ctx)?
         };
 
         let height = air_ctx.height();
@@ -142,7 +143,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
             .map(|m| m.buffer().as_ptr() as u64)
             .collect_vec();
         if partition_ptrs.len() > d_partition_ptrs.len() {
-            d_partition_ptrs = DeviceBuffer::with_capacity(partition_ptrs.len());
+            d_partition_ptrs = DeviceBuffer::with_capacity_on(partition_ptrs.len(), ctx);
         }
         partition_ptrs.copy_to(&mut d_partition_ptrs)?;
 
@@ -150,9 +151,9 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         // TODO[jpw]: remove magic 10
         let is_global = buffer_size > 10;
         let intermediates = if is_global {
-            DeviceBuffer::<EF>::with_capacity((TASK_SIZE as usize) * buffer_size as usize)
+            DeviceBuffer::<EF>::with_capacity_on((TASK_SIZE as usize) * buffer_size as usize, ctx)
         } else {
-            DeviceBuffer::<EF>::with_capacity(1)
+            DeviceBuffer::<EF>::with_capacity_on(1, ctx)
         };
 
         let num_rows_per_tile = height.div_ceil(TASK_SIZE as usize).max(1);
@@ -170,7 +171,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         let trace_output = if height != lifted_height {
             let required = height * num_interactions;
             if required > tmp.len() {
-                tmp = DeviceBuffer::with_capacity(required);
+                tmp = DeviceBuffer::with_capacity_on(required, ctx);
             }
             tmp.as_mut_ptr()
         } else {

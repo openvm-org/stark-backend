@@ -10,7 +10,10 @@ use std::sync::Arc;
 use itertools::Itertools;
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
-use openvm_cuda_common::stream::cudaStreamPerThread;
+use openvm_cuda_common::{
+    common::get_device,
+    stream::{CudaStream, DeviceContext, StreamGuard},
+};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_backend::{
     hasher::{Hasher as CpuMerkleHasher, MerkleHasher, MultiFieldHasher},
@@ -58,6 +61,13 @@ use crate::{
 
 type RefEngine = BabyBearPoseidon2RefEngine<DuplexSponge>;
 type Engine = RefEngine;
+
+fn test_ctx() -> DeviceContext {
+    DeviceContext {
+        device_id: get_device().unwrap() as u32,
+        stream: StreamGuard::new(CudaStream::new_non_blocking().unwrap()),
+    }
+}
 
 // ===========================================================================
 // Shared test suite (engine-generic + WHIR)
@@ -251,6 +261,7 @@ fn bn254_row_hash_emulated(vals: &[F]) -> Bn254Digest {
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 #[test]
 fn test_bn254_merkle_gpu_matches_host_large_matrix() {
+    let ctx = test_ctx();
     let height = 1 << 16;
     let width = 19;
     let rows_per_query = 1 << 4;
@@ -259,16 +270,19 @@ fn test_bn254_merkle_gpu_matches_host_large_matrix() {
         .collect_vec();
 
     let host_layers = bn254_host_merkle_layers(&host_matrix, height, width, rows_per_query);
-    let device_matrix =
-        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let device_matrix = DeviceMatrix::new(
+        Arc::new(host_matrix.to_device_on(&ctx).unwrap()),
+        height,
+        width,
+    );
     let gpu_tree = MerkleTreeGpu::<F, Bn254Digest>::new_with_hash::<
         crate::hash_scheme::Bn254Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
+    >(device_matrix, rows_per_query, true, &ctx)
     .unwrap();
     let gpu_layers = gpu_tree
         .digest_layers
         .iter()
-        .map(|layer| layer.to_host().unwrap())
+        .map(|layer| layer.to_host_on(&ctx).unwrap())
         .collect_vec();
 
     for (layer_idx, (gpu_layer, host_layer)) in
@@ -299,6 +313,7 @@ fn test_bn254_merkle_gpu_matches_host_large_matrix() {
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 #[test]
 fn test_bn254_merkle_proof_queries_gpu_match_host() {
+    let ctx = test_ctx();
     let height = 1 << 12;
     let width = 19;
     let rows_per_query = 1;
@@ -315,23 +330,34 @@ fn test_bn254_merkle_proof_queries_gpu_match_host() {
     let tree_a = MerkleTreeGpu::<F, Bn254Digest>::new_with_hash::<
         crate::hash_scheme::Bn254Poseidon2MerkleHash,
     >(
-        DeviceMatrix::new(Arc::new(host_matrix_a.to_device().unwrap()), height, width),
+        DeviceMatrix::new(
+            Arc::new(host_matrix_a.to_device_on(&ctx).unwrap()),
+            height,
+            width,
+        ),
         rows_per_query,
         true,
+        &ctx,
     )
     .unwrap();
     let tree_b = MerkleTreeGpu::<F, Bn254Digest>::new_with_hash::<
         crate::hash_scheme::Bn254Poseidon2MerkleHash,
     >(
-        DeviceMatrix::new(Arc::new(host_matrix_b.to_device().unwrap()), height, width),
+        DeviceMatrix::new(
+            Arc::new(host_matrix_b.to_device_on(&ctx).unwrap()),
+            height,
+            width,
+        ),
         rows_per_query,
         true,
+        &ctx,
     )
     .unwrap();
 
     let gpu_proofs = MerkleTreeGpu::<F, Bn254Digest>::batch_query_merkle_proofs(
         &[&tree_a, &tree_b],
         &query_indices,
+        &ctx,
     )
     .unwrap();
 
@@ -348,6 +374,7 @@ fn test_bn254_merkle_proof_queries_gpu_match_host() {
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 #[test]
 fn test_bn254_row_hash_gpu_matches_host_multi_block_rows() {
+    let ctx = test_ctx();
     let height = 1 << 12;
     let width = 19;
     let rows_per_query = 1;
@@ -356,13 +383,16 @@ fn test_bn254_row_hash_gpu_matches_host_multi_block_rows() {
         .collect_vec();
 
     let host_layers = bn254_host_merkle_layers(&host_matrix, height, width, rows_per_query);
-    let device_matrix =
-        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let device_matrix = DeviceMatrix::new(
+        Arc::new(host_matrix.to_device_on(&ctx).unwrap()),
+        height,
+        width,
+    );
     let gpu_tree = MerkleTreeGpu::<F, Bn254Digest>::new_with_hash::<
         crate::hash_scheme::Bn254Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
+    >(device_matrix, rows_per_query, true, &ctx)
     .unwrap();
-    let gpu_layer0 = gpu_tree.digest_layers[0].to_host().unwrap();
+    let gpu_layer0 = gpu_tree.digest_layers[0].to_host_on(&ctx).unwrap();
 
     if let Some((digest_idx, (gpu_digest, host_digest))) = gpu_layer0
         .iter()
@@ -377,6 +407,7 @@ fn test_bn254_row_hash_gpu_matches_host_multi_block_rows() {
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 #[test]
 fn test_bn254_row_hash_ext_gpu_matches_host_multi_block_rows() {
+    let ctx = test_ctx();
     let height = 1 << 11;
     let width = 5;
     let rows_per_query = 1;
@@ -393,13 +424,16 @@ fn test_bn254_row_hash_ext_gpu_matches_host_multi_block_rows() {
         .collect_vec();
 
     let host_layers = bn254_host_merkle_layers_ext(&host_matrix, height, width, rows_per_query);
-    let device_matrix =
-        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let device_matrix = DeviceMatrix::new(
+        Arc::new(host_matrix.to_device_on(&ctx).unwrap()),
+        height,
+        width,
+    );
     let gpu_tree = MerkleTreeGpu::<EF, Bn254Digest>::new_with_hash::<
         crate::hash_scheme::Bn254Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
+    >(device_matrix, rows_per_query, true, &ctx)
     .unwrap();
-    let gpu_layer0 = gpu_tree.digest_layers[0].to_host().unwrap();
+    let gpu_layer0 = gpu_tree.digest_layers[0].to_host_on(&ctx).unwrap();
 
     if let Some((digest_idx, (gpu_digest, host_digest))) = gpu_layer0
         .iter()
@@ -432,6 +466,7 @@ fn test_bn254_row_hash_emulation_matches_host_multi_block_rows() {
 fn test_merkle_gpu_supports_1024_rows_per_query() {
     use openvm_cuda_common::copy::MemCopyH2D;
 
+    let ctx = test_ctx();
     let height = 1 << 10;
     let width = 7;
     let rows_per_query = 1 << 10;
@@ -439,11 +474,14 @@ fn test_merkle_gpu_supports_1024_rows_per_query() {
         .map(|i| F::from_u32((i as u32).wrapping_mul(31).wrapping_add((i >> 2) as u32)))
         .collect_vec();
 
-    let device_matrix =
-        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let device_matrix = DeviceMatrix::new(
+        Arc::new(host_matrix.to_device_on(&ctx).unwrap()),
+        height,
+        width,
+    );
     let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
         crate::hash_scheme::Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
+    >(device_matrix, rows_per_query, true, &ctx)
     .expect("rows_per_query=1024 should be supported");
 
     assert_eq!(tree.query_stride(), 1);
@@ -454,6 +492,7 @@ fn test_merkle_gpu_supports_1024_rows_per_query() {
 fn test_merkle_batch_query_zero_work_returns_empty() {
     use openvm_cuda_common::copy::MemCopyH2D;
 
+    let ctx = test_ctx();
     let height = 1 << 3;
     let width = 4;
     let rows_per_query = height;
@@ -461,29 +500,26 @@ fn test_merkle_batch_query_zero_work_returns_empty() {
         .map(|i| F::from_u32((i as u32).wrapping_mul(19).wrapping_add(7)))
         .collect_vec();
 
-    let device_matrix =
-        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let device_matrix = DeviceMatrix::new(
+        Arc::new(host_matrix.to_device_on(&ctx).unwrap()),
+        height,
+        width,
+    );
     let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
         crate::hash_scheme::Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
+    >(device_matrix, rows_per_query, true, &ctx)
     .unwrap();
 
-    let proofs = MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(
-        &[&tree],
-        &[0],
-        cudaStreamPerThread,
-    )
-    .unwrap();
+    let proofs =
+        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(&[&tree], &[0], &ctx)
+            .unwrap();
     assert_eq!(proofs.len(), 1);
     assert_eq!(proofs[0].len(), 1);
     assert!(proofs[0][0].is_empty());
 
-    let empty_queries = MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(
-        &[&tree],
-        &[],
-        cudaStreamPerThread,
-    )
-    .unwrap();
+    let empty_queries =
+        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(&[&tree], &[], &ctx)
+            .unwrap();
     assert_eq!(empty_queries.len(), 1);
     assert!(empty_queries[0].is_empty());
 }
@@ -492,20 +528,24 @@ fn test_merkle_batch_query_zero_work_returns_empty() {
 fn test_merkle_batch_open_rows_empty_queries_returns_empty() {
     use openvm_cuda_common::copy::MemCopyH2D;
 
+    let ctx = test_ctx();
     let height = 1 << 3;
     let width = 4;
     let host_matrix = (0..width * height)
         .map(|i| F::from_u32((i as u32).wrapping_mul(23).wrapping_add(11)))
         .collect_vec();
-    let device_matrix =
-        DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
+    let device_matrix = DeviceMatrix::new(
+        Arc::new(host_matrix.to_device_on(&ctx).unwrap()),
+        height,
+        width,
+    );
 
     let opened_rows = MerkleTreeGpu::<F, crate::prelude::Digest>::batch_open_rows(
         &[&device_matrix],
         &[],
         1,
         1,
-        cudaStreamPerThread,
+        &ctx,
     )
     .unwrap();
     assert_eq!(opened_rows.len(), 1);
@@ -536,13 +576,14 @@ fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 
     setup_tracing_with_log_level(Level::DEBUG);
+    let gpu_ctx = test_ctx();
 
     let block_size = 1usize << l_skip;
     let cnt_blocks = (1024usize >> l_skip) + 1;
     let original = (0..(cnt_blocks * block_size))
         .map(|i| F::from_u32((i as u32).wrapping_mul(17).wrapping_add(5)))
         .collect_vec();
-    let mut d_values = original.to_device().unwrap();
+    let mut d_values = original.to_device_on(&gpu_ctx).unwrap();
 
     unsafe {
         batch_ntt_small(
@@ -550,13 +591,20 @@ fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
             l_skip,
             cnt_blocks,
             false,
-            cudaStreamPerThread,
+            gpu_ctx.stream.as_raw(),
         )
         .unwrap();
-        batch_ntt_small(&mut d_values, l_skip, cnt_blocks, true, cudaStreamPerThread).unwrap();
+        batch_ntt_small(
+            &mut d_values,
+            l_skip,
+            cnt_blocks,
+            true,
+            gpu_ctx.stream.as_raw(),
+        )
+        .unwrap();
     }
 
-    assert_eq!(d_values.to_host().unwrap(), original);
+    assert_eq!(d_values.to_host_on(&gpu_ctx).unwrap(), original);
 }
 
 #[test]
@@ -568,6 +616,7 @@ fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
     use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 
     setup_tracing_with_log_level(Level::DEBUG);
+    let gpu_ctx = test_ctx();
 
     let width = 3usize;
     let height = 769usize;
@@ -587,9 +636,11 @@ fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
         }
     }
 
-    let d_input = input.to_device().unwrap();
-    let mut d_output = DeviceBuffer::<Frac<EF>>::with_capacity(output_len);
-    vec![canary; output_len].copy_to(&mut d_output).unwrap();
+    let d_input = input.to_device_on(&gpu_ctx).unwrap();
+    let mut d_output = DeviceBuffer::<Frac<EF>>::with_capacity_on(output_len, &gpu_ctx);
+    vec![canary; output_len]
+        .copy_to_on(&mut d_output, &gpu_ctx)
+        .unwrap();
 
     unsafe {
         frac_matrix_vertically_repeat(
@@ -598,12 +649,12 @@ fn test_frac_matrix_vertically_repeat_guards_tail_rows() {
             width as u32,
             lifted_height as u32,
             height as u32,
-            cudaStreamPerThread,
+            gpu_ctx.stream.as_raw(),
         )
         .unwrap();
     }
 
-    let output = d_output.to_host().unwrap();
+    let output = d_output.to_host_on(&gpu_ctx).unwrap();
     assert_eq!(output.len(), expected.len());
     for (idx, (got, want)) in output.iter().zip(expected.iter()).enumerate() {
         assert_eq!(got.p, want.p, "numerator mismatch at index {idx}");
@@ -707,6 +758,7 @@ fn test_monomial_vs_dag_equivalence() {
     };
 
     setup_tracing_with_log_level(Level::DEBUG);
+    let gpu_ctx = test_ctx();
 
     let log_trace_degree = 5;
     let threshold = 32u32;
@@ -730,13 +782,14 @@ fn test_monomial_vs_dag_equivalence() {
     let ((_, _), r) =
         prove_up_to_batch_constraints(&gpu_engine, &mut prover_sponge, &pk, ctx_for_challenges);
 
-    let ctx = <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_proving_ctx_to_device(
-        device,
-        &fib.generate_proving_ctx(),
-    )
-    .into_sorted();
+    let proving_ctx =
+        <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_proving_ctx_to_device(
+            device,
+            &fib.generate_proving_ctx(),
+        )
+        .into_sorted();
 
-    let height = ctx.per_trace[0].1.common_main.height();
+    let height = proving_ctx.per_trace[0].1.common_main.height();
     let n_calc = log2_strict_usize(height).saturating_sub(l_skip);
     let xi_len = l_skip + n_calc + 1;
 
@@ -752,22 +805,21 @@ fn test_monomial_vs_dag_equivalence() {
 
     let omega_skip = F::two_adic_generator(l_skip);
     let omega_skip_pows: Vec<F> = omega_skip.powers().take(1 << l_skip).collect();
-    let d_omega_skip_pows = omega_skip_pows.to_device().unwrap();
+    let d_omega_skip_pows = omega_skip_pows.to_device_on(&gpu_ctx).unwrap();
 
-    let (air_idx, air_ctx) = &ctx.per_trace[0];
+    let (air_idx, air_ctx) = &proving_ctx.per_trace[0];
     let height = air_ctx.common_main.height();
     let n = log2_strict_usize(height) as isize - l_skip as isize;
     let n_lift = n.max(0) as usize;
 
-    let eq_xis =
-        EqEvalSegments::new(&xi[l_skip..], cudaStreamPerThread).expect("failed to compute eq_xis");
+    let eq_xis = EqEvalSegments::new(&xi[l_skip..], &gpu_ctx).expect("failed to compute eq_xis");
 
     let sel_height = 1 << n_lift;
     let mut sel_cols = F::zero_vec(3 * sel_height);
     sel_cols[sel_height..2 * sel_height - 1].fill(F::ONE);
     sel_cols[0] = F::ONE;
     sel_cols[2 * sel_height + sel_height - 1] = F::ONE;
-    let d_sels_base = sel_cols.to_device().unwrap();
+    let d_sels_base = sel_cols.to_device_on(&gpu_ctx).unwrap();
 
     let (l, r_fold) = if n.is_negative() {
         (
@@ -780,8 +832,10 @@ fn test_monomial_vs_dag_equivalence() {
     let omega = F::two_adic_generator(l);
     let is_first = eval_eq_uni_at_one(l, r_fold);
     let is_last = eval_eq_uni_at_one(l, r_fold * omega);
-    let d_sels_folded =
-        openvm_cuda_common::d_buffer::DeviceBuffer::<EF>::with_capacity(sel_height * 3);
+    let d_sels_folded = openvm_cuda_common::d_buffer::DeviceBuffer::<EF>::with_capacity_on(
+        sel_height * 3,
+        &gpu_ctx,
+    );
     unsafe {
         fold_selectors_round0(
             d_sels_folded.as_mut_ptr(),
@@ -789,14 +843,14 @@ fn test_monomial_vs_dag_equivalence() {
             is_first,
             is_last,
             sel_height,
-            cudaStreamPerThread,
+            gpu_ctx.stream.as_raw(),
         )
         .unwrap();
     }
 
     let inv_lagrange_denoms_r0 =
         crate::utils::compute_barycentric_inv_lagrange_denoms(l_skip, &omega_skip_pows, r[0]);
-    let d_inv_lagrange_denoms_r0 = inv_lagrange_denoms_r0.to_device().unwrap();
+    let d_inv_lagrange_denoms_r0 = inv_lagrange_denoms_r0.to_device_on(&gpu_ctx).unwrap();
 
     let mat_folded = fold_ple_evals_rotate(
         l_skip,
@@ -804,7 +858,7 @@ fn test_monomial_vs_dag_equivalence() {
         &air_ctx.common_main,
         &d_inv_lagrange_denoms_r0,
         true,
-        cudaStreamPerThread,
+        &gpu_ctx,
     )
     .unwrap();
 
@@ -817,12 +871,12 @@ fn test_monomial_vs_dag_equivalence() {
         .constraint_idx
         .len();
     let h_lambda_pows: Vec<EF> = lambda.powers().take(max_num_constraints).collect();
-    let d_lambda_pows = h_lambda_pows.to_device().unwrap();
+    let d_lambda_pows = h_lambda_pows.to_device_on(&gpu_ctx).unwrap();
 
     let d_public_values = if air_ctx.public_values.is_empty() {
         openvm_cuda_common::d_buffer::DeviceBuffer::new()
     } else {
-        air_ctx.public_values.to_device().unwrap()
+        air_ctx.public_values.to_device_on(&gpu_ctx).unwrap()
     };
 
     let dag = &air_pk.vk.symbolic_constraints;
@@ -868,16 +922,19 @@ fn test_monomial_vs_dag_equivalence() {
             );
         }
 
-        let interpolated =
-            crate::base::DeviceMatrix::<EF>::with_capacity(s_deg * num_y as usize, columns.len());
-        let d_columns = columns.to_device().unwrap();
+        let interpolated = crate::base::DeviceMatrix::<EF>::with_capacity_on(
+            s_deg * num_y as usize,
+            columns.len(),
+            &gpu_ctx,
+        );
+        let d_columns = columns.to_device_on(&gpu_ctx).unwrap();
         unsafe {
             interpolate_columns_gpu(
                 interpolated.buffer(),
                 &d_columns,
                 s_deg,
                 num_y as usize,
-                cudaStreamPerThread,
+                gpu_ctx.stream.as_raw(),
             )
             .expect("failed to interpolate columns");
         }
@@ -896,7 +953,7 @@ fn test_monomial_vs_dag_equivalence() {
                 .wrapping_add(4 * interpolated_height),
             air_width: mat_folded.width() as u32 / 2,
         }];
-        let main_ptrs_dev = main_ptrs.to_device().unwrap();
+        let main_ptrs_dev = main_ptrs.to_device_on(&gpu_ctx).unwrap();
 
         let trace_ctx = TraceCtx {
             trace_idx: 0,
@@ -917,27 +974,24 @@ fn test_monomial_vs_dag_equivalence() {
             eq_3bs_ptr: std::ptr::null(),
         };
 
-        let dag_builder = ZerocheckMleBatchBuilder::new(
-            std::iter::once(&trace_ctx),
-            &pk,
-            s_deg as u32,
-            cudaStreamPerThread,
-        )
-        .unwrap();
+        let dag_builder =
+            ZerocheckMleBatchBuilder::new(std::iter::once(&trace_ctx), &pk, s_deg as u32, &gpu_ctx)
+                .unwrap();
         let dag_output = dag_builder.evaluate(&d_lambda_pows, s_deg as u32).unwrap();
-        let dag_results: Vec<EF> = dag_output.to_host().expect("copy DAG output");
+        let dag_results: Vec<EF> = dag_output.to_host_on(&gpu_ctx).expect("copy DAG output");
 
-        let lambda_comb =
-            compute_lambda_combinations(&pk, 0, &d_lambda_pows, cudaStreamPerThread).unwrap();
+        let lambda_comb = compute_lambda_combinations(&pk, 0, &d_lambda_pows, &gpu_ctx).unwrap();
         let mono_batch = ZerocheckMonomialBatch::new(
             std::iter::once(&trace_ctx),
             &pk,
             &[&lambda_comb],
-            cudaStreamPerThread,
+            &gpu_ctx,
         )
         .unwrap();
         let mono_output = mono_batch.evaluate(s_deg as u32).unwrap();
-        let mono_results: Vec<EF> = mono_output.to_host().expect("copy monomial output");
+        let mono_results: Vec<EF> = mono_output
+            .to_host_on(&gpu_ctx)
+            .expect("copy monomial output");
 
         assert_eq!(
             dag_results.len(),

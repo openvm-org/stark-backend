@@ -62,7 +62,6 @@ where
         &self,
         traces: &[&DeviceMatrix<F>],
     ) -> Result<(HS::Digest, StackedPcsDataGpu<F, HS::Digest>), Self::Error> {
-        let stream = self.ctx.stream.as_raw();
         let cfg = self.config();
         stacked_commit::<HS::MerkleHash>(
             cfg.l_skip,
@@ -71,7 +70,7 @@ where
             cfg.k_whir(),
             traces,
             *self.prover_config(),
-            stream,
+            &self.ctx,
         )
     }
 }
@@ -103,7 +102,6 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
         ctx: &ProvingContext<GenericGpuBackend<HS>>,
         _common_main_pcs_data: &StackedPcsDataGpu<F, HS::Digest>,
     ) -> Result<((GkrProof<HS::SC>, BatchConstraintProof<HS::SC>), Vec<EF>), Self::Error> {
-        let stream = self.ctx.stream.as_raw();
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
         let save_memory = self.prover_config().zerocheck_save_memory;
         // Threshold for monomial evaluation path based on proof type:
@@ -121,7 +119,7 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
             save_memory,
             monomial_num_y_threshold,
             self.sm_count(),
-            stream,
+            &self.ctx,
         )?;
         mem.emit_metrics();
         Ok(((gkr_proof, batch_constraint_proof), r))
@@ -148,7 +146,6 @@ where
         common_main_pcs_data: StackedPcsDataGpu<F, HS::Digest>,
         r: Vec<EF>,
     ) -> Result<Self::OpeningProof, Self::Error> {
-        let stream = self.ctx.stream.as_raw();
         let mut mem = MemTracker::start_and_reset_peak("prover.openings");
         let params = self.config();
         #[cfg(debug_assertions)]
@@ -195,7 +192,7 @@ where
             transcript,
             stacked_per_commit,
             &u_cube,
-            stream,
+            &self.ctx,
         )?;
         mem.emit_metrics();
         mem.reset_peak();
